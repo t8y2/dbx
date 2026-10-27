@@ -3,18 +3,15 @@ import { computed, ref, watch } from "vue";
 import { AlertTriangle, Archive, CheckCircle2, FileUp, GitCompareArrows, Loader2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { NacosBatchPreview, NacosBatchPreviewDiff, NacosBatchReport, NacosConfigDataIdMapping, NacosConfigKey, NacosConfigSelectionScope, NacosConflictPolicy, NacosNamespaceInfo } from "@/types/nacos";
+import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 import { nacosNamespaceIdentity } from "@/lib/nacos/nacosNamespaceVisibility";
 
 export type NacosBatchDialogMode = "export" | "import" | "copy";
-
-export interface NacosConfigTransferTarget {
-  id: string;
-  label: string;
-}
 
 export interface NacosConfigTransferDialogPayload {
   scope: NacosConfigSelectionScope;
@@ -32,9 +29,10 @@ const props = defineProps<{
   selectedCount: number;
   selectedKeys: NacosConfigKey[];
   filteredCount: number;
-  targetConnections: NacosConfigTransferTarget[];
+  targetConnections: ConnectionConfig[];
   targetConnectionId: string;
   sourceConnectionId: string;
+  layout: SidebarLayout;
   namespaces: NacosNamespaceInfo[];
   currentNamespace: string;
   preview: NacosBatchPreview | null;
@@ -123,6 +121,11 @@ function batchStatusClass(status: string) {
 function showPreviewDiff(diff: NacosBatchPreviewDiff) {
   selectedPreviewDiff.value = diff;
   previewDiffOpen.value = true;
+}
+
+function changeTargetConnection(connectionId: string) {
+  emit("targetConnectionChange", connectionId);
+  emit("reset");
 }
 
 function resetTargetNamespace() {
@@ -235,18 +238,19 @@ watch(
           <div class="grid gap-4 sm:grid-cols-2">
             <div class="space-y-2">
               <div class="text-sm font-medium">{{ t("nacos.targetConnection") }}</div>
-              <select
-                :value="targetConnectionId"
-                class="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+              <ConnectionTreeSelect
+                :model-value="targetConnectionId"
+                :connections="targetConnections"
+                :layout="layout"
+                :placeholder="t('nacos.chooseTargetConnection')"
+                :search-placeholder="t('nacos.chooseTargetConnection')"
+                :empty-text="t('common.noResults')"
                 :disabled="loading || !targetConnections.length"
-                @change="
-                  emit('targetConnectionChange', ($event.target as HTMLSelectElement).value);
-                  emit('reset');
-                "
-              >
-                <option disabled value="">{{ t("nacos.chooseTargetConnection") }}</option>
-                <option v-for="connection in targetConnections" :key="connection.id" :value="connection.id">{{ connection.label }}</option>
-              </select>
+                trigger-class="h-10 w-full max-w-none justify-between rounded-md border border-input bg-background px-3 text-sm hover:bg-background"
+                list-class="w-[var(--reka-popover-trigger-width)]"
+                data-testid="nacos-target-connection"
+                @update:model-value="changeTargetConnection"
+              />
               <p v-if="!targetConnections.length" class="text-xs text-muted-foreground">{{ t("nacos.noTargetConnections") }}</p>
             </div>
 

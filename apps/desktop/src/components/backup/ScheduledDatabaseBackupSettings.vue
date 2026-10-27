@@ -1157,6 +1157,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
         <DatabaseBackupConfigFields
           :draft="draft"
           :connections="sqlConnections"
+          :layout="connectionStore.sidebarLayout"
           :all-databases="allDatabases"
           :selected-databases="selectedDatabases"
           :database-options="databaseOptions"
@@ -1252,6 +1253,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
       <DatabaseBackupConfigFields
         :draft="oneShotDraft"
         :connections="sqlConnections"
+        :layout="connectionStore.sidebarLayout"
         multi-select-connections
         :selected-connection-ids="oneShotConnectionIds"
         :all-databases="allDatabases"

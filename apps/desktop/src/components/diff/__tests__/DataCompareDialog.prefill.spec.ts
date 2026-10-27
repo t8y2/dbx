@@ -403,6 +403,8 @@ describe("DataCompareDialog source prefill", () => {
     expect(targetConnectionTrigger).toBeDefined();
     targetConnectionTrigger?.click();
     await flushAsyncSetup();
+    document.querySelector<HTMLButtonElement>('[data-picker-group="oracle"]')?.click();
+    await flushAsyncSetup();
 
     const jdbcConnectionOption = document.querySelector<HTMLButtonElement>('[data-picker-connection="oracle-jdbc-11g"]');
     expect(jdbcConnectionOption).toBeDefined();

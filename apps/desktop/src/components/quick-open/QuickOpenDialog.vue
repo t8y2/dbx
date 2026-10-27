@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Command, FileCode, FileText, Search, FolderPlus, SlidersHorizontal, X } from "@lucide/vue";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import { useQuickOpen, type QuickOpenItem } from "@/composables/useQuickOpen";
 import { usePluginCommandPalette } from "@/lib/plugins/pluginCommandPalette";
@@ -367,15 +367,22 @@ watch(selectedIndex, async () => {
               </button>
             </div>
             <!-- Connection scope: file-content search ignores connections, so the picker only shows in object mode. -->
-            <Select v-if="!contentMode" v-model="scopeSelection" :disabled="previewEditing">
-              <SelectTrigger class="h-7 w-[132px] gap-1 px-2 text-xs" :title="t('quickOpen.scope')">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem :value="SCOPE_ALL_VALUE">{{ t("quickOpen.scopeAll") }}</SelectItem>
-                <SelectItem v-for="conn in scopeConnections" :key="conn.id" :value="conn.id">{{ conn.name }}</SelectItem>
-              </SelectContent>
-            </Select>
+            <ConnectionTreeSelect
+              v-if="!contentMode"
+              v-model="scopeSelection"
+              :connections="scopeConnections"
+              :layout="connectionStore.sidebarLayout || { groups: [], order: [] }"
+              :placeholder="t('quickOpen.scope')"
+              :search-placeholder="t('editor.searchConnection')"
+              :empty-text="t('common.noResults')"
+              :disabled="previewEditing"
+              :extra-options="[{ id: SCOPE_ALL_VALUE, label: t('quickOpen.scopeAll') }]"
+              trigger-class="h-7 w-[132px] gap-1 px-2 text-xs"
+            >
+              <template #trigger-label="{ label }">
+                <span class="truncate" :title="t('quickOpen.scope')">{{ label }}</span>
+              </template>
+            </ConnectionTreeSelect>
             <!-- Search settings (roots & extensions) -->
             <button
               :disabled="previewEditing"

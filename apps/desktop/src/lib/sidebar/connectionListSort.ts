@@ -1,4 +1,4 @@
-import type { ConnectionConfig, TreeNode } from "@/types/database";
+import type { ConnectionConfig, SidebarLayout, SidebarOrderEntry, TreeNode } from "@/types/database";
 
 export type ConnectionListSortMode = "manual" | "asc" | "desc";
 
@@ -37,6 +37,32 @@ function sortConnectionSiblingsForDisplay(nodes: readonly TreeNode[], mode: Excl
 export function sortConnectionListForDisplay(nodes: readonly TreeNode[], mode: ConnectionListSortMode): TreeNode[] {
   if (mode === "manual") return nodes as TreeNode[];
   return sortConnectionSiblingsForDisplay(nodes, mode);
+}
+
+function sortLayoutEntriesForDisplay(entries: readonly SidebarOrderEntry[], nameById: ReadonlyMap<string, string>, mode: Exclude<ConnectionListSortMode, "manual">): SidebarOrderEntry[] {
+  const compareIds = (left: string, right: string) => {
+    const compared = connectionNameCollator.compare(nameById.get(left) ?? left, nameById.get(right) ?? right);
+    return mode === "asc" ? compared : -compared;
+  };
+  const sortedConnections = entries.filter((entry): entry is Extract<SidebarOrderEntry, { type: "connection" }> => entry.type === "connection").sort((left, right) => compareIds(left.id, right.id));
+
+  let nextConnectionIndex = 0;
+  return entries.map((entry) => {
+    if (entry.type === "connection") return sortedConnections[nextConnectionIndex++]!;
+    if (entry.children) return { ...entry, children: sortLayoutEntriesForDisplay(entry.children, nameById, mode) };
+    if (entry.connectionIds) return { ...entry, connectionIds: [...entry.connectionIds].sort(compareIds) };
+    return entry;
+  });
+}
+
+/**
+ * Applies the sidebar's display-only alphabetical modes to a layout without
+ * moving groups, so grouped pickers can mirror the sidebar's connection order.
+ */
+export function sortSidebarLayoutConnectionsForDisplay(layout: SidebarLayout, connections: readonly Pick<ConnectionConfig, "id" | "name">[], mode: ConnectionListSortMode): SidebarLayout {
+  if (mode === "manual") return layout;
+  const nameById = new Map(connections.map((connection) => [connection.id, connection.name]));
+  return { ...layout, order: sortLayoutEntriesForDisplay(layout.order, nameById, mode) };
 }
 
 /**

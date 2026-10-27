@@ -10,8 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import { useToast } from "@/composables/useToast";
 import FailureDetailsList from "@/components/sql-file/FailureDetailsList.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -46,7 +45,7 @@ import { isSqlFilePath } from "@/lib/sql/sqlFileOpen";
 import { isScrolledToBottom } from "./sqlFileProgressScroll";
 import { buildDisplayFileNames, tooltipText as computeTooltipText } from "./sqlFilePreviewLabel";
 import { parseSqlFilePathInput } from "./sqlFilePathInput";
-import { orderConnectionsForSidebarDisplay } from "@/lib/sidebar/connectionListSort";
+import { orderConnectionsForSidebarDisplay, sortSidebarLayoutConnectionsForDisplay } from "@/lib/sidebar/connectionListSort";
 import SqlFileProgressIndicator from "./SqlFileProgressIndicator.vue";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { readSqlFileCloseOnSuccess, writeSqlFileCloseOnSuccess } from "@/lib/sql/sqlFileExecutionOptions";
@@ -253,6 +252,7 @@ function resetPerFileState() {
 }
 
 const sqlConnections = computed(() => orderConnectionsForSidebarDisplay(store.connections, store.treeNodes, settingsStore.editorSettings.sidebarConnectionSortMode).filter((connection) => supportsSqlFileExecution(connection.db_type)));
+const connectionPickerLayout = computed(() => sortSidebarLayoutConnectionsForDisplay(store.sidebarLayout, store.connections, settingsStore.editorSettings.sidebarConnectionSortMode));
 // Mirrors the core executor gate (`relational_constraint_bypass_kind` in
 // sql_file_import.rs): MySQL-family types use the session-scoped
 // FOREIGN_KEY_CHECKS toggle, PostgreSQL-family types use DISABLE/ENABLE
@@ -446,11 +446,6 @@ function previewIsTruncated(item: SqlFilePreview) {
 function previewLineSummary(item: SqlFilePreview) {
   const count = previewLineCount(item);
   return previewIsTruncated(item) ? t("sqlFile.previewingFirstLines", { count }) : t("sqlFile.previewingLines", { count });
-}
-
-function connectionIconType(id: string) {
-  const config = store.getConfig(id);
-  return config?.driver_profile || config?.db_type || "mysql";
 }
 
 function formatBytes(bytes: number) {
@@ -1144,24 +1139,18 @@ watch(
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("sqlFile.connection") }}</Label>
-              <Select v-model="connectionId" :disabled="executionLocked" data-sql-file-connection>
-                <SelectTrigger class="h-8 text-xs">
-                  <div v-if="connectionId" class="flex items-center gap-1.5 min-w-0">
-                    <DatabaseIcon :db-type="connectionIconType(connectionId)" class="w-3.5 h-3.5 shrink-0" />
-                    <span class="truncate">{{ selectedConnection?.name ?? connectionId }}</span>
-                  </div>
-                  <SelectValue v-else :placeholder="t('sqlFile.selectConnection')" />
-                </SelectTrigger>
-                <SelectContent position="popper">
-                  <SelectItem v-for="c in sqlConnections" :key="c.id" :value="c.id">
-                    <div class="flex min-w-0 items-center gap-1.5">
-                      <DatabaseIcon :db-type="c.driver_profile || c.db_type" class="w-3.5 h-3.5 shrink-0" />
-                      <ConnectionGroupBadge :connection-id="c.id" />
-                      <span class="min-w-0 flex-1 truncate">{{ c.name }}</span>
-                    </div>
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+              <ConnectionTreeSelect
+                v-model="connectionId"
+                :connections="sqlConnections"
+                :layout="connectionPickerLayout"
+                :placeholder="t('sqlFile.selectConnection')"
+                :search-placeholder="t('editor.searchConnection')"
+                :empty-text="t('common.noResults')"
+                :disabled="executionLocked"
+                trigger-class="h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+                list-class="w-[var(--reka-popover-trigger-width)]"
+                data-sql-file-connection
+              />
             </div>
 
             <div class="space-y-1.5">

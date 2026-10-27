@@ -46,11 +46,18 @@ async function mountDialog(
           selectedKeys,
           filteredCount: 1,
           targetConnections: [
-            { id: "source", label: "Source" },
-            { id: "remote", label: "Remote" },
+            { id: "source", name: "Source", db_type: "nacos", host: "localhost", port: 8848, username: "", password: "" },
+            { id: "remote", name: "Remote", db_type: "nacos", host: "remote", port: 8848, username: "", password: "" },
           ],
           targetConnectionId,
           sourceConnectionId: "source",
+          layout: {
+            groups: [{ id: "nacos-prod", name: "Nacos production", collapsed: false }],
+            order: [
+              { type: "group", id: "nacos-prod", children: [{ type: "connection", id: "remote" }] },
+              { type: "connection", id: "source" },
+            ],
+          },
           currentNamespace: "shared",
           namespaces,
           preview,
@@ -77,7 +84,7 @@ describe("NacosConfigBatchDialog cross-connection sync", () => {
   it("keeps a same-named namespace available when the target is another connection", async () => {
     const { onPreview } = await mountDialog("remote");
     const selects = Array.from(document.body.querySelectorAll("select")) as HTMLSelectElement[];
-    const targetNamespaceValues = Array.from(selects[1].options).map((option) => option.value);
+    const targetNamespaceValues = Array.from(selects[0].options).map((option) => option.value);
 
     expect(targetNamespaceValues).toContain(JSON.stringify("shared"));
 
@@ -196,11 +203,17 @@ describe("NacosConfigBatchDialog cross-connection sync", () => {
   it("excludes the source namespace only for same-connection sync and emits connection changes", async () => {
     const { onTargetConnectionChange } = await mountDialog("source");
     const selects = Array.from(document.body.querySelectorAll("select")) as HTMLSelectElement[];
-    const targetNamespaceValues = Array.from(selects[1].options).map((option) => option.value);
+    const targetNamespaceValues = Array.from(selects[0].options).map((option) => option.value);
 
     expect(targetNamespaceValues).not.toContain(JSON.stringify("shared"));
-    selects[0].value = "remote";
-    selects[0].dispatchEvent(new Event("change"));
+    (document.body.querySelector("[data-testid=nacos-target-connection]") as HTMLButtonElement).click();
+    await nextTick();
+    const remoteGroup = document.body.querySelector('[data-picker-group="nacos-prod"]') as HTMLButtonElement;
+    expect(remoteGroup?.textContent).toContain("Nacos production");
+    expect(remoteGroup.getAttribute("aria-expanded")).toBe("false");
+    remoteGroup.click();
+    await nextTick();
+    (document.body.querySelector('[data-picker-connection="remote"]') as HTMLButtonElement).click();
     await nextTick();
     expect(onTargetConnectionChange).toHaveBeenCalledWith("remote");
   });

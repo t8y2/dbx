@@ -18,7 +18,7 @@ import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
 import NacosConfigHistoryDialog from "@/components/nacos/NacosConfigHistoryDialog.vue";
-import NacosConfigBatchDialog, { type NacosBatchDialogMode, type NacosConfigTransferDialogPayload, type NacosConfigTransferTarget } from "@/components/nacos/NacosConfigBatchDialog.vue";
+import NacosConfigBatchDialog, { type NacosBatchDialogMode, type NacosConfigTransferDialogPayload } from "@/components/nacos/NacosConfigBatchDialog.vue";
 import NacosContentSearchDialog from "@/components/nacos/NacosContentSearchDialog.vue";
 import NacosContentReplaceDialog from "@/components/nacos/NacosContentReplaceDialog.vue";
 import { useToast } from "@/composables/useToast";
@@ -69,7 +69,7 @@ import { validateNacosConfigContent, nacosConfigDiagnosticSeverity, nacosConfigV
 import { loadNacosConfigLanguage, resolveNacosConfigFormat } from "@/lib/nacos/nacosConfigLanguage";
 import { nacosConfigYamlLintDiagnostics, nacosConfigYamlLintExtension } from "@/lib/nacos/nacosConfigYamlLint";
 import { translateNacosYamlDiagnostic } from "@/lib/nacos/nacosYamlDiagnostics";
-import type { NacosConfigEditorViewport } from "@/types/database";
+import type { ConnectionConfig, NacosConfigEditorViewport } from "@/types/database";
 import type {
   NacosBatchPreview,
   NacosBatchReport,
@@ -367,12 +367,12 @@ const nacosConsoleUrl = computed(() => {
   }
 });
 const nacosProductionContext = computed(() => productionContextForDatabase(connectionStore.getConfig(props.connectionId), namespace.value));
-const batchTargetConnections = computed<NacosConfigTransferTarget[]>(() =>
+const batchTargetConnections = computed<ConnectionConfig[]>(() =>
   connectionStore.connections
     .filter((connection) => connection.db_type === "nacos" && !connectionIsEffectivelyReadOnly(connection))
     .map((connection) => {
       const address = [connection.host, connection.port].filter(Boolean).join(":");
-      return { id: connection.id, label: connection.name ? `${connection.name} (${address})` : address || connection.id };
+      return { ...connection, name: connection.name ? `${connection.name} (${address})` : address || connection.id };
     }),
 );
 const supportsConfigHistory = computed(() => connectionInfo.value?.capabilities.supportsConfigHistory !== false);
@@ -3514,6 +3514,7 @@ useUpdateBlocker(() =>
       :selected-keys="selectedConfigTransferKeys"
       :filtered-count="configTotal"
       :target-connections="batchTargetConnections"
+      :layout="connectionStore.sidebarLayout"
       :target-connection-id="batchTargetConnectionId"
       :source-connection-id="connectionId"
       :namespaces="batchTargetNamespaces"

@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onDeactivated, ref, watch } from "
 import { ArrowRightLeft, Download, FileUp, Loader2, Search, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import KvKeyBrowser from "@/components/kv/KvKeyBrowser.vue";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -894,12 +895,17 @@ defineExpose({ focusSearch, refresh });
           </div>
           <div class="grid gap-2">
             <Label>{{ t("consul.tools.targetConnection") }}</Label>
-            <Select v-model="transferTargetId" @update:model-value="resetTransferPreview">
-              <SelectTrigger><SelectValue :placeholder="t('consul.tools.selectTarget')" /></SelectTrigger>
-              <SelectContent
-                ><SelectItem v-for="connection in transferTargetConnections" :key="connection.id" :value="connection.id">{{ connection.name }}</SelectItem></SelectContent
-              >
-            </Select>
+            <ConnectionTreeSelect
+              v-model="transferTargetId"
+              :connections="transferTargetConnections"
+              :layout="connectionStore.sidebarLayout"
+              :placeholder="t('consul.tools.selectTarget')"
+              :search-placeholder="t('consul.tools.selectTarget')"
+              :empty-text="t('common.noResults')"
+              trigger-class="dbx-control-chrome h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-sm shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+              list-class="w-[var(--reka-popover-trigger-width)]"
+              @update:model-value="resetTransferPreview"
+            />
           </div>
           <div class="grid gap-2">
             <Label>{{ t("consul.tools.conflictPolicy") }}</Label>

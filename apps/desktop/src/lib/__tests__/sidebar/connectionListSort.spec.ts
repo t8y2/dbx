@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { orderConnectionsForSidebarDisplay, sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
-import type { TreeNode } from "@/types/database";
+import { orderConnectionsForSidebarDisplay, sortConnectionListForDisplay, sortSidebarLayoutConnectionsForDisplay } from "@/lib/sidebar/connectionListSort";
+import type { SidebarLayout, TreeNode } from "@/types/database";
 
 function connection(id: string, label: string): TreeNode {
   return { id, label, type: "connection", connectionId: id, children: [] };
@@ -49,5 +49,47 @@ describe("connection list display sort", () => {
     const tree = [group("parent", "Parent", [connection("zebra", "Zebra"), group("nested", "Nested", [connection("beta", "Beta")]), connection("alpha", "Alpha")])];
 
     expect(orderConnectionsForSidebarDisplay(connections, tree, "asc").map((connection) => connection.id)).toEqual(["alpha", "beta", "zebra"]);
+  });
+
+  it("sorts grouped layout entries without moving groups", () => {
+    const layout: SidebarLayout = {
+      groups: [{ id: "team", name: "Team", collapsed: false }],
+      order: [
+        { type: "connection", id: "zebra" },
+        {
+          type: "group",
+          id: "team",
+          children: [
+            { type: "connection", id: "beta" },
+            { type: "connection", id: "alpha" },
+          ],
+        },
+        { type: "connection", id: "alpha-root" },
+      ],
+    };
+    const connections = [
+      { id: "zebra", name: "Zebra" },
+      { id: "beta", name: "Beta" },
+      { id: "alpha", name: "alpha" },
+      { id: "alpha-root", name: "Alpha" },
+    ];
+
+    const ascending = sortSidebarLayoutConnectionsForDisplay(layout, connections, "asc");
+    expect(ascending.order.map((entry) => entry.id)).toEqual(["alpha-root", "team", "zebra"]);
+    expect(ascending.order[1]).toMatchObject({
+      children: [
+        { type: "connection", id: "alpha" },
+        { type: "connection", id: "beta" },
+      ],
+    });
+
+    const descending = sortSidebarLayoutConnectionsForDisplay(layout, connections, "desc");
+    expect(descending.order.map((entry) => entry.id)).toEqual(["zebra", "team", "alpha-root"]);
+    expect(descending.order[1]).toMatchObject({
+      children: [
+        { type: "connection", id: "beta" },
+        { type: "connection", id: "alpha" },
+      ],
+    });
   });
 });

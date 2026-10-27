@@ -15,7 +15,7 @@ vi.mock("@lucide/vue", async () => {
       return () => h("span", attrs);
     },
   });
-  return Object.fromEntries(["Copy", "Download", "Link2", "Loader2", "Maximize2", "Minimize2", "Network", "Plus", "RefreshCw", "Search", "Table2", "Upload", "X", "ZoomIn", "ZoomOut", "LayoutGrid"].map((name) => [name, Icon]));
+  return Object.fromEntries(["Check", "ChevronDown", "ChevronRight", "Copy", "Download", "Folder", "Link2", "Loader2", "Maximize2", "Minimize2", "Network", "Plus", "RefreshCw", "Search", "Table2", "Upload", "X", "ZoomIn", "ZoomOut", "LayoutGrid"].map((name) => [name, Icon]));
 });
 
 vi.mock("@/components/ui/input", async () => {
@@ -66,7 +66,6 @@ vi.mock("@/components/ui/select", async () => ({
   SelectValue: await passthrough("span"),
 }));
 vi.mock("@/components/icons/DatabaseIcon.vue", async () => ({ default: await passthrough("span") }));
-vi.mock("@/components/connection/ConnectionGroupBadge.vue", async () => ({ default: await passthrough("span") }));
 
 import DiagramToolbar from "../DiagramToolbar.vue";
 
@@ -95,7 +94,7 @@ function mountToolbar() {
             databases: [],
             schemas: [],
             sqlConnections: [],
-            selectedConnection: undefined,
+            layout: { groups: [], order: [] },
             isSchemaAware: false,
             loadingDatabases: false,
             loadingSchemas: false,

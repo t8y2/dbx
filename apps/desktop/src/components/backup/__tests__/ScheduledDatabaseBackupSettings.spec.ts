@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "../../../i18n";
 import ScheduledDatabaseBackupSettings from "../ScheduledDatabaseBackupSettings.vue";
 import type { DatabaseBackupRun, DatabaseBackupSchedule } from "../../../lib/backup/scheduledDatabaseBackup";
+import type { SidebarLayout } from "@/types/database";
 import { LAST_BACKUP_DIRECTORY_STORAGE_KEY } from "../../../lib/export/exportPath";
 
 const mocks = vi.hoisted(() => ({
@@ -13,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   sqlFileSource: null as any,
   prepareDatabaseBackupRestore: vi.fn(),
   connections: [] as Array<{ id: string; name: string; db_type: string }>,
+  sidebarLayout: { groups: [], order: [] } as SidebarLayout,
   schedules: [] as DatabaseBackupSchedule[],
   runs: [] as DatabaseBackupRun[],
   activeRunIds: new Set<string>(),
@@ -43,6 +45,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     connections: mocks.connections,
+    get sidebarLayout() {
+      return mocks.sidebarLayout;
+    },
     ensureConnected: mocks.ensureConnected,
     recordConnectionLostError: mocks.recordConnectionLostError,
     getConfig: (connectionId: string) => mocks.connections.find((connection) => connection.id === connectionId),
@@ -88,16 +93,6 @@ vi.mock("@/composables/useScheduledDatabaseBackups", () => ({
 vi.mock("@/composables/useToast", () => ({
   useToast: () => ({ toast: mocks.toast }),
 }));
-
-vi.mock("@/components/connection/ConnectionGroupBadge.vue", async () => {
-  const { defineComponent, h } = await import("vue");
-  return {
-    default: defineComponent({
-      props: { connectionId: { type: String, required: true } },
-      setup: (props) => () => h("span", { "data-connection-group-badge": "", "data-connection-id": props.connectionId }),
-    }),
-  };
-});
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: mocks.openDirectory,
@@ -350,6 +345,8 @@ afterEach(() => {
   mocks.sqlFileSource = null;
   mocks.prepareDatabaseBackupRestore.mockReset();
   mocks.connections.splice(0);
+  mocks.sidebarLayout.groups.splice(0);
+  mocks.sidebarLayout.order.splice(0);
   mocks.schedules.splice(0);
   mocks.runs.splice(0);
   mocks.activeRuns.splice(0);
@@ -676,8 +673,17 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     expect(currentDialog().querySelector<HTMLElement>("[data-backup-output-path-preview]")?.textContent).toContain("/backups/archive/");
   });
 
-  it("shows connection group badges in the backup connection picker", async () => {
+  it("shows connection groups in the backup connection picker", async () => {
     mocks.connections.push({ id: "mysql-primary", name: "Shared name", db_type: "mysql" }, { id: "mysql-archive", name: "Shared name", db_type: "mysql" });
+    mocks.sidebarLayout.groups.push({ id: "production", name: "Production", collapsed: false });
+    mocks.sidebarLayout.order.push({
+      type: "group",
+      id: "production",
+      children: [
+        { type: "connection", id: "mysql-primary" },
+        { type: "connection", id: "mysql-archive" },
+      ],
+    });
     await mountSettings();
 
     addScheduleButton().click();
@@ -685,7 +691,8 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     currentDialog().querySelector<HTMLButtonElement>("[data-backup-connection-picker]")?.click();
     await flush();
 
-    const connectionIds = Array.from(document.body.querySelectorAll<HTMLElement>("[data-connection-group-badge]")).map((badge) => badge.dataset.connectionId);
+    expect(document.body.querySelector('[data-picker-group="production"]')?.textContent).toContain("Production");
+    const connectionIds = Array.from(document.body.querySelectorAll<HTMLElement>("[data-picker-connection]")).map((option) => option.dataset.pickerConnection);
     expect(connectionIds).toEqual(["mysql-primary", "mysql-archive"]);
   });
 
@@ -1235,7 +1242,7 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     expect(mocks.toast).toHaveBeenCalledWith("backup destination unavailable", 5000);
   });
 
-  it("closes the backup connection picker on outside scroll but preserves it when scrolling inside the popover", async () => {
+  it("keeps the backup connection picker open while the dialog scrolls", async () => {
     mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
     await mountSettings();
 
@@ -1252,17 +1259,15 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     const popoverContent = document.body.querySelector<HTMLElement>('[data-slot="popover-content"]');
     expect(popoverContent).not.toBeNull();
 
-    // Scroll inside the popover list should not close the picker
     const internalList = popoverContent?.querySelector<HTMLElement>(".overflow-y-auto");
     if (!internalList) throw new Error("Internal popover scrollable list not found");
     internalList.dispatchEvent(new Event("scroll", { bubbles: true }));
     await flush();
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
 
-    // Scroll outside the popover (e.g. dialog content or window) should close the picker
     window.dispatchEvent(new Event("scroll"));
     await flush();
-    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
   });
 
   it("closes the history connection picker on outside scroll", async () => {

@@ -31,6 +31,30 @@ function collectLayoutConnectionIds(entries: SidebarOrderEntry[], into: Set<stri
   }
 }
 
+/**
+ * Groups to collapse when the picker opens: every group is collapsed except
+ * the ones on the path to a selected connection. With no selection this
+ * collapses the whole tree, keeping long pickers scannable.
+ */
+export function connectionPickerDefaultCollapsedGroupIds(layout: SidebarLayout, selectedConnectionIds: ReadonlySet<string>): Set<string> {
+  const groupIds = new Set<string>();
+  const expandedGroupIds = new Set<string>();
+  const visit = (entries: readonly SidebarOrderEntry[], ancestors: readonly string[]): void => {
+    for (const entry of entries) {
+      if (entry.type === "connection") {
+        if (!selectedConnectionIds.has(entry.id)) continue;
+        for (const groupId of ancestors) expandedGroupIds.add(groupId);
+        continue;
+      }
+      groupIds.add(entry.id);
+      visit(groupEntryChildren(entry), [...ancestors, entry.id]);
+    }
+  };
+  visit(layout.order, []);
+  for (const groupId of expandedGroupIds) groupIds.delete(groupId);
+  return groupIds;
+}
+
 function connectionMatchesQuery(name: string, groupPath: string[], normalizedQuery: string): boolean {
   if (name.toLowerCase().includes(normalizedQuery)) return true;
   return groupPath.join(" / ").toLowerCase().includes(normalizedQuery);

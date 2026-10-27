@@ -135,6 +135,8 @@ async function selectMatchedTarget(): Promise<void> {
   const targetConnectionTrigger = document.querySelectorAll<HTMLButtonElement>("button.dbx-diff-connection-trigger")[1];
   targetConnectionTrigger?.click();
   await flushAsyncSetup();
+  document.querySelector<HTMLButtonElement>('[data-picker-group="oracle"]')?.click();
+  await flushAsyncSetup();
   document.querySelector<HTMLButtonElement>(`[data-picker-connection="${TARGET_CONNECTION_ID}"]`)?.click();
   await flushAsyncSetup();
 

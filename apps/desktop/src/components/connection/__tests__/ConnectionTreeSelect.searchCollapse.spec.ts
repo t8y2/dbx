@@ -52,7 +52,20 @@ const layout: SidebarLayout = {
   order: [{ type: "group", id: "g1", children: [{ type: "connection", id: "c1" }] }],
 };
 
-async function mountPicker(extraConnections: ConnectionConfig[] = []) {
+const twoGroupLayout: SidebarLayout = {
+  groups: [
+    { id: "g1", name: "Production", collapsed: false },
+    { id: "g2", name: "Staging", collapsed: false },
+  ],
+  order: [
+    { type: "group", id: "g1", children: [{ type: "connection", id: "c1" }] },
+    { type: "group", id: "g2", children: [{ type: "connection", id: "c2" }] },
+  ],
+};
+
+const secondaryConnection: ConnectionConfig = { ...connections[0], id: "c2", name: "Secondary" };
+
+async function mountPicker(extraConnections: ConnectionConfig[] = [], extraProps: Record<string, unknown> = {}) {
   const container = document.createElement("div");
   document.body.append(container);
   const app = createApp(ConnectionTreeSelect, {
@@ -62,6 +75,7 @@ async function mountPicker(extraConnections: ConnectionConfig[] = []) {
     placeholder: "Select connection",
     searchPlaceholder: "Search connections",
     emptyText: "No connections",
+    ...extraProps,
   });
   mountedApps.push(app);
   app.mount(container);
@@ -77,9 +91,9 @@ async function setSearchText(value: string) {
   await nextTick();
 }
 
-function groupButton() {
-  const button = document.body.querySelector('[data-picker-group="g1"]');
-  if (!(button instanceof HTMLButtonElement)) throw new Error("Group button was not rendered");
+function groupButton(groupId = "g1") {
+  const button = document.body.querySelector(`[data-picker-group="${groupId}"]`);
+  if (!(button instanceof HTMLButtonElement)) throw new Error(`Group button ${groupId} was not rendered`);
   return button;
 }
 
@@ -96,7 +110,7 @@ describe("ConnectionTreeSelect search collapse behavior", () => {
     expect(icon?.getAttribute("data-contribution-id")).toBe("sample.connection");
   });
 
-  it("ignores group clicks during search without changing the post-search state", async () => {
+  it("restores the collapsed state after clearing a search", async () => {
     await mountPicker();
     await setSearchText("Primary");
 
@@ -108,15 +122,38 @@ describe("ConnectionTreeSelect search collapse behavior", () => {
     await setSearchText("");
 
     expect(groupButton().disabled).toBe(false);
-    expect(groupButton().getAttribute("aria-expanded")).toBe("true");
-    expect(document.body.querySelector('[data-picker-connection="c1"]')).not.toBeNull();
+    expect(groupButton().getAttribute("aria-expanded")).toBe("false");
+    expect(document.body.querySelector('[data-picker-connection="c1"]')).toBeNull();
+  });
+
+  it("collapses every group when no connection is selected", async () => {
+    await mountPicker([secondaryConnection], { layout: twoGroupLayout });
+
+    expect(groupButton("g1").getAttribute("aria-expanded")).toBe("false");
+    expect(groupButton("g2").getAttribute("aria-expanded")).toBe("false");
+    expect(document.body.querySelector('[data-picker-connection="c1"]')).toBeNull();
+    expect(document.body.querySelector('[data-picker-connection="c2"]')).toBeNull();
+  });
+
+  it("expands only the group holding the selected connection", async () => {
+    await mountPicker([secondaryConnection], { layout: twoGroupLayout, modelValue: "c2" });
+
+    expect(groupButton("g1").getAttribute("aria-expanded")).toBe("false");
+    expect(groupButton("g2").getAttribute("aria-expanded")).toBe("true");
+    expect(document.body.querySelector('[data-picker-connection="c1"]')).toBeNull();
+    expect(document.body.querySelector('[data-picker-connection="c2"]')).not.toBeNull();
+  });
+
+  it("expands every group holding a selected connection in multiple mode", async () => {
+    await mountPicker([secondaryConnection], { layout: twoGroupLayout, multiple: true, selectedConnectionIds: ["c1", "c2"] });
+
+    expect(groupButton("g1").getAttribute("aria-expanded")).toBe("true");
+    expect(groupButton("g2").getAttribute("aria-expanded")).toBe("true");
   });
 
   it("preserves group collapsing when search is inactive", async () => {
     await mountPicker();
 
-    groupButton().click();
-    await nextTick();
     expect(groupButton().getAttribute("aria-expanded")).toBe("false");
     expect(document.body.querySelector('[data-picker-connection="c1"]')).toBeNull();
 
@@ -124,5 +161,44 @@ describe("ConnectionTreeSelect search collapse behavior", () => {
     await nextTick();
     expect(groupButton().getAttribute("aria-expanded")).toBe("true");
     expect(document.body.querySelector('[data-picker-connection="c1"]')).not.toBeNull();
+
+    groupButton().click();
+    await nextTick();
+    expect(groupButton().getAttribute("aria-expanded")).toBe("false");
+    expect(document.body.querySelector('[data-picker-connection="c1"]')).toBeNull();
+  });
+
+  it("toggles connections without replacing the model in multiple mode", async () => {
+    const toggled: string[] = [];
+    const updated: string[] = [];
+    await mountPicker([{ ...connections[0], id: "c2", name: "Secondary" }], {
+      multiple: true,
+      selectedConnectionIds: ["c1"],
+      onToggleConnection: (connectionId: string) => toggled.push(connectionId),
+      "onUpdate:modelValue": (connectionId: string) => updated.push(connectionId),
+    });
+
+    const button = document.body.querySelector('[data-picker-connection="c2"]');
+    if (!(button instanceof HTMLButtonElement)) throw new Error("Connection button was not rendered");
+    button.click();
+    await nextTick();
+
+    expect(toggled).toEqual(["c2"]);
+    expect(updated).toEqual([]);
+  });
+
+  it("supports additional options alongside grouped connections", async () => {
+    const updated: string[] = [];
+    await mountPicker([], {
+      extraOptions: [{ id: "all", label: "All connections" }],
+      "onUpdate:modelValue": (value: string) => updated.push(value),
+    });
+
+    const button = document.body.querySelector('[data-picker-extra="all"]');
+    if (!(button instanceof HTMLButtonElement)) throw new Error("Extra option was not rendered");
+    button.click();
+    await nextTick();
+
+    expect(updated).toEqual(["all"]);
   });
 });

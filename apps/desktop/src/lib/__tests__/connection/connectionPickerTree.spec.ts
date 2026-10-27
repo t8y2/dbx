@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildConnectionPickerRows, connectionPickerSelectableRows, type ConnectionPickerRow } from "@/lib/connection/connectionPickerTree";
+import { buildConnectionPickerRows, connectionPickerDefaultCollapsedGroupIds, connectionPickerSelectableRows, type ConnectionPickerRow } from "@/lib/connection/connectionPickerTree";
 import type { SidebarLayout } from "@/types/database";
 
 const connections = [
@@ -102,5 +102,24 @@ describe("connectionPickerSelectableRows", () => {
   it("keeps only connection rows for keyboard navigation", () => {
     const rows = buildConnectionPickerRows(layout(), connections, new Set(), "");
     expect(connectionPickerSelectableRows(rows).map((row) => row.id)).toEqual(["c1", "c2", "c3", "c4"]);
+  });
+});
+
+describe("connectionPickerDefaultCollapsedGroupIds", () => {
+  it("collapses every group when nothing is selected", () => {
+    expect([...connectionPickerDefaultCollapsedGroupIds(layout(), new Set())].sort()).toEqual(["g1", "g2"]);
+  });
+
+  it("expands the group path to a selected nested connection", () => {
+    expect([...connectionPickerDefaultCollapsedGroupIds(layout(), new Set(["c1"]))].sort()).toEqual([]);
+  });
+
+  it("keeps unrelated groups collapsed", () => {
+    expect([...connectionPickerDefaultCollapsedGroupIds(layout(), new Set(["c2"]))]).toEqual(["g2"]);
+    expect([...connectionPickerDefaultCollapsedGroupIds(layout(), new Set(["c3"]))].sort()).toEqual(["g1", "g2"]);
+  });
+
+  it("collapses every group for connections missing from the layout", () => {
+    expect([...connectionPickerDefaultCollapsedGroupIds(layout(), new Set(["missing"]))].sort()).toEqual(["g1", "g2"]);
   });
 });

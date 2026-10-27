@@ -2,7 +2,7 @@
 
 import { createApp, defineComponent, h, nextTick, reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TreeNode } from "@/types/database";
+import type { SidebarLayout, TreeNode } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   desktop: true,
@@ -60,8 +60,20 @@ function connectionGroupNode(id: string, label: string, children: TreeNode[]): T
   return { id, label, type: "connection-group", isExpanded: true, children };
 }
 
+function layoutFromTree(nodes: readonly TreeNode[]): SidebarLayout {
+  const groups: SidebarLayout["groups"] = [];
+  const convert = (entries: readonly TreeNode[]): SidebarLayout["order"] =>
+    entries.flatMap((node): SidebarLayout["order"] => {
+      if (node.type === "connection") return [{ type: "connection", id: node.connectionId ?? node.id }];
+      if (node.type !== "connection-group") return [];
+      groups.push({ id: node.id, name: node.label, collapsed: node.isExpanded === false });
+      return [{ type: "group", id: node.id, children: convert(node.children ?? []) }];
+    });
+  return { groups, order: convert(nodes) };
+}
+
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
-vi.mock("@/lib/common/utils", () => ({ uuid: mocks.uuid }));
+vi.mock("@/lib/common/utils", () => ({ uuid: mocks.uuid, cn: (...classes: unknown[]) => classes.filter(Boolean).join(" ") }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => mocks.desktop }));
 vi.mock("@/lib/backend/http", () => ({
   previewSqlFile: mocks.previewWebSqlFile,
@@ -93,6 +105,9 @@ vi.mock("@/stores/connectionStore", () => ({
     get treeNodes() {
       return mocks.treeNodes;
     },
+    get sidebarLayout() {
+      return layoutFromTree(mocks.treeNodes);
+    },
     ensureConnected: mocks.ensureConnected,
     getConfig: mocks.getConfig,
     refreshDatabaseTreeNode: mocks.refreshDatabaseTreeNode,
@@ -115,7 +130,7 @@ vi.mock("@/lib/backend/api", () => ({
 }));
 vi.mock("@lucide/vue", () => {
   const Icon = passthrough("span");
-  return { Check: Icon, CheckSquare: Icon, ChevronRight: Icon, Copy: Icon, FileCode: Icon, FolderOpen: Icon, Loader2: Icon, Play: Icon, Square: Icon, X: Icon };
+  return { Check: Icon, CheckSquare: Icon, ChevronDown: Icon, ChevronRight: Icon, Copy: Icon, FileCode: Icon, Folder: Icon, FolderOpen: Icon, Loader2: Icon, Play: Icon, Search: Icon, Square: Icon, X: Icon };
 });
 vi.mock("@/components/ui/dialog", () => ({
   Dialog: defineComponent({
@@ -136,6 +151,11 @@ vi.mock("@/components/ui/tooltip", () => ({
   TooltipTrigger: passthrough("div"),
 }));
 vi.mock("@/components/ui/button", () => ({ Button: passthrough("button") }));
+vi.mock("@/components/ui/popover", () => ({
+  Popover: passthrough("div"),
+  PopoverContent: passthrough("div"),
+  PopoverTrigger: passthrough("div"),
+}));
 vi.mock("@/components/ui/input", () => ({
   Input: defineComponent({
     props: ["modelValue"],
@@ -179,7 +199,6 @@ vi.mock("@/components/ui/select", () => ({
   SelectValue: passthrough("span"),
 }));
 vi.mock("@/components/icons/DatabaseIcon.vue", () => ({ default: passthrough("span") }));
-vi.mock("@/components/connection/ConnectionGroupBadge.vue", () => ({ default: passthrough("span") }));
 
 import SqlFileExecutionDialog from "./SqlFileExecutionDialog.vue";
 import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
@@ -974,7 +993,7 @@ describe("SqlFileExecutionDialog retries", () => {
 
 describe("SqlFileExecutionDialog connection order", () => {
   function connectionOptionIds(): string[] {
-    return Array.from(root!.querySelectorAll<HTMLElement>("[data-sql-file-connection] [data-select-item]"), (item) => item.dataset.selectItem!);
+    return Array.from(root!.querySelectorAll<HTMLElement>("[data-picker-connection]"), (item) => item.dataset.pickerConnection!);
   }
 
   it("tracks nested sidebar order and sort mode while keeping missing SQL connections and the selection", async () => {
@@ -994,19 +1013,19 @@ describe("SqlFileExecutionDialog connection order", () => {
     await nextTick();
 
     expect(connectionOptionIds()).toEqual(["zebra", "beta", "alpha", "new"]);
-    expect(root.querySelector('[data-select-value="beta"]')).not.toBeNull();
+    expect(root.querySelector("[data-sql-file-connection]")?.textContent).toContain("Beta");
 
     mocks.treeNodes.splice(0, 1, connectionGroupNode("parent", "Parent", [connectionNode("alpha", "Alpha"), connectionGroupNode("nested", "Nested", [connectionNode("beta", "Beta")]), connectionNode("zebra", "Zebra")]));
     await nextTick();
 
     expect(connectionOptionIds()).toEqual(["alpha", "beta", "zebra", "new"]);
-    expect(root.querySelector('[data-select-value="beta"]')).not.toBeNull();
+    expect(root.querySelector("[data-sql-file-connection]")?.textContent).toContain("Beta");
 
     mocks.editorSettings.sidebarConnectionSortMode = "desc";
     await nextTick();
 
     expect(connectionOptionIds()).toEqual(["zebra", "beta", "alpha", "new"]);
-    expect(root.querySelector('[data-select-value="beta"]')).not.toBeNull();
+    expect(root.querySelector("[data-sql-file-connection]")?.textContent).toContain("Beta");
   });
 });
 
@@ -1188,7 +1207,7 @@ describe("SqlFileExecutionDialog target preservation (#4844)", () => {
     findButton("sqlFile.browse").click();
     await vi.waitFor(() => expect(mocks.previewSqlFile).toHaveBeenCalledWith("/tmp/saved_other.sql", "auto"));
 
-    expect(root.querySelector('[data-select-value="mysql-1"]')).not.toBeNull();
+    expect(root.querySelector("[data-sql-file-connection]")?.textContent).toContain("MySQL");
     expect(root.querySelector('[data-select-value="explicit_prefill_db"]')).not.toBeNull();
   });
 

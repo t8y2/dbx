@@ -4,6 +4,7 @@ import { Activity, AlertTriangle, ArrowRightLeft, ChevronDown, ChevronLeft, Chev
 import { useI18n } from "vue-i18n";
 import KvKeyBrowser from "@/components/kv/KvKeyBrowser.vue";
 import EtcdAdminConsole from "@/components/etcd/EtcdAdminConsole.vue";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -1298,12 +1299,18 @@ defineExpose({ focusSearch, refresh });
               <div class="grid gap-3 lg:grid-cols-[minmax(180px,0.75fr)_auto_minmax(260px,1.35fr)]">
                 <div class="flex min-w-0 flex-col gap-1.5">
                   <span class="text-xs font-medium text-foreground">目标连接</span>
-                  <Select :model-value="targetConnectionId" :disabled="transferLoading || transferApplying" @update:model-value="onTransferTargetChange">
-                    <SelectTrigger class="h-9"><SelectValue :placeholder="t('etcd.targetConnection')" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem v-for="connection in etcdConnections.filter((connection) => connection.id !== props.connectionId)" :key="connection.id" :value="connection.id">{{ connection.name }}</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <ConnectionTreeSelect
+                    :model-value="targetConnectionId"
+                    :connections="etcdConnections.filter((connection) => connection.id !== props.connectionId)"
+                    :layout="connectionStore.sidebarLayout"
+                    :placeholder="t('etcd.targetConnection')"
+                    :search-placeholder="t('etcd.targetConnection')"
+                    :empty-text="t('common.noResults')"
+                    :disabled="transferLoading || transferApplying"
+                    trigger-class="dbx-control-chrome h-9 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-sm shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+                    list-class="w-[var(--reka-popover-trigger-width)]"
+                    @update:model-value="onTransferTargetChange"
+                  />
                 </div>
 
                 <div class="flex min-w-0 flex-col gap-1.5">
@@ -1354,12 +1361,18 @@ defineExpose({ focusSearch, refresh });
           </template>
 
           <div v-else class="mt-3">
-            <Select :model-value="targetConnectionId" :disabled="transferLoading || transferApplying" @update:model-value="onTransferTargetChange">
-              <SelectTrigger><SelectValue :placeholder="t('etcd.targetConnection')" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="connection in etcdConnections" :key="connection.id" :value="connection.id">{{ connection.name }}</SelectItem>
-              </SelectContent>
-            </Select>
+            <ConnectionTreeSelect
+              :model-value="targetConnectionId"
+              :connections="etcdConnections"
+              :layout="connectionStore.sidebarLayout"
+              :placeholder="t('etcd.targetConnection')"
+              :search-placeholder="t('etcd.targetConnection')"
+              :empty-text="t('common.noResults')"
+              :disabled="transferLoading || transferApplying"
+              trigger-class="dbx-control-chrome h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-sm shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+              list-class="w-[var(--reka-popover-trigger-width)]"
+              @update:model-value="onTransferTargetChange"
+            />
           </div>
         </DialogHeader>
         <div v-if="transferError" class="border-b px-5 py-2 text-sm text-destructive">{{ transferError }}</div>

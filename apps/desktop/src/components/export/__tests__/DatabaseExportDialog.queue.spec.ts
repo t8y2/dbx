@@ -20,7 +20,7 @@ vi.mock("@/lib/backend/api", () => ({
   cancelDatabaseExport: mocks.cancel,
   recordDatabaseExportDestination: vi.fn(async () => undefined),
 }));
-vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: [connection], getConfig: () => connection, ensureConnected: vi.fn(async () => undefined) }) }));
+vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: [connection], sidebarLayout: { groups: [], order: [] }, getConfig: () => connection, ensureConnected: vi.fn(async () => undefined) }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: {} }) }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@/lib/export/exportPath", () => ({ promptExportSavePath: vi.fn(async () => "C:/exports/original.sql"), autoRevealExportedPathIfConfigured: vi.fn() }));
@@ -30,7 +30,6 @@ vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/i18n", () => ({ default: { install() {}, global: { t: (key: string) => key } } }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/components/icons/DatabaseIcon.vue", () => ({ default: { render: () => null } }));
-vi.mock("@/components/connection/ConnectionGroupBadge.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/ui/dialog", () => {
   const component = defineComponent({
     setup:

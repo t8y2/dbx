@@ -101,6 +101,8 @@ describe("data transfer connection choices", () => {
     const { container, selection } = await mountTransferPickers(source);
     for (const side of ["source", "target"]) {
       const picker = container.querySelector(`[data-side="${side}"]`)!;
+      (picker.querySelector('[data-picker-group="embedded"]') as HTMLButtonElement).click();
+      await nextTick();
       expect(picker.querySelector('[data-picker-connection="h2-local-id"]')?.textContent).toContain("Local H2");
       expect(picker.querySelector('[data-picker-connection="h2-jdbc-id"]')?.textContent).toContain("JDBC H2");
       expect(picker.querySelector('[data-picker-connection="yashandb-id"]')?.textContent).toContain("YashanDB");

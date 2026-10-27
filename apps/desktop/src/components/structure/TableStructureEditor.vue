@@ -75,6 +75,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import StarRocksAlterStatus from "@/components/structure/StarRocksAlterStatus.vue";
 import StarRocksSortKeyEditor from "@/components/structure/StarRocksSortKeyEditor.vue";
 import StarRocksLayoutCopyDialog from "@/components/structure/StarRocksLayoutCopyDialog.vue";
@@ -9988,15 +9989,16 @@ watch(
           <div class="grid gap-3 sm:grid-cols-2">
             <div class="grid gap-1.5 text-sm font-medium">
               <label id="copy-source-connection-label">{{ t("structureEditor.copyColumnsSourceConnection") }}</label>
-              <SearchableSelect
+              <ConnectionTreeSelect
                 :model-value="copySourceConnectionId"
-                :options="copySourceConnections.map((config) => config.id)"
+                :connections="copySourceConnections"
+                :layout="store.sidebarLayout"
                 :placeholder="t('structureEditor.copyColumnsSourceConnection')"
                 :search-placeholder="t('structureEditor.copyColumnsSourceConnection')"
                 :empty-text="t('common.noResults')"
                 aria-labelledby="copy-source-connection-label"
-                trigger-class="h-8 w-full justify-between text-xs"
-                :display-name="(id: string) => store.getConfig(id)?.name || id"
+                trigger-class="dbx-control-chrome h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+                list-class="w-[var(--reka-popover-trigger-width)]"
                 @update:model-value="(value: string) => changeCopySourceScope('connection', value)"
               />
             </div>

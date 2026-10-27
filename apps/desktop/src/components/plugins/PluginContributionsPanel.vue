@@ -42,6 +42,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/composables/useToast";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import PluginShortcutSettings from "./PluginShortcutSettings.vue";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import PluginAiAccessSection from "@/components/plugins/PluginAiAccessSection.vue";
@@ -2144,7 +2145,19 @@ onBeforeUnmount(() => {
             </div>
             <div v-if="detailChooseConnection" class="mb-4 flex flex-col gap-2 rounded-lg border p-3">
               <div class="text-sm font-medium">{{ t("pluginPlatform.chooseConnection") }}</div>
-              <Button v-for="connection in detailConnections" :key="connection.id" variant="outline" class="justify-start" :disabled="detailOpening || mutationRunning" @click="launchDetailEntry(connection.id)">{{ connection.name }}</Button>
+              <ConnectionTreeSelect
+                v-if="detailConnections.length"
+                model-value=""
+                :connections="detailConnections"
+                :layout="connectionStore.sidebarLayout || { groups: [], order: [] }"
+                :placeholder="t('pluginPlatform.chooseConnection')"
+                :search-placeholder="t('editor.searchConnection')"
+                :empty-text="t('common.noResults')"
+                :disabled="detailOpening || mutationRunning"
+                trigger-class="h-9 w-full justify-start border px-3 text-sm"
+                list-class="w-[var(--reka-popover-trigger-width)]"
+                @update:model-value="launchDetailEntry"
+              />
               <Button v-for="entry in detailProviders" :key="entry.contribution.id" variant="outline" class="justify-start" :disabled="detailOpening || mutationRunning" @click="createDetailConnection(entry.contribution.id)"
                 ><Plus class="size-3.5" />{{ t("pluginPlatform.newConnection") }} · {{ entry.contribution.label }}</Button
               >

@@ -6,8 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
-import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import * as api from "@/lib/backend/api";
 import type { ExportProgress } from "@/lib/backend/api";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
@@ -208,11 +207,6 @@ const filteredDatabases = computed(() => {
   if (!q) return databases.value;
   return databases.value.filter((name) => name.toLowerCase().includes(q));
 });
-
-function connectionIconType(connId: string) {
-  const config = store.getConfig(connId);
-  return config?.driver_profile || config?.db_type || "mysql";
-}
 
 // 当前连接是否为单数据库架构（达梦、Oracle 等），这类数据库的"源数据库"与"Schema"没有层级关系
 const isSingleDb = computed(() => {
@@ -1149,23 +1143,16 @@ watch([includeStructure, includeData, insertDialect, insertMode, includeObjects,
         <div v-if="!isExporting && !exportDone && !exportError && !exportCancelled" class="space-y-3">
           <div class="space-y-1.5">
             <Label class="text-xs">{{ t("transfer.sourceConnection") }}</Label>
-            <Select :model-value="connectionId" @update:model-value="(v: any) => (connectionId = String(v))">
-              <SelectTrigger class="h-8 text-xs">
-                <div class="flex items-center gap-2">
-                  <DatabaseIcon v-if="connectionId" :db-type="connectionIconType(connectionId)" class="w-3.5 h-3.5" />
-                  <SelectValue :placeholder="t('diff.selectConnection')" />
-                </div>
-              </SelectTrigger>
-              <SelectContent position="popper" align="start">
-                <SelectItem v-for="c in sqlConnections" :key="c.id" :value="c.id">
-                  <div class="flex min-w-0 items-center gap-2">
-                    <DatabaseIcon :db-type="c.driver_profile || c.db_type" class="w-3.5 h-3.5 shrink-0" />
-                    <ConnectionGroupBadge :connection-id="c.id" />
-                    <span class="min-w-0 flex-1 truncate">{{ c.name }}</span>
-                  </div>
-                </SelectItem>
-              </SelectContent>
-            </Select>
+            <ConnectionTreeSelect
+              v-model="connectionId"
+              :connections="sqlConnections"
+              :layout="store.sidebarLayout"
+              :placeholder="t('diff.selectConnection')"
+              :search-placeholder="t('editor.searchConnection')"
+              :empty-text="t('common.noResults')"
+              trigger-class="h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+              list-class="w-[var(--reka-popover-trigger-width)]"
+            />
           </div>
 
           <div v-if="exportAllDatabases && databases.length" class="space-y-2">

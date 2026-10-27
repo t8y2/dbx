@@ -1,24 +1,24 @@
 <script setup lang="ts">
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from "vue";
+import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { HelpTooltip } from "@/components/ui/tooltip";
-import { Check, ChevronDown, FolderOpen, Loader2, Search } from "@lucide/vue";
-import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
+import { FolderOpen, Loader2, Search } from "@lucide/vue";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import { databaseBackupFileNamePatternHasRunId, databaseBackupFileNamePatternIsValid, supportsNavicatBackupFormat, type DatabaseBackupExecutionConfig } from "@/lib/backup/scheduledDatabaseBackup";
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 import BackupTableSelector from "./BackupTableSelector.vue";
 import type { DatabaseBackupTableSelectionState } from "@/lib/backup/scheduledDatabaseBackup";
 
 const props = withDefaults(
   defineProps<{
     draft: DatabaseBackupExecutionConfig;
-    connections: Array<Pick<ConnectionConfig, "id" | "name"> & Partial<Pick<ConnectionConfig, "db_type">>>;
+    connections: ConnectionConfig[];
+    layout: SidebarLayout;
     allDatabases: boolean;
     selectedDatabases: string[];
     databaseOptions: string[];
@@ -47,11 +47,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-const connectionPickerOpen = ref(false);
-const connectionSearch = ref("");
 const databaseSearch = ref("");
-const connectionPickerTrigger = ref<ComponentPublicInstance | null>(null);
-const connectionPickerWidth = ref<number>();
 
 const selectedConnectionName = computed(() => props.connections.find((connection) => connection.id === props.draft.connectionId)?.name || props.draft.connectionId);
 const selectedConnectionType = computed(() => props.connections.find((connection) => connection.id === props.draft.connectionId)?.db_type);
@@ -66,11 +62,6 @@ const navicatFormatSupported = computed(() => supportsNavicatBackupFormat(select
 const navicatFormatUnsupported = computed(() => props.draft.outputCompression === "nb3" && !navicatFormatSupported.value);
 const connectionPickerLabel = computed(() => (multipleConnectionsSelected.value ? t("databaseBackup.connectionsSelected", { count: props.selectedConnectionIds.length }) : selectedConnectionName.value));
 const fileNamePatternNeedsRunId = computed(() => multipleConnectionsSelected.value && !databaseBackupFileNamePatternHasRunId(props.draft.fileNamePattern));
-const filteredConnections = computed(() => {
-  const query = connectionSearch.value.trim().toLocaleLowerCase();
-  if (!query) return props.connections;
-  return props.connections.filter((connection) => connection.name.toLocaleLowerCase().includes(query));
-});
 const filteredDatabaseOptions = computed(() => {
   const query = databaseSearch.value.trim().toLocaleLowerCase();
   if (!query) return props.databaseOptions;
@@ -90,59 +81,8 @@ const fileNameTemplateVariables = computed(() => [
   { token: "{runId}", description: t("databaseBackup.templateVariableRunId") },
 ]);
 
-function isConnectionSelected(connectionId: string): boolean {
-  return props.multiSelectConnections ? props.selectedConnectionIds.includes(connectionId) : connectionId === props.draft.connectionId;
-}
-
-function selectConnection(connectionId: string) {
-  if (props.multiSelectConnections) {
-    emit("toggleConnection", connectionId);
-    return;
-  }
-  emit("changeConnection", connectionId);
-  connectionPickerOpen.value = false;
-}
-
-function syncConnectionPickerWidth() {
-  const element = connectionPickerTrigger.value?.$el;
-  if (!(element instanceof HTMLElement)) return;
-  const width = Math.ceil(element.getBoundingClientRect().width);
-  if (width > 0) connectionPickerWidth.value = width;
-}
-
-function handleScrollOutside(event: Event) {
-  if (!connectionPickerOpen.value) return;
-  const target = event.target;
-  if (target instanceof HTMLElement && target.closest?.('[data-slot="popover-content"]')) return;
-  connectionPickerOpen.value = false;
-}
-
-watch(connectionPickerOpen, async (open) => {
-  if (!open) {
-    window.removeEventListener("scroll", handleScrollOutside, { capture: true });
-    connectionSearch.value = "";
-    return;
-  }
-  window.addEventListener("scroll", handleScrollOutside, { capture: true, passive: true });
-  await nextTick();
-  syncConnectionPickerWidth();
-});
-
 watch(
   () => props.draft,
-  () => {
-    connectionPickerOpen.value = false;
-    connectionSearch.value = "";
-    databaseSearch.value = "";
-  },
-);
-
-onBeforeUnmount(() => {
-  window.removeEventListener("scroll", handleScrollOutside, { capture: true });
-});
-
-watch(
-  () => props.draft.connectionId,
   () => {
     databaseSearch.value = "";
   },
@@ -153,39 +93,26 @@ watch(
   <div class="backup-config-fields grid gap-5 py-1">
     <div class="space-y-2">
       <Label>{{ t("databaseBackup.connection") }}</Label>
-      <Popover v-model:open="connectionPickerOpen">
-        <PopoverTrigger as-child>
-          <Button ref="connectionPickerTrigger" data-backup-connection-picker type="button" variant="outline" role="combobox" :aria-expanded="connectionPickerOpen" class="w-full justify-between font-normal" @click="syncConnectionPickerWidth">
-            <span class="truncate">{{ connectionPickerLabel }}</span>
-            <ChevronDown class="ml-2 h-4 w-4 shrink-0 opacity-50" />
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent align="start" :collision-padding="24" :hide-when-detached="true" class="w-[var(--reka-popover-trigger-width)] max-w-[calc(100vw-48px)] p-1" :style="connectionPickerWidth ? { width: `${connectionPickerWidth}px` } : undefined">
-          <div class="relative">
-            <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input v-model="connectionSearch" data-backup-connection-search class="h-9 pl-8" :aria-label="t('databaseBackup.searchConnections')" :placeholder="t('databaseBackup.searchConnections')" />
-          </div>
-          <div class="max-h-60 overflow-y-auto py-1">
-            <button
-              v-for="connection in filteredConnections"
-              :key="connection.id"
-              type="button"
-              class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
-              :role="multiSelectConnections ? 'checkbox' : undefined"
-              :aria-checked="multiSelectConnections ? isConnectionSelected(connection.id) : undefined"
-              @click="selectConnection(connection.id)"
-            >
-              <span v-if="multiSelectConnections" class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="isConnectionSelected(connection.id) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'">
-                <Check v-if="isConnectionSelected(connection.id)" class="h-3 w-3" />
-              </span>
-              <Check v-else class="h-4 w-4 shrink-0" :class="isConnectionSelected(connection.id) ? 'opacity-100' : 'opacity-0'" />
-              <ConnectionGroupBadge :connection-id="connection.id" />
-              <span class="min-w-0 flex-1 truncate">{{ connection.name }}</span>
-            </button>
-            <div v-if="filteredConnections.length === 0" class="px-2 py-2 text-sm text-muted-foreground">{{ t("databaseBackup.noMatchingConnections") }}</div>
-          </div>
-        </PopoverContent>
-      </Popover>
+      <ConnectionTreeSelect
+        :model-value="draft.connectionId"
+        :connections="connections"
+        :layout="layout"
+        :multiple="multiSelectConnections"
+        :selected-connection-ids="selectedConnectionIds"
+        :placeholder="t('databaseBackup.connection')"
+        :search-placeholder="t('databaseBackup.searchConnections')"
+        :empty-text="t('databaseBackup.noMatchingConnections')"
+        :search-input-attrs="{ 'data-backup-connection-search': '' }"
+        trigger-class="h-9 w-full max-w-none justify-between border font-normal"
+        list-class="w-[var(--reka-popover-trigger-width)]"
+        data-backup-connection-picker
+        @update:model-value="(connectionId) => emit('changeConnection', connectionId)"
+        @toggle-connection="(connectionId) => emit('toggleConnection', connectionId)"
+      >
+        <template #trigger-label>
+          <span class="truncate">{{ connectionPickerLabel }}</span>
+        </template>
+      </ConnectionTreeSelect>
     </div>
 
     <div class="space-y-2">

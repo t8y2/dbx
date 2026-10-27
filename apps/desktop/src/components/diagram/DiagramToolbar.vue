@@ -6,15 +6,14 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Copy, Download, Link2, Loader2, Maximize2, Minimize2, Network, Plus, RefreshCw, Search, Table2, Upload, X, ZoomIn, ZoomOut, LayoutGrid } from "@lucide/vue";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import DiagramSchemaSelect from "./DiagramSchemaSelect.vue";
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 import type { DiagramExportFormat } from "@/lib/export/diagramFormats";
 
 const { t } = useI18n();
 
-const props = defineProps<{
+defineProps<{
   connectionId: string;
   database: string;
   schema: string;
@@ -22,7 +21,7 @@ const props = defineProps<{
   databases: string[];
   schemas: string[];
   sqlConnections: ConnectionConfig[];
-  selectedConnection: ConnectionConfig | undefined;
+  layout: SidebarLayout;
   isSchemaAware: boolean;
   loadingDatabases: boolean;
   loadingSchemas: boolean;
@@ -82,33 +81,21 @@ function exportFormatLabel(format: DiagramExportFormat): string {
       return t("diagram.exportMermaid");
   }
 }
-
-function connectionIconType(id: string) {
-  const config = props.sqlConnections.find((c) => c.id === id);
-  return config?.driver_profile || config?.db_type || "mysql";
-}
 </script>
 
 <template>
   <div class="flex items-center gap-2 border-b px-3 py-2 shrink-0 overflow-x-auto">
-    <Select :model-value="connectionId" @update:model-value="(value: any) => emit('set-connection', String(value))">
-      <SelectTrigger class="h-8 w-48 text-xs">
-        <div v-if="connectionId" class="flex min-w-0 items-center gap-2">
-          <DatabaseIcon :db-type="connectionIconType(connectionId)" class="w-3.5 h-3.5 shrink-0" />
-          <span class="truncate">{{ selectedConnection?.name }}</span>
-        </div>
-        <SelectValue v-else :placeholder="t('diagram.selectConnection')" />
-      </SelectTrigger>
-      <SelectContent>
-        <SelectItem v-for="connection in sqlConnections" :key="connection.id" :value="connection.id">
-          <div class="flex min-w-0 items-center gap-2">
-            <DatabaseIcon :db-type="connection.driver_profile || connection.db_type" class="w-3.5 h-3.5 shrink-0" />
-            <ConnectionGroupBadge :connection-id="connection.id" />
-            <span class="min-w-0 flex-1 truncate">{{ connection.name }}</span>
-          </div>
-        </SelectItem>
-      </SelectContent>
-    </Select>
+    <ConnectionTreeSelect
+      :model-value="connectionId"
+      :connections="sqlConnections"
+      :layout="layout"
+      :placeholder="t('diagram.selectConnection')"
+      :search-placeholder="t('editor.searchConnection')"
+      :empty-text="t('common.noResults')"
+      trigger-class="h-8 w-48 max-w-none justify-between gap-1.5 border border-input bg-background px-2.5 text-xs shadow-none hover:bg-muted/40"
+      list-class="w-[var(--reka-popover-trigger-width)]"
+      @update:model-value="(value) => emit('set-connection', value)"
+    />
 
     <Select :model-value="database" :disabled="!databases.length || loadingDatabases" @update:model-value="(value: any) => emit('set-database', String(value))">
       <SelectTrigger class="h-8 w-44 text-xs">

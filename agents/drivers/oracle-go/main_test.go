@@ -2750,8 +2750,11 @@ func TestOracleListTriggersSQLLoadsSourceWithoutLongColumns(t *testing.T) {
 	if strings.Contains(sqlText, "TRIGGER_BODY") {
 		t.Fatalf("trigger listing should avoid Oracle LONG trigger bodies, got: %s", oracleListTriggersSQL)
 	}
-	if !strings.Contains(sqlText, "T.OWNER = :1") || !strings.Contains(sqlText, "T.TABLE_NAME = :2") {
-		t.Fatalf("trigger listing should stay scoped to the selected schema and table, got: %s", oracleListTriggersSQL)
+	// TABLE_OWNER scopes to the base table's schema; filtering on the trigger's
+	// own OWNER dropped cross-schema triggers whose USER_OBJECTS row was visible
+	// (issue #13498). OWNER stays as an OR so owner-scoped nodes keep working.
+	if !strings.Contains(sqlText, "T.TABLE_OWNER = :1") || !strings.Contains(sqlText, "T.TABLE_NAME = :2") {
+		t.Fatalf("trigger listing should scope by the base table owner and table, got: %s", oracleListTriggersSQL)
 	}
 }
 

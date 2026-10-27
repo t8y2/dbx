@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ !github.event.issue.pull_request }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Create DBX bot token
         id: app-token

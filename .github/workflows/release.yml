@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-22.04
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -59,7 +59,7 @@ jobs:
       new_version: ${{ steps.bump.outputs.new_version }}
       prev_tag: ${{ steps.prev-tag.outputs.prev_tag }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.MCP_RELEASE_TOKEN }}
@@ -150,7 +150,7 @@ jobs:
       # Keep releases working until the shared S3 secrets are configured.
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -325,7 +325,7 @@ jobs:
       VSIGN_SERVER: ${{ vars.VSIGN_SERVER }}
       VSIGN_TOOL_SHA256: ${{ vars.VSIGN_TOOL_SHA256 }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -589,7 +589,7 @@ jobs:
       VSIGN_SERVER: ${{ vars.VSIGN_SERVER }}
       VSIGN_TOOL_SHA256: ${{ vars.VSIGN_TOOL_SHA256 }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -749,7 +749,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -844,7 +844,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -997,7 +997,7 @@ jobs:
     needs: [cleanup-release-signatures, bump-jdbc-plugin-version]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -1070,7 +1070,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Download GitHub release assets
         env:
@@ -1117,7 +1117,7 @@ jobs:
       matrix:
         platform: [linux/amd64, linux/arm64]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -1241,7 +1241,7 @@ jobs:
     needs: [release-ready, docker-manifest]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Build versioned fnOS package
         env:

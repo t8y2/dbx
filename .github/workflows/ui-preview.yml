@@ -48,7 +48,7 @@ jobs:
       sha: ${{ steps.detect.outputs.sha }}
       number: ${{ steps.detect.outputs.number }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.repository.default_branch }}
           sparse-checkout: .github/ui-preview
@@ -90,7 +90,7 @@ jobs:
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.repository.default_branch }}
           path: ci
@@ -98,7 +98,7 @@ jobs:
           persist-credentials: false
       # the fork's code, on purpose: this job is the one meant to run it,
       # with a read-only token and no credentials left in the checkout
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.detect.outputs.sha }}
           path: pr
@@ -175,7 +175,7 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.repository.default_branch }}
           sparse-checkout: .github/ui-preview

@@ -25,7 +25,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -198,7 +198,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.MCP_RELEASE_TOKEN }}
@@ -319,7 +319,7 @@ jobs:
             binary: dbx.exe
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -476,7 +476,7 @@ jobs:
     needs: [prepare, publish-cli-platforms]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -572,7 +572,7 @@ jobs:
             binary: dbx-mcp.exe
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -781,7 +781,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [prepare, publish-mcp-platforms]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -839,7 +839,7 @@ jobs:
     runs-on: macos-15
     needs: [prepare, publish-mcp-server]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -947,7 +947,7 @@ jobs:
     needs: [prepare, publish-cli, publish-mcp-github-release]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -1016,7 +1016,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [prepare, publish-cli-github-release, publish-mcp-github-release]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Download MCP release checksums
         env:

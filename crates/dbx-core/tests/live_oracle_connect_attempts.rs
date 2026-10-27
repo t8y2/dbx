@@ -87,16 +87,10 @@ async fn live_oracle_connects_and_runs_a_query() {
     assert_eq!(single_int(&result), 1);
     eprintln!("live Oracle connect + query: {} ms", started.elapsed().as_millis());
 
-    let banner = execute_sql_statement(
-        &state,
-        id,
-        &service,
-        "SELECT banner FROM v$version WHERE ROWNUM = 1",
-        None,
-        None,
-    )
-    .await
-    .expect("v$version query");
+    let banner =
+        execute_sql_statement(&state, id, &service, "SELECT banner FROM v$version WHERE ROWNUM = 1", None, None)
+            .await
+            .expect("v$version query");
     let banner = banner.rows.first().and_then(|row| row.first()).cloned().unwrap_or_default();
     let banner = banner.as_str().unwrap_or_default();
     assert!(banner.contains("Oracle Database"), "unexpected v$version banner: {banner}");
@@ -111,10 +105,8 @@ async fn live_oracle_unreachable_port_does_not_fan_out_descriptor_retries() {
     // for enterprise security/zero-trust clients in front of the database, which
     // pop one native warning each, so the live failure must stay a single attempt.
     let state = app_state().await;
-    let closed_port = std::env::var("DBX_LIVE_ORACLE_CLOSED_PORT")
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(1);
+    let closed_port =
+        std::env::var("DBX_LIVE_ORACLE_CLOSED_PORT").ok().and_then(|value| value.parse::<u16>().ok()).unwrap_or(1);
     let (id, service) = ("live-oracle-closed-port", live_oracle_service());
     let config = live_oracle_config(id, closed_port, None);
     state.configs.write().await.insert(id.to_string(), config.clone());

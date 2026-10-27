@@ -3706,6 +3706,21 @@ pub async fn close_manual_transaction_query_session(
     }
 }
 
+/// Whether an open manual transaction can page a query through an Agent
+/// result-session cursor. Only Agent transaction connections host cursors;
+/// native (PostgreSQL/MySQL/SQL Server) and external-driver transactions page
+/// with SQL only.
+pub async fn manual_transaction_supports_agent_cursor(state: &AppState, txn_session_id: &str) -> bool {
+    let sessions = state.transaction_sessions.read().await;
+    let Some(session) = sessions.get(txn_session_id) else {
+        return false;
+    };
+    let Ok(connection) = session.connection.try_lock() else {
+        return false;
+    };
+    matches!(&*connection, TxnConnection::Agent { .. })
+}
+
 pub async fn execute_multi_core(
     state: &AppState,
     connection_id: &str,
@@ -12754,6 +12769,40 @@ for line in sys.stdin:
         cursor_ids.discard(cursor_id)
         print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": closed}}), flush=True)
         continue
+    if method == "execute_query_page":
+        # First cursor page: two rows and an open result session on this
+        # transaction connection.
+        params = request.get("params", {{}})
+        page_size = int(params.get("pageSize") or 1)
+        rows = [["page-row-" + str(index)] for index in range(1, min(page_size, 2) + 1)]
+        result = {{
+            "columns": ["val"],
+            "column_types": [],
+            "column_sortables": [],
+            "rows": rows,
+            "affected_rows": 0,
+            "execution_time_ms": 1,
+            "truncated": False,
+            "session_id": "cursor-1",
+            "has_more": True
+        }}
+        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
+        continue
+    if method == "fetch_query_page":
+        # Continuation page of the same cursor: one last row.
+        result = {{
+            "columns": ["val"],
+            "column_types": [],
+            "column_sortables": [],
+            "rows": [["page-row-3"]],
+            "affected_rows": 0,
+            "execution_time_ms": 1,
+            "truncated": False,
+            "session_id": "cursor-1",
+            "has_more": False
+        }}
+        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
+        continue
     if method == "execute_query":
         params = request.get("params", {{}})
         sql = params.get("sql", "")
@@ -12856,6 +12905,115 @@ for line in sys.stdin:
         assert!(state.transaction_sessions.read().await.contains_key(&txn_id));
         rollback_manual_transaction(&state, &txn_id).await.unwrap();
         assert!(!close_manual_transaction_query_session(&state, "agent-conn", &txn_id, "cursor-1").await.unwrap());
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn manual_transaction_agent_cursor_support_is_agent_only() {
+        let (state, txn_id, dir) = manual_transaction_test_state(DatabaseType::Oracle).await;
+        // The fake Oracle transaction holds an Agent connection, so exports may
+        // page it through an Agent result session.
+        assert!(manual_transaction_supports_agent_cursor(&state, &txn_id).await);
+        assert!(!manual_transaction_supports_agent_cursor(&state, "missing-txn").await);
+
+        // A native transaction connection only pages with SQL.
+        let mysql_state = AppState::new(crate::persistence::test_storage::open(&dir.join("mysql.db")).await.unwrap());
+        let mysql_txn_id = uuid::Uuid::new_v4().to_string();
+        mysql_state.transaction_sessions.write().await.insert(
+            mysql_txn_id.clone(),
+            TransactionSession {
+                sqlserver: None,
+                connection: Arc::new(tokio::sync::Mutex::new(TxnConnection::Mysql(None))),
+                pool_key: "mysql-conn".to_string(),
+                last_activity: std::time::Instant::now(),
+                idle_timeout: std::time::Duration::from_secs(60),
+                busy: false,
+                snapshot_rotation_safe: false,
+                connection_id: "mysql-conn".to_string(),
+                database: String::new(),
+                schema: None,
+            },
+        );
+        assert!(!manual_transaction_supports_agent_cursor(&mysql_state, &mysql_txn_id).await);
+
+        rollback_manual_transaction(&state, &txn_id).await.unwrap();
+        drop(mysql_state);
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Builds a query-result export request for the fake Agent transaction above.
+    fn manual_transaction_export_request(
+        txn_id: &str,
+        file_path: &std::path::Path,
+        sql: &str,
+        page_size: usize,
+    ) -> crate::data::query_result_export::QueryResultExportRequest {
+        serde_json::from_value(serde_json::json!({
+            "exportId": "export-1",
+            "connectionId": "agent-conn",
+            "database": "ORCL",
+            "schema": "APP",
+            "sql": sql,
+            "queryBaseSql": sql,
+            "databaseType": "oracle",
+            "useAgentCursor": true,
+            "filePath": file_path.to_string_lossy(),
+            "format": "csv",
+            "pageSize": page_size,
+            "txnSessionId": txn_id,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn oracle_query_result_export_pages_through_the_manual_transaction_cursor() {
+        let (state, txn_id, dir) = manual_transaction_test_state(DatabaseType::Oracle).await;
+        let csv_path = dir.join("cursor-export.csv");
+        // Wildcard projection: no safe ROWNUM wrapper, so the export needs the
+        // Agent result session to reach the second page — inside the transaction.
+        let request = manual_transaction_export_request(&txn_id, &csv_path, "SELECT * FROM APP.EVENTS", 2);
+        let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress_sink = progress.clone();
+        crate::data::query_result_export::export_query_result_core(&state, &request, None, move |update| {
+            progress_sink.lock().unwrap().push(update);
+        })
+        .await
+        .expect("manual-transaction export pages through the transaction cursor");
+
+        let csv = std::fs::read_to_string(&csv_path).unwrap();
+        for row in ["page-row-1", "page-row-2", "page-row-3"] {
+            assert!(csv.contains(row), "missing {row} in {csv}");
+        }
+        let terminal = progress.lock().unwrap().last().cloned().unwrap();
+        assert!(matches!(terminal.status, crate::database_export::ExportStatus::Done));
+        assert_eq!(terminal.rows_exported, 3);
+
+        rollback_manual_transaction(&state, &txn_id).await.unwrap();
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn oracle_rownum_bounded_export_runs_once_inside_the_manual_transaction() {
+        let (state, txn_id, dir) = manual_transaction_test_state(DatabaseType::Oracle).await;
+        let csv_path = dir.join("bounded-export.csv");
+        let sql = "SELECT FJFY, JCBW FROM T_YL_JCZD01 WHERE ROWNUM < 2000;";
+        let request = manual_transaction_export_request(&txn_id, &csv_path, sql, 2000);
+        crate::data::query_result_export::export_query_result_core(&state, &request, None, |_| {})
+            .await
+            .expect("ROWNUM-bounded export runs as one bounded transaction execution");
+
+        let csv = std::fs::read_to_string(&csv_path).unwrap();
+        // The fake transaction connection answers the statement itself (no
+        // cursor page fetch), proving the single-execution path was taken. The
+        // transaction executor strips the trailing semicolon, hence the prefix
+        // assertion rather than a byte-for-byte match.
+        assert!(csv.contains("FJFY") && csv.contains("ROWNUM < 2000"), "unexpected export content: {csv}");
+        assert!(!csv.contains("page-row"), "bounded export must not open a cursor: {csv}");
+
+        rollback_manual_transaction(&state, &txn_id).await.unwrap();
         drop(state);
         let _ = std::fs::remove_dir_all(dir);
     }

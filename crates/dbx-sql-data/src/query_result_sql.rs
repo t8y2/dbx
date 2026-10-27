@@ -10,10 +10,10 @@ use crate::sql_dialect::{
     quote_table_identifier, PaginationContext, TablePaginationStrategy,
 };
 use sqlparser::ast::{
-    visit_expressions, Expr, ForClause, GroupByExpr, LimitClause, ObjectNamePart, OrderByKind, Select, SelectItem,
-    SelectModifiers, SetExpr, Statement, TableFactor, Value, ValueWithSpan,
+    visit_expressions, BinaryOperator, Expr, ForClause, GroupByExpr, LimitClause, ObjectNamePart, OrderByKind, Select,
+    SelectItem, SelectModifiers, SetExpr, Statement, TableFactor, Value, ValueWithSpan,
 };
-use sqlparser::dialect::{ClickHouseDialect, GenericDialect, MsSqlDialect, MySqlDialect};
+use sqlparser::dialect::{ClickHouseDialect, GenericDialect, MsSqlDialect, MySqlDialect, OracleDialect};
 use sqlparser::parser::Parser;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2077,6 +2077,67 @@ fn has_top_level_fetch_first(sql: &str) -> bool {
 
 fn has_top_level_rownum(sql: &str) -> bool {
     top_level_sql_tokens(sql).iter().any(|token| token.text == "ROWNUM")
+}
+
+/// Exact upper bound on the rows a query can return when it already filters on
+/// Oracle's `ROWNUM` pseudo-column with a literal comparison (`ROWNUM < n`,
+/// `ROWNUM <= n`, in either operand order, optionally combined through `AND`).
+///
+/// Such a statement bounds itself, so it can be exported in one execution
+/// without a LIMIT/OFFSET rewrite (which Oracle 11g does not have) or an Agent
+/// cursor page — the predicate keeps the buffered result below the export page
+/// size. Anything ambiguous (expressions, placeholders, `OR`, ROWNUM inside a
+/// subquery) yields `None` so the caller keeps its normal pagination path.
+pub fn top_level_rownum_row_count(sql: &str) -> Option<usize> {
+    let statements = Parser::parse_sql(&OracleDialect {}, sql).ok()?;
+    let [Statement::Query(query)] = statements.as_slice() else {
+        return None;
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+    rownum_bound_from_expr(select.selection.as_ref()?)
+}
+
+fn rownum_bound_from_expr(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Nested(inner) => rownum_bound_from_expr(inner),
+        Expr::BinaryOp { left, op, right } if *op == BinaryOperator::And => {
+            match (rownum_bound_from_expr(left), rownum_bound_from_expr(right)) {
+                (Some(left_bound), Some(right_bound)) => Some(left_bound.min(right_bound)),
+                (Some(bound), None) | (None, Some(bound)) => Some(bound),
+                (None, None) => None,
+            }
+        }
+        Expr::BinaryOp { left, op, right } => {
+            let (rownum, literal, inclusive) = match op {
+                BinaryOperator::Lt => (left, right, false),
+                BinaryOperator::LtEq => (left, right, true),
+                // `2000 > ROWNUM` / `2000 >= ROWNUM` bound ROWNUM from above too.
+                BinaryOperator::Gt => (right, left, false),
+                BinaryOperator::GtEq => (right, left, true),
+                _ => return None,
+            };
+            if !is_rownum_column(rownum) {
+                return None;
+            }
+            let bound = literal_row_count(literal)?;
+            Some(if inclusive { bound } else { bound.saturating_sub(1) })
+        }
+        _ => None,
+    }
+}
+
+fn is_rownum_column(expr: &Expr) -> bool {
+    matches!(expr, Expr::Identifier(ident) if ident.value.eq_ignore_ascii_case("ROWNUM"))
+}
+
+fn literal_row_count(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Value(ValueWithSpan { value: Value::Number(number, _), .. }) => number.parse().ok(),
+        Expr::Nested(inner) => literal_row_count(inner),
+        _ => None,
+    }
 }
 
 fn has_top_level_offset_fetch_next(sql: &str) -> bool {
@@ -5144,6 +5205,30 @@ WHERE u.id = picked.id;
             });
             assert!(!result.ok, "expected query to be rejected: {sql}");
             assert_eq!(result.reason.as_deref(), Some("unsupported"), "reason mismatch: {sql}");
+        }
+    }
+
+    #[test]
+    fn top_level_rownum_row_count_bounds_rownum_filtered_queries() {
+        for (sql, expected) in [
+            ("SELECT FJFY, JCBW FROM T_YL_JCZD01 WHERE ROWNUM < 2000;", Some(1999)),
+            ("SELECT FJFY, JCBW FROM T_YL_JCZD01 WHERE ROWNUM <= 2000;", Some(2000)),
+            ("SELECT id FROM users WHERE ROWNUM < 10 AND active = 1", Some(9)),
+            ("SELECT id FROM users WHERE active = 1 AND ROWNUM <= 100", Some(100)),
+            ("SELECT id FROM users WHERE 2000 > ROWNUM", Some(1999)),
+            ("SELECT id FROM users WHERE (ROWNUM <= 50)", Some(50)),
+            ("SELECT id FROM users WHERE ROWNUM < 1", Some(0)),
+            // Ambiguous shapes must keep the normal pagination path.
+            ("SELECT id FROM users WHERE ROWNUM < 2000 OR active = 1", None),
+            ("SELECT id FROM users WHERE ROWNUM < :limit", None),
+            ("SELECT id FROM users WHERE ROWNUM > 10", None),
+            ("SELECT id FROM (SELECT id FROM users WHERE ROWNUM < 10) t WHERE ROWNUM <= 5", Some(5)),
+            ("SELECT id FROM (SELECT id FROM users WHERE ROWNUM < 10) t", None),
+            ("SELECT ROWNUM, id FROM users", None),
+            ("SELECT id FROM users", None),
+            ("SELECT id FROM users; SELECT 1", None),
+        ] {
+            assert_eq!(top_level_rownum_row_count(sql), expected, "{sql}");
         }
     }
 

@@ -37,10 +37,19 @@ class DdlBuilderDefaultTest {
             null, null, null, null, null
         );
         secondary.setKey_directions(List.of("DESC", "DESC"));
+        IndexInfo ascendingOnly = new IndexInfo(
+            "idx_created", List.of("customer_id", "created_at"), false, false,
+            null, null, null, null, null
+        );
+        ascendingOnly.setKey_directions(List.of("asc", "ASC"));
 
-        String ddl = DdlBuilder.buildTableDdl("root", "orders", List.of(), List.of(primaryKey, secondary), List.of());
+        String ddl = DdlBuilder.buildTableDdl(
+            "root", "orders", List.of(), List.of(primaryKey, secondary, ascendingOnly), List.of()
+        );
 
-        Assertions.assertTrue(ddl.contains("PRIMARY KEY (\"a\" ASC, \"b\" DESC)"), ddl);
+        Assertions.assertTrue(ddl.contains("PRIMARY KEY (\"a\", \"b\" DESC)"), ddl);
         Assertions.assertTrue(ddl.contains("(\"slip_number\" DESC, \"slip_input_date\" DESC)"), ddl);
+        Assertions.assertTrue(ddl.contains("(\"customer_id\", \"created_at\")"), ddl);
+        Assertions.assertFalse(ddl.contains(" ASC"), "ASC is the default and must stay implicit: " + ddl);
     }
 }

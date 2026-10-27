@@ -544,7 +544,7 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
             Map<String, Boolean> uniqueByIndex = new LinkedHashMap<>();
             Map<String, List<IndexColumn>> keyColumns = new LinkedHashMap<>();
             Map<String, List<String>> storingColumns = new LinkedHashMap<>();
-            Map<String, List<String>> keyDirections = new LinkedHashMap<>();
+            Map<String, Map<Integer, String>> keyDirections = new LinkedHashMap<>();
             try (ResultSet rs = conn.getMetaData().getIndexInfo(null, schema, table, false, false)) {
                 while (rs.next()) {
                     String name = rs.getString("INDEX_NAME");
@@ -554,15 +554,6 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
                     }
                     uniqueByIndex.putIfAbsent(name, !rs.getBoolean("NON_UNIQUE"));
                     Integer ordinal = intOrNull(rs, "ORDINAL_POSITION");
-                    if (ordinal != null) {
-                        // The Spanner JDBC driver surfaces INFORMATION_SCHEMA
-                        // INDEX_COLUMNS.ORDERING as ASC_OR_DESC; without it,
-                        // DESC key parts render direction-less in DDL and the
-                        // index panel (issue #13484).
-                        String direction = rs.getString("ASC_OR_DESC");
-                        keyDirections.computeIfAbsent(name, ignored -> new ArrayList<>())
-                            .add("D".equalsIgnoreCase(direction) ? "DESC" : "ASC");
-                    }
                     if (ordinal == null) {
                         // Spanner reports STORING (GoogleSQL) / INCLUDE (PostgreSQL) columns with a
                         // NULL ORDINAL_POSITION. Reading them with getShort() would turn them into
@@ -572,6 +563,14 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
                     }
                     keyColumns.computeIfAbsent(name, ignored -> new ArrayList<>())
                         .add(new IndexColumn(ordinal, column));
+                    // The Spanner JDBC driver surfaces INFORMATION_SCHEMA
+                    // INDEX_COLUMNS.COLUMN_ORDERING as a one-letter ASC_OR_DESC
+                    // ('A'/'D'); without it, DESC key parts render direction-less
+                    // in DDL and the index panel (issue #13484). Keyed by ordinal
+                    // so each direction follows its column through the sort below.
+                    String direction = rs.getString("ASC_OR_DESC");
+                    keyDirections.computeIfAbsent(name, ignored -> new LinkedHashMap<>())
+                        .put(ordinal, "D".equalsIgnoreCase(direction) ? "DESC" : "ASC");
                 }
             }
 
@@ -580,9 +579,12 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
                 String name = entry.getKey();
                 List<IndexColumn> ordered = keyColumns.getOrDefault(name, new ArrayList<>());
                 ordered.sort(Comparator.comparingInt(IndexColumn::getOrdinal));
+                Map<Integer, String> directionByOrdinal = keyDirections.getOrDefault(name, Collections.emptyMap());
                 List<String> columns = new ArrayList<>();
+                List<String> directions = new ArrayList<>();
                 for (IndexColumn column : ordered) {
                     columns.add(column.getName());
+                    directions.add(directionByOrdinal.getOrDefault(column.getOrdinal(), "ASC"));
                 }
                 IndexInfo index = new IndexInfo(
                     name,
@@ -595,7 +597,7 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
                     storingColumns.get(name),
                     null
                 );
-                index.setKey_directions(keyDirections.get(name));
+                index.setKey_directions(directions.isEmpty() ? null : directions);
                 result.add(index);
             }
             return result;

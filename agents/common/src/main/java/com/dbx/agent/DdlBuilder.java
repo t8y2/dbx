@@ -116,8 +116,8 @@ public final class DdlBuilder {
             List<String> directions = index.getKey_directions();
             for (int columnIndex = 0; columnIndex < index.getColumns().size(); columnIndex++) {
                 String renderedColumn = quoteIdent(index.getColumns().get(columnIndex), useBacktick);
-                if (directions != null && columnIndex < directions.size() && notBlank(directions.get(columnIndex))) {
-                    renderedColumn += " " + directions.get(columnIndex).toUpperCase(java.util.Locale.ROOT);
+                if (isDescendingKey(directions, columnIndex)) {
+                    renderedColumn += " DESC";
                 }
                 primaryKeys.add(renderedColumn);
             }
@@ -205,12 +205,13 @@ public final class DdlBuilder {
                     int options = keyOptions.get(columnIndex);
                     renderedColumn += (options & 1) != 0 ? " DESC" : " ASC";
                     renderedColumn += (options & 2) != 0 ? " NULLS FIRST" : " NULLS LAST";
-                } else if (directions != null && columnIndex < directions.size()
-                    && notBlank(directions.get(columnIndex))) {
+                } else if (isDescendingKey(directions, columnIndex)) {
                     // Explicit key directions (e.g. Spanner's ASC_OR_DESC) must
                     // survive into the DDL: DESC key parts change query plans
                     // and their absence misrepresents the schema (#13484).
-                    renderedColumn += " " + directions.get(columnIndex).toUpperCase(java.util.Locale.ROOT);
+                    // ASC is the default and stays implicit, matching the
+                    // engine's own DDL output and the index panels.
+                    renderedColumn += " DESC";
                 }
                 quotedColumns.add(renderedColumn);
             }
@@ -470,6 +471,14 @@ public final class DdlBuilder {
         }
         String truncated = defaultValue.substring(0, nullIdx).trim();
         return truncated.isEmpty() ? null : truncated;
+    }
+
+    private static boolean isDescendingKey(List<String> directions, int columnIndex) {
+        if (directions == null || columnIndex >= directions.size()) {
+            return false;
+        }
+        String direction = directions.get(columnIndex);
+        return direction != null && "DESC".equalsIgnoreCase(direction.trim());
     }
 
     private static boolean notBlank(String value) {

@@ -9924,7 +9924,9 @@ mod tests {
         .expect("SID listener errors should allow service-name retry");
         assert_eq!(service_retry.connection_string.as_deref(), Some("jdbc:oracle:thin:@//127.0.0.1:3306/ORCL"));
 
-        assert!(oracle_alternate_connect_config(&config, "ORA-12541: TNS:no listener").is_some());
+        // ORA-12541 / "no listener" is TCP-level unreachable: alternates cannot help
+        // and each one opens another connection (and another security-client popup).
+        assert!(oracle_alternate_connect_config(&config, "ORA-12541: TNS:no listener").is_none());
     }
 
     #[test]

@@ -1372,7 +1372,7 @@ describe("SidebarTreeRuntimeHost expansion", () => {
 
     connectionStore.treeNodes = [connectionNode];
     connectionStore.loadDatabases = vi.fn(async () => {
-      // Loader attaches children but does not set isExpanded (e.g. sidebarExpandTreeOnConnect is false)
+      // Loader attaches children but does not auto-expand the node in this harness.
       connectionNode.children = [databaseNode];
     });
 
@@ -1468,9 +1468,9 @@ describe("SidebarTreeRuntimeHost expansion", () => {
   });
 
   // #13579: the manual-expansion regression hit every connection type, not just
-  // SQL engines. Each loader below attaches children without setting
-  // isExpanded (sidebarExpandTreeOnConnect defaults to false), so the shared
-  // toggle path must expand the connection node itself.
+  // SQL engines. Each loader below attaches children without auto-expanding the
+  // node (the switch is off for this harness), so the shared toggle path must
+  // expand the connection node itself.
   it.each([
     { dbType: "redis", loader: "loadRedisDatabases" as const, childType: "redis-db" as const },
     { dbType: "mongodb", loader: "loadMongoDatabases" as const, childType: "mongo-db" as const },

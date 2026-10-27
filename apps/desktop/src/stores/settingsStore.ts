@@ -1185,8 +1185,10 @@ export interface EditorSettings {
   autoSelectActiveSidebarNode: boolean;
   sidebarPinDefaultDatabase: boolean;
   sidebarBrowseObjectsOnDatabaseActivation: boolean;
-  /** 连接成功后是否自动展开侧边栏对象树（连接节点/默认数据库节点）。默认关闭：模式多的库全量展开时元数据请求和渲染开销都大（#13302）。 */
+  /** 连接成功后是否自动展开侧边栏对象树（连接节点/默认数据库节点）。默认开启，与 v0.6.55 及更早的行为一致；模式较多的库可关闭以避免连接期全量展开的元数据请求与渲染开销（#13302）。 */
   sidebarExpandTreeOnConnect: boolean;
+  /** 「连接后自动展开对象树」默认值迁移标记（v1：默认由关闭恢复为开启）。 */
+  sidebarExpandTreeOnConnectMigrationVersion: number;
   openQueryOnConnectionOpen: boolean;
   sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: number;
   openTabsRestoreMode: OpenTabsRestoreMode;
@@ -1373,6 +1375,11 @@ const EDITOR_THEME_VALUES = new Set<EditorTheme>(EDITOR_THEMES.map((theme) => th
 
 export const EXECUTE_MODE_CURRENT_DEFAULT_VERSION = 1;
 export const SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION = 1;
+// v1: "expand tree on connect" became the default again, restoring the pre-v0.6.56
+// behavior. Builds that shipped the default-off version have no marker, so their
+// stored false is treated as the old default rather than an explicit opt-out; once
+// this marker is stamped, an explicit toggle wins.
+export const SIDEBAR_EXPAND_TREE_ON_CONNECT_DEFAULT_VERSION = 1;
 // v1: the welcome page default moved from "intro" back to "workspace"; persisted
 // blobs from the intro-default builds lack this marker and are migrated.
 export const WELCOME_PAGE_DEFAULT_VERSION = 1;
@@ -1552,7 +1559,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   autoSelectActiveSidebarNode: false,
   sidebarPinDefaultDatabase: true,
   sidebarBrowseObjectsOnDatabaseActivation: false,
-  sidebarExpandTreeOnConnect: false,
+  sidebarExpandTreeOnConnect: true,
+  sidebarExpandTreeOnConnectMigrationVersion: SIDEBAR_EXPAND_TREE_ON_CONNECT_DEFAULT_VERSION,
   openQueryOnConnectionOpen: false,
   sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
   openTabsRestoreMode: "all",
@@ -2027,6 +2035,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const savedCompactTabTitleDefaultVersion = settings.compactTabTitleDefaultVersion;
   const compactTabTitleDefaultVersion = typeof savedCompactTabTitleDefaultVersion === "number" && savedCompactTabTitleDefaultVersion >= COMPACT_TAB_TITLE_DEFAULT_VERSION ? savedCompactTabTitleDefaultVersion : COMPACT_TAB_TITLE_DEFAULT_VERSION;
   const hasCurrentCompactTabTitleDefault = compactTabTitleDefaultVersion === savedCompactTabTitleDefaultVersion;
+  const savedSidebarExpandTreeDefaultVersion = settings.sidebarExpandTreeOnConnectMigrationVersion;
+  const sidebarExpandTreeDefaultVersion = typeof savedSidebarExpandTreeDefaultVersion === "number" && savedSidebarExpandTreeDefaultVersion >= SIDEBAR_EXPAND_TREE_ON_CONNECT_DEFAULT_VERSION ? savedSidebarExpandTreeDefaultVersion : SIDEBAR_EXPAND_TREE_ON_CONNECT_DEFAULT_VERSION;
+  const hasCurrentSidebarExpandTreeDefault = sidebarExpandTreeDefaultVersion === savedSidebarExpandTreeDefaultVersion;
   // The active id can only be validated once the scheme list it points into is known.
   const dataGridTypeColorSchemes = normalizeDataGridTypeColorSchemes(settings.dataGridTypeColorSchemes);
   const savedExtractorMigrationVersion = settings.dataGridExtractorOptionsMigrationVersion;
@@ -2257,7 +2268,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarSearchOpenedDatabasesOnly: typeof settings.sidebarSearchOpenedDatabasesOnly === "boolean" ? settings.sidebarSearchOpenedDatabasesOnly : DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly,
     autoSelectActiveSidebarNode: settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
     sidebarPinDefaultDatabase: typeof settings.sidebarPinDefaultDatabase === "boolean" ? settings.sidebarPinDefaultDatabase : DEFAULT_EDITOR_SETTINGS.sidebarPinDefaultDatabase,
-    sidebarExpandTreeOnConnect: typeof settings.sidebarExpandTreeOnConnect === "boolean" ? settings.sidebarExpandTreeOnConnect : DEFAULT_EDITOR_SETTINGS.sidebarExpandTreeOnConnect,
+    sidebarExpandTreeOnConnect: hasCurrentSidebarExpandTreeDefault && typeof settings.sidebarExpandTreeOnConnect === "boolean" ? settings.sidebarExpandTreeOnConnect : DEFAULT_EDITOR_SETTINGS.sidebarExpandTreeOnConnect,
+    sidebarExpandTreeOnConnectMigrationVersion: SIDEBAR_EXPAND_TREE_ON_CONNECT_DEFAULT_VERSION,
     openQueryOnConnectionOpen: typeof settings.openQueryOnConnectionOpen === "boolean" ? settings.openQueryOnConnectionOpen : DEFAULT_EDITOR_SETTINGS.openQueryOnConnectionOpen,
     sidebarBrowseObjectsOnDatabaseActivation:
       typeof settings.sidebarBrowseObjectsOnDatabaseActivation === "boolean"

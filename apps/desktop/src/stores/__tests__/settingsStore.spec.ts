@@ -1299,22 +1299,30 @@ describe("normalizeEditorSettings - sidebarPinDefaultDatabase", () => {
   });
 });
 
-// #13302：连接后是否自动展开对象树的开关。默认必须为 false——模式多的库
-// 全量自动展开是反馈的卡顿来源，升级后的老用户也走新默认。
+// #13302 implemented this as an opt-in switch with a default-off build, but the
+// old auto-expand behavior was the long-standing default and the off default was
+// taken as a regression. The default is enabled again (migration v1); users with
+// many schemas can still opt out with the switch.
 describe("normalizeEditorSettings - sidebarExpandTreeOnConnect", () => {
-  it("defaults sidebarExpandTreeOnConnect to false", () => {
-    expect(normalizeEditorSettings({}).sidebarExpandTreeOnConnect).toBe(false);
+  it("defaults sidebarExpandTreeOnConnect to true", () => {
+    expect(normalizeEditorSettings({}).sidebarExpandTreeOnConnect).toBe(true);
   });
 
-  it("preserves explicit boolean values", () => {
+  it("honors an explicit toggle stamped with the current default version", () => {
+    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: true, sidebarExpandTreeOnConnectMigrationVersion: 1 }).sidebarExpandTreeOnConnect).toBe(true);
+    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: false, sidebarExpandTreeOnConnectMigrationVersion: 1 }).sidebarExpandTreeOnConnect).toBe(false);
+  });
+
+  it("migrates legacy blobs without the marker to the enabled default", () => {
+    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: false }).sidebarExpandTreeOnConnect).toBe(true);
     expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: true }).sidebarExpandTreeOnConnect).toBe(true);
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: false }).sidebarExpandTreeOnConnect).toBe(false);
+    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: "false" } as any).sidebarExpandTreeOnConnect).toBe(true);
   });
 
   it("falls back to default for non-boolean values", () => {
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: "true" } as any).sidebarExpandTreeOnConnect).toBe(false);
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: undefined } as any).sidebarExpandTreeOnConnect).toBe(false);
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: 1 } as any).sidebarExpandTreeOnConnect).toBe(false);
+    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: "true" } as any).sidebarExpandTreeOnConnect).toBe(true);
+    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: undefined } as any).sidebarExpandTreeOnConnect).toBe(true);
+    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: 1 } as any).sidebarExpandTreeOnConnect).toBe(true);
   });
 });
 
@@ -1361,13 +1369,13 @@ describe("updateEditorSettings - sidebarExpandTreeOnConnect", () => {
     // store after every apply. A key that never reaches the store keeps the two apart
     // forever, which is what made the dialog report unsaved changes and refuse to close.
     const base = editorSettingsDraftFromSettings(store.editorSettings);
-    const draft = { ...base, sidebarExpandTreeOnConnect: true };
+    const draft = { ...base, sidebarExpandTreeOnConnect: false };
     expect(editorSettingsDraftChanged(draft, base)).toBe(true);
 
     store.updateEditorSettings(editorSettingsPatchFromDraft(draft, base));
 
     const appliedBase = editorSettingsDraftFromSettings(store.editorSettings);
-    expect(appliedBase.sidebarExpandTreeOnConnect).toBe(true);
+    expect(appliedBase.sidebarExpandTreeOnConnect).toBe(false);
     expect(editorSettingsDraftChanged(draft, appliedBase)).toBe(false);
   });
 });

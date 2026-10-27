@@ -6,10 +6,10 @@ export type SidebarSearchMatchKind = "exact" | "prefix" | "word-prefix" | "subst
  * Foreground match-mode chosen in the sidebar search bar (#13505).
  *
  * - `fuzzy`: today's ladder, including in-order subsequences ("101" finds "1001").
- * - `contains`: a LIKE '%q%' filter; abbreviation, subsequence, and cross-word
- *   concatenation tiers are disabled.
- * - `edges`: only whole-label start/end matches (plus separator-blind variants),
- *   so mid-name words never match.
+ * - `contains`: a literal LIKE '%q%' filter; abbreviation, subsequence,
+ *   cross-word concatenation, and separator-blind tiers are disabled.
+ * - `edges`: only literal whole-label start/end matches; no separator-blind
+ *   variants, so mid-name words and separator-spanning queries never match.
  */
 export type SidebarSearchMatchMode = "fuzzy" | "contains" | "edges";
 
@@ -169,17 +169,11 @@ function matchSidebarLabelWithRegex(label: string, query: string, regex: RegExp 
   if (lowerLabel.startsWith(lowerQuery)) return { kind: "prefix", score: 90 };
 
   if (matchMode === "edges") {
-    // Gated to whole-label edges (#13505): the query must sit at the start or
-    // the end of the name, so mid-name words drop out. Separator-blind
-    // variants stay, because "delo" on "del_order" is still an edge match
-    // once the separator is ignored. `suffix` only exists here, so the
-    // fuzzy ranking is untouched.
+    // Strict mode stays literal: only the whole-label start/end counts. The
+    // separator-blind tiers below are fuzzy-only, so "delo" does not match
+    // "del_order" when the user asked for start/end matching. `suffix` only
+    // exists here, so the fuzzy ranking is untouched.
     if (lowerLabel.endsWith(lowerQuery)) return { kind: "suffix", score: 85 };
-    const strippedEdgeLabel = stripSeparators(lowerLabel);
-    if (strippedEdgeLabel !== lowerLabel && strippedEdgeLabel.length >= lowerQuery.length) {
-      if (strippedEdgeLabel.startsWith(lowerQuery)) return { kind: "word-prefix", score: 65 };
-      if (strippedEdgeLabel.endsWith(lowerQuery)) return { kind: "suffix", score: 60 };
-    }
     return null;
   }
 
@@ -189,23 +183,24 @@ function matchSidebarLabelWithRegex(label: string, query: string, regex: RegExp 
   if (matchMode === "fuzzy") {
     if (lowerQuery.length >= 2 && matchesAbbreviation(label, lowerQuery)) return { kind: "abbreviation", score: 60 };
     if (matchesSubsequence(label, lowerQuery)) return { kind: "fuzzy", score: 40 };
-  }
 
-  // Separator-blind matching: strip underscores, hyphens, dots, spaces,
-  // and slashes, then try again.  This lets "delo" match "del_order"
-  // without typing the underscore separator between prefix and name.
-  const stripped = stripSeparators(lowerLabel);
-  if (stripped !== lowerLabel && stripped.length >= lowerQuery.length) {
-    if (stripped.startsWith(lowerQuery)) return { kind: "word-prefix", score: 65 };
-    if (stripped.includes(lowerQuery)) return { kind: "substring", score: 55 };
-  }
+    // Separator-blind matching: strip underscores, hyphens, dots, spaces,
+    // and slashes, then try again.  This lets "delo" match "del_order"
+    // without typing the underscore separator between prefix and name. It is
+    // fuzzy-only because the strict modes promise literal matching.
+    const stripped = stripSeparators(lowerLabel);
+    if (stripped !== lowerLabel && stripped.length >= lowerQuery.length) {
+      if (stripped.startsWith(lowerQuery)) return { kind: "word-prefix", score: 65 };
+      if (stripped.includes(lowerQuery)) return { kind: "substring", score: 55 };
+    }
 
-  // Word-segment prefix concatenation: lets "exclog" find
-  // "system_exception_log". Uses the ORIGINAL label so camelCase boundaries
-  // survive for word segmentation, and compares case-insensitively. Flat 50
-  // keeps it below every existing tier — purely additive.
-  if (matchMode === "fuzzy" && matchesWordPrefixConcatenation(label, query)) {
-    return { kind: "abbreviation", score: 50 };
+    // Word-segment prefix concatenation: lets "exclog" find
+    // "system_exception_log". Uses the ORIGINAL label so camelCase boundaries
+    // survive for word segmentation, and compares case-insensitively. Flat 50
+    // keeps it below every existing tier — purely additive.
+    if (matchesWordPrefixConcatenation(label, query)) {
+      return { kind: "abbreviation", score: 50 };
+    }
   }
 
   return null;

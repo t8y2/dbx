@@ -87,8 +87,6 @@ interface LocalTableSearchOptions {
   enabled: boolean;
   queries: Readonly<Record<string, string>>;
   indexedResults: Readonly<Record<string, TableInfo[] | null>>;
-  /** Foreground match mode from the sidebar search bar (#13505); defaults to fuzzy. */
-  matcherOptions?: SidebarSearchMatcherOptions;
 }
 
 export function filterLocallySearchedTables(nodes: TreeNode[], options: LocalTableSearchOptions): TreeNode[] {
@@ -108,9 +106,8 @@ function filterLocallySearchedTableNodes(nodes: TreeNode[], options: LocalTableS
     // matchSidebarLabel compares case-insensitively internally and needs the
     // ORIGINAL label (and entry name) so camelCase boundaries stay detectable.
     // Table comments participate in matching, mirroring the global sidebar
-    // search and the backend's name-or-comment metadata filter. The foreground
-    // match mode applies uniformly to names and comments (#13505).
-    const entryMatches = (name: string, comment?: string | null) => !!matchSidebarLabel(name, query, options.matcherOptions) || (!!comment && !!matchSidebarLabel(comment, query, options.matcherOptions));
+    // search and the backend's name-or-comment metadata filter.
+    const entryMatches = (name: string, comment?: string | null) => !!matchSidebarLabel(name, query) || (!!comment && !!matchSidebarLabel(comment, query));
     // Grouped tables are flattened before matching so virtual groups stay
     // transparent during local table search.
     const flatChildren = stripTableVGroupsFromChildren(children);

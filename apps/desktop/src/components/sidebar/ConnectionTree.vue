@@ -122,6 +122,10 @@ const regexMode = ref(false);
 // Session-scoped foreground match mode (#13505). Deliberately not persisted:
 // the default stays `fuzzy`, i.e. today's behavior, and the choice resets with
 // the window. Regex mode keeps its own semantics and disables this selector.
+// Scope: the top search input only (tree search + global table index). The
+// per-database inline search boxes keep their own local/remote behavior; the
+// remote path is server-filtered, so sharing this mode would make local and
+// remote results diverge.
 const searchMatchMode = ref<SidebarSearchMatchMode>("fuzzy");
 store.sidebarSearchQuery = "";
 const showConnectedConnectionsOnly = ref(false);
@@ -722,7 +726,7 @@ const filteredNodes = computed(() => {
     nodes = filterSidebarTreeToConnectedConnections(nodes, store.connectedIds);
   }
 
-  nodes = filterLocallySearchedTables(nodes, { enabled: settingsStore.editorSettings.sidebarTableSearchLocal, queries: store.sidebarTableSearchQueries, indexedResults: localTableSearchResults.value, matcherOptions: { matchMode: searchMatchMode.value } });
+  nodes = filterLocallySearchedTables(nodes, { enabled: settingsStore.editorSettings.sidebarTableSearchLocal, queries: store.sidebarTableSearchQueries, indexedResults: localTableSearchResults.value });
   nodes = filterGloballyIndexedTables(nodes);
   nodes = mergeSidebarRemoteSearchResults(nodes, remoteSearchResults.value);
 

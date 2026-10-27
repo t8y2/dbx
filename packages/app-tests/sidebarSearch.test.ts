@@ -580,14 +580,15 @@ test("contains keeps literal containment and drops subsequence tiers", () => {
   // Word-segment prefix concatenation is a fuzzy-only tier too ("exc"+skip+"log").
   assert.equal(matchSidebarLabel("system_exception_log", "exclog", { matchMode: "contains" }), null);
 
-  // Kept: exact, prefix, word-prefix, substring, separator-blind variants.
+  // Kept: exact, prefix, word-prefix, substring — all literal contiguous text.
   assert.equal(contains("101", "101", 100)?.kind, "exact");
   assert.equal(contains("1010", "101", 90)?.kind, "prefix");
   assert.equal(contains("t_101", "101", 80)?.kind, "word-prefix");
   assert.equal(contains("dwd_order_101", "101", 80)?.kind, "word-prefix");
   assert.equal(contains("x101x", "101", 70)?.kind, "substring");
-  assert.equal(contains("del_order", "delo", 65)?.kind, "word-prefix");
-  assert.equal(contains("del_order", "elo", 55)?.kind, "substring");
+  // Strict modes are literal: separator-blind tiers belong to fuzzy only.
+  assert.equal(matchSidebarLabel("del_order", "delo", { matchMode: "contains" }), null);
+  assert.equal(matchSidebarLabel("del_order", "elo", { matchMode: "contains" }), null);
 });
 
 test("edges only matches whole-label start and end", () => {
@@ -613,16 +614,13 @@ test("edges only matches whole-label start and end", () => {
   assert.equal(matchSidebarLabel("dwd_order_101", "101", { matchMode: "edges" })?.score, 85);
   assert.equal(matchSidebarLabel("dwd_order_101_detail", "101", { matchMode: "edges" }), null);
 
-  // Separator-blind edges stay available.
-  assert.equal(matchSidebarLabel("del_order", "delo", { matchMode: "edges" })?.kind, "word-prefix");
-  assert.equal(matchSidebarLabel("del_order", "delo", { matchMode: "edges" })?.score, 65);
+  // Strict modes are literal: no separator-blind prefix/suffix variants.
+  assert.equal(matchSidebarLabel("del_order", "delo", { matchMode: "edges" }), null);
   assert.equal(matchSidebarLabel("del_order", "elo", { matchMode: "edges" }), null);
+  assert.equal(matchSidebarLabel("del_order", "delorder", { matchMode: "edges" }), null);
+  assert.equal(matchSidebarLabel("del_order", "elorder", { matchMode: "edges" }), null);
   assert.equal(matchSidebarLabel("del_order", "order", { matchMode: "edges" })?.kind, "suffix");
-  assert.equal(matchSidebarLabel("del_order", "delorder", { matchMode: "edges" })?.score, 65);
-  // Stripped suffix: the raw label does not end with the query, but the
-  // separator-stripped form does ("delorder".endsWith("elorder")).
-  assert.equal(matchSidebarLabel("del_order", "elorder", { matchMode: "edges" })?.kind, "suffix");
-  assert.equal(matchSidebarLabel("del_order", "elorder", { matchMode: "edges" })?.score, 60);
+  assert.equal(matchSidebarLabel("del_order", "order", { matchMode: "edges" })?.score, 85);
 });
 
 test("unknown match modes fall back to the fuzzy default", () => {

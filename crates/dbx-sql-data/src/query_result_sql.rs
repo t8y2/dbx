@@ -6839,6 +6839,15 @@ WHERE u.id = picked.id;
             (Some(DatabaseType::ClickHouse), "SELECT * FROM events LIMIT 10 WITH TIES", None),
             (Some(DatabaseType::DuckDb), "SELECT * FROM events LIMIT 10%", None),
             (Some(DatabaseType::DuckDb), "SELECT * FROM events LIMIT 10 PERCENT", None),
+            // Dameng accepts MySQL-style LIMIT alongside its ROWNUM pagination
+            // (#13502); the other ROWNUM dialects reject LIMIT syntax, so a
+            // top-level LIMIT must not bound them.
+            (Some(DatabaseType::Dameng), "SELECT * FROM events LIMIT 1000", Some(1000)),
+            (Some(DatabaseType::Dameng), "SELECT * FROM events LIMIT 1000 OFFSET 50", Some(1000)),
+            (Some(DatabaseType::Dameng), "SELECT * FROM events LIMIT 50, 1000", Some(1000)),
+            (Some(DatabaseType::Dameng), "SELECT * FROM (SELECT * FROM events LIMIT 5) t", None),
+            (Some(DatabaseType::Oracle), "SELECT * FROM events LIMIT 100", None),
+            (Some(DatabaseType::OceanbaseOracle), "SELECT * FROM events LIMIT 100", None),
             (None, "SELECT * FROM events LIMIT 100", Some(100)),
             (Some(DatabaseType::Postgres), "SELECT * FROM events", None),
         ] {

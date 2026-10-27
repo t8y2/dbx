@@ -2,7 +2,7 @@
 import { createApp, defineComponent, h, reactive, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
-import { isNewerRemoteVersion, resolveReleaseTagUrl, useAppUpdater } from "@/composables/useAppUpdater";
+import { effectiveUpdateInfo, isNewerRemoteVersion, resolveReleaseTagUrl, useAppUpdater } from "@/composables/useAppUpdater";
 const mocks = vi.hoisted(() => ({
   checkForUpdates: vi.fn(),
   downloadUpdate: vi.fn(),
@@ -585,13 +585,21 @@ describe("ignoring a version (#13626)", () => {
     expect(updater.visibleUpdateInfo.value?.update_available).toBe(true);
   });
 
-  it("still surfaces a downloaded package the user already has", async () => {
+  it("discards an ignored cached package at startup and keeps the dialog quiet", async () => {
     settings.ignoredUpdateVersion = "1.1.0";
     mocks.getDownloadedUpdate.mockResolvedValue(cache);
     const updater = mount();
     await updater.initialize();
     await flush();
 
-    expect(updater.visibleUpdateInfo.value?.latest_version).toBe("1.1.0");
+    expect(mocks.discardDownloadedUpdate).toHaveBeenCalledWith("cached");
+    expect(updater.visibleUpdateInfo.value?.update_available).toBe(false);
+  });
+
+  it("keeps a prepared package visible even when its version is ignored", () => {
+    expect(effectiveUpdateInfo(info, "1.1.0", true)).toBe(info);
+    expect(effectiveUpdateInfo(info, "1.1.0", false)).toEqual({ ...info, update_available: false });
+    expect(effectiveUpdateInfo(info, "1.0.5", false)).toBe(info);
+    expect(effectiveUpdateInfo(null, "1.1.0", false)).toBeNull();
   });
 });

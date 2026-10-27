@@ -1176,7 +1176,7 @@ jobs:
           cache: gradle
 
       - name: Cache approved Maven assets
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/dbx-offline-jdbc-maven
           key: offline-jdbc-${{ hashFiles('apps/desktop/src/lib/database/managedJdbcAssets.json') }}

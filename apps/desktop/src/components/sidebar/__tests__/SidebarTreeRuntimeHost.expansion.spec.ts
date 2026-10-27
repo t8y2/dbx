@@ -35,6 +35,13 @@ const connectionStore = {
   loadEtcdRoot: vi.fn(async () => undefined),
   loadMilvusDatabases: vi.fn(async () => undefined),
   loadElasticsearchIndices: vi.fn(async () => undefined),
+  loadMqttTopics: vi.fn(async () => undefined),
+  loadMqTenants: vi.fn(async () => undefined),
+  loadNacosNamespaces: vi.fn(async () => undefined),
+  loadDynamoDbTables: vi.fn(async () => undefined),
+  loadZooKeeperRoot: vi.fn(async () => undefined),
+  loadConsulRoot: vi.fn(async () => undefined),
+  loadVectorCollections: vi.fn(async () => undefined),
   loadCustomTypeChildren: vi.fn(async (node: TreeNode) => {
     node.hasMembers = true;
     node.children = [{ id: `${node.id}:attribute`, label: "STREET", type: "type-member", connectionId: node.connectionId, database: node.database }];
@@ -1477,7 +1484,14 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     { dbType: "etcd", loader: "loadEtcdRoot" as const, childType: "etcd-root" as const },
     { dbType: "milvus", loader: "loadMilvusDatabases" as const, childType: "vector-database" as const },
     { dbType: "elasticsearch", loader: "loadElasticsearchIndices" as const, childType: "elasticsearch-index" as const },
-  ])("expands a $dbType connection on first click (issue #13579)", async ({ dbType, loader, childType }) => {
+    { dbType: "mqtt", loader: "loadMqttTopics" as const, childType: "mqtt-topic" as const },
+    { dbType: "mq", loader: "loadMqTenants" as const, childType: "mq-tenant" as const },
+    { dbType: "nacos", loader: "loadNacosNamespaces" as const, childType: "nacos-namespace" as const, extraCallArgs: [undefined] },
+    { dbType: "dynamodb", loader: "loadDynamoDbTables" as const, childType: "dynamodb-table" as const },
+    { dbType: "zookeeper", loader: "loadZooKeeperRoot" as const, childType: "zookeeper-root" as const },
+    { dbType: "consul", loader: "loadConsulRoot" as const, childType: "consul-root" as const },
+    { dbType: "qdrant", loader: "loadVectorCollections" as const, childType: "vector-collection" as const },
+  ])("expands a $dbType connection on first click (issue #13579)", async ({ dbType, loader, childType, extraCallArgs }) => {
     const connectionId = `${dbType}-conn`;
     const child: TreeNode = {
       id: `${connectionId}:child`,
@@ -1518,7 +1532,7 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     host.value?.toggleNode(connectionNode);
     await vi.waitFor(() => expect(connectionNode.isExpanded).toBe(true));
 
-    expect(loaderMock).toHaveBeenCalledWith(connectionId);
+    expect(loaderMock).toHaveBeenCalledWith(connectionId, ...(extraCallArgs ?? []));
     expect(connectionNode.children?.map((node) => node.label)).toEqual([`${dbType} child`]);
   });
 });

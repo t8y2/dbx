@@ -138,6 +138,13 @@ pub struct DatabaseExportRequest {
     pub include_create_database: bool,
     #[serde(default)]
     pub drop_table_if_exists: bool,
+    /// Omit the database qualifier from MySQL-family table references in the
+    /// exported SQL (INSERT targets keep plain `table` names; the `USE`
+    /// preamble stays the authority for the database). Defaults to `false`
+    /// (preserve `db`.`table`) for callers that import into a different
+    /// database than the one named by the dump (issue #13509).
+    #[serde(default)]
+    pub omit_database_qualifier: bool,
     /// Drop the table-level `AUTO_INCREMENT=N` clause from exported MySQL DDL,
     /// so the script can initialize a fresh database without pinning a sequence
     /// position. No-op for non-MySQL databases. Defaults to `false` (preserve).
@@ -632,6 +639,9 @@ pub struct BuildDatabaseSqlExportOptions {
     /// Defaults to `false` (preserve). See `DatabaseExportRequest::omit_auto_increment`.
     #[serde(default)]
     pub omit_auto_increment: bool,
+    /// See `DatabaseExportRequest::omit_database_qualifier`.
+    #[serde(default)]
+    pub omit_database_qualifier: bool,
     /// See `DatabaseExportRequest::preserve_original_language`.
     #[serde(default)]
     pub preserve_original_language: bool,
@@ -2059,11 +2069,22 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
             lines.push(format!("-- Exported rows: {}", table.rows.len()));
         }
 
+        // #13509: with the `USE` preamble as the database authority, MySQL-family
+        // dumps can drop the `db`. qualifier so the script replays against any
+        // database the USE targets.
+        let mysql_omit = options.omit_database_qualifier
+            && matches!(
+                table.database_type,
+                Some(DatabaseType::Mysql)
+                    | Some(DatabaseType::Goldendb)
+                    | Some(DatabaseType::Doris)
+                    | Some(DatabaseType::StarRocks)
+            );
         let inserts = build_export_insert_statements_excluding_with_dialect(
             BuildExportInsertStatementsOptions {
                 database_type: table.database_type,
                 identifier_quote: table.identifier_quote.clone(),
-                schema: table.schema,
+                schema: if mysql_omit { None } else { table.schema.clone() },
                 table_name: table.table_name,
                 qualified_table_name: table.qualified_table_name,
                 columns: table.columns,
@@ -3127,6 +3148,7 @@ fn write_database_export_rows<W: Write>(
         SqlInsertMode::default(),
         false,
         None,
+        false,
     )
 }
 
@@ -3144,6 +3166,7 @@ fn write_database_export_rows_with_mode<W: Write>(
     insert_mode: SqlInsertMode,
     preserve_original_language: bool,
     table_ddl: Option<&str>,
+    omit_database_qualifier: bool,
 ) -> Result<(), String> {
     let normalized_column_extras;
     let column_extras = if *db_type == DatabaseType::Dameng && table_ddl.is_some_and(is_dameng_auto_increment_ddl) {
@@ -3205,7 +3228,19 @@ fn write_database_export_rows_with_mode<W: Write>(
     // Database exports use the same table qualification as the SELECT/DDL
     // path and the legacy typed INSERT writer. In particular, MySQL uses the
     // selected database rather than a schema-qualified table name.
+    // `omit_database_qualifier` drops the schema qualifier for the MySQL
+    // family: the export's `USE` preamble already sets the database, and a
+    // `db`.`table` INSERT target pins the dump to one database (#13509).
     let qualified_table_name = crate::transfer::qualified_table(table, schema, db_type, None);
+    let qualified_table_name = if omit_database_qualifier
+        && matches!(
+            db_type,
+            DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::Doris | DatabaseType::StarRocks
+        ) {
+        qualified_table_name.rsplit_once('.').map(|(_, table)| table.to_string()).unwrap_or(qualified_table_name)
+    } else {
+        qualified_table_name
+    };
     // Batch database exports do not currently thread a per-connection identifier
     // quote through BuildDatabaseSqlExportOptions; Kingbase MySQL-compat users
     // should fall back to the single-table export path which carries the quote.
@@ -3213,7 +3248,9 @@ fn write_database_export_rows_with_mode<W: Write>(
         BuildExportInsertStatementsOptions {
             database_type: Some(*db_type),
             identifier_quote: None,
-            schema: (!schema.is_empty()).then(|| schema.to_string()),
+            // Standard dialect re-derives `db`.`table` from the schema, so the
+            // flag also has to blank it here (#13509).
+            schema: if omit_database_qualifier { None } else { (!schema.is_empty()).then(|| schema.to_string()) },
             table_name: Some(table.to_string()),
             qualified_table_name: Some(qualified_table_name),
             columns: insert_columns.to_vec(),
@@ -4811,6 +4848,7 @@ async fn export_database_sql_core_inner(
                                     request.insert_mode,
                                     request.preserve_original_language,
                                     table_ddl_text.as_deref(),
+                                    request.omit_database_qualifier,
                                 )?;
                                 total_rows_exported += rows.len() as u64;
                                 on_progress(ExportProgress {
@@ -4931,6 +4969,7 @@ async fn export_database_sql_core_inner(
                             request.insert_mode,
                             request.preserve_original_language,
                             table_ddl_text.as_deref(),
+                            request.omit_database_qualifier,
                         )?;
                         total_rows_exported += row_count as u64;
                         if use_keyset {
@@ -5594,6 +5633,7 @@ mod tests {
             include_create_database: false,
             drop_table_if_exists: false,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             fail_on_error: false,
             prevent_overwrite: false,
             output_compression: Default::default(),
@@ -6961,6 +7001,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             preserve_original_language: false,
         })
         .expect("build SQL Server database export");
@@ -8353,6 +8394,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             preserve_original_language: false,
         })
         .unwrap();
@@ -8427,6 +8469,40 @@ mod tests {
     }
 
     #[test]
+    fn mysql_export_can_omit_the_database_qualifier_from_insert_targets() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("users.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // The USE preamble owns the database context, so the flag drops the
+        // `db`. prefix in both Standard and Source dialects (#13509).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1), json!("Ada")]],
+            &["id".to_string(), "name".to_string()],
+            &[Some("int".to_string()), Some("varchar(32)".to_string())],
+            &[None, None],
+            "users",
+            "app",
+            &DatabaseType::Mysql,
+            SqlInsertDialect::Standard,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');
+
+"
+        );
+    }
+
+    #[test]
     fn database_row_writer_standard_dialect_uses_mysql_backticks() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("users.sql");
@@ -8471,6 +8547,7 @@ mod tests {
             SqlInsertMode::Single,
             false,
             None,
+            false,
         )
         .unwrap();
         drop(file);
@@ -8827,6 +8904,7 @@ mod tests {
             SqlInsertMode::Single,
             false,
             Some(ddl),
+            false,
         )
         .unwrap();
         drop(file);
@@ -8906,6 +8984,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             preserve_original_language: false,
         })
         .unwrap();

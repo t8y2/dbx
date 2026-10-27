@@ -10312,6 +10312,7 @@ export default withEnglishFallback({
     includeCreateDatabase: "데이터베이스 설정 포함 (CREATE DATABASE / USE)",
     dropTableIfExists: "DDL 앞에 DROP TABLE IF EXISTS 추가",
     omitAutoIncrement: "AUTO_INCREMENT 생략 (초기 설치 스크립트용)",
+    omitDatabaseQualifier: "테이블 이름에서 DB 접두사 생략",
     preserveOriginalLanguage: "SQL에 원본 언어 유지 (\\uXXXX 이스케이프 디코딩)",
     includeData: "테이블 데이터 (INSERT)",
     sqlColumnSelection: "내보낼 열",

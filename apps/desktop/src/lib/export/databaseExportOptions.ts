@@ -9,6 +9,7 @@ export interface DatabaseExportSavedOptions {
   includeCreateDatabase: boolean;
   dropTableIfExists: boolean;
   omitAutoIncrement: boolean;
+  omitDatabaseQualifier: boolean;
   preserveOriginalLanguage: boolean;
   splitSqlOutput: boolean;
   splitSqlPartMaxMb: number;
@@ -26,6 +27,7 @@ export const DEFAULT_DATABASE_EXPORT_OPTIONS: DatabaseExportSavedOptions = {
   includeCreateDatabase: false,
   dropTableIfExists: false,
   omitAutoIncrement: false,
+  omitDatabaseQualifier: false,
   preserveOriginalLanguage: false,
   splitSqlOutput: false,
   splitSqlPartMaxMb: 100,
@@ -53,6 +55,7 @@ export function loadSavedDatabaseExportOptions(storage?: Pick<Storage, "getItem"
       includeCreateDatabase: typeof parsed.includeCreateDatabase === "boolean" ? parsed.includeCreateDatabase : DEFAULT_DATABASE_EXPORT_OPTIONS.includeCreateDatabase,
       dropTableIfExists: typeof parsed.dropTableIfExists === "boolean" ? parsed.dropTableIfExists : DEFAULT_DATABASE_EXPORT_OPTIONS.dropTableIfExists,
       omitAutoIncrement: typeof parsed.omitAutoIncrement === "boolean" ? parsed.omitAutoIncrement : DEFAULT_DATABASE_EXPORT_OPTIONS.omitAutoIncrement,
+      omitDatabaseQualifier: typeof parsed.omitDatabaseQualifier === "boolean" ? parsed.omitDatabaseQualifier : DEFAULT_DATABASE_EXPORT_OPTIONS.omitDatabaseQualifier,
       preserveOriginalLanguage: typeof parsed.preserveOriginalLanguage === "boolean" ? parsed.preserveOriginalLanguage : DEFAULT_DATABASE_EXPORT_OPTIONS.preserveOriginalLanguage,
       splitSqlOutput: typeof parsed.splitSqlOutput === "boolean" ? parsed.splitSqlOutput : DEFAULT_DATABASE_EXPORT_OPTIONS.splitSqlOutput,
       splitSqlPartMaxMb: typeof parsed.splitSqlPartMaxMb === "number" && Number.isFinite(parsed.splitSqlPartMaxMb) ? Math.min(MAX_SPLIT_SQL_PART_MB, Math.max(MIN_SPLIT_SQL_PART_MB, Math.round(parsed.splitSqlPartMaxMb))) : DEFAULT_DATABASE_EXPORT_OPTIONS.splitSqlPartMaxMb,

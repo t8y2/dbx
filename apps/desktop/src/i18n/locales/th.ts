@@ -12170,6 +12170,7 @@ export default withEnglishFallback({
     includeCreateDatabase: "รวมการตั้งค่าฐานข้อมูล (CREATE DATABASE / USE)",
     dropTableIfExists: "เพิ่ม DROP TABLE IF EXISTS ก่อน DDL",
     omitAutoIncrement: "ละเว้น AUTO_INCREMENT (สำหรับ Script ติดตั้งใหม่)",
+    omitDatabaseQualifier: "ละเว้นคำนำหน้า DB ในชื่อตาราง",
     preserveOriginalLanguage: "คงภาษาเดิมใน SQL (ถอดรหัส Escape \\uXXXX)",
     includeData: "ข้อมูลตาราง (INSERT)",
     sqlColumnSelection: "คอลัมน์ที่จะส่งออก",

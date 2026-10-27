@@ -10250,6 +10250,7 @@ export default withEnglishFallback({
     includeCreateDatabase: "データベース作成文を含める（CREATE DATABASE / USE）",
     dropTableIfExists: "DDLの前にDROP TABLE IF EXISTSを追加",
     omitAutoIncrement: "AUTO_INCREMENT を省略（新規インストール用スクリプト向け）",
+    omitDatabaseQualifier: "テーブル名からDB名の接頭辞を省略",
     preserveOriginalLanguage: "元の言語を SQL に保持する（\\uXXXX エスケープをデコード）",
     includeData: "テーブルデータ (INSERT)",
     sqlColumnSelection: "エクスポートする列",

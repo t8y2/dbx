@@ -11658,6 +11658,7 @@ export default {
     includeCreateDatabase: "Include database setup (CREATE DATABASE / USE)",
     dropTableIfExists: "Add DROP TABLE IF EXISTS before DDL",
     omitAutoIncrement: "Omit AUTO_INCREMENT (for fresh-install scripts)",
+    omitDatabaseQualifier: "Omit database prefix in table names",
     preserveOriginalLanguage: "Preserve original language in SQL (decode \\uXXXX escapes)",
     includeData: "Table data (INSERT)",
     sqlColumnSelection: "Columns to export",

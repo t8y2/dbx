@@ -975,7 +975,6 @@ const tableSearchStyle = computed(() => {
   const color = connectionColor.value;
   const rowBackgroundColor = color ? hexToRgba(color, isActiveConnectionScope.value ? 0.14 : 0.08) : "transparent";
   return {
-    paddingLeft: paddingLeft.value,
     "--tree-table-search-row-bg": rowBackgroundColor,
     "--tree-table-search-input-bg": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.05 : 0.03) : "color-mix(in srgb, var(--background) 56%, transparent)",
     "--tree-table-search-border": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.12 : 0.08) : "color-mix(in srgb, var(--border) 36%, transparent)",
@@ -1556,8 +1555,9 @@ function onKeydown(event: KeyboardEvent) {
 </script>
 
 <template>
-  <div v-if="node.type === 'table-search-control'" data-sidebar-table-search-control class="tree-table-search-control pr-2" :class="isCompactSidebar ? 'h-6 py-0' : 'h-7 py-0.5'" :style="tableSearchStyle" @click.stop @dblclick.stop @mousedown.stop @keydown="onTableSearchControlKeydown">
-    <div class="tree-table-search-control__content flex w-full min-w-0 items-center gap-1.5">
+  <div v-if="node.type === 'table-search-control'" data-sidebar-table-search-control class="tree-table-search-control" :class="isCompactSidebar ? 'h-6 py-0' : 'h-7 py-0.5'" :style="tableSearchStyle" @click.stop @dblclick.stop @mousedown.stop @keydown="onTableSearchControlKeydown">
+    <!-- Keep indentation inside the viewport-sized content so trailing controls fit. -->
+    <div class="tree-table-search-control__content flex w-full min-w-0 items-center gap-1.5 pr-2" :style="{ paddingLeft }">
       <div class="relative min-w-0 flex-1">
         <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
         <Input

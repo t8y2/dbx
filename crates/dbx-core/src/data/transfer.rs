@@ -10829,12 +10829,12 @@ fn postgres_table_dependency_selection_sql(schema: &str, tables: &[String]) -> O
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = {source_schema} AND c.relkind IN ('r','p','f') AND c.relname IN ({table_list}) \
          ), selected_dependencies(classid, objid) AS ( \
-             SELECT 'pg_catalog.pg_class'::regclass, oid FROM selected_tables \
-             UNION SELECT 'pg_catalog.pg_attrdef'::regclass, a.oid \
+             SELECT 'pg_catalog.pg_class'::regclass::oid, oid FROM selected_tables \
+             UNION SELECT 'pg_catalog.pg_attrdef'::regclass::oid, a.oid \
              FROM pg_catalog.pg_attrdef a JOIN selected_tables t ON t.oid = a.adrelid \
-             UNION SELECT 'pg_catalog.pg_constraint'::regclass, c.oid \
+             UNION SELECT 'pg_catalog.pg_constraint'::regclass::oid, c.oid \
              FROM pg_catalog.pg_constraint c JOIN selected_tables t ON t.oid = c.conrelid \
-             UNION SELECT 'pg_catalog.pg_class'::regclass, i.indexrelid \
+             UNION SELECT 'pg_catalog.pg_class'::regclass::oid, i.indexrelid \
              FROM pg_catalog.pg_index i JOIN selected_tables t ON t.oid = i.indrelid \
              UNION \
              SELECT d.refclassid, d.refobjid \
@@ -17447,6 +17447,19 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             assert!(sql.contains("'ENUM'::text"));
             assert!(sql.contains("'DOMAIN'::text"));
             assert!(sql.contains("'EXTENSION'::text"));
+        }
+
+        #[test]
+        fn postgres_table_dependency_recursive_cte_unifies_classid_to_oid() {
+            let sql = postgres_table_dependency_selection_sql("public", &["orders".into()]).unwrap();
+            for needle in [
+                "SELECT 'pg_catalog.pg_class'::regclass::oid, oid FROM selected_tables",
+                "UNION SELECT 'pg_catalog.pg_attrdef'::regclass::oid, a.oid",
+                "UNION SELECT 'pg_catalog.pg_constraint'::regclass::oid, c.oid",
+                "UNION SELECT 'pg_catalog.pg_class'::regclass::oid, i.indexrelid",
+            ] {
+                assert!(sql.contains(needle));
+            }
         }
 
         #[test]

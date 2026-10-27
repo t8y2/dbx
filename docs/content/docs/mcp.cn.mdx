@@ -124,6 +124,8 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 | --- | --- |
 | `dbx_list_connections` | 列出当前 MCP 会话可见的连接，包括已保存的备注 |
 | `dbx_list_databases` | 列出连接中可通过 MCP 访问的数据库，并遵守该连接的数据库范围 |
+| `dbx_list_sidebar_groups` | 列出侧边栏分组、组内连接以及未分组的连接 |
+| `dbx_move_connections_to_group` | 按需创建侧边栏分组并将连接移入；未知的 group_id 会被拒绝；请先关闭桌面应用，再重新打开以查看变更 |
 | `dbx_add_connection` | 添加连接到 DBX 存储 |
 | `dbx_duplicate_connection` | 复制一个连接及其完整配置 |
 | `dbx_remove_connection` | 从 DBX 存储删除连接 |
@@ -147,6 +149,14 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 | `dbx_send_message` | 向支持的消息队列 Topic 或队列发送消息 |
 | `dbx_open_table` | 在运行中的 DBX 桌面端打开表 |
 | `dbx_execute_and_show` | 执行查询并在 DBX 中展示结果 |
+
+侧边栏工具遵循桌面端保存的布局：
+
+- `dbx_list_sidebar_groups` 只返回当前 MCP 会话可见的连接；被连接策略隐藏的成员不会出现，嵌套分组的连接会按分组展开列出。
+- 名称未知时 `dbx_move_connections_to_group` 会创建分组，并展开处于折叠状态的目标分组。以新的 `children` 数组为准，过期的旧版 `connectionIds` 会被丢弃。
+- 参数错误返回 `UNKNOWN_GROUP_ID`、`AMBIGUOUS_GROUP_NAME` 或 `INVALID_GROUP_REQUEST`；布局本身损坏时返回 `INVALID_SIDEBAR_LAYOUT`。
+
+移动连接前请先关闭 DBX 桌面应用：它会用内存中的布局重写侧边栏，从而覆盖本次修改。
 
 `dbx_list_connections` 和 `dbx://connections` 会返回已保存的连接备注，不受侧边栏显示开关影响。可访问该连接的 MCP 客户端也能看到备注，请勿在备注中保存密码或其他敏感信息。
 

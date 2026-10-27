@@ -9717,6 +9717,8 @@ export default withEnglishFallback({
     mcpToolSendMessage: "Wyślij wiadomość do kolejki",
     mcpToolAddConnection: "Dodaj połączenie",
     mcpToolDuplicateConnection: "Duplikuj połączenie",
+    mcpToolListSidebarGroups: "Lista grup paska bocznego",
+    mcpToolMoveConnectionsToGroup: "Przenieś połączenia do grupy paska bocznego",
     mcpToolRemoveConnection: "Usuń połączenie",
     mcpToolOpenTable: "Otwórz tabelę w DBX",
     mcpToolExecuteAndShow: "Wykonaj i pokaż w DBX",

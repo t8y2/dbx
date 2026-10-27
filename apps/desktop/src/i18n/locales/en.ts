@@ -11401,6 +11401,8 @@ export default {
     mcpToolSendMessage: "Send message queue message",
     mcpToolAddConnection: "Add connection",
     mcpToolDuplicateConnection: "Duplicate connection",
+    mcpToolListSidebarGroups: "List sidebar groups",
+    mcpToolMoveConnectionsToGroup: "Move connections to a sidebar group",
     mcpToolRemoveConnection: "Remove connection",
     mcpToolOpenTable: "Open table in DBX",
     mcpToolExecuteAndShow: "Execute and show in DBX",

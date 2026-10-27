@@ -9697,6 +9697,8 @@ export default withEnglishFallback({
     mcpToolSendMessage: "Kirim pesan antrean pesan",
     mcpToolAddConnection: "Tambah koneksi",
     mcpToolDuplicateConnection: "Duplikat koneksi",
+    mcpToolListSidebarGroups: "Daftar grup bilah sisi",
+    mcpToolMoveConnectionsToGroup: "Pindahkan koneksi ke grup bilah sisi",
     mcpToolRemoveConnection: "Hapus koneksi",
     mcpToolOpenTable: "Buka tabel di DBX",
     mcpToolExecuteAndShow: "Eksekusi dan tampilkan di DBX",

@@ -297,6 +297,29 @@ pub trait DbxBackend: Send + Sync {
     async fn load_connection_group_paths(&self) -> Result<HashMap<String, Vec<String>>, String> {
         Ok(HashMap::new())
     }
+    async fn load_sidebar_layout(&self) -> Result<Option<Value>, String> {
+        Ok(None)
+    }
+    async fn save_sidebar_layout(&self, _layout: &Value) -> Result<(), String> {
+        Err("Sidebar layout is not supported by this backend.".to_string())
+    }
+    /// Raw JSON text of the stored layout, used for compare-and-swap writes.
+    async fn load_sidebar_layout_raw(&self) -> Result<Option<String>, String> {
+        self.load_sidebar_layout()
+            .await?
+            .map(|layout| serde_json::to_string(&layout).map_err(|error| error.to_string()))
+            .transpose()
+    }
+    /// Persist `next` only when the stored layout is still `expected`. Backends
+    /// without a conditional write must say so instead of reporting a success
+    /// they cannot guarantee.
+    async fn replace_sidebar_layout_if_unchanged(
+        &self,
+        _expected: Option<&str>,
+        _next: &Value,
+    ) -> Result<bool, String> {
+        Err("Conditional sidebar layout writes are not supported by this backend.".to_string())
+    }
     async fn load_connection_group_details(&self) -> Result<HashMap<String, McpConnectionGroupPath>, String> {
         Ok(self
             .load_connection_group_paths()
@@ -1237,10 +1260,24 @@ impl DbxBackend for LocalBackend {
             .collect())
     }
 
+    async fn load_sidebar_layout(&self) -> Result<Option<Value>, String> {
+        self.state.storage.load_sidebar_layout().await
+    }
+
+    async fn save_sidebar_layout(&self, layout: &Value) -> Result<(), String> {
+        self.state.storage.save_sidebar_layout(layout).await
+    }
+
+    async fn load_sidebar_layout_raw(&self) -> Result<Option<String>, String> {
+        self.state.storage.load_sidebar_layout_raw().await
+    }
+
+    async fn replace_sidebar_layout_if_unchanged(&self, expected: Option<&str>, next: &Value) -> Result<bool, String> {
+        self.state.storage.replace_sidebar_layout_if_unchanged(expected, next).await
+    }
+
     async fn load_connection_group_details(&self) -> Result<HashMap<String, McpConnectionGroupPath>, String> {
-        self.state
-            .storage
-            .load_sidebar_layout()
+        self.load_sidebar_layout()
             .await?
             .as_ref()
             .map(connection_group_paths)
@@ -1686,14 +1723,50 @@ impl DbxBackend for WebBackend {
             .collect())
     }
 
-    async fn load_connection_group_details(&self) -> Result<HashMap<String, McpConnectionGroupPath>, String> {
-        let layout = self
-            .request(reqwest::Method::GET, "/api/layout/sidebar", None)
+    async fn load_sidebar_layout(&self) -> Result<Option<Value>, String> {
+        self.request(reqwest::Method::GET, "/api/layout/sidebar", None)
             .await?
             .json::<Option<Value>>()
             .await
+            .map_err(|error| format!("Invalid sidebar layout response: {error}"))
+    }
+
+    async fn save_sidebar_layout(&self, layout: &Value) -> Result<(), String> {
+        self.request(reqwest::Method::POST, "/api/layout/sidebar", Some(json!({"layout": layout}))).await?;
+        Ok(())
+    }
+
+    async fn load_sidebar_layout_raw(&self) -> Result<Option<String>, String> {
+        // Take the stored text as-is: re-serializing would change whitespace and key
+        // order, so the conditional write would never match the row.
+        let body = self
+            .request(reqwest::Method::GET, "/api/layout/sidebar/raw", None)
+            .await?
+            .json::<Value>()
+            .await
             .map_err(|error| format!("Invalid sidebar layout response: {error}"))?;
-        layout.as_ref().map(connection_group_paths).transpose().map(Option::unwrap_or_default)
+        Ok(body.get("raw").and_then(Value::as_str).map(str::to_string))
+    }
+
+    async fn replace_sidebar_layout_if_unchanged(&self, expected: Option<&str>, next: &Value) -> Result<bool, String> {
+        let response = self
+            .request(
+                reqwest::Method::POST,
+                "/api/layout/sidebar",
+                Some(json!({"layout": next, "expected": expected, "conditional": true})),
+            )
+            .await?;
+        let body = response.json::<Value>().await.map_err(|error| format!("Invalid sidebar save response: {error}"))?;
+        Ok(body.get("applied").and_then(Value::as_bool).unwrap_or(false))
+    }
+
+    async fn load_connection_group_details(&self) -> Result<HashMap<String, McpConnectionGroupPath>, String> {
+        self.load_sidebar_layout()
+            .await?
+            .as_ref()
+            .map(connection_group_paths)
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 
     async fn execute_agent_tool(

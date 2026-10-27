@@ -35,6 +35,46 @@ impl Drop for EnvVarGuard {
 }
 
 #[tokio::test]
+async fn local_backend_persists_sidebar_moves() {
+    use dbx_core::ai::sidebar_layout::{move_connections_in_layout, SidebarGroupSpec};
+    use dbx_core::mcp_policy::connection_group_paths;
+
+    let directory = tempdir().expect("temporary data directory");
+    let db_path = directory.path().join("dbx.db");
+    let storage = Storage::open(&db_path).await.expect("open storage");
+    let connections = ["one", "two"]
+        .iter()
+        .map(|id| {
+            serde_json::from_value::<ConnectionConfig>(json!({
+                "id":id,"name":id,"db_type":"sqlite","host":"","port":0,"username":"","password":"","ssl":false
+            }))
+            .expect("connection")
+        })
+        .collect::<Vec<_>>();
+    storage.save_connections(&connections).await.expect("save connections");
+    let backend = LocalBackend::open(&db_path).await.expect("open backend");
+    let layout = move_connections_in_layout(
+        None,
+        &SidebarGroupSpec { id: None, name: Some("Project".into()) },
+        &["one".into(), "two".into()],
+    )
+    .expect("move connections");
+    backend.save_sidebar_layout(&layout).await.expect("save layout");
+    assert_eq!(backend.load_sidebar_layout().await.expect("load through backend"), Some(layout.clone()));
+    drop(backend);
+    drop(storage);
+    let reopened = Storage::open(&db_path).await.expect("reopen storage");
+    let persisted = reopened.load_sidebar_layout().await.expect("load layout").expect("persisted layout");
+    assert_eq!(persisted, layout);
+    assert_eq!(reopened.load_connections().await.expect("connections preserved").len(), 2);
+    let paths = connection_group_paths(&persisted).expect("group paths");
+    for id in ["one", "two"] {
+        assert_eq!(paths[id].names, ["Project"]);
+        assert_eq!(paths[id].ids, [layout["groups"][0]["id"].as_str().expect("group ID")]);
+    }
+}
+
+#[tokio::test]
 async fn local_backend_reads_dbx_storage_without_desktop_process() {
     let directory = tempdir().expect("temporary data directory");
     let db_path = directory.path().join("dbx.db");

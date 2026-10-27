@@ -11890,6 +11890,8 @@ export default withEnglishFallback({
     mcpToolSendMessage: "ส่งข้อความคิวข้อความ",
     mcpToolAddConnection: "เพิ่มการเชื่อมต่อ",
     mcpToolDuplicateConnection: "ทำสำเนาการเชื่อมต่อ",
+    mcpToolListSidebarGroups: "แสดงรายการกลุ่มแถบด้านข้าง",
+    mcpToolMoveConnectionsToGroup: "ย้ายการเชื่อมต่อไปยังกลุ่มแถบด้านข้าง",
     mcpToolRemoveConnection: "นำการเชื่อมต่อออก",
     mcpToolOpenTable: "เปิดตารางใน DBX",
     mcpToolExecuteAndShow: "เรียกใช้และแสดงใน DBX",

@@ -7,5 +7,6 @@ pub mod agent_tools;
 pub mod mcp_policy;
 pub mod plugin_tools;
 pub mod prompt_template;
+pub mod sidebar_layout;
 pub mod skill_tools;
 pub mod tool_approval;

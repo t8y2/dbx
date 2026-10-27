@@ -11368,6 +11368,8 @@ export default withEnglishFallback({
     mcpToolSendMessage: "发送消息队列消息",
     mcpToolAddConnection: "新增连接",
     mcpToolDuplicateConnection: "复制连接",
+    mcpToolListSidebarGroups: "列出侧边栏分组",
+    mcpToolMoveConnectionsToGroup: "将连接移动到侧边栏分组",
     mcpToolRemoveConnection: "删除连接",
     mcpToolOpenTable: "在 DBX 中打开表",
     mcpToolExecuteAndShow: "在 DBX 中执行并展示",

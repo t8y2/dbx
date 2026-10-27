@@ -9857,6 +9857,8 @@ export default withEnglishFallback({
     mcpToolSendMessage: "メッセージキューのメッセージを送信",
     mcpToolAddConnection: "接続を追加",
     mcpToolDuplicateConnection: "接続を複製",
+    mcpToolListSidebarGroups: "サイドバーグループを一覧表示",
+    mcpToolMoveConnectionsToGroup: "接続をサイドバーグループに移動",
     mcpToolRemoveConnection: "接続を削除",
     mcpToolOpenTable: "DBX でテーブルを開く",
     mcpToolExecuteAndShow: "DBX で実行して表示",

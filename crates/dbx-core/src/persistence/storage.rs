@@ -8550,6 +8550,44 @@ impl Storage {
         .await
     }
 
+    /// Raw JSON text of the stored layout. Compare-and-swap writes need the exact
+    /// bytes that are on disk, not a re-serialization that may reorder keys.
+    pub async fn load_sidebar_layout_raw(&self) -> Result<Option<String>, String> {
+        self.with_conn(|conn| {
+            conn.query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Persist `next` only when the row still holds `expected`. `None` means the
+    /// row was empty when the caller read it. Returns `false` when another writer
+    /// changed the row first, so the caller can re-read and retry instead of
+    /// silently discarding the other change.
+    pub async fn replace_sidebar_layout_if_unchanged(
+        &self,
+        expected: Option<&str>,
+        next: &serde_json::Value,
+    ) -> Result<bool, String> {
+        let json = serde_json::to_string(next).map_err(|e| e.to_string())?;
+        let expected = expected.map(str::to_string);
+        self.with_conn(move |conn| {
+            let changed = match expected.as_deref() {
+                Some(expected) => conn.execute(
+                    "UPDATE sidebar_layout SET layout_json = ?1 WHERE id = 1 AND layout_json = ?2",
+                    params![json, expected],
+                ),
+                None => {
+                    conn.execute("INSERT OR IGNORE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", params![json])
+                }
+            }
+            .map_err(|e| e.to_string())?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
     pub async fn load_sidebar_layout(&self) -> Result<Option<serde_json::Value>, String> {
         let json: Option<String> = self
             .with_conn(|conn| {

@@ -8788,6 +8788,8 @@ export default withEnglishFallback({
     mcpToolSendMessage: "Mesaj kuyruğu mesajı gönder",
     mcpToolAddConnection: "Bağlantı ekle",
     mcpToolDuplicateConnection: "Bağlantıyı çoğalt",
+    mcpToolListSidebarGroups: "Kenar çubuğu gruplarını listele",
+    mcpToolMoveConnectionsToGroup: "Bağlantıları kenar çubuğu grubuna taşı",
     mcpToolRemoveConnection: "Bağlantıyı kaldır",
     mcpToolOpenTable: "Tabloyu DBX'te aç",
     mcpToolExecuteAndShow: "Çalıştır ve DBX'te göster",

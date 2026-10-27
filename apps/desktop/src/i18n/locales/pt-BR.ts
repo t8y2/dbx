@@ -9877,6 +9877,8 @@ export default withEnglishFallback({
     mcpToolSendMessage: "Enviar mensagem da fila",
     mcpToolAddConnection: "Adicionar conexão",
     mcpToolDuplicateConnection: "Duplicar conexão",
+    mcpToolListSidebarGroups: "Listar grupos da barra lateral",
+    mcpToolMoveConnectionsToGroup: "Mover conexões para um grupo da barra lateral",
     mcpToolRemoveConnection: "Remover conexão",
     mcpToolOpenTable: "Abrir tabela no DBX",
     mcpToolExecuteAndShow: "Executar e mostrar no DBX",

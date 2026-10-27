@@ -10026,6 +10026,8 @@ export default withEnglishFallback({
     mcpToolSendMessage: "메시지 큐 메시지 전송",
     mcpToolAddConnection: "연결 추가",
     mcpToolDuplicateConnection: "연결 복제",
+    mcpToolListSidebarGroups: "사이드바 그룹 나열",
+    mcpToolMoveConnectionsToGroup: "연결을 사이드바 그룹으로 이동",
     mcpToolRemoveConnection: "연결 삭제",
     mcpToolOpenTable: "DBX에서 테이블 열기",
     mcpToolExecuteAndShow: "DBX에서 실행 및 표시",

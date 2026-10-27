@@ -9030,6 +9030,8 @@ export default withEnglishFallback({
     mcpToolSendMessage: "傳送訊息佇列訊息",
     mcpToolAddConnection: "新增連線",
     mcpToolDuplicateConnection: "複製連線",
+    mcpToolListSidebarGroups: "列出側邊欄群組",
+    mcpToolMoveConnectionsToGroup: "將連線移至側邊欄群組",
     mcpToolRemoveConnection: "刪除連線",
     mcpToolOpenTable: "在 DBX 中開啟資料表",
     mcpToolExecuteAndShow: "在 DBX 中執行並顯示",

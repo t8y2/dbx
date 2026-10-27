@@ -11511,6 +11511,8 @@ export default withEnglishFallback({
     mcpToolSendMessage: "Отправить сообщение в очередь",
     mcpToolAddConnection: "Добавить подключение",
     mcpToolDuplicateConnection: "Дублировать подключение",
+    mcpToolListSidebarGroups: "Список групп боковой панели",
+    mcpToolMoveConnectionsToGroup: "Переместить подключения в группу боковой панели",
     mcpToolRemoveConnection: "Удалить подключение",
     mcpToolOpenTable: "Открыть таблицу в DBX",
     mcpToolExecuteAndShow: "Выполнить и показать в DBX",

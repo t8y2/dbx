@@ -124,6 +124,8 @@ DBX MCP provides the following tools (availability depends on build features and
 | --- | --- |
 | `dbx_list_connections` | List connections visible to the MCP session, including saved notes |
 | `dbx_list_databases` | List databases available through a connection, respecting its MCP database scope |
+| `dbx_list_sidebar_groups` | List sidebar groups, their members, and ungrouped connections |
+| `dbx_move_connections_to_group` | Create a sidebar group if needed and move connections into it; an unknown group_id is rejected; close the desktop app first and reopen it to see changes |
 | `dbx_add_connection` | Add a connection to DBX storage |
 | `dbx_duplicate_connection` | Duplicate a DBX connection with its complete settings |
 | `dbx_remove_connection` | Remove a connection from DBX storage |
@@ -147,6 +149,14 @@ DBX MCP provides the following tools (availability depends on build features and
 | `dbx_send_message` | Send a message to a supported message queue topic or queue |
 | `dbx_open_table` | Open a table in the running DBX desktop app |
 | `dbx_execute_and_show` | Execute a query and display the result in DBX |
+
+Sidebar layout tools follow the layout stored by the desktop app:
+
+- `dbx_list_sidebar_groups` only reports connections visible to the MCP session; members hidden by the connection policy are omitted, and connections of nested groups are listed flattened per group.
+- `dbx_move_connections_to_group` creates the group when the name is unknown and expands a collapsed target. The modern `children` array is the source of truth, so a stale legacy `connectionIds` list is dropped.
+- Argument mistakes report `UNKNOWN_GROUP_ID`, `AMBIGUOUS_GROUP_NAME`, or `INVALID_GROUP_REQUEST`; a malformed stored layout reports `INVALID_SIDEBAR_LAYOUT`.
+
+Close the DBX desktop app before moving connections: it rewrites the sidebar layout from memory and would overwrite the change.
 
 `dbx_list_connections` and `dbx://connections` include saved connection notes regardless of the sidebar display setting. Notes are visible to MCP clients that can access the connection; do not store passwords or other secrets in notes.
 

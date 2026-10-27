@@ -8877,6 +8877,8 @@ export default withEnglishFallback({
     mcpToolSendMessage: "Mesaj növbəsinə mesaj göndər",
     mcpToolAddConnection: "Əlaqə əlavə et",
     mcpToolDuplicateConnection: "Əlaqənin surətini yarat",
+    mcpToolListSidebarGroups: "Yan panel qruplarını siyahıya al",
+    mcpToolMoveConnectionsToGroup: "Bağlantıları yan panel qrupuna köçür",
     mcpToolRemoveConnection: "Əlaqəni çıxar",
     mcpToolOpenTable: "Cədvəli DBX-də aç",
     mcpToolExecuteAndShow: "İcra et və DBX-də göstər",

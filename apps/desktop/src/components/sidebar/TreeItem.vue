@@ -329,6 +329,14 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
     case "object-browser":
       return { icon: TableProperties, colorClass: "text-primary" };
+    case "postgres-sessions":
+      return { icon: UsersRound, colorClass: "text-primary" };
+    case "postgres-locks":
+      return { icon: Key, colorClass: "text-primary" };
+    case "postgres-status":
+      return { icon: Gauge, colorClass: "text-primary" };
+    case "postgres-info-category":
+      return { icon: TableProperties, colorClass: "text-primary" };
     case "user-admin":
       return { icon: UsersRound, colorClass: "text-primary" };
     case "xugu-user-admin":

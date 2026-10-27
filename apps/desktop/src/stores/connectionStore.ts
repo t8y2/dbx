@@ -134,6 +134,7 @@ import {
   effectiveDatabaseTypeForConnection,
   gaussdbIdentifierQuoteOverride,
 } from "@/lib/database/jdbcDialect";
+import { postgresConnectionChildren, unwrapPostgresConnectionChildren } from "@/lib/database/postgresAdministration";
 import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, compareSidebarNames, sortSidebarDatabases, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
 import { spannerDisplayDatabase, spannerSchemaDisplayName } from "@/lib/connection/spannerResourcePath";
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
@@ -2026,7 +2027,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function connectionMetadataChildren(children: TreeNode[] | undefined): TreeNode[] {
-    return (children || []).filter((child) => !isConnectionUtilityNode(child));
+    return unwrapPostgresConnectionChildren(children || []).filter((child) => !isConnectionUtilityNode(child));
   }
 
   function hasConnectionMetadataChildren(children: TreeNode[] | undefined): boolean {
@@ -2048,7 +2049,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const nextUtilityChildren = children.filter(isConnectionUtilityNode);
     if (existingMetadataChildren.length === 0 || nextUtilityChildren.length === 0) return children;
 
-    return [...existingMetadataChildren, ...nextUtilityChildren];
+    return withSavedSqlRoot(parent.connectionId!, [...existingMetadataChildren, ...nextUtilityChildren], parent);
   }
 
   // Leaf tree nodes (table columns / indexes / foreign keys / triggers) are
@@ -2151,6 +2152,15 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function setChildren(parent: TreeNode, children: TreeNode[], options?: { trustEmptyConnectionChildren?: boolean }) {
+    // Normalize pre-upgrade live trees before matching children. In-flight loads
+    // retain the same database object when the new group is introduced.
+    if (parent.type === "connection" && parent.connectionId) {
+      const config = getConfig(parent.connectionId);
+      if (config) {
+        parent.children = postgresConnectionChildren(config, parent.children || [], parent.children);
+        children = postgresConnectionChildren(config, children, parent.children);
+      }
+    }
     // Compare markers against the resolved child list (after connection preserve), not the raw loader payload.
     children = preserveExistingConnectionMetadataChildren(parent, children, options?.trustEmptyConnectionChildren === true);
     children = decorateDatabaseSavedSqlTreeNodes(children, savedSqlFilesByDatabase, parent.children);
@@ -2185,6 +2195,11 @@ export const useConnectionStore = defineStore("connection", () => {
         // Virtual group containers are rebuilt from the layout on every projection;
         // stale copies must never override the freshly computed arrangement.
         if (child.type === "table-vgroup") return child;
+        if (child.type === "postgres-databases" && old) {
+          setChildren(old, child.children || []);
+          return { ...child, children: old.children };
+        }
+        if (child.type === "postgres-admin" || child.type === "postgres-info") return child;
         if (old?.isLoading) {
           const isExpanded = old.isExpanded;
           const isLoading = old.isLoading;
@@ -2436,7 +2451,9 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function withSavedSqlRoot(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
-    return withConnectionUtilityNodes(connectionId, children, existingConnectionNode);
+    const config = getConfig(connectionId);
+    const utilityChildren = withConnectionUtilityNodes(connectionId, children, existingConnectionNode);
+    return config ? postgresConnectionChildren(config, utilityChildren, existingConnectionNode?.children) : utilityChildren;
   }
 
   function refreshDatabaseSavedSqlTrees(nodes: TreeNode[] = treeNodes.value) {
@@ -8630,6 +8647,10 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadTreeNodeChildren(node: TreeNode, options?: LoadTreeOptions): Promise<void> {
+    if (["postgres-databases", "postgres-admin", "postgres-info"].includes(node.type)) {
+      node.isExpanded = true;
+      return;
+    }
     if (options?.sidebarSearch) {
       return withSidebarSearchLoad(node.connectionId, () => loadTreeNodeChildren(node, { ...options, sidebarSearch: false }));
     }

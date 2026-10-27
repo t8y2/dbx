@@ -24,7 +24,8 @@ export const PG_PROCESS_LIST_SQL = `SELECT pid,
        state,
        coalesce(nullif(wait_event_type, '') || ':' || wait_event, wait_event_type, '') AS wait,
        floor(extract(epoch FROM (now() - coalesce(query_start, xact_start, backend_start))))::bigint AS time,
-       query
+       query, backend_start::text AS backend_start, xact_start::text AS xact_start,
+       query_start::text AS query_start, state_change::text AS state_change, client_port
 FROM pg_stat_activity
 ORDER BY time DESC NULLS LAST`;
 
@@ -37,7 +38,8 @@ export const PG_PROCESS_LIST_LEGACY_SQL = `SELECT pid,
        state,
        CASE WHEN waiting THEN 'Lock' ELSE '' END AS wait,
        floor(extract(epoch FROM (now() - coalesce(query_start, xact_start, backend_start))))::bigint AS time,
-       query
+       query, backend_start::text AS backend_start, xact_start::text AS xact_start,
+       query_start::text AS query_start, state_change::text AS state_change, client_port
 FROM pg_stat_activity
 ORDER BY time DESC NULLS LAST`;
 
@@ -82,6 +84,11 @@ export const KINGBASE_OWN_SESSION_SQL = "SELECT sys_backend_pid()";
 export const KINGBASE_PG_OWN_SESSION_SQL = "SELECT pg_backend_pid()";
 
 export interface PgProcessRow {
+  backend_start?: string | null;
+  query_start?: string | null;
+  xact_start?: string | null;
+  state_change?: string | null;
+  client_port?: string | null;
   id: number;
   user: string;
   db: string | null;
@@ -136,6 +143,7 @@ export function mapPgProcessRows(result: QueryResult | null | undefined): PgProc
   const cell = (row: (string | number | boolean | null)[], idx: number) => (idx >= 0 ? row[idx] : null);
 
   return result.rows.map((row) => ({
+    ...Object.fromEntries(["backend_start", "query_start", "xact_start", "state_change", "client_port"].filter((key) => columnIndex(columns, key) >= 0).map((key) => [key, asNullableString(cell(row, columnIndex(columns, key)))])),
     id: asNumber(cell(row, pidIdx)),
     user: asString(cell(row, userIdx)),
     db: asNullableString(cell(row, dbIdx)),

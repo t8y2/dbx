@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
+import { unwrapPostgresConnectionChildren } from "@/lib/database/postgresAdministration";
 import { XUGU_PUBLIC_SYNONYM_SCOPE, XUGU_SCHEDULER_JOB_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
 
 function installLocalStorage() {
@@ -82,7 +83,7 @@ describe("connectionStore default schema", () => {
         ],
       },
     ];
-    const schemaLabels = () => (store.treeNodes[0]?.children?.[0]?.children || []).filter((node: TreeNode) => node.type === "schema").map((node: TreeNode) => node.label);
+    const schemaLabels = () => (unwrapPostgresConnectionChildren(store.treeNodes[0]?.children || []).find((node) => node.type === "database" && node.database === connection.database)?.children || []).filter((node: TreeNode) => node.type === "schema").map((node: TreeNode) => node.label);
 
     await store.setDefaultSchema(connection.id, " public ");
 

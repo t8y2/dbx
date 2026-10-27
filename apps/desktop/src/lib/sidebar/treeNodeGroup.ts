@@ -1,6 +1,9 @@
 import type { TreeNodeType } from "@/types/database";
 
 const treeGroupNodeTypes = new Set<TreeNodeType>([
+  "postgres-databases",
+  "postgres-admin",
+  "postgres-info",
   "oracle-db-links",
   "group-columns",
   "group-indexes",

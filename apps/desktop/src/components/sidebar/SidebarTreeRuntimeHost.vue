@@ -21,6 +21,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { normalizeBackendError } from "@/lib/backend/errorUtils";
 import { isConnectionTimeoutErrorMessage } from "@/lib/sql/queryError";
 import {
+  Key,
   Ban,
   BarChart3,
   BookOpen,
@@ -256,6 +257,7 @@ import { selectedSidebarBatchTargets, selectedTreeNodesInVisibleOrder as orderSe
 import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionEditTarget, selectedConnectionMoveTargets } from "@/lib/sidebar/sidebarConnectionSelection";
 import { connectionSupportsDatabaseUserAdmin, resolveDatabaseUserAdminProviderForConnection, type DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
 import { authorizationPlanSql, authorizationPlanStatus, buildCreateDatabaseAuthorizationPlan, executeAuthorizationPlan, type AuthorizationPlan, type AuthorizationStepResult } from "@/lib/database/databaseAuthorizationPlan";
+import { supportsPostgresAdministration } from "@/lib/database/postgresAdministration";
 import { connectionSupportsProcessList } from "@/lib/database/processListDrivers";
 import { connectionSupportsServerDashboard } from "@/lib/database/mysqlServerStatus";
 import { connectionSupportsServerDashboard as connectionSupportsPgServerDashboard } from "@/lib/database/postgresServerStatus";
@@ -889,7 +891,15 @@ async function openDirectNavigationNode(node: TreeNode, requestId: number) {
   if (!isCurrentNavigationRequest(requestId)) return;
   if ((node.type === "etcd-dashboard" || node.type === "etcd-access-control") && !connectionStore.getEtcdAccessCapabilities(node.connectionId).admin) return;
   const connectionName = connectionStore.getConfig(node.connectionId)?.name || (isNacosNavigation ? "Nacos" : isEtcdNavigation ? "etcd" : "Consul");
-  if (node.type === "consul-root") {
+  if (node.type === "postgres-sessions") {
+    queryStore.openProcessList(node.connectionId);
+  } else if (node.type === "postgres-locks") {
+    queryStore.openPostgresLocks(node.connectionId);
+  } else if (node.type === "postgres-status") {
+    queryStore.openPostgresDashboard(node.connectionId);
+  } else if (node.type === "postgres-info-category") {
+    queryStore.openPostgresSystemInfo(node.connectionId, node.postgresSystemCategory);
+  } else if (node.type === "consul-root") {
     queryStore.createTab(node.connectionId, "", `${connectionName}:keys`, "consul");
     refreshActiveKvBrowserAfterOpen("consul", node.connectionId);
   } else if (node.type === "consul-overview") {
@@ -923,6 +933,10 @@ async function toggle(requestId = beginNavigationRequest()) {
     connectionStore.activeConnectionId = node.connectionId;
   }
   const treeLoadSearchOptions = sidebarTreeContext?.getTreeLoadSearchOptions?.(node);
+  if (["postgres-databases", "postgres-admin", "postgres-info"].includes(node.type)) {
+    node.isExpanded = !node.isExpanded;
+    return;
+  }
   if (isDirectNavigationTreeNode(node.type)) {
     try {
       await openDirectNavigationNode(node, requestId);
@@ -7308,7 +7322,30 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       items.push({ sidebarActionId: "contextMenu.userAdmin", label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
     }
     if (node.connectionId && connectionSupportsProcessList(connectionStore.getConfig(node.connectionId))) {
-      items.push({ sidebarActionId: "contextMenu.processList", label: t(currentDatabaseType() === "xugu" ? "processList.transactionTitle" : "contextMenu.processList"), action: openProcessList, icon: Activity });
+      items.push({
+        sidebarActionId: "contextMenu.processList",
+        label: t(supportsPostgresAdministration(connectionStore.getConfig(node.connectionId)) ? "postgresAdmin.sessions" : currentDatabaseType() === "xugu" ? "processList.transactionTitle" : "contextMenu.processList"),
+        action: openProcessList,
+        icon: Activity,
+      });
+    }
+    if (node.connectionId && supportsPostgresAdministration(connectionStore.getConfig(node.connectionId))) {
+      items.push({
+        label: t("postgresAdmin.locks"),
+        action: async () => {
+          await connectionStore.ensureConnected(node.connectionId!);
+          queryStore.openPostgresLocks(node.connectionId!);
+        },
+        icon: Key,
+      });
+      items.push({
+        label: t("postgresAdmin.systemInfo"),
+        action: async () => {
+          await connectionStore.ensureConnected(node.connectionId!);
+          queryStore.openPostgresSystemInfo(node.connectionId!);
+        },
+        icon: Info,
+      });
     }
     if (currentDatabaseType() === "sqlserver") {
       items.push({ sidebarActionId: "contextMenu.sqlServerTrace", label: t("contextMenu.sqlServerTrace"), action: openSqlServerActivityTrace, icon: Activity });
@@ -7808,6 +7845,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
+  if (node.type.startsWith("postgres-")) return true;
   if (node.type === "user-admin") {
     items.push({ label: t("contextMenu.openUserAdmin"), action: openUserAdmin, icon: UsersRound });
     return true;

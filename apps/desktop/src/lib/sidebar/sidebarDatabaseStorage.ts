@@ -13,7 +13,7 @@ export function supportsSidebarTableStorage(connection: ConnectionConfig | undef
 
 export function sidebarDatabaseNames(nodes: readonly TreeNode[] | undefined): string[] {
   if (!nodes) return [];
-  return nodes.flatMap((node) => (node.type === "database" && !node.catalog && node.database ? [node.database] : []));
+  return nodes.flatMap((node) => (node.type === "postgres-databases" ? sidebarDatabaseNames(node.children) : node.type === "database" && !node.catalog && node.database ? [node.database] : []));
 }
 
 export function applySidebarDatabaseStorage(nodes: readonly TreeNode[] | undefined, storage: readonly DatabaseStorageInfo[]): boolean {
@@ -21,6 +21,10 @@ export function applySidebarDatabaseStorage(nodes: readonly TreeNode[] | undefin
   const byName = new Map(storage.map((item) => [item.name, item.size_bytes] as const));
   let changed = false;
   for (const node of nodes) {
+    if (node.type === "postgres-databases") {
+      changed = applySidebarDatabaseStorage(node.children, storage) || changed;
+      continue;
+    }
     if (node.type !== "database" || node.catalog || !node.database || !byName.has(node.database)) continue;
     const sizeBytes = byName.get(node.database) ?? null;
     if (node.sizeBytes === sizeBytes) continue;

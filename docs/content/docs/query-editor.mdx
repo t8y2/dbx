@@ -273,3 +273,24 @@ See [Production and Write Safety](/en/docs/production-safety) for the complete r
     Generate, explain, and optimize SQL, then return it to the editor for review.
   </Card>
 </Cards>
+
+
+## PostgreSQL administration
+
+Expand a PostgreSQL connection to find **Databases**, **Administration**, and **System information**. Database names, the default database, visibility filters, and **Users and Privileges** remain available. The connection context menu also provides **Sessions** (previously **Process List**), **Locks**, and **System information**.
+
+Under **Administration**, **Sessions** reuses the process list: select a row for session timestamps, client details, and its current or last SQL. Right-click to copy, filter idle sessions, cancel the current query, terminate the session, or open the monitoring SQL in an editor. Opening SQL does not execute it. **Server status** opens the existing PostgreSQL dashboard.
+
+**Locks** shows a row for each waiting/blocking PID pair. Select a pair to inspect the SQL and locks on both sides; use the toolbar or context menu to cancel a waiting query or terminate a selected session. Terminating a connection rolls back its open transaction. Signals require confirmation, respect read-only and production protection, and revalidate the observed session identity. The server's permission checks still apply. Prepared-transaction blockers have no backend PID and cannot be terminated from this screen.
+
+Refresh manually, or enable the optional five-second interval. This is a live snapshot, not a history of resolved deadlocks. A limited result is marked as incomplete. Locks requires PostgreSQL 9.6 or later; the existing sessions list retains its older-server fallback. PostgreSQL-compatible engines are not automatically enabled. On Aurora, results describe the connected instance, not every instance in a cluster or every client behind a proxy.
+
+**System information** provides read-only access to access methods, encodings, collations, languages, and available extensions. Choose the source database explicitly: installed languages, collations, and extension versions can differ between databases. Restricted users may see only partial session details; database-side query truncation also applies. Installing or removing extensions is outside this screen.
+
+To reproduce the PostgreSQL administration SQL checks locally, start a disposable `postgres:14` or `postgres:18` container with Podman, then run:
+
+```bash
+DBX_POSTGRES_ADMIN_TEST_CONTAINER=<container-name> pnpm exec tsx --tsconfig apps/desktop/tsconfig.json scripts/test-postgres-administration.ts
+```
+
+The opt-in script creates its own database and restricted role, verifies blocking relationships, cancellation without disconnecting, termination, rollback and catalog reads, then removes its fixtures.

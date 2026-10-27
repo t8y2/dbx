@@ -55,6 +55,8 @@ function isBottomConnectionUtilityNode(child: TreeNode): boolean {
 function orderSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">, children: readonly TreeNode[], databaseType?: DatabaseType): TreeNode[] {
   const normalized = children.map((child) => sortRecursive(child, databaseType));
 
+  if (parent.type === "postgres-databases") return sortByLabel(normalized);
+
   if (parent.type === "mongo-db") {
     const gridFsNodes = normalized.filter((child) => child.type === "mongo-gridfs");
     const collections = normalized.filter((child) => child.type !== "mongo-gridfs");

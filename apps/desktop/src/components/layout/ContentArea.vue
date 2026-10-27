@@ -151,6 +151,8 @@ const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/Ob
 const TableStructureEditor = defineAsyncComponent(() => import("@/components/structure/TableStructureEditor.vue"));
 const DatabaseUserAdmin = defineAsyncComponent(() => import("@/components/admin/DatabaseUserAdmin.vue"));
 const XuguUserPermissions = defineAsyncComponent(() => import("@/components/admin/XuguUserPermissions.vue"));
+const PostgresLocksPanel = defineAsyncComponent(() => import("@/components/admin/PostgresLocksPanel.vue"));
+const PostgresSystemInfoPanel = defineAsyncComponent(() => import("@/components/admin/PostgresSystemInfoPanel.vue"));
 const ProcessListPanel = defineAsyncComponent(() => import("@/components/admin/ProcessListPanel.vue"));
 const SqlServerActivityTracePanel = defineAsyncComponent(() => import("@/components/admin/SqlServerActivityTracePanel.vue"));
 const MySqlDashboard = defineAsyncComponent(() => import("@/components/admin/MySqlDashboard.vue"));
@@ -3932,6 +3934,12 @@ defineExpose({
       <XuguUserPermissions :key="activeTab.id" :connection="activeConnection" />
     </template>
 
+    <template v-else-if="activeTab.mode === 'postgres-locks' && activeConnection">
+      <PostgresLocksPanel :key="activeTab.id" :connection="activeConnection" />
+    </template>
+    <template v-else-if="activeTab.mode === 'postgres-system-info' && activeConnection">
+      <PostgresSystemInfoPanel :key="activeTab.id" :connection="activeConnection" :category="activeTab.postgresSystemCategory" />
+    </template>
     <template v-else-if="activeTab.mode === 'processlist' && activeConnection">
       <ProcessListPanel :key="activeTab.id" :connection="activeConnection" />
     </template>

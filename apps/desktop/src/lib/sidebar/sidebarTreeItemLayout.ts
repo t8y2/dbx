@@ -1,6 +1,10 @@
 import type { TreeNode, TreeNodeType } from "@/types/database";
 
 const leafTypes: Set<TreeNodeType> = new Set([
+  "postgres-sessions",
+  "postgres-locks",
+  "postgres-status",
+  "postgres-info-category",
   "column",
   "index",
   "fkey",

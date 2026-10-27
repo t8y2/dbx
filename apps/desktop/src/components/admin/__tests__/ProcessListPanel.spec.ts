@@ -224,11 +224,11 @@ function mysqlListResult() {
 
 function postgresListResult() {
   return {
-    columns: ["pid", "user", "db", "client", "app", "state", "wait", "time", "query"],
+    columns: ["pid", "user", "db", "client", "app", "state", "wait", "time", "query", "backend_start", "query_start"],
     rows: [
-      [5, "postgres", "postgres", "local", "", "active", "", 0, PG_PROCESS_LIST_SQL],
-      [21, "app", "shop", "10.0.0.2", "worker", "idle", "", 120, "SELECT 1"],
-      [22, "app", "shop", "10.0.0.3", "worker", "idle", "", 30, "SELECT 2"],
+      [5, "postgres", "postgres", "local", "", "active", "", 0, PG_PROCESS_LIST_SQL, "2026-10-27 10:00:00+00", "2026-10-27 11:00:00+00"],
+      [21, "app", "shop", "10.0.0.2", "worker", "idle", "", 120, "SELECT 1", "2026-10-27 10:00:00+00", "2026-10-27 11:00:00+00"],
+      [22, "app", "shop", "10.0.0.3", "worker", "idle", "", 30, "SELECT 2", "2026-10-27 10:00:00+00", "2026-10-27 11:00:00+00"],
     ],
   };
 }
@@ -290,6 +290,7 @@ beforeEach(() => {
     if (sql === "SHOW FULL PROCESSLIST") return mysqlListResult();
     if (sql === "SELECT pg_backend_pid()") return { columns: ["pg_backend_pid"], rows: [[5]] };
     if (sql === PG_PROCESS_LIST_SQL) return postgresListResult();
+    if (sql.startsWith("SELECT pg_terminate_backend(")) return { columns: ["pg_terminate_backend"], rows: [[true]] };
     if (sql === XUGU_OWN_SESSION_SQL) return { columns: ["NODEID", "SESSION_ID"], rows: [[1, 5]] };
     if (sql === XUGU_TRANSACTION_LIST_SQL) return xuguTransactionResult();
     if (sql === ORACLE_SESSION_VERSION_SQL) {
@@ -1020,6 +1021,24 @@ describe("ProcessListPanel batch terminate", () => {
     await vi.waitFor(() => expect(root?.textContent).toContain("processList.batchSummary:2,0"));
   });
 
+  it("disables PostgreSQL signals and selection when session identity is restricted", async () => {
+    const original = mocks.executeQuery.getMockImplementation()!;
+    mocks.executeQuery.mockImplementation((...args) => {
+      if (args[2] === PG_PROCESS_LIST_SQL) {
+        const result = postgresListResult();
+        return Promise.resolve({ ...result, rows: result.rows.map((row, index) => (index === 1 ? row.map((value, column) => (column === 9 ? null : value)) : row)) });
+      }
+      return original(...args);
+    });
+    app = createApp(ProcessListPanel, { connection: postgresConnection });
+    app.mount(root!);
+    await vi.waitFor(() => expect(sessionCheckbox(22)?.disabled).toBe(false));
+    const restricted = sessionCheckbox(21)!.closest("tr")!;
+    expect(restricted.querySelector<HTMLButtonElement>('button[title="processList.kill"]')?.disabled).toBe(true);
+    expect(restricted.querySelector<HTMLButtonElement>('button[title="processList.terminate"]')?.disabled).toBe(true);
+    expect(sessionCheckbox(21)?.disabled).toBe(true);
+  });
+
   it("enables selection and batch termination on engines without batch cancel", async () => {
     // PostgreSQL requires the server to confirm the termination with a true result cell.
     mocks.executeMulti.mockResolvedValue([{ columns: ["pg_terminate_backend"], rows: [[true]] }]);
@@ -1033,9 +1052,11 @@ describe("ProcessListPanel batch terminate", () => {
     await nextTick();
 
     findDialogButton("processList.terminate")?.click();
-    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(2));
-    expect(mocks.executeMulti).toHaveBeenNthCalledWith(1, "pg-1", "", "SELECT pg_terminate_backend(21)", undefined, undefined, { maxRows: 1 });
-    expect(mocks.executeMulti).toHaveBeenNthCalledWith(2, "pg-1", "", "SELECT pg_terminate_backend(22)", undefined, undefined, { maxRows: 1 });
+    await vi.waitFor(() => expect(mocks.executeQuery.mock.calls.filter((call) => String(call[2]).startsWith("SELECT pg_terminate_backend("))).toHaveLength(2));
+    const signals = mocks.executeQuery.mock.calls.filter((call) => String(call[2]).startsWith("SELECT pg_terminate_backend("));
+    expect(signals.map((call) => call[2])).toEqual([21, 22].map((pid) => `SELECT pg_terminate_backend(${pid}) FROM pg_catalog.pg_stat_activity WHERE pid = ${pid} AND backend_start::text = '2026-10-27 10:00:00+00' AND pid <> pg_catalog.pg_backend_pid()`));
+    expect(signals[0][5]).toMatchObject({ clientSessionId: expect.stringMatching(/^process-list:/), maxRows: 1 });
+    expect(signals[1][5]).toEqual(signals[0][5]);
     await vi.waitFor(() => expect(root?.textContent).toContain("processList.batchTerminateSummary:2,0"));
   });
 

@@ -1,5 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { unwrapPostgresConnectionChildren } from "@/lib/database/postgresAdministration";
 import { canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { filterLocallySearchedTables } from "@/lib/sidebar/sidebarSearchTree";
 import { encodeSchemaTreeCache } from "@/lib/metadata/schemaTreeCache";
@@ -3212,14 +3213,14 @@ describe("connectionStore metadata loading", () => {
 
     await store.loadDatabases(connection.id, { connectedOnly: true });
 
-    const databaseDuringRefresh = store.treeNodes[0]?.children?.find((child) => child.id === databaseNode.id);
+    const databaseDuringRefresh = unwrapPostgresConnectionChildren(store.treeNodes[0]?.children || []).find((child) => child.id === databaseNode.id);
     expect(databaseDuringRefresh).toBe(liveDatabaseNode);
     expect(databaseDuringRefresh?.isLoading).toBe(true);
 
     resolveSchemas([{ name: "public", comment: null }]);
     await schemaLoad;
 
-    const loadedDatabase = store.treeNodes[0]?.children?.find((child) => child.id === databaseNode.id);
+    const loadedDatabase = unwrapPostgresConnectionChildren(store.treeNodes[0]?.children || []).find((child) => child.id === databaseNode.id);
     expect(loadedDatabase).toBe(liveDatabaseNode);
     expect(loadedDatabase?.isLoading).toBe(false);
     expect(loadedDatabase?.isExpanded).toBe(true);

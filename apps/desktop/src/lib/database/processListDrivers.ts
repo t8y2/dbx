@@ -189,6 +189,8 @@ const MYSQL_DRIVER: ProcessListDriver = {
 };
 
 const POSTGRES_DRIVER: ProcessListDriver = {
+  useClientSession: true,
+  productionGuardScope: "connection",
   listSql: PG_PROCESS_LIST_SQL,
   fallbackListSql: PG_PROCESS_LIST_LEGACY_SQL,
   shouldUseFallbackListSql: isPgProcessListCompatibilityError,

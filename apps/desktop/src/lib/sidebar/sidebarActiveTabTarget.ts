@@ -10,7 +10,7 @@ export type ActiveTabSidebarTarget =
   | {
       type: "management";
       connectionId: string;
-      nodeType: "user-admin" | "xugu-user-admin" | "dameng-users" | "dameng-roles" | "dameng-job-admin" | "database-job-admin";
+      nodeType: "postgres-sessions" | "postgres-locks" | "postgres-status" | "postgres-info" | "user-admin" | "xugu-user-admin" | "dameng-users" | "dameng-roles" | "dameng-job-admin" | "database-job-admin";
     }
   | {
       type: "table";
@@ -126,6 +126,9 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
   if (!tab) return null;
 
   const managementNodeTypes = {
+    "postgres-locks": "postgres-locks",
+    "postgres-dashboard": "postgres-status",
+    "postgres-system-info": "postgres-info",
     users: "user-admin",
     "xugu-users": "xugu-user-admin",
     "dameng-users": "dameng-users",

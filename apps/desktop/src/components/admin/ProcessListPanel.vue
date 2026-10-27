@@ -18,6 +18,10 @@ import { resolveProcessListDriverForConnection, type ProcessRow } from "@/lib/da
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { processListSelectionAfterClick } from "@/lib/database/processListSelection";
 import { oracleMajorVersion } from "@/lib/database/oracleSessionManagement";
+import { buildPgSignalSql, pgSignalResultError, type PgSessionIdentity } from "@/lib/database/postgresLocks";
+import { supportsPostgresAdministration } from "@/lib/database/postgresAdministration";
+import { useQueryStore } from "@/stores/queryStore";
+import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const SessionDiagnostics = defineAsyncComponent(() => import("./SessionDiagnostics.vue"));
@@ -39,6 +43,9 @@ const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{
 
 // The panel is only opened for supported engines; guard the driver defensively so
 // a missing one degrades to an empty table rather than crashing the render.
+const postgres = computed(() => supportsPostgresAdministration(props.connection));
+const showIdle = ref(true);
+const detailRow = ref<ProcessRow | null>(null);
 const driver = computed(() => resolveProcessListDriverForConnection(props.connection));
 const xuguAdminRequired = computed(() => effectiveDatabaseTypeForConnection(props.connection) === "xugu" && driver.value === null);
 const columns = computed(() => driver.value?.columns ?? []);
@@ -158,7 +165,8 @@ async function copyPreview() {
 
 const filteredRows = computed(() => {
   const query = search.value.trim().toLowerCase();
-  const base = query ? rows.value.filter((row) => Object.values(row).some((value) => value !== null && value !== undefined && String(value).toLowerCase().includes(query))) : rows.value.slice();
+  const visible = postgres.value && !showIdle.value ? rows.value.filter((row) => !String(row.state ?? "").startsWith("idle")) : rows.value;
+  const base = query ? visible.filter((row) => Object.values(row).some((value) => value !== null && value !== undefined && String(value).toLowerCase().includes(query))) : visible.slice();
   const key = sortKey.value;
   const dir = sortDir.value === "asc" ? 1 : -1;
   return base.sort((a, b) => {
@@ -172,7 +180,7 @@ const filteredRows = computed(() => {
   });
 });
 
-const selectableRows = computed(() => (ownSessionId.value === null ? [] : filteredRows.value.filter((row) => !isOwnSession(row) && (typeof row.id === "string" ? /^\d+$/.test(row.id) : Number.isSafeInteger(row.id) && row.id > 0))));
+const selectableRows = computed(() => (ownSessionId.value === null ? [] : filteredRows.value.filter((row) => !isOwnSession(row) && (!postgres.value || !!row.backend_start) && (typeof row.id === "string" ? /^\d+$/.test(row.id) : Number.isSafeInteger(row.id) && row.id > 0))));
 const allSelected = computed(() => selectableRows.value.length > 0 && selectableRows.value.every((row) => selectedIds.value.has(row.id)));
 const partiallySelected = computed(() => selectedIds.value.size > 0 && !allSelected.value);
 
@@ -225,7 +233,7 @@ async function confirmBatchCancel() {
   let executed = false;
   try {
     const statements = targets.map((row) => ({ id: Number(row.id), sql: activeDriver.buildCancelQuerySql!(Number(row.id)) }));
-    const result = await executeWithProductionSqlGuard({
+    const result = await guardSessionAction({
       connection,
       database: "",
       sql: statements.map((statement) => statement.sql).join(";\n"),
@@ -283,14 +291,14 @@ async function confirmBatchTerminate() {
   terminating.value = true;
   let executed = false;
   try {
-    const statements = targets.map((row) => ({ id: Number(row.id), sql: buildTerminateSql.call(activeDriver, Number(row.id)) }));
+    const statements = targets.map((row) => ({ id: Number(row.id), sql: postgres.value ? buildPgSignalSql(pgTarget(row), "terminate") : buildTerminateSql.call(activeDriver, Number(row.id)) }));
     const executeTerminateSql = async (sql: string) => {
-      const results = await api.executeMulti(connection.id, "", sql, undefined, undefined, { maxRows: 1 });
+      const results = activeDriver.useClientSession ? [await executeProcessQuery(connection.id, activeDriver.database ?? "", sql, 1, activeDriver)] : await api.executeMulti(connection.id, "", sql, undefined, undefined, { maxRows: 1 });
       const executionError = processListExecutionError(results);
       if (executionError) throw new Error(executionError);
       return results;
     };
-    const result = await executeWithProductionSqlGuard({
+    const result = await guardSessionAction({
       connection,
       database: "",
       sql: statements.map((statement) => statement.sql).join(";\n"),
@@ -311,8 +319,8 @@ async function confirmBatchTerminate() {
               usedFallbackTerminateSql = true;
               results = await executeTerminateSql(activeDriver.buildFallbackTerminateSessionSql(statement.id));
             }
-            const terminateResultError = usedFallbackTerminateSql ? activeDriver.fallbackTerminateSessionResultError?.(results) : activeDriver.terminateSessionResultError?.(results);
-            if (terminateResultError) throw new Error(terminateResultError);
+            const terminateResultError = postgres.value ? (results[0] ? pgSignalResultError(results[0], "terminate") : "postgresAdmin.targetChanged") : usedFallbackTerminateSql ? activeDriver.fallbackTerminateSessionResultError?.(results) : activeDriver.terminateSessionResultError?.(results);
+            if (terminateResultError) throw new Error(postgres.value ? t(terminateResultError) : terminateResultError);
             summary.succeeded++;
           } catch (error: unknown) {
             summary.failures.push({ id: statement.id, message: error instanceof Error ? error.message : String(error) });
@@ -349,6 +357,7 @@ async function load(options: { silent?: boolean } = {}) {
   const connectionId = props.connection.id;
   const generation = connectionGeneration;
   const isCurrent = () => !disposed && generation === connectionGeneration;
+  detailRow.value = null;
   refreshing.value = true;
   if (!options.silent) loading.value = true;
   loadError.value = "";
@@ -475,6 +484,7 @@ function closeLockDialog() {
 }
 
 function requestCancel(row: ProcessRow) {
+  if (postgres.value && !row.backend_start) return;
   if (isOwnSession(row) || transactionIdentityUnavailable.value || actionsLocked.value || refreshing.value) return;
   cancelTarget.value = row;
 }
@@ -488,16 +498,16 @@ async function confirmCancel() {
   const isCurrent = () => !disposed && generation === connectionGeneration;
   canceling.value = true;
   try {
-    const cancelSql = transactionMode.value ? activeDriver.buildKillTransactionSql!(target) : activeDriver.buildCancelQuerySql!(Number(target.id));
+    const cancelSql = postgres.value ? buildPgSignalSql(pgTarget(target), "cancel") : transactionMode.value ? activeDriver.buildKillTransactionSql!(target) : activeDriver.buildCancelQuerySql!(Number(target.id));
     let usedFallbackCancelSql = false;
     const executeCancelSql = async (sql: string) => {
       if (!isCurrent()) return undefined;
-      const results = await api.executeMulti(connection.id, activeDriver.database ?? "", sql, undefined, undefined, { maxRows: 1 });
+      const results = activeDriver.useClientSession ? [await executeProcessQuery(connection.id, activeDriver.database ?? "", sql, 1, activeDriver)] : await api.executeMulti(connection.id, activeDriver.database ?? "", sql, undefined, undefined, { maxRows: 1 });
       const executionError = processListExecutionError(results);
       if (executionError) throw new Error(executionError);
       return results;
     };
-    const result = await executeWithProductionSqlGuard({
+    const result = await guardSessionAction({
       connection,
       database: activeDriver.database ?? "",
       sql: cancelSql,
@@ -522,8 +532,8 @@ async function confirmCancel() {
       },
     });
     if (result === undefined || !isCurrent()) return;
-    const cancelResultError = usedFallbackCancelSql ? activeDriver.fallbackCancelQueryResultError?.(result) : activeDriver.cancelQueryResultError?.(result);
-    if (cancelResultError) throw new Error(cancelResultError);
+    const cancelResultError = postgres.value ? (result[0] ? pgSignalResultError(result[0], "cancel") : "postgresAdmin.targetChanged") : usedFallbackCancelSql ? activeDriver.fallbackCancelQueryResultError?.(result) : activeDriver.cancelQueryResultError?.(result);
+    if (cancelResultError) throw new Error(postgres.value ? t(cancelResultError) : cancelResultError);
     toast(t(activeDriver.mode === "transaction" ? "processList.transactionKillSuccess" : "processList.killSuccess", { id: target.transactionId ?? target.id }), 2500);
     cancelTarget.value = null;
   } catch (error: any) {
@@ -535,6 +545,7 @@ async function confirmCancel() {
 }
 
 function requestTerminate(row: ProcessRow) {
+  if (postgres.value && !row.backend_start) return;
   if (isOwnSession(row) || (rowAwareTerminate.value && ownSessionId.value === null) || terminateRowDisabledReason(row) || actionsLocked.value || refreshing.value || !terminateSupported.value) return;
   terminateTarget.value = row;
 }
@@ -565,7 +576,7 @@ async function confirmTerminate() {
   terminating.value = true;
   let actionSubmitted = false;
   try {
-    const terminateSql = buildRowTerminateSql?.(target, versionMajor.value ?? undefined) ?? buildTerminateSql!.call(activeDriver, Number(target.id));
+    const terminateSql = postgres.value ? buildPgSignalSql(pgTarget(target), "terminate") : (buildRowTerminateSql?.(target, versionMajor.value ?? undefined) ?? buildTerminateSql!.call(activeDriver, Number(target.id)));
     let usedFallbackTerminateSql = false;
     const executeTerminateSql = async (sql: string) => {
       if (!isCurrentConnection()) throw new Error(t("processList.oracleConnectionChanged"));
@@ -594,10 +605,10 @@ async function confirmTerminate() {
     const result =
       activeDriver.productionGuardScope === "connection"
         ? await executeWithProductionContextGuard({ connection, database: "", reviewText: terminateSql, source: t("production.sourceAdmin"), scope: "connection", execute })
-        : await executeWithProductionSqlGuard({ connection, database: "", sql: terminateSql, source: t("production.sourceAdmin"), execute });
+        : await guardSessionAction({ connection, database: "", sql: terminateSql, source: t("production.sourceAdmin"), execute });
     if (result === undefined || !isCurrent()) return;
-    const terminateResultError = usedFallbackTerminateSql ? activeDriver.fallbackTerminateSessionResultError?.(result) : activeDriver.terminateSessionResultError?.(result);
-    if (terminateResultError) throw new Error(terminateResultError);
+    const terminateResultError = postgres.value ? (result[0] ? pgSignalResultError(result[0], "terminate") : "postgresAdmin.targetChanged") : usedFallbackTerminateSql ? activeDriver.fallbackTerminateSessionResultError?.(result) : activeDriver.terminateSessionResultError?.(result);
+    if (terminateResultError) throw new Error(postgres.value ? t(terminateResultError) : terminateResultError);
     terminateTarget.value = null;
     if (rowAware) {
       terminating.value = false;
@@ -703,6 +714,43 @@ onBeforeUnmount(() => {
     managedClientSession = null;
   }
 });
+function guardSessionAction<T>(options: import("@/lib/database/productionExecutionGuard").ProductionSqlExecutionGuardOptions<T>) {
+  return driver.value?.productionGuardScope === "connection" ? executeWithProductionContextGuard({ ...options, reviewText: options.sql, scope: "connection" }) : executeWithProductionSqlGuard(options);
+}
+function pgTarget(row: ProcessRow): PgSessionIdentity {
+  if (typeof row.backend_start !== "string" || !row.backend_start) throw new Error(t("postgresAdmin.targetChanged"));
+  return { pid: Number(row.id), backendStart: row.backend_start, queryStart: typeof row.query_start === "string" ? row.query_start : null };
+}
+async function copySessionValue(value: unknown) {
+  try {
+    await navigator.clipboard.writeText(typeof value === "string" ? value : JSON.stringify(value, null, 2));
+    toast(t("postgresAdmin.copied"), 1500);
+  } catch (e) {
+    toast(String(e), 3000);
+  }
+}
+function openMonitoringSql() {
+  useQueryStore().createTab(props.connection.id, props.connection.database || "", t("postgresAdmin.sessions"), "query", undefined, fallbackListSql.value ?? driver.value?.listSql);
+}
+function sessionMenu(row: ProcessRow): ContextMenuItem[] {
+  if (!postgres.value) return [];
+  const disabled = isOwnSession(row) || actionsLocked.value || refreshing.value || !row.backend_start || ownSessionId.value === null;
+  return [
+    { label: t("postgresAdmin.copy"), action: () => copySessionValue(row) },
+    { label: t("postgresAdmin.copySql"), disabled: !row.query, action: () => copySessionValue(row.query) },
+    {
+      label: t("postgresAdmin.showIdle"),
+      checked: showIdle.value,
+      action: () => {
+        showIdle.value = !showIdle.value;
+      },
+    },
+    { label: t("postgresAdmin.cancelSession"), disabled, action: () => requestCancel(row) },
+    { label: t("postgresAdmin.terminateSession"), disabled, action: () => requestTerminate(row) },
+    { label: t("postgresAdmin.showSql"), action: openMonitoringSql },
+    { label: t("postgresAdmin.refresh"), disabled: actionsLocked.value || refreshing.value, action: () => load() },
+  ];
+}
 </script>
 
 <template>
@@ -716,13 +764,15 @@ onBeforeUnmount(() => {
     <div class="flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-b bg-muted/20 px-3 py-1">
       <div class="flex min-w-0 items-center gap-2">
         <Activity class="h-4 w-4 text-primary" />
-        <div class="truncate text-sm font-semibold">{{ t(transactionMode ? "processList.transactionTitle" : "processList.title") }}</div>
+        <div class="truncate text-sm font-semibold">{{ t(postgres ? "postgresAdmin.sessions" : transactionMode ? "processList.transactionTitle" : "processList.title") }}</div>
         <Badge variant="outline" class="h-5 rounded-md px-1.5 text-[11px]">{{ connection.name }}</Badge>
         <Badge v-if="!transactionMode || !loadError" variant="secondary" class="h-5 rounded-md px-1.5 text-[11px]">{{
           t(transactionMode ? "processList.transactionCount" : "processList.sessionCount", { count: processListSessionCount(truncated ? rows.length : filteredRows.length, truncated) })
         }}</Badge>
       </div>
       <div class="ml-auto flex flex-wrap items-center gap-2">
+        <label v-if="postgres" class="flex items-center gap-2 text-xs"><input v-model="showIdle" type="checkbox" />{{ t("postgresAdmin.showIdle") }}</label>
+        <Button v-if="postgres" size="sm" variant="ghost" @click="openMonitoringSql">{{ t("postgresAdmin.showSql") }}</Button>
         <Button
           v-if="batchSupported"
           variant="destructive"
@@ -805,68 +855,80 @@ onBeforeUnmount(() => {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in filteredRows" :key="driver?.rowKey?.(row) ?? row.id" class="border-b hover:bg-accent/40" :class="{ 'bg-primary/5': isOwnSession(row) }">
-            <td v-if="selectionSupported" class="px-3 py-1.5">
-              <input
-                type="checkbox"
-                class="h-3.5 w-3.5 accent-primary"
-                :checked="selectedIds.has(row.id)"
-                :disabled="actionsLocked || refreshing || ownSessionId === null || isOwnSession(row) || typeof row.id !== 'number' || !Number.isSafeInteger(row.id) || row.id <= 0"
-                :aria-label="t('processList.selectSession', { id: row.id })"
-                @click="toggleSelection(row.id, $event as MouseEvent)"
-              />
-            </td>
-            <td
-              v-for="column in columns"
-              :key="column.key"
-              class="px-3 py-1.5"
-              :class="[column.mono ? 'font-mono' : '', column.wide ? 'max-w-md cursor-pointer truncate hover:text-foreground hover:underline' : 'whitespace-nowrap', column.wide || column.key === 'db' || column.key === 'state' || column.key === 'wait' ? 'text-muted-foreground' : '']"
-              :title="column.wide ? (row[column.key] === null || row[column.key] === undefined ? '' : t('processList.previewTitle')) : undefined"
-              @click="column.wide ? openPreview(row[column.key]) : undefined"
+          <CustomContextMenu v-for="row in filteredRows" :key="driver?.rowKey?.(row) ?? row.id" v-slot="{ onContextMenu }" :items="() => sessionMenu(row)">
+            <tr
+              tabindex="0"
+              class="border-b hover:bg-accent/40"
+              :class="{ 'bg-primary/5': isOwnSession(row), 'bg-accent': postgres && detailRow === row }"
+              @click="postgres && (detailRow = row)"
+              @keydown.enter="postgres && (detailRow = row)"
+              @contextmenu="
+                postgres && (detailRow = row);
+                postgres && onContextMenu($event);
+              "
             >
-              <template v-if="column.key === 'id'">
-                {{ row.id }}
-                <Badge v-if="isOwnSession(row)" variant="outline" class="ml-1 h-4 rounded px-1 text-[10px]">{{ t("processList.self") }}</Badge>
-              </template>
-              <template v-else>{{ row[column.key] === null || row[column.key] === undefined ? "—" : row[column.key] }}</template>
-            </td>
-            <td class="px-3 py-1.5 text-right">
-              <span class="inline-flex items-center justify-end gap-1">
-                <Button v-if="driver?.diagnosticEngine" variant="ghost" size="sm" class="h-6 gap-1 px-1.5 text-[11px]" :disabled="actionsLocked || refreshing" @click="showDiagnostics(row)">
-                  <Activity class="h-3.5 w-3.5" />
-                  {{ t("sessionDiagnostics.open") }}
-                </Button>
-                <Button v-if="driver?.buildLockDetailsSql" variant="ghost" size="sm" class="h-6 gap-1 px-1.5 text-[11px]" :disabled="actionsLocked || refreshing || loadingLocks" :title="t('processList.oracleLockDetails')" @click="showLocks(row)">
-                  <Search class="h-3.5 w-3.5" />
-                  {{ t("processList.oracleLockDetails") }}
-                </Button>
-                <Button
-                  v-if="cancelSupported"
-                  variant="ghost"
-                  size="sm"
-                  class="h-6 gap-1 px-1.5 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
-                  :disabled="isOwnSession(row) || transactionIdentityUnavailable || actionsLocked || refreshing"
-                  :title="isOwnSession(row) ? t(transactionMode ? 'processList.transactionCannotKillSelf' : 'processList.cannotKillSelf') : t(transactionMode ? 'processList.transactionKill' : 'processList.kill')"
-                  @click="requestCancel(row)"
-                >
-                  <Ban class="h-3.5 w-3.5" />
-                  {{ t(transactionMode ? "processList.transactionKill" : "processList.kill") }}
-                </Button>
-                <Button
-                  v-if="terminateSupported"
-                  variant="ghost"
-                  size="sm"
-                  class="h-6 gap-1 px-1.5 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
-                  :disabled="(rowAwareTerminate && ownSessionId === null) || isOwnSession(row) || !!terminateRowDisabledReason(row) || actionsLocked || refreshing"
-                  :title="isOwnSession(row) ? t('processList.cannotTerminateSelf') : terminateRowDisabledReason(row) ? t(terminateRowDisabledReason(row) ?? '') : t('processList.terminate')"
-                  @click="requestTerminate(row)"
-                >
-                  <PlugZap class="h-3.5 w-3.5" />
-                  {{ t("processList.terminate") }}
-                </Button>
-              </span>
-            </td>
-          </tr>
+              <td v-if="selectionSupported" class="px-3 py-1.5">
+                <input
+                  type="checkbox"
+                  class="h-3.5 w-3.5 accent-primary"
+                  :checked="selectedIds.has(row.id)"
+                  :disabled="(postgres && !row.backend_start) || actionsLocked || refreshing || ownSessionId === null || isOwnSession(row) || typeof row.id !== 'number' || !Number.isSafeInteger(row.id) || row.id <= 0"
+                  :aria-label="t('processList.selectSession', { id: row.id })"
+                  @click="toggleSelection(row.id, $event as MouseEvent)"
+                />
+              </td>
+              <td
+                v-for="column in columns"
+                :key="column.key"
+                class="px-3 py-1.5"
+                :class="[column.mono ? 'font-mono' : '', column.wide ? 'max-w-md cursor-pointer truncate hover:text-foreground hover:underline' : 'whitespace-nowrap', column.wide || column.key === 'db' || column.key === 'state' || column.key === 'wait' ? 'text-muted-foreground' : '']"
+                :title="column.wide ? (row[column.key] === null || row[column.key] === undefined ? '' : t('processList.previewTitle')) : undefined"
+                @click="column.wide ? openPreview(row[column.key]) : undefined"
+              >
+                <template v-if="column.key === 'id'">
+                  {{ row.id }}
+                  <Badge v-if="isOwnSession(row)" variant="outline" class="ml-1 h-4 rounded px-1 text-[10px]">{{ t("processList.self") }}</Badge>
+                </template>
+                <template v-else>{{ row[column.key] === null || row[column.key] === undefined ? "—" : row[column.key] }}</template>
+              </td>
+              <td class="px-3 py-1.5 text-right">
+                <span class="inline-flex items-center justify-end gap-1">
+                  <Button v-if="driver?.diagnosticEngine" variant="ghost" size="sm" class="h-6 gap-1 px-1.5 text-[11px]" :disabled="actionsLocked || refreshing" @click="showDiagnostics(row)">
+                    <Activity class="h-3.5 w-3.5" />
+                    {{ t("sessionDiagnostics.open") }}
+                  </Button>
+                  <Button v-if="driver?.buildLockDetailsSql" variant="ghost" size="sm" class="h-6 gap-1 px-1.5 text-[11px]" :disabled="actionsLocked || refreshing || loadingLocks" :title="t('processList.oracleLockDetails')" @click="showLocks(row)">
+                    <Search class="h-3.5 w-3.5" />
+                    {{ t("processList.oracleLockDetails") }}
+                  </Button>
+                  <Button
+                    v-if="cancelSupported"
+                    variant="ghost"
+                    size="sm"
+                    class="h-6 gap-1 px-1.5 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
+                    :disabled="isOwnSession(row) || (postgres && (!row.backend_start || ownSessionId === null)) || transactionIdentityUnavailable || actionsLocked || refreshing"
+                    :title="isOwnSession(row) ? t(transactionMode ? 'processList.transactionCannotKillSelf' : 'processList.cannotKillSelf') : t(transactionMode ? 'processList.transactionKill' : 'processList.kill')"
+                    @click="requestCancel(row)"
+                  >
+                    <Ban class="h-3.5 w-3.5" />
+                    {{ t(transactionMode ? "processList.transactionKill" : "processList.kill") }}
+                  </Button>
+                  <Button
+                    v-if="terminateSupported"
+                    variant="ghost"
+                    size="sm"
+                    class="h-6 gap-1 px-1.5 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
+                    :disabled="(postgres && (!row.backend_start || ownSessionId === null)) || (rowAwareTerminate && ownSessionId === null) || isOwnSession(row) || !!terminateRowDisabledReason(row) || actionsLocked || refreshing"
+                    :title="isOwnSession(row) ? t('processList.cannotTerminateSelf') : terminateRowDisabledReason(row) ? t(terminateRowDisabledReason(row) ?? '') : t('processList.terminate')"
+                    @click="requestTerminate(row)"
+                  >
+                    <PlugZap class="h-3.5 w-3.5" />
+                    {{ t("processList.terminate") }}
+                  </Button>
+                </span>
+              </td>
+            </tr>
+          </CustomContextMenu>
           <tr v-if="!loading && filteredRows.length === 0 && !loadError">
             <td :colspan="columns.length + 1 + (selectionSupported ? 1 : 0)" class="px-3 py-10 text-center text-muted-foreground">
               {{ search ? t("grid.noSearchResults") : t(transactionMode ? "processList.transactionEmpty" : "processList.empty") }}
@@ -876,6 +938,26 @@ onBeforeUnmount(() => {
       </table>
     </div>
 
+    <section v-if="postgres && detailRow" class="max-h-[40%] shrink-0 overflow-auto border-t p-3">
+      <div class="mb-2 flex items-center justify-between">
+        <h3 class="text-xs font-semibold">{{ t("postgresAdmin.details") }} · {{ detailRow.id }}</h3>
+        <Button size="sm" variant="ghost" @click="detailRow = null">{{ t("postgresAdmin.dismiss") }}</Button>
+      </div>
+      <dl class="grid grid-cols-2 gap-2 text-xs md:grid-cols-4">
+        <template v-for="(value, key) in detailRow" :key="key"
+          ><template v-if="key !== 'query'"
+            ><dt class="text-muted-foreground">{{ key }}</dt>
+            <dd class="break-all">{{ value ?? "—" }}</dd></template
+          ></template
+        >
+      </dl>
+      <div class="mt-3 flex items-center gap-2 text-xs">
+        <strong>{{ t(detailRow.state === "active" ? "postgresAdmin.currentQuery" : "postgresAdmin.lastQuery") }}</strong
+        ><Button size="sm" variant="ghost" @click="copySessionValue(detailRow.query)">{{ t("postgresAdmin.copySql") }}</Button>
+      </div>
+      <p class="whitespace-pre-wrap break-all rounded bg-muted p-2 font-mono text-xs">{{ detailRow.query ?? t("postgresAdmin.unavailable") }}</p>
+      <p class="mt-2 text-xs text-muted-foreground">{{ t("postgresAdmin.visibility") }}</p>
+    </section>
     <SessionDiagnostics v-if="diagnosticRow && driver?.diagnosticEngine" :connection="connection" :row="diagnosticRow" :engine="driver.diagnosticEngine" :version-major="versionMajor ?? undefined" :database="driver.database ?? ''" @close="diagnosticRow = null" />
 
     <Dialog

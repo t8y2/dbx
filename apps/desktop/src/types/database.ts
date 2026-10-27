@@ -2104,6 +2104,13 @@ export interface SqlReferenceAnalysis {
 export type TreeNodeType =
   | "connection"
   | "connection-group"
+  | "postgres-databases"
+  | "postgres-admin"
+  | "postgres-info"
+  | "postgres-sessions"
+  | "postgres-locks"
+  | "postgres-status"
+  | "postgres-info-category"
   | "database"
   | "tablespace"
   | "datafile"
@@ -2229,6 +2236,7 @@ export interface TableVGroupLayout {
 }
 
 export interface TreeNode {
+  postgresSystemCategory?: import("@/lib/database/postgresAdministration").PostgresSystemCategory;
   id: string;
   label: string;
   type: TreeNodeType;
@@ -2729,6 +2737,8 @@ export interface QueryTab {
     | "dameng-jobs"
     | "database-jobs"
     | "processlist"
+    | "postgres-locks"
+    | "postgres-system-info"
     | "sqlserver-trace"
     | "pl-debug"
     | "mysql-dashboard"
@@ -2739,6 +2749,7 @@ export interface QueryTab {
     | "plugin-workbench"
     | "plugin-filesystem"
     | "database-search";
+  postgresSystemCategory?: import("@/lib/database/postgresAdministration").PostgresSystemCategory;
   pluginWorkbench?: {
     /** Host command that created this tab; distinct commands can share a workbench. */
     commandId?: string;

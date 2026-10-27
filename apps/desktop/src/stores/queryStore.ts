@@ -4024,6 +4024,27 @@ export const useQueryStore = defineStore("query", () => {
     return registerOpenTab(tab);
   }
 
+  function openPostgresLocks(connectionId: string) {
+    return openPostgresAdminTab(connectionId, "postgres-locks", "postgresAdmin.locks");
+  }
+
+  function openPostgresSystemInfo(connectionId: string, category: import("@/lib/database/postgresAdministration").PostgresSystemCategory = "accessMethods") {
+    const id = openPostgresAdminTab(connectionId, "postgres-system-info", "postgresAdmin.systemInfo");
+    const tab = tabs.value.find((item) => item.id === id);
+    if (tab) tab.postgresSystemCategory = category;
+    return id;
+  }
+
+  function openPostgresAdminTab(connectionId: string, mode: "postgres-locks" | "postgres-system-info", titleKey: string) {
+    const existing = tabs.value.find((tab) => tab.mode === mode && tab.connectionId === connectionId);
+    if (existing) {
+      switchTab(existing.id);
+      return existing.id;
+    }
+    const conn = useConnectionStore().getConfig(connectionId);
+    return registerOpenTab({ id: uuid(), title: `${conn?.name || "PostgreSQL"} - ${t(titleKey)}`, connectionId, database: conn?.database || "", sql: "", isExecuting: false, isCancelling: false, isExplaining: false, mode });
+  }
+
   function openProcessList(connectionId: string) {
     const existing = tabs.value.find((tab) => tab.mode === "processlist" && tab.connectionId === connectionId);
     if (existing) {
@@ -4035,7 +4056,7 @@ export const useQueryStore = defineStore("query", () => {
     const id = uuid();
     const tab: QueryTab = {
       id,
-      title: conn?.name ? `${conn.name} - ${t(effectiveDatabaseTypeForConnection(conn) === "xugu" ? "processList.transactionTitle" : "processList.title")}` : t("processList.title"),
+      title: conn?.name ? `${conn.name} - ${t(effectiveDatabaseTypeForConnection(conn) === "postgres" ? "postgresAdmin.sessions" : effectiveDatabaseTypeForConnection(conn) === "xugu" ? "processList.transactionTitle" : "processList.title")}` : t("processList.title"),
       connectionId,
       database: conn?.database || "",
       sql: "",
@@ -11800,6 +11821,8 @@ export const useQueryStore = defineStore("query", () => {
     openUserAdmin,
     openXuguUserAdmin,
     openProcessList,
+    openPostgresLocks,
+    openPostgresSystemInfo,
     openSqlServerActivityTrace,
     openPlDebugTab,
     openMysqlDashboard,

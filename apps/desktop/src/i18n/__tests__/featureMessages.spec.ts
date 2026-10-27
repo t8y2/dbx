@@ -140,6 +140,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     translated: true,
   },
   { feature: "sidebar search skip hint", keys: ["sidebar.searchConnectionSkipped"] },
+  { feature: "sidebar search match mode (#13505)", keys: under("sidebar", ["searchMatchMode", "searchMatchModeFuzzy", "searchMatchModeContains", "searchMatchModeEdges", "searchMatchModeTooltip"]), translated: true },
   { feature: "PostgreSQL legacy TLS", keys: ["connection.postgresLegacyTls", "connection.postgresLegacyTlsHint"] },
   { feature: "settings search sections", keys: ["settings.syncWebDavWebDescription", "settings.performanceSection"] },
   { feature: "local backup selection", keys: ["settings.localBackupSecretsPassphraseRequiredHint", "settings.localBackupPathLabel", "settings.localBackupPathUnset", "settings.localBackupChoosePath", "settings.localBackupPathRequired"], translated: true },

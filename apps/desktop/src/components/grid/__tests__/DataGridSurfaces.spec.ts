@@ -3,7 +3,7 @@
 import { createApp, defineComponent, h, nextTick, shallowRef } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { dispatch, findAll, findOne, hostText, mountComponent } from "./vueHostHarness";
+import { dispatch, findAll, findOne, hostText, mountComponent, type HostNode } from "./vueHostHarness";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 
 const settingsMock = vi.hoisted(() => ({ store: null as any }));
@@ -503,7 +503,7 @@ describe("DataGridPagination", () => {
     // the complete button interaction model on a clickable text span.
     expect(sum.type).toBe("button");
     expect(average.type).toBe("button");
-    expect(sum.props.title).toBe("grid.copyValue");
+    expect(sum.props.title).toBe("grid.copyValue: grid.selectionSum");
     expect(hostText(sum)).toContain("grid.copyValue");
 
     dispatch(sum, "click");
@@ -512,6 +512,52 @@ describe("DataGridPagination", () => {
     dispatch(average, "click");
     expect(copySelectionSummary).toHaveBeenLastCalledWith("2.5");
     expect(copySelectionSummary).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets long aggregates shrink so load-all and export stay in the footer (#13468)", () => {
+    const longValue = "2026102710000008194";
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: { cellCount: 1, rowCount: 1 },
+      selectionSummarySumText: longValue,
+      selectionSummaryAverageText: longValue,
+      selectionSummaryMinText: longValue,
+      selectionSummaryMaxText: longValue,
+      selectionSummaryCount: 1,
+      selectionSummaryDistinctCount: 1,
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      canLoadAllRows: true,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: true,
+      canJumpLastPage: true,
+    });
+
+    const classes = (node: HostNode) => String(node.props.class).split(/\s+/);
+    const sum = findOne(mounted.root, (node) => node.props["data-selection-summary-sum"] === "");
+    const summaryGroup = sum.parent!;
+    const bar = summaryGroup.parent!;
+    // The status bar caps this column at the space left over, so the bar itself must be
+    // allowed to be narrower than its content instead of forcing max-content width.
+    expect(classes(bar)).toContain("min-w-0");
+    expect(classes(bar)).not.toContain("min-w-max");
+
+    const aggregates = ["sum", "average", "min", "max"].map((key) => findOne(mounted.root, (node) => node.props[`data-selection-summary-${key}`] === ""));
+    for (const aggregate of aggregates) {
+      expect(classes(aggregate)).toEqual(expect.arrayContaining(["min-w-0", "truncate"]));
+      expect(classes(aggregate)).not.toContain("shrink-0");
+    }
+    expect(classes(summaryGroup)).toEqual(expect.arrayContaining(["min-w-0", "overflow-hidden"]));
+    expect(classes(summaryGroup)).not.toContain("shrink-0");
+    // Truncated text stays readable on hover.
+    expect(sum.props.title).toBe("grid.copyValue: grid.selectionSum");
+
+    const loadAll = findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow");
+    expect(classes(loadAll)).toContain("shrink-0");
   });
 
   it("keeps the aggregate values non-copyable while the selection drag is pending", () => {

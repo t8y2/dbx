@@ -26,7 +26,7 @@ use sqlparser::parser::Parser;
 
 use crate::connection::{task_client_session_id, AppState, PoolKind};
 use crate::db;
-use crate::models::connection::DatabaseType;
+use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::sql::SqlParsingOptions;
 use crate::sql_file_import::{SqlFileStreamDecoder, StreamingSqlFileSplitter};
 use crate::transfer::{
@@ -4978,6 +4978,37 @@ fn build_import_insert_batches_with_plan(
     hard_sql_bytes: Option<usize>,
     start_row_offset: usize,
 ) -> Result<Vec<ImportSqlBatch>, String> {
+    build_import_insert_batches_with_plan_and_identifier_quote(
+        rows,
+        plan,
+        table,
+        schema,
+        db_type,
+        kingbase_oracle_mode,
+        None,
+        conflict_policy,
+        primary_key_columns,
+        date_time_format,
+        hard_sql_bytes,
+        start_row_offset,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_import_insert_batches_with_plan_and_identifier_quote(
+    rows: &[Vec<serde_json::Value>],
+    plan: &CompiledImportPlan,
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    kingbase_oracle_mode: bool,
+    identifier_quote: Option<&str>,
+    conflict_policy: TableImportConflictPolicy,
+    primary_key_columns: &[String],
+    date_time_format: Option<&str>,
+    hard_sql_bytes: Option<usize>,
+    start_row_offset: usize,
+) -> Result<Vec<ImportSqlBatch>, String> {
     if rows.is_empty() {
         return Ok(Vec::new());
     }
@@ -4995,6 +5026,7 @@ fn build_import_insert_batches_with_plan(
                 None,
                 limits,
                 conflict_policy == TableImportConflictPolicy::Skip,
+                identifier_quote,
             )?
         }
         TableImportConflictPolicy::UpdateExisting => {
@@ -5113,6 +5145,7 @@ fn build_import_execution_batches(
     schema: &str,
     db_type: &DatabaseType,
     kingbase_oracle_mode: bool,
+    identifier_quote: Option<&str>,
     conflict_policy: TableImportConflictPolicy,
     primary_key_columns: &[String],
     date_time_format: Option<&str>,
@@ -5120,13 +5153,14 @@ fn build_import_execution_batches(
     start_row_offset: usize,
 ) -> Result<Vec<ImportSqlBatch>, String> {
     if let Some(plan) = plan {
-        return build_import_insert_batches_with_plan(
+        return build_import_insert_batches_with_plan_and_identifier_quote(
             rows,
             plan,
             table,
             schema,
             db_type,
             kingbase_oracle_mode,
+            identifier_quote,
             conflict_policy,
             primary_key_columns,
             date_time_format,
@@ -5147,13 +5181,14 @@ fn build_import_execution_batches(
         );
     }
     let plan = compile_import_plan(columns, mappings, target_column_types)?;
-    build_import_insert_batches_with_plan(
+    build_import_insert_batches_with_plan_and_identifier_quote(
         rows,
         &plan,
         table,
         schema,
         db_type,
         kingbase_oracle_mode,
+        identifier_quote,
         conflict_policy,
         primary_key_columns,
         date_time_format,
@@ -5671,6 +5706,17 @@ pub fn build_import_create_table_plan(
     schema: &str,
     db_type: &DatabaseType,
 ) -> Result<ImportCreateTablePlan, String> {
+    build_import_create_table_plan_with_identifier_quote(data, mappings, table, schema, db_type, None)
+}
+
+fn build_import_create_table_plan_with_identifier_quote(
+    data: &ParsedImportFile,
+    mappings: &[TableImportColumnMapping],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    identifier_quote: Option<&str>,
+) -> Result<ImportCreateTablePlan, String> {
     if table.trim().is_empty() {
         return Err("Target table name is required".to_string());
     }
@@ -5699,15 +5745,67 @@ pub fn build_import_create_table_plan(
         return Err("No columns mapped for import".to_string());
     }
 
-    let full_table = qualified_table(table.trim(), schema, db_type, None);
+    let full_table = crate::data::transfer::qualified_table_with_explicit_quote(
+        table.trim(),
+        schema,
+        db_type,
+        None,
+        identifier_quote,
+    );
     let column_sql = columns
         .iter()
-        .map(|column| format!("{} {}", quote_identifier(&column.name, db_type), column.data_type))
+        .map(|column| {
+            format!(
+                "{} {}",
+                crate::data::transfer::quote_identifier_with_explicit_quote(&column.name, db_type, identifier_quote),
+                column.data_type
+            )
+        })
         .collect::<Vec<_>>()
         .join(",\n  ");
     let engine_clause =
         if matches!(db_type, DatabaseType::ClickHouse) { " ENGINE = MergeTree() ORDER BY tuple()" } else { "" };
     Ok(ImportCreateTablePlan { sql: format!("CREATE TABLE {full_table} (\n  {column_sql}\n){engine_clause}"), columns })
+}
+
+/// A generic JDBC connection can reach any engine, so the static `Jdbc` mapping (ANSI double
+/// quotes) breaks write SQL on MySQL-family servers, where a double quote starts a string literal.
+/// The JDBC plugin does not report an identifier quote, so this recognises the MySQL family from
+/// the same connection fields the frontend's `inferJdbcDialect` reads. That inference is also what
+/// offers table import for these connections in the first place.
+///
+/// NOTE: `TRUNCATE` deliberately keeps the static quoting. Generic JDBC truncates in a separate
+/// statement and then writes the batches in a transaction the JDBC plugin cannot open, so a
+/// MySQL-valid `TRUNCATE` would empty the table before the import fails.
+fn jdbc_import_identifier_quote(config: &ConnectionConfig) -> Option<&'static str> {
+    if config.db_type != DatabaseType::Jdbc {
+        return None;
+    }
+    let info = config.database_info.as_ref();
+    let haystack = [
+        config.driver_profile.as_deref(),
+        config.driver_label.as_deref(),
+        config.connection_string.as_deref(),
+        config.jdbc_driver_class.as_deref(),
+        info.and_then(|info| info.product_name.as_deref()),
+        info.and_then(|info| info.server_comment.as_deref()),
+        info.and_then(|info| info.driver_name.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(config.jdbc_driver_paths.iter().map(String::as_str))
+    .collect::<Vec<_>>()
+    .join("\n")
+    .to_ascii_lowercase();
+    // `inferJdbcDialect` checks Phoenix before MySQL and keeps it on generic JDBC SQL.
+    if haystack.contains("phoenix") {
+        return None;
+    }
+    (haystack.contains("mysql") || haystack.contains("mariadb")).then_some("`")
+}
+
+async fn import_target_identifier_quote(state: &AppState, connection_id: &str) -> Option<&'static str> {
+    state.configs.read().await.get(connection_id).and_then(jdbc_import_identifier_quote)
 }
 
 fn import_error_message(request: &TableImportRequest, rows_imported: usize, error: impl AsRef<str>) -> String {
@@ -6366,6 +6464,7 @@ async fn execute_import_rows_batch(
     postgres_copy_accumulator: &mut Option<PostgresCopyAccumulator>,
     sqlite_append_transaction: &mut Option<SqliteAppendTransaction>,
     kingbase_oracle_mode: bool,
+    identifier_quote: Option<&str>,
     conflict_policy: TableImportConflictPolicy,
     primary_key_columns: &[String],
     date_time_format: Option<&str>,
@@ -6442,6 +6541,7 @@ async fn execute_import_rows_batch(
         schema,
         db_type,
         kingbase_oracle_mode,
+        identifier_quote,
         conflict_policy,
         primary_key_columns,
         date_time_format,
@@ -7398,6 +7498,7 @@ where
     state.touch_pool_activity(pool_key).await;
     let _activity_touch = state.pool_activity_touch(pool_key);
     let kingbase_oracle_mode = kingbase_oracle_compatibility_mode(state, pool_key, db_type).await;
+    let identifier_quote = import_target_identifier_quote(state, &request.connection_id).await;
     let conflict_policy = request.effective_conflict_policy();
     if let Err(error) = validate_update_existing_target(conflict_policy, db_type, request.create_table) {
         return Err(emit_import_error(&mut progress_callback, request, 0, 0, started_at, error));
@@ -7540,12 +7641,13 @@ where
             }
         };
         let total_rows = parsed.total_rows;
-        let plan = match build_import_create_table_plan(
+        let plan = match build_import_create_table_plan_with_identifier_quote(
             &parsed,
             &request.mappings,
             &request.table,
             &request.schema,
             db_type,
+            identifier_quote,
         ) {
             Ok(plan) => plan,
             Err(error) => {
@@ -7784,6 +7886,7 @@ where
                         &mut postgres_copy_accumulator,
                         &mut sqlite_append_transaction,
                         kingbase_oracle_mode,
+                        identifier_quote,
                         conflict_policy,
                         &primary_key_columns,
                         request.date_time_format.as_deref(),
@@ -8272,6 +8375,7 @@ where
                         &mut postgres_copy_accumulator,
                         &mut sqlite_append_transaction,
                         kingbase_oracle_mode,
+                        identifier_quote,
                         conflict_policy,
                         &primary_key_columns,
                         request.date_time_format.as_deref(),
@@ -8611,6 +8715,7 @@ where
             &mut postgres_copy_accumulator,
             &mut sqlite_append_transaction,
             kingbase_oracle_mode,
+            identifier_quote,
             conflict_policy,
             &primary_key_columns,
             request.date_time_format.as_deref(),
@@ -12971,6 +13076,115 @@ mod tests {
     }
 
     #[test]
+    fn jdbc_import_identifier_quote_recognises_mysql_family_connections() {
+        let jdbc = |fields: serde_json::Value| -> ConnectionConfig {
+            let mut config = serde_json::json!({
+                "id": "jdbc-import",
+                "name": "jdbc import",
+                "db_type": "jdbc",
+                "host": "",
+                "port": 0,
+                "username": "",
+                "password": ""
+            });
+            config.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            serde_json::from_value(config).unwrap()
+        };
+
+        // #13575: a gateway wrapper driver whose URL does not name MySQL, identified only by the
+        // product the driver reported on connect.
+        let wrapped = jdbc(serde_json::json!({
+            "connection_string": "jdbc:gateway://10.0.0.1:3306/app",
+            "database_info": { "productName": "MySQL", "driverName": "MySQL Connector/J" }
+        }));
+        assert_eq!(jdbc_import_identifier_quote(&wrapped), Some("`"));
+        assert_eq!(
+            jdbc_import_identifier_quote(&jdbc(serde_json::json!({ "connection_string": "jdbc:mariadb://db/app" }))),
+            Some("`")
+        );
+        assert_eq!(
+            jdbc_import_identifier_quote(&jdbc(serde_json::json!({ "connection_string": "jdbc:postgresql://db/app" }))),
+            None
+        );
+        assert_eq!(
+            jdbc_import_identifier_quote(&jdbc(serde_json::json!({
+                "connection_string": "jdbc:phoenix:zk1",
+                "jdbc_driver_paths": ["/drivers/phoenix-mysql-shim.jar"]
+            }))),
+            None
+        );
+        let mut native_mysql = wrapped.clone();
+        native_mysql.db_type = DatabaseType::Mysql;
+        assert_eq!(jdbc_import_identifier_quote(&native_mysql), None);
+    }
+
+    #[test]
+    fn jdbc_import_write_sql_uses_the_mysql_identifier_quote() {
+        // #13575: a generic JDBC connection to MySQL wrote ANSI double-quoted identifiers,
+        // which MySQL rejects without `ANSI_QUOTES`.
+        let columns = vec!["id".to_string(), "col_name".to_string()];
+        let mappings = columns
+            .iter()
+            .map(|column| TableImportColumnMapping {
+                source_column: column.clone(),
+                target_column: column.clone(),
+                target_data_type: None,
+                generator: None,
+            })
+            .collect::<Vec<_>>();
+        let target_column_types =
+            vec![("id".to_string(), "INT".to_string()), ("col_name".to_string(), "VARCHAR(100)".to_string())];
+        let rows = vec![vec![serde_json::json!("1"), serde_json::json!("Ada")]];
+        let insert_sql = |identifier_quote: Option<&str>| {
+            build_import_execution_batches(
+                &rows,
+                None,
+                &columns,
+                &mappings,
+                &target_column_types,
+                "table_b",
+                "",
+                &DatabaseType::Jdbc,
+                false,
+                identifier_quote,
+                TableImportConflictPolicy::Error,
+                &[],
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|batch| batch.sql)
+            .collect::<Vec<_>>()
+        };
+
+        assert_eq!(insert_sql(Some("`")), vec!["INSERT INTO `table_b` (`id`, `col_name`) VALUES\n('1', 'Ada')"]);
+        let data =
+            ParsedImportFile { columns: columns.clone(), rows: rows.clone(), total_rows: 1, effective_encoding: None };
+        let typed_mappings = mappings
+            .iter()
+            .map(|mapping| TableImportColumnMapping {
+                target_data_type: Some("VARCHAR(100)".to_string()),
+                ..mapping.clone()
+            })
+            .collect::<Vec<_>>();
+        let plan = build_import_create_table_plan_with_identifier_quote(
+            &data,
+            &typed_mappings,
+            "table_b",
+            "",
+            &DatabaseType::Jdbc,
+            Some("`"),
+        )
+        .unwrap();
+        assert_eq!(plan.sql, "CREATE TABLE `table_b` (\n  `id` VARCHAR(100),\n  `col_name` VARCHAR(100)\n)");
+
+        // Other generic JDBC targets keep the previous SQL.
+        assert_eq!(insert_sql(None), vec!["INSERT INTO \"table_b\" (\"id\", \"col_name\") VALUES\n('1', 'Ada')"]);
+    }
+
+    #[test]
     fn create_table_plan_rejects_unsafe_user_defined_column_type() {
         let data = ParsedImportFile {
             columns: vec!["name".to_string()],
@@ -13921,6 +14135,7 @@ mod tests {
             &mut sqlite_append_transaction,
             &mut postgres_copy_accumulator,
             false,
+            None,
             TableImportConflictPolicy::Error,
             &[],
             None,
@@ -14137,6 +14352,7 @@ mod tests {
                 &mut self.postgres_copy_accumulator,
                 &mut self.transaction,
                 false,
+                None,
                 TableImportConflictPolicy::Error,
                 &[],
                 None,

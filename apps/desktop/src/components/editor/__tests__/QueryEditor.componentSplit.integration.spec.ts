@@ -29,7 +29,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function mountEditor(overrides: Partial<QueryEditorProps> = {}, vimEnabled = false) {
+async function mountEditor(overrides: Partial<QueryEditorProps> = {}, vimEnabled = false, beforeMount?: (stores: { connectionStore: ReturnType<typeof useConnectionStore> }) => void) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -60,6 +60,9 @@ async function mountEditor(overrides: Partial<QueryEditorProps> = {}, vimEnabled
   });
   app.use(pinia);
   app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+  // Lets a test stub store methods before the component setup (and any eager
+  // setup-time work such as completion prefetch) runs during mount.
+  beforeMount?.({ connectionStore });
   app.mount(host);
   let mounted = true;
   const unmount = () => {
@@ -461,5 +464,17 @@ describe("QueryEditor component split integration", () => {
     position.mockClear();
     window.dispatchEvent(createTableReferenceDropEvent({ payload, clientX: 30, clientY: 40 }));
     expect(position).not.toHaveBeenCalled();
+  });
+
+  it("prefetches completion tables for the active database instead of recursing on mount", async () => {
+    // Regression for #13529 / #13531: QueryEditor setup called the prefetch
+    // helper unconditionally, so prefetchCompletion: true (set for query tabs)
+    // recursed until RangeError killed the editor mount.
+    const listCompletionTables = vi.fn().mockResolvedValue([{ name: "users", type: "table" }]);
+    await mountEditor({ prefetchCompletion: true, connectionId: "c1", database: "shop" }, false, ({ connectionStore: store }) => {
+      vi.spyOn(store, "listCompletionTables").mockImplementation(listCompletionTables);
+    });
+    await vi.waitFor(() => expect(listCompletionTables).toHaveBeenCalled());
+    expect(listCompletionTables).toHaveBeenCalledWith("c1", "shop", "", 500, undefined, false, undefined, undefined, { activateConnection: false });
   });
 });

@@ -1554,7 +1554,7 @@ html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[d
 
 /* A colored ring distinguishes a collapsed group's hidden-tab count. */
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header--collapsed .tab-group-count {
-  box-shadow: inset 0 0 0 1px var(--tab-group-color);
+  box-shadow: inset 0 0 0 0.6px var(--tab-group-color);
 }
 
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active) .tab-group-chevron {

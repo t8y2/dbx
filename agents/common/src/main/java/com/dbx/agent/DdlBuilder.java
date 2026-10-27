@@ -113,8 +113,13 @@ public final class DdlBuilder {
             if (!index.getIs_primary() || index.getColumns().isEmpty()) {
                 continue;
             }
-            for (String column : index.getColumns()) {
-                primaryKeys.add(quoteIdent(column, useBacktick));
+            List<String> directions = index.getKey_directions();
+            for (int columnIndex = 0; columnIndex < index.getColumns().size(); columnIndex++) {
+                String renderedColumn = quoteIdent(index.getColumns().get(columnIndex), useBacktick);
+                if (directions != null && columnIndex < directions.size() && notBlank(directions.get(columnIndex))) {
+                    renderedColumn += " " + directions.get(columnIndex).toUpperCase(java.util.Locale.ROOT);
+                }
+                primaryKeys.add(renderedColumn);
             }
             break;
         }
@@ -188,6 +193,7 @@ public final class DdlBuilder {
             String unique = index.getIs_unique() ? "UNIQUE " : "";
             String using = notBlank(index.getIndex_type()) ? " USING " + index.getIndex_type() : "";
             List<String> quotedColumns = new ArrayList<>();
+            List<String> directions = index.getKey_directions();
             for (int columnIndex = 0; columnIndex < index.getColumns().size(); columnIndex++) {
                 String column = index.getColumns().get(columnIndex);
                 String renderedColumn = quoteIdent(column, useBacktick);
@@ -199,6 +205,12 @@ public final class DdlBuilder {
                     int options = keyOptions.get(columnIndex);
                     renderedColumn += (options & 1) != 0 ? " DESC" : " ASC";
                     renderedColumn += (options & 2) != 0 ? " NULLS FIRST" : " NULLS LAST";
+                } else if (directions != null && columnIndex < directions.size()
+                    && notBlank(directions.get(columnIndex))) {
+                    // Explicit key directions (e.g. Spanner's ASC_OR_DESC) must
+                    // survive into the DDL: DESC key parts change query plans
+                    // and their absence misrepresents the schema (#13484).
+                    renderedColumn += " " + directions.get(columnIndex).toUpperCase(java.util.Locale.ROOT);
                 }
                 quotedColumns.add(renderedColumn);
             }

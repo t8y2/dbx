@@ -544,6 +544,7 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
             Map<String, Boolean> uniqueByIndex = new LinkedHashMap<>();
             Map<String, List<IndexColumn>> keyColumns = new LinkedHashMap<>();
             Map<String, List<String>> storingColumns = new LinkedHashMap<>();
+            Map<String, List<String>> keyDirections = new LinkedHashMap<>();
             try (ResultSet rs = conn.getMetaData().getIndexInfo(null, schema, table, false, false)) {
                 while (rs.next()) {
                     String name = rs.getString("INDEX_NAME");
@@ -553,6 +554,15 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
                     }
                     uniqueByIndex.putIfAbsent(name, !rs.getBoolean("NON_UNIQUE"));
                     Integer ordinal = intOrNull(rs, "ORDINAL_POSITION");
+                    if (ordinal != null) {
+                        // The Spanner JDBC driver surfaces INFORMATION_SCHEMA
+                        // INDEX_COLUMNS.ORDERING as ASC_OR_DESC; without it,
+                        // DESC key parts render direction-less in DDL and the
+                        // index panel (issue #13484).
+                        String direction = rs.getString("ASC_OR_DESC");
+                        keyDirections.computeIfAbsent(name, ignored -> new ArrayList<>())
+                            .add("D".equalsIgnoreCase(direction) ? "DESC" : "ASC");
+                    }
                     if (ordinal == null) {
                         // Spanner reports STORING (GoogleSQL) / INCLUDE (PostgreSQL) columns with a
                         // NULL ORDINAL_POSITION. Reading them with getShort() would turn them into
@@ -574,7 +584,7 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
                 for (IndexColumn column : ordered) {
                     columns.add(column.getName());
                 }
-                result.add(new IndexInfo(
+                IndexInfo index = new IndexInfo(
                     name,
                     columns,
                     Boolean.TRUE.equals(entry.getValue()),
@@ -584,7 +594,9 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
                     null,
                     storingColumns.get(name),
                     null
-                ));
+                );
+                index.setKey_directions(keyDirections.get(name));
+                result.add(index);
             }
             return result;
         });

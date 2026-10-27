@@ -19,7 +19,10 @@ const ORA_NO_LISTENER = "Agent RPC error: ORA-12541: TNS:no listener";
 
 async function setup() {
   const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
-  const connectDb = vi.fn().mockRejectedValueOnce(new Error(ORA_NO_LISTENER)).mockImplementation(async (config: ConnectionConfig) => config.id);
+  const connectDb = vi
+    .fn()
+    .mockRejectedValueOnce(new Error(ORA_NO_LISTENER))
+    .mockImplementation(async (config: ConnectionConfig) => config.id);
   const disconnectDb = vi.fn().mockResolvedValue(undefined);
 
   vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));

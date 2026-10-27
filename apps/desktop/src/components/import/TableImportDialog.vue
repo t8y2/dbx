@@ -367,14 +367,16 @@ const createColumnSummaries = computed(() =>
 const parseOptions = computed<api.TableImportParseOptions>(() => taskParseOptions(sourceFormat.value, selectedSheet.value));
 const terminalStatus = computed(() => !!progress.value?.status && ["done", "error", "cancelled"].includes(progress.value.status));
 const displayedElapsedMs = computed(() => resolveTableImportElapsed(liveElapsedMs.value, progress.value?.elapsedMs, terminalStatus.value));
-// Source file the live progress belongs to (#13164): the queue runs one file
-// at a time, so the running task is whatever activeTaskIndex points at; the
-// single-file path has no task entry and reads the preview directly.
+// Source file the progress belongs to (#13164): the queue runs one file at a
+// time, so the active task is whatever activeTaskIndex points at; the
+// single-file path has no task entry and reads the preview directly. The file
+// stays visible once the run finishes, so the completion screen still says
+// which file was imported (#13495).
 const activeImportFile = computed(() => {
-  if (wizardStep.value !== "execution" || !running.value) return "";
+  if (wizardStep.value !== "execution") return "";
   if (isBatchImport.value) {
     const task = batchTasks.value[activeTaskIndex.value];
-    return task?.status === "running" ? task.preview.filePath || task.preview.fileName || "" : "";
+    return task ? task.preview.filePath || task.preview.fileName || "" : "";
   }
   return preview.value?.filePath || "";
 });

@@ -1517,8 +1517,8 @@ html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[d
 }
 
 /* Horizontal group headers share the same focus treatment in both row modes:
- * reserve the colored fill and underline for the active group while retaining
- * a small identity marker on peers. */
+ * reserve the colored fill and strong underline for the active group while
+ * retaining a small identity marker and faint underline on peers. */
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active) {
   color: var(--muted-foreground);
   font-weight: 500;
@@ -1535,7 +1535,7 @@ html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[d
 }
 
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active)::after {
-  opacity: 0;
+  opacity: 0.3;
 }
 
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active) .tab-group-marker {
@@ -1550,6 +1550,11 @@ html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[d
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active) .tab-group-count {
   color: var(--muted-foreground);
   background: color-mix(in srgb, var(--muted-foreground) 12%, transparent);
+}
+
+/* A colored ring distinguishes a collapsed group's hidden-tab count. */
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header--collapsed .tab-group-count {
+  box-shadow: inset 0 0 0 1px var(--tab-group-color);
 }
 
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active) .tab-group-chevron {

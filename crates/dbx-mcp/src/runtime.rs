@@ -3,7 +3,7 @@ use std::{
     net::{IpAddr, SocketAddr},
 };
 
-use crate::http_auth::HttpAuth;
+use crate::{http_auth::HttpAuth, oauth::OAuthVerifier};
 
 const DEFAULT_HTTP_HOST: &str = "127.0.0.1";
 const DEFAULT_HTTP_PORT: u16 = 5225;
@@ -45,7 +45,7 @@ impl RuntimeConfig {
         let mut host = env::var("DBX_MCP_HTTP_HOST").ok();
         let mut port = env::var("DBX_MCP_HTTP_PORT").ok();
         let mut path = env::var("DBX_MCP_HTTP_PATH").ok();
-        let mut allow_remote = env_flag("DBX_MCP_HTTP_ALLOW_REMOTE")?;
+        let allow_remote = env_flag("DBX_MCP_HTTP_ALLOW_REMOTE")?;
         let mut explicit_allow_remote = false;
 
         let mut arguments = env::args().skip(1);
@@ -54,7 +54,6 @@ impl RuntimeConfig {
                 "--stdio" => transport = Some("stdio".into()),
                 "--http" => transport = Some("streamable-http".into()),
                 "--http-allow-remote" => {
-                    allow_remote = true;
                     explicit_allow_remote = true;
                 }
                 "--transport" => transport = Some(required_argument(&mut arguments, "--transport")?),
@@ -107,14 +106,29 @@ impl RuntimeConfig {
             );
         }
 
-        let token = http_token_from_environment()?;
-        let allowed_hosts = if is_loopback {
-            // HTTP Host authorities require brackets around IPv6 literals.
+        let oauth = env::var_os("DBX_MCP_OAUTH_CONFIG_FILE")
+            .map(|file| OAuthVerifier::from_file(std::path::Path::new(&file), &path))
+            .transpose()?;
+        if oauth.is_some()
+            && (env::var_os("DBX_MCP_HTTP_TOKEN").is_some() || env::var_os("DBX_MCP_HTTP_TOKEN_FILE").is_some())
+        {
+            return Err("OAuth and static bearer authentication are mutually exclusive".into());
+        }
+        let mut allowed_hosts = if allowed_hosts.is_empty() && is_loopback {
             vec!["localhost".into(), "127.0.0.1".into(), "[::1]".into()]
         } else {
             allowed_hosts
         };
-        let auth = HttpAuth::new_with_hosts(Some(token), allowed_hosts.clone(), allowed_origins.clone(), is_loopback)?;
+        let auth = if let Some(oauth) = oauth {
+            let public_host = oauth.resource_host();
+            if !allowed_hosts.contains(&public_host) {
+                allowed_hosts.push(public_host);
+            }
+            HttpAuth::new_oauth(oauth, allowed_hosts.clone(), allowed_origins)?
+        } else {
+            let token = http_token_from_environment()?;
+            HttpAuth::new_with_hosts(Some(token), allowed_hosts.clone(), allowed_origins, is_loopback)?
+        };
 
         Ok(Self { transport, http: Some(HttpRuntimeConfig { bind_addr, path, auth, allowed_hosts }) })
     }

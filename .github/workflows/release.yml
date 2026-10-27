@@ -579,7 +579,11 @@ jobs:
     # The vendored loader is a tracked Cargo input, so Rust compile caching is safe.
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the legacy PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Guarded by assert-win7-pe-compat.ps1.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
       SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1
@@ -747,7 +751,11 @@ jobs:
             arch: x86_64
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the legacy PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Guarded by assert-win7-pe-compat.ps1.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
     steps:
       - uses: actions/checkout@v7
 

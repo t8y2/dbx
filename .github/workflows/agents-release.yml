@@ -963,7 +963,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
-            export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
+            # An env RUSTFLAGS replaces .cargo/config.toml target rustflags; keep
+            # the 8 MiB main-thread stack of the DBX app for the Win7 driver too.
+            export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static -C link-arg=/STACK:8388608"
           fi
           if [ -n "${{ matrix.manylinux_image }}" ]; then
             docker run --rm \

@@ -496,3 +496,26 @@ test("path filtering and the planner use the exact test merge first parent", () 
   }
   assert.doesNotMatch(changes, /steps\.filter\.outputs\.windows_win7_bundle|github\.event\.pull_request\.base\.sha|WIN7_CURRENT/);
 });
+
+test("legacy Windows builds keep the 8 MiB main-thread stack", () => {
+  const release = readFileSync(new URL("../workflows/release.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const sqlServerUserTest = readFileSync(new URL("../workflows/sqlserver2000-windows-user-test.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const stackFlag = /RUSTFLAGS:.*link-arg=\/STACK:8388608/;
+  // An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so every job
+  // that links a Windows PE has to repeat the /STACK link argument; otherwise
+  // the 1 MiB linker default returns and deep DB call stacks abort with
+  // 0xC00000FD ("DBX 已停止工作").
+  for (const name of ["windows-standard-check", "windows-win7-bundle", "duckdb-windows-driver"]) {
+    assert.match(job(name), stackFlag, `${name} must keep the 8 MiB main-thread stack in RUSTFLAGS`);
+  }
+  for (const name of ["build-windows-7-offline", "build-windows-7-static-browser"]) {
+    assert.match(job(name, release), stackFlag, `release job ${name} must keep the 8 MiB main-thread stack in RUSTFLAGS`);
+  }
+  assert.match(job("build-windows-7-x64", sqlServerUserTest), stackFlag, "the SQL Server 2000 Win7 test build must keep the 8 MiB main-thread stack");
+});
+
+test("the Win7 PE audit fails when the stack reserve regresses", () => {
+  const audit = readFileSync(new URL("./assert-win7-pe-compat.ps1", import.meta.url), "utf8");
+  assert.ok(audit.includes("minimumStackReserve"));
+  assert.ok(audit.includes("link-arg=/STACK:8388608"));
+});

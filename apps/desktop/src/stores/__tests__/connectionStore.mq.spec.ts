@@ -64,9 +64,6 @@ describe("connectionStore MQ sidebar tree", () => {
   });
 
   it("loads Pulsar tenants under a message queue connection", async () => {
-    // 用例覆盖「连接后自动展开」路径；#13302 把默认改为关闭后需显式开启。
-    const { useSettingsStore } = await import("@/stores/settingsStore");
-    useSettingsStore().editorSettings.sidebarExpandTreeOnConnect = true;
     const mqListTenants = vi.fn().mockResolvedValue([
       { name: "public", adminRoles: [], allowedClusters: [] },
       { name: "tenant-a", adminRoles: [], allowedClusters: [] },

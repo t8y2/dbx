@@ -28,7 +28,6 @@ import {
 } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
-import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft } from "@/lib/settings/editorSettingsDraft";
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
@@ -1296,87 +1295,6 @@ describe("normalizeEditorSettings - sidebarPinDefaultDatabase", () => {
     expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: undefined } as any).sidebarPinDefaultDatabase).toBe(true);
     expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: null } as any).sidebarPinDefaultDatabase).toBe(true);
     expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: 0 } as any).sidebarPinDefaultDatabase).toBe(true);
-  });
-});
-
-// #13302 implemented this as an opt-in switch with a default-off build, but the
-// old auto-expand behavior was the long-standing default and the off default was
-// taken as a regression. The default is enabled again (migration v1); users with
-// many schemas can still opt out with the switch.
-describe("normalizeEditorSettings - sidebarExpandTreeOnConnect", () => {
-  it("defaults sidebarExpandTreeOnConnect to true", () => {
-    expect(normalizeEditorSettings({}).sidebarExpandTreeOnConnect).toBe(true);
-  });
-
-  it("honors an explicit toggle stamped with the current default version", () => {
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: true, sidebarExpandTreeOnConnectMigrationVersion: 1 }).sidebarExpandTreeOnConnect).toBe(true);
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: false, sidebarExpandTreeOnConnectMigrationVersion: 1 }).sidebarExpandTreeOnConnect).toBe(false);
-  });
-
-  it("migrates legacy blobs without the marker to the enabled default", () => {
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: false }).sidebarExpandTreeOnConnect).toBe(true);
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: true }).sidebarExpandTreeOnConnect).toBe(true);
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: "false" } as any).sidebarExpandTreeOnConnect).toBe(true);
-  });
-
-  it("falls back to default for non-boolean values", () => {
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: "true" } as any).sidebarExpandTreeOnConnect).toBe(true);
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: undefined } as any).sidebarExpandTreeOnConnect).toBe(true);
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: 1 } as any).sidebarExpandTreeOnConnect).toBe(true);
-  });
-});
-
-// #13549: the toggle was registered on the interface, the defaults, the normalize
-// whitelist and the settings-dialog draft, but never on the patch applier. Every
-// apply dropped the key, so the store value never changed, the dialog compared its
-// draft against a base that never moved, and "apply and close" kept reporting
-// unsaved changes.
-describe("updateEditorSettings - sidebarExpandTreeOnConnect", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    setActivePinia(createPinia());
-  });
-
-  it("applies and persists the sidebarExpandTreeOnConnect toggle", async () => {
-    const loadEditorSettings = vi.fn().mockResolvedValue({});
-    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
-
-    const { useSettingsStore } = await import("@/stores/settingsStore");
-    const store = useSettingsStore();
-    await store.initEditorSettings();
-    saveEditorSettings.mockClear();
-
-    store.updateEditorSettings({ sidebarExpandTreeOnConnect: true });
-    expect(store.editorSettings.sidebarExpandTreeOnConnect).toBe(true);
-    await vi.waitFor(() => expect(saveEditorSettings).toHaveBeenCalledOnce());
-    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarExpandTreeOnConnect: true }));
-
-    store.updateEditorSettings({ sidebarExpandTreeOnConnect: false });
-    expect(store.editorSettings.sidebarExpandTreeOnConnect).toBe(false);
-  });
-
-  it("clears the settings-dialog dirty state once the toggle is applied", async () => {
-    const loadEditorSettings = vi.fn().mockResolvedValue({});
-    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
-
-    const { useSettingsStore } = await import("@/stores/settingsStore");
-    const store = useSettingsStore();
-    await store.initEditorSettings();
-
-    // The dialog compares its draft against a base snapshot that is rebuilt from the
-    // store after every apply. A key that never reaches the store keeps the two apart
-    // forever, which is what made the dialog report unsaved changes and refuse to close.
-    const base = editorSettingsDraftFromSettings(store.editorSettings);
-    const draft = { ...base, sidebarExpandTreeOnConnect: false };
-    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
-
-    store.updateEditorSettings(editorSettingsPatchFromDraft(draft, base));
-
-    const appliedBase = editorSettingsDraftFromSettings(store.editorSettings);
-    expect(appliedBase.sidebarExpandTreeOnConnect).toBe(false);
-    expect(editorSettingsDraftChanged(draft, appliedBase)).toBe(false);
   });
 });
 

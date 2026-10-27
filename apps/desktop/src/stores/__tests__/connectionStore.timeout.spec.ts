@@ -851,10 +851,6 @@ describe("connectionStore timeout recovery", () => {
       },
     ];
 
-    // 用例断言加载完成后连接节点自动展开；#13302 把该行为改为默认关闭，需在此显式开启。
-    const { useSettingsStore } = await import("@/stores/settingsStore");
-    useSettingsStore().editorSettings.sidebarExpandTreeOnConnect = true;
-
     void store.loadDatabases(connection.id).catch(() => undefined);
     await vi.advanceTimersByTimeAsync(1);
     expect(connectDb).toHaveBeenCalledTimes(1);

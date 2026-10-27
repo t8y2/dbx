@@ -4457,6 +4457,72 @@ func TestManualTransactionRewritesObjectColumnsBeforeTheFirstAttempt(t *testing.
 	}
 }
 
+// sdoGeometryDecodeErrorFallbackSteps scripts a SELECT whose response go-ora
+// misreads (a NULL MDSYS.SDO_GEOMETRY value), followed by the WKT rewrite. The
+// retry must not run on the session that misread the response (issue #13667).
+func sdoGeometryDecodeErrorFallbackSteps(decodeErr error, rows [][]driver.Value) []oracleViewSourceQueryStep {
+	return []oracleViewSourceQueryStep{
+		{exec: true, queryContains: `ALTER SESSION SET CURRENT_SCHEMA = "DBXT"`},
+		{queryContains: `SELECT * FROM "T_GEOM"`, args: []driver.Value{}, err: decodeErr},
+		// The poisoned pinned connection is replaced and gets the editor schema back.
+		{exec: true, queryContains: `ALTER SESSION SET CURRENT_SCHEMA = "DBXT"`},
+		{queryContains: "CURRENT_SCHEMA", args: []driver.Value{}, columns: []string{"SCHEMA"}, rows: [][]driver.Value{{"DBXT"}}},
+		{
+			queryContains: "ALL_TAB_COLUMNS",
+			args:          []driver.Value{"DBXT", "T_GEOM"},
+			columns:       []string{"COLUMN_NAME", "DATA_TYPE", "DATA_TYPE_OWNER"},
+			rows:          [][]driver.Value{{"ID", "NUMBER", nil}, {"GEOM", "SDO_GEOMETRY", "MDSYS"}},
+		},
+		{queryContains: "SDO_UTIL.TO_WKTGEOMETRY", args: []driver.Value{}, columns: []string{"ID", "GEOM"}, rows: rows},
+	}
+}
+
+func TestExecuteQueryRetriesDecodeErrorOnFreshPinnedConnection(t *testing.T) {
+	steps := sdoGeometryDecodeErrorFallbackSteps(
+		errors.New("TTC error: received code 3 during response reading"),
+		[][]driver.Value{{int64(1), nil}, {int64(2), "POINT (121.5 25.03)"}},
+	)
+	db, scripted := openGuardedOracleViewSourceTestDB(t, steps)
+	s := newServer()
+	s.db = db
+	result, err := s.executeQuery(queryOptions{SQL: `SELECT * FROM "T_GEOM"`, Schema: "DBXT", MaxRows: 10})
+	if err != nil {
+		t.Fatalf("expected the WKT rewrite to recover the decode error, got %v", err)
+	}
+	if !reflect.DeepEqual(result.Rows, [][]any{{int64(1), nil}, {int64(2), "POINT (121.5 25.03)"}}) {
+		t.Fatalf("unexpected rows: %#v", result.Rows)
+	}
+	if scripted.next != len(steps) {
+		t.Fatalf("expected all %d scripted steps, ran %d", len(steps), scripted.next)
+	}
+	if s.statementConn != nil || s.repinnedStatementConn != nil || s.statementSchema != "" || db.Stats().InUse != 0 {
+		t.Fatalf("statement leaked its pinned connections: %+v", db.Stats())
+	}
+}
+
+func TestExecuteQueryPageRetriesNonTTCDecodeErrorOnFreshPinnedConnection(t *testing.T) {
+	steps := sdoGeometryDecodeErrorFallbackSteps(
+		errors.New("invalid NUMBER"),
+		[][]driver.Value{{int64(1), nil}},
+	)
+	db, scripted := openGuardedOracleViewSourceTestDB(t, steps)
+	s := newServer()
+	s.db = db
+	result, err := s.executeQueryPage(queryOptions{SQL: `SELECT * FROM "T_GEOM"`, Schema: "DBXT", MaxRows: 10}, 10)
+	if err != nil {
+		t.Fatalf("expected the WKT rewrite to recover the decode error, got %v", err)
+	}
+	if !reflect.DeepEqual(result.Rows, [][]any{{int64(1), nil}}) || result.HasMore {
+		t.Fatalf("unexpected page: %+v", result)
+	}
+	if scripted.next != len(steps) {
+		t.Fatalf("expected all %d scripted steps, ran %d", len(steps), scripted.next)
+	}
+	if s.statementConn != nil || s.repinnedStatementConn != nil || db.Stats().InUse != 0 {
+		t.Fatalf("statement leaked its pinned connections: %+v", db.Stats())
+	}
+}
+
 func TestReadQuerySessionPageConvertsPanicToError(t *testing.T) {
 	// A nil *sql.Rows makes rows.Next() panic with a nil pointer dereference,
 	// which stands in for go-ora panicking while decoding an unknown type.

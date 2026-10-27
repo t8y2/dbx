@@ -5067,6 +5067,10 @@ func shouldRetryOracleXMLTypeRewrite(err error) bool {
 	if err == nil {
 		return false
 	}
+	var decodeErr oracleProtocolDecodeError
+	if errors.As(err, &decodeErr) {
+		return true
+	}
 	message := err.Error()
 	return strings.Contains(message, "abnormal data representation for date") ||
 		strings.Contains(message, "TTC error: received code ")
@@ -6160,10 +6164,10 @@ func (s *server) setSchema(schema string) error {
 }
 
 // repinPoisonedStatementConn replaces the statement's pinned connection once a
-// driver panic has poisoned it, so the placeholder fallbacks of the same
-// statement do not fail on the dead session (issue #13455). The fresh
-// connection gets the statement's CURRENT_SCHEMA back; the statement's owner
-// closes it together with the original one.
+// driver panic or a response decode error has poisoned it, so the fallbacks of
+// the same statement do not fail on the dead session (issues #13455, #13667).
+// The fresh connection gets the statement's CURRENT_SCHEMA back; the
+// statement's owner closes it together with the original one.
 func (s *server) repinPoisonedStatementConn() error {
 	if s.manualTx != nil || s.statementConn == nil || !oracleConnPoisoned(s.statementConn) {
 		return nil

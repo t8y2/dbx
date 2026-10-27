@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
+	"strings"
 )
 
 // Preserve the thin driver's optional interfaces (notably transaction options,
@@ -44,6 +46,10 @@ type oracleQueryConnection struct {
 }
 
 func (c *oracleQueryConnection) unusableError() error {
+	var decodeErr oracleProtocolDecodeError
+	if errors.As(c.failed, &decodeErr) {
+		return fmt.Errorf("Oracle connection is unusable after a response decode error; roll back the transaction or reconnect: %w", c.failed)
+	}
 	return fmt.Errorf("Oracle connection is unusable after a driver panic; roll back the transaction or reconnect: %w", c.failed)
 }
 
@@ -57,10 +63,41 @@ func (c *oracleQueryConnection) QueryContext(ctx context.Context, query string, 
 			rows, err = nil, c.unusableError()
 		}
 	}()
-	return c.oracleThinConnection.QueryContext(ctx, query, args)
+	rows, err = c.oracleThinConnection.QueryContext(ctx, query, args)
+	if isOracleProtocolDecodeFailure(err) {
+		// The driver stopped reading in the middle of the response, so the rest
+		// of it is still on the wire and the next call on this session reads it
+		// as its own reply (issue #13667). Retire the session like a panic does.
+		c.failed = oracleProtocolDecodeError{err: err}
+		return nil, c.failed
+	}
+	return rows, err
 }
 
-// oracleConnPoisoned reports whether a driver panic already made conn unusable.
+// oracleProtocolDecodeError marks a go-ora failure to decode a server response.
+// It keeps the driver's message so callers see the original error text.
+type oracleProtocolDecodeError struct{ err error }
+
+func (e oracleProtocolDecodeError) Error() string { return e.err.Error() }
+
+func (e oracleProtocolDecodeError) Unwrap() error { return e.err }
+
+// isOracleProtocolDecodeFailure reports whether err is one of the go-ora errors
+// raised when it misreads a response, for example on a NULL value of an object
+// type such as MDSYS.SDO_GEOMETRY. Server errors (ORA-xxxxx) carry none of these
+// messages, so they leave the session in service.
+func isOracleProtocolDecodeFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "TTC error: received code ") ||
+		strings.Contains(message, "invalid size for GetInt") ||
+		strings.Contains(message, "invalid NUMBER")
+}
+
+// oracleConnPoisoned reports whether a driver panic or a response decode error
+// already made conn unusable.
 func oracleConnPoisoned(conn *sql.Conn) bool {
 	poisoned := false
 	_ = conn.Raw(func(driverConn any) error {

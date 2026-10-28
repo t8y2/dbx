@@ -5878,6 +5878,17 @@ fn import_error_message(request: &TableImportRequest, rows_imported: usize, erro
     format!("Import into table '{}' failed after {} imported rows: {}", request.table, rows_imported, error.as_ref())
 }
 
+/// A standalone truncate (continue-on-error, or an engine whose truncate cannot join the
+/// chunk transaction) commits before any row is written, so a later fatal error cannot roll
+/// it back and the target table stays emptied. The terminal error must say so explicitly.
+fn append_truncate_note(message: String, table_truncated: bool) -> String {
+    if table_truncated {
+        format!("{message}; the table was already truncated before the failure")
+    } else {
+        message
+    }
+}
+
 fn import_progress(
     import_id: &str,
     status: TableImportStatus,
@@ -8159,6 +8170,7 @@ where
         let mut pending_truncate = matches!(request.mode, TableImportMode::Truncate)
             && supports_transactional_import_truncate(db_type)
             && !request.continue_on_error;
+        let mut table_truncated = false;
         if matches!(request.mode, TableImportMode::Truncate) && !pending_truncate {
             let sql = truncate_sql(&request.table, &request.schema, db_type);
             if let Err(error) =
@@ -8168,6 +8180,8 @@ where
                 let _ = producer.await;
                 return Err(emit_import_error(&mut progress_callback, request, 0, total_rows, started_at, error));
             }
+            // The truncate committed on its own, so no later failure can roll it back.
+            table_truncated = true;
         }
         let mut rows_imported = 0usize;
         let mut import_failures = ImportFailureSink::new(&request.table);
@@ -8269,7 +8283,7 @@ where
                                 rows_imported,
                                 total_rows,
                                 started_at,
-                                error.message,
+                                append_truncate_note(error.message, table_truncated),
                                 &import_failures,
                             ));
                         }
@@ -8305,7 +8319,7 @@ where
                         rows_imported,
                         total_rows,
                         started_at,
-                        error,
+                        append_truncate_note(error, table_truncated),
                         &import_failures,
                     ));
                 }
@@ -8320,7 +8334,7 @@ where
                     rows_imported,
                     total_rows,
                     started_at,
-                    error,
+                    append_truncate_note(error, table_truncated),
                     &import_failures,
                 ));
             }
@@ -8331,7 +8345,7 @@ where
                     rows_imported,
                     total_rows,
                     started_at,
-                    error.to_string(),
+                    append_truncate_note(error.to_string(), table_truncated),
                     &import_failures,
                 ));
             }
@@ -8387,7 +8401,7 @@ where
                     rows_imported,
                     total_rows,
                     started_at,
-                    error.message,
+                    append_truncate_note(error.message, table_truncated),
                     &import_failures,
                 ));
             }
@@ -8655,6 +8669,7 @@ where
         let mut pending_truncate = matches!(request.mode, TableImportMode::Truncate)
             && supports_transactional_import_truncate(db_type)
             && !request.continue_on_error;
+        let mut table_truncated = false;
         if matches!(request.mode, TableImportMode::Truncate) && !pending_truncate {
             let sql = truncate_sql(&request.table, &request.schema, db_type);
             if let Err(error) =
@@ -8665,6 +8680,8 @@ where
                 let _ = producer.await;
                 return Err(emit_import_error(&mut progress_callback, request, 0, 0, started_at, error));
             }
+            // The truncate committed on its own, so no later failure can roll it back.
+            table_truncated = true;
         }
         let mut rows_imported = 0usize;
         let mut import_failures = ImportFailureSink::new(&request.table);
@@ -8792,7 +8809,7 @@ where
                                 rows_imported,
                                 0,
                                 started_at,
-                                error.message,
+                                append_truncate_note(error.message, table_truncated),
                                 &import_failures,
                             ));
                         }
@@ -8839,7 +8856,7 @@ where
                         rows_imported,
                         0,
                         started_at,
-                        error,
+                        append_truncate_note(error, table_truncated),
                         &import_failures,
                     ));
                 }
@@ -8854,7 +8871,7 @@ where
                     rows_imported,
                     0,
                     started_at,
-                    error,
+                    append_truncate_note(error, table_truncated),
                     &import_failures,
                 ));
             }
@@ -8865,7 +8882,7 @@ where
                     rows_imported,
                     0,
                     started_at,
-                    error.to_string(),
+                    append_truncate_note(error.to_string(), table_truncated),
                     &import_failures,
                 ));
             }
@@ -8921,7 +8938,7 @@ where
                     rows_imported,
                     0,
                     started_at,
-                    error.message,
+                    append_truncate_note(error.message, table_truncated),
                     &import_failures,
                 ));
             }
@@ -9060,6 +9077,7 @@ where
     let mut pending_truncate = matches!(request.mode, TableImportMode::Truncate)
         && supports_transactional_import_truncate(db_type)
         && !request.continue_on_error;
+    let mut table_truncated = false;
     if matches!(request.mode, TableImportMode::Truncate) && !pending_truncate {
         let sql = truncate_sql(&request.table, &request.schema, db_type);
         if let Err(error) =
@@ -9067,6 +9085,8 @@ where
         {
             return Err(emit_import_error(&mut progress_callback, request, 0, total_rows, started_at, error));
         }
+        // The truncate committed on its own, so no later failure can roll it back.
+        table_truncated = true;
     }
 
     let mut rows_imported = 0;
@@ -9084,7 +9104,7 @@ where
                     total_rows,
                     total_rows_exact,
                     started_at,
-                    error,
+                    append_truncate_note(error, table_truncated),
                     &import_failures,
                 ));
             }
@@ -9159,7 +9179,7 @@ where
                     total_rows,
                     total_rows_exact,
                     started_at,
-                    error.message,
+                    append_truncate_note(error.message, table_truncated),
                     &import_failures,
                 ));
             }
@@ -9241,7 +9261,7 @@ where
                 total_rows,
                 total_rows_exact,
                 started_at,
-                error.message,
+                append_truncate_note(error.message, table_truncated),
                 &import_failures,
             ));
         }
@@ -15347,6 +15367,178 @@ mod tests {
         );
         let rows = crate::db::sqlite::execute_query(&sqlite, "SELECT COUNT(*) FROM items").await.unwrap().rows;
         assert_eq!(rows, vec![vec![serde_json::json!(0)]]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_truncate_import_with_continue_on_error_notes_truncated_table_on_fatal_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-truncate-note-continue";
+        let pool_key = format!("{connection_id}:session:import");
+        let database_path = dir.path().join("target.db");
+        let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+        crate::db::sqlite::execute_query(&sqlite, "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+            .await
+            .unwrap();
+        crate::db::sqlite::execute_query(&sqlite, "INSERT INTO items VALUES (999, 'old')").await.unwrap();
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": connection_id,
+            "name": "SQLite truncate note continue-on-error test",
+            "db_type": "sqlite",
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": database_path.to_string_lossy()
+        }))
+        .unwrap();
+        state.configs.write().await.insert(connection_id.to_string(), config);
+        // The valid INSERTs are prefetched before the truncate; the trailing unterminated
+        // literal only surfaces at EOF, which is a fatal error even under continue-on-error
+        // (it kills the source stream, not a single row).
+        let data_path = dir.path().join("rows.sql");
+        std::fs::write(
+            &data_path,
+            b"INSERT INTO items (id, name) VALUES (1, 'Ada');\nINSERT INTO items (id, name) VALUES (2, 'Grace');\nINSERT INTO items (id, name) VALUES (3, 'Linus');\nINSERT INTO items (id, name) VALUES (4, 'Broken\n",
+        )
+        .unwrap();
+        let request = TableImportRequest {
+            import_id: "sqlite-truncate-note-continue".to_string(),
+            connection_id: connection_id.to_string(),
+            database: String::new(),
+            schema: String::new(),
+            table: "items".to_string(),
+            file_path: data_path.to_string_lossy().to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Sql),
+            parse_options: TableImportParseOptions::default(),
+            mappings: ["id", "name"]
+                .into_iter()
+                .map(|column| TableImportColumnMapping {
+                    source_column: column.to_string(),
+                    target_column: column.to_string(),
+                    target_data_type: None,
+                    generator: None,
+                })
+                .collect(),
+            mode: TableImportMode::Truncate,
+            create_table: false,
+            batch_size: 2,
+            date_time_format: None,
+            prepared_source: None,
+            retain_source: false,
+            conflict_policy: Some(TableImportConflictPolicy::Error),
+            skip_duplicate_rows: false,
+            continue_on_error: true,
+        };
+
+        let error = import_table_file_core(
+            &state,
+            &request,
+            &DatabaseType::Sqlite,
+            &pool_key,
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("Import into table 'items' failed"), "unexpected terminal error: {error}");
+        assert!(error.contains("the table was already truncated"), "terminal error must explain the truncate: {error}");
+        // The standalone truncate cannot be rolled back; only rows delivered before the
+        // fatal error remain, which is exactly why the error message must mention it.
+        // (Row 3 was still buffered in the stream when the EOF error surfaced, so the
+        // stream drops it together with the failure — pre-existing behavior.)
+        let rows = crate::db::sqlite::execute_query(&sqlite, "SELECT id FROM items ORDER BY id").await.unwrap().rows;
+        assert_eq!(rows, vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_truncate_import_without_continue_on_error_keeps_error_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-truncate-note-default";
+        let pool_key = format!("{connection_id}:session:import");
+        let database_path = dir.path().join("target.db");
+        let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+        crate::db::sqlite::execute_query(&sqlite, "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+            .await
+            .unwrap();
+        crate::db::sqlite::execute_query(&sqlite, "INSERT INTO items VALUES (999, 'old')").await.unwrap();
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": connection_id,
+            "name": "SQLite truncate note default test",
+            "db_type": "sqlite",
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": database_path.to_string_lossy()
+        }))
+        .unwrap();
+        state.configs.write().await.insert(connection_id.to_string(), config);
+        // The transactional path rolls the truncate back with the failed batch, so the
+        // pre-existing row survives and the error must not claim the table was truncated.
+        let data_path = dir.path().join("rows.csv");
+        std::fs::write(&data_path, b"id,name\n1,Ada\n1,Duplicate\n2,Bob\n").unwrap();
+        let request = TableImportRequest {
+            import_id: "sqlite-truncate-note-default".to_string(),
+            connection_id: connection_id.to_string(),
+            database: String::new(),
+            schema: String::new(),
+            table: "items".to_string(),
+            file_path: data_path.to_string_lossy().to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Csv),
+            parse_options: TableImportParseOptions::default(),
+            mappings: ["id", "name"]
+                .into_iter()
+                .map(|column| TableImportColumnMapping {
+                    source_column: column.to_string(),
+                    target_column: column.to_string(),
+                    target_data_type: None,
+                    generator: None,
+                })
+                .collect(),
+            mode: TableImportMode::Truncate,
+            create_table: false,
+            batch_size: 500,
+            date_time_format: None,
+            prepared_source: None,
+            retain_source: false,
+            conflict_policy: Some(TableImportConflictPolicy::Error),
+            skip_duplicate_rows: false,
+            continue_on_error: false,
+        };
+
+        let error = import_table_file_core(
+            &state,
+            &request,
+            &DatabaseType::Sqlite,
+            &pool_key,
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("Import into table 'items' failed"), "unexpected terminal error: {error}");
+        assert!(!error.contains("truncated"), "error must not mention a truncate that rolled back: {error}");
+        let rows =
+            crate::db::sqlite::execute_query(&sqlite, "SELECT id, name FROM items ORDER BY id").await.unwrap().rows;
+        assert_eq!(rows, vec![vec![serde_json::json!(999), serde_json::json!("old")]]);
     }
 
     #[tokio::test]

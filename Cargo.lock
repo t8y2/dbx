@@ -304,7 +304,7 @@ dependencies = [
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",
- "zbus",
+ "zbus 5.18.0",
 ]
 
 [[package]]

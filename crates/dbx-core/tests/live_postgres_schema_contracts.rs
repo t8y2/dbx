@@ -387,6 +387,77 @@ async fn postgres_legacy_batched_ddl_metadata_preserves_relation_pairs_across_co
 }
 
 #[tokio::test]
+#[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL 15+ database"]
+async fn postgres_foreign_key_options_round_trip_through_single_and_partition_tree_ddl() {
+    let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+    let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source = format!("dbx_fk_options_{}", &suffix[..10]);
+    let references = format!("{source}_refs");
+    let source_ident = pg_quote_ident(&source);
+    let references_ident = pg_quote_ident(&references);
+    let client = pool.get().await.expect("get postgres client");
+    client.batch_execute(&format!(
+        "CREATE SCHEMA {source_ident}; CREATE SCHEMA {references_ident};
+         CREATE TABLE {references_ident}.\"parent(table\" (\"id)\" integer, version integer, PRIMARY KEY (\"id)\", version));
+         CREATE TABLE {source_ident}.children (
+           id integer, \"parent)a\" integer, \"parent\"\"b\" integer,
+           CONSTRAINT fk_parent FOREIGN KEY (\"parent)a\", \"parent\"\"b\")
+             REFERENCES {references_ident}.\"parent(table\" (\"id)\", version)
+             MATCH FULL ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+         ) PARTITION BY RANGE (id);
+         CREATE TABLE {source_ident}.children_default PARTITION OF {source_ident}.children DEFAULT;
+         ALTER TABLE {source_ident}.children_default ADD CONSTRAINT fk_local
+           FOREIGN KEY (\"parent)a\", \"parent\"\"b\") REFERENCES {references_ident}.\"parent(table\" (\"id)\", version)
+           ON UPDATE CASCADE ON DELETE SET NULL (\"parent)a\") DEFERRABLE INITIALLY IMMEDIATE NOT VALID;"
+    )).await.expect("create foreign key option fixtures");
+
+    for include_tree in [false, true] {
+        let replay = format!("{source}_{}", if include_tree { "tree" } else { "single" });
+        let replay_ident = pg_quote_ident(&replay);
+        let ddl = if include_tree {
+            dbx_core::schema::pg_ddl_with_partitions(&pool, &source, "children").await
+        } else {
+            dbx_core::schema::pg_ddl(&pool, &source, "children").await
+        }
+        .expect("read foreign key DDL");
+        client
+            .batch_execute(&format!("CREATE SCHEMA {replay_ident}; {}", ddl.replace(&source_ident, &replay_ident)))
+            .await
+            .unwrap_or_else(|error| panic!("replay foreign key DDL: {error:?}; DDL: {ddl}"));
+        let mut snapshots = Vec::new();
+        for schema in [&source, &replay] {
+            let result = execute_query(
+                &pool,
+                &format!(
+                    "SELECT c.relname::text, con.conname::text, con.condeferrable, con.condeferred,
+                        con.confupdtype::text, con.confdeltype::text, con.convalidated,
+                        pg_catalog.pg_get_constraintdef(con.oid, true) AS definition
+                 FROM pg_catalog.pg_constraint con
+                 JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = {} AND con.contype = 'f'
+                   AND (c.relname = 'children' OR {})
+                 ORDER BY c.relname, con.conname",
+                    pg_quote_literal(schema),
+                    include_tree
+                ),
+            )
+            .await
+            .expect("snapshot restored constraint properties");
+            assert!(!result.rows.is_empty());
+            snapshots.push(result.rows);
+        }
+        assert_eq!(snapshots[0], snapshots[1], "foreign key options changed; DDL: {ddl}");
+        client.batch_execute(&format!("DROP SCHEMA {replay_ident} CASCADE")).await.expect("drop replay schema");
+    }
+    client
+        .batch_execute(&format!("DROP SCHEMA {source_ident} CASCADE; DROP SCHEMA {references_ident} CASCADE"))
+        .await
+        .expect("drop fixture schemas");
+}
+
+#[tokio::test]
 #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
 async fn postgres_ddl_emits_not_valid_check_constraints_as_separate_replayable_alter() {
     let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");

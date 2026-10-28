@@ -32,6 +32,7 @@ import {
   WrapText,
   RefreshCw,
   UserRound,
+  Copy,
 } from "@lucide/vue";
 import { supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
 import { Button } from "@/components/ui/button";
@@ -61,7 +62,10 @@ import { resolveNextEditorToolbarTier, type EditorToolbarTier } from "@/lib/tabs
 import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { useToast } from "@/composables/useToast";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
+import type { MongoQueryLanguage } from "@/lib/mongo/mongoSql";
 import { isObjectDependencySection } from "@/lib/database/objectDependencyDetails";
 import { connectionDetailRows } from "@/lib/connection/connectionDetailRows";
 import { findConnectionGroupPath } from "@/lib/sidebar/sidebarLayout";
@@ -135,9 +139,23 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const showMongoSqlToggle = computed(() => props.activeConnection?.db_type === "mongodb" && props.activeTab.mode === "query");
+const mongoQueryLanguage = computed(() => props.activeTab.mongoQueryLanguage ?? "shell");
+
+function setMongoQueryLanguage(language: MongoQueryLanguage) {
+  queryStore.setMongoQueryLanguage(props.activeTab.id, language);
+}
+
+async function copyGeneratedMongoShell() {
+  const shell = props.activeTab.mongoGeneratedShell;
+  if (!shell) return;
+  await copyToClipboard(shell);
+  toast(t("toolbar.mongoShellCopied"));
+}
 const { databaseOptions, loadingDatabaseOptions, loadDatabaseOptions, catalogOptions, loadingCatalogOptions, loadCatalogOptions, catalogDatabaseOptions, loadingCatalogDatabaseOptions, loadCatalogDatabaseOptions } = useDatabaseOptions();
 const { loadSchemaOptions, getSchemaOptionsForDb, isLoadingSchemas, isSchemaAware } = useSchemaOptions();
 
@@ -263,6 +281,7 @@ const activeConnectionGroupPath = computed(() => {
   if (!connection) return "";
   return findConnectionGroupPath(connectionStore.sidebarLayout, connection.id)?.join(" / ") || "";
 });
+const visibleConnectionGroupPath = computed(() => (settingsStore.editorSettings.showConnectionGroupPath ? activeConnectionGroupPath.value : ""));
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
 // Salesforce identity badge. A Salesforce tab talks to one live org and every grid
 // save is a real REST write, so the signed-in user stays visible next to the
@@ -597,6 +616,7 @@ async function changeCatalog(selectedCatalog: string) {
 }
 
 const connectionPickerRef = ref<InstanceType<typeof ConnectionTreeSelect> | null>(null);
+const connectionPickerOpen = ref(false);
 const databasePickerRef = ref<InstanceType<typeof SearchableSelect> | null>(null);
 const schemaPickerRef = ref<InstanceType<typeof SearchableSelect> | null>(null);
 
@@ -627,6 +647,22 @@ defineExpose({
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ activeTab.isExecuting ? t("toolbar.stopQuery") : executeShortcutTooltip }}</TooltipContent>
+      </Tooltip>
+      <div v-if="showMongoSqlToggle" class="ml-1 flex h-6 shrink-0 items-center rounded-md border bg-muted/40 p-0.5" role="group" :aria-label="t('toolbar.mongoQueryLanguage')">
+        <button type="button" class="h-5 rounded px-1.5 text-[11px] font-medium" :class="mongoQueryLanguage !== 'sql' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" :aria-pressed="mongoQueryLanguage !== 'sql'" @click="setMongoQueryLanguage('shell')">
+          {{ t("toolbar.mongoShellMode") }}
+        </button>
+        <button type="button" class="h-5 rounded px-1.5 text-[11px] font-medium" :class="mongoQueryLanguage === 'sql' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" :aria-pressed="mongoQueryLanguage === 'sql'" @click="setMongoQueryLanguage('sql')">
+          {{ t("toolbar.mongoSqlMode") }}
+        </button>
+      </div>
+      <Tooltip v-if="showMongoSqlToggle && mongoQueryLanguage === 'sql' && activeTab.mongoGeneratedShell">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:text-foreground" :aria-label="t('toolbar.copyMongoShell')" @click="copyGeneratedMongoShell">
+            <Copy class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("toolbar.copyMongoShell") }}</TooltipContent>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger as-child>
@@ -1001,7 +1037,7 @@ defineExpose({
     <div class="flex shrink-0 items-center gap-2">
       <div class="flex shrink-0 items-center gap-1" :class="{ 'connection-required-prompt': connectionRequiredVisible }">
         <span v-if="activeConnection?.color" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: activeConnection.color }" />
-        <LightTooltip text="" :disabled="!activeConnectionDetailRows.length" side="bottom" :side-offset="6" :delay="250" :close-delay="80" surface="popover">
+        <LightTooltip text="" :disabled="connectionPickerOpen || !activeConnectionDetailRows.length" side="bottom" :side-offset="6" :delay="250" :close-delay="80" surface="popover">
           <ConnectionTreeSelect
             ref="connectionPickerRef"
             :model-value="activeConnectionValue"
@@ -1011,16 +1047,17 @@ defineExpose({
             :search-placeholder="t('editor.searchConnection')"
             :empty-text="t('grid.noSearchResults')"
             :hide-title="activeConnectionDetailRows.length > 0"
-            trigger-class="font-medium text-foreground"
+            trigger-class="max-w-[min(28rem,36vw)] font-medium text-foreground"
             trigger-icon-class="h-3 w-3"
             list-class="w-96 max-w-[calc(100vw-2rem)]"
             @update:model-value="(connectionId) => emit('changeConnection', connectionId)"
+            @update:open="(open: boolean) => (connectionPickerOpen = open)"
           >
             <template #trigger-label="{ label }">
               <div v-if="activeConnection" class="flex min-w-0 items-center gap-1.5">
                 <DatabaseIcon :db-type="connectionIconType(activeConnection)" class="h-3.5 w-3.5 shrink-0" />
-                <span v-if="activeConnectionGroupPath" class="shrink-0 text-muted-foreground">{{ activeConnectionGroupPath }} /</span>
-                <span class="truncate">{{ label }}</span>
+                <span v-if="visibleConnectionGroupPath" data-connection-group-path class="min-w-0 max-w-[50%] shrink truncate text-muted-foreground">{{ visibleConnectionGroupPath }} /</span>
+                <span :class="visibleConnectionGroupPath ? 'min-w-0 shrink truncate' : 'min-w-0 flex-1 truncate'">{{ label }}</span>
                 <ProductionContextBadge v-if="showConnectionProductionBadge" compact />
               </div>
               <span v-else class="truncate text-muted-foreground">{{ t("editor.selectConnection") }}</span>

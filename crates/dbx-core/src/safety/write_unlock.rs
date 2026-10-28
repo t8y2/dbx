@@ -68,6 +68,11 @@ impl WriteUnlockWindows {
     }
 
     #[cfg(test)]
+    pub(crate) async fn hold_lock_for_test(&self) -> impl Drop + '_ {
+        self.inner.write().await
+    }
+
+    #[cfg(test)]
     async fn force_expiry(&self, connection_id: &str) {
         let key = WriteUnlockKey::current(connection_id);
         self.inner

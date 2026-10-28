@@ -44,7 +44,7 @@ fn cookie_secure_enabled() -> bool {
     *SECURE.get_or_init(|| matches!(std::env::var("DBX_WEB_COOKIE_SECURE").ok().as_deref(), Some("1") | Some("true")))
 }
 
-fn session_cookie(state: &WebState, token: &str) -> String {
+pub(crate) fn session_cookie(state: &WebState, token: &str) -> String {
     let secure = if cookie_secure_enabled() { "; Secure" } else { "" };
     format!("dbx_session={token}; Path={}; HttpOnly; SameSite=Lax{secure}", session_cookie_path(state))
 }
@@ -223,14 +223,24 @@ pub async fn change_password(
     *state.password_hash.write().await = Some(new_hash);
 
     // Rotation revokes sibling sessions; only the caller stays logged in.
-    state.sessions.write().await.retain(|token| *token == current_token);
+    {
+        let mut sessions = state.sessions.write().await;
+        for token in sessions.iter().filter(|token| **token != current_token) {
+            dbx_core::query::pl_debug::pl_debug_revoke_web_owner_core(&state.app, token);
+        }
+        sessions.retain(|token| *token == current_token);
+    }
 
     Ok((StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response())
 }
 
 pub async fn logout(State(state): State<Arc<WebState>>, req: Request<axum::body::Body>) -> Response {
     if let Some(token) = extract_session_token(&req) {
-        state.sessions.write().await.remove(&token);
+        {
+            let mut sessions = state.sessions.write().await;
+            sessions.remove(&token);
+            dbx_core::query::pl_debug::pl_debug_revoke_web_owner_core(&state.app, &token);
+        }
         // 登出只清除当前登录会话的临时密码，不影响其他会话与桌面端凭据。
         state.app.session_credentials.clear_owner(&token);
     }

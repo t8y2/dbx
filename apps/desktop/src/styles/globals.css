@@ -1573,6 +1573,12 @@ html.dbx-data-grid-native-selection-blocked [role="textbox"] * {
     text-rendering: geometricPrecision;
     font-synthesis: none;
   }
+  /* Opt-in (#13359): macOS-style smoothing renders some fonts thin and blurry
+   * depending on the display and personal taste, so it stays off by default. */
+  html.dbx-font-smoothing body {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
   button,
   [role="button"],
   [role="menuitem"],
@@ -2830,13 +2836,17 @@ html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false
   height: 3px;
   border-radius: 999px;
   background: currentColor;
-  box-shadow: 0 5px 0 currentColor, 0 10px 0 currentColor;
+  box-shadow:
+    0 5px 0 currentColor,
+    0 10px 0 currentColor;
   color: color-mix(in srgb, var(--muted-foreground) 45%, transparent);
   content: "";
   opacity: 0.75;
   pointer-events: none;
   transform: translate(-50%, -50%);
-  transition: color 140ms ease, opacity 140ms ease;
+  transition:
+    color 140ms ease,
+    opacity 140ms ease;
 }
 .panel-resize-handle:hover::before,
 .panel-resize-handle:focus-visible::before,

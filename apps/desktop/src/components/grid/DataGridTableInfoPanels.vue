@@ -172,7 +172,7 @@ const overviewRows = computed(() => {
               <span v-if="index.index_type" class="rounded bg-muted px-1.5 py-0.5 text-muted-foreground">{{ index.index_type }}</span>
             </div>
             <div class="mt-2 font-mono text-[11px] text-muted-foreground break-all">
-              {{ index.columns.join(", ") }}
+              {{ index.columns.map((column, columnIndex) => column + (index.key_directions?.[columnIndex]?.toUpperCase() === "DESC" ? " DESC" : "")).join(", ") }}
             </div>
           </div>
           <Button v-if="props.canManageMongoIndexes && !props.isProtectedMongoIndex(index)" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-[11px] text-destructive hover:text-destructive" @click="emit('requestDropMongoIndex', index)">

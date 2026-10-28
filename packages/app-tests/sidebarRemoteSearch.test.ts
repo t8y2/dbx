@@ -1,5 +1,7 @@
 import { expect, test, vi } from "vitest";
-import { collectSidebarRemoteSearchResults, mergeSidebarRemoteSearchResults } from "../../apps/desktop/src/lib/sidebar/sidebarRemoteSearch";
+import { effectScope, ref } from "vue";
+import { useSidebarRemoteSearch } from "../../apps/desktop/src/composables/useSidebarRemoteSearch";
+import { collectSidebarRemoteSearchResults, mergeSidebarRemoteSearchResults, removeVerifiedSidebarTriggerSearchResult } from "../../apps/desktop/src/lib/sidebar/sidebarRemoteSearch";
 import type { TreeNode, TreeNodeType } from "../../apps/desktop/src/types/database";
 
 const remoteObjectGroupTypes = [
@@ -31,6 +33,84 @@ function fixture() {
   const options = { root, connectionId: "conn", databaseScope: null as ReadonlySet<string> | null, signal: controller.signal, isSimpleParent: (_node: TreeNode) => false, discover: vi.fn(async (node: TreeNode) => node.children ?? []), search, onError: vi.fn() };
   return { root, schema, procedures, functions, tables, controller, options };
 }
+
+test("removes only the verified physical trigger from search projections", () => {
+  const trigger = (name: string, objectId: string, catalog = "catalog-a", connectionId = "conn"): TreeNode => ({
+    id: name,
+    label: name,
+    objectName: name,
+    type: "trigger",
+    connectionId,
+    database: "service",
+    schema: " Owner ",
+    catalog,
+    meta: { name, timing: "BEFORE", event: "INSERT", oracle_metadata: { contractVersion: 1, identityMode: "exact", engine: "oracle", owner: " Owner ", name, objectId } },
+  });
+  const removed = trigger(" Raw Trigger ", "old-id");
+  const retained = [trigger(" Raw Trigger ", "replacement-id"), trigger(" raw trigger ", "neighbor-id"), trigger(" Raw Trigger ", "old-id", "catalog-b"), trigger(" Raw Trigger ", "old-id", "catalog-a", "other")];
+  const results = [{ parentNodeId: "group", nodeType: "group-triggers" as const, connectionId: "conn", database: "service", children: [removed, ...retained] }];
+  const next = removeVerifiedSidebarTriggerSearchResult(results, removed);
+  expect(next[0].children).toEqual(retained);
+  expect(results[0].children).toHaveLength(5);
+  expect(removeVerifiedSidebarTriggerSearchResult(results, { ...removed, meta: undefined })[0].children).toHaveLength(5);
+});
+
+test("a late search response cannot resurrect a verified deleted trigger", async () => {
+  vi.useFakeTimers();
+  const scope = effectScope();
+  try {
+    const node: TreeNode = {
+      id: "trigger",
+      label: "trigger",
+      objectName: "trigger",
+      type: "trigger",
+      connectionId: "conn",
+      database: "service",
+      schema: "owner",
+      meta: { name: "trigger", timing: "BEFORE", event: "INSERT", oracle_metadata: { contractVersion: 1, identityMode: "exact", engine: "oracle", owner: "owner", name: "trigger", objectId: "old-id" } },
+    };
+    const oldResult = [{ parentNodeId: "group", nodeType: "group-triggers" as const, connectionId: "conn", database: "service", schema: "owner", children: [node] }];
+    let finish!: (result: typeof oldResult) => void;
+    let publish!: (result: typeof oldResult) => void;
+    let oldSignal!: AbortSignal;
+    let calls = 0;
+    const query = ref("");
+    const remote = scope.run(() =>
+      useSidebarRemoteSearch({
+        query,
+        enabled: ref(true),
+        context: [],
+        onError: (error) => {
+          throw error;
+        },
+        load: async (_query, signal, onProgress) => {
+          if (calls++ > 0) return [{ ...oldResult[0], children: [] }];
+          oldSignal = signal;
+          publish = onProgress;
+          onProgress(oldResult);
+          return new Promise<typeof oldResult>((resolve) => {
+            finish = resolve;
+          });
+        },
+      }),
+    )!;
+    query.value = "trigger";
+    await vi.advanceTimersByTimeAsync(300);
+    expect(remote.results.value[0].children).toEqual([node]);
+    remote.removeVerifiedTriggerNode(node);
+    expect(remote.results.value[0].children).toEqual([]);
+    publish(oldResult);
+    finish(oldResult);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(remote.results.value[0].children).toEqual([]);
+    expect(oldSignal.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(remote.results.value[0].children).toEqual([]);
+  } finally {
+    scope.stop();
+    vi.useRealTimers();
+  }
+});
 
 test("searches never-expanded procedure/function groups, not indexed table/view groups", async () => {
   const { root, procedures, functions, tables, options } = fixture();

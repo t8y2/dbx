@@ -106,6 +106,7 @@ describe("management page sidebar targets", () => {
     ["dameng-users", "dameng-users"],
     ["dameng-roles", "dameng-roles"],
     ["dameng-jobs", "dameng-job-admin"],
+    ["database-jobs", "database-job-admin"],
   ] as const)("locates %s at its dedicated %s node", (mode, nodeType) => {
     const target = activeTabSidebarTarget({ mode, connectionId: "conn" } as QueryTab);
     expect(target).toEqual({ type: "management", connectionId: "conn", nodeType });

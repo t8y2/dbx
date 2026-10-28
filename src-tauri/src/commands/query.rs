@@ -412,8 +412,22 @@ pub async fn close_query_session(
 pub async fn read_large_value_chunk(
     state: State<'_, Arc<AppState>>,
     request: dbx_core::query::LargeValueRequest,
+    report_outcome: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    dbx_core::query::request_large_value(&state, request, false).await
+    if report_outcome == Some(true) {
+        Ok(snapshot_outcome(dbx_core::query::request_large_value_reported(&state, request).await))
+    } else {
+        dbx_core::query::request_large_value(&state, request, false).await
+    }
+}
+
+fn snapshot_outcome<T: serde::Serialize>(
+    result: Result<T, dbx_core::query::LargeValueOperationError>,
+) -> serde_json::Value {
+    match result {
+        Ok(value) => serde_json::json!({"status": "succeeded", "value": value}),
+        Err(error) => serde_json::json!({"status": error.status, "message": error.message}),
+    }
 }
 
 #[tauri::command]
@@ -445,8 +459,12 @@ pub async fn close_client_connection_session(
     database: String,
     client_session_id: String,
     catalog: Option<String>,
+    report_completion: Option<bool>,
 ) -> Result<bool, String> {
     let database = query_session_database(&database, catalog.as_deref());
+    if report_completion == Some(true) {
+        return state.close_client_session_pool_with_completion(&connection_id, database, &client_session_id).await;
+    }
     state.close_client_session_pool(&connection_id, database, &client_session_id).await
 }
 
@@ -455,13 +473,52 @@ pub async fn export_snapshot_result(
     state: State<'_, Arc<AppState>>,
     request: dbx_core::query::snapshot_export::SnapshotExportRequest,
     file_path: String,
-) -> Result<(), String> {
+    report_outcome: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    if report_outcome == Some(true) {
+        return Ok(snapshot_outcome(write_reported_snapshot(&state, request, &file_path).await));
+    }
     let path = std::path::Path::new(&file_path);
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
     let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
     dbx_core::query::snapshot_export::write_snapshot_export(&state, request, temporary.as_file_mut()).await?;
     temporary.persist(path).map_err(|error| error.to_string())?;
-    Ok(())
+    Ok(serde_json::Value::Null)
+}
+
+async fn write_reported_snapshot(
+    state: &AppState,
+    request: dbx_core::query::snapshot_export::SnapshotExportRequest,
+    file_path: &str,
+) -> Result<(), dbx_core::query::LargeValueOperationError> {
+    use dbx_core::query::{LargeValueCompletion, LargeValueOperationError};
+    let path = std::path::Path::new(file_path);
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    if let Err(error) =
+        dbx_core::query::snapshot_export::write_snapshot_export_reported(state, request, temporary.as_file_mut()).await
+    {
+        return match temporary.close() {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(LargeValueOperationError {
+                status: LargeValueCompletion::Unknown,
+                message: format!("{}; snapshot cleanup failed: {cleanup}", error.message),
+            }),
+        };
+    }
+    match temporary.persist(path) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let message = error.error.to_string();
+            match error.file.close() {
+                Ok(()) => Err(message.into()),
+                Err(cleanup) => Err(LargeValueOperationError {
+                    status: LargeValueCompletion::Unknown,
+                    message: format!("{message}; snapshot cleanup failed: {cleanup}"),
+                }),
+            }
+        }
+    }
 }
 
 fn query_session_database<'a>(database: &'a str, catalog: Option<&str>) -> Option<&'a str> {
@@ -925,6 +982,13 @@ pub fn validate_oracle_executable_object_source(
 }
 
 #[tauri::command]
+pub fn prepare_oracle_trigger_sql(
+    input: dbx_core::object_source_sql::OracleTriggerSqlInput,
+) -> Result<dbx_core::object_source_sql::PreparedOracleTriggerSql, String> {
+    dbx_core::object_source_sql::prepare_oracle_trigger_sql(input)
+}
+
+#[tauri::command]
 pub fn fingerprint_oracle_routine_object_source(
     input: dbx_core::object_source_sql::EditableObjectSourceSqlInput,
 ) -> Result<String, String> {
@@ -995,13 +1059,13 @@ pub fn build_table_structure_change_sql(
     options: dbx_core::table_structure_sql::TableStructureSqlOptions,
     starrocks: Option<dbx_core::table_structure_sql::StarRocksAlterOptions>,
     mysql_table_charset: Option<dbx_core::table_structure_sql::MysqlTableCharsetChange>,
-) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
+) -> Result<dbx_core::table_structure_sql::TableStructureSqlPlan, String> {
     let table_charset = mysql_table_charset
         .map(|change| dbx_core::table_structure_sql::build_mysql_table_charset_change_sql(&options, change));
-    let mut result = dbx_core::table_structure_sql::build_table_structure_change_sql_with_context(options, starrocks);
+    let mut result = dbx_core::table_structure_sql::build_table_structure_change_sql_plan(options, starrocks);
     if let Some(extra) = table_charset {
-        result.statements.extend(extra.statements);
-        result.warnings.extend(extra.warnings);
+        result.sql.statements.extend(extra.statements);
+        result.sql.warnings.extend(extra.warnings);
     }
     Ok(result)
 }
@@ -1047,8 +1111,8 @@ pub fn build_create_table_sql(
     options: dbx_core::table_structure_sql::TableStructureSqlOptions,
     server_version: Option<String>,
     dialect_options: Option<dbx_core::table_structure_sql::CreateTableDialectOptions>,
-) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
-    Ok(dbx_core::table_structure_sql::build_create_table_sql_with_dialect_options(
+) -> Result<dbx_core::table_structure_sql::TableStructureSqlPlan, String> {
+    Ok(dbx_core::table_structure_sql::build_create_table_sql_plan_with_dialect_options(
         options,
         server_version.as_deref(),
         dialect_options.unwrap_or_default(),
@@ -1314,6 +1378,57 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")))
+    }
+
+    fn snapshot_request(format: &str) -> dbx_core::query::snapshot_export::SnapshotExportRequest {
+        serde_json::from_value(serde_json::json!({
+            "context": {"connectionId":"original", "database":"APP", "valueRef":""},
+            "format": format, "columns":["C"], "rows":[["complete"]], "cells":[]
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn reported_snapshot_publishes_success_and_cleans_failed_staging_before_reply() {
+        let state = test_app_state().await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("result.json");
+        let result = write_reported_snapshot(&state, snapshot_request("json"), path.to_str().unwrap()).await;
+        assert_eq!(snapshot_outcome(result), serde_json::json!({"status":"succeeded","value":null}));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap(),
+            serde_json::json!([{"C":"complete"}])
+        );
+        let result = write_reported_snapshot(&state, snapshot_request("unsupported"), path.to_str().unwrap()).await;
+        assert_eq!(snapshot_outcome(result)["status"], "failed");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap(),
+            serde_json::json!([{"C":"complete"}])
+        );
+        // A following operation owns this path only after the failed staged file is gone.
+        write_reported_snapshot(&state, snapshot_request("csv"), path.to_str().unwrap()).await.unwrap();
+        assert!(std::fs::read_to_string(path).unwrap().contains("complete"));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn reported_snapshot_preserves_existing_target_on_persist_failure() {
+        let state = test_app_state().await;
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("existing-directory");
+        std::fs::create_dir(&target).unwrap();
+        let result = write_reported_snapshot(&state, snapshot_request("json"), target.to_str().unwrap()).await;
+        assert_eq!(snapshot_outcome(result)["status"], "failed");
+        assert!(target.is_dir());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        let result = write_reported_snapshot(
+            &state,
+            snapshot_request("json"),
+            target.join("missing/result.json").to_str().unwrap(),
+        )
+        .await;
+        assert_eq!(snapshot_outcome(result)["status"], "failed");
     }
 
     #[tokio::test]

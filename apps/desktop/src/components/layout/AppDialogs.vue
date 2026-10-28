@@ -26,6 +26,9 @@ const SshHostKeyPromptDialog = defineAsyncComponent(() => import("@/components/s
 const ConnectionPasswordPromptDialog = defineAsyncComponent(() => import("@/components/connection/ConnectionPasswordPromptDialog.vue"));
 const DatabaseExportDialog = defineAsyncComponent(() => import("@/components/export/DatabaseExportDialog.vue"));
 const DataGenerateDialog = defineAsyncComponent(() => import("@/components/generate/DataGenerateDialog.vue"));
+const PlDebugLaunchDialog = defineAsyncComponent(() => import("@/components/debug/PlDebugLaunchDialog.vue"));
+const PlDebugRecoveryDialog = defineAsyncComponent(() => import("@/components/debug/PlDebugRecoveryDialog.vue"));
+import { plDebugLaunchTarget, plDebugRecoveryConnectionId } from "@/components/debug/plDebugLaunch";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
@@ -160,6 +163,8 @@ watch(
 </script>
 
 <template>
+  <PlDebugLaunchDialog v-if="plDebugLaunchTarget" />
+  <PlDebugRecoveryDialog v-if="plDebugRecoveryConnectionId" />
   <ConnectionDialog
     v-if="shouldShowConnectionDialog"
     :open="shouldShowConnectionDialog"
@@ -279,6 +284,7 @@ watch(
     :prefill-connection-id="dialogs.diagramPrefillConnectionId.value"
     :prefill-database="dialogs.diagramPrefillDatabase.value"
     :prefill-schema="dialogs.diagramPrefillSchema.value"
+    :prefill-catalog="dialogs.diagramPrefillCatalog.value"
     :focus-table-name="dialogs.diagramFocusTableName.value"
     :focus-table-names="dialogs.diagramFocusTableNames.value"
     @open-target="emit('openDiagramTarget', $event)"

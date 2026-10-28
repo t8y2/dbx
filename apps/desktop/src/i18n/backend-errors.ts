@@ -82,6 +82,10 @@ const taggedAiCliErrorKeys: Record<string, string> = {
 };
 
 const exactMessageKeys: Record<string, string> = {
+  MYSQL_DATA_CHARSET_READ_ONLY: "connection.mysqlDataCharsetReadOnly",
+  MYSQL_DATA_CHARSET_EXPORT_UNSUPPORTED: "connection.mysqlDataCharsetExportHint",
+  MYSQL_DATA_CHARSET_TRANSFER_UNSUPPORTED: "connection.mysqlDataCharsetExportHint",
+  MYSQL_DATA_CHARSET_SESSION_CHANGE_UNSUPPORTED: "connection.mysqlDataCharsetConflict",
   "Folder name must not contain a path": "sqlFileTree.folderNameInvalid",
   "This folder name is excluded from the SQL file browser": "sqlFileTree.folderNameExcluded",
   "The maximum SQL folder depth has been reached": "sqlFileTree.folderDepthExceeded",
@@ -96,6 +100,10 @@ const exactMessageKeys: Record<string, string> = {
 };
 
 const patterns: [RegExp, string][] = [
+  [/^MYSQL_DATA_CHARSET_READ_ONLY(?::[\s\S]*)?$/, "connection.mysqlDataCharsetReadOnly"],
+  [/^MYSQL_DATA_CHARSET_EXPORT_UNSUPPORTED(?::[\s\S]*)?$/, "connection.mysqlDataCharsetExportHint"],
+  [/^MYSQL_DATA_CHARSET_TRANSFER_UNSUPPORTED(?::[\s\S]*)?$/, "connection.mysqlDataCharsetExportHint"],
+  [/^MYSQL_DATA_CHARSET_SESSION_CHANGE_UNSUPPORTED(?::[\s\S]*)?$/, "connection.mysqlDataCharsetConflict"],
   [/^Plugin update blocked by active connections: ([\s\S]+)$/, "pluginPlatform.updateBlockedByConnections"],
   // src-tauri/src/commands/plugins.rs and crates/dbx-web/src/routes/plugins.rs uninstall guard.
   [/^Cannot uninstall plugin '(.+?)' while these connections still use it: ([\s\S]+)$/, "pluginPlatform.uninstallBlockedByConnections"],

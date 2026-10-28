@@ -34,7 +34,7 @@ jobs:
   database-environments:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -42,7 +42,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
 
       - name: Validate database environment tooling
         run: |

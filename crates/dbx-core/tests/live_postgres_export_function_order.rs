@@ -160,6 +160,7 @@ async fn live_postgres_export_restores_tables_that_depend_on_functions() {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            resolve_includes: false,
         },
         &export_path,
         tokio_util::sync::CancellationToken::new(),

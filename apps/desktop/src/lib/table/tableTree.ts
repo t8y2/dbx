@@ -1,5 +1,6 @@
-import type { DatabaseType, ObjectInfo, TableInfo, TreeNode, TreeNodeType } from "@/types/database";
+import type { DatabaseType, ObjectInfo, OracleTriggerMetadata, TableInfo, TreeNode, TreeNodeType, TriggerInfo } from "@/types/database";
 import { normalizeSidebarObjectKind, supportsSchemaIndexManagement, type SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
+import { exactOracleTriggerMetadata, exactOracleTriggerObjectMetadata, oracleTriggerIdentityKey } from "@/lib/database/oracleTriggerIdentity";
 
 const databaseObjectNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
@@ -120,7 +121,9 @@ function foldedPartitionObjectLookupKey(objectType: string, schema: string | und
  * purpose: an anchor must never look "changed" because the server cased a name
  * differently between two responses.
  */
-export function tablePageRowAnchorKey(name: string, schema?: string | null, parentName?: string | null) {
+export function tablePageRowAnchorKey(name: string, schema?: string | null, parentName?: string | null, trigger?: TriggerInfo | null) {
+  const metadata = exactOracleTriggerMetadata(trigger);
+  if (metadata && metadata.name === name) return JSON.stringify(["oracle-trigger/v1", metadata.owner, metadata.name, metadata.objectId ?? null]);
   return `${(schema || "").toLowerCase()}\0${(parentName || "").toLowerCase()}\0${name.toLowerCase()}`;
 }
 
@@ -679,12 +682,20 @@ function coalesceXuguPackageObjects(objects: readonly ObjectInfo[], databaseType
   return result;
 }
 
-export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, schema, objects, databaseType }: { nodeId: string; connectionId: string; database: string; schema?: string; objects: ObjectInfo[]; databaseType?: DatabaseType }): TreeNode[] {
+export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, schema, catalog, objects, databaseType }: { nodeId: string; connectionId: string; database: string; schema?: string; catalog?: string; objects: ObjectInfo[]; databaseType?: DatabaseType }): TreeNode[] {
   const seen = new Set<string>();
   const tableEntries: TableTreeEntry[] = [];
   const objectNodes: TreeNode[] = [];
 
   for (const obj of coalesceXuguPackageObjects(objects, databaseType)) {
+    const exactTrigger = exactOracleTriggerObjectMetadata(obj);
+    if (exactTrigger) {
+      const key = oracleTriggerIdentityKey(exactTrigger, catalog);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      objectNodes.push(exactTriggerTreeNode(nodeId, connectionId, database, obj, exactTrigger, catalog));
+      continue;
+    }
     const objectType = normalizeObjectType(obj.object_type);
     const schemaIndex = objectType === "INDEX" && supportsSchemaIndexManagement(databaseType);
     if (!schemaIndex && !["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"].includes(objectType)) {
@@ -751,6 +762,29 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
   }
 
   return [...buildPartitionTree(tableEntries, connectionId, database), ...sortDatabaseObjectsByName(objectNodes, (node) => node.label)];
+}
+
+function exactTriggerTreeNode(nodeId: string, connectionId: string, database: string, object: ObjectInfo, metadata: OracleTriggerMetadata, catalog?: string): TreeNode {
+  const parent = metadata.scope === "TABLE" || metadata.scope === "VIEW" ? metadata.parent : undefined;
+  return {
+    id: `${nodeId}:${oracleTriggerIdentityKey(metadata, catalog)}`,
+    label: parent ? `${metadata.name} (${parent.name})` : metadata.name,
+    type: "trigger",
+    connectionId,
+    database,
+    catalog,
+    schema: metadata.owner,
+    objectName: metadata.name,
+    parentSchema: parent?.owner,
+    parentName: parent?.name,
+    parentType: parent?.objectType === "VIEW" ? "view" : parent?.objectType === "TABLE" ? "table" : undefined,
+    tableName: parent?.name,
+    valid: object.trigger?.valid ?? object.valid,
+    comment: object.comment,
+    meta: object.trigger ?? undefined,
+    isExpanded: false,
+    children: undefined,
+  };
 }
 
 function simpleObjectNodeType(objectType: DatabaseObjectTreeKind): TreeNodeType {
@@ -866,9 +900,18 @@ const groupDefs: Array<{
   {
     key: "__packages",
     label: "tree.packages",
-    objectTypes: ["PACKAGE", "PACKAGE_BODY"],
+    objectTypes: ["PACKAGE"],
     nodeType: "group-packages",
-    childType: (objectType) => (objectType === "PACKAGE_BODY" ? "package-body" : "package"),
+    childType: "package",
+  },
+  {
+    // #13239: package bodies live in their own group (PL/SQL Developer style)
+    // so browsing/editing the body no longer risks picking the spec.
+    key: "__package_bodies",
+    label: "tree.packageBodies",
+    objectTypes: ["PACKAGE_BODY"],
+    nodeType: "group-package-bodies",
+    childType: "package-body",
   },
   {
     key: "__types",
@@ -895,6 +938,7 @@ const objectGroupNodeTypes = new Set<TreeNodeType>([
   "group-synonyms",
   "group-jobs",
   "group-packages",
+  "group-package-bodies",
   "group-types",
 ]);
 
@@ -940,14 +984,50 @@ export function objectGroupRefreshParentId(node: TreeNode): string | null {
   return node.id.slice(0, suffixStart);
 }
 
-export function objectTypesForGroupNode(type: TreeNodeType): DatabaseObjectTreeKind[] | null {
-  return groupDefs.find((def) => def.nodeType === type)?.objectTypes ?? null;
+/**
+ * #13239: Xugu folds a package body into its package spec node, so the packages
+ * group must still fetch and keep PACKAGE_BODY rows — a body that only arrives
+ * on a later page then collapses into the spec child through
+ * `coalesceXuguPackageObjects`. Other drivers keep bodies in their own
+ * `__package_bodies` group.
+ */
+export function objectTypesForGroupNode(type: TreeNodeType, databaseType?: DatabaseType): DatabaseObjectTreeKind[] | null {
+  const objectTypes = groupDefs.find((def) => def.nodeType === type)?.objectTypes ?? null;
+  return objectTypes && type === "group-packages" && databaseType === "xugu" ? ["PACKAGE", "PACKAGE_BODY"] : objectTypes;
 }
 
-export function buildGroupedObjectTreeNodes({ nodeId, connectionId, database, schema, objects, databaseType, groupNodeType }: { nodeId: string; connectionId: string; database: string; schema?: string; objects: ObjectInfo[]; databaseType?: DatabaseType; groupNodeType?: TreeNodeType }): TreeNode[] {
+export function buildGroupedObjectTreeNodes({
+  nodeId,
+  connectionId,
+  database,
+  schema,
+  catalog,
+  objects,
+  databaseType,
+  groupNodeType,
+}: {
+  nodeId: string;
+  connectionId: string;
+  database: string;
+  schema?: string;
+  catalog?: string;
+  objects: ObjectInfo[];
+  databaseType?: DatabaseType;
+  groupNodeType?: TreeNodeType;
+}): TreeNode[] {
   const buckets = new Map<string, ObjectInfo[]>();
   const seen = new Set<string>();
   for (const obj of coalesceXuguPackageObjects(objects, databaseType)) {
+    const exactTrigger = exactOracleTriggerObjectMetadata(obj);
+    if (exactTrigger) {
+      const key = oracleTriggerIdentityKey(exactTrigger, catalog);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const bucket = buckets.get("TRIGGER") ?? [];
+      bucket.push(obj);
+      buckets.set("TRIGGER", bucket);
+      continue;
+    }
     const t = normalizeObjectType(obj.object_type);
     const schemaIndex = t === "INDEX" && supportsSchemaIndexManagement(databaseType);
     const name = schemaIndex ? obj.name : normalizeDatabaseObjectName(obj.name);
@@ -979,6 +1059,8 @@ export function buildGroupedObjectTreeNodes({ nodeId, connectionId, database, sc
           objectType: def.objectTypes[0] as "TABLE" | "VIEW" | "MATERIALIZED_VIEW",
         })
       : sortDatabaseObjectsByName(items, (obj) => obj.name).map((obj) => {
+          const exactTrigger = exactOracleTriggerObjectMetadata(obj);
+          if (exactTrigger) return exactTriggerTreeNode(`${nodeId}:${def.key}`, connectionId, database, obj, exactTrigger, catalog);
           const objectType = normalizeObjectType(obj.object_type);
           const schemaIndex = objectType === "INDEX" && supportsSchemaIndexManagement(databaseType);
           const childSchema = schemaIndex ? (obj.schema ?? schema) : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;

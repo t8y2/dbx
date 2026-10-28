@@ -91,6 +91,9 @@ pub struct SqlFileRequest {
     /// BOM/UTF-8/GBK detection behavior.
     #[serde(default)]
     pub encoding: SqlFileEncoding,
+    /// Explicitly allow desktop scripts to include SQL below the entry file's directory.
+    #[serde(default)]
+    pub resolve_includes: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -208,6 +211,13 @@ struct SqlDialectProfile {
     supports_firebird_routine_blocks: bool,
     supports_go_batch_separator: bool,
     keeps_sqlserver_module_batch_at_cursor: bool,
+    /// Whether a top-level T-SQL control-flow batch (`IF`/`WHILE` with a block
+    /// body or `ELSE`, or a top-level `BEGIN ... END` block) stays whole in the
+    /// `;`-statement splitter. The SQL Server profile needs it because T-SQL
+    /// does not end a block at a semicolon; the generic JDBC profile must not
+    /// lose it, or the backend re-splits the TRY/CATCH batches the editor
+    /// already kept together (#13514).
+    keeps_sqlserver_control_flow_batches: bool,
     preserves_tdsql_leading_directives: bool,
     requires_whitespace_after_line_comment_dashes: bool,
     supports_psql_control_commands: bool,
@@ -233,6 +243,7 @@ impl Default for SqlDialectProfile {
             supports_firebird_routine_blocks: false,
             supports_go_batch_separator: false,
             keeps_sqlserver_module_batch_at_cursor: false,
+            keeps_sqlserver_control_flow_batches: false,
             preserves_tdsql_leading_directives: false,
             requires_whitespace_after_line_comment_dashes: false,
             supports_psql_control_commands: false,
@@ -394,6 +405,7 @@ impl SqlDialectProfile {
         Self {
             supports_go_batch_separator: true,
             keeps_sqlserver_module_batch_at_cursor: true,
+            keeps_sqlserver_control_flow_batches: true,
             supports_nested_block_comments: true,
             ..Self::default()
         }
@@ -699,6 +711,8 @@ pub struct SqlStatementSplitter {
     pending_mysql_line_comment_dashes: bool,
     /// Open Oracle `q'...'` literal, if any.
     oracle_q_quote: OracleQQuoteState,
+    /// PL/SQL block state of the buffered statement, advanced at each `;`.
+    oracle_block: OraclePlSqlBlockTracker,
     custom_delimiter: Option<String>,
     stop_on_error: bool,
     pending_psql_command: Option<String>,
@@ -714,6 +728,22 @@ pub struct SqlStatementWithControl {
 impl SqlStatementSplitter {
     pub fn with_options(options: SqlParsingOptions) -> Self {
         Self { options, ..Self::default() }
+    }
+
+    /// A whole-line file directive must not be interpreted inside SQL text.
+    pub fn can_start_file_directive(&self) -> bool {
+        !self.in_single_quote
+            && !self.in_double_quote
+            && !self.in_backtick
+            && !self.in_line_comment
+            && self.block_comment_depth == 0
+            && self.dollar_quote_tag.is_none()
+            && !self.oracle_q_quote.is_open()
+            && self.pending_psql_command.is_none()
+    }
+
+    pub fn is_at_file_directive_boundary(&self) -> bool {
+        self.can_start_file_directive() && !has_executable_sql_with_options(&self.buffer, self.options)
     }
 
     pub fn push_chunk(&mut self, chunk: &str) -> Vec<String> {
@@ -939,10 +969,10 @@ impl SqlStatementSplitter {
                             self.buffer.push(ch);
                         }
                     } else if !self.postgres_dollar_quoted_routine
-                        && keeps_oracle_style_block_together(self.options, &self.buffer)
+                        && self.oracle_block.keeps_block_together(self.options, &self.buffer)
                     {
                         self.buffer.push(ch);
-                        if oracle_plsql_block_is_complete(&self.buffer) {
+                        if self.oracle_block.is_complete(&self.buffer) {
                             self.push_current_statement(&mut statements);
                         }
                     } else if self.options.profile.supports_hana_script_blocks
@@ -958,6 +988,60 @@ impl SqlStatementSplitter {
                         self.buffer.push(ch);
                         if firebird_routine_block_is_complete(&self.buffer) {
                             self.push_current_statement(&mut statements);
+                        }
+                    } else if keeps_sqlserver_control_flow_batch(self.options, &self.buffer) {
+                        // T-SQL does not end a control-flow batch at a semicolon
+                        // (#9336, #13051, #13514): the inner `;` stays in the
+                        // batch and the statement ends after the block's final
+                        // `END [TRY]`.
+                        self.buffer.push(ch);
+                        if sqlserver_control_flow_batch_is_complete(&self.buffer) {
+                            // A final `END` without its own `;` shares the
+                            // fragment with the next statement; the boundary
+                            // sits right after that `END` instead (TS parity).
+                            // An `END` directly followed by this `;` keeps the
+                            // historical shape: the batch ends here with its
+                            // terminating semicolon.
+                            let body_end = self.buffer.len() - ch.len_utf8();
+                            let body = self.buffer[..body_end].to_string();
+                            let mut boundaries = Vec::new();
+                            let mut cursor = 0usize;
+                            while let Some(relative) = sqlserver_control_flow_batch_boundary(&body[cursor..]) {
+                                if cursor + relative >= body.len() {
+                                    break;
+                                }
+                                cursor += relative;
+                                boundaries.push(cursor);
+                            }
+                            if boundaries.is_empty() {
+                                self.push_current_statement(&mut statements);
+                            } else {
+                                let mut piece_from = 0usize;
+                                for boundary_end in &boundaries {
+                                    self.buffer.clear();
+                                    self.buffer.push_str(&body[piece_from..*boundary_end]);
+                                    self.push_current_statement(&mut statements);
+                                    piece_from = *boundary_end;
+                                }
+                                let trailing = &body[piece_from..];
+                                if !trailing.trim().is_empty() {
+                                    self.buffer.clear();
+                                    self.buffer.push_str(trailing);
+                                    if keeps_sqlserver_control_flow_batch(self.options, trailing) {
+                                        // A new batch in the remainder keeps the
+                                        // terminating `;` when complete and this
+                                        // `;` when it is still mid-typing.
+                                        self.buffer.push(ch);
+                                        if sqlserver_control_flow_batch_is_complete(trailing) {
+                                            self.push_current_statement(&mut statements);
+                                        }
+                                    } else {
+                                        self.push_current_statement(&mut statements);
+                                    }
+                                } else {
+                                    self.buffer.clear();
+                                }
+                            }
                         }
                     } else {
                         self.push_current_statement(&mut statements);
@@ -980,6 +1064,7 @@ impl SqlStatementSplitter {
                             });
                         }
                         self.buffer.clear();
+                        self.oracle_block.reset();
                         self.postgres_dollar_quoted_routine = false;
                         self.previous = None;
                         i += 1;
@@ -1007,6 +1092,7 @@ impl SqlStatementSplitter {
                             }
                         }
                         self.buffer.clear();
+                        self.oracle_block.reset();
                         self.postgres_dollar_quoted_routine = false;
                         self.previous = None;
                         i += 1;
@@ -1096,6 +1182,7 @@ impl SqlStatementSplitter {
             statements.push(SqlStatementWithControl { sql: statement.to_string(), stop_on_error: self.stop_on_error });
         }
         self.buffer.clear();
+        self.oracle_block.reset();
         self.postgres_dollar_quoted_routine = false;
         self.previous = None;
         self.pending_mysql_line_comment_dashes = false;
@@ -1144,7 +1231,7 @@ fn is_identifier_continue_char(ch: char) -> bool {
 }
 
 /// Whether the text before a quote ends in an Oracle `q`/`nq` introducer token.
-fn ends_with_oracle_q_quote_prefix(text: &str) -> bool {
+pub(crate) fn ends_with_oracle_q_quote_prefix(text: &str) -> bool {
     let mut chars = text.chars().rev();
     if !matches!(chars.next(), Some('q' | 'Q')) {
         return false;
@@ -1172,7 +1259,7 @@ fn oracle_q_quote_closer(opening: char) -> Option<char> {
 
 /// Byte index just past the closing quote of the `q'...'` literal whose opening
 /// quote sits at `quote_index`, or `None` when the literal is not well formed.
-fn oracle_q_quote_end(sql: &str, quote_index: usize) -> Option<usize> {
+pub(crate) fn oracle_q_quote_end(sql: &str, quote_index: usize) -> Option<usize> {
     let opening = next_char_at(sql, quote_index + 1)?;
     let closer = oracle_q_quote_closer(opening)?;
     let content_start = quote_index + 1 + opening.len_utf8();
@@ -1471,6 +1558,8 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
     let mut custom_delimiter: Option<String> = None;
     let mut single_quote_escape_string = false;
     let mut postgres_dollar_quoted_routine = false;
+    let mut oracle_block = OraclePlSqlBlockTracker::default();
+    let mut oracle_block_start = 0;
 
     while i < sql.len() {
         if let Some(tag) = &dollar_quote_tag {
@@ -1624,10 +1713,14 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                     }
                     push_statement_range(&mut ranges, sql, start, i, options);
                 } else {
+                    if oracle_block_start != start {
+                        oracle_block.reset();
+                        oracle_block_start = start;
+                    }
                     let is_oracle_plsql =
-                        !postgres_dollar_quoted_routine && keeps_oracle_style_block_together(options, &sql[start..i]);
+                        !postgres_dollar_quoted_routine && oracle_block.keeps_block_together(options, &sql[start..i]);
                     if is_oracle_plsql {
-                        if !oracle_plsql_block_is_complete(&sql[start..i + ch.len_utf8()]) {
+                        if !oracle_block.is_complete(&sql[start..i + ch.len_utf8()]) {
                             i += ch.len_utf8();
                             continue;
                         }
@@ -1648,6 +1741,66 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                             continue;
                         }
                         push_statement_range(&mut ranges, sql, start, i + ch.len_utf8(), options);
+                    } else if keeps_sqlserver_control_flow_batch(options, &sql[start..i]) {
+                        // T-SQL does not end a control-flow batch at a semicolon
+                        // (#9336, #13051): the inner `;` stays in the batch and
+                        // the statement ends at the block's final `END [TRY]`.
+                        if !sqlserver_control_flow_batch_is_complete(&sql[start..i + ch.len_utf8()]) {
+                            i += ch.len_utf8();
+                            continue;
+                        }
+                        // A final `END` without its own `;` shares the fragment
+                        // with the next statement; the boundary sits right after
+                        // that `END` instead (TS parity with
+                        // `sqlStatementRanges.ts`). An `END` directly followed
+                        // by this `;` keeps the historical range shape.
+                        let body = &sql[start..i];
+                        let mut boundaries = Vec::new();
+                        let mut cursor = 0usize;
+                        while let Some(relative) = sqlserver_control_flow_batch_boundary(&body[cursor..]) {
+                            if cursor + relative >= body.len() {
+                                break;
+                            }
+                            cursor += relative;
+                            boundaries.push(cursor);
+                        }
+                        if boundaries.is_empty() {
+                            push_statement_range(&mut ranges, sql, start, i + ch.len_utf8(), options);
+                        } else {
+                            let mut piece_from = 0usize;
+                            for boundary_end in &boundaries {
+                                push_statement_range(
+                                    &mut ranges,
+                                    sql,
+                                    start + piece_from,
+                                    start + boundary_end,
+                                    options,
+                                );
+                                piece_from = *boundary_end;
+                            }
+                            let trailing = &body[piece_from..];
+                            if !trailing.trim().is_empty() {
+                                if keeps_sqlserver_control_flow_batch(options, trailing) {
+                                    if sqlserver_control_flow_batch_is_complete(trailing) {
+                                        push_statement_range(
+                                            &mut ranges,
+                                            sql,
+                                            start + piece_from,
+                                            i + ch.len_utf8(),
+                                            options,
+                                        );
+                                    } else {
+                                        // The remainder opens a new batch that is
+                                        // still mid-typing: this `;` stays inside it.
+                                        start += piece_from;
+                                        i += ch.len_utf8();
+                                        continue;
+                                    }
+                                } else {
+                                    push_statement_range(&mut ranges, sql, start + piece_from, i, options);
+                                }
+                            }
+                        }
                     } else {
                         push_statement_range(&mut ranges, sql, start, i, options);
                     }
@@ -1832,10 +1985,16 @@ fn find_sqlserver_statement_at_cursor(sql: &str, cursor_pos: usize) -> String {
 
     for (idx, batch) in batches.iter().enumerate() {
         if cursor >= batch.start && cursor <= batch.end {
-            if starts_with_sqlserver_control_flow_batch(&batch.text)
-                || (profile.keeps_sqlserver_module_batch_at_cursor && starts_with_sqlserver_module_ddl(&batch.text))
-            {
+            // Module DDL is checked before the block scan: a procedure body is
+            // itself a `BEGIN ... END` block, and the whole `CREATE`/`ALTER`
+            // batch is the execution unit there.
+            if profile.keeps_sqlserver_module_batch_at_cursor && starts_with_sqlserver_module_ddl(&batch.text) {
                 return batch.text.clone();
+            }
+            if let Some(statement) =
+                sqlserver_control_flow_statement_at(&batch.text, Some(cursor.saturating_sub(batch.start)))
+            {
+                return statement;
             }
             let relative_cursor = sql[..cursor].encode_utf16().count() - sql[..batch.start].encode_utf16().count();
             return find_statement_at_cursor_with_options(&batch.text, relative_cursor, SqlParsingOptions::default());
@@ -1843,10 +2002,11 @@ fn find_sqlserver_statement_at_cursor(sql: &str, cursor_pos: usize) -> String {
 
         if cursor < batch.start {
             if let Some(prev) = idx.checked_sub(1).and_then(|prev_idx| batches.get(prev_idx)) {
-                if starts_with_sqlserver_control_flow_batch(&prev.text)
-                    || (profile.keeps_sqlserver_module_batch_at_cursor && starts_with_sqlserver_module_ddl(&prev.text))
-                {
+                if profile.keeps_sqlserver_module_batch_at_cursor && starts_with_sqlserver_module_ddl(&prev.text) {
                     return prev.text.clone();
+                }
+                if let Some(statement) = sqlserver_control_flow_statement_at(&prev.text, None) {
+                    return statement;
                 }
                 let relative_cursor = prev.text.encode_utf16().count();
                 return find_statement_at_cursor_with_options(
@@ -1862,12 +2022,271 @@ fn find_sqlserver_statement_at_cursor(sql: &str, cursor_pos: usize) -> String {
     batches.last().map(|batch| batch.text.clone()).unwrap_or_else(|| sql.trim().to_string())
 }
 
+/// A top-level token of a SQL Server batch: a word or a `;` terminator outside
+/// string literals, quoted identifiers, comments and parentheses. `CASE ... END`
+/// inside a condition or select list therefore never looks like a block.
+struct SqlServerTopLevelToken<'a> {
+    text: &'a str,
+    start: usize,
+    end: usize,
+}
+
+impl SqlServerTopLevelToken<'_> {
+    fn is_word(&self, keyword: &str) -> bool {
+        self.text.eq_ignore_ascii_case(keyword)
+    }
+}
+
+fn sqlserver_top_level_tokens(sql: &str) -> Vec<SqlServerTopLevelToken<'_>> {
+    let bytes = sql.as_bytes();
+    let mut tokens = Vec::new();
+    let mut paren_depth = 0usize;
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            quote @ (b'\'' | b'"') => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == quote {
+                        if bytes.get(index + 1) == Some(&quote) {
+                            index += 2;
+                            continue;
+                        }
+                        index += 1;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            b'[' => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == b']' {
+                        if bytes.get(index + 1) == Some(&b']') {
+                            index += 2;
+                            continue;
+                        }
+                        index += 1;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index < bytes.len() && !(bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/')) {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+            }
+            b'(' => {
+                paren_depth += 1;
+                index += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                index += 1;
+            }
+            b';' if paren_depth == 0 => {
+                tokens.push(SqlServerTopLevelToken { text: ";", start: index, end: index + 1 });
+                index += 1;
+            }
+            byte if paren_depth == 0 && (byte == b'_' || byte.is_ascii_alphabetic()) => {
+                let start = index;
+                index += 1;
+                while index < bytes.len() {
+                    let next = bytes[index];
+                    if next == b'_' || next.is_ascii_alphanumeric() || next == b'$' {
+                        index += 1;
+                    } else {
+                        break;
+                    }
+                }
+                tokens.push(SqlServerTopLevelToken { text: &sql[start..index], start, end: index });
+            }
+            _ => index += 1,
+        }
+    }
+
+    tokens
+}
+
+/// `tokens[index]` opens a real block (`BEGIN ... END`, `BEGIN TRY`,
+/// `BEGIN CATCH`) rather than a transaction or conversation, which has no
+/// matching `END`.
+fn sqlserver_begins_block(tokens: &[SqlServerTopLevelToken<'_>], index: usize) -> bool {
+    let Some(next) = tokens.get(index + 1) else {
+        return false;
+    };
+    next.text != ";"
+        && !["TRANSACTION", "TRAN", "DISTRIBUTED", "DIALOG", "CONVERSATION"].iter().any(|keyword| next.is_word(keyword))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SqlServerBlockKind {
+    Begin,
+    Case,
+}
+
+struct SqlServerBlockFrame {
+    kind: SqlServerBlockKind,
+    start: usize,
+    /// An `IF`/`WHILE`/`ELSE` appeared since the last top-level `;`, so this
+    /// block is a branch body and its control statement is the execution unit.
+    control_statement: bool,
+}
+
+/// Byte span of a top-level SQL Server `BEGIN ... END` block.
+#[derive(Clone, Copy)]
+struct SqlServerControlFlowBlock {
+    start: usize,
+    end: usize,
+    control_statement: bool,
+}
+
+/// Top-level `BEGIN ... END` blocks of a batch (`BEGIN TRY ... END TRY BEGIN
+/// CATCH ... END CATCH` counts as one). `CASE` frames keep their own `END` from
+/// closing the surrounding block, and an unclosed block runs to the end of the
+/// batch so a block being typed stays whole.
+fn sqlserver_top_level_blocks(sql: &str) -> Vec<SqlServerControlFlowBlock> {
+    let tokens = sqlserver_top_level_tokens(sql);
+    let mut blocks = Vec::new();
+    let mut stack: Vec<SqlServerBlockFrame> = Vec::new();
+    let mut pending_try: Option<SqlServerBlockFrame> = None;
+    let mut in_control_statement = false;
+
+    for (index, token) in tokens.iter().enumerate() {
+        if token.text == ";" {
+            in_control_statement = false;
+            continue;
+        }
+        if token.is_word("IF") || token.is_word("WHILE") || token.is_word("ELSE") {
+            in_control_statement = true;
+            continue;
+        }
+        if token.is_word("BEGIN") {
+            if !sqlserver_begins_block(&tokens, index) {
+                continue;
+            }
+            let frame = match pending_try.take() {
+                Some(frame) if stack.is_empty() => frame,
+                _ => SqlServerBlockFrame {
+                    kind: SqlServerBlockKind::Begin,
+                    start: token.start,
+                    control_statement: in_control_statement,
+                },
+            };
+            stack.push(frame);
+            continue;
+        }
+        if token.is_word("CASE") {
+            stack.push(SqlServerBlockFrame {
+                kind: SqlServerBlockKind::Case,
+                start: token.start,
+                control_statement: in_control_statement,
+            });
+            continue;
+        }
+        if !token.is_word("END") {
+            continue;
+        }
+        let next = tokens.get(index + 1);
+        // `END CONVERSATION`/`END DIALOG` close a conversation, not a block.
+        if next.is_some_and(|next| next.is_word("CONVERSATION") || next.is_word("DIALOG")) {
+            continue;
+        }
+        let Some(frame) = stack.pop() else {
+            continue;
+        };
+        if frame.kind != SqlServerBlockKind::Begin || !stack.is_empty() {
+            continue;
+        }
+        // `END TRY`/`END CATCH` are two-token closers: the span includes the
+        // keyword so the boundary sits after the pair.
+        let end = match next {
+            Some(next) if next.is_word("TRY") || next.is_word("CATCH") => next.end,
+            _ => token.end,
+        };
+        if next.is_some_and(|next| next.is_word("TRY"))
+            && tokens.get(index + 2).is_some_and(|token| token.is_word("BEGIN"))
+            && tokens.get(index + 3).is_some_and(|token| token.is_word("CATCH"))
+        {
+            // `END TRY` immediately followed by `BEGIN CATCH`: both halves are
+            // one batch, so the CATCH block continues the TRY block's span.
+            pending_try = Some(frame);
+            continue;
+        }
+        blocks.push(SqlServerControlFlowBlock { start: frame.start, end, control_statement: frame.control_statement });
+    }
+
+    if let Some(frame) = pending_try {
+        // `END TRY` without its `BEGIN CATCH` yet: keep the half written batch
+        // whole while the user is still typing it.
+        blocks.push(SqlServerControlFlowBlock {
+            start: frame.start,
+            end: sql.len(),
+            control_statement: frame.control_statement,
+        });
+    } else if let Some(frame) = stack.first() {
+        if frame.kind == SqlServerBlockKind::Begin {
+            blocks.push(SqlServerControlFlowBlock {
+                start: frame.start,
+                end: sql.len(),
+                control_statement: frame.control_statement,
+            });
+        }
+    }
+
+    blocks
+}
+
+/// Text of the SQL Server control-flow statement that contains `cursor` (a byte
+/// offset into `sql`), or `None` when the batch is ordinary `;`-separated
+/// statements. `None` for the cursor means it sits after this batch, so any
+/// top-level block keeps the whole batch.
+///
+/// `IF`/`WHILE` batches and top-level `BEGIN ... END` blocks contain no
+/// independent statements: a `;` inside them does not end an execution range
+/// (#9336), and a batch that only *contains* the block, after a leading
+/// `SET XACT_ABORT ON;` for instance, still has to run it as one unit (#13051).
+fn sqlserver_control_flow_statement_at(sql: &str, cursor: Option<usize>) -> Option<String> {
+    if starts_with_sqlserver_control_flow_batch(sql) {
+        return Some(sql.to_string());
+    }
+    let blocks = sqlserver_top_level_blocks(sql);
+    let block = match cursor {
+        Some(cursor) => blocks.iter().find(|block| cursor >= block.start && cursor <= block.end),
+        None => blocks.last(),
+    }?;
+    // A branch body alone is invalid T-SQL, so its whole control statement is
+    // the unit; the whole batch keeps the leading statements too.
+    if block.control_statement || cursor.is_none() {
+        return Some(sql.to_string());
+    }
+    Some(sql[block.start..block.end].to_string())
+}
+
+/// True when the batch starts with a whole T-SQL control-flow statement: an
+/// `IF` batch, or a `BEGIN` block. `BEGIN` keywords that start a transaction or
+/// conversation have no matching `END` and stay split per statement.
 fn starts_with_sqlserver_control_flow_batch(sql: &str) -> bool {
-    let tokens = first_sql_tokens(sql, 128);
-    tokens.first().is_some_and(|token| token.eq_ignore_ascii_case("IF"))
-        && tokens.iter().any(|token| token.eq_ignore_ascii_case("ELSE"))
-        && tokens.iter().any(|token| token.eq_ignore_ascii_case("BEGIN"))
-        && tokens.iter().any(|token| token.eq_ignore_ascii_case("END"))
+    let tokens = sqlserver_top_level_tokens(sql);
+    let Some(first) = tokens.first() else {
+        return false;
+    };
+    if first.is_word("IF") {
+        return tokens.iter().any(|token| token.is_word("ELSE"))
+            && tokens.iter().any(|token| token.is_word("BEGIN"))
+            && tokens.iter().any(|token| token.is_word("END"));
+    }
+    first.is_word("BEGIN") && sqlserver_begins_block(&tokens, 0) && tokens.iter().any(|token| token.is_word("END"))
 }
 
 pub fn starts_with_sqlserver_module_ddl(sql: &str) -> bool {
@@ -2371,6 +2790,7 @@ pub fn optimize_sql_file_import_statements_with_max_insert_batch_statements(
     let mut pending_insert: Option<PendingInsertBatch> = None;
     let merge_adjacent_inserts =
         db_type.as_ref().is_none_or(|db_type| !is_mysql_compatible_import_target(db_type, driver_profile));
+    let insert_batch_syntax = insert_batch_syntax(db_type.as_ref());
 
     for statement in statements {
         let action = db_type
@@ -2403,10 +2823,10 @@ pub fn optimize_sql_file_import_statements_with_max_insert_batch_statements(
                         Some(batch) if batch.can_accept(&insert, max_insert_batch_statements) => batch.push(insert),
                         Some(_) => {
                             flush_pending_insert(&mut optimized, &mut pending_insert);
-                            pending_insert = Some(PendingInsertBatch::new(insert));
+                            pending_insert = Some(PendingInsertBatch::new(insert, insert_batch_syntax));
                         }
                         None => {
-                            pending_insert = Some(PendingInsertBatch::new(insert));
+                            pending_insert = Some(PendingInsertBatch::new(insert, insert_batch_syntax));
                         }
                     }
                 } else {
@@ -2440,6 +2860,23 @@ fn flush_pending_insert(optimized: &mut Vec<SqlFileImportStatement>, pending_ins
 const SQL_FILE_INSERT_BATCH_MAX_STATEMENTS: usize = 500;
 const SQL_FILE_INSERT_BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
 
+/// How a merged insert batch must be spelled for its target dialect.
+///
+/// Oracle-family servers reject the MySQL multi-row `VALUES (…), (…)` form, so
+/// merging there has to produce `INSERT ALL … SELECT 1 FROM dual` instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InsertBatchSyntax {
+    MultiRowValues,
+    OracleInsertAll,
+}
+
+fn insert_batch_syntax(db_type: Option<&DatabaseType>) -> InsertBatchSyntax {
+    match db_type {
+        Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle) => InsertBatchSyntax::OracleInsertAll,
+        _ => InsertBatchSyntax::MultiRowValues,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MergeableInsert {
     prefix: String,
@@ -2456,12 +2893,14 @@ struct PendingInsertBatch {
     source_sqls: Vec<String>,
     source_statement_count: usize,
     byte_len: usize,
+    syntax: InsertBatchSyntax,
 }
 
 impl PendingInsertBatch {
-    fn new(insert: MergeableInsert) -> Self {
+    fn new(insert: MergeableInsert, syntax: InsertBatchSyntax) -> Self {
         let byte_len = insert.prefix.len() + insert.values.len() + 16;
         Self {
+            syntax,
             prefix: insert.prefix,
             prefix_key: insert.prefix_key,
             values: vec![insert.values],
@@ -2488,8 +2927,47 @@ impl PendingInsertBatch {
         if self.source_statement_count == 1 {
             return self.source_sqls.first().cloned().unwrap_or_default();
         }
+        if self.syntax == InsertBatchSyntax::OracleInsertAll {
+            if let Some(target) = oracle_insert_all_target(&self.prefix) {
+                let mut sql = String::with_capacity(
+                    self.byte_len + "INSERT ALL\n".len() + "SELECT 1 FROM dual".len() + target.len() + 14,
+                );
+                sql.push_str("INSERT ALL\n");
+                for values in &self.values {
+                    sql.push_str("INTO ");
+                    sql.push_str(target);
+                    sql.push_str(" VALUES ");
+                    sql.push_str(values);
+                    sql.push('\n');
+                }
+                sql.push_str("SELECT 1 FROM dual");
+                return sql;
+            }
+        }
         format!("{} VALUES\n{}", self.prefix, self.values.join(",\n"))
     }
+}
+
+/// The `table (columns)` part of `INSERT INTO table (columns) VALUES …`, used
+/// as the repeated `INTO` clause of an `INSERT ALL` batch.
+fn oracle_insert_all_target(prefix: &str) -> Option<&str> {
+    let mut scanner = SqlScanner::default();
+    let mut seen_insert = false;
+    for (idx, ch) in prefix.char_indices() {
+        scanner.step(prefix, idx, ch);
+        if scanner.is_masked() {
+            continue;
+        }
+        if !seen_insert {
+            seen_insert = keyword_at(prefix, idx, "insert");
+            continue;
+        }
+        if keyword_at(prefix, idx, "into") {
+            let target = prefix[idx + "into".len()..].trim();
+            return (!target.is_empty()).then_some(target);
+        }
+    }
+    None
 }
 
 fn parse_mergeable_insert(sql: &str, options: SqlParsingOptions) -> Option<MergeableInsert> {
@@ -3065,6 +3543,174 @@ fn keeps_oracle_style_block_together(options: SqlParsingOptions, statement_head:
     options.profile.supports_oracle_style_routine_bodies && starts_with_oracle_style_routine_body(statement_head)
 }
 
+/// Whether the statement opened so far is a T-SQL control-flow batch that the
+/// `;`-statement splitter must keep whole: an `IF`/`WHILE` batch (its block
+/// body keeps the splitter going; a branchless one is a single statement
+/// anyway), or a top-level `BEGIN` that opens a real block (`BEGIN TRY ... END
+/// TRY BEGIN CATCH ... END CATCH` counts as one). `BEGIN TRAN[SACTION]` and
+/// friends have no matching `END` and stay split per statement. Only meaningful
+/// when the profile keeps such batches (`keeps_sqlserver_control_flow_batches`).
+fn keeps_sqlserver_control_flow_batch(options: SqlParsingOptions, statement_head: &str) -> bool {
+    if !options.profile.keeps_sqlserver_control_flow_batches {
+        return false;
+    }
+    let tokens = sqlserver_top_level_tokens(statement_head);
+    let Some(first) = tokens.first() else {
+        return false;
+    };
+    if first.is_word("IF") || first.is_word("WHILE") {
+        return true;
+    }
+    first.is_word("BEGIN") && sqlserver_begins_block(&tokens, 0)
+}
+
+/// Top-level `BEGIN`/`CASE` blocks the T-SQL statement has left open at its
+/// end. `END TRY` immediately followed by `BEGIN CATCH` continues the TRY
+/// block, so the pair keeps the depth open instead of ending the batch
+/// (#13051). Tokens inside strings, bracketed identifiers, comments and
+/// parentheses are ignored, so a nested statement's own blocks do not matter.
+fn sqlserver_control_flow_open_blocks(sql: &str) -> usize {
+    let tokens = sqlserver_top_level_tokens(sql);
+    let mut depth = 0usize;
+    let mut carried_try = false;
+    for (index, token) in tokens.iter().enumerate() {
+        if token.is_word("BEGIN") {
+            if !sqlserver_begins_block(&tokens, index) {
+                continue;
+            }
+            if carried_try {
+                // `BEGIN CATCH` continues the carried TRY block: the depth the
+                // `END TRY` left open is consumed here, not extended.
+                carried_try = false;
+            } else {
+                depth += 1;
+            }
+            continue;
+        }
+        if token.is_word("CASE") {
+            depth += 1;
+            continue;
+        }
+        if !token.is_word("END") {
+            continue;
+        }
+        let next = tokens.get(index + 1);
+        // `END CONVERSATION`/`END DIALOG` close a conversation, not a block.
+        if next.is_some_and(|next| next.is_word("CONVERSATION") || next.is_word("DIALOG")) {
+            continue;
+        }
+        if next.is_some_and(|next| next.is_word("TRY"))
+            && tokens.get(index + 2).is_some_and(|token| token.is_word("BEGIN"))
+            && tokens.get(index + 3).is_some_and(|token| token.is_word("CATCH"))
+        {
+            // `END TRY` immediately followed by `BEGIN CATCH`: both halves are
+            // one batch, so the CATCH block continues the TRY block's span.
+            carried_try = true;
+            continue;
+        }
+        depth = depth.saturating_sub(1);
+        carried_try = false;
+    }
+    depth
+}
+
+/// Whether the buffered control-flow batch is complete: every top-level
+/// `BEGIN`/`CASE` it opened has been closed, so this `;` is a real statement
+/// boundary. A batch still open — including one that is mid-typing — keeps the
+/// `;` and stays whole.
+fn sqlserver_control_flow_batch_is_complete(sql: &str) -> bool {
+    sqlserver_control_flow_open_blocks(sql) == 0
+}
+
+/// Byte offset just after the `END`/`END TRY`/`END CATCH` that closes the block
+/// a `;`-fragment carried into it, when that closure is final (not followed by
+/// `ELSE`). T-SQL semicolons are optional, so a batch whose final `END` has no
+/// trailing `;` shares its fragment with the next statement; the statement
+/// boundary then sits right after the closing token instead of at the next
+/// `;`. Mirrors `scanSqlServerControlFlow`'s `closedAt`/`wordAfterClose` in
+/// `sqlStatementRanges.ts`: a block opened and closed inside one `;`-free run
+/// has no boundary (the whole run stays one statement), and a closure followed
+/// by `ELSE` only continues the same `IF`, so a later closure in the same
+/// fragment replaces it.
+fn sqlserver_control_flow_batch_boundary(sql: &str) -> Option<usize> {
+    let tokens = sqlserver_top_level_tokens(sql);
+    let mut index = 0usize;
+    let mut fragment_start_depth = 0usize;
+    while index < tokens.len() {
+        // Scan one `;`-delimited fragment with the depth the previous fragment
+        // left open; only a closure of that carried depth is a boundary.
+        let mut depth = fragment_start_depth;
+        let mut carried_try = false;
+        let mut boundary: Option<(usize, &str)> = None;
+        while index < tokens.len() {
+            let token = &tokens[index];
+            if token.is_word(";") {
+                index += 1;
+                break;
+            }
+            if token.is_word("BEGIN") {
+                if sqlserver_begins_block(&tokens, index) {
+                    if carried_try {
+                        // `BEGIN CATCH` continues the carried TRY block.
+                        carried_try = false;
+                    } else {
+                        depth += 1;
+                    }
+                }
+                index += 1;
+                continue;
+            }
+            if token.is_word("CASE") {
+                depth += 1;
+                index += 1;
+                continue;
+            }
+            if !token.is_word("END") {
+                index += 1;
+                continue;
+            }
+            let next = tokens.get(index + 1);
+            // `END CONVERSATION`/`END DIALOG` close a conversation, not a block.
+            if next.is_some_and(|next| next.is_word("CONVERSATION") || next.is_word("DIALOG")) {
+                index += 1;
+                continue;
+            }
+            if next.is_some_and(|next| next.is_word("TRY"))
+                && tokens.get(index + 2).is_some_and(|token| token.is_word("BEGIN"))
+                && tokens.get(index + 3).is_some_and(|token| token.is_word("CATCH"))
+            {
+                // `END TRY BEGIN CATCH` keeps the pair in one batch.
+                carried_try = true;
+                index += 1;
+                continue;
+            }
+            depth = depth.saturating_sub(1);
+            carried_try = false;
+            if fragment_start_depth > 0 && depth == 0 {
+                // `END TRY`/`END CATCH` are two-token closers: the boundary sits
+                // after the pair, and the word after the pair decides finality.
+                let paired = next.is_some_and(|next| next.is_word("TRY") || next.is_word("CATCH"));
+                let (end_offset, word_after) = if paired {
+                    (tokens[index + 1].end, tokens.get(index + 2).map_or("", |token| token.text))
+                } else {
+                    (token.end, next.map_or("", |token| token.text))
+                };
+                if boundary.as_ref().is_none_or(|(_, word)| word.eq_ignore_ascii_case("ELSE")) {
+                    boundary = Some((end_offset, word_after));
+                }
+            }
+            index += 1;
+        }
+        if let Some((offset, word_after)) = boundary {
+            if !word_after.eq_ignore_ascii_case("ELSE") {
+                return Some(offset);
+            }
+        }
+        fragment_start_depth = depth;
+    }
+    None
+}
+
 fn starts_with_oracle_style_routine_body(sql: &str) -> bool {
     OraclePlSqlBlock::parse(sql).starts_oracle_style_routine_body()
 }
@@ -3272,6 +3918,168 @@ impl FirebirdRoutineBlock {
     }
 }
 
+/// The BEGIN/END scope walk behind [`OraclePlSqlBlock::is_complete`], kept resumable so
+/// [`OraclePlSqlBlockTracker`] only walks the tokens added since its previous check.
+#[derive(Debug, Clone)]
+struct OraclePlSqlBlockWalk {
+    object_kind: Option<OraclePlSqlCreateObjectKind>,
+    scopes: Vec<OraclePlSqlScope>,
+    awaiting_routine_declarations: bool,
+    saw_begin: bool,
+    complete: bool,
+    next_index: usize,
+}
+
+impl OraclePlSqlBlockWalk {
+    fn new(block: &OraclePlSqlBlock) -> Self {
+        // Package/type specifications have declarations and an outer END with
+        // no BEGIN. Bodies also own an outer END beyond nested routine END
+        // pairs so an inner END cannot finish the object.
+        let object_kind = block.create_object_kind();
+        let scopes = match object_kind {
+            Some(OraclePlSqlCreateObjectKind::Body | OraclePlSqlCreateObjectKind::Spec) => {
+                vec![OraclePlSqlScope::Object]
+            }
+            None => Vec::new(),
+        };
+        Self {
+            object_kind,
+            scopes,
+            // A stored PROCEDURE/FUNCTION has no DECLARE keyword: its declare section
+            // starts right after its own IS/AS. Opening it there lets a local subprogram
+            // own its BEGIN ... END instead of ending the routine.
+            awaiting_routine_declarations: block.is_create_routine(),
+            saw_begin: false,
+            complete: false,
+            next_index: 0,
+        }
+    }
+
+    fn advance(&mut self, tokens: &[OraclePlSqlToken]) {
+        while self.next_index < tokens.len() {
+            self.step(tokens, self.next_index);
+            self.next_index += 1;
+        }
+    }
+
+    fn step(&mut self, tokens: &[OraclePlSqlToken], index: usize) {
+        let token = &tokens[index];
+        let scopes = &mut self.scopes;
+        if token.is_semicolon() {
+            if matches!(scopes.last(), Some(OraclePlSqlScope::RoutineHeader)) {
+                scopes.pop();
+            }
+            return;
+        }
+
+        if self.awaiting_routine_declarations && token.is_any_word(&["IS", "AS"]) {
+            self.awaiting_routine_declarations = false;
+            scopes.push(OraclePlSqlScope::Declaration);
+        } else if token.is_word("DECLARE") {
+            if !matches!(scopes.last(), Some(OraclePlSqlScope::Declaration)) {
+                scopes.push(OraclePlSqlScope::Declaration);
+            }
+        } else if token.is_any_word(&["PROCEDURE", "FUNCTION"])
+            && matches!(scopes.last(), Some(OraclePlSqlScope::Declaration | OraclePlSqlScope::Routine))
+        {
+            scopes.push(OraclePlSqlScope::RoutineHeader);
+        } else if token.is_any_word(&["IS", "AS"]) && matches!(scopes.last(), Some(OraclePlSqlScope::RoutineHeader)) {
+            *scopes.last_mut().unwrap() = OraclePlSqlScope::Routine;
+        } else if token.is_word("BEGIN") {
+            // A local routine's BEGIN belongs to that routine, not to the outer block.
+            if matches!(scopes.last(), Some(OraclePlSqlScope::Declaration | OraclePlSqlScope::Routine)) {
+                *scopes.last_mut().unwrap() = OraclePlSqlScope::Block;
+            } else {
+                scopes.push(OraclePlSqlScope::Block);
+            }
+            self.saw_begin = true;
+            self.complete = false;
+        } else if token.is_word("CASE") {
+            // Both CASE expressions and CASE statements own an END.
+            // The CASE token that follows END CASE is a suffix, not a scope start.
+            // Require source adjacency: `end ), (case` must open a new CASE scope.
+            if previous_adjacent_word(tokens, index) != Some("END") {
+                scopes.push(OraclePlSqlScope::Case);
+            }
+        } else if token.is_word("END") {
+            let next = next_adjacent_word(tokens, index);
+            if matches!(next, Some("IF" | "LOOP")) {
+                return;
+            }
+            if matches!(next, Some("CASE")) && !matches!(scopes.last(), Some(OraclePlSqlScope::Case)) {
+                return;
+            }
+            if scopes.pop().is_some() {
+                self.complete = scopes.is_empty();
+            }
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        match self.object_kind {
+            // Package/type objects complete on their outer END [name]; a package
+            // body may omit an initialization BEGIN when it has no executable
+            // initialization section.
+            Some(OraclePlSqlCreateObjectKind::Body | OraclePlSqlCreateObjectKind::Spec) => self.complete,
+            _ => self.saw_begin && self.complete,
+        }
+    }
+}
+
+/// Incremental [`keeps_oracle_style_block_together`] and [`oracle_plsql_block_is_complete`]
+/// for a statement that the splitters grow one statement-level `;` at a time. Re-tokenizing
+/// the whole statement at every inner `;` made splitting a large package body quadratic: a
+/// 370 KB DM8 package body spent minutes in the splitter before reaching the server (#13450).
+///
+/// The splitters only consult it at a `;` outside quotes and comments, so tokenizing the
+/// statement in slices that start or end at those semicolons yields the same tokens as
+/// tokenizing it whole.
+#[derive(Debug, Default)]
+struct OraclePlSqlBlockTracker {
+    block: OraclePlSqlBlock,
+    scanned_len: usize,
+    walk: Option<OraclePlSqlBlockWalk>,
+}
+
+impl OraclePlSqlBlockTracker {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn scan(&mut self, statement: &str) {
+        if statement.len() < self.scanned_len {
+            self.reset();
+        }
+        self.block.tokens.extend(oracle_plsql_tokens(&statement[self.scanned_len..]));
+        self.scanned_len = statement.len();
+    }
+
+    /// [`keeps_oracle_style_block_together`] for `statement_head`, the statement before the `;`.
+    fn keeps_block_together(&mut self, options: SqlParsingOptions, statement_head: &str) -> bool {
+        if !options.profile.supports_oracle_plsql_blocks && !options.profile.supports_oracle_style_routine_bodies {
+            return false;
+        }
+        self.scan(statement_head);
+        if options.profile.supports_oracle_plsql_blocks {
+            return self.block.starts_block();
+        }
+        self.block.starts_oracle_style_routine_body()
+    }
+
+    /// [`oracle_plsql_block_is_complete`] for `statement`, which ends with the `;`.
+    fn is_complete(&mut self, statement: &str) -> bool {
+        self.scan(statement);
+        if let Some(complete) = self.block.completion_without_block_walk() {
+            return complete;
+        }
+        let block = &self.block;
+        let walk = self.walk.get_or_insert_with(|| OraclePlSqlBlockWalk::new(block));
+        walk.advance(&block.tokens);
+        walk.is_complete()
+    }
+}
+
+#[derive(Debug, Default)]
 struct OraclePlSqlBlock {
     tokens: Vec<OraclePlSqlToken>,
 }
@@ -3354,93 +4162,40 @@ impl OraclePlSqlBlock {
     }
 
     fn is_complete(&self) -> bool {
+        if let Some(complete) = self.completion_without_block_walk() {
+            return complete;
+        }
+        let mut walk = OraclePlSqlBlockWalk::new(self);
+        walk.advance(&self.tokens);
+        walk.is_complete()
+    }
+
+    /// The completion rules decided by the statement header alone; `None` means the
+    /// BEGIN/END walk in [`OraclePlSqlBlockWalk`] decides.
+    fn completion_without_block_walk(&self) -> Option<bool> {
         if !self.starts_block() {
-            return false;
+            return Some(false);
         }
 
         // `WITH [FUNCTION|PROCEDURE ... END;] <main query>;` follows its own completion
-        // rule (see with_function_is_complete); the classic block walk below would fire
-        // at the declaration's `END;` and cut the main query off the statement.
+        // rule (see with_function_is_complete); the classic block walk would fire at the
+        // declaration's `END;` and cut the main query off the statement.
         if self.starts_with_function_declaration() {
-            return self.with_function_is_complete();
+            return Some(self.with_function_is_complete());
         }
 
-        // Package/type specifications have declarations and an outer END with
-        // no BEGIN. Bodies also own an outer END beyond nested routine END
-        // pairs so an inner END cannot finish the object.
-        let object_kind = self.create_object_kind();
-        let mut scopes = match object_kind {
-            Some(OraclePlSqlCreateObjectKind::Body | OraclePlSqlCreateObjectKind::Spec) => {
-                vec![OraclePlSqlScope::Object]
-            }
-            None => Vec::new(),
-        };
-        // A stored PROCEDURE/FUNCTION has no DECLARE keyword: its declare section
-        // starts right after its own IS/AS. Opening it there lets a local subprogram
-        // own its BEGIN ... END instead of ending the routine.
-        let mut awaiting_routine_declarations = self.is_create_routine();
-        let mut saw_begin = false;
-        let mut complete = false;
-
-        for (index, token) in self.tokens.iter().enumerate() {
-            if token.is_semicolon() {
-                if matches!(scopes.last(), Some(OraclePlSqlScope::RoutineHeader)) {
-                    scopes.pop();
-                }
-                continue;
-            }
-
-            if awaiting_routine_declarations && token.is_any_word(&["IS", "AS"]) {
-                awaiting_routine_declarations = false;
-                scopes.push(OraclePlSqlScope::Declaration);
-            } else if token.is_word("DECLARE") {
-                if !matches!(scopes.last(), Some(OraclePlSqlScope::Declaration)) {
-                    scopes.push(OraclePlSqlScope::Declaration);
-                }
-            } else if token.is_any_word(&["PROCEDURE", "FUNCTION"])
-                && matches!(scopes.last(), Some(OraclePlSqlScope::Declaration | OraclePlSqlScope::Routine))
+        if self.tokens.first().is_some_and(|token| token.is_word("CREATE")) {
+            let object = Self::skip_create_modifiers(&self.tokens[1..]);
+            if object.first().is_some_and(|token| token.is_word("TRIGGER"))
+                && object
+                    .iter()
+                    .find(|token| token.is_any_word(&["BEGIN", "DECLARE", "COMPOUND", "CALL"]))
+                    .is_some_and(|token| token.is_word("CALL"))
             {
-                scopes.push(OraclePlSqlScope::RoutineHeader);
-            } else if token.is_any_word(&["IS", "AS"]) && matches!(scopes.last(), Some(OraclePlSqlScope::RoutineHeader))
-            {
-                *scopes.last_mut().unwrap() = OraclePlSqlScope::Routine;
-            } else if token.is_word("BEGIN") {
-                // A local routine's BEGIN belongs to that routine, not to the outer block.
-                if matches!(scopes.last(), Some(OraclePlSqlScope::Declaration | OraclePlSqlScope::Routine)) {
-                    *scopes.last_mut().unwrap() = OraclePlSqlScope::Block;
-                } else {
-                    scopes.push(OraclePlSqlScope::Block);
-                }
-                saw_begin = true;
-                complete = false;
-            } else if token.is_word("CASE") {
-                // Both CASE expressions and CASE statements own an END.
-                // The CASE token that follows END CASE is a suffix, not a scope start.
-                // Require source adjacency: `end ), (case` must open a new CASE scope.
-                if previous_adjacent_word(&self.tokens, index) != Some("END") {
-                    scopes.push(OraclePlSqlScope::Case);
-                }
-            } else if token.is_word("END") {
-                let next = next_adjacent_word(&self.tokens, index);
-                if matches!(next, Some("IF" | "LOOP")) {
-                    continue;
-                }
-                if matches!(next, Some("CASE")) && !matches!(scopes.last(), Some(OraclePlSqlScope::Case)) {
-                    continue;
-                }
-                if scopes.pop().is_some() {
-                    complete = scopes.is_empty();
-                }
+                return Some(self.tokens.last().is_some_and(OraclePlSqlToken::is_semicolon));
             }
         }
-
-        match object_kind {
-            // Package/type objects complete on their outer END [name]; a package
-            // body may omit an initialization BEGIN when it has no executable
-            // initialization section.
-            Some(OraclePlSqlCreateObjectKind::Body | OraclePlSqlCreateObjectKind::Spec) => complete,
-            _ => saw_begin && complete,
-        }
+        None
     }
 
     fn starts_with_function_declaration(&self) -> bool {
@@ -3841,7 +4596,7 @@ fn has_executable_sql_with_options(statement: &str, options: SqlParsingOptions) 
             continue;
         }
 
-        if ch == '-' && next == Some('-') {
+        if ch == '-' && next == Some('-') && dash_dash_starts_line_comment(options.profile, chars.get(i + 2).copied()) {
             in_line_comment = true;
             previous = Some(ch);
             i += 1;
@@ -3901,6 +4656,20 @@ mod tests {
         starts_with_executable_sql_keyword_for_database, starts_with_oracle_style_routine_body, SqlDialectProfile,
         SqlFileRequest, SqlFileStatementAction, SqlParsingOptions, SqlStatementSplitter,
     };
+
+    #[test]
+    fn file_directive_boundaries_use_the_dialect_line_comment_rule() {
+        let mut mysql = SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(DatabaseType::Mysql));
+        mysql.push_chunk("--foo\n");
+        assert!(!mysql.is_at_file_directive_boundary());
+        let mut sqlite = SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(DatabaseType::Sqlite));
+        sqlite.push_chunk("--foo\n");
+        assert!(sqlite.is_at_file_directive_boundary());
+        let mut mysql_comment =
+            SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(DatabaseType::Mysql));
+        mysql_comment.push_chunk("-- real comment\n");
+        assert!(mysql_comment.is_at_file_directive_boundary());
+    }
 
     #[test]
     fn sql_file_request_keeps_failure_logging_on_when_the_field_is_absent() {
@@ -4834,6 +5603,39 @@ mod tests {
     }
 
     #[test]
+    fn optimizes_adjacent_oracle_family_inserts_into_insert_all() {
+        let statements = vec![
+            "Insert into SYS_QUESTION (ID, NAME) values ('001', '市场监管')".to_string(),
+            "Insert into SYS_QUESTION (ID, NAME) values ('002', '网络交易')".to_string(),
+        ];
+
+        for db_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let optimized = optimize_sql_file_import_statements(&statements, Some(db_type), None);
+
+            assert_eq!(optimized.len(), 1, "{db_type:?}");
+            assert_eq!(optimized[0].source_statement_count, 2, "{db_type:?}");
+            assert_eq!(
+                optimized[0].sql,
+                "INSERT ALL\n\
+                 INTO SYS_QUESTION (ID, NAME) VALUES ('001', '市场监管')\n\
+                 INTO SYS_QUESTION (ID, NAME) VALUES ('002', '网络交易')\n\
+                 SELECT 1 FROM dual",
+                "{db_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_single_oracle_insert_as_written() {
+        let statements = vec!["INSERT INTO users (id) VALUES (1)".to_string()];
+
+        let optimized = optimize_sql_file_import_statements(&statements, Some(DatabaseType::OceanbaseOracle), None);
+
+        assert_eq!(optimized.len(), 1);
+        assert_eq!(optimized[0].sql, statements[0]);
+    }
+
+    #[test]
     fn keeps_mysql_insert_statements_separate_to_preserve_session_semantics() {
         let statements = vec![
             "INSERT INTO parents (name) VALUES ('first')".to_string(),
@@ -5534,6 +6336,24 @@ SELECT 2 FROM RDB$DATABASE;";
                     split_sql_statements_for_database(&format!("{routine}\nSELECT 1 FROM dual;"), database),
                     vec![routine.to_string(), "SELECT 1 FROM dual".to_string()],
                     "{database:?}: {routine}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_split_ends_call_trigger_before_following_ddl() {
+        let trigger = "CREATE OR REPLACE TRIGGER \"S\".\"TR\" BEFORE INSERT ON \"S\".\"T\" FOR EACH ROW CALL \"S\".\"P\"(:NEW.ID, 'a;b');";
+        for database in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            for separator in ["\n", "\n/\n"] {
+                let sql = format!("{trigger}{separator}ALTER TRIGGER \"S\".\"TR\" DISABLE; COMMENT ON TABLE \"S\".\"T\" IS 'unchanged';");
+                assert_eq!(
+                    split_sql_statements_for_database(&sql, database),
+                    vec![
+                        trigger.to_string(),
+                        "ALTER TRIGGER \"S\".\"TR\" DISABLE".to_string(),
+                        "COMMENT ON TABLE \"S\".\"T\" IS 'unchanged'".to_string()
+                    ]
                 );
             }
         }
@@ -6778,6 +7598,30 @@ SELECT 1;";
     }
 
     #[test]
+    fn oracle_like_split_large_package_body_in_linear_time() {
+        // Every inner `;` used to re-tokenize the whole body so far, so a few hundred KB
+        // DM8 package body spent minutes in the splitter before reaching the server (#13450).
+        let routines = (0..300)
+            .map(|i| {
+                format!(
+                    "  PROCEDURE p{i}(p_id INT) IS\n    v_name VARCHAR2(100) := 'x;y';\n  BEGIN\n    IF p_id > 0 THEN\n      INSERT INTO orders VALUES (p_id);\n    END IF;\n    FOR r IN (SELECT id FROM orders WHERE id = p_id) LOOP\n      UPDATE orders SET name = v_name WHERE id = r.id;\n    END LOOP;\n  END p{i};\n"
+                )
+            })
+            .collect::<String>();
+        let package_body = format!("CREATE OR REPLACE PACKAGE BODY pkg_orders AS\n{routines}END pkg_orders;");
+        let sql = format!("{package_body}\nSELECT 1 FROM dual;");
+
+        let started = std::time::Instant::now();
+        let statements = split_sql_statements_for_database(&sql, DatabaseType::Dameng);
+        let cursor_statement = find_statement_at_cursor_for_database(&sql, 1, DatabaseType::Dameng);
+        let elapsed = started.elapsed();
+
+        assert_eq!(statements, vec![package_body.as_str(), "SELECT 1 FROM dual"]);
+        assert_eq!(cursor_statement, package_body);
+        assert!(elapsed < std::time::Duration::from_secs(2), "splitting took {elapsed:?}");
+    }
+
+    #[test]
     fn xugu_split_keeps_create_type_body_together() {
         let sql = "\
 CREATE OR REPLACE TYPE BODY obj_t AS
@@ -7061,12 +7905,293 @@ END";
         assert_eq!(super::find_statement_at_cursor_for_database(sql, add_cursor, DatabaseType::SqlServer), sql);
     }
 
+    // #13051: a top-level BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH
+    // script is one batch, the same as an IF/ELSE control-flow batch.
+    #[test]
+    fn sqlserver_current_statement_keeps_top_level_try_catch_batch() {
+        let sql = "\
+BEGIN TRY
+    BEGIN TRANSACTION;
+    UPDATE dbo.Documents SET Deleted = 0 WHERE Deleted = 1;
+    COMMIT TRANSACTION;
+END TRY
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+    THROW;
+END CATCH";
+        let update_cursor = sql[..sql.find("UPDATE dbo.Documents").unwrap()].encode_utf16().count();
+        let rollback_cursor = sql[..sql.find("ROLLBACK").unwrap()].encode_utf16().count();
+
+        assert_eq!(super::find_statement_at_cursor_for_database(sql, update_cursor, DatabaseType::SqlServer), sql);
+        assert_eq!(super::find_statement_at_cursor_for_database(sql, rollback_cursor, DatabaseType::SqlServer), sql);
+    }
+
+    #[test]
+    fn sqlserver_current_statement_keeps_top_level_plain_begin_block() {
+        let sql = "BEGIN\n  SELECT 1;\n  SELECT 2;\nEND";
+        let cursor = sql[..sql.find("SELECT 2").unwrap()].encode_utf16().count();
+
+        assert_eq!(super::find_statement_at_cursor_for_database(sql, cursor, DatabaseType::SqlServer), sql);
+    }
+
+    #[test]
+    fn sqlserver_current_statement_still_splits_begin_transaction_batches() {
+        let sql = "BEGIN TRANSACTION;\nUPDATE dbo.T SET x = 1;\nCOMMIT;";
+        let cursor = sql[..sql.find("UPDATE").unwrap()].encode_utf16().count();
+
+        assert_eq!(
+            super::find_statement_at_cursor_for_database(sql, cursor, DatabaseType::SqlServer),
+            "UPDATE dbo.T SET x = 1"
+        );
+    }
+
+    // #13051: the reported script begins with `SET XACT_ABORT ON;`, so the batch
+    // does not start with the block. The statement at the cursor is still found
+    // by the enclosing top-level BEGIN TRY ... END CATCH block instead of being
+    // `;`-split into a lone `BEGIN TRANSACTION`.
+    #[test]
+    fn sqlserver_current_statement_keeps_try_catch_after_leading_statement() {
+        let sql = "\
+SET XACT_ABORT ON;
+
+BEGIN TRY
+    BEGIN TRANSACTION;
+
+    UPDATE [dbo].[Documents]
+    SET [Deleted] = 0
+    WHERE [Deleted] = 1;
+
+    DECLARE @Updated int = @@ROWCOUNT;
+
+    IF EXISTS (SELECT 1 FROM [dbo].[Documents] WHERE [Deleted] = 1)
+        THROW 50001, N'Rows with Deleted = 1 still exist.', 1;
+
+    COMMIT TRANSACTION;
+
+    SELECT N'OK' AS Result, @Updated AS RowsUpdated;
+END TRY
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+    THROW;
+END CATCH;";
+        let block = sql[sql.find("BEGIN TRY").unwrap()..].trim_end_matches(';');
+        let transaction_cursor = sql[..sql.find("BEGIN TRANSACTION").unwrap()].encode_utf16().count();
+        let update_cursor = sql[..sql.find("UPDATE [dbo].[Documents]").unwrap()].encode_utf16().count();
+        let catch_cursor = sql[..sql.find("BEGIN CATCH").unwrap()].encode_utf16().count();
+        let rollback_cursor = sql[..sql.find("ROLLBACK").unwrap()].encode_utf16().count();
+
+        assert_eq!(
+            super::find_statement_at_cursor_for_database(sql, transaction_cursor, DatabaseType::SqlServer),
+            block
+        );
+        assert_eq!(super::find_statement_at_cursor_for_database(sql, update_cursor, DatabaseType::SqlServer), block);
+        assert_eq!(super::find_statement_at_cursor_for_database(sql, catch_cursor, DatabaseType::SqlServer), block);
+        assert_eq!(super::find_statement_at_cursor_for_database(sql, rollback_cursor, DatabaseType::SqlServer), block);
+    }
+
+    // The block boundary must not be capped by a token budget: a block whose
+    // END is far past the first words still keeps every statement inside it.
+    #[test]
+    fn sqlserver_current_statement_keeps_long_top_level_block() {
+        let body = (0..200).map(|index| format!("    SELECT {index};")).collect::<Vec<_>>().join("\n");
+        let sql = format!("SET XACT_ABORT ON;\nBEGIN\n{body}\nEND");
+        let cursor = sql[..sql.find("SELECT 199").unwrap()].encode_utf16().count();
+        let block = &sql[sql.find("BEGIN").unwrap()..];
+
+        assert_eq!(super::find_statement_at_cursor_for_database(&sql, cursor, DatabaseType::SqlServer), block);
+
+        let plain = format!("BEGIN\n{body}\nEND");
+        let cursor = plain[..plain.find("SELECT 199").unwrap()].encode_utf16().count();
+
+        assert_eq!(super::find_statement_at_cursor_for_database(&plain, cursor, DatabaseType::SqlServer), plain);
+    }
+
     #[test]
     fn mysql_hash_comments_split_statements_per_issue_428() {
         let sql = "SELECT 1; # mysql comment\n\nSELECT 2 # trailing comment";
         assert_eq!(
             split_sql_statements_for_database(sql, DatabaseType::Mysql),
             vec!["SELECT 1", "# mysql comment\n\nSELECT 2 # trailing comment"]
+        );
+    }
+
+    // #13514: a JDBC SQL Server connection splits with the SQL Server profile
+    // (the mapped `statement_split_database_type`), so the reported script keeps
+    // its TRY/CATCH batch whole while the leading `SET` stays its own statement.
+    #[test]
+    fn sqlserver_statement_splitter_keeps_try_catch_batch_after_leading_statement() {
+        let sql = "\
+SET XACT_ABORT ON;
+
+BEGIN TRY
+    BEGIN TRANSACTION;
+
+    UPDATE [dbo].[Documents]
+    SET [Deleted] = 0
+    WHERE [Deleted] = 1;
+
+    DECLARE @Updated int = @@ROWCOUNT;
+
+    IF EXISTS (SELECT 1 FROM [dbo].[Documents] WHERE [Deleted] = 1)
+        THROW 50001, N'Rows with Deleted = 1 still exist.', 1;
+
+    COMMIT TRANSACTION;
+
+    SELECT N'OK' AS Result, @Updated AS RowsUpdated;
+END TRY
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+    THROW;
+END CATCH;";
+        let block = &sql[sql.find("BEGIN TRY").unwrap()..];
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SqlServer),
+            vec!["SET XACT_ABORT ON".to_string(), block.to_string()]
+        );
+    }
+
+    // The same script through the generic JDBC profile (no SQL Server signals)
+    // keeps its historical split shape: the Oracle-style routine-body handling
+    // glues the block opener to the first inner statement, and the rest splits
+    // per statement. The `statement_split_database_type` mapping is what opts a
+    // connection into the SQL Server rules instead.
+    #[test]
+    fn jdbc_statement_splitter_still_splits_try_catch_batches() {
+        let sql = "BEGIN TRY\n    BEGIN TRANSACTION;\n    UPDATE dbo.T SET x = 1;\nEND TRY\nBEGIN CATCH\n    THROW;\nEND CATCH;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Jdbc),
+            vec![
+                "BEGIN TRY\n    BEGIN TRANSACTION",
+                "UPDATE dbo.T SET x = 1",
+                "END TRY\nBEGIN CATCH\n    THROW",
+                "END CATCH",
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_keeps_if_block_batch_whole() {
+        let sql = "IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = N'demo')\nBEGIN\n    CREATE DATABASE demo;\nEND;\nSELECT 1;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SqlServer),
+            vec![
+                "IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = N'demo')\nBEGIN\n    CREATE DATABASE demo;\nEND;",
+                "SELECT 1",
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_still_splits_begin_transaction_batches() {
+        let sql = "BEGIN TRANSACTION;\nUPDATE dbo.T SET x = 1;\nCOMMIT TRANSACTION;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SqlServer),
+            vec!["BEGIN TRANSACTION", "UPDATE dbo.T SET x = 1", "COMMIT TRANSACTION"]
+        );
+    }
+
+    // The four specs below mirror `sqlStatementRanges.spec.ts` so the backend
+    // splitter and the editor range scanner agree on where a control-flow
+    // batch ends when its final `END` has no semicolon of its own.
+    #[test]
+    fn sqlserver_statement_splitter_ends_single_line_if_batch_before_next_statement() {
+        let sql = "IF @x = 1 BEGIN SELECT 1; END\nSELECT 999;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SqlServer),
+            vec!["IF @x = 1 BEGIN SELECT 1; END", "SELECT 999"]
+        );
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_ends_try_batch_without_catch_at_end_try() {
+        let sql = "BEGIN TRY\n    SELECT 1;\nEND TRY\nSELECT 999;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SqlServer),
+            vec!["BEGIN TRY\n    SELECT 1;\nEND TRY", "SELECT 999"]
+        );
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_ends_if_else_batch_before_next_statement() {
+        let batch = "\
+IF NOT EXISTS (SELECT 1 FROM dbo.T WHERE n = N'x')
+BEGIN
+    SELECT 1;
+END
+ELSE
+BEGIN
+    SELECT 2;
+END";
+
+        assert_eq!(
+            split_sql_statements_for_database(&format!("{batch}\nSELECT 999;"), DatabaseType::SqlServer),
+            vec![batch.to_string(), "SELECT 999".to_string()]
+        );
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_ends_if_else_batch_at_else_branch_end_without_semicolon() {
+        let batch = "\
+IF @x = 1
+BEGIN
+    SELECT 1;
+END
+ELSE
+BEGIN
+    SELECT 2
+END";
+
+        assert_eq!(
+            split_sql_statements_for_database(&format!("{batch}\nSELECT 999;"), DatabaseType::SqlServer),
+            vec![batch.to_string(), "SELECT 999".to_string()]
+        );
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_keeps_case_end_inside_if_batch() {
+        // `CASE ... END` must not close the surrounding `BEGIN` block, so the
+        // batch still ends at its own `END`, before the next statement.
+        let sql = "IF @x = 1 BEGIN SELECT CASE WHEN 1 = 1 THEN 'a' ELSE 'b' END AS v; END\nSELECT 999;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SqlServer),
+            vec!["IF @x = 1 BEGIN SELECT CASE WHEN 1 = 1 THEN 'a' ELSE 'b' END AS v; END", "SELECT 999",]
+        );
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_ignores_end_conversation_in_batches() {
+        let sql = "IF @x = 1 BEGIN SELECT 1; END\nEND CONVERSATION @handle;\nSELECT 999;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SqlServer),
+            vec!["IF @x = 1 BEGIN SELECT 1; END", "END CONVERSATION @handle", "SELECT 999",]
+        );
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_keeps_nested_try_catch_batch_whole() {
+        let batch = "\
+WHILE @i < 10
+BEGIN
+    BEGIN TRY
+        SELECT 1;
+    END TRY
+    BEGIN CATCH
+        SET @i = @i + 1;
+    END CATCH
+END";
+        let sql = format!("{batch}\nSELECT 999;");
+
+        assert_eq!(
+            split_sql_statements_for_database(&sql, DatabaseType::SqlServer),
+            vec![batch.to_string(), "SELECT 999".to_string()]
         );
     }
 

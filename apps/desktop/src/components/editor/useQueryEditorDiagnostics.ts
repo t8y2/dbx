@@ -15,7 +15,7 @@ import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { mergeSqlSemanticReferenceAnalysis } from "@/lib/sql/semantic/references";
 import { sqlServerUseDatabaseBeforeCursor } from "@/lib/sql/sqlCompletionLookupTarget";
 import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange, sqlErrorSqlMatchesEditor } from "@/lib/sql/sqlDiagnostics";
-import { scalarPositionToUtf16Offset, sqlErrorEditorOffset } from "@/lib/sql/errorPosition";
+import { sqlErrorEditorRange } from "@/lib/sql/errorPosition";
 import { analyzeMysqlRoutineSyntax, supportsMysqlRoutineSyntaxDiagnostics } from "@/lib/sql/mysqlRoutineSyntaxDiagnostics";
 import { buildOracleSyntaxDiagnostics } from "@/lib/sql/oracleSyntaxDiagnostics";
 import { buildSqlServerRoutineSyntaxDiagnostics } from "@/lib/sql/sqlServerRoutineSyntaxDiagnostics";
@@ -96,16 +96,12 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
     if (!props.executionError) return [];
     if (props.executionErrorResult?.sourceStatement) {
       const sql = currentState.doc.toString();
-      const mapped = sqlErrorEditorOffset({ editorSql: sql, result: props.executionErrorResult, resultIndex: props.executionErrorResult.statement_index, databaseType: props.databaseType, parameterOptions: sqlStatementParameterOptions() });
-      if (!mapped || mapped.offset >= sql.length) return [];
-      const source = props.executionErrorResult.sourceStatement;
-      const sourceRange = source ? resolveSqlErrorDecorationRange(source, props.executionError) : null;
-      const sourceOffset = source ? scalarPositionToUtf16Offset(source, mapped.line, mapped.column) : undefined;
-      const width = sourceRange && sourceRange.from === sourceOffset ? sourceRange.to - sourceRange.from : (sql.codePointAt(mapped.offset) ?? 0) > 0xffff ? 2 : 1;
-      return [{ from: mapped.offset, to: Math.min(sql.length, mapped.offset + width), message: props.executionError }];
+      const mapped = sqlErrorEditorRange({ editorSql: sql, result: props.executionErrorResult, resultIndex: props.executionErrorResult.statement_index, databaseType: props.databaseType, parameterOptions: sqlStatementParameterOptions() });
+      if (!mapped || mapped.from >= sql.length) return [];
+      return [{ ...mapped, message: props.executionError }];
     }
     if (!props.executionErrorSql || !sqlErrorSqlMatchesEditor(currentState.doc.toString(), props.executionErrorSql)) return [];
-    const range = resolveSqlErrorDecorationRange(currentState.doc.toString(), props.executionError);
+    const range = resolveSqlErrorDecorationRange(currentState.doc.toString(), props.executionError, props.databaseType);
     if (!range) return [];
     return [
       {
@@ -361,6 +357,10 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       return;
     }
     if (props.databaseType === "mongodb") {
+      if (props.mongoQueryLanguage === "sql") {
+        setSemanticDiagnostics([]);
+        return;
+      }
       // Shell commands have no SQL semantics; surface the parser's own diagnosis instead of waiting for Run.
       const cursor = currentView.state.selection.main.head;
       setSemanticDiagnostics(buildMongoSyntaxDiagnostics(sql, cursor));
@@ -547,6 +547,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
   async function loadSqlUnknownObjectSpans(currentView: EditorViewType): Promise<SqlUnknownObjectSpan[]> {
     if (!SQL_UNKNOWN_OBJECT_HIGHLIGHT_ENABLED || !runtime.editorIsActive) return [];
     if (options.queryEditorSelectionLanguage() !== "sql") return [];
+    if (props.databaseType === "mongodb") return [];
     if (shouldSkipSqlSemanticDiagnostics()) return [];
     if (props.databaseType && NON_SQL_UNKNOWN_OBJECT_DATABASE_TYPES.has(props.databaseType)) return [];
     if (!props.connectionId || props.database == null) return [];

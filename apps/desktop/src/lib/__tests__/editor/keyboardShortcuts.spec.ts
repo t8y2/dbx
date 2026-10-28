@@ -119,6 +119,25 @@ describe("keyboard shortcut matching", () => {
     expect(eventToShortcut({ key: "A", code: "KeyA", ctrlKey: true, shiftKey: true }, "Win32")).toBe("Shift+Mod+A");
   });
 
+  it("records Mod+/ from Windows Chinese IME punctuation, Process keys, and numpad divide", () => {
+    // Chinese IME converts "/" to "、" (Ideographic comma)
+    expect(eventToShortcut({ key: "、", code: "Slash", ctrlKey: true }, "Win32")).toBe("Mod+/");
+    // Windows IME keydown with "Process" key
+    expect(eventToShortcut({ key: "Process", code: "Slash", ctrlKey: true }, "Win32")).toBe("Mod+/");
+    expect(eventToShortcut({ key: "Process", code: "Slash", ctrlKey: true, isComposing: true }, "Win32")).toBe("Mod+/");
+    // Numpad divide key (which may report "Divide" or "/")
+    expect(eventToShortcut({ key: "Divide", code: "NumpadDivide", ctrlKey: true }, "Win32")).toBe("Mod+/");
+    expect(eventToShortcut({ key: "/", code: "NumpadDivide", ctrlKey: true }, "Win32")).toBe("Mod+/");
+  });
+
+  it("matches Mod+/ against Chinese IME punctuation, Process keys, and numpad divide", () => {
+    expect(matchesShortcut({ key: "、", code: "Slash", ctrlKey: true }, "Mod+/", "Win32")).toBe(true);
+    expect(matchesShortcut({ key: "Process", code: "Slash", ctrlKey: true }, "Mod+/", "Win32")).toBe(true);
+    expect(matchesShortcut({ key: "Process", code: "Slash", ctrlKey: true, isComposing: true }, "Mod+/", "Win32")).toBe(true);
+    expect(matchesShortcut({ key: "Divide", code: "NumpadDivide", ctrlKey: true }, "Mod+/", "Win32")).toBe(true);
+    expect(matchesShortcut({ key: "/", code: "NumpadDivide", ctrlKey: true }, "Mod+/", "Win32")).toBe(true);
+  });
+
   it.each([
     ["¨", "KeyU", "Shift+Alt+U"],
     ["Ò", "KeyL", "Shift+Alt+L"],

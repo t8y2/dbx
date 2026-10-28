@@ -62,6 +62,17 @@ func TestHandshakeResponse(t *testing.T) {
 	}
 }
 
+func TestConnectionInfoMethodIsSupported(t *testing.T) {
+	s := newServer()
+	resp, _ := s.handleLine(`{"jsonrpc":"2.0","id":8,"method":"connection_info","params":{}}`)
+	if resp.Error == nil {
+		t.Fatal("connection_info must fail on a disconnected server")
+	}
+	if !strings.Contains(resp.Error.Message, "not connected") {
+		t.Fatalf("connection_info must use the active connection: %s", resp.Error.Message)
+	}
+}
+
 func TestRuntimeHandshakeAdvertisesMultiSessionProtocol(t *testing.T) {
 	runtime := newRuntimeServer()
 	resp, shutdown := runtime.handleLine(`{"jsonrpc":"2.0","id":7,"method":"handshake","params":{"appVersion":"dev"}}`)
@@ -2365,6 +2376,9 @@ func TestListObjectsSQLUsesSplitDictionaryQuery(t *testing.T) {
 	if !strings.Contains(sqlText, "'SEQUENCE'") {
 		t.Fatalf("object listing should include sequences, got: %s", query.SQL)
 	}
+	if !strings.Contains(sqlText, "'TRIGGER'") {
+		t.Fatalf("object listing must expose triggers for data transfer selection, got: %s", query.SQL)
+	}
 	if !strings.Contains(sqlText, "'TYPE BODY'") || !strings.Contains(sqlText, "TYPE_BODY") || !strings.Contains(sqlText, "'TYPE'") {
 		t.Fatalf("object listing should include TYPE and normalize TYPE BODY, got: %s", query.SQL)
 	}
@@ -2373,6 +2387,34 @@ func TestListObjectsSQLUsesSplitDictionaryQuery(t *testing.T) {
 	}
 	if !strings.Contains(sqlText, "ALL_SYNONYMS") || !strings.Contains(sqlText, "'SYNONYM' AS OBJECT_TYPE") {
 		t.Fatalf("object listing should include schema synonyms, got: %s", query.SQL)
+	}
+}
+
+func TestTableIndexDDLExclusionBindsConstraintIndexOwner(t *testing.T) {
+	for _, fromConnection := range []bool{false, true} {
+		t.Run(fmt.Sprint(fromConnection), func(t *testing.T) {
+			ddl := `CREATE INDEX OTHER.IX ON APP.T(ID)`
+			db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+				{queryContains: "c.INDEX_OWNER = i.OWNER", args: []driver.Value{"APP", "T", "APP", "T"}, columns: []string{"DDL"}, rows: [][]driver.Value{{ddl}}},
+			})
+			var result []string
+			var err error
+			if fromConnection {
+				conn, connectErr := db.Conn(context.Background())
+				if connectErr != nil {
+					t.Fatal(connectErr)
+				}
+				defer conn.Close()
+				result, err = loadTableIndexDDLsFromConn(conn, "APP", "T")
+			} else {
+				s := newServer()
+				s.db = db
+				result, err = s.loadTableIndexDDLs("APP", "T")
+			}
+			if err != nil || len(result) != 1 || result[0] != ddl || scripted.next != len(scripted.steps) {
+				t.Fatalf("exact owner query failed: result=%v error=%v queries=%d", result, err, scripted.next)
+			}
+		})
 	}
 }
 
@@ -2462,10 +2504,13 @@ func TestExactTableDDLDoesNotBuildAnotherTargetAfterMetadataFailure(t *testing.T
 	}
 }
 
-func TestListSessionUserObjectsSQLIncludesSequences(t *testing.T) {
+func TestListSessionUserObjectsSQLIncludesSequencesAndTriggers(t *testing.T) {
 	sqlText := strings.ToUpper(oracleListObjectsSessionUserBaseSQL)
 	if !strings.Contains(sqlText, "FROM USER_OBJECTS") || !strings.Contains(sqlText, "'SEQUENCE'") || !strings.Contains(sqlText, "'TYPE BODY'") || !strings.Contains(sqlText, "'TYPE'") {
 		t.Fatalf("session-user object listing should include sequences, got: %s", oracleListObjectsSessionUserBaseSQL)
+	}
+	if !strings.Contains(sqlText, "'TRIGGER'") {
+		t.Fatalf("session-user object listing must expose triggers for data transfer selection, got: %s", oracleListObjectsSessionUserBaseSQL)
 	}
 }
 
@@ -3870,6 +3915,7 @@ type oracleViewSourceQueryStep struct {
 	nextPanicText    string
 	columnsPanicText string
 	columnsPanicCall int
+	nextError        error
 }
 
 type oracleViewSourceDriver struct {
@@ -3937,6 +3983,7 @@ func (c *oracleViewSourceConn) QueryContext(
 		nextPanicText:    step.nextPanicText,
 		columnsPanicText: step.columnsPanicText,
 		columnsPanicCall: step.columnsPanicCall,
+		nextError:        step.nextError,
 	}, nil
 }
 
@@ -3945,6 +3992,9 @@ func (c *oracleViewSourceConn) ExecContext(
 	query string,
 	args []driver.NamedValue,
 ) (driver.Result, error) {
+	if query == dbmsOutputEnableSQL || query == dbmsOutputDisableSQL {
+		return driver.RowsAffected(0), nil
+	}
 	if c.driver.next >= len(c.driver.steps) {
 		return nil, errors.New("unexpected extra exec: " + query)
 	}
@@ -3975,6 +4025,7 @@ type oracleViewSourceRows struct {
 	columnsPanicText string
 	columnsPanicCall int
 	columnsCalls     int
+	nextError        error
 }
 
 func (r *oracleViewSourceRows) Columns() []string {
@@ -3997,6 +4048,9 @@ func (r *oracleViewSourceRows) Next(dest []driver.Value) error {
 		return r.nextErr
 	}
 	if r.next >= len(r.values) {
+		if r.nextError != nil {
+			return r.nextError
+		}
 		return io.EOF
 	}
 	copy(dest, r.values[r.next])
@@ -4283,6 +4337,200 @@ func TestOracleQueryRowsKeepsSTAsTextErrorWhenPlaceholderAlsoFails(t *testing.T)
 	}
 	if err == nil || !strings.Contains(err.Error(), "ORA-28595") {
 		t.Fatalf("expected the original ST_AsText ORA-28595 error, got %v", err)
+	}
+}
+
+// oracleViewSourceTxConn lets the scripted driver open the manual transaction
+// the query guard wraps.
+type oracleViewSourceTxConn struct{ *oracleViewSourceConn }
+
+func (c oracleViewSourceTxConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+	return oracleViewSourceTx{}, nil
+}
+
+type oracleViewSourceTx struct{}
+
+func (oracleViewSourceTx) Commit() error   { return nil }
+func (oracleViewSourceTx) Rollback() error { return nil }
+
+type oracleViewSourceTxDriver struct{ scripted *oracleViewSourceDriver }
+
+func (d oracleViewSourceTxDriver) Open(string) (driver.Conn, error) {
+	return oracleViewSourceTxConn{&oracleViewSourceConn{driver: d.scripted}}, nil
+}
+
+func openGuardedOracleViewSourceTestDB(t *testing.T, steps []oracleViewSourceQueryStep) (*sql.DB, *oracleViewSourceDriver) {
+	t.Helper()
+	scripted := &oracleViewSourceDriver{steps: steps}
+	db := sql.OpenDB(oracleQueryConnector{oracleGuardTestConnector{oracleViewSourceTxDriver{scripted}}})
+	t.Cleanup(func() { _ = db.Close() })
+	return db, scripted
+}
+
+func udtPanicFallbackSteps(rows [][]driver.Value) []oracleViewSourceQueryStep {
+	return []oracleViewSourceQueryStep{
+		{exec: true, queryContains: `ALTER SESSION SET CURRENT_SCHEMA = "DBXT"`},
+		{queryContains: "SELECT ID, G FROM T_UDT", args: []driver.Value{}, panicText: "simulated go-ora panic on object column"},
+		// The poisoned pinned connection is replaced and gets the editor schema back.
+		{exec: true, queryContains: `ALTER SESSION SET CURRENT_SCHEMA = "DBXT"`},
+		{queryContains: "CURRENT_SCHEMA", args: []driver.Value{}, columns: []string{"SCHEMA"}, rows: [][]driver.Value{{"DBXT"}}},
+		{
+			queryContains: "ALL_TAB_COLUMNS",
+			args:          []driver.Value{"DBXT", "T_UDT"},
+			columns:       []string{"COLUMN_NAME", "DATA_TYPE", "DATA_TYPE_OWNER"},
+			rows:          [][]driver.Value{{"ID", "NUMBER", nil}, {"G", "GEOM_T", "DBXT"}},
+		},
+		{queryContains: "'<GEOM_T>'", args: []driver.Value{}, columns: []string{"ID", "G"}, rows: rows},
+	}
+}
+
+func TestExecuteQueryRetriesObjectColumnPanicOnFreshPinnedConnection(t *testing.T) {
+	steps := udtPanicFallbackSteps([][]driver.Value{{int64(1), "<GEOM_T>"}})
+	db, scripted := openGuardedOracleViewSourceTestDB(t, steps)
+	s := newServer()
+	s.db = db
+	result, err := s.executeQuery(queryOptions{SQL: "SELECT ID, G FROM T_UDT", Schema: "DBXT", MaxRows: 10})
+	if err != nil {
+		t.Fatalf("expected the placeholder fallback to recover the panic, got %v", err)
+	}
+	if !reflect.DeepEqual(result.Rows, [][]any{{int64(1), "<GEOM_T>"}}) {
+		t.Fatalf("unexpected rows: %#v", result.Rows)
+	}
+	if scripted.next != len(steps) {
+		t.Fatalf("expected all %d scripted steps, ran %d", len(steps), scripted.next)
+	}
+	if s.statementConn != nil || s.repinnedStatementConn != nil || s.statementSchema != "" || db.Stats().InUse != 0 {
+		t.Fatalf("statement leaked its pinned connections: %+v", db.Stats())
+	}
+}
+
+func TestExecuteQueryPageKeepsCursorOnReplacementPinnedConnection(t *testing.T) {
+	steps := udtPanicFallbackSteps([][]driver.Value{{int64(1), "<GEOM_T>"}, {int64(2), "<GEOM_T>"}})
+	db, scripted := openGuardedOracleViewSourceTestDB(t, steps)
+	s := newServer()
+	s.db = db
+	result, err := s.executeQueryPage(queryOptions{SQL: "SELECT ID, G FROM T_UDT", Schema: "DBXT", MaxRows: 10}, 1)
+	if err != nil {
+		t.Fatalf("expected the placeholder fallback to recover the panic, got %v", err)
+	}
+	if !result.HasMore || result.SessionID == nil || !reflect.DeepEqual(result.Rows, [][]any{{int64(1), "<GEOM_T>"}}) {
+		t.Fatalf("unexpected first page: %+v", result)
+	}
+	if scripted.next != len(steps) {
+		t.Fatalf("expected all %d scripted steps, ran %d", len(steps), scripted.next)
+	}
+	next, err := s.fetchQueryPage(*result.SessionID, 1)
+	if err != nil || !reflect.DeepEqual(next.Rows, [][]any{{int64(2), "<GEOM_T>"}}) {
+		t.Fatalf("unexpected second page: %+v, %v", next, err)
+	}
+	s.closeQuerySession(*result.SessionID)
+	if s.statementConn != nil || s.repinnedStatementConn != nil || db.Stats().InUse != 0 {
+		t.Fatalf("paging session leaked its pinned connections: %+v", db.Stats())
+	}
+}
+
+func TestManualTransactionRewritesObjectColumnsBeforeTheFirstAttempt(t *testing.T) {
+	steps := []oracleViewSourceQueryStep{
+		{exec: true, queryContains: `ALTER SESSION SET CURRENT_SCHEMA = "DBXT"`},
+		{queryContains: "CURRENT_SCHEMA", args: []driver.Value{}, columns: []string{"SCHEMA"}, rows: [][]driver.Value{{"DBXT"}}},
+		{
+			queryContains: "ALL_TAB_COLUMNS",
+			args:          []driver.Value{"DBXT", "T_UDT"},
+			columns:       []string{"COLUMN_NAME", "DATA_TYPE", "DATA_TYPE_OWNER"},
+			rows:          [][]driver.Value{{"ID", "NUMBER", nil}, {"G", "GEOM_T", "DBXT"}},
+		},
+		{queryContains: "'<GEOM_T>'", args: []driver.Value{}, columns: []string{"ID", "G"}, rows: [][]driver.Value{{int64(1), "<GEOM_T>"}}},
+		{queryContains: "SELECT 1 FROM DUAL", args: []driver.Value{}, columns: []string{"1"}, rows: [][]driver.Value{{int64(1)}}},
+	}
+	db, scripted := openGuardedOracleViewSourceTestDB(t, steps)
+	s := newServer()
+	s.db = db
+	if err := s.beginManualTransaction("DBXT"); err != nil {
+		t.Fatal(err)
+	}
+	// The raw statement would panic and take the transaction down with it, so it
+	// must never reach the driver.
+	result, err := s.executeQuery(queryOptions{SQL: "SELECT ID, G FROM T_UDT", MaxRows: 10})
+	if err != nil {
+		t.Fatalf("expected the rewritten projection, got %v", err)
+	}
+	if !reflect.DeepEqual(result.Rows, [][]any{{int64(1), "<GEOM_T>"}}) {
+		t.Fatalf("unexpected rows: %#v", result.Rows)
+	}
+	if _, err := s.executeQuery(queryOptions{SQL: "SELECT 1 FROM DUAL", MaxRows: 10}); err != nil {
+		t.Fatalf("manual transaction became unusable: %v", err)
+	}
+	if scripted.next != len(steps) {
+		t.Fatalf("expected all %d scripted steps, ran %d", len(steps), scripted.next)
+	}
+	if err := s.rollbackManualTransaction(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sdoGeometryDecodeErrorFallbackSteps scripts a SELECT whose response go-ora
+// misreads (a NULL MDSYS.SDO_GEOMETRY value), followed by the WKT rewrite. The
+// retry must not run on the session that misread the response (issue #13667).
+func sdoGeometryDecodeErrorFallbackSteps(decodeErr error, rows [][]driver.Value) []oracleViewSourceQueryStep {
+	return []oracleViewSourceQueryStep{
+		{exec: true, queryContains: `ALTER SESSION SET CURRENT_SCHEMA = "DBXT"`},
+		{queryContains: `SELECT * FROM "T_GEOM"`, args: []driver.Value{}, err: decodeErr},
+		// The poisoned pinned connection is replaced and gets the editor schema back.
+		{exec: true, queryContains: `ALTER SESSION SET CURRENT_SCHEMA = "DBXT"`},
+		{queryContains: "CURRENT_SCHEMA", args: []driver.Value{}, columns: []string{"SCHEMA"}, rows: [][]driver.Value{{"DBXT"}}},
+		{
+			queryContains: "ALL_TAB_COLUMNS",
+			args:          []driver.Value{"DBXT", "T_GEOM"},
+			columns:       []string{"COLUMN_NAME", "DATA_TYPE", "DATA_TYPE_OWNER"},
+			rows:          [][]driver.Value{{"ID", "NUMBER", nil}, {"GEOM", "SDO_GEOMETRY", "MDSYS"}},
+		},
+		{queryContains: "SDO_UTIL.TO_WKTGEOMETRY", args: []driver.Value{}, columns: []string{"ID", "GEOM"}, rows: rows},
+	}
+}
+
+func TestExecuteQueryRetriesDecodeErrorOnFreshPinnedConnection(t *testing.T) {
+	steps := sdoGeometryDecodeErrorFallbackSteps(
+		errors.New("TTC error: received code 3 during response reading"),
+		[][]driver.Value{{int64(1), nil}, {int64(2), "POINT (121.5 25.03)"}},
+	)
+	db, scripted := openGuardedOracleViewSourceTestDB(t, steps)
+	s := newServer()
+	s.db = db
+	result, err := s.executeQuery(queryOptions{SQL: `SELECT * FROM "T_GEOM"`, Schema: "DBXT", MaxRows: 10})
+	if err != nil {
+		t.Fatalf("expected the WKT rewrite to recover the decode error, got %v", err)
+	}
+	if !reflect.DeepEqual(result.Rows, [][]any{{int64(1), nil}, {int64(2), "POINT (121.5 25.03)"}}) {
+		t.Fatalf("unexpected rows: %#v", result.Rows)
+	}
+	if scripted.next != len(steps) {
+		t.Fatalf("expected all %d scripted steps, ran %d", len(steps), scripted.next)
+	}
+	if s.statementConn != nil || s.repinnedStatementConn != nil || s.statementSchema != "" || db.Stats().InUse != 0 {
+		t.Fatalf("statement leaked its pinned connections: %+v", db.Stats())
+	}
+}
+
+func TestExecuteQueryPageRetriesNonTTCDecodeErrorOnFreshPinnedConnection(t *testing.T) {
+	steps := sdoGeometryDecodeErrorFallbackSteps(
+		errors.New("invalid NUMBER"),
+		[][]driver.Value{{int64(1), nil}},
+	)
+	db, scripted := openGuardedOracleViewSourceTestDB(t, steps)
+	s := newServer()
+	s.db = db
+	result, err := s.executeQueryPage(queryOptions{SQL: `SELECT * FROM "T_GEOM"`, Schema: "DBXT", MaxRows: 10}, 10)
+	if err != nil {
+		t.Fatalf("expected the WKT rewrite to recover the decode error, got %v", err)
+	}
+	if !reflect.DeepEqual(result.Rows, [][]any{{int64(1), nil}}) || result.HasMore {
+		t.Fatalf("unexpected page: %+v", result)
+	}
+	if scripted.next != len(steps) {
+		t.Fatalf("expected all %d scripted steps, ran %d", len(steps), scripted.next)
+	}
+	if s.statementConn != nil || s.repinnedStatementConn != nil || db.Stats().InUse != 0 {
+		t.Fatalf("statement leaked its pinned connections: %+v", db.Stats())
 	}
 }
 

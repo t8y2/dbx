@@ -157,6 +157,18 @@ pub struct BackendError {
 }
 
 impl BackendError {
+    pub fn from_pl_debug_admission_rejection(message: &str) -> Self {
+        Self::new(
+            catalog_entry(CatalogCode::PlDebugAdmissionRejected),
+            BackendErrorSource::LegacyBackend,
+            BackendErrorOrigin::backend(),
+            BackendOperationOutcome::NotStarted,
+            BTreeMap::new(),
+            bounded_detail(message),
+            None,
+        )
+    }
+
     pub fn from_manual_transaction_failure(
         kind: ManualTransactionFailureKind,
         outcome: TransactionOutcome,
@@ -459,6 +471,7 @@ impl BackendError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CatalogCode {
+    PlDebugAdmissionRejected,
     ConnectionFailed,
     ConnectionInterrupted,
     TimeoutNotStarted,
@@ -509,6 +522,15 @@ const NO_PARAMS: &[ParamSpec] = &[];
 
 fn catalog_entry(code: CatalogCode) -> &'static CatalogEntry {
     const ENTRIES: &[(CatalogCode, CatalogEntry)] = &[
+        (
+            CatalogCode::PlDebugAdmissionRejected,
+            CatalogEntry {
+                code: "DBX-PLDEBUG-1001",
+                message_key: "backendErrors.plDebug.admissionRejected",
+                params: NO_PARAMS,
+                help_url: None,
+            },
+        ),
         (
             CatalogCode::TransactionUnsupported,
             CatalogEntry {

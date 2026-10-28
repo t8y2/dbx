@@ -5,7 +5,55 @@ import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRest
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./damengDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
+import type { McpAccessPolicy, McpAccessRule, McpSubScopeMode, McpToolCatalog, PluginMcpGrant, PluginMcpView } from "@/types/mcpCatalog";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
+import type { NativeJobContext, NativeJobDetails, NativeJobList, NativeJobListRequest, NativeJobRequest, NativeJobOperationStatus, NativeJobPreparedPlan, NativeJobRef, NativeJobReferenceCatalog, NativeJobReferenceListRequest } from "@/lib/database/nativeJobs";
+import type { PlDebugBootstrap, PlDebugSessionRef, PlDebugStartIntent, PlDebugOperationRequest, PlDebugReadRequest, PlDebugReceipt, PlDebugSnapshot } from "@/lib/debug/plDebugProtocol";
+import type { PlDebugInspectRequest, PlDebugInspectResult, PlDebugCompileIntent, PlDebugCompileRef, PlDebugCompileReceipt } from "@/lib/debug/plDebugProtocol";
+
+export function plDebugBootstrap(): Promise<PlDebugBootstrap> {
+  return post("/api/pl-debug/bootstrap", {});
+}
+
+export function plDebugInspect(request: PlDebugInspectRequest): Promise<PlDebugInspectResult> {
+  return post("/api/pl-debug/inspect", request);
+}
+
+export function plDebugCompile(request: PlDebugCompileIntent): Promise<PlDebugCompileReceipt> {
+  return post("/api/pl-debug/compile", request);
+}
+
+export function plDebugCompileStatus(reference: PlDebugCompileRef): Promise<PlDebugCompileReceipt> {
+  return post("/api/pl-debug/compile-status", reference);
+}
+
+export function plDebugList(serverEpoch: string, connectionId: string): Promise<PlDebugSnapshot[]> {
+  return post("/api/pl-debug/list", { serverEpoch, connectionId });
+}
+
+export function plDebugStart(request: PlDebugStartIntent): Promise<PlDebugReceipt> {
+  return post("/api/pl-debug/start", request);
+}
+
+export function plDebugStatus(reference: PlDebugSessionRef, refresh = false): Promise<PlDebugSnapshot> {
+  return post("/api/pl-debug/status", { reference, refresh });
+}
+
+export function plDebugHeartbeat(reference: PlDebugSessionRef): Promise<PlDebugSnapshot> {
+  return post("/api/pl-debug/heartbeat", reference);
+}
+
+export function plDebugOperation(reference: PlDebugSessionRef, operationId: string): Promise<PlDebugReceipt> {
+  return post("/api/pl-debug/operation", { reference, operationId });
+}
+
+export function plDebugOperate(request: PlDebugOperationRequest): Promise<PlDebugReceipt> {
+  return post("/api/pl-debug/operate", request);
+}
+
+export function plDebugRead(request: PlDebugReadRequest): Promise<Record<string, unknown> | unknown[]> {
+  return post("/api/pl-debug/read", request);
+}
 import type { PluginUiStorageItemRef, SqlFileFailureLogExportPayload, SqlFileFailureLogInfo, SqlFileFailureLogKey, SqlFileFailureLogTextPayload, SyncCatalogItem, SyncSelection, SyncSnapshotCatalog } from "@/lib/backend/tauri";
 import { FAILURE_LOG_TEXT_TOO_LARGE } from "@/lib/export/failureLogExport";
 import { saveTextFile } from "@/lib/export/saveTextFile";
@@ -136,6 +184,7 @@ import type {
   RedisValue,
   RedisKeysExpiryResult,
   RedisScanResult,
+  RedisKeyMetadata,
   RedisCommandResult,
   RedisSlowlogEntry,
   RedisNodeEndpoint,
@@ -260,6 +309,7 @@ import type { BuildTableSelectSqlOptions } from "@/lib/table/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/database/databaseSearch";
 import type { DatabaseStructureSearchSql, DatabaseStructureSearchSqlOptions } from "@/lib/database/databaseStructureSearch";
 import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput, FingerprintOracleRoutineObjectSourceInput, RewriteOracleRoutineReferencesInput, ValidateOracleExecutableObjectSourceInput } from "@/lib/table/objectSourceEditor";
+import type { OracleTriggerSqlInput, PreparedOracleTriggerSql } from "@/lib/database/oracleTriggerSql";
 import type { OracleTableReferenceRewriteInput, OracleViewRenameSource, OracleViewRenameSourceInput, OracleViewRenameSourceReview } from "@/types/database";
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
@@ -629,8 +679,8 @@ export async function saveConnections(configs: ConnectionConfig[], removedIds: s
   return post("/api/connection/save", { configs });
 }
 
-export async function loadConnections(): Promise<ConnectionConfig[]> {
-  return get("/api/connection/list");
+export async function loadConnections(legacySidebarShowUserAdmin?: boolean): Promise<ConnectionConfig[]> {
+  return get(legacySidebarShowUserAdmin === undefined ? "/api/connection/list" : `/api/connection/list?legacySidebarShowUserAdmin=${legacySidebarShowUserAdmin}`);
 }
 
 export async function loadTunnelProfiles(): Promise<TunnelProfile[]> {
@@ -1049,7 +1099,7 @@ export async function previewAgentOfflineExport(): Promise<AgentOfflineExportPre
   throw new Error("Offline Agent package export is only available in the desktop app.");
 }
 
-export async function exportAgentsOffline(_path: string, _driverKeys: string[]): Promise<AgentOfflineExportResult> {
+export async function exportAgentsOffline(_path: string, _driverKeys: string[], _includeJres = true): Promise<AgentOfflineExportResult> {
   throw new Error("Offline Agent package export is only available in the desktop app.");
 }
 
@@ -1262,8 +1312,9 @@ export async function listObjects(
   catalog?: string,
   tableNameFilter?: TableNameFilter,
   executionId?: string,
-  exactIdentity?: boolean,
+  options?: boolean | import("@/types/database").MetadataReadOptions,
 ): Promise<ObjectInfo[]> {
+  const readOptions = typeof options === "object" ? options : undefined;
   return get(
     `/api/schema/objects?${qs({
       connection_id: connectionId,
@@ -1273,10 +1324,11 @@ export async function listObjects(
       filter,
       limit,
       offset,
-      catalog,
+      catalog: readOptions?.catalog ?? catalog,
       table_name_filter: tableNameFilter ? JSON.stringify(tableNameFilter) : undefined,
       execution_id: executionId,
-      exact_identity: exactIdentity || undefined,
+      identity_mode: readOptions?.identityMode,
+      exact_identity: options === true || undefined,
     })}`,
   );
 }
@@ -1293,8 +1345,8 @@ export async function completionAssistantSearch(request: CompletionAssistantRequ
   return post("/api/schema/completion-assistant", request);
 }
 
-export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string, relationName?: string): Promise<ObjectSource> {
-  return get(`/api/schema/object-source?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType, signature, relation_name: relationName })}`);
+export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string, relationName?: string, options?: import("@/types/database").MetadataReadOptions): Promise<ObjectSource> {
+  return get(`/api/schema/object-source?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType, signature, relation_name: relationName, identity_mode: options?.identityMode, catalog: options?.catalog })}`);
 }
 
 export async function getEventInfo(connectionId: string, database: string, schema: string, name: string): Promise<MysqlEventInfo> {
@@ -1303,6 +1355,31 @@ export async function getEventInfo(connectionId: string, database: string, schem
 
 export async function getCustomTypeDetails(connectionId: string, database: string, schema: string, name: string): Promise<CustomTypeDetails> {
   return get(`/api/schema/custom-type-details?${qs({ connection_id: connectionId, database, schema, table: name })}`);
+}
+
+export function nativeJobOpenContext(connectionId: string, database: string): Promise<NativeJobContext> {
+  return post("/api/schema/native-jobs/context", { connectionId, database });
+}
+export function nativeJobList(request: NativeJobListRequest): Promise<NativeJobList> {
+  return post("/api/schema/native-jobs/list", request);
+}
+export function nativeJobReferences(request: NativeJobReferenceListRequest): Promise<NativeJobReferenceCatalog> {
+  return post("/api/schema/native-jobs/references", request);
+}
+export function nativeJobRead(target: NativeJobRef): Promise<NativeJobDetails> {
+  return post("/api/schema/native-jobs/read", target);
+}
+export function nativeJobPrepare(mutation: NativeJobRequest): Promise<NativeJobPreparedPlan> {
+  return post("/api/schema/native-jobs/prepare", mutation);
+}
+export function nativeJobApply(planId: string): Promise<NativeJobOperationStatus> {
+  return post("/api/schema/native-jobs/apply", { planId });
+}
+export function nativeJobStatus(operationId: string, observe?: boolean): Promise<NativeJobOperationStatus> {
+  return post("/api/schema/native-jobs/status", { operationId, ...(observe ? { observe: true } : {}) });
+}
+export function nativeJobCancel(operationId: string): Promise<NativeJobOperationStatus> {
+  return post("/api/schema/native-jobs/cancel", { operationId });
 }
 
 export async function getOracleTypeManagementSnapshot(connectionId: string, database: string, owner: string, name: string, knownObjects: OracleTypeManagementObjectKey[] = []): Promise<OracleTypeManagementSnapshot> {
@@ -1365,8 +1442,9 @@ export async function listForeignKeysForDatabase(connectionId: string, database:
   return get(`/api/schema/foreign-keys-for-database?${qs({ connection_id: connectionId, database, schema, catalog, execution_id: executionId })}`);
 }
 
-export async function listTriggers(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<TriggerInfo[]> {
-  return get(`/api/schema/triggers?${qs({ connection_id: connectionId, database, schema, table, catalog, exact_identity: exactIdentity || undefined })}`);
+export async function listTriggers(connectionId: string, database: string, schema: string, table: string, catalog?: string, options?: boolean | import("@/types/database").MetadataReadOptions): Promise<TriggerInfo[]> {
+  const readOptions = typeof options === "object" ? options : undefined;
+  return get(`/api/schema/triggers?${qs({ connection_id: connectionId, database, schema, table, catalog: readOptions?.catalog ?? catalog, identity_mode: readOptions?.identityMode, exact_identity: options === true || undefined })}`);
 }
 
 export async function listConstraints(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<ConstraintInfo[]> {
@@ -1399,12 +1477,12 @@ export async function listSubpartitions(connectionId: string, database: string, 
   return get(`/api/schema/subpartitions?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
 }
 
-export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string, portable = false, exactIdentity?: boolean): Promise<string> {
-  return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table, object_type: objectType, catalog, portable, exact_identity: exactIdentity || undefined })}`);
+export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string, portable = false, exactIdentity?: boolean, separateIndexes?: boolean, explicitOwner?: string): Promise<string> {
+  return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table, object_type: objectType, catalog, portable, exact_identity: exactIdentity || undefined, separate_indexes: separateIndexes || undefined, explicit_owner: explicitOwner })}`);
 }
 
-export async function getTableDisplayDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {
-  return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table, object_type: objectType, catalog, include_postgres_access: true })}`);
+export async function getTableDisplayDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string, separateIndexes?: boolean, explicitOwner?: string): Promise<string> {
+  return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table, object_type: objectType, catalog, include_postgres_access: true, separate_indexes: separateIndexes || undefined, explicit_owner: explicitOwner })}`);
 }
 
 export async function prepareSchemaDiff(options: SchemaDiffPreparationOptions): Promise<SchemaDiffPreparation> {
@@ -2072,6 +2150,10 @@ export async function validateOracleExecutableObjectSource(input: ValidateOracle
   return post("/api/query/validate-oracle-executable-object-source", { input });
 }
 
+export async function prepareOracleTriggerSql(input: OracleTriggerSqlInput): Promise<PreparedOracleTriggerSql> {
+  return post("/api/query/prepare-oracle-trigger-sql", { input });
+}
+
 export async function fingerprintOracleRoutineObjectSource(input: FingerprintOracleRoutineObjectSourceInput): Promise<string> {
   return post("/api/query/fingerprint-oracle-routine-object-source", { input });
 }
@@ -2488,6 +2570,50 @@ export async function saveDesktopSettings(settings: DesktopSettings): Promise<vo
 
 export async function loadMcpGlobalPolicy(): Promise<McpGlobalPolicy> {
   return get("/api/app-settings/mcp-policy");
+}
+
+export async function loadMcpToolCatalog(): Promise<McpToolCatalog> {
+  return get("/api/app-settings/mcp-tool-catalog");
+}
+
+export async function loadMcpAccessPolicy(): Promise<McpAccessPolicy> {
+  return get("/api/app-settings/mcp-access-policy");
+}
+
+export async function resetInvalidMcpAccessPolicy(): Promise<void> {
+  return post("/api/app-settings/mcp-access-policy/recover", {});
+}
+
+export async function setMcpPluginScopeRule(connectionId: string, kind: string, value: string | null, rule: McpAccessRule | null, subScope: McpSubScopeMode | null): Promise<McpAccessPolicy> {
+  const res = await fetch(apiUrl("/api/app-settings/mcp-access-policy/plugin-scope"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ connectionId, kind, value, rule, subScope }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+  return res.json();
+}
+
+export async function listPluginMcpViews(): Promise<PluginMcpView[]> {
+  return get("/api/app-settings/plugin-mcp");
+}
+
+export async function loadPluginMcpView(pluginId: string): Promise<PluginMcpView> {
+  return post("/api/app-settings/plugin-mcp/view", { pluginId });
+}
+
+export async function listMcpPluginScopes(pluginId: string, connectionId: string): Promise<{ values: string[] }> {
+  return post("/api/app-settings/plugin-mcp/scopes", { pluginId, connectionId });
+}
+
+export async function savePluginMcpGrant(pluginId: string, grant: PluginMcpGrant, approveCurrent: boolean): Promise<PluginMcpView> {
+  const res = await fetch(apiUrl("/api/app-settings/plugin-mcp/grant"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pluginId, grant, approveCurrent }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+  return res.json();
 }
 
 export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configured">): Promise<void> {
@@ -3936,6 +4062,14 @@ export async function redisScanKeysBatch(connectionId: string, db: number, curso
     count,
     maxIterations,
     includeTypes,
+  });
+}
+
+export async function redisKeyMetadataBatch(connectionId: string, db: number, keyRaws: string[]): Promise<RedisKeyMetadata[]> {
+  return post("/api/redis/key-metadata-batch", {
+    connectionId,
+    db,
+    keyRaws,
   });
 }
 

@@ -18,6 +18,36 @@ import { clearMetadataRuntimeCache } from "@/lib/metadata/metadataRuntimeCache";
 const request = { connectionId: "c1", database: "app", schema: "public", tableName: "users", catalog: "analytics" } as const;
 
 describe("objectDdlCache", () => {
+  it("keeps independent-index DDL separate from the original cached source", async () => {
+    mocks.getTableDisplayDdl.mockResolvedValueOnce("original").mockResolvedValueOnce("independent");
+    const separate = { ...request, separateIndexes: true };
+    expect(objectDdlCacheKey(separate)).not.toBe(objectDdlCacheKey(request));
+    await expect(loadObjectDdl(request)).resolves.toMatchObject({ ddl: "original", cacheStatus: "remote" });
+    await expect(loadObjectDdl(separate)).resolves.toMatchObject({ ddl: "independent", cacheStatus: "remote" });
+    expect(mocks.getTableDisplayDdl.mock.calls[1]).toEqual(["c1", "app", "public", "users", undefined, "analytics", true, undefined]);
+    await expect(loadObjectDdl(request)).resolves.toMatchObject({ ddl: "original", cacheStatus: "memory" });
+    await invalidateObjectDdlCache({ connectionId: "c1", database: "app", schema: "public", tableName: "users" });
+    mocks.getTableDisplayDdl.mockRejectedValueOnce(new Error("supporting index unavailable"));
+    await expect(loadObjectDdl(separate)).rejects.toThrow("supporting index unavailable");
+    mocks.getTableDisplayDdl.mockResolvedValueOnce("fresh original");
+    await expect(loadObjectDdl(request)).resolves.toMatchObject({ ddl: "fresh original", cacheStatus: "remote" });
+  });
+
+  it("isolates an explicit owner from the same service fallback and invalidates both", async () => {
+    const fallback = { ...request, schema: request.database, separateIndexes: true };
+    const explicit = { ...fallback, explicitOwner: request.database };
+    expect(objectDdlCacheKey(explicit)).not.toBe(objectDdlCacheKey(fallback));
+    mocks.getTableDisplayDdl.mockResolvedValueOnce("explicit").mockRejectedValueOnce(new Error("ambiguous service"));
+    await expect(loadObjectDdl(explicit)).resolves.toMatchObject({ ddl: "explicit", cacheStatus: "remote" });
+    expect(mocks.getTableDisplayDdl).toHaveBeenLastCalledWith("c1", "app", "app", "users", undefined, "analytics", true, "app");
+    await expect(loadObjectDdl(fallback)).rejects.toThrow("ambiguous service");
+    await expect(loadObjectDdl(explicit)).resolves.toMatchObject({ cacheStatus: "memory" });
+    await invalidateObjectDdlCache({ connectionId: "c1", database: "app", schema: "app", tableName: "users" });
+    mocks.getTableDisplayDdl.mockResolvedValueOnce("fresh");
+    await expect(loadObjectDdl(explicit)).resolves.toMatchObject({ ddl: "fresh", cacheStatus: "remote" });
+    expect(mocks.getTableDdl).not.toHaveBeenCalled();
+  });
+
   it.each(["remote", "disk"])("settles local waiting when cancellation retires a never-returning %s read", async (phase) => {
     if (phase === "disk") mocks.loadSchemaCache.mockReturnValueOnce(new Promise(() => undefined));
     mocks.getTableDisplayDdl.mockReturnValueOnce(new Promise(() => undefined));

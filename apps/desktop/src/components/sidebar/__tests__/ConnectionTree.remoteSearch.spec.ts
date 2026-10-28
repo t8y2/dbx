@@ -1,7 +1,4 @@
 // @vitest-environment happy-dom
-import { readFileSync } from "node:fs";
-import ts from "typescript";
-import { parse } from "vue/compiler-sfc";
 import { computed, createApp, defineComponent, h, nextTick, reactive, ref } from "vue";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { useSidebarRemoteSearch } from "@/composables/useSidebarRemoteSearch";
@@ -10,14 +7,9 @@ import { findNodePathByIdentity } from "@/lib/sidebar/sidebarSearchTree";
 import { sidebarIndexedObjectGroupTypes } from "@/lib/sidebar/sidebarGlobalSearchIndex";
 import { resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 import type { TreeNode } from "@/types/database";
+import { compileConnectionTreeTestScript } from "./connectionTreeTestScript";
 
-const source = parse(readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8")).descriptor.scriptSetup!.content;
-const script = ts.createSourceFile("ConnectionTree.ts", source, ts.ScriptTarget.Latest, true);
-const statements = script.statements.filter((statement) => {
-  if (ts.isFunctionDeclaration(statement)) return ["loadGlobalRemoteSearchResults", "isGlobalTableIndexParent", "discoverGlobalSearchChildren"].includes(statement.name?.text ?? "");
-  return ts.isVariableStatement(statement) && statement.declarationList.declarations.some((declaration) => ["globalSearchContext", "{ results: remoteSearchResults, isLoading: isRemoteSearchLoading }"].includes(declaration.name.getText(script)));
-});
-const compiled = ts.transpileModule(statements.map((statement) => statement.getText(script)).join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const compiled = compileConnectionTreeTestScript(["loadGlobalRemoteSearchResults", "isGlobalTableIndexParent", "discoverGlobalSearchChildren", "globalSearchContext", "remoteSearchResults"]);
 const cleanups: Array<() => void> = [];
 
 beforeEach(() => vi.useFakeTimers());
@@ -39,7 +31,7 @@ function mountSearch() {
     treeNodes: [root],
     sidebarTableSearchIndexInvalidation: { revision: 0 },
     sidebarObjectSearchRevision: 0,
-    isTreeNodeChildrenLoaded: vi.fn(() => true),
+    isTreeNodeChildrenLoaded: vi.fn((_nodeId: string) => true),
     searchSidebarObjects: vi.fn(async (_node: TreeNode, _query: string, _signal: AbortSignal): Promise<TreeNode[]> => []),
     loadTreeNodeChildren: vi.fn(),
     loadConnectedConnectionRootForSidebarSearch: vi.fn(),
@@ -170,6 +162,37 @@ test.each(["local", "regex"])("%s search never dispatches remote object search o
   expect(view.store.searchSidebarObjects).not.toHaveBeenCalled();
   expect(view.store.loadTreeNodeChildren).not.toHaveBeenCalled();
   expect(view.store.loadConnectedConnectionRootForSidebarSearch).not.toHaveBeenCalled();
+});
+
+test("searching a connection name does not load unopened databases when none is opened", async () => {
+  const view = mountSearch();
+  view.settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly = true;
+  view.store.isTreeNodeChildrenLoaded.mockReturnValue(false);
+  const databases: TreeNode[] = ["app", "other"].map((database) => ({ id: `conn:${database}`, label: database, type: "database", connectionId: "conn", database, isExpanded: false, children: [] }));
+  view.store.treeNodes = [{ id: "conn", label: "north", type: "connection", connectionId: "conn", isExpanded: true, children: databases }];
+
+  view.type("north");
+  await vi.advanceTimersByTimeAsync(600);
+
+  expect(view.store.loadTreeNodeChildren).not.toHaveBeenCalled();
+  expect(view.store.searchSidebarObjects).not.toHaveBeenCalled();
+  expect(databases.every((node) => !node.isExpanded && node.children?.length === 0)).toBe(true);
+});
+
+test("searches objects only in databases already opened by the user", async () => {
+  const view = mountSearch();
+  view.settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly = true;
+  const procedures: TreeNode = { id: "conn:app:__procedures", label: "Procedures", type: "group-procedures", connectionId: "conn", database: "app", children: [] };
+  const opened: TreeNode = { id: "conn:app", label: "app", type: "database", connectionId: "conn", database: "app", isExpanded: false, children: [procedures] };
+  const unopened: TreeNode = { id: "conn:other", label: "other", type: "database", connectionId: "conn", database: "other", isExpanded: false, children: [] };
+  view.store.treeNodes = [{ id: "conn", label: "north", type: "connection", connectionId: "conn", children: [opened, unopened] }];
+  view.store.isTreeNodeChildrenLoaded.mockImplementation((nodeId: string) => nodeId !== unopened.id);
+
+  view.type("routine");
+  await vi.advanceTimersByTimeAsync(600);
+
+  expect(view.store.searchSidebarObjects).toHaveBeenCalledExactlyOnceWith(procedures, "routine", expect.any(AbortSignal), expect.any(Function));
+  expect(view.store.loadTreeNodeChildren).not.toHaveBeenCalled();
 });
 
 test.each(["clear", "local", "regex", "disconnect", "refresh", "unmount"])("%s cancels a pending search and ignores its late failure", async (action) => {

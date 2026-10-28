@@ -24,4 +24,32 @@ class DdlBuilderDefaultTest {
         Assertions.assertTrue(ddl.contains("\"empty_default\" INTEGER"));
         Assertions.assertFalse(ddl.contains("\"empty_default\" INTEGER NOT NULL DEFAULT"));
     }
+
+    @Test
+    void keyDirectionsRenderIntoPrimaryKeyAndSecondaryIndexes() {
+        IndexInfo primaryKey = new IndexInfo(
+            "PRIMARY_KEY", List.of("a", "b"), true, true,
+            null, null, null, null, null
+        );
+        primaryKey.setKey_directions(List.of("ASC", "DESC"));
+        IndexInfo secondary = new IndexInfo(
+            "idx_lookup", List.of("slip_number", "slip_input_date"), true, false,
+            null, null, null, null, null
+        );
+        secondary.setKey_directions(List.of("DESC", "DESC"));
+        IndexInfo ascendingOnly = new IndexInfo(
+            "idx_created", List.of("customer_id", "created_at"), false, false,
+            null, null, null, null, null
+        );
+        ascendingOnly.setKey_directions(List.of("asc", "ASC"));
+
+        String ddl = DdlBuilder.buildTableDdl(
+            "root", "orders", List.of(), List.of(primaryKey, secondary, ascendingOnly), List.of()
+        );
+
+        Assertions.assertTrue(ddl.contains("PRIMARY KEY (\"a\", \"b\" DESC)"), ddl);
+        Assertions.assertTrue(ddl.contains("(\"slip_number\" DESC, \"slip_input_date\" DESC)"), ddl);
+        Assertions.assertTrue(ddl.contains("(\"customer_id\", \"created_at\")"), ddl);
+        Assertions.assertFalse(ddl.contains(" ASC"), "ASC is the default and must stay implicit: " + ddl);
+    }
 }

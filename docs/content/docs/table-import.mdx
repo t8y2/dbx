@@ -1,6 +1,6 @@
 ---
 title: Table Import
-description: Use a guided workflow to import CSV, TSV, text, JSON, Excel, SQL, or DuckDB Parquet data into an existing table or create new tables in batches.
+description: Use a guided workflow to import CSV, TSV, text, JSON, Excel, SQL, or DuckDB Parquet data into an existing table or create new tables in batches, and restore Navicat .nb3 backups into a database.
 ---
 
 Table Import writes file data into database tables. DBX parses and previews the source first, then asks you to review parsing options, the target, column mappings, and execution settings before any rows are written.
@@ -29,6 +29,7 @@ Create-table mode accepts multiple files at once. Excel workbooks are expanded i
 | Excel | `.xlsx`, `.xlsm`, and `.xls`, with worksheet selection |
 | SQL | `.sql` scripts containing literal `INSERT INTO ... VALUES` statements for one table |
 | Parquet | `.parquet` files, available when the target connection is DuckDB |
+| Navicat backup | `.nb3` archives, available from the database-level entry of MySQL and PostgreSQL connections; see [Navicat Backups](#navicat-backups) |
 
 SQL import accepts only literal `INSERT INTO ... VALUES` rows. Expressions, `REPLACE`, `INSERT IGNORE`, `INSERT ... SELECT`, and other constructs that cannot be rewritten losslessly are rejected so data and statement semantics are preserved.
 
@@ -39,6 +40,14 @@ Excel import reads `.xlsx` and `.xlsm` workbooks incrementally: the preview stop
 Desktop reads selected local files directly. Docker/Web uploads browser-selected files to temporary server storage, then releases the prepared source after preview and import finish.
 
 Parquet import uses the selected DuckDB connection's native Parquet reader. The same preview, mapping, new-table, append, and truncate workflow applies, while other database types do not offer Parquet as an import format. Large Parquet sources are read in bounded batches; nested values remain subject to the target column type and DuckDB conversion rules.
+
+## Navicat Backups
+
+When Table Import is opened from a database (not from a table) on a MySQL or PostgreSQL connection, the source step also offers **Navicat backup**. Choose the card, or pick a `.nb3` file with **Select File**, and DBX opens [SQL File Execution](/en/docs/sql-file) with the same connection, database, and archive already filled in, so the backup restores straight into the database you started from.
+
+![Navicat backup format in the Import Data dialog](/screenshots/table-import-navicat-nb3.png)
+
+The archive is restored as a whole database script rather than through the column-mapping wizard: it drops and recreates the archived tables, views, and routines, loads their rows, then adds indexes, constraints, and triggers. Restore into an empty or disposable database first, and keep a backup of the target. Encrypted Navicat archives are not supported. The same archives can also be restored from [Database Backup](/en/docs/database-backup) with **Restore from file**.
 
 ## Import Wizard
 

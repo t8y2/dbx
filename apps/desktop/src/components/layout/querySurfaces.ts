@@ -85,6 +85,7 @@ export interface ContentAreaSurfaceEmits {
   closeTab: [tabId: string];
   "locate-tab": [tab: QueryTab];
   "locate-sql-file": [tab: QueryTab];
+  "locate-sql-library-file": [tab: QueryTab];
   "update:activeOutputView": [tabId: string, value: TabOutputView];
   fixWithAi: [tabId: string, errorMessage: string];
   sendSelectionToAi: [tabId: string, sql: string];

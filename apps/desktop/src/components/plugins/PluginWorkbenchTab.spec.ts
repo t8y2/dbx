@@ -256,4 +256,25 @@ describe("PluginWorkbenchTab restore self-heal", () => {
     await vi.waitFor(() => expect(root.textContent).toContain("pluginPlatform.reloadRequired"));
     expect(root.querySelector("iframe")).toBeNull();
   });
+
+  it("forwards the active prop to PluginWorkbenchHost and exposes notifyLayout", async () => {
+    mocks.connectedIds.add("conn-1");
+    let tabInstance: any;
+    app = createApp({
+      components: { PluginWorkbenchTab },
+      setup() {
+        const tabRef = ref();
+        return { tabRef };
+      },
+      mounted() {
+        tabInstance = (this as any).tabRef;
+      },
+      template: '<PluginWorkbenchTab ref="tabRef" plugin-id="com.example.graph" contribution-id="graph.main" :active="false" />',
+    });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(root.querySelector("iframe")).toBeInstanceOf(HTMLIFrameElement));
+    expect(typeof tabInstance?.notifyLayout).toBe("function");
+    expect(() => tabInstance.notifyLayout()).not.toThrow();
+  });
 });

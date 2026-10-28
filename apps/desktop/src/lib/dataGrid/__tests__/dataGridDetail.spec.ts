@@ -178,6 +178,26 @@ describe("Cassandra collection cell detail presentation", () => {
 });
 
 describe("Mongo collection cell detail presentation", () => {
+  it("renders a pending-decode placeholder without replacing authoritative data", () => {
+    const detail = buildDataGridCellDetail({
+      rowIndex: 0,
+      rowId: 1,
+      row: ['{"carrier":"prefix"}'],
+      columns: ["body"],
+      columnIndex: 0,
+      displayValue: String,
+      isEditable: false,
+      isValuePreviewTruncated: true,
+      pendingDecodePlaceholder: "Read the full value to decode",
+    })!;
+    expect(detail.value).toBe('{"carrier":"prefix"}');
+    expect(detail.rawValue).toBe('{"carrier":"prefix"}');
+    expect(detail.rawValuePreview).toBe("Read the full value to decode");
+    expect(detail.displayValuePreview).toBe("Read the full value to decode");
+    expect(detail.formattedJson).toBe("");
+    expect(detail.imagePreviewUrl).toBeNull();
+    expect(detail.isSourceTruncated).toBe(true);
+  });
   it.each([null, "NULL", MONGO_DOCUMENT_GRID_NULL])("presents BSON value %j without leaking grid encoding", (bsonValue) => {
     const value = mongoDocumentGridValue(bsonValue) as string;
     const text = mongoDocumentGridDisplayText(value) ?? displayCellValue(value);

@@ -1,5 +1,7 @@
-import type { DatabaseType, QueryResult, QueryTab } from "@/types/database";
+import type { DatabaseType, QueryResult, QueryTab, TriggerInfo } from "@/types/database";
 import type { SqlObjectNavigationTarget, SqlObjectNavigationType } from "@/lib/sql/sqlNavigation";
+import { BackendErrorException } from "@/lib/backend/errorUtils";
+import { exactOracleTriggerMetadata } from "@/lib/database/oracleTriggerIdentity";
 import { oracleObjectRelationsSql, oracleObjectRelationKinds, type ObjectRelationKind, type OracleDependencyObjectType } from "@/lib/database/oracleObjectDependencies";
 
 export type ObjectDetails = NonNullable<QueryTab["objectDetails"]>;
@@ -15,6 +17,7 @@ export interface ObjectDependencyTarget {
   catalog?: string;
   name: string;
   objectType: OracleDependencyObjectType;
+  databaseType?: DatabaseType;
 }
 
 export interface ObjectDependencyRow {
@@ -27,19 +30,25 @@ export interface ObjectDependencyRow {
   sourceType: string;
 }
 
-export function objectDependencyTarget(details: (Omit<ObjectDependencyTarget, "objectType"> & { objectType: string; section?: ObjectDetailsSection }) | undefined, databaseType?: DatabaseType): ObjectDependencyTarget | undefined {
-  if (!details || (databaseType !== "oracle" && databaseType !== "oceanbase-oracle")) return;
+export function objectDependencyTarget(details: (Omit<ObjectDependencyTarget, "objectType"> & { objectType: string; section?: ObjectDetailsSection }) | undefined, databaseType?: DatabaseType, trigger?: Pick<TriggerInfo, "name" | "oracle_metadata"> | null): ObjectDependencyTarget | undefined {
+  if (!details) return;
   const type = details.objectType === "PACKAGE_BODY" ? "PACKAGE" : details.objectType;
+  if (type === "TRIGGER") {
+    const metadata = exactOracleTriggerMetadata(trigger);
+    if (!metadata || metadata.owner !== details.schema || metadata.name !== details.name || metadata.engine !== (databaseType === "dameng" ? "dm" : databaseType)) return;
+    if (metadata.engine === "dm" && !/(?:^|\D)8\./.test(metadata.engineVersion ?? "")) return;
+  } else if (databaseType !== "oracle" && databaseType !== "oceanbase-oracle") return;
   if (!["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "TYPE", "TYPE_BODY", "SEQUENCE", "SYNONYM", "TRIGGER", "INDEX"].includes(type)) return;
   const { section: _section, ...identity } = details;
-  return { ...identity, objectType: type as OracleDependencyObjectType };
+  return { ...identity, objectType: type as OracleDependencyObjectType, ...(databaseType === "dameng" ? { databaseType } : {}) };
 }
 
 export function objectDependencySql(target: ObjectDependencyTarget, kind: ObjectRelationKind = "dependencies"): string {
+  if (!objectRelationKinds(target).includes(kind)) throw new Error("This relation kind is not supported for this object.");
   return oracleObjectRelationsSql({ schema: target.schema, objectName: target.name, objectType: target.objectType }, kind);
 }
 
-export const objectRelationKinds = (target: ObjectDependencyTarget) => oracleObjectRelationKinds(target.objectType);
+export const objectRelationKinds = (target: ObjectDependencyTarget): ObjectRelationKind[] => (target.databaseType === "dameng" ? ["dependencies"] : oracleObjectRelationKinds(target.objectType));
 
 export interface RelationObjectIdentity {
   schema: string;
@@ -120,6 +129,7 @@ export function objectOwnershipNavigation(row: ObjectOwnershipRow): SqlObjectNav
 }
 
 export function objectDependencyRows(result: QueryResult): ObjectDependencyRow[] {
+  if (result.execution_error) throw new BackendErrorException(result.error || "The dependency query failed.");
   const indexes = new Map(result.columns.map((name, index) => [name.toUpperCase(), index]));
   const required = ["DIRECTION", "OBJECT_OWNER", "OBJECT_NAME", "OBJECT_TYPE", "REFERENCED_OWNER", "REFERENCED_NAME", "REFERENCED_TYPE", "DEPENDENCY_TYPE", "REFERENCED_LINK_NAME"];
   if (required.some((name) => !indexes.has(name))) throw new Error("The dependency query returned an unexpected column layout.");

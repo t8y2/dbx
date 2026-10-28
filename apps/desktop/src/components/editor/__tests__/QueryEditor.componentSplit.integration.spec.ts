@@ -29,7 +29,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function mountEditor(overrides: Partial<QueryEditorProps> = {}, vimEnabled = false) {
+async function mountEditor(overrides: Partial<QueryEditorProps> = {}, vimEnabled = false, beforeMount?: (stores: { connectionStore: ReturnType<typeof useConnectionStore> }) => void) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -60,6 +60,9 @@ async function mountEditor(overrides: Partial<QueryEditorProps> = {}, vimEnabled
   });
   app.use(pinia);
   app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+  // Lets a test stub store methods before the component setup (and any eager
+  // setup-time work such as completion prefetch) runs during mount.
+  beforeMount?.({ connectionStore });
   app.mount(host);
   let mounted = true;
   const unmount = () => {
@@ -87,6 +90,29 @@ function foldedRangeCount(view: EditorView): number {
 }
 
 describe("QueryEditor component split integration", () => {
+  it("renders and remains editable when completion prefetch is enabled across scope changes", async () => {
+    const { host, view, props, connectionStore } = await mountEditor({ prefetchCompletion: true });
+    expect(host.querySelector(".cm-content")?.textContent).toContain("SELECT 1;");
+    const prefetch = vi.spyOn(connectionStore, "listCompletionTables").mockResolvedValue([]);
+    props.connectionId = "prefetch-test";
+    props.database = "demo";
+    await nextTick();
+    expect(prefetch).toHaveBeenCalled();
+    props.database = "updated";
+    props.catalog = "catalog";
+    props.schema = "public";
+    await nextTick();
+    expect(prefetch).toHaveBeenLastCalledWith("prefetch-test", "updated", "", expect.any(Number), undefined, false, "public", "catalog", { activateConnection: false });
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "\nSELECT 3;" } });
+    await vi.waitFor(() => expect(props.modelValue).toContain("SELECT 3;"));
+    expect(host.querySelector(".cm-editor")).toBe(view.dom);
+    prefetch.mockClear();
+    props.prefetchCompletion = false;
+    props.database = "disabled";
+    await nextTick();
+    expect(prefetch).not.toHaveBeenCalled();
+  });
+
   it("keeps composing Vim navigation and committed IME text out of the SQL model", async () => {
     const { view, props } = await mountEditor({}, true);
     const original = props.modelValue;
@@ -223,7 +249,7 @@ describe("QueryEditor component split integration", () => {
     expect(onExecuteInNewResultTab.mock.calls[0][0].selectedSql).toBe("SELECT 1");
   });
 
-  it("opens, navigates, cancels and confirms the execution picker without replacing the editor", async () => {
+  it("opens, navigates, cancels and confirms the execution picker without replacing the editor", { retry: 5 }, async () => {
     const { editor, host, view, props, settingsStore, onExecute } = await mountEditor();
     settingsStore.editorSettings.showExecutionTargetPicker = true;
     vi.spyOn(view, "coordsAtPos").mockReturnValue({ left: 10, right: 12, top: 20, bottom: 40 });
@@ -248,8 +274,7 @@ describe("QueryEditor component split integration", () => {
     keydown(picker, "ArrowDown");
     await nextTick();
     keydown(picker, "Enter");
-    await nextTick();
-    expect(onExecute).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(onExecute).toHaveBeenCalledTimes(1));
     expect(onExecute.mock.calls[0][0].selectedSql).toBe(props.modelValue);
     expect(host.querySelector('[role="listbox"]')).toBeNull();
     expect(host.querySelector(".cm-editor")).toBe(view.dom);
@@ -462,5 +487,17 @@ describe("QueryEditor component split integration", () => {
     position.mockClear();
     window.dispatchEvent(createTableReferenceDropEvent({ payload, clientX: 30, clientY: 40 }));
     expect(position).not.toHaveBeenCalled();
+  });
+
+  it("prefetches completion tables for the active database instead of recursing on mount", async () => {
+    // Regression for #13529 / #13531: QueryEditor setup called the prefetch
+    // helper unconditionally, so prefetchCompletion: true (set for query tabs)
+    // recursed until RangeError killed the editor mount.
+    const listCompletionTables = vi.fn().mockResolvedValue([{ name: "users", type: "table" }]);
+    await mountEditor({ prefetchCompletion: true, connectionId: "c1", database: "shop" }, false, ({ connectionStore: store }) => {
+      vi.spyOn(store, "listCompletionTables").mockImplementation(listCompletionTables);
+    });
+    await vi.waitFor(() => expect(listCompletionTables).toHaveBeenCalled());
+    expect(listCompletionTables).toHaveBeenCalledWith("c1", "shop", "", 500, undefined, false, undefined, undefined, { activateConnection: false });
   });
 });

@@ -4,10 +4,11 @@ import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import { uuid } from "@/lib/common/utils";
 import { formatQueryDuration } from "@/lib/format/duration";
 import { autoRevealExportedPathIfConfigured } from "@/lib/export/exportPath";
+import { releaseManualExport, submitManualExport, type ManualExportMode } from "@/lib/export/manualExportQueue";
 import { acceptOraclePackageTransferApproval, acceptOraclePackageTransferPreflight, acceptOracleRoutineDeploymentOperation, type OracleRoutineDeployment } from "@/lib/schema/oracleRoutineDeploy";
 
-export type BackgroundTaskKind = "table-export" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "data-generation" | "multi-db-execution" | "schema-diff" | "data-compare";
-export type BackgroundTaskStatus = "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
+export type BackgroundTaskKind = "table-export" | "table-copy" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "data-generation" | "multi-db-execution" | "schema-diff" | "data-compare";
+export type BackgroundTaskStatus = "Queued" | "Unknown" | "PreparingSnapshot" | "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
 export type DatabaseExportSource = "manual" | "scheduled";
 
 export interface DataTransferFailure {
@@ -40,6 +41,11 @@ export interface ExportTask {
   totalRows: number | null;
   status: BackgroundTaskStatus;
   errorMessage: string | null;
+  /**
+   * 任务执行日志（#13281）：目前只有数据传输任务在写入，记录逐表开始/失败与
+   * 终态摘要，供进度对话框的「执行日志」区展示。按时间正序追加，超上限丢头部。
+   */
+  logLines?: BackgroundTaskLogLine[];
   databaseExportSource?: DatabaseExportSource;
   currentObject?: string;
   preparing?: boolean;
@@ -96,6 +102,8 @@ export interface ExportTask {
   dictionaryWarnings?: number;
   dictionaryProgressKnown?: boolean;
   canCancel?: boolean;
+  canRemove?: boolean;
+  copyPhase?: "preparing" | "structure" | "data" | "refreshing" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown";
   onOpen?: () => void;
   onRemove?: () => void;
 }
@@ -151,6 +159,32 @@ export const MAX_SQL_FILE_FAILURE_ERROR_BYTES = 8 * 1024;
 export const MAX_SQL_FILE_FAILURE_SUMMARY_BYTES = 2 * 1024;
 const MAX_SQL_FILE_FAILURE_NAME_BYTES = 1024;
 const MAX_TRACKED_OMITTED_FAILURES = 4096;
+
+/** 任务日志行的上限：传输上千张表的长任务不会撑爆内存，超出时丢弃最早的行。 */
+export const MAX_TASK_LOG_LINES = 500;
+
+export type BackgroundTaskLogLevel = "info" | "error" | "success";
+
+/**
+ * 任务日志行：文案不在写入时拼死，而是存 i18n key + 参数，由展示端按当前
+ * 界面语言渲染（切语言后历史日志随之变化，与对话框其余文案保持一致）。
+ */
+export interface BackgroundTaskLogLine {
+  /** 事件发生的毫秒时间戳，展示端格式化为 HH:mm:ss。 */
+  at: number;
+  /** i18n key（如 transfer.log.tableStarted）。 */
+  key: string;
+  /** i18n 插值参数；total 等数值在写入端已做兜底，保证渲染端无需判空。 */
+  params?: Record<string, string | number>;
+  level: BackgroundTaskLogLevel;
+}
+
+/** 向任务追加一条日志；超上限时丢弃最早一条。task 未必开启日志（可选字段）。 */
+export function appendTaskLogLine(task: ExportTask, key: string, level: BackgroundTaskLogLevel, params?: Record<string, string | number>) {
+  const lines = task.logLines ?? (task.logLines = []);
+  lines.push({ at: Date.now(), key, level, ...(params ? { params } : {}) });
+  if (lines.length > MAX_TASK_LOG_LINES) lines.splice(0, lines.length - MAX_TASK_LOG_LINES);
+}
 
 interface TransferFailureState {
   indexes: Map<string, number>;
@@ -340,7 +374,7 @@ function recordSqlFileFailure(task: ExportTask, progress: api.SqlFileProgress, c
 }
 
 function normalizeExportStatus(status: string): BackgroundTaskStatus {
-  if (status === "Writing" || status === "Done" || status === "Error" || status === "Cancelled") return status;
+  if (status === "PreparingSnapshot" || status === "Writing" || status === "Done" || status === "Error" || status === "Cancelled") return status;
   return "Running";
 }
 
@@ -361,6 +395,19 @@ function normalizeTransferStatus(status: api.TransferProgress["status"], termina
 function finishDataTransferTask(task: ExportTask) {
   // Preserve the first terminal timestamp so later completion events cannot change the displayed duration.
   task.finishedAt ??= Date.now();
+  // 终态摘要只记一次：terminal progress 可能重复到达，用 finishedAt 已在前面固定的
+  // 特性无法区分，改由调用方 status 判定后写日志；这里以 logLines 末尾是否已是同
+  // key 的终态行做幂等保护，避免重复完成事件刷出多条摘要。
+  const lines = task.logLines;
+  const last = lines && lines.length > 0 ? lines[lines.length - 1] : undefined;
+  if (last?.key === "transfer.log.completed" || last?.key === "transfer.log.failed" || last?.key === "transfer.log.cancelled") return;
+  if (task.status === "Done") {
+    appendTaskLogLine(task, "transfer.log.completed", "success", { total: task.totalTables ?? 0, failed: task.transferFailures?.length ?? 0 });
+  } else if (task.status === "Cancelled") {
+    appendTaskLogLine(task, "transfer.log.cancelled", "info", { index: (task.tableIndex ?? 0) + 1, total: task.totalTables ?? 0 });
+  } else if (task.status === "Error") {
+    appendTaskLogLine(task, "transfer.log.failed", "error", { error: task.errorMessage || "" });
+  }
 }
 
 function finishExportTask(task: ExportTask) {
@@ -386,7 +433,7 @@ function findActiveOverlappingTransfer(request: api.TransferRequest): string[] {
   for (const task of taskMap.values()) {
     if (task.exportId === request.transferId) continue;
     if (task.kind !== "data-transfer") continue;
-    if (task.status !== "Running" && task.status !== "Writing") continue;
+    if (task.status !== "PreparingSnapshot" && task.status !== "Running" && task.status !== "Writing") continue;
     if (task.targetConnectionId !== request.targetConnectionId) continue;
     if ((task.targetCatalog ?? "") !== (request.targetCatalog ?? "")) continue;
     if (task.targetDatabase !== request.targetDatabase) continue;
@@ -401,9 +448,42 @@ function findActiveOverlappingTransfer(request: api.TransferRequest): string[] {
 export function useExportTracker() {
   const tasks = computed(() => Array.from(taskMap.values()));
 
-  const activeCount = computed(() => tasks.value.filter((t) => t.status === "Running" || t.status === "Writing" || t.status === "Cancelling").length);
+  const activeCount = computed(() => tasks.value.filter((t) => t.status === "Queued" || t.status === "Unknown" || t.status === "PreparingSnapshot" || t.status === "Running" || t.status === "Writing" || t.status === "Cancelling").length);
 
   const hasActive = computed(() => activeCount.value > 0);
+
+  function submitExportTask(task: ExportTask, mode: ManualExportMode, run: () => Promise<"settled" | "unknown">, onStateChange?: (task: ExportTask) => void) {
+    let handle: ReturnType<typeof submitManualExport>;
+    const cancelQueued = () => {
+      handle.cancelQueued();
+    };
+    handle = submitManualExport({
+      id: task.exportId,
+      mode,
+      run,
+      onStateChange(state, error) {
+        if (state === "queued") {
+          task.status = "Queued";
+          task.startedAt = undefined;
+          taskCancelHandlers.set(task.exportId, cancelQueued);
+        } else if (state === "running") {
+          if (taskCancelHandlers.get(task.exportId) === cancelQueued) taskCancelHandlers.delete(task.exportId);
+          task.status = "Running";
+          task.startedAt = Date.now();
+        } else if (state === "cancelled") {
+          task.status = "Cancelled";
+          task.finishedAt = Date.now();
+          taskCancelHandlers.delete(task.exportId);
+        } else if (state === "unknown") {
+          task.status = "Unknown";
+          task.finishedAt = undefined;
+          if (error !== undefined) task.errorMessage = error instanceof Error ? error.message : String(error);
+        }
+        onStateChange?.(task);
+      },
+    });
+    return handle;
+  }
 
   function addTask(tableName: string, format: string, filePath: string, exportId?: string): ExportTask {
     const id = exportId ?? uuid();
@@ -417,6 +497,26 @@ export function useExportTracker() {
       totalRows: null,
       status: "Running",
       errorMessage: null,
+      startedAt: Date.now(),
+    });
+    taskMap.set(id, task);
+    return task;
+  }
+
+  function addTableCopyTask(id: string, label: string, onOpen: () => void): ExportTask {
+    const task = reactive<ExportTask>({
+      exportId: id,
+      kind: "table-copy",
+      tableName: label,
+      format: "",
+      filePath: "",
+      rowsExported: 0,
+      totalRows: null,
+      status: "Running",
+      errorMessage: null,
+      canCancel: true,
+      canRemove: false,
+      onOpen,
       startedAt: Date.now(),
     });
     taskMap.set(id, task);
@@ -709,7 +809,7 @@ export function useExportTracker() {
     task.rowsExported = progress.rowsExported;
     task.totalRows = progress.totalRows;
     const nextStatus = normalizeExportStatus(progress.status);
-    task.status = task.status === "Cancelling" && (nextStatus === "Running" || nextStatus === "Writing") ? "Cancelling" : nextStatus;
+    task.status = task.status === "Cancelling" && (nextStatus === "PreparingSnapshot" || nextStatus === "Running" || nextStatus === "Writing") ? "Cancelling" : nextStatus;
     task.errorMessage = progress.errorMessage || null;
     if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") finishExportTask(task);
   }
@@ -793,16 +893,23 @@ export function useExportTracker() {
     const nextStatus = normalizeTransferStatus(progress.status, progress.terminal);
     const hadError = task.status === "Error";
     task.status = hadError && nextStatus === "Done" ? "Error" : nextStatus;
-    if (isTerminalTransferProgress(progress)) finishDataTransferTask(task);
     task.errorMessage = progress.error || task.errorMessage || null;
     task.tableIndex = progress.tableIndex;
     task.totalTables = progress.totalTables;
+    // 表切换即记一条「开始传输」日志（#13281）：progress 事件可能对同一表多次
+    // 触发（行块推进），只在表名变化时记，避免日志刷屏。
+    if (progress.table && progress.table !== task.currentTable) {
+      appendTaskLogLine(task, "transfer.log.tableStarted", "info", { table: progress.table, index: progress.tableIndex + 1, total: progress.totalTables || "?" });
+    }
     task.currentTable = progress.table || task.currentTable;
     const packageEvent = progress.oraclePackageApproval || progress.oraclePackagePreflight || progress.oracleRoutineOperation;
     if (!packageEvent && (progress.table || progress.rowsTransferred > 0 || task.rowsExported === 0)) {
       task.rowsExported = progress.rowsTransferred;
     }
     task.totalRows = progress.totalRows ?? task.totalRows;
+    // 终态收尾放在字段全部更新之后：finishDataTransferTask 会把 errorMessage、
+    // 表计数写进终态日志，提前调用会记到旧值。
+    if (isTerminalTransferProgress(progress)) finishDataTransferTask(task);
   }
 
   function updateDataGenerationTask(executionId: string, progress: DataGenerationTaskProgress): void {
@@ -847,6 +954,8 @@ export function useExportTracker() {
 
   function removeTask(exportId: string) {
     const task = taskMap.get(exportId);
+    if (task?.canRemove === false) return;
+    if (task?.status === "Unknown") releaseManualExport(exportId);
     if (task && (task.status === "Done" || task.status === "Error" || task.status === "Cancelled")) cleanupFinishedTask(task);
     taskMap.delete(exportId);
     taskCancelHandlers.delete(exportId);
@@ -856,7 +965,7 @@ export function useExportTracker() {
 
   function clearFinished() {
     for (const [id, task] of taskMap) {
-      if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") {
+      if (task.canRemove !== false && (task.status === "Done" || task.status === "Error" || task.status === "Cancelled")) {
         cleanupFinishedTask(task);
         taskMap.delete(id);
         taskCancelHandlers.delete(id);
@@ -877,6 +986,7 @@ export function useExportTracker() {
   async function cancelTask(exportId: string) {
     const task = taskMap.get(exportId);
     if (task?.canCancel === false) return;
+    if (task && (task.kind === "table-export" || task.kind === "database-export") && (task.status === "Done" || task.status === "Error" || task.status === "Cancelled" || task.status === "Unknown" || task.status === "Cancelling")) return;
     try {
       const customHandler = taskCancelHandlers.get(exportId);
       if (customHandler) {
@@ -900,7 +1010,9 @@ export function useExportTracker() {
     tasks,
     activeCount,
     hasActive,
+    submitExportTask,
     addTask,
+    addTableCopyTask,
     addDatabaseExportTask,
     addDataDictionaryTask,
     updateDataDictionaryTask,

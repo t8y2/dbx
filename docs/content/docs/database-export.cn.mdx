@@ -5,7 +5,7 @@ description: 将一个或多个数据库的结构、数据和可读取对象流�
 
 数据库导出会生成可审阅的 SQL 脚本，用于小型备份、迁移、测试数据准备或高风险操作前留档。它可以导出单个数据库/Schema，也可以按连接批量导出多个数据库。
 
-<Callout type="info">SQL 导出是逻辑导出，不等同于数据库原生物理备份。大型生产库、时间点恢复、增量备份或严格一致性要求，应优先使用数据库官方备份工具；MySQL 和 PostgreSQL 的定时一致性备份可参阅 [数据库备份](/cn/docs/database-backup)。</Callout>
+<Callout type="info">SQL 导出是逻辑导出，不等同于数据库原生物理备份。大型生产库、时间点恢复、增量备份或严格一致性要求，应优先使用数据库官方备份工具；MySQL、PostgreSQL 和 openGauss 的定时一致性备份可参阅 [数据库备份](/cn/docs/database-backup)。</Callout>
 
 ## 可以导出的内容
 
@@ -18,6 +18,8 @@ description: 将一个或多个数据库的结构、数据和可读取对象流�
 | 导入辅助语句 | 根据引擎生成外键检查、identity 写入、例程分隔符等必要的 setup/收尾语句 |
 
 启用“仅选中表”时，表结构和数据只处理所选表。例程等 Schema 级对象不会因为选择少量表而被一并带出；对象导出始终受当前数据库能力限制。
+
+openGauss 导出目前不会生成 `CREATE SEQUENCE`、`ALTER SEQUENCE ... OWNED BY` 和 `setval`，恢复后自增计数器会从 1 开始，自定义序列也会缺失；同样因为相关处理仅适用于 PostgreSQL，存在循环外键的 Schema 无法恢复。
 
 ## 单库导出
 
@@ -113,7 +115,7 @@ DBX 使用分页或流式读取，把数据分批写入输出文件。交互式�
 
 <Cards>
   <Card title="数据库备份" href="/cn/docs/database-backup">
-    在 Desktop 中为 MySQL 和 PostgreSQL 配置定时一致性 SQL 备份。
+    在 Desktop 中为 MySQL、PostgreSQL 和 openGauss 配置定时一致性 SQL 备份。
   </Card>
   <Card title="SQL 文件执行" href="/cn/docs/sql-file">
     预览、批量执行并检查 SQL 文件结果。

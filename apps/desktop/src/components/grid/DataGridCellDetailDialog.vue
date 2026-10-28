@@ -11,9 +11,9 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { useCellDetailEditor, type UseCellDetailEditorReturn } from "@/composables/useCellDetailEditor";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { BINARY_CELL_DOWNLOAD_MODES, isBinaryCellColumnType, binaryCellUtf8Text, isBlobCellColumnType, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
-import { cellDetailPreviewText, isGeometryColumnType } from "@/lib/dataGrid/cellDetailPresentation";
-import { isHexGeometry, renderWktOnCanvas } from "@/lib/dataGrid/geometryPreview";
+import { BINARY_CELL_DOWNLOAD_MODES, isBinaryCellColumnType, binaryCellUtf8Text, isBinaryCellTextEditable, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
+import { canPreviewCellGeometry, cellDetailPreviewText } from "@/lib/dataGrid/cellDetailPresentation";
+import { renderWktOnCanvas } from "@/lib/dataGrid/geometryPreview";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 import type { DatabaseType } from "@/types/database";
 
@@ -30,7 +30,7 @@ const props = defineProps<{
   downloadBinaryValue: (detail: DataGridCellDetail | null, mode: BinaryCellDownloadMode) => void | Promise<void>;
   canImportBinaryValue: (detail: DataGridCellDetail | null) => boolean;
   importBinaryValue: (detail: DataGridCellDetail | null) => void | Promise<void>;
-  /** BLOB 文本预览与编辑写回一致，在 MySQL / Oracle（含 OceanBase-Oracle）连接开启。 */
+  /** BLOB / BYTEA 文本预览与编辑写回一致，在 MySQL / Oracle（含 OceanBase-Oracle）或 PostgreSQL 连接开启。 */
   databaseType?: DatabaseType;
 }>();
 
@@ -48,7 +48,7 @@ let jsonPreviewEditor: UseCellDetailEditorReturn | null = null;
 const jsonFormatted = computed(() => settingsStore.editorSettings.cellDetailJsonFormatted);
 const jsonView = computed(() => jsonFormatted.value && !!props.detail?.formattedJson);
 const wordWrapEnabled = computed(() => settingsStore.editorSettings.wordWrap);
-const binaryTextPreview = computed(() => (props.detail && isBlobCellColumnType(props.detail.type) ? binaryCellUtf8Text(props.detail.value, props.detail.type, props.databaseType) : null));
+const binaryTextPreview = computed(() => (props.detail && isBinaryCellTextEditable(props.detail.type, props.databaseType) ? binaryCellUtf8Text(props.detail.value, props.detail.type, props.databaseType) : null));
 const presentedValuePreview = computed(() => (binaryTextPreview.value === null && props.detail ? cellDetailPreviewText(props.detail, props.databaseType) : props.detail?.displayValuePreview) ?? "");
 
 function toggleWordWrap() {
@@ -216,7 +216,7 @@ watch(
                 </DropdownMenuContent>
               </DropdownMenu>
               <!-- Unsupported geometry values can arrive as a hex fallback that cannot be rendered. -->
-              <Popover v-if="isGeometryColumnType(detail.type) && detail.value !== null && !isHexGeometry(detail.value as string)" v-model:open="geometryPreviewOpen">
+              <Popover v-if="canPreviewCellGeometry(detail.value, detail.type)" v-model:open="geometryPreviewOpen">
                 <PopoverTrigger as-child>
                   <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.geometryPreview')">
                     <Eye class="h-3 w-3" />

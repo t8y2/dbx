@@ -2365,11 +2365,75 @@ fn export_progress(
     }
 }
 
+#[derive(Default)]
+struct MongoExportEvidence {
+    unknown: std::sync::atomic::AtomicBool,
+    cancelled: std::sync::atomic::AtomicBool,
+}
+
+impl MongoExportEvidence {
+    fn unknown(&self) {
+        self.unknown.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn cancelled(&self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum MongoExportOutcome {
+    Succeeded { value: MongoExportSummary },
+    Failed { message: String },
+    Cancelled { message: String },
+    Unknown { message: String },
+}
+
+pub async fn export_mongodb_query_reported<C, F>(
+    state: &AppState,
+    request: &MongoExportRequest,
+    is_cancelled: C,
+    on_progress: F,
+) -> MongoExportOutcome
+where
+    C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+    F: FnMut(MongoExportProgress),
+{
+    let evidence = MongoExportEvidence::default();
+    let result = export_mongodb_query_inner(state, request, is_cancelled, on_progress, Some(&evidence)).await;
+    if evidence.unknown.load(std::sync::atomic::Ordering::Relaxed) {
+        return MongoExportOutcome::Unknown {
+            message: result.err().unwrap_or_else(|| "MongoDB export cleanup was not confirmed".into()),
+        };
+    }
+    match result {
+        Ok(value) => MongoExportOutcome::Succeeded { value },
+        Err(message) if evidence.cancelled.load(std::sync::atomic::Ordering::Relaxed) => {
+            MongoExportOutcome::Cancelled { message }
+        }
+        Err(message) => MongoExportOutcome::Failed { message },
+    }
+}
+
 pub async fn export_mongodb_query_core<C, F>(
+    state: &AppState,
+    request: &MongoExportRequest,
+    is_cancelled: C,
+    on_progress: F,
+) -> Result<MongoExportSummary, String>
+where
+    C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+    F: FnMut(MongoExportProgress),
+{
+    export_mongodb_query_inner(state, request, is_cancelled, on_progress, None).await
+}
+
+async fn export_mongodb_query_inner<C, F>(
     state: &AppState,
     request: &MongoExportRequest,
     mut is_cancelled: C,
     mut on_progress: F,
+    evidence: Option<&MongoExportEvidence>,
 ) -> Result<MongoExportSummary, String>
 where
     C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
@@ -2381,6 +2445,9 @@ where
         return Err("Gzip compression is only supported for BSON dump exports".to_string());
     }
     if is_cancelled(&request.export_id).await {
+        if let Some(evidence) = evidence {
+            evidence.cancelled();
+        }
         on_progress(export_progress(
             &request.export_id,
             MongoExportStatus::Cancelled,
@@ -2399,7 +2466,10 @@ where
         _ => return Err("Not a MongoDB connection".to_string()),
     }
 
-    let total_documents = count_export_documents(state, request).await;
+    let total_documents = count_export_documents(state, request, evidence).await;
+    if evidence.is_some_and(|evidence| evidence.unknown.load(std::sync::atomic::Ordering::Relaxed)) {
+        return Err("MongoDB export count completion was not confirmed".into());
+    }
 
     let target = PathBuf::from(&request.file_path);
     if let Some(parent) = target.parent() {
@@ -2410,20 +2480,53 @@ where
 
     let result = match request.format {
         MongoExportFormat::Ndjson => {
-            export_ndjson(state, request, &temp, total_documents, started_at, &mut is_cancelled, &mut on_progress).await
+            export_ndjson(
+                state,
+                request,
+                &temp,
+                total_documents,
+                started_at,
+                &mut is_cancelled,
+                &mut on_progress,
+                evidence,
+            )
+            .await
         }
         MongoExportFormat::Csv => {
-            export_csv(state, request, &temp, total_documents, started_at, &mut is_cancelled, &mut on_progress).await
+            export_csv(
+                state,
+                request,
+                &temp,
+                total_documents,
+                started_at,
+                &mut is_cancelled,
+                &mut on_progress,
+                evidence,
+            )
+            .await
         }
         MongoExportFormat::Bson => {
-            export_bson(state, request, &temp, total_documents, started_at, &mut is_cancelled, &mut on_progress).await
+            export_bson(
+                state,
+                request,
+                &temp,
+                total_documents,
+                started_at,
+                &mut is_cancelled,
+                &mut on_progress,
+                evidence,
+            )
+            .await
         }
     };
 
     match result {
         Ok((documents_read, _bytes_written)) => {
             if is_cancelled(&request.export_id).await {
-                cleanup_temp(&temp);
+                if let Some(evidence) = evidence {
+                    evidence.cancelled();
+                }
+                cleanup_export_temp(&temp, evidence)?;
                 on_progress(export_progress(
                     &request.export_id,
                     MongoExportStatus::Cancelled,
@@ -2435,7 +2538,16 @@ where
                 ));
                 return Err("Export cancelled".to_string());
             }
-            atomic_rename(&temp, &target)?;
+            if evidence.is_some_and(|evidence| evidence.unknown.load(std::sync::atomic::Ordering::Relaxed)) {
+                cleanup_export_temp(&temp, evidence)?;
+                return Err("MongoDB export completion was not confirmed".into());
+            }
+            if let Err(error) = atomic_rename(&temp, &target) {
+                return match cleanup_export_temp(&temp, evidence) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(format!("{error}; {cleanup}")),
+                };
+            }
             on_progress(export_progress(
                 &request.export_id,
                 MongoExportStatus::Done,
@@ -2453,7 +2565,9 @@ where
             })
         }
         Err(error) => {
-            cleanup_temp(&temp);
+            if let Err(cleanup) = cleanup_export_temp(&temp, evidence) {
+                return Err(format!("{error}; {cleanup}"));
+            }
             let cancelled = error == "Export cancelled" || is_cancelled(&request.export_id).await;
             on_progress(export_progress(
                 &request.export_id,
@@ -2469,21 +2583,42 @@ where
     }
 }
 
-async fn count_export_documents(state: &AppState, request: &MongoExportRequest) -> Option<u64> {
+fn cleanup_export_temp(path: &Path, evidence: Option<&MongoExportEvidence>) -> Result<(), String> {
+    if let Some(evidence) = evidence {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                evidence.unknown();
+                Err(format!("MongoDB export temp cleanup failed: {error}"))
+            }
+        }
+    } else {
+        cleanup_temp(path);
+        Ok(())
+    }
+}
+
+async fn count_export_documents(
+    state: &AppState,
+    request: &MongoExportRequest,
+    evidence: Option<&MongoExportEvidence>,
+) -> Option<u64> {
     if request.filter.as_deref().is_some_and(|filter| !filter.trim().is_empty() && filter.trim() != "{}") {
         return None;
     }
     let pool = mongo_pool_for_database(state, &request.connection_id, &request.database).await.ok()?;
-    match pool {
-        PoolKind::MongoDb(client) => mongo_driver::count_documents(
-            &client,
-            &request.database,
-            &request.collection,
-            request.filter.as_deref(),
-            false,
-        )
-        .await
-        .ok(),
+    let result = match pool {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::count_documents(
+                &client,
+                &request.database,
+                &request.collection,
+                request.filter.as_deref(),
+                false,
+            )
+            .await
+        }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             client
@@ -2494,10 +2629,15 @@ async fn count_export_documents(state: &AppState, request: &MongoExportRequest) 
                     "accurate": false,
                 }))
                 .await
-                .ok()
         }
-        _ => None,
+        _ => return None,
+    };
+    if result.is_err() {
+        if let Some(evidence) = evidence {
+            evidence.unknown();
+        }
     }
+    result.ok()
 }
 
 async fn for_each_export_json_document<C, F>(
@@ -2505,6 +2645,7 @@ async fn for_each_export_json_document<C, F>(
     request: &MongoExportRequest,
     is_cancelled: &mut C,
     mut on_document: F,
+    evidence: Option<&MongoExportEvidence>,
 ) -> Result<(), String>
 where
     C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
@@ -2513,7 +2654,7 @@ where
     let pool = mongo_pool_for_database(state, &request.connection_id, &request.database).await?;
     match pool {
         PoolKind::MongoDb(client) => {
-            for_each_find_document(
+            let result = for_each_find_document(
                 &client,
                 &request.database,
                 &request.collection,
@@ -2524,9 +2665,17 @@ where
                 DEFAULT_EXPORT_BATCH_SIZE,
                 |document| on_document(document_to_canonical_extended_json(&document)),
             )
-            .await
+            .await;
+            if result.is_err() {
+                if let Some(evidence) = evidence {
+                    evidence.unknown();
+                }
+            }
+            result
         }
-        PoolKind::Agent(client) => for_each_agent_export_document(&client, request, is_cancelled, on_document).await,
+        PoolKind::Agent(client) => {
+            for_each_agent_export_document(&client, request, is_cancelled, on_document, evidence).await
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -2536,6 +2685,7 @@ async fn for_each_agent_export_document<C, F>(
     request: &MongoExportRequest,
     is_cancelled: &mut C,
     mut on_document: F,
+    evidence: Option<&MongoExportEvidence>,
 ) -> Result<(), String>
 where
     C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
@@ -2545,9 +2695,9 @@ where
     // other operation that shares this pooled agent connection.
     let supports_cursor = client.lock().await.supports_capability(AgentCapability::MongoFindCursor);
     if supports_cursor {
-        export_agent_find_cursor(client, request, is_cancelled, &mut on_document).await
+        export_agent_find_cursor(client, request, is_cancelled, &mut on_document, evidence).await
     } else {
-        export_agent_find_pages(client, request, is_cancelled, &mut on_document).await
+        export_agent_find_pages(client, request, is_cancelled, &mut on_document, evidence).await
     }
 }
 
@@ -2662,12 +2812,16 @@ async fn export_agent_find_cursor<C, F>(
     request: &MongoExportRequest,
     is_cancelled: &mut C,
     on_document: &mut F,
+    evidence: Option<&MongoExportEvidence>,
 ) -> Result<(), String>
 where
     C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
     F: FnMut(serde_json::Value) -> Result<(), String>,
 {
     if is_cancelled(&request.export_id).await {
+        if let Some(evidence) = evidence {
+            evidence.cancelled();
+        }
         return Err("Export cancelled".to_string());
     }
     let started: serde_json::Value = {
@@ -2675,21 +2829,37 @@ where
         match guard.mongo_start_find_cursor(agent_cursor_find_params(request)).await {
             Ok(started) => started,
             Err(error) if crate::mongo_ops::is_unknown_agent_method_error(&error, "start_find_cursor") => {
-                return export_agent_find_pages(client, request, is_cancelled, on_document).await;
+                return export_agent_find_pages(client, request, is_cancelled, on_document, evidence).await;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                if let Some(evidence) = evidence {
+                    evidence.unknown();
+                }
+                return Err(error);
+            }
         }
     };
     let cursor_id = started
         .get("cursor_id")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "MongoDB Legacy Agent returned an invalid find cursor".to_string())?
+        .ok_or_else(|| {
+            if let Some(evidence) = evidence {
+                evidence.unknown();
+            }
+            "MongoDB Legacy Agent returned an invalid find cursor".to_string()
+        })?
         .to_string();
-    let result = fetch_agent_find_cursor(client, request, &cursor_id, is_cancelled, on_document).await;
-    let _: Result<serde_json::Value, String> = {
+    let mut exhausted = false;
+    let result = fetch_agent_find_cursor(client, request, &cursor_id, is_cancelled, on_document, &mut exhausted).await;
+    let close: Result<serde_json::Value, String> = {
         let mut guard = client.lock().await;
         guard.mongo_close_find_cursor(serde_json::json!({ "cursor_id": cursor_id })).await
     };
+    if !exhausted || close.is_err() {
+        if let Some(evidence) = evidence {
+            evidence.unknown();
+        }
+    }
     result
 }
 
@@ -2699,6 +2869,7 @@ async fn fetch_agent_find_cursor<C, F>(
     cursor_id: &str,
     is_cancelled: &mut C,
     on_document: &mut F,
+    confirmed_exhausted: &mut bool,
 ) -> Result<(), String>
 where
     C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
@@ -2723,6 +2894,7 @@ where
             .map(std::mem::take)
             .ok_or_else(|| "MongoDB Legacy Agent returned an invalid find cursor page".to_string())?;
         let exhausted = page.get("exhausted").and_then(serde_json::Value::as_bool).unwrap_or(documents.is_empty());
+        *confirmed_exhausted = page.get("exhausted").and_then(serde_json::Value::as_bool) == Some(true);
         let empty = documents.is_empty();
         for document in documents {
             on_document(document)?;
@@ -2738,6 +2910,7 @@ async fn export_agent_find_pages<C, F>(
     request: &MongoExportRequest,
     is_cancelled: &mut C,
     on_document: &mut F,
+    evidence: Option<&MongoExportEvidence>,
 ) -> Result<(), String>
 where
     C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
@@ -2752,6 +2925,9 @@ where
     let mut last_id: Option<serde_json::Value> = None;
     loop {
         if is_cancelled(&request.export_id).await {
+            if let Some(evidence) = evidence {
+                evidence.cancelled();
+            }
             return Err("Export cancelled".to_string());
         }
         let params = match &keyset_base {
@@ -2770,7 +2946,12 @@ where
                             .to_string(),
                     );
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    if let Some(evidence) = evidence {
+                        evidence.unknown();
+                    }
+                    return Err(error);
+                }
             }
         };
         // The shipped legacy agent answers this method with `documentQueryResult`, so
@@ -2818,6 +2999,7 @@ async fn export_ndjson<C, F>(
     started_at: Instant,
     is_cancelled: &mut C,
     on_progress: &mut F,
+    evidence: Option<&MongoExportEvidence>,
 ) -> Result<(u64, u64), String>
 where
     C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
@@ -2827,27 +3009,36 @@ where
     let mut writer = BufWriter::new(file);
     let mut documents_read = 0u64;
     let mut bytes_written = 0u64;
-    for_each_export_json_document(state, request, is_cancelled, |json| {
-        let mut line = json.to_string();
-        line.push('\n');
-        bytes_written += write_export_line(&mut writer, &line)?;
-        documents_read += 1;
-        if documents_read == 1 || documents_read.is_multiple_of(500) {
-            on_progress(export_progress(
-                &request.export_id,
-                MongoExportStatus::Running,
-                documents_read,
-                bytes_written,
-                total_documents,
-                None,
-                started_at,
-            ));
-        }
-        Ok(())
-    })
+    for_each_export_json_document(
+        state,
+        request,
+        is_cancelled,
+        |json| {
+            let mut line = json.to_string();
+            line.push('\n');
+            bytes_written += write_export_line(&mut writer, &line)?;
+            documents_read += 1;
+            if documents_read == 1 || documents_read.is_multiple_of(500) {
+                on_progress(export_progress(
+                    &request.export_id,
+                    MongoExportStatus::Running,
+                    documents_read,
+                    bytes_written,
+                    total_documents,
+                    None,
+                    started_at,
+                ));
+            }
+            Ok(())
+        },
+        evidence,
+    )
     .await?;
     writer.flush().map_err(|error| error.to_string())?;
     if is_cancelled(&request.export_id).await {
+        if let Some(evidence) = evidence {
+            evidence.cancelled();
+        }
         return Err("Export cancelled".to_string());
     }
     Ok((documents_read, bytes_written))
@@ -2894,12 +3085,16 @@ async fn export_bson<C, F>(
     started_at: Instant,
     is_cancelled: &mut C,
     on_progress: &mut F,
+    evidence: Option<&MongoExportEvidence>,
 ) -> Result<(u64, u64), String>
 where
     C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
     F: FnMut(MongoExportProgress),
 {
     if is_cancelled(&request.export_id).await {
+        if let Some(evidence) = evidence {
+            evidence.cancelled();
+        }
         return Err("Export cancelled".to_string());
     }
     let pool = mongo_pool_for_database(state, &request.connection_id, &request.database).await?;
@@ -2948,9 +3143,13 @@ where
             let mut poll_cancel = tokio::time::interval(std::time::Duration::from_millis(100));
             loop {
                 tokio::select! {
-                    result = &mut export => { result?; break; }
+                    result = &mut export => {
+                        if result.is_err() { if let Some(evidence) = evidence { evidence.unknown(); } }
+                        result?; break;
+                    }
                     _ = poll_cancel.tick() => {
                         if is_cancelled(&request.export_id).await {
+                            if let Some(evidence) = evidence { evidence.unknown(); }
                             return Err("Export cancelled".to_string());
                         }
                     }
@@ -2964,15 +3163,22 @@ where
             if !client.lock().await.supports_capability(AgentCapability::MongoFindCursor) {
                 return Err("BSON export over the MongoDB Legacy Agent needs find-cursor support; upgrade or reinstall the MongoDB Legacy driver".into());
             }
-            for_each_agent_export_document(client, request, is_cancelled, |value| {
-                write_document(mongo_driver::json_object_to_document_extended_json(&value)?)
-            })
+            for_each_agent_export_document(
+                client,
+                request,
+                is_cancelled,
+                |value| write_document(mongo_driver::json_object_to_document_extended_json(&value)?),
+                evidence,
+            )
             .await?;
         }
         _ => return Err("Not a MongoDB connection".to_string()),
     }
     writer.finish()?;
     if is_cancelled(&request.export_id).await {
+        if let Some(evidence) = evidence {
+            evidence.cancelled();
+        }
         return Err("Export cancelled".to_string());
     }
     Ok((documents_read, bytes_written))
@@ -2988,12 +3194,16 @@ async fn export_csv<C, F>(
     started_at: Instant,
     is_cancelled: &mut C,
     on_progress: &mut F,
+    evidence: Option<&MongoExportEvidence>,
 ) -> Result<(u64, u64), String>
 where
     C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
     F: FnMut(MongoExportProgress),
 {
     if is_cancelled(&request.export_id).await {
+        if let Some(evidence) = evidence {
+            evidence.cancelled();
+        }
         return Err("Export cancelled".to_string());
     }
     let file = File::create(temp).map_err(|error| error.to_string())?;
@@ -3005,20 +3215,40 @@ where
     let mut documents_read = 0u64;
     let mut bytes_written = 0u64;
 
-    for_each_export_json_document(state, request, is_cancelled, |json| {
-        if !header_ready {
-            collect_csv_fields(&json, &mut fields, &mut seen)?;
-            buffered.push(json);
-            if buffered.len() >= CSV_FIELD_DISCOVERY_DOCS {
-                write_csv_header_and_buffer(
-                    request.include_header,
-                    &mut fields,
-                    &mut buffered,
-                    &mut writer,
-                    &mut bytes_written,
-                    &mut documents_read,
-                )?;
-                header_ready = true;
+    for_each_export_json_document(
+        state,
+        request,
+        is_cancelled,
+        |json| {
+            if !header_ready {
+                collect_csv_fields(&json, &mut fields, &mut seen)?;
+                buffered.push(json);
+                if buffered.len() >= CSV_FIELD_DISCOVERY_DOCS {
+                    write_csv_header_and_buffer(
+                        request.include_header,
+                        &mut fields,
+                        &mut buffered,
+                        &mut writer,
+                        &mut bytes_written,
+                        &mut documents_read,
+                    )?;
+                    header_ready = true;
+                    on_progress(export_progress(
+                        &request.export_id,
+                        MongoExportStatus::Running,
+                        documents_read,
+                        bytes_written,
+                        total_documents,
+                        None,
+                        started_at,
+                    ));
+                }
+                return Ok(());
+            }
+            let line = format_csv_document_line(&fields, &json);
+            bytes_written += write_export_line(&mut writer, &line)?;
+            documents_read += 1;
+            if documents_read.is_multiple_of(500) {
                 on_progress(export_progress(
                     &request.export_id,
                     MongoExportStatus::Running,
@@ -3029,24 +3259,10 @@ where
                     started_at,
                 ));
             }
-            return Ok(());
-        }
-        let line = format_csv_document_line(&fields, &json);
-        bytes_written += write_export_line(&mut writer, &line)?;
-        documents_read += 1;
-        if documents_read.is_multiple_of(500) {
-            on_progress(export_progress(
-                &request.export_id,
-                MongoExportStatus::Running,
-                documents_read,
-                bytes_written,
-                total_documents,
-                None,
-                started_at,
-            ));
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+        evidence,
+    )
     .await?;
     if !header_ready {
         write_csv_header_and_buffer(
@@ -3060,6 +3276,9 @@ where
     }
     writer.flush().map_err(|error| error.to_string())?;
     if is_cancelled(&request.export_id).await {
+        if let Some(evidence) = evidence {
+            evidence.cancelled();
+        }
         return Err("Export cancelled".to_string());
     }
     Ok((documents_read, bytes_written))
@@ -3083,6 +3302,124 @@ pub fn format_mongo_csv_row(fields: &[String], document: &serde_json::Value) -> 
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn reported_mongo_cursor_requires_explicit_exhaustion_and_actual_close() {
+        use super::*;
+        use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec, AgentRuntimeClient, PooledAgentClient};
+        use std::sync::Arc;
+        for mode in ["exhausted", "missing", "early", "close_error", "count_error"] {
+            let dir = std::env::temp_dir().join(format!("dbx-mongo-completion-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = dir.join("agent.py");
+            std::fs::write(&script, r#"import json,sys,time
+mode=sys.argv[1]
+print(json.dumps({'ready':True}),flush=True)
+for line in sys.stdin:
+ req=json.loads(line); method=req['method']; result={}
+ if method=='handshake': result={'protocolVersion':2,'agentProtocolVersion':2,'capabilities':['multi_session','mongo_find_cursor']}
+ elif method.endswith('count_documents'):
+  print(json.dumps({'jsonrpc':'2.0','id':req['id'],'error':{'code':-1,'message':'count reply failed'}}),flush=True); continue
+ elif method.endswith('start_find_cursor'): result={'cursor_id':'cursor'}
+ elif method.endswith('fetch_find_cursor'):
+  result={'documents':[] if mode=='missing' else [{'x':1}]}
+  if mode!='missing': result['exhausted']=mode!='early'
+ elif method.endswith('close_find_cursor'):
+  time.sleep(0.05)
+  if mode=='close_error':
+   print(json.dumps({'jsonrpc':'2.0','id':req['id'],'error':{'code':-1,'message':'close failed'}}),flush=True); continue
+  result={'ok':True}
+ print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+"#).unwrap();
+            let runtime = AgentRuntimeClient::spawn(
+                AgentLaunchSpec::new(if cfg!(windows) { "python" } else { "python3" })
+                    .with_args([script.to_string_lossy().into_owned(), mode.to_string()]),
+                "test",
+            )
+            .await
+            .unwrap();
+            runtime.increment_session_count();
+            let client =
+                Arc::new(PooledAgentClient::new(AgentDriverClient::shared_session(runtime, "mongo-export".into())));
+            let request: MongoExportRequest = serde_json::from_value(serde_json::json!({"exportId":"completion", "connectionId":"conn", "database":"db", "collection":"docs", "format":"ndjson", "filePath":dir.join("out.json").to_string_lossy()})).unwrap();
+            let evidence = MongoExportEvidence::default();
+            if mode == "count_error" {
+                let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+                let state = AppState::new(storage);
+                let config = serde_json::from_value(serde_json::json!({
+                    "id":"conn", "name":"Mongo", "db_type":"mongodb", "host":"localhost",
+                    "port":27017, "username":"", "password":"", "database":"db"
+                }))
+                .unwrap();
+                state.configs.write().await.insert("conn".into(), config);
+                state
+                    .update_connection_pools(|pools| {
+                        pools.insert("conn:db".into(), PoolKind::Agent(client.clone()));
+                    })
+                    .await;
+                let mut progress = Vec::new();
+                let outcome = export_mongodb_query_reported(
+                    &state,
+                    &request,
+                    |_| Box::pin(std::future::ready(false)),
+                    |value| progress.push(value),
+                )
+                .await;
+                assert!(matches!(outcome, MongoExportOutcome::Unknown { .. }));
+                assert_eq!(progress.len(), 1, "count failure must not start the writer");
+                assert!(!std::path::Path::new(&request.file_path).exists());
+                assert!(!std::fs::read_dir(&dir).unwrap().any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with("dbx-export.tmp")));
+                let old =
+                    export_mongodb_query_core(&state, &request, |_| Box::pin(std::future::ready(false)), |_| {}).await;
+                assert!(old.is_ok(), "default count tolerance must remain: {old:?}");
+                assert!(std::path::Path::new(&request.file_path).exists());
+                state.shutdown(std::time::Duration::from_secs(1)).await;
+                drop(client);
+                let _ = std::fs::remove_dir_all(dir);
+                continue;
+            }
+            let started = Instant::now();
+            let mut checks = 0;
+            let result = export_agent_find_cursor(
+                &client,
+                &request,
+                &mut |_| {
+                    checks += 1;
+                    Box::pin(std::future::ready(mode == "early" && checks > 2))
+                },
+                &mut |_| Ok(()),
+                Some(&evidence),
+            )
+            .await;
+            assert!(started.elapsed() >= std::time::Duration::from_millis(40));
+            assert_eq!(evidence.unknown.load(std::sync::atomic::Ordering::Relaxed), mode != "exhausted", "{mode}");
+            if mode == "exhausted" {
+                assert!(result.is_ok());
+            }
+            drop(client);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn reported_mongo_temp_cleanup_checks_actual_deletion() {
+        use super::*;
+        let dir = std::env::temp_dir().join(format!("dbx-mongo-cleanup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let evidence = MongoExportEvidence::default();
+        let path = dir.join("temp");
+        std::fs::write(&path, "task data").unwrap();
+        cleanup_export_temp(&path, Some(&evidence)).unwrap();
+        assert!(!path.exists());
+        cleanup_export_temp(&path, Some(&evidence)).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(cleanup_export_temp(&path, Some(&evidence)).is_err());
+        assert!(evidence.unknown.load(std::sync::atomic::Ordering::Relaxed));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     use super::*;
     use mongodb::bson::{doc, Bson, Document};
     use std::io::Cursor;

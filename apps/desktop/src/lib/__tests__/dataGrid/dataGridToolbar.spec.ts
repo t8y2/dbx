@@ -94,6 +94,7 @@ describe("data grid toolbar capabilities", () => {
     const visibleActions = ["refresh", "navigation", "addRow", "preview", "save", "rollback"] as const;
 
     expect(DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER.slice(-3)).toEqual(["preview", "save", "rollback"]);
+    expect(DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER.indexOf("deleteColumn")).toBe(DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER.indexOf("deleteRow") + 1);
     expect(isDataGridToolbarActionCompact("refresh", visibleActions, 3)).toBe(true);
     expect(isDataGridToolbarActionCompact("navigation", visibleActions, 3)).toBe(true);
     expect(isDataGridToolbarActionCompact("addRow", visibleActions, 3)).toBe(true);

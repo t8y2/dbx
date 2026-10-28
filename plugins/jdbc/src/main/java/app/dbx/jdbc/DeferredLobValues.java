@@ -67,7 +67,8 @@ final class DeferredLobValues {
             retained = true;
             String prefix = entry.binary ? "0x" + text.substring(0, PREVIEW * 2)
                 : text.substring(0, text.offsetByCodePoints(0, PREVIEW));
-            return new Preview(prefix, ref, entry.binary ? length : 64L * 1024 * 1024);
+            // With a locator, zero means unknown byte size; Clob.length() is not a UTF-8 byte count.
+            return new Preview(prefix, ref, entry.binary ? length : 0);
         } finally {
             if (!retained) free(entry);
         }

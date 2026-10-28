@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -1268,6 +1267,7 @@ func peekedMessageFromDelivery(queue string, index int64, delivery amqp.Delivery
 		"deliveryTag":   delivery.DeliveryTag,
 		"timestamp":     int64(0),
 		"headers":       stringHeaders(delivery.Headers),
+		"properties":    deliveryProperties(delivery),
 		"payloadBase64": base64.StdEncoding.EncodeToString(delivery.Body),
 	}
 	if delivery.MessageId != "" {
@@ -1276,8 +1276,8 @@ func peekedMessageFromDelivery(queue string, index int64, delivery amqp.Delivery
 	if !delivery.Timestamp.IsZero() {
 		message["timestamp"] = delivery.Timestamp.UnixMilli()
 	}
-	if utf8.Valid(delivery.Body) {
-		message["payloadText"] = string(delivery.Body)
+	if text, ok := decodeDeliveryPayloadText(delivery.Body); ok {
+		message["payloadText"] = text
 	}
 	return message
 }
@@ -1322,6 +1322,9 @@ func (s *server) sendMessage(params jsonObject) (any, error) {
 				publishing.Headers[key] = converted
 			}
 		}
+	}
+	if err := applyMessageProperties(&publishing, params); err != nil {
+		return nil, err
 	}
 	if err := channel.PublishWithContext(context.Background(), exchange, routingKey, false, false, publishing); err != nil {
 		return nil, err

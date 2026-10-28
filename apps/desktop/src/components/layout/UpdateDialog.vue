@@ -30,6 +30,7 @@ const props = withDefaults(
     isDownloadingUpdate: boolean;
     downloadProgress: number | null;
     updateDownloaded: boolean;
+    updateDownloadedVersion?: string;
     isInstallingUpdate: boolean;
     isPreparingUpdate?: boolean;
     updateReady: boolean;
@@ -64,6 +65,7 @@ const props = withDefaults(
     componentUpdatesUpdating: false,
     updatingComponent: null,
     isUpdatingAll: false,
+    updateDownloadedVersion: "",
   },
 );
 
@@ -85,6 +87,13 @@ const selectedTab = ref<UpdateTab>("app");
 const renderedNotes = ref("");
 
 const hasAppUpdate = computed(() => props.updateDownloaded || props.updateReady || props.updateInfo?.update_available === true);
+/**
+ * A prepared package must stay actionable even when the remote no longer
+ * reports that release as newest (yanked/rolled-back latest, mirror lag): the
+ * download already happened, so hiding the install button would strand the
+ * user with a permanent "downloaded" badge and no way to install it (#13562).
+ */
+const appUpdateActionsVisible = computed(() => props.updateInfo?.update_available === true || props.updateDownloaded || props.updateReady);
 const mcpAvailable = computed(() => (props.mcpUpdate ? mcpUpdateAvailability(props.mcpUpdate) === true : false));
 
 /** 历史版本每页条数（与更新日志一致，避免一次性铺开所有版本） */
@@ -364,7 +373,7 @@ watch(
                   })
                 }}
               </p>
-              <p v-else-if="!checkingUpdates" class="text-muted-foreground">
+              <p v-else-if="!checkingUpdates && !updateDownloaded && !updateReady" class="text-muted-foreground">
                 {{ updateCheckMessage || t("updates.upToDate", { version: updateInfo?.current_version || "" }) }}
               </p>
               <div
@@ -393,7 +402,7 @@ watch(
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("updates.checking") }}
             </p>
-            <p v-if="updateDownloaded && !isInstallingUpdate" class="mt-3">{{ t("updates.downloadedReady", { version: updateInfo?.latest_version }) }}</p>
+            <p v-if="updateDownloaded && !isInstallingUpdate" class="mt-3">{{ t("updates.downloadedReady", { version: updateDownloadedVersion || updateInfo?.latest_version }) }}</p>
             <p v-if="updateCheckFailed && updateInfo?.update_available" role="alert" class="mt-3 text-destructive">{{ updateCheckMessage }}</p>
 
             <div v-if="olderReleases.length || historyError" data-update-history class="mt-4 border-t pt-3">
@@ -511,15 +520,15 @@ watch(
               </SelectContent>
             </Select>
           </div>
-          <template v-if="updateInfo?.update_available">
-            <div class="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
+          <template v-if="appUpdateActionsVisible">
+            <div v-if="updateInfo?.update_available" class="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
               <Button v-if="canIgnoreVersion" variant="ghost" class="shrink-0" :disabled="isIgnoringUpdate" @click="emit('ignore-version')">
                 <Loader2 v-if="isIgnoringUpdate" class="h-4 w-4 animate-spin" />
                 {{ t("updates.ignoreVersion") }}
               </Button>
               <Button variant="outline" class="shrink-0" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
             </div>
-            <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop)">
+            <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop) || updateDownloaded || updateReady">
               <Button v-if="updateReady" class="shrink-0" :disabled="activeTaskCount > 0 || isIgnoringUpdate || isUpdatingAll" @click="emit('restart')">{{ t("updates.restart") }}</Button>
               <Button v-else-if="isInstallingUpdate" class="shrink-0" disabled>
                 <Loader2 class="h-4 w-4 animate-spin" />

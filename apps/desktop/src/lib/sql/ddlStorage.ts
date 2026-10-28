@@ -68,7 +68,10 @@ function spliceTightRemovals(sql: string, tokens: readonly SqlSemanticToken[], r
   let cursor = 0;
   for (const { start, end } of merged) {
     result += sql.slice(cursor, start);
-    if (needsRemovalSeparator(sql[start - 1], sql[end])) result += " ";
+    const comments = tokens.filter((token) => token.kind === "comment" && token.span.start >= start && token.span.end <= end);
+    if (comments.length) {
+      result += " " + comments.map((token) => token.text + (token.text.startsWith("--") ? "\n" : " ")).join("");
+    } else if (needsRemovalSeparator(sql[start - 1], sql[end])) result += " ";
     cursor = end;
   }
   return result + sql.slice(cursor);

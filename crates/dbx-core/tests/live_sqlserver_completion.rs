@@ -87,6 +87,8 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,
+        show_native_jobs: None,
+        show_user_admin: None,
         database_info: None,
     }
 }
@@ -113,6 +115,7 @@ fn live_sqlserver_import_mapping(source: &str, target: &str) -> TableImportColum
         source_column: source.to_string(),
         target_column: target.to_string(),
         target_data_type: None,
+        generator: None,
     }
 }
 
@@ -1327,6 +1330,7 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
         failure_log_enabled: true,
+        resolve_includes: false,
         encoding: Default::default(),
     };
     let done_seen = AtomicBool::new(false);

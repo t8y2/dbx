@@ -1,4 +1,4 @@
-import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionReferencedTable } from "@/lib/sql/sqlCompletion";
+import { removeActiveTableCompletionReference, type SqlCompletionColumn, type SqlCompletionContext, type SqlCompletionReferencedTable } from "@/lib/sql/sqlCompletion";
 import { SQL_SEMANTIC_DIALECTS } from "@/lib/sql/semantic/dialect";
 import type { SqlSemanticModel, SqlSemanticRowSource, SqlSemanticSpan, SqlSemanticToken } from "@/lib/sql/semantic/types";
 
@@ -352,11 +352,15 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
   const prefix = useBaseTrailingIdentifier ? base.prefix : model.cursorIntent.prefix;
   const qualifierParts = model.cursorIntent.qualifierParts.length > 0 ? [...model.cursorIntent.qualifierParts] : useBaseTrailingIdentifier ? base.qualifierParts : undefined;
   const qualifier = qualifierParts?.join(".");
-  const referencedTables = sqlSemanticReferencedTables(model);
+  let referencedTables = sqlSemanticReferencedTables(model);
+  const suggestTables = scope.kind === "table" || scope.kind === "schema" || scope.kind === "catalog";
+  const activePrefixIsCte = model.rowSources.some((source) => source.kind === "cte" && source.name.toLowerCase() === prefix.toLowerCase());
+  if (suggestTables && prefix && referencedTables.length > 1 && !activePrefixIsCte) {
+    referencedTables = removeActiveTableCompletionReference(referencedTables, prefix, qualifier);
+  }
   const mutationTarget = semanticMutationTarget(model);
   const mutationDatabase = mutationTarget?.metadataTarget?.database;
   const mutationSchema = mutationTarget?.qualifierParts[mutationTarget.qualifierParts.length - 1];
-  const suggestTables = scope.kind === "table" || scope.kind === "schema" || scope.kind === "catalog";
   const suggestColumns = scope.kind === "columns";
   const suggestRoutines = scope.kind === "routine" || (suggestColumns && base.suggestRoutines && !base.exclusiveColumnSuggestions);
   const projectionAliases = sqlSemanticProjectionAliasColumns(model).map((column) => column.name);

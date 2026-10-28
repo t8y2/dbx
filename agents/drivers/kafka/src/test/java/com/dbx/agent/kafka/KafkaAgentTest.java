@@ -187,8 +187,21 @@ class KafkaAgentTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
-    void consumerGroupQueriesKeepCommittedTopicsWhenDescriptionsTimeOut(boolean snapshot) throws Exception {
+    void consumerGroupQueriesKeepCommittedTopicsWhenManyDescriptionsTimeOut(boolean snapshot) throws Exception {
         TopicPartition partition = new TopicPartition("orders", 0);
+        List<ConsumerGroupListing> listings = new ArrayList<>();
+        Map<String, KafkaFuture<ConsumerGroupDescription>> descriptions = new LinkedHashMap<>();
+        for (int index = 0; index < 197; index++) {
+            String groupId = index == 0 ? "orders-service" : String.format("slow-group-%03d", index);
+            listings.add(new ConsumerGroupListing(groupId, false));
+            descriptions.put(groupId, index == 0
+                ? KafkaFuture.completedFuture(new ConsumerGroupDescription(
+                    groupId, false, List.of(), "", ConsumerGroupState.EMPTY, Node.noNode()
+                ))
+                : new KafkaFutureImpl<>());
+        }
+        AtomicInteger descriptionRequests = new AtomicInteger();
+        AtomicInteger offsetRequests = new AtomicInteger();
         ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
         try {
             Admin admin = (Admin) Proxy.newProxyInstance(Admin.class.getClassLoader(), new Class<?>[] {Admin.class},
@@ -197,18 +210,16 @@ class KafkaAgentTest {
                         case "listConsumerGroups" -> {
                             var constructor = ListConsumerGroupsResult.class.getDeclaredConstructor(KafkaFuture.class);
                             constructor.setAccessible(true);
-                            yield constructor.newInstance(KafkaFuture.completedFuture(List.of(
-                                new ConsumerGroupListing("orders-service", false),
-                                new ConsumerGroupListing("slow-group", false)
-                            )));
+                            yield constructor.newInstance(KafkaFuture.completedFuture(listings));
                         }
-                        case "describeConsumerGroups" -> new DescribeConsumerGroupsResult(Map.of(
-                            "orders-service", KafkaFuture.completedFuture(new ConsumerGroupDescription(
-                                "orders-service", false, List.of(), "", ConsumerGroupState.EMPTY, Node.noNode()
-                            )),
-                            "slow-group", new KafkaFutureImpl<>()
-                        ));
+                        case "describeConsumerGroups" -> {
+                            descriptionRequests.incrementAndGet();
+                            assertEquals(197, ((java.util.Collection<?>) args[0]).size());
+                            yield new DescribeConsumerGroupsResult(descriptions);
+                        }
                         case "listConsumerGroupOffsets" -> {
+                            offsetRequests.incrementAndGet();
+                            assertEquals(197, ((Map<?, ?>) args[0]).size());
                             // Model an offsets response that needs a small amount of network time.
                             // If descriptions consumed the deadline before this request was sent,
                             // the broker cannot return even these independently available offsets.
@@ -223,10 +234,11 @@ class KafkaAgentTest {
                             }, Math.min(50, timeout), TimeUnit.MILLISECONDS);
                             var constructor = ListConsumerGroupOffsetsResult.class.getDeclaredConstructor(Map.class);
                             constructor.setAccessible(true);
-                            yield constructor.newInstance(Map.of(
-                                CoordinatorKey.byGroupId("orders-service"), offsets,
-                                CoordinatorKey.byGroupId("slow-group"), offsets
-                            ));
+                            Map<CoordinatorKey, KafkaFuture<Map<TopicPartition, OffsetAndMetadata>>> groupOffsets = new LinkedHashMap<>();
+                            for (ConsumerGroupListing listing : listings) {
+                                groupOffsets.put(CoordinatorKey.byGroupId(listing.groupId()), offsets);
+                            }
+                            yield constructor.newInstance(groupOffsets);
                         }
                         case "listOffsets" -> new ListOffsetsResult(Map.of(
                             partition, KafkaFuture.completedFuture(new ListOffsetsResult.ListOffsetsResultInfo(5, -1, Optional.empty()))
@@ -237,23 +249,28 @@ class KafkaAgentTest {
             JsonObject params = new JsonObject();
             params.addProperty("timeout_ms", 300);
             params.addProperty("topic", "orders");
+            long start = System.nanoTime();
             Object result = snapshot
                 ? KafkaAgent.getConsumerGroupSnapshot(params, admin)
                 : KafkaAgent.listConsumerGroups(params, admin);
+            long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            assertTrue(elapsed < 1_500, "waited " + elapsed + "ms; 197 groups must share one 300ms deadline");
+            assertEquals(1, descriptionRequests.get());
+            assertEquals(1, offsetRequests.get());
             var groups = new Gson().toJsonTree(result).getAsJsonObject().getAsJsonArray("groups");
-            assertEquals(2, groups.size());
+            assertEquals(197, groups.size());
             for (var row : groups) {
                 JsonObject group = row.getAsJsonObject();
                 if (snapshot) {
                     assertEquals(1, group.getAsJsonArray("topics").size(), "committed topic survives description timeout");
                     assertEquals("orders", group.getAsJsonArray("topics").get(0).getAsString());
                     assertEquals(3, group.getAsJsonArray("partitions").get(0).getAsJsonObject().get("currentOffset").getAsInt());
-                    if (group.get("groupId").getAsString().equals("slow-group")) {
+                    if (!group.get("groupId").getAsString().equals("orders-service")) {
                         assertTrue(group.get("error").getAsString().contains("Consumer group details unavailable"));
                         assertFalse(group.has("memberCount"));
                     }
                 } else {
-                    assertEquals(!group.get("groupId").getAsString().equals("slow-group"), group.get("membersAvailable").getAsBoolean());
+                    assertEquals(group.get("groupId").getAsString().equals("orders-service"), group.get("membersAvailable").getAsBoolean());
                     assertEquals(1, group.getAsJsonArray("committedOffsets").size(), "committed offsets survive description timeout");
                     assertEquals("orders", group.getAsJsonArray("committedOffsets").get(0).getAsJsonObject().get("topic").getAsString());
                     assertEquals(3, group.getAsJsonArray("committedOffsets").get(0).getAsJsonObject().get("offset").getAsInt());
@@ -261,6 +278,96 @@ class KafkaAgentTest {
             }
         } finally {
             executor.shutdownNow();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void consumerGroupQueriesShardBothLookupsAcrossIndependentAdmins(boolean snapshot) throws Exception {
+        TopicPartition partition = new TopicPartition("orders", 0);
+        List<ConsumerGroupListing> listings = new ArrayList<>();
+        for (int index = 0; index < 197; index++) {
+            listings.add(new ConsumerGroupListing(String.format("group-%03d", index), false));
+        }
+        Map<String, Integer> offsetOwners = new HashMap<>();
+        Map<String, Integer> descriptionOwners = new HashMap<>();
+        Map<String, KafkaFutureImpl<Map<TopicPartition, OffsetAndMetadata>>> pendingOffsets = new HashMap<>();
+        List<Admin> admins = new ArrayList<>();
+        for (int index = 0; index < 12; index++) {
+            int owner = index;
+            admins.add((Admin) Proxy.newProxyInstance(Admin.class.getClassLoader(), new Class<?>[] {Admin.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "listConsumerGroups" -> {
+                        assertEquals(0, owner);
+                        var constructor = ListConsumerGroupsResult.class.getDeclaredConstructor(KafkaFuture.class);
+                        constructor.setAccessible(true);
+                        yield constructor.newInstance(KafkaFuture.completedFuture(listings));
+                    }
+                    case "listConsumerGroupOffsets" -> {
+                        Map<?, ?> specs = (Map<?, ?>) args[0];
+                        assertTrue(specs.size() <= 17, "197 groups must be split across 12 clients");
+                        Map<CoordinatorKey, KafkaFuture<Map<TopicPartition, OffsetAndMetadata>>> offsets = new HashMap<>();
+                        for (Object key : specs.keySet()) {
+                            String groupId = (String) key;
+                            assertNull(offsetOwners.put(groupId, owner), "offsets requested twice for " + groupId);
+                            KafkaFutureImpl<Map<TopicPartition, OffsetAndMetadata>> future = new KafkaFutureImpl<>();
+                            pendingOffsets.put(groupId, future);
+                            offsets.put(CoordinatorKey.byGroupId(groupId), future);
+                        }
+                        var constructor = ListConsumerGroupOffsetsResult.class.getDeclaredConstructor(Map.class);
+                        constructor.setAccessible(true);
+                        yield constructor.newInstance(offsets);
+                    }
+                    case "describeConsumerGroups" -> {
+                        java.util.Collection<?> ids = (java.util.Collection<?>) args[0];
+                        assertTrue(ids.size() <= 17, "descriptions must use the same shards as offsets");
+                        Map<String, KafkaFuture<ConsumerGroupDescription>> descriptions = new HashMap<>();
+                        for (Object key : ids) {
+                            String groupId = (String) key;
+                            assertNull(descriptionOwners.put(groupId, owner), "description requested twice for " + groupId);
+                            descriptions.put(groupId, KafkaFuture.completedFuture(new ConsumerGroupDescription(
+                                groupId, false, List.of(), "", ConsumerGroupState.EMPTY, Node.noNode()
+                            )));
+                        }
+                        // None of the offset futures completes until every shard was sent.
+                        // Waiting on one client before dispatching the others loses its rows.
+                        if (offsetOwners.size() == 197 && descriptionOwners.size() == 197) {
+                            pendingOffsets.values().forEach(future -> future.complete(Map.of(partition, new OffsetAndMetadata(3))));
+                        }
+                        yield new DescribeConsumerGroupsResult(descriptions);
+                    }
+                    case "listOffsets" -> new ListOffsetsResult(Map.of(
+                        partition, KafkaFuture.completedFuture(new ListOffsetsResult.ListOffsetsResultInfo(5, -1, Optional.empty()))
+                    ));
+                    default -> throw new UnsupportedOperationException(method.getName());
+                }));
+        }
+        JsonObject params = new JsonObject();
+        params.addProperty("timeout_ms", 300);
+        params.addProperty("topic", "orders");
+        java.util.function.IntFunction<List<Admin>> provider = count -> {
+            assertEquals(197, count);
+            return admins;
+        };
+        Object result = snapshot
+            ? KafkaAgent.getConsumerGroupSnapshot(params, admins.get(0), provider)
+            : KafkaAgent.listConsumerGroups(params, admins.get(0), provider);
+        assertEquals(197, offsetOwners.size());
+        assertEquals(offsetOwners, descriptionOwners);
+        assertEquals(12, new java.util.HashSet<>(offsetOwners.values()).size());
+        var groups = new Gson().toJsonTree(result).getAsJsonObject().getAsJsonArray("groups");
+        assertEquals(197, groups.size());
+        for (var row : groups) {
+            JsonObject group = row.getAsJsonObject();
+            if (snapshot) {
+                assertEquals(2, group.get("totalLag").getAsInt());
+                assertTrue(group.get("lagAvailable").getAsBoolean());
+                assertFalse(group.has("error"));
+            } else {
+                assertTrue(group.get("membersAvailable").getAsBoolean());
+                assertEquals(1, group.getAsJsonArray("committedOffsets").size());
+                assertEquals(1, group.getAsJsonArray("endOffsets").size());
+            }
         }
     }
 

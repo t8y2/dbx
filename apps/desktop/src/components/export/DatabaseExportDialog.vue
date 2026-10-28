@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import * as api from "@/lib/backend/api";
@@ -26,10 +27,16 @@ import { revealExportedPath } from "@/lib/export/exportPath";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { databaseExportFileStem, loadSavedDatabaseExportOptions, MAX_SPLIT_SQL_PART_MB, MIN_SPLIT_SQL_PART_MB, saveDatabaseExportOptions, sortDatabaseTableNames } from "@/lib/export/databaseExportOptions";
 import { notifyExportComplete } from "@/lib/export/exportReveal";
+import ExportExecutionMode from "@/components/export/ExportExecutionMode.vue";
+import type { ManualExportMode } from "@/lib/export/manualExportQueue";
+import type { ExportTask } from "@/composables/useExportTracker";
+import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
+import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 
 const { t } = useI18n();
 const { toast } = useToast();
-const { addDatabaseExportTask, updateDatabaseExportTask } = useExportTracker();
+const exportTracker = useExportTracker();
+const { addDatabaseExportTask, updateDatabaseExportTask } = exportTracker;
 const open = defineModel<boolean>("open", { default: false });
 const store = useConnectionStore();
 
@@ -80,6 +87,9 @@ const omitAutoIncrement = ref(savedOptions.omitAutoIncrement);
 const preserveOriginalLanguage = ref(savedOptions.preserveOriginalLanguage);
 const splitSqlOutput = ref(savedOptions.splitSqlOutput);
 const splitSqlPartMaxMb = ref(savedOptions.splitSqlPartMaxMb);
+const executionMode = ref<ManualExportMode>("immediate");
+const desktopTaskStatus = ref<ExportTask["status"] | null>(null);
+let disposed = false;
 
 function applyStoredExportOptions() {
   const saved = loadSavedDatabaseExportOptions();
@@ -158,6 +168,7 @@ onMounted(() => {
   }, 1000);
 });
 onBeforeUnmount(() => {
+  disposed = true;
   if (elapsedTimer) clearInterval(elapsedTimer);
 });
 
@@ -173,6 +184,7 @@ const exportElapsedText = computed(() => {
 const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "solr", "couchdb", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "salesforce"].includes(c.db_type)));
 
 const canExport = computed(() => {
+  if (mysqlDataCharsetEnabled(store.getConfig(connectionId.value))) return false;
   const hasContent = includeStructure.value || includeData.value || includeObjects.value;
   if (!connectionId.value || !hasContent || isExporting.value) return false;
   if (exportAllDatabases.value) return selectedDatabases.value.length > 0 && !loadingMeta.value;
@@ -398,8 +410,233 @@ async function buildExportPlanForDatabases(dbs: string[]): Promise<AllDatabaseEx
   return buildAllDatabaseExportPlan({ databases: dbs, schemaAware, schemasByDatabase, dbType });
 }
 
+async function startDesktopExport() {
+  const config = store.getConfig(connectionId.value);
+  if (!config) return;
+  const captured = {
+    connectionId: connectionId.value,
+    fingerprint: connectionConfigFingerprint(config),
+    connectionType: config.db_type,
+    database: database.value,
+    schema: isPostgresAllSchemas.value ? "" : schema.value,
+    allDatabases: exportAllDatabases.value,
+    databases: [...selectedDatabases.value],
+    tables: [...selectedTables.value],
+    mode: executionMode.value,
+    split: splitSqlOutput.value,
+    request: {
+      selectedTables: !isPostgresAllSchemas.value && (includeStructure.value || includeData.value) ? buildSelectedTablesPayload(tables.value, selectedTables.value) : undefined,
+      includeStructure: includeStructure.value,
+      includeData: includeData.value,
+      insertDialect: insertDialect.value,
+      insertMode: insertMode.value,
+      includeObjects: includeObjects.value,
+      includeCreateDatabase: includeCreateDatabase.value,
+      dropTableIfExists: dropTableIfExists.value,
+      omitAutoIncrement: omitAutoIncrement.value,
+      preserveOriginalLanguage: preserveOriginalLanguage.value,
+      batchSize: 1000,
+      splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
+    },
+  };
+  let destination: string;
+  try {
+    if (captured.allDatabases) {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const path = await openDialog({ directory: true, multiple: false, title: t("databaseExport.selectExportDirectory") });
+      if (typeof path !== "string") return;
+      destination = path;
+    } else {
+      const name = sanitizeFileName(databaseExportFileStem(captured.database || "database", captured.tables) || "database");
+      const path = await promptExportSavePath({ defaultFileName: `${name}.${captured.split ? "zip" : "sql"}`, filters: [{ name: captured.split ? "ZIP" : "SQL", extensions: [captured.split ? "zip" : "sql"] }] });
+      if (!path) return;
+      destination = path;
+    }
+    const { dirname } = await import("@tauri-apps/api/path");
+    await api.recordDatabaseExportDestination(captured.allDatabases ? destination : await dirname(destination));
+  } catch (error) {
+    toast(translateBackendError(t, error), 5000);
+    return;
+  }
+  const currentConfig = store.getConfig(captured.connectionId);
+  if (
+    disposed ||
+    !currentConfig ||
+    connectionId.value !== captured.connectionId ||
+    database.value !== captured.database ||
+    (isPostgresAllSchemas.value ? "" : schema.value) !== captured.schema ||
+    exportAllDatabases.value !== captured.allDatabases ||
+    connectionConfigFingerprint(currentConfig) !== captured.fingerprint ||
+    JSON.stringify(selectedTables.value) !== JSON.stringify(captured.tables) ||
+    JSON.stringify(selectedDatabases.value) !== JSON.stringify(captured.databases)
+  ) {
+    toast(t("exportProgress.connectionChanged"), 5000);
+    return;
+  }
+  const id = generateDatabaseExportId();
+  const label = captured.allDatabases ? t("databaseExport.allDatabasesTask", { count: captured.databases.length }) : captured.database || "database";
+  const task = addDatabaseExportTask(id, label, destination);
+  exportId.value = id;
+  exportFilePath.value = destination;
+  exportDone.value = false;
+  exportError.value = null;
+  exportWarning.value = null;
+  exportCancelled.value = false;
+  exportFinishedAt.value = null;
+  batchDatabaseIndex.value = 0;
+  batchDatabaseTotal.value = 0;
+  batchRowsExported.value = 0;
+  exportProgress.value = { exportId: id, currentObject: "", objectIndex: 0, totalObjects: 0, rowsExported: 0, totalRows: null, status: "Running", error: null, preparing: true };
+  const ownsView = () => !disposed && exportId.value === id;
+  const sync = () => {
+    if (!ownsView()) return;
+    desktopTaskStatus.value = task.status;
+    exportStartedAt.value = task.startedAt ?? null;
+    exportFinishedAt.value = task.finishedAt ?? null;
+    isExporting.value = task.status === "Queued" || task.status === "Running" || task.status === "Writing" || task.status === "Cancelling";
+    exportDone.value = task.status === "Done";
+    exportCancelled.value = task.status === "Cancelled";
+    exportError.value = task.status === "Unknown" || task.status === "Error" ? task.errorMessage || t("exportProgress.unknown") : null;
+  };
+  let completion: Promise<"settled" | "unknown"> | undefined;
+  const execute = async (): Promise<"settled" | "unknown"> => {
+    const controller = new AbortController();
+    let activeExport = "";
+    let unknown = false;
+    let rows = 0;
+    let completedItems = 0;
+    let totalItems = 0;
+    let lenientErrors = 0;
+    let firstError: string | null = null;
+    let firstFile = "";
+    let confirmedCancelled = false;
+    let lastProgress: ExportProgress | undefined;
+    const check = () => {
+      if (controller.signal.aborted) throw new SnapshotCompletionError("cancelled", "Export cancelled");
+      const current = store.getConfig(captured.connectionId);
+      if (!current || connectionConfigFingerprint(current) !== captured.fingerprint) throw new SnapshotCompletionError("failed", t("exportProgress.connectionChanged"));
+    };
+    exportTracker.registerTaskCancelHandler(id, async () => {
+      controller.abort();
+      task.status = "Cancelling";
+      sync();
+      if (activeExport) await api.cancelDatabaseExport(activeExport);
+    });
+    try {
+      check();
+      let plan: AllDatabaseExportPlanItem[];
+      if (captured.allDatabases) {
+        const schemaAware = isSchemaAware(captured.connectionType);
+        const schemasByDatabase: Record<string, string[]> = {};
+        if (schemaAware)
+          for (const database of captured.databases) {
+            check();
+            try {
+              schemasByDatabase[database] = filterExportableSchemas(await api.listSchemas(captured.connectionId, database), captured.connectionType);
+            } catch (error) {
+              throw new SnapshotCompletionError("unknown", error instanceof Error ? error.message : String(error));
+            }
+            check();
+          }
+        plan = buildAllDatabaseExportPlan({ databases: captured.databases, schemaAware, schemasByDatabase, dbType: captured.connectionType });
+      } else plan = [{ database: captured.database, schema: captured.schema, displayName: label, fileStem: label }];
+      totalItems = plan.length;
+      if (ownsView()) batchDatabaseTotal.value = captured.allDatabases ? totalItems : 0;
+      for (const [index, item] of plan.entries()) {
+        check();
+        if (ownsView()) batchDatabaseIndex.value = index + 1;
+        const filePath = captured.allDatabases ? joinExportPath(destination, `${sanitizeFileName(item.fileStem)}.${captured.split ? "zip" : "sql"}`) : destination;
+        firstFile ||= filePath;
+        let itemRows = 0;
+        const currentId = captured.allDatabases ? `${id}-${index + 1}` : id;
+        const terminal = await runWithDatabaseBackupSnapshot({ connectionId: captured.connectionId, database: item.database, enabled: shouldUseDatabaseBackupSnapshot(captured.connectionType, captured.request.includeData, true), reportCompletion: true }, async (snapshotSessionId) => {
+          check();
+          activeExport = currentId;
+          try {
+            return await runDatabaseExportUntilTerminal(
+              { ...captured.request, selectedTables: captured.allDatabases ? undefined : captured.request.selectedTables, exportId: currentId, connectionId: captured.connectionId, database: item.database, schema: item.schema, filePath, snapshotSessionId },
+              (progress) => {
+                lastProgress = progress;
+                const nextRows = Math.max(0, progress.rowsExported);
+                rows += Math.max(0, nextRows - itemRows);
+                itemRows = nextRows;
+                const combined: ExportProgress = { ...progress, exportId: id, status: "Running", rowsExported: rows, ...(captured.allDatabases ? { currentObject: `${item.displayName}: ${progress.currentObject || item.displayName}`, objectIndex: index, totalObjects: plan.length } : {}) };
+                updateDatabaseExportTask(id, combined);
+                if (controller.signal.aborted) task.status = "Cancelling";
+                if (ownsView()) {
+                  exportProgress.value = combined;
+                  batchRowsExported.value = rows;
+                }
+                sync();
+              },
+              true,
+            );
+          } finally {
+            activeExport = "";
+          }
+        });
+        completedItems = index + 1;
+        lenientErrors += terminal.errorCount ?? 0;
+        firstError ??= terminal.errorSummary ?? null;
+        if (terminal.status === "Cancelled") {
+          confirmedCancelled = true;
+          controller.abort();
+          break;
+        }
+      }
+      const cancelled = confirmedCancelled || (controller.signal.aborted && completedItems < totalItems);
+      const final: ExportProgress = {
+        exportId: id,
+        currentObject: captured.allDatabases ? label : lastProgress?.currentObject || label,
+        objectIndex: captured.allDatabases ? completedItems : (lastProgress?.objectIndex ?? completedItems),
+        totalObjects: captured.allDatabases ? totalItems : (lastProgress?.totalObjects ?? totalItems),
+        rowsExported: rows,
+        totalRows: captured.allDatabases ? null : (lastProgress?.totalRows ?? null),
+        status: cancelled ? "Cancelled" : "Done",
+        error: null,
+        errorCount: lenientErrors,
+        errorSummary: firstError,
+      };
+      updateDatabaseExportTask(id, final);
+      if (ownsView()) {
+        exportProgress.value = final;
+        exportWarning.value = firstError;
+      }
+      if (!cancelled) {
+        if (captured.allDatabases)
+          notifyExportComplete({
+            filePath: firstFile || destination,
+            message: lenientErrors ? t("databaseExport.exportAllSuccessWithErrors", { count: captured.databases.length, errorCount: lenientErrors, firstError: firstError ?? "" }) : t("databaseExport.exportAllSuccess", { count: captured.databases.length }),
+            openFolderLabel: t("exportProgress.openFolder"),
+            toast,
+            duration: lenientErrors ? 8000 : 3000,
+          });
+        else toastDatabaseExportCompletion(lenientErrors, firstError, destination);
+      }
+      return "settled";
+    } catch (error) {
+      unknown = error instanceof SnapshotCompletionError && error.status === "unknown";
+      task.status = unknown ? "Unknown" : error instanceof SnapshotCompletionError && error.status === "cancelled" ? "Cancelled" : "Error";
+      task.errorMessage = error instanceof Error ? error.message : String(error);
+      task.finishedAt = unknown ? undefined : Date.now();
+      return unknown ? "unknown" : "settled";
+    } finally {
+      if (!unknown) exportTracker.unregisterTaskCancelHandler(id);
+      task.canCancel = false;
+      sync();
+    }
+  };
+  exportTracker.submitExportTask(task, captured.mode, () => (completion = execute()), sync);
+  if (captured.mode === "immediate") await completion;
+}
+
 async function startExport() {
+  if (mysqlDataCharsetEnabled(store.getConfig(connectionId.value))) return;
   if (!canExport.value) return;
+  if (isTauriRuntime()) {
+    await startDesktopExport();
+    return;
+  }
   if (exportAllDatabases.value) {
     await startAllDatabasesExport();
     return;
@@ -732,6 +969,10 @@ async function startAllDatabasesExport() {
 }
 
 async function cancelExport() {
+  if (isTauriRuntime() && desktopTaskStatus.value && exportId.value) {
+    await exportTracker.cancelTask(exportId.value);
+    return;
+  }
   if (exportId.value) {
     if (exportAllDatabases.value) {
       exportCancelled.value = true;
@@ -747,6 +988,8 @@ async function cancelExport() {
 }
 
 function resetState() {
+  desktopTaskStatus.value = null;
+  executionMode.value = "immediate";
   connectionId.value = "";
   database.value = "";
   databases.value = [];
@@ -791,6 +1034,7 @@ const progressPercent = computed(() => {
 
 /** True while schema metadata is still loading — before objects are written. */
 const isPreparingExport = computed(() => {
+  if (desktopTaskStatus.value === "Queued") return false;
   if (!isExporting.value) return false;
   if (exportDone.value || exportError.value || exportCancelled.value) return false;
   const p = exportProgress.value;
@@ -799,6 +1043,8 @@ const isPreparingExport = computed(() => {
 });
 
 const progressStatusText = computed(() => {
+  if (desktopTaskStatus.value === "Queued") return t("exportProgress.queued");
+  if (desktopTaskStatus.value === "Cancelling") return t("databaseBackup.cancelling");
   const p = exportProgress.value;
   if (isPreparingExport.value) {
     // Keep it as presence feedback only — no second progress counter that later resets.
@@ -902,6 +1148,7 @@ watch([includeStructure, includeData, insertDialect, insertMode, includeObjects,
       </DialogHeader>
 
       <div class="flex-1 min-h-0 overflow-auto space-y-4 py-2">
+        <p v-if="mysqlDataCharsetEnabled(store.getConfig(connectionId))" class="text-xs text-muted-foreground">{{ t("connection.mysqlDataCharsetExportHint") }}</p>
         <!-- Connection / Database / Schema Selection -->
         <div v-if="!isExporting && !exportDone && !exportError && !exportCancelled" class="space-y-3">
           <div class="space-y-1.5">
@@ -1105,6 +1352,7 @@ watch([includeStructure, includeData, insertDialect, insertMode, includeObjects,
             <p v-if="splitSqlOutput" class="pl-5 text-[11px] text-muted-foreground">
               {{ t("databaseExport.splitSqlOutputDescription", { min: MIN_SPLIT_SQL_PART_MB, max: MAX_SPLIT_SQL_PART_MB }) }}
             </p>
+            <ExportExecutionMode v-if="isTauriRuntime()" v-model="executionMode" />
           </div>
         </div>
 
@@ -1115,16 +1363,16 @@ watch([includeStructure, includeData, insertDialect, insertMode, includeObjects,
           </div>
           <div class="space-y-2">
             <div v-if="!exportAllDatabases || !exportDone" class="flex items-center gap-2 text-xs text-muted-foreground">
-              <Loader2 v-if="isExporting && !exportDone && !exportError && !exportCancelled" class="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+              <Loader2 v-if="isExporting && desktopTaskStatus !== 'Queued' && !exportDone && !exportError && !exportCancelled" class="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
               <span>{{ progressStatusText }}</span>
             </div>
 
-            <div class="w-full bg-muted rounded-full h-2 overflow-hidden">
+            <div v-if="desktopTaskStatus !== 'Queued'" class="w-full bg-muted rounded-full h-2 overflow-hidden">
               <div v-if="isPreparingExport" class="database-export-progress-indeterminate h-full rounded-full bg-primary" />
               <div v-else class="h-full rounded-full transition-[width] duration-300" :class="exportError ? 'bg-destructive' : exportCancelled ? 'bg-yellow-500' : exportDone ? 'bg-green-500' : 'bg-primary'" :style="{ width: `${exportDone ? 100 : progressPercent}%` }" />
             </div>
 
-            <div v-if="exportProgress && !isPreparingExport" class="text-xs text-muted-foreground tabular-nums">
+            <div v-if="exportProgress && desktopTaskStatus !== 'Queued' && !isPreparingExport" class="text-xs text-muted-foreground tabular-nums">
               {{ exportAllDatabases ? t("databaseExport.allRowsExported", { count: exportProgress.rowsExported.toLocaleString() }) : t("databaseExport.rowsExported", { current: exportProgress.objectIndex, total: exportProgress.totalObjects, count: exportProgress.rowsExported.toLocaleString() }) }}
             </div>
             <div v-if="exportElapsedText" class="text-xs text-muted-foreground tabular-nums">
@@ -1168,7 +1416,7 @@ watch([includeStructure, includeData, insertDialect, insertMode, includeObjects,
           <Button variant="outline" size="sm" @click="open = false">
             {{ t("databaseExport.runInBackground") }}
           </Button>
-          <Button variant="destructive" size="sm" @click="cancelExport">
+          <Button variant="destructive" size="sm" :disabled="desktopTaskStatus === 'Cancelling'" @click="cancelExport">
             <X class="w-3.5 h-3.5 mr-1.5" />
             {{ t("transfer.cancel") }}
           </Button>

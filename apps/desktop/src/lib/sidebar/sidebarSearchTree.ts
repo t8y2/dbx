@@ -80,7 +80,7 @@ export function reuseLiveSidebarTreeNodes(indexedNodes: TreeNode[], liveNodes: r
   return indexedNodes.map((node) => liveNodesById.get(node.id) ?? node);
 }
 
-export const localTableSearchParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables"]);
+export const localTableSearchParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables", "group-views", "group-materialized-views"]);
 const localTableSearchChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
 
 interface LocalTableSearchOptions {
@@ -377,6 +377,60 @@ function preservedSearchChildren(node: TreeNode, collapsedIds: ReadonlySet<strin
   return node.children.filter((child) => !hiddenSearchNodeTypes.has(child.type)).map((child) => applySearchCollapsedState(child, collapsedIds));
 }
 
+const typeFilterDatabaseDescendantTypes = new Set<TreeNodeType>([
+  "database",
+  "redis-db",
+  "mq-tenant",
+  "nacos-namespace",
+  "consul-root",
+  "mongo-db",
+  "doris-catalog",
+  "linked-server",
+  "linked-server-catalog",
+  "linked-server-schema",
+  "schema",
+  "table",
+  "mongo-collection",
+  "mongo-bucket",
+  "dynamodb-table",
+  "vector-collection",
+  "elasticsearch-index",
+  "view",
+  "materialized_view",
+]);
+
+const typeFilterSchemaDescendantTypes = new Set<TreeNodeType>(["schema", "linked-server-schema", "table", "mongo-collection", "mongo-bucket", "dynamodb-table", "vector-collection", "elasticsearch-index", "view", "materialized_view"]);
+
+const typeFilterTableDescendantTypes = new Set<TreeNodeType>(["table", "mongo-collection", "mongo-bucket", "dynamodb-table", "vector-collection", "elasticsearch-index", "view", "materialized_view"]);
+
+function isUnloadedTypeFilterContainer(node: TreeNode, searchableNodeTypes: ReadonlySet<TreeNodeType>): boolean {
+  if (node.children && node.children.length > 0) return false;
+  if (searchableNodeTypes.has(node.type)) return false;
+
+  if (node.type === "connection") {
+    for (const type of searchableNodeTypes) {
+      if (typeFilterDatabaseDescendantTypes.has(type)) return true;
+    }
+    return false;
+  }
+
+  if (node.type === "database" || node.type === "redis-db" || node.type === "mongo-db" || node.type === "doris-catalog" || node.type === "linked-server") {
+    for (const type of searchableNodeTypes) {
+      if (typeFilterSchemaDescendantTypes.has(type)) return true;
+    }
+    return false;
+  }
+
+  if (node.type === "schema" || node.type === "linked-server-schema" || node.type === "group-tables" || node.type === "group-views" || node.type === "table-vgroup") {
+    for (const type of searchableNodeTypes) {
+      if (typeFilterTableDescendantTypes.has(type)) return true;
+    }
+    return false;
+  }
+
+  return false;
+}
+
 function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabelMatcher | undefined, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>, resolveLabel?: (node: TreeNode) => string, query?: string): TreeNode[] {
   const filteredNodes: { node: TreeNode; score: number }[] = [];
 
@@ -410,13 +464,16 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
     // A type-matched table keeps its loaded detail groups after the text query
     // is cleared instead of being rebuilt with an empty filtered child list.
     const preservesTypeMatchedTable = !matchLabel && !!selfMatch && node.type === "table";
+    // Unloaded container nodes (such as unexpanded connections or database-level containers)
+    // must be preserved during type-only filtering so the user can access and expand them.
+    const isUnloadedContainer = !matchLabel && !!searchableNodeTypes && isUnloadedTypeFilterContainer(node, searchableNodeTypes);
     // Connection utility entries are synthetic navigation actions, not schema
     // search results. Keep real loaded descendants for connection-name matches,
     // but do not let those actions make a disconnected result look expanded.
     const filteredChildren = preservesSubtree ? preservedSearchChildren(node, collapsedIds) : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query) : undefined;
 
-    if (selfMatch || (filteredChildren && filteredChildren.length > 0)) {
-      if (!node.children || preservesTypeMatchedTable) {
+    if (selfMatch || (filteredChildren && filteredChildren.length > 0) || isUnloadedContainer) {
+      if (!node.children || preservesTypeMatchedTable || isUnloadedContainer) {
         filteredNodes.push({ node, score: selfMatch?.score ?? 0 });
       } else {
         const children = filteredChildren ?? [];

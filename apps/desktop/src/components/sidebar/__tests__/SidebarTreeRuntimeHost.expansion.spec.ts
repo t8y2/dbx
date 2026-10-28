@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick, provide, ref, type App } from "vue";
+import { computed, createApp, defineComponent, h, nextTick, provide, reactive, ref, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { TreeNode } from "@/types/database";
@@ -9,6 +9,7 @@ import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { filterSidebarTree } from "@/lib/sidebar/sidebarSearchTree";
 import { OBJECT_BROWSER_SEARCH_FOCUS_EVENT } from "@/lib/tabs/objectBrowserSearchFocus";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
+import { compileConnectionTreeTestScript } from "./connectionTreeTestScript";
 
 const connectionStore = {
   treeNodes: [] as TreeNode[],
@@ -28,6 +29,19 @@ const connectionStore = {
     node.isExpanded = true;
   }),
   loadTables: vi.fn(async () => undefined),
+  loadDatabases: vi.fn(async () => undefined),
+  loadRedisDatabases: vi.fn(async () => undefined),
+  loadMongoDatabases: vi.fn(async () => undefined),
+  loadEtcdRoot: vi.fn(async () => undefined),
+  loadMilvusDatabases: vi.fn(async () => undefined),
+  loadElasticsearchIndices: vi.fn(async () => undefined),
+  loadMqttTopics: vi.fn(async () => undefined),
+  loadMqTenants: vi.fn(async () => undefined),
+  loadNacosNamespaces: vi.fn(async () => undefined),
+  loadDynamoDbTables: vi.fn(async () => undefined),
+  loadZooKeeperRoot: vi.fn(async () => undefined),
+  loadConsulRoot: vi.fn(async () => undefined),
+  loadVectorCollections: vi.fn(async () => undefined),
   loadCustomTypeChildren: vi.fn(async (node: TreeNode) => {
     node.hasMembers = true;
     node.children = [{ id: `${node.id}:attribute`, label: "STREET", type: "type-member", connectionId: node.connectionId, database: node.database }];
@@ -45,6 +59,8 @@ const queryStore = {
   updateSql: vi.fn(),
   setTableMeta: vi.fn(),
   openNacosAdmin: vi.fn(),
+  openDamengJobAdmin: vi.fn(),
+  openDatabaseJobAdmin: vi.fn(),
   openObjectBrowser: vi.fn(() => "object-browser-tab"),
 };
 
@@ -88,6 +104,15 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
 });
 
 const mountedApps: App[] = [];
+const compiledSearchHandlers = compileConnectionTreeTestScript(["onSearchToggle", "onNodeToggled"]);
+
+function searchHandlers(searchCollapsedIds: { value: Set<string> }) {
+  const bindings = { searchCollapsedIds, isTreeSearchFiltering: ref(true), store: connectionStore, syncSidebarTreeNodeExpansion, sidebarLayoutMonitor: { recordEvent: vi.fn() } };
+  return new Function(...Object.keys(bindings), `${compiledSearchHandlers}; return { onSearchToggle, onNodeToggled };`)(...Object.values(bindings)) as {
+    onSearchToggle: (node: TreeNode) => void;
+    onNodeToggled: (node: TreeNode, expanded: boolean) => void;
+  };
+}
 
 afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount();
@@ -108,6 +133,24 @@ afterEach(() => {
 });
 
 describe("SidebarTreeRuntimeHost expansion", () => {
+  it.each(["dameng-job-admin", "database-job-admin"] as const)("opens %s through the direct-navigation production path", async (type) => {
+    const node: TreeNode = { id: `c:${type}`, label: "Jobs", type, connectionId: "c", database: "" };
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+    host.value?.handleRowClick(node, 1);
+    host.value?.handleRowClick(node, 2);
+    host.value?.handleRowDoubleClick(node, new MouseEvent("dblclick"));
+    const open = type === "dameng-job-admin" ? queryStore.openDamengJobAdmin : queryStore.openDatabaseJobAdmin;
+    await vi.waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith("c"));
+    expect(connectionStore.loadObjectGroupChildren).not.toHaveBeenCalled();
+    expect(node.children).toBeUndefined();
+  });
+
   it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("lazy-loads unknown TYPE members for %s on row activation", async (dbType) => {
     const typeNode: TreeNode = { id: `${dbType}:demo:APP:TYPE_OBJ`, label: "TYPE_OBJ", type: "type", connectionId: dbType, database: "demo", schema: "APP", objectName: "TYPE_OBJ", hasMembers: undefined };
     connectionStore.getConfig.mockReturnValue({ db_type: dbType });
@@ -822,15 +865,18 @@ describe("SidebarTreeRuntimeHost expansion", () => {
       children: [tableGroup],
     };
     connectionStore.sidebarSearchQuery = "json";
-    const searchToggle = vi.fn();
-    const nodeToggled = vi.fn();
+    const collapsedIds = ref(new Set([database.id]));
+    const projection = computed(() => filterSidebarTree([database], "json", collapsedIds.value));
+    const handlers = searchHandlers(collapsedIds);
+    const searchToggle = vi.fn(handlers.onSearchToggle);
+    const nodeToggled = vi.fn(handlers.onNodeToggled);
 
     const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
     const app = createApp(
       defineComponent({
         setup() {
           provide(sidebarTreeContextKey, {
-            getVisibleNodes: () => [database],
+            getVisibleNodes: () => projection.value,
             getVisibleNodeIndex: () => 0,
             isSearchProjectionActive: () => true,
           });
@@ -848,9 +894,169 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     await nextTick();
 
     expect(searchToggle).toHaveBeenCalledWith(database);
+    expect(projection.value[0].isExpanded).toBe(true);
+    expect(database.isExpanded).toBe(false);
     expect(nodeToggled).not.toHaveBeenCalled();
     expect(connectionStore.loadTables).not.toHaveBeenCalled();
     expect(connectionStore.releaseCollapsedTreeNodeChildren).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { loaded: false, query: "north" },
+    { loaded: true, query: "north" },
+    { loaded: false, query: "basic" },
+  ])("expands a database during search ($query, loaded: $loaded)", async ({ loaded, query }) => {
+    const tableGroup: TreeNode = {
+      id: "mysql:basic:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: false,
+      children: [
+        { id: "mysql:basic:orders", label: "orders", type: "table", connectionId: "mysql", database: "basic" },
+        { id: "mysql:basic:customers", label: "customers", type: "table", connectionId: "mysql", database: "basic" },
+      ],
+    };
+    const database = reactive<TreeNode>({
+      id: "mysql:basic",
+      label: "basic",
+      type: "database",
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: false,
+      // Unopened databases can already contain their saved-SQL shortcut.
+      children: loaded ? [tableGroup] : [{ id: "mysql:basic:queries", label: "tree.queries", type: "saved-sql-root", connectionId: "mysql", database: "basic", children: [] }],
+    });
+    const otherDatabase: TreeNode = { id: "mysql:other", label: "other", type: "database", connectionId: "mysql", database: "other", isExpanded: false, children: [] };
+    const root: TreeNode = { id: "mysql", label: "north", type: "connection", connectionId: "mysql", isExpanded: true, children: [database, otherDatabase] };
+    connectionStore.treeNodes = [root];
+    connectionStore.connectedIds.add("mysql");
+    connectionStore.loadTables.mockImplementation(async () => {
+      if (!loaded) database.children = [tableGroup];
+      database.isExpanded = true;
+    });
+    const collapsedIds = ref(new Set(query === "basic" ? [database.id] : []));
+    const projectedDatabase = computed(() => filterSidebarTree([root], query, collapsedIds.value)[0].children![0]);
+    const handlers = searchHandlers(collapsedIds);
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup() {
+          provide(sidebarTreeContextKey, {
+            getVisibleNodes: () => [projectedDatabase.value],
+            getVisibleNodeIndex: () => 0,
+            isSearchProjectionActive: () => true,
+            getTreeLoadSearchOptions: () => ({ searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: "" }),
+          });
+          return () => h(SidebarTreeRuntimeHost, { ref: host, node: projectedDatabase.value, depth: 1, onSearchToggle: handlers.onSearchToggle, onNodeToggled: handlers.onNodeToggled });
+        },
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value!.toggleNode(projectedDatabase.value);
+    await vi.waitFor(() => expect(projectedDatabase.value.isExpanded).toBe(true));
+    expect(connectionStore.loadTables).toHaveBeenCalledExactlyOnceWith("mysql", "basic", undefined, { searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: "" });
+    expect(database.children?.[0].children?.map((node) => node.label)).toEqual(["orders", "customers"]);
+    expect(otherDatabase.isExpanded).toBe(false);
+
+    host.value!.toggleNode(projectedDatabase.value);
+    await nextTick();
+    expect(projectedDatabase.value.isExpanded).toBe(false);
+    host.value!.toggleNode(projectedDatabase.value);
+    await vi.waitFor(() => expect(projectedDatabase.value.isExpanded).toBe(true));
+    expect(connectionStore.loadTables).toHaveBeenCalledTimes(query === "basic" ? 1 : 2);
+    expect(connectionStore.releaseCollapsedTreeNodeChildren).not.toHaveBeenCalled();
+  });
+
+  it("reopens a cached table group below a matching connection without replacing its children", async () => {
+    const group = reactive<TreeNode>({
+      id: "mysql:basic:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: true,
+      children: [
+        { id: "mysql:basic:orders", label: "orders", type: "table", connectionId: "mysql", database: "basic" },
+        { id: "mysql:basic:customers", label: "customers", type: "table", connectionId: "mysql", database: "basic" },
+      ],
+    });
+    const root: TreeNode = { id: "mysql", label: "north", type: "connection", connectionId: "mysql", isExpanded: true, children: [{ id: "mysql:basic", label: "basic", type: "database", connectionId: "mysql", database: "basic", isExpanded: true, children: [group] }] };
+    connectionStore.treeNodes = [root];
+    connectionStore.connectedIds.add("mysql");
+    const collapsedIds = ref(new Set<string>());
+    const projectedGroup = computed(() => filterSidebarTree([root], "north", collapsedIds.value)[0].children![0].children![0]);
+    const handlers = searchHandlers(collapsedIds);
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup() {
+          provide(sidebarTreeContextKey, { getVisibleNodes: () => [projectedGroup.value], getVisibleNodeIndex: () => 0, isSearchProjectionActive: () => true });
+          return () => h(SidebarTreeRuntimeHost, { ref: host, node: projectedGroup.value, depth: 2, onSearchToggle: handlers.onSearchToggle, onNodeToggled: handlers.onNodeToggled });
+        },
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+    const children = group.children;
+
+    for (let cycle = 0; cycle < 2; cycle++) {
+      host.value!.toggleNode(projectedGroup.value);
+      await nextTick();
+      expect(projectedGroup.value.isExpanded).toBe(false);
+      expect(collapsedIds.value.has("mysql:basic:orders")).toBe(true);
+      host.value!.toggleNode(projectedGroup.value);
+      await nextTick();
+      expect(projectedGroup.value.isExpanded).toBe(true);
+      expect(group.isExpanded).toBe(true);
+      expect(group.children).toBe(children);
+    }
+    expect(connectionStore.loadObjectGroupChildren).not.toHaveBeenCalled();
+    expect(connectionStore.releaseCollapsedTreeNodeChildren).not.toHaveBeenCalled();
+  });
+
+  it("does not skip schema expansion when another visible database has the same node id", async () => {
+    const schema = reactive<TreeNode>({ id: "pg:a:b", label: "b", type: "schema", connectionId: "pg", database: "a", schema: "b", isExpanded: false, children: [{ id: "pg:a:b:tables", label: "Tables", type: "group-tables", connectionId: "pg", database: "a", schema: "b", children: [] }] });
+    const otherDatabase: TreeNode = { id: "pg:a:b", label: "a:b", type: "database", connectionId: "pg", database: "a:b", isExpanded: true, children: [] };
+    const root: TreeNode = { id: "pg", label: "north", type: "connection", connectionId: "pg", isExpanded: true, children: [{ id: "pg:a", label: "a", type: "database", connectionId: "pg", database: "a", isExpanded: true, children: [schema] }, otherDatabase] };
+    connectionStore.treeNodes = [root];
+    connectionStore.connectedIds.add("pg");
+    connectionStore.getConfig.mockReturnValue({ db_type: "postgres", name: "north" });
+    connectionStore.loadTables.mockImplementation(async () => {
+      schema.isExpanded = true;
+    });
+    const collapsedIds = ref(new Set<string>());
+    const projection = computed(() => filterSidebarTree([root], "north", collapsedIds.value)[0]);
+    const visible = computed(() => [projection.value.children![0].children![0], projection.value.children![1]]);
+    const handlers = searchHandlers(collapsedIds);
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup() {
+          provide(sidebarTreeContextKey, { getVisibleNodes: () => visible.value, getVisibleNodeIndex: () => 1, isSearchProjectionActive: () => true });
+          return () => h(SidebarTreeRuntimeHost, { ref: host, node: visible.value[0], depth: 2, onSearchToggle: handlers.onSearchToggle, onNodeToggled: handlers.onNodeToggled });
+        },
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value!.toggleNode(visible.value[0]);
+    await vi.waitFor(() => expect(schema.isExpanded).toBe(true));
+    expect(connectionStore.loadTables).toHaveBeenCalledExactlyOnceWith("pg", "a", "b", undefined);
+    expect(otherDatabase.isExpanded).toBe(true);
   });
 
   it("expands an unloaded object group without leaking a matching connection name", async () => {
@@ -1150,5 +1356,183 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     expect(groupNode.isExpanded).toBe(false);
     expect(connectionNode.isExpanded).toBe(false);
     expect(databaseNode.isExpanded).toBe(false);
+  });
+
+  it("expands a connection on first click even when loader does not pre-set isExpanded (issue #13536)", async () => {
+    const databaseNode: TreeNode = {
+      id: "mysql:db1",
+      label: "db1",
+      type: "database",
+      connectionId: "mysql",
+      database: "db1",
+      isExpanded: false,
+      children: [],
+    };
+    const connectionNode = reactive<TreeNode>({
+      id: "mysql",
+      label: "MySQL Prod",
+      type: "connection",
+      connectionId: "mysql",
+      isExpanded: false,
+      children: [],
+    });
+
+    connectionStore.treeNodes = [connectionNode];
+    connectionStore.loadDatabases = vi.fn(async () => {
+      // This harness stubs the loader, so it only attaches children; the shared toggle path must still set expansion.
+      connectionNode.children = [databaseNode];
+    });
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const toggled = vi.fn((node: TreeNode, expanded: boolean) => {
+      syncSidebarTreeNodeExpansion(connectionStore.treeNodes, node, expanded);
+    });
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: connectionNode, depth: 0, onNodeToggled: toggled }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(connectionNode);
+    await vi.waitFor(() => expect(connectionNode.isExpanded).toBe(true));
+
+    expect(connectionStore.loadDatabases).toHaveBeenCalledWith("mysql", undefined);
+    expect(connectionStore.treeNodes[0].isExpanded).toBe(true);
+    expect(toggled).toHaveBeenCalledWith(connectionNode, true);
+  });
+
+  it("expands a connection during search on first click (issue #13536)", async () => {
+    const databaseNode: TreeNode = {
+      id: "mysql:db1",
+      label: "db1",
+      type: "database",
+      connectionId: "mysql",
+      database: "db1",
+      isExpanded: false,
+      children: [],
+    };
+    const connectionNode = reactive<TreeNode>({
+      id: "mysql",
+      label: "MySQL Prod",
+      type: "connection",
+      connectionId: "mysql",
+      isExpanded: false,
+      children: [],
+    });
+
+    connectionStore.treeNodes = [connectionNode];
+    connectionStore.loadDatabases = vi.fn(async () => {
+      connectionNode.children = [databaseNode];
+    });
+
+    const collapsedIds = ref(new Set<string>());
+    const projection = computed(() => filterSidebarTree(connectionStore.treeNodes, "MySQL", collapsedIds.value));
+    const handlers = searchHandlers(collapsedIds);
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup() {
+          provide(sidebarTreeContextKey, {
+            getVisibleNodes: () => projection.value,
+            getVisibleNodeIndex: () => 0,
+            isSearchProjectionActive: () => true,
+            getTreeLoadSearchOptions: () => ({ searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: "" }),
+          });
+          return () =>
+            h(SidebarTreeRuntimeHost, {
+              ref: host,
+              node: projection.value[0],
+              depth: 0,
+              onSearchToggle: handlers.onSearchToggle,
+              onNodeToggled: handlers.onNodeToggled,
+            });
+        },
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(projection.value[0]);
+    await vi.waitFor(() => expect(projection.value[0].isExpanded).toBe(true));
+
+    expect(connectionStore.loadDatabases).toHaveBeenCalledWith("mysql", {
+      searchFilter: "",
+      allowGlobalSearchMismatch: true,
+      expectedSidebarSearchQuery: "",
+    });
+    expect(connectionStore.treeNodes[0].isExpanded).toBe(true);
+    expect(projection.value[0].isExpanded).toBe(true);
+    expect(projection.value[0].children?.map((c) => c.label)).toEqual(["db1"]);
+  });
+
+  // #13579: the manual-expansion regression hit every connection type, not just
+  // SQL engines. The store loaders now always expand after loading, but this
+  // harness stubs each loader, so children arrive without pre-set isExpanded and
+  // the shared toggle path must still expand the connection node itself.
+  it.each([
+    { dbType: "redis", loader: "loadRedisDatabases" as const, childType: "redis-db" as const },
+    { dbType: "mongodb", loader: "loadMongoDatabases" as const, childType: "mongo-db" as const },
+    { dbType: "etcd", loader: "loadEtcdRoot" as const, childType: "etcd-root" as const },
+    { dbType: "milvus", loader: "loadMilvusDatabases" as const, childType: "vector-database" as const },
+    { dbType: "elasticsearch", loader: "loadElasticsearchIndices" as const, childType: "elasticsearch-index" as const },
+    { dbType: "mqtt", loader: "loadMqttTopics" as const, childType: "mqtt-topic" as const },
+    { dbType: "mq", loader: "loadMqTenants" as const, childType: "mq-tenant" as const },
+    { dbType: "nacos", loader: "loadNacosNamespaces" as const, childType: "nacos-namespace" as const, extraCallArgs: [undefined] },
+    { dbType: "dynamodb", loader: "loadDynamoDbTables" as const, childType: "dynamodb-table" as const },
+    { dbType: "zookeeper", loader: "loadZooKeeperRoot" as const, childType: "zookeeper-root" as const },
+    { dbType: "consul", loader: "loadConsulRoot" as const, childType: "consul-root" as const },
+    { dbType: "qdrant", loader: "loadVectorCollections" as const, childType: "vector-collection" as const },
+  ])("expands a $dbType connection on first click (issue #13579)", async ({ dbType, loader, childType, extraCallArgs }) => {
+    const connectionId = `${dbType}-conn`;
+    const child: TreeNode = {
+      id: `${connectionId}:child`,
+      label: `${dbType} child`,
+      type: childType,
+      connectionId,
+      isExpanded: false,
+      children: [],
+    };
+    const connectionNode = reactive<TreeNode>({
+      id: connectionId,
+      label: `${dbType} connection`,
+      type: "connection",
+      connectionId,
+      isExpanded: false,
+      children: [],
+    });
+
+    connectionStore.getConfig.mockReturnValue({ db_type: dbType, name: dbType } as ReturnType<typeof connectionStore.getConfig>);
+    connectionStore.treeNodes = [connectionNode];
+    const loaderMock = connectionStore[loader] as ReturnType<typeof vi.fn>;
+    loaderMock.mockImplementation(async () => {
+      connectionNode.children = [child];
+    });
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: connectionNode, depth: 0 }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(connectionNode);
+    await vi.waitFor(() => expect(connectionNode.isExpanded).toBe(true));
+
+    expect(loaderMock).toHaveBeenCalledWith(connectionId, ...(extraCallArgs ?? []));
+    expect(connectionNode.children?.map((node) => node.label)).toEqual([`${dbType} child`]);
   });
 });

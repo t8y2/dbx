@@ -66,6 +66,22 @@ async fn emit_terminal_progress<F>(
     emitter.emit_terminal(progress);
 }
 
+fn cancelled_table_counts(
+    source: &DatabaseType,
+    target: &DatabaseType,
+    moved_rows: Option<u64>,
+    source_rows: Option<u64>,
+) -> (u64, Option<u64>) {
+    // Cancellation does not roll back batches already committed to Xugu. Keep
+    // the current table's acknowledged writes, never a previous table's count.
+    // Preserve the existing terminal-event contract for every other DB pair.
+    if super::transfer::mysql_xugu::is_pair(source, target) {
+        (moved_rows.unwrap_or(0), source_rows)
+    } else {
+        (0, None)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_transfer<F>(
     state: Arc<AppState>,
@@ -86,7 +102,13 @@ where
     let app = ProgressEmitter::new(progress_callback);
 
     let (routine_context, package_transfer) = match async {
+        // Reject interpreted source/target data before preflight I/O or claiming
+        // package approvals. Keep the later check after those awaited steps too.
+        super::transfer::check_data_charset_transfer(&state, &request).await?;
         super::transfer::validate_transfer_database_pair(&request, &source_db_type, &target_db_type)?;
+        if super::transfer::mysql_xugu::is_pair(&source_db_type, &target_db_type) {
+            super::transfer::mysql_xugu::preflight(&state, &request, &source_pool_key, &target_pool_key).await?;
+        }
         let routine = crate::schema::oracle_routines::capture_routine_transfer_context(
             &state,
             &request.source_connection_id,
@@ -126,6 +148,28 @@ where
     };
 
     super::transfer::with_transfer_operation_timeout(operation_timeout_secs, async {
+        if let Err(error) = super::transfer::check_data_charset_transfer(&state, &request).await {
+            emit_terminal_progress(
+                &app,
+                history.as_ref(),
+                TransferProgress {
+                    oracle_package_approval: None,
+                    oracle_package_preflight: None,
+                    oracle_routine_operation: None,
+                    transfer_id: transfer_id.clone(),
+                    table: String::new(),
+                    table_index: 0,
+                    total_tables,
+                    rows_transferred: 0,
+                    total_rows: None,
+                    status: TransferStatus::Error,
+                    error: Some(error),
+                    terminal: true,
+                },
+            )
+            .await;
+            return;
+        }
         // Sort tables by FK dependency so referenced tables are transferred first,
         // and keep the foreign key metadata fetched along the way — MySQL-family
         // targets reuse it per table below instead of re-querying it.
@@ -506,6 +550,8 @@ where
                 }
                 Err(e) => {
                     if e == "Cancelled" {
+                        let (rows_transferred, total_rows) =
+                            cancelled_table_counts(&source_db_type, &target_db_type, moved_row_count, source_row_count);
                         if let Some(journal) = history.as_ref() {
                             journal
                                 .finish_table(
@@ -527,8 +573,8 @@ where
                                 table: table.clone(),
                                 table_index: i,
                                 total_tables,
-                                rows_transferred: 0,
-                                total_rows: None,
+                                rows_transferred,
+                                total_rows,
                                 status: TransferStatus::Cancelled,
                                 error: None,
                                 terminal: true,
@@ -798,6 +844,70 @@ mod tests {
     use super::*;
     use crate::models::connection::ConnectionConfig;
     use serde_json::json;
+
+    #[test]
+    fn mysql_xugu_cancellation_preserves_only_current_table_acknowledged_rows() {
+        assert_eq!(
+            cancelled_table_counts(&DatabaseType::Mysql, &DatabaseType::Xugu, Some(413), Some(10_000)),
+            (413, Some(10_000))
+        );
+        assert_eq!(
+            cancelled_table_counts(&DatabaseType::Mysql, &DatabaseType::Xugu, None, Some(10_000)),
+            (0, Some(10_000))
+        );
+        assert_eq!(cancelled_table_counts(&DatabaseType::Mysql, &DatabaseType::Xugu, None, None), (0, None));
+        for (source, target) in [
+            (DatabaseType::Mysql, DatabaseType::Mysql),
+            (DatabaseType::Xugu, DatabaseType::Xugu),
+            (DatabaseType::Postgres, DatabaseType::Xugu),
+        ] {
+            assert_eq!(cancelled_table_counts(&source, &target, Some(413), Some(10_000)), (0, None));
+        }
+    }
+
+    #[tokio::test]
+    async fn data_charset_transfer_stops_before_preflight_or_connection_capture() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, directory.path().join("plugins")));
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": "legacy", "name": "legacy", "db_type": "mysql", "host": "127.0.0.1",
+            "port": 1, "username": "", "password": "", "url_params": "dataCharset=GBK"
+        }))
+        .unwrap();
+        state.configs.write().await.insert("legacy".into(), config);
+        for (source, target, source_type, target_type) in [
+            ("legacy", "unconfigured", DatabaseType::Mysql, DatabaseType::Xugu),
+            ("unconfigured", "legacy", DatabaseType::Mysql, DatabaseType::Mysql),
+        ] {
+            let request: TransferRequest = serde_json::from_value(json!({
+                "transferId": uuid::Uuid::new_v4().to_string(), "sourceConnectionId": source,
+                "sourceDatabase": "db", "sourceSchema": "db", "targetConnectionId": target,
+                "targetDatabase": "db", "targetSchema": "db", "tables": ["must-not-read"],
+                "createTable": false, "content": "dataOnly", "batchSize": 100
+            }))
+            .unwrap();
+            let terminal = run_transfer(
+                state.clone(),
+                request,
+                source_type,
+                target_type,
+                "no-source-pool".into(),
+                "no-target-pool".into(),
+                None,
+                None,
+                |_| panic!("compatibility rejection must precede progress"),
+            )
+            .await;
+            assert!(terminal.terminal);
+            assert!(matches!(terminal.status, TransferStatus::Error));
+            assert!(terminal.error.unwrap().starts_with(crate::query::mysql_data_charset_policy::TRANSFER_UNSUPPORTED));
+            assert!(terminal.oracle_package_approval.is_none());
+            assert!(terminal.oracle_package_preflight.is_none());
+            assert!(terminal.oracle_routine_operation.is_none());
+        }
+        assert!(state.connection_pools_snapshot().await.is_empty());
+    }
 
     #[tokio::test]
     async fn unsupported_package_requests_stop_before_connection_capture_or_any_table_work() {

@@ -9,7 +9,10 @@ const dataGridSource = readFileSync(dataGridPath, "utf8");
 test("set NULL applies a real null value only to editable selections", () => {
   const handler = dataGridSource.match(/function setSelectionNull\(\) \{[^]*?\n\}/)?.[0] ?? "";
 
-  assert.match(handler, /if \(!props\.editable \|\| !selectionHasEditableCells\(\)\) return;/);
+  assert.match(dataGridSource, /const resolvedConnectionConfig = computed\(\(\) => connectionStore\.getConfig\(props\.connectionId \?\? ""\)\);/);
+  assert.match(dataGridSource, /const compatibilityReadOnly = computed\(\(\) => mysqlDataCharsetEnabled\(resolvedConnectionConfig\.value\)\);/);
+  assert.match(dataGridSource, /const effectiveEditable = computed\(\(\) => !!props\.editable && !compatibilityReadOnly\.value\);/);
+  assert.match(handler, /if \(!effectiveEditable\.value \|\| !selectionHasEditableCells\(\)\) return;/);
   assert.match(handler, /fillSelectionWithValue\(null\);/);
   assert.doesNotMatch(handler, /fillSelectionWithValue\(["'](?:NULL)?["']\)/);
 });

@@ -11,6 +11,48 @@ import { resolveDataGridRowNumberLabel } from "@/lib/dataGrid/dataGridRowNumber"
 
 export const CANVAS_DATA_GRID_ROW_HEIGHT = 26;
 export const MAX_CANVAS_DATA_GRID_PIXEL_RATIO = 4;
+/**
+ * Cross-browser maximum element scroll height to prevent browser layout clamping.
+ * Blink and WebKit clamp element layout dimensions to LayoutUnit::max() (33,554,432px = 2^25),
+ * while Gecko/Firefox clamps around 17,895,697px (~2^24). Keeping the DOM container
+ * height within 16,000,000px guarantees safe, uninterrupted virtual scrolling across all browsers.
+ */
+export const MAX_CANVAS_DATA_GRID_SCROLL_HEIGHT = 16_000_000;
+
+export function canvasDataGridContentHeight(rowCount: number, rowHeight = CANVAS_DATA_GRID_ROW_HEIGHT, maxScrollHeight = MAX_CANVAS_DATA_GRID_SCROLL_HEIGHT): number {
+  const virtualHeight = Math.max(1, rowCount * rowHeight);
+  return Math.min(virtualHeight, maxScrollHeight);
+}
+
+export function canvasDataGridVirtualScrollTop(options: { scrollTop: number; rowCount: number; rowHeight?: number; viewportHeight: number; maxScrollHeight?: number }): number {
+  const rowHeight = options.rowHeight ?? CANVAS_DATA_GRID_ROW_HEIGHT;
+  const maxScrollHeight = options.maxScrollHeight ?? MAX_CANVAS_DATA_GRID_SCROLL_HEIGHT;
+  const virtualHeight = Math.max(1, options.rowCount * rowHeight);
+  const domHeight = Math.min(virtualHeight, maxScrollHeight);
+  const maxDomScrollTop = Math.max(0, domHeight - options.viewportHeight);
+  const maxVirtualScrollTop = Math.max(0, virtualHeight - options.viewportHeight);
+
+  if (maxDomScrollTop <= 0 || maxVirtualScrollTop <= 0) return 0;
+  if (virtualHeight <= maxScrollHeight) return Math.min(maxDomScrollTop, Math.max(0, options.scrollTop));
+
+  const ratio = Math.min(1, Math.max(0, options.scrollTop / maxDomScrollTop));
+  return ratio * maxVirtualScrollTop;
+}
+
+export function canvasDataGridDomScrollTop(options: { virtualScrollTop: number; rowCount: number; rowHeight?: number; viewportHeight: number; maxScrollHeight?: number }): number {
+  const rowHeight = options.rowHeight ?? CANVAS_DATA_GRID_ROW_HEIGHT;
+  const maxScrollHeight = options.maxScrollHeight ?? MAX_CANVAS_DATA_GRID_SCROLL_HEIGHT;
+  const virtualHeight = Math.max(1, options.rowCount * rowHeight);
+  const domHeight = Math.min(virtualHeight, maxScrollHeight);
+  const maxDomScrollTop = Math.max(0, domHeight - options.viewportHeight);
+  const maxVirtualScrollTop = Math.max(0, virtualHeight - options.viewportHeight);
+
+  if (maxDomScrollTop <= 0 || maxVirtualScrollTop <= 0) return 0;
+  if (virtualHeight <= maxScrollHeight) return Math.min(maxVirtualScrollTop, Math.max(0, options.virtualScrollTop));
+
+  const ratio = Math.min(1, Math.max(0, options.virtualScrollTop / maxVirtualScrollTop));
+  return ratio * maxDomScrollTop;
+}
 
 export interface CanvasDevicePixelSize {
   cssWidth: number;
@@ -63,6 +105,7 @@ export interface DrawCanvasDataGridOptions {
   scroller: HTMLElement;
   width: number;
   height: number;
+  virtualScrollTop?: number;
   pixelRatio?: number;
   devicePixelSize?: CanvasDevicePixelSize | null;
   isDark: boolean;
@@ -442,7 +485,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
   const crosshairRowBg = rawCrosshairRowBg?.trim() || theme.cellCrosshairRow;
   const crosshairColBg = rawCrosshairColBg?.trim() || theme.cellCrosshairCol;
 
-  const scrollTop = scroller.scrollTop;
+  const scrollTop = options.virtualScrollTop ?? scroller.scrollTop;
   const scrollLeft = scroller.scrollLeft;
   const firstRow = Math.max(0, Math.floor(scrollTop / CANVAS_DATA_GRID_ROW_HEIGHT));
   const lastRow = Math.min(rowCount - 1, Math.ceil((scrollTop + height) / CANVAS_DATA_GRID_ROW_HEIGHT));

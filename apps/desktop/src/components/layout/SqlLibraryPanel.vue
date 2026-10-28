@@ -33,6 +33,8 @@ import {
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useSqlPanelSearchMode } from "@/composables/useSqlPanelSearchMode";
+import SidebarLocateButton from "@/components/sidebar/SidebarLocateButton.vue";
 import SqlPanelSearch from "@/components/layout/SqlPanelSearch.vue";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import CustomContextMenu, { type ContextMenuItem as CtxMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -76,8 +78,13 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { databaseOptions, loadingDatabaseOptions, loadDatabaseOptions, catalogOptions, loadingCatalogOptions, loadCatalogOptions, catalogDatabaseOptions, loadingCatalogDatabaseOptions, loadCatalogDatabaseOptions } = useDatabaseOptions();
 
+const props = defineProps<{
+  locateRequest?: { id: number; fileId: string } | null;
+}>();
+
 const emit = defineEmits<{
   close: [];
+  "locate-handled": [id: number];
 }>();
 
 const UNFILED_DROP_TARGET_ID = "__sql-library-unfiled__";
@@ -91,7 +98,7 @@ const searchInput = ref<InstanceType<typeof SqlPanelSearch> | null>(null);
 const searchInputPending = ref(false);
 const searchQuery = ref("");
 
-const searchMode = ref<"name" | "content">("name");
+const searchMode = useSqlPanelSearchMode("library");
 const loadingSearchContent = ref(false);
 const unloadedSearchFiles = computed(() => savedSqlStore.allFiles.filter((file) => file.sqlLoaded === false));
 const contentSearchActive = computed(() => searchMode.value === "content" && !!searchQuery.value);
@@ -536,6 +543,52 @@ const lastClickedItemIndex = ref<number | null>(null); // Unified index for both
 const activeItemId = ref<string | null>(null);
 const activeItemType = ref<"file" | "folder" | null>(null);
 const activeSavedSqlId = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId)?.savedSqlId ?? null);
+const libraryTree = ref<HTMLElement | null>(null);
+const currentSavedSqlFile = computed(() => (activeSavedSqlId.value ? savedSqlStore.getFile(activeSavedSqlId.value) : undefined));
+
+async function locateFile(fileId: string) {
+  const file = savedSqlStore.getFile(fileId);
+  if (!file) return;
+  if (searchInputPending.value || !treeRows.value.some((row) => row.type === "file" && row.file.id === file.id)) {
+    searchInput.value?.clear();
+  }
+  const expanded = new Set(collapsedFolders.value);
+  const visited = new Set<string>();
+  let folderId = file.folderId;
+  while (folderId && !visited.has(folderId)) {
+    visited.add(folderId);
+    expanded.delete(folderId);
+    folderId = savedSqlStore.allFolders.find((folder) => folder.id === folderId)?.parentFolderId;
+  }
+  collapsedFolders.value = expanded;
+  clearSelection();
+  activeItemId.value = file.id;
+  activeItemType.value = "file";
+  lastClickedItemIndex.value = treeRows.value.findIndex((row) => row.type === "file" && row.file.id === file.id);
+  await nextTick();
+  const row = Array.from(libraryTree.value?.querySelectorAll<HTMLElement>("[data-sql-library-file]") ?? []).find((element) => element.dataset.sqlLibraryFile === file.id);
+  row?.scrollIntoView({ block: "center", inline: "nearest" });
+}
+
+async function locateCurrentFile() {
+  const file = currentSavedSqlFile.value;
+  if (!file) return;
+  await locateFile(file.id);
+}
+
+watch(
+  [() => savedSqlStore.loadState, () => props.locateRequest],
+  async ([loadState, request]) => {
+    if (!request || loadState === "loading") return;
+    try {
+      await locateFile(request.fileId);
+    } finally {
+      emit("locate-handled", request.id);
+    }
+  },
+  { immediate: true, flush: "post" },
+);
+
 const hasCurrentSavedSqlExecutionTarget = computed(() => {
   const activeTab = queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId);
   const target = savedSqlExecutionTargetFromTab(activeTab);
@@ -1582,6 +1635,12 @@ function showDropAfter(targetId: string) {
 function showDropInside(targetId: string) {
   return dragState.active && dragState.targetId === targetId && dragState.dropPosition === "inside";
 }
+
+defineExpose({
+  locateFile,
+  locateCurrentFile,
+  searchInput,
+});
 </script>
 
 <template>
@@ -1602,6 +1661,9 @@ function showDropInside(targetId: string) {
         <Button variant="ghost" size="icon" class="h-5 w-5" @click="sortMode = sortMode === 'folder' ? 'date' : 'folder'">
           <ArrowDownWideNarrow :class="['h-3 w-3', sortMode === 'date' ? 'text-primary' : '']" />
         </Button>
+      </LightTooltip>
+      <LightTooltip :text="t('sqlFileTree.locateActiveFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <SidebarLocateButton class="disabled:pointer-events-none disabled:opacity-50" :label="t('sqlFileTree.locateActiveFile')" :disabled="!currentSavedSqlFile" @locate="locateCurrentFile" />
       </LightTooltip>
       <LightTooltip :text="t('savedSql.newFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button variant="ghost" size="icon" class="h-5 w-5" @click="openNewFolderInput()">
@@ -1634,7 +1696,7 @@ function showDropInside(targetId: string) {
       </p>
     </div>
 
-    <div class="min-h-0 flex-1 overflow-y-auto py-1">
+    <div ref="libraryTree" class="min-h-0 flex-1 overflow-y-auto py-1">
       <CustomContextMenu :items="contextMenuItems" @close="clearContextTarget">
         <template #default="{ onContextMenu }">
           <div

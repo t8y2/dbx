@@ -1,4 +1,5 @@
 import { useConnectionStore } from "@/stores/connectionStore";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { hexToRgba } from "@/lib/common/color";
 import { isLegacyWebView } from "@/lib/ui/legacyWebView";
@@ -76,7 +77,8 @@ export function tabConnectionColor(connectionId: string): string {
 
 export function isConnectionReadonly(connectionId: string): boolean {
   const connectionStore = useConnectionStore();
-  return connectionStore.getConfig(connectionId)?.read_only ?? false;
+  const connection = connectionStore.getConfig(connectionId);
+  return mysqlDataCharsetEnabled(connection) || connection?.read_only === true;
 }
 
 function jdbcTargetLabel(connection: ConnectionConfig): string {
@@ -273,6 +275,10 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
   const compact = settingsStore.editorSettings.compactTabTitle;
   if (isPreviewTab(tab)) return tab.title;
   if (useConnectionStore().getConfig(tab.connectionId)?.db_type === "redis") {
+    // Redis query tabs normally identify their logical database (db0/db1), but a
+    // saved SQL file or external SQL file is a document: show its file title
+    // instead, otherwise every Redis file tab looks like the same database.
+    if (!tab.isDefaultQuery && (tab.savedSqlId || tab.externalSqlPath) && tab.title.trim()) return tab.title;
     return tab.database ? database : connectionDisplayName(tab.connectionId);
   }
   if (tab.mode === "data" && tab.tableMeta?.tableName) {
@@ -463,6 +469,14 @@ export function middleEllipsis(value: string, maxLength = 24): string {
   return `${value.slice(0, startLength)}...${end}`;
 }
 
+// 无来源对象的结果（如外层 SELECT * FROM (...) 包装查询）页签 tooltip 会回退到 SQL 文本；
+// 整条语句会把浮层撑成遮挡工作区的巨块并拦截点击，这里折叠空白并限制长度 (#13266)
+export function sourceStatementTooltip(statement: string | undefined, maxLength = 160): string | undefined {
+  const singleLine = statement?.replace(/\s+/g, " ").trim();
+  if (!singleLine) return undefined;
+  return singleLine.length > maxLength ? `${singleLine.slice(0, maxLength)}…` : singleLine;
+}
+
 export function resultSqlForGrid(tab: Pick<QueryTab, "result" | "resultBaseSql" | "lastExecutedSql" | "sql">): string {
   return tab.result?.sourceStatement || tab.resultBaseSql || tab.lastExecutedSql || tab.sql;
 }
@@ -602,7 +616,7 @@ export function tabularResultItems(results: QueryResult[] | undefined, options: 
         label: displaySource,
         displayLabel,
         labelTruncated: !!displaySource && displayLabel !== displaySource,
-        title: item.result.sourceLabel || item.result.sourceStatement,
+        title: item.result.sourceLabel || sourceStatementTooltip(item.result.sourceStatement),
       };
     });
 }

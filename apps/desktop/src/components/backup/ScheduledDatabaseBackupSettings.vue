@@ -28,6 +28,7 @@ import {
   nextDatabaseBackupRunAt,
   normalizeDatabaseBackupRetention,
   normalizeDatabaseBackupTablePatterns,
+  supportsNavicatBackupFormat,
   supportsScheduledDatabaseBackup,
   type DatabaseBackupExecutionConfig,
   type DatabaseBackupFile,
@@ -297,6 +298,10 @@ function databaseLoadIsCurrent(generation: number, dialog: BackupDialogKind, tar
   return scheduleDialogOpen.value && draft.value === targetDraft && targetDraft.connectionId === connectionId;
 }
 
+// `.nb3` is a MySQL/PostgreSQL-only format; keep a saved or newly selected value from being submitted for other connections.
+const scheduleNavicatFormatSupported = computed(() => supportsNavicatBackupFormat([connectionStore.getConfig(draft.value.connectionId)?.db_type]));
+const oneShotNavicatFormatSupported = computed(() => supportsNavicatBackupFormat(oneShotConnectionIds.value.map((connectionId) => connectionStore.getConfig(connectionId)?.db_type)));
+
 const canSave = computed(() => {
   const hasContent = draft.value.includeStructure || draft.value.includeData || draft.value.includeObjects;
   const hasDatabaseScope = allDatabases.value || selectedDatabases.value.length > 0;
@@ -307,6 +312,7 @@ const canSave = computed(() => {
     !!draft.value.destinationDirectory.trim() &&
     databaseBackupRunDirectoryPatternIsValid(draft.value.runDirectoryPattern || "") &&
     databaseBackupFileNamePatternIsValid(draft.value.fileNamePattern || "") &&
+    (draft.value.outputCompression !== "nb3" || scheduleNavicatFormatSupported.value) &&
     hasContent &&
     hasDatabaseScope &&
     hasTableScope &&
@@ -354,8 +360,18 @@ const canStartOneShot = computed(() => {
   const hasTableScope = tableScopeReady(oneShotDraft.value, oneShotTableSelectionState.value);
   // Runs started together share a timestamp, so only {runId} keeps their files apart.
   const hasUniqueFileNames = !multiple || databaseBackupFileNamePatternHasRunId(oneShotDraft.value.fileNamePattern);
+  const hasSupportedFormat = oneShotDraft.value.outputCompression !== "nb3" || oneShotNavicatFormatSupported.value;
   return (
-    !!oneShotDraft.value.connectionId && !!oneShotDraft.value.destinationDirectory.trim() && databaseBackupFileNamePatternIsValid(oneShotDraft.value.fileNamePattern || "") && hasContent && hasDatabaseScope && hasTableScope && hasUniqueFileNames && !oneShotStarting.value && !loadingDatabases.value
+    !!oneShotDraft.value.connectionId &&
+    !!oneShotDraft.value.destinationDirectory.trim() &&
+    databaseBackupFileNamePatternIsValid(oneShotDraft.value.fileNamePattern || "") &&
+    hasContent &&
+    hasDatabaseScope &&
+    hasTableScope &&
+    hasUniqueFileNames &&
+    hasSupportedFormat &&
+    !oneShotStarting.value &&
+    !loadingDatabases.value
   );
 });
 
@@ -582,6 +598,11 @@ function toggleDatabase(database: string) {
   const selected = new Set(selectedDatabases.value);
   if (selected.has(database)) selected.delete(database);
   else selected.add(database);
+  selectedDatabases.value = databaseOptions.value.filter((item) => selected.has(item));
+}
+
+function updateSelectedDatabases(databases: string[]) {
+  const selected = new Set(databases);
   selectedDatabases.value = databaseOptions.value.filter((item) => selected.has(item));
 }
 
@@ -1153,6 +1174,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
           @change-connection="changeConnection"
           @choose-destination="chooseDestination"
           @toggle-database="toggleDatabase"
+          @update:selected-databases="updateSelectedDatabases"
           @update:all-databases="setAllDatabases"
           @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
           @table-selection-state="(state) => (scheduleTableSelectionState = state)"
@@ -1248,6 +1270,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
         @toggle-connection="toggleOneShotConnection"
         @choose-destination="chooseDestination"
         @toggle-database="toggleDatabase"
+        @update:selected-databases="updateSelectedDatabases"
         @update:all-databases="setAllDatabases"
         @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
         @table-selection-state="(state) => (oneShotTableSelectionState = state)"

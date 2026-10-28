@@ -43,6 +43,7 @@ import { activeTabExternalSqlFileTarget, rememberExternalSqlFileTarget, resolveE
 import type { SqlFileEncoding } from "@/lib/backend/tauri";
 import { TABLE_IMPORT_ENCODING_OPTIONS } from "@/lib/table/tableImport";
 import { isSqlFilePath } from "@/lib/sql/sqlFileOpen";
+import { isScrolledToBottom } from "./sqlFileProgressScroll";
 import { buildDisplayFileNames, tooltipText as computeTooltipText } from "./sqlFilePreviewLabel";
 import { parseSqlFilePathInput } from "./sqlFilePathInput";
 import { orderConnectionsForSidebarDisplay } from "@/lib/sidebar/connectionListSort";
@@ -76,6 +77,7 @@ const isDesktopRuntime = isTauriRuntime();
 const fileInput = ref<HTMLInputElement | null>(null);
 const previews = ref<SqlFilePreview[]>([]);
 const encoding = ref<SqlFileEncoding>("auto");
+const resolveIncludes = ref(false);
 const previewError = ref("");
 let previewGeneration = 0;
 let selectedSources: Array<string | File> = [];
@@ -172,6 +174,50 @@ const failureDetailsExpanded = ref(false);
 const refreshedTarget = ref(false);
 const DEFAULT_WEB_SQL_FILE_BYTES = 200 * 1024 * 1024;
 const webSqlFileUploadMaxBytes = ref(DEFAULT_WEB_SQL_FILE_BYTES);
+
+// The scrollable body renders the progress block as its last child, so the
+// progress area starts below the fold once a file is selected. Execution
+// scrolls it into view on start and keeps it in view while the user stays at
+// the bottom of the body; scrolling up hands the scroll position back to the
+// user instead of fighting them.
+const scrollBodyRef = ref<HTMLElement | null>(null);
+let pinnedToBottom = true;
+
+function scrollBodyToBottom() {
+  const element = scrollBodyRef.value;
+  if (!element) return;
+  element.scrollTop = element.scrollHeight;
+}
+
+function handleScrollBodyScroll() {
+  const element = scrollBodyRef.value;
+  if (!element) return;
+  pinnedToBottom = isScrolledToBottom(element);
+}
+
+// Starting an execution reveals the progress area for the first time, so jump
+// straight to it instead of leaving the user to scroll down by hand.
+watch(
+  running,
+  (isRunning) => {
+    if (!isRunning) return;
+    pinnedToBottom = true;
+    scrollBodyToBottom();
+  },
+  { flush: "post" },
+);
+
+// The progress block grows while it runs (byte progress, per-file summary,
+// failure details), so keep it in view as long as the user has not scrolled
+// away from the bottom.
+watch(
+  [progress, running],
+  () => {
+    if (!pinnedToBottom) return;
+    scrollBodyToBottom();
+  },
+  { flush: "post" },
+);
 
 // The web server caps SQL file uploads via DBX_SQL_FILE_UPLOAD_MAX_MB; fetch the
 // effective limit once so the client-side pre-check matches the server rule.
@@ -300,6 +346,10 @@ onBeforeUnmount(() => {
 });
 
 const restoreSelectedTables = ref(false);
+const canResolveIncludes = computed(() => isDesktopRuntime && !restoreSelectedTables.value && previews.value.length > 0 && previews.value.every((item) => !item.packageFilePaths && item.fileName.toLowerCase().endsWith(".sql")));
+watch(canResolveIncludes, (allowed) => {
+  if (!allowed) resolveIncludes.value = false;
+});
 const backupTables = ref<SqlFileTable[]>([]);
 const selectedTableKeys = ref(new Set<string>());
 const tableSearch = ref("");
@@ -524,6 +574,7 @@ function resetState() {
   const initialTarget = resolveInitialTarget();
   previews.value = [];
   encoding.value = "auto";
+  resolveIncludes.value = false;
   selectingFile.value = false;
   loadingPreview.value = false;
   applyTarget(initialTarget);
@@ -858,6 +909,7 @@ async function startExecution() {
           ...(target.schema ? { schema: target.schema } : {}),
           filePath: executionPaths[0]!,
           encoding: encoding.value,
+          resolveIncludes: canResolveIncludes.value && resolveIncludes.value,
           continueOnError: continueOnError.value,
           ...(txnSessionId.value ? { txnSessionId: txnSessionId.value } : {}),
           ...(restoreSelectedTables.value ? { selectedTables: selectedTables.value.map((table) => ({ ...table })) } : {}),
@@ -1011,7 +1063,7 @@ watch(
       </DialogHeader>
 
       <!-- Keep terminal actions reachable while long previews and errors scroll inside the viewport. -->
-      <div class="grid min-h-0 min-w-0 flex-1 gap-4 overflow-y-auto py-3">
+      <div ref="scrollBodyRef" data-testid="sql-file-scroll-body" class="grid min-h-0 min-w-0 flex-1 gap-4 overflow-y-auto py-3" @scroll="handleScrollBodyScroll">
         <div class="min-w-0 space-y-3">
           <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
             {{ t("sqlFile.file") }}
@@ -1167,6 +1219,11 @@ watch(
             {{ t("toolbar.manualTransaction") }}
           </label>
           <p v-if="manualTransaction" class="text-xs text-muted-foreground">{{ t("sqlFile.manualTransactionHint") }}</p>
+          <label v-if="isDesktopRuntime" class="flex items-center gap-2 text-xs">
+            <input v-model="resolveIncludes" type="checkbox" :disabled="executionLocked || !canResolveIncludes" />
+            {{ t("sqlFile.resolveIncludes") }}
+          </label>
+          <p v-if="resolveIncludes" class="text-xs text-muted-foreground">{{ t("sqlFile.resolveIncludesHint") }}</p>
           <button type="button" class="flex items-center gap-2 text-xs text-left" :disabled="executionLocked || manualTransaction" @click="continueOnError = !continueOnError">
             <CheckSquare v-if="continueOnError" class="w-3.5 h-3.5 text-primary shrink-0" />
             <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />

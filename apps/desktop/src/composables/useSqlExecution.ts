@@ -27,11 +27,13 @@ import { expandSqlVariables } from "@/lib/sql/sqlVariables";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { assessProductionSql } from "@/lib/database/productionSafety";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { SqlExecutionDangerRequest } from "@/stores/sqlExecutionDangerStore";
 import type { ConnectionConfig, DatabaseType, QueryResult, QueryTab } from "@/types/database";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution, MultiDbTargetExecutionResult, MultiDbManualTransaction } from "@/types/sqlExecution";
 import { effectiveDatabaseTypeForConnection, kingbaseSqlDatabaseType } from "@/lib/database/jdbcDialect";
+import { oracleTriggerReadOptions } from "@/lib/database/oracleTriggerIdentity";
 import type { SqlExecutionTargetContext } from "@/lib/database/sqlExecutionTargetRegistry";
 import { MULTI_SOURCE_MAX_ROWS_PER_SOURCE } from "@/lib/query/multiSourceResult";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -332,6 +334,13 @@ export function useSqlExecution(deps: {
       cancelEditorViewportRequest(editorViewportRequestId);
       return notStarted("missing-database", context.tabId);
     }
+    if (tab.objectSource?.objectType === "TRIGGER" && oracleTriggerReadOptions(effectiveDatabaseTypeForConnection(context.connection))) {
+      const previousResult = queryStore.oracleTriggerSourceState(tab.id)?.result;
+      const ok = await queryStore.runOracleTriggerSourceAction(tab.id, "replace", sql);
+      cancelEditorViewportRequest(editorViewportRequestId);
+      const state = queryStore.oracleTriggerSourceState(tab.id);
+      return ok || (state?.result !== previousResult && state?.result?.steps.some((step) => step.receipt !== undefined)) ? { status: "started", ok, tabId: tab.id, errorMessage: state?.error } : notStarted("blocked", tab.id);
+    }
     if (supportsSqlTemplateParameters(context.connection, sql) && prepareSqlParameterDialog(sql, sourceOffset, executionOptions)) {
       return deferred("parameters", context.tabId);
     }
@@ -349,10 +358,10 @@ export function useSqlExecution(deps: {
       return notStarted("no-tab", context.tabId);
     }
     if (!(await ensureReadOnlyWriteAccess({ connection: context.connection, sql, source: t("production.sourceSqlEditor") }))) {
-      // The read-only unlock dialog was dismissed: the user saw UI, so the panel
-      // adds nothing (see aiSqlActionFeedback).
+      // Compatibility denial is a policy block; ordinary unlock dismissal
+      // remains cancellation. The shared guard owns the denial notification.
       cancelEditorViewportRequest(options.editorViewportRequestId);
-      return notStarted("cancelled", context.tabId);
+      return notStarted(mysqlDataCharsetEnabled(context.connection) ? "blocked" : "cancelled", context.tabId);
     }
     // Redis: block dangerous commands when toggle is on (scan entire batch for highest safety level)
     if (context.connection?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
@@ -650,7 +659,7 @@ export function useSqlExecution(deps: {
     if (cancelRequested()) return finish({ status: "cancelled" });
     if (!sql.trim()) return finish({ status: "failed", errorMessage: t("explain.emptySql") });
     if (!(await ensureReadOnlyWriteAccess({ connection, sql, source: t("production.sourceMultiDbSql") }))) {
-      return finish({ status: "skipped", errorMessage: t("dangerDialog.cancel") });
+      return finish({ status: "skipped", errorMessage: t(mysqlDataCharsetEnabled(connection) ? "connection.mysqlDataCharsetWriteBlocked" : "dangerDialog.cancel") });
     }
     if (requiresConnectionSelection(executionTab, connection)) {
       deps.onMissingConnection?.(executionTab.id);
@@ -1035,7 +1044,7 @@ export function useSqlExecution(deps: {
     const connection = connectionStore.getConfig(tab.connectionId);
     if (!(await ensureReadOnlyWriteAccess({ connection, sql, source: t("production.sourceSqlEditor") }))) {
       cancelEditorViewportRequest(editorViewportRequestId);
-      reportDeferredExecution(notStarted("cancelled", tab.id));
+      reportDeferredExecution(notStarted(mysqlDataCharsetEnabled(connection) ? "blocked" : "cancelled", tab.id));
       return;
     }
     try {

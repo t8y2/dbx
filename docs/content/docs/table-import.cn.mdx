@@ -1,6 +1,6 @@
 ---
 title: 表数据导入
-description: 通过向导将 CSV、TSV、文本、JSON、Excel、SQL 或 DuckDB Parquet 数据导入现有表，或按文件批量创建新表。
+description: 通过向导将 CSV、TSV、文本、JSON、Excel、SQL 或 DuckDB Parquet 数据导入现有表，或按文件批量创建新表，并可将 Navicat .nb3 备份恢复到数据库。
 ---
 
 表数据导入用于把文件数据写入数据库表。DBX 会先解析和预览文件，再让你确认解析选项、目标表、字段映射和执行方式，而不是选中文件后立即写入。
@@ -29,6 +29,7 @@ MongoDB Collection 不走这条关系型导入流程。请在 Collection 文档�
 | Excel | 支持 `.xlsx`、`.xlsm` 和 `.xls`，可选择工作表 |
 | SQL | 包含字面量 `INSERT INTO ... VALUES` 语句的 `.sql` 脚本，每个文件对应一张表 |
 | Parquet | `.parquet` 文件，仅在目标连接为 DuckDB 时提供 |
+| Navicat 备份 | `.nb3` 归档，仅在 MySQL 和 PostgreSQL 连接的数据库级入口提供，参见 [Navicat 备份](#navicat-备份) |
 
 SQL 导入只接受字面量 `INSERT INTO ... VALUES` 行；表达式、`REPLACE`、`INSERT IGNORE`、`INSERT ... SELECT` 等无法无损改写的内容会被拒绝，以保留数据和语句语义。
 
@@ -39,6 +40,14 @@ Excel 导入按增量方式读取 `.xlsx` 和 `.xlsm` 工作表：预览只读�
 Desktop 直接读取所选本地文件；Docker/Web 会先把浏览器选择的文件上传到服务器临时目录，预览和导入结束后释放临时源文件。
 
 Parquet 导入使用所选 DuckDB 连接的原生 Parquet 读取能力，仍然沿用预览、字段映射、新建表、追加和清空后导入流程；其他数据库类型不会提供 Parquet 导入格式。大型 Parquet 文件按有界批次读取，嵌套值仍受目标字段类型和 DuckDB 类型转换规则约束。
+
+## Navicat 备份
+
+在 MySQL 或 PostgreSQL 连接上从数据库（而不是某张表）打开表数据导入时，来源步骤还会提供 **Navicat 备份**。点击该卡片，或通过 **选择文件** 选中 `.nb3` 文件后，DBX 会打开 [SQL 文件执行](/cn/docs/sql-file)，并自动填入相同的连接、数据库和归档文件，让备份直接恢复到当前数据库。
+
+![导入数据对话框中的 Navicat 备份格式](/screenshots/table-import-navicat-nb3.png)
+
+归档会作为整库恢复脚本执行，而不走字段映射向导：先删除并重建归档中的表、视图和例程，再写入数据，最后创建索引、约束和触发器。建议先恢复到空库或测试库，并为目标库保留备份。不支持加密的 Navicat 归档。同样的归档也可以在 [数据库备份](/cn/docs/database-backup) 中通过 **从文件恢复** 还原。
 
 ## 导入向导
 

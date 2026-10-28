@@ -1,6 +1,6 @@
 ---
 title: 连接导入
-description: 从 Navicat、DBeaver 和 DataGrip 导入连接、分组和可识别的数据库类型。
+description: 从 Navicat、DBeaver、DataGrip、RedisDesktopManager 和 Another Redis Desktop Manager 导入连接与分组。
 ---
 
 DBX 可以从其他数据库工具导入连接，在切换工具时无需手动重新创建大量连接。
@@ -12,6 +12,8 @@ DBX 可以从其他数据库工具导入连接，在切换工具时无需手动�
 | Navicat | `.ncx` 导出文件 | 主机、端口、用户名、数据库类型、连接名称 |
 | DBeaver | 连接配置文件    | 主机、端口、用户名、数据库类型、连接名称 |
 | DataGrip | `dataSources.xml` 等项目/全局配置 | JDBC URL、驱动、连接名称、分组和可读取凭据 |
+| RedisDesktopManager | JSON 导出文件 | Redis 连接、嵌套分组、认证、TLS 和 SSH 配置 |
+| Another Redis Desktop Manager | `.ano` 导出文件 | Redis 连接、分组、ACL、SSH/TLS、Sentinel 和 Cluster 配置 |
 
 <Callout type="info">导入的连接保留原始连接名称和类型。其他工具以加密格式存储的密码无法解密——导入后需要重新输入密码。</Callout>
 
@@ -101,6 +103,22 @@ DBX 可以从其他数据库工具导入连接，在切换工具时无需手动�
 
   </Step>
 </Steps>
+
+## 导入 RedisDesktopManager 连接
+
+从 RedisDesktopManager 导出 JSON，在侧边栏或欢迎页的导入菜单选择 **导入 RedisDesktopManager**。检查连接选择预览，再选择需要迁移的连接并确认导入。连接和嵌套分组会一起迁移，原有连接不会被覆盖。
+
+支持普通 Redis 连接的主机、端口、ACL 用户名、`auth` 密码、键分隔符和过滤模式，以及 SSH 密码、私钥或 agent 配置。连接和执行超时会从毫秒转换为秒。
+
+TLS 的 CA、客户端证书和私钥路径会保留，但不会读取或复制文件，跨机器迁移后需要检查路径。不会继承 RDM 的忽略证书错误设置。导出文件可能含有明文密码，请妥善保管；导入不会自动连接数据库。
+
+## 导入 Another Redis Desktop Manager 连接
+
+在 Another Redis Desktop Manager 的设置中导出 `connections.ano`，在 DBX 侧边栏或欢迎页的导入菜单选择 **导入 Another Redis Desktop Manager**。勾选需要的连接并确认，再按提示恢复分组。支持旧版连接数组和新版带 `connections` / `groups` 的导出，保留普通、Sentinel、Cluster 模式及只读标记。
+
+`.ano` 是 Base64 包装的 UTF-8 JSON，并不是加密文件，可能包含 Redis、SSH 和 Sentinel 的明文密码。请妥善保管。SSH 私钥口令、证书和私钥文件路径会保留，但不会读取或复制这些文件；跨机器后应重新检查。Sentinel 密码与 Redis 节点密码分别映射，不互相替代。
+
+自定义 TLS `servername` 和非空 NAT 映射目前无法无损映射到 DBX，导入会明确拒绝，而不是静默丢弃。文件最大 16 MiB，连接和分组各最多 10,000 项；畸形文件在保存任何连接前报错。运行时的 `key` / 当前 `db` 不导入，原有连接不被覆盖，导入不会自动连接。
 
 ## 导入后
 

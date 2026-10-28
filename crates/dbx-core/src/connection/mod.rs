@@ -31,6 +31,7 @@ use crate::db::agent_driver::{AgentCallError, AgentMethod};
 use crate::db::http_tunnel::HttpTunnelManager;
 use crate::db::proxy_tunnel::ProxyTunnelManager;
 use crate::db::ssh_tunnel::TunnelManager;
+use crate::db::transport_layer_tunnel::ResolvedTransportLayers;
 use crate::models::connection::{
     database_info_from_protocol_value, parse_jdbc_host_port, parse_mongo_first_host, rewrite_jdbc_url_host,
     validate_jdbc_transport_url, ConnectionConfig, ConnectionIdleClosedEvent, ConnectionLivenessFailureKind,
@@ -58,7 +59,7 @@ const SQLSERVER_LEGACY_DRIVER_INSTALL_HINT: &str =
     "Install the SQL Server legacy compatibility component from Driver Manager, or open the connection settings and enable SQL Server legacy compatibility mode again.";
 const DEFAULT_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
 const ACCESS_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
-const POOL_CLOSE_TIMEOUT_SECS: u64 = 3;
+pub(crate) const POOL_CLOSE_TIMEOUT_SECS: u64 = 3;
 const HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Upper bound for the "is this checked-out connection still alive" query that
 /// follows a successful health checkout. Windows keeps retransmitting on a
@@ -160,15 +161,18 @@ impl PoolKind {
 }
 
 #[derive(Clone)]
-struct PoolPublication(Arc<()>);
+struct PoolPublication {
+    identity: Arc<()>,
+    transport: Option<ConnectionTransportStamp>,
+}
 
 impl PoolPublication {
     fn new() -> Self {
-        Self(Arc::new(()))
+        Self { identity: Arc::new(()), transport: None }
     }
 
     fn is_same(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.identity, &other.identity)
     }
 }
 
@@ -178,11 +182,22 @@ struct PoolPublicationSnapshot {
     publication: PoolPublication,
 }
 
+pub struct ConnectionPoolReceipt {
+    pool_key: String,
+    publication: PoolPublication,
+}
+
+enum ConnectionPoolBuild {
+    Candidate(Box<PoolKind>),
+    Published(ConnectionPoolReceipt),
+}
+
 #[cfg(test)]
 #[derive(Default)]
 struct StalePoolCleanupBarriers {
     before_removal: Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
     after_removal: Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
+    before_transport_reset: Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
 }
 
 /// Internal pool registry that assigns an opaque identity to every published
@@ -201,7 +216,17 @@ impl ConnectionPoolRegistry {
     }
 
     pub fn insert(&mut self, pool_key: String, pool: PoolKind) -> Option<PoolKind> {
+        self.insert_with_transport(pool_key, pool, None)
+    }
+
+    fn insert_with_transport(
+        &mut self,
+        pool_key: String,
+        pool: PoolKind,
+        transport: Option<ConnectionTransportStamp>,
+    ) -> Option<PoolKind> {
         self.publications.insert(pool_key.clone(), PoolPublication::new());
+        self.publications.get_mut(&pool_key).unwrap().transport = transport;
         self.pools.insert(pool_key, pool)
     }
 
@@ -300,6 +325,8 @@ pub enum TxnConnection {
 }
 
 pub struct TransactionSession {
+    /// Immutable interpretation from the pool that owns the pinned connection.
+    pub mysql_data_charset: Option<db::mysql::MySqlDataCharset>,
     pub sqlserver: Option<crate::query::sqlserver_manual_transaction::SessionMetadata>,
     pub connection: Arc<Mutex<TxnConnection>>,
     pub pool_key: String,
@@ -434,6 +461,7 @@ pub struct AppState {
     pub plugins: PluginRegistry,
     pub plugin_host: PluginHost,
     pub agent_manager: crate::agent_manager::AgentManager,
+    pub pl_debug: crate::query::pl_debug::PlDebugRegistry,
     pub nacos_registry: crate::nacos::NacosAdminRegistry,
     duckdb_worker_process_isolation: AtomicBool,
     duckdb_worker_max_processes: AtomicUsize,
@@ -461,6 +489,7 @@ pub struct AppState {
     pub session_credentials: SessionCredentialStore,
     /// In-memory, never-persisted 1/5 minute write overrides for read-only connections.
     pub write_unlock_windows: crate::write_unlock::WriteUnlockWindows,
+    pub native_jobs: crate::schema::native_jobs::NativeJobRegistry,
     metadata_gates: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     /// Backend-confirmed liveness losses plus resync requests (#4339). The keepalive task
     /// publishes here once a connection has no pools left; each shell relays it to its own
@@ -614,6 +643,144 @@ fn kafka_ssh_loopback_bootstrap_port(
         return Ok(None);
     }
     Ok(kafka_single_loopback_bootstrap_endpoint(&mqc.extra).map(|(_, port)| port))
+}
+
+/// Short-lived connection preparation shared by pools and dedicated runtimes.
+/// Contains runtime credentials; never serialize or log this value.
+pub(crate) struct PreparedConnectionRuntime {
+    pub config: ConnectionConfig,
+    pub endpoint: ConnectionEndpoint,
+    pub url: String,
+    pub connect_timeout: Duration,
+    pub transport_stamp: ConnectionTransportStamp,
+}
+
+struct ConnectionPreparationFailure {
+    message: String,
+    transport_stamp: Option<ConnectionTransportStamp>,
+}
+
+impl From<String> for ConnectionPreparationFailure {
+    fn from(message: String) -> Self {
+        Self { message, transport_stamp: None }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ConnectionTransportPlan {
+    layers: ResolvedTransportLayers,
+    route: ConnectionTransportRoute,
+    agent_env: Vec<(String, String)>,
+    pub(crate) source_profile_ids: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct ConnectionTransportStamp {
+    connection_id: String,
+    runtime: uuid::Uuid,
+    token: uuid::Uuid,
+    pub(crate) plan: Arc<ConnectionTransportPlan>,
+    layer_count: usize,
+}
+
+impl ConnectionTransportStamp {
+    pub fn agent_launch_env(&self) -> &[(String, String)] {
+        &self.plan.agent_env
+    }
+
+    pub(crate) fn new(
+        connection_id: &str,
+        plan: ConnectionTransportPlan,
+        previous: Option<&Self>,
+        reuse: bool,
+    ) -> Self {
+        let layer_count = previous.map_or(0, |stamp| stamp.layer_count).max(plan.layers.layers().len());
+        Self {
+            connection_id: connection_id.to_owned(),
+            runtime: previous.filter(|_| reuse).map_or_else(uuid::Uuid::new_v4, |stamp| stamp.runtime),
+            token: uuid::Uuid::new_v4(),
+            plan: Arc::new(plan),
+            layer_count,
+        }
+    }
+
+    pub(crate) fn same_token(&self, other: &Self) -> bool {
+        self.token == other.token
+    }
+
+    pub(crate) fn same_runtime(&self, other: &Self) -> bool {
+        self.runtime == other.runtime
+    }
+
+    pub(crate) fn same_plan(&self, plan: &ConnectionTransportPlan) -> bool {
+        self.plan.as_ref() == plan
+    }
+
+    pub(crate) fn layer_count(&self) -> usize {
+        self.layer_count
+    }
+}
+
+pub struct ConnectionEndpointAttempt {
+    pub stamp: ConnectionTransportStamp,
+    pub endpoint: Result<ConnectionEndpoint, String>,
+}
+
+impl PartialEq for ConnectionTransportPlan {
+    fn eq(&self, other: &Self) -> bool {
+        self.layers == other.layers
+            && self.agent_env == other.agent_env
+            && match (&self.route, &other.route) {
+                (
+                    ConnectionTransportRoute::Direct { tns_target: Some(left), .. },
+                    ConnectionTransportRoute::Direct { tns_target: Some(right), .. },
+                ) => left == right,
+                _ => self.route == other.route,
+            }
+    }
+}
+
+impl Eq for ConnectionTransportPlan {}
+
+#[derive(Clone, PartialEq, Eq)]
+enum ConnectionTransportRoute {
+    SqliteWorker {
+        host: String,
+        port: u16,
+        route: Box<db::sqlite_worker::ResolvedSqliteWorkerRoute>,
+    },
+    Direct {
+        host: String,
+        port: u16,
+        tns_target: Option<String>,
+    },
+    Navicat {
+        url: String,
+        connect_timeout_secs: u64,
+        host: String,
+        port: u16,
+        username: String,
+        password: String,
+        database: Option<String>,
+    },
+    HttpClientProxy {
+        host: String,
+        port: u16,
+    },
+    SocksProxy {
+        host: String,
+        port: u16,
+    },
+    #[cfg(feature = "mq-admin")]
+    RocketMqProxy {
+        host: String,
+        port: u16,
+    },
+    Static {
+        host: String,
+        port: u16,
+        fixed_local_port: Option<u16>,
+    },
 }
 
 fn transport_layers_through_last_ssh(layers: &[TransportLayerConfig]) -> Result<&[TransportLayerConfig], String> {
@@ -1942,6 +2109,7 @@ impl AppState {
                 agent_dir,
                 app_version,
             ),
+            pl_debug: crate::query::pl_debug::PlDebugRegistry::default(),
             nacos_registry: crate::nacos::NacosAdminRegistry::new(),
             duckdb_worker_process_isolation: AtomicBool::new(false),
             duckdb_worker_max_processes: AtomicUsize::new(DUCKDB_WORKER_MAX_PROCESSES_DEFAULT),
@@ -1952,6 +2120,7 @@ impl AppState {
             sqlserver_transaction_ends: Arc::new(std::sync::Mutex::new(Default::default())),
             session_credentials: SessionCredentialStore::new(),
             write_unlock_windows: crate::write_unlock::WriteUnlockWindows::default(),
+            native_jobs: crate::schema::native_jobs::NativeJobRegistry::default(),
             metadata_gates: Arc::new(Mutex::new(HashMap::new())),
             // Bounded so a shell that stops draining cannot grow memory without bound. A
             // lagged receiver re-syncs from the read-only status check on its next use, so
@@ -2342,7 +2511,9 @@ impl AppState {
         config: &ConnectionConfig,
         wait_for_drain: bool,
         keep_existing: bool,
-    ) -> Result<(), String> {
+        transport: Option<&ConnectionTransportStamp>,
+        connection_attempt: Option<u64>,
+    ) -> Result<ConnectionPoolReceipt, String> {
         if wait_for_drain {
             self.wait_for_pool_drain(&pool_key).await;
         }
@@ -2353,15 +2524,67 @@ impl AppState {
             None
         };
         let routing = self.pool_routing_control();
+        let transport_guard = if let Some(stamp) = transport {
+            match crate::query::pl_debug::transport_publication_guard(self, &config.id, stamp).await {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    routing.close_pool_with_timeout(pool_key, pool).await;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         let previous = loop {
             let mut connections = self.connections.write().await;
-            if keep_existing && connections.get(&pool_key).is_some_and(PoolKind::is_available_for_routing) {
+            let attempt_guard = if connection_attempt.is_some() {
+                match self.connection_attempts.try_read() {
+                    Ok(attempts) => Some(attempts),
+                    Err(_) => {
+                        drop(connections);
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            if connection_attempt.is_some_and(|expected| {
+                attempt_guard
+                    .as_ref()
+                    .and_then(|attempts| attempts.get(&config.id))
+                    .map(|attempt| attempt.server_attempt)
+                    != Some(expected)
+            }) {
+                drop(attempt_guard);
+                drop(connections);
+                drop(transport_guard);
+                routing.close_pool_with_timeout(pool_key, pool).await;
+                return Err("Connection attempt was superseded by a newer attempt".into());
+            }
+            let same_transport = transport.is_none_or(|stamp| {
+                connections
+                    .publications
+                    .get(&pool_key)
+                    .and_then(|publication| publication.transport.as_ref())
+                    .is_none_or(|published| published.same_runtime(stamp))
+            });
+            if keep_existing
+                && same_transport
+                && connections.get(&pool_key).is_some_and(PoolKind::is_available_for_routing)
+            {
                 // A concurrent request published this key while our candidate was connecting.
                 // Replacing it would close a pool other requests may already be using.
+                if let Some(publication) = connections.publications.get_mut(&pool_key) {
+                    if let Some(stamp) = transport.filter(|_| publication.transport.is_some()) {
+                        crate::query::pl_debug::adopt_published_transport(self, &config.id, stamp);
+                        *publication = PoolPublication { identity: Arc::new(()), transport: Some(stamp.clone()) };
+                    }
+                }
+                let publication = connections.publications[&pool_key].clone();
                 drop(connections);
-                routing.close_pool_with_timeout(pool_key.clone(), pool).await;
-                self.touch_pool_activity(&pool_key).await;
-                return Ok(());
+                drop(attempt_guard);
+                break Ok((Some(pool), publication, true));
             }
             if !pool.is_available_for_routing() {
                 break Err(pool);
@@ -2370,6 +2593,7 @@ impl AppState {
                 // Idle reclamation reads activity before routing. Never await that lock while
                 // holding the routing lock; release and retry to preserve a single lock order.
                 drop(connections);
+                drop(attempt_guard);
                 tokio::task::yield_now().await;
                 continue;
             };
@@ -2390,9 +2614,15 @@ impl AppState {
                     mq_keepalive_adapter.clone(),
                 );
             }
-            break Ok(connections.insert(pool_key.clone(), pool));
+            if let Some(stamp) = transport {
+                crate::query::pl_debug::adopt_published_transport(self, &config.id, stamp);
+            }
+            let previous = connections.insert_with_transport(pool_key.clone(), pool, transport.cloned());
+            let publication = connections.publications[&pool_key].clone();
+            break Ok((previous, publication, false));
         };
-        let previous = match previous {
+        drop(transport_guard);
+        let (previous, publication, kept_existing) = match previous {
             Ok(previous) => previous,
             Err(pool) => {
                 if let PoolKind::Agent(client) = &pool {
@@ -2405,14 +2635,21 @@ impl AppState {
         if let Some(pool) = previous {
             routing.close_pool_with_timeout(pool_key.clone(), pool).await;
         }
-        let route_is_available = self
-            .with_connection_pools(|connections| {
-                connections.get(&pool_key).is_some_and(PoolKind::is_available_for_routing)
-            })
-            .await;
-        if !route_is_available {
-            routing.detach_pool_by_key(&pool_key, true).await;
-            return Err("Agent runtime is unavailable while publishing the connection pool".to_string());
+        match self.pool_publication_snapshot(&pool_key).await {
+            Some(current) if !current.publication.is_same(&publication) => {
+                return Err("Connection pool publication was superseded while closing the previous pool".into());
+            }
+            Some(current) if current.pool.is_available_for_routing() => {}
+            current => {
+                if current.is_some() {
+                    self.remove_stale_pool_if_current(&pool_key, &publication).await;
+                }
+                return Err("Agent runtime is unavailable while publishing the connection pool".into());
+            }
+        }
+        if kept_existing {
+            self.touch_pool_activity(&pool_key).await;
+            return Ok(ConnectionPoolReceipt { pool_key, publication });
         }
         // 记录 no-save 池由哪个 owner 会话创建，供多会话复用判定使用
         // （见 pool_credential_owner_mismatch）。已保存密码连接始终共享池，不记录。
@@ -2422,7 +2659,7 @@ impl AppState {
                 self.session_credentials.record_pool_owner(&pool_key, &owner);
             }
         }
-        Ok(())
+        Ok(ConnectionPoolReceipt { pool_key, publication })
     }
 
     pub async fn insert_connection_pool(
@@ -2431,21 +2668,44 @@ impl AppState {
         pool: PoolKind,
         config: &ConnectionConfig,
     ) -> Result<(), String> {
-        self.insert_connection_pool_inner(pool_key, pool, config, true, false).await
+        self.insert_connection_pool_inner(pool_key, pool, config, true, false, None, None).await.map(|_| ())
     }
 
     /// Publishes a pool created on demand, keeping the existing pool when a concurrent request
     /// published the same key first.
+    #[cfg(test)]
     async fn publish_created_pool(
         &self,
         pool_key: String,
         pool: PoolKind,
         config: &ConnectionConfig,
     ) -> Result<(), String> {
+        self.insert_connection_pool_inner(pool_key, pool, config, true, config.save_password, None, None)
+            .await
+            .map(|_| ())
+    }
+
+    async fn publish_created_pool_with_transport(
+        &self,
+        pool_key: String,
+        pool: PoolKind,
+        config: &ConnectionConfig,
+        transport: &ConnectionTransportStamp,
+        connection_attempt: Option<u64>,
+    ) -> Result<ConnectionPoolReceipt, String> {
         // A no-save pool records its credential owner only after publication, so an existing
         // pool cannot be proven to belong to the current session here. Keep replacing it.
         let keep_existing = config.save_password;
-        self.insert_connection_pool_inner(pool_key, pool, config, true, keep_existing).await
+        self.insert_connection_pool_inner(
+            pool_key,
+            pool,
+            config,
+            true,
+            keep_existing,
+            Some(transport),
+            connection_attempt,
+        )
+        .await
     }
 
     pub async fn begin_connection_attempt(&self, connection_id: &str) -> u64 {
@@ -2520,18 +2780,45 @@ impl AppState {
         self.insert_connection_pool(pool_key, pool, config).await
     }
 
+    pub async fn insert_connection_pool_for_attempt_with_transport(
+        &self,
+        connection_id: &str,
+        attempt: u64,
+        pool_key: String,
+        pool: PoolKind,
+        config: &ConnectionConfig,
+        transport: &ConnectionTransportStamp,
+    ) -> Result<(), String> {
+        if let Err(error) = self.ensure_current_connection_attempt(connection_id, Some(attempt)).await {
+            self.pool_routing_control().close_pool_with_timeout(pool_key, pool).await;
+            return Err(error);
+        }
+        self.insert_connection_pool_inner(pool_key, pool, config, true, false, Some(transport), Some(attempt))
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn discard_connection_pool_receipt(&self, receipt: &ConnectionPoolReceipt) {
+        self.remove_stale_pool_if_current(&receipt.pool_key, &receipt.publication).await;
+    }
+
+    pub async fn pool_handle_for_receipt(&self, receipt: &ConnectionPoolReceipt) -> Option<PoolKind> {
+        let current = self.pool_publication_snapshot(&receipt.pool_key).await?;
+        current.publication.is_same(&receipt.publication).then_some(current.pool)
+    }
+
     async fn discard_stale_connection_attempt_pool(
         &self,
         connection_id: &str,
         pool_key: String,
         pool: PoolKind,
-        config: &ConnectionConfig,
+        transport: &ConnectionTransportStamp,
     ) {
         #[cfg(feature = "mq-admin")]
         if matches!(pool, PoolKind::MessageQueue) {
             self.mq_registry.drop_connection(connection_id).await;
         }
-        self.reset_connection_transport_for_config(connection_id, config).await;
+        self.reset_connection_transport_if_current(connection_id, transport).await;
         self.pool_routing_control().close_pool_with_timeout(pool_key, pool).await;
     }
 
@@ -2724,8 +3011,45 @@ impl AppState {
     }
 
     pub async fn shutdown(&self, deadline: Duration) {
+        let application_deadline = Instant::now() + deadline;
+        let debug_shutdown = crate::query::pl_debug::begin_shutdown(self, application_deadline);
         self.invalidate_all_connection_lifecycles();
         self.running_queries.cancel_all();
+        if let Some(debug_shutdown) = debug_shutdown {
+            let stop_dependencies = |remaining| async move {
+                let (_, _, _, _, _, plugin_shutdown) = tokio::join!(
+                    self.task_supervisor.shutdown(remaining),
+                    self.tunnels.stop_all_tunnels(),
+                    self.proxy_tunnels.stop_all_tunnels(),
+                    self.http_tunnels.stop_all_tunnels(),
+                    self.agent_manager.stop_daemons(),
+                    self.plugin_host.stop_all(),
+                );
+                if let Err(error) = plugin_shutdown {
+                    log::warn!("Failed to stop plugin runtimes during shutdown: {error}");
+                }
+            };
+            let shutdown = async {
+                let mut removed_pools = self.drain_all_connection_pools().await;
+                #[cfg(feature = "mq-admin")]
+                self.persist_removed_mqtt_history(&mut removed_pools).await;
+                self.transaction_sessions.write().await.clear();
+                let routing = self.pool_routing_control();
+                let protected = async {
+                    if let Err(error) = debug_shutdown.wait().await {
+                        log::warn!("Debugger cleanup could not confirm controlled release during application shutdown: {error}");
+                    }
+                    stop_dependencies(application_deadline.saturating_duration_since(Instant::now())).await;
+                };
+                tokio::join!(routing.close_removed(removed_pools), protected);
+            };
+            if tokio::time::timeout_at(application_deadline.into(), shutdown).await.is_err() {
+                debug_shutdown.isolate_remaining();
+                let _ = tokio::time::timeout(Duration::ZERO, stop_dependencies(Duration::ZERO)).await;
+                log::warn!("Timed out shutting down DBX runtime resources after {}ms", deadline.as_millis());
+            }
+            return;
+        }
         let mut removed_pools = self.drain_all_connection_pools().await;
         #[cfg(feature = "mq-admin")]
         self.persist_removed_mqtt_history(&mut removed_pools).await;
@@ -2805,6 +3129,23 @@ impl AppState {
         attempt: u64,
     ) -> Result<String, String> {
         self.get_or_create_pool_for_session_inner(
+            connection_id,
+            database,
+            None,
+            None,
+            AgentSessionRole::Workload,
+            Some(attempt),
+        )
+        .await
+    }
+
+    pub async fn get_or_create_pool_for_connection_attempt_with_receipt(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        attempt: u64,
+    ) -> Result<ConnectionPoolReceipt, String> {
+        self.get_or_create_pool_for_session_inner_with_receipt(
             connection_id,
             database,
             None,
@@ -2949,6 +3290,150 @@ impl AppState {
         }
     }
 
+    async fn prepare_connection_runtime(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+        database: Option<&str>,
+        catalog: Option<&str>,
+        connection_attempt: Option<u64>,
+        claimant: Option<&crate::query::pl_debug::PlDebugPreparation>,
+    ) -> Result<PreparedConnectionRuntime, String> {
+        match self
+            .prepare_connection_runtime_attempt(connection_id, config, database, catalog, connection_attempt, claimant)
+            .await
+        {
+            Ok(prepared) => Ok(prepared),
+            Err(error) => {
+                if let Some(stamp) = &error.transport_stamp {
+                    self.reset_connection_transport_if_current(connection_id, stamp).await;
+                }
+                Err(error.message)
+            }
+        }
+    }
+
+    async fn prepare_connection_runtime_attempt(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+        database: Option<&str>,
+        catalog: Option<&str>,
+        connection_attempt: Option<u64>,
+        claimant: Option<&crate::query::pl_debug::PlDebugPreparation>,
+    ) -> Result<PreparedConnectionRuntime, ConnectionPreparationFailure> {
+        let mut db_config = database_connection_config_with_catalog(config, database, catalog);
+        self.apply_session_credential(config, &mut db_config, connection_id);
+        validate_h2_file_connection(&db_config)?;
+        self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
+        let plan = self.prepare_connection_transport_with_claimant(connection_id, &db_config, claimant).await?;
+        let attempt = self.start_connection_transport_attempt(connection_id, &plan, claimant).await?;
+        let transport_stamp = attempt.stamp;
+        let result = async {
+            let endpoint = attempt.endpoint?;
+            self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
+            if let Some(database) = self.resolve_legacy_postgres_like_database(connection_id, &db_config).await {
+                db_config.database = Some(database);
+            }
+            if db_config.db_type != DatabaseType::Plugin && endpoint.proxy.is_none() {
+                probe_connection_endpoint(&db_config, &endpoint.host, endpoint.port).await?;
+            }
+            self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
+            let url = connection_url_for_endpoint(&db_config, &endpoint.host, endpoint.port);
+            let connect_timeout = Duration::from_secs(db_config.effective_connect_timeout_secs());
+            Ok(PreparedConnectionRuntime {
+                config: db_config,
+                endpoint,
+                url,
+                connect_timeout,
+                transport_stamp: transport_stamp.clone(),
+            })
+        }
+        .await;
+        result.map_err(|message| ConnectionPreparationFailure { message, transport_stamp: Some(transport_stamp) })
+    }
+
+    pub(crate) async fn prepare_pl_debug_connection(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        lifecycle: &ConnectionLifecycleSnapshot,
+        claimant: &crate::query::pl_debug::PlDebugPreparation,
+    ) -> Result<PreparedConnectionRuntime, String> {
+        let config = self.configs.read().await.get(connection_id).cloned().ok_or("Connection config not found")?;
+        if !matches!(config.db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+            return Err("PL/SQL debugging requires an Oracle or OceanBase Oracle connection".into());
+        }
+        if !self.connection_lifecycle_is_current(connection_id, lifecycle) {
+            return Err("The original debug connection was disconnected or changed".into());
+        }
+        validate_connection_url_params(&config)?;
+        let driver_key =
+            dbx_drivers::agent_runtime::db_type_to_agent_key(&config.db_type, config.driver_profile.as_deref())
+                .ok_or("The original debug driver is not available")?;
+        claimant.bind_driver(self, driver_key)?;
+        let prepared =
+            self.prepare_connection_runtime(connection_id, &config, database, None, None, Some(claimant)).await?;
+        if !self.connection_lifecycle_is_current(connection_id, lifecycle) {
+            return Err("The original debug connection was disconnected or changed".into());
+        }
+        Ok(prepared)
+    }
+
+    pub(crate) fn pl_debug_supervisor(&self) -> TaskSupervisor {
+        self.task_supervisor.clone()
+    }
+
+    pub(crate) async fn prepare_pl_debug_inspection_connection(
+        &self,
+        inspection: &crate::query::pl_debug::InspectionOwner,
+    ) -> Result<PreparedConnectionRuntime, String> {
+        inspection.check(self)?;
+        validate_connection_url_params(&inspection.config)?;
+        inspection.begin_preparation(self)?;
+        let result = self
+            .prepare_connection_runtime_attempt(
+                &inspection.request.connection_id,
+                &inspection.config,
+                Some(&inspection.request.database),
+                None,
+                None,
+                None,
+            )
+            .await;
+        let stamp = match &result {
+            Ok(prepared) => Some(prepared.transport_stamp.clone()),
+            Err(error) => error.transport_stamp.clone(),
+        };
+        inspection.preparation_finished(stamp.clone(), result.is_ok());
+        match result {
+            Ok(prepared) => {
+                inspection.check(self)?;
+                Ok(prepared)
+            }
+            Err(error) => {
+                if let Some(stamp) = stamp {
+                    if let Err(cleanup) = self
+                        .reset_connection_transport_layers_checked(
+                            &inspection.request.connection_id,
+                            stamp.layer_count(),
+                            Some(&stamp),
+                            true,
+                            Some(inspection.deadline),
+                        )
+                        .await
+                    {
+                        return Err(format!(
+                            "{}; original transport cleanup remains unconfirmed: {cleanup}",
+                            error.message
+                        ));
+                    }
+                }
+                Err(error.message)
+            }
+        }
+    }
+
     async fn get_or_create_pool_for_session_inner(
         &self,
         connection_id: &str,
@@ -2958,6 +3443,27 @@ impl AppState {
         session_role: AgentSessionRole,
         connection_attempt: Option<u64>,
     ) -> Result<String, String> {
+        self.get_or_create_pool_for_session_inner_with_receipt(
+            connection_id,
+            database,
+            catalog,
+            client_session_id,
+            session_role,
+            connection_attempt,
+        )
+        .await
+        .map(|receipt| receipt.pool_key)
+    }
+
+    async fn get_or_create_pool_for_session_inner_with_receipt(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        catalog: Option<&str>,
+        client_session_id: Option<&str>,
+        session_role: AgentSessionRole,
+        connection_attempt: Option<u64>,
+    ) -> Result<ConnectionPoolReceipt, String> {
         let config = {
             let configs = self.configs.read().await;
             configs.get(connection_id).ok_or("Connection config not found")?.clone()
@@ -2980,8 +3486,12 @@ impl AppState {
                     self.remove_stale_connection_pool(&pool_key).await;
                     break;
                 } else if !validate_existing_pool || !self.remove_stale_connection_pool(&pool_key).await {
+                    let Some(current) = self.pool_publication_snapshot(&pool_key).await else {
+                        continue;
+                    };
+                    self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
                     self.touch_pool_activity(&pool_key).await;
-                    return Ok(pool_key);
+                    return Ok(ConnectionPoolReceipt { pool_key, publication: current.publication });
                 }
                 break;
             }
@@ -2994,32 +3504,14 @@ impl AppState {
             break;
         }
 
-        let mut db_config = database_connection_config_with_catalog(&config, database, catalog);
-        self.apply_session_credential(&config, &mut db_config, connection_id);
-
-        validate_h2_file_connection(&db_config)?;
-        self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
-        let endpoint = self.connection_endpoint(connection_id, &db_config).await?;
+        let PreparedConnectionRuntime { config: db_config, endpoint, url, connect_timeout, transport_stamp } = self
+            .prepare_connection_runtime(connection_id, &config, database, catalog, connection_attempt, None)
+            .await?;
         let (host, port) = (endpoint.host, endpoint.port);
         let runtime_proxy = endpoint.proxy;
-        if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
-            self.reset_connection_transport_for_config(connection_id, &db_config).await;
-            return Err(err);
-        }
-        if let Some(database) = self.resolve_legacy_postgres_like_database(connection_id, &db_config).await {
-            db_config.database = Some(database);
-        }
-        if db_config.db_type != DatabaseType::Plugin && runtime_proxy.is_none() {
-            probe_connection_endpoint(&db_config, &host, port).await?;
-        }
-        if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
-            self.reset_connection_transport_for_config(connection_id, &db_config).await;
-            return Err(err);
-        }
-        let url = connection_url_for_endpoint(&db_config, &host, port);
-        let connect_timeout = std::time::Duration::from_secs(db_config.effective_connect_timeout_secs());
         let idle_timeout = std::time::Duration::from_secs(db_config.idle_timeout_secs);
         let mysql_pool_max_connections = mysql_pool_max_connections_for_session(client_session_id);
+        let pool_result = async {
         let pool = match db_config.db_type {
             DatabaseType::Mysql => {
                 let (pool, mode) = connect_mysql_metadata_pool(
@@ -3076,18 +3568,7 @@ impl AppState {
             }
             DatabaseType::Sqlite => {
                 if db::sqlite_worker::sqlite_remote_worker_requested(&db_config) {
-                    let transport_layers = self.resolved_transport_layers(&db_config).await?;
-                    let worker = db::sqlite_worker::connect_sqlite_worker(
-                        &self.tunnels,
-                        &self.proxy_tunnels,
-                        &self.http_tunnels,
-                        &self.agent_manager,
-                        self.storage.data_dir(),
-                        connection_id,
-                        &db_config,
-                        &transport_layers,
-                    )
-                    .await?;
+                    let worker = self.connect_sqlite_worker_with_transport(connection_id, &db_config, &transport_stamp).await?;
                     PoolKind::Sqlite(db::sqlite::SqliteHandle::from_worker(worker))
                 } else {
                     let sqlite_path = expand_tilde(&db_config.host);
@@ -3214,13 +3695,6 @@ impl AppState {
                         .await
                         {
                             Ok(()) => {
-                                // Re-check: another task may have created the pool while we were connecting.
-                                if self.pool_handle(&pool_key).await.is_some() {
-                                    self.pool_routing_control()
-                                        .close_pool_with_timeout(pool_key.clone(), PoolKind::MongoDb(client))
-                                        .await;
-                                    return Ok(pool_key);
-                                }
                                 if let Err(err) =
                                     self.ensure_current_connection_attempt(connection_id, connection_attempt).await
                                 {
@@ -3228,14 +3702,16 @@ impl AppState {
                                         connection_id,
                                         pool_key.clone(),
                                         PoolKind::MongoDb(client),
-                                        &db_config,
+                                        &transport_stamp,
                                     )
                                     .await;
                                     return Err(err);
                                 }
-                                self.insert_connection_pool(pool_key.clone(), PoolKind::MongoDb(client), &db_config)
-                                    .await?;
-                                return Ok(pool_key);
+                                let receipt = self.insert_connection_pool_inner(
+                                    pool_key.clone(), PoolKind::MongoDb(client), &db_config,
+                                    true, true, Some(&transport_stamp), connection_attempt,
+                                ).await?;
+                                return Ok(ConnectionPoolBuild::Published(receipt));
                             }
                             Err(e) => e,
                         },
@@ -3457,13 +3933,13 @@ impl AppState {
                 )?;
                 if db_config.db_type != DatabaseType::ZooKeeper {
                     let agent_session_id = uuid::Uuid::new_v4().simple().to_string();
-                    let agent_env = self.agent_launch_env(&db_config).await;
+                    let agent_env = transport_stamp.agent_launch_env();
                     let mut initial_result = self
                         .spawn_routed_shared_agent_client(
                             &db_config.db_type,
                             db_config.driver_profile.as_deref(),
                             &db_config.agent_java_options,
-                            &agent_env,
+                            agent_env,
                             agent_session_id.clone(),
                             connect_params,
                             agent_connect_timeout(&db_config),
@@ -3484,7 +3960,7 @@ impl AppState {
                                     &db_config.db_type,
                                     db_config.driver_profile.as_deref(),
                                     &db_config.agent_java_options,
-                                    &agent_env,
+                                    agent_env,
                                     agent_session_id.clone(),
                                     agent_connect_params_with_role(
                                         &db_config,
@@ -3507,14 +3983,14 @@ impl AppState {
                             let alternate_configs = oracle_alternate_connect_configs(&db_config, &err);
                             if alternate_configs.is_empty() {
                                 if err.contains("does not support multi_session protocol v2") {
-                                    let mut client = self
-                                        .agent_manager
-                                        .spawn_with_extra_java_args(
-                                            &db_config.db_type,
-                                            db_config.driver_profile.as_deref(),
-                                            &db_config.agent_java_options,
-                                        )
-                                        .await?;
+                                    let mut client = crate::agent_runtime::spawn_connection_client_with_env(
+                                        &self.agent_manager,
+                                        &db_config.db_type,
+                                        db_config.driver_profile.as_deref(),
+                                        &db_config.agent_java_options,
+                                        agent_env,
+                                    )
+                                    .await?;
                                     client
                                         .call_method_with_timeout::<serde_json::Value>(
                                             AgentMethod::Connect,
@@ -3548,13 +4024,12 @@ impl AppState {
                                         alternate_config.effective_database().unwrap_or(""),
                                         session_role,
                                     )?;
-                                    let alternate_env = self.agent_launch_env(&alternate_config).await;
                                     match self
                                         .spawn_routed_shared_agent_client(
                                             &alternate_config.db_type,
                                             alternate_config.driver_profile.as_deref(),
                                             &alternate_config.agent_java_options,
-                                            &alternate_env,
+                                            agent_env,
                                             agent_session_id.clone(),
                                             alternate_params,
                                             agent_connect_timeout(&alternate_config),
@@ -3689,7 +4164,7 @@ impl AppState {
                     let adapter = self.mq_registry.build_transient_config(mqc, agent_launch).await?;
                     adapter.test_connection().await?;
                     if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
-                        self.reset_connection_transport_for_config(connection_id, &db_config).await;
+                        self.reset_connection_transport_if_current(connection_id, &transport_stamp).await;
                         return Err(err);
                     }
                     // adapter drops here and kills agent-backed processes (RocketMQ/Kafka/RabbitMQ).
@@ -3708,7 +4183,7 @@ impl AppState {
                     }
                     if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
                         self.mq_registry.drop_connection(connection_id).await;
-                        self.reset_connection_transport_for_config(connection_id, &db_config).await;
+                        self.reset_connection_transport_if_current(connection_id, &transport_stamp).await;
                         return Err(err);
                     }
                     PoolKind::MessageQueue
@@ -3735,12 +4210,33 @@ impl AppState {
             }
         };
 
+        Ok::<_, String>(ConnectionPoolBuild::Candidate(Box::new(pool)))
+        }.await;
+        let pool = match pool_result {
+            Ok(ConnectionPoolBuild::Candidate(pool)) => *pool,
+            Ok(ConnectionPoolBuild::Published(receipt)) => return Ok(receipt),
+            Err(error) => {
+                self.reset_connection_transport_if_current(connection_id, &transport_stamp).await;
+                return Err(error);
+            }
+        };
         if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
-            self.discard_stale_connection_attempt_pool(connection_id, pool_key.clone(), pool, &db_config).await;
+            self.discard_stale_connection_attempt_pool(connection_id, pool_key.clone(), pool, &transport_stamp).await;
             return Err(err);
         }
-        self.publish_created_pool(pool_key.clone(), pool, &db_config).await?;
-        Ok(pool_key)
+        let published = self
+            .publish_created_pool_with_transport(
+                pool_key.clone(),
+                pool,
+                &db_config,
+                &transport_stamp,
+                connection_attempt,
+            )
+            .await;
+        if published.is_err() {
+            self.reset_connection_transport_if_current(connection_id, &transport_stamp).await;
+        }
+        published
     }
 
     /// Returns the enabled transport layers for a connection with tunnel
@@ -3754,13 +4250,20 @@ impl AppState {
         config: &ConnectionConfig,
     ) -> Result<Vec<TransportLayerConfig>, String> {
         let layers = config.effective_transport_layers();
+        self.resolve_transport_profile_layers(layers).await
+    }
+
+    async fn resolve_transport_profile_layers(
+        &self,
+        layers: Vec<TransportLayerConfig>,
+    ) -> Result<Vec<TransportLayerConfig>, String> {
         if layers.iter().all(|layer| layer.profile_id().is_empty()) {
             return Ok(layers);
         }
 
         let profiles: HashMap<String, TransportLayerConfig> = self
             .storage
-            .load_tunnel_profiles()
+            .load_tunnel_profiles_readonly()
             .await?
             .into_iter()
             .map(|profile| (profile.id().to_string(), profile))
@@ -3928,7 +4431,69 @@ impl AppState {
         connection_id: &str,
         config: &ConnectionConfig,
     ) -> Result<ConnectionEndpoint, String> {
-        let transport_layers = self.resolved_transport_layers(config).await?;
+        let attempt = self.connection_endpoint_attempt(connection_id, config).await?;
+        match attempt.endpoint {
+            Ok(endpoint) => Ok(endpoint),
+            Err(error) => {
+                self.reset_connection_transport_if_current(connection_id, &attempt.stamp).await;
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn connection_endpoint_attempt(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+    ) -> Result<ConnectionEndpointAttempt, String> {
+        let plan = self.prepare_connection_transport(connection_id, config).await?;
+        self.start_connection_transport_attempt(connection_id, &plan, None).await
+    }
+
+    async fn start_connection_transport_attempt(
+        &self,
+        connection_id: &str,
+        plan: &ConnectionTransportPlan,
+        claimant: Option<&crate::query::pl_debug::PlDebugPreparation>,
+    ) -> Result<ConnectionEndpointAttempt, String> {
+        let reservation = crate::query::pl_debug::reserve_transport(self, connection_id, plan, claimant).await?;
+        if reservation.replace {
+            self.stop_connection_transport_layers(connection_id, reservation.stamp.layer_count()).await;
+        }
+        let started = match &reservation.endpoint {
+            Some(endpoint) => Ok(endpoint.clone()),
+            None => self.start_connection_transport(connection_id, plan).await,
+        };
+        let endpoint = match started {
+            Ok(endpoint) => reservation.finish(&endpoint, claimant).map(|()| endpoint),
+            Err(error) => Err(error),
+        };
+        Ok(ConnectionEndpointAttempt { stamp: reservation.stamp.clone(), endpoint })
+    }
+
+    async fn prepare_connection_transport(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+    ) -> Result<ConnectionTransportPlan, String> {
+        self.prepare_connection_transport_with_claimant(connection_id, config, None).await
+    }
+
+    async fn prepare_connection_transport_with_claimant(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+        claimant: Option<&crate::query::pl_debug::PlDebugPreparation>,
+    ) -> Result<ConnectionTransportPlan, String> {
+        let layers = config.effective_transport_layers();
+        let mut source_profile_ids =
+            layers.iter().map(|layer| layer.profile_id().to_owned()).filter(|id| !id.is_empty()).collect::<Vec<_>>();
+        source_profile_ids.sort();
+        source_profile_ids.dedup();
+        if let Some(claimant) = claimant {
+            claimant.bind_profile_sources(self, source_profile_ids.clone())?;
+        }
+        let transport_layers = self.resolve_transport_profile_layers(layers).await?;
         self.ensure_ssh_local_port_supported(config, &transport_layers)?;
         let transport_summary = transport_layers
             .iter()
@@ -3973,34 +4538,69 @@ impl AppState {
                 return Err("Navicat MySQL HTTP tunnel does not support MySQL TLS settings. Disable MySQL SSL or remove the TLS certificate paths.".to_string());
             }
         }
-        if transport_layers.is_empty() || db::sqlite_worker::sqlite_remote_worker_requested(config) {
-            return Ok(ConnectionEndpoint::direct(config.host.clone(), config.port));
+        let agent_env = self.agent_launch_env(config).await;
+        if db::sqlite_worker::sqlite_remote_worker_requested(config) {
+            let route = db::sqlite_worker::prepare_sqlite_worker_route(config, &transport_layers)?;
+            return Ok(ConnectionTransportPlan {
+                source_profile_ids,
+                agent_env,
+                layers: route.prefix().clone(),
+                route: ConnectionTransportRoute::SqliteWorker {
+                    host: config.host.clone(),
+                    port: config.port,
+                    route: Box::new(route),
+                },
+            });
+        }
+        if transport_layers.is_empty() {
+            return Ok(ConnectionTransportPlan {
+                source_profile_ids,
+                agent_env,
+                layers: ResolvedTransportLayers::resolve(&[])?,
+                route: ConnectionTransportRoute::Direct {
+                    host: config.host.clone(),
+                    port: config.port,
+                    tns_target: config.uses_oracle_tns().then(|| {
+                        let target = config.connection_string.as_deref().unwrap_or("").trim();
+                        if crate::oracle_oci::uses_oracle_oci_profile(config) {
+                            crate::oracle_oci::strip_oracle_tns_admin_query(
+                                &crate::oracle_oci::rewrite_oracle_url_protocol(target, true),
+                            )
+                        } else {
+                            target.to_owned()
+                        }
+                    }),
+                },
+            });
         }
         if let Some(TransportLayerConfig::HttpTunnel(http)) = transport_layers.first() {
             if http.protocol == crate::models::connection::HttpTunnelProtocol::NavicatMysql {
-                let local_port = self
-                    .http_tunnels
-                    .start_navicat_mysql_tunnel(
-                        connection_id,
-                        &http.url,
-                        http.connect_timeout_secs,
-                        &config.host,
-                        config.port,
-                        &config.username,
-                        &config.password,
-                        config.database.as_deref(),
-                    )
-                    .await?;
-                return Ok(ConnectionEndpoint::direct("127.0.0.1".to_string(), local_port));
+                return Ok(ConnectionTransportPlan {
+                    source_profile_ids,
+                    agent_env,
+                    layers: ResolvedTransportLayers::resolve(&[])?,
+                    route: ConnectionTransportRoute::Navicat {
+                        url: http.url.clone(),
+                        connect_timeout_secs: http.connect_timeout_secs,
+                        host: config.host.clone(),
+                        port: config.port,
+                        username: config.username.clone(),
+                        password: config.password.clone(),
+                        database: config.database.clone(),
+                    },
+                });
             }
         }
-        if config.db_type == DatabaseType::ClickHouse
-            || config.db_type == DatabaseType::CloudflareD1
-            || config.db_type == DatabaseType::Turso
+        let resolved_transport = ResolvedTransportLayers::resolve(&transport_layers)?;
+        if matches!(config.db_type, DatabaseType::ClickHouse | DatabaseType::CloudflareD1 | DatabaseType::Turso)
+            && matches!(transport_layers.last(), Some(TransportLayerConfig::Ssh(_) | TransportLayerConfig::Proxy(_)))
         {
-            if let Some(proxy) = self.clickhouse_proxy_for_transport_layers(connection_id, &transport_layers).await? {
-                return Ok(ConnectionEndpoint { host: config.host.clone(), port: config.port, proxy: Some(proxy) });
-            }
+            return Ok(ConnectionTransportPlan {
+                source_profile_ids,
+                agent_env,
+                layers: resolved_transport,
+                route: ConnectionTransportRoute::HttpClientProxy { host: config.host.clone(), port: config.port },
+            });
         }
         if config.uses_oracle_tns() {
             // A TNS descriptor may contain several failover addresses, so rewriting it
@@ -4016,8 +4616,12 @@ impl AppState {
             && crate::mq::config::MqAdminConfig::from_connection(config)?.system_kind
                 == crate::mq::types::MqSystemKind::RocketMq
         {
-            self.rocketmq_socks_proxy_for_transport_layers(connection_id, &transport_layers).await?;
-            return Ok(ConnectionEndpoint::direct(config.host.clone(), config.port));
+            return Ok(ConnectionTransportPlan {
+                source_profile_ids,
+                agent_env,
+                layers: resolved_transport,
+                route: ConnectionTransportRoute::RocketMqProxy { host: config.host.clone(), port: config.port },
+            });
         }
 
         // Multi-endpoint plugin providers (Kafka bootstrap + advertised
@@ -4025,10 +4629,17 @@ impl AppState {
         // dialer instead of a static tunnel, which can only reach a single
         // broker. The payload keeps the logical endpoint so the plugin can
         // still resolve its own seed list and metadata names.
-        if config.db_type == DatabaseType::Plugin && self.plugin_host.wants_proxy_route(config).await {
-            if let Some(proxy) = self.socks5_route_for_transport_layers(connection_id, &transport_layers).await? {
-                return Ok(ConnectionEndpoint { host: config.host.clone(), port: config.port, proxy: Some(proxy) });
-            }
+        if config.db_type == DatabaseType::Plugin
+            && self.plugin_host.wants_proxy_route(config).await
+            && (matches!(transport_layers.last(), Some(TransportLayerConfig::Ssh(_)))
+                || matches!(transport_layers.last(), Some(TransportLayerConfig::Proxy(proxy)) if proxy.proxy_type == crate::models::connection::ProxyType::Socks5))
+        {
+            return Ok(ConnectionTransportPlan {
+                source_profile_ids,
+                agent_env,
+                layers: resolved_transport,
+                route: ConnectionTransportRoute::SocksProxy { host: config.host.clone(), port: config.port },
+            });
         }
 
         if config.db_type == DatabaseType::Jdbc {
@@ -4049,19 +4660,115 @@ impl AppState {
             );
         }
         let fixed_local_port = self.static_tunnel_fixed_local_port(connection_id, config, &transport_layers)?;
-        let local_port = db::transport_layer_tunnel::start_transport_layers_with_final_ssh_local_port(
-            connection_id,
-            &transport_layers,
-            &remote_host,
-            remote_port,
-            fixed_local_port,
+        Ok(ConnectionTransportPlan {
+            source_profile_ids,
+            agent_env,
+            layers: resolved_transport,
+            route: ConnectionTransportRoute::Static { host: remote_host, port: remote_port, fixed_local_port },
+        })
+    }
+
+    pub async fn connect_sqlite_worker_with_transport(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+        stamp: &ConnectionTransportStamp,
+    ) -> Result<Arc<db::sqlite_worker::SqliteWorkerClient>, String> {
+        if stamp.connection_id != connection_id {
+            return Err("The original SQLite worker transport belongs to another connection".into());
+        }
+        let ConnectionTransportRoute::SqliteWorker { route, .. } = &stamp.plan.route else {
+            return Err("The original connection transport is not a remote SQLite worker route".into());
+        };
+        let gate = crate::query::pl_debug::transport_publication_guard(self, connection_id, stamp).await?;
+        let result = db::sqlite_worker::connect_sqlite_worker_with_route(
             &self.tunnels,
             &self.proxy_tunnels,
             &self.http_tunnels,
+            &self.agent_manager,
+            self.storage.data_dir(),
+            connection_id,
+            config,
+            route,
+            &db::sqlite_worker::sqlite_worker_chain_id(connection_id),
         )
-        .await?;
+        .await;
+        drop(gate);
+        if result.is_err() {
+            self.reset_connection_transport_if_current(connection_id, stamp).await;
+        }
+        result
+    }
 
-        Ok(ConnectionEndpoint { host: "127.0.0.1".to_string(), port: local_port, proxy: None })
+    async fn start_connection_transport(
+        &self,
+        connection_id: &str,
+        plan: &ConnectionTransportPlan,
+    ) -> Result<ConnectionEndpoint, String> {
+        match &plan.route {
+            ConnectionTransportRoute::Direct { host, port, .. }
+            | ConnectionTransportRoute::SqliteWorker { host, port, .. } => {
+                Ok(ConnectionEndpoint::direct(host.clone(), *port))
+            }
+            ConnectionTransportRoute::Navicat {
+                url,
+                connect_timeout_secs,
+                host,
+                port,
+                username,
+                password,
+                database,
+            } => {
+                let local_port = self
+                    .http_tunnels
+                    .start_navicat_mysql_tunnel(
+                        connection_id,
+                        url,
+                        *connect_timeout_secs,
+                        host,
+                        *port,
+                        username,
+                        password,
+                        database.as_deref(),
+                    )
+                    .await?;
+                Ok(ConnectionEndpoint::direct("127.0.0.1".to_owned(), local_port))
+            }
+            ConnectionTransportRoute::HttpClientProxy { host, port } => {
+                let proxy = self
+                    .clickhouse_proxy_for_transport_layers(connection_id, &plan.layers)
+                    .await?
+                    .expect("prepared HTTP client proxy has an SSH or proxy final layer");
+                Ok(ConnectionEndpoint { host: host.clone(), port: *port, proxy: Some(proxy) })
+            }
+            ConnectionTransportRoute::SocksProxy { host, port } => {
+                let proxy = self
+                    .socks5_route_for_transport_layers(connection_id, &plan.layers)
+                    .await?
+                    .expect("prepared SOCKS route has an SSH or SOCKS5 final layer");
+                Ok(ConnectionEndpoint { host: host.clone(), port: *port, proxy: Some(proxy) })
+            }
+            #[cfg(feature = "mq-admin")]
+            ConnectionTransportRoute::RocketMqProxy { host, port } => {
+                self.rocketmq_socks_proxy_for_transport_layers(connection_id, &plan.layers).await?;
+                Ok(ConnectionEndpoint::direct(host.clone(), *port))
+            }
+            ConnectionTransportRoute::Static { host, port, fixed_local_port } => {
+                let local_port = plan
+                    .layers
+                    .start_with_final_ssh_local_port(
+                        connection_id,
+                        host,
+                        *port,
+                        *fixed_local_port,
+                        &self.tunnels,
+                        &self.proxy_tunnels,
+                        &self.http_tunnels,
+                    )
+                    .await?;
+                Ok(ConnectionEndpoint::direct("127.0.0.1".to_owned(), local_port))
+            }
+        }
     }
 
     /// Config check that runs ahead of the early returns in `connection_endpoint`,
@@ -4106,29 +4813,24 @@ impl AppState {
     async fn clickhouse_proxy_for_transport_layers(
         &self,
         connection_id: &str,
-        transport_layers: &[TransportLayerConfig],
+        resolved_transport: &ResolvedTransportLayers,
     ) -> Result<Option<PluginRuntimeProxy>, String> {
         use crate::models::connection::ProxyType;
+        let transport_layers = resolved_transport.layers();
 
         let Some(TransportLayerConfig::Proxy(proxy)) = transport_layers.last() else {
-            return self.socks5_route_for_transport_layers(connection_id, transport_layers).await;
+            return self.socks5_route_for_transport_layers(connection_id, resolved_transport).await;
         };
         if proxy.proxy_type == ProxyType::Socks5 {
-            return self.socks5_route_for_transport_layers(connection_id, transport_layers).await;
+            return self.socks5_route_for_transport_layers(connection_id, resolved_transport).await;
         }
         let (host, port) = if transport_layers.len() == 1 {
             (proxy.host.clone(), proxy.port)
         } else {
-            let local_port = db::transport_layer_tunnel::start_transport_layers(
-                connection_id,
-                &transport_layers[..transport_layers.len() - 1],
-                &proxy.host,
-                proxy.port,
-                &self.tunnels,
-                &self.proxy_tunnels,
-                &self.http_tunnels,
-            )
-            .await?;
+            let local_port = resolved_transport
+                .prefix(transport_layers.len() - 1)
+                .start(connection_id, &proxy.host, proxy.port, &self.tunnels, &self.proxy_tunnels, &self.http_tunnels)
+                .await?;
             ("127.0.0.1".to_string(), local_port)
         };
         Ok(Some(PluginRuntimeProxy {
@@ -4146,9 +4848,10 @@ impl AppState {
     async fn socks5_route_for_transport_layers(
         &self,
         connection_id: &str,
-        transport_layers: &[TransportLayerConfig],
+        resolved_transport: &ResolvedTransportLayers,
     ) -> Result<Option<PluginRuntimeProxy>, String> {
         use crate::models::connection::ProxyType;
+        let transport_layers = resolved_transport.layers();
 
         let Some(final_layer) = transport_layers.last() else {
             return Ok(None);
@@ -4157,14 +4860,9 @@ impl AppState {
             TransportLayerConfig::Ssh(_) => {
                 // The final SSH hop exposes a dynamic SOCKS5 endpoint so every
                 // advertised broker is reachable through one tunnel.
-                let local_port = db::transport_layer_tunnel::start_transport_layers_with_final_ssh_socks5(
-                    connection_id,
-                    transport_layers,
-                    &self.tunnels,
-                    &self.proxy_tunnels,
-                    &self.http_tunnels,
-                )
-                .await?;
+                let local_port = resolved_transport
+                    .start_with_final_ssh_socks5(connection_id, &self.tunnels, &self.proxy_tunnels, &self.http_tunnels)
+                    .await?;
                 Ok(Some(PluginRuntimeProxy::socks5("127.0.0.1".to_string(), local_port, String::new(), String::new())))
             }
             TransportLayerConfig::Proxy(proxy) if proxy.proxy_type == ProxyType::Socks5 => {
@@ -4176,16 +4874,17 @@ impl AppState {
                         proxy.password.clone(),
                     )))
                 } else {
-                    let local_port = db::transport_layer_tunnel::start_transport_layers(
-                        connection_id,
-                        &transport_layers[..transport_layers.len() - 1],
-                        &proxy.host,
-                        proxy.port,
-                        &self.tunnels,
-                        &self.proxy_tunnels,
-                        &self.http_tunnels,
-                    )
-                    .await?;
+                    let local_port = resolved_transport
+                        .prefix(transport_layers.len() - 1)
+                        .start(
+                            connection_id,
+                            &proxy.host,
+                            proxy.port,
+                            &self.tunnels,
+                            &self.proxy_tunnels,
+                            &self.http_tunnels,
+                        )
+                        .await?;
                     Ok(Some(PluginRuntimeProxy::socks5(
                         "127.0.0.1".to_string(),
                         local_port,
@@ -4419,22 +5118,18 @@ impl AppState {
     async fn rocketmq_socks_proxy_for_transport_layers(
         &self,
         connection_id: &str,
-        transport_layers: &[TransportLayerConfig],
+        resolved_transport: &ResolvedTransportLayers,
     ) -> Result<crate::mq::config::MqSocksProxy, String> {
         // ProxyType 仅此 mq-admin 分支用到，局部导入避免在关闭 mq-admin 时
         // 顶层 import 触发 unused 警告。
         use crate::models::connection::ProxyType;
+        let transport_layers = resolved_transport.layers();
         let final_layer = transport_layers.last().ok_or("No transport layers configured")?;
         match final_layer {
             TransportLayerConfig::Ssh(_) => {
-                let local_port = db::transport_layer_tunnel::start_transport_layers_with_final_ssh_socks5(
-                    connection_id,
-                    transport_layers,
-                    &self.tunnels,
-                    &self.proxy_tunnels,
-                    &self.http_tunnels,
-                )
-                .await?;
+                let local_port = resolved_transport
+                    .start_with_final_ssh_socks5(connection_id, &self.tunnels, &self.proxy_tunnels, &self.http_tunnels)
+                    .await?;
                 Ok(crate::mq::config::MqSocksProxy {
                     host: "127.0.0.1".to_string(),
                     port: local_port,
@@ -4451,16 +5146,17 @@ impl AppState {
                         password: proxy.password.clone(),
                     })
                 } else {
-                    let local_port = db::transport_layer_tunnel::start_transport_layers(
-                        connection_id,
-                        &transport_layers[..transport_layers.len() - 1],
-                        &proxy.host,
-                        proxy.port,
-                        &self.tunnels,
-                        &self.proxy_tunnels,
-                        &self.http_tunnels,
-                    )
-                    .await?;
+                    let local_port = resolved_transport
+                        .prefix(transport_layers.len() - 1)
+                        .start(
+                            connection_id,
+                            &proxy.host,
+                            proxy.port,
+                            &self.tunnels,
+                            &self.proxy_tunnels,
+                            &self.http_tunnels,
+                        )
+                        .await?;
                     Ok(crate::mq::config::MqSocksProxy {
                         host: "127.0.0.1".to_string(),
                         port: local_port,
@@ -4500,7 +5196,8 @@ impl AppState {
         self.ensure_ssh_local_port_supported(config, &transport_layers)?;
 
         if mqc.system_kind == crate::mq::types::MqSystemKind::RocketMq {
-            let proxy = self.rocketmq_socks_proxy_for_transport_layers(connection_id, &transport_layers).await?;
+            let resolved_transport = ResolvedTransportLayers::resolve(&transport_layers)?;
+            let proxy = self.rocketmq_socks_proxy_for_transport_layers(connection_id, &resolved_transport).await?;
             return Ok(mqc.with_socks_proxy(&proxy.host, proxy.port, &proxy.username, &proxy.password));
         }
 
@@ -5162,6 +5859,16 @@ impl AppState {
 
         self.postgres_cancel_contexts.write().await.remove(pool_key);
         routing.close_pool_with_timeout(pool_key.to_string(), removed).await;
+        #[cfg(test)]
+        if let Some((ready, resume)) =
+            cleanup_barriers.as_ref().and_then(|barriers| barriers.before_transport_reset.as_ref())
+        {
+            ready.wait().await;
+            resume.wait().await;
+        }
+        if let Some(stamp) = &checked_publication.transport {
+            self.reset_connection_transport_if_current(&stamp.connection_id, stamp).await;
+        }
         true
     }
 
@@ -5232,8 +5939,8 @@ impl AppState {
         let base_pool_key = base_pool_key_for_config(config.as_ref(), connection_id, pool_database, catalog, true);
         let pool_key = pool_key_for_session_role(config.as_ref(), base_pool_key, client_session_id, session_role);
         if self.uses_forwarded_transport(connection_id).await {
-            self.remove_connection_pools(connection_id).await;
-            self.reset_connection_transport(connection_id).await;
+            self.remove_connection_pools_checked(connection_id).await?;
+            self.reset_connection_transport_checked(connection_id).await?;
         } else {
             self.stop_keepalive_task(&pool_key).await;
             self.pool_activity.write().await.remove(&pool_key);
@@ -5267,6 +5974,24 @@ impl AppState {
             return Ok(false);
         };
         self.pool_routing_control().close_pool_with_timeout(pool_key, pool).await;
+        Ok(true)
+    }
+
+    pub async fn close_client_session_pool_with_completion(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        client_session_id: &str,
+    ) -> Result<bool, String> {
+        let Some((_, pool)) = self
+            .take_client_session_pool(connection_id, database, client_session_id, AgentSessionRole::Workload)
+            .await?
+        else {
+            return Ok(false);
+        };
+        tokio::time::timeout(Duration::from_secs(POOL_CLOSE_TIMEOUT_SECS), close_pool_kind_with_completion(pool))
+            .await
+            .map_err(|_| "Export session close completion was not confirmed".to_string())??;
         Ok(true)
     }
 
@@ -5535,9 +6260,15 @@ impl AppState {
                 Some(PoolKind::Agent(client)) => Arc::strong_count(client) == 1 && client.try_lock().is_ok(),
                 _ => false,
             };
-            exclusively_idle.then(|| connections.remove(pool_key)).flatten()
+            if exclusively_idle {
+                let transport =
+                    connections.publications.get(pool_key).and_then(|publication| publication.transport.clone());
+                connections.remove(pool_key).map(|pool| (pool, transport))
+            } else {
+                None
+            }
         };
-        let Some(pool) = removed else {
+        let Some((pool, transport)) = removed else {
             self.restart_agent_keepalive(pool_key).await;
             return false;
         };
@@ -5553,7 +6284,7 @@ impl AppState {
             }
             Err((pool, error)) => {
                 log::warn!("Failed to close reclaimed Agent pool '{pool_key}': {error}; restoring the pool");
-                self.restore_reclaimed_agent_pool(pool_key, pool).await;
+                self.restore_reclaimed_agent_pool(pool_key, pool, transport).await;
                 false
             }
         }
@@ -5581,16 +6312,59 @@ impl AppState {
         }
     }
 
-    async fn restore_reclaimed_agent_pool(&self, pool_key: &str, pool: PoolKind) {
+    async fn restore_reclaimed_agent_pool(
+        &self,
+        pool_key: &str,
+        pool: PoolKind,
+        transport: Option<ConnectionTransportStamp>,
+    ) {
         let config = {
             let configs = self.configs.read().await;
             config_for_pool_key(pool_key, &configs).cloned()
         };
-        if let Some(config) = config {
-            let _ = self.insert_connection_pool_inner(pool_key.to_string(), pool, &config, false, false).await;
+        let routing = self.pool_routing_control();
+        let transport_guard = if let Some(stamp) = &transport {
+            match crate::query::pl_debug::transport_publication_guard(self, &stamp.connection_id, stamp).await {
+                Ok(guard) => Some(guard),
+                Err(_) => {
+                    routing.close_pool_with_timeout(pool_key.to_string(), pool).await;
+                    return;
+                }
+            }
         } else {
-            self.pool_activity.write().await.insert(pool_key.to_string(), PoolActivity::now());
-            self.connections.write().await.insert(pool_key.to_string(), pool);
+            None
+        };
+        loop {
+            let mut connections = self.connections.write().await;
+            if connections.contains_key(pool_key) || !pool.is_available_for_routing() {
+                drop(connections);
+                drop(transport_guard);
+                routing.close_pool_with_timeout(pool_key.to_string(), pool).await;
+                return;
+            }
+            let Ok(mut activity) = self.pool_activity.try_write() else {
+                drop(connections);
+                tokio::task::yield_now().await;
+                continue;
+            };
+            routing.stop_keepalive(pool_key);
+            if let Some(config) = &config {
+                if !pool_key.contains(":session:manual-txn-") {
+                    self.start_keepalive_task(
+                        pool_key,
+                        &pool,
+                        config,
+                        #[cfg(feature = "mq-admin")]
+                        None,
+                    );
+                }
+            }
+            if let Some(stamp) = &transport {
+                crate::query::pl_debug::adopt_published_transport(self, &stamp.connection_id, stamp);
+            }
+            connections.insert_with_transport(pool_key.to_string(), pool, transport.clone());
+            activity.insert(pool_key.to_string(), PoolActivity::now());
+            break;
         }
     }
 
@@ -5741,13 +6515,22 @@ impl AppState {
         let pool_key = self.get_or_create_pool(connection_id, database).await?;
         enum IdentifierQuoteSource {
             NativeGaussdb(deadpool_postgres::Pool),
+            NativeOpenGauss(deadpool_postgres::Pool),
             Agent(Arc<db::agent_driver::PooledAgentClient>),
             ExternalDriver { config: Arc<ConnectionConfig>, session: Arc<PluginDriverSession> },
         }
         let source = {
             match self.pool_handle(&pool_key).await.as_ref() {
+                // GaussDB and openGauss take their identifier quote from the
+                // database compatibility mode (`pg_database.datcompatibility`):
+                // MySQL-compatible databases use backticks, while Oracle and
+                // PostgreSQL modes use double quotes. Both share the native
+                // PostgreSQL pool.
                 Some(PoolKind::Postgres(pool)) if config.db_type == DatabaseType::Gaussdb => {
                     Some(IdentifierQuoteSource::NativeGaussdb(pool.clone()))
+                }
+                Some(PoolKind::Postgres(pool)) if config.db_type == DatabaseType::OpenGauss => {
+                    Some(IdentifierQuoteSource::NativeOpenGauss(pool.clone()))
                 }
                 Some(PoolKind::Agent(client)) if database_capabilities::is_agent_type(&config.db_type) => {
                     Some(IdentifierQuoteSource::Agent(client.clone()))
@@ -5760,6 +6543,9 @@ impl AppState {
         };
         match source {
             Some(IdentifierQuoteSource::NativeGaussdb(pool)) => Ok(db::postgres::gaussdb_identifier_quote(&pool).await),
+            Some(IdentifierQuoteSource::NativeOpenGauss(pool)) => {
+                Ok(db::postgres::opengauss_identifier_quote(&pool).await)
+            }
             Some(IdentifierQuoteSource::Agent(client)) => {
                 let mut agent = client.lock().await;
                 let info = agent.connection_info(Some(db::connection_timeout())).await?;
@@ -5940,23 +6726,104 @@ impl AppState {
     }
 
     pub async fn reset_connection_transport(&self, connection_id: &str) {
+        if let Err(error) = self.reset_connection_transport_checked(connection_id).await {
+            log::warn!("Transport reset is waiting for original debugger cleanup: {error}");
+        }
+    }
+
+    pub async fn reset_connection_transport_checked(&self, connection_id: &str) -> Result<(), String> {
+        let stamp = crate::query::pl_debug::current_transport(self, connection_id);
         let layer_count = {
             let configs = self.configs.read().await;
             configs.get(connection_id).map(|config| config.effective_transport_layers().len()).unwrap_or(0)
         };
-        self.reset_connection_transport_layers(connection_id, layer_count).await;
+        self.reset_connection_transport_layers_checked(connection_id, layer_count, stamp.as_ref(), false, None).await
     }
 
     pub async fn reset_connection_transport_for_config(&self, connection_id: &str, config: &ConnectionConfig) {
+        let stamp = crate::query::pl_debug::current_transport(self, connection_id);
         let existing_layer_count = {
             let configs = self.configs.read().await;
             configs.get(connection_id).map(|config| config.effective_transport_layers().len()).unwrap_or(0)
         };
         let layer_count = existing_layer_count.max(config.effective_transport_layers().len());
-        self.reset_connection_transport_layers(connection_id, layer_count).await;
+        self.reset_connection_transport_layers(connection_id, layer_count, stamp.as_ref(), false).await;
     }
 
-    async fn reset_connection_transport_layers(&self, connection_id: &str, layer_count: usize) {
+    pub async fn reset_connection_transport_if_current(&self, connection_id: &str, stamp: &ConnectionTransportStamp) {
+        self.reset_connection_transport_layers(connection_id, stamp.layer_count(), Some(stamp), true).await;
+    }
+
+    async fn reset_connection_transport_layers(
+        &self,
+        connection_id: &str,
+        layer_count: usize,
+        stamp: Option<&ConnectionTransportStamp>,
+        protect_debuggers: bool,
+    ) {
+        if let Err(error) = self
+            .reset_connection_transport_layers_checked(connection_id, layer_count, stamp, protect_debuggers, None)
+            .await
+        {
+            log::warn!("Transport reset is waiting for original debugger cleanup: {error}");
+        }
+    }
+
+    async fn reset_connection_transport_layers_checked(
+        &self,
+        connection_id: &str,
+        layer_count: usize,
+        stamp: Option<&ConnectionTransportStamp>,
+        protect_debuggers: bool,
+        deadline: Option<Instant>,
+    ) -> Result<(), String> {
+        let Some(debug_fence) =
+            crate::query::pl_debug::drain_transport(self, connection_id, stamp, protect_debuggers, deadline).await?
+        else {
+            return Ok(());
+        };
+        let current = crate::query::pl_debug::current_transport(self, connection_id);
+        if match (&current, stamp) {
+            (Some(current), Some(stamp)) => !current.same_token(stamp),
+            (None, None) => false,
+            _ => true,
+        } {
+            debug_fence.complete();
+            return Ok(());
+        }
+        let published = if protect_debuggers {
+            self.connections
+                .read()
+                .await
+                .publications
+                .values()
+                .filter_map(|publication| publication.transport.as_ref())
+                .find(|published| {
+                    published.connection_id == connection_id && stamp.is_some_and(|stamp| published.same_runtime(stamp))
+                })
+                .cloned()
+        } else {
+            None
+        };
+        if let Some(published) = published {
+            crate::query::pl_debug::adopt_published_transport(self, connection_id, &published);
+            debug_fence.complete();
+            return Ok(());
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err("The original connection cleanup deadline expired".into());
+        }
+        self.stop_connection_transport_layers(
+            connection_id,
+            layer_count.max(stamp.map_or(0, |stamp| stamp.layer_count())),
+        )
+        .await;
+        crate::query::pl_debug::retire_transport(self, connection_id, stamp);
+        debug_fence.complete();
+        Ok(())
+    }
+
+    async fn stop_connection_transport_layers(&self, connection_id: &str, layer_count: usize) {
         let redis_cluster_prefix = redis_cluster_transport_prefix(connection_id);
         self.tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
         self.proxy_tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
@@ -6084,6 +6951,24 @@ impl AppState {
         // Clone pool handles under a short-lived read lock, then release it
         // before performing I/O-heavy health checks to avoid blocking writers.
         let checks = self.connection_pool_publication_snapshots().await;
+        let legacy_transports = {
+            let configs = self.configs.read().await;
+            checks
+                .iter()
+                .filter_map(|(key, checked)| {
+                    if checked.publication.transport.is_some() {
+                        return None;
+                    }
+                    let config = config_for_pool_key(key, &configs)?;
+                    if !config.has_effective_transport_layers()
+                        || crate::query::pl_debug::current_transport(self, &config.id).is_some()
+                    {
+                        return None;
+                    }
+                    Some((key.clone(), (config.id.clone(), config.effective_transport_layers().len())))
+                })
+                .collect::<HashMap<_, _>>()
+        };
 
         let mut failed_agent_checks = Vec::new();
         let mut dead_pools = Vec::new();
@@ -6336,14 +7221,19 @@ impl AppState {
             }
         }
 
-        let mut detached_pool_keys = Vec::new();
+        let mut detached_transports = Vec::new();
+        let mut detached_legacy_transports = Vec::new();
         for (key, client, publication, replace_runtime) in failed_agent_checks {
             if self
                 .pool_routing_control()
                 .detach_agent_pool_if_current(&key, &client, Some(&publication), replace_runtime)
                 .await
             {
-                detached_pool_keys.push(key);
+                if let Some(stamp) = publication.transport {
+                    detached_transports.push(stamp);
+                } else if let Some(legacy) = legacy_transports.get(&key) {
+                    detached_legacy_transports.push(legacy.clone());
+                }
             }
         }
 
@@ -6354,33 +7244,38 @@ impl AppState {
             for (key, publication) in &dead_pools {
                 if let Some(pool) = conns.remove_if_publication(key, publication) {
                     removed.push((key.clone(), pool));
+                    if let Some(stamp) = &publication.transport {
+                        detached_transports.push(stamp.clone());
+                    } else if let Some(legacy) = legacy_transports.get(key) {
+                        detached_legacy_transports.push(legacy.clone());
+                    }
                 } else {
                     log::debug!("Skipping stale refresh health result for replaced pool '{key}'");
                 }
             }
             drop(conns);
-            detached_pool_keys.extend(removed.iter().map(|(key, _)| key.clone()));
             self.pool_routing_control().finish_detach(removed).await;
         }
 
         // Only failed pools may require a fresh transport. Healthy tunnel listeners must keep
         // their local ports stable across app resume and visibility-triggered health checks.
-        let tunnel_connection_ids: HashSet<String> = {
-            let configs = self.configs.read().await;
-            detached_pool_keys
-                .iter()
-                .filter_map(|pool_key| config_for_pool_key(pool_key, &configs))
-                .filter(|config| config.has_effective_transport_layers())
-                .map(|config| config.id.clone())
-                .collect()
-        };
-        for connection_id in tunnel_connection_ids {
-            self.reset_connection_transport(&connection_id).await;
+        for stamp in detached_transports {
+            self.reset_connection_transport_if_current(&stamp.connection_id, &stamp).await;
             // Tunnels will be re-created on next pool access via connection_host_port
+        }
+        for (connection_id, layer_count) in detached_legacy_transports {
+            self.reset_connection_transport_layers(&connection_id, layer_count, None, true).await;
         }
     }
 
     pub async fn remove_connection_pools(&self, connection_id: &str) {
+        if let Err(error) = self.remove_connection_pools_checked(connection_id).await {
+            log::warn!("Connection pool removal is waiting for original debugger cleanup: {error}");
+        }
+    }
+
+    pub async fn remove_connection_pools_checked(&self, connection_id: &str) -> Result<(), String> {
+        let debug_fence = crate::query::pl_debug::drain_connection(self, connection_id, "connection_removed").await?;
         self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
         let mut removed = self.drain_connection_pools(connection_id).await;
@@ -6388,6 +7283,8 @@ impl AppState {
         #[cfg(feature = "mq-admin")]
         self.persist_removed_mqtt_history(&mut removed).await;
         self.pool_routing_control().close_removed(removed).await;
+        debug_fence.complete();
+        Ok(())
     }
 
     /// Drop a connection's pools WITHOUT closing them. Only for plugin
@@ -6399,14 +7296,30 @@ impl AppState {
     /// user disconnect still goes through remove_connection_pools* and does
     /// send connection/disconnect.
     pub async fn drop_connection_pools_without_close(&self, connection_id: &str) {
+        if let Err(error) = self.drop_connection_pools_without_close_checked(connection_id).await {
+            log::warn!("Connection pool replacement is waiting for original debugger cleanup: {error}");
+        }
+    }
+
+    pub async fn drop_connection_pools_without_close_checked(&self, connection_id: &str) -> Result<(), String> {
+        let debug_fence = crate::query::pl_debug::drain_connection(self, connection_id, "connection_replaced").await?;
         self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
         let removed = self.drain_connection_pools(connection_id).await;
         self.clear_metadata_gates_for_connection(connection_id).await;
         drop(removed);
+        debug_fence.complete();
+        Ok(())
     }
 
     pub async fn remove_connection_pools_detached(&self, connection_id: &str) {
+        if let Err(error) = self.remove_connection_pools_detached_checked(connection_id).await {
+            log::warn!("Detached pool removal is waiting for original debugger cleanup: {error}");
+        }
+    }
+
+    pub async fn remove_connection_pools_detached_checked(&self, connection_id: &str) -> Result<(), String> {
+        let debug_fence = crate::query::pl_debug::drain_connection(self, connection_id, "connection_removed").await?;
         self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
         let mut removed = self.drain_connection_pools(connection_id).await;
@@ -6414,6 +7327,8 @@ impl AppState {
         #[cfg(feature = "mq-admin")]
         self.persist_removed_mqtt_history(&mut removed).await;
         self.pool_routing_control().close_removed_in_background(removed);
+        debug_fence.complete();
+        Ok(())
     }
 
     /// 关闭「空闲已超过 `idle_disconnect_secs`」的连接名下全部连接池，返回被关闭的 connection id 列表。
@@ -6496,6 +7411,9 @@ impl AppState {
             // 5. 复用既有池回收路径：先摘除，再走后台关闭。close_removed_in_background 内部
             //    经 close_pool_with_timeout，从而继承 Agent 共享 runtime / 手动事务共享 runtime
             //    的保护逻辑，确保池被真正 close/释放而不只是从 map 移除。
+            let Some(_debug_fence) = self.pl_debug.try_idle_fence(&connection_id) else {
+                continue;
+            };
             let removed = self.drain_connection_pools(&connection_id).await;
             self.pool_routing_control().close_removed_in_background(removed);
             log::info!(
@@ -7273,7 +8191,7 @@ fn is_manual_transaction_pool_key(pool_key: &str) -> bool {
 /// `conn` from matching a `conn-2` pool. Used by
 /// [`AppState::is_connection_open`] and [`config_for_pool_key`];
 /// `drain_connection_pools` filters on the same convention.
-fn pool_key_belongs_to_connection(pool_key: &str, connection_id: &str) -> bool {
+pub(crate) fn pool_key_belongs_to_connection(pool_key: &str, connection_id: &str) -> bool {
     pool_key.strip_prefix(connection_id).is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
 }
 
@@ -7333,6 +8251,12 @@ pub fn connection_configs_pool_equivalent(a: &ConnectionConfig, b: &ConnectionCo
     // established database session.
     a.sidebar_auto_load_all_tables = false;
     b.sidebar_auto_load_all_tables = false;
+    a.show_database_links = None;
+    b.show_database_links = None;
+    a.show_native_jobs = None;
+    b.show_native_jobs = None;
+    a.show_user_admin = None;
+    b.show_user_admin = None;
     // A default browser filter does not change the established Redis session.
     a.redis_key_filter = None;
     b.redis_key_filter = None;
@@ -7362,6 +8286,9 @@ pub fn connection_configs_session_credentials_compatible(a: &ConnectionConfig, b
         config.visible_schemas = None;
         config.show_system_schemas = false;
         config.sidebar_auto_load_all_tables = false;
+        config.show_database_links = None;
+        config.show_native_jobs = None;
+        config.show_user_admin = None;
         config.color = None;
         config.docs_notes_path = None;
         config.connect_timeout_secs = 0;
@@ -7466,9 +8393,20 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
 }
 
 async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
+    close_pool_kind_inner(pool, false).await
+}
+
+async fn close_pool_kind_with_completion(pool: PoolKind) -> Result<(), String> {
+    close_pool_kind_inner(pool, true).await
+}
+
+async fn close_pool_kind_inner(pool: PoolKind, report_completion: bool) -> Result<(), String> {
     match pool {
         PoolKind::Mysql(p, _) => {
-            let _ = p.disconnect().await;
+            let result = p.disconnect().await;
+            if report_completion {
+                result.map_err(|error| error.to_string())?;
+            }
         }
         PoolKind::Postgres(p) => p.close(),
         PoolKind::Sqlite(pool) => {
@@ -7540,6 +8478,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         }
         PoolKind::PluginConnection(handle) => {
             if let Err(error) = handle.disconnect().await {
+                if report_completion {
+                    return Err(error.to_string());
+                }
                 log::warn!(
                     "Failed to disconnect plugin connection '{}' ({}/{}): {error}",
                     handle.connection_id,
@@ -7791,6 +8732,12 @@ fn native_postgres_url_config(config: &ConnectionConfig) -> Option<ConnectionCon
 }
 
 fn validate_connection_url_params(config: &ConnectionConfig) -> Result<(), String> {
+    db::mysql::data_charset_for_config(config)?;
+    if matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
+        && db::mysql::data_charset_from_params(config.url_params.as_deref().unwrap_or(""))?.is_some()
+    {
+        return Err("dataCharset interpretation is supported only by the native MySQL connection type".into());
+    }
     let normalized = native_postgres_url_config(config);
     normalized.as_ref().unwrap_or(config).validate_native_url_params()
 }
@@ -7985,6 +8932,125 @@ mod tests {
         assert_eq!(redact_transport_url("https://alice:secret@%/"), "<invalid-url>");
     }
 
+    #[tokio::test]
+    async fn transport_oci_tns_identity_uses_the_effective_target_and_admin_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, directory.path().join("plugins"));
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::Oracle;
+        config.driver_profile = Some(crate::oracle_oci::ORACLE_OCI_DRIVER_PROFILE.into());
+        config.oracle_connection_type = Some("tns".into());
+        config.oracle_oci_tns_admin = Some("fixture-explicit-wallet".into());
+        config.connection_string = Some("jdbc:oracle:thin:@FIXTURE?TNS_ADMIN=unused-first-wallet".into());
+        let original_params = agent_connect_params(&config, &config.host, config.port, "").unwrap();
+        let original = state.prepare_connection_transport("conn", &config).await.unwrap();
+        let original_env = state.agent_launch_env(&config).await;
+        config.connection_string = Some("jdbc:oracle:oci8:@FIXTURE?TNS_ADMIN=unused-second-wallet".into());
+        let current_params = agent_connect_params(&config, &config.host, config.port, "").unwrap();
+        assert_eq!(original_params["connection_string"], current_params["connection_string"]);
+        assert_eq!(original_env, state.agent_launch_env(&config).await);
+        let same = state.prepare_connection_transport("conn", &config).await.unwrap();
+        assert!(
+            original == same,
+            "an overridden TNS_ADMIN query or OCI protocol spelling changed the effective identity"
+        );
+        config.oracle_oci_tns_admin = Some("fixture-different-wallet".into());
+        let different = state.prepare_connection_transport("conn", &config).await.unwrap();
+        assert!(same != different, "the effective TNS_ADMIN directory was omitted from transport identity");
+    }
+
+    #[tokio::test]
+    async fn transport_remote_sqlite_identity_includes_the_actual_final_ssh() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, directory.path().join("plugins"));
+        db::sqlite_worker::enable_sqlite_ssh_runtime("fixture");
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::Sqlite;
+        config.host = "/fixture/data.db".into();
+        config.password.clear();
+        let mut final_ssh = ssh_layer("original", "");
+        final_ssh.host = "203.0.113.10".into();
+        final_ssh.user = "fixture-user".into();
+        final_ssh.password = "fixture-password".into();
+        config.transport_layers = vec![TransportLayerConfig::Ssh(final_ssh.clone())];
+        let original = state.prepare_connection_transport("conn", &config).await.unwrap();
+        final_ssh.id = "renamed".into();
+        final_ssh.name = "Display change".into();
+        final_ssh.expose_lan = true;
+        config.transport_layers = vec![TransportLayerConfig::Ssh(final_ssh.clone())];
+        let same = state.prepare_connection_transport("conn", &config).await.unwrap();
+        assert!(original == same, "unused final-hop display/forwarding fields changed worker identity");
+        for field in ["host", "user", "password", "timeout"] {
+            let mut changed = final_ssh.clone();
+            match field {
+                "host" => changed.host = "203.0.113.11".into(),
+                "user" => changed.user = "another-user".into(),
+                "password" => changed.password = "another-password".into(),
+                "timeout" => changed.connect_timeout_secs += 1,
+                _ => unreachable!(),
+            }
+            config.transport_layers = vec![TransportLayerConfig::Ssh(changed)];
+            let different = state.prepare_connection_transport("conn", &config).await.unwrap();
+            assert!(original != different, "actual final SSH {field} was omitted from worker identity");
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_remote_sqlite_start_uses_the_original_gate_route_and_runtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, directory.path().join("plugins")));
+        db::sqlite_worker::enable_sqlite_ssh_runtime("fixture");
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::Sqlite;
+        config.host = "/fixture/data.db".into();
+        config.password.clear();
+        let mut ssh = ssh_layer("original", "");
+        ssh.host = "127.0.0.1".into();
+        ssh.port = listener.local_addr().unwrap().port();
+        ssh.user = "fixture-user".into();
+        ssh.auth_method = "none".into();
+        ssh.connect_timeout_secs = 1;
+        config.transport_layers = vec![TransportLayerConfig::Ssh(ssh.clone())];
+        let original = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        original.endpoint.unwrap();
+        let admitted = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        admitted.endpoint.unwrap();
+        assert!(original.stamp.same_runtime(&admitted.stamp));
+        assert!(!original.stamp.same_token(&admitted.stamp));
+        let gate = crate::query::pl_debug::transport_publication_guard(&state, "conn", &admitted.stamp).await.unwrap();
+        let starting_state = state.clone();
+        let mut launch_config = config.clone();
+        let TransportLayerConfig::Ssh(layer) = &mut launch_config.transport_layers[0] else { unreachable!() };
+        layer.host = "unresolvable.invalid".into();
+        layer.user = "changed-user".into();
+        let starting = tokio::spawn(async move {
+            starting_state.connect_sqlite_worker_with_transport("conn", &launch_config, &original.stamp).await
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        drop(gate);
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await.unwrap().unwrap();
+        drop(stream);
+        let error = starting.await.unwrap().err().expect("fixture intentionally stops the SSH handshake");
+        assert!(error.contains("SSH connection"), "{error}");
+        ssh.user = "new-runtime-user".into();
+        config.transport_layers = vec![TransportLayerConfig::Ssh(ssh)];
+        let replacement = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        replacement.endpoint.unwrap();
+        assert!(!admitted.stamp.same_runtime(&replacement.stamp));
+        let error = state
+            .connect_sqlite_worker_with_transport("conn", &config, &admitted.stamp)
+            .await
+            .err()
+            .expect("old physical runtime must be rejected before SSH starts");
+        assert!(error.contains("superseded"), "{error}");
+        assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        state.reset_connection_transport_if_current("conn", &replacement.stamp).await;
+    }
+
     pub(super) fn mysql_config(database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
             oracle_oci_nls_lang: None,
@@ -8010,6 +9076,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -8513,6 +9581,7 @@ mod tests {
             deferred_large_value_cells: Vec::new(),
             column_sortables: vec![true],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!("M")]],
             affected_rows: 0,
@@ -8887,7 +9956,9 @@ mod tests {
         .expect("SID listener errors should allow service-name retry");
         assert_eq!(service_retry.connection_string.as_deref(), Some("jdbc:oracle:thin:@//127.0.0.1:3306/ORCL"));
 
-        assert!(oracle_alternate_connect_config(&config, "ORA-12541: TNS:no listener").is_some());
+        // ORA-12541 / "no listener" is TCP-level unreachable: alternates cannot help
+        // and each one opens another connection (and another security-client popup).
+        assert!(oracle_alternate_connect_config(&config, "ORA-12541: TNS:no listener").is_none());
     }
 
     #[test]
@@ -8930,6 +10001,90 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         (AppState::new(storage), dir)
+    }
+
+    #[tokio::test]
+    async fn inspection_preparation_reset_uses_original_deadline_when_joining_a_drain() {
+        let (state, dir) = test_app_state().await;
+        let first =
+            crate::query::pl_debug::drain_transport(&state, "inspect-drain", None, false, None).await.unwrap().unwrap();
+        let started = Instant::now();
+        let result = state
+            .reset_connection_transport_layers_checked(
+                "inspect-drain",
+                0,
+                None,
+                false,
+                Some(started + Duration::from_millis(25)),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        first.complete();
+        let expired = state
+            .reset_connection_transport_layers_checked("inspect-drain", 0, None, false, Some(Instant::now()))
+            .await;
+        assert!(matches!(expired, Err(error) if error.contains("deadline expired")));
+        let next =
+            crate::query::pl_debug::drain_transport(&state, "inspect-drain", None, false, None).await.unwrap().unwrap();
+        next.complete();
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn inspection_preparation_reset_cannot_extend_an_existing_shorter_drain() {
+        let (state, dir) = test_app_state().await;
+        let deadline = Instant::now() + Duration::from_millis(25);
+        let first = crate::query::pl_debug::drain_transport(&state, "inspect-drain", None, false, Some(deadline))
+            .await
+            .unwrap()
+            .unwrap();
+        let started = Instant::now();
+        let result = state
+            .reset_connection_transport_layers_checked(
+                "inspect-drain",
+                0,
+                None,
+                false,
+                Some(started + Duration::from_secs(5)),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        first.complete();
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn inspection_preparation_attempt_retains_failed_transport_until_owner_reset() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(Some("xe"));
+        config.db_type = DatabaseType::Oracle;
+        config.host = "127.0.0.1".into();
+        config.port = 0;
+        config.transport_layers = vec![TransportLayerConfig::Ssh(ssh_layer("inspection-failed-hop", ""))];
+        let failure = match state
+            .prepare_connection_runtime_attempt("inspect-preparation", &config, None, None, None, None)
+            .await
+        {
+            Ok(_) => panic!("an SSH hop without a host must not pass endpoint preparation"),
+            Err(error) => error,
+        };
+        let original = failure.transport_stamp.as_ref().expect("failed endpoint attempt retains its original stamp");
+        assert!(crate::query::pl_debug::current_transport(&state, "inspect-preparation")
+            .is_some_and(|current| current.same_token(original)));
+        assert!(state.agent_manager.connection_runtimes.lock().await.is_empty());
+        let legacy_error =
+            match state.prepare_connection_runtime("inspect-preparation", &config, None, None, None, None).await {
+                Ok(_) => panic!("legacy wrapper must still reject endpoint failure"),
+                Err(error) => error,
+            };
+        assert_eq!(legacy_error, failure.message);
+        assert!(crate::query::pl_debug::current_transport(&state, "inspect-preparation").is_none());
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -9730,6 +10885,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fixed_ssh_local_port_is_frozen_into_transport_plan_identity() {
+        let (state, dir) = test_app_state().await;
+        state.set_honor_fixed_ssh_local_ports(true);
+        let mut config = mysql_config(None);
+        config.transport_layers = vec![unreachable_ssh_layer(4059)];
+        let first = state.prepare_connection_transport(&config.id, &config).await.unwrap();
+        assert!(matches!(first.route, super::ConnectionTransportRoute::Static { fixed_local_port: Some(4059), .. }));
+        config.transport_layers = vec![unreachable_ssh_layer(4060)];
+        let second = state.prepare_connection_transport(&config.id, &config).await.unwrap();
+        assert!(matches!(second.route, super::ConnectionTransportRoute::Static { fixed_local_port: Some(4060), .. }));
+        assert!(first != second);
+        let stamp = super::ConnectionTransportStamp::new(&config.id, first, None, false);
+        assert!(!stamp.same_plan(&second));
+        let probe = state.prepare_connection_transport(&format!("{}:test", config.id), &config).await.unwrap();
+        assert!(matches!(probe.route, super::ConnectionTransportRoute::Static { fixed_local_port: None, .. }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn connection_endpoint_binds_the_fixed_ssh_local_port_only_for_opted_in_primary_tunnels() {
         let (state, dir) = test_app_state().await;
         let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -10036,6 +11210,244 @@ mod tests {
     #[tokio::test]
     async fn concurrently_created_no_save_pool_still_replaces_the_existing_pool() {
         assert!(!publish_two_created_sqlite_pools(false).await);
+    }
+
+    #[tokio::test]
+    async fn transport_old_post_connect_receipt_cannot_remove_a_new_adoption() {
+        let (state, _dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.save_password = true;
+        config.transport_layers = vec![serde_json::from_value(serde_json::json!({
+            "type":"proxy","id":"proxy","host":"127.0.0.1","port":65000
+        }))
+        .unwrap()];
+        let first = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        let port = first.endpoint.unwrap().port;
+        let first_receipt = state
+            .publish_created_pool_with_transport("conn".into(), PoolKind::Nacos, &config, &first.stamp, None)
+            .await
+            .unwrap();
+        let second = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        second.endpoint.unwrap();
+        let current = state
+            .publish_created_pool_with_transport("conn".into(), PoolKind::Nacos, &config, &second.stamp, None)
+            .await
+            .unwrap();
+        assert!(state.pool_handle_for_receipt(&first_receipt).await.is_none());
+        assert!(matches!(state.pool_handle_for_receipt(&current).await, Some(PoolKind::Nacos)));
+        state.discard_connection_pool_receipt(&first_receipt).await;
+        assert!(state.pool_publication_snapshot("conn").await.unwrap().publication.is_same(&current.publication));
+        assert_eq!(state.proxy_tunnels.local_port("conn:transport:0").await, Some(port));
+        state.discard_connection_pool_receipt(&current).await;
+        assert!(state.pool_handle("conn").await.is_none());
+        assert_eq!(state.proxy_tunnels.local_port("conn:transport:0").await, None);
+    }
+
+    #[tokio::test]
+    async fn transport_actual_pool_build_returns_its_original_publication_receipt() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::Sqlite;
+        config.host = dir.join("receipt.db").to_string_lossy().into_owned();
+        config.password.clear();
+        let created = db::sqlite::connect_path_create_if_missing(&config.host).await.unwrap();
+        drop(created);
+        state.configs.write().await.insert("conn".into(), config);
+        let first_attempt = state.begin_connection_attempt("conn").await;
+        let first =
+            state.get_or_create_pool_for_connection_attempt_with_receipt("conn", None, first_attempt).await.unwrap();
+        state.remove_connection_pools("conn").await;
+        let next_attempt = state.begin_connection_attempt("conn").await;
+        let current =
+            state.get_or_create_pool_for_connection_attempt_with_receipt("conn", None, next_attempt).await.unwrap();
+        state.discard_connection_pool_receipt(&first).await;
+        assert!(state.pool_publication_snapshot("conn").await.unwrap().publication.is_same(&current.publication));
+        state.discard_connection_pool_receipt(&current).await;
+        assert!(state.pool_handle("conn").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn transport_health_preserves_legacy_unstamped_cleanup_without_adopting_new_runtime() {
+        let (state, _dir) = test_app_state().await;
+        let unavailable = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = unavailable.local_addr().unwrap().port();
+        drop(unavailable);
+        let mut config = mysql_config(None);
+        config.keepalive_interval_secs = 0;
+        config.transport_layers = vec![serde_json::from_value(serde_json::json!({
+            "type":"proxy","id":"proxy","host":"127.0.0.1","port":65000
+        }))
+        .unwrap()];
+        db::transport_layer_tunnel::start_transport_layers(
+            "conn",
+            &config.transport_layers,
+            &config.host,
+            config.port,
+            &state.tunnels,
+            &state.proxy_tunnels,
+            &state.http_tunnels,
+        )
+        .await
+        .unwrap();
+        let url = format!("mysql://root@127.0.0.1:{port}/app");
+        let pool = db::mysql::MySqlPool::new(url.as_str(), 1);
+        state.configs.write().await.insert("conn".into(), config.clone());
+        state.insert_connection_pool("conn".into(), PoolKind::Mysql(pool, MysqlMode::Normal), &config).await.unwrap();
+        state.refresh_connections().await;
+        assert!(state.pool_handle("conn").await.is_none());
+        assert_eq!(state.proxy_tunnels.local_port("conn:transport:0").await, None);
+    }
+
+    #[tokio::test]
+    async fn transport_concurrent_creators_publish_the_same_runtime_and_keep_current_cleanup() {
+        let (state, _dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.save_password = true;
+        config.transport_layers = vec![serde_json::from_value(serde_json::json!({
+            "type":"proxy","id":"proxy","host":"127.0.0.1","port":65000
+        }))
+        .unwrap()];
+        let first = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        let port = first.endpoint.unwrap().port;
+        let second = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        assert_eq!(second.endpoint.unwrap().port, port);
+        assert!(first.stamp.same_runtime(&second.stamp));
+        state
+            .publish_created_pool_with_transport("conn".into(), PoolKind::Nacos, &config, &first.stamp, None)
+            .await
+            .unwrap();
+        state
+            .publish_created_pool_with_transport("conn".into(), PoolKind::Nacos, &config, &second.stamp, None)
+            .await
+            .unwrap();
+        state.reset_connection_transport_if_current("conn", &first.stamp).await;
+        assert_eq!(state.proxy_tunnels.local_port("conn:transport:0").await, Some(port));
+        let publication = state.pool_publication_snapshot("conn").await.unwrap().publication;
+        assert!(state.remove_stale_pool_if_current("conn", &publication).await);
+        assert_eq!(state.proxy_tunnels.local_port("conn:transport:0").await, None);
+    }
+
+    #[tokio::test]
+    async fn transport_failed_candidate_keeps_a_published_shared_runtime() {
+        let (state, _dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.save_password = true;
+        config.transport_layers = vec![serde_json::from_value(serde_json::json!({
+            "type":"proxy","id":"proxy","host":"127.0.0.1","port":65000
+        }))
+        .unwrap()];
+        let published = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        let port = published.endpoint.unwrap().port;
+        state
+            .publish_created_pool_with_transport("conn".into(), PoolKind::Nacos, &config, &published.stamp, None)
+            .await
+            .unwrap();
+        let candidate = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        candidate.endpoint.unwrap();
+        state.reset_connection_transport_if_current("conn", &candidate.stamp).await;
+        assert_eq!(state.proxy_tunnels.local_port("conn:transport:0").await, Some(port));
+        let publication = state.pool_publication_snapshot("conn").await.unwrap().publication;
+        assert!(state.remove_stale_pool_if_current("conn", &publication).await);
+        assert_eq!(state.proxy_tunnels.local_port("conn:transport:0").await, None);
+    }
+
+    #[tokio::test]
+    async fn transport_late_pool_build_cannot_retire_a_newer_publication() {
+        let (state, _dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.transport_layers = vec![serde_json::from_value(serde_json::json!({
+            "type":"proxy","id":"proxy","host":"127.0.0.1","port":65000
+        }))
+        .unwrap()];
+        let old_attempt = state.begin_connection_attempt("conn").await;
+        let old = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        old.endpoint.unwrap();
+        let new_attempt = state.begin_connection_attempt("conn").await;
+        let current = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        let port = current.endpoint.unwrap().port;
+        state
+            .insert_connection_pool_for_attempt_with_transport(
+                "conn",
+                new_attempt,
+                "conn".into(),
+                PoolKind::Nacos,
+                &config,
+                &current.stamp,
+            )
+            .await
+            .unwrap();
+        assert!(state.ensure_current_connection_attempt("conn", Some(old_attempt)).await.is_err());
+        state.discard_stale_connection_attempt_pool("conn", "conn".into(), PoolKind::Nacos, &old.stamp).await;
+        assert!(state.pool_handle("conn").await.is_some());
+        assert_eq!(state.proxy_tunnels.local_port("conn:transport:0").await, Some(port));
+        state.remove_connection_pools("conn").await;
+        state.reset_connection_transport("conn").await;
+    }
+
+    #[tokio::test]
+    async fn transport_health_cleanup_keeps_a_new_publication_after_original_pool_was_removed() {
+        let (state, _dir) = test_app_state().await;
+        let state = Arc::new(state);
+        let mut config = mysql_config(None);
+        config.transport_layers = vec![serde_json::from_value(serde_json::json!({
+            "type":"proxy","id":"proxy","host":"127.0.0.1","port":65000
+        }))
+        .unwrap()];
+        let old_attempt = state.begin_connection_attempt("conn").await;
+        let old = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        old.endpoint.unwrap();
+        state
+            .insert_connection_pool_for_attempt_with_transport(
+                "conn",
+                old_attempt,
+                "conn".into(),
+                PoolKind::Nacos,
+                &config,
+                &old.stamp,
+            )
+            .await
+            .unwrap();
+        let publication = state.pool_publication_snapshot("conn").await.unwrap().publication;
+        let ready = Arc::new(tokio::sync::Barrier::new(2));
+        let resume = Arc::new(tokio::sync::Barrier::new(2));
+        let cleanup_state = state.clone();
+        let cleanup_ready = ready.clone();
+        let cleanup_resume = resume.clone();
+        let cleanup = tokio::spawn(async move {
+            cleanup_state
+                .remove_stale_pool_if_current_inner(
+                    "conn",
+                    &publication,
+                    Some(super::StalePoolCleanupBarriers {
+                        before_transport_reset: Some((cleanup_ready, cleanup_resume)),
+                        ..Default::default()
+                    }),
+                )
+                .await
+        });
+        ready.wait().await;
+        assert!(state.pool_handle("conn").await.is_none());
+        let new_attempt = state.begin_connection_attempt("conn").await;
+        let current = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        let port = current.endpoint.unwrap().port;
+        state
+            .insert_connection_pool_for_attempt_with_transport(
+                "conn",
+                new_attempt,
+                "conn".into(),
+                PoolKind::Nacos,
+                &config,
+                &current.stamp,
+            )
+            .await
+            .unwrap();
+        let current_publication = state.pool_publication_snapshot("conn").await.unwrap().publication;
+        resume.wait().await;
+        assert!(cleanup.await.unwrap());
+        assert!(state.pool_publication_snapshot("conn").await.unwrap().publication.is_same(&current_publication));
+        assert_eq!(state.proxy_tunnels.local_port("conn:transport:0").await, Some(port));
+        state.remove_connection_pools("conn").await;
+        state.reset_connection_transport("conn").await;
     }
 
     #[tokio::test]
@@ -10560,6 +11972,38 @@ sleep 30
     }
 
     #[test]
+    fn mysql_data_charset_rejects_compatible_native_products_before_connect() {
+        for db_type in [DatabaseType::Doris, DatabaseType::StarRocks, DatabaseType::ManticoreSearch] {
+            let mut config = mysql_config(None);
+            config.db_type = db_type;
+            for params in [
+                "dataCharset=GBK",
+                "charset=utf8mb4& dataCharset=GBK",
+                "  dataCharset=GBK  ",
+                "%64ataCharset=GBK",
+                "dataCharset+=GBK",
+                "dataCharset%20=GBK",
+                "%64ataCharset=%47BK",
+                "%64ataCharset=",
+                "%64ataCharset=invalid",
+                "%64ataCharset",
+            ] {
+                config.url_params = Some(params.into());
+                assert!(validate_connection_url_params(&config).is_err(), "{db_type:?}: {params}");
+            }
+            config.url_params = None;
+            validate_connection_url_params(&config).unwrap();
+        }
+        let mut config = mysql_config(None);
+        config.url_params = Some("%64ataCharset=%47BK".into());
+        validate_connection_url_params(&config).unwrap();
+        // Firebird owns its own unrelated option; this gate must not parse it.
+        config.db_type = DatabaseType::Firebird;
+        config.url_params = Some("dataCharset=WIN1252".into());
+        validate_connection_url_params(&config).unwrap();
+    }
+
+    #[test]
     fn postgres_url_validation_rejects_invalid_stringtype_before_connect() {
         let mut config = mysql_config(Some("postgres"));
         config.db_type = DatabaseType::Postgres;
@@ -10907,6 +12351,7 @@ sleep 30
                     Some(super::StalePoolCleanupBarriers {
                         before_removal: Some((cleanup_ready_for_task, cleanup_continue)),
                         after_removal: None,
+                        before_transport_reset: None,
                     }),
                 )
                 .await
@@ -10967,6 +12412,7 @@ sleep 30
                     Some(super::StalePoolCleanupBarriers {
                         before_removal: None,
                         after_removal: Some((cleanup_route_removed, cleanup_continue)),
+                        before_transport_reset: None,
                     }),
                 )
                 .await
@@ -11341,6 +12787,8 @@ sleep 30
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             database_info: None,
         }
     }
@@ -12187,6 +13635,84 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn export_session_close_reports_failure_without_replacing_shared_transaction_runtime() {
+        let (state, dir) = test_app_state().await;
+        let (runtime, export_client, manual_client) = replace_runtime_on_error_clients(&dir, "close_session").await;
+        let mut config = mysql_config(Some("analytics"));
+        config.id = "conn".to_string();
+        config.db_type = DatabaseType::Dameng;
+        state.configs.write().await.insert(config.id.clone(), config);
+        let export_key = "conn:analytics:session:export-test";
+        let manual_key = "conn:analytics:session:manual-txn-test";
+        {
+            let mut pools = state.connections.write().await;
+            pools.insert(export_key.to_string(), PoolKind::Agent(export_client));
+            pools.insert(manual_key.to_string(), PoolKind::Agent(manual_client));
+        }
+        let error = state
+            .close_client_session_pool_with_completion("conn", Some("analytics"), "export-test")
+            .await
+            .unwrap_err();
+        assert!(error.contains("resource limit"), "{error}");
+        assert!(state.connections.read().await.contains_key(manual_key));
+        assert!(!runtime.is_failed());
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn export_core_entries_report_the_first_pool_close_failure() {
+        for table_export in [true, false] {
+            let (state, dir) = test_app_state().await;
+            let (runtime, export_client, manual_client) = replace_runtime_on_error_clients(&dir, "close_session").await;
+            let mut config = mysql_config(Some("analytics"));
+            config.id = "conn".to_string();
+            config.db_type = DatabaseType::Dameng;
+            state.configs.write().await.insert(config.id.clone(), config);
+            let session = if table_export { "table-export:close-test" } else { "query-export:close-test" };
+            let export_key = super::session_scoped_pool_key("conn:analytics".to_string(), Some(session));
+            let manual_key = "conn:analytics:session:manual-txn-test";
+            {
+                let mut pools = state.connections.write().await;
+                pools.insert(export_key.clone(), PoolKind::Agent(export_client));
+                pools.insert(manual_key.to_string(), PoolKind::Agent(manual_client));
+            }
+            let file_path = dir.join("missing-parent").join("export.csv").to_string_lossy().into_owned();
+            let completion = if table_export {
+                let request = serde_json::from_value(serde_json::json!({
+                    "exportId": "close-test", "connectionId": "conn", "database": "analytics",
+                    "tableName": "T", "filePath": file_path, "format": "csv", "columns": ["ID"],
+                    "columnTypes": [null], "primaryKeys": [], "skipCount": true,
+                }))
+                .unwrap();
+                crate::table_export::export_table_data_core_with_completion(&state, &request, |_| {}).await
+            } else {
+                let request = serde_json::from_value(serde_json::json!({
+                    "exportId": "close-test", "connectionId": "conn", "database": "analytics",
+                    "sql": "SELECT 1", "queryBaseSql": "SELECT 1", "databaseType": "dameng",
+                    "filePath": file_path, "format": "unsupported", "pageSize": 100,
+                    "clientSessionId": session,
+                }))
+                .unwrap();
+                crate::query_result_export::export_query_result_core_with_completion(&state, &request, None, |_| {})
+                    .await
+            };
+            assert!(completion.result.is_err());
+            let error = completion.cleanup.expect_err(if table_export {
+                "table cleanup must fail"
+            } else {
+                "query cleanup must fail"
+            });
+            assert!(error.contains("resource limit"), "table={table_export}: {error}");
+            assert!(!state.connections.read().await.contains_key(&export_key));
+            assert!(state.connections.read().await.contains_key(manual_key));
+            assert!(!runtime.is_failed());
+            state.shutdown(Duration::from_secs(1)).await;
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
     async fn legacy_sqlserver_metadata_close_finds_role_isolated_pool() {
         let (state, dir) = test_app_state().await;
         let mut config = mysql_config(Some("master"));
@@ -12276,6 +13802,197 @@ for line in sys.stdin:
         assert!(!state.connections.read().await.contains_key(pool_key));
         assert!(runtime.is_failed());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn keeping_existing_pool_rejects_receipt_after_candidate_close_replaces_runtime() {
+        let (state, dir) = test_app_state().await;
+        let (runtime, existing, candidate) = replace_runtime_on_error_clients(&dir, "close_session").await;
+        let mut config = mysql_config(Some("analytics"));
+        config.db_type = DatabaseType::Dameng;
+        state.connections.write().await.insert("conn:analytics".into(), PoolKind::Agent(existing));
+
+        let result = state
+            .insert_connection_pool_inner(
+                "conn:analytics".into(),
+                PoolKind::Agent(candidate),
+                &config,
+                true,
+                true,
+                None,
+                None,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(!state.connections.read().await.contains_key("conn:analytics"));
+        assert!(runtime.is_failed());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn pool_publication_close_preserves_a_newer_publication() {
+        let (state, dir) = test_app_state().await;
+        let config = mysql_config(Some("analytics"));
+        let key = "conn:analytics";
+        let previous = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+            crate::db::agent_driver::AgentDriverClient::test_stub(),
+        ));
+        state.connections.write().await.insert(key.into(), PoolKind::Agent(previous.clone()));
+        let original = state.pool_publication_snapshot(key).await.unwrap().publication;
+        let previous_lock = previous.lock().await;
+        let publishing = state.insert_connection_pool(key.into(), agent_pool_stub(), &config);
+        tokio::pin!(publishing);
+        assert!(futures::poll!(publishing.as_mut()).is_pending());
+        assert!(!state.pool_publication_snapshot(key).await.unwrap().publication.is_same(&original));
+
+        state.insert_connection_pool(key.into(), agent_pool_stub(), &config).await.unwrap();
+        let latest = state.pool_publication_snapshot(key).await.unwrap().publication;
+        drop(previous_lock);
+        assert!(publishing.await.unwrap_err().contains("superseded"));
+        let current = state.pool_publication_snapshot(key).await.unwrap();
+        assert!(current.publication.is_same(&latest));
+        assert!(current.pool.is_available_for_routing());
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn reclaimed_pool_restoration_preserves_original_transport_without_requiring_config() {
+        for has_config in [false, true] {
+            let (state, dir) = test_app_state().await;
+            let config = mysql_config(None);
+            if has_config {
+                state.configs.write().await.insert(config.id.clone(), config.clone());
+            }
+            let attempt = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+            assert!(attempt.endpoint.is_ok());
+
+            state.restore_reclaimed_agent_pool("conn", agent_pool_stub(), Some(attempt.stamp.clone())).await;
+
+            let current = state.pool_publication_snapshot("conn").await.unwrap();
+            assert!(current.publication.transport.as_ref().unwrap().same_token(&attempt.stamp));
+            assert!(current.pool.is_available_for_routing());
+            state.shutdown(Duration::from_secs(1)).await;
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn reclaim_close_failure_restores_the_removed_publication_transport() {
+        let (state, dir) = test_app_state().await;
+        let marker = dir.join("reclaim-close-called");
+        let script_path = dir.join("reclaim-keep-runtime-agent.py");
+        let script = r#"import json, pathlib, sys
+print(json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'handshake':
+        response = {'jsonrpc':'2.0','id':req['id'],'result':{'protocolVersion':2,'agentProtocolVersion':2,'capabilities':['multi_session']}}
+    elif req['method'] == 'close_session':
+        pathlib.Path(__MARKER__).write_text('called')
+        response = {'jsonrpc':'2.0','id':req['id'],'error':{'code':-1,'message':'close refused','data':{'category':'sql','retryable':False,'sessionDisposition':'keep','stage':'close'}}}
+    else:
+        response = {'jsonrpc':'2.0','id':req['id'],'result':{}}
+    print(json.dumps(response), flush=True)
+"#
+            .replace("__MARKER__", &serde_json::to_string(&marker.to_string_lossy()).unwrap());
+        std::fs::write(&script_path, script).unwrap();
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let runtime = crate::db::agent_driver::AgentRuntimeClient::spawn(
+            crate::db::agent_driver::AgentLaunchSpec::new(python)
+                .with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+        runtime.increment_session_count();
+        let client = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+            crate::db::agent_driver::AgentDriverClient::shared_session(runtime.clone(), "reclaimed-session".into()),
+        ));
+        let config = mysql_config(None);
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        let attempt = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+        state
+            .insert_connection_pool_inner(
+                "conn".into(),
+                PoolKind::Agent(client),
+                &config,
+                true,
+                false,
+                Some(&attempt.stamp),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(!state.try_reclaim_idle_agent_pool("conn").await);
+
+        assert!(marker.exists(), "the exclusive pool must actually reach close_session");
+        let current = state.pool_publication_snapshot("conn").await.unwrap();
+        assert!(current.publication.transport.as_ref().unwrap().same_token(&attempt.stamp));
+        assert!(current.pool.is_available_for_routing());
+        assert!(!runtime.is_failed());
+        runtime.kill();
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn reclaimed_pool_restoration_rejects_a_rebuilt_transport() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        let original = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+        config.port += 1;
+        let latest = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+        assert!(!original.stamp.same_token(&latest.stamp));
+
+        state.restore_reclaimed_agent_pool("conn", agent_pool_stub(), Some(original.stamp)).await;
+
+        assert!(state.pool_publication_snapshot("conn").await.is_none());
+        assert!(crate::query::pl_debug::current_transport(&state, "conn").unwrap().same_token(&latest.stamp));
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn reclaimed_pool_restoration_does_not_replace_a_concurrent_same_transport_publication() {
+        for has_config in [false, true] {
+            let (state, dir) = test_app_state().await;
+            let config = mysql_config(None);
+            let attempt = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+            let mut configs = state.configs.write().await;
+            if has_config {
+                configs.insert(config.id.clone(), config.clone());
+            }
+            let restoring = state.restore_reclaimed_agent_pool("conn", agent_pool_stub(), Some(attempt.stamp.clone()));
+            tokio::pin!(restoring);
+            assert!(futures::poll!(restoring.as_mut()).is_pending());
+            state
+                .insert_connection_pool_inner(
+                    "conn".into(),
+                    agent_pool_stub(),
+                    &config,
+                    true,
+                    false,
+                    Some(&attempt.stamp),
+                    None,
+                )
+                .await
+                .unwrap();
+            let latest = state.pool_publication_snapshot("conn").await.unwrap().publication;
+            drop(configs);
+
+            restoring.await;
+
+            let current = state.pool_publication_snapshot("conn").await.unwrap();
+            assert!(current.publication.is_same(&latest));
+            assert!(current.publication.transport.as_ref().unwrap().same_token(&attempt.stamp));
+            assert!(current.pool.is_available_for_routing());
+            state.shutdown(Duration::from_secs(1)).await;
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[tokio::test]
@@ -12525,11 +14242,21 @@ for line in sys.stdin:
             test_target: None,
         })];
         state.configs.write().await.insert(config.id.clone(), config.clone());
-        state.connection_host_port(&config.id, &config).await.unwrap();
-        {
-            let mut connections = state.connections.write().await;
-            connections.insert("conn:analytics".to_string(), PoolKind::Agent(target_client));
-            connections.insert("conn:billing".to_string(), PoolKind::Agent(sibling_client));
+        let attempt = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+        assert!(attempt.endpoint.is_ok());
+        for (key, client) in [("conn:analytics", target_client), ("conn:billing", sibling_client)] {
+            state
+                .insert_connection_pool_inner(
+                    key.to_string(),
+                    PoolKind::Agent(client),
+                    &config,
+                    true,
+                    false,
+                    Some(&attempt.stamp),
+                    None,
+                )
+                .await
+                .unwrap();
         }
 
         state.refresh_connections().await;
@@ -12960,6 +14687,63 @@ for line in sys.stdin:
             connect_timeout_secs: 10,
             profile_id: profile_id.to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn prepared_transport_tns_identity_uses_the_actual_target_not_unused_host_fields() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(Some("DBX_FAILOVER"));
+        config.db_type = DatabaseType::Oracle;
+        config.oracle_connection_type = Some("tns".into());
+        config.connection_string = Some("jdbc:oracle:thin:@FIRST_ALIAS".into());
+        let original = state.prepare_connection_transport("tns-plan", &config).await.unwrap();
+        config.host = "unused.invalid".into();
+        config.port = 9999;
+        let same_target = state.prepare_connection_transport("tns-plan", &config).await.unwrap();
+        assert!(original == same_target);
+        config.connection_string = Some("jdbc:oracle:thin:@SECOND_ALIAS".into());
+        let changed_target = state.prepare_connection_transport("tns-plan", &config).await.unwrap();
+        assert!(original != changed_target);
+        assert_eq!(state.proxy_tunnels.local_port("tns-plan").await, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn prepared_transport_navicat_captures_its_payload_without_starting_a_listener() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(Some("app"));
+        let mut http = http_tunnel_layer("navicat", "");
+        http.protocol = crate::models::connection::HttpTunnelProtocol::NavicatMysql;
+        http.url = "http://127.0.0.1:1/tunnel.php".into();
+        config.transport_layers = vec![TransportLayerConfig::HttpTunnel(http)];
+        let original = state.prepare_connection_transport("navicat-plan", &config).await.unwrap();
+        assert!(matches!(&original.route, super::ConnectionTransportRoute::Navicat { .. }));
+        assert_eq!(state.http_tunnels.local_port("navicat-plan").await, None);
+        config.name = "Changed display name".into();
+        let same_payload = state.prepare_connection_transport("navicat-plan", &config).await.unwrap();
+        assert!(original == same_payload);
+        config.password.push_str("-changed");
+        let changed_payload = state.prepare_connection_transport("navicat-plan", &config).await.unwrap();
+        assert!(original != changed_payload);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn prepared_transport_distinguishes_static_and_http_client_proxy_routes_without_starting_them() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(Some("app"));
+        config.db_type = DatabaseType::Oracle;
+        let mut proxy = proxy_layer("route", "");
+        proxy.host = "127.0.0.1".into();
+        config.transport_layers = vec![TransportLayerConfig::Proxy(proxy)];
+        let static_plan = state.prepare_connection_transport("route-plan", &config).await.unwrap();
+        assert!(matches!(&static_plan.route, super::ConnectionTransportRoute::Static { .. }));
+        config.db_type = DatabaseType::ClickHouse;
+        let proxy_plan = state.prepare_connection_transport("route-plan", &config).await.unwrap();
+        assert!(matches!(&proxy_plan.route, super::ConnectionTransportRoute::HttpClientProxy { .. }));
+        assert!(static_plan != proxy_plan);
+        assert_eq!(state.proxy_tunnels.local_port("route-plan:transport:0").await, None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -13663,6 +15447,43 @@ for line in sys.stdin:
             url_params.as_deref(),
         ))
         .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable openGauss instance via environment variables"]
+    async fn live_opengauss_identifier_quote_matches_compatibility_mode() {
+        let host = std::env::var("DBX_TEST_OPENGAUSS_HOST").expect("DBX_TEST_OPENGAUSS_HOST not set");
+        let port = std::env::var("DBX_TEST_OPENGAUSS_PORT")
+            .expect("DBX_TEST_OPENGAUSS_PORT not set")
+            .parse::<u16>()
+            .expect("DBX_TEST_OPENGAUSS_PORT should be a u16");
+        let username = std::env::var("DBX_TEST_OPENGAUSS_USER").expect("DBX_TEST_OPENGAUSS_USER not set");
+        let password = std::env::var("DBX_TEST_OPENGAUSS_PASSWORD").expect("DBX_TEST_OPENGAUSS_PASSWORD not set");
+        let database = std::env::var("DBX_TEST_OPENGAUSS_DATABASE").unwrap_or_else(|_| "postgres".to_string());
+
+        let mut config = live_postgres_like_config(DatabaseType::OpenGauss, &host, port, &username, &password, None);
+        config.id = "opengauss-quote-live".to_string();
+        config.database = Some(database.clone());
+
+        let (state, dir) = test_app_state().await;
+        state.configs.write().await.insert(config.id.clone(), config);
+        let pool_key = state.get_or_create_pool("opengauss-quote-live", Some(&database)).await.unwrap();
+        let pool = match state.pool_handle(&pool_key).await.expect("openGauss pool should be created") {
+            PoolKind::Postgres(pool) => pool,
+            _ => panic!("openGauss should use the PostgreSQL pool path"),
+        };
+
+        let mode = db::postgres::opengauss_compatibility_mode(&pool).await.unwrap();
+        let quote = state.connection_identifier_quote("opengauss-quote-live", Some(&database)).await.unwrap();
+        println!("[live] database = {database}, compatibility mode = {mode:?}, identifier quote = {quote:?}");
+        assert_eq!(
+            quote.as_deref(),
+            mode.as_deref().and_then(db::postgres::gaussdb_identifier_quote_for_compatibility_mode),
+            "identifier quote should follow the database compatibility mode"
+        );
+
+        pool.close();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

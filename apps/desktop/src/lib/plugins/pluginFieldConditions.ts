@@ -13,6 +13,19 @@ export function pluginConditionValueText(value: PluginFormFieldValue): string {
 /** Reads the current value of a sibling form field by key. */
 export type PluginFieldValueReader = (key: string) => PluginFormFieldValue;
 
+/**
+ * Whether a value counts as "filled" for required-field gating (footer
+ * buttons, required-field errors). Strings are trimmed so stray whitespace
+ * does not satisfy a required text field — except `type: "password"` inputs:
+ * whitespace is significant in secrets (a single space is a real password,
+ * jinpy666/dbx-plugin-ssh#215), so only undefined/null/"" count as missing.
+ */
+export function pluginFieldHasValue(field: Pick<PluginFormField, "type">, value: PluginFormFieldValue): boolean {
+  if (typeof value !== "string") return value !== undefined;
+  if (field.type === "password") return value.length > 0;
+  return value.trim().length > 0;
+}
+
 /** A leaf clause matches when the sibling value equals one of its literals. */
 function conditionClauseMatches(clause: { field: string; one_of: readonly (string | number | boolean)[] }, value: PluginFormFieldValue): boolean {
   if (value === undefined || value === null || (typeof value === "string" && value.trim().length === 0)) return false;

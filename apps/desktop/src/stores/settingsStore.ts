@@ -107,7 +107,9 @@ export interface DesktopSettings {
 export interface McpGlobalPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
+  /** Legacy temporary elevation; new confirmation never reuses this flag. */
   promptHighRiskSql: boolean;
+  callConfirmation?: "off" | "full" | "high_risk" | null;
   allowedConnectionIds: string[] | null;
   allowedGroupIds: string[];
   allowedToolNames: string[] | null;
@@ -116,6 +118,7 @@ export interface McpGlobalPolicy {
   configured: boolean;
   /** MCP query timeout override in seconds. null/undefined = inherit the connection; 0 = no limit. */
   queryTimeoutSecs: number | null;
+  pluginToolsMode: "auto" | "flat" | "lazy";
 }
 
 export interface McpGroupPolicy {
@@ -198,6 +201,7 @@ export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
   groupPolicies: [],
   configured: false,
   queryTimeoutSecs: null,
+  pluginToolsMode: "flat",
 };
 
 export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null | undefined): McpGlobalPolicy {
@@ -262,7 +266,8 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
   return {
     readOnly: policy?.readOnly === true,
     allowDangerousSql: policy?.allowDangerousSql === true,
-    promptHighRiskSql: policy?.promptHighRiskSql === true,
+    promptHighRiskSql: policy?.callConfirmation === "full" || (!policy?.callConfirmation && policy?.promptHighRiskSql === true),
+    ...(policy?.callConfirmation === "high_risk" ? { callConfirmation: "high_risk" as const } : {}),
     allowedConnectionIds,
     allowedGroupIds,
     allowedToolNames,
@@ -270,6 +275,9 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
     groupPolicies,
     configured: policy?.configured === true,
     queryTimeoutSecs,
+    // A saved policy without this field used automatic discovery before the
+    // default changed. Preserve it; only new configurations start in flat mode.
+    pluginToolsMode: policy?.pluginToolsMode === "auto" || policy?.pluginToolsMode === "flat" || policy?.pluginToolsMode === "lazy" ? policy.pluginToolsMode : policy?.configured ? "auto" : "flat",
   };
 }
 
@@ -868,6 +876,17 @@ export type DeleteConnectionTabHandlingMode = (typeof DELETE_CONNECTION_TAB_HAND
 const CLICK_TABLE_NAVIGATION_TARGETS = ["data", "ddl"] as const;
 export type ClickTableNavigationTarget = (typeof CLICK_TABLE_NAVIGATION_TARGETS)[number];
 
+/**
+ * 通过连接深链（`dbx://connection/new`）打开连接时，哪些情况跳过确认直接保存。
+ *
+ * - `always`：新建与更新都要在弹窗里确认（默认）
+ * - `create`：仅新建连接免确认；带 `id` 的更新链接仍要确认（更新会改动已保存的配置）
+ * - `update`：仅带 `id` 的更新链接免确认；新建仍要确认
+ * - `all`：所有连接深链都免确认
+ */
+const DEEP_LINK_CONNECTION_CONFIRM_MODES = ["always", "create", "update", "all"] as const;
+export type DeepLinkConnectionConfirmMode = (typeof DEEP_LINK_CONNECTION_CONFIRM_MODES)[number];
+
 export interface CustomThemeColors {
   keyword: string;
   field: string;
@@ -975,6 +994,8 @@ export interface EditorSettings {
   aiFontFamily: string;
   aiFontSize: number;
   uiScale: number;
+  /** macOS-style font smoothing (antialiased + grayscale); off keeps the platform default. */
+  fontSmoothing: boolean;
   theme: EditorTheme;
   backgroundImage: BackgroundImageSettings;
   customThemeColors: CustomThemeColors;
@@ -996,6 +1017,8 @@ export interface EditorSettings {
   showLineNumbers: boolean;
   showCurrentStatementFrame: boolean;
   showInsertValueHints: boolean;
+  /** Whether the query toolbar connection picker shows the full group path. */
+  showConnectionGroupPath: boolean;
   autoAliasTables: boolean;
   tableCompletionSchemaQualification: SqlTableCompletionSchemaQualification;
   insertSpaceAfterCompletion: boolean;
@@ -1009,7 +1032,9 @@ export interface EditorSettings {
   tableDdlWordWrap: boolean;
   ddlOpenMode: "dialog" | "tab";
   refreshDdlOnOpen: boolean;
-  excludeDdlStorage: boolean;
+  includeDdlStorage: boolean;
+  compactDdlSql: boolean;
+  separateDdlIndexes: boolean;
   vimModeEnabled: boolean;
   /** 是否允许按 F7 切换浏览器的插入光标浏览模式（关闭时拦截 F7 避免误触）。 */
   caretBrowsingEnabled: boolean;
@@ -1066,6 +1091,10 @@ export interface EditorSettings {
   showResultSourceDatabase: boolean;
   /** Show SQL in the footer of query results and table data grids. */
   showDataGridStatusSql: boolean;
+  dataGridExportInToolbar: boolean;
+  dataGridLoadAllInToolbar: boolean;
+  showSaveResult: boolean;
+  warnIncompleteExport: boolean;
   /**
    * Global Oracle Instant Client location (the directory that contains
    * oci.dll / libclnts). Shared by every Oracle connection whose driver mode
@@ -1159,6 +1188,7 @@ export interface EditorSettings {
   sidebarMenuHiddenPrimaryActions: SidebarMenuPinnedActions;
   sidebarMenuOrder: SidebarMenuOrder;
   sidebarConnectionSortMode: ConnectionListSortMode;
+  sidebarSearchMatchMode: "fuzzy" | "contains";
   sidebarObjectDisplay: "grouped" | "simple";
   routineSourceOpenMode: "query-tab" | "dialog";
   sidebarTableSearchEnabled: boolean;
@@ -1178,8 +1208,14 @@ export interface EditorSettings {
   rememberConnectionDatabaseOnDelete: boolean;
   /** 已记住的「连接名 → { 数据库名, 数据库类型 }」映射，用于新建同名连接时自动选中数据库。 */
   rememberedConnectionDatabases: Record<string, RememberedConnectionDatabase>;
+  /**
+   * 通过连接深链（`dbx://connection/new`，含带 `id` 的更新链接）打开连接时，
+   * 哪些情况跳过确认直接保存。见 {@link DeepLinkConnectionConfirmMode}。
+   */
+  deepLinkConnectionConfirmMode: DeepLinkConnectionConfirmMode;
   dataTabReuseMode: DataTabReuseMode;
   openDataTabsNextToActive: boolean;
+  openTablesInDetachedWindow: boolean;
   prefillNewQueryWithSelect: boolean;
   generateSqlIncludeDatabaseName: boolean;
   generateSqlQuoteIdentifiers: boolean;
@@ -1199,7 +1235,8 @@ export interface EditorSettings {
   sidebarObjectInfoMode: SidebarObjectInfoMode;
   sidebarShowConnectionNotes: boolean;
   sidebarShowTooltips: boolean;
-  sidebarShowUserAdmin: boolean;
+  /** Legacy input for the one-time connection visibility migration. */
+  sidebarShowUserAdmin?: boolean;
   sidebarAllowHorizontalScroll: boolean;
   sidebarIndent: number;
   sidebarFontSize: number;
@@ -1364,6 +1401,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   aiFontFamily: AI_CONVERSATION_FONT_FAMILY_DEFAULT,
   aiFontSize: AI_CONVERSATION_FONT_SIZE_DEFAULT,
   uiScale: 1,
+  fontSmoothing: false,
   theme: "app",
   backgroundImage: defaultBackgroundImageSettings(),
   customThemeColors: { ...DEFAULT_CUSTOM_THEME_COLORS },
@@ -1384,6 +1422,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showLineNumbers: true,
   showCurrentStatementFrame: true,
   showInsertValueHints: true,
+  showConnectionGroupPath: false,
   autoAliasTables: true,
   tableCompletionSchemaQualification: DEFAULT_SQL_TABLE_COMPLETION_SCHEMA_QUALIFICATION,
   insertSpaceAfterCompletion: true,
@@ -1398,7 +1437,9 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   tableDdlWordWrap: true,
   ddlOpenMode: "dialog",
   refreshDdlOnOpen: false,
-  excludeDdlStorage: true,
+  includeDdlStorage: false,
+  compactDdlSql: true,
+  separateDdlIndexes: false,
   vimModeEnabled: false,
   caretBrowsingEnabled: false,
   doubleClickStringSelectionMode: "content",
@@ -1447,13 +1488,17 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showColumnHeaderTooltips: true,
   showResultSourceDatabase: true,
   showDataGridStatusSql: true,
+  dataGridExportInToolbar: false,
+  dataGridLoadAllInToolbar: false,
+  showSaveResult: true,
+  warnIncompleteExport: true,
   oracleOciClientPath: "",
   damengClientBinDir: "",
   oracleOciNlsLang: "",
   oracleOciTnsAdmin: "",
   resultTabNamingMode: "source",
   resultTabPreferComments: true,
-  dataGridShowTransposeFieldMetadata: false,
+  dataGridShowTransposeFieldMetadata: true,
   dataGridTransposeMetadataInInfoColumn: false,
   colorizeDataGridCellTypes: false,
   dataGridTypeColorSchemes: [],
@@ -1514,6 +1559,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarMenuHiddenPrimaryActions: {},
   sidebarMenuOrder: {},
   sidebarConnectionSortMode: "manual",
+  sidebarSearchMatchMode: "fuzzy",
   sidebarObjectDisplay: "grouped",
   routineSourceOpenMode: "query-tab",
   sidebarTableSearchEnabled: false,
@@ -1531,8 +1577,10 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   deleteConnectionTabHandlingMode: "close-tabs",
   rememberConnectionDatabaseOnDelete: true,
   rememberedConnectionDatabases: {},
+  deepLinkConnectionConfirmMode: "always",
   dataTabReuseMode: DEFAULT_DATA_TAB_REUSE_MODE,
   openDataTabsNextToActive: false,
+  openTablesInDetachedWindow: false,
   prefillNewQueryWithSelect: true,
   generateSqlIncludeDatabaseName: false,
   generateSqlQuoteIdentifiers: true,
@@ -1550,7 +1598,6 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarObjectInfoMode: "comment-inline",
   sidebarShowConnectionNotes: false,
   sidebarShowTooltips: true,
-  sidebarShowUserAdmin: true,
   sidebarAllowHorizontalScroll: false,
   sidebarIndent: SIDEBAR_INDENT_DEFAULT,
   sidebarFontSize: SIDEBAR_FONT_SIZE_DEFAULT,
@@ -1798,6 +1845,24 @@ function normalizeDeleteConnectionTabHandlingMode(value: unknown): DeleteConnect
   return DEFAULT_EDITOR_SETTINGS.deleteConnectionTabHandlingMode;
 }
 
+/**
+ * 深链免确认模式。
+ *
+ * `legacyAutoCreate` 是上一版布尔开关 `deepLinkConnectionAutoCreate` 的值：
+ * 它只覆盖新建连接，所以 `true` 收敛成 `create`、`false` 收敛成 `always`。
+ */
+function normalizeDeepLinkConnectionConfirmMode(value: unknown, legacyAutoCreate?: unknown): DeepLinkConnectionConfirmMode {
+  if (DEEP_LINK_CONNECTION_CONFIRM_MODES.includes(value as DeepLinkConnectionConfirmMode)) {
+    return value as DeepLinkConnectionConfirmMode;
+  }
+  // 兼容早期试验值。
+  if (value === "never" || value === "none") return "always";
+  if (value === "create-only") return "create";
+  if (value === "update-only") return "update";
+  if (legacyAutoCreate === true) return "create";
+  return DEFAULT_EDITOR_SETTINGS.deepLinkConnectionConfirmMode;
+}
+
 /** 记住的连接名 → 数据库映射：只保留合法条目，并限制条目数量避免无限增长。 */
 const REMEMBERED_CONNECTION_DATABASES_LIMIT = 200;
 
@@ -1962,6 +2027,7 @@ function normalizeTableInfoTab(value: unknown): TableInfoTab {
 }
 
 export function normalizeEditorSettings(settings: Partial<EditorSettings>, existing?: EditorSettings): EditorSettings {
+  const legacyExcludeDdlStorage = (settings as { excludeDdlStorage?: unknown }).excludeDdlStorage;
   const legacyTimeoutSettings = settings as Partial<EditorSettings> & { queryTimeoutSecs?: unknown; queryTimeoutInheritanceMigrationVersion?: unknown };
   const legacySidebarOpenDatabaseOnSingleClick = (settings as Partial<EditorSettings> & { sidebarOpenDatabaseOnSingleClick?: unknown }).sidebarOpenDatabaseOnSingleClick;
   const legacyDataGridAutoHideFilterBuilder = (settings as Partial<EditorSettings> & { dataGridAutoHideFilterBuilder?: unknown }).dataGridAutoHideFilterBuilder;
@@ -2037,6 +2103,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     aiFontFamily: normalizeAiConversationFontFamily(settings.aiFontFamily),
     aiFontSize: normalizeAiConversationFontSize(settings.aiFontSize),
     uiScale: normalizeUiScale(settings.uiScale),
+    fontSmoothing: settings.fontSmoothing === true,
     theme: settings.theme && EDITOR_THEME_VALUES.has(settings.theme) ? settings.theme : DEFAULT_EDITOR_SETTINGS.theme,
     customThemeColors: {
       ...DEFAULT_CUSTOM_THEME_COLORS,
@@ -2064,6 +2131,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showLineNumbers: typeof settings.showLineNumbers === "boolean" ? settings.showLineNumbers : DEFAULT_EDITOR_SETTINGS.showLineNumbers,
     showCurrentStatementFrame: typeof settings.showCurrentStatementFrame === "boolean" ? settings.showCurrentStatementFrame : DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame,
     showInsertValueHints: typeof settings.showInsertValueHints === "boolean" ? settings.showInsertValueHints : DEFAULT_EDITOR_SETTINGS.showInsertValueHints,
+    showConnectionGroupPath: typeof settings.showConnectionGroupPath === "boolean" ? settings.showConnectionGroupPath : DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath,
     autoAliasTables: settings.autoAliasTables ?? DEFAULT_EDITOR_SETTINGS.autoAliasTables,
     tableCompletionSchemaQualification: normalizeSqlTableCompletionSchemaQualification(settings.tableCompletionSchemaQualification),
     insertSpaceAfterCompletion: typeof settings.insertSpaceAfterCompletion === "boolean" ? settings.insertSpaceAfterCompletion : DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion,
@@ -2076,7 +2144,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
     showWhitespace: typeof settings.showWhitespace === "boolean" ? settings.showWhitespace : DEFAULT_EDITOR_SETTINGS.showWhitespace,
     tableDdlWordWrap: typeof settings.tableDdlWordWrap === "boolean" ? settings.tableDdlWordWrap : DEFAULT_EDITOR_SETTINGS.tableDdlWordWrap,
-    excludeDdlStorage: typeof settings.excludeDdlStorage === "boolean" ? settings.excludeDdlStorage : DEFAULT_EDITOR_SETTINGS.excludeDdlStorage,
+    includeDdlStorage: typeof settings.includeDdlStorage === "boolean" ? settings.includeDdlStorage : typeof legacyExcludeDdlStorage === "boolean" ? !legacyExcludeDdlStorage : DEFAULT_EDITOR_SETTINGS.includeDdlStorage,
+    compactDdlSql: typeof settings.compactDdlSql === "boolean" ? settings.compactDdlSql : DEFAULT_EDITOR_SETTINGS.compactDdlSql,
+    separateDdlIndexes: typeof settings.separateDdlIndexes === "boolean" ? settings.separateDdlIndexes : DEFAULT_EDITOR_SETTINGS.separateDdlIndexes,
     ddlOpenMode: settings.ddlOpenMode === "tab" ? "tab" : DEFAULT_EDITOR_SETTINGS.ddlOpenMode,
     refreshDdlOnOpen: typeof settings.refreshDdlOnOpen === "boolean" ? settings.refreshDdlOnOpen : DEFAULT_EDITOR_SETTINGS.refreshDdlOnOpen,
     vimModeEnabled: typeof settings.vimModeEnabled === "boolean" ? settings.vimModeEnabled : DEFAULT_EDITOR_SETTINGS.vimModeEnabled,
@@ -2127,13 +2197,17 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showColumnHeaderTooltips: settings.showColumnHeaderTooltips ?? DEFAULT_EDITOR_SETTINGS.showColumnHeaderTooltips,
     showResultSourceDatabase: settings.showResultSourceDatabase ?? DEFAULT_EDITOR_SETTINGS.showResultSourceDatabase,
     showDataGridStatusSql: settings.showDataGridStatusSql !== false,
+    dataGridExportInToolbar: settings.dataGridExportInToolbar === true,
+    dataGridLoadAllInToolbar: settings.dataGridLoadAllInToolbar === true,
+    showSaveResult: settings.showSaveResult !== false,
+    warnIncompleteExport: settings.warnIncompleteExport !== false,
     oracleOciNlsLang: typeof settings.oracleOciNlsLang === "string" ? settings.oracleOciNlsLang.trim() : "",
     oracleOciTnsAdmin: typeof settings.oracleOciTnsAdmin === "string" ? settings.oracleOciTnsAdmin.trim() : "",
     oracleOciClientPath: typeof settings.oracleOciClientPath === "string" ? settings.oracleOciClientPath.trim() : "",
     damengClientBinDir: typeof settings.damengClientBinDir === "string" ? settings.damengClientBinDir.trim() : "",
     resultTabNamingMode: normalizeResultTabNamingMode(settings.resultTabNamingMode),
     resultTabPreferComments: settings.resultTabPreferComments !== false,
-    dataGridShowTransposeFieldMetadata: settings.dataGridShowTransposeFieldMetadata === true,
+    dataGridShowTransposeFieldMetadata: settings.dataGridShowTransposeFieldMetadata ?? DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata,
     dataGridTransposeMetadataInInfoColumn: settings.dataGridTransposeMetadataInInfoColumn === true,
     colorizeDataGridCellTypes: settings.colorizeDataGridCellTypes ?? DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes,
     dataGridTypeColorSchemes,
@@ -2194,6 +2268,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarMenuHiddenPrimaryActions: normalizeSidebarMenuPinnedActions(settings.sidebarMenuHiddenPrimaryActions),
     sidebarMenuOrder: normalizeSidebarMenuOrder(settings.sidebarMenuOrder),
     sidebarConnectionSortMode: normalizeConnectionListSortMode(settings.sidebarConnectionSortMode),
+    sidebarSearchMatchMode: settings.sidebarSearchMatchMode === "contains" ? "contains" : "fuzzy",
     sidebarObjectDisplay: settings.sidebarObjectDisplay === "simple" || settings.sidebarObjectDisplay === "grouped" ? settings.sidebarObjectDisplay : DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay,
     routineSourceOpenMode: settings.routineSourceOpenMode === "query-tab" || settings.routineSourceOpenMode === "dialog" ? settings.routineSourceOpenMode : DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode,
     sidebarTableSearchEnabled: typeof settings.sidebarTableSearchEnabled === "boolean" ? settings.sidebarTableSearchEnabled : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled,
@@ -2234,6 +2309,11 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     deleteConnectionTabHandlingMode: normalizeDeleteConnectionTabHandlingMode(settings.deleteConnectionTabHandlingMode),
     rememberConnectionDatabaseOnDelete: typeof settings.rememberConnectionDatabaseOnDelete === "boolean" ? settings.rememberConnectionDatabaseOnDelete : DEFAULT_EDITOR_SETTINGS.rememberConnectionDatabaseOnDelete,
     rememberedConnectionDatabases: normalizeRememberedConnectionDatabases(settings.rememberedConnectionDatabases),
+    deepLinkConnectionConfirmMode: normalizeDeepLinkConnectionConfirmMode(
+      settings.deepLinkConnectionConfirmMode,
+      // 上一版布尔开关，已从类型里移除，只在这里读一次做迁移。
+      (settings as { deepLinkConnectionAutoCreate?: unknown }).deepLinkConnectionAutoCreate,
+    ),
     dataTabReuseMode: normalizeDataTabReuseMode(
       settings.dataTabReuseMode,
       (
@@ -2243,6 +2323,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
       ).reuseDataTab,
     ),
     openDataTabsNextToActive: typeof settings.openDataTabsNextToActive === "boolean" ? settings.openDataTabsNextToActive : DEFAULT_EDITOR_SETTINGS.openDataTabsNextToActive,
+    openTablesInDetachedWindow: typeof settings.openTablesInDetachedWindow === "boolean" ? settings.openTablesInDetachedWindow : DEFAULT_EDITOR_SETTINGS.openTablesInDetachedWindow,
     prefillNewQueryWithSelect: typeof settings.prefillNewQueryWithSelect === "boolean" ? settings.prefillNewQueryWithSelect : DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect,
     generateSqlIncludeDatabaseName: settings.generateSqlIncludeDatabaseName === true,
     generateSqlQuoteIdentifiers: typeof settings.generateSqlQuoteIdentifiers === "boolean" ? settings.generateSqlQuoteIdentifiers : DEFAULT_EDITOR_SETTINGS.generateSqlQuoteIdentifiers,
@@ -2277,7 +2358,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     ),
     sidebarShowConnectionNotes: settings.sidebarShowConnectionNotes === true,
     sidebarShowTooltips: settings.sidebarShowTooltips ?? DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips,
-    sidebarShowUserAdmin: settings.sidebarShowUserAdmin ?? DEFAULT_EDITOR_SETTINGS.sidebarShowUserAdmin,
+    ...(typeof settings.sidebarShowUserAdmin === "boolean" ? { sidebarShowUserAdmin: settings.sidebarShowUserAdmin } : {}),
     sidebarAllowHorizontalScroll: settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
     sidebarIndent: normalizeSidebarIndent(settings.sidebarIndent),
     sidebarFontSize: normalizeSidebarFontSize(settings.sidebarFontSize),
@@ -2335,13 +2416,16 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
  * through `normalizeEditorSettings`. Translate the removed inverse flag into
  * the current initial-expansion preference on every incremental update path.
  */
-function migrateLegacyFilterEditorExpansionPatch(partial: Partial<EditorSettings>): Partial<EditorSettings> {
-  const patch = partial as Partial<EditorSettings> & { dataGridAutoHideFilterBuilder?: unknown };
-  const { dataGridAutoHideFilterBuilder: legacyAutoHide, ...current } = patch;
-  if (Object.prototype.hasOwnProperty.call(patch, "dataGridKeepFilterEditorExpanded") || typeof legacyAutoHide !== "boolean") {
-    return current;
+function migrateLegacyEditorSettingsPatch(partial: Partial<EditorSettings>): Partial<EditorSettings> {
+  const patch = partial as Partial<EditorSettings> & { dataGridAutoHideFilterBuilder?: unknown; excludeDdlStorage?: unknown };
+  const { dataGridAutoHideFilterBuilder: legacyAutoHide, excludeDdlStorage: legacyExcludeStorage, ...current } = patch;
+  if (!Object.prototype.hasOwnProperty.call(patch, "dataGridKeepFilterEditorExpanded") && typeof legacyAutoHide === "boolean") {
+    current.dataGridKeepFilterEditorExpanded = !legacyAutoHide;
   }
-  return { ...current, dataGridKeepFilterEditorExpanded: !legacyAutoHide };
+  if (typeof current.includeDdlStorage !== "boolean" && typeof legacyExcludeStorage === "boolean") {
+    current.includeDdlStorage = !legacyExcludeStorage;
+  }
+  return current;
 }
 
 function loadLegacyEditorSettings(): EditorSettings | null {
@@ -2626,12 +2710,14 @@ export const useSettingsStore = defineStore("settings", () => {
         readOnly: next.readOnly,
         allowDangerousSql: next.allowDangerousSql,
         promptHighRiskSql: next.promptHighRiskSql,
+        ...(next.callConfirmation ? { callConfirmation: next.callConfirmation } : {}),
         allowedConnectionIds: next.allowedConnectionIds,
         allowedGroupIds: next.allowedGroupIds,
         allowedToolNames: next.allowedToolNames,
         connectionPolicies: next.connectionPolicies,
         groupPolicies: next.groupPolicies,
         queryTimeoutSecs: next.queryTimeoutSecs,
+        pluginToolsMode: next.pluginToolsMode,
       });
     } catch (error) {
       mcpGlobalPolicy.value = previous;
@@ -2944,6 +3030,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.aiFontFamily !== undefined) editorSettings.value.aiFontFamily = normalizeAiConversationFontFamily(partial.aiFontFamily);
     if (partial.aiFontSize !== undefined) editorSettings.value.aiFontSize = normalizeAiConversationFontSize(partial.aiFontSize);
     if (partial.uiScale !== undefined) editorSettings.value.uiScale = normalizeUiScale(partial.uiScale);
+    if (partial.fontSmoothing !== undefined) editorSettings.value.fontSmoothing = partial.fontSmoothing === true;
     if (partial.backgroundImage !== undefined) editorSettings.value.backgroundImage = normalizeBackgroundImageSettings(partial.backgroundImage);
     if (partial.theme !== undefined) editorSettings.value.theme = partial.theme;
     if (partial.customThemeColors !== undefined) {
@@ -2985,6 +3072,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showLineNumbers !== undefined) editorSettings.value.showLineNumbers = partial.showLineNumbers === true;
     if (partial.showCurrentStatementFrame !== undefined) editorSettings.value.showCurrentStatementFrame = partial.showCurrentStatementFrame === true;
     if (partial.showInsertValueHints !== undefined) editorSettings.value.showInsertValueHints = partial.showInsertValueHints === true;
+    if (partial.showConnectionGroupPath !== undefined) editorSettings.value.showConnectionGroupPath = partial.showConnectionGroupPath === true;
     if (partial.autoAliasTables !== undefined) editorSettings.value.autoAliasTables = partial.autoAliasTables;
     if (partial.tableCompletionSchemaQualification !== undefined) editorSettings.value.tableCompletionSchemaQualification = normalizeSqlTableCompletionSchemaQualification(partial.tableCompletionSchemaQualification);
     if (partial.insertSpaceAfterCompletion !== undefined) editorSettings.value.insertSpaceAfterCompletion = partial.insertSpaceAfterCompletion === true;
@@ -2997,7 +3085,9 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
     if (partial.showWhitespace !== undefined) editorSettings.value.showWhitespace = partial.showWhitespace === true;
     if (partial.tableDdlWordWrap !== undefined) editorSettings.value.tableDdlWordWrap = partial.tableDdlWordWrap === true;
-    if (partial.excludeDdlStorage !== undefined) editorSettings.value.excludeDdlStorage = partial.excludeDdlStorage === true;
+    if (partial.includeDdlStorage !== undefined) editorSettings.value.includeDdlStorage = partial.includeDdlStorage === true;
+    if (partial.compactDdlSql !== undefined) editorSettings.value.compactDdlSql = partial.compactDdlSql === true;
+    if (partial.separateDdlIndexes !== undefined) editorSettings.value.separateDdlIndexes = partial.separateDdlIndexes === true;
     if (partial.ddlOpenMode !== undefined) editorSettings.value.ddlOpenMode = partial.ddlOpenMode === "tab" ? "tab" : "dialog";
     if (partial.refreshDdlOnOpen !== undefined) editorSettings.value.refreshDdlOnOpen = partial.refreshDdlOnOpen === true;
     if (partial.vimModeEnabled !== undefined) editorSettings.value.vimModeEnabled = partial.vimModeEnabled === true;
@@ -3055,6 +3145,10 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showColumnHeaderTooltips !== undefined) editorSettings.value.showColumnHeaderTooltips = partial.showColumnHeaderTooltips;
     if (partial.showResultSourceDatabase !== undefined) editorSettings.value.showResultSourceDatabase = partial.showResultSourceDatabase;
     if (partial.showDataGridStatusSql !== undefined) editorSettings.value.showDataGridStatusSql = partial.showDataGridStatusSql !== false;
+    if (partial.dataGridExportInToolbar !== undefined) editorSettings.value.dataGridExportInToolbar = partial.dataGridExportInToolbar === true;
+    if (partial.dataGridLoadAllInToolbar !== undefined) editorSettings.value.dataGridLoadAllInToolbar = partial.dataGridLoadAllInToolbar === true;
+    if (partial.showSaveResult !== undefined) editorSettings.value.showSaveResult = partial.showSaveResult !== false;
+    if (partial.warnIncompleteExport !== undefined) editorSettings.value.warnIncompleteExport = partial.warnIncompleteExport !== false;
     if (partial.oracleOciNlsLang !== undefined) editorSettings.value.oracleOciNlsLang = partial.oracleOciNlsLang.trim();
     if (partial.oracleOciTnsAdmin !== undefined) editorSettings.value.oracleOciTnsAdmin = partial.oracleOciTnsAdmin.trim();
     if (partial.oracleOciClientPath !== undefined) editorSettings.value.oracleOciClientPath = partial.oracleOciClientPath.trim();
@@ -3128,6 +3222,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarMenuHiddenPrimaryActions !== undefined) editorSettings.value.sidebarMenuHiddenPrimaryActions = normalizeSidebarMenuPinnedActions(partial.sidebarMenuHiddenPrimaryActions);
     if (partial.sidebarMenuOrder !== undefined) editorSettings.value.sidebarMenuOrder = normalizeSidebarMenuOrder(partial.sidebarMenuOrder);
     if (partial.sidebarConnectionSortMode !== undefined) editorSettings.value.sidebarConnectionSortMode = normalizeConnectionListSortMode(partial.sidebarConnectionSortMode);
+    if (partial.sidebarSearchMatchMode !== undefined) editorSettings.value.sidebarSearchMatchMode = partial.sidebarSearchMatchMode === "contains" ? "contains" : "fuzzy";
     if (partial.sidebarObjectDisplay !== undefined) editorSettings.value.sidebarObjectDisplay = partial.sidebarObjectDisplay;
     if (partial.routineSourceOpenMode !== undefined) editorSettings.value.routineSourceOpenMode = partial.routineSourceOpenMode;
     if (partial.sidebarTableSearchEnabled !== undefined) editorSettings.value.sidebarTableSearchEnabled = partial.sidebarTableSearchEnabled;
@@ -3144,8 +3239,10 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.deleteConnectionTabHandlingMode !== undefined) editorSettings.value.deleteConnectionTabHandlingMode = normalizeDeleteConnectionTabHandlingMode(partial.deleteConnectionTabHandlingMode);
     if (partial.rememberConnectionDatabaseOnDelete !== undefined) editorSettings.value.rememberConnectionDatabaseOnDelete = partial.rememberConnectionDatabaseOnDelete === true;
     if (partial.rememberedConnectionDatabases !== undefined) editorSettings.value.rememberedConnectionDatabases = normalizeRememberedConnectionDatabases(partial.rememberedConnectionDatabases);
+    if (partial.deepLinkConnectionConfirmMode !== undefined) editorSettings.value.deepLinkConnectionConfirmMode = normalizeDeepLinkConnectionConfirmMode(partial.deepLinkConnectionConfirmMode);
     if (partial.dataTabReuseMode !== undefined) editorSettings.value.dataTabReuseMode = normalizeDataTabReuseMode(partial.dataTabReuseMode);
     if (partial.openDataTabsNextToActive !== undefined) editorSettings.value.openDataTabsNextToActive = partial.openDataTabsNextToActive === true;
+    if (partial.openTablesInDetachedWindow !== undefined) editorSettings.value.openTablesInDetachedWindow = partial.openTablesInDetachedWindow === true;
     if (partial.prefillNewQueryWithSelect !== undefined) editorSettings.value.prefillNewQueryWithSelect = partial.prefillNewQueryWithSelect;
     if (partial.generateSqlIncludeDatabaseName !== undefined) editorSettings.value.generateSqlIncludeDatabaseName = partial.generateSqlIncludeDatabaseName === true;
     if (partial.generateSqlQuoteIdentifiers !== undefined) editorSettings.value.generateSqlQuoteIdentifiers = partial.generateSqlQuoteIdentifiers === true;
@@ -3175,7 +3272,6 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarObjectInfoMode !== undefined) editorSettings.value.sidebarObjectInfoMode = normalizeSidebarObjectInfoMode(partial.sidebarObjectInfoMode);
     if (partial.sidebarShowConnectionNotes !== undefined) editorSettings.value.sidebarShowConnectionNotes = partial.sidebarShowConnectionNotes === true;
     if (partial.sidebarShowTooltips !== undefined) editorSettings.value.sidebarShowTooltips = partial.sidebarShowTooltips;
-    if (partial.sidebarShowUserAdmin !== undefined) editorSettings.value.sidebarShowUserAdmin = partial.sidebarShowUserAdmin;
     if (partial.sidebarAllowHorizontalScroll !== undefined) editorSettings.value.sidebarAllowHorizontalScroll = partial.sidebarAllowHorizontalScroll;
     if (partial.sidebarIndent !== undefined) editorSettings.value.sidebarIndent = normalizeSidebarIndent(partial.sidebarIndent);
     if (partial.sidebarFontSize !== undefined) editorSettings.value.sidebarFontSize = normalizeSidebarFontSize(partial.sidebarFontSize);
@@ -3226,7 +3322,7 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   function updateEditorSettings(partial: Partial<EditorSettings>) {
-    const patch = migrateLegacyFilterEditorExpansionPatch(partial);
+    const patch = migrateLegacyEditorSettingsPatch(partial);
     applyEditorSettingsPatch(patch);
     markEditorSettingsPatch(patch);
     if (!isEditorSettingsLoaded.value) {
@@ -3250,7 +3346,7 @@ export const useSettingsStore = defineStore("settings", () => {
     return enqueueEditorSettingsAtomicMutation(async () => {
       await initEditorSettings();
       const previous = editorSettingsSnapshot(editorSettings.value);
-      const patch = migrateLegacyFilterEditorExpansionPatch(partial);
+      const patch = migrateLegacyEditorSettingsPatch(partial);
       applyEditorSettingsPatch(patch);
       const revision = markEditorSettingsPatch(patch);
       try {

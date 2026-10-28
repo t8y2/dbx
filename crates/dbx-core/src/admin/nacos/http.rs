@@ -403,10 +403,7 @@ impl NacosOpenApiAdmin {
         // tenant. Keep the explicit `public` scope in DBX (ordinary users may
         // not be able to list namespaces), and translate only at the HTTP
         // boundary. Naming APIs, Nacos 3 and r-nacos retain their own IDs.
-        if !self.is_rnacos_compatible()
-            && matches!(self.cfg.version_mode, Some(NacosVersionMode::V2))
-            && (path.starts_with("/v1/cs/") || path.starts_with("/v2/cs/"))
-        {
+        if !self.is_rnacos_compatible() && (path.starts_with("/v1/cs/") || path.starts_with("/v2/cs/")) {
             for (key, value) in query.iter_mut().chain(form.iter_mut().flatten()) {
                 if key == "tenant" && value == "public" {
                     value.clear();
@@ -2651,6 +2648,11 @@ impl NacosAdmin for NacosOpenApiAdmin {
                             resp.text().await.map_err(|e| format!("Failed to read Nacos config response: {e}"))?;
                         // show=all → detail JSON; default GET → opaque content text.
                         if show_all {
+                            if text.is_empty() {
+                                // An empty detail response is not a config value;
+                                // the plain GET can still return valid empty content.
+                                continue;
+                            }
                             if let Ok(value) = serde_json::from_str::<Value>(&text) {
                                 return Ok(parse_config_detail(value, key.data_id, key.group, namespace));
                             }
@@ -3243,9 +3245,9 @@ impl NacosAdmin for NacosOpenApiAdmin {
         ];
         push_optional(&mut params, "groupName", req.group_name);
         push_optional(&mut params, "clusterName", req.cluster_name);
-        if let Some(ephemeral) = req.ephemeral {
-            params.push(("ephemeral".to_string(), ephemeral.to_string()));
-        }
+        // Manual registrations are persistent; omission must address the
+        // same instance type. Callers can explicitly target ephemeral ones.
+        params.push(("ephemeral".to_string(), req.ephemeral.unwrap_or(false).to_string()));
         self.submit_service_query_candidates(
             "deregister Nacos instance",
             reqwest::Method::DELETE,
@@ -4704,6 +4706,94 @@ mod tests {
             page_size: 100,
             connect_override: None,
         }
+    }
+
+    #[tokio::test]
+    async fn public_config_requests_use_empty_v1_tenant_and_empty_detail_falls_back() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (step, body) in ["", "", "ok", "ok", "ok"].into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                let target = request.lines().next().unwrap().split_whitespace().nth(1).unwrap();
+                let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+                let params = url.query_pairs().collect::<HashMap<_, _>>();
+                if step < 2 {
+                    assert_eq!(params.get("tenant").map(|v| v.as_ref()), Some(""));
+                    assert_eq!(params.contains_key("show"), step == 0);
+                } else if step == 2 {
+                    assert_eq!(request_form_value(&request, "tenant"), Some(""));
+                } else {
+                    assert_eq!(
+                        params.get("tenant").map(|v| v.as_ref()),
+                        Some(if step == 3 { "team" } else { "public" })
+                    );
+                }
+                write_text_response(&mut socket, body).await;
+            }
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+        let item = admin
+            .get_config(NacosConfigKey { namespace: Some("public".into()), data_id: "a".into(), group: "g".into() })
+            .await
+            .unwrap();
+        assert_eq!(item.content.as_deref(), Some(""));
+        admin
+            .request(
+                reqwest::Method::POST,
+                "/v1/cs/configs",
+                vec![],
+                Some(vec![("tenant".into(), "public".into())]),
+                None,
+            )
+            .await
+            .unwrap();
+        admin
+            .request(reqwest::Method::GET, "/v1/cs/configs", vec![("tenant".into(), "team".into())], None, None)
+            .await
+            .unwrap();
+        admin
+            .request(reqwest::Method::GET, "/v3/admin/cs/config", vec![("tenant".into(), "public".into())], None, None)
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deregister_defaults_to_persistent_and_preserves_explicit_instance_type() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for expected in ["false", "true", "false"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let target = read_request_target(&mut socket).await;
+                let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+                assert_eq!(url.path(), "/v1/ns/instance");
+                assert_eq!(url.query_pairs().find(|(k, _)| k == "ephemeral").unwrap().1, expected);
+                write_text_response(&mut socket, "ok").await;
+            }
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+        for ephemeral in [None, Some(true), Some(false)] {
+            admin
+                .deregister_instance(NacosInstanceRef {
+                    namespace: None,
+                    service_name: "api".into(),
+                    ip: "127.0.0.1".into(),
+                    port: 8080,
+                    group_name: None,
+                    cluster_name: None,
+                    ephemeral,
+                })
+                .await
+                .unwrap();
+        }
+        server.await.unwrap();
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@ use std::process::Stdio;
 use std::{ffi::OsStr, io, path::Path};
 
 use tokio::io::{AsyncReadExt, Join};
-use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::process::{ChildStdin, ChildStdout};
 
 /// Transport helpers that a `ProxyCommand` may invoke. Compared against the
 /// basename of the first argv token, case-insensitively, with a trailing
@@ -181,6 +181,10 @@ fn spawn_with_homebrew_fallback<T>(
 /// one duplex stream for the SSH handshake. The child is reaped in the
 /// background; dropping the stream closes its stdin, which makes the usual
 /// helpers (`nc`, `cloudflared`) exit.
+///
+/// The helper is spawned through `crate::process::new_tokio_command`, which sets
+/// `CREATE_NO_WINDOW` on Windows: a stacked tunnel spawns one helper per layer,
+/// and a plain `Command` flashed a console window for each of them (#13605).
 pub fn spawn_proxy_command_stream(
     command: &str,
     host: &str,
@@ -193,7 +197,12 @@ pub fn spawn_proxy_command_stream(
     validate_proxy_command_program(program)?;
 
     let spawn = |path: &std::path::Path| {
-        Command::new(path).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+        crate::process::new_tokio_command(path)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
     };
     #[cfg(target_os = "macos")]
     let mut child = spawn_with_homebrew_fallback(

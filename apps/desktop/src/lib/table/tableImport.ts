@@ -3,10 +3,26 @@ import type { TableImportJsonShape, TableImportParseOptions, TableImportSourceFo
 
 export const IMPORT_SKIP_TARGET = "";
 
+export type TableImportGeneratorKey = "uuid" | "uuid_simple" | "current_timestamp" | "current_date" | "sequence";
+
+export interface TableImportGeneratorOption {
+  value: TableImportGeneratorKey;
+  labelKey: string;
+}
+
+export const TABLE_IMPORT_GENERATOR_OPTIONS: ReadonlyArray<TableImportGeneratorOption> = [
+  { value: "uuid", labelKey: "tableImport.generatorUuid" },
+  { value: "uuid_simple", labelKey: "tableImport.generatorUuidSimple" },
+  { value: "current_timestamp", labelKey: "tableImport.generatorCurrentTimestamp" },
+  { value: "current_date", labelKey: "tableImport.generatorCurrentDate" },
+  { value: "sequence", labelKey: "tableImport.generatorSequence" },
+];
+
 export interface ImportColumnMappingLike {
   sourceColumn: string;
   targetColumn: string;
   targetDataType?: string | null;
+  generator?: string | null;
 }
 
 export interface ImportMappingValidationResult {
@@ -61,7 +77,36 @@ export function resolveTableImportElapsed(liveElapsedMs: number, backendElapsedM
   return Math.max(live, backend ?? 0);
 }
 
-export function formatTableImportPreviewCell(value: unknown): string {
+export function previewValueForGenerator(generator: string, sequence = 1): string {
+  const normalized = generator.toLowerCase().replace(/[-_]/g, "");
+  switch (normalized) {
+    case "uuid":
+    case "uuidv4":
+      return "<UUID>";
+    case "uuidsimple":
+    case "uuidnohyphens":
+    case "uuid32":
+      return "<UUID32>";
+    case "currenttimestamp":
+    case "now":
+    case "datetime":
+      return "<NOW>";
+    case "currentdate":
+    case "today":
+    case "date":
+      return "<TODAY>";
+    case "sequence":
+    case "autoincrement":
+      return `<SEQ:${sequence}>`;
+    default:
+      return `<${generator}>`;
+  }
+}
+
+export function formatTableImportPreviewCell(value: unknown, generator?: string | null, rowIndex = 0): string {
+  if (generator) {
+    return previewValueForGenerator(generator, rowIndex + 1);
+  }
   if (value === null) return "NULL";
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
     const marker = value as Record<string, unknown>;
@@ -320,4 +365,32 @@ export function importDataTypeForDatabase(inferredType: ImportInferredType, data
 
 export function suggestImportTargetDataTypes(columns: string[], rows: unknown[][], databaseType?: DatabaseType): Record<string, string> {
   return Object.fromEntries(columns.map((column, index) => [column, importDataTypeForDatabase(inferColumnType(rows, index), databaseType)]));
+}
+
+export function suggestDataTypeForGenerator(generator: string, databaseType?: DatabaseType): string {
+  const normalized = generator.toLowerCase().replace(/[-_]/g, "");
+  switch (normalized) {
+    case "uuid":
+    case "uuidv4":
+      if (["postgres", "gaussdb", "opengauss", "kingbase", "highgo", "uxdb", "kwdb", "vastbase"].includes(databaseType || "")) return "UUID";
+      if (databaseType === "sqlserver") return "UNIQUEIDENTIFIER";
+      return "VARCHAR(36)";
+    case "uuidsimple":
+    case "uuidnohyphens":
+    case "uuid32":
+      return "VARCHAR(32)";
+    case "currenttimestamp":
+    case "now":
+    case "datetime":
+      return importDataTypeForDatabase("timestamp", databaseType);
+    case "currentdate":
+    case "today":
+    case "date":
+      return importDataTypeForDatabase("date", databaseType);
+    case "sequence":
+    case "autoincrement":
+      return importDataTypeForDatabase("integer", databaseType);
+    default:
+      return importDataTypeForDatabase("text", databaseType);
+  }
 }

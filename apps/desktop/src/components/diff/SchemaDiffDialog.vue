@@ -4,10 +4,15 @@ import { useI18n } from "vue-i18n";
 import { Dialog, DialogHeader, DialogTitle, DialogFooter, DialogContent } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
+import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
+import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { useToast } from "@/composables/useToast";
 import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, AlertTriangle, CircleCheck, ChevronDown, ChevronRight } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { supportsDatabaseCompare } from "@/lib/database/databaseCompareCapabilities";
 import { useSchemaDiffConfig } from "@/composables/useSchemaDiffConfig";
@@ -46,6 +51,7 @@ import {
   selectOracleRoutineDraft,
   synchronizeOracleRoutineSelection,
   validateOracleRoutineDeployment,
+  canRegenerateOracleRoutineDeployment,
 } from "@/lib/schema/oracleRoutineDeploy";
 import type { SchemaDiffCompareOptions, SchemaDiffConfig, FieldMappingEntry, SchemaDiffTableMapping, SchemaDiffRoutineMapping, OracleRoutineKind, OracleRoutineIdentity } from "@/types/schemaDiff";
 import { getSchemaDiffSession, schemaDiffSessionObjects, startSchemaDiffSession, type SchemaDiffSession } from "@/composables/useSchemaDiffSession";
@@ -90,6 +96,7 @@ const { t } = useI18n();
 const { toast } = useToast();
 const open = defineModel<boolean>("open", { default: false });
 const store = useConnectionStore();
+const settingsStore = useSettingsStore();
 const schemaDiffTableListLoader = createSchemaDiffTableListLoader({
   ensureConnected: (connectionId) => store.ensureConnected(connectionId),
   listTables: (connectionId, database, schema) => api.listTables(connectionId, database, schema),
@@ -244,17 +251,32 @@ const deployEditorSql = computed({
   set: (sql: string) => {
     if (!isOracleRoutineDeploy.value || !routineDeployment.value) {
       selectedDeploySql.value = sql;
+      if (deploySqlMode.value === "rollback") rollbackSql.value = sql;
+      else selectedForwardDeploySql.value = sql;
       return;
     }
     if (!routineDeployment.value.recoveryPlan && routineDeployment.value.selectedObjectId) editOracleRoutineDraft(routineDeployment.value, routineDeployment.value.selectedObjectId, sql);
   },
 });
 let routineConfirmRevision: number | null = null;
+let confirmedDeploy: {
+  sql: string;
+  connectionId: string;
+  connection: ReturnType<typeof store.getConfig>;
+  connectionFingerprint: string;
+  database: string;
+  schema: string;
+  mode: "forward" | "rollback";
+  continueOnError: boolean;
+  destructive: boolean;
+  completeness: RollbackCompleteness;
+} | null = null;
 
 function ensureRoutineDeployment() {
   const session = comparisonSession.value;
   if (!isOracleRoutineComparison.value || !session?.routineSnapshots?.source || !session.routineSnapshots.target) return;
   session.routineDeployment ??= reactive(createOracleRoutineDeployment(session.routineSnapshots.source, session.routineSnapshots.target));
+  session.routineDeployment.ddlPreferences ??= { ...tableDdlPreferences.value };
   synchronizeOracleRoutineSelection(session.routineDeployment, routineDiffObjects.value);
   return session.routineDeployment;
 }
@@ -284,6 +306,85 @@ const showRenamePanel = ref(true);
 
 // Rollback / forward SQL mode in deploy step
 const deploySqlMode = ref<"forward" | "rollback">("forward");
+const selectedRawPlan = ref<ReturnType<typeof formatSchemaSyncPlan> | null>(null);
+const focusedRawPlan = ref<ReturnType<typeof formatSchemaSyncPlan> | null>(null);
+const focusedPlanObjectId = ref<string | null>(null);
+const focusedPlanError = ref("");
+const generatedForwardSql = ref("");
+const generatedRollbackSql = ref("");
+const selectedPlanCurrent = ref(false);
+const selectedGenerationIssues = computed(() => selectedRawPlan.value?.generationIssues.filter((issue) => issue.direction === deploySqlMode.value) ?? []);
+const focusedGenerationIssues = computed(() => focusedRawPlan.value?.generationIssues.filter((issue) => issue.direction === deploySqlMode.value) ?? []);
+const tableDdlPreferences = ref({
+  includeDdlStorage: settingsStore.editorSettings.includeDdlStorage,
+  compactDdlSql: settingsStore.editorSettings.compactDdlSql,
+  separateDdlIndexes: settingsStore.editorSettings.separateDdlIndexes,
+});
+const ddlPreferences = computed({
+  get: () => (isOracleRoutineDeploy.value ? routineDeployment.value?.ddlPreferences : undefined) ?? tableDdlPreferences.value,
+  set: (preferences) => {
+    if (isOracleRoutineDeploy.value && routineDeployment.value) routineDeployment.value.ddlPreferences = preferences;
+    else tableDdlPreferences.value = preferences;
+  },
+});
+const routineDdlOptionsLocked = computed(() => {
+  const state = routineDeployment.value;
+  return isOracleRoutineDeploy.value && !!state && (!!state.plan || !!state.recoveryPlan || state.drafts.some((draft) => draft.included && draft.sql !== undefined)) && !canRegenerateOracleRoutineDeployment(state);
+});
+const deploySqlDirty = computed(() => !!selectedRawPlan.value && (selectedForwardDeploySql.value !== generatedForwardSql.value || rollbackSql.value !== generatedRollbackSql.value));
+
+function confirmDiscardDeployEdits(): boolean {
+  return !deploySqlDirty.value || window.confirm(t("objects.refreshDiscardConfirm"));
+}
+
+function renderSelectedPlan() {
+  if (!selectedRawPlan.value) return;
+  const type = targetEngineDbType.value ?? getDbType();
+  generatedForwardSql.value = applyDdlTextPreferences(selectedRawPlan.value.forwardSql, type, ddlPreferences.value);
+  generatedRollbackSql.value = applyDdlTextPreferences(selectedRawPlan.value.rollbackSql, type, ddlPreferences.value);
+  selectedForwardDeploySql.value = generatedForwardSql.value;
+  rollbackSql.value = generatedRollbackSql.value;
+  selectedDeploySql.value = deploySqlMode.value === "rollback" ? rollbackSql.value : selectedForwardDeploySql.value;
+}
+
+function renderFocusedPlan() {
+  if (!focusedRawPlan.value) return;
+  const type = targetEngineDbType.value ?? getDbType();
+  focusedForwardDeploySql.value = applyDdlTextPreferences(focusedRawPlan.value.forwardSql, type, ddlPreferences.value);
+  focusedRollbackSql.value = applyDdlTextPreferences(focusedRawPlan.value.rollbackSql, type, ddlPreferences.value);
+  focusedDeploySql.value = deploySqlMode.value === "rollback" ? focusedRollbackSql.value : focusedForwardDeploySql.value;
+}
+
+const independentPreview = ref<{ objectId: string; source?: string; target?: string; issues: string[]; loading: boolean } | null>(null);
+let independentPreviewGeneration = 0;
+const displayedSelectedObject = computed(() => {
+  const object = selectedObject.value;
+  if (!object) return null;
+  return {
+    ...object,
+    sourceDdl: applyDdlTextPreferences((independentPreview.value?.objectId === object.id ? independentPreview.value.source : undefined) ?? object.sourceDdl ?? "", sourceEngineDbType.value ?? getDbType(), ddlPreferences.value),
+    targetDdl: applyDdlTextPreferences((independentPreview.value?.objectId === object.id ? independentPreview.value.target : undefined) ?? object.targetDdl ?? "", targetEngineDbType.value ?? getDbType(), ddlPreferences.value),
+  };
+});
+
+watch([() => settingsStore.editorSettings.includeDdlStorage, () => settingsStore.editorSettings.compactDdlSql, () => settingsStore.editorSettings.separateDdlIndexes, deploySqlDirty, showConfirmDialog, deployIsBusy, isOracleRoutineDeploy], ([include, compact, separate, dirty, confirming, busy]) => {
+  if ((dirty && !isOracleRoutineDeploy.value) || confirming || busy || routineDdlOptionsLocked.value) return;
+  const indexesChanged = ddlPreferences.value.separateDdlIndexes !== separate;
+  const compactChanged = ddlPreferences.value.compactDdlSql !== compact;
+  ddlPreferences.value = { includeDdlStorage: include, compactDdlSql: compact, separateDdlIndexes: separate };
+  if (isOracleRoutineDeploy.value) {
+    const state = routineDeployment.value;
+    if (compactChanged && state && canRegenerateOracleRoutineDeployment(state)) void validateOracleRoutineDeployment(state, undefined, { compactSql: compact, regenerateGenerated: true });
+    return;
+  }
+  if (indexesChanged) {
+    void regenerateSelectedDeploySql();
+    void regenerateFocusedDeploySql();
+    return;
+  }
+  renderSelectedPlan();
+  renderFocusedPlan();
+});
 
 // Deploy review: bracket the deploy script with MySQL's FOREIGN_KEY_CHECKS toggle.
 // Only MySQL honours the session variable, so the option is offered — and sent to
@@ -458,6 +559,32 @@ const canDeployRoutines = computed(() => {
   const kinds = comparisonSession.value!.config.options.routineObjectKinds;
   return !!kinds?.length && kinds.every((kind) => kind === "PACKAGE" || kind === "PACKAGE_BODY") && routineDiffObjects.value.every((object) => object.routineType === "PACKAGE" || object.routineType === "PACKAGE_BODY");
 });
+watch([selectedObject, () => ddlPreferences.value.separateDdlIndexes, sourceConnectionId, sourceDatabase, sourceSchema, targetConnectionId, targetDatabase, targetSchema, sourceEngineDbType, targetEngineDbType, () => open.value], async () => {
+  const generation = ++independentPreviewGeneration;
+  independentPreview.value = null;
+  const object = selectedObject.value;
+  if (!open.value || !ddlPreferences.value.separateDdlIndexes || object?.objectKind !== "table") return;
+  const diff = lastDiffResult.value?.diffs.find((diff) => diff.name === object.name);
+  if (!diff) return;
+  const sides = [
+    { side: "source" as const, exists: diff.type !== "removed", type: sourceEngineDbType.value, connectionId: sourceConnectionId.value, database: sourceDatabase.value, schema: sourceSchema.value, tableName: diff.name },
+    { side: "target" as const, exists: diff.type !== "added", type: targetEngineDbType.value, connectionId: targetConnectionId.value, database: targetDatabase.value, schema: targetSchema.value, tableName: diff.targetName ?? diff.name },
+  ].filter((side) => side.exists && (side.type === "oracle" || side.type === "oceanbase-oracle"));
+  if (!sides.length) return;
+  independentPreview.value = { objectId: object.id, issues: [], loading: true };
+  const results = await Promise.all(
+    sides.map(async (side) => {
+      try {
+        const { ddl } = await loadObjectDdl({ connectionId: side.connectionId, queryTimeoutSecs: store.getConfig(side.connectionId)?.query_timeout_secs, database: side.database, schema: side.schema, tableName: side.tableName, separateIndexes: true });
+        return { side: side.side, ddl, issue: undefined };
+      } catch (error: any) {
+        return { side: side.side, ddl: undefined, issue: `${t(side.side === "source" ? "diff.sourceDdl" : "diff.targetDdl")} ${side.schema}.${side.tableName}: ${error?.message || String(error)}` };
+      }
+    }),
+  );
+  if (componentUnmounted || generation !== independentPreviewGeneration || !open.value) return;
+  independentPreview.value = { objectId: object.id, source: results.find((result) => result.side === "source")?.ddl, target: results.find((result) => result.side === "target")?.ddl, issues: results.flatMap((result) => (result.issue ? [result.issue] : [])), loading: false };
+});
 
 const canDeploy = computed(() => {
   // MySQL/SQL Server routine sync is deferred (copy DDL only). Postgres-family
@@ -505,6 +632,10 @@ const schemaDiffNextProgressLabel = computed(() => {
 });
 
 function resetComparisonResultState() {
+  selectedRawPlan.value = null;
+  focusedRawPlan.value = null;
+  focusedPlanObjectId.value = null;
+  focusedPlanError.value = "";
   selectedDeploySqlGeneration++;
   focusedDeploySqlGeneration++;
   loading.value = false;
@@ -679,8 +810,18 @@ watch(
   () => applySchemaDiffSession(getSchemaDiffSession(activeSessionId.value)),
 );
 
-watch(resultTab, () => {
+let restoringResultTab = false;
+watch(resultTab, (_tab, previous) => {
+  if (restoringResultTab) {
+    restoringResultTab = false;
+    return;
+  }
   if (step.value !== "result") return;
+  if (!confirmDiscardDeployEdits()) {
+    restoringResultTab = true;
+    resultTab.value = previous;
+    return;
+  }
   void regenerateSelectedDeploySql();
   void regenerateFocusedDeploySql();
 });
@@ -866,6 +1007,7 @@ function handleFieldMappingsUpdate(mappings: FieldMappingEntry[]) {
 }
 
 function handleCompare(): void {
+  if (!confirmDiscardDeployEdits()) return;
   const sourceConfig = store.getConfig(sourceConnectionId.value);
   const targetConfig = store.getConfig(targetConnectionId.value);
   if (!supportsDatabaseCompare(sourceConfig, "schema") || !supportsDatabaseCompare(targetConfig, "schema")) return;
@@ -905,6 +1047,7 @@ function handleToggleGroup(operationType: DiffOperationType) {
 }
 
 function handleToggleGroupSelection(operationType: DiffOperationType, selected: boolean) {
+  if (!confirmDiscardDeployEdits()) return;
   const group = activeDiffGroups.value.find((candidate) => candidate.operationType === operationType);
   for (const object of group?.typeGroups.flatMap((typeGroup) => typeGroup.objects) ?? []) {
     for (const target of schemaDiffSelectionTargets(object)) {
@@ -916,6 +1059,7 @@ function handleToggleGroupSelection(operationType: DiffOperationType, selected: 
 }
 
 function handleToggleObjectSelection(object: SchemaDiffObject, selected: boolean) {
+  if (!confirmDiscardDeployEdits()) return;
   let changed = false;
   for (const target of schemaDiffSelectionTargets(object)) {
     changed = updateObjectSelection(target.id, selected) || changed;
@@ -958,6 +1102,16 @@ function buildSchemaSyncPlanOptions(options: SchemaDiffCompareOptions) {
     fieldMappings: options.fieldMappings,
     enableRollback: options.enableRollback,
     ignoreForeignKeyChecks: effectiveIgnoreForeignKeyChecks.value,
+    ...(ddlPreferences.value.separateDdlIndexes && (engineDbType === "oracle" || engineDbType === "oceanbase-oracle")
+      ? {
+          oracleDdl: {
+            separateIndexes: true,
+            source: { connectionId: sourceConnectionId.value, database: sourceDatabase.value, schema: sourceSchema.value },
+            target: { connectionId: targetConnectionId.value, database: targetDatabase.value, schema: targetSchema.value },
+            tableMappings: comparisonSession.value?.config.options.tableMappings?.map((mapping) => ({ ...mapping })),
+          },
+        }
+      : {}),
   };
 }
 
@@ -968,10 +1122,12 @@ function formatSchemaSyncPlan(plan: Awaited<ReturnType<typeof api.generateSchema
     forwardSql = injectColumnRenameSql(forwardSql, input.diffs, options.renameThreshold);
     if (nextRollbackSql) nextRollbackSql = injectColumnRenameSql(nextRollbackSql, input.diffs, options.renameThreshold, true);
   }
-  return { forwardSql, rollbackSql: nextRollbackSql };
+  return { forwardSql, rollbackSql: nextRollbackSql, forwardCompleteness: plan.forwardCompleteness ?? "complete", rollbackCompleteness: plan.rollbackCompleteness ?? "complete", generationIssues: plan.generationIssues ?? [] };
 }
 
 function clearSelectedDeploySql() {
+  selectedPlanCurrent.value = false;
+  selectedRawPlan.value = null;
   selectedForwardDeploySql.value = "";
   selectedDeploySql.value = "";
   rollbackSql.value = "";
@@ -982,8 +1138,9 @@ function clearSelectedDeploySql() {
 async function regenerateSelectedDeploySql() {
   const result = lastDiffResult.value;
   const generation = ++selectedDeploySqlGeneration;
-  clearSelectedDeploySql();
+  selectedPlanCurrent.value = false;
   if (!result) {
+    clearSelectedDeploySql();
     return;
   }
   if (isOracleRoutineDeploy.value) {
@@ -1005,17 +1162,22 @@ async function regenerateSelectedDeploySql() {
   const formatted = formatSchemaSyncPlan(plan, input, options);
   rollbackCompleteness.value = plan.rollbackCompleteness ?? "complete";
   missingRollbackObjects.value = plan.missingRollbackObjects ?? [];
-  selectedForwardDeploySql.value = formatted.forwardSql;
-  rollbackSql.value = formatted.rollbackSql;
-  selectedDeploySql.value = deploySqlMode.value === "rollback" && formatted.rollbackSql ? formatted.rollbackSql : formatted.forwardSql;
+  selectedRawPlan.value = formatted;
+  renderSelectedPlan();
+  selectedPlanCurrent.value = true;
 }
 
 async function regenerateFocusedDeploySql(objectId: string | null = selectedObjectId.value) {
   const result = lastDiffResult.value;
   const generation = ++focusedDeploySqlGeneration;
-  focusedForwardDeploySql.value = "";
-  focusedRollbackSql.value = "";
-  focusedDeploySql.value = "";
+  focusedPlanError.value = "";
+  if (focusedPlanObjectId.value !== objectId || !result || !objectId) {
+    focusedRawPlan.value = null;
+    focusedPlanObjectId.value = null;
+    focusedForwardDeploySql.value = "";
+    focusedRollbackSql.value = "";
+    focusedDeploySql.value = "";
+  }
   if (isOracleRoutineDeploy.value) return;
   if (!result || !objectId || !findSchemaDiffObject(diffObjects.value, objectId)) {
     return;
@@ -1027,15 +1189,18 @@ async function regenerateFocusedDeploySql(objectId: string | null = selectedObje
   try {
     plan = await api.generateSchemaSyncPlan(input, buildSchemaSyncPlanOptions(options));
   } catch (error: any) {
-    if (!componentUnmounted && generation === focusedDeploySqlGeneration && selectedObjectId.value === objectId) toast(error?.message || String(error), 5000);
+    if (!componentUnmounted && generation === focusedDeploySqlGeneration && selectedObjectId.value === objectId) {
+      focusedPlanError.value = error?.message || String(error);
+      toast(focusedPlanError.value, 5000);
+    }
     return;
   }
   if (componentUnmounted || generation !== focusedDeploySqlGeneration || selectedObjectId.value !== objectId) return;
 
   const formatted = formatSchemaSyncPlan(plan, input, options);
-  focusedForwardDeploySql.value = formatted.forwardSql;
-  focusedRollbackSql.value = formatted.rollbackSql;
-  focusedDeploySql.value = deploySqlMode.value === "rollback" && formatted.rollbackSql ? formatted.rollbackSql : formatted.forwardSql;
+  focusedRawPlan.value = formatted;
+  focusedPlanObjectId.value = objectId;
+  renderFocusedPlan();
 }
 
 function switchDeploySqlMode(mode: "forward" | "rollback") {
@@ -1059,6 +1224,8 @@ const canExecuteDeploy = computed(() => {
   if (deploySqlMode.value === "rollback" && rollbackCompleteness.value === "incomplete") {
     return false;
   }
+  if (!selectedPlanCurrent.value) return false;
+  if (deploySqlMode.value === "forward" && selectedRawPlan.value?.forwardCompleteness === "incomplete") return false;
   const sql = selectedDeploySql.value.trim();
   return sql.length > 0 && sql !== "-- No objects selected";
 });
@@ -1069,6 +1236,7 @@ const destructiveStatements = computed(() => {
 });
 
 function applyRename(rc: RenameCandidate) {
+  if (!confirmDiscardDeployEdits()) return;
   let found = false;
   for (const obj of diffObjects.value) {
     // Backend-detected renamed diff (diff_type = "renamed")
@@ -1099,6 +1267,7 @@ function applyRename(rc: RenameCandidate) {
 }
 
 function ignoreRename(index: number) {
+  if (!confirmDiscardDeployEdits()) return;
   const rc = renameCandidates.value[index];
   if (rc) {
     for (const obj of diffObjects.value) {
@@ -1146,23 +1315,31 @@ async function executeDeploySql() {
     );
     return;
   }
+  const confirmed = confirmedDeploy;
+  if (!confirmed || confirmed.completeness === "incomplete") return;
+  const targetIsCurrent = () => {
+    const connection = store.getConfig(confirmed.connectionId);
+    return !!connection && confirmed.connectionId === targetConnectionId.value && confirmed.database === targetDatabase.value && confirmed.schema === targetSchema.value && confirmed.mode === deploySqlMode.value && connectionConfigFingerprint(connection) === confirmed.connectionFingerprint;
+  };
+  confirmedDeploy = null;
   executing.value = true;
   try {
-    const targetConnection = store.getConfig(targetConnectionId.value);
+    if (!targetIsCurrent()) throw new Error(t("processList.oracleConnectionChanged"));
     const failed = await executeWithProductionSqlGuard({
-      connection: targetConnection,
-      database: targetDatabase.value,
-      sql: selectedDeploySql.value,
+      connection: confirmed.connection,
+      database: confirmed.database,
+      sql: confirmed.sql,
       source: t("production.sourceSchemaDiff"),
       execute: async () => {
-        if (continueOnError.value) {
-          const results = await api.executeMulti(targetConnectionId.value, targetDatabase.value, selectedDeploySql.value, targetSchema.value || undefined, undefined, {
+        if (!targetIsCurrent()) throw new Error(t("processList.oracleConnectionChanged"));
+        if (confirmed.continueOnError) {
+          const results = await api.executeMulti(confirmed.connectionId, confirmed.database, confirmed.sql, confirmed.schema || undefined, undefined, {
             continueOnError: true,
             maxRows: 1,
           });
           return buildContinueOnErrorDeployLog(results);
         }
-        const txLog = await api.executeScriptWith2pc(targetConnectionId.value, targetDatabase.value, [selectedDeploySql.value], targetSchema.value, destructiveStatements.value.length > 0);
+        const txLog = await api.executeScriptWith2pc(confirmed.connectionId, confirmed.database, [confirmed.sql], confirmed.schema, confirmed.destructive);
         return txLog;
       },
     });
@@ -1415,13 +1592,14 @@ async function handleDeployReview() {
     const state = ensureRoutineDeployment();
     if (state) {
       state.reviewOpen = true;
-      if (!state.plan && !state.recoveryPlan && !state.executing) await validateOracleRoutineDeployment(state);
+      if (!state.plan && !state.recoveryPlan && !state.executing) await validateOracleRoutineDeployment(state, undefined, { compactSql: ddlPreferences.value.compactDdlSql });
     }
   }
   fetchDbVersion(targetConnectionId.value, targetDatabase.value, targetSchema.value);
 }
 
 async function handleDeploy() {
+  confirmedDeploy = null;
   if (isOracleRoutineDeploy.value) {
     if (!canExecuteDeploy.value) return;
     routineConfirmRevision = routineDeployment.value?.revision ?? null;
@@ -1430,11 +1608,29 @@ async function handleDeploy() {
     toast(t("diff.rollbackIncompleteBlocked"), 5000);
     return;
   }
+  if (!isOracleRoutineDeploy.value) {
+    if (!canExecuteDeploy.value) return;
+    const connection = store.getConfig(targetConnectionId.value);
+    if (!connection) return;
+    confirmedDeploy = {
+      sql: selectedDeploySql.value,
+      connectionId: targetConnectionId.value,
+      connection: connection ? { ...connection } : undefined,
+      connectionFingerprint: connectionConfigFingerprint(connection),
+      database: targetDatabase.value,
+      schema: targetSchema.value,
+      mode: deploySqlMode.value,
+      continueOnError: continueOnError.value,
+      destructive: destructiveStatements.value.length > 0,
+      completeness: deploySqlMode.value === "rollback" ? rollbackCompleteness.value : (selectedRawPlan.value?.forwardCompleteness ?? "complete"),
+    };
+  }
   showConfirmDialog.value = true;
 }
 
 async function onConfirmDeploy() {
   showConfirmDialog.value = false;
+  if (!isOracleRoutineDeploy.value && confirmedDeploy) confirmedDeploy.continueOnError = continueOnError.value;
   if (isOracleRoutineDeploy.value && (routineConfirmRevision !== routineDeployment.value?.revision || !canExecuteDeploy.value)) return;
   if (deploySqlMode.value === "rollback" && rollbackCompleteness.value === "incomplete") {
     toast(t("diff.rollbackIncompleteBlocked"), 5000);
@@ -1566,6 +1762,14 @@ const targetConnectionInfo = computed(() => {
 
         <!-- Result Step -->
         <template v-else-if="step === 'result'">
+          <p v-if="independentPreview?.loading" role="status" class="flex shrink-0 items-center gap-2 px-3 py-2 text-sm text-muted-foreground"><Loader2 class="h-4 w-4 animate-spin" />{{ t("common.loading") }}</p>
+          <ul v-if="independentPreview?.issues.length" role="alert" class="max-h-32 shrink-0 overflow-auto px-3 py-2 text-sm text-destructive">
+            <li v-for="issue in independentPreview.issues" :key="issue">{{ issue }}</li>
+          </ul>
+          <ul v-if="!isOracleRoutineDeploy && focusedGenerationIssues.length" role="alert" class="max-h-32 shrink-0 overflow-auto px-3 py-2 text-sm text-destructive">
+            <li v-for="(issue, index) in focusedGenerationIssues" :key="index">{{ issue.table ? `${issue.table} / ` : "" }}{{ issue.name }}: {{ issue.reason }}</li>
+          </ul>
+          <p v-if="!isOracleRoutineDeploy && focusedPlanError" role="alert" class="shrink-0 px-3 py-2 text-sm text-destructive">{{ focusedPlanError }}</p>
           <Tabs v-model="resultTab" class="flex min-h-0 flex-1 flex-col gap-0 data-horizontal:flex-col">
             <TabsList v-if="showResultTabList" class="mx-3 mt-2 h-8 w-fit shrink-0">
               <TabsTrigger value="tables" class="text-xs">
@@ -1630,8 +1834,14 @@ const targetConnectionInfo = computed(() => {
                 </Pane>
                 <Pane :size="100 - splitpanesSize" min-size="20">
                   <SchemaDiffDdlPanel
-                    :selected-object="selectedObject"
+                    :selected-object="displayedSelectedObject"
                     :focused-object="selectedTreeObject"
+                    :source-schema="sourceSchema"
+                    :target-schema="targetSchema"
+                    :source-database="sourceDatabase"
+                    :target-database="targetDatabase"
+                    :source-db-type="sourceDbType"
+                    :target-db-type="targetDbType"
                     :deploy-sql="focusedDeploySql"
                     :deploy-sql-all="selectedDeploySql"
                     :rollback-forward-sql="selectedForwardDeploySql"
@@ -1701,6 +1911,10 @@ const targetConnectionInfo = computed(() => {
 
         <!-- Deploy Review Step -->
         <template v-else-if="step === 'deploy-review'">
+          <DdlStorageToggle :database-type="targetEngineDbType" :preferences="ddlPreferences" :disabled="(!isOracleRoutineDeploy && deploySqlDirty) || deployIsBusy || showConfirmDialog || routineDdlOptionsLocked" class="px-3 py-2" />
+          <ul v-if="!isOracleRoutineDeploy && selectedGenerationIssues.length" role="alert" class="max-h-32 shrink-0 overflow-auto px-3 py-2 text-sm text-destructive">
+            <li v-for="(issue, index) in selectedGenerationIssues" :key="index">{{ issue.table ? `${issue.table} / ` : "" }}{{ issue.name }}: {{ issue.reason }}</li>
+          </ul>
           <SchemaDiffDeployStep
             v-model:deploy-sql="deployEditorSql"
             v-model:ignore-foreign-key-checks="ignoreForeignKeyChecks"
@@ -1710,7 +1924,7 @@ const targetConnectionInfo = computed(() => {
             :target-connection-id="targetConnectionId"
             :target-database="targetDatabase"
             :target-schema="targetSchema"
-            :executing="deployIsBusy"
+            :executing="deployIsBusy || showConfirmDialog"
             :database-type="targetEngineDbType"
             :routine-deployment="isOracleRoutineDeploy ? routineDeployment : null"
             :rollback-sql="isOracleRoutineDeploy ? undefined : rollbackSql"
@@ -1729,7 +1943,7 @@ const targetConnectionInfo = computed(() => {
                 if (routineDeployment) selectOracleRoutineDraft(routineDeployment, id);
               }
             "
-            @validate-routines="routineDeployment && validateOracleRoutineDeployment(routineDeployment)"
+            @validate-routines="routineDeployment && validateOracleRoutineDeployment(routineDeployment, undefined, { compactSql: ddlPreferences.compactDdlSql })"
             @include-package-companion="(id, source) => routineDeployment && includeOraclePackageCompanion(routineDeployment, id, source)"
             @update-package-options="(id, options) => routineDeployment && editOraclePackageOptions(routineDeployment, id, options)"
             @review-package-target="(id) => routineDeployment && reviewOraclePackageTargetDraft(routineDeployment, id)"
@@ -1743,6 +1957,7 @@ const targetConnectionInfo = computed(() => {
       <!-- Footer -->
       <DialogFooter class="flex items-center justify-between">
         <div v-if="step === 'result'" class="flex items-center gap-2">
+          <DdlStorageToggle :database-type="targetEngineDbType" :preferences="ddlPreferences" :disabled="(!isOracleRoutineDeploy && deploySqlDirty) || deployIsBusy || showConfirmDialog || routineDdlOptionsLocked" />
           <Button variant="outline" size="sm" @click="step = 'config'">
             <ArrowLeft class="w-3.5 h-3.5 mr-1" />
             {{ t("diff.prevStep") }}

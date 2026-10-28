@@ -15,10 +15,7 @@ describe("diagram refresh confirmation wiring", () => {
     assert.match(dialogSource, /function requestRefreshDiagram\(\)/);
     assert.match(dialogSource, /showRefreshConfirm\.value = true/);
     assert.match(dialogSource, /@refresh="requestRefreshDiagram"/);
-    assert.match(
-      dialogSource,
-      /DangerConfirmDialog[^>]*v-model:open="showRefreshConfirm"[^>]*@confirm="confirmRefreshDiagram"/,
-    );
-    assert.match(dialogSource, /function confirmRefreshDiagram\(\)[\s\S]*?void loadDiagram\(\)/);
+    assert.match(dialogSource, /DangerConfirmDialog[^>]*v-model:open="showRefreshConfirm"[^>]*@confirm="confirmRefreshDiagram"/);
+    assert.match(dialogSource, /function confirmRefreshDiagram\(\)[\s\S]*?void loadDiagram\(\{ force: true \}\)/);
   });
 });

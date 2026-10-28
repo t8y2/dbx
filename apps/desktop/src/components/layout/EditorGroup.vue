@@ -192,6 +192,7 @@ const groupExecutableSql = computed(() => {
         @activate-tab="$emit('activate-tab', $event)"
         @locate-tab="$emit('locate-tab', $event)"
         @locate-sql-file="$emit('locate-sql-file', $event)"
+        @locate-sql-library-file="$emit('locate-sql-library-file', $event)"
         @toggle-zen-mode="$emit('toggle-zen-mode')"
         @start-resize="$emit('start-resize', $event)"
         @toggle-collapse="$emit('toggle-collapse')"

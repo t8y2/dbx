@@ -25,7 +25,10 @@ export function normalizeDatabaseBackupOutputCompression(value: unknown): Databa
   return value === "gzip" || value === "nb3" ? value : "none";
 }
 
-const CONSISTENT_BACKUP_DATABASE_TYPES = new Set(["mysql", "postgres"]);
+const CONSISTENT_BACKUP_DATABASE_TYPES = new Set(["mysql", "postgres", "opengauss"]);
+// The backend writes and restores Navicat `.nb3` archives for MySQL and PostgreSQL only
+// (`navicat_nb3.rs`); openGauss backups must use plain or gzipped SQL.
+const NAVICAT_BACKUP_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "postgres"]);
 
 export class DatabaseBackupConnectionQueue {
   private readonly tails = new Map<string, Promise<void>>();
@@ -55,6 +58,11 @@ export function databaseBackupAggregateExportStatus(status: DatabaseBackupExport
 
 export function supportsScheduledDatabaseBackup(databaseType: string | undefined): boolean {
   return !!databaseType && CONSISTENT_BACKUP_DATABASE_TYPES.has(databaseType);
+}
+
+/** Navicat `.nb3` archives are only supported when every selected connection is MySQL or PostgreSQL. */
+export function supportsNavicatBackupFormat(databaseTypes: readonly (DatabaseType | undefined)[]): boolean {
+  return databaseTypes.length > 0 && databaseTypes.every((databaseType) => !!databaseType && NAVICAT_BACKUP_DATABASE_TYPES.has(databaseType));
 }
 
 export function resolveScheduledDatabaseBackupTargets(configuredDatabases: readonly string[], availableDatabases: readonly string[], databaseType?: DatabaseType): string[] {

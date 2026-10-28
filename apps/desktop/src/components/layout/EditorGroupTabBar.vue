@@ -145,6 +145,7 @@ const emit = defineEmits<{
   "activate-tab": [tabId: string];
   "locate-tab": [tab: QueryTab];
   "locate-sql-file": [tab: QueryTab];
+  "locate-sql-library-file": [tab: QueryTab];
   "toggle-zen-mode": [];
   "start-resize": [event: PointerEvent];
   "toggle-collapse": [];
@@ -1658,11 +1659,6 @@ function handleSaveAllTabs() {
 
 function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
   const items: ContextMenuItem[] = [
-    {
-      label: compactTabTitle.value ? t("contextMenu.fullTabTitle") : t("contextMenu.compactTabTitle"),
-      action: toggleCompactTabTitle,
-      icon: compactTabTitle.value ? Maximize2 : Minimize2,
-    },
     ...createRenameDuplicateTabItems({
       tab,
       t,
@@ -1677,7 +1673,7 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       visible: canSetTabSuffix(tab),
     },
     {
-      label: t("contextMenu.copyName"),
+      label: t("contextMenu.copyTabName"),
       action: async () => {
         try {
           await copyToClipboard(tabTitleText(tab));
@@ -1694,6 +1690,112 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       icon: Maximize2,
       visible: !!props.canDetachTabs && isDetachableTab(tab),
     },
+    // Split actions stay visible but render disabled when they cannot produce
+    // a new layout — at the four-group cap, or with a single open tab (the
+    // store rejects with the same rules). Every tab type can split: groups
+    // host non-query tabs via ContentArea, same as moving them between groups.
+    {
+      label: t("contextMenu.splitTab"),
+      icon: ArrowRight,
+      children: [
+        {
+          label: t("contextMenu.splitRight"),
+          action: () => queryStore.splitTabRight(tab.id),
+          disabled: splitUnavailable.value,
+          icon: ArrowRight,
+        },
+        {
+          label: t("contextMenu.splitDown"),
+          action: () => queryStore.splitTabDown(tab.id),
+          disabled: splitUnavailable.value,
+          icon: ArrowDown,
+        },
+        ...(canChangeOrientation.value
+          ? [
+              {
+                label: t("contextMenu.changeOrientation"),
+                action: () => queryStore.setOrientation(queryStore.orientation === "vertical" ? "horizontal" : "vertical"),
+                icon: RotateCw,
+              },
+            ]
+          : []),
+        ...(isSecondaryGroup.value
+          ? [
+              {
+                label: t("contextMenu.unsplit"),
+                action: () => queryStore.unsplitTab(tab.id),
+                icon: ArrowRight,
+                visible: true,
+              },
+            ]
+          : []),
+      ],
+    },
+    { label: "", separator: true },
+    createPinTabMenuItem({
+      label: tab.pinned ? t("contextMenu.unpinTab") : t("contextMenu.pinTab"),
+      onToggle: () => queryStore.togglePinnedTab(tab.id),
+    }),
+    createSaveAllTabsMenuItem({
+      label: t("contextMenu.saveAllTabs"),
+      disabled: !queryStore.hasDirtyTabs,
+      shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.saveAllTabs ?? ""),
+      onSaveAll: () => handleSaveAllTabs(),
+    }),
+    createReopenClosedTabMenuItem({
+      label: t("contextMenu.reopenClosedTab"),
+      disabled: !queryStore.canReopenClosedTab,
+      shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.reopenClosedTab ?? "Shift+Mod+T"),
+      onReopen: () => queryStore.reopenClosedTab(),
+    }),
+    createCloseTabMenuItem({
+      label: t("contextMenu.closeTab"),
+      onClose: () => closeTab(tab),
+    }),
+    {
+      label: t("contextMenu.batchCloseTabs"),
+      icon: X,
+      children: [
+        createCloseOtherTabMenuItem({
+          label: t("contextMenu.closeOtherTabs"),
+          onClose: () => queryStore.closeOtherTabsInGroup(props.groupId, tab.id),
+        }),
+        createCloseLeftTabMenuItem({
+          label: t("contextMenu.closeLeftTabs"),
+          disabled: !hasTabsToLeft(tab),
+          onClose: () => {
+            const tabsToClose = tabsToLeftInDisplayOrder(tab).map((item) => item.id);
+            const finalActiveTabId = queryStore.activeTabId && !tabsToClose.includes(queryStore.activeTabId) ? queryStore.activeTabId : tab.id;
+            queryStore.closeTabsByIds(tabsToClose, finalActiveTabId);
+          },
+        }),
+        createCloseRightTabMenuItem({
+          label: t("contextMenu.closeRightTabs"),
+          disabled: !hasTabsToRight(tab),
+          onClose: () => {
+            const tabsToClose = tabsToRightInDisplayOrder(tab).map((item) => item.id);
+            const finalActiveTabId = queryStore.activeTabId && !tabsToClose.includes(queryStore.activeTabId) ? queryStore.activeTabId : tab.id;
+            queryStore.closeTabsByIds(tabsToClose, finalActiveTabId);
+          },
+        }),
+        createCloseAllTabMenuItem({
+          label: t("contextMenu.closeAllTabs"),
+          onClose: () => queryStore.closeAllTabsInGroup(props.groupId, tab.id),
+        }),
+        {
+          label: t("contextMenu.closeTabGroup"),
+          action: () => closeTabGroup(tab),
+          visible: settingsStore.editorSettings.tabGroupMode !== "none",
+          icon: X,
+        },
+      ],
+    },
+    { label: "", separator: true },
+    {
+      label: compactTabTitle.value ? t("contextMenu.fullTabTitle") : t("contextMenu.compactTabTitle"),
+      action: toggleCompactTabTitle,
+      icon: compactTabTitle.value ? Maximize2 : Minimize2,
+    },
     createLocateTabMenuItem({
       t,
       visible: !!activeTabSidebarTarget(tab),
@@ -1705,94 +1807,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       visible: !!queryTabExternalFilePath(tab),
       action: () => emit("locate-sql-file", tab),
     },
-    { label: "", separator: true },
-    createPinTabMenuItem({
-      label: tab.pinned ? t("contextMenu.unpinTab") : t("contextMenu.pinTab"),
-      onToggle: () => queryStore.togglePinnedTab(tab.id),
-    }),
-    // Split actions stay visible but render disabled when they cannot produce
-    // a new layout — at the four-group cap, or with a single open tab (the
-    // store rejects with the same rules). Every tab type can split: groups
-    // host non-query tabs via ContentArea, same as moving them between groups.
     {
-      label: t("contextMenu.splitRight"),
-      action: () => queryStore.splitTabRight(tab.id),
-      disabled: splitUnavailable.value,
-      icon: ArrowRight,
+      label: t("sqlFileTree.locateActiveFile"),
+      icon: Crosshair,
+      visible: !!tab.savedSqlId,
+      action: () => emit("locate-sql-library-file", tab),
     },
-    {
-      label: t("contextMenu.splitDown"),
-      action: () => queryStore.splitTabDown(tab.id),
-      disabled: splitUnavailable.value,
-      icon: ArrowDown,
-    },
-    ...(canChangeOrientation.value
-      ? [
-          {
-            label: t("contextMenu.changeOrientation"),
-            action: () => queryStore.setOrientation(queryStore.orientation === "vertical" ? "horizontal" : "vertical"),
-            icon: RotateCw,
-          },
-        ]
-      : []),
-    ...(isSecondaryGroup.value
-      ? [
-          {
-            label: t("contextMenu.unsplit"),
-            action: () => queryStore.unsplitTab(tab.id),
-            icon: ArrowRight,
-            visible: true,
-          },
-        ]
-      : []),
-    createCloseOtherTabMenuItem({
-      label: t("contextMenu.closeOtherTabs"),
-      onClose: () => queryStore.closeOtherTabsInGroup(props.groupId, tab.id),
-    }),
-    createCloseLeftTabMenuItem({
-      label: t("contextMenu.closeLeftTabs"),
-      disabled: !hasTabsToLeft(tab),
-      onClose: () => {
-        const tabsToClose = tabsToLeftInDisplayOrder(tab).map((item) => item.id);
-        const finalActiveTabId = queryStore.activeTabId && !tabsToClose.includes(queryStore.activeTabId) ? queryStore.activeTabId : tab.id;
-        queryStore.closeTabsByIds(tabsToClose, finalActiveTabId);
-      },
-    }),
-    createCloseRightTabMenuItem({
-      label: t("contextMenu.closeRightTabs"),
-      disabled: !hasTabsToRight(tab),
-      onClose: () => {
-        const tabsToClose = tabsToRightInDisplayOrder(tab).map((item) => item.id);
-        const finalActiveTabId = queryStore.activeTabId && !tabsToClose.includes(queryStore.activeTabId) ? queryStore.activeTabId : tab.id;
-        queryStore.closeTabsByIds(tabsToClose, finalActiveTabId);
-      },
-    }),
-    createCloseAllTabMenuItem({
-      label: t("contextMenu.closeAllTabs"),
-      onClose: () => queryStore.closeAllTabsInGroup(props.groupId, tab.id),
-    }),
-    createSaveAllTabsMenuItem({
-      label: t("contextMenu.saveAllTabs"),
-      disabled: !queryStore.hasDirtyTabs,
-      shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.saveAllTabs ?? ""),
-      onSaveAll: () => handleSaveAllTabs(),
-    }),
-    {
-      label: t("contextMenu.closeTabGroup"),
-      action: () => closeTabGroup(tab),
-      visible: settingsStore.editorSettings.tabGroupMode !== "none",
-      icon: X,
-    },
-    createCloseTabMenuItem({
-      label: t("contextMenu.closeTab"),
-      onClose: () => closeTab(tab),
-    }),
-    createReopenClosedTabMenuItem({
-      label: t("contextMenu.reopenClosedTab"),
-      disabled: !queryStore.canReopenClosedTab,
-      shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.reopenClosedTab ?? "Shift+Mod+T"),
-      onReopen: () => queryStore.reopenClosedTab(),
-    }),
   ];
   return items;
 }
@@ -1953,10 +1973,12 @@ const tabScrollBehavior = ref<ScrollBehavior>("smooth");
 
 watch(
   () => props.activeTabId,
-  (tabId) => {
+  (tabId, previousTabId) => {
     lastDispatchedSwitchTabId = null;
-    // A tab that just became active must be visible: reveal its group if collapsed.
-    expandTabGroupForTab(tabId);
+    // Closing the active tab selects a fallback without changing other groups.
+    if (!previousTabId || queryStore.tabs.some((tab) => tab.id === previousTabId)) {
+      expandTabGroupForTab(tabId);
+    }
     if (isTwoRowLayout.value && tabId) {
       const tab = queryStore.tabs.find((item) => item.id === tabId);
       if (tab) {

@@ -226,4 +226,65 @@ describe("DataTransferProgressDialog", () => {
       ?.click();
     await vi.waitFor(() => expect(mocks.cancelTransfer).toHaveBeenCalledWith(task.exportId));
   });
+
+  it("records per-table log lines and a terminal summary for data transfer tasks (#13281)", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("transfer-log-flow", "source → target", 2);
+    const progress = (overrides: Partial<Record<"table" | "tableIndex" | "rowsTransferred" | "status" | "terminal" | "error", unknown>>) =>
+      tracker.updateDataTransferTask("transfer-log-flow", {
+        transferId: "transfer-log-flow",
+        table: "",
+        tableIndex: 0,
+        totalTables: 2,
+        rowsTransferred: 0,
+        totalRows: null,
+        status: "running",
+        error: null,
+        terminal: false,
+        ...overrides,
+      } as Parameters<typeof tracker.updateDataTransferTask>[1]);
+
+    progress({ table: "users", tableIndex: 0, rowsTransferred: 10 });
+    // 同表的后续行块进度事件不重复记日志。
+    progress({ table: "users", tableIndex: 0, rowsTransferred: 120 });
+    progress({ table: "orders", tableIndex: 1, rowsTransferred: 5 });
+    progress({ table: "orders", tableIndex: 2, rowsTransferred: 99, status: "done", terminal: true });
+
+    const lines = task.logLines!;
+    expect(lines.map((line) => line.key)).toEqual(["transfer.log.tableStarted", "transfer.log.tableStarted", "transfer.log.completed"]);
+    expect(lines[0].params).toMatchObject({ table: "users", index: 1, total: 2 });
+    expect(lines[1].params).toMatchObject({ table: "orders", index: 2, total: 2 });
+    expect(lines[2].level).toBe("success");
+  });
+
+  it("renders the collapsible execution log with per-line timestamps (#13281)", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("transfer-log-ui", "source → target", 1);
+    task.logLines = [
+      { at: new Date(2026, 0, 1, 12, 30, 5).getTime(), key: "transfer.log.tableStarted", params: { table: "users", index: 1, total: 1 }, level: "info" },
+      { at: new Date(2026, 0, 1, 12, 30, 6).getTime(), key: "transfer.log.completed", params: { total: 1, failed: 0 }, level: "success" },
+    ];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const app = createApp({ render: () => h(DataTransferProgressDialog, { open: true, task }) });
+    mountedApps.push(app);
+    app.use(i18n);
+    app.mount(container);
+    await nextTick();
+
+    const logText = i18n.global.t("transfer.log.title");
+    const toggle = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(logText));
+    expect(toggle).toBeDefined();
+    expect(container.textContent).toContain("12:30:05");
+    expect(container.textContent).toContain("Transferring table users (1/1)");
+    expect(container.textContent).toContain("Transfer finished: 1 table(s), 0 failed");
+
+    // 折叠走 v-show（display:none），textContent 仍包含文本，改查容器样式。
+    const logBody = () => [...document.body.querySelectorAll<HTMLDivElement>("div")].find((div) => div.className.includes("font-mono"));
+    expect(logBody()).toBeDefined();
+    toggle!.click();
+    await nextTick();
+    expect(logBody()!.style.display).toBe("none");
+    expect([...document.body.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(logText))).toBeDefined();
+  });
 });

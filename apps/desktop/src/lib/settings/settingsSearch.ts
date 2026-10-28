@@ -2,6 +2,7 @@ import { getPlatform } from "@/lib/backend/platform";
 import { SQL_VARIABLE_SYNTAX_KEYS, SQL_VARIABLE_SYNTAX_TOKENS } from "@/lib/sql/sqlVariableSyntax";
 import { APP_CUSTOM_UI_COLOR_DEFS } from "@/lib/app/appTheme";
 import { MCP_TOOL_OPTIONS, MCP_EXECUTION_MODE_COLUMNS } from "@/lib/mcp/mcpPolicySelection";
+import type { McpCapabilityNavigationTarget } from "@/lib/mcp/mcpCapabilitySearch";
 
 export type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "backups" | "tunnels" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "updates" | "security" | "about";
 
@@ -56,9 +57,9 @@ export interface SettingsSearchEntry {
 
 export interface SettingsSearchRoute {
   syncMethodTab?: "webdav" | "snippet" | "local";
-  mcpManagementTab?: "access" | "permissions";
+  mcpManagementTab?: "access" | "permissions" | "capabilities";
   mcpTransportTab?: "stdio" | "http";
-  mcpAuthorizationTab?: "overrides" | "connections" | "databases" | "capabilities";
+  mcpCapabilityTarget?: McpCapabilityNavigationTarget;
   formatterMode?: "form" | "json";
 }
 
@@ -148,12 +149,16 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "editor-execute-mode", category: "editor", titleKey: "settings.executeMode", targetId: "editor", keywordKeys: ["settings.executeModeAll", "settings.executeModeCurrent"] },
   { id: "editor-default-transaction-mode", category: "editor", titleKey: "settings.defaultTransactionMode", descriptionKey: "settings.defaultTransactionModeDescription", targetId: "editor", keywordKeys: ["settings.defaultTransactionModeAuto", "settings.defaultTransactionModeManual"] },
   { id: "editor-execute-all-on-blank-line", category: "editor", titleKey: "settings.executeAllOnBlankLine", descriptionKey: "settings.executeAllOnBlankLineDescription", targetId: "editor" },
+  // 全局超时入口（#13233）：标题/描述复用连接对话框已有的 connection.* 文案，避免 14 个 locale 各补一份同义 key。
+  { id: "editor-global-connect-timeout", category: "editor", titleKey: "connection.connectTimeout", descriptionKey: "connection.globalConnectTimeoutHint", targetId: "editor" },
+  { id: "editor-global-query-timeout", category: "editor", titleKey: "connection.queryTimeout", descriptionKey: "connection.globalQueryTimeoutHint", targetId: "editor" },
   { id: "editor-execution-target", category: "editor", titleKey: "settings.showExecutionTargetPicker", descriptionKey: "settings.showExecutionTargetPickerDescription", targetId: "editor" },
   { id: "editor-run-buttons", category: "editor", titleKey: "settings.showStatementRunButtons", descriptionKey: "settings.showStatementRunButtonsDescription", targetId: "editor" },
   { id: "editor-locate-cursor-on-gutter-execute", category: "editor", titleKey: "settings.locateCursorOnGutterExecute", descriptionKey: "settings.locateCursorOnGutterExecuteDescription", targetId: "editor" },
   { id: "editor-line-numbers", category: "editor", titleKey: "settings.showLineNumbers", descriptionKey: "settings.showLineNumbersDescription", targetId: "editor" },
   { id: "editor-statement-frame", category: "editor", titleKey: "settings.showCurrentStatementFrame", descriptionKey: "settings.showCurrentStatementFrameDescription", targetId: "editor" },
   { id: "editor-value-hints", category: "editor", titleKey: "settings.showInsertValueHints", descriptionKey: "settings.showInsertValueHintsDescription", targetId: "editor" },
+  { id: "editor-connection-group-path", category: "editor", titleKey: "settings.showConnectionGroupPath", descriptionKey: "settings.showConnectionGroupPathDescription", targetId: "editor" },
   { id: "editor-show-whitespace", category: "editor", titleKey: "settings.showWhitespace", descriptionKey: "settings.showWhitespaceDescription", targetId: "editor" },
   { id: "editor-word-wrap", category: "editor", titleKey: "settings.wordWrap", descriptionKey: "settings.wordWrapDescription", targetId: "editor" },
   { id: "editor-vim", category: "editor", titleKey: "settings.vimMode", descriptionKey: "settings.vimModeDescription", targetId: "editor" },
@@ -303,6 +308,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "appearance-theme", category: "appearance", titleKey: "settings.theme", targetId: "appearance" },
   { id: "appearance-color-theme", category: "appearance", titleKey: "settings.colorTheme", targetId: "appearance", keywordKeys: APP_CUSTOM_UI_COLOR_DEFS.map((item) => item.labelKey) },
   { id: "appearance-ui-scale", category: "appearance", titleKey: "settings.uiScale", descriptionKey: "settings.uiScaleDescription", targetId: "appearance" },
+  { id: "appearance-font-smoothing", category: "appearance", titleKey: "settings.fontSmoothing", descriptionKey: "settings.fontSmoothingDescription", targetId: "appearance" },
   { id: "appearance-ui-font", category: "appearance", titleKey: "settings.uiFontFamily", descriptionKey: "settings.uiFontFamilyDescription", targetId: "appearance" },
   { id: "appearance-grid-font", category: "appearance", titleKey: "settings.dataGridFontFamily", descriptionKey: "settings.dataGridFontFamilyDescription", targetId: "appearance" },
   { id: "appearance-corners", category: "appearance", titleKey: "settings.cornerStyle", targetId: "appearance" },
@@ -358,6 +364,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   },
   { id: "navigation-reuse-data-tab", category: "navigation", titleKey: "settings.reuseDataTab", descriptionKey: "settings.reuseDataTabDescription", targetId: "navigation" },
   { id: "navigation-open-data-tabs-next-to-active", category: "navigation", titleKey: "settings.openDataTabsNextToActive", descriptionKey: "settings.openDataTabsNextToActiveDescription", targetId: "navigation" },
+  { id: "navigation-open-tables-in-detached-window", category: "navigation", titleKey: "settings.openTablesInDetachedWindow", descriptionKey: "settings.openTablesInDetachedWindowDescription", targetId: "navigation" },
   { id: "navigation-object-display", category: "navigation", titleKey: "settings.sidebarObjectDisplay", targetId: "navigation" },
   {
     id: "navigation-object-info",
@@ -382,7 +389,6 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   },
   { id: "navigation-sidebar-scroll", category: "navigation", titleKey: "settings.sidebarAllowHorizontalScroll", descriptionKey: "settings.sidebarAllowHorizontalScrollDescription", targetId: "navigation" },
   { id: "navigation-sidebar-tooltips", category: "navigation", titleKey: "settings.sidebarShowTooltips", descriptionKey: "settings.sidebarShowTooltipsDescription", targetId: "navigation" },
-  { id: "navigation-sidebar-user-admin", category: "navigation", titleKey: "settings.sidebarShowUserAdmin", descriptionKey: "settings.sidebarShowUserAdminDescription", targetId: "navigation" },
   { id: "navigation-sidebar-indent", category: "navigation", titleKey: "settings.sidebarIndent", descriptionKey: "settings.sidebarIndentDescription", targetId: "navigation" },
   { id: "navigation-sidebar-font-size", category: "navigation", titleKey: "settings.sidebarFontSize", descriptionKey: "settings.sidebarFontSizeDescription", targetId: "navigation" },
   { id: "navigation-sidebar-density", category: "navigation", titleKey: "settings.sidebarDensity", descriptionKey: "settings.sidebarDensityDescription", targetId: "navigation" },
@@ -407,6 +413,14 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     keywordKeys: ["settings.deleteConnectionTabHandlingModeCloseTabs", "settings.deleteConnectionTabHandlingModeKeepSqlTabs", "settings.deleteConnectionTabHandlingModeKeepPinnedSqlTabs", "settings.deleteConnectionTabHandlingModeKeepAllTabs"],
   },
   { id: "navigation-remember-connection-database", category: "navigation", titleKey: "settings.rememberConnectionDatabaseOnDelete", descriptionKey: "settings.rememberConnectionDatabaseOnDeleteDescription", targetId: "navigation", keywordKeys: ["settings.rememberConnectionDatabaseOnDeleteHint"] },
+  {
+    id: "navigation-deeplink-connection-confirm-mode",
+    category: "navigation",
+    titleKey: "settings.deepLinkConnectionConfirmMode",
+    descriptionKey: "settings.deepLinkConnectionConfirmModeDescription",
+    targetId: "navigation",
+    keywordKeys: ["settings.deepLinkConnectionConfirmModeAlways", "settings.deepLinkConnectionConfirmModeCreate", "settings.deepLinkConnectionConfirmModeUpdate", "settings.deepLinkConnectionConfirmModeAll"],
+  },
   { id: "query-page-size", category: "data", titleKey: "settings.queryPageSize", descriptionKey: "settings.queryPageSizeDescription", targetId: "data" },
   { id: "data-page-size", category: "data", titleKey: "settings.tableOpenPageSize", descriptionKey: "settings.tableOpenPageSizeDescription", targetId: "data" },
   { id: "data-table-open-sort-mode", category: "data", titleKey: "settings.tableOpenSortMode", descriptionKey: "settings.tableOpenSortDescription", targetId: "data", keywordKeys: ["settings.tableSortUnchanged", "settings.tableSortDatabase", "settings.tableSortLocal"] },
@@ -701,7 +715,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     titleKey: "settings.mcpExecutionMode",
     descriptionKey: "settings.mcpExecutionModeDescription",
     targetId: "mcp-overrides",
-    route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "overrides" },
+    route: { mcpManagementTab: "permissions" },
     keywordKeys: MCP_EXECUTION_MODE_COLUMNS.map((mode) => mode.labelKey),
   },
   { id: "mcp-config", category: "mcp", titleKey: "settings.mcpConfig", targetId: "mcp-client-config", route: { mcpManagementTab: "access", mcpTransportTab: "stdio" } },
@@ -852,18 +866,22 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   {
     id: "mcp-prompt-high-risk-sql",
     category: "mcp",
-    titleKey: "settings.mcpPromptHighRiskSql",
-    targetId: "mcp-overrides",
-    route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "overrides" },
-    keywordKeys: ["settings.mcpExecutionModeDescription", "settings.mcpPermissionGlobalDefaultHint", "settings.mcpCapabilityTitle", "settings.mcpCapabilityDescription", "settings.mcpCapabilityOperation", "settings.mcpCapabilityAlwaysEnforced"],
+    titleKey: "settings.mcpCallSafety",
+    targetId: "mcp-call-safety",
+    route: { mcpManagementTab: "permissions" },
+    keywordKeys: ["settings.mcpCallSafetyConfirm", "settings.mcpExecutionModeDescription", "settings.mcpPermissionGlobalDefaultHint", "settings.mcpCapabilityTitle", "settings.mcpCapabilityDescription", "settings.mcpCapabilityOperation", "settings.mcpCapabilityAlwaysEnforced"],
   },
   {
     id: "mcp-auth-tab-connections-title",
     category: "mcp",
     titleKey: "settings.mcpAuthTabConnectionsTitle",
     targetId: "mcp-connections",
-    route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "connections" },
+    route: { mcpManagementTab: "permissions" },
     keywordKeys: [
+      "settings.mcpAccessTreeScopeLabel",
+      "settings.mcpAccessTreeExceptionsOnly",
+      "settings.mcpAccessTreeColumnVisible",
+      "settings.mcpAccessTreeColumnSetting",
       "settings.mcpConnectionPolicyAllowSalesforceDml",
       "settings.mcpConnectionPolicyInherit",
       "settings.mcpConnectionPolicyReadOnly",
@@ -878,13 +896,18 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     id: "mcp-auth-tab-databases-title",
     category: "mcp",
     titleKey: "settings.mcpAuthTabDatabasesTitle",
-    targetId: "mcp-databases",
-    route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "databases" },
+    targetId: "mcp-connections",
+    route: { mcpManagementTab: "permissions" },
     keywordKeys: [
       "settings.mcpConnectionPolicyInherit",
       "settings.mcpConnectionPolicyReadOnly",
       "settings.mcpConnectionPolicySafeWrite",
       "settings.mcpConnectionPolicyHighRiskWrite",
+      "settings.mcpAccessTreeDatabases",
+      "settings.mcpDatabaseSearch",
+      "settings.mcpDatabaseSelectResults",
+      "settings.mcpDatabaseBatchLevel",
+      "settings.mcpAccessTreeManualDatabase",
       "settings.mcpDatabaseScopeTitle",
       "settings.mcpDatabaseScopeDescription",
       "settings.mcpDatabaseScopeAriaLabel",
@@ -901,13 +924,28 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     category: "mcp",
     titleKey: "settings.mcpToolPermissionsTitle",
     descriptionKey: "settings.mcpToolPermissionsDescription",
-    keywordKeys: ["settings.mcpToolCustomPlaceholder", "settings.mcpToolCustomHint"],
+    keywordKeys: ["settings.mcpBrowser.searchPlaceholder", "settings.mcpCapabilitiesOnlyEnabled", "settings.mcpBrowser.navigation", "settings.mcpCapabilitiesFilterLabel", "settings.mcpBrowser.builtin", "settings.mcpBrowser.plugins"],
     targetId: "mcp-capabilities",
-    route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "capabilities" },
+    route: { mcpManagementTab: "capabilities" },
   },
-  { id: "mcp-permission-preview-title", category: "mcp", titleKey: "settings.mcpPermissionPreviewTitle", targetId: "mcp-capabilities", route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "capabilities" } },
+  {
+    id: "mcp-custom-tool-entries",
+    category: "mcp",
+    titleKey: "settings.mcpPluginToolEntriesTitle",
+    keywordKeys: ["settings.mcpToolCustomPlaceholder", "settings.mcpToolCustomHint", "settings.mcpPluginToolEntriesHint"],
+    targetId: "mcp-capabilities",
+    route: { mcpManagementTab: "capabilities", mcpCapabilityTarget: { kind: "advanced" } },
+  },
+  { id: "mcp-permission-preview-title", category: "mcp", titleKey: "settings.mcpAccessTreeTitle", targetId: "mcp-connections", route: { mcpManagementTab: "permissions" } },
   { id: "backups-background-worker", category: "backups", titleKey: "databaseBackup.backgroundWorker", targetId: "backups", visible: desktopOnly },
-  ...MCP_TOOL_OPTIONS.map((tool): SettingsSearchDefinition => ({ id: `mcp-tool-${tool.name}`, category: "mcp", titleKey: tool.labelKey, targetId: "mcp-capabilities", route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "capabilities" } })),
+  ...MCP_TOOL_OPTIONS.map((tool): SettingsSearchDefinition => ({
+    id: `mcp-tool-${tool.name}`,
+    category: "mcp",
+    titleKey: tool.labelKey,
+    keywordTexts: [tool.name],
+    targetId: "mcp-capabilities",
+    route: { mcpManagementTab: "capabilities", mcpCapabilityTarget: { kind: "tool", toolName: tool.name } },
+  })),
 ];
 
 export function resolveSettingsSearchEntries(definitions: readonly SettingsSearchDefinition[], context: SettingsSearchContext, translate: Translate, categoryLabels: Readonly<Record<SettingsCategory, string>>): SettingsSearchEntry[] {

@@ -8,13 +8,28 @@ use crate::models::connection::DatabaseType;
 use crate::sql::{oracle_plsql_block_is_complete, split_sql_statements_for_database};
 use crate::types::ObjectSourceKind;
 
+mod oracle_indexes;
+mod oracle_trigger;
+pub use oracle_trigger::{
+    prepare_oracle_trigger_sql, OracleTriggerSqlBinding, OracleTriggerSqlHeader, OracleTriggerSqlInput,
+    OracleTriggerSqlPurpose, PreparedOracleTriggerSql,
+};
 mod oracle_routines;
+pub use oracle_indexes::{
+    extract_oracle_table_triggers, oracle_index_ddl_sources, oracle_table_created_index_identities,
+    oracle_trigger_ddl_sources, oracle_trigger_definitions_match, oracle_trigger_enabled,
+    oracle_trigger_metadata_matches, oracle_trigger_source_with_create, order_oracle_trigger_sources,
+    parse_oracle_table_ddl, rebase_oracle_table_ddl, rebase_oracle_trigger_ddl, separate_oracle_supporting_indexes,
+    separate_oracle_supporting_indexes_with_retained, split_oracle_table_ddl, split_oracle_table_ddl_with_retained,
+    OracleDdlNameMapping, OracleIndexDdlSource, OracleSupportingIndexDdl, OracleSupportingIndexIdentity,
+    OracleTableConstraintSource, OracleTableDdlParts, OracleTableDdlSource, OracleTriggerDdlSource,
+};
 pub use oracle_routines::{
-    analyze_oracle_package_body_draft, analyze_oracle_routine_draft, comparable_oracle_routine_definition,
-    prepare_oracle_routine_definition, validate_oracle_routine_target_definition, OracleDraftIssue, OracleDraftName,
-    OracleDraftPackageCall, OracleDraftPackageMember, OracleDraftPackageMemberKind, OracleDraftParameter,
-    OracleDraftQuery, OracleDraftReference, OracleDraftReferenceRole, OracleRoutineDefinitionInput,
-    OracleRoutineDraftAnalysis,
+    analyze_oracle_package_body_draft, analyze_oracle_routine_draft, compact_oracle_ddl,
+    comparable_oracle_routine_definition, prepare_oracle_routine_definition, validate_oracle_routine_target_definition,
+    OracleDraftIssue, OracleDraftName, OracleDraftPackageCall, OracleDraftPackageMember, OracleDraftPackageMemberKind,
+    OracleDraftParameter, OracleDraftQuery, OracleDraftReference, OracleDraftReferenceRole,
+    OracleRoutineDefinitionInput, OracleRoutineDraftAnalysis,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -607,6 +622,9 @@ fn build_executable_object_source_statements_with_mysql_validation_name(
 }
 
 pub fn validate_oracle_executable_object_source(input: OracleObjectSourceValidationInput) -> Result<(), String> {
+    if input.object_type == ObjectSourceKind::Trigger {
+        return oracle_trigger::validate(input);
+    }
     if !matches!(input.database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
         || !matches!(
             input.object_type,

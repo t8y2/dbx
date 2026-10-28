@@ -93,6 +93,7 @@
         "icon": { "type": "string", "format": "uri-reference" },
         "tags": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
         "permissions": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "mcpTools": { "type": "boolean", "default": false, "description": "The plugin provides MCP tools (its manifest declares an mcp contribution)." },
         "source": { "type": "string", "format": "uri" },
         "homepage": { "type": "string", "format": "uri" },
         "license": { "type": "string", "minLength": 1 },

@@ -23,3 +23,11 @@ linker = "rust-lld"
 # Large Rust projects in debug mode overflow the 1 MiB stack when DB query
 # paths pull in deep serde/driver call stacks. This embeds the size in the PE.
 rustflags = ["-C", "link-arg=/STACK:8388608"]
+
+# The legacy Windows 7 / Server 2012 R2 target keeps the same 8 MiB main-thread
+# stack. CI builds it with an explicit RUSTFLAGS env (static CRT), which
+# replaces this table, so the same link arg is repeated in those workflows and
+# audited by .github/scripts/assert-win7-pe-compat.ps1. Without it the legacy PE
+# keeps the 1 MiB default and the app aborts with 0xC00000FD ("DBX 已停止工作").
+[target.x86_64-win7-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]

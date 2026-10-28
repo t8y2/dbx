@@ -128,6 +128,11 @@ export interface PluginFileHandleMeta {
   relativePath?: string;
 }
 
+export interface PluginDragPosition {
+  x: number;
+  y: number;
+}
+
 export interface PluginPickFilesOptions {
   multiple?: boolean;
 }
@@ -607,13 +612,36 @@ export class PluginHostBridge {
   }
 
   /** Tell the plugin whether an OS-level file drag is currently over its workbench. */
-  forwardDragState(active: boolean): void {
-    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "dragstate", active });
+  forwardDragState(active: boolean, position?: PluginDragPosition): void {
+    this.post({
+      source: HOST_MESSAGE_SOURCE,
+      version: BRIDGE_VERSION,
+      type: "dragstate",
+      active,
+      position: position ? { x: position.x, y: position.y } : undefined,
+    });
   }
 
   /** Hand the plugin already-opened handles for files dropped onto its workbench. */
-  forwardFileDrop(files: PluginFileHandleMeta[], drop?: { dropId?: string; truncated?: boolean }): void {
-    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "filedrop", files, dropId: drop?.dropId, truncated: drop?.truncated === true });
+  forwardFileDrop(files: PluginFileHandleMeta[], drop?: { dropId?: string; truncated?: boolean; position?: PluginDragPosition }): void {
+    this.post({
+      source: HOST_MESSAGE_SOURCE,
+      version: BRIDGE_VERSION,
+      type: "filedrop",
+      files,
+      dropId: drop?.dropId,
+      truncated: drop?.truncated === true,
+      position: drop?.position ? { x: drop.position.x, y: drop.position.y } : undefined,
+    });
+  }
+
+  /** Tell the plugin UI that its workbench container was resized or transitioned to active. */
+  notifyLayout(): void {
+    this.post({
+      source: HOST_MESSAGE_SOURCE,
+      version: BRIDGE_VERSION,
+      type: "layout",
+    });
   }
 
   private async handleRequest(request: PluginRequestMessage, target: Window): Promise<void> {
@@ -1297,7 +1325,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     .replace(/\u2029/g, "\\u2029");
   return `(() => {
     const pending = new Map();
-    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set(), close: new Set() };
+    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set(), close: new Set(), layout: new Set() };
     let sequence = 0;
     let contributionId;
     let context;
@@ -1549,6 +1577,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       onBinary: (listener) => { listeners.binary.add(listener); return () => listeners.binary.delete(listener); },
       onContext: (listener) => { listeners.context.add(listener); return () => listeners.context.delete(listener); },
       onInit: (listener) => { listeners.init.add(listener); if (context !== undefined) listener(context); return () => listeners.init.delete(listener); },
+      onLayout: (listener) => { listeners.layout.add(listener); return () => listeners.layout.delete(listener); },
       // §8.3 workbench/close handshake: the host sends workbench/close before
       // tearing the webview down; the plugin releases its workbench scope (PTY
       // sessions, subscriptions) in the listeners and the SDK acks once every
@@ -1599,15 +1628,31 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         document.dispatchEvent(new CustomEvent('dbx-plugin-binary', { detail: payload }));
       } else if (message.type === 'filedrop') {
         const files = Array.isArray(message.files) ? message.files : [];
+        const position = (message.position && typeof message.position.x === 'number' && typeof message.position.y === 'number')
+          ? { x: message.position.x, y: message.position.y }
+          : undefined;
         // The drop metadata rides as a second listener argument so existing
         // single-parameter listeners keep working unchanged.
-        const drop = { dropId: typeof message.dropId === 'string' ? message.dropId : undefined, truncated: message.truncated === true };
+        const drop = {
+          dropId: typeof message.dropId === 'string' ? message.dropId : undefined,
+          truncated: message.truncated === true,
+          position,
+        };
         listeners.filedrop.forEach((listener) => listener(files, drop));
         document.dispatchEvent(new CustomEvent('dbx-plugin-filedrop', { detail: { files, drop } }));
       } else if (message.type === 'dragstate') {
         const active = message.active === true;
-        listeners.dragstate.forEach((listener) => listener(active));
+        const position = (message.position && typeof message.position.x === 'number' && typeof message.position.y === 'number')
+          ? { x: message.position.x, y: message.position.y }
+          : undefined;
+        listeners.dragstate.forEach((listener) => listener(active, position));
         document.dispatchEvent(new CustomEvent('dbx-plugin-dragstate', { detail: active }));
+      } else if (message.type === 'layout') {
+        try {
+          window.dispatchEvent(new Event('resize'));
+        } catch {}
+        listeners.layout.forEach((listener) => listener(message));
+        document.dispatchEvent(new CustomEvent('dbx-plugin-layout', { detail: message }));
       } else if (message.type === 'workbench/close') {
         const notifyClose = (listener) => Promise.resolve().then(listener).catch(() => undefined);
         Promise.allSettled([...listeners.close].map(notifyClose)).finally(() => {

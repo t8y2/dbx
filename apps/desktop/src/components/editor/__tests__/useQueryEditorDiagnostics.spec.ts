@@ -143,6 +143,26 @@ describe("QueryEditor diagnostic scheduling ownership", () => {
     expect(diagnostics.sqlErrorDecorationRange(currentView.state)).toEqual([{ from: 7, to: 8, message: "syntax error at line 1, column 8" }]);
   });
 
+  it("underlines the complete missing Oracle object in a selected DDL statement", () => {
+    const statement = 'CREATE VIEW V_MISSING AS SELECT * FROM "HR"."EMP_REF"';
+    const modelValue = `SELECT 1 FROM DUAL;\n${statement};`;
+    const sourceFrom = modelValue.indexOf(statement);
+    const objectFrom = statement.indexOf('"HR"');
+    const message = `ORA-00942: table or view does not exist error occur at position: ${objectFrom}`;
+    const result: QueryResult = {
+      columns: ["Error"],
+      rows: [[message]],
+      affected_rows: 0,
+      execution_time_ms: 0,
+      execution_error: true,
+      sourceStatement: statement,
+      sourceFrom,
+      sourceTo: sourceFrom + statement.length,
+    };
+    const { diagnostics, currentView } = createHarness({ modelValue, databaseType: "oracle", dialect: "oracle", executionError: message, executionErrorResult: result });
+    expect(diagnostics.sqlErrorDecorationRange(currentView.state)).toEqual([{ from: sourceFrom + objectFrom, to: sourceFrom + statement.length, message }]);
+  });
+
   it("retains textual diagnostics for older result envelopes without source metadata", () => {
     const result: QueryResult = { columns: ["Error"], rows: [["syntax error at line 1, column 8"]], affected_rows: 0, execution_time_ms: 0, execution_error: true };
     const { diagnostics, currentView } = createHarness({ executionError: "syntax error at line 1, column 8", executionErrorSql: "SELECT missing;", executionErrorResult: result });

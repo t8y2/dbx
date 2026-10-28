@@ -645,6 +645,25 @@ describe("TDengine table hierarchy", () => {
     expect(nodes[0].children?.[0].children?.map((node) => node.label)).toEqual(["device_a", "device_b"]);
   });
 
+  it("keeps all supertables visible at the root when a supertable has many child tables (#13728)", () => {
+    const childTables = Array.from({ length: 998 }, (_, i) => ({
+      name: `sub_${String(i).padStart(4, "0")}`,
+      table_type: "TABLE",
+      comment: null,
+      parent_name: "stable_b",
+    }));
+    const tables: TableInfo[] = [{ name: "stable_a", table_type: "STABLE", comment: null }, { name: "stable_b", table_type: "STABLE", comment: null }, { name: "stable_c", table_type: "STABLE", comment: null }, ...childTables.slice(0, 997)];
+
+    const nodes = buildTableTreeNodes({ ...context, tables });
+
+    expect(nodes.map((node) => node.label)).toEqual(["stable_a", "stable_b", "stable_c"]);
+    expect(nodes[1].children?.[0]).toMatchObject({
+      type: "group-partitions",
+      label: "tree.childTables",
+      objectCount: 997,
+    });
+  });
+
   it("attaches child tables loaded on later pages to the existing supertable", () => {
     const firstPage = buildTableTreeNodes({
       ...context,
@@ -748,5 +767,38 @@ describe("tablePageRowAnchorKey", () => {
   it("keeps a partition's parent in the key so same-named child tables stay distinct", () => {
     expect(tablePageRowAnchorKey("p_2024", "app", "orders")).not.toBe(tablePageRowAnchorKey("p_2024", "app", "customers"));
     expect(tablePageRowAnchorKey("p_2024", "app")).not.toBe(tablePageRowAnchorKey("p_2024", "app", "orders"));
+  });
+});
+
+describe("package and package body groups (#13239)", () => {
+  function pkg(type: string, name: string): ObjectInfo {
+    return { name, object_type: type, schema: "app" } as ObjectInfo;
+  }
+
+  it("splits packages and package bodies into separate groups", () => {
+    const nodes = buildGroupedObjectTreeNodes({
+      ...context,
+      objects: [pkg("PACKAGE", "ledger"), pkg("PACKAGE_BODY", "ledger"), pkg("PACKAGE", "reports")],
+      databaseType: "oracle",
+    });
+    const packagesGroup = nodes.find((node) => node.type === "group-packages");
+    const bodiesGroup = nodes.find((node) => node.type === "group-package-bodies");
+    expect(bodiesGroup).toBeDefined();
+    const packageChildren = packagesGroup!.children!.map((node) => node.label);
+    expect(packageChildren).toEqual(["ledger", "reports"]);
+    expect(bodiesGroup!.children!.map((node) => node.label)).toEqual(["ledger"]);
+  });
+
+  it("keeps the body-only package visible inside the bodies group", () => {
+    const nodes = buildGroupedObjectTreeNodes({
+      ...context,
+      objects: [pkg("PACKAGE_BODY", "orphan")],
+      databaseType: "oracle",
+    });
+    const bodiesGroup = nodes.find((node) => node.type === "group-package-bodies");
+    expect(bodiesGroup!.children!.map((node) => node.label)).toEqual(["orphan"]);
+    // Empty groups may be omitted entirely rather than rendered with zero children.
+    const packagesGroup = nodes.find((node) => node.type === "group-packages");
+    expect(!packagesGroup || (packagesGroup.children ?? []).length === 0).toBe(true);
   });
 });

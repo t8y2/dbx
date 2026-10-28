@@ -32,7 +32,7 @@ jobs:
       matrix:
         chunk_index: [0, 1, 2]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Create DBX bot token
         id: app-token
@@ -47,7 +47,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
 
       - name: Backfill similar issue suggestions
         run: node .github/scripts/backfill-similar-issues.mjs

@@ -10,7 +10,7 @@ import { extractQualifiedIdentifierAt, isSqlKeyword, splitQualifiedIdentifier, s
 import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, quoteIdentifier, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
 import { matchHoverTableCandidates, resolveHoverTableLookupTarget } from "@/lib/editor/hoverTableLookup";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
-import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import * as api from "@/lib/backend/api";
 import type { SqlCompletionColumn } from "@/lib/sql/sqlCompletion";
@@ -134,7 +134,9 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
     const hoverTarget = completionMetadataTarget({
       name: lookup.tableName,
       catalog: props.catalog,
-      database: lookup.database !== props.database ? lookup.database : undefined,
+      // Keep the hovered table's own database so metadata/DDL requests never fall back
+      // to the tab's database (cross-database `b.orders` while tab database `a` is selected).
+      database: lookup.database,
       schema: lookup.schema,
     });
     if (!hoverTarget) return null;
@@ -143,7 +145,9 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
       database: hoverTarget.database,
       schema: hoverTarget.schema,
     };
-    const preferredSchema = props.schema;
+    // MySQL-family engines address `other_db.table` with the selected database
+    // cleared (no schema); the toolbar value must not leak into that lookup.
+    const preferredSchema = lookup.schemaFromQualifier ? hoverScope.schema : props.schema;
     const matchHoverTable = (tables: typeof completionMetadata.cachedTables) =>
       matchHoverTableCandidates(tables, {
         lookups: [qualifiedTableLookup, identifier],
@@ -160,7 +164,7 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
       };
       const searchRemote = async (schema: string | undefined, globalSearch: boolean) => {
         const loadedTables = await connectionStore.listCompletionTables(props.connectionId!, hoverScope.database, tableLookupName, MAX_COMPLETION_TABLES, schema, globalSearch, preferredSchema, hoverScope.catalog);
-        return schema ? scopeHoverTables(loadedTables, { ...hoverScope, schema }) : loadedTables;
+        return scopeHoverTables(loadedTables, schema ? { ...hoverScope, schema } : { ...hoverScope, schema: undefined });
       };
 
       let hoverTables = completionMetadata.cachedTables.filter((table) => (lookup.preferGlobalFirst || !hoverScope.schema ? hoverTableMatchesScope(table, { ...hoverScope, schema: undefined }) : hoverTableMatchesScope(table, hoverScope)));
@@ -211,6 +215,9 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
         const hoverDatabase = table.database ?? hoverScope.database;
         const hoverSchema = table.schema ?? hoverScope.schema ?? "";
         const hoverQualifiedName = [hoverScope.catalog, hoverDatabase, hoverSchema, table.name].filter(Boolean).join(".");
+        const databaseType = props.databaseType;
+        const preferences = { includeDdlStorage: settingsStore.editorSettings.includeDdlStorage, compactDdlSql: settingsStore.editorSettings.compactDdlSql, separateDdlIndexes: settingsStore.editorSettings.separateDdlIndexes };
+        const separateIndexes = (databaseType === "oracle" || databaseType === "oceanbase-oracle") && preferences.separateDdlIndexes;
         const objectMetadataRequest = {
           connectionId: props.connectionId,
           queryTimeoutSecs: connectionStore.getConfig(props.connectionId)?.query_timeout_secs,
@@ -219,6 +226,7 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
           tableName: table.name,
           catalog: hoverScope.catalog,
           objectType: sqlObjectNavigationSourceKind(table),
+          separateIndexes,
         };
         let sqlContent: string | undefined;
         const formatDialect = props.formatDialect ?? sqlFormatDialectForDbType(props.databaseType);
@@ -228,7 +236,7 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
         // views. Hover only removes PostgreSQL's appended access-control tail.
         try {
           const { ddl } = await loadObjectDdl(objectMetadataRequest);
-          const rawDdl = ddlForHoverPreview(applyDdlStoragePreference(ddl, props.databaseType, settingsStore.editorSettings.excludeDdlStorage));
+          const rawDdl = ddlForHoverPreview(ddl);
           if (rawDdl && rawDdl.trim()) {
             // A view's display DDL wraps the raw (often single-line) view source
             // in `CREATE ... VIEW ... AS`; the table-oriented reformatter cannot
@@ -241,12 +249,13 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
             sqlContent = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? unqualified : omitDdlIdentifierQuotes(unqualified, formatDialect);
           }
         } catch (error) {
+          if (separateIndexes) metadataLoadFailed = true;
           console.warn(`[DBX] Failed to load table DDL for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
         }
 
         // Fallback path: rebuild the DDL from cached table metadata when the
         // backend DDL is unavailable (empty result or request failure).
-        if (!sqlContent) {
+        if (!sqlContent && !separateIndexes) {
           let fullColumns: ColumnInfo[] = [];
           let fullIndexes: IndexInfo[] = [];
           let tableComment: string | undefined;
@@ -276,10 +285,20 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
             metadataLoadFailed = false;
           }
         }
+        if (sqlContent) sqlContent = applyDdlTextPreferences(sqlContent, databaseType, preferences);
+        else if (separateIndexes) metadataLoadFailed = true;
         // Re-check after async metadata load — the context menu may have opened
         // while the DDL request was in flight, and we must not display a hover
         // tooltip on top of an open context menu.
-        if (contextMenuOpen.value) return null;
+        if (
+          contextMenuOpen.value ||
+          props.connectionId !== objectMetadataRequest.connectionId ||
+          props.databaseType !== databaseType ||
+          settingsStore.editorSettings.includeDdlStorage !== preferences.includeDdlStorage ||
+          settingsStore.editorSettings.compactDdlSql !== preferences.compactDdlSql ||
+          settingsStore.editorSettings.separateDdlIndexes !== preferences.separateDdlIndexes
+        )
+          return null;
         return {
           pos: range.from,
           end: range.to,

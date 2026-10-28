@@ -48,6 +48,14 @@ export function createQueryEditorExecutionViewportOwnership() {
     recordUserInteraction() {
       if (executionActive) userInteractedDuringExecution = true;
     },
+    consumeErrorCompletion(): boolean {
+      const canLocate = executionActive && !userInteractedDuringExecution;
+      acceptedRequestId = undefined;
+      executionActive = false;
+      userInteractedDuringExecution = false;
+      cursorVisibleBeforeExecution = false;
+      return canLocate;
+    },
     consumeCompletionPreservation(): boolean {
       const preserveViewport = acceptedRequestId !== undefined || userInteractedDuringExecution || cursorVisibleBeforeExecution;
       acceptedRequestId = undefined;

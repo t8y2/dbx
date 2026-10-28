@@ -83,6 +83,13 @@ describe("update restart preparation", () => {
     expect(() => assertUpdateAllowsCommand("unknown_future_mutation")).toThrow();
     expect(() => assertUpdateAllowsCommand("save_open_tabs_state")).not.toThrow();
     expect(() => assertUpdateAllowsCommand("install_downloaded_update")).not.toThrow();
+    // Restart happens after preparation succeeds while the barrier is still up.
+    expect(() => assertUpdateAllowsCommand("relaunch_app")).not.toThrow();
+    // The preparation persist() pass must be able to flush durable drafts.
+    expect(() => assertUpdateAllowsCommand("save_default_query_content")).not.toThrow();
+    expect(() => assertUpdateAllowsCommand("save_saved_sql_editor_positions")).not.toThrow();
+    expect(() => assertUpdateAllowsCommand("sync_saved_sql_directory")).not.toThrow();
+    expect(() => assertUpdateAllowsCommand("load_saved_sql_files_for_sync")).not.toThrow();
     const event = new Event("beforeinput", { cancelable: true });
     window.dispatchEvent(event);
     expect(event.defaultPrevented).toBe(true);

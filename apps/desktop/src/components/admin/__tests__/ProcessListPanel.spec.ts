@@ -383,6 +383,7 @@ afterEach(() => {
   root?.remove();
   root = null;
   document.body.innerHTML = "";
+  vi.useRealTimers();
 });
 
 function gridButtons(): HTMLButtonElement[] {
@@ -456,6 +457,97 @@ async function mountXuguPanel() {
   await vi.waitFor(() => expect(root?.textContent).toContain("9007199254740993"));
   await nextTick();
 }
+
+describe("ProcessListPanel automatic refresh failures", () => {
+  function autoRefreshCheckbox(): HTMLInputElement {
+    const label = [...root!.querySelectorAll("label")].find((element) => element.textContent?.includes("processList.autoRefresh"));
+    return label!.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  }
+
+  async function enableAutoRefresh() {
+    const interval = root!.querySelector<HTMLInputElement>('input[type="number"]')!;
+    interval.value = "1";
+    interval.dispatchEvent(new Event("input", { bubbles: true }));
+    interval.dispatchEvent(new Event("change", { bubbles: true }));
+    const checkbox = autoRefreshCheckbox();
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    await nextTick();
+  }
+
+  it.each([
+    ["MySQL", mysqlConnection],
+    ["Oracle", oracleConnection],
+  ] as const)("pauses %s polling after a connection failure and keeps manual retry available", async (_label, connection) => {
+    if (connection.db_type === "oracle") await mountOraclePanel();
+    else await mountPanel(connection);
+    vi.useFakeTimers();
+    await enableAutoRefresh();
+    mocks.ensureConnected.mockRejectedValueOnce(new Error("connection unavailable"));
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(autoRefreshCheckbox().checked).toBe(false);
+    expect(root?.textContent).toContain("connection unavailable");
+    expect(mocks.ensureConnected).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(mocks.ensureConnected).toHaveBeenCalledTimes(2);
+
+    findGridButton("grid.refresh")?.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.ensureConnected).toHaveBeenCalledTimes(3);
+    expect(root?.textContent).not.toContain("connection unavailable");
+    expect(autoRefreshCheckbox().checked).toBe(false);
+
+    await enableAutoRefresh();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(autoRefreshCheckbox().checked).toBe(true);
+    expect(mocks.ensureConnected).toHaveBeenCalledTimes(5);
+  });
+
+  it("pauses polling when the session-list query fails after connecting", async () => {
+    await mountOraclePanel();
+    vi.useFakeTimers();
+    await enableAutoRefresh();
+    mocks.oracleListFailure = "ORA-03113: end-of-file on communication channel";
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(autoRefreshCheckbox().checked).toBe(false);
+    expect(root?.textContent).toContain(mocks.oracleListFailure);
+    const queryCount = mocks.executeQuery.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(mocks.ensureConnected).toHaveBeenCalledTimes(2);
+    expect(mocks.executeQuery).toHaveBeenCalledTimes(queryCount);
+  });
+
+  it("keeps polling the new connection after an old connection fails late", async () => {
+    const connection = await mountReactivePanel(oracleConnection);
+    vi.useFakeTimers();
+    await enableAutoRefresh();
+    let rejectOld!: (error: Error) => void;
+    mocks.ensureConnected.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectOld = reject;
+        }),
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    connection.id = "oracle-next";
+    await nextTick();
+
+    rejectOld(new Error("old connection unavailable"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(autoRefreshCheckbox().checked).toBe(true);
+    expect(root?.textContent).not.toContain("old connection unavailable");
+    expect(mocks.ensureConnected).toHaveBeenLastCalledWith("oracle-next", { skipIfClosedByUser: true });
+    const attemptCount = mocks.ensureConnected.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(mocks.ensureConnected).toHaveBeenCalledTimes(attemptCount + 1);
+    expect(autoRefreshCheckbox().checked).toBe(true);
+  });
+});
 
 describe("ProcessListPanel batch terminate", () => {
   it.each([

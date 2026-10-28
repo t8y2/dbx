@@ -472,6 +472,7 @@ impl LenientExportErrors {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExportStatus {
+    PreparingSnapshot,
     Running,
     Writing,
     Done,
@@ -2881,6 +2882,12 @@ pub async fn begin_database_backup_snapshot_core_for_export(
     database: &str,
     export_id: Option<&str>,
 ) -> Result<DatabaseBackupSnapshot, String> {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        connection_id,
+        crate::query::mysql_data_charset_policy::EXPORT_UNSUPPORTED,
+    )
+    .await?;
     let db_type = state
         .configs
         .read()
@@ -2888,8 +2895,10 @@ pub async fn begin_database_backup_snapshot_core_for_export(
         .get(connection_id)
         .map(|config| config.db_type)
         .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
-    if !matches!(db_type, DatabaseType::Mysql | DatabaseType::Postgres) {
-        return Err("Consistent database backup snapshots are only supported for MySQL and PostgreSQL".to_string());
+    if !matches!(db_type, DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::OpenGauss) {
+        return Err(
+            "Consistent database backup snapshots are only supported for MySQL, PostgreSQL, and openGauss".to_string()
+        );
     }
 
     let session_id = if let Some(export_id) = export_id {
@@ -2919,7 +2928,7 @@ pub async fn begin_database_backup_snapshot_core_for_export(
         crate::query::begin_database_backup_snapshot(state, connection_id, database).await?
     };
 
-    let schemas_result = if matches!(db_type, DatabaseType::Postgres) {
+    let schemas_result = if matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss) {
         const POSTGRES_BACKUP_SCHEMAS_SQL: &str = "SELECT n.nspname FROM pg_catalog.pg_namespace n \
              WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
              AND n.nspname NOT LIKE 'pg_toast_temp_%' \
@@ -3006,7 +3015,7 @@ fn database_export_metadata_prefetch_concurrency(db_type: DatabaseType) -> usize
     // PostgreSQL exports can hold a snapshot connection while metadata and UI
     // requests share the base pool. Keep enough capacity available for normal
     // browsing instead of filling nearly the entire ten-connection pool.
-    if db_type == DatabaseType::Postgres {
+    if matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss) {
         4
     } else {
         8
@@ -3695,6 +3704,12 @@ pub async fn export_database_sql_core(
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        &request.connection_id,
+        crate::query::mysql_data_charset_policy::EXPORT_UNSUPPORTED,
+    )
+    .await?;
     let db_type = state
         .configs
         .read()
@@ -3705,11 +3720,12 @@ pub async fn export_database_sql_core(
     // Keep the large export state machine on the heap. Besides making the
     // caller future small, this prevents the metadata-prefetch locals from
     // exhausting the bounded stack used by test and runtime worker threads.
-    let result = if matches!(db_type, DatabaseType::Postgres) && request.schema.trim().is_empty() {
-        Box::pin(export_postgres_all_schemas_sql_core(state, request, &on_progress)).await
-    } else {
-        Box::pin(export_database_sql_core_inner(state, request, &on_progress)).await
-    };
+    let result =
+        if matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss) && request.schema.trim().is_empty() {
+            Box::pin(export_postgres_all_schemas_sql_core(state, request, &on_progress)).await
+        } else {
+            Box::pin(export_database_sql_core_inner(state, request, &on_progress)).await
+        };
     let metadata_session_id = database_export_client_session_id(&request.export_id);
     if let Err(error) =
         state.close_metadata_session_pool(&request.connection_id, Some(&request.database), &metadata_session_id).await
@@ -6157,6 +6173,7 @@ mod tests {
     #[test]
     fn postgres_metadata_prefetch_reserves_pool_capacity() {
         assert_eq!(database_export_metadata_prefetch_concurrency(DatabaseType::Postgres), 4);
+        assert_eq!(database_export_metadata_prefetch_concurrency(DatabaseType::OpenGauss), 4);
         assert_eq!(database_export_metadata_prefetch_concurrency(DatabaseType::Mysql), 8);
     }
 

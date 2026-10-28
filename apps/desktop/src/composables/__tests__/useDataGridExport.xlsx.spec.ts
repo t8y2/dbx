@@ -4,6 +4,7 @@ import { computed, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDataGridExport, type UseDataGridExportOptions } from "@/composables/useDataGridExport";
 import type { QueryResult } from "@/types/database";
+import { useExportTracker } from "@/composables/useExportTracker";
 
 const mocks = vi.hoisted(() => ({
   exportQueryResultsXlsx: vi.fn(),
@@ -42,16 +43,6 @@ vi.mock("@/composables/useDataGridExtractor", () => ({
     previewWithExtractor: vi.fn(),
     previewWithPreference: vi.fn(),
     canCopyWithExtractor: vi.fn(),
-  }),
-}));
-
-vi.mock("@/composables/useExportTracker", () => ({
-  useExportTracker: () => ({
-    addTask: vi.fn(),
-    updateTableExportTask: vi.fn(),
-    registerTaskCancelHandler: vi.fn(),
-    unregisterTaskCancelHandler: vi.fn(),
-    removeTask: vi.fn(),
   }),
 }));
 
@@ -121,6 +112,8 @@ function createOptions(): UseDataGridExportOptions {
 describe("useDataGridExport XLSX headers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    const tracker = useExportTracker();
+    for (const task of tracker.tasks.value) tracker.removeTask(task.exportId);
   });
 
   it("maps combined headers independently for every result sheet", async () => {

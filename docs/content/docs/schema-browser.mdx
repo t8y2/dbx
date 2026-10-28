@@ -61,7 +61,7 @@ Object-tree search can match:
 - Object paths, column comments, and table comments
 - Loaded metadata and complete cached table/view indexes
 
-The main sidebar search reuses table/view indexes from memory or the persisted schema cache. When an index is missing, the first search builds it for the eligible scopes in the active, connected datasource. Further edits filter the index locally without reloading the datasource tree. The “Search only opened databases” setting controls which databases are indexed; when none are open, all visible databases are eligible.
+The main sidebar search reuses table/view indexes from memory or the persisted schema cache. When an index is missing, the first search builds it for the eligible scopes in the active, connected datasource. Further edits filter the index locally without reloading the datasource tree. With “Search only opened databases” enabled, search does not load objects from unopened databases, even when none are open. Connection and database names remain searchable, and you can expand a database to load its objects. Turn the setting off to search every visible database in the active connection.
 
 Other supported object types (including procedures, functions, triggers, sequences, and packages) use debounced, on-demand remote search, even when their group has never been expanded or the object is beyond its first page. Matching pages are cached in memory by keyword and full scope; filtered results are not treated as a complete schema index. Changing the input cancels the previous remote request and discards late results. Search results do not replace the loaded browsing tree.
 
@@ -99,6 +99,16 @@ Object metadata display is configurable. In large schemas, show only the extra i
 | Open specialized object | Opens Redis, MongoDB, vector, HBase, MQ, etcd, ZooKeeper, or Nacos workspaces |
 
 Table, object, and data tabs use distinct identities so same-named objects do not incorrectly reuse a data tab.
+
+## Open Triggers from a Schema or Owning Object
+
+For Oracle, OceanBase Oracle, and DM8, drivers that provide exact trigger metadata expose a schema-level **Triggers** group as well as triggers under their actual owning table or view. Same-named triggers with different owners remain separate objects. Trigger owner, owning-object owner, and execution schema are shown separately rather than inferred from tree labels.
+
+- Open source from the trigger menu using the configured dialog or source-tab mode.
+- Create from a schema, an empty trigger group, or an owning table/view menu. Choose the name and a supported scope, then generate, edit, and preview the complete definition. Non-table triggers show their actual scope without an invented parent table.
+- Menus expose enable, disable, compile, and drop according to the driver's capabilities. Tree batch deletion retains same-type selection: review all SQL before serial execution. An unverified step stops the remaining steps.
+
+An unknown result keeps the original row. Use **Verify without writing** in the error details to inspect the database before attempting another deletion. See [Object Browser](/en/docs/object-browser#inspect-and-edit-oracle-family-triggers) for state meanings and source recovery.
 
 ## Context Menus and Batch Actions
 

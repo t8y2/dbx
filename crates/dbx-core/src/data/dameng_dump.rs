@@ -8,8 +8,9 @@
 //!
 //! The password necessarily rides on the command line (Dameng requires `USERID`
 //! as the first argument — see the dbx-sql module docs), so the spawned
-//! process must stay short-lived; `PARFILE` keeps everything else out of the
-//! process list.
+//! process must stay short-lived; `PARFILE` keeps the schema/table parameters out
+//! of the process list, while FILE/LOG ride on the command line so Windows paths
+//! keep their native separators (#13585).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

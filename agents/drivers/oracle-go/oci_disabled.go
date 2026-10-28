@@ -4,12 +4,35 @@ package main
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 )
 
 // ociBuildEnabled 报告当前二进制是否包含 OCI（thick）支持：
 // thin 版本（默认构建，跨平台、CGO_ENABLED=0）不包含。
 func ociBuildEnabled() bool { return false }
+
+func plDebugNativeOCINumber(string) (interface{}, error) {
+	return nil, errors.New("this Oracle agent build does not include OCI NUMBER support")
+}
+
+func plDebugNativeOCILobInput(plDebugLobInput, bool) (interface{}, error) {
+	return nil, errors.New("this Oracle agent build does not include OCI LOB support")
+}
+
+func newPLDebugOCILobOutput(bool) (*plDebugLobOutput, error) {
+	return nil, errors.New("this Oracle agent build does not include OCI LOB support")
+}
+
+func newPLDebugOCIClobOutput() (*plDebugClobOutput, error) {
+	return nil, errors.New("this Oracle agent build does not include OCI CLOB support")
+}
+
+func configurePLDebugOCIStatement(driver.Stmt) error { return nil }
+
+func newPLDebugOCIConnector(params connectParams) (driver.Connector, error) {
+	return nil, errors.New("this Oracle agent build does not include OCI support")
+}
 
 // openOCIDB 在未带 `oci` 构建标记的二进制里给出明确错误。
 //

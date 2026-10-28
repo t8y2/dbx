@@ -64,10 +64,13 @@ describe("transferObjectKinds", () => {
     expect(isSameTransferFamily("sqlserver", "mysql")).toBe(false);
   });
 
-  it("allows Xugu transfer only between two Xugu connections", () => {
+  it("allows native MySQL to Xugu tables without opening other Xugu directions", () => {
     expect(isTransferPairSupported("xugu", "xugu")).toBe(true);
     expect(isTransferPairSupported("xugu", "postgres")).toBe(false);
-    expect(isTransferPairSupported("mysql", "xugu")).toBe(false);
+    expect(isTransferPairSupported("mysql", "xugu")).toBe(true);
+    expect(isTransferPairSupported("xugu", "mysql")).toBe(false);
+    expect(isTransferPairSupported("doris", "xugu")).toBe(false);
+    expect(isTransferPairSupported("starrocks", "xugu")).toBe(false);
     expect(isTransferPairSupported("mysql", "postgres")).toBe(true);
     expect(isTransferPairSupported(undefined, "xugu")).toBe(true);
   });

@@ -46,7 +46,13 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean();
     private ScheduledExecutorService maintenance;
     private boolean blobBindStatements;
+    private boolean nativeJobSessions;
+    private boolean nativeLegacyJobs;
     private boolean exactMetadataIdentity;
+    private boolean nativePlDebug;
+    private boolean nativeValueOperationStatus;
+    private boolean nativeBreakpointOperationStatus;
+    private boolean nativeRetainedResults;
 
     public MultiSessionJsonRpcServer(Supplier<? extends DatabaseAgent> agentFactory) {
         this(agentFactory, new JdbcConnectionPoolRegistry(), RuntimeLimits.defaults());
@@ -99,8 +105,42 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
         return server;
     }
 
+    public static MultiSessionJsonRpcServer withNativeJobSessions(Supplier<? extends DatabaseAgent> agentFactory) {
+        MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(agentFactory);
+        server.nativeJobSessions = true;
+        return server;
+    }
+
+    public static MultiSessionJsonRpcServer withNativeLegacyJobs(Supplier<? extends DatabaseAgent> agentFactory, boolean blobBindings) {
+        MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(agentFactory);
+        server.nativeLegacyJobs = true;
+        server.blobBindStatements = blobBindings;
+        return server;
+    }
+
     public MultiSessionJsonRpcServer withExactMetadataIdentity() {
         exactMetadataIdentity = true;
+        return this;
+    }
+
+    /** Opt in only after implementing native calls, stable start IDs and no helper DDL. */
+    public MultiSessionJsonRpcServer withNativePlDebug() {
+        return withNativePlDebug(false);
+    }
+
+    public MultiSessionJsonRpcServer withNativePlDebug(boolean valueOperationStatus) {
+        nativePlDebug = true;
+        nativeValueOperationStatus = valueOperationStatus;
+        return this;
+    }
+
+    public MultiSessionJsonRpcServer withBreakpointOperationStatus() {
+        nativeBreakpointOperationStatus = true;
+        return this;
+    }
+
+    public MultiSessionJsonRpcServer withRetainedPlDebugResults() {
+        nativeRetainedResults = true;
         return this;
     }
 
@@ -114,6 +154,12 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
             while ((line = reader.readLine()) != null) {
                 JsonObject request = JsonParser.parseString(line).getAsJsonObject();
                 String method = request.get("method").getAsString();
+                try {
+                    JsonRpcServer.validateTypedDebugWire(line, request);
+                } catch (AgentRpcError error) {
+                    writeResponse(errorResponse(request.get("id"), error));
+                    continue;
+                }
                 if (AgentProtocol.METHOD_SHUTDOWN.equals(method)) {
                     writeResponse(handleRequest(request));
                     return;
@@ -123,12 +169,22 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
         } catch (Exception e) {
             throw new RuntimeException(e);
         } finally {
-            close();
+            try {
+                close();
+            } finally {
+                poolRegistry.awaitDedicatedDrain();
+            }
         }
     }
 
     String handleRequest(String line) {
-        return gson.toJson(handleRequest(JsonParser.parseString(line).getAsJsonObject()));
+        JsonObject request = JsonParser.parseString(line).getAsJsonObject();
+        try {
+            JsonRpcServer.validateTypedDebugWire(line, request);
+        } catch (AgentRpcError error) {
+            return gson.toJson(errorResponse(request.get("id"), error));
+        }
+        return gson.toJson(handleRequest(request));
     }
 
     void executeRequest(JsonObject request, Consumer<JsonObject> responseConsumer) {
@@ -152,7 +208,9 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
             Object result;
             if (AgentProtocol.METHOD_HANDSHAKE.equals(method)) {
                 result = sessionHandlerFactory == null
-                    ? AgentProtocol.withExactMetadataIdentity(AgentProtocol.multiSessionJdbcHandshakeResult(blobBindStatements), exactMetadataIdentity)
+                    ? AgentProtocol.withExactMetadataIdentity(AgentProtocol.withNativePlDebug(
+                        AgentProtocol.multiSessionJdbcHandshakeResult(blobBindStatements, nativeJobSessions, nativeLegacyJobs),
+                        nativePlDebug, nativeValueOperationStatus, nativeBreakpointOperationStatus, nativeRetainedResults), exactMetadataIdentity)
                     : customHandshake();
             } else if (AgentProtocol.METHOD_OPEN_SESSION.equals(method)) {
                 result = openSession(requiredSessionId(params), params);
@@ -197,11 +255,9 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
             session = new Session(sessionHandlerFactory.get());
         } else {
             DatabaseAgent agent = agentFactory.get();
-            if (poolRegistry.isEnabled()
-                && agent instanceof AbstractJdbcAgent jdbcAgent
-                && jdbcAgent.supportsConnectionPooling()) {
+            if (agent instanceof AbstractJdbcAgent jdbcAgent) {
                 jdbcAgent.attachConnectionPoolRegistry(poolRegistry);
-                ensureMaintenanceStarted();
+                if (jdbcAgent.usesConnectionPool()) ensureMaintenanceStarted();
             }
             session = new Session(new JsonRpcServer(agent));
         }
@@ -416,6 +472,12 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
 
         private Object handle(String method, JsonObject params) throws Exception {
             requireActive();
+            // Debug sessions use their own physical connections and short operation
+            // guard. Let that guard reject busy controls rather than queueing them
+            // behind CONTINUE (including a duplicate start behind its first call).
+            if (handler == null && AgentProtocol.PL_DEBUG_SESSION_METHODS.contains(method)) {
+                return server.dispatchForRuntime(method, params);
+            }
             lock.lock();
             try {
                 requireActive();

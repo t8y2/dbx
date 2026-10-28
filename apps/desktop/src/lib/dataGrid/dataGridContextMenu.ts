@@ -50,6 +50,8 @@ export function createDataGridFilterSubmenu(options: {
   apply: (mode: "equals" | "not-equals" | "like" | "not-like" | "less-than" | "greater-than" | "is-null" | "is-not-null") => void;
   applyCustom: () => void;
   clear: () => void;
+  /** Result grids filter in memory and have no SQL condition builder (#13237). */
+  hideCustom?: boolean;
 }): DataGridContextMenuItem {
   const { labels } = options;
   return {
@@ -62,7 +64,7 @@ export function createDataGridFilterSubmenu(options: {
       { label: labels.notLike, action: () => options.apply("not-like") },
       { label: labels.lessThan, action: () => options.apply("less-than") },
       { label: labels.greaterThan, action: () => options.apply("greater-than") },
-      { label: labels.custom, action: () => options.applyCustom() },
+      ...(options.hideCustom ? [] : [{ label: labels.custom, action: () => options.applyCustom() }]),
       { label: "", separator: true },
       { label: labels.isNull, action: () => options.apply("is-null") },
       { label: labels.isNotNull, action: () => options.apply("is-not-null") },

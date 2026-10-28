@@ -246,7 +246,7 @@ fn maps_table_pagination_strategy_by_database_type() {
     assert_eq!(table_pagination_strategy(Some(DatabaseType::OceanbaseOracle)), TablePaginationStrategy::Rownum);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Questdb)), TablePaginationStrategy::QuestDbLimit);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Oracle)), TablePaginationStrategy::Rownum);
-    assert_eq!(table_pagination_strategy(Some(DatabaseType::Oscar)), TablePaginationStrategy::Rownum);
+    assert_eq!(table_pagination_strategy(Some(DatabaseType::Oscar)), TablePaginationStrategy::LimitOffset);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Cassandra)), TablePaginationStrategy::AgentMaxRows);
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Cassandra), PaginationContext::BoundedRead),
@@ -276,6 +276,38 @@ fn maps_table_pagination_strategy_by_database_type() {
     // Both Spanner dialects support `LIMIT n OFFSET m`; pin the fallback.
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Spanner)), TablePaginationStrategy::LimitOffset);
     assert_eq!(table_pagination_strategy(None), TablePaginationStrategy::LimitOffset);
+}
+
+#[test]
+fn oscar_table_data_pages_use_one_limit_pagination_form_without_rownum() {
+    let options = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Oscar),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "USERS".to_string(),
+        table_type: Some("TABLE".to_string()),
+        primary_keys: vec!["ID".to_string()],
+        columns: vec!["ID".to_string(), "NAME".to_string()],
+        order_by: Some("\"ID\" ASC".to_string()),
+        limit: Some(100),
+        offset: Some(0),
+        ..Default::default()
+    };
+
+    // OSCAR rejects a statement that combines ROWNUM with a LIMIT. The JDBC
+    // agent always caps table-data statements with setMaxRows(), so table
+    // previews must not also wrap the statement in ROWNUM: a later page's
+    // ROWNUM bound (offset + limit) exceeds the driver cap and the server
+    // reports "rownum and limit cannot be mixed" (#13515).
+    let first_page = build_table_data_select_sql(options.clone());
+    assert_eq!(first_page, "SELECT \"ID\", \"NAME\" FROM \"SYSDBA\".\"USERS\" ORDER BY \"ID\" ASC LIMIT 100;");
+    assert!(!first_page.to_ascii_uppercase().contains("ROWNUM"), "{first_page}");
+
+    let second_page = build_table_data_select_sql(TableDataSelectSqlOptions { offset: Some(100), ..options });
+    assert_eq!(
+        second_page,
+        "SELECT \"ID\", \"NAME\" FROM \"SYSDBA\".\"USERS\" ORDER BY \"ID\" ASC LIMIT 100 OFFSET 100;"
+    );
+    assert!(!second_page.to_ascii_uppercase().contains("ROWNUM"), "{second_page}");
 }
 
 #[test]
@@ -577,6 +609,32 @@ fn jdbc_table_data_qualifies_schema_without_forcing_identifier_quotes() {
             ..Default::default()
         }),
         "SELECT * FROM STUDENT;"
+    );
+}
+
+#[test]
+fn opengauss_table_data_uses_compatibility_identifier_quote() {
+    // openGauss keeps the PostgreSQL catalog but switches identifier quoting with
+    // the database compatibility mode: B/MySQL databases reject the double quotes
+    // that A/PG databases require (#13596).
+    let base = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::OpenGauss),
+        schema: Some("dbx-demo".to_string()),
+        table_name: "order".to_string(),
+        limit: Some(25),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            identifier_quote: Some("`".to_string()),
+            ..base.clone()
+        }),
+        "SELECT * FROM `dbx-demo`.`order` LIMIT 25;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions { identifier_quote: Some("\"".to_string()), ..base }),
+        "SELECT * FROM \"dbx-demo\".\"order\" LIMIT 25;"
     );
 }
 
@@ -1454,6 +1512,43 @@ fn explicit_table_data_order_is_preserved() {
         }),
         "SELECT * FROM \"public\".\"country_gdp\" ORDER BY \"iso3\" ASC LIMIT 100;"
     );
+}
+
+#[test]
+fn greenplum_servers_do_not_receive_the_system_column_locator() {
+    let base = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "ao_table".to_string(),
+        table_type: Some("TABLE".to_string()),
+        columns: vec!["id".to_string()],
+        limit: Some(20),
+        include_row_id: true,
+        ..Default::default()
+    };
+
+    // Greenplum reports itself through version(); its segments reject
+    // tableoid/ctid/xmin with "cannot retrieve a system column" (#13227).
+    let greenplum = build_table_data_select_sql(TableDataSelectSqlOptions {
+        server_version: Some("PostgreSQL 9.4.24 (Greenplum Database 6.18.2 build commit:4b1c8322)".to_string()),
+        ..base.clone()
+    });
+    assert_eq!(greenplum, "SELECT * FROM \"public\".\"ao_table\" LIMIT 20;");
+
+    // Real Cloudberry `version()` never contains the "greenplum" word.
+    let cloudberry = build_table_data_select_sql(TableDataSelectSqlOptions {
+        server_version: Some("PostgreSQL 14.4 (Cloudberry Database 1.6.0 build 6f2c4a1)".to_string()),
+        ..base.clone()
+    });
+    assert_eq!(cloudberry, "SELECT * FROM \"public\".\"ao_table\" LIMIT 20;");
+
+    // Plain PostgreSQL and unknown versions keep the locator.
+    assert!(build_table_data_select_sql(base.clone()).contains("\"__DBX_ROWID\""));
+    assert!(build_table_data_select_sql(TableDataSelectSqlOptions {
+        server_version: Some("PostgreSQL 16.3".to_string()),
+        ..base
+    })
+    .contains("\"__DBX_ROWID\""));
 }
 
 #[test]

@@ -799,6 +799,14 @@ async fn serve() -> Result<(), String> {
         .route("/schema/object-source", get(routes::schema::get_object_source))
         .route("/schema/event-info", get(routes::schema::get_event_info))
         .route("/schema/custom-type-details", get(routes::schema::get_custom_type_details))
+        .route("/schema/native-jobs/context", post(routes::native_jobs::open_context))
+        .route("/schema/native-jobs/list", post(routes::native_jobs::list))
+        .route("/schema/native-jobs/references", post(routes::native_jobs::references))
+        .route("/schema/native-jobs/read", post(routes::native_jobs::read))
+        .route("/schema/native-jobs/prepare", post(routes::native_jobs::prepare))
+        .route("/schema/native-jobs/apply", post(routes::native_jobs::apply))
+        .route("/schema/native-jobs/status", post(routes::native_jobs::status))
+        .route("/schema/native-jobs/cancel", post(routes::native_jobs::cancel))
         .route("/schema/oracle-type-data", post(routes::schema::verify_oracle_type_data))
         .route("/schema/oracle-type-evolution", post(routes::schema::prepare_oracle_type_evolution))
         .route(
@@ -862,6 +870,7 @@ async fn serve() -> Result<(), String> {
         .route("/tab-runtime-cache/prune", post(routes::tab_runtime_cache::prune_tab_runtime_cache))
         .route("/tab-runtime-cache/owner", delete(routes::tab_runtime_cache::delete_tab_runtime_cache_owner))
         // Query
+        .merge(routes::pl_debug::router())
         .route("/query/execute", post(routes::query::execute_query))
         .route("/query/execute-conditional-update", post(routes::query::execute_conditional_update))
         .route("/query/execute-multi", post(routes::query::execute_multi))
@@ -916,6 +925,7 @@ async fn serve() -> Result<(), String> {
             "/query/validate-oracle-executable-object-source",
             post(routes::query::validate_oracle_executable_object_source),
         )
+        .route("/query/prepare-oracle-trigger-sql", post(routes::query::prepare_oracle_trigger_sql))
         .route(
             "/query/fingerprint-oracle-routine-object-source",
             post(routes::query::fingerprint_oracle_routine_object_source),
@@ -1005,6 +1015,7 @@ async fn serve() -> Result<(), String> {
         .route("/redis/list-databases", post(routes::redis::list_databases))
         .route("/redis/scan-keys", post(routes::redis::scan_keys))
         .route("/redis/scan-keys-batch", post(routes::redis::scan_keys_batch))
+        .route("/redis/key-metadata-batch", post(routes::redis::key_metadata_batch))
         .route("/redis/scan-values", post(routes::redis::scan_values))
         .route("/redis/get-value", post(routes::redis::get_value))
         .route("/redis/get-raw-value", post(routes::redis::get_raw_value))
@@ -1486,6 +1497,14 @@ async fn serve() -> Result<(), String> {
             "/app-settings/mcp-policy",
             get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
         )
+        .route("/app-settings/mcp-tool-catalog", get(routes::app_settings::load_mcp_tool_catalog))
+        .route("/app-settings/mcp-access-policy", get(routes::app_settings::load_mcp_access_policy))
+        .route("/app-settings/mcp-access-policy/recover", post(routes::app_settings::reset_invalid_mcp_access_policy))
+        .route("/app-settings/mcp-access-policy/plugin-scope", put(routes::app_settings::set_mcp_plugin_scope_rule))
+        .route("/app-settings/plugin-mcp", get(routes::app_settings::list_plugin_mcp_views))
+        .route("/app-settings/plugin-mcp/view", post(routes::app_settings::load_plugin_mcp_view))
+        .route("/app-settings/plugin-mcp/scopes", post(routes::app_settings::list_plugin_mcp_scopes))
+        .route("/app-settings/plugin-mcp/grant", put(routes::app_settings::save_plugin_mcp_grant))
         .route("/app-settings/mcp-http-status", get(routes::app_settings::load_web_mcp_http_status))
         .route("/app-settings/mcp-http", put(routes::app_settings::save_web_mcp_http_settings))
         .route("/app-settings/mcp-http/rotate-token", post(routes::app_settings::rotate_web_mcp_token))

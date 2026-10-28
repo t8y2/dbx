@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/backend/api", () => mocks);
 
-import { cancelObjectMetadataLoadsForConnection, getObjectMetadataCacheDebugStateForTests, invalidateObjectMetadataCache, loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
+import { cancelObjectMetadataLoadsForConnection, getObjectMetadataCacheDebugStateForTests, invalidateObjectMetadataCache, invalidateObjectMetadataFacet, loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { isObjectCacheInvalidationError } from "@/lib/metadata/objectCacheInvalidationError";
 import { clearMetadataRuntimeCache } from "@/lib/metadata/metadataRuntimeCache";
 
@@ -132,6 +132,55 @@ describe("objectMetadataCache", () => {
     await loadObjectMetadataFacet({ ...request, objectType: "VIEW" }, "columns", viewLoader);
     expect(tableLoader).toHaveBeenCalledTimes(1);
     expect(viewLoader).toHaveBeenCalledTimes(1);
+  });
+
+  it("separates exact trigger snapshots without changing other facet keys and invalidates both modes together", async () => {
+    const exactRequest = { ...request, oracleTriggerContract: 1 as const };
+    const oldLoader = vi.fn().mockResolvedValue(["legacy-body"]);
+    const exactLoader = vi.fn().mockResolvedValue(["exact-metadata"]);
+    expect((await loadObjectMetadataFacet(request, "triggers", oldLoader)).value).toEqual(["legacy-body"]);
+    expect((await loadObjectMetadataFacet(exactRequest, "triggers", exactLoader)).value).toEqual(["exact-metadata"]);
+    expect(exactLoader).toHaveBeenCalledTimes(1);
+    const columns = vi.fn().mockResolvedValue(["column"]);
+    await loadObjectMetadataFacet(request, "columns", columns);
+    await loadObjectMetadataFacet(exactRequest, "columns", columns);
+    expect(columns).toHaveBeenCalledTimes(1);
+    await invalidateObjectMetadataCache(request);
+    await loadObjectMetadataFacet(exactRequest, "triggers", exactLoader);
+    await loadObjectMetadataFacet(request, "triggers", oldLoader);
+    expect(exactLoader).toHaveBeenCalledTimes(2);
+    expect(oldLoader).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([false, true])("retires all trigger identity and contract variants from an exact=%s facet request", async (exactIdentity) => {
+    const variants = [request, { ...request, oracleTriggerContract: 1 as const }, { ...request, exactIdentity: true }, { ...request, exactIdentity: true, oracleTriggerContract: 1 as const }];
+    for (const variant of variants) await loadObjectMetadataFacet(variant, "triggers", async () => ["old"]);
+    await loadObjectMetadataFacet(request, "columns", async () => ["column"]);
+    await loadObjectMetadataFacet({ ...request, catalog: "other" }, "triggers", async () => ["other"]);
+    await invalidateObjectMetadataFacet({ ...request, exactIdentity }, "triggers", { strict: true });
+    for (const variant of variants) expect((await loadObjectMetadataFacet(variant, "triggers", async () => ["new"])).value).toEqual(["new"]);
+    expect((await loadObjectMetadataFacet(request, "columns", async () => ["wrong"])).value).toEqual(["column"]);
+    expect((await loadObjectMetadataFacet({ ...request, catalog: "other" }, "triggers", async () => ["wrong"])).value).toEqual(["other"]);
+  });
+
+  it("retires exact in-flight trigger loads even when persisted deletion fails", async () => {
+    const exact = { ...request, exactIdentity: true, oracleTriggerContract: 1 as const };
+    let resolve!: (value: string[]) => void;
+    const loader = vi.fn(
+      () =>
+        new Promise<string[]>((done) => {
+          resolve = done;
+        }),
+    );
+    const pending = loadObjectMetadataFacet(exact, "triggers", loader);
+    const retired = expect(pending).rejects.toThrow();
+    await vi.waitFor(() => expect(loader).toHaveBeenCalledOnce());
+    mocks.deleteSchemaCachePrefix.mockRejectedValueOnce(new Error("storage unavailable"));
+    await expect(invalidateObjectMetadataFacet(request, "triggers", { strict: true })).rejects.toMatchObject({ name: "ObjectCacheInvalidationError" });
+    await retired;
+    resolve(["late"]);
+    await Promise.resolve();
+    expect((await loadObjectMetadataFacet(exact, "triggers", async () => ["fresh"])).value).toEqual(["fresh"]);
   });
 
   it("persists a remote facet and force bypasses disk", async () => {

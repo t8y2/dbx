@@ -59,6 +59,7 @@ interface ResolvedDataGridExtraction {
 const NUMERIC_COLUMN_TYPES = new Set(["int", "integer", "smallint", "bigint", "tinyint", "mediumint", "decimal", "numeric", "number", "float", "double", "real", "serial", "smallserial", "bigserial", "money", "smallmoney", "dec", "fixed"]);
 
 interface UseDataGridExtractorOptions {
+  allowExtractor?: (extractor: DataGridCopyExtractorId) => boolean;
   columns: ComputedRef<string[]>;
   displayItems: ComputedRef<ExtractorRowItem[]>;
   allColumns: ComputedRef<string[]>;
@@ -295,7 +296,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const effectiveValueFormat = descriptor.category === "sql" ? "native" : extractorOptions.valueFormat === "default" ? (extractor === "dbunit" || extractor === "php" ? "native" : "legacy") : extractorOptions.valueFormat;
     const rows = rawRows.map((row) =>
       row.map((value, index) => {
-        const formatNumbers = ["csv", "csv-with-headers", "dsv"].includes(extractor) ? extractorOptions.dsv.formatNumbers : "inherit";
+        const formatNumbers = ["csv", "csv-with-headers", "dsv", "tsv", "tsv-with-headers"].includes(extractor) ? extractorOptions.dsv.formatNumbers : "inherit";
         const cellFormat = formatNumbers !== "inherit" && isNumericColumnType(columnTypes[index]) ? formatNumbers : effectiveValueFormat;
         return extractorCellValue(value, columnTypes[index], normalizeValues, keepUnsafeJsonText, presentBinaryText, index, requiredSourceIndexes[index], cellFormat);
       }),
@@ -347,7 +348,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       keepUnsafeJsonText,
       presentBinaryText,
       valueFormat: effectiveValueFormat,
-      formatNumbers: ["csv", "csv-with-headers", "dsv"].includes(extractor) ? extractorOptions.dsv.formatNumbers : "inherit",
+      formatNumbers: ["csv", "csv-with-headers", "dsv", "tsv", "tsv-with-headers"].includes(extractor) ? extractorOptions.dsv.formatNumbers : "inherit",
       rawRows,
     });
     return request;
@@ -411,6 +412,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   }
 
   function canCopyWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): boolean {
+    if (options.allowExtractor?.(extractor) === false) return false;
     const contextPredicateTarget = hasContextPredicateTarget(extractor);
     if (hasUnsupportedDiscreteSelection.value && !contextPredicateTarget) return false;
     if (!options.hasRowSelection.value && !options.hasCellSelection.value && !options.contextCell.value) return false;
@@ -486,6 +488,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   }
 
   async function extractWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, maxRows?: number): Promise<ResolvedDataGridExtraction | null> {
+    if (options.allowExtractor?.(extractor) === false) return null;
     const initialRequest = buildRequest(extractor, extractorOptions);
     if (!initialRequest) return null;
     const rowLimit = maxRows === undefined ? undefined : Math.min(initialRequest.rows.length, maxRows);

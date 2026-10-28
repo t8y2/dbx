@@ -212,7 +212,7 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     hoisted.shortcuts = defaults();
     const host = await mountShortcutsTab();
 
-    expect(groupLabels(host)).toEqual(["settings.shortcutScopeGlobal", "settings.shortcutScopeEditor", "settings.shortcutScopeGrid", "settings.shortcutScopeSearch", "settings.shortcutScopeSidebar"]);
+    expect(groupLabels(host)).toEqual(["settings.shortcutScopeGlobal", "plDebug.start.title", "settings.shortcutScopeEditor", "settings.shortcutScopeGrid", "settings.shortcutScopeSearch", "settings.shortcutScopeSidebar"]);
 
     // Scope moved into the group header — rows must not repeat it.
     const rendered = rows(host);
@@ -403,13 +403,14 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
 
     const scopes = new Set(SHORTCUT_DEFINITIONS.map((definition) => definition.scope));
     const rendered = groupLabels(host).map((label) => {
+      if (label === "plDebug.start.title") return "debug";
       const raw = label.replace("settings.shortcutScope", "");
       return raw.charAt(0).toLowerCase() + raw.slice(1);
     });
 
     // Only scopes that actually have actions render, but whatever renders must be
     // a sub-sequence of the dispatch order (global -> editor -> grid -> search -> sidebar).
-    const dispatchOrder = ["global", "editor", "grid", "search", "sidebar"];
+    const dispatchOrder = ["global", "debug", "editor", "grid", "search", "sidebar"];
     for (const scope of rendered) expect(scopes).toContain(scope);
     const positions = rendered.map((scope) => dispatchOrder.indexOf(scope));
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
@@ -423,8 +424,8 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     const crossBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-warning/30"]');
     const conflictBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-destructive/25"]');
 
-    // 未搜索：全局口径（默认键位 6 组跨域同键），且默认无同作用域阻断冲突。
-    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=6");
+    // 调试 stepOver 与 quickOpen 共用 Mod+P，增加一组跨域提示，不阻断应用。
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=7");
     expect(conflictBadge()).toBeNull();
 
     const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
@@ -447,7 +448,7 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     search.value = "";
     search.dispatchEvent(new Event("input", { bubbles: true }));
     await flushAsyncUpdates();
-    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=6");
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=7");
   });
 
   it("scopes the red same-scope badge to the search results while the footer gate stays global", async () => {

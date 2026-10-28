@@ -1,9 +1,12 @@
 package com.dbx.agent.mongodb;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -43,18 +46,32 @@ import com.mongodb.client.model.UpdateOneModel;
 import com.mongodb.client.model.WriteModel;
 import com.mongodb.client.result.UpdateResult;
 import java.io.FileInputStream;
+import java.io.InputStream;
 import java.lang.reflect.Proxy;
+import java.net.InetAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.PrivateKey;
+import java.security.Security;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLServerSocket;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import org.bson.BsonDocument;
 import org.bson.BsonRegularExpression;
 import org.bson.Document;
@@ -1737,6 +1754,377 @@ class MongoAgentTest {
             caPemPath.toString(), clientPemPath.toString(), clientKeyPath.toString());
 
         assertNotNull(ctx);
+    }
+
+    // ─── TLS: URL params and timeouts (issue #10657) ───
+
+    @Test
+    void formModeWithTlsAllowInvalidCertificatesEnablesSslAndTrustsSelfSignedCert() throws Exception {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("ssl", true);
+        connection.addProperty("url_params", "tlsAllowInvalidCertificates=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        // Only tlsInsecure skips hostname verification; cert-only skips just the chain check.
+        assertFalse(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNotNull(settings.getSslSettings().getContext());
+
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        X509Certificate selfSignedCert;
+        try (InputStream is = new FileInputStream(caPemPath.toFile())) {
+            selfSignedCert = (X509Certificate) cf.generateCertificate(is);
+        }
+        TrustManager[] trustManagers = MongoAgent.createTrustAllTrustManagers();
+        assertNotNull(trustManagers);
+        assertTrue(trustManagers.length > 0);
+        assertInstanceOf(X509TrustManager.class, trustManagers[0]);
+        X509TrustManager tm = (X509TrustManager) trustManagers[0];
+        assertDoesNotThrow(() -> tm.checkServerTrusted(new X509Certificate[] {selfSignedCert}, "RSA"));
+        assertDoesNotThrow(() -> tm.checkClientTrusted(new X509Certificate[] {selfSignedCert}, "RSA"));
+        assertEquals(0, tm.getAcceptedIssuers().length);
+    }
+
+    @Test
+    void formModeWithoutInvalidCertParamKeepsDefaultVerification() {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("ssl", true);
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        assertFalse(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNull(settings.getSslSettings().getContext());
+    }
+
+    @Test
+    void formModeWithTruthyUrlParamVariants() {
+        for (String param : List.of(
+            "tlsAllowInvalidCertificates=1",
+            "sslAllowInvalidCertificates=yes",
+            "TLSALLOWINVALIDCERTIFICATES=TRUE")) {
+            JsonObject connection = minimalConnection();
+            connection.addProperty("ssl", true);
+            connection.addProperty("url_params", "retryWrites=false&" + param);
+
+            MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+            assertTrue(settings.getSslSettings().isEnabled(), "Failed for " + param);
+            assertFalse(settings.getSslSettings().isInvalidHostNameAllowed(), "Failed for " + param);
+            assertNotNull(settings.getSslSettings().getContext(), "Failed for " + param);
+        }
+    }
+
+    @Test
+    void formModeWithTlsInsecureSkipsCertificateAndHostnameChecks() {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("ssl", true);
+        connection.addProperty("url_params", "tlsInsecure=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        assertTrue(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNotNull(settings.getSslSettings().getContext());
+    }
+
+    @Test
+    void formModeWithInvalidHostnamesOnlyDoesNotTrustInvalidCertificates() {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("ssl", true);
+        connection.addProperty("url_params", "tlsAllowInvalidHostnames=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        assertTrue(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNull(settings.getSslSettings().getContext());
+    }
+
+    @Test
+    void uriModeHonoursTlsAllowInvalidCertificatesInConnectionString() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://127.0.0.1:27017/?ssl=true&tlsAllowInvalidCertificates=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        assertFalse(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNotNull(settings.getSslSettings().getContext());
+    }
+
+    @Test
+    void uriModeWithTlsInsecureSkipsCertificateAndHostnameChecks() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://127.0.0.1:27017/?ssl=true&tlsInsecure=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        assertTrue(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNotNull(settings.getSslSettings().getContext());
+    }
+
+    @Test
+    void connectTimeoutSecsAppliedToServerSelectionTimeoutAndCapped() {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("connect_timeout_secs", 10);
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(10_000L, settings.getClusterSettings().getServerSelectionTimeout(TimeUnit.MILLISECONDS));
+        assertEquals(10_000, settings.getSocketSettings().getConnectTimeout(TimeUnit.MILLISECONDS));
+
+        JsonObject longTimeoutConn = minimalConnection();
+        longTimeoutConn.addProperty("connect_timeout_secs", 30);
+        MongoClientSettings cappedSettings = MongoAgent.configureBuilder(longTimeoutConn).build();
+
+        assertEquals(20_000L, cappedSettings.getClusterSettings().getServerSelectionTimeout(TimeUnit.MILLISECONDS));
+        assertEquals(30_000, cappedSettings.getSocketSettings().getConnectTimeout(TimeUnit.MILLISECONDS));
+    }
+
+    @Test
+    void explicitServerSelectionTimeoutMsInUriWinsOverConnectTimeoutSecs() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://127.0.0.1:27017/?serverSelectionTimeoutMS=5000");
+        connection.addProperty("connect_timeout_secs", 10);
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(5_000L, settings.getClusterSettings().getServerSelectionTimeout(TimeUnit.MILLISECONDS));
+        assertEquals(10_000, settings.getSocketSettings().getConnectTimeout(TimeUnit.MILLISECONDS));
+    }
+
+    @Test
+    void formModeWithoutSslIgnoresInvalidCertificateParam() {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("url_params", "tlsAllowInvalidCertificates=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertFalse(settings.getSslSettings().isEnabled());
+    }
+
+    @Test
+    void relaxedDisabledAlgorithmsAllowsLegacyMongoTlsOnly() {
+        String current = "SSLv3, TLSv1, TLSv1.1, RC4, DES, 3DES_EDE_CBC, anon, NULL, TLS_RSA_*, "
+            + "rsa_pkcs1_sha1 usage HandshakeSignature, ecdsa_sha1 usage HandshakeSignature";
+
+        assertEquals(
+            "SSLv3, RC4, DES, 3DES_EDE_CBC, anon, NULL, ecdsa_sha1 usage HandshakeSignature",
+            MongoAgent.relaxedDisabledAlgorithms(current));
+        assertEquals("", MongoAgent.relaxedDisabledAlgorithms(null));
+    }
+
+    @Test
+    void demotedLegacyAlgorithmsKeepOriginalCasing() {
+        String current = "SSLv3, TLSv1, TLS_RSA_*, rsa_pkcs1_sha1 usage HandshakeSignature, RC4";
+
+        assertEquals(
+            List.of("TLS_RSA_*", "rsa_pkcs1_sha1 usage HandshakeSignature"),
+            MongoAgent.demotedLegacyAlgorithms(current));
+        assertTrue(MongoAgent.demotedLegacyAlgorithms(null).isEmpty());
+    }
+
+    @Test
+    void mergedLegacyAlgorithmsMergeWithoutDuplicates() {
+        assertEquals(
+            "NULL, anon, RC4, DES, 3DES_EDE_CBC, TLS_RSA_*, rsa_pkcs1_sha1 usage HandshakeSignature",
+            MongoAgent.mergedLegacyAlgorithms(
+                "NULL, anon, RC4, DES, 3DES_EDE_CBC",
+                List.of("TLS_RSA_*", "rsa_pkcs1_sha1 usage HandshakeSignature")));
+        // Already-present entries (any casing) are not duplicated.
+        assertEquals(
+            "NULL, TLS_RSA_*",
+            MongoAgent.mergedLegacyAlgorithms("NULL, TLS_RSA_*", List.of("tls_rsa_*")));
+        assertEquals("TLS_RSA_*", MongoAgent.mergedLegacyAlgorithms(null, List.of("TLS_RSA_*")));
+    }
+
+    @Test
+    void relaxLegacyTlsPolicyUpdatesLiveSecurityProperties() {
+        String originalDisabled = Security.getProperty("jdk.tls.disabledAlgorithms");
+        String originalLegacy = Security.getProperty("jdk.tls.legacyAlgorithms");
+        assertNotNull(originalDisabled, "jdk.tls.disabledAlgorithms must be defined by the JRE");
+        Set<String> disabledBefore = upperCasedEntries(originalDisabled);
+        List<String> legacyEntries = List.of("TLSV1", "TLSV1.1", "TLS_RSA_*",
+            "RSA_PKCS1_SHA1 USAGE HANDSHAKESIGNATURE");
+        try {
+            MongoAgent.relaxLegacyTlsPolicy();
+            // A second run must not change anything (idempotent).
+            MongoAgent.relaxLegacyTlsPolicy();
+
+            Set<String> disabledAfter = upperCasedEntries(Security.getProperty("jdk.tls.disabledAlgorithms"));
+            for (String removed : legacyEntries) {
+                assertFalse(disabledAfter.contains(removed), removed + " must leave the disabled list");
+            }
+            // Unrelated JRE defaults must stay disabled; JDK 21 also disables these.
+            for (String kept : List.of("SSLV3", "DTLSV1.0", "ECDH")) {
+                assertTrue(disabledAfter.contains(kept), kept + " must stay disabled");
+            }
+            // Every other entry of the real starting value (RC4, DES, 3DES_EDE_CBC, anon, NULL,
+            // ecdsa_sha1/dsa_sha1 usage HandshakeSignature, ...) survives untouched.
+            for (String entry : disabledBefore) {
+                if (!legacyEntries.contains(entry)) {
+                    assertTrue(disabledAfter.contains(entry), entry + " must stay disabled");
+                }
+            }
+
+            Set<String> legacyAfter = upperCasedEntries(Security.getProperty("jdk.tls.legacyAlgorithms"));
+            for (String entry : upperCasedEntries(originalLegacy)) {
+                assertTrue(legacyAfter.contains(entry), entry + " must stay legacy");
+            }
+            // The static-RSA entries move over when the running JRE disables them (Temurin 21
+            // does; older 21 updates do not list them, and then there is nothing to demote).
+            for (String demoted : List.of("TLS_RSA_*", "RSA_PKCS1_SHA1 USAGE HANDSHAKESIGNATURE")) {
+                if (disabledBefore.contains(demoted)) {
+                    assertTrue(legacyAfter.contains(demoted), demoted + " must become legacy");
+                } else {
+                    assertFalse(legacyAfter.contains(demoted));
+                }
+            }
+        } finally {
+            Security.setProperty("jdk.tls.disabledAlgorithms", originalDisabled);
+            Security.setProperty("jdk.tls.legacyAlgorithms",
+                originalLegacy == null ? "" : originalLegacy);
+        }
+    }
+
+    @Test
+    void legacyTlsPolicyRelaxationRequiresExplicitOptIn() {
+        String originalDisabled = Security.getProperty("jdk.tls.disabledAlgorithms");
+        String originalLegacy = Security.getProperty("jdk.tls.legacyAlgorithms");
+        boolean rsaDemotable = upperCasedEntries(originalDisabled).contains("TLS_RSA_*");
+        try {
+            // Without the option the policy must stay at the JRE defaults.
+            JsonObject plain = minimalConnection();
+            plain.addProperty("ssl", true);
+            MongoAgent.configureBuilder(plain).build();
+            assertEquals(originalDisabled, Security.getProperty("jdk.tls.disabledAlgorithms"));
+            assertEquals(originalLegacy, Security.getProperty("jdk.tls.legacyAlgorithms"));
+
+            // The option without TLS must not relax anything either.
+            JsonObject noTls = minimalConnection();
+            noTls.addProperty("url_params", "tlsAllowLegacyProtocols=true");
+            MongoAgent.configureBuilder(noTls).build();
+            assertEquals(originalDisabled, Security.getProperty("jdk.tls.disabledAlgorithms"));
+            assertEquals(originalLegacy, Security.getProperty("jdk.tls.legacyAlgorithms"));
+
+            // With TLS and the option the policy is relaxed process-wide.
+            JsonObject legacy = minimalConnection();
+            legacy.addProperty("ssl", true);
+            legacy.addProperty("url_params", "tlsAllowLegacyProtocols=true");
+            MongoAgent.configureBuilder(legacy).build();
+            assertFalse(upperCasedEntries(Security.getProperty("jdk.tls.disabledAlgorithms")).contains("TLSV1"));
+            assertEquals(rsaDemotable,
+                upperCasedEntries(Security.getProperty("jdk.tls.legacyAlgorithms")).contains("TLS_RSA_*"));
+
+            // The same option works inside a connection string.
+            Security.setProperty("jdk.tls.disabledAlgorithms", originalDisabled);
+            Security.setProperty("jdk.tls.legacyAlgorithms", originalLegacy);
+            JsonObject legacyUri = new JsonObject();
+            legacyUri.addProperty("connection_string",
+                "mongodb://127.0.0.1:27017/?ssl=true&tlsAllowLegacyProtocols=true");
+            MongoAgent.configureBuilder(legacyUri).build();
+            assertFalse(upperCasedEntries(Security.getProperty("jdk.tls.disabledAlgorithms")).contains("TLSV1.1"));
+            assertEquals(rsaDemotable,
+                upperCasedEntries(Security.getProperty("jdk.tls.legacyAlgorithms")).contains("TLS_RSA_*"));
+        } finally {
+            Security.setProperty("jdk.tls.disabledAlgorithms", originalDisabled);
+            Security.setProperty("jdk.tls.legacyAlgorithms",
+                originalLegacy == null ? "" : originalLegacy);
+        }
+    }
+
+    @Test
+    void relaxLegacyTlsPolicyDemotesRsaEntriesOnTemurinShapedPolicy() {
+        // Temurin 21 disables more entries than older 21 updates; seed that exact shape so
+        // the demotion path runs against live properties even on a JRE without the entries.
+        String temurinDisabled = "SSLv3, TLSv1, TLSv1.1, DTLSv1.0, RC4, DES, MD5withRSA, "
+            + "DH keySize < 1024, EC keySize < 224, 3DES_EDE_CBC, anon, NULL, ECDH, "
+            + "TLS_RSA_*, rsa_pkcs1_sha1 usage HandshakeSignature, "
+            + "ecdsa_sha1 usage HandshakeSignature, dsa_sha1 usage HandshakeSignature";
+        String originalDisabled = Security.getProperty("jdk.tls.disabledAlgorithms");
+        String originalLegacy = Security.getProperty("jdk.tls.legacyAlgorithms");
+        try {
+            Security.setProperty("jdk.tls.disabledAlgorithms", temurinDisabled);
+            Security.setProperty("jdk.tls.legacyAlgorithms", "NULL, anon, RC4, DES, 3DES_EDE_CBC");
+
+            MongoAgent.relaxLegacyTlsPolicy();
+
+            assertEquals(
+                "SSLv3, DTLSv1.0, RC4, DES, MD5withRSA, DH keySize < 1024, EC keySize < 224, "
+                    + "3DES_EDE_CBC, anon, NULL, ECDH, "
+                    + "ecdsa_sha1 usage HandshakeSignature, dsa_sha1 usage HandshakeSignature",
+                Security.getProperty("jdk.tls.disabledAlgorithms"));
+            assertEquals(
+                "NULL, anon, RC4, DES, 3DES_EDE_CBC, TLS_RSA_*, rsa_pkcs1_sha1 usage HandshakeSignature",
+                Security.getProperty("jdk.tls.legacyAlgorithms"));
+        } finally {
+            Security.setProperty("jdk.tls.disabledAlgorithms", originalDisabled);
+            Security.setProperty("jdk.tls.legacyAlgorithms",
+                originalLegacy == null ? "" : originalLegacy);
+        }
+    }
+
+    private static Set<String> upperCasedEntries(String property) {
+        if (property == null || property.isBlank()) {
+            return Set.of();
+        }
+        Set<String> entries = new HashSet<>();
+        for (String part : property.split(",")) {
+            if (!part.isBlank()) {
+                entries.add(part.trim().toUpperCase(Locale.ROOT));
+            }
+        }
+        return entries;
+    }
+
+    @Test
+    void sslContextInstalledInSettingsTrustsSelfSignedServer() throws Exception {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("ssl", true);
+        connection.addProperty("url_params", "tlsAllowInvalidCertificates=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+        SSLContext clientContext = settings.getSslSettings().getContext();
+        assertNotNull(clientContext);
+
+        SSLContext serverContext = SSLContext.getInstance("TLS");
+        serverContext.init(
+            MongoAgent.loadKeyManagersFromPem(clientPemPath.toString(), clientKeyPath.toString()),
+            null, null);
+        AtomicReference<Exception> serverError = new AtomicReference<>();
+        try (SSLServerSocket server = (SSLServerSocket) serverContext
+            .getServerSocketFactory()
+            .createServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+            Thread serverThread = new Thread(() -> {
+                try (SSLSocket socket = (SSLSocket) server.accept()) {
+                    socket.getOutputStream().write(42);
+                    socket.getOutputStream().flush();
+                } catch (Exception e) {
+                    serverError.set(e);
+                }
+            });
+            serverThread.setDaemon(true);
+            serverThread.start();
+
+            // The default JRE trust store would reject this self-signed certificate; the
+            // context installed into SslSettings must carry the trust-all manager.
+            try (SSLSocket client = (SSLSocket) clientContext
+                .getSocketFactory()
+                .createSocket("127.0.0.1", server.getLocalPort())) {
+                client.setSoTimeout(10_000);
+                assertEquals(42, client.getInputStream().read());
+            }
+            serverThread.join(10_000);
+        }
+        assertNull(serverError.get());
     }
 
     // ─── TLS: trust manager loading ───

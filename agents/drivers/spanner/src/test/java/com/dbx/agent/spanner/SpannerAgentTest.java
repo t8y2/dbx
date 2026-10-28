@@ -211,6 +211,34 @@ class SpannerAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void keepsKeyDirectionsAlignedWithOrdinalPosition() {
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getIndexInfo", Arrays.asList(
+            // The driver reports the one-letter ASC_OR_DESC ('A'/'D'), not ASC/DESC.
+            indexRow("PRIMARY_KEY", "singer_id", 1, false, "A"),
+            indexRow("PRIMARY_KEY", "album_id", 2, false, "D"),
+            // Rows arriving out of ordinal order must not detach a direction from its column,
+            // and the STORING column (NULL ordinal) must not add a direction entry.
+            indexRow("idx_albums_title", "release_ts", 2, true, "D"),
+            indexRow("idx_albums_title", "stored_col", null, true, null),
+            indexRow("idx_albums_title", "title", 1, true, "A")
+        ));
+        SpannerAgent agent = connectedAgent(GOOGLE_SQL_PRODUCT, null, rows);
+
+        List<IndexInfo> indexes = agent.listIndexes("", "albums");
+
+        assertEquals(2, indexes.size());
+        IndexInfo primaryKey = indexes.get(0);
+        assertEquals(Arrays.asList("singer_id", "album_id"), primaryKey.getColumns());
+        assertEquals(Arrays.asList("ASC", "DESC"), primaryKey.getKey_directions());
+
+        IndexInfo secondary = indexes.get(1);
+        assertEquals(Arrays.asList("title", "release_ts"), secondary.getColumns());
+        assertEquals(Arrays.asList("ASC", "DESC"), secondary.getKey_directions());
+        assertEquals(Collections.singletonList("stored_col"), secondary.getIncluded_columns());
+    }
+
+    @Test
     void skipsUnnamedInterleaveRelationshipsReportedAsForeignKeys() {
         Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
         rows.put("getImportedKeys", Arrays.asList(
@@ -735,6 +763,14 @@ class SpannerAgentTest extends JdbcFakeExecutionBehaviorTest {
             "ORDINAL_POSITION", ordinal,
             "NON_UNIQUE", nonUnique
         );
+    }
+
+    private static Map<String, Object> indexRow(
+        String indexName, String column, Integer ordinal, boolean nonUnique, String ascOrDesc
+    ) {
+        Map<String, Object> result = indexRow(indexName, column, ordinal, nonUnique);
+        result.put("ASC_OR_DESC", ascOrDesc);
+        return result;
     }
 
     @SuppressWarnings("unchecked")

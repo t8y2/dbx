@@ -198,6 +198,54 @@ describe("useDataGridActions", () => {
     releaseIndexes([]);
   });
 
+  it("keeps a MySQL table editable while manual refresh index discovery is still running (#13503)", async () => {
+    mocks.getConfig.mockReturnValue({ id: "mysql-1", db_type: "mysql" });
+    const tab = tableDataTab({ connectionId: "mysql-1" });
+    mocks.tabs.push(tab);
+    let releaseIndexes!: (indexes: IndexInfo[]) => void;
+    mocks.listIndexes.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseIndexes = resolve;
+      }),
+    );
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.id, tab.sql, "", "", "", 100, 0, "refresh");
+
+    // 刷新等待段只拉列；后台索引发现不得重新挂起行标识，否则
+    // ContentArea 的 editable 变 false，增删/提交/回滚控件全部消失。
+    await vi.waitFor(() => expect(mocks.listIndexes).toHaveBeenCalledTimes(1));
+    expect(tab.tableMetaPending).toBe(false);
+    expect(tab.tableMeta?.primaryKeys).toEqual(["id"]);
+    releaseIndexes([]);
+    await vi.waitFor(() => expect(mocks.listIndexes).toHaveBeenCalledTimes(1));
+    expect(tab.tableMetaPending).toBe(false);
+    expect(tab.tableMeta?.primaryKeys).toEqual(["id"]);
+  });
+
+  it("preserves MySQL primary keys across a manual refresh when fresh columns do not declare them (#13503)", async () => {
+    mocks.getConfig.mockReturnValue({ id: "mysql-1", db_type: "mysql" });
+    const tab = tableDataTab({ connectionId: "mysql-1" });
+    mocks.tabs.push(tab);
+    mocks.getColumns.mockResolvedValue([{ ...tab.tableMeta!.columns[0]!, is_primary_key: false }]);
+    let releaseIndexes!: (indexes: IndexInfo[]) => void;
+    mocks.listIndexes.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseIndexes = resolve;
+      }),
+    );
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.id, tab.sql, "", "", "", 100, 0, "refresh");
+
+    await vi.waitFor(() => expect(mocks.listIndexes).toHaveBeenCalledTimes(1));
+    expect(tab.tableMetaPending).toBe(false);
+    expect(tab.tableMeta?.primaryKeys).toEqual(["id"]);
+    releaseIndexes([{ name: "PRIMARY", columns: ["id"], is_unique: true, is_primary: true }]);
+    await vi.waitFor(() => expect(tab.tableMeta?.primaryKeys).toEqual(["id"]));
+    expect(tab.tableMetaPending).toBe(false);
+  });
+
   it("manual refresh derives primary keys from fresh columns", async () => {
     const tab = tableDataTab();
     mocks.tabs.push(tab);
@@ -207,6 +255,78 @@ describe("useDataGridActions", () => {
     await actions.onReloadData(tab.id, tab.sql, "", "", "", 100, 0, "refresh");
     // 旧 PK 不在新列中：等待段不得把失效 PK 写回 tab 元数据
     expect(tab.tableMeta?.primaryKeys).toEqual(["id2"]);
+  });
+
+  it("keeps Kingbase table editable after manual refresh when primary keys are populated (#13128)", async () => {
+    mocks.getConfig.mockReturnValue({ id: "kingbase-1", db_type: "kingbase" });
+    const tab = tableDataTab({
+      connectionId: "kingbase-1",
+      tableMeta: {
+        schema: "lhxzztb",
+        tableName: "basestr",
+        tableType: "TABLE",
+        columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: "nextval('lhxzztb.basestr_id_seq'::regclass)", is_primary_key: true, extra: null }],
+        primaryKeys: ["id"],
+      },
+    });
+    mocks.tabs.push(tab);
+    mocks.getColumns.mockResolvedValue([{ name: "id", data_type: "bigint", is_nullable: false, column_default: "nextval('lhxzztb.basestr_id_seq'::regclass)", is_primary_key: true, extra: null }]);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.id, tab.sql, "", "", "", 100, 0, "refresh");
+
+    expect(tab.tableMeta?.primaryKeys).toEqual(["id"]);
+    await vi.waitFor(() => expect(tab.tableMetaPending).toBe(false));
+  });
+
+  it("keeps a table editable after manual refresh when index metadata fails but its columns declare the key (#13473)", async () => {
+    mocks.getConfig.mockReturnValue({ id: "kingbase-1", db_type: "kingbase" });
+    const idColumn = { name: "TitleId", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null };
+    const tab = tableDataTab({
+      connectionId: "kingbase-1",
+      tableMeta: { schema: "dbo", tableName: "Title", tableType: "TABLE", columns: [idColumn], primaryKeys: ["TitleId"] },
+    });
+    mocks.tabs.push(tab);
+    mocks.getColumns.mockResolvedValue([idColumn]);
+    mocks.listIndexes.mockRejectedValue(new Error("index catalog unavailable"));
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.id, tab.sql, "", "", "", 100, 0, "refresh");
+    // The background index refresh runs after the reload returns; let it settle first.
+    await vi.waitFor(() => expect(mocks.listIndexes).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(tab.tableMeta?.primaryKeys).toEqual(["TitleId"]);
+    expect(tab.tableMetaPending).toBe(false);
+  });
+
+  it("keeps a keyless MySQL table editable after manual refresh while index discovery is still running (#13503)", async () => {
+    mocks.getConfig.mockReturnValue({ id: "mysql-1", db_type: "mysql" });
+    const keylessColumn = { name: "id", data_type: "int", is_nullable: true, column_default: null, is_primary_key: false, extra: null };
+    const tab = tableDataTab({
+      connectionId: "mysql-1",
+      tableMeta: { schema: undefined, tableName: "events", tableType: "TABLE", columns: [keylessColumn], primaryKeys: [] },
+    });
+    mocks.tabs.push(tab);
+    mocks.getColumns.mockResolvedValue([keylessColumn]);
+    let resolveIndexes!: (indexes: IndexInfo[]) => void;
+    mocks.listIndexes.mockReturnValueOnce(
+      new Promise<IndexInfo[]>((resolve) => {
+        resolveIndexes = resolve;
+      }),
+    );
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.id, tab.sql, "", "", "", 100, 0, "refresh");
+
+    // MySQL edits keyless rows through the keyless predicate, so an empty key
+    // set is already a resolved identity and must not block the edit controls.
+    expect(tab.tableMetaPending).toBe(false);
+    expect(tab.tableMeta?.primaryKeys).toEqual([]);
+    expect(mocks.listIndexes).toHaveBeenCalledTimes(1);
+
+    resolveIndexes([]);
+    await vi.waitFor(() => expect(tab.tableMetaPending).toBe(false));
   });
 
   it.each([true, false])("keeps a surviving old key read-only until index discovery settles (success=%s)", async (success) => {

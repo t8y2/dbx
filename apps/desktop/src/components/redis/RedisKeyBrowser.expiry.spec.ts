@@ -292,13 +292,14 @@ vi.mock("@/components/editor/DangerConfirmDialog.vue", async () => {
   const { defineComponent, h } = await import("vue");
   return {
     default: defineComponent({
-      props: { open: Boolean, loading: Boolean, details: String },
+      props: { open: Boolean, loading: Boolean, details: String, detailsText: String, sql: String },
       emits: ["confirm"],
       setup(props, { emit }) {
         return () =>
           props.open
             ? h("div", { "data-test-danger-dialog": "" }, [
-                h("div", { "data-test-danger-details": "" }, props.details),
+                h("div", { "data-test-danger-details": "" }, props.detailsText ?? props.details),
+                h("div", { "data-test-danger-sql": "" }, props.sql),
                 h(
                   "button",
                   {
@@ -1600,6 +1601,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
 
     expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
     expect(requiredElement<HTMLElement>("[data-test-danger-details]").textContent).toContain("session:current");
+    expect(requiredElement<HTMLElement>("[data-test-danger-sql]").textContent).toBe("DEL session:current");
     requiredElement<HTMLButtonElement>("[data-test-danger-confirm]").click();
     await settle();
 
@@ -1625,6 +1627,9 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
 
     expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
     expect(requiredElement<HTMLElement>("[data-test-danger-details]").textContent).toContain("MCP");
+    expect(requiredElement<HTMLElement>("[data-test-danger-sql]").textContent).toContain("python3");
+    expect(requiredElement<HTMLElement>("[data-test-danger-sql]").textContent).toContain("SCAN COUNT 500");
+    expect(requiredElement<HTMLElement>("[data-test-danger-sql]").textContent).toContain("MCP:*");
     requiredElement<HTMLButtonElement>("[data-test-danger-confirm]").click();
     await settle();
 
@@ -2228,8 +2233,12 @@ describe("RedisKeyBrowser interrupted Fetch All", () => {
     await submitKeySearch("group:second");
 
     expect(document.querySelector(`[data-redis-leaf="${buffered.key_raw}"]`)).not.toBeNull();
+    // The first footer click continues from the current cursor, so the sweep
+    // costs the same round trip as before.
     expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(2);
-    expect(document.body.textContent).not.toContain("redis.fetchAllKeys");
+    // The sweep completed, so the action bar keeps offering the full reload
+    // instead of disappearing together with the exhausted button.
+    expect(document.body.textContent).toContain("redis.refetchAllKeys");
   });
 
   it("filters a completed Fetch All snapshot while editing a key search", async () => {

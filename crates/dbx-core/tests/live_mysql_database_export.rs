@@ -79,6 +79,7 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
                 part_cooldown_ms: 0,
                 skip_relational_constraints: false,
                 failure_log_enabled: true,
+                resolve_includes: false,
                 encoding: Default::default(),
             };
             execute_sql_file_path(&state, &request, &path, CancellationToken::new(), std::time::Instant::now(), |_| {}).await?;
@@ -98,6 +99,7 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            resolve_includes: false,
             encoding: Default::default(),
         };
         let mut events = Vec::new();
@@ -188,6 +190,7 @@ async fn live_mysql_database_export_restores_dependent_views() {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            resolve_includes: false,
             encoding: Default::default(),
         };
         execute_sql_file_path(

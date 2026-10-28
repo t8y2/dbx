@@ -40,6 +40,157 @@ fn resolve_ssh_layer_chains(
         .collect()
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct ResolvedTransportLayers {
+    layers: Vec<TransportLayerConfig>,
+    ssh_chains: Vec<Option<Vec<SshTunnelConfig>>>,
+}
+
+impl ResolvedTransportLayers {
+    pub fn resolve(layers: &[TransportLayerConfig]) -> Result<Self, String> {
+        Self::resolve_with(layers, crate::ssh_config::resolve_ssh_tunnel_chain)
+    }
+
+    fn resolve_with(
+        layers: &[TransportLayerConfig],
+        resolve: impl Fn(&SshTunnelConfig) -> Vec<SshTunnelConfig>,
+    ) -> Result<Self, String> {
+        validate_transport_layers(layers)?;
+        let mut ssh_chains = resolve_ssh_layer_chains(layers, resolve);
+        for (index, chain) in ssh_chains.iter_mut().enumerate() {
+            if let Some(chain) = chain {
+                if chain.len() > 1 && index != 0 {
+                    return Err(format!(
+                        "SSH layer {} uses a multi-hop `~/.ssh/config` ProxyJump chain, which DBX only supports as the first transport layer. Add the jump host as its own tunnel layer instead.",
+                        index + 1
+                    ));
+                }
+                for hop in chain {
+                    hop.id.clear();
+                    hop.name.clear();
+                    hop.profile_id.clear();
+                    hop.enabled = true;
+                }
+            }
+        }
+        let layers = layers
+            .iter()
+            .zip(&ssh_chains)
+            .map(|(layer, chain)| {
+                let mut layer = match chain {
+                    Some(chain) => TransportLayerConfig::Ssh(chain[0].clone()),
+                    None => layer.clone(),
+                };
+                normalize_layer_identity(&mut layer);
+                layer
+            })
+            .collect();
+        Ok(Self { layers, ssh_chains })
+    }
+
+    pub fn layers(&self) -> &[TransportLayerConfig] {
+        &self.layers
+    }
+
+    pub fn prefix(&self, layer_count: usize) -> Self {
+        Self { layers: self.layers[..layer_count].to_vec(), ssh_chains: self.ssh_chains[..layer_count].to_vec() }
+    }
+
+    pub async fn start(
+        &self,
+        connection_id: &str,
+        remote_host: &str,
+        remote_port: u16,
+        ssh_tunnels: &TunnelManager,
+        proxy_tunnels: &ProxyTunnelManager,
+        http_tunnels: &HttpTunnelManager,
+    ) -> Result<u16, String> {
+        self.start_with_final_ssh_local_port(
+            connection_id,
+            remote_host,
+            remote_port,
+            None,
+            ssh_tunnels,
+            proxy_tunnels,
+            http_tunnels,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_with_final_ssh_local_port(
+        &self,
+        connection_id: &str,
+        remote_host: &str,
+        remote_port: u16,
+        final_ssh_local_port: Option<u16>,
+        ssh_tunnels: &TunnelManager,
+        proxy_tunnels: &ProxyTunnelManager,
+        http_tunnels: &HttpTunnelManager,
+    ) -> Result<u16, String> {
+        start_transport_layers_internal(
+            connection_id,
+            self,
+            remote_host,
+            remote_port,
+            final_ssh_local_port,
+            false,
+            ssh_tunnels,
+            proxy_tunnels,
+            http_tunnels,
+        )
+        .await
+    }
+
+    pub async fn start_with_final_ssh_socks5(
+        &self,
+        connection_id: &str,
+        ssh_tunnels: &TunnelManager,
+        proxy_tunnels: &ProxyTunnelManager,
+        http_tunnels: &HttpTunnelManager,
+    ) -> Result<u16, String> {
+        if !matches!(self.layers.last(), Some(TransportLayerConfig::Ssh(_))) {
+            return Err("Dynamic SOCKS5 routing requires SSH as the final transport layer".to_string());
+        }
+        start_transport_layers_internal(
+            connection_id,
+            self,
+            "",
+            0,
+            None,
+            true,
+            ssh_tunnels,
+            proxy_tunnels,
+            http_tunnels,
+        )
+        .await
+    }
+}
+
+fn normalize_layer_identity(layer: &mut TransportLayerConfig) {
+    match layer {
+        TransportLayerConfig::Ssh(layer) => {
+            layer.id.clear();
+            layer.name.clear();
+            layer.profile_id.clear();
+            layer.enabled = true;
+        }
+        TransportLayerConfig::Proxy(layer) => {
+            layer.id.clear();
+            layer.name.clear();
+            layer.profile_id.clear();
+            layer.enabled = true;
+            layer.test_target = None;
+        }
+        TransportLayerConfig::HttpTunnel(layer) => {
+            layer.id.clear();
+            layer.name.clear();
+            layer.profile_id.clear();
+            layer.enabled = true;
+        }
+    }
+}
+
 /// Starts an ordered transport layer chain and returns the final local port.
 ///
 /// Each layer listens on a local port. The next layer connects to that local
@@ -76,18 +227,17 @@ pub async fn start_transport_layers_with_final_ssh_local_port(
     proxy_tunnels: &ProxyTunnelManager,
     http_tunnels: &HttpTunnelManager,
 ) -> Result<u16, String> {
-    start_transport_layers_internal(
-        connection_id,
-        layers,
-        remote_host,
-        remote_port,
-        final_ssh_local_port,
-        false,
-        ssh_tunnels,
-        proxy_tunnels,
-        http_tunnels,
-    )
-    .await
+    ResolvedTransportLayers::resolve(layers)?
+        .start_with_final_ssh_local_port(
+            connection_id,
+            remote_host,
+            remote_port,
+            final_ssh_local_port,
+            ssh_tunnels,
+            proxy_tunnels,
+            http_tunnels,
+        )
+        .await
 }
 
 /// Starts the layer chain with the final SSH hop exposing a dynamic SOCKS5
@@ -104,14 +254,15 @@ pub async fn start_transport_layers_with_final_ssh_socks5(
     if !matches!(layers.last(), Some(TransportLayerConfig::Ssh(_))) {
         return Err("Dynamic SOCKS5 routing requires SSH as the final transport layer".to_string());
     }
-    start_transport_layers_internal(connection_id, layers, "", 0, None, true, ssh_tunnels, proxy_tunnels, http_tunnels)
+    ResolvedTransportLayers::resolve(layers)?
+        .start_with_final_ssh_socks5(connection_id, ssh_tunnels, proxy_tunnels, http_tunnels)
         .await
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn start_transport_layers_internal(
     connection_id: &str,
-    layers: &[TransportLayerConfig],
+    resolved: &ResolvedTransportLayers,
     remote_host: &str,
     remote_port: u16,
     final_ssh_local_port: Option<u16>,
@@ -120,23 +271,11 @@ async fn start_transport_layers_internal(
     proxy_tunnels: &ProxyTunnelManager,
     http_tunnels: &HttpTunnelManager,
 ) -> Result<u16, String> {
+    let layers = &resolved.layers;
     if layers.is_empty() {
         return Err("No transport layers configured".to_string());
     }
-    validate_transport_layers(layers)?;
-
-    let ssh_chains = resolve_ssh_layer_chains(layers, crate::ssh_config::resolve_ssh_tunnel_chain);
-    for (index, chain) in ssh_chains.iter().enumerate() {
-        // A multi-hop chain only knows how to dial its first hop directly
-        // (see the `start_chain` call below), so it can't yet sit behind an
-        // earlier transport layer.
-        if chain.as_ref().is_some_and(|chain| chain.len() > 1) && index != 0 {
-            return Err(format!(
-                "SSH layer {} uses a multi-hop `~/.ssh/config` ProxyJump chain, which DBX only supports as the first transport layer. Add the jump host as its own tunnel layer instead.",
-                index + 1
-            ));
-        }
-    }
+    let ssh_chains = &resolved.ssh_chains;
     let entry_endpoint = |index: usize| -> (String, u16) {
         match &ssh_chains[index] {
             Some(chain) => {
@@ -391,7 +530,7 @@ fn plan_transport_layers_with_resolver(
 mod tests {
     use super::{
         plan_transport_layers, plan_transport_layers_with_resolver, validate_transport_layers, PlannedLayerType,
-        PlannedTransportLayer,
+        PlannedTransportLayer, ResolvedTransportLayers,
     };
     use crate::models::connection::{
         HttpTunnelConfig, ProxyTunnelConfig, ProxyType, SshTunnelConfig, TransportLayerConfig,
@@ -447,6 +586,119 @@ mod tests {
             protocol: dbx_types::models::connection::HttpTunnelProtocol::DbxTcp,
             connect_timeout_secs: 10,
         })
+    }
+
+    #[test]
+    fn resolved_transport_compares_the_actual_ssh_chain_not_its_alias_or_display_fields() {
+        let alias = ssh_layer("original", "db-alias", 22);
+        let canonical = ssh_layer("other", "canonical-alias", 22);
+        let resolve = |_: &SshTunnelConfig| {
+            let TransportLayerConfig::Ssh(hop) = ssh_layer("profile", "jump.example", 2222) else { unreachable!() };
+            vec![hop]
+        };
+        let first = ResolvedTransportLayers::resolve_with(&[alias], resolve).unwrap();
+        let second = ResolvedTransportLayers::resolve_with(&[canonical], resolve).unwrap();
+        assert!(first == second);
+        assert_eq!(first.layers()[0].endpoint(), ("jump.example", 2222));
+        assert_eq!(first.layers()[0].id(), "");
+    }
+
+    #[test]
+    fn resolved_transport_retains_all_actual_hops_and_credentials() {
+        let alias = ssh_layer("source", "db-alias", 22);
+        let resolve = |password: &str| {
+            ResolvedTransportLayers::resolve_with(std::slice::from_ref(&alias), |_| {
+                let TransportLayerConfig::Ssh(first) = ssh_layer("jump", "jump.example", 22) else { unreachable!() };
+                let TransportLayerConfig::Ssh(mut last) = ssh_layer("last", "db-gateway.example", 2222) else {
+                    unreachable!()
+                };
+                last.password = password.to_owned();
+                vec![first, last]
+            })
+            .unwrap()
+        };
+        let first = resolve("first-secret");
+        let changed = resolve("changed-secret");
+        assert!(first != changed);
+        let chain = first.ssh_chains[0].as_ref().unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[1].host, "db-gateway.example");
+        assert_eq!(chain[1].port, 2222);
+        assert_eq!(chain[1].password, "first-secret");
+    }
+
+    #[test]
+    fn resolved_transport_does_not_reresolve_a_frozen_plan() {
+        let calls = std::cell::Cell::new(0);
+        let layers = [ssh_layer("source", "db-alias", 22)];
+        let resolved = ResolvedTransportLayers::resolve_with(&layers, |ssh| {
+            calls.set(calls.get() + 1);
+            let mut ssh = ssh.clone();
+            ssh.host = format!("resolved-{}", calls.get());
+            vec![ssh]
+        })
+        .unwrap();
+        let cloned = resolved.clone();
+        assert_eq!(cloned.layers()[0].endpoint(), ("resolved-1", 22));
+        assert!(cloned == resolved);
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn resolved_transport_prefix_reuses_its_frozen_alias_without_changing_the_full_plan() {
+        let calls = std::cell::Cell::new(0);
+        let layers = [ssh_layer("ssh", "db-alias", 22), proxy_layer("proxy", "proxy.internal", 1080)];
+        let resolved = ResolvedTransportLayers::resolve_with(&layers, |ssh| {
+            calls.set(calls.get() + 1);
+            let mut ssh = ssh.clone();
+            ssh.host = "frozen.internal".into();
+            vec![ssh]
+        })
+        .unwrap();
+        let prefix = resolved.prefix(1);
+        assert_eq!(calls.get(), 1);
+        assert_eq!(resolved.layers().len(), 2);
+        assert_eq!(prefix.layers().len(), 1);
+        assert_eq!(prefix.layers()[0].endpoint(), ("frozen.internal", 22));
+        assert!(prefix.ssh_chains[0] == resolved.ssh_chains[0]);
+    }
+
+    #[tokio::test]
+    async fn resolved_transport_starts_the_same_frozen_ssh_endpoint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let calls = std::cell::Cell::new(0);
+        let layers = [ssh_layer("source", "unresolved.invalid", 22)];
+        let resolved = ResolvedTransportLayers::resolve_with(&layers, |ssh| {
+            calls.set(calls.get() + 1);
+            let mut ssh = ssh.clone();
+            ssh.host = "127.0.0.1".to_owned();
+            ssh.port = port;
+            vec![ssh]
+        })
+        .unwrap();
+        let ssh = super::TunnelManager::default();
+        let proxy = super::ProxyTunnelManager::new();
+        let http = super::HttpTunnelManager::new();
+        let (started, accepted) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(resolved.start("frozen-transport", "db.internal", 1521, &ssh, &proxy, &http), async {
+                let (socket, _) = listener.accept().await.unwrap();
+                drop(socket);
+                true
+            })
+        })
+        .await
+        .unwrap();
+        assert!(accepted);
+        assert!(started.is_err());
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn resolved_transport_rejects_unsupported_proxyjump_before_starting_any_layer() {
+        let layers = [proxy_layer("proxy", "proxy.example", 1080), ssh_layer("ssh", "db-alias", 22)];
+        let result = ResolvedTransportLayers::resolve_with(&layers, |ssh| vec![ssh.clone(), ssh.clone()]);
+        assert!(result.err().unwrap().contains("only supports as the first transport layer"));
     }
 
     #[test]

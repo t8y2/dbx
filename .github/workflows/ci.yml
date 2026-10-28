@@ -33,7 +33,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install frontend dependencies
@@ -82,7 +82,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install frontend dependencies
@@ -115,7 +115,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install frontend dependencies
@@ -156,7 +156,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
 
       - name: GitHub script tests
         env:
@@ -216,7 +216,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install system dependencies
@@ -238,7 +238,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Install nextest
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b # v2.68.13
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
 
@@ -313,7 +313,11 @@ jobs:
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the Windows PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Guarded by assert-win7-pe-compat.ps1.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
       RUSTC_WRAPPER: sccache
       # Prefer S3 when available; GitHub's 10 GB cache quota evicts the shared
       # Linux target caches when thousands of GHA sccache entries pile up.
@@ -388,7 +392,11 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_RELEASE_LTO: "off"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the Windows PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Guarded by assert-win7-pe-compat.ps1.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
       RUSTC_WRAPPER: sccache
       # Prefer S3 when available; GitHub's 10 GB cache quota evicts the shared
       # Linux target caches when thousands of GHA sccache entries pile up.
@@ -397,7 +405,7 @@ jobs:
       SCCACHE_IDLE_TIMEOUT: "0"
       # Single source for the job's nightly pin: the toolchain step and the
       # prebuilt AWS-LC artifact name must move together.
-      WIN7_NIGHTLY_TOOLCHAIN: nightly-2026-07-22
+      WIN7_NIGHTLY_TOOLCHAIN: nightly-2026-10-25
     steps:
       - uses: actions/checkout@v7
 
@@ -409,7 +417,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install frontend dependencies
@@ -421,6 +429,9 @@ jobs:
           toolchain: ${{ env.WIN7_NIGHTLY_TOOLCHAIN }}
           components: rust-src
 
+      # build-std makes this rustc invocation reach the Windows 32K command-line limit;
+      # sccache 0.16.0 spawns it fine while 0.19.0 fails with `os error 206`. Do not bump
+      # this pin without a green Windows 7 run.
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: "v0.16.0"
@@ -827,7 +838,11 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/duckdb-driver
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the Windows PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Guarded by assert-win7-pe-compat.ps1.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
       RUSTC_WRAPPER: sccache
       # Prefer S3 when available; GitHub's 10 GB cache quota evicts the shared
       # Linux target caches when thousands of GHA sccache entries pile up.
@@ -842,7 +857,7 @@ jobs:
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-22
+          toolchain: nightly-2026-10-25
           components: rust-src
 
       - name: Setup MSVC
@@ -852,7 +867,7 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.15"
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -1079,7 +1094,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install nextest
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
 
@@ -1173,7 +1188,7 @@ jobs:
           cache: gradle
 
       - name: Cache approved Maven assets
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/dbx-offline-jdbc-maven
           key: offline-jdbc-${{ hashFiles('apps/desktop/src/lib/database/managedJdbcAssets.json') }}
@@ -1407,7 +1422,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
       - name: CI planner and gate tests
         run: node --test .github/scripts/ci-*.test.mjs
       - name: Core architecture contracts
@@ -1443,7 +1458,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
       - name: Install packaging tools
         run: sudo python3 ../.github/scripts/ci-install-system-deps.py --group packaging
       - name: Agent script tests
@@ -1476,6 +1491,8 @@ jobs:
         run: sudo python3 ../.github/scripts/ci-install-system-deps.py --group packaging
       - name: Java agent tests and packages
         run: python3 ../.github/scripts/ci-gradle.py agents -- ./gradlew test shadowJar --continue
+      - name: Gradle repository authentication tests
+        run: python3 ../.github/scripts/ci-gradle-repositories.test.py
       - name: Agent jar validation
         run: python3 scripts/validate_agent_jars.py
   agent-rust:
@@ -1547,7 +1564,7 @@ jobs:
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install nextest
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
       # mold -run wraps the whole process tree (see the packages job note);
@@ -1590,7 +1607,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 1.25.x
+          go-version: 1.27.x
           cache-dependency-path: agents/drivers/${{ matrix.driver }}/go.sum
       - name: Native Go tests and target builds
         env:
@@ -1639,7 +1656,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 1.25.x
+          go-version: 1.27.x
           cache-dependency-path: agents/drivers/${{ matrix.driver }}/go.sum
         if: matrix.driver != 'tdengine'
       - name: Setup Rust
@@ -1647,7 +1664,7 @@ jobs:
         if: matrix.driver == 'tdengine'
       - name: Install nextest
         if: matrix.driver == 'tdengine'
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
       - name: TDengine Rust cache

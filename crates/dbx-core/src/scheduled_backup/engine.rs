@@ -168,13 +168,13 @@ impl BackupService {
             .into_iter()
             .find(|c| c.id == job.config.connection_id)
             .ok_or("Saved backup connection is unavailable")?;
-        if !matches!(connection.db_type, DatabaseType::Mysql | DatabaseType::Postgres) {
+        if !matches!(connection.db_type, DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::OpenGauss) {
             return Err("This connection does not support consistent scheduled backups".into());
         }
         if !connection.save_password || connection.one_time {
             return Err("Unattended backups require a saved connection and saved credentials".into());
         }
-        let postgres = connection.db_type == DatabaseType::Postgres;
+        let postgres = matches!(connection.db_type, DatabaseType::Postgres | DatabaseType::OpenGauss);
         job.run.connection_name = connection.name.clone();
         state.configs.write().await.insert(connection.id.clone(), connection);
         check_cancel(stop)?;
@@ -447,7 +447,7 @@ fn check_cancel(stop: &CancellationToken) -> Result<(), String> {
     }
 }
 
-fn system_database(name: &str, postgres: bool) -> bool {
+pub(crate) fn system_database(name: &str, postgres: bool) -> bool {
     let name = name.to_ascii_lowercase();
     if postgres {
         matches!(name.as_str(), "template0" | "template1")

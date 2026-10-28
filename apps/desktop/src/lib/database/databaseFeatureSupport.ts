@@ -235,6 +235,10 @@ export function supportsObjectBrowser(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "objectBrowser");
 }
 
+export function supportsPlDebugRoutine(dbType?: DatabaseType): boolean {
+  return dbType === "oracle" || dbType === "oceanbase-oracle";
+}
+
 export function supportsConnectionDatabaseBrowser(dbType?: DatabaseType): boolean {
   // MongoDB reuses the object browser for collections, not the SQL database list.
   //

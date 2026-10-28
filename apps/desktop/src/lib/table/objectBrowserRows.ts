@@ -1,9 +1,10 @@
-import type { MongoCollectionKind, ObjectBrowserFilter, ObjectInfo, TreeNode, TreeNodeType } from "@/types/database";
+import type { MongoCollectionKind, ObjectBrowserFilter, ObjectInfo, TreeNode, TreeNodeType, TriggerInfo } from "@/types/database";
 export type { ObjectBrowserFilter } from "@/types/database";
 import { pinnedTreeNodeIdentityMatches, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { toMongoCollectionKind } from "@/lib/sidebar/mongoCollectionMutation";
 import { buildGroupedObjectTreeNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, compareDatabaseObjectNames, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
 import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
+import { exactOracleTriggerMetadata, exactOracleTriggerObjectMetadata, oracleTriggerIdentityKey } from "@/lib/database/oracleTriggerIdentity";
 
 export type ObjectBrowserRow = {
   id: string;
@@ -15,6 +16,7 @@ export type ObjectBrowserRow = {
   parentName?: string;
   collectionKind?: MongoCollectionKind;
   valid?: boolean | null;
+  trigger?: TriggerInfo | null;
   signature?: string | null;
   comment?: string | null;
   created_at?: string | null;
@@ -80,7 +82,7 @@ export function objectBrowserRowPinnedTreeNodeIdentity(row: ObjectBrowserRow, co
 }
 
 export function objectBrowserRowMatchesPinnedTreeNode(row: ObjectBrowserRow, identity: PinnedTreeNodeIdentity, context: ObjectBrowserPinnedTreeNodeContext): boolean {
-  return pinnedTreeNodeIdentityMatches(identity, objectBrowserRowPinnedTreeNodeIdentity(row, context), canonicalizeObjectBrowserPinnedTreeNodeIdentity(context));
+  return pinnedTreeNodeIdentityMatches(identity, objectBrowserRowPinnedTreeNodeIdentity(row, context), exactOracleTriggerMetadata(row.trigger) ? undefined : canonicalizeObjectBrowserPinnedTreeNodeIdentity(context));
 }
 
 function flattenTreeNodeIds(nodes: readonly TreeNode[]): string[] {
@@ -94,12 +96,15 @@ function objectBrowserRowObjectInfo(row: ObjectBrowserRow, schema?: string): Obj
     schema,
     valid: row.valid,
     signature: row.signature || undefined,
+    trigger: row.trigger,
     parent_schema: row.type === "INDEX" ? row.parentSchema : row.partitionParentSchema,
     parent_name: row.type === "INDEX" ? row.parentName : row.partitionParentName,
   };
 }
 
 function legacySchemaCandidates(row: ObjectBrowserRow, context: ObjectBrowserPinnedTreeNodeContext): Array<string | undefined> {
+  const trigger = exactOracleTriggerMetadata(row.trigger);
+  if (trigger) return [trigger.owner];
   const identity = objectBrowserRowPinnedTreeNodeIdentity(row, context);
   const canonicalIdentity = canonicalizeObjectBrowserPinnedTreeNodeIdentity(context)(identity);
   return [...new Set([row.schema, context.schema, canonicalIdentity.schema, undefined].map((schema) => schema?.trim() || undefined))];
@@ -163,7 +168,27 @@ export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type
 
 export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; database: string; fallbackSchema: string; rowSchema?: string }): ObjectBrowserRow[] {
   const seen = new Map<string, number>();
-  const rows = options.objects.flatMap((object) => {
+  const rows = options.objects.flatMap<ObjectBrowserRow>((object) => {
+    const exactTrigger = exactOracleTriggerObjectMetadata(object);
+    if (exactTrigger) {
+      const baseId = oracleTriggerIdentityKey(exactTrigger);
+      const index = seen.get(baseId) ?? 0;
+      seen.set(baseId, index + 1);
+      return [
+        {
+          id: `${baseId}:${index}`,
+          name: exactTrigger.name,
+          displayName: exactTrigger.name,
+          schema: exactTrigger.owner,
+          type: "TRIGGER" as const,
+          valid: object.trigger?.valid ?? object.valid,
+          trigger: object.trigger,
+          comment: object.comment,
+          created_at: object.created_at,
+          updated_at: object.updated_at,
+        },
+      ];
+    }
     const type = normalizeObjectBrowserType(object.object_type);
     const name = type === "INDEX" ? object.name : normalizeDatabaseObjectName(object.name);
     if (!name) return [];
@@ -187,6 +212,7 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
         comment: object.comment,
         created_at: object.created_at,
         updated_at: object.updated_at,
+        trigger: object.trigger,
         parentSchema: type === "INDEX" ? (object.parent_schema ?? undefined) : undefined,
         parentName: type === "INDEX" ? (object.parent_name ?? undefined) : undefined,
         partitionParentSchema: type !== "INDEX" && object.parent_schema ? normalizeDatabaseObjectName(object.parent_schema) : undefined,

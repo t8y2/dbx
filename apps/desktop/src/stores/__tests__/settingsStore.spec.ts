@@ -31,6 +31,58 @@ import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
+  it("retains only an explicit legacy sidebar value without creating a global default", () => {
+    expect(DEFAULT_EDITOR_SETTINGS).not.toHaveProperty("sidebarShowUserAdmin");
+    expect(normalizeEditorSettings({})).not.toHaveProperty("sidebarShowUserAdmin");
+    for (const visible of [false, true]) {
+      expect(normalizeEditorSettings({ sidebarShowUserAdmin: visible }).sidebarShowUserAdmin).toBe(visible);
+    }
+    expect(normalizeEditorSettings({ sidebarShowUserAdmin: "false" as any })).not.toHaveProperty("sidebarShowUserAdmin");
+  });
+
+  it("preserves result export view options across settings updates and reload normalization", async () => {
+    const defaults = { dataGridExportInToolbar: false, dataGridLoadAllInToolbar: false, showSaveResult: true, warnIncompleteExport: true };
+    expect(normalizeEditorSettings({})).toMatchObject(defaults);
+    setActivePinia(createPinia());
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settings = useSettingsStore();
+    const changes = { dataGridExportInToolbar: true, dataGridLoadAllInToolbar: true, showSaveResult: false, warnIncompleteExport: false };
+    settings.updateEditorSettings(changes);
+    expect(normalizeEditorSettings(JSON.parse(JSON.stringify(settings.editorSettings)))).toMatchObject(changes);
+  });
+
+  it("defaults query connection group paths to hidden and validates the toggle", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath).toBe(false);
+    expect(normalizeEditorSettings({}).showConnectionGroupPath).toBe(false);
+    expect(normalizeEditorSettings({ showConnectionGroupPath: true }).showConnectionGroupPath).toBe(true);
+    expect(normalizeEditorSettings({ showConnectionGroupPath: "true" as any }).showConnectionGroupPath).toBe(false);
+  });
+
+  it("migrates legacy partial DDL settings before applying and tracking the patch", async () => {
+    setActivePinia(createPinia());
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settings = useSettingsStore();
+    settings.updateEditorSettings({ excludeDdlStorage: false } as any);
+    expect(settings.editorSettings.includeDdlStorage).toBe(true);
+    settings.updateEditorSettings({ includeDdlStorage: false, excludeDdlStorage: false } as any);
+    expect(settings.editorSettings.includeDdlStorage).toBe(false);
+    expect(settings.editorSettings).not.toHaveProperty("excludeDdlStorage");
+  });
+
+  it("migrates DDL storage choices to positive settings without retaining the legacy key", () => {
+    const defaults = normalizeEditorSettings({});
+    expect(defaults).toMatchObject({ includeDdlStorage: false, compactDdlSql: true, separateDdlIndexes: false });
+    for (const excludeDdlStorage of [true, false]) {
+      const migrated = normalizeEditorSettings({ excludeDdlStorage } as any);
+      expect(migrated.includeDdlStorage).toBe(!excludeDdlStorage);
+      expect(migrated).not.toHaveProperty("excludeDdlStorage");
+      expect(normalizeEditorSettings(JSON.parse(JSON.stringify(migrated))).includeDdlStorage).toBe(!excludeDdlStorage);
+    }
+    expect(normalizeEditorSettings({ includeDdlStorage: true, excludeDdlStorage: true } as any).includeDdlStorage).toBe(true);
+    expect(normalizeEditorSettings({ includeDdlStorage: false, excludeDdlStorage: false } as any).includeDdlStorage).toBe(false);
+    expect(normalizeEditorSettings({ compactDdlSql: false, separateDdlIndexes: true })).toMatchObject({ compactDdlSql: false, separateDdlIndexes: true });
+  });
+
   it("preserves the compact object browser view and rejects unknown modes", () => {
     expect(normalizeEditorSettings({ objectBrowserViewMode: "compact" }).objectBrowserViewMode).toBe("compact");
     expect(normalizeEditorSettings({ objectBrowserViewMode: "unknown" as any }).objectBrowserViewMode).toBe(DEFAULT_EDITOR_SETTINGS.objectBrowserViewMode);
@@ -590,6 +642,19 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ deleteConnectionTabHandlingMode: "keep-all" } as any).deleteConnectionTabHandlingMode).toBe("keep-all-tabs");
   });
 
+  it("defaults DeepLink confirmation to always and maps the legacy boolean switch", () => {
+    // 默认都要确认：深链打开连接仍然要用户在弹窗里确认一次。
+    expect(normalizeEditorSettings({}).deepLinkConnectionConfirmMode).toBe("always");
+    for (const mode of ["always", "create", "update", "all"] as const) {
+      expect(normalizeEditorSettings({ deepLinkConnectionConfirmMode: mode }).deepLinkConnectionConfirmMode).toBe(mode);
+    }
+    // 上一版的布尔开关只覆盖新建连接，true 收敛成 create。
+    expect(normalizeEditorSettings({ deepLinkConnectionAutoCreate: true } as any).deepLinkConnectionConfirmMode).toBe("create");
+    expect(normalizeEditorSettings({ deepLinkConnectionAutoCreate: false } as any).deepLinkConnectionConfirmMode).toBe("always");
+    // 非法值一律回落默认值。
+    expect(normalizeEditorSettings({ deepLinkConnectionConfirmMode: "sometimes" } as any).deepLinkConnectionConfirmMode).toBe("always");
+  });
+
   it("remembers connection databases by default and sanitizes the stored map", () => {
     expect(normalizeEditorSettings({}).rememberConnectionDatabaseOnDelete).toBe(true);
     expect(normalizeEditorSettings({ rememberConnectionDatabaseOnDelete: false }).rememberConnectionDatabaseOnDelete).toBe(false);
@@ -981,7 +1046,18 @@ describe("normalizeMcpGlobalPolicy", () => {
       groupPolicies: [],
       configured: false,
       queryTimeoutSecs: null,
+      pluginToolsMode: "flat",
     });
+  });
+
+  it.each(["auto", "flat", "lazy"] as const)("preserves the saved %s plugin tool mode", (pluginToolsMode) => {
+    expect(normalizeMcpGlobalPolicy({ configured: true, pluginToolsMode }).pluginToolsMode).toBe(pluginToolsMode);
+  });
+
+  it("distinguishes a missing mode in legacy saved policies from a fresh configuration", () => {
+    expect(normalizeMcpGlobalPolicy({ configured: true }).pluginToolsMode).toBe("auto");
+    expect(normalizeMcpGlobalPolicy({ configured: false }).pluginToolsMode).toBe("flat");
+    expect(normalizeMcpGlobalPolicy(null).pluginToolsMode).toBe("flat");
   });
 
   it("normalizes and deduplicates an explicit connection allowlist", () => {
@@ -1003,6 +1079,7 @@ describe("normalizeMcpGlobalPolicy", () => {
       groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
+      pluginToolsMode: "auto",
     });
   });
 
@@ -1011,6 +1088,9 @@ describe("normalizeMcpGlobalPolicy", () => {
   });
 
   it("enables high-risk SQL prompts only when explicitly configured", () => {
+    expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: true, callConfirmation: "high_risk" })).toMatchObject({ promptHighRiskSql: false, callConfirmation: "high_risk" });
+    expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: true, callConfirmation: "off" }).promptHighRiskSql).toBe(false);
+    expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: false, callConfirmation: "full" }).promptHighRiskSql).toBe(true);
     expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: true }).promptHighRiskSql).toBe(true);
     expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: "true" } as any).promptHighRiskSql).toBe(false);
   });
@@ -1619,6 +1699,7 @@ describe("settingsStore MCP policy persistence", () => {
       groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
+      pluginToolsMode: "auto",
     };
     store.mcpGlobalPolicy = previous;
 
@@ -1637,6 +1718,7 @@ describe("settingsStore MCP policy persistence", () => {
       groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
+      pluginToolsMode: "auto",
     });
 
     rejectSave(new Error("save failed"));
@@ -1649,6 +1731,32 @@ describe("settingsStore persisted settings initialization", () => {
   beforeEach(() => {
     vi.resetModules();
     setActivePinia(createPinia());
+  });
+
+  it.each(["persisted", "legacy"])("preserves a %s global opt-out through unrelated saves until connection migration", async (source) => {
+    const old = { sidebarShowUserAdmin: false, theme: "xcode-dark" };
+    const data = new Map(source === "legacy" ? [["dbx-editor-settings", JSON.stringify(old)]] : []);
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => data.set(key, value),
+      removeItem: (key: string) => data.delete(key),
+    });
+    try {
+      const loadEditorSettings = vi.fn().mockResolvedValue(source === "persisted" ? old : null);
+      const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+      vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+      const { useSettingsStore } = await import("@/stores/settingsStore");
+      const store = useSettingsStore();
+      await store.initEditorSettings();
+      expect(store.editorSettings.sidebarShowUserAdmin).toBe(false);
+      expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ sidebarShowUserAdmin: false }));
+      store.updateEditorSettings({ fontSize: 16 });
+      await store.persistEditorSettings();
+      expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarShowUserAdmin: false, fontSize: 16 }));
+      if (source === "legacy") expect(data.has("dbx-editor-settings")).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("does not treat an editor settings read failure as an empty record", async () => {

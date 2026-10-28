@@ -1,4 +1,5 @@
-import { applyDdlStoragePreference, supportsDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { supportsDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
 import { watch, createApp, getCurrentScope, onScopeDispose, type ShallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 import i18n from "@/i18n";
@@ -37,6 +38,11 @@ import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import type { SqlInsertDialect } from "@/lib/export/sqlInsertMode";
 import { uuid } from "@/lib/common/utils";
+import { showExportExecutionModeDialog } from "@/lib/export/exportExecutionMode";
+import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
+import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
+import type { ManualExportMode } from "@/lib/export/manualExportQueue";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 
 type StructureCopyFormat = "tsv" | "markdown";
 
@@ -64,6 +70,12 @@ interface SidebarTableExportTarget {
   csvQuoteMode: CsvQuoteMode;
   /** 导出 CSV 时 NULL 的字面量；空串表示关闭（旧行为）。 */
   nullLiteral: string;
+  primaryKeyMode: api.TableExportRequest["primaryKeyMode"];
+  omitDatabaseQualifier: boolean;
+  dateTimeFormat?: string;
+  connectionFingerprint: string;
+  connectionType: string;
+  queryTimeoutSecs?: number;
   fileNameBase?: string;
 }
 
@@ -98,6 +110,13 @@ interface ExportTableDataOptions {
   outputDirectory?: string;
   suppressDoneToast?: boolean;
   insertDialect?: SqlInsertDialect;
+  operation?: {
+    outputPath: string;
+    task?: ExportTask;
+    check: () => void;
+    read: <T>(request: () => Promise<T>, cleanup?: boolean) => Promise<T>;
+    setActive: (task: ExportTask, cancel: (() => Promise<void>) | undefined) => void;
+  };
 }
 
 function joinExportFilePath(directory: string, fileName: string): string {
@@ -108,7 +127,8 @@ function joinExportFilePath(directory: string, fileName: string): string {
 export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOptions) {
   const { t } = useI18n();
   const { toast } = useToast();
-  const { addTask: addExportTask, updateTableExportTask } = useExportTracker();
+  const tracker = useExportTracker();
+  const { addTask: addExportTask, updateTableExportTask } = tracker;
   const { activeNode, connectionStore, settingsStore } = options;
 
   async function saveFileContent(content: string, defaultFileName: string, filterName: string, filterExt: string) {
@@ -147,10 +167,12 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
   }
 
   let structureSource: Array<{ ddl: string; databaseType: ReturnType<typeof effectiveDatabaseTypeForConnection> }> = [];
+  let structureTargets: ReturnType<typeof structureExportTargets> = [];
   let structureRequestId = 0;
   function invalidateStructureRequest() {
     structureRequestId++;
     structureSource = [];
+    structureTargets = [];
     isLoadingStructurePreview.value = false;
   }
   watch(
@@ -162,25 +184,40 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
   );
   if (getCurrentScope()) onScopeDispose(invalidateStructureRequest);
   function renderStructurePreview() {
-    structurePreviewSql.value = joinExportedDdls(structureSource.map(({ ddl, databaseType }) => applyDdlStoragePreference(ddl, databaseType, settingsStore.editorSettings.excludeDdlStorage)));
+    structurePreviewSql.value = joinExportedDdls(structureSource.map(({ ddl, databaseType }) => applyDdlTextPreferences(ddl, databaseType, settingsStore.editorSettings)));
   }
+  watch([() => settingsStore.editorSettings.includeDdlStorage, () => settingsStore.editorSettings.compactDdlSql], () => {
+    if (showStructurePreviewDialog.value && structureSource.length) renderStructurePreview();
+  });
+
   watch(
-    () => settingsStore.editorSettings.excludeDdlStorage,
+    () => settingsStore.editorSettings.separateDdlIndexes,
     () => {
-      if (showStructurePreviewDialog.value && structureSource.length) renderStructurePreview();
+      if (showStructurePreviewDialog.value && structureTargets.length) void loadStructurePreview(structureTargets);
     },
   );
 
   async function exportStructure() {
-    const targets = structureExportTargets();
+    await loadStructurePreview(structureExportTargets());
+  }
+
+  async function loadStructurePreview(targets: ReturnType<typeof structureExportTargets>) {
     if (!targets.length) return;
+    const sameTargets =
+      targets.length === structureTargets.length &&
+      targets.every((target, index) => {
+        const previous = structureTargets[index];
+        return previous && target.connectionId === previous.connectionId && target.database === previous.database && target.schema === previous.schema && target.catalog === previous.catalog && target.type === previous.type && target.label === previous.label;
+      });
+    structureTargets = targets.map((target) => ({ ...target }));
+    const separateIndexes = settingsStore.editorSettings.separateDdlIndexes;
     const requestId = ++structureRequestId;
     const requestSource: typeof structureSource = [];
     isLoadingStructurePreview.value = true;
     structurePreviewError.value = "";
-    structurePreviewSql.value = "";
-    structurePreviewDdlStorageType.value = undefined;
-    structureSource = [];
+    if (!sameTargets) structurePreviewSql.value = "";
+    structurePreviewDdlStorageType.value = targets.map((target) => effectiveDatabaseTypeForConnection(connectionStore.getConfig(target.connectionId))).find(supportsDdlStoragePreference);
+    if (!sameTargets) structureSource = [];
     structurePreviewTitle.value = targets.length === 1 ? t("contextMenu.exportStructurePreviewTitle", { name: targets[0]!.label }) : t("contextMenu.exportStructurePreviewTitleMultiple", { count: targets.length });
     structurePreviewDefaultFileName.value = targets.length === 1 ? `${targets[0]!.label}.sql` : "structures.sql";
     showStructurePreviewDialog.value = true;
@@ -188,9 +225,10 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       for (const target of targets) {
         await connectionStore.ensureConnected(target.connectionId);
         if (requestId !== structureRequestId) return;
-        const ddl = await api.getTableDdl(target.connectionId, target.database, target.schema || target.database, target.label, tableDdlObjectTypeForNode(target.type), target.catalog, true);
-        if (requestId !== structureRequestId) return;
         const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(target.connectionId));
+        const indexOptions: [boolean?, boolean?, string?] = supportsDdlStoragePreference(databaseType) && separateIndexes ? [undefined, true, target.schema || undefined] : [];
+        const ddl = await api.getTableDdl(target.connectionId, target.database, target.schema || target.database, target.label, tableDdlObjectTypeForNode(target.type), target.catalog, true, ...indexOptions);
+        if (requestId !== structureRequestId) return;
         requestSource.push({ ddl, databaseType });
       }
       structureSource = requestSource;
@@ -198,6 +236,10 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       renderStructurePreview();
     } catch (error: any) {
       if (requestId !== structureRequestId) return;
+      if (requestSource.length) {
+        structureSource = requestSource;
+        renderStructurePreview();
+      }
       structurePreviewError.value = error?.message || String(error);
       console.error("Export structure failed:", error);
     } finally {
@@ -353,15 +395,24 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     return resolveExportOutputPath(target.fileNameBase ?? target.tableName, format, outputDirectory);
   }
 
-  async function exportDataLegacyForTarget(target: SidebarTableExportTarget, outputDirectory?: string, suppressDoneToast = false) {
+  async function exportDataLegacyForTarget(target: SidebarTableExportTarget, outputDirectory?: string, suppressDoneToast = false, operation?: ExportTableDataOptions["operation"]) {
     const { connectionId, database } = target;
     const config = connectionStore.getConfig(connectionId);
-    if (!config) return false;
+    if (!config && !operation) return false;
 
+    let task: ExportTask | undefined;
     try {
+      operation?.check();
       await connectionStore.ensureConnected(connectionId);
-      const queryColumns = config.db_type === "neo4j" ? (await api.getColumns(connectionId, database, target.metadataSchema, target.tableName, target.catalog)).map((column) => column.name) : undefined;
-      const useAgentCursor = config.db_type === "cassandra";
+      operation?.check();
+      if (operation) {
+        task = operation.task ?? addExportTask(target.tableName, "json", operation.outputPath);
+        operation.setActive(task, undefined);
+      }
+      const read: NonNullable<ExportTableDataOptions["operation"]>["read"] = operation?.read ?? (<T>(request: () => Promise<T>) => request());
+      const connectionType = operation ? target.connectionType : config!.db_type;
+      const queryColumns = connectionType === "neo4j" ? (await read(() => api.getColumns(connectionId, database, target.metadataSchema, target.tableName, target.catalog))).map((column) => column.name) : undefined;
+      const useAgentCursor = connectionType === "cassandra";
       const clientSessionId = useAgentCursor ? `table-export:${uuid()}` : undefined;
       const result = await fetchTableDataForExport({
         databaseType: target.databaseType,
@@ -371,21 +422,41 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         tableType: target.tableType,
         columns: queryColumns,
         useAgentCursor,
-        executePage: (sql, cursorOptions) => (cursorOptions ? api.executeQuery(connectionId, database, sql, undefined, undefined, { ...cursorOptions, clientSessionId, catalog: target.catalog, timeoutSecs: config.query_timeout_secs }) : api.executeQuery(connectionId, database, sql)),
+        executePage: async (sql, cursorOptions) => {
+          const result = await read(() =>
+            cursorOptions ? api.executeQuery(connectionId, database, sql, undefined, undefined, { ...cursorOptions, clientSessionId, catalog: target.catalog, timeoutSecs: operation ? target.queryTimeoutSecs : config!.query_timeout_secs }) : api.executeQuery(connectionId, database, sql),
+          );
+          if (operation) {
+            if (result.execution_error) throw new SnapshotCompletionError(result.error?.operationOutcome === "not_started" ? "failed" : "unknown", translateBackendError(t, result.error ?? String(result.rows[0]?.[0] ?? "Query failed")));
+            if (result.large_value_cells?.length || result.truncated) throw new SnapshotCompletionError("failed", "Incomplete table export result");
+          }
+          return result;
+        },
         closeCursor: useAgentCursor
           ? async (sessionId) => {
               try {
-                if (sessionId) await api.closeQuerySession(connectionId, database, sessionId, clientSessionId, target.catalog);
+                if (sessionId) await read(() => api.closeQuerySession(connectionId, database, sessionId, clientSessionId, target.catalog), true);
               } finally {
-                await api.closeClientConnectionSession(connectionId, database, clientSessionId!, target.catalog);
+                await read(() => (operation ? api.closeClientConnectionSession(connectionId, database, clientSessionId!, target.catalog, true) : api.closeClientConnectionSession(connectionId, database, clientSessionId!, target.catalog)), true);
               }
             }
           : undefined,
       });
 
-      const outputPath = await resolveTableExportOutputPath(target, "json", outputDirectory);
+      operation?.check();
+      const outputPath = operation?.outputPath ?? (await resolveTableExportOutputPath(target, "json", outputDirectory));
       if (!outputPath) return false;
-      await api.exportQueryResultJson(outputPath, result.columns, result.rows);
+      if (task && operation) {
+        task.canCancel = false;
+        operation.setActive(task, undefined);
+      }
+      await read(() => api.exportQueryResultJson(outputPath, result.columns, result.rows));
+      if (task) {
+        task.status = "Done";
+        task.rowsExported = result.rows.length;
+        task.totalRows = result.rows.length;
+        task.finishedAt = Date.now();
+      }
       if (!suppressDoneToast) {
         notifyExportComplete({
           filePath: outputPath,
@@ -396,6 +467,14 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       }
       return true;
     } catch (error: any) {
+      if (operation) {
+        if (task) {
+          task.status = error instanceof SnapshotCompletionError && error.status === "unknown" ? "Unknown" : error instanceof SnapshotCompletionError && error.status === "cancelled" ? "Cancelled" : "Error";
+          task.errorMessage = error?.message || String(error);
+          task.finishedAt = task.status === "Unknown" ? undefined : Date.now();
+        }
+        throw error;
+      }
       toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
       return false;
     }
@@ -410,6 +489,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       const app = createApp(XlsxHeaderDialog, {
         open: true,
         showHeaderOptions: hasComments,
+        showExecutionMode: isTauriRuntime(),
         onConfirm: (exportOptions: XlsxExportOptions) => {
           resolve(exportOptions);
           app.unmount();
@@ -450,6 +530,12 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       rowLimit: editorSettings.exportRowLimitEnabled ? editorSettings.exportRowLimit : null,
       csvQuoteMode: editorSettings.csvQuoteMode,
       nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode),
+      primaryKeyMode: editorSettings.dataGridExtractorOptions.sql.primaryKeyMode,
+      omitDatabaseQualifier: dropsSchemaQualifier(effectiveDatabaseTypeForConnection(config), editorSettings.generateSqlIncludeDatabaseName, node.catalog),
+      dateTimeFormat: editorSettings.globalDateTimeExportFormat || undefined,
+      connectionFingerprint: connectionConfigFingerprint(config),
+      connectionType: config.db_type,
+      queryTimeoutSecs: config.query_timeout_secs,
     };
   }
 
@@ -462,18 +548,22 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
   }
 
   async function exportTableData(target: SidebarTableExportTarget, format: "csv" | "xlsx" | "sql", exportOptions: ExportTableDataOptions = {}) {
-    const { columnInfos, headerMode = "name", autoFilter = true, outputDirectory, suppressDoneToast = false, insertDialect = "source" } = exportOptions;
+    const { columnInfos, headerMode = "name", autoFilter = true, outputDirectory, suppressDoneToast = false, insertDialect = "source", operation } = exportOptions;
     const { connectionId, database } = target;
 
     let task: ExportTask | null = null;
     try {
-      const outputPath = await resolveTableExportOutputPath(target, format, outputDirectory);
+      const outputPath = operation?.outputPath ?? (await resolveTableExportOutputPath(target, format, outputDirectory));
       if (!outputPath) return false;
 
+      operation?.check();
       await connectionStore.ensureConnected(connectionId);
-      task = addExportTask(target.tableName, format, outputPath);
+      operation?.check();
+      task = operation?.task ?? addExportTask(target.tableName, format, outputPath);
       const currentTask = task;
-      const exportColumnInfos = columnInfos ?? (target.loadColumnMetadata ? await api.getColumns(connectionId, database, target.metadataSchema, target.tableName, target.catalog) : undefined);
+      const read = operation?.read ?? (<T>(request: () => Promise<T>) => request());
+      operation?.setActive(currentTask, undefined);
+      const exportColumnInfos = columnInfos ?? (target.loadColumnMetadata ? await read(() => api.getColumns(connectionId, database, target.metadataSchema, target.tableName, target.catalog)) : undefined);
       const queryColumns = exportColumnInfos?.map((column) => column.name);
       const primaryKeys = exportColumnInfos?.filter((column) => column.is_primary_key).map((column) => column.name);
       if (target.databaseType === "victoriametrics") {
@@ -482,25 +572,18 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
           schema: target.schema,
           tableName: target.tableName,
           tableType: target.tableType,
-          executePage: (sql) => api.executeQuery(connectionId, database, sql),
+          executePage: (sql) => read(() => api.executeQuery(connectionId, database, sql)),
         });
+        operation?.check();
+        if (operation && (result.execution_error || result.large_value_cells?.length || result.truncated)) throw new SnapshotCompletionError(result.execution_error && result.error?.operationOutcome !== "not_started" ? "unknown" : "failed", "Incomplete table export result");
+        if (operation) currentTask.canCancel = false;
+        operation?.setActive(currentTask, undefined);
         if (format === "csv") {
-          await api.exportQueryResultCsv(outputPath, result.columns, result.rows, target.csvQuoteMode, target.nullLiteral);
+          await read(() => api.exportQueryResultCsv(outputPath, result.columns, result.rows, target.csvQuoteMode, target.nullLiteral));
         } else {
           const comments = result.columns.map((name) => exportColumnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
           const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
-          await api.exportQueryResultXlsx(
-            outputPath,
-            target.tableName,
-            result.columns,
-            result.column_types ?? result.columns.map(() => ""),
-            headerOverrides,
-            result.rows,
-            undefined,
-            autoFilter,
-            settingsStore.editorSettings.globalDateTimeExportFormat || undefined,
-            xlsxHeaderUsesCommentRows(headerMode),
-          );
+          await read(() => api.exportQueryResultXlsx(outputPath, target.tableName, result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows, undefined, autoFilter, target.dateTimeFormat, xlsxHeaderUsesCommentRows(headerMode)));
         }
         currentTask.status = "Done";
         currentTask.rowsExported = result.rows.length;
@@ -535,7 +618,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         ...(format === "sql"
           ? {
               insertDialect,
-              omitDatabaseQualifier: dropsSchemaQualifier(target.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, target.catalog),
+              omitDatabaseQualifier: target.omitDatabaseQualifier,
             }
           : {}),
         csvQuoteMode: target.csvQuoteMode,
@@ -545,13 +628,19 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         headerCommentRows: format === "xlsx" ? xlsxHeaderUsesCommentRows(headerMode) : undefined,
         autoFilter: format === "xlsx" ? autoFilter : undefined,
         primaryKeys,
-        primaryKeyMode: settingsStore.editorSettings.dataGridExtractorOptions.sql.primaryKeyMode,
+        primaryKeyMode: target.primaryKeyMode,
         batchSize: target.batchSize,
         skipCount: format === "sql",
         rowLimit: target.rowLimit,
       };
 
-      await api.startTableExport(request, (progress) => {
+      operation?.check();
+      let terminalSeen = false;
+      let terminalProgress: api.TableExportProgress | undefined;
+      operation?.setActive(currentTask, () => api.cancelTableExport(currentTask.exportId));
+      const onProgress = (progress: api.TableExportProgress) => {
+        terminalSeen ||= progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled";
+        if (progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled") terminalProgress = progress;
         updateTableExportTask(currentTask.exportId, progress);
         if (progress.status === "Done") {
           if (!suppressDoneToast) {
@@ -563,9 +652,26 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
             });
           }
         } else if (progress.status === "Error") toast(t("grid.exportFailed", { message: translateBackendError(t, progress.errorMessage || "") }), 5000);
+      };
+      await (operation ? api.startTableExport(request, onProgress, true) : api.startTableExport(request, onProgress)).catch((error) => {
+        if (error instanceof SnapshotCompletionError && error.status === "failed") throw error;
+        if (operation && !terminalSeen) throw new SnapshotCompletionError("unknown", error instanceof Error ? error.message : String(error));
+        if (operation && terminalProgress?.status === "Done") return terminalProgress;
+        if (operation && terminalProgress?.status === "Cancelled") throw new SnapshotCompletionError("cancelled", terminalProgress.errorMessage || "Export cancelled");
+        throw error;
       });
+      if (operation && !terminalSeen) throw new SnapshotCompletionError("unknown", "Export completion was not confirmed");
+      if (operation && terminalProgress) updateTableExportTask(currentTask.exportId, terminalProgress);
       return true;
     } catch (error: any) {
+      if (operation) {
+        if (task) {
+          task.status = error instanceof SnapshotCompletionError && error.status === "unknown" ? "Unknown" : error instanceof SnapshotCompletionError && error.status === "cancelled" ? "Cancelled" : "Error";
+          task.errorMessage = error?.message || String(error);
+          task.finishedAt = task.status === "Unknown" ? undefined : Date.now();
+        }
+        throw error;
+      }
       if (task) {
         task.status = "Error";
         task.errorMessage = error?.message || String(error);
@@ -581,7 +687,208 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     return pickTableExportDirectory();
   }
 
+  async function submitTableExports(targets: SidebarTableExportTarget[], format: "csv" | "xlsx" | "sql" | "json", outputDirectory: string | undefined, mode: ManualExportMode, optionsForTarget: (target: SidebarTableExportTarget) => ExportTableDataOptions) {
+    const capturedOptions = targets.map((target) => {
+      const options = optionsForTarget(target);
+      return { ...options, columnInfos: options.columnInfos?.map((column) => ({ ...column })) };
+    });
+    const paths: string[] = [];
+    for (const target of targets) {
+      const path = await resolveTableExportOutputPath(target, format, outputDirectory);
+      if (!path) return;
+      paths.push(path);
+    }
+    const selectedIds = currentTableExportTargets()
+      .map((target) => target.nodeId)
+      .join("\n");
+    if (selectedIds !== targets.map((target) => target.nodeId).join("\n")) {
+      toast(t("exportProgress.connectionChanged"), 5000);
+      return;
+    }
+    const task = addExportTask(targets.map((target) => target.tableName).join(", "), format, targets.length === 1 ? paths[0]! : outputDirectory!);
+    let complete!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    tracker.submitExportTask(
+      task,
+      mode,
+      async () => {
+        const controller = new AbortController();
+        const active: { task?: ExportTask; cancel?: () => Promise<void> } = {};
+        const cancel = async () => {
+          controller.abort();
+          task.status = "Cancelling";
+          if (active.task) active.task.status = "Cancelling";
+          await active.cancel?.();
+        };
+        tracker.registerTaskCancelHandler(task.exportId, cancel);
+        let unknown = false;
+        let unknownMessage: string | undefined;
+        let exported = 0;
+        let failed = false;
+        try {
+          for (let index = 0; index < targets.length; index++) {
+            if (controller.signal.aborted) break;
+            const target = targets[index]!;
+            const check = () => {
+              if (unknown) throw new SnapshotCompletionError("unknown", unknownMessage ?? "Export operation completion was not confirmed");
+              if (controller.signal.aborted) throw new SnapshotCompletionError("cancelled", "Export cancelled");
+              const config = connectionStore.getConfig(target.connectionId);
+              if (!config || connectionConfigFingerprint(config) !== target.connectionFingerprint) throw new SnapshotCompletionError("failed", t("exportProgress.connectionChanged"));
+            };
+            const read = async <T>(request: () => Promise<T>, cleanup = false): Promise<T> => {
+              if (!cleanup) check();
+              let result: T;
+              try {
+                result = await request();
+              } catch (error) {
+                unknown = true;
+                unknownMessage ??= error instanceof Error ? error.message : String(error);
+                throw new SnapshotCompletionError("unknown", error instanceof Error ? error.message : String(error));
+              }
+              if (!cleanup && active.task?.canCancel !== false) check();
+              return result;
+            };
+            try {
+              const operation: NonNullable<ExportTableDataOptions["operation"]> = {
+                outputPath: paths[index]!,
+                task: targets.length === 1 ? task : undefined,
+                check,
+                read,
+                setActive: (child, cancelChild) => {
+                  if (active.task && active.task !== task) tracker.unregisterTaskCancelHandler(active.task.exportId);
+                  active.task = child;
+                  active.cancel = cancelChild;
+                  task.canCancel = child.canCancel !== false;
+                  if (child !== task) tracker.registerTaskCancelHandler(child.exportId, cancel);
+                },
+              };
+              const succeeded = format === "json" ? await exportDataLegacyForTarget(target, outputDirectory, targets.length > 1, operation) : await exportTableData(target, format, { ...capturedOptions[index], suppressDoneToast: targets.length > 1, operation });
+              if (succeeded && active.task?.status === "Done") exported++;
+              if (active.task?.status === "Error") {
+                failed = true;
+                task.errorMessage = active.task.errorMessage;
+              }
+              if (active.task?.status === "Cancelled") controller.abort();
+            } catch (error) {
+              unknown ||= error instanceof SnapshotCompletionError && error.status === "unknown";
+              task.errorMessage = error instanceof Error ? error.message : String(error);
+              if (unknown) {
+                task.status = "Unknown";
+                return "unknown";
+              }
+              if (error instanceof SnapshotCompletionError && error.status === "cancelled") break;
+              failed = true;
+              toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
+            }
+            if (active.task && active.task !== task) tracker.unregisterTaskCancelHandler(active.task.exportId);
+            active.task = undefined;
+            active.cancel = undefined;
+            task.canCancel = true;
+          }
+          task.status = exported === targets.length ? "Done" : controller.signal.aborted ? "Cancelled" : failed ? "Error" : "Done";
+          task.finishedAt = Date.now();
+          if (targets.length > 1 && exported > 0) toast(t("contextMenu.exportDataMultipleSuccess", { count: exported }));
+          return "settled";
+        } finally {
+          if (!unknown) {
+            tracker.unregisterTaskCancelHandler(task.exportId);
+            if (active.task && active.task !== task) tracker.unregisterTaskCancelHandler(active.task.exportId);
+          }
+          task.canCancel = false;
+          if (unknown && active.task) active.task.canCancel = false;
+        }
+      },
+      (current) => {
+        if (current.status === "Done" || current.status === "Error" || current.status === "Cancelled" || current.status === "Unknown") complete();
+      },
+    );
+    if (mode === "immediate") await completion;
+  }
+
+  async function exportQueuedMongoCollection(outputFormat: "csv" | "ndjson" | "bson" | "bsonGzip") {
+    const node = activeNode.value;
+    if (node.type !== "mongo-collection" || !node.connectionId || !node.database) return;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    const collection = node.label;
+    const config = connectionStore.getConfig(connectionId);
+    const fingerprint = config ? connectionConfigFingerprint(config) : undefined;
+    const preferredPath = settingsStore.editorSettings.preferredExportPath;
+    const format = outputFormat === "bsonGzip" ? "bson" : outputFormat;
+    const extension = outputFormat === "bsonGzip" ? "bson.gz" : outputFormat;
+    const mode = await showExportExecutionModeDialog();
+    if (mode === null) return;
+    const outputPath = await promptExportSavePath({ defaultFileName: `${collection}.${extension}`, filters: [{ name: exportFilterName(extension), extensions: [outputFormat === "bsonGzip" ? "gz" : extension] }], preferredPath });
+    if (!outputPath) return;
+    const task = addExportTask(collection, format, outputPath);
+    task.canCancel = true;
+    let complete!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    tracker.submitExportTask(
+      task,
+      mode,
+      async () => {
+        let started = false;
+        let cancelled = false;
+        tracker.registerTaskCancelHandler(task.exportId, async () => {
+          cancelled = true;
+          task.status = "Cancelling";
+          if (started) await api.cancelMongodbExport(task.exportId);
+        });
+        const check = () => {
+          const current = connectionStore.getConfig(connectionId);
+          if (!current || connectionConfigFingerprint(current) !== fingerprint) throw new Error(t("exportProgress.connectionChanged"));
+        };
+        try {
+          check();
+          await connectionStore.ensureConnected(connectionId);
+          check();
+          if (cancelled) {
+            task.status = "Cancelled";
+            task.finishedAt = Date.now();
+            return "settled";
+          }
+          started = true;
+          const summary = await api.exportMongodbQuery(
+            { exportId: task.exportId, connectionId, database, collection, format, includeHeader: true, gzip: outputFormat === "bsonGzip", filePath: outputPath },
+            (progress) => {
+              task.rowsExported = progress.documentsRead;
+              task.totalRows = progress.totalDocuments ?? null;
+              if (task.status !== "Cancelling") task.status = "Writing";
+              task.errorMessage = progress.errorMessage ?? null;
+            },
+            true,
+          );
+          task.status = "Done";
+          task.rowsExported = summary.documentsExported;
+          task.finishedAt = Date.now();
+          notifyExportComplete({ filePath: outputPath, message: t("grid.exported"), openFolderLabel: t("exportProgress.openFolder"), toast });
+          return "settled";
+        } catch (error) {
+          task.errorMessage = error instanceof Error ? error.message : String(error);
+          const status = error instanceof SnapshotCompletionError ? error.status : started ? "unknown" : "failed";
+          task.status = status === "unknown" ? "Unknown" : status === "cancelled" ? "Cancelled" : "Error";
+          task.finishedAt = status === "unknown" ? undefined : Date.now();
+          if (status !== "cancelled") toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
+          return status === "unknown" ? "unknown" : "settled";
+        } finally {
+          if (task.status !== "Unknown") tracker.unregisterTaskCancelHandler(task.exportId);
+          task.canCancel = false;
+        }
+      },
+      (current) => {
+        if (current.status === "Done" || current.status === "Error" || current.status === "Cancelled" || current.status === "Unknown") complete();
+      },
+    );
+    if (mode === "immediate") await completion;
+  }
+
   async function exportMongoCollection(outputFormat: "csv" | "ndjson" | "bson" | "bsonGzip") {
+    if (isTauriRuntime()) return exportQueuedMongoCollection(outputFormat);
     const node = activeNode.value;
     if (node.type !== "mongo-collection" || !node.connectionId || !node.database) return;
     const format: api.MongoExportFormat = outputFormat === "bsonGzip" ? "bson" : outputFormat;
@@ -635,9 +942,18 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
   async function exportData(format: "csv" | "json" | "sql", insertDialect: SqlInsertDialect = "source") {
     const targets = currentTableExportTargets();
     if (!targets.length) return;
+    if (format === "sql" && targets.some((target) => mysqlDataCharsetEnabled(connectionStore.getConfig(target.connectionId)))) {
+      toast(t("connection.mysqlDataCharsetExportHint"), 5000);
+      return;
+    }
+
+    const mode = isTauriRuntime() ? await showExportExecutionModeDialog() : undefined;
+    if (mode === null) return;
 
     const outputDirectory = await resolveMultiTableExportDirectory(targets.length);
     if (outputDirectory === null) return;
+
+    if (mode) return submitTableExports(targets, format, outputDirectory, mode, () => ({ insertDialect }));
 
     if (format === "json") {
       let exported = 0;
@@ -675,9 +991,13 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
 
     const xlsxOptions = await showSidebarTreeXlsxHeaderDialog(hasComments);
     if (xlsxOptions === null) return;
+    const mode = isTauriRuntime() ? (xlsxOptions.executionMode ?? (await showExportExecutionModeDialog())) : undefined;
+    if (mode === null) return;
 
     const outputDirectory = await resolveMultiTableExportDirectory(targets.length);
     if (outputDirectory === null) return;
+
+    if (mode) return submitTableExports(targets, "xlsx", outputDirectory, mode, (target) => ({ columnInfos: columnInfosByTarget.get(tableExportTargetCacheKey(target)), headerMode: xlsxOptions.headerMode, autoFilter: xlsxOptions.autoFilter }));
 
     let exported = 0;
     for (const target of targets) {

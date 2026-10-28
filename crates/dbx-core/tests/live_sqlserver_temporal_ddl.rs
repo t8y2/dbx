@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::ConnectionConfig;
 use dbx_core::query::execute_sql_statement;

@@ -1,11 +1,13 @@
 #![recursion_limit = "256"]
 
+pub mod approval;
 pub mod backend;
 pub mod diagnostics;
 pub mod http;
 pub mod http_auth;
 pub mod paths;
 pub mod plugin_tools;
+pub mod products;
 pub mod runtime;
 pub mod server;
 pub mod session;

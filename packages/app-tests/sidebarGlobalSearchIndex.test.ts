@@ -1,6 +1,7 @@
 import { expect, test, vi } from "vitest";
 import { collectSidebarGlobalSearchIndexes, sidebarIndexedObjectGroupTypes, type SidebarGlobalSearchIndexLoader } from "../../apps/desktop/src/lib/sidebar/sidebarGlobalSearchIndex.ts";
 import type { SidebarRegexIndexScope } from "../../apps/desktop/src/lib/sidebar/sidebarSearchTree.ts";
+import { resolveSidebarSearchDatabaseScope } from "../../apps/desktop/src/lib/sidebar/sidebarSearchDatabaseScope.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function fixture() {
@@ -94,6 +95,18 @@ test("restricts cached and missing scopes to opened databases", async () => {
   expect(results).toEqual([]);
   expect(loader.discover).not.toHaveBeenCalledWith(database);
   expect(loader.loadIndex).not.toHaveBeenCalled();
+});
+
+test("does not discover or index unopened databases when none has been opened", async () => {
+  const { root, database, cached, loader, run } = fixture();
+  root.children?.push({ ...database, id: "conn:other", database: "other", children: [] });
+  loader.loadCachedScopes.mockResolvedValue([cached]);
+  const scope = resolveSidebarSearchDatabaseScope(root, { enabled: true, isChildrenLoaded: () => false, openDatabaseKeys: new Set() });
+
+  expect(await run(scope)).toEqual([]);
+  expect(loader.discover).toHaveBeenCalledExactlyOnceWith(root);
+  expect(loader.loadIndex).not.toHaveBeenCalled();
+  expect(root.children?.every((node) => !node.isExpanded)).toBe(true);
 });
 
 test("discovers a missing namespace before indexing its tables", async () => {

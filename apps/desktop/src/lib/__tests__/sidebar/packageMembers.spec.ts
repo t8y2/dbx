@@ -16,6 +16,13 @@ function packageNode(): TreeNode {
 }
 
 describe("package member tree", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("preserves exact quoted member names for %s debugger targets", (databaseType) => {
+    const name = ' Mixed.Name"\n ';
+    const parent = { ...packageNode(), objectName: ' Pkg." ', schema: ' Owner." ' };
+    const nodes = buildPackageMemberNodes(parent, [{ name, kind: "procedure", routine_id: "exact" }], databaseType);
+    expect(nodes[0]).toMatchObject({ objectName: name, parentName: parent.objectName, schema: parent.schema });
+  });
+
   it("keeps OceanBase overload identities when their signatures are unknown or identical", () => {
     const candidates: CompletionAssistantCandidate[] = [
       { name: "RUN", kind: "procedure", signature: null, routine_id: "APP:101:1" },

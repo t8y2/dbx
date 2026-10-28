@@ -101,7 +101,7 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
     parent.remove();
   });
   const provide = (explicit = true) => completion.provideSqlCompletions(new CompletionContext(currentView.state, currentView.state.selection.main.head, explicit));
-  return { props, currentView, view, store, settings, runtime, completion, provide, startCompletion };
+  return { props, currentView, view, store, settings, runtime, metadata, completion, provide, startCompletion };
 }
 
 describe.each([false, true])("OceanBase standalone routine completion (semantic=%s)", (semanticCompletionEnabled) => {
@@ -306,6 +306,39 @@ describe.each([false, true])("Snowflake namespace completion (semantic=%s)", (se
     props.modelValue = quotedSql;
     currentView.dispatch({ changes: { from: 0, to: currentView.state.doc.length, insert: quotedSql }, selection: { anchor: quotedSql.length } });
     expect((await provide())?.options.map((option) => option.label)).toEqual(["QUOTED_TABLE"]);
+  });
+
+  it("drops an in-flight table response after the completion cache resets", async () => {
+    const { metadata, store, props } = createHarness({ database: "a", modelValue: "SELECT * FROM " });
+    let resolveOld!: (tables: SqlCompletionTable[]) => void;
+    store.listCompletionTables.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+    );
+    const old = metadata.listCompletionTablesWithLatencyBudget("connection", "a", "", 100);
+    await Promise.resolve();
+
+    props.database = "b";
+    metadata.refreshCompletionCache();
+    store.listCompletionTables.mockResolvedValue([{ name: "NEW_TABLE", database: "b" }]);
+    resolveOld([{ name: "OLD_TABLE", database: "a" }]);
+    await old;
+
+    expect(metadata.cachedTables.map((table) => table.name)).not.toContain("OLD_TABLE");
+    const tables = await metadata.listCompletionTablesWithLatencyBudget("connection", "b", "", 100);
+    expect(tables.map((table) => table.name)).toContain("NEW_TABLE");
+  });
+
+  it("prefetches the active database completion tables", async () => {
+    const { metadata, store } = createHarness({ database: "shop" });
+    store.listCompletionTables.mockResolvedValue([{ name: "TIS_ORDER", database: "shop" }]);
+
+    await metadata.prefetchCompletionTables();
+
+    expect(store.listCompletionTables).toHaveBeenCalledWith("connection", "shop", "", 500, undefined, false, undefined, undefined, { activateConnection: false });
+    expect(metadata.cachedTables.map((table) => table.name)).toContain("TIS_ORDER");
   });
 
   it.each([false, true])("preserves the quote-identifiers preference (%s) for mixed-case table insertion", async (quoteIdentifiers) => {

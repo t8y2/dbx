@@ -1273,6 +1273,10 @@ pub struct SendMessageRequest {
     /// Optional message headers.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// RabbitMQ: standard AMQP BasicProperties, separate from custom headers.
+    /// Keys use AMQP snake_case names; values remain strings on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<HashMap<String, String>>,
     /// Optional target partition (Kafka). When `None`, the key-based partitioner
     /// is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1383,6 +1387,27 @@ mod tests {
         assert!(req.exchange.is_none());
         assert!(req.routing_key.is_none());
         assert!(req.namespace.is_none());
+        assert!(serde_json::to_value(req).unwrap().get("properties").is_none());
+    }
+
+    #[test]
+    fn send_message_request_round_trips_rabbitmq_properties_separately_from_headers() {
+        let value = serde_json::json!({
+            "topic": "dbx-queue",
+            "payloadBase64": "aGVsbG8=",
+            "headers": { "content_type": "custom-header" },
+            "properties": {
+                "content_type": "application/json",
+                "delivery_mode": "2",
+                "priority": "0",
+                "expiration": "0",
+                "timestamp": "1735689600"
+            }
+        });
+        let req: super::SendMessageRequest = serde_json::from_value(value.clone()).expect("send request");
+        let round_trip = serde_json::to_value(req).expect("serialize send request");
+        assert_eq!(round_trip.get("properties"), value.get("properties"));
+        assert_eq!(round_trip.get("headers"), value.get("headers"));
     }
 
     #[test]

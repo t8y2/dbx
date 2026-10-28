@@ -309,6 +309,81 @@ pub struct PluginMcpContribution {
     /// `false`; set to `true` to opt in to that surface.
     #[serde(default, skip_serializing_if = "is_false")]
     pub external_tools: bool,
+    /// Optional grouping of the plugin's tools for the MCP settings UI. A
+    /// plugin without toolsets shows as one group.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolsets: Vec<PluginMcpToolset>,
+    /// Per-tool declarations keyed by the tool name `mcp/tools` returns. On
+    /// the external `dbx` MCP server only tools declared here with an
+    /// `access` level can be exposed; MCP annotations are not a substitute.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tools: BTreeMap<String, PluginMcpToolDeclaration>,
+    /// Optional sub-scope below a connection (a Kubernetes namespace, a
+    /// directory, …) that users can allow or restrict per connection, like
+    /// databases for SQL connections. The host reads the declared argument
+    /// from each call and enforces the access policy before forwarding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<PluginMcpScope>,
+}
+
+/// A plugin-declared sub-scope kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMcpScope {
+    /// Scope kind id, e.g. `namespace`. Must not be `database` (reserved for
+    /// the built-in database scope).
+    pub kind: String,
+    /// Display name in the access-control tree, e.g. "Namespace".
+    pub title: String,
+    /// Tool argument that carries the scope value. When a connection uses
+    /// selected or none sub-scope admission, the host requires this argument
+    /// on every scope-bound call; only an all-scopes connection may evaluate a
+    /// missing argument at connection level.
+    pub argument: String,
+    /// Optional sidecar method listing a connection's scope values
+    /// (`{ connectionId } → { values: [string] }`), for the settings picker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_method: Option<String>,
+}
+
+/// One group of plugin MCP tools.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMcpToolset {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Highest access a plugin MCP tool can reach, declared by its author.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginMcpAccess {
+    Read,
+    Write,
+    Full,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMcpToolDeclaration {
+    /// Toolset id from `toolsets`; omitted tools join the default group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<PluginMcpAccess>,
+}
+
+impl PluginMcpContribution {
+    /// The declared access of `tool`, if the author declared one.
+    pub fn declared_access(&self, tool: &str) -> Option<PluginMcpAccess> {
+        self.tools.get(tool).and_then(|declaration| declaration.access)
+    }
+
+    pub fn declared_toolset(&self, tool: &str) -> Option<&str> {
+        self.tools.get(tool).and_then(|declaration| declaration.toolset.as_deref())
+    }
 }
 
 fn default_true() -> bool {
@@ -1058,6 +1133,14 @@ impl PluginManifest {
         })
     }
 
+    /// Whether the plugin carries the "provides MCP tools" mark: a backend plus
+    /// an `mcp` contribution. Only marked plugins appear in the MCP settings
+    /// (capability tab) and the Plugin Center's MCP filter; a plugin without
+    /// the mark has no MCP surface at all.
+    pub fn provides_mcp_tools(&self) -> bool {
+        self.backend_entrypoint().is_some() && self.mcp_contribution().is_some()
+    }
+
     /// Whether the optional `mcp` declaration keeps the sidecar tools off the
     /// built-in AI agent (`ai_tools: false`) even when the user opts in via
     /// the Plugin Center. Without it the tools participate once opted in.
@@ -1158,6 +1241,16 @@ impl PluginManifest {
             plugin_dir,
             &mut errors,
         );
+        // Missing external access declarations must not disable an older
+        // plugin's drivers or AI tools. The MCP exposure gate hides those tools.
+        if let Some(mcp) = self.mcp_contribution() {
+            if mcp.external_tools && !mcp.tools.values().any(|declaration| declaration.access.is_some()) {
+                warnings.push(format!(
+                    "Mcp contribution '{}' sets external_tools but declares no tool access level; external tools remain hidden until declared under `tools` with `access`",
+                    mcp.id
+                ));
+            }
+        }
 
         let target = current_plugin_target();
         let backend_executable = self.backend_entrypoint().and_then(|backend| {
@@ -1572,6 +1665,53 @@ fn validate_contributions(
                 if !has_backend {
                     errors.push(format!("Mcp contribution '{id}' requires a backend entrypoint"));
                 }
+                let mut toolset_ids = HashSet::new();
+                for toolset in &mcp.toolsets {
+                    if !is_plugin_mcp_identifier(&toolset.id) {
+                        errors.push(format!("Mcp contribution '{id}' toolset id '{}' is invalid", toolset.id));
+                    }
+                    if !toolset_ids.insert(toolset.id.as_str()) {
+                        errors
+                            .push(format!("Mcp contribution '{id}' declares toolset '{}' more than once", toolset.id));
+                    }
+                    validate_required_text(&toolset.title, &format!("Mcp toolset '{}' title", toolset.id), errors);
+                    validate_optional_text(
+                        toolset.description.as_deref(),
+                        &format!("Mcp toolset '{}' description", toolset.id),
+                        errors,
+                    );
+                }
+                if mcp.tools.len() > MAX_PLUGIN_MCP_TOOL_DECLARATIONS {
+                    errors.push(format!(
+                        "Mcp contribution '{id}' declares {} tools; at most {MAX_PLUGIN_MCP_TOOL_DECLARATIONS} are allowed",
+                        mcp.tools.len()
+                    ));
+                }
+                if let Some(scope) = &mcp.scope {
+                    if !is_plugin_mcp_identifier(&scope.kind) || scope.kind == "database" {
+                        errors.push(format!(
+                            "Mcp contribution '{id}' scope kind '{}' is invalid or reserved",
+                            scope.kind
+                        ));
+                    }
+                    validate_required_text(&scope.title, &format!("Mcp contribution '{id}' scope title"), errors);
+                    if scope.argument.trim().is_empty() || scope.argument.chars().count() > 64 {
+                        errors.push(format!("Mcp contribution '{id}' scope argument '{}' is invalid", scope.argument));
+                    }
+                    if scope.list_method.as_deref().is_some_and(|method| method.trim().is_empty()) {
+                        errors.push(format!("Mcp contribution '{id}' scope list_method cannot be empty when present"));
+                    }
+                }
+                for (tool, declaration) in &mcp.tools {
+                    if tool.trim().is_empty() || tool.chars().count() > 128 {
+                        errors.push(format!("Mcp contribution '{id}' declares an invalid tool name '{tool}'"));
+                    }
+                    if let Some(toolset) = &declaration.toolset {
+                        if !toolset_ids.contains(toolset.as_str()) {
+                            errors.push(format!("Mcp tool '{tool}' references missing toolset '{toolset}'"));
+                        }
+                    }
+                }
             }
         }
     }
@@ -1985,6 +2125,17 @@ fn validate_optional_reference(value: Option<&str>, label: &str, contribution_id
     }
 }
 
+/// Upper bound for per-tool declarations in one `mcp` contribution; matches
+/// the host's per-plugin tool cap (`MAX_TOOLS_PER_PLUGIN` in dbx-core).
+const MAX_PLUGIN_MCP_TOOL_DECLARATIONS: usize = 64;
+
+fn is_plugin_mcp_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    value.len() <= 64
+        && chars.next().is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && chars.all(|char| char.is_ascii_lowercase() || char.is_ascii_digit() || matches!(char, '.' | '_' | '-'))
+}
+
 fn validate_required_text(value: &str, label: &str, errors: &mut Vec<String>) {
     if value.trim().is_empty() {
         errors.push(format!("{label} cannot be empty"));
@@ -2054,13 +2205,15 @@ fn valid_locale_tag(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
         parse_host_network_permission, resolve_safe_plugin_path, validate_connection_actions, validate_contributions,
         PluginCommandAction, PluginCommandContribution, PluginCommandPresentation, PluginCommandRestore,
         PluginCommandReuse, PluginConnectionActionContribution, PluginConnectionProviderContribution,
-        PluginContribution, PluginFormFieldBinding, PluginManifest, PluginMcpContribution, PluginMenuItem,
-        PluginMenuLocation, PluginMenusContribution, PluginOpenWorkbenchAction, SUPPORTED_PLUGIN_HOST_API_VERSION,
-        SUPPORTED_PLUGIN_PERMISSIONS,
+        PluginContribution, PluginFormFieldBinding, PluginManifest, PluginMcpAccess, PluginMcpContribution,
+        PluginMcpToolDeclaration, PluginMenuItem, PluginMenuLocation, PluginMenusContribution,
+        PluginOpenWorkbenchAction, SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_PERMISSIONS,
     };
 
     fn context_menu_manifest(menu: &str) -> Result<(tempfile::TempDir, PluginManifest), Box<dyn std::error::Error>> {
@@ -2125,6 +2278,12 @@ mod tests {
             description: None,
             ai_tools: true,
             external_tools: true,
+            toolsets: Vec::new(),
+            scope: None,
+            tools: BTreeMap::from([(
+                "ping".to_string(),
+                PluginMcpToolDeclaration { toolset: None, access: Some(PluginMcpAccess::Read) },
+            )]),
         });
         let mut errors = Vec::new();
         validate_contributions(std::slice::from_ref(&mcp), false, false, &plugin_dir, &mut errors);
@@ -2134,10 +2293,110 @@ mod tests {
         validate_contributions(std::slice::from_ref(&mcp), true, false, &plugin_dir, &mut errors);
         assert!(errors.is_empty(), "{errors:?}");
 
+        // Missing external declarations do not invalidate the whole plugin.
+        let PluginContribution::Mcp(undeclared) = &mcp else { unreachable!() };
+        let undeclared =
+            PluginContribution::Mcp(PluginMcpContribution { tools: BTreeMap::new(), ..undeclared.clone() });
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&undeclared), true, false, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
         let two = vec![mcp.clone(), mcp];
         let mut errors = Vec::new();
         validate_contributions(&two, true, false, &plugin_dir, &mut errors);
         assert!(errors.iter().any(|error| error.contains("at most one")), "{errors:?}");
+    }
+
+    #[test]
+    fn mcp_contribution_declares_toolsets_and_tool_access() {
+        let mcp: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "mcp",
+            "id": "io.dbx.example.mcp",
+            "external_tools": true,
+            "toolsets": [
+                { "id": "files", "title": "Files" },
+                { "id": "shell", "title": "Remote shell", "description": "Run commands" }
+            ],
+            "tools": {
+                "sftp_list_dir": { "toolset": "files", "access": "read" },
+                "ssh_exec": { "toolset": "shell", "access": "full" },
+                "sftp_upload": { "access": "write" }
+            }
+        }))
+        .unwrap();
+        let PluginContribution::Mcp(parsed) = &mcp else { unreachable!() };
+        assert_eq!(parsed.declared_access("ssh_exec"), Some(PluginMcpAccess::Full));
+        assert_eq!(parsed.declared_toolset("sftp_list_dir"), Some("files"));
+        assert_eq!(parsed.declared_toolset("sftp_upload"), None);
+        assert_eq!(parsed.declared_access("unknown"), None);
+        let plugin_dir = std::env::temp_dir();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&mcp), true, false, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // Unknown access levels and unknown fields reject at parse time.
+        assert!(serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "mcp", "id": "x", "tools": { "t": { "access": "admin" } }
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "mcp", "id": "x", "toolsets": [{ "id": "a", "title": "A", "icon": "x" }]
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn mcp_contribution_declares_a_scope() {
+        let mcp: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "mcp",
+            "id": "io.dbx.k8s.mcp",
+            "external_tools": true,
+            "tools": { "get_pods": { "access": "read" } },
+            "scope": { "kind": "namespace", "title": "Namespace", "argument": "namespace", "list_method": "mcp/scopes" }
+        }))
+        .unwrap();
+        let PluginContribution::Mcp(parsed) = &mcp else { unreachable!() };
+        let scope = parsed.scope.as_ref().unwrap();
+        assert_eq!((scope.kind.as_str(), scope.argument.as_str()), ("namespace", "namespace"));
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&mcp), true, false, &std::env::temp_dir(), &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        let reserved: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "mcp", "id": "x", "scope": { "kind": "database", "title": " ", "argument": "" }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&reserved), true, false, &std::env::temp_dir(), &mut errors);
+        let joined = errors.join("\n");
+        assert!(
+            joined.contains("invalid or reserved")
+                && joined.contains("scope title")
+                && joined.contains("scope argument"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn mcp_contribution_rejects_broken_toolset_references() {
+        let mcp: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "mcp",
+            "id": "io.dbx.example.mcp",
+            "toolsets": [
+                { "id": "files", "title": "Files" },
+                { "id": "files", "title": "Again" },
+                { "id": "Bad Id", "title": " " }
+            ],
+            "tools": { "ssh_exec": { "toolset": "shell" } }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&mcp), true, false, &std::env::temp_dir(), &mut errors);
+        let joined = errors.join("\n");
+        assert!(joined.contains("declares toolset 'files' more than once"), "{joined}");
+        assert!(joined.contains("toolset id 'Bad Id' is invalid"), "{joined}");
+        assert!(joined.contains("title cannot be empty"), "{joined}");
+        assert!(joined.contains("references missing toolset 'shell'"), "{joined}");
     }
 
     #[test]
@@ -2160,10 +2419,35 @@ mod tests {
             }]
         }))
         .unwrap();
+        assert!(manifest.provides_mcp_tools(), "backend + mcp contribution carries the MCP mark");
         assert!(!manifest.ai_tools_excluded(), "ai_tools defaults to participating");
         assert!(manifest.external_tools_excluded(), "external_tools defaults to off");
         let compatibility = manifest.compatibility(dir.path(), "0.6.0");
         assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        assert!(compatibility.warnings.is_empty(), "{:?}", compatibility.warnings);
+
+        let mut manifest = manifest;
+        let PluginContribution::Mcp(mcp) = &mut manifest.contributions[0] else { unreachable!() };
+        mcp.external_tools = true;
+        for tools in [BTreeMap::new(), BTreeMap::from([("ping".to_string(), PluginMcpToolDeclaration::default())])] {
+            let PluginContribution::Mcp(mcp) = &mut manifest.contributions[0] else { unreachable!() };
+            mcp.tools = tools;
+            let compatibility = manifest.compatibility(dir.path(), "0.6.0");
+            assert!(compatibility.compatible, "{:?}", compatibility.errors);
+            assert!(
+                compatibility.warnings.iter().any(|warning| warning.contains("external tools remain hidden")),
+                "{:?}",
+                compatibility.warnings
+            );
+            assert!(!manifest.ai_tools_excluded());
+            assert!(manifest.provides_mcp_tools());
+        }
+
+        let PluginContribution::Mcp(mcp) = &mut manifest.contributions[0] else { unreachable!() };
+        mcp.tools.get_mut("ping").unwrap().access = Some(PluginMcpAccess::Read);
+        let compatibility = manifest.compatibility(dir.path(), "0.6.0");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        assert!(compatibility.warnings.is_empty(), "{:?}", compatibility.warnings);
     }
 
     #[test]

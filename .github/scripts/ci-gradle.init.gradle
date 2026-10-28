@@ -23,7 +23,8 @@ afterProject { project ->
         project.repositories.withType(MavenArtifactRepository).each { repository ->
             if (repository.url.toString() in ['https://repo.maven.apache.org/maven2/',
                                               'https://repo.maven.apache.org/maven2']) {
-                if (repository.credentials.username || repository.credentials.password) {
+                // Gradle 9.8.2's credentials getter creates credentials even for anonymous repositories.
+                if (repository.usesCredentials() || !repository.authentication.empty) {
                     throw new GradleException('CI mirror switching does not support authenticated Central repositories')
                 }
                 repository.url = uri(mirror)

@@ -326,6 +326,9 @@ pub async fn execute_sql_file(
     Json(body): Json<SqlFileExecuteWrapper>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let req = body.request;
+    if req.resolve_includes {
+        return Err(AppError::from("Local SQL includes are only available in the desktop application".to_string()));
+    }
     // The failure log of this run belongs to the session that started it: the
     // export/copy routes look it up by this owner, never by path (dbx#11619).
     let log_owner = crate::auth::session_token_from_headers(&headers)
@@ -810,6 +813,27 @@ mod tests {
     async fn restore_state(directory: &Path) -> WebState {
         let storage = dbx_core::persistence::test_storage::open(&directory.join("dbx.db")).await.unwrap();
         WebState::for_tests(Arc::new(dbx_core::connection::AppState::new(storage)), directory.to_path_buf())
+    }
+
+    #[tokio::test]
+    async fn web_execution_rejects_local_includes_before_reading_any_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(restore_state(directory.path()).await);
+        let request = serde_json::from_value(serde_json::json!({
+            "executionId": "includes", "connectionId": "missing", "database": "app",
+            "filePath": "/not-an-upload/main.sql", "continueOnError": false, "resolveIncludes": true
+        }))
+        .unwrap();
+        let error = execute_sql_file(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SqlFileExecuteWrapper { request, file_paths: vec![] }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("only available in the desktop"));
+        assert!(state.sql_file_executions.read().await.is_empty());
     }
 
     #[tokio::test]

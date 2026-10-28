@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'app.dbx'
-version = '0.1.49'
+version = '0.1.50'
 
 java {
     toolchain {
@@ -17,7 +17,7 @@ repositories {
 }
 
 def mavenResolverVersion = '2.0.24'
-def mavenCoreVersion = '4.0.0-rc-5'
+def mavenCoreVersion = '4.0.0-rc-7'
 
 dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.22.4'
@@ -26,7 +26,7 @@ dependencies {
             strictly '1.7.36'
         }
     }
-    implementation 'org.apache.commons:commons-lang3:3.18.0'
+    implementation 'org.apache.commons:commons-lang3:3.21.0'
 
     implementation "org.apache.maven.resolver:maven-resolver-api:${mavenResolverVersion}"
     implementation "org.apache.maven.resolver:maven-resolver-spi:${mavenResolverVersion}"
@@ -43,7 +43,7 @@ dependencies {
 
     testImplementation 'com.h2database:h2:2.2.224'
     testRuntimeOnly 'org.duckdb:duckdb_jdbc:2.0.0.0'
-    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.3'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.14.4'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 

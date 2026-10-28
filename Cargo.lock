@@ -2143,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.53"
+version = "0.6.59"
 dependencies = [
  "anyhow",
  "axum",
@@ -2231,7 +2231,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.129"
+version = "0.4.134"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2389,6 +2389,7 @@ dependencies = [
  "dbx-sql-core",
  "dbx-sql-dialect",
  "dbx-types",
+ "encoding_rs",
  "futures",
  "log",
  "mysql_async",
@@ -2496,6 +2497,7 @@ name = "dbx-drivers"
 version = "0.1.0"
 dependencies = [
  "aws-sdk-dynamodb",
+ "axum",
  "base64 0.22.1",
  "bytes",
  "chrono",
@@ -2572,7 +2574,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.129"
+version = "0.4.134"
 dependencies = [
  "async-trait",
  "axum",
@@ -2756,7 +2758,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.53"
+version = "0.6.59"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

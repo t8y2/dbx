@@ -113,7 +113,7 @@ try {
     $script:count++
     Write-Output 'PASS older mirror cannot downgrade installation'
     $installDir = Split-Path $binary
-    $preservedNames = @('dbx-mcp.exe', '.dbx-mcp-version', 'other.tmp', 'dbx-mcp.exe~RFxyz.TMP', 'dbx-mcp.exe~RF.TMP')
+    $preservedNames = @('dbx-mcp.exe', '.dbx-mcp-version', 'other.tmp', 'dbx-mcp.exe~RFxyz.TMP', 'dbx-mcp.exe~RF.TMP', 'dbx-mcp.exe.RFxyz.TMP', 'dbx-mcp.exe.RF.TMP')
     foreach ($name in $preservedNames | Select-Object -Skip 2) {
         [IO.File]::WriteAllText((Join-Path $installDir $name), 'preserve')
     }
@@ -123,8 +123,12 @@ try {
     [IO.File]::WriteAllText($nestedFile, 'nested')
     $stale = Join-Path $installDir 'DBX-MCP.EXE~rfABC123.tmp'
     [IO.File]::WriteAllText($stale, 'old executable')
+    # ReplaceFile also writes the dot-separated form (#13009); it must be swept too.
+    $staleDot = Join-Path $installDir 'dbx-mcp.exe.RF1A2B3C4D.TMP'
+    [IO.File]::WriteAllText($staleDot, 'old executable')
     Remove-McpReplacementTempFiles $installDir
     Assert-True (!(Test-Path -LiteralPath $stale)) 'Case-insensitive replacement cleanup failed'
+    Assert-True (!(Test-Path -LiteralPath $staleDot)) 'Dot-form replacement cleanup failed'
     foreach ($name in $preservedNames) {
         Assert-True (Test-Path -LiteralPath (Join-Path $installDir $name) -PathType Leaf) "Cleanup removed $name"
     }
@@ -134,6 +138,13 @@ try {
     Remove-McpReplacementTempFiles (Join-Path $testRoot 'missing')
     $script:count++
     Write-Output 'PASS cleanup preserves active binary, marker, unrelated files and directories'
+    $readonlyPath = Join-Path $installDir 'dbx-mcp.exe~RF8c73e4f.TMP'
+    [IO.File]::WriteAllText($readonlyPath, 'readonly leftover')
+    [IO.File]::SetAttributes($readonlyPath, [IO.FileAttributes]::ReadOnly)
+    Remove-McpReplacementTempFiles $installDir
+    Assert-True (!(Test-Path -LiteralPath $readonlyPath)) 'Cleanup kept a read-only replacement temp file'
+    $script:count++
+    Write-Output 'PASS cleanup removes read-only replacement temp files'
     $linkTarget = Join-Path $testRoot 'linked-target'
     [IO.Directory]::CreateDirectory($linkTarget) | Out-Null
     $targetFile = Join-Path $linkTarget 'dbx-mcp.exe~RF789.TMP'

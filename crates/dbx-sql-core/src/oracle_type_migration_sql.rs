@@ -114,6 +114,8 @@ fn oceanbase_table_header(owner: &str, name: &str, ddl: &str) -> Result<Cursor, 
 /// OceanBase can return NULL for ALL_TABLES.READ_ONLY even after ALTER TABLE
 /// READ ONLY. Only its complete, exact native simple-table definition supplies
 /// the fallback; an unfamiliar or partial suffix must remain unverifiable.
+/// The six-option suffix was verified on OceanBase Oracle 4.2.5.7; this is a
+/// grammar boundary, not a claim that other versions cannot support READ ONLY.
 pub fn oceanbase_table_read_only_from_ddl(owner: &str, name: &str, ddl: &str) -> Result<bool, String> {
     let mut cursor = oceanbase_table_header(owner, name, ddl)?;
     let start = cursor.at;

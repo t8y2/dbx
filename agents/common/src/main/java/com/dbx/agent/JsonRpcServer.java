@@ -39,10 +39,17 @@ public final class JsonRpcServer {
         .create();
     private ConnectParams lastConnectParams;
     private long lastConnectionValidationTimeMillis;
+    private NativeJobSession nativeJobSession;
+    private NativeLegacyJobSession nativeLegacyJobSession;
+    private final Object dedicatedAdmission;
 
     public JsonRpcServer(DatabaseAgent agent) {
         this.agent = agent;
         this.jdbcExecutor = new JdbcExecutor();
+        if (agent instanceof AbstractJdbcAgent jdbcAgent) {
+            dedicatedAdmission = jdbcAgent.dedicatedAdmission();
+            jdbcAgent.bindNativeJobReservation(() -> nativeJobSession != null || nativeLegacyJobSession != null);
+        } else dedicatedAdmission = new Object();
     }
 
     public void run() {
@@ -76,6 +83,7 @@ public final class JsonRpcServer {
         response.add("id", id);
 
         try {
+            validateTypedDebugWire(line, req);
             Object result = dispatch(method, params);
             response.add("result", gson.toJsonTree(result));
             return gson.toJson(response);
@@ -85,6 +93,24 @@ public final class JsonRpcServer {
             error.addProperty("message", e.getMessage() == null ? e.toString() : e.getMessage());
             response.add("error", error);
             return gson.toJson(response);
+        }
+    }
+
+    public static final int MAX_TYPED_DEBUG_WIRE_BYTES = 16 * 1024 * 1024;
+
+    static void validateTypedDebugWire(String line, JsonObject request) {
+        if (!AgentProtocol.METHOD_PL_DEBUG_START.equals(stringOrNull(request, "method"))) return;
+        JsonObject params = paramsObject(request);
+        JsonElement signature = params.get("targetSignature");
+        if (signature == null || !signature.isJsonObject() || !signature.getAsJsonObject().has("signatureVersion")) return;
+        int bytes = 0;
+        for (int index = 0; index < line.length(); index++) {
+            char next = line.charAt(index);
+            if (Character.isHighSurrogate(next) && index + 1 < line.length() && Character.isLowSurrogate(line.charAt(index + 1))) {
+                bytes += 4;
+                index++;
+            } else bytes += next < 128 ? 1 : next < 2048 ? 2 : 3;
+            if (bytes > MAX_TYPED_DEBUG_WIRE_BYTES) throw AgentRpcError.requestRejected("Typed debug request wire byte budget exceeded");
         }
     }
 
@@ -110,6 +136,7 @@ public final class JsonRpcServer {
 
     private Object dispatchWithConnection(String method, JsonObject params) throws Exception {
         return AgentExecutionContext.withJdbcExecutor(jdbcExecutor, () -> {
+            authorizeNativeJobRequest(method, params);
             AbstractJdbcAgent jdbcAgent = pooledJdbcAgent();
             if (AgentProtocol.METHOD_VALIDATE_CONNECTION.equals(method)
                 && jdbcAgent != null
@@ -182,6 +209,49 @@ public final class JsonRpcServer {
     }
 
     private Object dispatch(String method, JsonObject params) throws Exception {
+        authorizeNativeJobRequest(method, params);
+        if (NativeLegacyJobSession.isControl(method)) return legacyJob(method, params);
+        if (AgentProtocol.METHOD_OPEN_NATIVE_JOB_SESSION.equals(method)) {
+            String operationId = NativeJobSession.operationId(params);
+            if (!(agent instanceof AbstractJdbcAgent jdbcAgent) || !agent.supportsNativeJobSessions()) {
+                throw new UnsupportedOperationException("native_job_session_not_supported");
+            }
+            NativeJobSession existing;
+            synchronized (dedicatedAdmission) {
+                existing = nativeJobSession;
+                if (existing == null && (nativeLegacyJobSession != null || jdbcAgent.hasDedicatedDebugReservation())) {
+                    throw new IllegalStateException("native_job_session_reserved");
+                }
+            }
+            if (existing != null) return existing.openedFor(operationId);
+            NativeJobSession candidate = new NativeJobSession(jdbcAgent, operationId);
+            jdbcAgent.requireIdleNativeJobSession(jdbcExecutor);
+            synchronized (dedicatedAdmission) {
+                existing = nativeJobSession;
+                if (existing == null) {
+                    if (nativeLegacyJobSession != null || jdbcAgent.hasDedicatedDebugReservation()) {
+                        throw new IllegalStateException("native_job_session_reserved");
+                    }
+                    nativeJobSession = candidate;
+                }
+            }
+            if (existing != null) return existing.openedFor(operationId);
+            try {
+                candidate.open();
+                return candidate.openedFor(operationId);
+            } catch (Exception | LinkageError error) {
+                if (!candidate.openOutcomeUnknown()) synchronized (dedicatedAdmission) {
+                    if (nativeJobSession == candidate) nativeJobSession = null;
+                }
+                throw error;
+            }
+        }
+        if (AgentProtocol.METHOD_CLOSE_NATIVE_JOB_SESSION.equals(method)) {
+            NativeJobSession current;
+            synchronized (dedicatedAdmission) { current = nativeJobSession; }
+            if (current == null) throw new IllegalStateException("native_job_session_unavailable");
+            return current.close(params);
+        }
         if (agent instanceof AbstractJdbcAgent observingAgent) {
             observingAgent.beforeAgentMethod(method, stringOrNull(params, "sessionId"));
         }
@@ -253,6 +323,8 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_LIST_OBJECTS.equals(method)) {
             switchCatalog(params);
+            MetadataReadOptions options = metadataReadOptions(params);
+            if (options.exact()) return agent.listObjects(params.get("schema").getAsString(), metadataListConstraints(params), options);
             return agent.listObjects(params.get("schema").getAsString(), metadataListConstraints(params));
         }
         if (AgentProtocol.METHOD_LIST_DATA_TYPES.equals(method)) {
@@ -265,13 +337,16 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_GET_OBJECT_SOURCE.equals(method)) {
             switchCatalog(params);
+            MetadataReadOptions options = metadataReadOptions(params);
             boolean includeOrigin = params.has("include_source_origin") && params.get("include_source_origin").getAsBoolean();
             String schema = params.get("schema").getAsString();
             String name = params.get("name").getAsString();
             String objectType = params.get("object_type").getAsString();
-            ObjectSource source = includeOrigin
-                ? agent.getObjectSourceWithOrigin(schema, name, objectType)
-                : agent.getObjectSource(schema, name, objectType);
+            ObjectSource source = options.exact()
+                ? agent.getObjectSource(schema, name, objectType, options)
+                : includeOrigin
+                    ? agent.getObjectSourceWithOrigin(schema, name, objectType)
+                    : agent.getObjectSource(schema, name, objectType);
             if (includeOrigin) {
                 JsonObject result = gson.toJsonTree(source).getAsJsonObject();
                 if (source.getSourceOrigin() != null) {
@@ -303,6 +378,8 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_LIST_TRIGGERS.equals(method)) {
             switchCatalog(params);
+            MetadataReadOptions options = metadataReadOptions(params);
+            if (options.exact()) return agent.listTriggers(params.get("schema").getAsString(), params.get("table").getAsString(), options);
             return agent.listTriggers(params.get("schema").getAsString(), params.get("table").getAsString());
         }
         if (AgentProtocol.METHOD_LIST_CONSTRAINTS.equals(method)) {
@@ -423,21 +500,228 @@ public final class JsonRpcServer {
             return executeStatementsWithTimeout(intOrDefault(params, "timeoutSecs", 0),
                 () -> agent.executeBatch(statements, stringOrNull(params, "schema")));
         }
+        if (AgentProtocol.METHOD_PL_DEBUG_PROBE.equals(method)) return agent.plDebugProbe();
+        if (AgentProtocol.METHOD_PL_DEBUG_INSPECT.equals(method)) {
+            return agent.plDebugInspect(gson.fromJson(params.get("target"), PlDebugStartRequest.class));
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_RESOLVE_TARGET.equals(method)) {
+            return agent.plDebugResolveTarget(gson.fromJson(params, PlDebugStartRequest.class));
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_START.equals(method)) {
+            return agent.plDebugStart(gson.fromJson(params, PlDebugStartRequest.class));
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_COMPILE.equals(method)) {
+            if (!params.has("target") || !params.get("target").isJsonObject()
+                || !params.has("preview") || !params.get("preview").isJsonObject()) {
+                throw AgentRpcError.requestRejected("A named target and confirmed compilation preview are required");
+            }
+            JsonObject target = params.getAsJsonObject("target");
+            String operationId;
+            PlDebugStartRequest compileTarget;
+            Map<String, Object> preview;
+            try {
+                for (String key : List.of("schema", "objectType", "objectName", "packageName", "metadataPreparation")) debugString(target, key);
+                operationId = debugString(params, "operationId");
+                if (operationId == null || !operationId.matches("[A-Za-z0-9_-]{1,128}")) throw new IllegalArgumentException();
+                preview = gson.fromJson(params.get("preview"), new TypeToken<Map<String, Object>>() {}.getType());
+                compileTarget = gson.fromJson(target, PlDebugStartRequest.class);
+            } catch (IllegalArgumentException error) {
+                throw AgentRpcError.requestRejected("Invalid debug compilation identity, target or preview");
+            }
+            return agent.plDebugCompile(operationId, compileTarget, preview);
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_COMPILE_STATUS.equals(method)) {
+            return agent.plDebugCompileStatus(debugString(params, "operationId"));
+        }
+        if (AgentProtocol.METHOD_PL_DEBUG_SET_BREAKPOINTS.equals(method)
+            || AgentProtocol.METHOD_PL_DEBUG_DELETE_BREAKPOINTS.equals(method)) {
+            if (!params.has("breakpoints")) {
+                return agent.plDebugMutateBreakpoint(requiredDebugId(params),
+                    AgentProtocol.METHOD_PL_DEBUG_SET_BREAKPOINTS.equals(method) ? "set_breakpoints" : "delete_breakpoints",
+                    debugBreakpointMutation(params));
+            }
+            Type type = new TypeToken<List<PlDebugBreakpoint>>() {}.getType();
+            List<PlDebugBreakpoint> breakpoints = gson.fromJson(params.get("breakpoints"), type);
+            if (breakpoints == null) throw new IllegalArgumentException("breakpoints must be an array");
+            String debugId = requiredDebugId(params);
+            return AgentProtocol.METHOD_PL_DEBUG_SET_BREAKPOINTS.equals(method)
+                ? agent.plDebugSetBreakpoints(debugId, stringOrNull(params, "operationId"), debugInteger(params, "stopRevision", null), breakpoints)
+                : agent.plDebugDeleteBreakpoints(debugId, stringOrNull(params, "operationId"), debugInteger(params, "stopRevision", null), breakpoints);
+        }
+        if (AgentProtocol.PL_DEBUG_SESSION_METHODS.contains(method)) {
+            String debugId = requiredDebugId(params);
+            return switch (method) {
+                case AgentProtocol.METHOD_PL_DEBUG_LIST_BREAKPOINTS -> agent.plDebugListBreakpoints(debugId);
+                case AgentProtocol.METHOD_PL_DEBUG_RESUME -> agent.plDebugResume(debugId);
+                case AgentProtocol.METHOD_PL_DEBUG_STEP_OVER -> agent.plDebugStepOver(debugId);
+                case AgentProtocol.METHOD_PL_DEBUG_STEP_IN -> agent.plDebugStepIn(debugId);
+                case AgentProtocol.METHOD_PL_DEBUG_STEP_OUT -> agent.plDebugStepOut(debugId);
+                case AgentProtocol.METHOD_PL_DEBUG_RESUME_IGNORE_BREAKPOINTS -> agent.plDebugResumeIgnoreBreakpoints(debugId);
+                case AgentProtocol.METHOD_PL_DEBUG_ABORT -> agent.plDebugAbort(debugId);
+                case AgentProtocol.METHOD_PL_DEBUG_GET_VARIABLES -> agent.plDebugGetVariables(debugId, intOrDefault(params, "frame", 0));
+                case AgentProtocol.METHOD_PL_DEBUG_GET_VALUE -> agent.plDebugGetValue(debugId, requiredDebugName(params), intOrDefault(params, "frame", 0));
+                case AgentProtocol.METHOD_PL_DEBUG_SET_VALUE -> {
+                    String name;
+                    Long revision;
+                    int frame, index;
+                    try {
+                        name = requiredDebugName(params);
+                        revision = debugInteger(params, "stopRevision", null);
+                        frame = Math.toIntExact(debugInteger(params, "frame", 0L));
+                        index = Math.toIntExact(debugInteger(params, "index", 0L));
+                    } catch (IllegalArgumentException | ArithmeticException error) {
+                        throw AgentRpcError.requestRejected("Invalid assignment name, stopRevision, frame or index");
+                    }
+                    yield agent.plDebugSetValue(debugId, stringOrNull(params, "operationId"), revision,
+                        name, frame, index, stringOrNull(params, "value"));
+                }
+                case AgentProtocol.METHOD_PL_DEBUG_OPERATION_STATUS -> agent.plDebugOperationStatus(debugId, stringOrNull(params, "operationId"));
+                case AgentProtocol.METHOD_PL_DEBUG_SET_EXCEPTION_BREAKPOINT -> agent.plDebugSetExceptionBreakpoint(debugId, booleanOrDefault(params, "enabled", false));
+                case AgentProtocol.METHOD_PL_DEBUG_SET_BREAKPOINT_ENABLED -> params.has("registrationId")
+                    ? agent.plDebugMutateBreakpoint(debugId, "set_breakpoint_enabled", debugBreakpointMutation(params))
+                    : agent.plDebugSetBreakpointEnabled(debugId, stringOrNull(params, "operationId"), debugInteger(params, "stopRevision", null),
+                        intOrDefault(params, "breakpointNumber", 0), booleanOrDefault(params, "enabled", false));
+                case AgentProtocol.METHOD_PL_DEBUG_GET_STACK -> agent.plDebugGetStack(debugId);
+                case AgentProtocol.METHOD_PL_DEBUG_GET_LOG -> agent.plDebugGetLog(debugId);
+                case AgentProtocol.METHOD_PL_DEBUG_GET_RESULTS -> agent.plDebugGetResults(debugId);
+                case AgentProtocol.METHOD_PL_DEBUG_GET_RESULT_PAGE -> {
+                    String generation;
+                    String resultId;
+                    int offset;
+                    int limit;
+                    try {
+                        for (String key : List.of("generation", "resultId")) {
+                            JsonElement value = params.get(key);
+                            if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()
+                                || value.getAsString().isEmpty() || value.getAsString().length() > 128) throw new IllegalArgumentException();
+                        }
+                        generation = params.get("generation").getAsString();
+                        resultId = params.get("resultId").getAsString();
+                        offset = Math.toIntExact(debugInteger(params, "offset", 0L));
+                        limit = Math.toIntExact(debugInteger(params, "limit", 32000L));
+                        if (offset < 0 || limit < 1 || limit > 65536) throw new IllegalArgumentException();
+                    } catch (IllegalArgumentException | ArithmeticException error) {
+                        throw AgentRpcError.requestRejected("Invalid debugger result identity or page bounds");
+                    }
+                    yield agent.plDebugGetResultPage(debugId, generation, resultId, offset, limit);
+                }
+                case AgentProtocol.METHOD_PL_DEBUG_GET_LOG_PAGE -> agent.plDebugGetLogPage(debugId,
+                    intOrDefault(params, "offset", 0), intOrDefault(params, "limit", 32000));
+                case AgentProtocol.METHOD_PL_DEBUG_STATUS -> agent.plDebugStatus(debugId);
+                case AgentProtocol.METHOD_PL_DEBUG_HEARTBEAT -> agent.plDebugHeartbeat(debugId);
+                case AgentProtocol.METHOD_PL_DEBUG_EXECUTE -> agent.plDebugExecute(debugId,
+                    stringOrNull(params, "sql"), intOrDefault(params, "maxRows", 1000));
+                case AgentProtocol.METHOD_PL_DEBUG_CLOSE -> agent.plDebugClose(debugId);
+                default -> throw new IllegalArgumentException("Unknown debug method: " + method);
+            };
+        }
         if (AgentProtocol.METHOD_DISCONNECT.equals(method)) {
-            jdbcExecutor.closeAllQuerySessions();
-            jdbcExecutor.closeAllTableReadSessions();
-            agent.disconnect();
-            lastConnectParams = null;
+            disconnect();
             return Collections.singletonMap("ok", true);
         }
         if (AgentProtocol.METHOD_SHUTDOWN.equals(method)) {
-            jdbcExecutor.closeAllQuerySessions();
-            jdbcExecutor.closeAllTableReadSessions();
-            agent.disconnect();
-            lastConnectParams = null;
+            disconnect();
             return Collections.singletonMap("ok", true);
         }
         throw new IllegalArgumentException("Unknown method: " + method);
+    }
+
+    private void authorizeNativeJobRequest(String method, JsonObject params) throws Exception {
+        if (AgentProtocol.METHOD_HANDSHAKE.equals(method)
+            || AgentProtocol.METHOD_DISCONNECT.equals(method) || AgentProtocol.METHOD_SHUTDOWN.equals(method)) return;
+        NativeJobSession job;
+        NativeLegacyJobSession legacy;
+        synchronized (dedicatedAdmission) { job = nativeJobSession; legacy = nativeLegacyJobSession; }
+        if (legacy != null && !NativeLegacyJobSession.isControl(method)) {
+            throw new IllegalStateException("native_job_session_reserved");
+        }
+        if (NativeLegacyJobSession.isControl(method)) {
+            if (job != null) throw new IllegalStateException("native_job_session_reserved");
+            return;
+        }
+        if (NativeJobSession.isControl(method)) return;
+        if (job != null) {
+            job.authorize(method, params);
+        } else if (params.has("nativeJobSessionToken") || params.has("nativeJobOperationId")) {
+            // A replacement logical session must not borrow a connection for an old lease token.
+            throw new IllegalStateException("native_job_session_unavailable");
+        }
+    }
+
+    private void disconnect() {
+        jdbcExecutor.closeAllQuerySessions();
+        jdbcExecutor.closeAllTableReadSessions();
+        NativeJobSession job;
+        NativeLegacyJobSession legacy;
+        synchronized (dedicatedAdmission) { job = nativeJobSession; legacy = nativeLegacyJobSession; }
+        JsonObject nativeClose = job == null ? null : job.dispose();
+        JsonObject legacyClose = legacy == null ? null : legacy.dispose();
+        agent.disconnect();
+        lastConnectParams = null;
+        if ((nativeClose != null && !"closed".equals(nativeClose.get("phase").getAsString()))
+            || (legacyClose != null && (!legacyClose.has("disposalConfirmed") || !legacyClose.get("disposalConfirmed").getAsBoolean()))) {
+            throw AgentRpcError.resource("close", new JdbcConnectionPoolRegistry.PhysicalConnectionStateUnknownException(
+                new IllegalStateException("native_job_session_dispose_unknown")));
+        }
+    }
+
+    private JsonObject legacyJob(String method, JsonObject params) throws Exception {
+        String operationId = NativeJobSession.operationId(params);
+        if (AgentProtocol.METHOD_PREPARE_LEGACY_JOB.equals(method)) {
+            if (!(agent instanceof AbstractJdbcAgent jdbcAgent) || !agent.supportsNativeLegacyJobs()) {
+                throw new UnsupportedOperationException("native_job_legacy_protocol_unavailable");
+            }
+            NativeLegacyJobSession candidate;
+            try { candidate = new NativeLegacyJobSession(jdbcAgent, params); }
+            catch (IllegalArgumentException invalid) {
+                return NativeLegacyJobSession.failure(operationId, "not_started", invalid.getMessage());
+            }
+            NativeLegacyJobSession existing;
+            synchronized (dedicatedAdmission) {
+                existing = nativeLegacyJobSession;
+                if (existing == null && (nativeJobSession != null || jdbcAgent.hasDedicatedDebugReservation())) {
+                    throw new IllegalStateException("native_job_session_reserved");
+                }
+            }
+            if (existing != null) {
+                return existing.sameRequest(candidate) ? existing.status(operationId)
+                    : NativeLegacyJobSession.failure(operationId, "unknown", "native_job_operation_mismatch");
+            }
+            jdbcAgent.requireIdleNativeJobSession(jdbcExecutor);
+            synchronized (dedicatedAdmission) {
+                existing = nativeLegacyJobSession;
+                if (existing == null) {
+                    if (nativeJobSession != null || jdbcAgent.hasDedicatedDebugReservation()) {
+                        throw new IllegalStateException("native_job_session_reserved");
+                    }
+                    nativeLegacyJobSession = candidate;
+                }
+            }
+            if (existing != null) return existing.sameRequest(candidate) ? existing.status(operationId)
+                : NativeLegacyJobSession.failure(operationId, "unknown", "native_job_operation_mismatch");
+            candidate.prepare();
+            return candidate.status(operationId);
+        }
+        NativeLegacyJobSession current;
+        synchronized (dedicatedAdmission) { current = nativeLegacyJobSession; }
+        if (current == null) {
+            return NativeLegacyJobSession.failure(operationId, "unknown", "native_job_legacy_session_unavailable");
+        }
+        if (AgentProtocol.METHOD_LEGACY_JOB_STATUS.equals(method)) return current.status(operationId);
+        return current.finish(operationId, stringOrNull(params, "jobId") == null ? "" : stringOrNull(params, "jobId"),
+            AgentProtocol.METHOD_COMMIT_LEGACY_JOB.equals(method));
+    }
+
+    private static String requiredDebugId(JsonObject params) {
+        String id = stringOrNull(params, "debugId");
+        if (id == null || id.isBlank()) throw new IllegalArgumentException("debugId is required");
+        return id;
+    }
+
+    private static String requiredDebugName(JsonObject params) {
+        String name = stringOrNull(params, "name");
+        if (name == null || name.isBlank()) throw new IllegalArgumentException("variable name is required");
+        return name;
     }
 
     private QueryResult executeStatementsWithTimeout(int timeoutSecs, DatabaseAgent.ThrowingSupplier<QueryResult> execute) throws Exception {
@@ -504,6 +788,8 @@ public final class JsonRpcServer {
     }
 
     private void ensureLiveConnection(String method) {
+        if (AgentProtocol.PL_DEBUG_SESSION_METHODS.contains(method)) return;
+        if (agent instanceof AbstractJdbcAgent jdbcAgent && jdbcAgent.hasNativeJobConnection()) return;
         if (!agent.permitsAutomaticReconnect()) return;
         if (lastConnectParams == null || !shouldValidateConnection(method)) {
             return;
@@ -547,6 +833,8 @@ public final class JsonRpcServer {
         return !AgentProtocol.METHOD_HANDSHAKE.equals(method)
             && !AgentProtocol.METHOD_CONNECT.equals(method)
             && !AgentProtocol.METHOD_TEST_CONNECTION.equals(method)
+            && !NativeJobSession.isControl(method)
+            && !NativeLegacyJobSession.isControl(method)
             && !AgentProtocol.METHOD_VALIDATE_CONNECTION.equals(method)
             && !AgentProtocol.METHOD_FETCH_QUERY_PAGE.equals(method)
             && !AgentProtocol.METHOD_CLOSE_QUERY_SESSION.equals(method)
@@ -564,9 +852,12 @@ public final class JsonRpcServer {
     }
 
     private static boolean requiresConnectedConnection(String method) {
-        return !AgentProtocol.METHOD_HANDSHAKE.equals(method)
+        return !AgentProtocol.PL_DEBUG_SESSION_METHODS.contains(method)
+            && !AgentProtocol.METHOD_HANDSHAKE.equals(method)
             && !AgentProtocol.METHOD_CONNECT.equals(method)
             && !AgentProtocol.METHOD_TEST_CONNECTION.equals(method)
+            && !NativeJobSession.isControl(method)
+            && !NativeLegacyJobSession.isControl(method)
             && !AgentProtocol.METHOD_DISCONNECT.equals(method)
             && !AgentProtocol.METHOD_SHUTDOWN.equals(method);
     }
@@ -667,6 +958,65 @@ public final class JsonRpcServer {
             stringListOrNull(params, "object_types"),
             booleanOrDefault(params, "exact_identity", false)
         );
+    }
+
+    private static MetadataReadOptions metadataReadOptions(JsonObject params) {
+        String mode = stringOrNull(params, "identity_mode");
+        String alias = stringOrNull(params, "identityMode");
+        if (mode != null && alias != null && !mode.equals(alias)) {
+            throw new IllegalArgumentException("Conflicting metadata identity modes");
+        }
+        return MetadataReadOptions.fromIdentityMode(mode != null ? mode : alias);
+    }
+
+    private PlDebugBreakpointMutation debugBreakpointMutation(JsonObject params) {
+        try {
+            Map<String, Object> rules = null;
+            if (params.has("rules") && !params.get("rules").isJsonNull()) {
+                if (!params.get("rules").isJsonObject()) throw new IllegalArgumentException("rules must be an object");
+                JsonObject input = params.getAsJsonObject("rules");
+                rules = gson.fromJson(input, new TypeToken<Map<String, Object>>() {}.getType());
+                if (input.has("ignoreCount")) rules.put("ignoreCount", debugInteger(input, "ignoreCount", null));
+            }
+            Boolean enabled = null;
+            if (params.has("enabled") && !params.get("enabled").isJsonNull()) {
+                if (!params.get("enabled").isJsonPrimitive() || !params.getAsJsonPrimitive("enabled").isBoolean()) {
+                    throw new IllegalArgumentException("enabled must be boolean");
+                }
+                enabled = params.get("enabled").getAsBoolean();
+            }
+            return new PlDebugBreakpointMutation(debugString(params, "operationId"), debugString(params, "sourceRefId"),
+                nullableDebugInteger(params, "sourceRevision"), nullableDebugInteger(params, "stopRevision"),
+                nullableDebugInt(params, "nativeFrameId"), nullableDebugInt(params, "line"), nullableDebugInt(params, "breakpointNumber"),
+                debugString(params, "registrationId"), enabled, rules);
+        } catch (RuntimeException error) {
+            throw AgentRpcError.requestRejected("Invalid breakpoint identity, integer, enabled value or rules");
+        }
+    }
+
+    private static String debugString(JsonObject object, String key) {
+        JsonElement value = object.get(key);
+        if (value == null || value.isJsonNull()) return null;
+        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) throw new IllegalArgumentException("Expected string " + key);
+        return value.getAsString();
+    }
+
+    private static Long nullableDebugInteger(JsonObject object, String key) {
+        return object.has(key) && object.get(key).isJsonNull() ? null : debugInteger(object, key, null);
+    }
+
+    private static Integer nullableDebugInt(JsonObject object, String key) {
+        Long value = nullableDebugInteger(object, key);
+        return value == null ? null : Math.toIntExact(value);
+    }
+
+    private static Long debugInteger(JsonObject object, String key, Long defaultValue) {
+        if (!object.has(key)) return defaultValue;
+        JsonElement value = object.get(key);
+        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException("Expected integer " + key);
+        }
+        return value.getAsBigDecimal().longValueExact();
     }
 
     private static int intOrDefault(JsonObject object, String key, int defaultValue) {

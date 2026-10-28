@@ -234,6 +234,13 @@ pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<Es
         DatabaseType::Postgres => {
             EstimatedPlanStrategy { sql_generation: Postgres, acquisition: GeneratedSql, format: Json }
         }
+        // openGauss documents EXPLAIN (FORMAT TEXT|XML|JSON|YAML) but JSON output
+        // additionally depends on the session's explain_perf_mode; plain text avoids
+        // assuming that GUC, so the plan is generated as plain `EXPLAIN <statement>`
+        // text (#13055).
+        DatabaseType::OpenGauss => {
+            EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text }
+        }
         DatabaseType::Questdb => {
             EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text }
         }
@@ -2226,6 +2233,7 @@ mod tests {
             (DatabaseType::Doris, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Xugu, "EXPLAIN VERBOSE SELECT 1", Text, GeneratedSql),
             (DatabaseType::Postgres, "EXPLAIN (FORMAT JSON) SELECT 1", Json, GeneratedSql),
+            (DatabaseType::OpenGauss, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Questdb, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Dameng, "EXPLAIN SELECT 1", Text, DriverNative),
             (DatabaseType::Oracle, "EXPLAIN PLAN FOR SELECT 1", Text, DriverNative),
@@ -3015,6 +3023,23 @@ mod tests {
                 &format!("DBX DYNAMODB {operation}\ntable: \"orders\""),
                 DatabaseType::DynamoDb
             ));
+        }
+    }
+
+    #[test]
+    fn classifies_dynamodb_partiql_reads_and_writes_for_read_only_protection() {
+        assert!(!is_write_sql_for_database(
+            "SELECT * FROM \"items\" WHERE \"status\"='PENDING'",
+            DatabaseType::DynamoDb
+        ));
+        assert!(!is_write_sql_for_database("-- comment\nSELECT 'UPDATE' FROM \"items\"", DatabaseType::DynamoDb));
+        for statement in [
+            "INSERT INTO \"items\" VALUE {'pk':'x'}",
+            "UPDATE \"items\" SET flag=true WHERE pk='x'",
+            "DELETE FROM \"items\" WHERE pk='x'",
+            "SELECT * FROM \"items\"; DELETE FROM \"items\" WHERE pk='x'",
+        ] {
+            assert!(is_write_sql_for_database(statement, DatabaseType::DynamoDb), "{statement}");
         }
     }
 

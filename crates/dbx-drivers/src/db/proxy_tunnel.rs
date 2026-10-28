@@ -8,6 +8,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
+use tokio_util::task::AbortOnDropHandle;
+
+#[cfg(test)]
+tokio::task_local! {
+    static SPAWNED_TUNNELS: tokio::sync::mpsc::UnboundedSender<(u16, tokio::task::AbortHandle)>;
+}
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HTTP_RESPONSE_SIZE: usize = 8192;
@@ -52,15 +58,17 @@ impl ProxyTunnelManager {
             password: proxy_password.to_string(),
         };
         let remote = RemoteEndpoint { host: remote_host.to_string(), port: remote_port };
-        let handle = tokio::spawn(proxy_forward_loop(listener, proxy, remote));
+        let handle = AbortOnDropHandle::new(tokio::spawn(proxy_forward_loop(listener, proxy, remote)));
+
+        #[cfg(test)]
+        let _ = SPAWNED_TUNNELS.try_with(|observer| observer.send((local_port, handle.abort_handle())));
 
         let mut tunnels = self.tunnels.lock().await;
         if let Some((_, existing_port)) = tunnels.get(connection_id) {
-            handle.abort();
             return Ok(*existing_port);
         }
 
-        tunnels.insert(connection_id.to_string(), (handle, local_port));
+        tunnels.insert(connection_id.to_string(), (handle.detach(), local_port));
         Ok(local_port)
     }
 
@@ -642,6 +650,57 @@ pub async fn test_proxy_endpoint(
 mod tests {
     use super::*;
     use crate::models::connection::ProxyType;
+
+    #[tokio::test]
+    async fn transport_proxy_registration_cancellation_preserves_published_listener() {
+        let manager = ProxyTunnelManager::new();
+        let retained_port = manager
+            .start_tunnel("retained", ProxyType::Http, "127.0.0.1", 8080, "", "", "db.internal", 5432)
+            .await
+            .unwrap();
+        let initial_lock = manager.tunnels.lock().await;
+        let (observer, mut spawned) = tokio::sync::mpsc::unbounded_channel();
+        let mut starting = Box::pin(SPAWNED_TUNNELS.scope(
+            observer,
+            manager.start_tunnel("cancelled", ProxyType::Http, "127.0.0.1", 8080, "", "", "db.internal", 5432),
+        ));
+        assert!(futures::poll!(starting.as_mut()).is_pending());
+        let registration_lock = manager.tunnels.lock();
+        tokio::pin!(registration_lock);
+        assert!(futures::poll!(registration_lock.as_mut()).is_pending());
+        drop(initial_lock);
+        assert!(futures::poll!(starting.as_mut()).is_pending());
+        let held = registration_lock.await;
+        let (local_port, abort) = timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                biased;
+                spawned = spawned.recv() => spawned.unwrap(),
+                result = &mut starting => panic!("registration escaped held lock: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        drop(starting);
+        let closed = timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(listener) = TcpListener::bind(("127.0.0.1", local_port)).await {
+                    drop(listener);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        abort.abort();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held.get("retained").unwrap().1, retained_port);
+        drop(held);
+        let retained = TcpStream::connect(("127.0.0.1", retained_port)).await;
+        manager.stop_tunnel("retained").await;
+        assert!(closed, "cancelled proxy registration left listener {local_port}");
+        assert!(retained.is_ok(), "cancellation stopped the published listener");
+    }
 
     // ── HTTP CONNECT response parsing ──────────────────────────────────────
 

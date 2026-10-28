@@ -18,6 +18,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import SidebarTableVGroupDialog from "@/components/sidebar/SidebarTableVGroupDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { showTableVGroupDialog, tableVGroupName, tableVGroupDialogScope, tableVGroupDialogParentGroupId, tableVGroupDialogTableNames } from "@/components/sidebar/sidebarTreeDialogState";
 
 const connection = { id: "pg-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgresql", host: "localhost", port: 5432, username: "postgres", password: "" };
@@ -93,6 +94,38 @@ describe("table virtual group context menus and dialog", () => {
     expect(tableVGroupDialogScope.value).toBe(tablesGroupNode);
     expect(tableVGroupDialogParentGroupId.value).toBeNull();
     expect(tableVGroupDialogTableNames.value).toEqual([]);
+  });
+
+  it("does not provide 'New Group' on database container in grouped mode (issue #13030)", async () => {
+    const host = await mountHost();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    const databaseNode: TreeNode = {
+      id: "pg-1:app",
+      type: "database",
+      label: "app",
+      connectionId: connection.id,
+      database: "app",
+    };
+    const items = host.buildContextMenu(databaseNode);
+    const createGroupItem = items.find((item) => item.label === tr("connectionGroup.createGroup"));
+    expect(createGroupItem).toBeUndefined();
+  });
+
+  it("provides 'New Group' on database container in simple mode", async () => {
+    const host = await mountHost();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "simple";
+    const databaseNode: TreeNode = {
+      id: "pg-1:app",
+      type: "database",
+      label: "app",
+      connectionId: connection.id,
+      database: "app",
+    };
+    const items = host.buildContextMenu(databaseNode);
+    const createGroupItem = items.find((item) => item.label === tr("connectionGroup.createGroup"));
+    expect(createGroupItem).toBeDefined();
   });
 
   it("provides 'New Group' on group-views container", async () => {

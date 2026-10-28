@@ -139,10 +139,7 @@ test("mergeTableTreePageChildren dedupes non-table nodes repeated across pages",
   const ids = merged.map((node) => node.id);
   assert.equal(new Set(ids).size, ids.length, "merged children must not contain duplicate ids");
   assert.equal(merged.filter((node) => node.type === "view").length, 1, "the repeated view must appear once");
-  assert.deepEqual(
-    merged.map((node) => node.label).sort(),
-    ["orders", "orders_v", "payments"].sort(),
-  );
+  assert.deepEqual(merged.map((node) => node.label).sort(), ["orders", "orders_v", "payments"].sort());
 });
 
 test("buildTableTreeNodes keeps sidebar tables in natural name order", () => {
@@ -228,10 +225,15 @@ test("buildGroupedObjectTreeNodes groups Oracle packages and package bodies", ()
   assert.equal(packageGroup?.label, "tree.packages");
   assert.deepEqual(
     packageGroup?.children?.map((node) => ({ label: node.label, type: node.type, id: node.id })),
-    [
-      { label: "PAYROLL", type: "package", id: "conn:app:HR:__packages:HR:PAYROLL:PACKAGE" },
-      { label: "PAYROLL", type: "package-body", id: "conn:app:HR:__packages:HR:PAYROLL:PACKAGE_BODY" },
-    ],
+    [{ label: "PAYROLL", type: "package", id: "conn:app:HR:__packages:HR:PAYROLL:PACKAGE" }],
+  );
+
+  // #13239: the body lives in its own group so picking it cannot open the spec.
+  const bodyGroup = groups.find((node) => node.type === "group-package-bodies");
+  assert.equal(bodyGroup?.label, "tree.packageBodies");
+  assert.deepEqual(
+    bodyGroup?.children?.map((node) => ({ label: node.label, type: node.type, id: node.id })),
+    [{ label: "PAYROLL", type: "package-body", id: "conn:app:HR:__package_bodies:HR:PAYROLL:PACKAGE_BODY" }],
   );
 });
 

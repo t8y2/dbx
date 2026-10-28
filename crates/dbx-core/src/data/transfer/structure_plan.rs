@@ -98,7 +98,7 @@ pub(super) async fn build_structure_preview(
     // `create_transfer_target_table` (PostgreSQL-dialect target from another family) and
     // `transfer_postgres_schema_dependencies` (PostgreSQL→PostgreSQL). Plan the same statement
     // for either, deciding it with a read-only existence check instead of executing anything.
-    let create_schema_sql = if is_postgres_transfer_dialect(target_db_type)
+    let create_schema_sql = if is_postgres_family_target(target_db_type)
         && !request.target_schema.trim().is_empty()
         && !postgres_schema_exists(state, target_pool_key, &request.target_schema).await?
     {

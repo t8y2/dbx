@@ -7,8 +7,8 @@ use tokio::sync::RwLock;
 use crate::commands::connection::{ensure_connection_writable, AppState};
 
 pub use dbx_core::mongodb_import_export::{
-    MongoExportProgress, MongoExportRequest, MongoExportSummary, MongoImportPreview, MongoImportPreviewRequest,
-    MongoImportProgress, MongoImportRequest, MongoImportSummary,
+    MongoExportProgress, MongoExportRequest, MongoImportPreview, MongoImportPreviewRequest, MongoImportProgress,
+    MongoImportRequest, MongoImportSummary,
 };
 
 static CANCELLED_IMPORTS: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
@@ -72,7 +72,21 @@ pub async fn export_mongodb_query(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     request: MongoExportRequest,
-) -> Result<MongoExportSummary, String> {
+    report_outcome: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    if report_outcome == Some(true) {
+        let outcome = dbx_core::mongodb_import_export::export_mongodb_query_reported(
+            &state,
+            &request,
+            |export_id| {
+                let export_id = export_id.to_string();
+                Box::pin(async move { dbx_core::transfer::is_cancelled(&export_id).await })
+            },
+            |progress| emit_export_progress(&app, progress),
+        )
+        .await;
+        return serde_json::to_value(outcome).map_err(|error| error.to_string());
+    }
     dbx_core::mongodb_import_export::export_mongodb_query_core(
         &state,
         &request,
@@ -83,6 +97,7 @@ pub async fn export_mongodb_query(
         |progress| emit_export_progress(&app, progress),
     )
     .await
+    .and_then(|summary| serde_json::to_value(summary).map_err(|error| error.to_string()))
 }
 
 #[tauri::command]

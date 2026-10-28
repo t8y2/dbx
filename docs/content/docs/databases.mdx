@@ -95,8 +95,60 @@ Redis, MongoDB, search, vector, HBase, configuration-center, and message-queue w
 ### Backup and Export
 
 - [Database Export](/en/docs/database-export) is a capability-driven logical SQL export
-- [Database Backup](/en/docs/database-backup) currently schedules consistent MySQL and PostgreSQL backups in Desktop only
+- [Database Backup](/en/docs/database-backup) currently schedules consistent MySQL, PostgreSQL, and openGauss backups in Desktop only
 - Cloud Sync and configuration export migrate DBX settings, not business database contents
+
+### Native Job and Scheduler Management
+
+Oracle and OceanBase Oracle connections expose **Native jobs**; Dameng retains **Agent Jobs**. They share the same management page. Use **Job type** to select Scheduler or traditional Job, with SYSJOB agent jobs available for Dameng. Owner filtering and search run against the database rather than only the loaded page. Scheduler jobs with the same name are selected separately by owner.
+
+Scheduler creation and editing provide definition, argument, and advanced-attribute sections. Arguments distinguish keeping the original, unset, inherited default, SQL NULL, and explicit values; native values that cannot be safely converted remain unchanged. Preview changes, confirm, and inspect the result in the same page. Traditional jobs retain their native numeric IDs and display `LOG_USER`, `PRIV_USER`, and `SCHEMA_USER` separately. When creating a traditional job, `SCHEMA_USER` sets the execution schema, not the login identity.
+
+When creating a Scheduler job, select a Program, named Schedule, or Chain from the catalog where applicable. Credential and Destination selection is available under advanced attributes. The catalog filters by owner and name, pages results, and shows the actual readable scope. You can enter exact names when the catalog is unavailable. Selecting a Program or named Schedule retains the corresponding inline fields in the draft without writing them; clear the reference to edit those inline fields again.
+
+For a referenced Program, argument counts and defaults come from the Program rather than the job's inline argument count. The argument section shows defaults separately from explicit job values; database-supplied metadata arguments cannot be overridden. An unresolved default is not treated as SQL NULL. Creation and Oracle reference editing retain separate Program and inline argument drafts instead of applying old overrides to the newly selected Program.
+
+Oracle argument values offer plain text or an explicit ANYDATA scalar type. **SQL NULL** retains the selected type; it is distinct from unset or inherited. Enter NUMBER as complete decimal text. Date and time inputs are separate; timestamps retain up to 9 fractional digits, and local-time-zone timestamps are edited in UTC. INTERVAL uses total months or nanoseconds, RAW uses hexadecimal, and BINARY_FLOAT/BINARY_DOUBLE use complete bit patterns. Program defaults use the same controls in read-only mode. Values that cannot be read losslessly remain read-only. Lightweight jobs do not offer ANYDATA input.
+
+When editing an existing Oracle Scheduler job, use the same editor to change its Program, Schedule, Window, Window group, or Chain, and choose credentials and destinations under advanced attributes. After selecting a Program, review its arguments and choose the final enabled state. The preview includes pausing future scheduling and conditional argument settings or resets. Arguments already at their target are skipped; conflicting external changes stop the operation. The selected enabled state is applied only after the definition and arguments have been verified.
+
+Oracle's **Trigger** selector offers a date or repeat rule, a named schedule or window, a queue event, or a file arrival event. Queue events have separate owner, queue name, optional AQ agent, and condition inputs. File arrival events reuse the File watcher picker. Inactive time and reference inputs stay in the draft without being written. Destination groups are selected as references, not expanded or modified; an incompatible job type is rejected during preview with the input retained for correction.
+
+Under Oracle's advanced attributes, **Execution target** selects local execution, a legacy remote host (`host[:port]`), or a named destination or group. Host text is edited verbatim, not parsed as an object name. Switching modes retains inactive drafts, while the preview includes only the selected mode. Select local execution to clear the previous remote target.
+
+After partial success, inspect the current state and use **Correct draft** to read and preview again. **Restore original definition draft** puts the initially read definition back in the editor; it does not roll back the database. Review the current state and confirm a new preview before applying it. Editing does not automatically run the job.
+
+For asynchronous Run or Stop, **Accepted** describes the management request, not the job's business result. **Native execution observation** in the same result area shows running/history read states and identifiable instances; use **Refresh run result** to read again. Newly observed success, failure, or stop records are not automatically attributed to this request, and uncertain association is stated explicitly. The absence of a running row does not prove that the job never ran or that this request stopped it. DBX does not automatically rerun the job on that evidence.
+
+Reference lists require read access to the corresponding system views. OceanBase V4.2.5 uses [`SYS.DBA_SCHEDULER_PROGRAM`](https://www.oceanbase.com/docs/common-oceanbase-database-cn-1000000001500817), not Oracle's plural name. An account without read access can receive ORA-00942. An unreadable list does not establish that the referenced object is absent; DBX does not grant privileges automatically.
+
+OceanBase V4.2.5's Job and [Program argument views](https://www.oceanbase.com/docs/common-oceanbase-database-cn-1000000001500848) are compatibility placeholders that always return no rows, including when arguments exist. DBX reports that argument metadata cannot be read instead of treating it as an empty argument list. Readable definition fields and controls that do not depend on those arguments remain available.
+
+Existing OceanBase V4.2.5 Scheduler jobs have read-only base definitions. Use **Advanced attributes** to edit the job class, maximum failures, maximum run duration, and execution Zone. Durations use a nonnegative, whole-second DS interval, such as `0 00:02:00` for two minutes. A Zone is a name or `RANDOM`, not an Oracle numeric instance. Maximum failures is read from the native view after checking the job identity; an unreadable value does not block other editable attributes. Fields that cannot be cleared have no clear action.
+
+Creation accepts a different set of inputs: initial action, dates, repeat expression, and comments remain available, with 0–255 arguments and the `STORED_PROCEDURE` or `PLSQL_BLOCK` job types. This version does not offer named Schedule, Credential, or Destination creation inputs. Program references follow its native naming rules.
+
+OceanBase traditional jobs use a nullable Zone name rather than an Oracle numeric instance. Creation requires a matching OceanBase Agent or Generic JDBC runtime; if DBX requests an update, update the runtime and reconnect. An administrator must also enable the database's `DBMS_JOB` package; DBX does not change the global switch. Creation sets and verifies the selected enabled state and date before the first commit. Enabling or disabling preserves the latest next-run date read during execution.
+
+Oracle and OceanBase traditional jobs use **Run in foreground**, which waits for the native call to return. On the verified OceanBase 4.2.5.7 configuration, running also clears the broken flag and recalculates the next-run date; review this scheduling effect before confirming the preview. Traditional DBMS_JOB has no native stop operation; ending a session is not a substitute. Oracle Scheduler exposes separate normal and **Force stop** previews and confirmation. OceanBase does not reuse Oracle's force-stop signature.
+
+#### Dameng SYSJOB Jobs
+
+This release does not yet implement these DM operations: attaching or detaching Program/named Schedule references when switching an existing Scheduler job to or from an inline definition, argument RESET/default inheritance restoration, job execution-schema migration, and traditional DBMS_JOB creation. DBX does not dispatch native calls whose contracts have not been confirmed. The Oracle reference-editing and traditional-job creation capabilities above do not extend to DM; these DM operations require confirmed native contracts before implementation. Native Oracle and DM8 database acceptance testing remains deferred. Automated tests and UI checks with mocked external boundaries do not establish database acceptance.
+
+Open **Agent Jobs** from a Dameng connection to manage SYSJOB jobs. Search by name, owner, or description, then select a job to read properties, steps, schedules, current runs, and history separately. An unavailable or denied section is shown explicitly rather than treated as empty.
+
+To create a job:
+
+1. Click **New Job**, enter its name, and choose the final enabled state under **Job properties**.
+2. Under **Steps**, enter SQL or native configuration input. Add multiple steps and configure success/failure actions and next steps. Use **Schedules** to add one or more schedules.
+3. Click **Preview SQL**, review the target and configuration, and confirm. DBX creates the job disabled, completes configuration on one physical session, and verifies readback before applying the selected final enabled state.
+
+Use **Edit job** for existing jobs. Unchanged properties and children are preserved. A backup, restore, or DTS step's catalog `COMMAND` may be database-generated SQL; changing its definition requires the original native configuration, not the generated command.
+
+For a partial or unknown result, use **Read again**, **Correct draft**, and **Check operation result** in the original result area. Acknowledged jobs and children retain their native IDs. An uncertain add is not automatically adopted by name or created again. Correct the draft and confirm a fresh preview to apply remaining changes; business jobs are not rerun automatically.
+
+**Stop remaining steps** only cancels management steps not yet dispatched. Use **Stop Current Run** to request native job stopping; disabling future scheduling does not stop a current run. A missing job environment has a separate **Initialize Job Environment** action and is never initialized automatically.
 
 ### Desktop and Docker/Web
 

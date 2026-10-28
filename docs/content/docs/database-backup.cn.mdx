@@ -1,9 +1,9 @@
 ---
 title: 定时数据库备份
-description: 在 DBX 桌面端为 MySQL 和 PostgreSQL 创建可手动运行或按小时、每天、每周执行的 SQL 备份计划。
+description: 在 DBX 桌面端为 MySQL、PostgreSQL 和 openGauss 创建可手动运行或按小时、每天、每周执行的 SQL 备份计划。
 ---
 
-定时数据库备份使用 DBX 的数据库导出引擎，为 MySQL 和 PostgreSQL 连接生成 SQL 文件。它适合开发、测试和中小型数据库的周期性逻辑备份，并提供表范围、保留数量、运行历史和手动执行。
+定时数据库备份使用 DBX 的数据库导出引擎，为 MySQL、PostgreSQL 和 openGauss 连接生成 SQL 文件。它适合开发、测试和中小型数据库的周期性逻辑备份，并提供表范围、保留数量、运行历史和手动执行。
 
 如果只需要立即备份一次，可以在设置中使用**立即备份**，不必创建计划。配置连接、目录、数据库、表范围和备份内容后点击**开始备份**。一次性备份不会创建或修改计划，不会计算下次执行时间，并会出现在统一的备份历史中。
 
@@ -13,10 +13,10 @@ description: 在 DBX 桌面端为 MySQL 和 PostgreSQL 创建可手动运行或�
 
 | 项目 | 当前行为 |
 | --- | --- |
-| 数据库 | MySQL、PostgreSQL |
+| 数据库 | MySQL、PostgreSQL、openGauss |
 | 平台 | DBX 桌面端 |
 | 输出 | 默认模板为每次计划运行创建独立目录；目录内按数据库/Schema 生成备份文件，且可通过模板自定义目录与文件名 |
-| 格式 | 普通 SQL（`.sql`）、Gzip 压缩 SQL（`.sql.gz`）或 Navicat 备份归档（`.nb3`） |
+| 格式 | 所有支持的数据库均可使用普通 SQL（`.sql`）和 Gzip 压缩 SQL（`.sql.gz`）；Navicat 备份归档（`.nb3`）仅支持 MySQL 和 PostgreSQL |
 | 频率 | 每隔若干小时、每天指定时间、每周指定星期和时间 |
 | 内容 | 表结构、表数据、数据库对象、可选 `DROP TABLE IF EXISTS` |
 | 表范围 | 全部、按模式包含、按模式排除 |
@@ -34,7 +34,7 @@ description: 在 DBX 桌面端为 MySQL 和 PostgreSQL 创建可手动运行或�
   <Step>
     ### 配置备份范围
 
-    选择 MySQL 或 PostgreSQL 连接、备份目录、数据库范围、表范围和备份内容。一次性备份不包含计划名称、执行频率、执行时间、保留数量或启用状态。
+    选择 MySQL、PostgreSQL 或 openGauss 连接、备份目录、数据库范围、表范围和备份内容。一次性备份不包含计划名称、执行频率、执行时间、保留数量或启用状态。
 
     连接列表支持多选，可一次勾选多个连接统一备份；每个连接会在**备份历史**中生成独立的备份记录，并依次执行。选择多个连接时，每个连接都备份其全部数据库，不支持精确选择表，且文件名模板必须包含 `{runId}`，避免不同连接的备份文件重名。
 
@@ -59,7 +59,7 @@ description: 在 DBX 桌面端为 MySQL 和 PostgreSQL 创建可手动运行或�
   <Step>
     ### 选择连接和数据库
 
-    选择 MySQL 或 PostgreSQL 连接。可以备份所有非系统数据库，也可以选择指定数据库。
+    选择 MySQL、PostgreSQL 或 openGauss 连接。可以备份所有非系统数据库，也可以选择指定数据库。
 
   </Step>
   <Step>
@@ -151,7 +151,7 @@ DBX 从不删除导入的文件。删除导入记录只会将其从历史中移�
 
 ## Navicat 备份（.nb3）
 
-将备份格式选择为 **Navicat 备份（.nb3）** 时，DBX 会按 Navicat 用于 MySQL 和 PostgreSQL 的归档结构写出文件：一个包含 `meta.json` 索引、Gzip 压缩的对象元数据（DDL、索引、约束、触发器）以及 Gzip 压缩数据分块的 tar 归档，每个成员都带有 SHA-1 校验值。
+在 MySQL 或 PostgreSQL 连接上将备份格式选择为 **Navicat 备份（.nb3）** 时，DBX 会按 Navicat 的归档结构写出文件：一个包含 `meta.json` 索引、Gzip 压缩的对象元数据（DDL、索引、约束、触发器）以及 Gzip 压缩数据分块的 tar 归档，每个成员都带有 SHA-1 校验值。其他数据库类型不提供此格式。
 
 DBX 也可以恢复 `.nb3` 文件，包括由 Navicat 创建的备份。在 [SQL 文件执行](/cn/docs/sql-file) 中打开文件，或在备份历史中点击**恢复**。DBX 会把归档转换为恢复脚本，依次：
 

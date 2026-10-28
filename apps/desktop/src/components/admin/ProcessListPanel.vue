@@ -354,7 +354,9 @@ async function load(options: { silent?: boolean } = {}) {
   loadError.value = "";
   versionProbeWarning.value = "";
   try {
-    await connectionStore.ensureConnected(connectionId, { skipIfClosedByUser: true });
+    // 轮询/静默刷新走被动重连：失败后退避，避免后台每次 tick 都新建连接
+    // （企业安全/零信任客户端会为每次新连接弹一次授权框）。手动刷新不受影响。
+    await connectionStore.ensureConnected(connectionId, { skipIfClosedByUser: true, ...(options.silent === true ? { passive: true } : {}) });
     if (!isCurrent()) return;
     if (activeDriver.versionSql && versionMajor.value === null) {
       try {
@@ -412,6 +414,8 @@ async function load(options: { silent?: boolean } = {}) {
     truncated.value = result.truncated === true;
   } catch (error: any) {
     if (isCurrent()) {
+      autoRefresh.value = false;
+      stopTimer();
       if (activeDriver.mode === "transaction") {
         // A failed refresh must not leave stale kill targets on screen. A
         // connection failure is not evidence that there are no transactions.

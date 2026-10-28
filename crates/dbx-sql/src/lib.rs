@@ -10,7 +10,9 @@ pub use dbx_sql_data::{
     database_structure_search_sql, query_result_sql,
 };
 pub use dbx_sql_dialect::{dml_binding, postgres_index_key, sql_dialect};
-pub use dbx_sql_schema::{db_admin_sql, schema_diff, sql_parser, table_structure_sql};
+pub use dbx_sql_schema::{
+    db_admin_sql, native_job_arguments, native_job_changes, native_jobs, schema_diff, sql_parser, table_structure_sql,
+};
 pub use dbx_types::{database_manifest, models, types};
 
 pub mod dameng_dump;

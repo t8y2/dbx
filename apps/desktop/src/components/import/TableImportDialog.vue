@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileCode, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, Maximize2, Minimize2, RefreshCw, Square, Upload, X } from "@lucide/vue";
+import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, DatabaseBackup, FileCode, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, Maximize2, Minimize2, Plus, RefreshCw, Square, Trash2, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -24,14 +24,18 @@ import {
   previousTableImportWizardStep,
   requiredImportTargetColumns,
   resolveTableImportElapsed,
+  suggestDataTypeForGenerator,
   suggestImportTargetDataTypes,
   TABLE_IMPORT_ENCODING_OPTIONS,
+  TABLE_IMPORT_GENERATOR_OPTIONS,
   tableImportProgressPercent,
-  validateImportMappings,
+  type TableImportGeneratorKey,
   type TableImportWizardStep,
+  validateImportMappings,
 } from "@/lib/table/tableImport";
 import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview } from "@/lib/import/importSource";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
+import { uniqueKeyModelColumns } from "@/lib/table/tableEditing";
 import { metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
 import { schemaOptionsForConnection } from "@/composables/useSchemaOptions";
@@ -74,6 +78,14 @@ const props = defineProps<{
 
 type ImportTargetMode = "existing" | "create";
 type ImportSource = string | File;
+type SourceFormatCard = { value: api.TableImportSourceFormat | typeof NAVICAT_BACKUP_FORMAT; icon: any; labelKey: string; descriptionKey: string };
+
+export interface GeneratedColumnItem {
+  id: string;
+  targetColumn: string;
+  generator: TableImportGeneratorKey | string;
+  targetDataType?: string;
+}
 
 interface BatchImportTask {
   id: string;
@@ -84,6 +96,8 @@ interface BatchImportTask {
   tableName: string;
   preview: api.TableImportPreview;
   columnMapping: Record<string, string>;
+  columnGenerators: Record<string, string>;
+  generatedColumns: GeneratedColumnItem[];
   columnDataTypes: Record<string, string>;
   status: "pending" | "running" | "done" | "error" | "cancelled";
   rowsImported: number;
@@ -91,6 +105,9 @@ interface BatchImportTask {
 }
 
 const SKIP_VALUE = "__skip__";
+const NAVICAT_BACKUP_FORMAT = "nb3";
+const NAVICAT_BACKUP_FILTER = { name: "Navicat backup", extensions: [NAVICAT_BACKUP_FORMAT] };
+const NAVICAT_BACKUP_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "postgres"]);
 const TARGET_COLUMNS_TIMEOUT_MS = 15000;
 const TARGET_COLUMNS_TIMEOUT = Symbol("target-columns-timeout");
 
@@ -122,6 +139,8 @@ const activeTaskIndex = ref(0);
 const sourceFormat = ref<api.TableImportSourceFormat>("csv");
 const preview = shallowRef<api.TableImportPreview | null>(null);
 const columnMapping = ref<Record<string, string>>({});
+const columnGenerators = ref<Record<string, string>>({});
+const generatedColumns = ref<GeneratedColumnItem[]>([]);
 const columnDataTypes = ref<Record<string, string>>({});
 const dynamicDataTypeOptions = ref<string[]>([]);
 const loadingDataTypeOptions = ref(false);
@@ -137,6 +156,7 @@ const progress = ref<api.TableImportProgress | null>(null);
 const errorMessage = ref("");
 const wizardStep = ref<TableImportWizardStep>("source");
 const fileInput = ref<HTMLInputElement | null>(null);
+const navicatBackupInput = ref<HTMLInputElement | null>(null);
 const delimiter = ref(",");
 const decimalSeparator = ref<"." | ",">(".");
 const textEncoding = ref<api.TableImportTextEncoding>("auto");
@@ -183,7 +203,11 @@ const selectedConnection = computed(() => (props.prefillConnectionId ? store.get
 const structureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(selectedConnection.value));
 const supportsDuckDbParquetImport = computed(() => structureDatabaseType.value === "duckdb");
 const availableFormatOptions = computed(() => formatOptions.filter((format) => format.value !== "parquet" || supportsDuckDbParquetImport.value));
-const importFileExtensions = computed(() => ["csv", "tsv", "txt", "json", "xlsx", "xlsm", "xls", "sql", ...(supportsDuckDbParquetImport.value ? ["parquet"] : [])]);
+// A Navicat `.nb3` archive restores a whole database, so it is only offered from the
+// database-level entry of the connection types the archive reader supports.
+const supportsNavicatBackupImport = computed(() => !props.prefillTable && !!selectedConnection.value && NAVICAT_BACKUP_DATABASE_TYPES.has(selectedConnection.value.db_type));
+const sourceFormatCards = computed<SourceFormatCard[]>(() => [...availableFormatOptions.value, ...(supportsNavicatBackupImport.value ? [{ value: NAVICAT_BACKUP_FORMAT, icon: DatabaseBackup, labelKey: "tableImport.formatNb3", descriptionKey: "tableImport.formatNb3Description" } as const] : [])]);
+const importFileExtensions = computed(() => ["csv", "tsv", "txt", "json", "xlsx", "xlsm", "xls", "sql", ...(supportsDuckDbParquetImport.value ? ["parquet"] : []), ...(supportsNavicatBackupImport.value ? [NAVICAT_BACKUP_FORMAT] : [])]);
 // Mirrors the conflict SQL dispatch in transfer.rs. Other dialects must keep
 // ordinary INSERT/error behavior instead of approximating an upsert.
 const IMPORT_CONFLICT_DATABASE_TYPES = new Set<DatabaseType>(["postgres", "kingbase", "opengauss", "sqlite", "cloudflare-d1", "duckdb", "mysql", "doris", "starrocks"]);
@@ -211,16 +235,35 @@ const targetColumnNames = computed(() => targetColumns.value.map((column) => col
 const mappedColumns = computed<api.TableImportColumnMapping[]>(() => {
   const currentPreview = preview.value;
   if (!currentPreview) return [];
-  return currentPreview.columns
+  const sourceMappings = currentPreview.columns
     .map((sourceColumn) => {
+      const targetColumn = columnMapping.value[sourceColumn] ?? (targetMode.value === "create" ? sourceColumn : "");
+      const generator = columnGenerators.value[sourceColumn] || undefined;
       const targetDataType = targetMode.value === "create" ? String(columnDataTypes.value[sourceColumn] ?? "").trim() : undefined;
       return {
         sourceColumn,
-        targetColumn: columnMapping.value[sourceColumn] ?? "",
+        targetColumn,
+        ...(generator ? { generator } : {}),
         ...(targetMode.value === "create" ? { targetDataType } : {}),
       };
     })
     .filter((mapping) => mapping.targetColumn);
+
+  const extraMappings = generatedColumns.value
+    .filter((item) => item.targetColumn && item.targetColumn.trim())
+    .map((item) => {
+      const targetColumn = item.targetColumn.trim();
+      const generator = item.generator || "uuid";
+      const targetDataType = targetMode.value === "create" ? String(item.targetDataType || suggestDataTypeForGenerator(generator, structureDatabaseType.value)).trim() : undefined;
+      return {
+        sourceColumn: "",
+        targetColumn,
+        generator,
+        ...(targetMode.value === "create" ? { targetDataType } : {}),
+      };
+    });
+
+  return [...sourceMappings, ...extraMappings];
 });
 const mappedCount = computed(() => mappedColumns.value.length);
 const mappingValidation = computed(() => validateImportMappings(mappedColumns.value));
@@ -267,7 +310,23 @@ const canImport = computed(() => {
   if (!isBatchImport.value) return !!preview.value?.rows.length && !!targetTableName.value && mappingValidation.value.valid;
   if (!batchTargetNamesValid.value) return false;
   return selectedBatchTasks.value.every((task) => {
-    const mappings = task.preview.columns.map((sourceColumn) => ({ sourceColumn, targetColumn: task.columnMapping[sourceColumn] ?? "", targetDataType: task.columnDataTypes[sourceColumn] ?? "" })).filter((mapping) => mapping.targetColumn);
+    const sourceMappings = task.preview.columns
+      .map((sourceColumn) => ({
+        sourceColumn,
+        targetColumn: task.columnMapping[sourceColumn] ?? "",
+        generator: task.columnGenerators?.[sourceColumn] || undefined,
+        targetDataType: task.columnDataTypes[sourceColumn] ?? "",
+      }))
+      .filter((mapping) => mapping.targetColumn);
+    const extraMappings = (task.generatedColumns || [])
+      .filter((item) => item.targetColumn && item.targetColumn.trim())
+      .map((item) => ({
+        sourceColumn: "",
+        targetColumn: item.targetColumn.trim(),
+        generator: item.generator || "uuid",
+        targetDataType: item.targetDataType || suggestDataTypeForGenerator(item.generator, structureDatabaseType.value),
+      }));
+    const mappings = [...sourceMappings, ...extraMappings];
     return task.preview.rows.length > 0 && !!task.tableName.trim() && validateImportMappings(mappings).valid;
   });
 });
@@ -300,7 +359,7 @@ const selectedSourceName = computed(() => {
 });
 const createColumnSummaries = computed(() =>
   mappedColumns.value.map((mapping) => ({
-    sourceColumn: mapping.sourceColumn,
+    sourceColumn: mapping.sourceColumn || (mapping.generator ? `[${mapping.generator}]` : ""),
     targetColumn: mapping.targetColumn,
     targetDataType: mapping.targetDataType || "",
   })),
@@ -308,14 +367,16 @@ const createColumnSummaries = computed(() =>
 const parseOptions = computed<api.TableImportParseOptions>(() => taskParseOptions(sourceFormat.value, selectedSheet.value));
 const terminalStatus = computed(() => !!progress.value?.status && ["done", "error", "cancelled"].includes(progress.value.status));
 const displayedElapsedMs = computed(() => resolveTableImportElapsed(liveElapsedMs.value, progress.value?.elapsedMs, terminalStatus.value));
-// Source file the live progress belongs to (#13164): the queue runs one file
-// at a time, so the running task is whatever activeTaskIndex points at; the
-// single-file path has no task entry and reads the preview directly.
+// Source file the progress belongs to (#13164): the queue runs one file at a
+// time, so the active task is whatever activeTaskIndex points at; the
+// single-file path has no task entry and reads the preview directly. The file
+// stays visible once the run finishes, so the completion screen still says
+// which file was imported (#13495).
 const activeImportFile = computed(() => {
-  if (wizardStep.value !== "execution" || !running.value) return "";
+  if (wizardStep.value !== "execution") return "";
   if (isBatchImport.value) {
     const task = batchTasks.value[activeTaskIndex.value];
-    return task?.status === "running" ? task.preview.filePath || task.preview.fileName || "" : "";
+    return task ? task.preview.filePath || task.preview.fileName || "" : "";
   }
   return preview.value?.filePath || "";
 });
@@ -458,6 +519,8 @@ function resetState() {
   previewLimit.value = 50;
   preview.value = null;
   columnMapping.value = {};
+  columnGenerators.value = {};
+  generatedColumns.value = [];
   columnDataTypes.value = {};
   importMode.value = "append";
   batchSize.value = 500;
@@ -759,8 +822,22 @@ async function loadTargetColumns() {
   errorMessage.value = "";
   try {
     await store.ensureConnected(props.prefillConnectionId);
-    const columns = await withTimeout(api.getColumns(props.prefillConnectionId, props.prefillDatabase, targetSchema.value, tableName), TARGET_COLUMNS_TIMEOUT_MS);
+    const columnsPromise = withTimeout(api.getColumns(props.prefillConnectionId, props.prefillDatabase, targetSchema.value, tableName), TARGET_COLUMNS_TIMEOUT_MS);
+    const indexesPromise =
+      isUniqueKeyModelDatabase.value && typeof api.listIndexes === "function"
+        ? withTimeout(
+            api.listIndexes(props.prefillConnectionId, props.prefillDatabase, targetSchema.value || "", tableName).catch(() => []),
+            TARGET_COLUMNS_TIMEOUT_MS,
+          )
+        : Promise.resolve([]);
+    const [loadedColumns, indexes] = await Promise.all([columnsPromise, indexesPromise]);
     if (requestId !== targetColumnsRequestId) return;
+    // Doris/StarRocks UNIQUE KEY columns are the conflict key but are NULLable and
+    // not reported as primary keys. Flag only `is_unique`: this array is not
+    // copied, so writing `is_primary_key` here would also make unrelated metadata
+    // readers treat the column as a literal PRIMARY KEY.
+    const keyColumns = uniqueKeyModelColumns(structureDatabaseType.value, indexes);
+    const columns = keyColumns.size > 0 ? loadedColumns.map((column) => (keyColumns.has(column.name.toLowerCase()) ? { ...column, is_unique: true } : column)) : loadedColumns;
     targetColumns.value = columns;
     loadedTargetTableName.value = tableName;
     applyAutoMapping();
@@ -825,6 +902,8 @@ function assignSelectedSource(source: string | File) {
   selectedSource.value = source;
   preview.value = null;
   columnMapping.value = {};
+  columnGenerators.value = {};
+  generatedColumns.value = [];
   columnDataTypes.value = {};
   progress.value = null;
   errorMessage.value = "";
@@ -850,6 +929,8 @@ function activateBatchTask(index: number) {
   newTableName.value = task.tableName;
   preview.value = task.preview;
   columnMapping.value = { ...task.columnMapping };
+  columnGenerators.value = { ...task.columnGenerators };
+  generatedColumns.value = (task.generatedColumns || []).map((col) => ({ ...col }));
   columnDataTypes.value = { ...task.columnDataTypes };
 }
 
@@ -859,6 +940,8 @@ function saveActiveBatchTask() {
   if (!task) return;
   task.tableName = newTableName.value.trim();
   task.columnMapping = { ...columnMapping.value };
+  task.columnGenerators = { ...columnGenerators.value };
+  task.generatedColumns = generatedColumns.value.map((col) => ({ ...col }));
   task.columnDataTypes = { ...columnDataTypes.value };
 }
 
@@ -908,6 +991,8 @@ async function prepareBatchSources(sources: ImportSource[]) {
           tableName: uniqueTableName(tableBase, usedNames),
           preview: taskPreview,
           columnMapping: Object.fromEntries(taskPreview.columns.map((column) => [column, column])),
+          columnGenerators: {},
+          generatedColumns: [],
           columnDataTypes: suggestImportTargetDataTypes(taskPreview.columns, taskPreview.rows, structureDatabaseType.value),
           status: "pending",
           rowsImported: 0,
@@ -943,12 +1028,11 @@ async function selectFile() {
       { name: "Excel", extensions: ["xlsx", "xlsm", "xls"] },
       { name: "SQL", extensions: ["sql"] },
       ...(supportsDuckDbParquetImport.value ? [{ name: "Parquet", extensions: ["parquet"] }] : []),
+      ...(supportsNavicatBackupImport.value ? [NAVICAT_BACKUP_FILTER] : []),
     ],
   });
   if (!selected) return;
-  const sources = Array.isArray(selected) ? selected : [selected];
-  if (targetMode.value === "create") await prepareBatchSources(sources);
-  else assignSelectedSource(sources[0]);
+  await applySelectedSources(Array.isArray(selected) ? selected : [selected]);
 }
 
 async function handleFileInputChange(event: Event) {
@@ -956,8 +1040,65 @@ async function handleFileInputChange(event: Event) {
   const files = Array.from(input.files || []);
   input.value = "";
   if (!files.length || running.value) return;
-  if (targetMode.value === "create") await prepareBatchSources(files);
-  else assignSelectedSource(files[0]);
+  await applySelectedSources(files);
+}
+
+async function applySelectedSources(sources: ImportSource[]) {
+  // A Navicat archive restores a whole database, so only a single-file selection may
+  // take that path; a mixed batch must stay in the table-import flow for the other files.
+  const navicatBackup = supportsNavicatBackupImport.value && sources.length === 1 ? sources.find((source) => sourceName(source).toLowerCase().endsWith(`.${NAVICAT_BACKUP_FORMAT}`)) : undefined;
+  if (navicatBackup) await openNavicatBackupRestore(navicatBackup);
+  else if (targetMode.value === "create") await prepareBatchSources(sources);
+  else assignSelectedSource(sources[0]!);
+}
+
+function selectFormatCard(format: SourceFormatCard["value"]) {
+  if (format === NAVICAT_BACKUP_FORMAT) void selectNavicatBackupFile();
+  else sourceFormat.value = format;
+}
+
+async function selectNavicatBackupFile() {
+  if (!isTauriRuntime()) {
+    navicatBackupInput.value?.click();
+    return;
+  }
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({ multiple: false, filters: [NAVICAT_BACKUP_FILTER] });
+  if (typeof selected === "string") await openNavicatBackupRestore(selected);
+}
+
+async function handleNavicatBackupInputChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (file && !running.value) await openNavicatBackupRestore(file);
+}
+
+/**
+ * Navicat archives hold whole databases (DDL, rows, routines, triggers), so they are
+ * restored by the SQL file executor, prefilled with this dialog's target database.
+ */
+async function openNavicatBackupRestore(source: ImportSource) {
+  const connectionId = props.prefillConnectionId;
+  if (!connectionId) return;
+  const target = { connectionId, database: props.prefillDatabase || "", ...(props.prefillSchema ? { schema: props.prefillSchema } : {}) };
+  if (typeof source === "string") {
+    store.sqlFileSource = { ...target, filePath: source };
+  } else {
+    // The web SQL file executor runs uploaded files, so upload the archive before handing it over.
+    loadingPreview.value = true;
+    errorMessage.value = "";
+    try {
+      const { previewSqlFile } = await import("@/lib/backend/http");
+      store.sqlFileSource = { ...target, preview: await previewSqlFile(source) };
+    } catch (e: any) {
+      errorMessage.value = String(e?.message || e);
+      return;
+    } finally {
+      loadingPreview.value = false;
+    }
+  }
+  open.value = false;
 }
 
 function updateMapping(sourceColumn: string, value: any) {
@@ -1002,6 +1143,120 @@ function updateColumnDataType(sourceColumn: string, value: any) {
     [sourceColumn]: String(value),
   };
 }
+
+const generatorPickerOpen = ref(false);
+const activeGeneratorColumn = ref<{ type: "source"; sourceColumn: string } | { type: "generated"; id: string } | null>(null);
+const generatorPickerStyle = ref<Record<string, string>>({});
+
+function openGeneratorPicker(target: { type: "source"; sourceColumn: string } | { type: "generated"; id: string }, trigger: HTMLElement) {
+  const rect = trigger.getBoundingClientRect();
+  generatorPickerStyle.value = {
+    position: "fixed",
+    top: `${rect.bottom + 2}px`,
+    left: `${Math.max(10, Math.min(rect.left, window.innerWidth - 260))}px`,
+    width: "250px",
+  };
+  activeGeneratorColumn.value = target;
+  generatorPickerOpen.value = true;
+}
+
+function closeGeneratorPicker() {
+  generatorPickerOpen.value = false;
+  activeGeneratorColumn.value = null;
+}
+
+function selectGeneratorOption(generator: string) {
+  if (!activeGeneratorColumn.value) return;
+  if (activeGeneratorColumn.value.type === "source") {
+    updateColumnGenerator(activeGeneratorColumn.value.sourceColumn, generator);
+  } else {
+    updateGeneratedColumn(activeGeneratorColumn.value.id, { generator });
+  }
+  closeGeneratorPicker();
+}
+
+function generatorLabel(key: string | undefined): string {
+  if (!key) return t("tableImport.sourceValue");
+  const opt = TABLE_IMPORT_GENERATOR_OPTIONS.find((o) => o.value === key);
+  return opt ? t(opt.labelKey) : key;
+}
+
+function updateColumnGenerator(sourceColumn: string, generator: string) {
+  if (!generator) {
+    const next = { ...columnGenerators.value };
+    delete next[sourceColumn];
+    columnGenerators.value = next;
+  } else {
+    columnGenerators.value = {
+      ...columnGenerators.value,
+      [sourceColumn]: generator,
+    };
+    if (targetMode.value === "create" && (!columnDataTypes.value[sourceColumn] || columnDataTypes.value[sourceColumn] === "TEXT")) {
+      columnDataTypes.value = {
+        ...columnDataTypes.value,
+        [sourceColumn]: suggestDataTypeForGenerator(generator, structureDatabaseType.value),
+      };
+    }
+  }
+}
+
+function addGeneratedColumn(targetCol = "", generator = "uuid") {
+  const defaultDataType = suggestDataTypeForGenerator(generator, structureDatabaseType.value);
+  generatedColumns.value = [
+    ...generatedColumns.value,
+    {
+      id: uuid(),
+      targetColumn: targetCol,
+      generator,
+      targetDataType: defaultDataType,
+    },
+  ];
+}
+
+function removeGeneratedColumn(id: string) {
+  generatedColumns.value = generatedColumns.value.filter((col) => col.id !== id);
+}
+
+function updateGeneratedColumn(id: string, updates: Partial<GeneratedColumnItem>) {
+  generatedColumns.value = generatedColumns.value.map((col) => {
+    if (col.id !== id) return col;
+    const updated = { ...col, ...updates };
+    if (updates.generator && updates.generator !== col.generator && targetMode.value === "create") {
+      updated.targetDataType = suggestDataTypeForGenerator(updates.generator, structureDatabaseType.value);
+    }
+    return updated;
+  });
+}
+
+function autoGenerateRequiredColumns() {
+  const unmapped = [...requiredUnmappedColumns.value];
+  if (!unmapped.length) return;
+  const newCols: GeneratedColumnItem[] = [];
+  for (const colName of unmapped) {
+    const targetCol = targetColumns.value.find((c) => c.name.toLowerCase() === colName.toLowerCase());
+    let generator: TableImportGeneratorKey = "uuid";
+    const lowerName = colName.toLowerCase();
+    const typeLower = String(targetCol?.data_type || "").toLowerCase();
+    if (typeLower.includes("int") || typeLower.includes("number") || typeLower.includes("serial")) {
+      generator = "sequence";
+    } else if (typeLower.includes("date") && !typeLower.includes("time")) {
+      generator = "current_date";
+    } else if (typeLower.includes("time") || typeLower.includes("timestamp") || lowerName.includes("time") || lowerName.includes("date") || lowerName.endsWith("_at")) {
+      generator = "current_timestamp";
+    } else if (lowerName.includes("uuid")) {
+      generator = "uuid";
+    }
+    newCols.push({
+      id: uuid(),
+      targetColumn: colName,
+      generator,
+      targetDataType: targetCol?.data_type || suggestDataTypeForGenerator(generator, structureDatabaseType.value),
+    });
+  }
+  generatedColumns.value = [...generatedColumns.value, ...newCols];
+}
+
+const activeGeneratedColumns = computed(() => generatedColumns.value.filter((col) => col.targetColumn && col.targetColumn.trim()));
 
 function goBack() {
   wizardStep.value = previousTableImportWizardStep(wizardStep.value);
@@ -1174,13 +1429,23 @@ async function startBatchImport() {
       activeTaskIndex.value = index;
       task.status = "running";
       importId.value = uuid();
-      const mappings = task.preview.columns
+      const sourceMappings = task.preview.columns
         .map((sourceColumn) => ({
           sourceColumn,
           targetColumn: task.columnMapping[sourceColumn] ?? "",
+          generator: task.columnGenerators?.[sourceColumn] || undefined,
           targetDataType: String(task.columnDataTypes[sourceColumn] ?? "").trim(),
         }))
         .filter((mapping) => mapping.targetColumn);
+      const extraMappings = (task.generatedColumns || [])
+        .filter((item) => item.targetColumn && item.targetColumn.trim())
+        .map((item) => ({
+          sourceColumn: "",
+          targetColumn: item.targetColumn.trim(),
+          generator: item.generator || "uuid",
+          targetDataType: item.targetDataType || suggestDataTypeForGenerator(item.generator, structureDatabaseType.value),
+        }));
+      const mappings = [...sourceMappings, ...extraMappings];
       const validation = validateImportMappings(mappings);
       if (!task.tableName.trim() || !validation.valid) {
         throw new Error(validation.errors[0] || "Target table name is required");
@@ -1366,9 +1631,12 @@ onBeforeUnmount(() => {
 
 watch([sourceFormat, delimiter, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
 watch([textEncoding, decimalSeparator], schedulePreviewReloadAfterEncodingChange);
-watch([newTableName, columnMapping, columnDataTypes], saveActiveBatchTask, { deep: true });
+watch([newTableName, columnMapping, columnGenerators, generatedColumns, columnDataTypes], saveActiveBatchTask, { deep: true });
 watch(wizardStep, (step) => {
-  if (step !== "mapping") closeDataTypePicker();
+  if (step !== "mapping") {
+    closeDataTypePicker();
+    closeGeneratorPicker();
+  }
   if (step === "options") {
     if (showSchemaSelector.value) void loadSchemaOptions();
     void loadExistingTables();
@@ -1430,6 +1698,7 @@ watch(rawProgressPercent, (percent) => {
       <div class="min-h-0 flex-1 space-y-4 overflow-y-auto py-2 pr-1">
         <div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
           <input ref="fileInput" type="file" :accept="importFileExtensions.map((extension) => `.${extension}`).join(',')" :multiple="targetMode === 'create'" class="hidden" @change="handleFileInputChange" />
+          <input v-if="supportsNavicatBackupImport" ref="navicatBackupInput" data-testid="table-import-nb3-input" type="file" :accept="`.${NAVICAT_BACKUP_FORMAT}`" class="hidden" @change="handleNavicatBackupInputChange" />
           <div class="flex h-10 min-w-0 items-center gap-2 rounded-md border bg-muted/20 px-3">
             <span class="shrink-0 text-xs text-muted-foreground">{{ t("tableImport.target") }}</span>
             <span class="min-w-0 truncate text-sm font-medium">
@@ -1509,11 +1778,20 @@ watch(rawProgressPercent, (percent) => {
             data-testid="table-import-format-options"
             class="grid grid-cols-2 gap-2 sm:grid-cols-3"
             :class="{
-              'lg:grid-cols-6': availableFormatOptions.length === 6,
-              'lg:grid-cols-7': availableFormatOptions.length === 7,
+              'lg:grid-cols-6': sourceFormatCards.length === 6,
+              'lg:grid-cols-7': sourceFormatCards.length === 7,
             }"
           >
-            <button v-for="format in availableFormatOptions" :key="format.value" type="button" class="min-h-20 rounded-md border px-3 py-2 text-left" :class="sourceFormat === format.value ? 'border-primary bg-primary/5' : 'hover:bg-muted/30'" @click="sourceFormat = format.value">
+            <button
+              v-for="format in sourceFormatCards"
+              :key="format.value"
+              type="button"
+              :data-format="format.value"
+              class="min-h-20 rounded-md border px-3 py-2 text-left"
+              :class="sourceFormat === format.value ? 'border-primary bg-primary/5' : 'hover:bg-muted/30'"
+              :disabled="loadingPreview"
+              @click="selectFormatCard(format.value)"
+            >
               <component :is="format.icon" class="mb-2 h-4 w-4 text-muted-foreground" />
               <div class="text-xs font-medium">{{ t(format.labelKey) }}</div>
               <div class="mt-1 text-[11px] leading-snug text-muted-foreground">{{ t(format.descriptionKey) }}</div>
@@ -1779,31 +2057,39 @@ watch(rawProgressPercent, (percent) => {
             </div>
           </div>
 
-          <div v-if="preview" class="grid gap-3" :class="targetMode === 'create' ? 'grid-cols-[minmax(360px,460px)_1fr]' : 'grid-cols-[minmax(280px,360px)_1fr]'">
+          <div v-if="preview" class="grid gap-3" :class="targetMode === 'create' ? 'grid-cols-[minmax(460px,580px)_1fr]' : 'grid-cols-[minmax(380px,480px)_1fr]'">
             <div class="rounded-md border">
               <div class="flex items-center justify-between border-b px-3 py-1.5 text-xs font-medium">
                 <span>{{ t("tableImport.mapping") }}</span>
-                <div v-if="targetMode === 'existing'" class="flex items-center gap-1.5 font-normal">
-                  <button type="button" data-action="map-by-position" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="mapByPosition">
-                    {{ t("tableImport.mapByPosition") }}
+                <div class="flex items-center gap-1.5 font-normal">
+                  <button type="button" data-action="add-generated-column" class="flex items-center gap-1 text-xs text-primary hover:underline font-medium" @click="() => addGeneratedColumn()">
+                    <Plus class="h-3.5 w-3.5" />
+                    {{ t("tableImport.addGeneratedColumn") }}
                   </button>
-                  <span class="text-muted-foreground/40">·</span>
-                  <button type="button" data-action="map-by-name" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="mapByName">
-                    {{ t("tableImport.mapByName") }}
-                  </button>
-                  <span class="text-muted-foreground/40">·</span>
-                  <button type="button" data-action="skip-all" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="skipAllColumns">
-                    {{ t("tableImport.skipAll") }}
-                  </button>
+                  <template v-if="targetMode === 'existing'">
+                    <span class="text-muted-foreground/40">·</span>
+                    <button type="button" data-action="map-by-position" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="mapByPosition">
+                      {{ t("tableImport.mapByPosition") }}
+                    </button>
+                    <span class="text-muted-foreground/40">·</span>
+                    <button type="button" data-action="map-by-name" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="mapByName">
+                      {{ t("tableImport.mapByName") }}
+                    </button>
+                    <span class="text-muted-foreground/40">·</span>
+                    <button type="button" data-action="skip-all" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="skipAllColumns">
+                      {{ t("tableImport.skipAll") }}
+                    </button>
+                  </template>
                 </div>
               </div>
               <div class="max-h-[320px] overflow-auto p-2">
-                <div class="grid items-center gap-2 border-b px-1 pb-1 text-[11px] font-medium text-muted-foreground" :class="targetMode === 'create' ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(92px,120px)]' : 'grid-cols-[1fr_1fr]'">
+                <div class="grid items-center gap-2 border-b px-1 pb-1 text-[11px] font-medium text-muted-foreground" :class="targetMode === 'create' ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(110px,130px)_minmax(92px,120px)]' : 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(110px,130px)]'">
                   <span>{{ t("tableImport.sourceColumn") }}</span>
                   <span>{{ t("tableImport.targetColumn") }}</span>
+                  <span>{{ t("tableImport.generator") }}</span>
                   <span v-if="targetMode === 'create'">{{ t("tableImport.targetDataType") }}</span>
                 </div>
-                <div v-for="sourceColumn in preview.columns" :key="sourceColumn" class="grid items-center gap-2 py-1" :class="targetMode === 'create' ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(92px,120px)]' : 'grid-cols-[1fr_1fr]'">
+                <div v-for="sourceColumn in preview.columns" :key="sourceColumn" class="grid items-center gap-2 py-1" :class="targetMode === 'create' ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(110px,130px)_minmax(92px,120px)]' : 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(110px,130px)]'">
                   <div class="truncate font-mono text-xs" :title="sourceColumn">
                     {{ sourceColumn }}
                   </div>
@@ -1825,6 +2111,16 @@ watch(rawProgressPercent, (percent) => {
                       {{ column.name }}
                     </option>
                   </select>
+                  <!-- Generator selector button -->
+                  <button
+                    type="button"
+                    data-generator-picker
+                    class="h-7 w-full truncate rounded-md border bg-background px-2 text-left text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
+                    :class="columnGenerators[sourceColumn] ? 'text-primary font-medium' : 'text-muted-foreground'"
+                    @click="(e) => openGeneratorPicker({ type: 'source', sourceColumn }, e.currentTarget as HTMLElement)"
+                  >
+                    {{ generatorLabel(columnGenerators[sourceColumn]) }}
+                  </button>
                   <!-- 数据类型：plain input + 全局 popover，点击才弹出 -->
                   <div v-if="targetMode === 'create'" class="relative">
                     <input
@@ -1844,6 +2140,58 @@ watch(rawProgressPercent, (percent) => {
                     />
                   </div>
                 </div>
+
+                <!-- 自定义生成列列表 -->
+                <div v-if="generatedColumns.length" class="mt-2 border-t pt-2 space-y-1">
+                  <div class="px-1 pb-1 text-[11px] font-medium text-muted-foreground">
+                    {{ t("tableImport.generatedColumns") }}
+                  </div>
+                  <div
+                    v-for="genCol in generatedColumns"
+                    :key="genCol.id"
+                    class="grid items-center gap-2 py-1"
+                    :class="targetMode === 'create' ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(110px,130px)_minmax(92px,120px)_28px]' : 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(110px,130px)_28px]'"
+                  >
+                    <div class="truncate font-mono text-xs text-muted-foreground italic">({{ t("tableImport.generator") }})</div>
+                    <input
+                      v-if="targetMode === 'create'"
+                      :value="genCol.targetColumn"
+                      :placeholder="t('tableImport.targetColumn')"
+                      class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
+                      @input="(e) => updateGeneratedColumn(genCol.id, { targetColumn: (e.target as HTMLInputElement).value })"
+                    />
+                    <select
+                      v-else
+                      data-generated-target-select
+                      :value="genCol.targetColumn || ''"
+                      class="h-7 w-full min-w-0 rounded-md border border-input bg-background text-foreground px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25 [color-scheme:light] dark:[color-scheme:dark]"
+                      @change="(e) => updateGeneratedColumn(genCol.id, { targetColumn: (e.target as HTMLSelectElement).value })"
+                    >
+                      <option value="" disabled class="bg-popover text-popover-foreground">{{ t("tableImport.selectTargetColumn") }}</option>
+                      <option v-for="column in targetColumns" :key="column.name" :value="column.name" class="bg-popover text-popover-foreground">
+                        {{ column.name }}
+                      </option>
+                    </select>
+                    <button
+                      type="button"
+                      data-generator-picker
+                      class="h-7 w-full truncate rounded-md border bg-background px-2 text-left text-xs font-mono font-medium text-primary shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
+                      @click="(e) => openGeneratorPicker({ type: 'generated', id: genCol.id }, e.currentTarget as HTMLElement)"
+                    >
+                      {{ generatorLabel(genCol.generator) }}
+                    </button>
+                    <input
+                      v-if="targetMode === 'create'"
+                      :value="genCol.targetDataType || ''"
+                      :placeholder="t('tableImport.targetDataType')"
+                      class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
+                      @input="(e) => updateGeneratedColumn(genCol.id, { targetDataType: (e.target as HTMLInputElement).value })"
+                    />
+                    <button type="button" class="flex h-7 w-7 items-center justify-center rounded-md border text-muted-foreground hover:bg-destructive/10 hover:text-destructive" :title="t('tableImport.removeGeneratedColumn')" @click="removeGeneratedColumn(genCol.id)">
+                      <Trash2 class="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -1859,8 +2207,16 @@ watch(rawProgressPercent, (percent) => {
                           :class="{ 'line-through text-muted-foreground': isSourceColumnSkipped(column) }"
                           :data-column-skipped="isSourceColumnSkipped(column) ? 'true' : undefined"
                           :title="isSourceColumnSkipped(column) ? `${column} (${t('tableImport.skipColumn')})` : column"
-                          >{{ column }}</span
                         >
+                          {{ column }}
+                          <span v-if="columnGenerators[column]" class="ml-1 text-[10px] text-primary not-italic font-normal"> [{{ columnGenerators[column] }}] </span>
+                        </span>
+                      </th>
+                      <th v-for="genCol in activeGeneratedColumns" :key="genCol.id" class="border-b border-r px-2 py-1.5 text-left font-medium transition-colors bg-muted/10">
+                        <span class="block max-w-[140px] truncate text-primary font-medium" :title="`${genCol.targetColumn} (${genCol.generator})`">
+                          {{ genCol.targetColumn }}
+                          <span class="ml-1 text-[10px] text-muted-foreground">[{{ genCol.generator }}]</span>
+                        </span>
                       </th>
                     </tr>
                   </thead>
@@ -1875,7 +2231,14 @@ watch(rawProgressPercent, (percent) => {
                           'text-muted-foreground/50 bg-muted/20': isSourceColumnSkipped(preview.columns[colIndex]),
                         }"
                       >
-                        <span class="block truncate" :class="{ 'line-through': isSourceColumnSkipped(preview.columns[colIndex]) }" :data-cell-skipped="isSourceColumnSkipped(preview.columns[colIndex]) ? 'true' : undefined">{{ formatTableImportPreviewCell(cell) }}</span>
+                        <span class="block truncate" :class="{ 'line-through': isSourceColumnSkipped(preview.columns[colIndex]) }" :data-cell-skipped="isSourceColumnSkipped(preview.columns[colIndex]) ? 'true' : undefined">
+                          {{ formatTableImportPreviewCell(cell, columnGenerators[preview.columns[colIndex]], rowIndex) }}
+                        </span>
+                      </td>
+                      <td v-for="genCol in activeGeneratedColumns" :key="genCol.id" class="max-w-[180px] border-b border-r px-2 py-1.5 font-mono text-primary/80 bg-muted/5 transition-colors">
+                        <span class="block truncate">
+                          {{ formatTableImportPreviewCell(null, genCol.generator, rowIndex) }}
+                        </span>
                       </td>
                     </tr>
                   </tbody>
@@ -1890,9 +2253,19 @@ watch(rawProgressPercent, (percent) => {
           <div v-else-if="conflictPolicyError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             {{ conflictPolicyError }}
           </div>
-          <div v-else-if="requiredUnmappedColumns.length" class="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/20 dark:text-amber-300">
-            <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span>{{ t("tableImport.requiredUnmapped", { columns: requiredUnmappedColumns.join(", ") }) }}</span>
+          <div v-else-if="requiredUnmappedColumns.length" class="flex items-center justify-between gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/20 dark:text-amber-300">
+            <div class="flex items-start gap-2 min-w-0">
+              <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span class="break-words">{{ t("tableImport.requiredUnmapped", { columns: requiredUnmappedColumns.join(", ") }) }}</span>
+            </div>
+            <button
+              type="button"
+              data-action="auto-generate-required"
+              class="shrink-0 rounded border border-amber-400 bg-white dark:bg-amber-950 px-2 py-1 text-xs font-medium text-amber-900 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900 transition-colors"
+              @click="autoGenerateRequiredColumns"
+            >
+              {{ t("tableImport.autoGenerateRequired") }}
+            </button>
           </div>
         </div>
 
@@ -2030,6 +2403,22 @@ watch(rawProgressPercent, (percent) => {
             @pointerdown.prevent="selectDataTypeOption(opt)"
           >
             {{ opt }}
+          </button>
+        </div>
+      </Teleport>
+
+      <!-- 全局生成器 popover -->
+      <Teleport to="body">
+        <div v-if="generatorPickerOpen" class="fixed inset-0 z-[9998]" @click="closeGeneratorPicker" />
+        <div v-if="generatorPickerOpen" id="table-import-generator-options" role="listbox" :style="generatorPickerStyle" class="pointer-events-auto z-[9999] max-h-60 overflow-auto rounded-md border bg-popover p-1 shadow-md">
+          <div class="px-2 py-1 text-[11px] font-semibold text-muted-foreground">
+            {{ t("tableImport.valueSource") }}
+          </div>
+          <button v-if="activeGeneratorColumn?.type === 'source'" type="button" role="option" class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground" @click="selectGeneratorOption('')">
+            {{ t("tableImport.sourceValue") }}
+          </button>
+          <button v-for="opt in TABLE_IMPORT_GENERATOR_OPTIONS" :key="opt.value" type="button" role="option" class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground" @click="selectGeneratorOption(opt.value)">
+            {{ t(opt.labelKey) }}
           </button>
         </div>
       </Teleport>

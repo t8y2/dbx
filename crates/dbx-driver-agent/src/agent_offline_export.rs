@@ -108,13 +108,14 @@ pub fn export_agents_offline(
     am: &AgentManager,
     destination: &Path,
     selected_driver_keys: &[String],
+    include_jres: bool,
 ) -> Result<AgentOfflineExportResult, String> {
     // Driver install/uninstall operations intentionally share the read side of
     // this lock so different drivers can be managed concurrently. Export must
     // take the write side because it reads an arbitrary set of drivers and JREs
     // as one consistent snapshot.
     let _installation_guard = am.installation_operation_lock.blocking_write();
-    export_agents_offline_unlocked(am, destination, selected_driver_keys)
+    export_agents_offline_unlocked(am, destination, selected_driver_keys, include_jres)
 }
 
 fn preview_agent_offline_export_unlocked(am: &AgentManager) -> AgentOfflineExportPreview {
@@ -313,6 +314,7 @@ fn export_agents_offline_unlocked(
     am: &AgentManager,
     destination: &Path,
     selected_driver_keys: &[String],
+    include_jres: bool,
 ) -> Result<AgentOfflineExportResult, String> {
     let selected = selected_driver_keys.iter().map(String::as_str).collect::<BTreeSet<_>>();
     if selected.is_empty() {
@@ -350,7 +352,7 @@ fn export_agents_offline_unlocked(
                 format!("dbx-agent-{db_type}-{}{suffix}", AgentManager::current_platform())
             }
         };
-        if kind == AgentOfflineArtifactKind::Jar {
+        if kind == AgentOfflineArtifactKind::Jar && include_jres {
             required_jres.insert(installed.jre.clone());
         }
         drivers.push(PreparedDriver {
@@ -1414,7 +1416,8 @@ mod tests {
         let package = temp.path().join("agents.zip");
 
         let result =
-            export_agents_offline_unlocked(&source, &package, &["kafka".to_string(), "duckdb".to_string()]).unwrap();
+            export_agents_offline_unlocked(&source, &package, &["kafka".to_string(), "duckdb".to_string()], true)
+                .unwrap();
         assert_eq!(result.driver_count, 2);
         assert_eq!(result.jre_count, 1);
         let plan = inspect_offline_package(&package).unwrap();
@@ -1476,13 +1479,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn jar_export_can_skip_the_jre_runtime_on_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = manager(&temp.path().join("source"));
+        install_managed_jar(&source, "duckdb", "1.2.3", "temurin-21", false);
+        // Eligibility requires the *source* machine to have the JRE installed;
+        // the flag only controls whether the runtime ships in the package.
+        install_managed_jre(&source, "temurin-21", "21.0.5");
+        let package = temp.path().join("jar-no-jre.zip");
+
+        let result = export_agents_offline_unlocked(&source, &package, &["duckdb".to_string()], false).unwrap();
+        assert_eq!(result.driver_count, 1);
+        assert_eq!(result.jre_count, 0);
+        let plan = inspect_offline_package(&package).unwrap();
+        assert_eq!(plan.driver_keys, vec!["duckdb"]);
+        assert!(!plan.includes_jre);
+
+        let target = manager(&temp.path().join("target"));
+        let imported = import_agents_from_package(&target, &package, |_| {}).await.unwrap();
+        assert_eq!(imported.drivers_installed, vec!["duckdb"]);
+    }
+
+    #[tokio::test]
     async fn exported_native_package_round_trips_without_a_jre() {
         let temp = tempfile::tempdir().unwrap();
         let source = manager(&temp.path().join("source"));
         let native_bytes = install_managed_native(&source, "duckdb", "1.2.3");
         let package = temp.path().join("native-agents.zip");
 
-        let result = export_agents_offline_unlocked(&source, &package, &["duckdb".to_string()]).unwrap();
+        let result = export_agents_offline_unlocked(&source, &package, &["duckdb".to_string()], true).unwrap();
         assert_eq!(result.driver_count, 1);
         assert_eq!(result.jre_count, 0);
         let plan = inspect_offline_package(&package).unwrap();
@@ -1533,7 +1558,7 @@ mod tests {
 
         assert!(candidate(&preview_agent_offline_export_unlocked(&source), "h2").eligible);
         let package = temp.path().join("agents.zip");
-        let result = export_agents_offline_unlocked(&source, &package, &["h2".to_string()]).unwrap();
+        let result = export_agents_offline_unlocked(&source, &package, &["h2".to_string()], true).unwrap();
         assert_eq!(result.driver_count, 1);
         assert_eq!(result.jre_count, 1);
 
@@ -1630,7 +1655,7 @@ mod tests {
         );
         let destination = temp.path().join("stale.zip");
 
-        let error = export_agents_offline_unlocked(&am, &destination, &["duckdb".to_string()]).unwrap_err();
+        let error = export_agents_offline_unlocked(&am, &destination, &["duckdb".to_string()], true).unwrap_err();
         assert!(error.contains("cannot be exported"), "unexpected error: {error}");
         assert!(!destination.exists());
         assert!(!fs::read_dir(temp.path())
@@ -1648,7 +1673,7 @@ mod tests {
         let export_manager = std::sync::Arc::clone(&am);
         let destination = temp.path().join("waited.zip");
         let mut export = tokio::task::spawn_blocking(move || {
-            export_agents_offline(&export_manager, &destination, &["duckdb".to_string()])
+            export_agents_offline(&export_manager, &destination, &["duckdb".to_string()], true)
         });
 
         assert!(
@@ -1672,7 +1697,7 @@ mod tests {
         let destination = temp.path().join("existing.zip");
         fs::write(&destination, b"keep-me").unwrap();
 
-        let error = export_agents_offline_unlocked(&am, &destination, &["missing".to_string()]).unwrap_err();
+        let error = export_agents_offline_unlocked(&am, &destination, &["missing".to_string()], true).unwrap_err();
         assert!(error.contains("not installed"));
         assert_eq!(fs::read(destination).unwrap(), b"keep-me");
     }
@@ -1702,7 +1727,7 @@ mod tests {
         let destination = temp.path().join("existing.zip");
         fs::write(&destination, b"replace-me").unwrap();
 
-        let result = export_agents_offline_unlocked(&am, &destination, &["duckdb".to_string()]).unwrap();
+        let result = export_agents_offline_unlocked(&am, &destination, &["duckdb".to_string()], true).unwrap();
         assert_eq!(result.driver_count, 1);
         assert_ne!(fs::read(&destination).unwrap(), b"replace-me");
         assert_eq!(inspect_offline_package(&destination).unwrap().driver_keys, vec!["duckdb"]);
@@ -1716,7 +1741,7 @@ mod tests {
         let parent = temp.path().join("new-directory");
         let destination = parent.join("agents.tar.zst");
 
-        let error = export_agents_offline_unlocked(&am, &destination, &["duckdb".to_string()]).unwrap_err();
+        let error = export_agents_offline_unlocked(&am, &destination, &["duckdb".to_string()], true).unwrap_err();
         assert!(error.contains(".zip extension"), "unexpected error: {error}");
         assert!(!parent.exists());
     }
@@ -1730,7 +1755,7 @@ mod tests {
         fs::create_dir(&destination).unwrap();
         fs::write(destination.join("sentinel"), b"keep-me").unwrap();
 
-        let error = export_agents_offline_unlocked(&am, &destination, &["duckdb".to_string()]).unwrap_err();
+        let error = export_agents_offline_unlocked(&am, &destination, &["duckdb".to_string()], true).unwrap_err();
         assert!(error.contains("regular non-symbolic-link file"), "unexpected error: {error}");
         assert_eq!(fs::read(destination.join("sentinel")).unwrap(), b"keep-me");
     }
@@ -1748,7 +1773,7 @@ mod tests {
         let destination = temp.path().join("existing.zip");
         symlink(&target, &destination).unwrap();
 
-        let error = export_agents_offline_unlocked(&am, &destination, &["duckdb".to_string()]).unwrap_err();
+        let error = export_agents_offline_unlocked(&am, &destination, &["duckdb".to_string()], true).unwrap_err();
         assert!(error.contains("regular non-symbolic-link file"), "unexpected error: {error}");
         assert_eq!(fs::read(&target).unwrap(), b"keep-me");
         assert!(fs::symlink_metadata(&destination).unwrap().file_type().is_symlink());
@@ -1760,7 +1785,7 @@ mod tests {
         let am = manager(&temp.path().join("agents"));
         let destination = temp.path().join("empty.zip");
 
-        let error = export_agents_offline_unlocked(&am, &destination, &[]).unwrap_err();
+        let error = export_agents_offline_unlocked(&am, &destination, &[], true).unwrap_err();
         assert!(error.contains("Select at least one"));
         assert!(!destination.exists());
     }
@@ -1772,7 +1797,7 @@ mod tests {
         install_managed_native(&am, "duckdb", "1.2.3");
         let destination = am.base_dir().join("must-not-overwrite.zip");
 
-        let error = export_agents_offline_unlocked(&am, &destination, &["duckdb".to_string()]).unwrap_err();
+        let error = export_agents_offline_unlocked(&am, &destination, &["duckdb".to_string()], true).unwrap_err();
         assert!(error.contains("managed Agent store"), "unexpected error: {error}");
         assert!(!destination.exists());
     }

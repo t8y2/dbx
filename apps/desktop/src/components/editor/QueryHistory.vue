@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onBeforeUnmount, onMounted, watch } from "vue";
+import type { McpCallHistoryRequest, McpCallHistoryResource } from "@/lib/mcp/mcpCallHistory";
 import { useI18n } from "vue-i18n";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { CalendarClock, Check, Copy, Database, ListFilter, LoaderCircle, Maximize2, Minimize2, Minus, RefreshCw, RotateCcw, Search, Sparkles, Trash2, X } from "@lucide/vue";
@@ -35,6 +36,7 @@ const props = defineProps<{
   currentConnectionId?: string;
   currentDatabase?: string;
   maximized?: boolean;
+  mcpRequest?: McpCallHistoryRequest | null;
 }>();
 
 const emit = defineEmits<{
@@ -42,6 +44,7 @@ const emit = defineEmits<{
   analyzeAi: [entry: HistoryEntry];
   close: [];
   toggleMaximize: [];
+  mcpRequestHandled: [];
 }>();
 
 type HistoryFilter = "all" | "query" | "data_change" | "schema_change" | "failed" | "mcp_success";
@@ -400,9 +403,41 @@ function detailsRows(entry: HistoryEntry) {
     [t("history.detail.rollback"), canRollbackHistoryEntry(entry) ? t("history.rollbackAvailable") : t("history.rollbackUnavailable")],
     [t("history.detail.status"), entry.success ? t("history.success") : t("history.failed")],
   ];
-  if (entry.source === "mcp" || historyEntrySource(entry) === "MCP") rows.splice(1, 0, [t("history.detail.mcpTool"), entry.mcp_tool_name || entry.operation || "-"]);
+  if (entry.source === "mcp" || historyEntrySource(entry) === "MCP") {
+    rows.splice(1, 0, [t("history.detail.mcpTool"), entry.mcp_tool_name || entry.operation || "-"]);
+    const client = mcpClientLabel(entry);
+    if (client) rows.splice(2, 0, [t("history.detail.mcpClient"), client]);
+    const audit = mcpAuditDetails(entry);
+    if (audit.transport) rows.splice(3, 0, [t("history.detail.mcpTransport"), audit.transport]);
+    if (audit.accessLevel) rows.splice(4, 0, [t("history.detail.mcpAccess"), audit.accessLevel]);
+    if (audit.confirmation) rows.splice(5, 0, [t("history.detail.mcpConfirmation"), audit.confirmation]);
+  }
   if (entry.error) rows.push([t("history.detail.error"), entry.error]);
   return rows;
+}
+
+/** The MCP client recorded in `details_json` (`{ client: { name, version } }`), if any. */
+function mcpClientLabel(entry: HistoryEntry): string {
+  try {
+    const client = JSON.parse(entry.details_json || "{}")?.client;
+    if (!client?.name) return "";
+    return client.version ? `${client.name} ${client.version}` : String(client.name);
+  } catch {
+    return "";
+  }
+}
+
+function mcpAuditDetails(entry: HistoryEntry): { transport?: string; accessLevel?: string; confirmation?: string } {
+  try {
+    const details = JSON.parse(entry.details_json || "{}");
+    return {
+      transport: typeof details?.transport === "string" ? details.transport : undefined,
+      accessLevel: typeof details?.accessLevel === "string" ? details.accessLevel : undefined,
+      confirmation: typeof details?.confirmation === "string" ? details.confirmation : undefined,
+    };
+  } catch {
+    return {};
+  }
 }
 
 async function recordRollback(entry: HistoryEntry, affectedRows: number, executionTime: number) {
@@ -553,6 +588,30 @@ watch(
 );
 
 watch([searchText, mcpToolName, activeSource, activeFilter, () => dateRange.value.startDate, () => dateRange.value.endDate, () => selectedConnections.value.map(connectionKey).join("\0"), () => selectedDatabases.value.map(databaseKey).join("\0")], scheduleHistorySearch);
+
+function applyMcpResource(resource?: McpCallHistoryResource) {
+  activeSource.value = "mcp";
+  activeFilter.value = "all";
+  resetScopeFilter();
+  scopeFilterOpen.value = false;
+  if (!resource?.connectionId) return;
+  // Scope by the requested IDs immediately. History options contain only resources
+  // with existing records and must not widen the scope or replay navigation later.
+  const connection = store.connectionOptions.find((option) => option.connection_id === resource.connectionId);
+  const target = { connection_id: resource.connectionId, connection_name: connection?.connection_name ?? connectionStore.getConfig(resource.connectionId)?.name ?? "" };
+  selectedConnections.value = [target];
+  selectedDatabases.value = resource.database ? [{ ...target, database: resource.database }] : [];
+}
+
+watch(
+  () => props.mcpRequest,
+  (request) => {
+    if (!request) return;
+    applyMcpResource(request.resource);
+    emit("mcpRequestHandled");
+  },
+  { immediate: true },
+);
 
 onMounted(() => {
   store.setHistoryPanelActive(true);

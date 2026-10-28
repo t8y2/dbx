@@ -1,6 +1,17 @@
 import { compileSearchRegex, parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
 
-export type SidebarSearchMatchKind = "exact" | "prefix" | "word-prefix" | "substring" | "abbreviation" | "fuzzy" | "regex";
+export type SidebarSearchMatchKind = "exact" | "prefix" | "word-prefix" | "substring" | "suffix" | "abbreviation" | "fuzzy" | "regex";
+
+/**
+ * Foreground match-mode chosen in the sidebar search bar (#13505).
+ *
+ * - `fuzzy`: today's ladder, including in-order subsequences ("101" finds "1001").
+ * - `contains`: a literal LIKE '%q%' filter; abbreviation, subsequence,
+ *   cross-word concatenation, and separator-blind tiers are disabled.
+ * - `edges`: only literal whole-label start/end matches; no separator-blind
+ *   variants, so mid-name words and separator-spanning queries never match.
+ */
+export type SidebarSearchMatchMode = "fuzzy" | "contains" | "edges";
 
 export interface SidebarSearchMatch {
   kind: SidebarSearchMatchKind;
@@ -140,7 +151,7 @@ function testRegex(regex: RegExp, value: string): boolean {
   return matched;
 }
 
-function matchSidebarLabelWithRegex(label: string, query: string, regex: RegExp | null, invalidRegex = false): SidebarSearchMatch | null {
+function matchSidebarLabelWithRegex(label: string, query: string, regex: RegExp | null, invalidRegex = false, matchMode: SidebarSearchMatchMode = "fuzzy"): SidebarSearchMatch | null {
   if (!query) return null;
 
   if (invalidRegex) return null;
@@ -156,26 +167,40 @@ function matchSidebarLabelWithRegex(label: string, query: string, regex: RegExp 
 
   if (lowerLabel === lowerQuery) return { kind: "exact", score: 100 };
   if (lowerLabel.startsWith(lowerQuery)) return { kind: "prefix", score: 90 };
-  if (matchesWordPrefix(label, lowerQuery)) return { kind: "word-prefix", score: 80 };
-  if (lowerLabel.includes(lowerQuery)) return { kind: "substring", score: 70 };
-  if (lowerQuery.length >= 2 && matchesAbbreviation(label, lowerQuery)) return { kind: "abbreviation", score: 60 };
-  if (matchesSubsequence(label, lowerQuery)) return { kind: "fuzzy", score: 40 };
 
-  // Separator-blind matching: strip underscores, hyphens, dots, spaces,
-  // and slashes, then try again.  This lets "delo" match "del_order"
-  // without typing the underscore separator between prefix and name.
-  const stripped = stripSeparators(lowerLabel);
-  if (stripped !== lowerLabel && stripped.length >= lowerQuery.length) {
-    if (stripped.startsWith(lowerQuery)) return { kind: "word-prefix", score: 65 };
-    if (stripped.includes(lowerQuery)) return { kind: "substring", score: 55 };
+  if (matchMode === "edges") {
+    // Strict mode stays literal: only the whole-label start/end counts. The
+    // separator-blind tiers below are fuzzy-only, so "delo" does not match
+    // "del_order" when the user asked for start/end matching. `suffix` only
+    // exists here, so the fuzzy ranking is untouched.
+    if (lowerLabel.endsWith(lowerQuery)) return { kind: "suffix", score: 85 };
+    return null;
   }
 
-  // Word-segment prefix concatenation: lets "exclog" find
-  // "system_exception_log". Uses the ORIGINAL label so camelCase boundaries
-  // survive for word segmentation, and compares case-insensitively. Flat 50
-  // keeps it below every existing tier — purely additive.
-  if (matchesWordPrefixConcatenation(label, query)) {
-    return { kind: "abbreviation", score: 50 };
+  if (matchesWordPrefix(label, lowerQuery)) return { kind: "word-prefix", score: 80 };
+  if (lowerLabel.includes(lowerQuery)) return { kind: "substring", score: 70 };
+
+  if (matchMode === "fuzzy") {
+    if (lowerQuery.length >= 2 && matchesAbbreviation(label, lowerQuery)) return { kind: "abbreviation", score: 60 };
+    if (matchesSubsequence(label, lowerQuery)) return { kind: "fuzzy", score: 40 };
+
+    // Separator-blind matching: strip underscores, hyphens, dots, spaces,
+    // and slashes, then try again.  This lets "delo" match "del_order"
+    // without typing the underscore separator between prefix and name. It is
+    // fuzzy-only because the strict modes promise literal matching.
+    const stripped = stripSeparators(lowerLabel);
+    if (stripped !== lowerLabel && stripped.length >= lowerQuery.length) {
+      if (stripped.startsWith(lowerQuery)) return { kind: "word-prefix", score: 65 };
+      if (stripped.includes(lowerQuery)) return { kind: "substring", score: 55 };
+    }
+
+    // Word-segment prefix concatenation: lets "exclog" find
+    // "system_exception_log". Uses the ORIGINAL label so camelCase boundaries
+    // survive for word segmentation, and compares case-insensitively. Flat 50
+    // keeps it below every existing tier — purely additive.
+    if (matchesWordPrefixConcatenation(label, query)) {
+      return { kind: "abbreviation", score: 50 };
+    }
   }
 
   return null;
@@ -183,23 +208,35 @@ function matchSidebarLabelWithRegex(label: string, query: string, regex: RegExp 
 
 export interface SidebarSearchMatcherOptions {
   regexMode?: boolean;
+  /** Defaults to `"fuzzy"`, i.e. the historical ladder. */
+  matchMode?: SidebarSearchMatchMode;
 }
 
 function slashDelimitedCandidate(query: string): boolean {
   return query.startsWith("/") && query.lastIndexOf("/") > 0;
 }
 
+/**
+ * Anything outside the union falls back to `fuzzy` (the documented default)
+ * rather than degrading to the more restrictive `contains` ladder.
+ */
+function normalizedMatchMode(mode: SidebarSearchMatchMode | undefined): SidebarSearchMatchMode {
+  return mode === "contains" || mode === "edges" ? mode : "fuzzy";
+}
+
 export function createSidebarLabelMatcher(query: string, options: SidebarSearchMatcherOptions = {}): SidebarLabelMatcher {
+  // Regex keeps its own semantics; the mode only gates the plain-text ladder.
+  const matchMode = normalizedMatchMode(options.matchMode);
   if (options.regexMode) {
     const compiled = compileSearchRegex(query);
-    return (label) => matchSidebarLabelWithRegex(label, query, compiled.regex, compiled.invalid);
+    return (label) => matchSidebarLabelWithRegex(label, query, compiled.regex, compiled.invalid, matchMode);
   }
 
   const regex = parseSlashDelimitedRegexQuery(query);
   // A slash-delimited expression is an explicit regex request even when it is
   // malformed.  Do not silently reinterpret an invalid pattern as fuzzy text.
   const invalidRegex = slashDelimitedCandidate(query) && !regex;
-  return (label) => matchSidebarLabelWithRegex(label, query, regex, invalidRegex);
+  return (label) => matchSidebarLabelWithRegex(label, query, regex, invalidRegex, matchMode);
 }
 
 export function matchSidebarLabel(label: string, query: string, options: SidebarSearchMatcherOptions = {}): SidebarSearchMatch | null {

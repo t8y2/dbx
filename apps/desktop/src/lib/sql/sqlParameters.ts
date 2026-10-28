@@ -10,7 +10,7 @@ export interface SqlParameterInput {
   value: string;
 }
 
-export type SqlParameterSyntax = "positional" | "named" | "shell" | "mybatis" | "sqlserver" | "substitution";
+export type SqlParameterSyntax = "positional" | "named" | "shell" | "bracketed-shell" | "mybatis" | "sqlserver" | "substitution";
 
 export interface SqlParameterDescriptor {
   key: string;
@@ -513,6 +513,22 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
       continue;
     }
     if (ch === "[") {
+      if (isSyntaxEnabled("bracketed-shell") && sql.startsWith("${", i + 1)) {
+        const bracketed = tryReadBracketedShellPlaceholder(sql, i);
+        if (bracketed) {
+          occurrences.push(bracketed);
+          i = bracketed.end;
+          continue;
+        }
+        // A failed bracketed-shell candidate must never swallow characters:
+        // treat "[" as a plain character so the inner `${...}` is still picked
+        // up by the shell branch below. Postgres keeps its array-bracket
+        // tracking so `:` slice handling stays intact.
+        if (databaseType !== "postgres") {
+          i += 1;
+          continue;
+        }
+      }
       if (databaseType === "postgres") {
         postgresBracketStack.push({
           constructor: isPostgresArrayConstructorBracket(sql, i, postgresBracketStack[postgresBracketStack.length - 1]?.constructor ?? false),
@@ -1685,6 +1701,22 @@ function readParameterName(sql: string, start: number): string {
   let i = start + 1;
   while (i < sql.length && PARAMETER_NAME_CHAR_RE.test(sql[i])) i += 1;
   return sql.slice(start, i);
+}
+
+/**
+ * Match the bracketed-shell placeholder `[${name}]` (Navicat-style). All five
+ * segments — "[", "${", a valid parameter name, "}", "]" — must match, and the
+ * brackets belong to the token so they disappear on substitution. Any mismatch
+ * returns null so the caller falls back to the default "[" handling without
+ * consuming characters.
+ */
+function tryReadBracketedShellPlaceholder(sql: string, start: number): ParameterOccurrence | null {
+  if (sql[start] !== "[" || sql[start + 1] !== "$" || sql[start + 2] !== "{") return null;
+  const closeBrace = sql.indexOf("}", start + 3);
+  if (closeBrace === -1 || sql[closeBrace + 1] !== "]") return null;
+  const name = sql.slice(start + 3, closeBrace).trim();
+  if (!PARAMETER_NAME_RE.test(name)) return null;
+  return { key: name, name, syntax: "bracketed-shell", token: sql.slice(start, closeBrace + 2), start, end: closeBrace + 2 };
 }
 
 /** Match only unprefixed quote + exact `${name}`/`#{name}` + same quote. Leaves skipQuoted unchanged. */

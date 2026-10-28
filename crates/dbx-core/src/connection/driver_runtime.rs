@@ -88,7 +88,7 @@ pub async fn restart_driver_runtime(state: &AppState, runtime_id: &str) -> Resul
     }
 }
 
-fn runtime_agent_key(runtime_id: &str) -> Option<&str> {
+pub fn runtime_agent_key(runtime_id: &str) -> Option<&str> {
     runtime_id.strip_prefix("agent:").or_else(|| {
         runtime_id.strip_prefix("agent-runtime:").and_then(|value| value.rsplit_once(':').map(|(key, _)| key))
     })

@@ -1,4 +1,4 @@
-use super::{canceled_error, is_canceled, request_large_value_with_cancel, LargeValueRequest};
+use super::{is_canceled, request_large_value_internal, LargeValueOperationError, LargeValueRequest};
 use crate::connection::AppState;
 use serde::Deserialize;
 use serde_json::Value;
@@ -33,6 +33,23 @@ pub async fn write_snapshot_export(
     request: SnapshotExportRequest,
     output: &mut std::fs::File,
 ) -> Result<(), String> {
+    write_snapshot_export_internal(state, request, output, false).await.map_err(|error| error.message)
+}
+
+pub async fn write_snapshot_export_reported(
+    state: &AppState,
+    request: SnapshotExportRequest,
+    output: &mut std::fs::File,
+) -> Result<(), LargeValueOperationError> {
+    write_snapshot_export_internal(state, request, output, true).await
+}
+
+async fn write_snapshot_export_internal(
+    state: &AppState,
+    request: SnapshotExportRequest,
+    output: &mut std::fs::File,
+    report_completion: bool,
+) -> Result<(), LargeValueOperationError> {
     let registered = request.context.execution_id.as_ref().map(|id| {
         state.running_queries.register_task(
             id.clone(),
@@ -45,7 +62,7 @@ pub async fn write_snapshot_export(
     });
     let cancel = registered.as_ref().map(|task| task.token());
     write_snapshot_export_with_fetch(request, output, cancel.clone(), |chunk_request| {
-        request_large_value_with_cancel(state, chunk_request, false, cancel.clone())
+        request_large_value_internal(state, chunk_request, false, cancel.clone(), report_completion)
     })
     .await
 }
@@ -55,10 +72,10 @@ async fn write_snapshot_export_with_fetch<F, Fut>(
     output: &mut std::fs::File,
     cancel: Option<tokio_util::sync::CancellationToken>,
     mut fetch: F,
-) -> Result<(), String>
+) -> Result<(), LargeValueOperationError>
 where
     F: FnMut(LargeValueRequest) -> Fut,
-    Fut: std::future::Future<Output = Result<Value, String>>,
+    Fut: std::future::Future<Output = Result<Value, LargeValueOperationError>>,
 {
     let mut buffered = std::io::BufWriter::new(output);
     let output = &mut buffered;
@@ -101,7 +118,7 @@ where
     }
     for (row_index, row) in request.rows.iter().enumerate() {
         if is_canceled(&cancel) {
-            return Err(canceled_error());
+            return Err(LargeValueOperationError::cancelled());
         }
         output
             .write_all(if json {
@@ -131,9 +148,12 @@ where
                 let mut original_kind: Option<String> = None;
                 loop {
                     if is_canceled(&cancel) {
-                        return Err(canceled_error());
+                        return Err(LargeValueOperationError::cancelled());
                     }
                     let chunk = fetch(chunk_request.clone()).await?;
+                    if is_canceled(&cancel) {
+                        return Err(LargeValueOperationError::cancelled());
+                    }
                     let (data, next, eof, kind) = checked_chunk(&chunk, chunk_request.offset)?;
                     if original_kind.as_deref().is_some_and(|original| original != kind) {
                         return Err("LOB chunk type changed".into());
@@ -168,7 +188,7 @@ where
                 let mut buffer = [0_u8; 8192];
                 loop {
                     if is_canceled(&cancel) {
-                        return Err(canceled_error());
+                        return Err(LargeValueOperationError::cancelled());
                     }
                     let count = cell_file.read(&mut buffer).map_err(|e| e.to_string())?;
                     if count == 0 {
@@ -197,12 +217,12 @@ where
         }
     }
     if is_canceled(&cancel) {
-        return Err(canceled_error());
+        return Err(LargeValueOperationError::cancelled());
     }
     if json {
         output.write_all(b"]").map_err(|e| e.to_string())?;
     }
-    output.flush().map_err(|e| e.to_string())
+    output.flush().map_err(|error| error.to_string().into())
 }
 
 struct CancelableReader<'a, R> {
@@ -212,7 +232,7 @@ struct CancelableReader<'a, R> {
 impl<R: Read> Read for CancelableReader<'_, R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         if is_canceled(self.cancel) {
-            return Err(std::io::Error::other(canceled_error()));
+            return Err(std::io::Error::other(LargeValueOperationError::cancelled()));
         }
         self.reader.read(buffer)
     }
@@ -255,10 +275,18 @@ fn write_escaped(output: &mut impl Write, bytes: &[u8], json: bool) -> Result<()
     Ok(())
 }
 
-fn csv_needs_quotes(mut reader: impl Read) -> Result<bool, String> {
+fn snapshot_read_error(error: std::io::Error) -> LargeValueOperationError {
+    error
+        .get_ref()
+        .and_then(|cause| cause.downcast_ref::<LargeValueOperationError>())
+        .cloned()
+        .unwrap_or_else(|| error.to_string().into())
+}
+
+fn csv_needs_quotes(mut reader: impl Read) -> Result<bool, LargeValueOperationError> {
     let mut buffer = [0_u8; 8192];
     loop {
-        let count = reader.read(&mut buffer).map_err(|e| e.to_string())?;
+        let count = reader.read(&mut buffer).map_err(snapshot_read_error)?;
         if count == 0 {
             return Ok(false);
         }
@@ -270,9 +298,9 @@ fn csv_needs_quotes(mut reader: impl Read) -> Result<bool, String> {
 
 // Same cell-level guard as dbx-formats, including negative decimals and literal
 // apostrophes, without retaining leading spaces/zeroes or the complete cell.
-fn stream_formula_guard(reader: impl Read) -> Result<bool, String> {
+fn stream_formula_guard(reader: impl Read) -> Result<bool, LargeValueOperationError> {
     let mut bytes = BufReader::new(reader).bytes();
-    let mut next = || bytes.next().transpose().map_err(|e| e.to_string());
+    let mut next = || bytes.next().transpose().map_err(snapshot_read_error);
     let mut byte = next()?;
     if byte == Some(b'\'') {
         byte = next()?;
@@ -387,7 +415,7 @@ mod tests {
                 Err(std::io::Error::other("snapshot read failed"))
             }
         }
-        assert_eq!(stream_formula_guard(FailingReader).unwrap_err(), "snapshot read failed");
+        assert_eq!(stream_formula_guard(FailingReader).unwrap_err().message, "snapshot read failed");
     }
     #[test]
     fn escapes_chunk_boundaries_without_changing_utf8_or_binary_hex() {
@@ -471,7 +499,43 @@ mod tests {
                 } else { serde_json::json!({"status":"expired"}) }))
             }).await.unwrap_err();
             assert_eq!(calls, if cancel_read { 1 } else { 2 });
-            assert!(!error.is_empty());
+            assert!(!error.message.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn reported_writer_waits_for_current_chunk_and_never_overwrites_unknown_with_cancel() {
+        for unknown in [false, true] {
+            let token = tokio_util::sync::CancellationToken::new();
+            let mut file = tempfile::tempfile().unwrap();
+            let (send, receive) = tokio::sync::oneshot::channel();
+            let mut receive = Some(receive);
+            let mut calls = 0;
+            let mut writing =
+                Box::pin(write_snapshot_export_with_fetch(request("json"), &mut file, Some(token.clone()), |_| {
+                    calls += 1;
+                    let receive = receive.take().expect("A cancelled writer must not request another chunk");
+                    async move { receive.await.unwrap() }
+                }));
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(10), &mut writing).await.is_err());
+            token.cancel();
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(10), &mut writing).await.is_err());
+            send.send(if unknown {
+                Err(LargeValueOperationError::unknown("lost original response".into()))
+            } else {
+                Ok(serde_json::json!({"status":"ok","data":"first","next_offset":5,"eof":false,"value_kind":"text"}))
+            })
+            .unwrap();
+            let error = writing.await.unwrap_err();
+            assert_eq!(
+                error.status,
+                if unknown {
+                    super::super::LargeValueCompletion::Unknown
+                } else {
+                    super::super::LargeValueCompletion::Cancelled
+                }
+            );
+            assert_eq!(calls, 1);
         }
     }
 

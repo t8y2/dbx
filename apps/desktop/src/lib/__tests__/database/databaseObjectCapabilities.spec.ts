@@ -30,7 +30,7 @@ describe("databaseObjectCapabilities", () => {
   });
 
   it("exposes supported programmable objects for Dameng", () => {
-    expect(sidebarObjectKindsForDatabase("dameng")).toEqual(expect.arrayContaining(["MATERIALIZED_VIEW", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"]));
+    expect(sidebarObjectKindsForDatabase("dameng")).toEqual(expect.arrayContaining(["MATERIALIZED_VIEW", "TRIGGER", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"]));
   });
 
   it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("exposes %s types and bodies through the existing read-only browsing paths", (dbType) => {
@@ -50,8 +50,8 @@ describe("databaseObjectCapabilities", () => {
   it("exposes OceanBase Oracle sequences and synonyms through the grouped object path", () => {
     const oceanBaseObjects = sidebarObjectKindsForDatabase("oceanbase-oracle");
 
-    expect(oceanBaseObjects).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "INDEX", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"]);
-    expect(databaseObjectCapabilities("oceanbase-oracle").sourceReadable).toEqual(["VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"]);
+    expect(oceanBaseObjects).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "INDEX", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"]);
+    expect(databaseObjectCapabilities("oceanbase-oracle").sourceReadable).toEqual(["VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"]);
     expect(
       buildObjectGroupPlaceholderNodes({
         nodeId: "connection:database:APP",
@@ -60,13 +60,13 @@ describe("databaseObjectCapabilities", () => {
         schema: "APP",
         objectTypes: oceanBaseObjects,
       }).map((node) => node.type),
-    ).toEqual(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-database-indexes", "group-synonyms", "group-packages", "group-types"]);
+    ).toEqual(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-database-indexes", "group-synonyms", "group-packages", "group-package-bodies", "group-types"]);
   });
 
   it("exposes Oracle sequences through the existing grouped object path", () => {
     const oracleObjects = sidebarObjectKindsForDatabase("oracle");
 
-    expect(oracleObjects).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "INDEX", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"]);
+    expect(oracleObjects).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "INDEX", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"]);
     expect(databaseObjectCapabilities("oracle").sourceReadable).toContain("SEQUENCE");
     expect(
       buildObjectGroupPlaceholderNodes({
@@ -132,6 +132,13 @@ describe("databaseObjectCapabilities", () => {
     expect(sidebarObjectKindsForDatabase("kingbase")).toContain("TRIGGER");
     expect(databaseObjectCapabilities("kingbase").sourceReadable).toContain("TRIGGER");
     expect(sidebarObjectKindsForDatabase("vastbase")).not.toContain("TRIGGER");
+  });
+
+  it("discovers Oracle-family triggers alongside the main TYPE and INDEX capabilities", () => {
+    for (const dbType of ["oracle", "oceanbase-oracle", "dameng"] as const) {
+      expect(databaseObjectCapabilities(dbType).sourceReadable).toContain("TRIGGER");
+      expect(sidebarObjectKindsForDatabase(dbType)).toEqual(expect.arrayContaining(["TRIGGER", "TYPE", "TYPE_BODY", "INDEX"]));
+    }
   });
 
   it("exposes sequences for Kingbase and Vastbase via the agent PostgreSQL catalogs", () => {

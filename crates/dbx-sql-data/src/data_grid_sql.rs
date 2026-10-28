@@ -3372,7 +3372,13 @@ fn is_postgres_binary_literal_column(
     column_info: Option<&DataGridColumnInfo>,
 ) -> bool {
     database_type == Some(DatabaseType::Postgres)
-        && column_info.is_some_and(|column| column.data_type.trim().eq_ignore_ascii_case("bytea"))
+        && column_info.is_some_and(|column| {
+            let data_type = column.data_type.trim();
+            // accept an optional single schema qualifier (pg_catalog.bytea) so the write-back
+            // literal path stays aligned with the frontend BYTEA_TYPE_RE edit gate
+            let bytea_name = data_type.split_once('.').map_or(data_type, |(_, name)| name);
+            bytea_name.eq_ignore_ascii_case("bytea")
+        })
 }
 
 fn format_postgres_binary_literal_text(text: &str) -> Option<String> {
@@ -11128,6 +11134,25 @@ mod tests {
         );
         assert_eq!(format_grid_sql_literal(&json!("0xabc"), Some(DatabaseType::Postgres), Some(&bytea)), "'0xabc'");
         assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(DatabaseType::Postgres), Some(&text)), "'0x00ab'");
+    }
+
+    #[test]
+    fn postgres_bytea_literal_gate_accepts_schema_qualified_and_rejects_arrays() {
+        let qualified = column("payload", "pg_catalog.bytea", true, None);
+        let array = column("payload", "bytea[]", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&json!("0x00aBff"), Some(DatabaseType::Postgres), Some(&qualified)),
+            "decode('00aBff', 'hex')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("0x00aBff"), Some(DatabaseType::Postgres), Some(&array)),
+            "'0x00aBff'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("0x00aBff"), Some(DatabaseType::Gaussdb), Some(&qualified)),
+            "'0x00aBff'"
+        );
     }
 
     #[test]

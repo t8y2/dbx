@@ -49,7 +49,7 @@ test("removeConnection prunes pinned ids and persists the pruned set", async () 
 
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
-    if (url === "/api/connection/list") {
+    if (url.split("?")[0] === "/api/connection/list") {
       return new Response(JSON.stringify([conn("conn-a", "A"), conn("conn-b", "B")]), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -93,7 +93,7 @@ test("removeConnection clears persisted sidebar table filters for the removed co
 
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
-    if (url === "/api/connection/list") {
+    if (url.split("?")[0] === "/api/connection/list") {
       return new Response(JSON.stringify([conn("conn-a", "A"), conn("conn-b", "B")]), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -136,7 +136,7 @@ test("removeConnections clears persisted sidebar table filters for every removed
 
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
-    if (url === "/api/connection/list") {
+    if (url.split("?")[0] === "/api/connection/list") {
       return new Response(JSON.stringify([conn("conn-a", "A"), conn("conn-b", "B"), conn("conn-c", "C")]), {
         status: 200,
         headers: { "Content-Type": "application/json" },

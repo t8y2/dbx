@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-22.04
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -59,7 +59,7 @@ jobs:
       new_version: ${{ steps.bump.outputs.new_version }}
       prev_tag: ${{ steps.prev-tag.outputs.prev_tag }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.MCP_RELEASE_TOKEN }}
@@ -150,7 +150,7 @@ jobs:
       # Keep releases working until the shared S3 secrets are configured.
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -169,9 +169,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -257,7 +257,20 @@ jobs:
           sudo apt-get update
           # Bundle GTK input-method modules from the same Jammy ABI baseline
           # instead of loading potentially incompatible modules from the host.
-          sudo apt-get install -y fcitx5-frontend-gtk3 ibus-gtk3 libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev xdg-utils
+          sudo apt-get install -y fcitx5-frontend-gtk3 ibus-gtk3 libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev xdg-utils lld
+          # The ARM hosted runner has 16 GB RAM and no swap; the serialized
+          # release build plus the final lld link of the dbx binary still
+          # exhausts memory and the runner loses communication with the
+          # server. Back it with a swapfile so the link peak pages to disk
+          # instead of starving the runner agent.
+          if [ "${{ matrix.platform }}" = "ubuntu-22.04-arm" ]; then
+            df -h /
+            sudo fallocate -l 14G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=14336
+            sudo chmod 600 /mnt/swapfile
+            sudo mkswap /mnt/swapfile
+            sudo swapon /mnt/swapfile
+            free -h
+          fi
 
       - name: Prepare Wayland-capable AppImage bundler
         if: startsWith(matrix.platform, 'ubuntu')
@@ -282,6 +295,13 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Standard ARM runners have 16 GB RAM; parallel rustc of the heavy
+          # workspace crates (dbx-core, dbx-mcp) plus linking peaks past what
+          # the pool now tolerates and the runner is killed with a shutdown
+          # signal. Serialize codegen on the ARM leg and link with lld, which
+          # holds far less memory than the default bfd linker.
+          CARGO_BUILD_JOBS: ${{ (matrix.platform == 'ubuntu-22.04-arm' && '1') || 'default' }}
+          RUSTFLAGS: ${{ (matrix.platform == 'ubuntu-22.04-arm' && '-C link-arg=-fuse-ld=lld') || '' }}
           APPLE_SIGNING_IDENTITY: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_SIGNING_IDENTITY || '' }}
           APPLE_ID: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_ID || '' }}
           APPLE_PASSWORD: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_PASSWORD || '' }}
@@ -325,7 +345,7 @@ jobs:
       VSIGN_SERVER: ${{ vars.VSIGN_SERVER }}
       VSIGN_TOOL_SHA256: ${{ vars.VSIGN_TOOL_SHA256 }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -344,9 +364,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -579,7 +599,11 @@ jobs:
     # The vendored loader is a tracked Cargo input, so Rust compile caching is safe.
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the legacy PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Guarded by assert-win7-pe-compat.ps1.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
       SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1
@@ -589,7 +613,7 @@ jobs:
       VSIGN_SERVER: ${{ vars.VSIGN_SERVER }}
       VSIGN_TOOL_SHA256: ${{ vars.VSIGN_TOOL_SHA256 }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -605,7 +629,7 @@ jobs:
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-22
+          toolchain: nightly-2026-10-25
           components: rust-src
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
@@ -747,9 +771,13 @@ jobs:
             arch: x86_64
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the legacy PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Guarded by assert-win7-pe-compat.ps1.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -768,7 +796,7 @@ jobs:
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-22
+          toolchain: nightly-2026-10-25
           components: rust-src
 
       - name: Install NASM
@@ -844,7 +872,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -866,9 +894,9 @@ jobs:
         run: pip3 install cargo-zigbuild
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
 
       # Plain CC/CXX only wrap HOST C compilations (build scripts): for the
       # musl targets cargo-zigbuild sets CC_<target> to zig cc, which takes
@@ -997,12 +1025,12 @@ jobs:
     needs: [cleanup-release-signatures, bump-jdbc-plugin-version]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -1070,7 +1098,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Download GitHub release assets
         env:
@@ -1117,7 +1145,7 @@ jobs:
       matrix:
         platform: [linux/amd64, linux/arm64]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -1241,7 +1269,7 @@ jobs:
     needs: [release-ready, docker-manifest]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Build versioned fnOS package
         env:

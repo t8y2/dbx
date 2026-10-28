@@ -21,8 +21,10 @@ import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { Switch } from "@/components/ui/switch";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/backend/api";
+import { SnapshotCompletionError, type ExportReadControl } from "@/lib/export/snapshotCompletion";
 import type { DynamoDbIndexInfo, DynamoDbTableDescription } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 import { getDataGridConditionSuggestionPosition, type DataGridConditionSuggestionPosition } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { documentViewerFontStyle } from "@/lib/document/documentViewerFontStyle";
@@ -462,8 +464,7 @@ if (restoredDocumentData) {
 }
 
 const elasticsearchMappingFields = ref<ColumnInfo[]>([]);
-function elasticsearchGridColumnTypesFor(columns: readonly string[]): string[] {
-  const mappingTypes = elasticsearchFieldTypes.value;
+function elasticsearchGridColumnTypesFor(columns: readonly string[], mappingTypes = elasticsearchFieldTypes.value): string[] {
   return columns.map((column) => {
     // Elasticsearch metadata fields are not part of an index mapping, but they
     // are textual identifiers in the document grid just like mapped keywords.
@@ -474,8 +475,8 @@ function elasticsearchGridColumnTypesFor(columns: readonly string[]): string[] {
 const elasticsearchGridColumnTypes = computed(() => elasticsearchGridColumnTypesFor(lastGridColumns.value));
 const solrSchemaFields = ref<ColumnInfo[]>([]);
 const solrFieldTypes = computed(() => new Map(solrSchemaFields.value.map((field) => [field.name, field.data_type])));
-function solrGridColumnTypesFor(columns: readonly string[]): string[] {
-  return columns.map((column) => (column === "_id" ? "string" : (solrFieldTypes.value.get(column) ?? "")));
+function solrGridColumnTypesFor(columns: readonly string[], fieldTypes = solrFieldTypes.value): string[] {
+  return columns.map((column) => (column === "_id" ? "string" : (fieldTypes.get(column) ?? "")));
 }
 const solrGridColumnTypes = computed(() => solrGridColumnTypesFor(lastGridColumns.value));
 const dynamodbTableDescription = ref<DynamoDbTableDescription | null>(null);
@@ -650,7 +651,7 @@ const gridResult = computed<QueryResult>(() => {
   };
 });
 
-async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
+function captureDocumentStoreExport(queued = true) {
   const kind = documentStoreProvider.value.kind;
   if (kind !== "mongodb" && kind !== "dynamodb" && kind !== "elasticsearch" && kind !== "solr") return undefined;
 
@@ -662,71 +663,119 @@ async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExporte
   const exportSettings = settingsStore.editorSettings;
   const batchSize = Math.max(1, Math.trunc(exportSettings.exportBatchSize));
   const rowLimit = exportSettings.exportRowLimitEnabled ? Math.max(0, Math.trunc(exportSettings.exportRowLimit)) : kind === "dynamodb" ? DYNAMODB_DEFAULT_EXPORT_ROW_LIMIT : Number.POSITIVE_INFINITY;
-  const exportExecutionId = uuid();
-  const exportStartedAt = performance.now();
-  const exportedDocuments: JsonRecord[] = [];
-  let exportedCopyDocuments: JsonRecord[] | undefined = kind === "mongodb" ? [] : undefined;
-  let totalRows: number | null = null;
-  let cursor: string | undefined;
-  let lastCursor: string | undefined;
-  const seenCursors = new Set<string>();
+  const fallbackColumns = [...gridResult.value.columns];
+  const mappingTypes = new Map(elasticsearchFieldTypes.value);
+  const fieldTypes = new Map(solrFieldTypes.value);
+  const config = queued ? connectionStore.getConfig(connectionId) : undefined;
+  const fingerprint = config ? connectionConfigFingerprint(config) : undefined;
 
-  try {
-    while (exportedDocuments.length < rowLimit) {
-      const requestLimit = Math.min(batchSize, kind === "dynamodb" ? 1000 : kind === "elasticsearch" ? ELASTICSEARCH_DEFAULT_MAX_RESULT_WINDOW : Number.POSITIVE_INFINITY, rowLimit - exportedDocuments.length);
-      if (requestLimit <= 0) break;
-      if (cursor) lastCursor = cursor;
-      const result = await api.documentFindDocuments(connectionId, database, collection, kind === "dynamodb" || kind === "elasticsearch" ? 0 : exportedDocuments.length, requestLimit, filter, undefined, sort, undefined, exportExecutionId, cursor, kind === "elasticsearch");
-      const pageDocuments = result.documents.slice(0, requestLimit).map(asRecord);
-      exportedDocuments.push(...pageDocuments);
+  return async (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, control?: ExportReadControl): Promise<QueryResult | undefined> => {
+    let unknownError: SnapshotCompletionError | undefined;
+    const check = () => {
+      if (unknownError) throw unknownError;
+      if (control?.signal.aborted) throw new SnapshotCompletionError("cancelled", "Export cancelled");
+      if (queued) {
+        const current = connectionStore.getConfig(connectionId);
+        if (!current || connectionConfigFingerprint(current) !== fingerprint) throw new Error(t("exportProgress.connectionChanged"));
+      }
+    };
+    try {
+      check();
+      if (queued) {
+        await connectionStore.ensureConnected(connectionId);
+        check();
+      }
+      const exportExecutionId = uuid();
+      const exportStartedAt = performance.now();
+      const exportedDocuments: JsonRecord[] = [];
+      let exportedCopyDocuments: JsonRecord[] | undefined = kind === "mongodb" ? [] : undefined;
+      let totalRows: number | null = null;
+      let cursor: string | undefined;
+      let lastCursor: string | undefined;
+      const seenCursors = new Set<string>();
 
-      if (kind === "mongodb" && exportedCopyDocuments) {
-        if (result.extended_documents?.length === result.documents.length) {
-          exportedCopyDocuments.push(...result.extended_documents.slice(0, pageDocuments.length).map(asRecord));
-        } else {
-          exportedCopyDocuments = undefined;
+      try {
+        while (exportedDocuments.length < rowLimit) {
+          check();
+          const requestLimit = Math.min(batchSize, kind === "dynamodb" ? 1000 : kind === "elasticsearch" ? ELASTICSEARCH_DEFAULT_MAX_RESULT_WINDOW : Number.POSITIVE_INFINITY, rowLimit - exportedDocuments.length);
+          if (requestLimit <= 0) break;
+          if (cursor) lastCursor = cursor;
+          const result = await api.documentFindDocuments(connectionId, database, collection, kind === "dynamodb" || kind === "elasticsearch" ? 0 : exportedDocuments.length, requestLimit, filter, undefined, sort, undefined, exportExecutionId, cursor, kind === "elasticsearch").catch((error) => {
+            if (!queued) throw error;
+            unknownError = new SnapshotCompletionError("unknown", error instanceof Error ? error.message : String(error));
+            throw unknownError;
+          });
+          if (queued && result.next_cursor) lastCursor = result.next_cursor;
+          check();
+          const pageDocuments = result.documents.slice(0, requestLimit).map(asRecord);
+          exportedDocuments.push(...pageDocuments);
+
+          if (kind === "mongodb" && exportedCopyDocuments) {
+            if (result.extended_documents?.length === result.documents.length) {
+              exportedCopyDocuments.push(...result.extended_documents.slice(0, pageDocuments.length).map(asRecord));
+            } else {
+              exportedCopyDocuments = undefined;
+            }
+          }
+
+          if ((kind === "mongodb" || kind === "elasticsearch" || kind === "solr") && result.total_is_exact !== false) totalRows = Math.min(result.total, rowLimit);
+          onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
+
+          if (kind === "dynamodb" || kind === "elasticsearch") {
+            cursor = result.next_cursor;
+            if (!cursor) break;
+            if (seenCursors.has(cursor)) throw new Error(kind === "dynamodb" ? t("dynamodb.repeatedCursor") : "Elasticsearch cursor repeated during export");
+            seenCursors.add(cursor);
+            continue;
+          }
+
+          const reachedExactTotal = result.total_is_exact !== false && exportedDocuments.length >= result.total;
+          if (pageDocuments.length === 0 || pageDocuments.length < requestLimit || reachedExactTotal) break;
+        }
+      } finally {
+        if (kind === "elasticsearch") {
+          const cursorToClose = lastCursor ?? cursor;
+          if (cursorToClose) {
+            if (queued) {
+              try {
+                await api.closeQuerySession(connectionId, database, cursorToClose);
+              } catch (error) {
+                unknownError ??= new SnapshotCompletionError("unknown", error instanceof Error ? error.message : String(error));
+              }
+            } else void closeElasticsearchCursor(cursorToClose);
+          }
+        }
+      }
+      if (unknownError) throw unknownError;
+
+      if (kind === "dynamodb" || kind === "elasticsearch") {
+        const truncatedByLimit = !!cursor && exportedDocuments.length >= rowLimit;
+        totalRows = truncatedByLimit ? null : exportedDocuments.length;
+        onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
+        if (truncatedByLimit) {
+          toast(kind === "dynamodb" ? t("dynamodb.exportLimitReached", { count: rowLimit }) : `Elasticsearch export limit reached (${rowLimit})`, 6000);
         }
       }
 
-      if ((kind === "mongodb" || kind === "elasticsearch" || kind === "solr") && result.total_is_exact !== false) totalRows = Math.min(result.total, rowLimit);
-      onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
-
-      if (kind === "dynamodb" || kind === "elasticsearch") {
-        cursor = result.next_cursor;
-        if (!cursor) break;
-        if (seenCursors.has(cursor)) throw new Error(kind === "dynamodb" ? t("dynamodb.repeatedCursor") : "Elasticsearch cursor repeated during export");
-        seenCursors.add(cursor);
-        continue;
-      }
-
-      const reachedExactTotal = result.total_is_exact !== false && exportedDocuments.length >= result.total;
-      if (pageDocuments.length === 0 || pageDocuments.length < requestLimit || reachedExactTotal) break;
+      // Exports consume source text (CSV/SQL), not the live grid's BSON-faithful
+      // cell encoding, so every document store keeps plain JSON cells here.
+      const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null, { documentGridValues: false });
+      if (result.columns.length === 0) result.columns = fallbackColumns;
+      result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : kind === "elasticsearch" ? elasticsearchGridColumnTypesFor(result.columns, mappingTypes) : kind === "solr" ? solrGridColumnTypesFor(result.columns, fieldTypes) : undefined;
+      result.affected_rows = exportedDocuments.length;
+      result.truncated = (kind === "dynamodb" || kind === "elasticsearch") && !!cursor && exportedDocuments.length >= rowLimit;
+      result.has_more = result.truncated;
+      return result;
+    } catch (error) {
+      if (unknownError) throw unknownError;
+      if (!queued || error instanceof SnapshotCompletionError) throw error;
+      throw new SnapshotCompletionError("failed", error instanceof Error ? error.message : String(error));
     }
-  } finally {
-    if (kind === "elasticsearch") {
-      const cursorToClose = lastCursor ?? cursor;
-      if (cursorToClose) void closeElasticsearchCursor(cursorToClose);
-    }
-  }
+  };
+}
 
-  if (kind === "dynamodb" || kind === "elasticsearch") {
-    const truncatedByLimit = !!cursor && exportedDocuments.length >= rowLimit;
-    totalRows = truncatedByLimit ? null : exportedDocuments.length;
-    onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
-    if (truncatedByLimit) {
-      toast(kind === "dynamodb" ? t("dynamodb.exportLimitReached", { count: rowLimit }) : `Elasticsearch export limit reached (${rowLimit})`, 6000);
-    }
-  }
-
-  // Exports consume source text (CSV/SQL), not the live grid's BSON-faithful
-  // cell encoding, so every document store keeps plain JSON cells here.
-  const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null, { documentGridValues: false });
-  if (result.columns.length === 0) result.columns = gridResult.value.columns;
-  result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : kind === "elasticsearch" ? elasticsearchGridColumnTypesFor(result.columns) : kind === "solr" ? solrGridColumnTypesFor(result.columns) : undefined;
-  result.affected_rows = exportedDocuments.length;
-  result.truncated = (kind === "dynamodb" || kind === "elasticsearch") && !!cursor && exportedDocuments.length >= rowLimit;
-  result.has_more = result.truncated;
-  return result;
+async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
+  return captureDocumentStoreExport(false)?.(onProgress);
 }
 const expandedDocumentFilterFieldPaths = ref<Set<string>>(new Set());
 const elasticsearchFieldTypes = computed(() => new Map(elasticsearchMappingFields.value.map((field) => [field.name, field.data_type])));
@@ -2674,7 +2723,7 @@ onMounted(async () => {
   try {
     // A restored tab issues no query, so a blocking health probe here would be
     // the only round trip left on the switch.
-    await connectionStore.ensureConnected(props.connectionId, { ...(restoredDocumentData ? { verifyHealth: false } : {}), skipIfClosedByUser: true });
+    await connectionStore.ensureConnected(props.connectionId, { ...(restoredDocumentData ? { verifyHealth: false, passive: true } : {}), skipIfClosedByUser: true });
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
@@ -3001,6 +3050,7 @@ defineExpose({ focusSearch });
       :load-all-rows-enabled="false"
       :count-total-rows="countExactDocumentTotal"
       :full-export-result="documentStoreProvider.kind === 'mongodb' || documentStoreProvider.kind === 'dynamodb' || documentStoreProvider.kind === 'elasticsearch' ? exportAllDocumentStoreDocuments : undefined"
+      :capture-full-export-result="documentStoreProvider.kind === 'mongodb' || documentStoreProvider.kind === 'dynamodb' || documentStoreProvider.kind === 'elasticsearch' ? captureDocumentStoreExport : undefined"
       @sort="onSort"
       @reload="refreshDocuments"
       @paginate="(offset: number, limit: number) => paginate(offset, limit)"

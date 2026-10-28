@@ -2104,6 +2104,9 @@ export default withEnglishFallback({
     sshAgentKeyHint: "해당 호스트에 대해 승인된 키를 선택하세요. 서버는 단일 연결에서 인증 시도 횟수를 제한하므로, 모든 agent 키를 하나씩 시도하다 보면 올바른 키 차례가 되기 전에 횟수를 다 써버릴 수 있습니다.",
     sshAgentKeyLoadFailed: "SSH agent의 identity 목록을 읽을 수 없습니다: {error}",
     sshAgentKeyRefresh: "새로 고침",
+    oracleLegacyCharset: "US7ASCII 레거시 데이터베이스 실제 인코딩",
+    oracleLegacyCharsetDisabled: "끄기(표준 문자 집합 변환)",
+    oracleLegacyCharsetHint: "Thin 드라이버 및 US7ASCII 레거시 데이터베이스에만 해당: 일반 문자 필드를 과거 기록 시의 실제 인코딩으로 읽고 쓰며, 예를 들어 GBK 중국어는 ZHS16GBK를 선택합니다. 국가 문자 집합 필드는 Unicode를 유지합니다. 먼저 원시 바이트를 확인하고 인코딩을 추측하지 마십시오.",
   },
   editor: {
     duckdbDraining: "이전 DuckDB 쿼리가 아직 중지 중입니다. 잠시 후 다시 시도해 주세요.",

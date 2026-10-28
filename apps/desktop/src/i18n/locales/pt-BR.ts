@@ -2177,6 +2177,9 @@ export default withEnglishFallback({
     sshAgentKeyHint: "Selecione uma chave já autorizada para este host. O servidor limita o número de tentativas de autenticação por conexão; tentar todas as chaves do agente uma a uma pode esgotar as tentativas antes de chegar à chave correta.",
     sshAgentKeyLoadFailed: "Não foi possível ler a lista de identidades do agente SSH: {error}",
     sshAgentKeyRefresh: "Atualizar",
+    oracleLegacyCharset: "Codificação real do banco legado US7ASCII",
+    oracleLegacyCharsetDisabled: "Desativado (conversão de conjunto de caracteres padrão)",
+    oracleLegacyCharsetHint: "Somente para driver Thin e banco legado US7ASCII: leia e grave campos de caracteres comuns usando a codificação real das gravações históricas, por exemplo, para chinês GBK escolha ZHS16GBK; campos de conjunto de caracteres nacional permanecem Unicode. Verifique primeiro os bytes originais; não presuma a codificação.",
   },
   editor: {
     duckdbDraining: "A consulta anterior do DuckDB ainda está sendo interrompida. Tente novamente em breve.",

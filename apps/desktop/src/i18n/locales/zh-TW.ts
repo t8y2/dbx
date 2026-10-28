@@ -2155,6 +2155,9 @@ export default withEnglishFallback({
     sshAgentKeyHint: "選擇該主機已授權的金鑰。伺服器會限制單一連線上的驗證嘗試次數，逐一嘗試所有 agent 金鑰可能在輪到正確的金鑰前就用盡次數。",
     sshAgentKeyLoadFailed: "無法讀取 SSH agent 的身分列表：{error}",
     sshAgentKeyRefresh: "重新整理",
+    oracleLegacyCharset: "US7ASCII 舊資料庫實際編碼",
+    oracleLegacyCharsetDisabled: "關閉（標準字元集轉換）",
+    oracleLegacyCharsetHint: "僅限 Thin 驅動程式與 US7ASCII 舊資料庫：依歷史寫入時的實際編碼讀取和寫入一般字元欄位，例如 GBK 中文選 ZHS16GBK；國家字元集欄位保持 Unicode。請先核對原始位元組，勿猜測編碼。",
   },
   editor: {
     duckdbDraining: "上一筆 DuckDB 查詢仍在停止，請稍後重試。",

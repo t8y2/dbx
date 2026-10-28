@@ -410,7 +410,7 @@ jobs:
 
       - name: Setup Python for cargo-zigbuild
         if: runner.os == 'Linux'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.x'
 
@@ -662,7 +662,7 @@ jobs:
 
       - name: Setup Python for cargo-zigbuild
         if: runner.os == 'Linux'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.x'
 

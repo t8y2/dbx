@@ -168,7 +168,6 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   {
     feature: "single-line snippet completion (#13598)",
     keys: under("settings", ["snippetCompletionSingleLine", "snippetCompletionSingleLineDescription"]),
-    locales: ALL_LOCALES.filter((locale) => locale !== "it" && locale !== "pt-BR" && locale !== "zh-TW"),
     translated: true,
   },
 ];

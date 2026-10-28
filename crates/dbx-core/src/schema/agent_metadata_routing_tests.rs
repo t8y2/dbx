@@ -143,6 +143,34 @@ async fn oracle_public_object_entry_applies_index_filter_and_offset_once() {
 }
 
 #[tokio::test]
+async fn oracle_exact_object_listing_loads_table_comments() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    let types = vec!["TABLE".to_string()];
+    let options = dbx_types::oracle_trigger::MetadataReadOptions {
+        identity_mode: Some(dbx_types::oracle_trigger::MetadataIdentityMode::Exact),
+        catalog: None,
+    };
+    let objects = super::list_objects_core_with_options(
+        &fixture.state,
+        "conn",
+        "configured",
+        "HR",
+        None,
+        None,
+        None,
+        Some(&types),
+        None,
+        &options,
+    )
+    .await
+    .unwrap();
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].name, "ORDERS");
+    assert_eq!(objects[0].comment.as_deref(), Some("Customer orders table"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn enumeration_creates_metadata_pool_when_only_workload_exists() {
     let fixture = AgentFixture::new(DatabaseType::Hive).await;
     let workload_key = fixture.state.get_or_create_pool_for_session("conn", None, None).await.unwrap();

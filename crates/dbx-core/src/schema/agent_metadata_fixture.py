@@ -57,8 +57,12 @@ def handle(request):
         if failure.exists():
             error = rpc_error(failure.read_text())
         else:
-            objects = [{'name': 'Ix%d' % i, 'schema': params['schema'], 'object_type': 'INDEX',
-                        'parent_schema': ' Other Owner ', 'parent_name': ' T(a) '} for i in range(5)]
+            types = [t.upper() for t in (params.get('object_types') or params.get('objectTypes') or [])]
+            if 'TABLE' in types:
+                objects = [{'name': 'ORDERS', 'schema': params['schema'], 'object_type': 'TABLE'}]
+            else:
+                objects = [{'name': 'Ix%d' % i, 'schema': params['schema'], 'object_type': 'INDEX',
+                            'parent_schema': ' Other Owner ', 'parent_name': ' T(a) '} for i in range(5)]
             if params.get('filter'):
                 objects = [obj for obj in objects if params['filter'].lower() in obj['name'].lower()]
             start = params.get('offset') or 0
@@ -83,6 +87,10 @@ def handle(request):
                     error = rpc_error(mode)
                 elif mode == 'fallback' and ('TABLE_USED_PAGES' in params['sql'] or 'DBA_OB_TABLET_REPLICAS' in params['sql']):
                     error = rpc_error('sql')
+                elif 'ALL_TAB_COMMENTS' in params.get('sql', ''):
+                    result = {'columns': ['TABLE_NAME', 'COMMENTS'],
+                              'rows': [['ORDERS', 'Customer orders table']],
+                              'affected_rows': 0, 'execution_time_ms': 0}
                 else:
                     result = {'columns': ['TABLE_NAME', 'OWNER', 'NUM_ROWS', 'TOTAL_BYTES'],
                               'rows': [] if mode == 'empty' else [['EVENTS', 'APP', 12, None if mode == 'fallback' else 4096]],

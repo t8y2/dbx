@@ -2167,7 +2167,7 @@ async fn load_tdengine_table_comments_for_filter(
     Ok(())
 }
 
-async fn load_oracle_table_comments_for_objects(
+pub(super) async fn load_oracle_table_comments_for_objects(
     client: &mut db::agent_driver::AgentDriverClient,
     database: &str,
     schema: &str,
@@ -10656,7 +10656,7 @@ fn object_types_include_packages(object_types: Option<&[String]>) -> (bool, bool
 /// Used to keep agent errors visible: the native PostgreSQL fallback never
 /// lists custom types, so running it for a dedicated type request would mask a
 /// real catalog failure as an empty type group.
-fn object_types_only_custom_types(object_types: Option<&[String]>) -> bool {
+pub(super) fn object_types_only_custom_types(object_types: Option<&[String]>) -> bool {
     object_types.is_some_and(|types| {
         !types.is_empty() && types.iter().all(|t| t.eq_ignore_ascii_case("TYPE") || t.eq_ignore_ascii_case("TYPE_BODY"))
     })

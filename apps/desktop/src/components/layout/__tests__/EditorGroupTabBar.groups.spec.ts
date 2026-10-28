@@ -883,8 +883,16 @@ describe("EditorGroupTabBar group behavior", () => {
       const target = menuTarget === "tab" ? host.querySelector<HTMLElement>(`[data-tab-id="${closing}"]`)! : Array.from(host.querySelectorAll<HTMLButtonElement>(".tab-group-header")).find((header) => header.title === "pg-1")!;
       target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
       await settle();
-      const closeGroup = Array.from(document.body.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")).find((button) => button.textContent?.includes("Close group"))!;
-      closeGroup.click();
+      // Current main nests tab batch actions in a submenu; the original base
+      // exposes them directly. Exercise the actual menu in either layout.
+      const batchClose = Array.from(document.body.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")).find((button) => button.textContent?.includes("Close multiple tabs"));
+      if (batchClose) {
+        batchClose.click();
+        await settle();
+      }
+      const closeGroup = Array.from(document.body.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")).find((button) => button.textContent?.includes("Close group"));
+      expect(closeGroup).toBeDefined();
+      closeGroup!.click();
       await settle();
       expect(store.tabs.map((tab) => tab.id)).not.toContain(closing);
       expect(store.activeTabId).toBe(survivor);

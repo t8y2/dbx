@@ -3876,6 +3876,10 @@ done
         config.jdbc_driver_class = Some("com.mysql.cj.jdbc.Driver".to_string());
         assert!(!is_oracle_external_driver_config(&config));
 
+        config.connection_string = Some("__DBX_SAVED_CREDENTIAL__:xyz".to_string());
+        config.jdbc_driver_class = Some("oracle.jdbc.OracleDriver".to_string());
+        assert!(is_oracle_external_driver_config(&config));
+
         config.db_type = DatabaseType::Oracle;
         assert!(!is_oracle_external_driver_config(&config));
     }
@@ -10798,9 +10802,22 @@ pub(crate) fn is_oracle_external_driver_config(config: &ConnectionConfig) -> boo
         return false;
     }
 
-    let connection_string = config.connection_string.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let connection_string = config
+        .connection_string
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.starts_with("__DBX_SAVED_CREDENTIAL__:"));
     let driver_class = config.jdbc_driver_class.as_deref().map(str::trim).filter(|value| !value.is_empty());
-    let oracle_url = connection_string.map(|value| value.to_ascii_lowercase().starts_with("jdbc:oracle:"));
+    let oracle_url =
+        connection_string.map(|value| value.to_ascii_lowercase().starts_with("jdbc:oracle:")).or_else(|| {
+            if crate::models::connection::jdbc_dialect_hint(config)
+                == Some(crate::models::connection::JdbcDialectHint::Oracle)
+            {
+                Some(true)
+            } else {
+                None
+            }
+        });
     let oracle_driver = driver_class.map(|value| {
         matches!(value.to_ascii_lowercase().as_str(), "oracle.jdbc.oracledriver" | "oracle.jdbc.driver.oracledriver")
     });

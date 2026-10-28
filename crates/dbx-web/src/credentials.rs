@@ -577,7 +577,7 @@ mod tests {
         .await
         .unwrap();
         let Json(listed) = connection::load_connections(State(state.clone()), HeaderMap::new()).await.unwrap();
-        assert!(listed[0].jdbc_dialect.is_none());
+        assert_eq!(listed[0].jdbc_dialect, Some(dbx_core::models::connection::JdbcDialectHint::Oracle));
         assert_eq!(
             state.app.storage.load_connections().await.unwrap()[0].connection_string.as_deref(),
             Some("jdbc:oracle:thin:@host/service")

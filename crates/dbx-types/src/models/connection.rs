@@ -694,6 +694,7 @@ include!(concat!(env!("OUT_DIR"), "/database_type.rs"));
 #[serde(rename_all = "kebab-case")]
 pub enum JdbcDialectHint {
     OceanbaseOracle,
+    Oracle,
 }
 
 /// Connection data returned to a client, with response-only metadata flattened into the JSON.
@@ -723,9 +724,16 @@ pub fn jdbc_dialect_hint(config: &ConnectionConfig) -> Option<JdbcDialectHint> {
         return None;
     }
     let url = config.connection_string.as_deref()?.trim();
-    url.get(.."jdbc:oceanbase:oracle://".len())
-        .filter(|prefix| prefix.eq_ignore_ascii_case("jdbc:oceanbase:oracle://"))
-        .map(|_| JdbcDialectHint::OceanbaseOracle)
+    if url
+        .get(.."jdbc:oceanbase:oracle://".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("jdbc:oceanbase:oracle://"))
+    {
+        return Some(JdbcDialectHint::OceanbaseOracle);
+    }
+    if url.get(.."jdbc:oracle:".len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case("jdbc:oracle:")) {
+        return Some(JdbcDialectHint::Oracle);
+    }
+    None
 }
 
 #[derive(Deserialize)]
@@ -3227,7 +3235,7 @@ mod tests {
     };
 
     #[test]
-    fn connection_response_derives_only_oceanbase_oracle_from_explicit_jdbc_url() {
+    fn connection_response_derives_approved_hints_from_explicit_jdbc_url() {
         let mut config = mysql_config("root", "", None);
         config.db_type = DatabaseType::Jdbc;
         config.connection_string = Some(" JDBC:OCEANBASE:ORACLE://host/service ".into());
@@ -3238,6 +3246,12 @@ mod tests {
         assert_eq!(response.config, config);
 
         config.connection_string = Some("jdbc:oracle:thin:@host/service".into());
+        let oracle_response = ConnectionResponse::from_config(config.clone());
+        let oracle_value = serde_json::to_value(&oracle_response).unwrap();
+        assert_eq!(oracle_value["jdbc_dialect"], "oracle");
+        assert_eq!(oracle_value["db_type"], "jdbc");
+
+        config.connection_string = Some("jdbc:mysql://host:3306/service".into());
         assert!(serde_json::to_value(ConnectionResponse::from_config(config.clone()))
             .unwrap()
             .get("jdbc_dialect")

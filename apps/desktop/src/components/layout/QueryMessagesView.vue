@@ -1,9 +1,10 @@
 <script setup lang="ts">
+import { ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Copy } from "@lucide/vue";
-import { copyToClipboard } from "@/lib/common/clipboard";
+import { copyToClipboard, eventTargetUsesNativeClipboard, isPlainClipboardShortcut } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
 import type { QueryMessage } from "@/types/database";
 
@@ -11,6 +12,29 @@ defineProps<{ messages: QueryMessage[] }>();
 
 const { t } = useI18n();
 const { toast } = useToast();
+const messagesRef = ref<HTMLElement>();
+const messageContentsRef = ref<HTMLElement>();
+
+function focusMessages(event: MouseEvent) {
+  if (event.button !== 0 || (event.target instanceof Element && event.target.closest("button, a, input, textarea, [contenteditable]"))) return;
+  messagesRef.value?.focus({ preventScroll: true });
+}
+
+function onKeydown(event: KeyboardEvent) {
+  if (!isPlainClipboardShortcut(event, "a") || eventTargetUsesNativeClipboard(event)) return;
+  const contents = messageContentsRef.value;
+  if (!contents) return;
+  // App's capture listener blocks page-wide select-all. Select this output
+  // explicitly even when it has already prevented the browser default.
+  event.preventDefault();
+  event.stopPropagation();
+  const selection = window.getSelection();
+  if (!selection) return;
+  const range = document.createRange();
+  range.selectNodeContents(contents);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
 
 async function copyShell(message: string) {
   await copyToClipboard(message);
@@ -34,11 +58,11 @@ const severityBadgeClasses: Record<SeverityTone, string> = {
 </script>
 
 <template>
-  <div class="h-full overflow-auto bg-background">
+  <div ref="messagesRef" data-native-clipboard tabindex="0" class="h-full overflow-auto bg-background select-text outline-none" @mousedown="focusMessages" @keydown="onKeydown" @contextmenu.stop>
     <div v-if="messages.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
       {{ t("queryMessages.empty") }}
     </div>
-    <div v-else class="overflow-hidden">
+    <div v-else ref="messageContentsRef" class="overflow-hidden">
       <div v-for="(message, index) in messages" :key="index" class="flex items-start gap-2 border-b px-3 py-2 text-xs last:border-b-0">
         <Badge variant="secondary" class="mt-px shrink-0 font-mono text-[10px] uppercase" :class="severityBadgeClasses[severityTone(message.severity)]">
           {{ message.severity }}

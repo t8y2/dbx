@@ -1,3 +1,4 @@
+import { tableCopyTaskZhCN as tableCopyTask } from "./tableCopyTask";
 import { tableColumnPasteZhCN as tableColumnPaste } from "./tableColumnPaste";
 import { sidebarMenuZhCN as sidebarMenu } from "./sidebarMenuMessages";
 import { oceanbaseCloneDialogZhCN as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
@@ -359,6 +360,7 @@ export default withEnglishFallback({
   },
 
   oceanbaseCloneDialog,
+  tableCopyTask,
   oracleForeignKey: {
     resultTitle: "外键操作结果",
     executionFailed: "外键操作未完整完成，请核对逐条结果和数据库状态。",

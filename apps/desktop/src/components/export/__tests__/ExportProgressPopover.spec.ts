@@ -84,6 +84,40 @@ async function mountPopover() {
   await nextTick();
 }
 
+describe("table copy background task", () => {
+  it("shares phase, elapsed time, details and cancellation without claiming a row percentage", async () => {
+    const tracker = useExportTracker();
+    const onOpen = vi.fn();
+    const cancel = vi.fn();
+    const task = tracker.addTableCopyTask("copy-task", "orders_copy", onOpen);
+    task.copyPhase = "data";
+    tracker.registerTaskCancelHandler(task.exportId, cancel);
+    await mountPopover();
+    expect(document.body.textContent).toContain("Table copy: orders_copy");
+    expect(document.body.textContent).toContain("Copying data");
+    expect(document.body.textContent).toContain("Elapsed:");
+    expect(document.body.textContent).not.toContain("0 rows");
+    expect(document.body.textContent).not.toContain("0%");
+    (document.querySelector('button[title="Open task"]') as HTMLButtonElement).click();
+    expect(onOpen).toHaveBeenCalledOnce();
+    (document.querySelector('button[title="Cancel"]') as HTMLButtonElement).click();
+    await nextTick();
+    expect(cancel).toHaveBeenCalledOnce();
+    task.status = "Unknown";
+    await nextTick();
+    expect(document.querySelector('button[title="Delete"]')).toBeNull();
+    tracker.removeTask(task.exportId);
+    expect(tracker.tasks.value).toContain(task);
+    task.status = "Done";
+    task.copyPhase = "succeeded";
+    task.canRemove = true;
+    task.canCancel = false;
+    task.affectedRows = 1000;
+    await nextTick();
+    expect(document.body.textContent).toContain("Database-confirmed copied rows: 1000");
+  });
+});
+
 describe("failure detail copy text", () => {
   it("formats a data-transfer failure from its authoritative fields", () => {
     expect(dataTransferFailureCopyText({ table: "users", error: "permission denied" })).toBe("users\npermission denied");

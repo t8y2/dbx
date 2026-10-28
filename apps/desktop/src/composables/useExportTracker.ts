@@ -7,7 +7,7 @@ import { autoRevealExportedPathIfConfigured } from "@/lib/export/exportPath";
 import { releaseManualExport, submitManualExport, type ManualExportMode } from "@/lib/export/manualExportQueue";
 import { acceptOraclePackageTransferApproval, acceptOraclePackageTransferPreflight, acceptOracleRoutineDeploymentOperation, type OracleRoutineDeployment } from "@/lib/schema/oracleRoutineDeploy";
 
-export type BackgroundTaskKind = "table-export" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "data-generation" | "multi-db-execution" | "schema-diff" | "data-compare";
+export type BackgroundTaskKind = "table-export" | "table-copy" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "data-generation" | "multi-db-execution" | "schema-diff" | "data-compare";
 export type BackgroundTaskStatus = "Queued" | "Unknown" | "PreparingSnapshot" | "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
 export type DatabaseExportSource = "manual" | "scheduled";
 
@@ -102,6 +102,8 @@ export interface ExportTask {
   dictionaryWarnings?: number;
   dictionaryProgressKnown?: boolean;
   canCancel?: boolean;
+  canRemove?: boolean;
+  copyPhase?: "preparing" | "structure" | "data" | "refreshing" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown";
   onOpen?: () => void;
   onRemove?: () => void;
 }
@@ -495,6 +497,26 @@ export function useExportTracker() {
       totalRows: null,
       status: "Running",
       errorMessage: null,
+      startedAt: Date.now(),
+    });
+    taskMap.set(id, task);
+    return task;
+  }
+
+  function addTableCopyTask(id: string, label: string, onOpen: () => void): ExportTask {
+    const task = reactive<ExportTask>({
+      exportId: id,
+      kind: "table-copy",
+      tableName: label,
+      format: "",
+      filePath: "",
+      rowsExported: 0,
+      totalRows: null,
+      status: "Running",
+      errorMessage: null,
+      canCancel: true,
+      canRemove: false,
+      onOpen,
       startedAt: Date.now(),
     });
     taskMap.set(id, task);
@@ -932,6 +954,7 @@ export function useExportTracker() {
 
   function removeTask(exportId: string) {
     const task = taskMap.get(exportId);
+    if (task?.canRemove === false) return;
     if (task?.status === "Unknown") releaseManualExport(exportId);
     if (task && (task.status === "Done" || task.status === "Error" || task.status === "Cancelled")) cleanupFinishedTask(task);
     taskMap.delete(exportId);
@@ -942,7 +965,7 @@ export function useExportTracker() {
 
   function clearFinished() {
     for (const [id, task] of taskMap) {
-      if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") {
+      if (task.canRemove !== false && (task.status === "Done" || task.status === "Error" || task.status === "Cancelled")) {
         cleanupFinishedTask(task);
         taskMap.delete(id);
         taskCancelHandlers.delete(id);
@@ -989,6 +1012,7 @@ export function useExportTracker() {
     hasActive,
     submitExportTask,
     addTask,
+    addTableCopyTask,
     addDatabaseExportTask,
     addDataDictionaryTask,
     updateDataDictionaryTask,

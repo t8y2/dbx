@@ -1,3 +1,4 @@
+import { tableCopyTaskEn as tableCopyTask } from "./tableCopyTask";
 import { tableColumnPasteEn as tableColumnPaste } from "./tableColumnPaste";
 import { sidebarMenuEn as sidebarMenu } from "./sidebarMenuMessages";
 import { oceanbaseCloneDialogEn as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
@@ -414,6 +415,7 @@ export default {
   },
 
   oceanbaseCloneDialog,
+  tableCopyTask,
   oracleForeignKey: {
     resultTitle: "Foreign key operation result",
     executionFailed: "The foreign key operation did not complete cleanly. Check each statement and the database state.",

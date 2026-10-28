@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { uuid } from "@/lib/common/utils";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
@@ -4385,6 +4386,18 @@ async function confirmPasteTableImpl() {
   const mode = pasteTableMode.value;
   const copyData = pasteTableModeCopiesData(mode) && pasteTableDataCopySupported.value;
   showPasteDialog.value = false;
+  if (context.databaseType === "mysql") {
+    const copies = entries.map((entry) => ({ ...entry, connection: context.connection, database: context.database, catalog: context.catalog, schema: entry.schema || context.schema, identifierQuote: context.identifierQuote }));
+    const completed = await useTableCopyTaskStore().run(copies, mode);
+    if (completed && shouldConsumeTableClipboard && connectionStore.treeClipboard === clipboardAtPasteStart) connectionStore.treeClipboard = null;
+    try {
+      await reloadTableCopyContext(context);
+    } catch (error) {
+      const task = useTableCopyTaskStore().task;
+      if (task) task.refreshError = error instanceof Error ? error.message : String(error);
+    }
+    return;
+  }
   let successCount = 0;
   let pasteFailCount = 0;
   let firstPasteError: unknown;

@@ -26,6 +26,7 @@ import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { usePlDebugStore } from "@/stores/plDebugStore";
 import { dispatchPlDebugStepShortcut } from "@/lib/editor/plDebugStepShortcut";
 import { useNavigationStore } from "@/stores/navigationStore";
@@ -248,6 +249,7 @@ const DriverStorePage = defineAsyncComponent(() => import("@/components/config/D
 const PluginCenterPage = defineAsyncComponent(() => import("@/components/plugins/PluginContributionsPanel.vue"));
 const PluginBottomDock = defineAsyncComponent(() => import("@/components/plugins/PluginBottomDock.vue"));
 const EditorSettingsPage = defineAsyncComponent(() => import("@/components/editor/EditorSettingsDialog.vue"));
+const TableCopyProgressDialog = defineAsyncComponent(() => import("@/components/objects/TableCopyProgressDialog.vue"));
 const UpdateDialog = defineAsyncComponent(() => import("@/components/layout/UpdateDialog.vue"));
 const CloseActionPromptDialog = defineAsyncComponent(() => import("@/components/layout/CloseActionPromptDialog.vue"));
 const AiRunsClosePromptDialog = defineAsyncComponent(() => import("@/components/layout/AiRunsClosePromptDialog.vue"));
@@ -324,6 +326,7 @@ connectionStore.setBeforeConnectHandler(async (config) => {
 const { message: toastMessage, visible: toastVisible, action: toastAction, toast } = useToast();
 const { isDark, themeMode, applyTheme, setThemeMode, writeRootToken } = useTheme();
 const { activeCount: activeBackgroundTaskCount, tasks: backgroundTasks, cancelTask: cancelBackgroundTask } = useExportTracker();
+const tableCopyTasks = useTableCopyTaskStore();
 const trackedUpdateTaskCount = computed(() => countActiveUpdateBlockingTasks(activeBackgroundTaskCount.value, queryStore.tabs));
 const {
   initialize: initializeUpdater,
@@ -2491,7 +2494,7 @@ function confirmQuitWithActiveBackgroundTasks() {
   showBackgroundTasksClosePrompt.value = false;
   backgroundTasksQuitConfirmed = true;
   for (const task of backgroundTasks.value) {
-    if (task.status === "Running" || task.status === "Writing") void cancelBackgroundTask(task.exportId);
+    if (task.status === "Running" || task.status === "Writing" || (task.kind === "table-copy" && task.canCancel)) void cancelBackgroundTask(task.exportId);
   }
   void finishPendingAppClose(action);
 }
@@ -5930,6 +5933,7 @@ onUnmounted(() => {
           @open-database-search-target="openDatabaseSearchTarget"
           @open-diagram-target="openDiagramTarget"
         />
+        <TableCopyProgressDialog v-if="tableCopyTasks.open" />
         <MultiDbExecuteDialog
           v-model:open="showMultiDbExecuteDialog"
           :sql="multiExecuteSql"

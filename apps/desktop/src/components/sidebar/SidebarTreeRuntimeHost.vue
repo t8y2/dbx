@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { uuid } from "@/lib/common/utils";
 import { computed, defineAsyncComponent, nextTick, watch, onBeforeUnmount, onScopeDispose, inject, reactive, ref, shallowRef } from "vue";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -5989,6 +5990,12 @@ async function confirmPasteTableImpl() {
   const mode = pasteTableMode.value;
   const copyData = pasteTableModeCopiesData(mode) && pasteTableDataCopySupported.value;
   showPasteDialog.value = false;
+  if (entries.every((entry) => entry.databaseType === "mysql")) {
+    const copies = entries.map((entry) => ({ ...entry, connection: { ...connectionStore.getConfig(entry.connectionId)! } }));
+    const completed = await useTableCopyTaskStore().run(copies, mode);
+    if (completed && shouldConsumeTableClipboard && connectionStore.treeClipboard === clipboardAtPasteStart) connectionStore.treeClipboard = null;
+    return;
+  }
   let successCount = 0;
   let pasteFailCount = 0;
   let firstPasteError: unknown;

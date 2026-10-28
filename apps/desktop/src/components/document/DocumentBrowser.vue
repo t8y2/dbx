@@ -198,6 +198,7 @@ const viewMode = computed<ViewMode>({
   set: (value) => settingsStore.updateEditorSettings({ mongoViewMode: value }),
 });
 const filterInput = ref(restoredDocumentBrowserState?.filterInput ?? "");
+const filterEnabled = ref(restoredDocumentBrowserState?.filterEnabled ?? true);
 const sortInput = ref(restoredDocumentBrowserState?.sortInput ?? "");
 const localColumnFilters = ref<SerializedDataGridLocalColumnFilters>(restoredDocumentBrowserState?.localColumnFilters ?? {});
 const localColumnFilterColumns = ref<string[] | undefined>(restoredDocumentBrowserState?.localColumnFilterColumns);
@@ -392,6 +393,7 @@ function persistDocumentBrowserState(options: { includeData?: boolean } = {}) {
   if (!props.stateKey) return;
   saveDocumentBrowserState(props.stateKey, {
     filterInput: filterInput.value,
+    filterEnabled: filterEnabled.value,
     sortInput: sortInput.value,
     appliedDocumentFilter: appliedDocumentFilter.value,
     documentFilterRules: documentFilterRules.value,
@@ -416,7 +418,7 @@ function handleLocalColumnFiltersChange(filters: SerializedDataGridLocalColumnFi
 // changed query means the local-filter snapshot no longer describes what the
 // user is looking at.
 watch(
-  [filterInput, sortInput, appliedDocumentFilter],
+  [filterInput, filterEnabled, sortInput, appliedDocumentFilter],
   () => {
     localColumnFilters.value = {};
     localColumnFilterColumns.value = undefined;
@@ -1046,7 +1048,7 @@ function resetElasticsearchPagination() {
 }
 
 function currentDocumentFilter(): string | undefined {
-  const filter = currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, documentStoreProvider.value.kind);
+  const filter = filterEnabled.value ? currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, documentStoreProvider.value.kind) : undefined;
   if (documentStoreProvider.value.kind !== "dynamodb" || dynamodbIndexName.value === "__table__") return filter;
   const parsed = filter ? JSON.parse(filter) : {};
   return JSON.stringify({ ...parsed, $index: dynamodbIndexName.value });
@@ -3297,7 +3299,10 @@ defineExpose({ focusSearch });
                 </div>
               </PopoverContent>
             </Popover>
-            <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0">{{ documentStoreLabels.filterInputLabel }}</span>
+            <label class="flex shrink-0 items-center gap-1 text-xs font-medium select-none" :class="filterEnabled ? 'text-blue-600 dark:text-blue-400' : 'text-muted-foreground'">
+              <input v-model="filterEnabled" type="checkbox" class="h-3.5 w-3.5 accent-primary" :aria-label="t('grid.applyFilter')" :disabled="loading" @change="applyFilter" />
+              {{ documentStoreLabels.filterInputLabel }}
+            </label>
             <textarea
               ref="filterInputRef"
               v-model="filterInput"

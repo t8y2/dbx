@@ -436,6 +436,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sidebarShowConnectionNotes: false }).sidebarShowConnectionNotes).toBe(false);
   });
 
+  it("hides connection endpoints by default and normalizes non-boolean values", () => {
+    expect(normalizeEditorSettings({}).sidebarShowConnectionEndpoints).toBe(false);
+    expect(normalizeEditorSettings({ sidebarShowConnectionEndpoints: true }).sidebarShowConnectionEndpoints).toBe(true);
+    expect(normalizeEditorSettings({ sidebarShowConnectionEndpoints: false }).sidebarShowConnectionEndpoints).toBe(false);
+    expect(normalizeEditorSettings({ sidebarShowConnectionEndpoints: "yes" } as any).sidebarShowConnectionEndpoints).toBe(false);
+  });
+
   it("shows sidebar tooltips by default and preserves an explicit opt-out", () => {
     expect(normalizeEditorSettings({}).sidebarShowTooltips).toBe(true);
     expect(normalizeEditorSettings({ sidebarShowTooltips: false }).sidebarShowTooltips).toBe(false);
@@ -2201,6 +2208,20 @@ describe("settingsStore persisted settings initialization", () => {
     expect(store.editorSettings.sidebarShowConnectionNotes).toBe(true);
     expect(saveEditorSettings).toHaveBeenCalledTimes(2);
     expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarShowConnectionNotes: true }));
+  });
+
+  it("persists sidebarShowConnectionEndpoints update", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue({ sidebarShowConnectionEndpoints: false });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    await store.updateEditorSettingsAndPersist({ sidebarShowConnectionEndpoints: true });
+    expect(store.editorSettings.sidebarShowConnectionEndpoints).toBe(true);
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarShowConnectionEndpoints: true }));
   });
 
   it("persists preferredExportPath update", async () => {

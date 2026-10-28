@@ -9262,6 +9262,8 @@ export default withEnglishFallback({
     sidebarObjectInfoModeHidden: "Ninguna",
     sidebarAllowHorizontalScroll: "Permitir desplazamiento horizontal lateral",
     sidebarAllowHorizontalScrollDescription: "Muestra completos los nombres largos de tablas, vistas y colecciones permitiendo desplazamiento horizontal en la barra lateral.",
+    sidebarShowConnectionEndpoints: "Mostrar servidor y cuenta tras el nombre de la conexión",
+    sidebarShowConnectionEndpointsDescription: "Añade servidor:puerto@cuenta tras cada nombre de conexión en la barra lateral para distinguir las conexiones.",
     sidebarShowTooltips: "Sugerencias al pasar el cursor en la barra lateral",
     sidebarShowTooltipsDescription: "Muestra sugerencias con detalles al pasar el cursor sobre conexiones y objetos de la base de datos en la barra lateral. Desactívalo para ocultarlas.",
     sidebarShowUserAdmin: "Mostrar usuarios y permisos",

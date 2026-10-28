@@ -8162,6 +8162,8 @@ export default withEnglishFallback({
     sidebarObjectInfoModeHidden: "不顯示",
     sidebarAllowHorizontalScroll: "允許側邊欄水平捲動",
     sidebarAllowHorizontalScrollDescription: "透過啟用側邊欄的水平捲動功能，完整顯示長表格、檢視和集合的名稱",
+    sidebarShowConnectionEndpoints: "在連線名稱後顯示伺服器與帳號",
+    sidebarShowConnectionEndpointsDescription: "在側邊欄連線名稱後顯示「伺服器:連接埠@帳號」，便於區分不同伺服器或帳號的連線。",
     sidebarShowTooltips: "側邊欄懸浮提示",
     sidebarShowTooltipsDescription: "在側邊欄的連線與資料庫物件上懸浮時顯示詳細提示；關閉後懸浮不再彈出。",
     sidebarShowUserAdmin: "顯示使用者與權限入口",

@@ -10606,6 +10606,8 @@ export default withEnglishFallback({
     sidebarObjectInfoModeHidden: "Нет",
     sidebarAllowHorizontalScroll: "Разрешить горизонтальную прокрутку боковой панели",
     sidebarAllowHorizontalScrollDescription: "Показывать длинные имена таблиц, представлений и коллекций полностью, разрешив горизонтальную прокрутку боковой панели.",
+    sidebarShowConnectionEndpoints: "Показывать сервер и учётную запись после имени подключения",
+    sidebarShowConnectionEndpointsDescription: "Добавляет «сервер:порт@пользователь» после имени подключения в боковой панели, чтобы различать подключения.",
     sidebarShowTooltips: "Подсказки при наведении в боковой панели",
     sidebarShowTooltipsDescription: "Показывать подробные подсказки при наведении на подключения и объекты базы данных в боковой панели. Отключите, чтобы убрать всплывающие подсказки.",
     sidebarShowUserAdmin: "Показывать пользователей и права",

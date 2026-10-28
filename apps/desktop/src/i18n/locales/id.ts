@@ -8786,6 +8786,8 @@ export default withEnglishFallback({
     sidebarObjectInfoModeHidden: "Tidak ada",
     sidebarAllowHorizontalScroll: "Izinkan gulir horizontal bilah sisi",
     sidebarAllowHorizontalScrollDescription: "Tampilkan nama tabel, tampilan, dan koleksi yang panjang secara lengkap dengan mengizinkan gulir horizontal pada bilah sisi.",
+    sidebarShowConnectionEndpoints: "Tampilkan server dan akun setelah nama koneksi",
+    sidebarShowConnectionEndpointsDescription: "Menambahkan server:port@akun setelah setiap nama koneksi di bilah sisi untuk membedakan koneksi.",
     sidebarShowTooltips: "Tooltip hover bilah sisi",
     sidebarShowTooltipsDescription: "Tampilkan tooltip detail saat mengarahkan kursor ke koneksi dan objek database di bilah sisi. Nonaktifkan untuk menghentikan popup hover.",
     sidebarShowUserAdmin: "Tampilkan pengguna dan izin",

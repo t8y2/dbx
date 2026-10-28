@@ -89,6 +89,7 @@ import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isTableVGroupGroupableRowType, selectedTableVGroupMoveTargets, tableVGroupIdFromNodeId } from "@/lib/table/tableVGroup";
 import { findTreeNodeById } from "@/lib/sql/newQueryContext";
 import { resolveTableVGroupDropTarget, setTableVGroupDropTargetNodeId, tableVGroupDropTargetNodeId } from "@/lib/sidebar/sidebarTableVGroupDrag";
+import { connectionEndpointUserLabel } from "@/lib/connection/connectionPresentation";
 import { isExecuteSqlShortcut, isFocusSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { connectionDetailRows, type ConnectionDetailRow } from "@/lib/connection/connectionDetailRows";
 import { hexToRgba } from "@/lib/common/color";
@@ -808,6 +809,11 @@ function isLoginUserNode(): boolean {
 const trailingComment = computed(() => {
   if (!settingsStore.editorSettings.sidebarObjectInfoMode.startsWith("comment-")) return null;
   return sidebarTreeNodeComment(activeNode.value, settingsStore.editorSettings.sidebarShowConnectionNotes);
+});
+
+const connectionEndpointText = computed(() => {
+  if (activeNode.value.type !== "connection" || !settingsStore.editorSettings.sidebarShowConnectionEndpoints) return null;
+  return connectionEndpointUserLabel(activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined) || null;
 });
 
 function isRightAlignedComment(): boolean {
@@ -1676,7 +1682,7 @@ function onKeydown(event: KeyboardEvent) {
               :class="[
                 labelWidthClass,
                 {
-                  'flex-1': node.type === 'connection' && !trailingComment,
+                  'flex-1': node.type === 'connection' && !trailingComment && !connectionEndpointText,
                   'tree-connection-label': node.type === 'connection' || node.type === 'connection-group',
                   'tree-object-label': node.type !== 'connection' && node.type !== 'connection-group',
                   'font-semibold': isLoginUserNode(),
@@ -1684,6 +1690,7 @@ function onKeydown(event: KeyboardEvent) {
               ]"
               >{{ visibleLabel(node) }}</span
             >
+            <span v-if="connectionEndpointText && !isRenamingConnection" class="sidebar-connection-endpoint flex-1 min-w-0 truncate" :class="{ 'shrink-0 whitespace-nowrap': usesFullWidthLabel }" :title="connectionEndpointText">{{ connectionEndpointText }}</span>
             <span
               v-if="node.type === 'column' && node.meta"
               class="shrink-0 rounded px-1 text-[10px] leading-4"
@@ -1857,6 +1864,16 @@ function onKeydown(event: KeyboardEvent) {
   font-size: 1em;
   font-weight: 500;
   opacity: 1;
+}
+
+.sidebar-connection-endpoint {
+  color: var(--muted-foreground);
+  /* Matches the connection detail tooltip (text-xs ≈ 12px at the default sidebar font size) and scales with the sidebar font size setting. */
+  font-size: 0.85em;
+  line-height: 1.25;
+  opacity: 0.7;
+  /* Two name-sized characters of gap; this element's own font is 0.85em, so scale the 2em back to the row font. */
+  margin-left: calc(2em / 0.85);
 }
 
 .tree-connection-label {

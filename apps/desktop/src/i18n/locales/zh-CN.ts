@@ -10443,6 +10443,8 @@ export default withEnglishFallback({
     sidebarObjectInfoModeHidden: "不显示",
     sidebarAllowHorizontalScroll: "允许侧边栏横向滚动",
     sidebarAllowHorizontalScrollDescription: "完整显示较长的表、视图和集合名称；默认关闭以保留省略号截断。",
+    sidebarShowConnectionEndpoints: "在连接名后显示服务器与账号",
+    sidebarShowConnectionEndpointsDescription: "在侧边栏连接名称后显示“服务器:端口@账号”，便于区分不同服务器或账号的连接。",
     sidebarShowTooltips: "侧边栏悬浮提示",
     sidebarShowTooltipsDescription: "在侧边栏的连接和数据库对象上悬浮时显示详情提示；关闭后悬浮不再弹出。",
     sidebarShowUserAdmin: "显示用户与权限入口",

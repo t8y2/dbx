@@ -215,6 +215,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "objectBrowserAutoOpenDetailPanel",
     "sidebarObjectInfoMode",
     "sidebarAllowHorizontalScroll",
+    "sidebarShowConnectionEndpoints",
     "sidebarShowTooltips",
     "sidebarShowUserAdmin",
     "sidebarIndent",

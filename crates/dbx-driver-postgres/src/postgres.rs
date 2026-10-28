@@ -48,6 +48,9 @@ use crate::types::{
 pub const GAUSSDB_COMPATIBILITY_SQL: &str =
     "SELECT datcompatibility FROM pg_catalog.pg_database WHERE datname = current_database()";
 
+/// Identifier quote implied by the GaussDB database compatibility mode
+/// (`pg_database.datcompatibility`): MySQL-style modes need backticks while
+/// Oracle and PostgreSQL modes need double quotes.
 pub async fn gaussdb_identifier_quote(pool: &Pool) -> Option<String> {
     let timeout = super::connection_timeout();
     let client = checkout_postgres_client(pool, None, timeout).await.ok()?;
@@ -55,6 +58,17 @@ pub async fn gaussdb_identifier_quote(pool: &Pool) -> Option<String> {
     let row = tokio::time::timeout(timeout, client.query_opt(GAUSSDB_COMPATIBILITY_SQL, &[])).await.ok()?.ok()??;
     let compatibility_mode = row.try_get::<_, String>(0).ok()?;
     gaussdb_identifier_quote_for_compatibility_mode(&compatibility_mode).map(str::to_string)
+}
+
+/// Identifier quote for an openGauss database, derived from the same
+/// `datcompatibility` catalog value. openGauss exposes A/B/PG modes, so the
+/// MySQL-compatible (B) databases need backticks while A/PG need double quotes.
+pub async fn opengauss_identifier_quote(pool: &Pool) -> Option<String> {
+    opengauss_compatibility_mode(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|mode| gaussdb_identifier_quote_for_compatibility_mode(&mode).map(str::to_string))
 }
 
 pub fn gaussdb_identifier_quote_for_compatibility_mode(compatibility_mode: &str) -> Option<&'static str> {
@@ -2184,6 +2198,7 @@ async fn execute_select_prepared(
         deferred_large_value_cells: Vec::new(),
         column_sortables: Vec::new(),
         spatial_columns,
+        raw_key_cells: Vec::new(),
         spatial_values,
         rows: result_rows,
         affected_rows: 0,
@@ -2294,6 +2309,7 @@ async fn execute_select_text(
         deferred_large_value_cells: Vec::new(),
         column_sortables: Vec::new(),
         spatial_columns,
+        raw_key_cells: Vec::new(),
         spatial_values,
         rows: result_rows,
         affected_rows: 0,
@@ -8972,6 +8988,7 @@ pub async fn execute_query_with_max_rows(
                 deferred_large_value_cells: Vec::new(),
                 column_sortables: Vec::new(),
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![],
                 affected_rows: affected,
@@ -9813,6 +9830,7 @@ async fn execute_query_with_max_rows_inner(
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![],
             affected_rows: affected,
@@ -16540,6 +16558,7 @@ mod tests {
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: Vec::new(),
+            raw_key_cells: Vec::new(),
             spatial_values: Vec::new(),
             rows: vec![vec![
                 serde_json::json!("amount"),

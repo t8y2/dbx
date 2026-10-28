@@ -2691,6 +2691,7 @@ pub fn run() {
             commands::redis_cmd::redis_list_databases,
             commands::redis_cmd::redis_scan_keys,
             commands::redis_cmd::redis_scan_keys_batch,
+            commands::redis_cmd::redis_key_metadata_batch,
             commands::redis_cmd::redis_scan_values,
             commands::redis_cmd::redis_get_value,
             commands::redis_cmd::redis_get_raw_value,

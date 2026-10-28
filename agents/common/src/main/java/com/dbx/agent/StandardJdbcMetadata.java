@@ -521,7 +521,7 @@ public final class StandardJdbcMetadata {
         if (table == null || table.trim().isEmpty()) {
             return;
         }
-        try (ResultSet rs = meta.getColumns(catalog, blankToNull(schema), table, completionPattern(meta, request))) {
+        try (ResultSet rs = meta.getColumns(catalog, blankToNull(schema), escapeSchemaPattern(meta, table, true), completionPattern(meta, request))) {
             while (rs.next() && result.size() < limit) {
                 String name = rs.getString("COLUMN_NAME");
                 if (!completionNameMatches(name, request)) {

@@ -671,10 +671,10 @@ test("defaults data grid header display settings", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.dataGridColumnCommentsInInfoArea, false);
   assert.equal(normalizeEditorSettings({}).dataGridColumnCommentsInInfoArea, false);
   assert.equal(DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader, true);
-  assert.equal(DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata, false);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata, true);
   assert.equal(DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions, true);
   assert.equal(normalizeEditorSettings({}).showColumnCommentsInHeader, true);
-  assert.equal(normalizeEditorSettings({}).dataGridShowTransposeFieldMetadata, false);
+  assert.equal(normalizeEditorSettings({}).dataGridShowTransposeFieldMetadata, true);
   assert.equal(normalizeEditorSettings({}).compactColumnHeaderActions, true);
 });
 
@@ -683,14 +683,14 @@ test("keeps saved data grid header display settings", () => {
     dataGridTransposeMetadataInInfoColumn: true,
     dataGridColumnCommentsInInfoArea: true,
     showColumnCommentsInHeader: true,
-    dataGridShowTransposeFieldMetadata: true,
+    dataGridShowTransposeFieldMetadata: false,
     compactColumnHeaderActions: false,
   } as any);
 
   assert.equal(settings.showColumnCommentsInHeader, true);
   assert.equal(settings.dataGridTransposeMetadataInInfoColumn, true);
   assert.equal(settings.dataGridColumnCommentsInInfoArea, true);
-  assert.equal(settings.dataGridShowTransposeFieldMetadata, true);
+  assert.equal(settings.dataGridShowTransposeFieldMetadata, false);
   assert.equal(settings.compactColumnHeaderActions, false);
 });
 

@@ -64,6 +64,8 @@ fn live_connection_config(id: &str, database: &str) -> ConnectionConfig {
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,
+        show_native_jobs: None,
+        show_user_admin: None,
         attached_databases: Vec::new(),
         init_script: None,
         color: None,

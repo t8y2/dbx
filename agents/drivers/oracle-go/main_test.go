@@ -62,6 +62,17 @@ func TestHandshakeResponse(t *testing.T) {
 	}
 }
 
+func TestConnectionInfoMethodIsSupported(t *testing.T) {
+	s := newServer()
+	resp, _ := s.handleLine(`{"jsonrpc":"2.0","id":8,"method":"connection_info","params":{}}`)
+	if resp.Error == nil {
+		t.Fatal("connection_info must fail on a disconnected server")
+	}
+	if !strings.Contains(resp.Error.Message, "not connected") {
+		t.Fatalf("connection_info must use the active connection: %s", resp.Error.Message)
+	}
+}
+
 func TestRuntimeHandshakeAdvertisesMultiSessionProtocol(t *testing.T) {
 	runtime := newRuntimeServer()
 	resp, shutdown := runtime.handleLine(`{"jsonrpc":"2.0","id":7,"method":"handshake","params":{"appVersion":"dev"}}`)

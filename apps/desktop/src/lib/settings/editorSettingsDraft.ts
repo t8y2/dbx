@@ -148,7 +148,6 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sidebarObjectInfoMode",
   "sidebarAllowHorizontalScroll",
   "sidebarShowTooltips",
-  "sidebarShowUserAdmin",
   "sidebarIndent",
   "sidebarFontSize",
   "sidebarDensity",

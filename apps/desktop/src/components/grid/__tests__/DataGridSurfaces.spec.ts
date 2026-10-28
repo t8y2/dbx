@@ -447,7 +447,7 @@ describe("DataGridPagination", () => {
       canExport: true,
     });
 
-    const findExportMenu = () => findAll(mounted.root, (node) => node.props["data-stub"] === "LightDropdown" && node.props["aria-label"] === "grid.export");
+    const findExportMenu = () => findAll(mounted.root, (node) => node.props["aria-label"] === "grid.export");
     expect(findExportMenu()).toHaveLength(1);
 
     await mounted.setProps({ canExport: false });
@@ -474,7 +474,7 @@ describe("DataGridPagination", () => {
       canJumpLastPage: false,
     });
 
-    const exportMenus = findAll(mounted.root, (node) => node.props["data-stub"] === "LightDropdown" && node.props["aria-label"] === "grid.export");
+    const exportMenus = findAll(mounted.root, (node) => node.props["aria-label"] === "grid.export");
     expect(exportMenus).toHaveLength(1);
   });
 

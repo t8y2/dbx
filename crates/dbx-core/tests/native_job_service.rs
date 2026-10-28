@@ -629,6 +629,19 @@ async fn a_configuration_change_during_identity_read_cannot_issue_a_context() {
 }
 
 #[tokio::test]
+async fn oracle_context_opens_successfully_without_database_info() {
+    let (_directory, state) = state("oracle").await;
+    let ctx = native_job_open_context_with(&state, "connection", "", |_| {
+        std::future::ready(Ok(NativeJobRuntimeIdentity { database_info: None, session_user: "SYSTEM".into() }))
+    })
+    .await
+    .unwrap();
+    assert_eq!(ctx.engine, NativeJobEngine::Oracle);
+    assert_eq!(ctx.session_user, "SYSTEM");
+    assert!(ctx.product_version.is_none());
+}
+
+#[tokio::test]
 async fn runtime_engine_discovery_does_not_assume_oceanbase_means_oracle_mode() {
     let (_directory, state) = state("jdbc").await;
     state.configs.write().await.get_mut("connection").unwrap().database_info = Some(DatabaseConnectionInfo {

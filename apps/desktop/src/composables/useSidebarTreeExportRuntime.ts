@@ -42,6 +42,7 @@ import { showExportExecutionModeDialog } from "@/lib/export/exportExecutionMode"
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 import type { ManualExportMode } from "@/lib/export/manualExportQueue";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 
 type StructureCopyFormat = "tsv" | "markdown";
 
@@ -941,6 +942,10 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
   async function exportData(format: "csv" | "json" | "sql", insertDialect: SqlInsertDialect = "source") {
     const targets = currentTableExportTargets();
     if (!targets.length) return;
+    if (format === "sql" && targets.some((target) => mysqlDataCharsetEnabled(connectionStore.getConfig(target.connectionId)))) {
+      toast(t("connection.mysqlDataCharsetExportHint"), 5000);
+      return;
+    }
 
     const mode = isTauriRuntime() ? await showExportExecutionModeDialog() : undefined;
     if (mode === null) return;

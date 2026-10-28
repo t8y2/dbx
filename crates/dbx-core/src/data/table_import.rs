@@ -5269,6 +5269,7 @@ fn effective_import_batch_size(db_type: &DatabaseType, requested: usize) -> usiz
     let max_rows = match db_type {
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_IMPORT_BATCH_ROWS,
         DatabaseType::Iris => 1,
+        DatabaseType::SapHana => 1,
         DatabaseType::CloudflareD1 | DatabaseType::Transwarp => 100,
         DatabaseType::SqlServer => 1000,
         DatabaseType::Sqlite => SQLITE_APPEND_COMMIT_ROWS,
@@ -5587,6 +5588,7 @@ fn infer_column_type(rows: &[Vec<serde_json::Value>], source_index: usize) -> Im
 fn text_data_type(db_type: &DatabaseType) -> &'static str {
     match db_type {
         DatabaseType::SqlServer => "NVARCHAR(MAX)",
+        DatabaseType::SapHana => "NCLOB",
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng | DatabaseType::Db2 => "CLOB",
         DatabaseType::ClickHouse => "String",
         DatabaseType::Hive
@@ -7824,6 +7826,12 @@ pub async fn import_table_file_core<F>(
 where
     F: FnMut(TableImportProgress),
 {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        &request.connection_id,
+        crate::query::mysql_data_charset_policy::READ_ONLY,
+    )
+    .await?;
     let started_at = Instant::now();
     let mut db_write_ms = 0u128;
     let mut statement_count = 0usize;
@@ -13432,6 +13440,30 @@ mod tests {
     }
 
     #[test]
+    fn hana_create_table_plan_uses_nclob_for_inferred_text() {
+        let data = ParsedImportFile {
+            columns: vec!["id".to_string(), "notes".to_string()],
+            rows: vec![vec![serde_json::json!(1), serde_json::json!("long text")]],
+            total_rows: 1,
+            effective_encoding: None,
+        };
+        let mappings = data
+            .columns
+            .iter()
+            .map(|column| TableImportColumnMapping {
+                source_column: column.clone(),
+                target_column: column.clone(),
+                target_data_type: None,
+                generator: None,
+            })
+            .collect::<Vec<_>>();
+
+        let plan = build_import_create_table_plan(&data, &mappings, "events", "RACE", &DatabaseType::SapHana).unwrap();
+
+        assert_eq!(plan.sql, "CREATE TABLE \"RACE\".\"events\" (\n  \"id\" BIGINT,\n  \"notes\" NCLOB\n)");
+    }
+
+    #[test]
     fn db2_create_table_plan_uses_clob_for_inferred_text() {
         let data = ParsedImportFile {
             columns: vec!["id".to_string(), "notes".to_string()],
@@ -13739,6 +13771,58 @@ mod tests {
     }
 
     #[test]
+    fn hana_import_uses_schema_qualified_single_row_insert() {
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "id".to_string(),
+                target_column: "ID".to_string(),
+                target_data_type: None,
+                generator: None,
+            },
+            TableImportColumnMapping {
+                source_column: "name".to_string(),
+                target_column: "NAME".to_string(),
+                target_data_type: None,
+                generator: None,
+            },
+        ];
+        let data = ParsedImportFile {
+            columns: vec!["id".to_string(), "name".to_string()],
+            rows: vec![
+                vec![serde_json::json!(1), serde_json::json!("Ada")],
+                vec![serde_json::json!(2), serde_json::json!("Grace")],
+            ],
+            total_rows: 2,
+            effective_encoding: None,
+        };
+
+        let batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &[("ID".to_string(), "BIGINT".to_string()), ("NAME".to_string(), "NCLOB".to_string())],
+            "USERS",
+            "RACE",
+            &DatabaseType::SapHana,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            batches,
+            vec![
+                ImportSqlBatch {
+                    sql: "INSERT INTO \"RACE\".\"USERS\" (\"ID\", \"NAME\") VALUES\n(1, 'Ada')".to_string(),
+                    row_count: 1,
+                },
+                ImportSqlBatch {
+                    sql: "INSERT INTO \"RACE\".\"USERS\" (\"ID\", \"NAME\") VALUES\n(2, 'Grace')".to_string(),
+                    row_count: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn db2_import_uses_schema_qualified_multi_row_insert() {
         let mappings = vec![
             TableImportColumnMapping {
@@ -14017,6 +14101,7 @@ mod tests {
         assert_eq!(effective_import_batch_size(&DatabaseType::OceanbaseOracle, 1000), 500);
         assert_eq!(effective_import_batch_size(&DatabaseType::OceanbaseOracle, 1), 1);
         assert_eq!(effective_import_batch_size(&DatabaseType::Iris, 1000), 1);
+        assert_eq!(effective_import_batch_size(&DatabaseType::SapHana, 1000), 1);
         assert_eq!(effective_import_batch_size(&DatabaseType::CloudflareD1, 1000), 100);
         assert_eq!(effective_import_batch_size(&DatabaseType::SqlServer, 1001), 1000);
         assert_eq!(effective_import_batch_size(&DatabaseType::Postgres, 1000), 1000);

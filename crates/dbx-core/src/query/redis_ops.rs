@@ -1,7 +1,7 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::redis_driver::{
-    self, RedisBlob, RedisCollectionPage, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisKeysExpiry,
-    RedisKeysExpiryResult, RedisScanResult, RedisStreamConsumer, RedisStreamGroup, RedisStreamPage,
+    self, RedisBlob, RedisCollectionPage, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisKeyMetadata,
+    RedisKeysExpiry, RedisKeysExpiryResult, RedisScanResult, RedisStreamConsumer, RedisStreamGroup, RedisStreamPage,
     RedisStreamPendingPage, RedisValue,
 };
 
@@ -82,6 +82,47 @@ pub async fn redis_scan_keys_batch_core(
                     include_types,
                 )
                 .await
+            }
+        },
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
+/// Reads TYPE and TTL for an explicit list of keys.
+///
+/// The key browser lists key names without metadata when it loads a whole
+/// database in one sweep. This endpoint fills the missing badges for the rows
+/// that are actually shown, so the cost is proportional to the visible rows
+/// instead of the keyspace.
+pub async fn redis_key_metadata_batch_in_db_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    key_raws: &[String],
+) -> Result<Vec<RedisKeyMetadata>, String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    let mut keys = Vec::with_capacity(key_raws.len());
+    for key_raw in key_raws {
+        keys.push(redis_driver::redis_key_raw_to_bytes(key_raw)?);
+    }
+    match &pool {
+        PoolKind::Redis(redis) => match redis.as_ref() {
+            RedisConnection::Direct(con) => {
+                let mut con = con.lock().await;
+                redis_driver::select_db(&mut *con, db).await?;
+                redis_driver::key_metadata_batch(&mut *con, &keys).await
+            }
+            RedisConnection::Cluster(cluster) => {
+                redis_driver::ensure_cluster_database(cluster, db).await?;
+                // A cluster pipeline cannot span slots, so every key keeps its
+                // own slot-routed connection, like `apply_redis_keys_expiry`.
+                let mut result = Vec::with_capacity(keys.len());
+                for key in &keys {
+                    let mut con = redis_driver::cluster_key_connection_in_db(cluster, key, db).await?;
+                    result.extend(redis_driver::key_metadata_batch(&mut con, std::slice::from_ref(key)).await?);
+                }
+                Ok(result)
             }
         },
         _ => Err("Not a Redis connection".to_string()),

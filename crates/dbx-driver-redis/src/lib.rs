@@ -52,6 +52,14 @@ const COLLECTION_OVERFLOW_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
 const COLLECTION_OVERFLOW_CURSOR_START: u64 = 1 << 52;
 const INVALID_CLUSTER_SCAN_CURSOR_ERROR: &str = "Redis cluster scan cursor is invalid or expired";
 const MAX_SAFE_INTEGER_CURSOR: u64 = (1 << 53) - 1;
+/// Keys per packed round trip when a batch also asks for TYPE and TTL.
+///
+/// The scan itself may return tens of thousands of keys in one batch, but the
+/// metadata pipeline is split into chunks of this size: each chunk is one
+/// round trip that carries at most `2 * SCAN_METADATA_PIPELINE_CHUNK`
+/// commands (one TYPE and one TTL per key, interleaved), which keeps the
+/// single-threaded server responsive for the other clients of the instance.
+const SCAN_METADATA_PIPELINE_CHUNK: usize = 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedisDatabaseInfo {
@@ -93,6 +101,20 @@ pub struct RedisScanResult {
     pub cursor: u64,
     pub keys: Vec<RedisKeyInfo>,
     pub total_keys: u64,
+}
+
+/// Per-key metadata (type + TTL) resolved for an explicit list of keys.
+///
+/// The "fetch all" path scans key names without TYPE/TTL so a million-key
+/// database is not hit with two extra commands per key. When the UI needs
+/// those badges afterwards it asks for exactly the keys it shows, so the cost
+/// stays proportional to the visible rows instead of the keyspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedisKeyMetadata {
+    pub key_raw: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_type: String,
+    pub ttl: i64,
 }
 
 /// The expiration shapes the Key Browser may apply to a batch of selected keys.
@@ -3153,6 +3175,95 @@ where
     scan_keys_batch_inner(con, cursor, pattern, count, max_iterations, include_types, true).await
 }
 
+/// Reads the type and the TTL of one chunk of keys with a single packed pipeline.
+///
+/// The pipeline interleaves TYPE and TTL, so one round trip carries at most
+/// `2 * keys.len()` commands and every answer keeps the key's position.
+/// A reply that cannot be parsed becomes ("unknown", -2): the key stays
+/// listed, its badge simply stays unknown.
+async fn read_type_and_ttl_chunk<C>(con: &mut C, keys: &[Vec<u8>]) -> Result<Vec<(String, i64)>, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let mut pipeline = redis::pipe();
+    for key in keys {
+        pipeline.cmd("TYPE").arg(key);
+        pipeline.cmd("TTL").arg(key);
+    }
+    let count = pipeline.len();
+    let replies = con.req_packed_commands(&pipeline, 0, count).await.map_err(|error| error.to_string())?;
+    if replies.len() != count {
+        return Err("Redis did not return one TYPE and one TTL reply per key".to_string());
+    }
+
+    let mut metadata = Vec::with_capacity(keys.len());
+    for index in 0..keys.len() {
+        let key_type =
+            String::from_redis_value(replies[index * 2].clone()).ok().unwrap_or_else(|| "unknown".to_string());
+        let ttl = i64::from_redis_value(replies[index * 2 + 1].clone()).ok().unwrap_or(-2);
+        metadata.push((key_type, ttl));
+    }
+    Ok(metadata)
+}
+
+/// Reads the types of one chunk of keys with a single packed pipeline.
+///
+/// The types are worth a round trip of their own when the combined TYPE/TTL
+/// pipeline failed as a whole: one refused command (an ACL without the TTL
+/// permission, for example) must not cost the whole chunk its badges.
+async fn read_types_chunk<C>(con: &mut C, keys: &[Vec<u8>]) -> Vec<String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let mut pipeline = redis::pipe();
+    for key in keys {
+        pipeline.cmd("TYPE").arg(key);
+    }
+    let count = pipeline.len();
+    let replies = match con.req_packed_commands(&pipeline, 0, count).await {
+        Ok(replies) => replies,
+        Err(_) => return vec!["unknown".to_string(); keys.len()],
+    };
+    (0..keys.len())
+        .map(|index| {
+            replies
+                .get(index)
+                .and_then(|value| String::from_redis_value(value.clone()).ok())
+                .unwrap_or_else(|| "unknown".to_string())
+        })
+        .collect()
+}
+
+/// Reads TYPE and TTL for a batch of named keys.
+///
+/// This is the metadata half of `scan_keys_batch` (one packed pipeline that
+/// interleaves TYPE and TTL per key) addressed by key name instead of by scan
+/// cursor, so the key browser can fill the badges of rows it already listed
+/// without scanning the keyspace again. A key that disappeared meanwhile
+/// answers `TYPE` = "none" and `TTL` = -2.
+///
+/// The batch is split into chunks of `SCAN_METADATA_PIPELINE_CHUNK` keys, so
+/// one round trip never carries more than `2 * SCAN_METADATA_PIPELINE_CHUNK`
+/// commands. A transport error fails the whole batch; a reply that cannot be
+/// parsed becomes ("unknown", -2) instead of an empty type.
+pub async fn key_metadata_batch<C>(con: &mut C, keys: &[Vec<u8>]) -> Result<Vec<RedisKeyMetadata>, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut result = Vec::with_capacity(keys.len());
+    for chunk in keys.chunks(SCAN_METADATA_PIPELINE_CHUNK) {
+        let chunk_metadata = read_type_and_ttl_chunk(con, chunk).await?;
+        for (key, (key_type, ttl)) in chunk.iter().zip(chunk_metadata) {
+            result.push(RedisKeyMetadata { key_raw: redis_key_bytes_to_raw(key), key_type, ttl });
+        }
+    }
+    Ok(result)
+}
+
 async fn scan_keys_batch_inner<C>(
     con: &mut C,
     cursor: u64,
@@ -3224,24 +3335,34 @@ where
 
         if !keys.is_empty() {
             let (key_types, key_ttls): (Vec<String>, Vec<i64>) = if include_types {
-                let mut type_pipe = redis::pipe();
-                for key in &keys {
-                    type_pipe.cmd("TYPE").arg(key);
+                let mut key_types: Vec<String> = Vec::with_capacity(keys.len());
+                let mut key_ttls: Vec<i64> = Vec::with_capacity(keys.len());
+                // One packed pipeline per chunk keeps a single round trip bounded.
+                // The whole batch would otherwise ask the server for tens of
+                // thousands of TYPE and TTL commands at once, and Redis answers
+                // them one after another on its single thread — every other
+                // client of that instance waits for the whole batch.
+                for chunk in keys.chunks(SCAN_METADATA_PIPELINE_CHUNK) {
+                    match read_type_and_ttl_chunk(con, chunk).await {
+                        Ok(chunk_metadata) => {
+                            for (key_type, ttl) in chunk_metadata {
+                                key_types.push(key_type);
+                                key_ttls.push(ttl);
+                            }
+                        }
+                        // Best effort: a chunk whose metadata cannot be read
+                        // keeps its keys listed with an unknown badge instead
+                        // of failing the whole scan. The types are asked for
+                        // on their own, because a single refused command must
+                        // not take the badges of the whole chunk with it.
+                        Err(_) => {
+                            for key_type in read_types_chunk(con, chunk).await {
+                                key_types.push(key_type);
+                                key_ttls.push(-2);
+                            }
+                        }
+                    }
                 }
-                let type_count = type_pipe.len();
-                let type_values = con.req_packed_commands(&type_pipe, 0, type_count).await.unwrap_or_default();
-                let key_types = type_values
-                    .iter()
-                    .map(|value| String::from_redis_value(value.clone()).unwrap_or_else(|_| "unknown".to_string()))
-                    .collect();
-
-                let mut ttl_pipe = redis::pipe();
-                for key in &keys {
-                    ttl_pipe.cmd("TTL").arg(key);
-                }
-                let ttl_count = ttl_pipe.len();
-                let ttl_values = con.req_packed_commands(&ttl_pipe, 0, ttl_count).await.unwrap_or_default();
-                let key_ttls = ttl_values.into_iter().map(|value| i64::from_redis_value(value).unwrap_or(-2)).collect();
                 (key_types, key_ttls)
             } else {
                 (Vec::new(), Vec::new())
@@ -3560,15 +3681,21 @@ async fn read_string_preview_by_length<C>(
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    let Some(known_length) = redis_string_length(con, key).await else {
-        return Err(rejected);
+    let known_length = match redis_string_length(con, key).await {
+        Ok(length) => length,
+        // The fallback needs the length, and the reason it is missing belongs
+        // in the error: the rejection alone does not say that STRLEN was denied.
+        Err(error) => return Err(format!("{rejected} (the value length could not be read: {error})")),
     };
     match read_string_windows(con, key, preview_limit_bytes, Some(known_length)).await {
         Ok(result) => Ok(result),
         Err(error) if is_redis_out_of_bounds_error(&error) => {
             // The value shrank between the length read and the window read.
-            let Some(fresh_length) = redis_string_length(con, key).await else {
-                return Err(error);
+            let fresh_length = match redis_string_length(con, key).await {
+                Ok(length) => length,
+                Err(strlen_error) => {
+                    return Err(format!("{error} (the value length could not be read: {strlen_error})"))
+                }
             };
             read_string_windows(con, key, preview_limit_bytes, Some(fresh_length)).await
         }
@@ -3631,8 +3758,8 @@ where
         Some(total) => Some(total),
         // The budget was filled exactly, so the value may continue — STRLEN
         // settles that without materializing the rest in the backend or IPC
-        // layer.
-        None if at_budget => redis_string_length(con, key).await,
+        // layer. A server that denies STRLEN only leaves the size unknown.
+        None if at_budget => redis_string_length(con, key).await.ok(),
         None => Some(bytes.len() as u64),
     };
     let truncated = total_bytes.map_or(at_budget, |total| total > limit);
@@ -3643,12 +3770,12 @@ where
 }
 
 /// Read the length of a Redis string value.
-async fn redis_string_length<C>(con: &mut C, key: &[u8]) -> Option<u64>
+async fn redis_string_length<C>(con: &mut C, key: &[u8]) -> Result<u64, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    let length: i64 = redis::cmd("STRLEN").arg(key).query_async(con).await.ok()?;
-    u64::try_from(length).ok()
+    let length: i64 = redis::cmd("STRLEN").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
+    u64::try_from(length).map_err(|_| "Redis string length is negative".to_string())
 }
 
 /// Whether a server rejected a range because it reached past the value.
@@ -7214,6 +7341,22 @@ mod tests {
         commands.lock().unwrap().iter().filter(|packed| packed.contains(&needle)).count()
     }
 
+    /// Byte offsets of every occurrence of `command` inside a packed pipeline.
+    ///
+    /// The offsets make the order of the commands observable, so a test can
+    /// tell an interleaved pipeline (TYPE, TTL, TYPE, TTL) from a grouped one
+    /// (TYPE, TYPE, TTL, TTL) that carries the same commands.
+    fn command_offsets(packed: &str, command: &str) -> Vec<usize> {
+        let needle = format!("\r\n{command}\r\n");
+        let mut offsets = Vec::new();
+        let mut start = 0;
+        while let Some(index) = packed[start..].find(&needle) {
+            offsets.push(start + index);
+            start += index + needle.len();
+        }
+        offsets
+    }
+
     fn bulk(value: &str) -> RedisRawValue {
         RedisRawValue::BulkString(value.as_bytes().to_vec())
     }
@@ -8274,10 +8417,50 @@ mod tests {
         let error = super::get_value(&mut con, b"message").await.unwrap_err();
 
         assert!(error.contains("out of bounds"), "{error}");
+        // The error also says why the fallback could not run.
+        assert!(error.contains("the value length could not be read"), "{error}");
+        assert!(error.contains("strlen"), "{error}");
         // One rejected window and one length read; the rejected window is not
         // requested again.
         assert_eq!(con.command_count("GETRANGE"), 1);
         assert_eq!(con.command_count("STRLEN"), 1);
+    }
+
+    #[tokio::test]
+    async fn string_value_reports_a_failed_length_read_after_the_value_shrinks() {
+        // The value shrank between the length read and the window read, and the
+        // fresh length read fails as well. The error has to say so instead of
+        // surfacing the bare rejection.
+        let out_of_bounds = || {
+            redis::RedisError::from((
+                redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+                "ERR",
+                "0-100 is out of bounds".to_string(),
+            ))
+        };
+        let denied = redis::RedisError::from((
+            redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+            "ERR",
+            "NOPERM this user has no permissions to run the 'strlen' command".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(bulk("string")),
+            Ok(RedisRawValue::Int(-1)),
+            Err(out_of_bounds()),
+            Ok(RedisRawValue::Int(100)),
+            Err(out_of_bounds()),
+            Err(denied),
+        ]);
+
+        let error = super::get_value(&mut con, b"message").await.unwrap_err();
+
+        assert!(error.contains("out of bounds"), "{error}");
+        assert!(error.contains("the value length could not be read"), "{error}");
+        assert!(error.contains("strlen"), "{error}");
+        // One rejected window, one bounded window and two length reads; the
+        // rejected window is not requested again.
+        assert_eq!(con.command_count("GETRANGE"), 2);
+        assert_eq!(con.command_count("STRLEN"), 2);
     }
 
     #[tokio::test]
@@ -9265,12 +9448,15 @@ mod tests {
 
     #[tokio::test]
     async fn scan_keys_batch_batches_type_and_ttl_metadata() {
+        // The fake connection answers a packed pipeline in the order the
+        // commands were sent, so the replies follow the interleaved order
+        // TYPE, TTL, TYPE, TTL.
         let mut con = FakeRedisConnection::new(vec![
             RedisRawValue::Int(2),
             scan_response("0", vec!["session:a", "cache:b"]),
             RedisRawValue::SimpleString("string".to_string()),
-            RedisRawValue::SimpleString("hash".to_string()),
             RedisRawValue::Int(-1),
+            RedisRawValue::SimpleString("hash".to_string()),
             RedisRawValue::Int(3600),
         ]);
 
@@ -9281,12 +9467,60 @@ mod tests {
         assert_eq!(result.keys[0].ttl, -1);
         assert_eq!(result.keys[1].key_type, "hash");
         assert_eq!(result.keys[1].ttl, 3600);
-        let type_pipeline = con.commands.iter().find(|packed| packed.contains("\r\nTYPE\r\n")).unwrap();
-        let ttl_pipeline = con.commands.iter().find(|packed| packed.contains("\r\nTTL\r\n")).unwrap();
-        assert_eq!(type_pipeline.matches("\r\nTYPE\r\n").count(), 2);
-        assert_eq!(type_pipeline.matches("\r\nTTL\r\n").count(), 0);
-        assert_eq!(ttl_pipeline.matches("\r\nTYPE\r\n").count(), 0);
-        assert_eq!(ttl_pipeline.matches("\r\nTTL\r\n").count(), 2);
+
+        // One pipeline carries the metadata of the whole batch: two TYPE and
+        // two TTL commands, interleaved in that very order.
+        let metadata_pipelines: Vec<&String> =
+            con.commands.iter().filter(|packed| packed.contains("\r\nTYPE\r\n")).collect();
+        assert_eq!(metadata_pipelines.len(), 1);
+        let packed = metadata_pipelines[0];
+        let type_offsets = command_offsets(packed, "TYPE");
+        let ttl_offsets = command_offsets(packed, "TTL");
+        assert_eq!(type_offsets.len(), 2);
+        assert_eq!(ttl_offsets.len(), 2);
+        assert!(type_offsets[0] < ttl_offsets[0]);
+        assert!(ttl_offsets[0] < type_offsets[1]);
+        assert!(type_offsets[1] < ttl_offsets[1]);
+    }
+
+    #[tokio::test]
+    async fn scan_keys_batch_splits_the_metadata_pipeline_into_bounded_chunks() {
+        let chunk = super::SCAN_METADATA_PIPELINE_CHUNK;
+        let key_count = chunk + 1;
+        let key_names: Vec<String> = (0..key_count).map(|index| format!("key:{index}")).collect();
+        let key_refs: Vec<&str> = key_names.iter().map(|name| name.as_str()).collect();
+
+        let mut responses = vec![RedisRawValue::Int(key_count as i64), scan_response("0", key_refs)];
+        // The first chunk answers with interleaved TYPE and TTL replies.
+        for _ in 0..chunk {
+            responses.push(RedisRawValue::SimpleString("string".to_string()));
+            responses.push(RedisRawValue::Int(60));
+        }
+        // The tail chunk holds the single remaining key.
+        responses.push(RedisRawValue::SimpleString("hash".to_string()));
+        responses.push(RedisRawValue::Int(30));
+
+        let mut con = FakeRedisConnection::new(responses);
+        let result = super::scan_keys_batch(&mut con, 0, "*", 1000, 1, true).await.unwrap();
+
+        assert_eq!(result.keys.len(), key_count);
+        // Every key keeps its own metadata even though the pipeline was split.
+        assert_eq!(result.keys[0].key_type, "string");
+        assert_eq!(result.keys[0].ttl, 60);
+        assert_eq!(result.keys[chunk - 1].key_type, "string");
+        assert_eq!(result.keys[chunk - 1].ttl, 60);
+        assert_eq!(result.keys[chunk].key_type, "hash");
+        assert_eq!(result.keys[chunk].ttl, 30);
+
+        // The metadata never travels in one oversized round trip: every packed
+        // command carries at most one chunk worth of TYPE and TTL commands.
+        let type_pipelines: Vec<&String> =
+            con.commands.iter().filter(|packed| packed.contains("\r\nTYPE\r\n")).collect();
+        assert_eq!(type_pipelines.len(), 2);
+        assert_eq!(command_offsets(type_pipelines[0], "TYPE").len(), chunk);
+        assert_eq!(command_offsets(type_pipelines[0], "TTL").len(), chunk);
+        assert_eq!(command_offsets(type_pipelines[1], "TYPE").len(), 1);
+        assert_eq!(command_offsets(type_pipelines[1], "TTL").len(), 1);
     }
 
     #[tokio::test]
@@ -9295,8 +9529,8 @@ mod tests {
             RedisRawValue::Int(2),
             scan_response("0", vec!["session:a", "cache:b"]),
             RedisRawValue::SimpleString("string".to_string()),
-            RedisRawValue::SimpleString("hash".to_string()),
             redis::parse_redis_value(b"-NOPERM this user has no permissions to run the 'ttl' command\r\n").unwrap(),
+            RedisRawValue::SimpleString("hash".to_string()),
             RedisRawValue::Int(3600),
         ]);
 
@@ -9307,6 +9541,29 @@ mod tests {
         assert_eq!(result.keys[0].ttl, -2);
         assert_eq!(result.keys[1].key_type, "hash");
         assert_eq!(result.keys[1].ttl, 3600);
+    }
+
+    #[tokio::test]
+    async fn scan_keys_batch_keeps_the_types_when_the_metadata_pipeline_fails_as_a_whole() {
+        // The combined TYPE/TTL pipeline is refused as a whole, for example by
+        // an ACL without the TTL permission. The types are asked for on their
+        // own, so the chunk does not lose its badges with the expiry.
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(RedisRawValue::Int(2)),
+            Ok(scan_response("0", vec!["session:a", "cache:b"])),
+            Err(noperm("ttl")),
+            Ok(RedisRawValue::SimpleString("string".to_string())),
+            Ok(RedisRawValue::SimpleString("hash".to_string())),
+        ]);
+
+        let result = super::scan_keys_batch(&mut con, 0, "*", 100, 1, true).await.unwrap();
+
+        assert_eq!(result.keys.len(), 2);
+        assert_eq!(result.keys[0].key_type, "string");
+        assert_eq!(result.keys[1].key_type, "hash");
+        // The expiry stays unknown, so the browser fills it in afterwards.
+        assert_eq!(result.keys[0].ttl, -2);
+        assert_eq!(result.keys[1].ttl, -2);
     }
 
     #[tokio::test]
@@ -9321,6 +9578,111 @@ mod tests {
         assert_eq!(result.keys[0].ttl, -2);
         assert_eq!(con.command_count("TYPE"), 0);
         assert_eq!(con.command_count("TTL"), 0);
+    }
+
+    #[tokio::test]
+    async fn key_metadata_batch_reads_type_and_ttl_for_the_given_keys() {
+        // The fake connection answers a packed pipeline in the order the
+        // commands were sent, so the replies follow the interleaved order
+        // TYPE, TTL, TYPE, TTL.
+        let mut con = FakeRedisConnection::new(vec![
+            RedisRawValue::SimpleString("string".to_string()),
+            RedisRawValue::Int(3600),
+            RedisRawValue::SimpleString("hash".to_string()),
+            RedisRawValue::Int(-1),
+        ]);
+
+        let result = super::key_metadata_batch(&mut con, &[b"session:a".to_vec(), b"cache:b".to_vec()]).await.unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].key_raw, super::redis_key_bytes_to_raw(b"session:a"));
+        assert_eq!(result[0].key_type, "string");
+        assert_eq!(result[0].ttl, 3600);
+        assert_eq!(result[1].key_type, "hash");
+        assert_eq!(result[1].ttl, -1);
+        // The whole batch travels in one pipeline: one TYPE and one TTL per key.
+        assert_eq!(con.commands.len(), 1);
+        let packed = &con.commands[0];
+        let type_offsets = command_offsets(packed, "TYPE");
+        let ttl_offsets = command_offsets(packed, "TTL");
+        assert_eq!(type_offsets.len(), 2);
+        assert_eq!(ttl_offsets.len(), 2);
+        assert!(type_offsets[0] < ttl_offsets[0]);
+        assert!(ttl_offsets[0] < type_offsets[1]);
+        assert!(type_offsets[1] < ttl_offsets[1]);
+    }
+
+    #[tokio::test]
+    async fn key_metadata_batch_splits_the_metadata_pipeline_into_bounded_chunks() {
+        let chunk = super::SCAN_METADATA_PIPELINE_CHUNK;
+        let key_count = chunk + 1;
+        let keys: Vec<Vec<u8>> = (0..key_count).map(|index| format!("key:{index}").into_bytes()).collect();
+
+        // Every key answers with its own type and its own expiry, so a reply
+        // that drifted to another key would be visible in the result.
+        let mut responses = Vec::with_capacity(key_count * 2);
+        for index in 0..key_count {
+            let key_type = if index % 2 == 0 { "string" } else { "hash" };
+            responses.push(RedisRawValue::SimpleString(key_type.to_string()));
+            responses.push(RedisRawValue::Int(index as i64));
+        }
+
+        let mut con = FakeRedisConnection::new(responses);
+        let result = super::key_metadata_batch(&mut con, &keys).await.unwrap();
+
+        assert_eq!(result.len(), key_count);
+        for (index, metadata) in result.iter().enumerate() {
+            let expected_type = if index % 2 == 0 { "string" } else { "hash" };
+            assert_eq!(metadata.key_type, expected_type);
+            assert_eq!(metadata.ttl, index as i64);
+        }
+
+        // The metadata never travels in one oversized round trip: every packed
+        // command carries at most one chunk worth of TYPE and TTL commands.
+        let type_pipelines: Vec<&String> =
+            con.commands.iter().filter(|packed| packed.contains("\r\nTYPE\r\n")).collect();
+        assert_eq!(type_pipelines.len(), 2);
+        assert_eq!(command_offsets(type_pipelines[0], "TYPE").len(), chunk);
+        assert_eq!(command_offsets(type_pipelines[0], "TTL").len(), chunk);
+        assert_eq!(command_offsets(type_pipelines[1], "TYPE").len(), 1);
+        assert_eq!(command_offsets(type_pipelines[1], "TTL").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn key_metadata_batch_answers_unknown_type_when_the_reply_cannot_be_parsed() {
+        // A TYPE reply that is not a string cannot be read as a type: the key
+        // stays listed with the same "unknown" badge the scan path uses.
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Nil, RedisRawValue::Int(60)]);
+
+        let result = super::key_metadata_batch(&mut con, &[b"session:a".to_vec()]).await.unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].key_type, "unknown");
+        assert_eq!(result[0].ttl, 60);
+    }
+
+    #[tokio::test]
+    async fn key_metadata_batch_answers_unknown_expiry_for_a_vanished_key() {
+        // "none" is a readable answer: the key does not exist any more, which
+        // is not the same as an answer that cannot be parsed.
+        let mut con =
+            FakeRedisConnection::new(vec![RedisRawValue::SimpleString("none".to_string()), RedisRawValue::Int(-2)]);
+
+        let result = super::key_metadata_batch(&mut con, &[b"gone".to_vec()]).await.unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].key_type, "none");
+        assert_eq!(result[0].ttl, -2);
+    }
+
+    #[tokio::test]
+    async fn key_metadata_batch_without_keys_issues_no_command() {
+        let mut con = FakeRedisConnection::new(vec![]);
+
+        let result = super::key_metadata_batch(&mut con, &[]).await.unwrap();
+
+        assert!(result.is_empty());
+        assert!(con.commands.is_empty());
     }
 
     #[tokio::test]
@@ -11898,6 +12260,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

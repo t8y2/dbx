@@ -3116,8 +3116,8 @@ export async function saveConnections(configs: ConnectionConfig[], removedIds: s
   return invoke("save_connections", { configs, removedIds });
 }
 
-export async function loadConnections(): Promise<ConnectionConfig[]> {
-  return invoke("load_connections");
+export async function loadConnections(legacySidebarShowUserAdmin?: boolean): Promise<ConnectionConfig[]> {
+  return legacySidebarShowUserAdmin === undefined ? invoke("load_connections") : invoke("load_connections", { legacySidebarShowUserAdmin });
 }
 
 export async function loadTunnelProfiles(): Promise<TunnelProfile[]> {
@@ -3763,6 +3763,13 @@ export interface RedisKeyInfo {
   value_preview?: string;
 }
 
+/** TYPE + TTL of one key, resolved for an explicit list of keys. */
+export interface RedisKeyMetadata {
+  key_raw: string;
+  key_type?: string;
+  ttl: number;
+}
+
 export interface RedisDatabaseInfo {
   db: number;
   /** 该库的键数量；服务端无法给出可信数量时（如 kvrocks 未执行过 DBSIZE SCAN）缺省。 */
@@ -3937,6 +3944,14 @@ export async function redisScanKeysBatch(connectionId: string, db: number, curso
     count,
     maxIterations,
     includeTypes,
+  });
+}
+
+export async function redisKeyMetadataBatch(connectionId: string, db: number, keyRaws: string[]): Promise<RedisKeyMetadata[]> {
+  return invoke("redis_key_metadata_batch", {
+    connectionId,
+    db,
+    keyRaws,
   });
 }
 

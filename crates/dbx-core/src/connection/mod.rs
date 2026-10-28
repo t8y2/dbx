@@ -325,6 +325,8 @@ pub enum TxnConnection {
 }
 
 pub struct TransactionSession {
+    /// Immutable interpretation from the pool that owns the pinned connection.
+    pub mysql_data_charset: Option<db::mysql::MySqlDataCharset>,
     pub sqlserver: Option<crate::query::sqlserver_manual_transaction::SessionMetadata>,
     pub connection: Arc<Mutex<TxnConnection>>,
     pub pool_key: String,
@@ -6513,13 +6515,22 @@ impl AppState {
         let pool_key = self.get_or_create_pool(connection_id, database).await?;
         enum IdentifierQuoteSource {
             NativeGaussdb(deadpool_postgres::Pool),
+            NativeOpenGauss(deadpool_postgres::Pool),
             Agent(Arc<db::agent_driver::PooledAgentClient>),
             ExternalDriver { config: Arc<ConnectionConfig>, session: Arc<PluginDriverSession> },
         }
         let source = {
             match self.pool_handle(&pool_key).await.as_ref() {
+                // GaussDB and openGauss take their identifier quote from the
+                // database compatibility mode (`pg_database.datcompatibility`):
+                // MySQL-compatible databases use backticks, while Oracle and
+                // PostgreSQL modes use double quotes. Both share the native
+                // PostgreSQL pool.
                 Some(PoolKind::Postgres(pool)) if config.db_type == DatabaseType::Gaussdb => {
                     Some(IdentifierQuoteSource::NativeGaussdb(pool.clone()))
+                }
+                Some(PoolKind::Postgres(pool)) if config.db_type == DatabaseType::OpenGauss => {
+                    Some(IdentifierQuoteSource::NativeOpenGauss(pool.clone()))
                 }
                 Some(PoolKind::Agent(client)) if database_capabilities::is_agent_type(&config.db_type) => {
                     Some(IdentifierQuoteSource::Agent(client.clone()))
@@ -6532,6 +6543,9 @@ impl AppState {
         };
         match source {
             Some(IdentifierQuoteSource::NativeGaussdb(pool)) => Ok(db::postgres::gaussdb_identifier_quote(&pool).await),
+            Some(IdentifierQuoteSource::NativeOpenGauss(pool)) => {
+                Ok(db::postgres::opengauss_identifier_quote(&pool).await)
+            }
             Some(IdentifierQuoteSource::Agent(client)) => {
                 let mut agent = client.lock().await;
                 let info = agent.connection_info(Some(db::connection_timeout())).await?;
@@ -8177,7 +8191,7 @@ fn is_manual_transaction_pool_key(pool_key: &str) -> bool {
 /// `conn` from matching a `conn-2` pool. Used by
 /// [`AppState::is_connection_open`] and [`config_for_pool_key`];
 /// `drain_connection_pools` filters on the same convention.
-fn pool_key_belongs_to_connection(pool_key: &str, connection_id: &str) -> bool {
+pub(crate) fn pool_key_belongs_to_connection(pool_key: &str, connection_id: &str) -> bool {
     pool_key.strip_prefix(connection_id).is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
 }
 
@@ -8237,6 +8251,12 @@ pub fn connection_configs_pool_equivalent(a: &ConnectionConfig, b: &ConnectionCo
     // established database session.
     a.sidebar_auto_load_all_tables = false;
     b.sidebar_auto_load_all_tables = false;
+    a.show_database_links = None;
+    b.show_database_links = None;
+    a.show_native_jobs = None;
+    b.show_native_jobs = None;
+    a.show_user_admin = None;
+    b.show_user_admin = None;
     // A default browser filter does not change the established Redis session.
     a.redis_key_filter = None;
     b.redis_key_filter = None;
@@ -8266,6 +8286,9 @@ pub fn connection_configs_session_credentials_compatible(a: &ConnectionConfig, b
         config.visible_schemas = None;
         config.show_system_schemas = false;
         config.sidebar_auto_load_all_tables = false;
+        config.show_database_links = None;
+        config.show_native_jobs = None;
+        config.show_user_admin = None;
         config.color = None;
         config.docs_notes_path = None;
         config.connect_timeout_secs = 0;
@@ -8709,6 +8732,12 @@ fn native_postgres_url_config(config: &ConnectionConfig) -> Option<ConnectionCon
 }
 
 fn validate_connection_url_params(config: &ConnectionConfig) -> Result<(), String> {
+    db::mysql::data_charset_for_config(config)?;
+    if matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
+        && db::mysql::data_charset_from_params(config.url_params.as_deref().unwrap_or(""))?.is_some()
+    {
+        return Err("dataCharset interpretation is supported only by the native MySQL connection type".into());
+    }
     let normalized = native_postgres_url_config(config);
     normalized.as_ref().unwrap_or(config).validate_native_url_params()
 }
@@ -9047,6 +9076,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -9550,6 +9581,7 @@ mod tests {
             deferred_large_value_cells: Vec::new(),
             column_sortables: vec![true],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!("M")]],
             affected_rows: 0,
@@ -11940,6 +11972,38 @@ sleep 30
     }
 
     #[test]
+    fn mysql_data_charset_rejects_compatible_native_products_before_connect() {
+        for db_type in [DatabaseType::Doris, DatabaseType::StarRocks, DatabaseType::ManticoreSearch] {
+            let mut config = mysql_config(None);
+            config.db_type = db_type;
+            for params in [
+                "dataCharset=GBK",
+                "charset=utf8mb4& dataCharset=GBK",
+                "  dataCharset=GBK  ",
+                "%64ataCharset=GBK",
+                "dataCharset+=GBK",
+                "dataCharset%20=GBK",
+                "%64ataCharset=%47BK",
+                "%64ataCharset=",
+                "%64ataCharset=invalid",
+                "%64ataCharset",
+            ] {
+                config.url_params = Some(params.into());
+                assert!(validate_connection_url_params(&config).is_err(), "{db_type:?}: {params}");
+            }
+            config.url_params = None;
+            validate_connection_url_params(&config).unwrap();
+        }
+        let mut config = mysql_config(None);
+        config.url_params = Some("%64ataCharset=%47BK".into());
+        validate_connection_url_params(&config).unwrap();
+        // Firebird owns its own unrelated option; this gate must not parse it.
+        config.db_type = DatabaseType::Firebird;
+        config.url_params = Some("dataCharset=WIN1252".into());
+        validate_connection_url_params(&config).unwrap();
+    }
+
+    #[test]
     fn postgres_url_validation_rejects_invalid_stringtype_before_connect() {
         let mut config = mysql_config(Some("postgres"));
         config.db_type = DatabaseType::Postgres;
@@ -12723,6 +12787,8 @@ sleep 30
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             database_info: None,
         }
     }
@@ -15381,6 +15447,43 @@ for line in sys.stdin:
             url_params.as_deref(),
         ))
         .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable openGauss instance via environment variables"]
+    async fn live_opengauss_identifier_quote_matches_compatibility_mode() {
+        let host = std::env::var("DBX_TEST_OPENGAUSS_HOST").expect("DBX_TEST_OPENGAUSS_HOST not set");
+        let port = std::env::var("DBX_TEST_OPENGAUSS_PORT")
+            .expect("DBX_TEST_OPENGAUSS_PORT not set")
+            .parse::<u16>()
+            .expect("DBX_TEST_OPENGAUSS_PORT should be a u16");
+        let username = std::env::var("DBX_TEST_OPENGAUSS_USER").expect("DBX_TEST_OPENGAUSS_USER not set");
+        let password = std::env::var("DBX_TEST_OPENGAUSS_PASSWORD").expect("DBX_TEST_OPENGAUSS_PASSWORD not set");
+        let database = std::env::var("DBX_TEST_OPENGAUSS_DATABASE").unwrap_or_else(|_| "postgres".to_string());
+
+        let mut config = live_postgres_like_config(DatabaseType::OpenGauss, &host, port, &username, &password, None);
+        config.id = "opengauss-quote-live".to_string();
+        config.database = Some(database.clone());
+
+        let (state, dir) = test_app_state().await;
+        state.configs.write().await.insert(config.id.clone(), config);
+        let pool_key = state.get_or_create_pool("opengauss-quote-live", Some(&database)).await.unwrap();
+        let pool = match state.pool_handle(&pool_key).await.expect("openGauss pool should be created") {
+            PoolKind::Postgres(pool) => pool,
+            _ => panic!("openGauss should use the PostgreSQL pool path"),
+        };
+
+        let mode = db::postgres::opengauss_compatibility_mode(&pool).await.unwrap();
+        let quote = state.connection_identifier_quote("opengauss-quote-live", Some(&database)).await.unwrap();
+        println!("[live] database = {database}, compatibility mode = {mode:?}, identifier quote = {quote:?}");
+        assert_eq!(
+            quote.as_deref(),
+            mode.as_deref().and_then(db::postgres::gaussdb_identifier_quote_for_compatibility_mode),
+            "identifier quote should follow the database compatibility mode"
+        );
+
+        pool.close();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

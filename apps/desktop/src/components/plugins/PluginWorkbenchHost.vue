@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { AlertTriangle, Loader2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
@@ -40,10 +41,11 @@ const props = withDefaults(
     plugin: InstalledPlugin;
     contribution: PluginUiContribution;
     context?: PluginWorkbenchContext;
+    active?: boolean;
     setTitle?: (title: string | null) => Promise<void> | void;
     getTitle?: () => Promise<string> | string;
   }>(),
-  { context: () => ({}) },
+  { context: () => ({}), active: true },
 );
 
 const emit = defineEmits<{
@@ -601,7 +603,7 @@ function createBridge() {
               databaseType: connection.db_type,
               connected,
               isConnected: connected,
-              readOnly: connection.read_only === true,
+              readOnly: mysqlDataCharsetEnabled(connection) || connection.read_only === true,
               database: connection.database,
               schema: connection.default_schema,
               providerId: connection.plugin_connection_provider ?? "",
@@ -626,7 +628,7 @@ function createBridge() {
               isConnected: connected,
               providerId: connection.plugin_connection_provider ?? "",
               connectionType: connection.plugin_connection_type,
-              readOnly: connection.read_only === true,
+              readOnly: mysqlDataCharsetEnabled(connection) || connection.read_only === true,
               database: connection.database,
               schema: connection.default_schema,
               // #193b — dock/tab titles bound to the connection (dock first), so plugins can label session rows after renamed terminals.
@@ -648,7 +650,7 @@ function createBridge() {
             databaseType: connection.db_type,
             connected,
             isConnected: connected,
-            readOnly: connection.read_only === true,
+            readOnly: mysqlDataCharsetEnabled(connection) || connection.read_only === true,
             database: connection.database,
             schema: connection.default_schema,
             providerId: connection.plugin_connection_provider ?? "",
@@ -898,6 +900,20 @@ watch(
   () => bridge?.updateTheme(currentBridgeTheme()),
 );
 
+function notifyLayout(): void {
+  bridge?.notifyLayout();
+}
+
+watch(
+  () => props.active,
+  async (active) => {
+    if (active) {
+      await nextTick();
+      notifyLayout();
+    }
+  },
+);
+
 /** §8.3/§7.4 two-phase close: parents await this before removing the entry so
  * the plugin can release its workbench scope (PTY sessions, subscriptions);
  * the bridge bounds the wait and resolves false on legacy/hung plugins. */
@@ -905,7 +921,7 @@ function requestClose(): Promise<boolean> {
   return bridge ? bridge.requestWorkbenchClose() : Promise.resolve(false);
 }
 
-defineExpose({ requestClose });
+defineExpose({ requestClose, notifyLayout });
 
 onBeforeUnmount(() => {
   disposed = true;

@@ -67,7 +67,7 @@ function installBackend(initialConnections: ConnectionConfig[], initialLayout: S
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
-    if (url === "/api/connection/list") return json(state.connections);
+    if (url.split("?")[0] === "/api/connection/list") return json(state.connections);
     if (url === "/api/layout/sidebar") {
       if (init?.method === "POST") {
         state.layout = JSON.parse(String(init.body ?? "null"));

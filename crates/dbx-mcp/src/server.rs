@@ -6246,6 +6246,7 @@ fn empty_query_result() -> dbx_core::db::QueryResult {
         deferred_large_value_cells: Vec::new(),
         column_sortables: Vec::new(),
         spatial_columns: Vec::new(),
+        raw_key_cells: Vec::new(),
         spatial_values: Vec::new(),
         rows: Vec::new(),
         affected_rows: 0,
@@ -6594,9 +6595,14 @@ fn mcp_permissions(
     connection: &dbx_core::models::connection::ConnectionConfig,
     policy: &McpGlobalPolicy,
 ) -> dbx_core::agent_tools::AgentSqlPermissions {
+    // Invalid compatibility configuration must not advertise write permission.
+    let compatibility_read_only = dbx_core::query::mysql_data_charset_policy::enabled(connection).unwrap_or(true);
     dbx_core::agent_tools::AgentSqlPermissions {
-        allow_writes: !policy.read_only && !connection.read_only,
-        allow_dangerous: !policy.read_only && !connection.read_only && policy.allow_dangerous_sql,
+        allow_writes: !policy.read_only && !connection.read_only && !compatibility_read_only,
+        allow_dangerous: !policy.read_only
+            && !connection.read_only
+            && !compatibility_read_only
+            && policy.allow_dangerous_sql,
         confirmed_write_sql: mcp_confirmed_write_sql_from_env(),
     }
 }
@@ -7066,6 +7072,12 @@ fn validate_sql_policy(
     sql: &str,
     allow_database_switch: bool,
 ) -> Result<dbx_core::agent_tools::AgentSqlPermissions, CallToolResult> {
+    if dbx_core::query::mysql_data_charset_policy::enabled(connection)
+        .map_err(|error| tool_error("MYSQL_DATA_CHARSET_CONFIG_INVALID", error))?
+    {
+        dbx_core::query::mysql_data_charset_policy::check_sql(sql, &connection.name)
+            .map_err(|error| tool_error("MYSQL_DATA_CHARSET_SQL_BLOCKED", error))?;
+    }
     if !allow_database_switch && mcp_sql_has_forbidden_database_switch(sql, connection.db_type) {
         return Err(tool_error(
             "SQL_BLOCKED",
@@ -7586,6 +7598,7 @@ mod tests {
                     deferred_large_value_cells: Vec::new(),
                     column_sortables: Vec::new(),
                     spatial_columns: Vec::new(),
+                    raw_key_cells: Vec::new(),
                     spatial_values: Vec::new(),
                     rows: Vec::new(),
                     affected_rows: 0,
@@ -8316,6 +8329,7 @@ mod tests {
                     deferred_large_value_cells: Vec::new(),
                     column_sortables: vec![],
                     spatial_columns: vec![],
+                    raw_key_cells: Vec::new(),
                     spatial_values: vec![],
                     rows: vec![],
                     affected_rows: 0,
@@ -11447,6 +11461,25 @@ mod tests {
         ConnectionSelector { connection_id: Some(id.to_string()), connection_name: None }
     }
 
+    #[test]
+    fn data_charset_policy_blocks_writes_and_session_changes_despite_mcp_permissions() {
+        let mut conn = connection("mysql", "mysql", "mysql", "app");
+        conn.url_params = Some("dataCharset=GBK".to_string());
+        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, ..Default::default() };
+        assert!(!conn.read_only);
+        let permissions = mcp_permissions(&conn, &policy);
+        assert!(!permissions.allow_writes);
+        assert!(!permissions.allow_dangerous);
+        assert!(validate_sql_policy(&conn, &policy, "app", "SELECT 1", true).is_ok());
+        for sql in ["UPDATE t SET value=1", "SET NAMES latin1", "SET @v=1", "SELECT 1; UPDATE t SET value=1"] {
+            let error = validate_sql_policy(&conn, &policy, "app", sql, true).unwrap_err();
+            assert!(result_text(&error).contains("MYSQL_DATA_CHARSET"));
+        }
+        conn.url_params = None;
+        assert!(mcp_permissions(&conn, &policy).allow_writes);
+        assert!(validate_sql_policy(&conn, &policy, "app", "UPDATE t SET value=1", true).is_ok());
+    }
+
     #[tokio::test]
     async fn opted_in_session_exposes_transaction_tools_and_structured_state() {
         let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, ..Default::default() };
@@ -13016,6 +13049,7 @@ mod tests {
                 deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![],
                 affected_rows: 0,
@@ -13050,6 +13084,7 @@ mod tests {
                 deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![],
                 affected_rows: 2,
@@ -13085,6 +13120,7 @@ mod tests {
                 deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![vec![serde_json::Value::String(value)]],
                 affected_rows: 1,

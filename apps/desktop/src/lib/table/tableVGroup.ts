@@ -66,19 +66,22 @@ function matchesTableNamePattern(name: string, pattern: string): boolean {
   return previous[value.length]!;
 }
 
+export function matchesTableNameFilter(name: string, filter?: TableNameFilter): boolean {
+  const include = filter?.includePatterns.filter((pattern) => pattern.trim()) ?? [];
+  const exclude = filter?.excludePatterns.filter((pattern) => pattern.trim()) ?? [];
+  return (!include.length || include.some((pattern) => matchesTableNamePattern(name, pattern))) && !exclude.some((pattern) => matchesTableNamePattern(name, pattern));
+}
+
 /** Only real group members need supplementary metadata, never ungrouped order entries. */
 export function missingTableVGroupMemberNames(layout: TableVGroupLayout | null | undefined, loadedNames: ReadonlySet<string>, filter?: TableNameFilter): string[] {
   if (!layout || !tableVGroupsEnabled(layout)) return [];
-  const include = filter?.includePatterns.filter((pattern) => pattern.trim()) ?? [];
-  const exclude = filter?.excludePatterns.filter((pattern) => pattern.trim()) ?? [];
   const names = new Set<string>();
   const visit = (entries: TableVGroupOrderEntry[], inGroup: boolean) => {
     for (const entry of entries) {
       if (entry.type === "group") {
         visit(entry.children ?? [], true);
       } else if (inGroup && (!entry.rowType || entry.rowType === "table") && !loadedNames.has(entry.name)) {
-        if (include.length && !include.some((pattern) => matchesTableNamePattern(entry.name, pattern))) continue;
-        if (exclude.some((pattern) => matchesTableNamePattern(entry.name, pattern))) continue;
+        if (!matchesTableNameFilter(entry.name, filter)) continue;
         names.add(entry.name);
       }
     }

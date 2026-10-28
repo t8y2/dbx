@@ -9,7 +9,7 @@ import type { ConnectionConfig, IndexInfo, ObjectInfo } from "@/types/database";
 const mocks = vi.hoisted(() => ({ listObjects: vi.fn(), listTables: vi.fn(), listIndexes: vi.fn(), getColumns: vi.fn(), getTableDdl: vi.fn(), openTableStructure: vi.fn(), executeQuery: vi.fn(), executeBatch: vi.fn(), toolbarTier: 0 }));
 const ddlSettings = vi.hoisted(() => ({ separateDdlIndexes: false, includeDdlStorage: true, compactDdlSql: false, sidebarMenuLayout: "grouped" }));
 vi.mock("@/lib/backend/api", () => ({ ...mocks, listSchemas: vi.fn().mockResolvedValue([" Mixed "]), listObjectStatistics: vi.fn().mockResolvedValue([]), loadSchemaCache: vi.fn().mockResolvedValue(null), saveSchemaCache: vi.fn(), deleteSchemaCachePrefix: vi.fn() }));
-vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ getConfig: () => connection, ensureConnected: vi.fn().mockResolvedValue(undefined), orderByPinnedTreeNodes: (rows: unknown[]) => rows }) }));
+vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ getConfig: () => connection, ensureConnected: vi.fn().mockResolvedValue(undefined), tableNameFilterForScope: () => undefined, orderByPinnedTreeNodes: (rows: unknown[]) => rows }) }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ openTableStructure: mocks.openTableStructure }) }));
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({

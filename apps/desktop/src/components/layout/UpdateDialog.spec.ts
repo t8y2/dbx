@@ -234,6 +234,40 @@ describe("UpdateDialog active task guard", () => {
   });
 });
 
+describe("UpdateDialog prepared package without a remote update (#13562)", () => {
+  const upToDateInfo = {
+    current_version: "0.5.61",
+    latest_version: "0.5.61",
+    update_available: false,
+    portable_mode: false,
+    manual_update_only: false,
+    release_name: "DBX v0.5.61",
+    release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.61",
+    release_notes: "",
+  };
+
+  it("keeps the install action reachable when the remote reports no update", async () => {
+    const installDownloaded = vi.fn(async () => {});
+    await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 }, installDownloaded, { updateInfo: upToDateInfo });
+
+    const button = installDownloadedButton();
+    expect(button).toBeDefined();
+    expect(button?.disabled).toBe(false);
+    button?.click();
+    await flushDialog();
+
+    expect(installDownloaded).toHaveBeenCalledOnce();
+  });
+
+  it("labels the prepared package with its own version", async () => {
+    await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 }, undefined, { updateInfo: upToDateInfo, updateDownloadedVersion: "0.5.62" });
+
+    expect(document.body.textContent).toContain("v0.5.62 is downloaded");
+    expect(document.body.textContent).not.toContain("DBX is up to date");
+    expect(document.body.textContent).not.toContain("v0.5.61 is downloaded");
+  });
+});
+
 describe("UpdateDialog download progress", () => {
   it("keeps the downloading button at a fixed width as progress changes", async () => {
     const { state } = await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: 9 });

@@ -1984,6 +1984,8 @@ export interface SqlCompletionProviderInput {
   quoteIdentifiers?: boolean;
   functionCompletionIncludeParams?: boolean;
   sequenceCompletionEnabled?: boolean;
+  /** Join built-in snippet bodies into one line instead of their multi-line template. */
+  snippetSingleLine?: boolean;
 }
 
 export function buildSqlCompletionItems(
@@ -2008,6 +2010,8 @@ export function buildSqlCompletionItems(
     quoteIdentifiers?: boolean;
     functionCompletionIncludeParams?: boolean;
     sequenceCompletionEnabled?: boolean;
+    /** Join built-in snippet bodies into one line instead of their multi-line template. */
+    snippetSingleLine?: boolean;
   },
 ): SqlCompletionItem[] {
   if (isSqlCompletionSuppressedContext(sql, cursor, input)) return [];
@@ -2061,6 +2065,12 @@ class SqlCompletionProvider {
     this.columnsByTable = ensureReferencedTableColumns(input.columnsByTable, context.referencedTables);
   }
 
+  // Built-in templates ship multi-line for readability; the single-line
+  // preference joins them so accepting a snippet inserts no line breaks.
+  private snippetSingleLine(): boolean {
+    return this.input.snippetSingleLine !== false;
+  }
+
   build(): SqlCompletionItem[] {
     const { context } = this;
     const pendingJoinKeyword = isPendingJoinKeywordContext(context);
@@ -2087,6 +2097,7 @@ class SqlCompletionProvider {
       snippets.filter((snippet) => !shouldFormatBuiltinSnippet(snippet)),
       this.input.keywordCase,
       this.databaseType,
+      this.snippetSingleLine(),
     );
     if (context.preferredValueKeywords?.length) {
       return dedupeAndSort([...customSnippetItems, ...buildPreferredKeywordItems(context.prefix, context.preferredValueKeywords, this.input.keywordCase)], context);
@@ -2099,7 +2110,7 @@ class SqlCompletionProvider {
     this.items.push(...buildLocalVariableItems(context));
     if (!pendingJoinKeyword && !context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions) {
       if (!preferReferencedColumns && !context.dataTypeContext) {
-        this.items.push(...buildSnippetItems(context.prefix, snippets.filter(shouldFormatBuiltinSnippet), this.input.keywordCase, this.databaseType));
+        this.items.push(...buildSnippetItems(context.prefix, snippets.filter(shouldFormatBuiltinSnippet), this.input.keywordCase, this.databaseType, this.snippetSingleLine()));
       }
       if ((!preferReferencedColumns && !context.dataTypeContext) || context.suggestRoutines) {
         const functionItems = context.dataTypeContext
@@ -2119,6 +2130,7 @@ class SqlCompletionProvider {
           MANTICORESEARCH_SQL_SNIPPETS.filter((snippet) => snippet.id === "builtin-manticore-call-pq"),
           this.input.keywordCase,
           this.databaseType,
+          this.snippetSingleLine(),
         ),
       );
     }
@@ -6540,11 +6552,24 @@ function singularTableName(name: string): string {
   return lower;
 }
 
-export function buildSnippetItemsForTest(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase, databaseType?: DatabaseType): SqlCompletionItem[] {
-  return buildSnippetItems(prefix, snippets, keywordCase, databaseType);
+export function buildSnippetItemsForTest(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase, databaseType?: DatabaseType, singleLine = true): SqlCompletionItem[] {
+  return buildSnippetItems(prefix, snippets, keywordCase, databaseType, singleLine);
 }
 
-function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase, databaseType?: DatabaseType): SqlCompletionItem[] {
+/**
+ * Collapses an authored snippet template onto one line. Only the line breaks
+ * and the indentation they introduce are rewritten, so placeholders and any
+ * literal text inside the template keep their exact spelling.
+ */
+export function collapseSnippetBodyToSingleLine(body: string): string {
+  return body
+    .replace(/\s*\r?\n\s*/g, " ")
+    .replace(/\(\s+/g, "(")
+    .replace(/\s+\)/g, ")")
+    .trim();
+}
+
+function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase, databaseType?: DatabaseType, singleLine = true): SqlCompletionItem[] {
   if (!prefix) return [];
   return snippets
     .filter((snippet) => {
@@ -6565,8 +6590,12 @@ function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?:
       // Placeholder replacement runs on the original (UPPER-case) body first,
       // then keyword casing is applied to both variants uniformly.
       const resolvedBody = resolveSqlSnippetBodyForDatabase(snippet, databaseType);
-      const body = applyBuiltinSnippetKeywordCase(snippet, resolvedBody, keywordCase);
-      const apply = applyBuiltinSnippetKeywordCase(snippet, applyBuiltinSnippetPlaceholders(snippet, resolvedBody), keywordCase);
+      // Custom snippets are always inserted exactly as authored; only built-in
+      // templates follow the single-line preference.
+      const collapse = singleLine && shouldFormatBuiltinSnippet(snippet);
+      const collapseIfNeeded = (value: string) => (collapse ? collapseSnippetBodyToSingleLine(value) : value);
+      const body = collapseIfNeeded(applyBuiltinSnippetKeywordCase(snippet, resolvedBody, keywordCase));
+      const apply = collapseIfNeeded(applyBuiltinSnippetKeywordCase(snippet, applyBuiltinSnippetPlaceholders(snippet, resolvedBody), keywordCase));
       return {
         label: snippet.label,
         filterText: snippet.prefix,

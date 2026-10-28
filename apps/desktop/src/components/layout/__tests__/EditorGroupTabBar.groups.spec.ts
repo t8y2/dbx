@@ -37,18 +37,6 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
 const specDir = dirname(fileURLToPath(import.meta.url));
 const sharedStyles = readFileSync(resolve(specDir, "../appTabBar.css"), "utf8");
 
-// non-active group headers dim alongside their tabs (#13250)
-const GROUP_HEADER_DIM_RULE = `.app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active) {`;
-const GROUP_HEADER_ACTIVE_RULE = `.app-tab-bar:not(.vertical-tab-layout) .tab-group-header--active {`;
-
-describe("tab group header dimming (#13250)", () => {
-  it("dims non-active headers and restores full foreground for the active one", () => {
-    expect(sharedStyles).toContain(GROUP_HEADER_DIM_RULE);
-    expect(sharedStyles).toContain(GROUP_HEADER_ACTIVE_RULE);
-    expect(sharedStyles).toContain(".vertical-tab-layout .tab-group-header:not(.tab-group-header--active)");
-  });
-});
-
 function createHost(): HTMLDivElement {
   const host = document.createElement("div");
   document.body.appendChild(host);

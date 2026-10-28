@@ -97,6 +97,7 @@ import {
   supportsIdleTimeout,
 } from "@/lib/connection/timeoutLimits";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
+import { ORACLE_LEGACY_CHARSETS, oracleLegacyCharset, withOracleLegacyCharset } from "@/lib/connection/oracleLegacyCharset";
 import { applyConnectionDeepLinkUpdate, resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
 import {
   connectionDeepLinkServiceHydrationValue,
@@ -3637,6 +3638,13 @@ function persistOracleOciClientPath() {
  * global default for reuse.
  */
 const OCI_NLS_LANG_FOLLOW_GLOBAL = "__follow_global__";
+const ORACLE_LEGACY_CHARSET_DISABLED = "__disabled__";
+const oracleLegacyCharsetSelection = computed(() => oracleLegacyCharset(form.value.url_params) || ORACLE_LEGACY_CHARSET_DISABLED);
+function onOracleLegacyCharsetSelected(value: unknown) {
+  const charset = typeof value === "string" && value !== ORACLE_LEGACY_CHARSET_DISABLED ? value : "";
+  form.value.url_params = withOracleLegacyCharset(form.value.url_params, charset);
+  resetTestState();
+}
 const ORACLE_NLS_LANG_OPTIONS = [
   "AMERICAN_AMERICA.AL32UTF8",
   "AMERICAN_AMERICA.UTF8",
@@ -9587,6 +9595,22 @@ function openExternalUrl(url: string) {
                       <div class="col-span-3 flex gap-2">
                         <Button size="sm" :variant="form.driver_profile !== 'oci' ? 'default' : 'outline'" @click="switchOracleDriverMode('thin')"> Thin </Button>
                         <Button v-if="oracleOciDriverSelectable" size="sm" :variant="form.driver_profile === 'oci' ? 'default' : 'outline'" @click="switchOracleDriverMode('oci')"> OCI </Button>
+                      </div>
+                    </div>
+
+                    <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.oracleLegacyCharset") }}</Label>
+                      <div class="col-span-3 space-y-1">
+                        <Select :model-value="oracleLegacyCharsetSelection" @update:model-value="onOracleLegacyCharsetSelected">
+                          <SelectTrigger :aria-label="t('connection.oracleLegacyCharset')">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem :value="ORACLE_LEGACY_CHARSET_DISABLED">{{ t("connection.oracleLegacyCharsetDisabled") }}</SelectItem>
+                            <SelectItem v-for="charset in ORACLE_LEGACY_CHARSETS" :key="charset" :value="charset">{{ charset }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p class="text-xs text-muted-foreground">{{ t("connection.oracleLegacyCharsetHint") }}</p>
                       </div>
                     </div>
 

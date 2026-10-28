@@ -1389,7 +1389,7 @@ export default withEnglishFallback({
     oracleOciTnsAdminSavedGlobal: "已保存为全局默认：{value}",
     oracleOciTnsAdminSaveGlobalEmpty: "请先填写要保存的 TNS_ADMIN 目录",
     oracleOciNlsLangSaveGlobalEmpty: "请先选择要保存的 NLS_LANG",
-    oracleOciNlsLangHint: "连接级 OCI 客户端字符集（NLS_LANG）：填写后将为此连接启用独立 agent 进程；数据库为 UTF-8 时建议设为 AL32UTF8，避免中文乱码。",
+    oracleOciNlsLangHint: "連線級 OCI 環境設定。資料傳輸固定使用 UTF-8，NLS_LANG 的字元集部分不會改變中文解碼。US7ASCII 舊庫請選 Thin 並指定實際編碼。",
     oracleTnsAdminPlaceholder: "包含 tnsnames.ora 的目錄",
     oracleTnsAdminBrowse: "選擇 tnsnames.ora",
     oracleTnsPathHint: "此路徑由 DBX 後端/Oracle Agent 讀取。桌面版填寫本機路徑，Web 和 Docker 部署填寫伺服器路徑。",

@@ -929,7 +929,7 @@ export default withEnglishFallback({
     oracleOciTnsAdminSavedGlobal: "Disimpan sebagai default global: {value}",
     oracleOciTnsAdminSaveGlobalEmpty: "Masukkan direktori TNS_ADMIN untuk disimpan terlebih dahulu",
     oracleOciNlsLangSaveGlobalEmpty: "Pilih NLS_LANG untuk disimpan terlebih dahulu",
-    oracleOciNlsLangHint: "Set karakter klien tingkat koneksi (NLS_LANG) untuk OCI; menimpanya memberi koneksi ini proses agent tersendiri. Tetapkan AL32UTF8 agar sesuai dengan database UTF-8 dan menghindari karakter rusak.",
+    oracleOciNlsLangHint: "Pengaturan lingkungan OCI per koneksi. Data ditransfer sebagai UTF-8; charset NLS_LANG tidak mengubah dekode. Untuk data lama US7ASCII, pilih Thin dan encoding sebenarnya.",
     oracleTnsAdminPlaceholder: "Direktori yang berisi tnsnames.ora",
     oracleTnsAdminBrowse: "Pilih direktori TNS_ADMIN",
     oracleTnsPathHint: "Backend DBX/agent Oracle membaca jalur ini. Jalur desktop bersifat lokal; jalur Web dan Docker berada di server.",

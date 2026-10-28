@@ -1406,7 +1406,7 @@ export default withEnglishFallback({
     oracleOciTnsAdminSavedGlobal: "Saved as the global default: {value}",
     oracleOciTnsAdminSaveGlobalEmpty: "Enter a TNS_ADMIN directory to save first",
     oracleOciNlsLangSaveGlobalEmpty: "Select an NLS_LANG to save first",
-    oracleOciNlsLangHint: "Connection-level client character set (NLS_LANG) for OCI; overriding it gives this connection its own agent process. Set AL32UTF8 to match a UTF-8 database and avoid mojibake.",
+    oracleOciNlsLangHint: "Configuração OCI por conexão. Os dados são transferidos em UTF-8; o conjunto de caracteres de NLS_LANG não altera a decodificação. Para dados legados US7ASCII, selecione Thin e a codificação real.",
     oracleTnsAdminPlaceholder: "Diretório que contém tnsnames.ora",
     oracleTnsAdminBrowse: "Selecionar tnsnames.ora",
     oracleTnsPathHint: "O caminho é lido pelo backend do DBX/Oracle Agent. No desktop é local; no Web e Docker pertence ao servidor.",

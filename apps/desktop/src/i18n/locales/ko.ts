@@ -1411,7 +1411,7 @@ export default withEnglishFallback({
     oracleOciTnsAdminSavedGlobal: "Saved as the global default: {value}",
     oracleOciTnsAdminSaveGlobalEmpty: "Enter a TNS_ADMIN directory to save first",
     oracleOciNlsLangSaveGlobalEmpty: "Select an NLS_LANG to save first",
-    oracleOciNlsLangHint: "Connection-level client character set (NLS_LANG) for OCI; overriding it gives this connection its own agent process. Set AL32UTF8 to match a UTF-8 database and avoid mojibake.",
+    oracleOciNlsLangHint: "연결별 OCI 환경 설정입니다. 데이터는 UTF-8로 전송되며 NLS_LANG의 문자 집합은 디코딩을 변경하지 않습니다. 기존 US7ASCII 데이터에는 Thin과 실제 인코딩을 선택하세요.",
     oracleTnsAdminPlaceholder: "tnsnames.ora가 있는 디렉터리",
     oracleTnsAdminBrowse: "tnsnames.ora 선택",
     oracleTnsPathHint: "DBX 백엔드/Oracle 에이전트가 이 경로를 읽습니다. 데스크톱 경로는 로컬이며, Web과 Docker 경로는 서버에 있습니다.",

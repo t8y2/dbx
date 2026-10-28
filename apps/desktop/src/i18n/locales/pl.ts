@@ -980,7 +980,7 @@ export default withEnglishFallback({
     oracleOciTnsAdminSavedGlobal: "Zapisano globalne ustawienie domyślne: {value}",
     oracleOciTnsAdminSaveGlobalEmpty: "Najpierw wprowadź katalog TNS_ADMIN do zapisania",
     oracleOciNlsLangSaveGlobalEmpty: "Najpierw wybierz NLS_LANG do zapisania",
-    oracleOciNlsLangHint: "Zestaw znaków klienta (NLS_LANG) dla OCI na poziomie połączenia; zmiana uruchamia dla tego połączenia osobny proces agenta. Ustaw AL32UTF8 dla bazy UTF-8, aby uniknąć błędnego kodowania znaków.",
+    oracleOciNlsLangHint: "Ustawienie środowiska OCI dla połączenia. Dane są przesyłane w UTF-8; zestaw znaków NLS_LANG nie zmienia dekodowania. Dla starszych danych US7ASCII wybierz Thin i rzeczywiste kodowanie.",
     oracleTnsAdminPlaceholder: "Katalog zawierający tnsnames.ora",
     oracleTnsAdminBrowse: "Wybierz katalog TNS_ADMIN",
     oracleTnsPathHint: "Backend DBX/agent Oracle odczytuje tę ścieżkę. Ścieżki desktopowe są lokalne; w wersji Web i Docker znajdują się na serwerze.",

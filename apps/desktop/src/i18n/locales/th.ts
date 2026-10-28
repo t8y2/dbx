@@ -1485,7 +1485,7 @@ export default withEnglishFallback({
     oracleOciTnsAdminSavedGlobal: "บันทึกเป็นค่าเริ่มต้นส่วนกลางแล้ว: {value}",
     oracleOciTnsAdminSaveGlobalEmpty: "ป้อนไดเรกทอรี TNS_ADMIN เพื่อบันทึกก่อน",
     oracleOciNlsLangSaveGlobalEmpty: "เลือก NLS_LANG เพื่อบันทึกก่อน",
-    oracleOciNlsLangHint: "ชุดอักขระ Client ระดับการเชื่อมต่อ (NLS_LANG) สำหรับ OCI การ Override จะทำให้การเชื่อมต่อนี้มีโปรเซส Agent ของตัวเอง ตั้ง AL32UTF8 ให้ตรงกับฐานข้อมูล UTF-8 เพื่อหลีกเลี่ยง Mojibake",
+    oracleOciNlsLangHint: "การตั้งค่าสภาพแวดล้อม OCI สำหรับการเชื่อมต่อ ข้อมูลส่งด้วย UTF-8 โดยชุดอักขระใน NLS_LANG ไม่เปลี่ยนการถอดรหัส สำหรับข้อมูล US7ASCII เดิม ให้เลือก Thin และการเข้ารหัสจริง",
     oracleTnsAdminPlaceholder: "ไดเรกทอรีที่มี tnsnames.ora",
     oracleTnsAdminBrowse: "เลือกไดเรกทอรี TNS_ADMIN",
     oracleTnsPathHint: "Backend ของ DBX/Oracle Agent จะอ่าน Path นี้ Path ของ Desktop เป็นของเครื่องนั้น ส่วน Path ของ Web และ Docker อยู่บน Server",

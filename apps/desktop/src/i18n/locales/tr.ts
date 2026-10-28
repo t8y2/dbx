@@ -726,7 +726,7 @@ export default withEnglishFallback({
     oracleOciTnsAdminSavedGlobal: "Saved as the global default: {value}",
     oracleOciTnsAdminSaveGlobalEmpty: "Enter a TNS_ADMIN directory to save first",
     oracleOciNlsLangSaveGlobalEmpty: "Select an NLS_LANG to save first",
-    oracleOciNlsLangHint: "Connection-level client character set (NLS_LANG) for OCI; overriding it gives this connection its own agent process. Set AL32UTF8 to match a UTF-8 database and avoid mojibake.",
+    oracleOciNlsLangHint: "Bağlantıya özel OCI ortam ayarı. Veriler UTF-8 ile aktarılır; NLS_LANG karakter kümesi kod çözmeyi değiştirmez. Eski US7ASCII verileri için Thin ve gerçek kodlamayı seçin.",
     oracleTnsAdminPlaceholder: "tnsnames.ora dosyasını içeren dizin",
     oracleTnsAdminBrowse: "tnsnames.ora seçin",
     oracleTnsPathHint: "Bu yolu DBX arka ucu/Oracle agent'ı okur. Masaüstü yolları yereldir; Web ve Docker yolları sunucudadır.",

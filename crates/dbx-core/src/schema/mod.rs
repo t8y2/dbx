@@ -1488,24 +1488,33 @@ struct OracleSynonymResolver {
     depth: usize,
     /// Candidates tried after the current chain finds nothing, last entry first.
     retries: Vec<OracleObjectRef>,
+    database_link_name: bool,
 }
 
 impl OracleSynonymResolver {
-    /// The SQL editor sends `TABLE@LINK` as a single table name. It starts as a remote object
-    /// owned by the requested schema, then retries under the link user's default schema because
-    /// a one-part reference still arrives with the query tab's schema. The literal name is kept
-    /// last for quoted local names that contain `@`.
+    /// The SQL editor sends `TABLE@LINK` as a single table name. The literal name is read
+    /// first, so a quoted local name that contains `@` keeps resolving even when no such link
+    /// exists. Then it is read as a remote object owned by the requested schema, and last under
+    /// the link user's default schema because a one-part reference still arrives with the query
+    /// tab's schema.
     fn new(owner: String, name: String) -> Self {
-        let literal = OracleObjectRef { owner, name, db_link: None };
-        let (current, retries) = match split_oracle_database_link(&literal.name) {
+        let current = OracleObjectRef { owner, name, db_link: None };
+        let retries = match split_oracle_database_link(&current.name) {
             Some((name, db_link)) => {
-                let remote = OracleObjectRef { owner: literal.owner.clone(), name, db_link: Some(db_link) };
+                let remote = OracleObjectRef { owner: current.owner.clone(), name, db_link: Some(db_link) };
                 let link_user = OracleObjectRef { owner: String::new(), ..remote.clone() };
-                (remote, vec![literal, link_user])
+                vec![link_user, remote]
             }
-            None => (literal, Vec::new()),
+            None => Vec::new(),
         };
-        Self { current: current.clone(), visited: HashSet::from([current]), depth: 0, retries }
+        let database_link_name = !retries.is_empty();
+        Self { current: current.clone(), visited: HashSet::from([current]), depth: 0, retries, database_link_name }
+    }
+
+    /// Reads through a link, and every candidate of a name that may be a link, keep the login
+    /// user as the session schema: the requested owner may only exist on the remote side.
+    fn uses_login_schema(&self) -> bool {
+        self.database_link_name || self.current.db_link.is_some()
     }
 
     fn current(&self) -> &OracleObjectRef {
@@ -1755,6 +1764,68 @@ fn oracle_columns_from_query_result(result: db::QueryResult) -> Vec<db::ColumnIn
         .collect()
 }
 
+/// Runs the Oracle column resolver's dictionary queries over either the native agent or an
+/// external JDBC driver session.
+enum OracleMetadataQuery<'a> {
+    Agent { client: &'a mut db::agent_driver::AgentDriverClient, database: &'a str, timeout_duration: Option<Duration> },
+    ExternalDriver { session: &'a crate::plugins::PluginDriverSession, config: &'a ConnectionConfig, database: &'a str },
+}
+
+impl OracleMetadataQuery<'_> {
+    async fn run(&mut self, sql: &str, schema: Option<&str>, max_rows: usize) -> Result<db::QueryResult, String> {
+        match self {
+            Self::Agent { client, database, timeout_duration } => {
+                client
+                    .execute_query_with_timeout::<db::QueryResult>(
+                        agent_execute_query_params(
+                            sql,
+                            if database.is_empty() { None } else { Some(*database) },
+                            schema,
+                            QueryExecutionOptions { max_rows: Some(max_rows), ..Default::default() },
+                        ),
+                        *timeout_duration,
+                    )
+                    .await
+            }
+            Self::ExternalDriver { session, config, database } => {
+                session
+                    .invoke_with_timeout(
+                        "executeQuery",
+                        serde_json::json!({
+                            "connection": config,
+                            "database": database,
+                            "schema": schema.unwrap_or(""),
+                            "sql": sql,
+                            "maxRows": max_rows
+                        }),
+                        agent_metadata_timeout(Some(config)),
+                    )
+                    .await
+            }
+        }
+    }
+
+    /// A query through a link that Oracle cannot resolve (`ORA-02019`) means the name was not
+    /// a usable database link. That candidate yields no rows; other remote errors still fail.
+    async fn run_candidate(
+        &mut self,
+        sql: &str,
+        schema: Option<&str>,
+        max_rows: usize,
+        through_link: bool,
+    ) -> Result<Option<db::QueryResult>, String> {
+        match self.run(sql, schema, max_rows).await {
+            Ok(result) => Ok(Some(result)),
+            Err(error) if through_link && is_oracle_missing_database_link_error(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn is_oracle_missing_database_link_error(error: &str) -> bool {
+    error.contains("ORA-02019")
+}
+
 async fn oracle_columns_via_sql(
     database: &str,
     schema: &str,
@@ -1762,116 +1833,8 @@ async fn oracle_columns_via_sql(
     client: &mut db::agent_driver::AgentDriverClient,
     timeout_duration: Option<Duration>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
-    let request_schema = (!schema.trim().is_empty()).then_some(schema);
-    let owner = if let Some(schema) = request_schema {
-        schema.trim().to_uppercase()
-    } else {
-        let result = client
-            .execute_query_with_timeout::<db::QueryResult>(
-                agent_execute_query_params(
-                    ORACLE_CURRENT_SCHEMA_SQL,
-                    if database.is_empty() { None } else { Some(database) },
-                    None,
-                    QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
-                ),
-                timeout_duration,
-            )
-            .await?;
-        oracle_current_schema_from_query_result(result)?
-    };
-    let mut resolver = OracleSynonymResolver::new(owner, table.to_string());
-    let mut session_user = None;
-
-    loop {
-        if resolver.current().db_link.is_some() && session_user.is_none() {
-            let result = client
-                .execute_query_with_timeout::<db::QueryResult>(
-                    agent_execute_query_params(
-                        ORACLE_SESSION_USER_SQL,
-                        if database.is_empty() { None } else { Some(database) },
-                        None,
-                        QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
-                    ),
-                    timeout_duration,
-                )
-                .await?;
-            session_user = oracle_identifier_from_query_result(result, "SESSION_USER");
-            if session_user.is_none() {
-                return Ok(Vec::new());
-            }
-        }
-        let session_schema =
-            if resolver.current().db_link.is_some() { session_user.as_deref() } else { request_schema };
-
-        if let Some(db_link) = resolver.pending_database_link_user() {
-            let sql = oracle_database_link_user_sql(&db_link)?;
-            let result = client
-                .execute_query_with_timeout::<db::QueryResult>(
-                    agent_execute_query_params(
-                        &sql,
-                        if database.is_empty() { None } else { Some(database) },
-                        session_schema,
-                        QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
-                    ),
-                    timeout_duration,
-                )
-                .await?;
-            if !oracle_identifier_from_query_result(result, "USERNAME")
-                .is_some_and(|owner| resolver.resolve_database_link_user(owner))
-            {
-                if resolver.retry_next_candidate() {
-                    continue;
-                }
-                return Ok(Vec::new());
-            }
-        }
-
-        let object = resolver.current();
-        let sql = oracle_columns_sql_for_resolved_owner(&object.owner, &object.name, object.db_link.as_deref())?;
-        let result = client
-            .execute_query_with_timeout::<db::QueryResult>(
-                agent_execute_query_params(
-                    &sql,
-                    if database.is_empty() { None } else { Some(database) },
-                    session_schema,
-                    QueryExecutionOptions { max_rows: Some(10_000), ..Default::default() },
-                ),
-                timeout_duration,
-            )
-            .await?;
-        let columns = oracle_columns_from_query_result(result);
-        if !columns.is_empty() {
-            return Ok(deduplicate_column_infos(columns));
-        }
-
-        let target = if resolver.can_follow() {
-            let object = resolver.current();
-            let sql = oracle_synonym_target_sql(
-                &object.owner,
-                &object.name,
-                object.db_link.as_deref(),
-                resolver.include_public_synonym(),
-            )?;
-            let result = client
-                .execute_query_with_timeout::<db::QueryResult>(
-                    agent_execute_query_params(
-                        &sql,
-                        if database.is_empty() { None } else { Some(database) },
-                        session_schema,
-                        QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
-                    ),
-                    timeout_duration,
-                )
-                .await?;
-            oracle_synonym_target_from_query_result(result, resolver.current())
-        } else {
-            None
-        };
-        if target.is_some_and(|target| resolver.follow(target)) || resolver.retry_next_candidate() {
-            continue;
-        }
-        return Ok(Vec::new());
-    }
+    let mut query = OracleMetadataQuery::Agent { client, database, timeout_duration };
+    oracle_columns_via_metadata_query(&mut query, schema, table).await
 }
 
 async fn external_driver_oracle_columns_via_sql(
@@ -1881,71 +1844,41 @@ async fn external_driver_oracle_columns_via_sql(
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::ColumnInfo>, String> {
-    let request_schema = if schema.trim().is_empty() { "" } else { schema };
-    let owner = if request_schema.is_empty() {
-        let result: db::QueryResult = session
-            .invoke_with_timeout(
-                "executeQuery",
-                serde_json::json!({
-                    "connection": config,
-                    "database": database,
-                    "schema": request_schema,
-                    "sql": ORACLE_CURRENT_SCHEMA_SQL,
-                    "maxRows": 1
-                }),
-                agent_metadata_timeout(Some(config)),
-            )
-            .await?;
-        oracle_current_schema_from_query_result(result)?
-    } else {
-        schema.trim().to_uppercase()
+    let mut query = OracleMetadataQuery::ExternalDriver { session: &session, config, database };
+    oracle_columns_via_metadata_query(&mut query, schema, table).await
+}
+
+async fn oracle_columns_via_metadata_query(
+    query: &mut OracleMetadataQuery<'_>,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<db::ColumnInfo>, String> {
+    let request_schema = (!schema.trim().is_empty()).then_some(schema);
+    let owner = match request_schema {
+        Some(schema) => schema.trim().to_uppercase(),
+        None => oracle_current_schema_from_query_result(query.run(ORACLE_CURRENT_SCHEMA_SQL, None, 1).await?)?,
     };
     let mut resolver = OracleSynonymResolver::new(owner, table.to_string());
     let mut session_user = None;
 
     loop {
-        if resolver.current().db_link.is_some() && session_user.is_none() {
-            let result: db::QueryResult = session
-                .invoke_with_timeout(
-                    "executeQuery",
-                    serde_json::json!({
-                        "connection": config,
-                        "database": database,
-                        "schema": "",
-                        "sql": ORACLE_SESSION_USER_SQL,
-                        "maxRows": 1
-                    }),
-                    agent_metadata_timeout(Some(config)),
-                )
-                .await?;
+        if resolver.uses_login_schema() && session_user.is_none() {
+            let result = query.run(ORACLE_SESSION_USER_SQL, None, 1).await?;
             session_user = oracle_identifier_from_query_result(result, "SESSION_USER");
             if session_user.is_none() {
                 return Ok(Vec::new());
             }
         }
-        let session_schema = match (&resolver.current().db_link, &session_user) {
-            (Some(_), Some(user)) => user.as_str(),
-            _ => request_schema,
-        };
+        let session_schema = if resolver.uses_login_schema() { session_user.as_deref() } else { request_schema };
+        let through_link = resolver.current().db_link.is_some();
 
         if let Some(db_link) = resolver.pending_database_link_user() {
             let sql = oracle_database_link_user_sql(&db_link)?;
-            let result: db::QueryResult = session
-                .invoke_with_timeout(
-                    "executeQuery",
-                    serde_json::json!({
-                        "connection": config,
-                        "database": database,
-                        "schema": session_schema,
-                        "sql": sql,
-                        "maxRows": 1
-                    }),
-                    agent_metadata_timeout(Some(config)),
-                )
-                .await?;
-            if !oracle_identifier_from_query_result(result, "USERNAME")
-                .is_some_and(|owner| resolver.resolve_database_link_user(owner))
-            {
+            let owner = query
+                .run_candidate(&sql, session_schema, 1, through_link)
+                .await?
+                .and_then(|result| oracle_identifier_from_query_result(result, "USERNAME"));
+            if !owner.is_some_and(|owner| resolver.resolve_database_link_user(owner)) {
                 if resolver.retry_next_candidate() {
                     continue;
                 }
@@ -1955,20 +1888,11 @@ async fn external_driver_oracle_columns_via_sql(
 
         let object = resolver.current();
         let sql = oracle_columns_sql_for_resolved_owner(&object.owner, &object.name, object.db_link.as_deref())?;
-        let result: db::QueryResult = session
-            .invoke_with_timeout(
-                "executeQuery",
-                serde_json::json!({
-                    "connection": config,
-                    "database": database,
-                    "schema": session_schema,
-                    "sql": sql,
-                    "maxRows": 10_000
-                }),
-                agent_metadata_timeout(Some(config)),
-            )
-            .await?;
-        let columns = oracle_columns_from_query_result(result);
+        let columns = query
+            .run_candidate(&sql, session_schema, 10_000, through_link)
+            .await?
+            .map(oracle_columns_from_query_result)
+            .unwrap_or_default();
         if !columns.is_empty() {
             return Ok(deduplicate_column_infos(columns));
         }
@@ -1981,20 +1905,10 @@ async fn external_driver_oracle_columns_via_sql(
                 object.db_link.as_deref(),
                 resolver.include_public_synonym(),
             )?;
-            let result: db::QueryResult = session
-                .invoke_with_timeout(
-                    "executeQuery",
-                    serde_json::json!({
-                        "connection": config,
-                        "database": database,
-                        "schema": session_schema,
-                        "sql": sql,
-                        "maxRows": 1
-                    }),
-                    agent_metadata_timeout(Some(config)),
-                )
-                .await?;
-            oracle_synonym_target_from_query_result(result, resolver.current())
+            query
+                .run_candidate(&sql, session_schema, 1, through_link)
+                .await?
+                .and_then(|result| oracle_synonym_target_from_query_result(result, resolver.current()))
         } else {
             None
         };
@@ -6519,10 +6433,14 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn oracle_resolver_reads_editor_database_link_names_remotely_first() {
+    fn oracle_resolver_reads_editor_database_link_names_after_the_literal_name() {
         let literal =
             OracleObjectRef { owner: "LOCAL_TAB".to_string(), name: "ORDERS@SALES".to_string(), db_link: None };
         let mut resolver = OracleSynonymResolver::new(literal.owner.clone(), literal.name.clone());
+        assert_eq!(resolver.current(), &literal);
+        assert!(resolver.uses_login_schema());
+
+        assert!(resolver.retry_next_candidate());
         assert_eq!(
             resolver.current(),
             &OracleObjectRef {
@@ -6531,6 +6449,7 @@ for line in sys.stdin:
                 db_link: Some("SALES".to_string())
             }
         );
+        assert!(resolver.include_public_synonym());
         assert_eq!(resolver.pending_database_link_user(), None);
 
         assert!(resolver.retry_next_candidate());
@@ -6538,22 +6457,24 @@ for line in sys.stdin:
         assert!(resolver.resolve_database_link_user("REMOTE_APP".to_string()));
         assert_eq!(resolver.current().owner, "REMOTE_APP");
         assert_eq!(resolver.pending_database_link_user(), None);
-
-        assert!(resolver.retry_next_candidate());
-        assert_eq!(resolver.current(), &literal);
-        assert!(resolver.include_public_synonym());
         assert!(!resolver.retry_next_candidate());
 
         // A link user that equals the schema already tried has nothing new to read.
         let mut same_owner = OracleSynonymResolver::new("APP".to_string(), "ORDERS@SALES".to_string());
         assert!(same_owner.retry_next_candidate());
-        assert!(!same_owner.resolve_database_link_user("APP".to_string()));
         assert!(same_owner.retry_next_candidate());
-        assert_eq!(same_owner.current().db_link, None);
+        assert!(!same_owner.resolve_database_link_user("APP".to_string()));
+        assert!(!same_owner.retry_next_candidate());
 
         let mut local = OracleSynonymResolver::new("APP".to_string(), "ORDERS".to_string());
-        assert_eq!(local.current().db_link, None);
+        assert!(!local.uses_login_schema());
         assert!(!local.retry_next_candidate());
+        assert!(local.follow(OracleObjectRef {
+            owner: "APP".to_string(),
+            name: "ORDERS".to_string(),
+            db_link: Some("SALES".to_string())
+        }));
+        assert!(local.uses_login_schema());
     }
 
     #[test]
@@ -6732,6 +6653,216 @@ for line in sys.stdin:
         assert_eq!(columns[1].name, "data");
         assert_eq!(columns[1].data_type, "TIMESTAMP");
         assert!(columns[1].is_nullable);
+    }
+
+    /// Dictionary answers shared by the native agent and JDBC mocks below. The login user
+    /// `APP` owns a quoted local table `"ORDERS@NOLINK"` and a private link `SALES`, whose user
+    /// `REMOTE_APP` owns `ORDERS`. `BROKEN` fails like an unreachable listener, any other link
+    /// is unknown, and a private link only resolves while `APP` is the session schema.
+    #[cfg(unix)]
+    const ORACLE_DATABASE_LINK_DICTIONARY_PY: &str = r#"
+import json, re, sys
+
+COLUMNS = ['COLUMN_NAME', 'DATA_TYPE', 'NULLABLE', 'DATA_DEFAULT', 'DATA_LENGTH',
+           'DATA_PRECISION', 'DATA_SCALE', 'COLUMN_ID', 'IS_PK', 'COMMENTS']
+TABLES = {
+    (None, 'APP', 'ORDERS@NOLINK'): [['LOCAL_ID', 'NUMBER', 'N', None, '22', '10', '0', '1', '0', 'quoted local']],
+    ('SALES', 'REMOTE_APP', 'ORDERS'): [['REMOTE_ID', 'NUMBER', 'N', None, '22', '10', '0', '1', '1', 'remote']],
+}
+
+def handle(sql, schema):
+    if 'SESSION_USER' in sql:
+        return {'columns': ['SESSION_USER'], 'rows': [['APP']]}
+    if 'CURRENT_SCHEMA' in sql:
+        return {'columns': ['CURRENT_SCHEMA'], 'rows': [['APP']]}
+    view, link = re.search(r'(ALL_TAB_COLUMNS|USER_USERS|ALL_SYNONYMS)(?:@([A-Z0-9_$#.]+))?', sql).groups()
+    if link == 'BROKEN':
+        raise RuntimeError('ORA-12541: Cannot connect. No listener at host 10.0.0.9 port 1521.')
+    if link is not None and (link != 'SALES' or schema not in (None, '', 'APP')):
+        raise RuntimeError('ORA-02019: connection description for remote database not found')
+    if view == 'USER_USERS':
+        return {'columns': ['USERNAME'], 'rows': [['REMOTE_APP']]}
+    if view == 'ALL_SYNONYMS':
+        return {'columns': ['TABLE_OWNER', 'TABLE_NAME', 'DB_LINK'], 'rows': []}
+    owner, table = re.search(r"c\.OWNER = '([^']*)' AND c\.TABLE_NAME = '([^']*)'", sql).groups()
+    return {'columns': COLUMNS, 'rows': TABLES.get((link, owner, table), [])}
+
+def answer(calls_path, params):
+    with open(calls_path, 'a') as calls:
+        calls.write(json.dumps({'sql': params.get('sql'), 'schema': params.get('schema')}) + '\n')
+    result = handle(params['sql'], params.get('schema'))
+    result.update({'affected_rows': 0, 'execution_time_ms': 1})
+    return result
+"#;
+
+    #[cfg(unix)]
+    fn take_oracle_mock_calls(path: &std::path::Path) -> String {
+        let calls = std::fs::read_to_string(path).unwrap_or_default();
+        std::fs::write(path, "").unwrap();
+        calls
+    }
+
+    /// Runs the database link candidates against one metadata transport and checks them
+    /// call by call, so a remote failure cannot hide the local candidate.
+    #[cfg(unix)]
+    async fn assert_oracle_database_link_candidates<F, Fut>(calls: &std::path::Path, mut columns: F)
+    where
+        F: FnMut(&'static str, &'static str) -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<db::ColumnInfo>, String>>,
+    {
+        // A quoted local name that contains `@` is read locally before any link lookup.
+        let local = columns("APP", "ORDERS@NOLINK").await.unwrap();
+        assert_eq!(local.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), ["LOCAL_ID"]);
+        let log = take_oracle_mock_calls(calls);
+        assert!(!log.contains("@NOLINK "), "{log}");
+
+        // An unknown link is not an error: the name just has no columns.
+        assert!(columns("APP", "INVOICES@NOLINK").await.unwrap().is_empty());
+        let log = take_oracle_mock_calls(calls);
+        assert!(log.contains("ALL_TAB_COLUMNS@NOLINK "), "{log}");
+
+        // `APP` has no remote `ORDERS`, so the link user's schema is read next. `REMOTE_APP`
+        // names the remote owner directly; it does not exist locally, so every read in this
+        // resolution keeps the login schema.
+        for schema in ["APP", "REMOTE_APP"] {
+            let remote = columns(schema, "ORDERS@SALES").await.unwrap();
+            assert_eq!(remote.len(), 1, "{schema}");
+            assert_eq!(remote[0].name, "REMOTE_ID");
+            assert!(remote[0].is_primary_key);
+            assert_eq!(remote[0].comment.as_deref(), Some("remote"));
+            let log = take_oracle_mock_calls(calls);
+            assert_eq!(log.contains("USER_USERS@SALES"), schema == "APP", "{log}");
+            assert!(!log.contains(r#""schema": "REMOTE_APP""#), "{log}");
+        }
+
+        // Any other remote failure still reaches the caller.
+        let error = columns("APP", "ORDERS@BROKEN").await.unwrap_err();
+        assert!(error.contains("ORA-12541"), "{error}");
+        take_oracle_mock_calls(calls);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn oracle_agent_columns_resolve_database_link_candidates() {
+        let dir = std::env::temp_dir().join(format!("dbx-oracle-link-agent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let calls = dir.join("calls.log");
+        let script_path = dir.join("oracle-link-agent.py");
+        std::fs::write(
+            &script_path,
+            format!(
+                r#"{ORACLE_DATABASE_LINK_DICTIONARY_PY}
+calls_path = {calls_path}
+print(json.dumps({{'ready': True}}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'handshake':
+        result = {{'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']}}
+    elif req['method'] != 'execute_query':
+        result = {{}}
+    else:
+        try:
+            result = answer(calls_path, req.get('params') or {{}})
+        except RuntimeError as error:
+            print(json.dumps({{'jsonrpc': '2.0', 'id': req['id'], 'error': {{'code': -1, 'message': str(error)}}}}), flush=True)
+            continue
+    print(json.dumps({{'jsonrpc': '2.0', 'id': req['id'], 'result': result}}), flush=True)
+"#,
+                calls_path = serde_json::to_string(&calls.to_string_lossy()).unwrap(),
+            ),
+        )
+        .unwrap();
+        let runtime = crate::db::agent_driver::AgentRuntimeClient::spawn(
+            crate::db::agent_driver::AgentLaunchSpec::new("python3")
+                .with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+        runtime.increment_session_count();
+        let client = tokio::sync::Mutex::new(crate::db::agent_driver::AgentDriverClient::shared_session(
+            runtime.clone(),
+            "metadata-session".to_string(),
+        ));
+
+        assert_oracle_database_link_candidates(&calls, |schema, table| {
+            let client = &client;
+            async move {
+                let mut client = client.lock().await;
+                super::oracle_columns_via_sql("FREEPDB1", schema, table, &mut client, None).await
+            }
+        })
+        .await;
+
+        runtime.kill();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn jdbc_oracle_columns_resolve_database_link_candidates() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-oracle-link-jdbc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let calls = dir.join("calls.log");
+        let executable = dir.join("plugin.py");
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/usr/bin/env python3
+{ORACLE_DATABASE_LINK_DICTIONARY_PY}
+calls_path = {calls_path}
+for line in sys.stdin:
+    req = json.loads(line)
+    if req.get('method') != 'executeQuery':
+        continue
+    try:
+        response = {{'id': req['id'], 'result': answer(calls_path, req.get('params') or {{}})}}
+    except RuntimeError as error:
+        response = {{'id': req['id'], 'error': {{'message': str(error)}}}}
+    print(json.dumps(response), flush=True)
+"#,
+                calls_path = serde_json::to_string(&calls.to_string_lossy()).unwrap(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.py".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+                ..PluginManifest::default()
+            },
+            path: dir.clone(),
+            compatibility: crate::plugins::PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(executable.clone()),
+                ..Default::default()
+            },
+            provenance: None,
+        };
+        let session = std::sync::Arc::new(
+            PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
+        );
+        let config = test_connection_config(DatabaseType::Jdbc);
+
+        assert_oracle_database_link_candidates(&calls, |schema, table| {
+            super::external_driver_oracle_columns_via_sql(session.clone(), &config, "FREEPDB1", schema, table)
+        })
+        .await;
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A `jdbc:oracle:` connection answers `getColumns` from the object it was asked for,

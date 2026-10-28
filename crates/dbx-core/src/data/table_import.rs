@@ -77,6 +77,10 @@ const POSTGRES_COPY_MAX_ROWS: usize = 50_000;
 const SQLSERVER_BULK_ROW_MEMORY_BYTES: usize = 16 * 1024 * 1024;
 const SQL_IMPORT_EXPRESSION_KEY: &str = "$dbxSqlImportExpression";
 const SQL_IMPORT_CURRENT_TIMESTAMP: &str = "currentTimestamp";
+/// Upper bound on the failed rows reported back to the UI. A pathological import
+/// can fail on every row, and shipping millions of records through one progress
+/// payload would stall the backend without helping the user.
+const IMPORT_FAILURE_RECORD_LIMIT: usize = 1000;
 
 pub fn table_import_client_session_id(import_id: &str) -> String {
     task_client_session_id("table-import", import_id)
@@ -387,6 +391,58 @@ pub struct TableImportRequest {
     pub conflict_policy: Option<TableImportConflictPolicy>,
     #[serde(default)]
     pub skip_duplicate_rows: bool,
+    /// Keep importing after a row fails (issue #13683). Off by default so a
+    /// failed statement still aborts the whole import as before. When enabled,
+    /// a failed multi-row batch is retried row by row, and the failed rows are
+    /// reported in the summary/progress instead of silently disappearing.
+    #[serde(default)]
+    pub continue_on_error: bool,
+}
+
+/// One source row that failed to import while `continue_on_error` is enabled.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TableImportFailure {
+    /// Target table, so a multi-table (batch) import can label each failure.
+    pub table: String,
+    /// 1-based data row number in the source (the header row is not counted).
+    pub row: usize,
+    pub error: String,
+}
+
+/// Collects failed rows for one import. The full list is capped so a broken
+/// source cannot exhaust memory; `failed` still counts every failed row.
+#[derive(Debug)]
+struct ImportFailureSink {
+    table: String,
+    failures: Vec<TableImportFailure>,
+    failed: usize,
+    omitted: usize,
+}
+
+impl ImportFailureSink {
+    fn new(table: &str) -> Self {
+        Self { table: table.to_string(), failures: Vec::new(), failed: 0, omitted: 0 }
+    }
+
+    fn record(&mut self, row: usize, error: impl Into<String>) {
+        self.failed = self.failed.saturating_add(1);
+        if self.failures.len() < IMPORT_FAILURE_RECORD_LIMIT {
+            self.failures.push(TableImportFailure { table: self.table.clone(), row, error: error.into() });
+        } else {
+            self.omitted = self.omitted.saturating_add(1);
+        }
+    }
+
+    fn failures_truncated(&self) -> bool {
+        self.omitted > 0
+    }
+}
+
+impl Default for ImportFailureSink {
+    fn default() -> Self {
+        Self::new("")
+    }
 }
 
 impl TableImportRequest {
@@ -503,6 +559,11 @@ pub struct TableImportSummary {
     pub rows_imported: usize,
     pub total_rows: usize,
     pub elapsed_ms: u128,
+    /// Rows skipped because they failed while `continue_on_error` was enabled.
+    pub rows_failed: usize,
+    pub failures: Vec<TableImportFailure>,
+    /// True when `failures` is capped and omits further failed rows.
+    pub failures_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -518,6 +579,11 @@ pub struct TableImportProgress {
     pub total_bytes: u64,
     pub elapsed_ms: u128,
     pub error: Option<String>,
+    /// Failed-row details are carried on the terminal event; running events
+    /// keep the counters but leave the list empty.
+    pub rows_failed: usize,
+    pub failures: Vec<TableImportFailure>,
+    pub failures_truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -5851,15 +5917,40 @@ fn import_progress_with_details(
         total_bytes,
         elapsed_ms: started_at.elapsed().as_millis(),
         error,
+        rows_failed: 0,
+        failures: Vec::new(),
+        failures_truncated: false,
     }
 }
 
+/// Attaches the accumulated failed-row report to a terminal progress event.
+fn with_import_failures(mut progress: TableImportProgress, sink: &ImportFailureSink) -> TableImportProgress {
+    progress.rows_failed = sink.failed;
+    progress.failures = sink.failures.clone();
+    progress.failures_truncated = sink.failures_truncated();
+    progress
+}
+
+#[cfg(test)]
 fn import_summary(import_id: &str, rows_imported: usize, total_rows: usize, started_at: Instant) -> TableImportSummary {
+    import_summary_with_failures(import_id, rows_imported, total_rows, started_at, &ImportFailureSink::default())
+}
+
+fn import_summary_with_failures(
+    import_id: &str,
+    rows_imported: usize,
+    total_rows: usize,
+    started_at: Instant,
+    sink: &ImportFailureSink,
+) -> TableImportSummary {
     TableImportSummary {
         import_id: import_id.to_string(),
         rows_imported,
         total_rows,
         elapsed_ms: started_at.elapsed().as_millis(),
+        rows_failed: sink.failed,
+        failures: sink.failures.clone(),
+        failures_truncated: sink.failures_truncated(),
     }
 }
 
@@ -6281,8 +6372,13 @@ impl SqliteAppendTransaction {
 fn sqlite_append_transaction_for_import(
     mode: &TableImportMode,
     db_type: &DatabaseType,
+    continue_on_error: bool,
 ) -> Option<SqliteAppendTransaction> {
-    (matches!(mode, TableImportMode::Append) && *db_type == DatabaseType::Sqlite).then(SqliteAppendTransaction::new)
+    // The buffered transaction commits a whole chunk at once, which turns one
+    // bad row into a failure for the entire chunk. Continue-on-error must keep
+    // per-row attribution, so it writes through the ordinary statement path.
+    (!continue_on_error && matches!(mode, TableImportMode::Append) && *db_type == DatabaseType::Sqlite)
+        .then(SqliteAppendTransaction::new)
 }
 
 fn supports_transactional_import_truncate(db_type: &DatabaseType) -> bool {
@@ -6470,11 +6566,16 @@ async fn execute_import_rows_batch(
     date_time_format: Option<&str>,
     hard_sql_bytes: Option<usize>,
     start_row_offset: usize,
+    continue_on_error: bool,
+    failures: &mut ImportFailureSink,
     db_write_ms: &mut u128,
     statement_count: &mut usize,
 ) -> Result<usize, ImportRowsBatchError> {
     let execution_policy = import_batch_execution_policy(mode, pending_truncate, db_type);
-    if conflict_policy == TableImportConflictPolicy::Error {
+    // Both fast paths write a whole chunk through one backend operation, so a
+    // single bad row fails the batch with no way to tell which row it was.
+    // Continue-on-error has to fall back to the portable INSERT generator.
+    if !continue_on_error && conflict_policy == TableImportConflictPolicy::Error {
         if let Some((import_plan, bulk_plan)) = sqlserver_bulk_plans_for_rows(db_type, plan, sqlserver_bulk_plan, rows)
         {
             return execute_sqlserver_bulk_rows_batch(
@@ -6496,7 +6597,8 @@ async fn execute_import_rows_batch(
     }
     // COPY is used only for plain scalar PostgreSQL rows and ordinary tables. Any unsupported
     // value or table feature falls through to the portable INSERT generator below.
-    if conflict_policy == TableImportConflictPolicy::Error
+    if !continue_on_error
+        && conflict_policy == TableImportConflictPolicy::Error
         && execution_policy.allow_postgres_copy
         && *db_type == DatabaseType::Postgres
         && !rows
@@ -6549,77 +6651,208 @@ async fn execute_import_rows_batch(
         start_row_offset,
     )
     .map_err(|message| ImportRowsBatchError::with_rows_imported(rows_imported, message))?;
-    if let Some(transaction) = sqlite_append_transaction.as_mut() {
+    if !continue_on_error {
+        if let Some(transaction) = sqlite_append_transaction.as_mut() {
+            for batch in batches {
+                ensure_import_write_allowed(import_id, is_cancelled, rows_imported).await?;
+                if transaction.should_flush_before(&batch) {
+                    rows_imported = flush_sqlite_append_transaction(
+                        state,
+                        pool_key,
+                        import_id,
+                        is_cancelled,
+                        connection_id,
+                        database,
+                        schema,
+                        transaction,
+                        rows_imported,
+                        db_write_ms,
+                        statement_count,
+                    )
+                    .await?;
+                }
+                transaction.push(batch);
+                if transaction.is_ready() {
+                    rows_imported = flush_sqlite_append_transaction(
+                        state,
+                        pool_key,
+                        import_id,
+                        is_cancelled,
+                        connection_id,
+                        database,
+                        schema,
+                        transaction,
+                        rows_imported,
+                        db_write_ms,
+                        statement_count,
+                    )
+                    .await?;
+                }
+            }
+            return Ok(rows_imported);
+        }
+        if execution_policy.transactional {
+            ensure_import_write_allowed(import_id, is_cancelled, rows_imported).await?;
+            let mut statements = Vec::with_capacity(batches.len() + usize::from(execution_policy.include_truncate));
+            if execution_policy.include_truncate {
+                statements.push(truncate_sql(table, schema, db_type));
+            }
+            statements.extend(batches.into_iter().map(|batch| batch.sql));
+            let result = execute_import_transaction(
+                state,
+                pool_key,
+                connection_id,
+                database,
+                schema,
+                &statements,
+                db_write_ms,
+                statement_count,
+            )
+            .await
+            .map_err(|message| ImportRowsBatchError::with_rows_imported(rows_imported, message))?;
+            return Ok(rows_imported.saturating_add(completed_import_rows(
+                conflict_policy,
+                rows.len(),
+                result.affected_rows,
+            )));
+        }
         for batch in batches {
             ensure_import_write_allowed(import_id, is_cancelled, rows_imported).await?;
-            if transaction.should_flush_before(&batch) {
-                rows_imported = flush_sqlite_append_transaction(
-                    state,
-                    pool_key,
-                    import_id,
-                    is_cancelled,
-                    connection_id,
-                    database,
-                    schema,
-                    transaction,
-                    rows_imported,
-                    db_write_ms,
-                    statement_count,
-                )
-                .await?;
-            }
-            transaction.push(batch);
-            if transaction.is_ready() {
-                rows_imported = flush_sqlite_append_transaction(
-                    state,
-                    pool_key,
-                    import_id,
-                    is_cancelled,
-                    connection_id,
-                    database,
-                    schema,
-                    transaction,
-                    rows_imported,
-                    db_write_ms,
-                    statement_count,
-                )
-                .await?;
-            }
+            let result = execute_import_statement(state, pool_key, &batch.sql, db_write_ms, statement_count)
+                .await
+                .map_err(|error| ImportRowsBatchError::with_rows_imported(rows_imported, error))?;
+            rows_imported = rows_imported.saturating_add(completed_import_rows(
+                conflict_policy,
+                batch.row_count,
+                result.affected_rows,
+            ));
         }
         return Ok(rows_imported);
     }
-    if execution_policy.transactional {
-        ensure_import_write_allowed(import_id, is_cancelled, rows_imported).await?;
-        let mut statements = Vec::with_capacity(batches.len() + usize::from(execution_policy.include_truncate));
-        if execution_policy.include_truncate {
-            statements.push(truncate_sql(table, schema, db_type));
-        }
-        statements.extend(batches.into_iter().map(|batch| batch.sql));
-        let result = execute_import_transaction(
-            state,
-            pool_key,
-            connection_id,
-            database,
-            schema,
-            &statements,
-            db_write_ms,
-            statement_count,
-        )
-        .await
-        .map_err(|message| ImportRowsBatchError::with_rows_imported(rows_imported, message))?;
-        return Ok(rows_imported.saturating_add(completed_import_rows(
-            conflict_policy,
-            rows.len(),
-            result.affected_rows,
-        )));
-    }
+    // Continue-on-error runs one statement per batch and retries a failed batch
+    // row by row. It deliberately avoids the chunk-wide transaction above: a
+    // rollback there would also undo batches that already succeeded, and
+    // replaying those rows would insert them twice.
+    let mut batch_start = 0usize;
     for batch in batches {
         ensure_import_write_allowed(import_id, is_cancelled, rows_imported).await?;
-        let result = execute_import_statement(state, pool_key, &batch.sql, db_write_ms, statement_count)
-            .await
-            .map_err(|error| ImportRowsBatchError::with_rows_imported(rows_imported, error))?;
-        rows_imported =
-            rows_imported.saturating_add(completed_import_rows(conflict_policy, batch.row_count, result.affected_rows));
+        let batch_end = (batch_start + batch.row_count).min(rows.len());
+        let result = execute_import_statement(state, pool_key, &batch.sql, db_write_ms, statement_count).await;
+        match result {
+            Ok(result) => {
+                rows_imported = rows_imported.saturating_add(completed_import_rows(
+                    conflict_policy,
+                    batch.row_count,
+                    result.affected_rows,
+                ));
+            }
+            Err(_) => {
+                // Keep the batch error private: each retried row gets the
+                // backend's own per-row message, which is what the user needs.
+                rows_imported = rows_imported.saturating_add(
+                    import_failed_batch_rows(
+                        state,
+                        pool_key,
+                        import_id,
+                        is_cancelled,
+                        &rows[batch_start..batch_end],
+                        plan,
+                        columns,
+                        mappings,
+                        target_column_types,
+                        table,
+                        schema,
+                        db_type,
+                        kingbase_oracle_mode,
+                        identifier_quote,
+                        conflict_policy,
+                        primary_key_columns,
+                        date_time_format,
+                        hard_sql_bytes,
+                        start_row_offset + batch_start,
+                        failures,
+                        db_write_ms,
+                        statement_count,
+                    )
+                    .await?,
+                );
+            }
+        }
+        batch_start = batch_end;
+    }
+    Ok(rows_imported)
+}
+
+/// Retries the rows of a failed batch one statement at a time, recording each
+/// row that still fails instead of aborting the import.
+#[allow(clippy::too_many_arguments)]
+async fn import_failed_batch_rows(
+    state: &AppState,
+    pool_key: &str,
+    import_id: &str,
+    is_cancelled: &impl Fn(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>,
+    rows: &[Vec<serde_json::Value>],
+    plan: Option<&CompiledImportPlan>,
+    columns: &[String],
+    mappings: &[TableImportColumnMapping],
+    target_column_types: &[(String, String)],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    kingbase_oracle_mode: bool,
+    identifier_quote: Option<&str>,
+    conflict_policy: TableImportConflictPolicy,
+    primary_key_columns: &[String],
+    date_time_format: Option<&str>,
+    hard_sql_bytes: Option<usize>,
+    start_row_offset: usize,
+    failures: &mut ImportFailureSink,
+    db_write_ms: &mut u128,
+    statement_count: &mut usize,
+) -> Result<usize, ImportRowsBatchError> {
+    let mut rows_imported = 0usize;
+    for (local_index, row) in rows.iter().enumerate() {
+        ensure_import_write_allowed(import_id, is_cancelled, rows_imported).await?;
+        let source_row = start_row_offset.saturating_add(local_index).saturating_add(1);
+        let row_start_offset = start_row_offset.saturating_add(local_index);
+        let row_batches = match build_import_execution_batches(
+            std::slice::from_ref(row),
+            plan,
+            columns,
+            mappings,
+            target_column_types,
+            table,
+            schema,
+            db_type,
+            kingbase_oracle_mode,
+            identifier_quote,
+            conflict_policy,
+            primary_key_columns,
+            date_time_format,
+            hard_sql_bytes,
+            row_start_offset,
+        ) {
+            Ok(batches) => batches,
+            Err(error) => {
+                failures.record(source_row, error);
+                continue;
+            }
+        };
+        for batch in row_batches {
+            match execute_import_statement(state, pool_key, &batch.sql, db_write_ms, statement_count).await {
+                Ok(result) => {
+                    rows_imported = rows_imported.saturating_add(completed_import_rows(
+                        conflict_policy,
+                        batch.row_count,
+                        result.affected_rows,
+                    ));
+                }
+                Err(error) => {
+                    failures.record(source_row, error);
+                    break;
+                }
+            }
+        }
     }
     Ok(rows_imported)
 }
@@ -6686,8 +6919,86 @@ fn emit_import_error_with_total_rows_exact<F>(
 where
     F: FnMut(TableImportProgress),
 {
+    emit_import_error_and_sink(
+        progress_callback,
+        request,
+        rows_imported,
+        total_rows,
+        total_rows_exact,
+        started_at,
+        error,
+        None,
+    )
+}
+
+/// Error terminal for an import that may already have skipped failed rows.
+#[allow(clippy::too_many_arguments)]
+fn emit_import_error_with_failures<F>(
+    progress_callback: &mut F,
+    request: &TableImportRequest,
+    rows_imported: usize,
+    total_rows: usize,
+    started_at: Instant,
+    error: impl AsRef<str>,
+    failures: &ImportFailureSink,
+) -> String
+where
+    F: FnMut(TableImportProgress),
+{
+    emit_import_error_and_sink(
+        progress_callback,
+        request,
+        rows_imported,
+        total_rows,
+        true,
+        started_at,
+        error,
+        Some(failures),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_import_error_with_total_rows_exact_with_failures<F>(
+    progress_callback: &mut F,
+    request: &TableImportRequest,
+    rows_imported: usize,
+    total_rows: usize,
+    total_rows_exact: bool,
+    started_at: Instant,
+    error: impl AsRef<str>,
+    failures: &ImportFailureSink,
+) -> String
+where
+    F: FnMut(TableImportProgress),
+{
+    emit_import_error_and_sink(
+        progress_callback,
+        request,
+        rows_imported,
+        total_rows,
+        total_rows_exact,
+        started_at,
+        error,
+        Some(failures),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_import_error_and_sink<F>(
+    progress_callback: &mut F,
+    request: &TableImportRequest,
+    rows_imported: usize,
+    total_rows: usize,
+    total_rows_exact: bool,
+    started_at: Instant,
+    error: impl AsRef<str>,
+    failures: Option<&ImportFailureSink>,
+) -> String
+where
+    F: FnMut(TableImportProgress),
+{
     let message = import_error_message(request, rows_imported, error);
-    progress_callback(import_progress_with_details(
+    let progress = import_progress_with_details(
         &request.import_id,
         TableImportStatus::Error,
         TableImportPhase::Done,
@@ -6698,7 +7009,11 @@ where
         0,
         started_at,
         Some(message.clone()),
-    ));
+    );
+    progress_callback(match failures {
+        Some(failures) => with_import_failures(progress, failures),
+        None => progress,
+    });
     message
 }
 
@@ -6721,6 +7036,21 @@ fn import_cancelled_progress(
         0,
         started_at,
         None,
+    )
+}
+
+/// Cancellation terminal for an import that may already have skipped failed rows.
+fn import_cancelled_progress_with_failures(
+    import_id: &str,
+    rows_imported: usize,
+    total_rows: usize,
+    total_rows_exact: bool,
+    started_at: Instant,
+    failures: &ImportFailureSink,
+) -> TableImportProgress {
+    with_import_failures(
+        import_cancelled_progress(import_id, rows_imported, total_rows, total_rows_exact, started_at),
+        failures,
     )
 }
 
@@ -7822,9 +8152,13 @@ where
             &request.table,
             &request.schema,
         );
-        let mut sqlite_append_transaction = sqlite_append_transaction_for_import(&request.mode, db_type);
-        let mut pending_truncate =
-            matches!(request.mode, TableImportMode::Truncate) && supports_transactional_import_truncate(db_type);
+        let mut sqlite_append_transaction =
+            sqlite_append_transaction_for_import(&request.mode, db_type, request.continue_on_error);
+        // Continue-on-error skips the chunk-wide transaction, so the truncate
+        // must run on its own (below) or it would never execute.
+        let mut pending_truncate = matches!(request.mode, TableImportMode::Truncate)
+            && supports_transactional_import_truncate(db_type)
+            && !request.continue_on_error;
         if matches!(request.mode, TableImportMode::Truncate) && !pending_truncate {
             let sql = truncate_sql(&request.table, &request.schema, db_type);
             if let Err(error) =
@@ -7836,6 +8170,7 @@ where
             }
         }
         let mut rows_imported = 0usize;
+        let mut import_failures = ImportFailureSink::new(&request.table);
         let mut sequence_offset = 0usize;
         let mut last_bytes_read = 0u64;
         let mut last_progress_emit = Instant::now();
@@ -7851,17 +8186,20 @@ where
                     if is_cancelled(&request.import_id).await {
                         drop(receiver);
                         let _ = producer.await;
-                        progress_callback(import_progress_with_details(
-                            &request.import_id,
-                            TableImportStatus::Cancelled,
-                            TableImportPhase::Done,
-                            rows_imported,
-                            total_rows,
-                            total_rows_exact,
-                            last_bytes_read.min(total_bytes),
-                            total_bytes,
-                            started_at,
-                            None,
+                        progress_callback(with_import_failures(
+                            import_progress_with_details(
+                                &request.import_id,
+                                TableImportStatus::Cancelled,
+                                TableImportPhase::Done,
+                                rows_imported,
+                                total_rows,
+                                total_rows_exact,
+                                last_bytes_read.min(total_bytes),
+                                total_bytes,
+                                started_at,
+                                None,
+                            ),
+                            &import_failures,
                         ));
                         return Err("Import cancelled".to_string());
                     }
@@ -7892,6 +8230,8 @@ where
                         request.date_time_format.as_deref(),
                         import_sql_hard_limit,
                         sequence_offset,
+                        request.continue_on_error,
+                        &mut import_failures,
                         &mut db_write_ms,
                         &mut statement_count,
                     )
@@ -7906,27 +8246,31 @@ where
                             let _ = producer.await;
                             rows_imported = rows_imported.saturating_add(error.rows_imported);
                             if error.cancelled {
-                                progress_callback(import_progress_with_details(
-                                    &request.import_id,
-                                    TableImportStatus::Cancelled,
-                                    TableImportPhase::Done,
-                                    rows_imported,
-                                    total_rows,
-                                    total_rows_exact,
-                                    last_bytes_read.min(total_bytes),
-                                    total_bytes,
-                                    started_at,
-                                    None,
+                                progress_callback(with_import_failures(
+                                    import_progress_with_details(
+                                        &request.import_id,
+                                        TableImportStatus::Cancelled,
+                                        TableImportPhase::Done,
+                                        rows_imported,
+                                        total_rows,
+                                        total_rows_exact,
+                                        last_bytes_read.min(total_bytes),
+                                        total_bytes,
+                                        started_at,
+                                        None,
+                                    ),
+                                    &import_failures,
                                 ));
                                 return Err(error.message);
                             }
-                            return Err(emit_import_error(
+                            return Err(emit_import_error_with_failures(
                                 &mut progress_callback,
                                 request,
                                 rows_imported,
                                 total_rows,
                                 started_at,
                                 error.message,
+                                &import_failures,
                             ));
                         }
                     };
@@ -7955,13 +8299,14 @@ where
                 Err(error) => {
                     drop(receiver);
                     let _ = producer.await;
-                    return Err(emit_import_error(
+                    return Err(emit_import_error_with_failures(
                         &mut progress_callback,
                         request,
                         rows_imported,
                         total_rows,
                         started_at,
                         error,
+                        &import_failures,
                     ));
                 }
             }
@@ -7969,23 +8314,25 @@ where
         match producer.await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                return Err(emit_import_error(
+                return Err(emit_import_error_with_failures(
                     &mut progress_callback,
                     request,
                     rows_imported,
                     total_rows,
                     started_at,
                     error,
+                    &import_failures,
                 ));
             }
             Err(error) => {
-                return Err(emit_import_error(
+                return Err(emit_import_error_with_failures(
                     &mut progress_callback,
                     request,
                     rows_imported,
                     total_rows,
                     started_at,
                     error.to_string(),
+                    &import_failures,
                 ));
             }
         }
@@ -8016,28 +8363,32 @@ where
         {
             Ok(rows) => rows,
             Err(error) if error.cancelled => {
-                progress_callback(import_progress_with_details(
-                    &request.import_id,
-                    TableImportStatus::Cancelled,
-                    TableImportPhase::Done,
-                    rows_imported,
-                    total_rows,
-                    total_rows_exact,
-                    last_bytes_read.min(total_bytes),
-                    total_bytes,
-                    started_at,
-                    None,
+                progress_callback(with_import_failures(
+                    import_progress_with_details(
+                        &request.import_id,
+                        TableImportStatus::Cancelled,
+                        TableImportPhase::Done,
+                        rows_imported,
+                        total_rows,
+                        total_rows_exact,
+                        last_bytes_read.min(total_bytes),
+                        total_bytes,
+                        started_at,
+                        None,
+                    ),
+                    &import_failures,
                 ));
                 return Err(error.message);
             }
             Err(error) => {
-                return Err(emit_import_error(
+                return Err(emit_import_error_with_failures(
                     &mut progress_callback,
                     request,
                     rows_imported,
                     total_rows,
                     started_at,
                     error.message,
+                    &import_failures,
                 ));
             }
         };
@@ -8046,21 +8397,30 @@ where
             rows_imported = rows_imported.min(known_total_rows);
         }
 
-        progress_callback(import_progress_with_details(
-            &request.import_id,
-            TableImportStatus::Done,
-            TableImportPhase::Done,
-            rows_imported,
-            rows_imported,
-            true,
-            total_bytes,
-            total_bytes,
-            started_at,
-            None,
+        progress_callback(with_import_failures(
+            import_progress_with_details(
+                &request.import_id,
+                TableImportStatus::Done,
+                TableImportPhase::Done,
+                rows_imported,
+                rows_imported,
+                true,
+                total_bytes,
+                total_bytes,
+                started_at,
+                None,
+            ),
+            &import_failures,
         ));
         log_import_metrics(request, source_format, rows_imported, started_at, db_write_ms, statement_count);
 
-        return Ok(import_summary(&request.import_id, rows_imported, rows_imported, started_at));
+        return Ok(import_summary_with_failures(
+            &request.import_id,
+            rows_imported,
+            rows_imported,
+            started_at,
+            &import_failures,
+        ));
     }
 
     if source_format == TableImportSourceFormat::Excel && excel_path_streams_incrementally(&request.file_path) {
@@ -8288,9 +8648,13 @@ where
             &request.table,
             &request.schema,
         );
-        let mut sqlite_append_transaction = sqlite_append_transaction_for_import(&request.mode, db_type);
-        let mut pending_truncate =
-            matches!(request.mode, TableImportMode::Truncate) && supports_transactional_import_truncate(db_type);
+        let mut sqlite_append_transaction =
+            sqlite_append_transaction_for_import(&request.mode, db_type, request.continue_on_error);
+        // Continue-on-error skips the chunk-wide transaction, so the truncate
+        // must run on its own (below) or it would never execute.
+        let mut pending_truncate = matches!(request.mode, TableImportMode::Truncate)
+            && supports_transactional_import_truncate(db_type)
+            && !request.continue_on_error;
         if matches!(request.mode, TableImportMode::Truncate) && !pending_truncate {
             let sql = truncate_sql(&request.table, &request.schema, db_type);
             if let Err(error) =
@@ -8303,6 +8667,7 @@ where
             }
         }
         let mut rows_imported = 0usize;
+        let mut import_failures = ImportFailureSink::new(&request.table);
         let mut sequence_offset = 0usize;
         loop {
             let message = match receive_xlsx_stream_message(
@@ -8318,17 +8683,20 @@ where
                 Err(()) => {
                     drop(receiver);
                     let _ = producer.await;
-                    progress_callback(import_progress_with_details(
-                        &request.import_id,
-                        TableImportStatus::Cancelled,
-                        TableImportPhase::Done,
-                        rows_imported,
-                        0,
-                        false,
-                        last_xlsx_read_bytes,
-                        total_bytes,
-                        started_at,
-                        None,
+                    progress_callback(with_import_failures(
+                        import_progress_with_details(
+                            &request.import_id,
+                            TableImportStatus::Cancelled,
+                            TableImportPhase::Done,
+                            rows_imported,
+                            0,
+                            false,
+                            last_xlsx_read_bytes,
+                            total_bytes,
+                            started_at,
+                            None,
+                        ),
+                        &import_failures,
                     ));
                     return Err("Import cancelled".to_string());
                 }
@@ -8340,17 +8708,20 @@ where
                         producer_cancelled.store(true, Ordering::Release);
                         drop(receiver);
                         let _ = producer.await;
-                        progress_callback(import_progress_with_details(
-                            &request.import_id,
-                            TableImportStatus::Cancelled,
-                            TableImportPhase::Done,
-                            rows_imported,
-                            0,
-                            false,
-                            last_xlsx_read_bytes,
-                            total_bytes,
-                            started_at,
-                            None,
+                        progress_callback(with_import_failures(
+                            import_progress_with_details(
+                                &request.import_id,
+                                TableImportStatus::Cancelled,
+                                TableImportPhase::Done,
+                                rows_imported,
+                                0,
+                                false,
+                                last_xlsx_read_bytes,
+                                total_bytes,
+                                started_at,
+                                None,
+                            ),
+                            &import_failures,
                         ));
                         return Err("Import cancelled".to_string());
                     }
@@ -8381,6 +8752,8 @@ where
                         request.date_time_format.as_deref(),
                         import_sql_hard_limit,
                         sequence_offset,
+                        request.continue_on_error,
+                        &mut import_failures,
                         &mut db_write_ms,
                         &mut statement_count,
                     )
@@ -8396,27 +8769,31 @@ where
                             let _ = producer.await;
                             rows_imported = rows_imported.saturating_add(error.rows_imported);
                             if error.cancelled {
-                                progress_callback(import_progress_with_details(
-                                    &request.import_id,
-                                    TableImportStatus::Cancelled,
-                                    TableImportPhase::Done,
-                                    rows_imported,
-                                    0,
-                                    false,
-                                    0,
-                                    total_bytes,
-                                    started_at,
-                                    None,
+                                progress_callback(with_import_failures(
+                                    import_progress_with_details(
+                                        &request.import_id,
+                                        TableImportStatus::Cancelled,
+                                        TableImportPhase::Done,
+                                        rows_imported,
+                                        0,
+                                        false,
+                                        0,
+                                        total_bytes,
+                                        started_at,
+                                        None,
+                                    ),
+                                    &import_failures,
                                 ));
                                 return Err(error.message);
                             }
-                            return Err(emit_import_error(
+                            return Err(emit_import_error_with_failures(
                                 &mut progress_callback,
                                 request,
                                 rows_imported,
                                 0,
                                 started_at,
                                 error.message,
+                                &import_failures,
                             ));
                         }
                     };
@@ -8456,13 +8833,14 @@ where
                     producer_cancelled.store(true, Ordering::Release);
                     drop(receiver);
                     let _ = producer.await;
-                    return Err(emit_import_error(
+                    return Err(emit_import_error_with_failures(
                         &mut progress_callback,
                         request,
                         rows_imported,
                         0,
                         started_at,
                         error,
+                        &import_failures,
                     ));
                 }
             }
@@ -8470,16 +8848,25 @@ where
         match producer.await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                return Err(emit_import_error(&mut progress_callback, request, rows_imported, 0, started_at, error));
+                return Err(emit_import_error_with_failures(
+                    &mut progress_callback,
+                    request,
+                    rows_imported,
+                    0,
+                    started_at,
+                    error,
+                    &import_failures,
+                ));
             }
             Err(error) => {
-                return Err(emit_import_error(
+                return Err(emit_import_error_with_failures(
                     &mut progress_callback,
                     request,
                     rows_imported,
                     0,
                     started_at,
                     error.to_string(),
+                    &import_failures,
                 ));
             }
         }
@@ -8510,46 +8897,59 @@ where
         {
             Ok(rows) => rows,
             Err(error) if error.cancelled => {
-                progress_callback(import_progress_with_details(
-                    &request.import_id,
-                    TableImportStatus::Cancelled,
-                    TableImportPhase::Done,
-                    rows_imported,
-                    0,
-                    false,
-                    total_bytes,
-                    total_bytes,
-                    started_at,
-                    None,
+                progress_callback(with_import_failures(
+                    import_progress_with_details(
+                        &request.import_id,
+                        TableImportStatus::Cancelled,
+                        TableImportPhase::Done,
+                        rows_imported,
+                        0,
+                        false,
+                        total_bytes,
+                        total_bytes,
+                        started_at,
+                        None,
+                    ),
+                    &import_failures,
                 ));
                 return Err(error.message);
             }
             Err(error) => {
-                return Err(emit_import_error(
+                return Err(emit_import_error_with_failures(
                     &mut progress_callback,
                     request,
                     rows_imported,
                     0,
                     started_at,
                     error.message,
+                    &import_failures,
                 ));
             }
         };
         rows_imported = rows_imported.saturating_add(flushed_rows);
-        progress_callback(import_progress_with_details(
-            &request.import_id,
-            TableImportStatus::Done,
-            TableImportPhase::Done,
-            rows_imported,
-            rows_imported,
-            true,
-            total_bytes,
-            total_bytes,
-            started_at,
-            None,
+        progress_callback(with_import_failures(
+            import_progress_with_details(
+                &request.import_id,
+                TableImportStatus::Done,
+                TableImportPhase::Done,
+                rows_imported,
+                rows_imported,
+                true,
+                total_bytes,
+                total_bytes,
+                started_at,
+                None,
+            ),
+            &import_failures,
         ));
         log_import_metrics(request, source_format, rows_imported, started_at, db_write_ms, statement_count);
-        return Ok(import_summary(&request.import_id, rows_imported, rows_imported, started_at));
+        return Ok(import_summary_with_failures(
+            &request.import_id,
+            rows_imported,
+            rows_imported,
+            started_at,
+            &import_failures,
+        ));
     }
 
     let total_bytes = tokio::fs::metadata(&request.file_path).await.map(|metadata| metadata.len()).unwrap_or(0);
@@ -8652,10 +9052,14 @@ where
         &request.table,
         &request.schema,
     );
-    let mut sqlite_append_transaction = sqlite_append_transaction_for_import(&request.mode, db_type);
+    let mut sqlite_append_transaction =
+        sqlite_append_transaction_for_import(&request.mode, db_type, request.continue_on_error);
 
-    let mut pending_truncate =
-        matches!(request.mode, TableImportMode::Truncate) && supports_transactional_import_truncate(db_type);
+    // Continue-on-error skips the chunk-wide transaction, so the truncate must
+    // run on its own (below) or it would never execute.
+    let mut pending_truncate = matches!(request.mode, TableImportMode::Truncate)
+        && supports_transactional_import_truncate(db_type)
+        && !request.continue_on_error;
     if matches!(request.mode, TableImportMode::Truncate) && !pending_truncate {
         let sql = truncate_sql(&request.table, &request.schema, db_type);
         if let Err(error) =
@@ -8666,13 +9070,14 @@ where
     }
 
     let mut rows_imported = 0;
+    let mut import_failures = ImportFailureSink::new(&request.table);
     let mut sequence_offset = 0usize;
     loop {
         let rows = match row_source.next_batch(effective_batch_size).await {
             Ok(Some(rows)) => rows,
             Ok(None) => break,
             Err(error) => {
-                return Err(emit_import_error_with_total_rows_exact(
+                return Err(emit_import_error_with_total_rows_exact_with_failures(
                     &mut progress_callback,
                     request,
                     rows_imported,
@@ -8680,16 +9085,18 @@ where
                     total_rows_exact,
                     started_at,
                     error,
+                    &import_failures,
                 ));
             }
         };
         if is_cancelled(&request.import_id).await {
-            progress_callback(import_cancelled_progress(
+            progress_callback(import_cancelled_progress_with_failures(
                 &request.import_id,
                 rows_imported,
                 total_rows,
                 total_rows_exact,
                 started_at,
+                &import_failures,
             ));
             return Err("Import cancelled".to_string());
         }
@@ -8721,6 +9128,8 @@ where
             request.date_time_format.as_deref(),
             import_sql_hard_limit,
             sequence_offset,
+            request.continue_on_error,
+            &mut import_failures,
             &mut db_write_ms,
             &mut statement_count,
         )
@@ -8733,16 +9142,17 @@ where
             Err(error) => {
                 rows_imported = (rows_imported + error.rows_imported).min(total_rows_cap);
                 if error.cancelled {
-                    progress_callback(import_cancelled_progress(
+                    progress_callback(import_cancelled_progress_with_failures(
                         &request.import_id,
                         rows_imported,
                         total_rows,
                         total_rows_exact,
                         started_at,
+                        &import_failures,
                     ));
                     return Err(error.message);
                 }
-                return Err(emit_import_error_with_total_rows_exact(
+                return Err(emit_import_error_with_total_rows_exact_with_failures(
                     &mut progress_callback,
                     request,
                     rows_imported,
@@ -8750,6 +9160,7 @@ where
                     total_rows_exact,
                     started_at,
                     error.message,
+                    &import_failures,
                 ));
             }
         };
@@ -8812,17 +9223,18 @@ where
     let flushed_rows = match flushed_rows {
         Ok(rows) => rows,
         Err(error) if error.cancelled => {
-            progress_callback(import_cancelled_progress(
+            progress_callback(import_cancelled_progress_with_failures(
                 &request.import_id,
                 rows_imported,
                 total_rows,
                 total_rows_exact,
                 started_at,
+                &import_failures,
             ));
             return Err(error.message);
         }
         Err(error) => {
-            return Err(emit_import_error_with_total_rows_exact(
+            return Err(emit_import_error_with_total_rows_exact_with_failures(
                 &mut progress_callback,
                 request,
                 rows_imported,
@@ -8830,6 +9242,7 @@ where
                 total_rows_exact,
                 started_at,
                 error.message,
+                &import_failures,
             ));
         }
     };
@@ -8837,17 +9250,26 @@ where
 
     // 流式脚本到 EOF 才能确认总行数；写入全部成功时它就是已导入的行数。
     let reported_total_rows = if total_rows_exact { total_rows } else { rows_imported };
-    progress_callback(import_progress(
-        &request.import_id,
-        TableImportStatus::Done,
-        rows_imported,
-        reported_total_rows,
-        started_at,
-        None,
+    progress_callback(with_import_failures(
+        import_progress(
+            &request.import_id,
+            TableImportStatus::Done,
+            rows_imported,
+            reported_total_rows,
+            started_at,
+            None,
+        ),
+        &import_failures,
     ));
     log_import_metrics(request, source_format, rows_imported, started_at, db_write_ms, statement_count);
 
-    Ok(import_summary(&request.import_id, rows_imported, reported_total_rows, started_at))
+    Ok(import_summary_with_failures(
+        &request.import_id,
+        rows_imported,
+        reported_total_rows,
+        started_at,
+        &import_failures,
+    ))
 }
 
 #[cfg(test)]
@@ -8906,6 +9328,51 @@ mod tests {
         assert_eq!(summary_json["elapsedMs"], serde_json::json!(summary.elapsed_ms));
         assert_eq!(progress_json["phase"], serde_json::json!("writing"));
         assert_eq!(progress_json["totalRowsExact"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn error_and_cancel_terminals_carry_recorded_failures() {
+        let request: TableImportRequest = serde_json::from_value(serde_json::json!({
+            "importId": "import-1",
+            "connectionId": "connection-1",
+            "database": "db",
+            "schema": "public",
+            "table": "items",
+            "filePath": "items.csv",
+            "mappings": [],
+            "mode": "append",
+            "batchSize": 500
+        }))
+        .unwrap();
+        let mut failures = ImportFailureSink::new("items");
+        failures.record(2, "value too long");
+        let mut events = Vec::new();
+        {
+            let mut callback = |progress: TableImportProgress| events.push(progress);
+            let message =
+                emit_import_error_with_failures(&mut callback, &request, 1, 3, Instant::now(), "fatal", &failures);
+            assert!(message.contains("fatal"));
+            events.push(import_cancelled_progress_with_failures(
+                &request.import_id,
+                1,
+                3,
+                true,
+                Instant::now(),
+                &failures,
+            ));
+        }
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].status, TableImportStatus::Error);
+        assert_eq!(events[1].status, TableImportStatus::Cancelled);
+        for event in events {
+            assert_eq!(event.rows_failed, 1);
+            assert_eq!(event.failures.len(), 1);
+            assert_eq!(event.failures[0].table, "items");
+            assert_eq!(event.failures[0].row, 2);
+            assert_eq!(event.failures[0].error, "value too long");
+            assert!(!event.failures_truncated);
+        }
     }
 
     #[test]
@@ -9114,6 +9581,7 @@ mod tests {
             skip_duplicate_rows: false,
             conflict_policy: None,
             retain_source: false,
+            continue_on_error: false,
         };
 
         let prepared = validated_prepared_import_source(&request, TableImportSourceFormat::Csv).unwrap();
@@ -11315,6 +11783,7 @@ mod tests {
             skip_duplicate_rows: false,
             conflict_policy: None,
             retain_source: false,
+            continue_on_error: false,
         };
         let started_at = Instant::now();
         let mut events = vec![import_cancelled_progress(&request.import_id, 19_000, 2_771, false, started_at)];
@@ -11740,6 +12209,7 @@ mod tests {
             skip_duplicate_rows: false,
             conflict_policy: None,
             retain_source: false,
+            continue_on_error: false,
         };
 
         let error = import_table_file_core(
@@ -11833,6 +12303,7 @@ mod tests {
             skip_duplicate_rows: false,
             conflict_policy: None,
             retain_source: false,
+            continue_on_error: false,
         };
 
         let error = import_table_file_core(
@@ -11917,6 +12388,7 @@ mod tests {
             skip_duplicate_rows: false,
             conflict_policy: None,
             retain_source: false,
+            continue_on_error: false,
         };
 
         let error = import_table_file_core(
@@ -14108,6 +14580,7 @@ mod tests {
         let checks_for_import = cancellation_checks.clone();
         let mut postgres_copy_accumulator = None;
         let mut sqlite_append_transaction = None;
+        let mut import_failures = ImportFailureSink::default();
         let mut db_write_ms = 0;
         let mut statement_count = 0;
 
@@ -14143,6 +14616,8 @@ mod tests {
             // batches and the cancellation check lands between writes.
             Some(512 * 1024),
             0,
+            false,
+            &mut import_failures,
             &mut db_write_ms,
             &mut statement_count,
         )
@@ -14331,6 +14806,7 @@ mod tests {
 
         async fn append(&mut self, ids: &[i64]) -> Result<usize, ImportRowsBatchError> {
             let rows = ids.iter().map(|id| vec![serde_json::json!(id)]).collect::<Vec<_>>();
+            let mut import_failures = ImportFailureSink::default();
             execute_import_rows_batch(
                 &self.state,
                 &self.pool_key,
@@ -14358,6 +14834,8 @@ mod tests {
                 None,
                 None,
                 0,
+                false,
+                &mut import_failures,
                 &mut self.db_write_ms,
                 &mut self.statement_count,
             )
@@ -14485,6 +14963,7 @@ mod tests {
             skip_duplicate_rows: false,
             conflict_policy: None,
             retain_source: false,
+            continue_on_error: false,
         };
 
         let summary = import_table_file_core(
@@ -14580,6 +15059,7 @@ mod tests {
             skip_duplicate_rows: false,
             conflict_policy: None,
             retain_source: false,
+            continue_on_error: false,
         };
 
         let mut active_during_import = Vec::new();
@@ -14671,6 +15151,7 @@ mod tests {
             retain_source: false,
             conflict_policy: Some(TableImportConflictPolicy::UpdateExisting),
             skip_duplicate_rows: false,
+            continue_on_error: false,
         };
 
         let summary = import_table_file_core(
@@ -14697,6 +15178,175 @@ mod tests {
                 vec![serde_json::json!(1), serde_json::json!(2), serde_json::json!("Inserted")],
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn sqlite_continue_on_error_skips_failed_rows_and_reports_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-continue-on-error";
+        let pool_key = format!("{connection_id}:session:import");
+        let database_path = dir.path().join("target.db");
+        let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+        crate::db::sqlite::execute_query(&sqlite, "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+            .await
+            .unwrap();
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": connection_id,
+            "name": "SQLite continue-on-error test",
+            "db_type": "sqlite",
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": database_path.to_string_lossy()
+        }))
+        .unwrap();
+        state.configs.write().await.insert(connection_id.to_string(), config);
+        let data_path = dir.path().join("rows.csv");
+        // Row 2 duplicates the primary key, so it fails while rows 1 and 3 must land.
+        std::fs::write(&data_path, b"id,name\n1,Ada\n1,Duplicate\n2,Bob\n").unwrap();
+        let request = TableImportRequest {
+            import_id: "sqlite-continue-on-error".to_string(),
+            connection_id: connection_id.to_string(),
+            database: String::new(),
+            schema: String::new(),
+            table: "items".to_string(),
+            file_path: data_path.to_string_lossy().to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Csv),
+            parse_options: TableImportParseOptions::default(),
+            mappings: ["id", "name"]
+                .into_iter()
+                .map(|column| TableImportColumnMapping {
+                    source_column: column.to_string(),
+                    target_column: column.to_string(),
+                    target_data_type: None,
+                    generator: None,
+                })
+                .collect(),
+            mode: TableImportMode::Append,
+            create_table: false,
+            batch_size: 500,
+            date_time_format: None,
+            prepared_source: None,
+            retain_source: false,
+            conflict_policy: Some(TableImportConflictPolicy::Error),
+            skip_duplicate_rows: false,
+            continue_on_error: true,
+        };
+
+        let summary = import_table_file_core(
+            &state,
+            &request,
+            &DatabaseType::Sqlite,
+            &pool_key,
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.rows_imported, 2);
+        assert_eq!(summary.rows_failed, 1);
+        assert!(!summary.failures_truncated);
+        assert_eq!(summary.failures.len(), 1);
+        assert_eq!(summary.failures[0].row, 2);
+        assert_eq!(summary.failures[0].table, "items");
+        assert!(
+            summary.failures[0].error.to_ascii_lowercase().contains("unique")
+                || summary.failures[0].error.to_ascii_lowercase().contains("constraint"),
+            "unexpected failure message: {}",
+            summary.failures[0].error
+        );
+        let rows = crate::db::sqlite::execute_query(&sqlite, "SELECT id FROM items ORDER BY id").await.unwrap().rows;
+        assert_eq!(rows, vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_import_still_aborts_on_a_failed_batch_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-stop-on-error";
+        let pool_key = format!("{connection_id}:session:import");
+        let database_path = dir.path().join("target.db");
+        let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+        crate::db::sqlite::execute_query(&sqlite, "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+            .await
+            .unwrap();
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": connection_id,
+            "name": "SQLite stop-on-error test",
+            "db_type": "sqlite",
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": database_path.to_string_lossy()
+        }))
+        .unwrap();
+        state.configs.write().await.insert(connection_id.to_string(), config);
+        let data_path = dir.path().join("rows.csv");
+        std::fs::write(&data_path, b"id,name\n1,Ada\n1,Duplicate\n2,Bob\n").unwrap();
+        let request = TableImportRequest {
+            import_id: "sqlite-stop-on-error".to_string(),
+            connection_id: connection_id.to_string(),
+            database: String::new(),
+            schema: String::new(),
+            table: "items".to_string(),
+            file_path: data_path.to_string_lossy().to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Csv),
+            parse_options: TableImportParseOptions::default(),
+            mappings: ["id", "name"]
+                .into_iter()
+                .map(|column| TableImportColumnMapping {
+                    source_column: column.to_string(),
+                    target_column: column.to_string(),
+                    target_data_type: None,
+                    generator: None,
+                })
+                .collect(),
+            mode: TableImportMode::Append,
+            create_table: false,
+            batch_size: 500,
+            date_time_format: None,
+            prepared_source: None,
+            retain_source: false,
+            conflict_policy: Some(TableImportConflictPolicy::Error),
+            skip_duplicate_rows: false,
+            continue_on_error: false,
+        };
+
+        let error = import_table_file_core(
+            &state,
+            &request,
+            &DatabaseType::Sqlite,
+            &pool_key,
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.to_ascii_lowercase().contains("unique") || error.to_ascii_lowercase().contains("constraint"),
+            "unexpected error: {error}"
+        );
+        let rows = crate::db::sqlite::execute_query(&sqlite, "SELECT COUNT(*) FROM items").await.unwrap().rows;
+        assert_eq!(rows, vec![vec![serde_json::json!(0)]]);
     }
 
     #[tokio::test]

@@ -1227,6 +1227,7 @@ export type {
   TableImportRequest,
   TableImportSummary,
   TableImportProgress,
+  TableImportFailure,
   MongoImportFormat,
   MongoImportTypeMode,
   MongoImportInferredType,

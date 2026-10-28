@@ -4474,6 +4474,8 @@ export default withEnglishFallback({
     attachSqliteDatabaseSuccess: "Baza danych SQLite „{name}” została podłączona",
     attachSqliteDatabaseDesktopOnly: "Podłączanie plików baz SQLite jest dostępne tylko w aplikacji na komputery",
     dropDatabaseSuccess: "Baza danych „{name}” została usunięta",
+    dropDatabaseInUseSessions: "Nie można usunąć bazy danych „{name}”: nadal połączone są inne sesje ({count}). Zamknij te połączenia i spróbuj ponownie.",
+    dropDatabaseInUse: "Nie można usunąć bazy danych „{name}”: nadal używają jej inne połączenia. Zamknij te połączenia i spróbuj ponownie.",
     dropCollection: "Usuń kolekcję",
     elasticsearchViewMapping: "Pokaż mapowanie (Mapping)",
     elasticsearchViewSettings: "Pokaż ustawienia indeksu",

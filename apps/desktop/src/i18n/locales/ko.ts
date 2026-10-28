@@ -4825,6 +4825,8 @@ export default withEnglishFallback({
     attachSqliteDatabaseSuccess: 'SQLite 데이터베이스 "{name}"이(가) 연결되었습니다',
     attachSqliteDatabaseDesktopOnly: "SQLite 데이터베이스 파일 연결은 데스크톱 앱에서만 사용할 수 있습니다",
     dropDatabaseSuccess: '데이터베이스 "{name}" 삭제됨',
+    dropDatabaseInUseSessions: '데이터베이스 "{name}"을(를) 삭제할 수 없습니다: 다른 세션 {count}개가 아직 연결되어 있습니다. 해당 연결을 닫은 후 다시 시도하세요.',
+    dropDatabaseInUse: '데이터베이스 "{name}"을(를) 삭제할 수 없습니다: 다른 연결이 아직 사용 중입니다. 해당 연결을 닫은 후 다시 시도하세요.',
     dropCollection: "컬렉션 삭제",
     elasticsearchViewMapping: "매핑 보기",
     elasticsearchViewSettings: "인덱스 설정 보기",

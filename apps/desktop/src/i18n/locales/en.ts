@@ -5404,6 +5404,8 @@ export default {
     attachSqliteDatabaseSuccess: 'SQLite database "{name}" attached',
     attachSqliteDatabaseDesktopOnly: "Attaching SQLite database files is only available in the desktop app",
     dropDatabaseSuccess: 'Database "{name}" dropped',
+    dropDatabaseInUseSessions: 'Cannot drop database "{name}": {count} other session(s) are still connected to it. Close those connections and try again.',
+    dropDatabaseInUse: 'Cannot drop database "{name}": other connections are still using it. Close those connections and try again.',
     dropCollection: "Drop Collection",
     elasticsearchViewMapping: "View Mapping",
     elasticsearchViewSettings: "View Index Settings",

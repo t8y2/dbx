@@ -5061,6 +5061,8 @@ export default withEnglishFallback({
     attachSqliteDatabaseSuccess: 'Base de datos SQLite "{name}" adjuntada',
     attachSqliteDatabaseDesktopOnly: "Adjuntar archivos de base de datos SQLite solo está disponible en la app de escritorio",
     dropDatabaseSuccess: 'Base de datos "{name}" eliminada',
+    dropDatabaseInUseSessions: 'No se puede eliminar la base de datos "{name}": {count} sesión(es) más siguen conectadas. Cierre esas conexiones e inténtelo de nuevo.',
+    dropDatabaseInUse: 'No se puede eliminar la base de datos "{name}": otras conexiones aún la están usando. Cierre esas conexiones e inténtelo de nuevo.',
     dropCollection: "Eliminar colección",
     elasticsearchViewMapping: "Ver mapping",
     elasticsearchViewSettings: "Ver configuración del índice",

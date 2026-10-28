@@ -4877,6 +4877,8 @@ export default withEnglishFallback({
     attachSqliteDatabaseSuccess: 'Database SQLite "{name}" collegato',
     attachSqliteDatabaseDesktopOnly: "Il collegamento di file di database SQLite è disponibile solo nell'applicazione desktop",
     dropDatabaseSuccess: 'Database "{name}" eliminato',
+    dropDatabaseInUseSessions: 'Impossibile eliminare il database "{name}": {count} altre sessioni sono ancora connesse. Chiudi queste connessioni e riprova.',
+    dropDatabaseInUse: 'Impossibile eliminare il database "{name}": altre connessioni lo stanno ancora usando. Chiudi queste connessioni e riprova.',
     dropCollection: "Elimina Collection",
     elasticsearchViewMapping: "Visualizza mapping",
     elasticsearchViewSettings: "Visualizza impostazioni indice",

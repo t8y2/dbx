@@ -13,6 +13,7 @@ import { useSidebarTableMutationRuntime } from "@/composables/useSidebarTableMut
 import { useSidebarTreeExportRuntime } from "@/composables/useSidebarTreeExportRuntime";
 import { useSidebarTreeToolRuntime } from "@/composables/useSidebarTreeToolRuntime";
 import { canDropDatabaseNode, notifyDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
+import { dropDatabaseOtherSessionCount } from "@/lib/database/dropDatabaseError";
 import { canDropDatabaseTables, canEmptyDatabaseTables, useDatabaseTableEmpty } from "@/composables/useDatabaseTableEmpty";
 import { useI18n } from "vue-i18n";
 import { launchPlDebug, openPlDebugRecovery } from "@/components/debug/plDebugLaunch";
@@ -5816,7 +5817,10 @@ async function confirmDropDatabase() {
     notifyDatabaseBrowserMutation({ connectionId, database: node.database || node.label, operation: "drop-database" });
     queryStore.closeDatabaseTabs(connectionId, node.database || node.label);
   } catch (e: any) {
-    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+    const message = e?.message || String(e);
+    const otherSessions = dropDatabaseOtherSessionCount(message);
+    if (otherSessions === undefined) toast(t("contextMenu.tableOperationFailed", { message }), 5000);
+    else toast(otherSessions === null ? t("contextMenu.dropDatabaseInUse", { name: node.label }) : t("contextMenu.dropDatabaseInUseSessions", { name: node.label, count: otherSessions }), 5000);
   } finally {
     dropDatabaseLoading.value = false;
   }

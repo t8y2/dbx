@@ -5220,6 +5220,8 @@ export default withEnglishFallback({
     attachSqliteDatabaseSuccess: "แนบฐานข้อมูล SQLite “{name}” แล้ว",
     attachSqliteDatabaseDesktopOnly: "การแนบไฟล์ฐานข้อมูล SQLite ใช้ได้เฉพาะใน Desktop App",
     dropDatabaseSuccess: "Drop ฐานข้อมูล “{name}” แล้ว",
+    dropDatabaseInUseSessions: "ไม่สามารถ Drop ฐานข้อมูล “{name}” ได้: ยังมีเซสชันอื่นเชื่อมต่ออยู่ {count} รายการ ปิดการเชื่อมต่อเหล่านั้นแล้วลองอีกครั้ง",
+    dropDatabaseInUse: "ไม่สามารถ Drop ฐานข้อมูล “{name}” ได้: ยังมีการเชื่อมต่ออื่นใช้งานอยู่ ปิดการเชื่อมต่อเหล่านั้นแล้วลองอีกครั้ง",
     dropCollection: "Drop Collection",
     elasticsearchViewMapping: "ดู Mapping",
     elasticsearchViewSettings: "ดู Settings ของ Index",

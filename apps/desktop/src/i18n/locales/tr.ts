@@ -4041,6 +4041,8 @@ export default withEnglishFallback({
     attachSqliteDatabaseSuccess: '"{name}" SQLite veritabanı eklendi',
     attachSqliteDatabaseDesktopOnly: "SQLite veritabanı dosyası eklemek yalnızca masaüstü uygulamasında kullanılabilir",
     dropDatabaseSuccess: '"{name}" veritabanı silindi',
+    dropDatabaseInUseSessions: '"{name}" veritabanı silinemiyor: {count} başka oturum hâlâ bağlı. Bu bağlantıları kapatıp yeniden deneyin.',
+    dropDatabaseInUse: '"{name}" veritabanı silinemiyor: başka bağlantılar hâlâ kullanıyor. Bu bağlantıları kapatıp yeniden deneyin.',
     dropCollection: "Koleksiyonu Sil",
     elasticsearchViewMapping: "Eşlemeyi Görüntüle",
     elasticsearchViewSettings: "Dizin Ayarlarını Görüntüle",

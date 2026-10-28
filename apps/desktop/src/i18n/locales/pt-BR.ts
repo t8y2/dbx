@@ -4873,6 +4873,8 @@ export default withEnglishFallback({
     attachSqliteDatabaseSuccess: 'Banco de dados SQLite "{name}" anexado',
     attachSqliteDatabaseDesktopOnly: "Anexar arquivos de banco de dados SQLite só está disponível no aplicativo desktop",
     dropDatabaseSuccess: 'Banco de dados "{name}" removido',
+    dropDatabaseInUseSessions: 'Não é possível remover o banco de dados "{name}": {count} outra(s) sessão(ões) ainda estão conectadas. Feche essas conexões e tente novamente.',
+    dropDatabaseInUse: 'Não é possível remover o banco de dados "{name}": outras conexões ainda o estão usando. Feche essas conexões e tente novamente.',
     dropCollection: "Remover coleção",
     elasticsearchViewMapping: "Ver mapping",
     elasticsearchViewSettings: "Ver configurações do índice",

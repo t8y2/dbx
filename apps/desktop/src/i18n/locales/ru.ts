@@ -5045,6 +5045,8 @@ export default withEnglishFallback({
     attachSqliteDatabaseSuccess: "База данных SQLite «{name}» присоединена",
     attachSqliteDatabaseDesktopOnly: "Присоединение файлов баз данных SQLite доступно только в настольном приложении",
     dropDatabaseSuccess: "База данных «{name}» удалена",
+    dropDatabaseInUseSessions: "Не удалось удалить базу данных «{name}»: к ней всё ещё подключено других сеансов: {count}. Закройте эти подключения и повторите попытку.",
+    dropDatabaseInUse: "Не удалось удалить базу данных «{name}»: она всё ещё используется другими подключениями. Закройте эти подключения и повторите попытку.",
     dropCollection: "Удалить коллекцию",
     elasticsearchViewMapping: "Просмотреть mapping",
     elasticsearchViewSettings: "Просмотреть настройки индекса",

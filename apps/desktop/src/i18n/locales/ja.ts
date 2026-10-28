@@ -4890,6 +4890,8 @@ export default withEnglishFallback({
     attachSqliteDatabaseSuccess: "SQLiteデータベース「{name}」をアタッチしました",
     attachSqliteDatabaseDesktopOnly: "SQLiteデータベースファイルのアタッチはデスクトップアプリでのみ利用可能です",
     dropDatabaseSuccess: "データベース「{name}」を削除しました",
+    dropDatabaseInUseSessions: "データベース「{name}」を削除できません：他のセッションが {count} 件接続中です。それらの接続を閉じてから再試行してください。",
+    dropDatabaseInUse: "データベース「{name}」を削除できません：他の接続が使用中です。それらの接続を閉じてから再試行してください。",
     dropCollection: "コレクションを削除",
     elasticsearchViewMapping: "マッピングを表示",
     elasticsearchViewSettings: "インデックス設定を表示",

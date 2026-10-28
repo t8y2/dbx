@@ -4072,6 +4072,8 @@ export default withEnglishFallback({
     attachSqliteDatabaseSuccess: '"{name}" adlı SQLite verilənlər bazası qoşuldu',
     attachSqliteDatabaseDesktopOnly: "SQLite verilənlər bazası fayllarını qoşmaq yalnız masaüstü tətbiqdə mümkündür",
     dropDatabaseSuccess: '"{name}" verilənlər bazası silindi',
+    dropDatabaseInUseSessions: '"{name}" verilənlər bazası silinə bilmir: hələ {count} başqa sessiya qoşulub. Bu bağlantıları bağlayıb yenidən cəhd edin.',
+    dropDatabaseInUse: '"{name}" verilənlər bazası silinə bilmir: başqa bağlantılar hələ də ondan istifadə edir. Bu bağlantıları bağlayıb yenidən cəhd edin.',
     dropCollection: "Kolleksiyanı sil",
     elasticsearchViewMapping: "Sahə uyğunlaşdırmasına bax",
     elasticsearchViewSettings: "İndeks parametrlərinə bax",

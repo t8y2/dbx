@@ -5331,6 +5331,8 @@ export default withEnglishFallback({
     attachSqliteDatabaseSuccess: "SQLite 数据库「{name}」已附加",
     attachSqliteDatabaseDesktopOnly: "附加 SQLite 数据库文件仅支持桌面端",
     dropDatabaseSuccess: "数据库「{name}」已删除",
+    dropDatabaseInUseSessions: "无法删除数据库「{name}」：仍有 {count} 个其他会话连接到该数据库。请关闭这些连接后重试。",
+    dropDatabaseInUse: "无法删除数据库「{name}」：仍有其他连接正在使用该数据库。请关闭这些连接后重试。",
     dropCollection: "删除集合",
     elasticsearchViewMapping: "查看 Mapping",
     elasticsearchViewSettings: "查看索引配置",

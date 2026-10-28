@@ -4410,6 +4410,8 @@ export default withEnglishFallback({
     attachSqliteDatabaseSuccess: 'Database SQLite "{name}" dilampirkan',
     attachSqliteDatabaseDesktopOnly: "Melampirkan file database SQLite hanya tersedia di aplikasi desktop",
     dropDatabaseSuccess: 'Database "{name}" telah di-drop',
+    dropDatabaseInUseSessions: 'Tidak dapat men-drop database "{name}": masih ada {count} sesi lain yang terhubung. Tutup koneksi tersebut lalu coba lagi.',
+    dropDatabaseInUse: 'Tidak dapat men-drop database "{name}": koneksi lain masih menggunakannya. Tutup koneksi tersebut lalu coba lagi.',
     dropCollection: "Drop Koleksi",
     elasticsearchViewMapping: "Lihat Mapping",
     elasticsearchViewSettings: "Lihat Pengaturan Indeks",

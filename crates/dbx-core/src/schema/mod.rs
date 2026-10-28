@@ -1467,24 +1467,45 @@ fn table_comments_from_query_result(result: db::QueryResult) -> HashMap<String, 
 
 // Oracle 11g can spend about a minute evaluating SYS_CONTEXT inside the ALL_SYNONYMS START WITH clause.
 const ORACLE_CURRENT_SCHEMA_SQL: &str = "SELECT SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS CURRENT_SCHEMA FROM DUAL";
+// Private database links resolve in the session's current schema, and the metadata session
+// may have switched to the requested owner. Reads through a link run as the login user, who
+// owns the private links the session can use.
+const ORACLE_SESSION_USER_SQL: &str = "SELECT SYS_CONTEXT('USERENV','SESSION_USER') AS SESSION_USER FROM DUAL";
 const ORACLE_SYNONYM_MAX_DEPTH: usize = 16;
 
+/// An object owner left empty on a database link stands for the link user's default schema,
+/// which is only known after asking the remote database.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct OracleObjectRef {
     owner: String,
     name: String,
+    db_link: Option<String>,
 }
 
 struct OracleSynonymResolver {
     current: OracleObjectRef,
     visited: HashSet<OracleObjectRef>,
     depth: usize,
+    /// Candidates tried after the current chain finds nothing, last entry first.
+    retries: Vec<OracleObjectRef>,
 }
 
 impl OracleSynonymResolver {
+    /// The SQL editor sends `TABLE@LINK` as a single table name. It starts as a remote object
+    /// owned by the requested schema, then retries under the link user's default schema because
+    /// a one-part reference still arrives with the query tab's schema. The literal name is kept
+    /// last for quoted local names that contain `@`.
     fn new(owner: String, name: String) -> Self {
-        let current = OracleObjectRef { owner, name };
-        Self { current: current.clone(), visited: HashSet::from([current]), depth: 0 }
+        let literal = OracleObjectRef { owner, name, db_link: None };
+        let (current, retries) = match split_oracle_database_link(&literal.name) {
+            Some((name, db_link)) => {
+                let remote = OracleObjectRef { owner: literal.owner.clone(), name, db_link: Some(db_link) };
+                let link_user = OracleObjectRef { owner: String::new(), ..remote.clone() };
+                (remote, vec![literal, link_user])
+            }
+            None => (literal, Vec::new()),
+        };
+        Self { current: current.clone(), visited: HashSet::from([current]), depth: 0, retries }
     }
 
     fn current(&self) -> &OracleObjectRef {
@@ -1507,6 +1528,71 @@ impl OracleSynonymResolver {
         self.depth += 1;
         true
     }
+
+    fn retry_next_candidate(&mut self) -> bool {
+        while let Some(target) = self.retries.pop() {
+            if self.visited.insert(target.clone()) {
+                self.current = target;
+                self.depth = 0;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn pending_database_link_user(&self) -> Option<String> {
+        self.current.owner.is_empty().then(|| self.current.db_link.clone()).flatten()
+    }
+
+    fn resolve_database_link_user(&mut self, owner: String) -> bool {
+        let resolved = OracleObjectRef { owner, ..self.current.clone() };
+        if !self.visited.insert(resolved.clone()) {
+            return false;
+        }
+        self.current = resolved;
+        true
+    }
+}
+
+/// Database link names are spliced into dictionary view names, so only the plain
+/// `NAME[.DOMAIN]` spelling is accepted.
+fn oracle_database_link_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    let identifier_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '#');
+    let valid = value.len() <= 128
+        && value.split('.').enumerate().all(|(index, part)| {
+            part.chars().next().is_some_and(|first| index > 0 || first.is_ascii_alphabetic())
+                && part.chars().all(identifier_char)
+        });
+    valid.then(|| value.to_ascii_uppercase())
+}
+
+fn split_oracle_database_link(name: &str) -> Option<(String, String)> {
+    let (object, db_link) = name.split_once('@')?;
+    if object.is_empty() {
+        return None;
+    }
+    Some((object.to_string(), oracle_database_link_name(db_link)?))
+}
+
+fn oracle_dictionary_link_suffix(db_link: Option<&str>) -> Result<String, String> {
+    match db_link {
+        None => Ok(String::new()),
+        Some(link) => oracle_database_link_name(link)
+            .map(|link| format!("@{link}"))
+            .ok_or_else(|| "Invalid Oracle database link name".to_string()),
+    }
+}
+
+fn oracle_database_link_user_sql(db_link: &str) -> Result<String, String> {
+    Ok(format!("SELECT USERNAME FROM USER_USERS{}", oracle_dictionary_link_suffix(Some(db_link))?))
+}
+
+fn oracle_identifier_from_query_result(result: db::QueryResult, column: &str) -> Option<String> {
+    let index = result.columns.iter().position(|name| name.trim().eq_ignore_ascii_case(column))?;
+    let value = query_result_cell_string(result.rows.first()?, index)?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn oracle_current_schema_from_query_result(result: db::QueryResult) -> Result<String, String> {
@@ -1534,21 +1620,22 @@ fn oracle_columns_sql(schema: &str, table: &str) -> Result<String, String> {
     if schema.is_empty() {
         return Err("Oracle columns query requires a resolved schema".to_string());
     }
-    oracle_columns_sql_for_resolved_owner(&schema.to_uppercase(), table)
+    oracle_columns_sql_for_resolved_owner(&schema.to_uppercase(), table, None)
 }
 
-fn oracle_columns_sql_for_resolved_owner(owner: &str, table: &str) -> Result<String, String> {
+fn oracle_columns_sql_for_resolved_owner(owner: &str, table: &str, db_link: Option<&str>) -> Result<String, String> {
     if owner.trim().is_empty() {
         return Err("Oracle columns query requires a resolved schema".to_string());
     }
     let owner = sql_string(owner);
+    let at = oracle_dictionary_link_suffix(db_link)?;
     Ok(format!(
         "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.NULLABLE, c.DATA_DEFAULT, \
          c.DATA_LENGTH, c.DATA_PRECISION, c.DATA_SCALE, c.COLUMN_ID, \
          CASE WHEN EXISTS ( \
            SELECT 1 \
-           FROM ALL_CONS_COLUMNS cols \
-           JOIN ALL_CONSTRAINTS con \
+           FROM ALL_CONS_COLUMNS{at} cols \
+           JOIN ALL_CONSTRAINTS{at} con \
              ON con.OWNER = cols.OWNER \
             AND con.CONSTRAINT_NAME = cols.CONSTRAINT_NAME \
             AND con.CONSTRAINT_TYPE = 'P' \
@@ -1558,12 +1645,12 @@ fn oracle_columns_sql_for_resolved_owner(owner: &str, table: &str) -> Result<Str
          ) THEN 1 ELSE 0 END AS IS_PK, \
          ( \
            SELECT cm.COMMENTS \
-           FROM ALL_COL_COMMENTS cm \
+           FROM ALL_COL_COMMENTS{at} cm \
            WHERE cm.OWNER = c.OWNER \
              AND cm.TABLE_NAME = c.TABLE_NAME \
              AND cm.COLUMN_NAME = c.COLUMN_NAME \
          ) AS COMMENTS \
-         FROM ALL_TAB_COLUMNS c \
+         FROM ALL_TAB_COLUMNS{at} c \
          WHERE c.OWNER = {owner} \
            AND c.TABLE_NAME = {table} \
          ORDER BY c.COLUMN_ID",
@@ -1571,32 +1658,52 @@ fn oracle_columns_sql_for_resolved_owner(owner: &str, table: &str) -> Result<Str
     ))
 }
 
-fn oracle_synonym_target_sql(owner: &str, table: &str, include_public: bool) -> Result<String, String> {
+fn oracle_synonym_target_sql(
+    owner: &str,
+    table: &str,
+    db_link: Option<&str>,
+    include_public: bool,
+) -> Result<String, String> {
     if owner.trim().is_empty() {
         return Err("Oracle synonym query requires a resolved schema".to_string());
     }
     let owner = sql_string(owner);
     let owner_filter =
         if include_public { format!("s.OWNER IN ({owner}, 'PUBLIC')") } else { format!("s.OWNER = {owner}") };
+    let at = oracle_dictionary_link_suffix(db_link)?;
+    // A link name in a remote dictionary is relative to the remote database, so the
+    // resolver does not chain links.
+    let remote_filter = if db_link.is_some() { " AND s.DB_LINK IS NULL" } else { "" };
     Ok(format!(
-        "SELECT s.TABLE_OWNER, s.TABLE_NAME \
-         FROM ALL_SYNONYMS s \
+        "SELECT s.TABLE_OWNER, s.TABLE_NAME, s.DB_LINK \
+         FROM ALL_SYNONYMS{at} s \
          WHERE s.SYNONYM_NAME = {} \
-           AND {owner_filter} \
-           AND s.DB_LINK IS NULL \
+           AND {owner_filter}{remote_filter} \
          ORDER BY CASE WHEN s.OWNER = {owner} THEN 0 ELSE 1 END",
         sql_string(table),
     ))
 }
 
-fn oracle_synonym_target_from_query_result(result: db::QueryResult) -> Option<OracleObjectRef> {
+fn oracle_synonym_target_from_query_result(
+    result: db::QueryResult,
+    source: &OracleObjectRef,
+) -> Option<OracleObjectRef> {
     let owner_index = result.columns.iter().position(|column| column.eq_ignore_ascii_case("TABLE_OWNER"))?;
     let table_index = result.columns.iter().position(|column| column.eq_ignore_ascii_case("TABLE_NAME"))?;
+    let link_index = result.columns.iter().position(|column| column.eq_ignore_ascii_case("DB_LINK"));
     let row = result.rows.first()?;
-    Some(OracleObjectRef {
-        owner: query_result_cell_string(row, owner_index)?,
-        name: query_result_cell_string(row, table_index)?,
-    })
+    let db_link =
+        match link_index.and_then(|index| query_result_cell_string(row, index)).filter(|link| !link.is_empty()) {
+            Some(link) => Some(oracle_database_link_name(&link)?),
+            None => source.db_link.clone(),
+        };
+    // `CREATE SYNONYM s FOR t@link` stores no owner; the remote object belongs to the link user.
+    let owner = match query_result_cell_string(row, owner_index) {
+        Some(owner) => owner,
+        None if db_link.is_some() => String::new(),
+        None => return None,
+    };
+    Some(OracleObjectRef { owner, name: query_result_cell_string(row, table_index)?, db_link })
 }
 
 fn oracle_column_type(data_type: &str, precision: Option<i32>, scale: Option<i32>, length: Option<i32>) -> String {
@@ -1673,16 +1780,60 @@ async fn oracle_columns_via_sql(
         oracle_current_schema_from_query_result(result)?
     };
     let mut resolver = OracleSynonymResolver::new(owner, table.to_string());
+    let mut session_user = None;
 
     loop {
+        if resolver.current().db_link.is_some() && session_user.is_none() {
+            let result = client
+                .execute_query_with_timeout::<db::QueryResult>(
+                    agent_execute_query_params(
+                        ORACLE_SESSION_USER_SQL,
+                        if database.is_empty() { None } else { Some(database) },
+                        None,
+                        QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
+                    ),
+                    timeout_duration,
+                )
+                .await?;
+            session_user = oracle_identifier_from_query_result(result, "SESSION_USER");
+            if session_user.is_none() {
+                return Ok(Vec::new());
+            }
+        }
+        let session_schema =
+            if resolver.current().db_link.is_some() { session_user.as_deref() } else { request_schema };
+
+        if let Some(db_link) = resolver.pending_database_link_user() {
+            let sql = oracle_database_link_user_sql(&db_link)?;
+            let result = client
+                .execute_query_with_timeout::<db::QueryResult>(
+                    agent_execute_query_params(
+                        &sql,
+                        if database.is_empty() { None } else { Some(database) },
+                        session_schema,
+                        QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
+                    ),
+                    timeout_duration,
+                )
+                .await?;
+            if !oracle_identifier_from_query_result(result, "USERNAME")
+                .is_some_and(|owner| resolver.resolve_database_link_user(owner))
+            {
+                if resolver.retry_next_candidate() {
+                    continue;
+                }
+                return Ok(Vec::new());
+            }
+        }
+
         let object = resolver.current();
-        let sql = oracle_columns_sql_for_resolved_owner(&object.owner, &object.name)?;
+        let sql = oracle_columns_sql_for_resolved_owner(&object.owner, &object.name, object.db_link.as_deref())?;
         let result = client
             .execute_query_with_timeout::<db::QueryResult>(
                 agent_execute_query_params(
                     &sql,
                     if database.is_empty() { None } else { Some(database) },
-                    request_schema,
+                    session_schema,
                     QueryExecutionOptions { max_rows: Some(10_000), ..Default::default() },
                 ),
                 timeout_duration,
@@ -1692,29 +1843,34 @@ async fn oracle_columns_via_sql(
         if !columns.is_empty() {
             return Ok(deduplicate_column_infos(columns));
         }
-        if !resolver.can_follow() {
-            return Ok(Vec::new());
-        }
 
-        let object = resolver.current();
-        let sql = oracle_synonym_target_sql(&object.owner, &object.name, resolver.include_public_synonym())?;
-        let result = client
-            .execute_query_with_timeout::<db::QueryResult>(
-                agent_execute_query_params(
-                    &sql,
-                    if database.is_empty() { None } else { Some(database) },
-                    request_schema,
-                    QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
-                ),
-                timeout_duration,
-            )
-            .await?;
-        let Some(target) = oracle_synonym_target_from_query_result(result) else {
-            return Ok(Vec::new());
+        let target = if resolver.can_follow() {
+            let object = resolver.current();
+            let sql = oracle_synonym_target_sql(
+                &object.owner,
+                &object.name,
+                object.db_link.as_deref(),
+                resolver.include_public_synonym(),
+            )?;
+            let result = client
+                .execute_query_with_timeout::<db::QueryResult>(
+                    agent_execute_query_params(
+                        &sql,
+                        if database.is_empty() { None } else { Some(database) },
+                        session_schema,
+                        QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
+                    ),
+                    timeout_duration,
+                )
+                .await?;
+            oracle_synonym_target_from_query_result(result, resolver.current())
+        } else {
+            None
         };
-        if !resolver.follow(target) {
-            return Ok(Vec::new());
+        if target.is_some_and(|target| resolver.follow(target)) || resolver.retry_next_candidate() {
+            continue;
         }
+        return Ok(Vec::new());
     }
 }
 
@@ -1745,17 +1901,67 @@ async fn external_driver_oracle_columns_via_sql(
         schema.trim().to_uppercase()
     };
     let mut resolver = OracleSynonymResolver::new(owner, table.to_string());
+    let mut session_user = None;
 
     loop {
+        if resolver.current().db_link.is_some() && session_user.is_none() {
+            let result: db::QueryResult = session
+                .invoke_with_timeout(
+                    "executeQuery",
+                    serde_json::json!({
+                        "connection": config,
+                        "database": database,
+                        "schema": "",
+                        "sql": ORACLE_SESSION_USER_SQL,
+                        "maxRows": 1
+                    }),
+                    agent_metadata_timeout(Some(config)),
+                )
+                .await?;
+            session_user = oracle_identifier_from_query_result(result, "SESSION_USER");
+            if session_user.is_none() {
+                return Ok(Vec::new());
+            }
+        }
+        let session_schema = match (&resolver.current().db_link, &session_user) {
+            (Some(_), Some(user)) => user.as_str(),
+            _ => request_schema,
+        };
+
+        if let Some(db_link) = resolver.pending_database_link_user() {
+            let sql = oracle_database_link_user_sql(&db_link)?;
+            let result: db::QueryResult = session
+                .invoke_with_timeout(
+                    "executeQuery",
+                    serde_json::json!({
+                        "connection": config,
+                        "database": database,
+                        "schema": session_schema,
+                        "sql": sql,
+                        "maxRows": 1
+                    }),
+                    agent_metadata_timeout(Some(config)),
+                )
+                .await?;
+            if !oracle_identifier_from_query_result(result, "USERNAME")
+                .is_some_and(|owner| resolver.resolve_database_link_user(owner))
+            {
+                if resolver.retry_next_candidate() {
+                    continue;
+                }
+                return Ok(Vec::new());
+            }
+        }
+
         let object = resolver.current();
-        let sql = oracle_columns_sql_for_resolved_owner(&object.owner, &object.name)?;
+        let sql = oracle_columns_sql_for_resolved_owner(&object.owner, &object.name, object.db_link.as_deref())?;
         let result: db::QueryResult = session
             .invoke_with_timeout(
                 "executeQuery",
                 serde_json::json!({
                     "connection": config,
                     "database": database,
-                    "schema": request_schema,
+                    "schema": session_schema,
                     "sql": sql,
                     "maxRows": 10_000
                 }),
@@ -1766,31 +1972,36 @@ async fn external_driver_oracle_columns_via_sql(
         if !columns.is_empty() {
             return Ok(deduplicate_column_infos(columns));
         }
-        if !resolver.can_follow() {
-            return Ok(Vec::new());
-        }
 
-        let object = resolver.current();
-        let sql = oracle_synonym_target_sql(&object.owner, &object.name, resolver.include_public_synonym())?;
-        let result: db::QueryResult = session
-            .invoke_with_timeout(
-                "executeQuery",
-                serde_json::json!({
-                    "connection": config,
-                    "database": database,
-                    "schema": request_schema,
-                    "sql": sql,
-                    "maxRows": 1
-                }),
-                agent_metadata_timeout(Some(config)),
-            )
-            .await?;
-        let Some(target) = oracle_synonym_target_from_query_result(result) else {
-            return Ok(Vec::new());
+        let target = if resolver.can_follow() {
+            let object = resolver.current();
+            let sql = oracle_synonym_target_sql(
+                &object.owner,
+                &object.name,
+                object.db_link.as_deref(),
+                resolver.include_public_synonym(),
+            )?;
+            let result: db::QueryResult = session
+                .invoke_with_timeout(
+                    "executeQuery",
+                    serde_json::json!({
+                        "connection": config,
+                        "database": database,
+                        "schema": session_schema,
+                        "sql": sql,
+                        "maxRows": 1
+                    }),
+                    agent_metadata_timeout(Some(config)),
+                )
+                .await?;
+            oracle_synonym_target_from_query_result(result, resolver.current())
+        } else {
+            None
         };
-        if !resolver.follow(target) {
-            return Ok(Vec::new());
+        if target.is_some_and(|target| resolver.follow(target)) || resolver.retry_next_candidate() {
+            continue;
         }
+        return Ok(Vec::new());
     }
 }
 
@@ -3298,7 +3509,8 @@ mod tests {
         mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
         mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
         oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_completion_synonyms_sql,
-        oracle_current_schema_from_query_result, oracle_object_statistics_dba_segments_sql,
+        oracle_current_schema_from_query_result, oracle_database_link_name, oracle_database_link_user_sql,
+        oracle_identifier_from_query_result, oracle_object_statistics_dba_segments_sql,
         oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
         oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
         oracle_synonym_target_from_query_result, oracle_synonym_target_sql, oracle_table_comment_sql,
@@ -3306,12 +3518,12 @@ mod tests {
         presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
         reference_key_columns_from_indexes, reference_keys_from_indexes, replace_metadata_runtime,
         should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
-        single_table_comment_from_query_result, table_comments_from_query_result, table_name_filter_matches,
-        tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
-        uses_mongodb_agent_collection_listing, visible_schema_filter, ExternalDriverStatisticsDialect,
-        MetadataErrorAction, MysqlTableListSource, OracleObjectRef, OracleSynonymResolver, ReferenceKeyInfo,
-        TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL, ORACLE_SYNONYM_MAX_DEPTH, TDENGINE_COMMENT_SEARCH_TIMEOUT,
-        TDENGINE_LIKE_PATTERN_MAX_BYTES,
+        single_table_comment_from_query_result, split_oracle_database_link, table_comments_from_query_result,
+        table_name_filter_matches, tdengine_table_comment_like_pattern, tdengine_table_comment_sql,
+        tdengine_table_comments_sql, uses_mongodb_agent_collection_listing, visible_schema_filter,
+        ExternalDriverStatisticsDialect, MetadataErrorAction, MysqlTableListSource, OracleObjectRef,
+        OracleSynonymResolver, ReferenceKeyInfo, TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL, ORACLE_SYNONYM_MAX_DEPTH,
+        TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     use super::{list_databases_core, list_tables_core};
     use super::{
@@ -6184,16 +6396,15 @@ for line in sys.stdin:
 
     #[test]
     fn oracle_synonym_sql_resolves_private_before_public_without_hierarchical_queries() {
-        let sql = oracle_synonym_target_sql("Dbx'Owner", "ORDERS_ALIAS", true).unwrap();
+        let sql = oracle_synonym_target_sql("Dbx'Owner", "ORDERS_ALIAS", None, true).unwrap();
 
         assert!(!sql.contains("SYS_CONTEXT"));
         assert!(sql.contains("FROM ALL_SYNONYMS s"));
         assert!(sql.contains("s.OWNER IN ('Dbx''Owner', 'PUBLIC')"));
         assert!(sql.contains("CASE WHEN s.OWNER = 'Dbx''Owner' THEN 0 ELSE 1 END"));
-        assert!(sql.contains("s.DB_LINK IS NULL"));
         assert!(!sql.contains("CONNECT BY"));
 
-        let nested_sql = oracle_synonym_target_sql("OTHER_OWNER", "ORDERS_ALIAS_2", false).unwrap();
+        let nested_sql = oracle_synonym_target_sql("OTHER_OWNER", "ORDERS_ALIAS_2", None, false).unwrap();
         assert!(nested_sql.contains("s.OWNER = 'OTHER_OWNER'"));
         assert!(!nested_sql.contains("s.OWNER IN"));
     }
@@ -6212,8 +6423,8 @@ for line in sys.stdin:
         ))
         .unwrap();
         assert_eq!(current_schema, "Mixed'Case");
-        let sql = oracle_columns_sql_for_resolved_owner(&current_schema, "ORDERS_ALIAS").unwrap();
-        let synonym_sql = oracle_synonym_target_sql(&current_schema, "ORDERS_ALIAS", true).unwrap();
+        let sql = oracle_columns_sql_for_resolved_owner(&current_schema, "ORDERS_ALIAS", None).unwrap();
+        let synonym_sql = oracle_synonym_target_sql(&current_schema, "ORDERS_ALIAS", None, true).unwrap();
 
         assert!(sql.contains("c.OWNER = 'Mixed''Case'"));
         assert!(synonym_sql.contains("s.OWNER IN ('Mixed''Case', 'PUBLIC')"));
@@ -6243,34 +6454,178 @@ for line in sys.stdin:
 
     #[test]
     fn oracle_synonym_resolver_follows_two_levels_and_rejects_cycles() {
-        let initial = OracleObjectRef { owner: "DBX_TEST".to_string(), name: "ORDERS_ALIAS".to_string() };
+        let initial =
+            OracleObjectRef { owner: "DBX_TEST".to_string(), name: "ORDERS_ALIAS".to_string(), db_link: None };
         let mut resolver = OracleSynonymResolver::new(initial.owner.clone(), initial.name.clone());
 
         assert_eq!(resolver.current(), &initial);
         assert!(resolver.include_public_synonym());
-        assert!(resolver.follow(OracleObjectRef { owner: "APP".to_string(), name: "ORDERS_ALIAS_2".to_string() }));
+        assert!(resolver.follow(OracleObjectRef {
+            owner: "APP".to_string(),
+            name: "ORDERS_ALIAS_2".to_string(),
+            db_link: None
+        }));
         assert!(!resolver.include_public_synonym());
-        assert!(resolver.follow(OracleObjectRef { owner: "DATA".to_string(), name: "ORDERS".to_string() }));
+        assert!(resolver.follow(OracleObjectRef {
+            owner: "DATA".to_string(),
+            name: "ORDERS".to_string(),
+            db_link: None
+        }));
         assert_eq!(resolver.current().owner, "DATA");
         assert_eq!(resolver.current().name, "ORDERS");
         assert!(!resolver.follow(initial));
     }
 
     #[test]
-    fn oracle_columns_sql_preserves_quoted_case_synonym_names_and_excludes_database_links() {
-        let sql = oracle_synonym_target_sql("DBX_TEST", "Order Alias", true).unwrap();
+    fn oracle_columns_sql_preserves_quoted_case_synonym_names() {
+        let sql = oracle_synonym_target_sql("DBX_TEST", "Order Alias", None, true).unwrap();
 
         assert!(sql.contains("s.SYNONYM_NAME = 'Order Alias'"));
         assert!(!sql.contains("ORDER ALIAS"));
-        assert_eq!(sql.matches("s.DB_LINK IS NULL").count(), 1);
+    }
+
+    #[test]
+    fn oracle_metadata_sql_reads_remote_dictionary_through_database_link() {
+        let columns_sql = oracle_columns_sql_for_resolved_owner("APP", "ORDERS", Some("sales.example")).unwrap();
+        for view in ["ALL_TAB_COLUMNS", "ALL_CONS_COLUMNS", "ALL_CONSTRAINTS", "ALL_COL_COMMENTS"] {
+            assert!(columns_sql.contains(&format!("{view}@SALES.EXAMPLE ")), "{view}: {columns_sql}");
+        }
+        assert!(columns_sql.contains("c.OWNER = 'APP'"));
+
+        let local_synonym_sql = oracle_synonym_target_sql("APP", "ORDERS", None, true).unwrap();
+        assert!(local_synonym_sql.contains("s.DB_LINK"));
+        assert!(local_synonym_sql.contains("FROM ALL_SYNONYMS s"));
+        assert!(!local_synonym_sql.contains("DB_LINK IS NULL"));
+
+        let remote_synonym_sql = oracle_synonym_target_sql("APP", "ORDERS", Some("SALES"), true).unwrap();
+        assert!(remote_synonym_sql.contains("FROM ALL_SYNONYMS@SALES s"));
+        assert!(remote_synonym_sql.contains("s.DB_LINK IS NULL"));
+
+        assert_eq!(oracle_database_link_user_sql("sales").unwrap(), "SELECT USERNAME FROM USER_USERS@SALES");
+    }
+
+    #[test]
+    fn oracle_database_link_names_reject_sql_outside_the_link_identifier() {
+        assert_eq!(oracle_database_link_name(" sales.example.com "), Some("SALES.EXAMPLE.COM".to_string()));
+        assert_eq!(oracle_database_link_name("LINK_1$#"), Some("LINK_1$#".to_string()));
+        for invalid in ["", "1LINK", "LINK X", "LINK;DROP", "LINK--", "\"LINK\"", "LINK.", ".LINK", "LINK@OTHER"] {
+            assert_eq!(oracle_database_link_name(invalid), None, "{invalid}");
+            assert!(oracle_columns_sql_for_resolved_owner("APP", "ORDERS", Some(invalid)).is_err(), "{invalid}");
+        }
+        assert_eq!(split_oracle_database_link("ORDERS@SALES"), Some(("ORDERS".to_string(), "SALES".to_string())));
+        assert_eq!(split_oracle_database_link("ORDERS"), None);
+        assert_eq!(split_oracle_database_link("@SALES"), None);
+        assert_eq!(split_oracle_database_link("ORDERS@SALES X"), None);
+    }
+
+    #[test]
+    fn oracle_resolver_reads_editor_database_link_names_remotely_first() {
+        let literal =
+            OracleObjectRef { owner: "LOCAL_TAB".to_string(), name: "ORDERS@SALES".to_string(), db_link: None };
+        let mut resolver = OracleSynonymResolver::new(literal.owner.clone(), literal.name.clone());
+        assert_eq!(
+            resolver.current(),
+            &OracleObjectRef {
+                owner: "LOCAL_TAB".to_string(),
+                name: "ORDERS".to_string(),
+                db_link: Some("SALES".to_string())
+            }
+        );
+        assert_eq!(resolver.pending_database_link_user(), None);
+
+        assert!(resolver.retry_next_candidate());
+        assert_eq!(resolver.pending_database_link_user().as_deref(), Some("SALES"));
+        assert!(resolver.resolve_database_link_user("REMOTE_APP".to_string()));
+        assert_eq!(resolver.current().owner, "REMOTE_APP");
+        assert_eq!(resolver.pending_database_link_user(), None);
+
+        assert!(resolver.retry_next_candidate());
+        assert_eq!(resolver.current(), &literal);
+        assert!(resolver.include_public_synonym());
+        assert!(!resolver.retry_next_candidate());
+
+        // A link user that equals the schema already tried has nothing new to read.
+        let mut same_owner = OracleSynonymResolver::new("APP".to_string(), "ORDERS@SALES".to_string());
+        assert!(same_owner.retry_next_candidate());
+        assert!(!same_owner.resolve_database_link_user("APP".to_string()));
+        assert!(same_owner.retry_next_candidate());
+        assert_eq!(same_owner.current().db_link, None);
+
+        let mut local = OracleSynonymResolver::new("APP".to_string(), "ORDERS".to_string());
+        assert_eq!(local.current().db_link, None);
+        assert!(!local.retry_next_candidate());
+    }
+
+    #[test]
+    fn oracle_synonym_target_follows_database_links() {
+        let local = OracleObjectRef { owner: "APP".to_string(), name: "ORDERS_ALIAS".to_string(), db_link: None };
+        let result = |owner: serde_json::Value, link: serde_json::Value| {
+            oracle_current_schema_result(
+                &["TABLE_OWNER", "TABLE_NAME", "DB_LINK"],
+                vec![vec![owner, serde_json::json!("ORDERS"), link]],
+            )
+        };
+
+        let remote = oracle_synonym_target_from_query_result(
+            result(serde_json::json!("REMOTE_APP"), serde_json::json!("sales.example")),
+            &local,
+        )
+        .unwrap();
+        assert_eq!(remote.owner, "REMOTE_APP");
+        assert_eq!(remote.db_link.as_deref(), Some("SALES.EXAMPLE"));
+
+        // `CREATE SYNONYM s FOR t@link` leaves TABLE_OWNER empty: the link user owns the target.
+        let unqualified = oracle_synonym_target_from_query_result(
+            result(serde_json::Value::Null, serde_json::json!("SALES")),
+            &local,
+        )
+        .unwrap();
+        assert_eq!(unqualified.owner, "");
+        assert_eq!(unqualified.db_link.as_deref(), Some("SALES"));
+
+        assert!(oracle_synonym_target_from_query_result(
+            result(serde_json::Value::Null, serde_json::Value::Null),
+            &local
+        )
+        .is_none());
+        assert!(oracle_synonym_target_from_query_result(
+            result(serde_json::json!("APP"), serde_json::json!("BAD LINK")),
+            &local
+        )
+        .is_none());
+
+        // Synonyms read through a link stay on that link.
+        let on_link = OracleObjectRef { db_link: Some("SALES".to_string()), ..local };
+        let nested = oracle_synonym_target_from_query_result(
+            result(serde_json::json!("DATA"), serde_json::Value::Null),
+            &on_link,
+        )
+        .unwrap();
+        assert_eq!(nested.db_link.as_deref(), Some("SALES"));
+
+        assert_eq!(
+            oracle_identifier_from_query_result(
+                oracle_current_schema_result(&["username"], vec![vec![serde_json::json!(" REMOTE_APP ")]]),
+                "USERNAME"
+            ),
+            Some("REMOTE_APP".to_string())
+        );
+        assert_eq!(
+            oracle_identifier_from_query_result(oracle_current_schema_result(&["USERNAME"], Vec::new()), "USERNAME"),
+            None
+        );
     }
 
     #[test]
     fn oracle_synonym_target_preserves_dictionary_identifier_values() {
-        let target = oracle_synonym_target_from_query_result(oracle_current_schema_result(
-            &["table_name", "table_owner"],
-            vec![vec![serde_json::json!("Order Detail"), serde_json::json!("Mixed Owner")]],
-        ))
+        let source = OracleObjectRef { owner: "DBX_TEST".to_string(), name: "ORDER_ALIAS".to_string(), db_link: None };
+        let target = oracle_synonym_target_from_query_result(
+            oracle_current_schema_result(
+                &["table_name", "table_owner"],
+                vec![vec![serde_json::json!("Order Detail"), serde_json::json!("Mixed Owner")]],
+            ),
+            &source,
+        )
         .unwrap();
 
         assert_eq!(target.owner, "Mixed Owner");
@@ -6281,11 +6636,19 @@ for line in sys.stdin:
     fn oracle_synonym_resolver_enforces_maximum_depth() {
         let mut resolver = OracleSynonymResolver::new("DBX_TEST".to_string(), "ALIAS_0".to_string());
         for depth in 1..=ORACLE_SYNONYM_MAX_DEPTH {
-            assert!(resolver.follow(OracleObjectRef { owner: "DBX_TEST".to_string(), name: format!("ALIAS_{depth}") }));
+            assert!(resolver.follow(OracleObjectRef {
+                owner: "DBX_TEST".to_string(),
+                name: format!("ALIAS_{depth}"),
+                db_link: None
+            }));
         }
 
         assert!(!resolver.can_follow());
-        assert!(!resolver.follow(OracleObjectRef { owner: "DBX_TEST".to_string(), name: "ALIAS_TOO_DEEP".to_string() }));
+        assert!(!resolver.follow(OracleObjectRef {
+            owner: "DBX_TEST".to_string(),
+            name: "ALIAS_TOO_DEEP".to_string(),
+            db_link: None
+        }));
     }
 
     #[test]

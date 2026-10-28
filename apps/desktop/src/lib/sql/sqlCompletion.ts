@@ -4141,6 +4141,7 @@ function extractReferencedTables(sql: string, databaseType?: DatabaseType): SqlC
   // FROM/JOIN table reference; double-quoted table names survive masking (see
   // maskSqlLiteralsAndComments), so the returned table info built from `match` is unaffected.
   const scanSql = maskSqlLiteralsAndComments(sql, databaseType);
+  const postgresIdentifiers = !!databaseType && POSTGRES_LIKE_IDENTIFIER_DATABASES.has(databaseType);
   const referenced: SqlCompletionReferencedTable[] = [];
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(scanSql)) !== null) {
@@ -4150,7 +4151,12 @@ function extractReferencedTables(sql: string, databaseType?: DatabaseType): SqlC
       pattern.lastIndex = match.index + match[0].length - alias.length;
     }
     const quotedName = !!rawName && (rawName.startsWith('"') || rawName.startsWith("`") || rawName.startsWith("["));
-    if (!quotedName && rawName && ALIAS_BLACKLIST.has(rawName.toLowerCase())) continue;
+    // Alias/clause words can still be legal unquoted PostgreSQL table names (#13742).
+    if (!quotedName && rawName && ALIAS_BLACKLIST.has(rawName.toLowerCase()) && (!postgresIdentifiers || requiresPostgresIdentifierQuote(rawName.toLowerCase()))) {
+      // A keyword-like projection (SELECT apply FROM ...) must not consume the real FROM.
+      pattern.lastIndex = match.index + match[0].search(/\s/) + 1;
+      continue;
+    }
     // Filter out SQL keywords that accidentally matched as aliases
     const cleanAlias = alias && !ALIAS_BLACKLIST.has(alias.toLowerCase()) ? alias : undefined;
     if (isElasticsearchStyleIndexName(rawName)) {

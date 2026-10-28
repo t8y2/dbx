@@ -7099,6 +7099,7 @@ export default withEnglishFallback({
       cancelled: "Transfer anulowany (zatrzymano na tabeli {index}/{total})",
     },
     title: "Aktualizacja zabezpieczeń danych",
+    reexecute: "Uruchom ponownie",
     content: "Zawartość transferu",
     contentStructureAndData: "Struktura i dane",
     contentStructureOnly: "Tylko struktura",

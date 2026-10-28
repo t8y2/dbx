@@ -7413,6 +7413,7 @@ export default withEnglishFallback({
       cancelled: "전송이 취소되었습니다({index}/{total} 테이블에서 중지)",
     },
     title: "데이터 이전",
+    reexecute: "다시 실행",
     content: "전송 내용",
     contentStructureAndData: "구조 및 데이터",
     contentStructureOnly: "구조만",

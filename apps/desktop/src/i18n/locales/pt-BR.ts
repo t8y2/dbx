@@ -7383,6 +7383,7 @@ export default withEnglishFallback({
       cancelled: "Transferência cancelada (parou na tabela {index}/{total})",
     },
     title: "Transferência de Dados",
+    reexecute: "Reexecutar",
     content: "Conteúdo da transferência",
     contentStructureAndData: "Estrutura e dados",
     contentStructureOnly: "Apenas estrutura",

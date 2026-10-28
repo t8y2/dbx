@@ -8587,6 +8587,7 @@ export default withEnglishFallback({
   },
   transfer: {
     title: "数据传输",
+    reexecute: "重新执行",
     log: {
       title: "执行日志",
       tableStarted: "开始传输表 {table}（{index}/{total}）",

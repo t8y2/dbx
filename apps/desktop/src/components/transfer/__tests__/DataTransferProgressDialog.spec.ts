@@ -8,6 +8,7 @@ import type { OracleRoutineOperation } from "@/types/schemaDiff";
 
 const mocks = vi.hoisted(() => ({
   cancelTransfer: vi.fn(),
+  startTransfer: vi.fn(),
   prepare: vi.fn(),
   observe: vi.fn(),
   execute: vi.fn(),
@@ -20,7 +21,7 @@ vi.mock("@/lib/backend/api", () => ({
   cancelSqlFileExecution: vi.fn(),
   cancelTableExport: vi.fn(),
   cancelTransfer: mocks.cancelTransfer,
-  startTransfer: vi.fn(),
+  startTransfer: mocks.startTransfer,
   prepareOracleRoutinePlan: mocks.prepare,
   observeOracleRoutineOperation: mocks.observe,
   executeOracleRoutineOperation: mocks.execute,
@@ -286,5 +287,67 @@ describe("DataTransferProgressDialog", () => {
     await nextTick();
     expect(logBody()!.style.display).toBe("none");
     expect([...document.body.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(logText))).toBeDefined();
+  });
+
+  it("renders re-execute button when completed and triggers re-execution (#13621)", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.startDataTransferTask(
+      {
+        transferId: "transfer-dialog-reexecute",
+        sourceConnectionId: "source",
+        sourceDatabase: "sdb",
+        targetConnectionId: "target",
+        targetDatabase: "tdb",
+        tables: ["orders"],
+        createTable: true,
+        content: "structureAndData",
+        objects: [],
+        mode: "append",
+        targetTableNameCase: "preserve",
+        quoteTargetColumnNames: true,
+        batchSize: 1000,
+        dropTargetBeforeCreate: false,
+        dropTargetConfirmed: false,
+      },
+      "sdb → tdb",
+    );
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const app = createApp({ render: () => h(DataTransferProgressDialog, { open: true, task }) });
+    mountedApps.push(app);
+    app.use(i18n);
+    app.mount(container);
+    await nextTick();
+
+    // While active, no re-execute button
+    const reexecuteText = i18n.global.t("transfer.reexecute");
+    expect([...document.body.querySelectorAll("button")].some((b) => b.textContent?.includes(reexecuteText))).toBe(false);
+
+    // Complete the task
+    tracker.updateDataTransferTask(task.exportId, {
+      transferId: task.exportId,
+      table: "orders",
+      tableIndex: 1,
+      totalTables: 1,
+      rowsTransferred: 100,
+      totalRows: 100,
+      status: "done",
+      terminal: true,
+      error: null,
+    });
+    await nextTick();
+
+    // Now finished, re-execute button is rendered
+    const reexecuteBtn = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.includes(reexecuteText));
+    expect(reexecuteBtn).toBeDefined();
+
+    // Click re-execute
+    reexecuteBtn!.click();
+    await nextTick();
+
+    // Task status resets to Running and api.startTransfer is invoked again
+    expect(task.status).toBe("Running");
+    expect(mocks.startTransfer).toHaveBeenCalledTimes(2);
   });
 });

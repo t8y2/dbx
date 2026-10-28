@@ -7074,6 +7074,7 @@ export default withEnglishFallback({
       cancelled: "Transfer dibatalkan (berhenti di tabel {index}/{total})",
     },
     title: "Transfer Data",
+    reexecute: "Jalankan lagi",
     content: "Isi transfer",
     contentStructureAndData: "Struktur dan data",
     contentStructureOnly: "Hanya struktur",

@@ -8627,6 +8627,7 @@ export default {
       cancelled: "Transfer cancelled (stopped at table {index}/{total})",
     },
     title: "Data Transfer",
+    reexecute: "Re-execute",
     content: "Transfer content",
     contentStructureAndData: "Structure and data",
     contentStructureOnly: "Structure only",

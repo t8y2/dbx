@@ -1070,6 +1070,7 @@ function runTransfer(request: api.TransferRequest, shouldRefreshTargetTree: bool
     formatOverlapError: (tables) => t("transfer.targetTableBusy", { tables: tables.join(", ") }),
     onStarted: () => toast(t("transfer.backgroundStarted")),
     onOpen: () => openDataTransferTask(request.transferId),
+    openTask: (taskId: string) => openDataTransferTask(taskId),
     onDone: async () => {
       if (shouldRefreshTargetTree) {
         await store.refreshObjectListTreeNode(request.targetConnectionId, request.targetDatabase, request.targetSchema, request.targetCatalog);

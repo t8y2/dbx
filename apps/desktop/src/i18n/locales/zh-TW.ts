@@ -6490,6 +6490,7 @@ export default withEnglishFallback({
       cancelled: "傳輸已取消（處理到第 {index}/{total} 張資料表）",
     },
     title: "資料傳輸",
+    reexecute: "重新執行",
     content: "傳輸內容",
     contentStructureAndData: "結構和資料",
     contentStructureOnly: "僅結構",

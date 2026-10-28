@@ -8847,6 +8847,7 @@ export default withEnglishFallback({
       cancelled: "Передача отменена (остановлена на таблице {index}/{total})",
     },
     title: "Перенос данных",
+    reexecute: "Повторить выполнение",
     content: "Содержимое переноса",
     contentStructureAndData: "Структура и данные",
     contentStructureOnly: "Только структура",

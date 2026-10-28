@@ -3,8 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
-import { Loader2, Check, CheckCircle2, XCircle, AlertCircle, Clock, X, FileDown, Database, DatabaseBackup, FileCode2, ArrowRightLeft, Layers3, GitCompareArrows, ChevronRight, FolderOpen, Copy } from "@lucide/vue";
-import { formatDataTransferDuration, useExportTracker, type ExportTask } from "@/composables/useExportTracker";
+import { Loader2, Check, CheckCircle2, XCircle, AlertCircle, Clock, X, FileDown, Database, DatabaseBackup, FileCode2, ArrowRightLeft, Layers3, GitCompareArrows, ChevronRight, FolderOpen, Copy, RotateCcw } from "@lucide/vue";
+import { formatDataTransferDuration, useExportTracker, canReexecuteDataTransferTask, type ExportTask } from "@/composables/useExportTracker";
 import { dataTransferFailureCopyText } from "@/components/export/failureDetailCopyText";
 import SqlFileProgressIndicator from "@/components/sql-file/SqlFileProgressIndicator.vue";
 import FailureDetailsList from "@/components/sql-file/FailureDetailsList.vue";
@@ -16,7 +16,14 @@ import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
 const { toast } = useToast();
-const { tasks, activeCount, hasActive, clearFinished, cancelTask, removeTask } = useExportTracker();
+const { tasks, activeCount, hasActive, clearFinished, cancelTask, removeTask, reexecuteDataTransferTask } = useExportTracker();
+
+function handleReexecuteTask(task: ExportTask) {
+  const newTask = reexecuteDataTransferTask(task);
+  if (newTask) {
+    toast(t("transfer.backgroundStarted"));
+  }
+}
 const open = ref(false);
 const showAll = ref(false);
 const expandedFailureTaskIds = ref<string[]>([]);
@@ -472,9 +479,14 @@ function openTask(task: ExportTask): void {
               <Loader2 v-if="task.status === 'Cancelling'" class="h-3.5 w-3.5 animate-spin text-primary" />
               <X v-else class="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
             </button>
-            <button v-else-if="isFinished(task.status) || task.status === 'Unknown'" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.delete')" @click="removeTask(task.exportId)">
-              <X class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
-            </button>
+            <template v-else-if="isFinished(task.status) || task.status === 'Unknown'">
+              <button v-if="canReexecuteDataTransferTask(task)" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('transfer.reexecute')" :aria-label="t('transfer.reexecute')" @click.stop="handleReexecuteTask(task)">
+                <RotateCcw class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+              </button>
+              <button class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.delete')" @click="removeTask(task.exportId)">
+                <X class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+              </button>
+            </template>
           </div>
         </div>
       </div>

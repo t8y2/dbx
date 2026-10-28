@@ -7395,6 +7395,7 @@ export default withEnglishFallback({
       cancelled: "転送をキャンセルしました（{index}/{total} テーブル目で停止）",
     },
     title: "データ転送",
+    reexecute: "再実行",
     content: "転送内容",
     contentStructureAndData: "構造とデータ",
     contentStructureOnly: "構造のみ",

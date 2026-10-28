@@ -6409,6 +6409,7 @@ export default withEnglishFallback({
       cancelled: "Ötürülmə ləğv edildi ({index}/{total} cədvəldə dayandırıldı)",
     },
     title: "Məlumatların köçürülməsi",
+    reexecute: "Yenidən icra et",
     content: "Köçürülən məzmun",
     contentStructureAndData: "Struktur və məlumatlar",
     contentStructureOnly: "Yalnız struktur",

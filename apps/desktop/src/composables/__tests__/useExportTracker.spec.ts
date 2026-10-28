@@ -29,6 +29,7 @@ import {
   MAX_TRANSFER_FAILURE_DETAIL_BYTES,
   MAX_TRANSFER_FAILURE_DETAILS,
   MAX_TRANSFER_FAILURE_ERROR_BYTES,
+  canReexecuteDataTransferTask,
   useExportTracker,
 } from "@/composables/useExportTracker";
 
@@ -313,6 +314,131 @@ describe("data transfer task duration", () => {
 
     for (const resolve of resolvers) resolve();
     await Promise.resolve();
+  });
+
+  describe("data transfer re-execution (#13621)", () => {
+    it("determines whether a task can be re-executed", () => {
+      const tracker = useExportTracker();
+      const task = tracker.addDataTransferTask("manual", "users", 1);
+      expect(canReexecuteDataTransferTask(task)).toBe(false);
+
+      const request = transferRequest("with-req");
+      const tracked = tracker.startDataTransferTask(request, "users");
+      expect(canReexecuteDataTransferTask(tracked)).toBe(false);
+
+      tracker.updateDataTransferTask(tracked.exportId, transferProgress(tracked.exportId, "done"));
+      expect(canReexecuteDataTransferTask(tracked)).toBe(true);
+
+      tracked.status = "Error";
+      expect(canReexecuteDataTransferTask(tracked)).toBe(true);
+
+      tracked.status = "Cancelled";
+      expect(canReexecuteDataTransferTask(tracked)).toBe(true);
+
+      const tableExport = tracker.addTask("users", "csv", "/tmp/users.csv");
+      tableExport.status = "Done";
+      expect(canReexecuteDataTransferTask(tableExport)).toBe(false);
+    });
+
+    it("resets state, assigns a new transferId, and starts transfer again", async () => {
+      let activeProgressHandler: ((progress: TransferProgress) => void) | undefined;
+      vi.mocked(api.startTransfer).mockImplementation(async (request, onProgress) => {
+        activeProgressHandler = onProgress;
+      });
+
+      const tracker = useExportTracker();
+      const openedTaskIds: string[] = [];
+      const onDone = vi.fn();
+      const initialRequest = transferRequest("transfer-1");
+
+      const task = tracker.startDataTransferTask(initialRequest, "users", {
+        openTask: (id) => openedTaskIds.push(id),
+        onDone,
+      });
+
+      expect(task.exportId).toBe("transfer-1");
+      expect(task.status).toBe("Running");
+      expect(api.startTransfer).toHaveBeenCalledTimes(1);
+
+      // Finish first run with an error and failure logs
+      tracker.updateDataTransferTask(task.exportId, {
+        transferId: "transfer-1",
+        table: "users",
+        tableIndex: 0,
+        totalTables: 1,
+        rowsTransferred: 5,
+        totalRows: 10,
+        status: "error",
+        error: "connection timeout",
+        terminal: true,
+      });
+
+      expect(task.status).toBe("Error");
+      expect(task.errorMessage).toBe("connection timeout");
+      expect(canReexecuteDataTransferTask(task)).toBe(true);
+
+      // Now re-execute the finished task
+      now = 50_000;
+      const reexecuted = tracker.reexecuteDataTransferTask(task);
+      expect(reexecuted).toBe(task);
+      expect(reexecuted!.exportId).not.toBe("transfer-1");
+      const nextTransferId = reexecuted!.exportId;
+
+      // Verify task in tracker map has moved to the new id
+      expect(tracker.tasks.value.find((t) => t.exportId === "transfer-1")).toBeUndefined();
+      expect(tracker.tasks.value.find((t) => t.exportId === nextTransferId)).toBe(task);
+
+      // Verify task fields were reset
+      expect(task.status).toBe("Running");
+      expect(task.startedAt).toBe(50_000);
+      expect(task.finishedAt).toBeUndefined();
+      expect(task.rowsExported).toBe(0);
+      expect(task.tableIndex).toBe(0);
+      expect(task.errorMessage).toBeNull();
+      expect(task.transferFailures).toEqual([]);
+      expect(task.logLines).toEqual([]);
+
+      // Verify backend API called with the new transferId and cloned options
+      expect(api.startTransfer).toHaveBeenCalledTimes(2);
+      const secondCallArg = vi.mocked(api.startTransfer).mock.calls[1][0];
+      expect(secondCallArg.transferId).toBe(nextTransferId);
+      expect(secondCallArg.tables).toEqual(["users"]);
+
+      // Verify onOpen now invokes with the nextTransferId
+      task.onOpen?.();
+      expect(openedTaskIds).toEqual([nextTransferId]);
+
+      // Verify terminal success for the re-executed run
+      activeProgressHandler?.({
+        transferId: nextTransferId,
+        table: "users",
+        tableIndex: 1,
+        totalTables: 1,
+        rowsTransferred: 10,
+        totalRows: 10,
+        status: "done",
+        error: null,
+        terminal: true,
+      });
+
+      await Promise.resolve();
+      expect(task.status).toBe("Done");
+      expect(onDone).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses to re-execute an already running transfer", () => {
+      const tracker = useExportTracker();
+      const request = transferRequest("active-transfer");
+      const task = tracker.startDataTransferTask(request, "users");
+
+      expect(task.status).toBe("Running");
+      expect(api.startTransfer).toHaveBeenCalledTimes(1);
+
+      const result = tracker.reexecuteDataTransferTask(task);
+      expect(result).toBe(task);
+      expect(api.startTransfer).toHaveBeenCalledTimes(1);
+      expect(task.exportId).toBe("active-transfer");
+    });
   });
 
   it("keeps SQL-file backend elapsed time unchanged", () => {

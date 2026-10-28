@@ -21,11 +21,11 @@ describe("sidebar tree item layout", () => {
   });
 
   it("supports ordinary nodes but excludes controls and group headings", () => {
-    for (const type of ["database", "schema", "column", "index", "mongo-db", "elasticsearch-index"] as const) {
+    for (const type of ["database", "schema", "column", "index", "connection", "connection-group", "mongo-db", "elasticsearch-index"] as const) {
       expect(usesFullWidthTreeLabel(type, true, true)).toBe(true);
       expect(usesFullWidthTreeLabel(type, false)).toBe(false);
     }
-    for (const type of ["connection", "connection-group", "group-tables", "group-columns", "table-search-control", "load-more"] as const) expect(usesFullWidthTreeLabel(type, true)).toBe(false);
+    for (const type of ["group-tables", "group-columns", "table-search-control", "load-more"] as const) expect(usesFullWidthTreeLabel(type, true)).toBe(false);
   });
 
   it("includes aligned names, badges, comments and size without letting right comments grow unbounded", () => {

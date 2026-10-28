@@ -889,7 +889,7 @@ const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(activeNode.valu
 const isCompactSidebar = computed(() => settingsStore.editorSettings.sidebarDensity === "compact");
 
 const isConnectionRow = computed(() => activeNode.value.type === "connection" || activeNode.value.type === "connection-group");
-const rowWidthClass = computed(() => (isConnectionRow.value ? "w-full min-w-0 tree-row-connection" : usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0 tree-row-viewport"));
+const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0 tree-row-viewport"));
 
 const labelWidthClass = computed(() => {
   // aligned 模式靠 leading 块固定宽度对齐 comment 列，label 需 flex-1 撑满 leading 块；
@@ -1839,14 +1839,6 @@ function onKeydown(event: KeyboardEvent) {
 </template>
 
 <style>
-.tree-row-connection {
-  /* Keep connection actions visible even when object rows widen the tree. */
-  position: sticky;
-  left: 0;
-  width: 100cqw;
-  max-width: 100%;
-}
-
 .sidebar-object-comment {
   color: var(--muted-foreground);
   /* Relative to the sidebar tree root font size so comments follow the sidebarFontSize setting. */

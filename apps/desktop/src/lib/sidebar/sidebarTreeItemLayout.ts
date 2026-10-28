@@ -44,9 +44,9 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "datafile",
 ]);
 
-// Connection names truncate so their status and actions stay in the viewport.
-// Database objects can still contribute their natural width to horizontal scrolling.
-const nonNaturalWidthTypes: Set<TreeNodeType> = new Set(["connection", "connection-group", "table-search-control", "load-more"]);
+// Controls stay viewport-sized. Names, including connections and groups, may
+// contribute their natural width when the user allows horizontal scrolling.
+const nonNaturalWidthTypes: Set<TreeNodeType> = new Set(["table-search-control", "load-more"]);
 
 const emptyContainerTypes: Set<TreeNodeType> = new Set(["saved-sql-root", "saved-sql-folder", "type"]);
 

@@ -11,7 +11,7 @@ const preserveMatchedSubtreeTypes = new Set(["connection", "database", "schema",
 // groups whose children ARE real objects, so their children stay searchable
 // and the group only survives through a child hit. saved-sql-root is exempt:
 // its saved queries are real searchable files rather than a shortcut.
-const hiddenSearchNodeTypes = new Set<TreeNodeType>(["user-admin", "dameng-users", "dameng-roles", "dameng-job-admin", "group-tablespaces", "oracle-db-links"]);
+const hiddenSearchNodeTypes = new Set<TreeNodeType>(["user-admin", "xugu-user-admin", "dameng-users", "dameng-roles", "dameng-job-admin", "database-job-admin", "group-tablespaces", "oracle-db-links"]);
 
 function bestMatch(matchLabel: SidebarLabelMatcher, label: string, comment?: string | null, aliases?: readonly string[]) {
   let best = matchLabel(label);

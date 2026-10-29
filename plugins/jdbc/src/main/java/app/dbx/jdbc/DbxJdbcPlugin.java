@@ -566,7 +566,7 @@ public final class DbxJdbcPlugin {
         String sessionId = optionalText(result, "session_id");
         for (JsonNode cell : result.path("large_value_cells")) connectionState().largeValues.release(cell.path("value_ref").asText());
         if (sessionId == null) sessionId = optionalText(params, "sessionId");
-        if (sessionId != null) closeQuerySession(sessionId);
+        if (sessionId != null) discardQuerySession(sessionId);
         throw new SQLException(RESPONSE_LIMIT_MESSAGE);
     }
 
@@ -1822,11 +1822,6 @@ public final class DbxJdbcPlugin {
         private final long startNanos;
         private final Connection connection;
         private final boolean restoreAutoCommit;
-        // Driver-reported effect count of the statement behind this cursor.
-        // Negative means a plain read; zero or more means the statement had
-        // effects (for example INSERT ... RETURNING), so ending the paging
-        // transaction must commit instead of roll back (#13644).
-        private final int updateCount;
         private final boolean preserveOracleDateTime;
         private final ZoneId timestampZone;
         private final boolean bitStringColumns;
@@ -1845,7 +1840,6 @@ public final class DbxJdbcPlugin {
             long startNanos,
             Connection connection,
             boolean restoreAutoCommit,
-            int updateCount,
             boolean preserveOracleDateTime,
             ZoneId timestampZone,
             boolean bitStringColumns,
@@ -1861,7 +1855,6 @@ public final class DbxJdbcPlugin {
             this.startNanos = startNanos;
             this.connection = connection;
             this.restoreAutoCommit = restoreAutoCommit;
-            this.updateCount = updateCount;
             this.preserveOracleDateTime = preserveOracleDateTime;
             this.timestampZone = timestampZone;
             this.bitStringColumns = bitStringColumns;
@@ -1938,7 +1931,6 @@ public final class DbxJdbcPlugin {
                 start,
                 conn,
                 restoreAutoCommit,
-                executed.updateCount(),
                 preserveOracleDateTime,
                 timestampZone,
                 bitStringColumns,
@@ -1995,20 +1987,29 @@ public final class DbxJdbcPlugin {
 
     /**
      * Ends the transaction begun by {@link #beginPagedQueryTransaction} after a
-     * statement completed without leaving a cursor behind. Such a statement's
-     * effects are the user's intent, so the transaction is committed, not
-     * rolled back: a rolled-back DROP TABLE or CREATE TABLE AS silently
-     * vanished while DBX reported success (#13644). Only the caller that
-     * flipped auto-commit off owns the transaction; manual transactions end
-     * through their own commit/rollback entry points.
+     * statement completed without leaving a cursor behind, or after a paged
+     * cursor was fully drained. The statement's effects are the user's intent,
+     * so the transaction is committed, not rolled back: a rolled-back DROP
+     * TABLE or CREATE TABLE AS silently vanished while DBX reported success
+     * (#13644). Only the caller that flipped auto-commit off owns the
+     * transaction; manual transactions end through their own commit/rollback
+     * entry points.
+     *
+     * <p>A failed commit is rethrown after a best-effort connection restore:
+     * a deferred constraint failure or a connection dropped during commit must
+     * reach the caller as an error, not as a success whose effects vanish.
+     * Secondary failures while clearing the broken transaction are ignored so
+     * the original commit error is what surfaces.
      */
-    private static void commitPagedQueryTransaction(Connection connection, boolean ownedTransaction) {
+    private static void commitPagedQueryTransaction(Connection connection, boolean ownedTransaction) throws SQLException {
         if (!ownedTransaction) {
             return;
         }
         try {
             connection.commit();
-        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+        } catch (SQLException | RuntimeException | Error error) {
+            restorePagedQueryTransaction(connection, true);
+            throw error;
         }
         try {
             connection.setAutoCommit(true);
@@ -2066,7 +2067,7 @@ public final class DbxJdbcPlugin {
         return queryPageResult(session, rows, largeCells, false, true);
         } catch (SQLException | RuntimeException | LinkageError error) {
             for (JsonNode cell : largeCells) connectionState().largeValues.release(cell.path("value_ref").asText());
-            closeQuerySession(session.id);
+            discardQuerySession(session.id);
             throw error;
         }
     }
@@ -2088,13 +2089,22 @@ public final class DbxJdbcPlugin {
         return result;
     }
 
-    private static ObjectNode closeQuerySessionResult(String sessionId) {
+    private static ObjectNode closeQuerySessionResult(String sessionId) throws SQLException {
         ObjectNode result = MAPPER.createObjectNode();
         result.put("ok", closeQuerySession(sessionId));
         return result;
     }
 
-    private static boolean closeQuerySession(String sessionId) {
+    /**
+     * Success-path close: the cursor completed or the caller explicitly closed
+     * it, so the paging transaction ends by committing. JDBC reports -1 as the
+     * update count whenever the current result is a result set -- including
+     * INSERT ... RETURNING -- so effects cannot be classified from the driver;
+     * committing every completed statement is what keeps returned rows durable
+     * (#13644). A commit failure propagates ({@link #commitPagedQueryTransaction})
+     * instead of reporting the session as closed-ok.
+     */
+    private static boolean closeQuerySession(String sessionId) throws SQLException {
         QuerySession session = connectionState().querySessions.remove(sessionId);
         if (session == null) {
             return false;
@@ -2108,22 +2118,39 @@ public final class DbxJdbcPlugin {
             session.statement.close();
         } catch (Exception ignored) {
         }
-        // A drained cursor cannot be resumed, so the paging transaction ends
-        // here. Reads keep the rollback; a statement that reported effects
-        // (updateCount >= 0, e.g. INSERT ... RETURNING) must commit or its
-        // effects are silently undone while the rows were already shown (#13644).
-        if (session.updateCount >= 0) {
-            commitPagedQueryTransaction(session.connection, session.restoreAutoCommit);
-        } else {
-            restorePagedQueryTransaction(session.connection, session.restoreAutoCommit);
-        }
+        commitPagedQueryTransaction(session.connection, session.restoreAutoCommit);
         return true;
+    }
+
+    /**
+     * Error-path cleanup: a page failed or was cancelled, so an owned paging
+     * transaction ends with a rollback and never commits, and the cleanup does
+     * not mask the original error with a commit failure.
+     */
+    private static void discardQuerySession(String sessionId) {
+        QuerySession session = connectionState().querySessions.remove(sessionId);
+        if (session == null) {
+            return;
+        }
+        if (session.pendingRow != null) releaseRowValues(session.pendingRow);
+        try {
+            session.resultSet.close();
+        } catch (Exception ignored) {
+        }
+        try {
+            session.statement.close();
+        } catch (Exception ignored) {
+        }
+        restorePagedQueryTransaction(session.connection, session.restoreAutoCommit);
     }
 
     private static void closeAllQuerySessions() {
         List<String> sessionIds = new ArrayList<>(connectionState().querySessions.keySet());
         for (String sessionId : sessionIds) {
-            closeQuerySession(sessionId);
+            try {
+                closeQuerySession(sessionId);
+            } catch (SQLException ignored) {
+            }
         }
     }
 
@@ -2207,21 +2234,7 @@ public final class DbxJdbcPlugin {
             return new ExecutedStatement(statement.executeQuery(sql), -1);
         }
         boolean hasResultSet = statement.execute(sql);
-        // Read the update count before the result set, per the JDBC contract.
-        // For result-set statements this records the driver's effect count so
-        // paged sessions can tell an effectful statement (INSERT ... RETURNING)
-        // from a plain read when the transaction is ended; reads report -1.
-        int updateCount;
-        try {
-            updateCount = statement.getUpdateCount();
-        } catch (SQLException error) {
-            if (!hasResultSet) {
-                throw error;
-            }
-            // A driver that throws for getUpdateCount with an open result set is
-            // classified as a plain read, which matches the pre-#13644 handling.
-            updateCount = -1;
-        }
+        int updateCount = hasResultSet ? -1 : statement.getUpdateCount();
         ResultSet rs = hasResultSet ? statement.getResultSet() : null;
         if (rs == null && shouldRetryWithExecuteQuery(sql, hasResultSet, updateCount)) {
             rs = statement.executeQuery(sql);

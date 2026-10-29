@@ -90,7 +90,8 @@ import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isTableVGroupGroupableRowType, selectedTableVGroupMoveTargets, tableVGroupIdFromNodeId } from "@/lib/table/tableVGroup";
 import { findTreeNodeById } from "@/lib/sql/newQueryContext";
 import { resolveTableVGroupDropTarget, setTableVGroupDropTargetNodeId, tableVGroupDropTargetNodeId } from "@/lib/sidebar/sidebarTableVGroupDrag";
-import { isExecuteSqlShortcut, isFocusSearchShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isExecuteSqlShortcut, isFocusSearchShortcut, isToggleCaseShortcut } from "@/lib/editor/keyboardShortcuts";
+import { applySelectionCaseToInput, vSelectionCaseSupport } from "@/directives/vSelectionCaseSupport";
 import { connectionDetailRows, type ConnectionDetailRow } from "@/lib/connection/connectionDetailRows";
 import { hexToRgba } from "@/lib/common/color";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
@@ -1017,6 +1018,15 @@ function onTableSearchControlKeydown(event: KeyboardEvent) {
     input?.focus();
     input?.select();
   }
+  if (isToggleCaseShortcut(event, settingsStore.editorSettings.shortcuts)) {
+    const control = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+    const input = control?.querySelector<HTMLInputElement>("[data-sidebar-table-search-parent-id]");
+    if (input && applySelectionCaseToInput(input, "toggle")) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+  }
   // Let the app-level shortcut handler open the database default query while
   // the table-search input remains focused. Other tree-local key handling
   // must stay contained in the search control.
@@ -1563,6 +1573,7 @@ function onKeydown(event: KeyboardEvent) {
       <div class="relative min-w-0 flex-1">
         <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
         <Input
+          v-selection-case-support
           :model-value="tableSearchValue"
           autocapitalize="off"
           autocorrect="off"

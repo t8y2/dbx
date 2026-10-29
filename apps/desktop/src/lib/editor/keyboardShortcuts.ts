@@ -306,6 +306,18 @@ export function isConvertNamingStyleShortcut(event: ShortcutLikeEvent, shortcuts
   return matchesShortcut(event, actionShortcut("convertNamingStyle", shortcuts, platform), platform);
 }
 
+export function isToggleCaseShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("toggleCaseSelection", shortcuts, platform), platform);
+}
+
+export function isUppercaseShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("uppercaseSelection", shortcuts, platform), platform);
+}
+
+export function isLowercaseShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("lowercaseSelection", shortcuts, platform), platform);
+}
+
 export function isNewQueryShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("newQuery", shortcuts));
 }

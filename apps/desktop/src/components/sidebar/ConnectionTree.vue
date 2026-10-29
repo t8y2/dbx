@@ -66,6 +66,7 @@ import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntim
 import { createSidebarPasteHandlerRegistry } from "@/lib/sidebar/sidebarPasteHandlerRegistry";
 import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode, sidebarSearchableObjectGroupTypes } from "@/lib/sidebar/sidebarTableSearchControl";
 import { createSidebarTableSearchDebouncer, scheduleExclusiveSidebarTableSearchDebounce } from "@/lib/sidebar/sidebarTableSearchIndex";
+import { vSelectionCaseSupport } from "@/directives/vSelectionCaseSupport";
 import TreeItem from "./TreeItem.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { isSidebarProductionContainer, showSidebarRowProductionBadge, showSidebarStickyProductionBadge } from "@/lib/sidebar/sidebarProductionBadge";
@@ -2902,6 +2903,7 @@ defineExpose({
           <input
             ref="searchInputRef"
             v-model="searchQuery"
+            v-selection-case-support
             autocapitalize="off"
             autocorrect="off"
             spellcheck="false"

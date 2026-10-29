@@ -3,6 +3,7 @@ import { ref } from "vue";
 import { CaseSensitive, ChevronDown, ChevronRight, ChevronUp, Search, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { vNamingStyleSupport } from "@/directives/vNamingStyleSupport";
+import { vSelectionCaseSupport } from "@/directives/vSelectionCaseSupport";
 import type { DataGridReplaceScope } from "@/lib/dataGrid/dataGridReplace";
 
 const { t } = useI18n();
@@ -83,6 +84,7 @@ defineExpose({
           ref="searchInput"
           v-model="searchText"
           v-naming-style-support
+          v-selection-case-support
           type="search"
           autocapitalize="off"
           autocomplete="off"

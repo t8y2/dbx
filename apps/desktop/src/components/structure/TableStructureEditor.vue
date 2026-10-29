@@ -1262,6 +1262,12 @@ function isPlainModShortcut(event: KeyboardEvent, key: string): boolean {
   return event.key.toLowerCase() === key;
 }
 
+function isModShiftShortcut(event: KeyboardEvent, key: string): boolean {
+  if (event.isComposing || event.altKey || !event.shiftKey) return false;
+  if (!event.metaKey && !event.ctrlKey) return false;
+  return event.key.toLowerCase() === key;
+}
+
 const structureDensityValues: StructureEditorDensity[] = ["compact", "standard", "comfortable"];
 const STRUCTURE_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-column-widths";
 const STRUCTURE_INDEX_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-index-column-widths";
@@ -7723,6 +7729,18 @@ function onStructureEditorKeydown(event: KeyboardEvent) {
       void copySelectedStructureColumns();
       return;
     }
+    // Open the "copy fields from another table" picker (#13719). Guarded like the
+    // clipboard shortcuts above so it never fires while typing into a native input,
+    // and only when the event originates inside this editor instance.
+    if (isModShiftShortcut(event, "c") && canAddColumn.value) {
+      const target = event.target;
+      if (target instanceof Element && rootRef.value?.contains(target) && !target.closest('[role="dialog"], [role="alertdialog"]')) {
+        event.preventDefault();
+        event.stopPropagation();
+        void openCopyColumnsDialog();
+        return;
+      }
+    }
   }
   const focusedColumn = activeTab.value === "columns" ? focusedEditableColumn(event.target) : undefined;
   if (focusedColumn && isShiftEnterShortcut(event) && canAddColumn.value) {
@@ -8500,19 +8518,23 @@ watch(
               >
                 <SlidersHorizontal :class="structureIconClass" /><span class="structure-toolbar-label">{{ t("starrocksLayout.copyButton") }}</span>
               </Button>
-              <Button
-                v-if="activeTab === 'columns'"
-                size="sm"
-                variant="outline"
-                :class="[structureToolbarButtonClass, 'structure-toolbar-action structure-toolbar-secondary']"
-                :disabled="!canAddColumn"
-                :title="t('structureEditor.copyColumns')"
-                :aria-label="t('structureEditor.copyColumns')"
-                @click="openCopyColumnsDialog"
-              >
-                <Copy :class="structureIconClass" />
-                <span class="structure-toolbar-label">{{ t("structureEditor.copyColumns") }}</span>
-              </Button>
+              <Tooltip v-if="activeTab === 'columns'" :delay-duration="FIELD_SHORTCUT_TOOLTIP_DELAY_MS">
+                <TooltipTrigger as-child>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    :class="[structureToolbarButtonClass, 'structure-toolbar-action structure-toolbar-secondary']"
+                    :disabled="!canAddColumn"
+                    :title="t('structureEditor.copyColumns') + ' ⌘/Ctrl+Shift+C'"
+                    :aria-label="t('structureEditor.copyColumns')"
+                    @click="openCopyColumnsDialog"
+                  >
+                    <Copy :class="structureIconClass" />
+                    <span class="structure-toolbar-label">{{ t("structureEditor.copyColumns") }}</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" class="font-mono font-medium">⌘/Ctrl+Shift+C</TooltipContent>
+              </Tooltip>
               <Button
                 v-if="activeTab === 'columns' && databaseType === 'mysql'"
                 size="sm"

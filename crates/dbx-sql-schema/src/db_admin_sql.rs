@@ -3109,7 +3109,8 @@ mod tests {
             vec![
                 "CREATE TABLE \"APP\".\"users_copy\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0".to_string(),
                 "COMMENT ON TABLE \"APP\".\"users_copy\" IS '测试''克隆'".to_string(),
-                "COMMENT ON COLUMN \"APP\".\"users_copy\".\"DISPLAY\"\"NAME\" IS '  Owner''s; display name'".to_string(),
+                "COMMENT ON COLUMN \"APP\".\"users_copy\".\"DISPLAY\"\"NAME\" IS '  Owner''s; display name'"
+                    .to_string(),
                 "COMMENT ON COLUMN \"APP\".\"users_copy\".\"STATUS\" IS 'active  '".to_string(),
             ]
         );

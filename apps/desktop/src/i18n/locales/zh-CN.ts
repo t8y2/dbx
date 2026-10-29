@@ -2896,6 +2896,8 @@ export default withEnglishFallback({
     loadAllInToolbar: "右上角显示加载全部数据",
     showSaveResult: "显示保存结果",
     warnIncompleteExport: "导出不完整警告",
+    defaultExportMode: "默认导出方式",
+    hideToolbarLabels: "隐藏工具栏文字",
     incompleteExportWarning: "当前页仅导出已显示的 {count} 行，可能不包含全部数据。",
     showStatusSql: "显示底部 SQL",
     showStatusSqlHint: "在所有查询结果和表数据的底部状态栏中显示 SQL。",

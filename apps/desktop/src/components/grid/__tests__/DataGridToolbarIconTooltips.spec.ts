@@ -95,7 +95,7 @@ function mountToolbar(autoRefreshEnabled = false) {
   );
 }
 
-function mountGrid(resultOverride?: Partial<QueryResult>) {
+function mountGrid(resultOverride?: Partial<QueryResult>, inspectToolbarSlots = false) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -115,7 +115,24 @@ function mountGrid(resultOverride?: Partial<QueryResult>) {
   document.body.append(host);
   const Root = defineComponent({
     setup() {
-      return () => h(TooltipProvider, { delayDuration: 0 }, { default: () => h(DataGrid, { ref: grid, result, databaseType: "mysql", context: "table-data" }) });
+      return () =>
+        h(
+          TooltipProvider,
+          { delayDuration: 0 },
+          {
+            default: () =>
+              h(
+                DataGrid,
+                { ref: grid, result, databaseType: "mysql", context: "table-data" },
+                inspectToolbarSlots
+                  ? {
+                      "result-toolbar-leading": ({ compact }: { compact: boolean }) => h("span", { "data-test-leading-mode": "" }, String(compact)),
+                      "result-toolbar-actions": ({ compact }: { compact: boolean }) => h("span", { "data-test-action-mode": "" }, String(compact)),
+                    }
+                  : undefined,
+              ),
+          },
+        );
     },
   });
   const app = createApp(Root);
@@ -125,7 +142,7 @@ function mountGrid(resultOverride?: Partial<QueryResult>) {
   app.mount(host);
   const mounted = { app, host };
   mountedApps.push(mounted);
-  return { ...mounted, grid };
+  return { ...mounted, grid, settingsStore };
 }
 
 async function settle() {
@@ -180,6 +197,19 @@ afterEach(() => {
 });
 
 describe("data grid icon-only toolbar tooltips", () => {
+  it("hides action labels without changing the leading view-switcher state", async () => {
+    const { host, settingsStore } = mountGrid(undefined, true);
+    await settle();
+    const leadingMode = host.querySelector("[data-test-leading-mode]")!.textContent;
+    settingsStore.updateEditorSettings({ dataGridHideToolbarLabels: true });
+    await settle();
+    expect(host.querySelector("[data-test-leading-mode]")!.textContent).toBe(leadingMode);
+    expect(host.querySelector("[data-test-action-mode]")!.textContent).toBe("true");
+    const refresh = toolbarButton(host, "refresh");
+    expect(refresh.getAttribute("aria-label")).toBeTruthy();
+    await hover(refresh);
+    expect(showsTooltip("Refresh")).toBe(true);
+  });
   it("keeps the existing refresh tooltip (control case)", async () => {
     const { host } = mountToolbar();
     await settle();

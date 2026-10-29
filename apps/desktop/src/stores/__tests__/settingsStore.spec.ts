@@ -31,6 +31,21 @@ import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
+  it("keeps manual export and toolbar preferences across updates and reloads", async () => {
+    const defaults = { defaultExportMode: "immediate", dataGridHideToolbarLabels: false };
+    expect(DEFAULT_EDITOR_SETTINGS).toMatchObject(defaults);
+    expect(normalizeEditorSettings({})).toMatchObject(defaults);
+    expect(normalizeEditorSettings({ defaultExportMode: "invalid", dataGridHideToolbarLabels: "true" } as any)).toMatchObject(defaults);
+    setActivePinia(createPinia());
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settings = useSettingsStore();
+    const changes = { defaultExportMode: "queued" as const, dataGridHideToolbarLabels: true };
+    settings.updateEditorSettings(changes);
+    expect(normalizeEditorSettings(JSON.parse(JSON.stringify(settings.editorSettings)))).toMatchObject(changes);
+    settings.updateEditorSettings(defaults as { defaultExportMode: "immediate"; dataGridHideToolbarLabels: boolean });
+    expect(settings.editorSettings).toMatchObject(defaults);
+  });
+
   it("retains only an explicit legacy sidebar value without creating a global default", () => {
     expect(DEFAULT_EDITOR_SETTINGS).not.toHaveProperty("sidebarShowUserAdmin");
     expect(normalizeEditorSettings({})).not.toHaveProperty("sidebarShowUserAdmin");

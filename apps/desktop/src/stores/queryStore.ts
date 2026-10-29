@@ -154,7 +154,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useExportTracker } from "@/composables/useExportTracker";
-import { showExportExecutionModeDialog } from "@/lib/export/exportExecutionMode";
+import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
 import { recordQueryCancellationLatency, resourceLifecycleDiagnostics } from "@/lib/diagnostics/resourceLifecycleDiagnostics";
 import { appendDebugLog } from "@/lib/backend/debugLog";
 import { BackendErrorException, formatError, isManualTransactionSessionExpired, isUnsupportedManualTransactionMethod, normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
@@ -11617,8 +11617,7 @@ export const useQueryStore = defineStore("query", () => {
     };
 
     const transactionEpoch = manualTransactionTargetEpoch(tab);
-    const mode = await showExportExecutionModeDialog();
-    if (mode === null) return;
+    const mode = getDefaultExportExecutionMode();
 
     function assertQueuedSourceAvailable() {
       if (mode !== "queued") return;

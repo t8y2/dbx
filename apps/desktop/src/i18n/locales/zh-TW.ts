@@ -2565,6 +2565,8 @@ export default withEnglishFallback({
     loadAllInToolbar: "右上角顯示載入全部資料",
     showSaveResult: "顯示儲存結果",
     warnIncompleteExport: "匯出不完整警告",
+    defaultExportMode: "預設匯出方式",
+    hideToolbarLabels: "隱藏工具列文字",
     incompleteExportWarning: "目前頁僅匯出已顯示的 {count} 列，可能不包含全部資料。",
     showStatusSql: "顯示底部 SQL",
     showStatusSqlHint: "在所有查詢結果和資料表資料的底部狀態列中顯示 SQL。",

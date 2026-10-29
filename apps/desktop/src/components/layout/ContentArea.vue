@@ -341,6 +341,7 @@ function groupedQueryReadonlyColumnIndexes(tab: QueryTab): number[] | undefined 
   return tab.querySourceColumns.flatMap((column, index) => (column && primaryKeys.has(column) ? [index] : []));
 }
 const settingsStore = useSettingsStore();
+const hideToolbarLabels = computed(() => settingsStore.editorSettings.dataGridHideToolbarLabels);
 const booleanDisplayMode = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode);
 const setBooleanDisplayMode = (mode: "checkbox" | "dropdown") => settingsStore.updateEditorSettings({ dataGridBooleanDisplayMode: mode });
 const booleanValueStyle = computed(() => settingsStore.editorSettings.dataGridBooleanValueStyle);
@@ -2497,7 +2498,7 @@ defineExpose({
               </template>
               <div class="ml-auto flex shrink-0 items-center gap-1">
                 <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson">
-                  <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" />
+                  <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" :compact="hideToolbarLabels" />
                   <LightTooltip v-if="dataGridRef?.goToColumnToolbarCapability?.visible" :text="dataGridRef.goToColumnToolbarCapability.tooltip ?? dataGridRef.goToColumnToolbarCapability.label" side="bottom" nowrap>
                     <Button
                       data-toolbar-action="navigation"
@@ -2510,7 +2511,7 @@ defineExpose({
                       @click="dataGridRef.goToColumnToolbarCapability.onTrigger()"
                     >
                       <Columns3 class="h-3.5 w-3.5" />
-                      {{ dataGridRef.goToColumnToolbarCapability.label }}
+                      <span v-if="!hideToolbarLabels">{{ dataGridRef.goToColumnToolbarCapability.label }}</span>
                     </Button>
                   </LightTooltip>
                   <LightTooltip v-if="dataGridRef?.tableInfoToolbarCapability?.visible" :text="t('contextMenu.viewDdl')" side="bottom" nowrap>
@@ -2525,7 +2526,7 @@ defineExpose({
                       @click="dataGridRef.tableInfoToolbarCapability.onTrigger()"
                     >
                       <TableProperties class="h-3.5 w-3.5" />
-                      DDL
+                      <span v-if="!hideToolbarLabels">DDL</span>
                     </Button>
                   </LightTooltip>
                 </template>
@@ -2853,7 +2854,7 @@ defineExpose({
                 :can-show-profile="canShowProfile"
                 :can-export-archive="canExportResultArchive && settingsStore.editorSettings.showSaveResult"
                 :archive-exporting="resultArchiveExporting"
-                :compact="standaloneResultToolbarCompact"
+                :compact="standaloneResultToolbarCompact || hideToolbarLabels"
                 :has-result="!!activeTab.result"
                 @select-explain="selectOutputView(activeTab.id, 'explain')"
                 @select-profile="selectOutputView(activeTab.id, 'profile')"
@@ -2861,7 +2862,14 @@ defineExpose({
                 @open-result-view="openPluginResultView"
               >
                 <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
-                  <DataGridExportMenu v-if="settingsStore.editorSettings.dataGridExportInToolbar" :items="dataGridRef.exportMenuItems" :warning="dataGridRef.exportWarning" :label="t('grid.export')" :compact="standaloneResultToolbarCompact" :on-select="dataGridRef.selectExportMenuItem" />
+                  <DataGridExportMenu
+                    v-if="settingsStore.editorSettings.dataGridExportInToolbar"
+                    :items="dataGridRef.exportMenuItems"
+                    :warning="dataGridRef.exportWarning"
+                    :label="t('grid.export')"
+                    :compact="standaloneResultToolbarCompact || hideToolbarLabels"
+                    :on-select="dataGridRef.selectExportMenuItem"
+                  />
                   <Button
                     v-if="settingsStore.editorSettings.dataGridLoadAllInToolbar && dataGridRef.loadAllToolbarState?.visible"
                     variant="ghost"
@@ -2872,7 +2880,7 @@ defineExpose({
                     :aria-label="t('grid.loadAllAndGoToLastRow')"
                     @click="dataGridRef.loadAllRowsAndGoToLast()"
                   >
-                    <ChevronsDown class="h-3.5 w-3.5" /><span v-if="!standaloneResultToolbarCompact">{{ t("grid.loadAllRows") }}</span>
+                    <ChevronsDown class="h-3.5 w-3.5" /><span v-if="!standaloneResultToolbarCompact && !hideToolbarLabels">{{ t("grid.loadAllRows") }}</span>
                   </Button>
                 </template>
               </QueryResultToolbarActions>
@@ -3156,10 +3164,12 @@ defineExpose({
                       class="inline-flex h-5 shrink-0 items-center gap-1 rounded-sm border border-transparent px-2 text-xs leading-none transition-colors"
                       :class="activeOutputView === 'profile' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'"
                       :aria-pressed="activeOutputView === 'profile'"
+                      :aria-label="t('profile.title')"
+                      :title="t('profile.title')"
                       @click="selectOutputView(activeTab.id, activeOutputView === 'profile' ? 'result' : 'profile')"
                     >
                       <Gauge class="h-3.5 w-3.5" />
-                      {{ t("profile.title") }}
+                      <span v-if="!hideToolbarLabels">{{ t("profile.title") }}</span>
                     </button>
                   </template>
                 </template>
@@ -3278,10 +3288,10 @@ defineExpose({
           <LightTooltip v-if="dataGridRef?.canOpenTableStructureEditor" :text="t('contextMenu.editStructure')" side="bottom" nowrap>
             <Button data-edit-table-structure variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :aria-label="t('contextMenu.editStructure')" @click="dataGridRef?.openTableStructureEditor('columns')">
               <PencilRuler class="h-3.5 w-3.5" />
-              <span v-if="!dataToolbarCompact">{{ t("contextMenu.editStructure") }}</span>
+              <span v-if="!dataToolbarCompact && !hideToolbarLabels">{{ t("contextMenu.editStructure") }}</span>
             </Button>
           </LightTooltip>
-          <DataGridColumnLayoutPopover v-if="activeTab.result?.columns.length" :grid="dataGridRef" trigger-class="px-1.5" />
+          <DataGridColumnLayoutPopover v-if="activeTab.result?.columns.length" :grid="dataGridRef" trigger-class="px-1.5" :compact="hideToolbarLabels" />
           <LightTooltip v-if="dataGridRef?.goToColumnToolbarCapability?.visible" :text="dataGridRef.goToColumnToolbarCapability.tooltip ?? dataGridRef.goToColumnToolbarCapability.label" side="bottom" nowrap>
             <Button
               data-toolbar-action="navigation"
@@ -3293,16 +3303,24 @@ defineExpose({
               :aria-pressed="dataGridRef.goToColumnToolbarCapability.active"
               @click="dataGridRef.goToColumnToolbarCapability.onTrigger()"
             >
-              <Columns3 class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ dataGridRef.goToColumnToolbarCapability.label }}</span>
+              <Columns3 class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact && !hideToolbarLabels">{{ dataGridRef.goToColumnToolbarCapability.label }}</span>
             </Button>
           </LightTooltip>
-          <Button v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent': dataGridRef?.showDdl }" :title="dataToolbarCompact ? t('grid.tableInfo') : undefined" @click="dataGridRef?.toggleDdl()"
-            ><TableProperties class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ t("grid.tableInfo") }}</span></Button
+          <Button
+            v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId"
+            variant="ghost"
+            size="sm"
+            class="h-5 text-xs px-1.5 shrink-0"
+            :class="{ 'bg-accent': dataGridRef?.showDdl }"
+            :title="dataToolbarCompact || hideToolbarLabels ? t('grid.tableInfo') : undefined"
+            :aria-label="t('grid.tableInfo')"
+            @click="dataGridRef?.toggleDdl()"
+            ><TableProperties class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact && !hideToolbarLabels">{{ t("grid.tableInfo") }}</span></Button
           >
           <DropdownMenu v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId">
             <DropdownMenuTrigger as-child>
-              <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :title="t('tableToolbox.title')"
-                ><Toolbox class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ t("tableToolbox.title") }}</span></Button
+              <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :title="t('tableToolbox.title')" :aria-label="t('tableToolbox.title')"
+                ><Toolbox class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact && !hideToolbarLabels">{{ t("tableToolbox.title") }}</span></Button
               >
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" class="w-max min-w-44 gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl">

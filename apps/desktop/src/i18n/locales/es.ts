@@ -2686,6 +2686,8 @@ export default withEnglishFallback({
     loadAllInToolbar: "Mostrar cargar todo arriba",
     showSaveResult: "Mostrar guardar resultados",
     warnIncompleteExport: "Avisar de exportaciones incompletas",
+    defaultExportMode: "Modo de exportación predeterminado",
+    hideToolbarLabels: "Ocultar texto de la barra de herramientas",
     incompleteExportWarning: "Esta página solo exporta las {count} filas mostradas y puede no incluir todos los datos.",
     showStatusSql: "Mostrar SQL al pie",
     showStatusSqlHint: "Mostrar SQL al pie de todos los resultados de consultas y datos de tablas.",

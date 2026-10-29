@@ -2583,6 +2583,8 @@ export default withEnglishFallback({
     loadAllInToolbar: "오른쪽 위에 전체 로드 표시",
     showSaveResult: "결과 저장 표시",
     warnIncompleteExport: "불완전한 내보내기 경고",
+    defaultExportMode: "기본 내보내기 방식",
+    hideToolbarLabels: "도구 모음 텍스트 숨기기",
     incompleteExportWarning: "현재 페이지는 표시된 {count}개 행만 내보내므로 전체 데이터가 포함되지 않을 수 있습니다.",
     showStatusSql: "하단에 SQL 표시",
     showStatusSqlHint: "모든 쿼리 결과와 테이블 데이터의 하단 상태 표시줄에 SQL을 표시합니다.",

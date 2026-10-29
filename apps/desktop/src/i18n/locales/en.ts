@@ -2964,6 +2964,8 @@ export default {
     loadAllInToolbar: "Show load all in top toolbar",
     showSaveResult: "Show save results",
     warnIncompleteExport: "Warn about incomplete exports",
+    defaultExportMode: "Default export mode",
+    hideToolbarLabels: "Hide toolbar labels",
     incompleteExportWarning: "This page exports only the {count} displayed rows and may not include all data.",
     showStatusSql: "Show SQL in Footer",
     showStatusSqlHint: "Show SQL in the footer of all query results and table data grids.",

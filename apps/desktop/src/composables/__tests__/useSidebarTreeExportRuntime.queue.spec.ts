@@ -17,7 +17,7 @@ vi.mock("@/lib/backend/api", () => ({
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(async () => "C:/exports") }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
-vi.mock("@/lib/export/exportExecutionMode", () => ({ showExportExecutionModeDialog: mocks.mode }));
+vi.mock("@/lib/export/exportExecutionMode", () => ({ getDefaultExportExecutionMode: mocks.mode }));
 vi.mock("@/lib/export/exportPath", () => ({ promptExportSavePath: mocks.save, autoRevealExportedPathIfConfigured: vi.fn() }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
@@ -32,7 +32,7 @@ describe("sidebar Mongo manual export queue", () => {
     vi.clearAllMocks();
     operations.length = 0;
     tables.length = 0;
-    mocks.mode.mockResolvedValue("queued");
+    mocks.mode.mockReturnValue("queued");
     mocks.save.mockResolvedValue("C:/exports/original.bson.gz");
     mocks.ensure.mockResolvedValue(undefined);
     mocks.cancel.mockResolvedValue(true);

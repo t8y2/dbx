@@ -28,6 +28,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { databaseExportFileStem, loadSavedDatabaseExportOptions, MAX_SPLIT_SQL_PART_MB, MIN_SPLIT_SQL_PART_MB, saveDatabaseExportOptions, sortDatabaseTableNames } from "@/lib/export/databaseExportOptions";
 import { notifyExportComplete } from "@/lib/export/exportReveal";
 import ExportExecutionMode from "@/components/export/ExportExecutionMode.vue";
+import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
 import type { ManualExportMode } from "@/lib/export/manualExportQueue";
 import type { ExportTask } from "@/composables/useExportTracker";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
@@ -989,7 +990,7 @@ async function cancelExport() {
 
 function resetState() {
   desktopTaskStatus.value = null;
-  executionMode.value = "immediate";
+  executionMode.value = getDefaultExportExecutionMode();
   connectionId.value = "";
   database.value = "";
   databases.value = [];

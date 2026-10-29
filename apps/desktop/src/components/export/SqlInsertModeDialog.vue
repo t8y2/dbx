@@ -9,9 +9,9 @@ import type { ManualExportMode } from "@/lib/export/manualExportQueue";
 
 const { t } = useI18n();
 const open = defineModel<boolean>("open", { default: false });
-const props = defineProps<{ allowSplit?: boolean; columns?: SqlExportColumnSelection[]; showExecutionMode?: boolean }>();
+const props = withDefaults(defineProps<{ allowSplit?: boolean; columns?: SqlExportColumnSelection[]; showExecutionMode?: boolean; initialExecutionMode?: ManualExportMode }>(), { initialExecutionMode: "immediate" });
 const selected = ref<SqlInsertMode>("batch");
-const executionMode = ref<ManualExportMode>("immediate");
+const executionMode = ref<ManualExportMode>(props.initialExecutionMode);
 const selectedColumnIndexes = ref(props.columns?.map((column) => column.sourceIndex) ?? []);
 const splitSqlOutput = ref(false);
 const splitSqlPartMaxMb = ref(100);

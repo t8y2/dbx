@@ -2673,6 +2673,8 @@ export default withEnglishFallback({
     loadAllInToolbar: "Показывать загрузку всех данных вверху",
     showSaveResult: "Показывать сохранение результатов",
     warnIncompleteExport: "Предупреждать о неполном экспорте",
+    defaultExportMode: "Режим экспорта по умолчанию",
+    hideToolbarLabels: "Скрывать подписи панели инструментов",
     incompleteExportWarning: "Экспортируются только отображаемые строки ({count}); часть данных может не попасть в файл.",
     showStatusSql: "Показывать SQL внизу",
     showStatusSqlHint: "Показывать SQL в нижней строке всех результатов запросов и данных таблиц.",

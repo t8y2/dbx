@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
   config: { id: "oracle-1", name: "Oracle", db_type: "oracle", database: "APP", query_timeout_secs: 30 },
 }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
-vi.mock("@/lib/export/exportExecutionMode", () => ({ showExportExecutionModeDialog: mocks.mode }));
+vi.mock("@/lib/export/exportExecutionMode", () => ({ getDefaultExportExecutionMode: mocks.mode }));
 vi.mock("@/lib/backend/api", () => ({ saveOpenTabsState: vi.fn().mockResolvedValue(undefined), startQueryResultExport: mocks.start, cancelQueryResultExport: mocks.cancel }));
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ ensureConnected: mocks.ensure, getConfig: () => mocks.config, connectionIdentifierQuote: () => '"' }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { exportBatchSize: 1000, exportRowLimitEnabled: false, globalQueryTimeoutSecs: 30 } }) }));
@@ -24,7 +24,7 @@ beforeEach(() => {
   pinia = createPinia();
   setActivePinia(pinia);
   vi.stubGlobal("localStorage", { getItem: () => null, setItem() {}, removeItem() {} });
-  mocks.mode.mockResolvedValue("queued");
+  mocks.mode.mockReturnValue("queued");
   mocks.ensure.mockResolvedValue(undefined);
   mocks.cancel.mockResolvedValue(undefined);
   mocks.start.mockImplementation((request, progress) => new Promise((resolve, reject) => pending.push({ request, progress, resolve, reject })));

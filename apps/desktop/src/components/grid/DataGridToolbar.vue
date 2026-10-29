@@ -96,7 +96,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
 
     <Tooltip v-if="isDataGridToolbarCapabilityVisible(refresh)">
       <TooltipTrigger as-child>
-        <Button data-toolbar-action="refresh" variant="ghost" size="sm" :class="actionButtonClass('refresh')" :disabled="isDataGridToolbarCapabilityDisabled(refresh)" @click="void triggerDataGridToolbarAction(refresh)">
+        <Button data-toolbar-action="refresh" :aria-label="refresh?.label" variant="ghost" size="sm" :class="actionButtonClass('refresh')" :disabled="isDataGridToolbarCapabilityDisabled(refresh)" @click="void triggerDataGridToolbarAction(refresh)">
           <Loader2 v-if="refresh.loading" class="data-grid-topbar-action-icon h-3 w-3 animate-spin" />
           <RefreshCcw v-else class="data-grid-topbar-action-icon h-3 w-3" />
           <span class="data-grid-topbar-action-label" :class="actionLabelClass('refresh')">{{ refresh.label }}</span>
@@ -143,7 +143,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
     <div v-if="isDataGridToolbarCapabilityVisible(copyData)" class="flex h-5 shrink-0 items-stretch overflow-hidden rounded-md border border-border">
       <Tooltip>
         <TooltipTrigger as-child>
-          <Button data-toolbar-action="copyData" variant="ghost" size="sm" :class="[...actionButtonClass('copyData'), 'rounded-none border-0']" :disabled="copyData?.disabled" @click="void triggerDataGridToolbarCopy(copyData)">
+          <Button data-toolbar-action="copyData" :aria-label="copyData?.label" variant="ghost" size="sm" :class="[...actionButtonClass('copyData'), 'rounded-none border-0']" :disabled="copyData?.disabled" @click="void triggerDataGridToolbarCopy(copyData)">
             <Copy class="data-grid-topbar-action-icon h-3 w-3" />
             <span class="data-grid-topbar-action-label" :class="actionLabelClass('copyData')">{{ copyData?.label }}</span>
           </Button>
@@ -171,7 +171,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
     <div v-if="isDataGridToolbarCapabilityVisible(addRow)" class="flex h-5 shrink-0 items-stretch overflow-hidden rounded-md border border-border">
       <Tooltip>
         <TooltipTrigger as-child>
-          <Button data-toolbar-action="addRow" variant="ghost" size="sm" :class="[...actionButtonClass('addRow'), 'rounded-none border-0']" :disabled="isDataGridToolbarCapabilityDisabled(addRow)" @click="void triggerDataGridToolbarAction(addRow)">
+          <Button data-toolbar-action="addRow" :aria-label="addRow?.label" variant="ghost" size="sm" :class="[...actionButtonClass('addRow'), 'rounded-none border-0']" :disabled="isDataGridToolbarCapabilityDisabled(addRow)" @click="void triggerDataGridToolbarAction(addRow)">
             <Plus class="data-grid-topbar-action-icon h-3 w-3" />
             <span class="data-grid-topbar-action-label" :class="actionLabelClass('addRow')">{{ addRow?.label }}</span>
           </Button>
@@ -199,7 +199,15 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
 
     <Tooltip v-if="isDataGridToolbarCapabilityVisible(deleteRow)">
       <TooltipTrigger as-child>
-        <Button data-toolbar-action="deleteRow" variant="ghost" size="sm" :class="[...actionButtonClass('deleteRow'), 'text-destructive hover:bg-destructive/10 hover:text-destructive']" :disabled="isDataGridToolbarCapabilityDisabled(deleteRow)" @click="void triggerDataGridToolbarAction(deleteRow)">
+        <Button
+          data-toolbar-action="deleteRow"
+          :aria-label="deleteRow?.label"
+          variant="ghost"
+          size="sm"
+          :class="[...actionButtonClass('deleteRow'), 'text-destructive hover:bg-destructive/10 hover:text-destructive']"
+          :disabled="isDataGridToolbarCapabilityDisabled(deleteRow)"
+          @click="void triggerDataGridToolbarAction(deleteRow)"
+        >
           <Trash2 class="data-grid-topbar-action-icon h-3 w-3" />
           <span class="data-grid-topbar-action-label" :class="actionLabelClass('deleteRow')">{{ deleteRow?.label }}</span>
         </Button>
@@ -211,6 +219,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
       <TooltipTrigger as-child>
         <Button
           data-toolbar-action="deleteColumn"
+          :aria-label="deleteColumn?.label"
           variant="ghost"
           size="sm"
           :class="[...actionButtonClass('deleteColumn'), 'text-destructive hover:bg-destructive/10 hover:text-destructive']"
@@ -228,7 +237,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
       <Tooltip>
         <TooltipTrigger as-child>
           <DropdownMenuTrigger as-child>
-            <Button ref="exportTriggerRef" data-toolbar-action="exportData" variant="ghost" size="sm" :class="actionButtonClass('exportData')" :disabled="exportData?.disabled || !exportData?.items.length">
+            <Button ref="exportTriggerRef" data-toolbar-action="exportData" :aria-label="exportData?.label" variant="ghost" size="sm" :class="actionButtonClass('exportData')" :disabled="exportData?.disabled || !exportData?.items.length">
               <Upload class="data-grid-topbar-action-icon h-3 w-3" />
               <span class="data-grid-topbar-action-label" :class="actionLabelClass('exportData')">{{ exportData?.label }}</span>
             </Button>
@@ -250,6 +259,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
       <TooltipTrigger as-child>
         <Button
           data-toolbar-action="transpose"
+          :aria-label="transpose?.label"
           variant="ghost"
           size="sm"
           :class="[...actionButtonClass('transpose'), transpose?.active ? 'bg-primary/10 text-primary hover:bg-primary/15' : '']"
@@ -285,7 +295,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
 
     <Tooltip v-if="isDataGridToolbarCapabilityVisible(layerPreview)">
       <TooltipTrigger as-child>
-        <Button data-toolbar-action="layerPreview" variant="ghost" size="sm" :class="actionButtonClass('layerPreview')" :disabled="isDataGridToolbarCapabilityDisabled(layerPreview)" @click="void triggerDataGridToolbarAction(layerPreview)">
+        <Button data-toolbar-action="layerPreview" :aria-label="layerPreview?.label" variant="ghost" size="sm" :class="actionButtonClass('layerPreview')" :disabled="isDataGridToolbarCapabilityDisabled(layerPreview)" @click="void triggerDataGridToolbarAction(layerPreview)">
           <Map class="data-grid-topbar-action-icon h-3 w-3" />
           <span class="data-grid-topbar-action-label" :class="actionLabelClass('layerPreview')">{{ layerPreview?.label }}</span>
         </Button>
@@ -295,7 +305,15 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
 
     <Tooltip v-if="isDataGridToolbarCapabilityVisible(preview)">
       <TooltipTrigger as-child>
-        <Button data-toolbar-action="preview" variant="ghost" size="sm" :class="[...actionButtonClass('preview'), 'text-sky-600 hover:bg-sky-500/10 hover:text-sky-700']" :disabled="isDataGridToolbarCapabilityDisabled(preview)" @click="void triggerDataGridToolbarAction(preview)">
+        <Button
+          data-toolbar-action="preview"
+          :aria-label="preview?.label"
+          variant="ghost"
+          size="sm"
+          :class="[...actionButtonClass('preview'), 'text-sky-600 hover:bg-sky-500/10 hover:text-sky-700']"
+          :disabled="isDataGridToolbarCapabilityDisabled(preview)"
+          @click="void triggerDataGridToolbarAction(preview)"
+        >
           <Loader2 v-if="preview?.loading" class="data-grid-topbar-action-icon h-3 w-3 animate-spin" />
           <Eye v-else class="data-grid-topbar-action-icon h-3 w-3" />
           <span class="data-grid-topbar-action-label" :class="actionLabelClass('preview')">{{ preview?.label }}</span>
@@ -306,7 +324,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
 
     <Tooltip v-if="isDataGridToolbarCapabilityVisible(save)">
       <TooltipTrigger as-child>
-        <Button data-toolbar-action="save" variant="default" size="sm" :class="[...actionButtonClass('save'), 'data-grid-topbar-action-button--commit relative ml-2']" :disabled="isDataGridToolbarCapabilityDisabled(save)" @click="void triggerDataGridToolbarAction(save)">
+        <Button data-toolbar-action="save" :aria-label="save?.label" variant="default" size="sm" :class="[...actionButtonClass('save'), 'data-grid-topbar-action-button--commit relative ml-2']" :disabled="isDataGridToolbarCapabilityDisabled(save)" @click="void triggerDataGridToolbarAction(save)">
           <Loader2 v-if="save?.loading" class="data-grid-topbar-action-icon h-3 w-3 animate-spin" />
           <Save v-else-if="actionIsCompact('save') || !save?.pendingCount" class="data-grid-topbar-action-icon h-3 w-3" />
           <span
@@ -329,7 +347,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
 
     <Tooltip v-if="isDataGridToolbarCapabilityVisible(rollback)">
       <TooltipTrigger as-child>
-        <Button data-toolbar-action="rollback" variant="outline" size="sm" :class="actionButtonClass('rollback')" :disabled="isDataGridToolbarCapabilityDisabled(rollback)" @click="void triggerDataGridToolbarAction(rollback)">
+        <Button data-toolbar-action="rollback" :aria-label="rollback?.label" variant="outline" size="sm" :class="actionButtonClass('rollback')" :disabled="isDataGridToolbarCapabilityDisabled(rollback)" @click="void triggerDataGridToolbarAction(rollback)">
           <RotateCcw class="data-grid-topbar-action-icon h-3 w-3" />
           <span class="data-grid-topbar-action-label" :class="actionLabelClass('rollback')">{{ rollback?.label }}</span>
         </Button>

@@ -2605,6 +2605,8 @@ export default withEnglishFallback({
     loadAllInToolbar: "右上に全データ読み込みを表示",
     showSaveResult: "結果の保存を表示",
     warnIncompleteExport: "不完全なエクスポートを警告",
+    defaultExportMode: "既定のエクスポート方法",
+    hideToolbarLabels: "ツールバーの文字を非表示",
     incompleteExportWarning: "現在のページでは表示中の {count} 行のみをエクスポートするため、全データが含まれない場合があります。",
     showStatusSql: "フッターに SQL を表示",
     showStatusSqlHint: "すべてのクエリ結果とテーブルデータのフッターに SQL を表示します。",

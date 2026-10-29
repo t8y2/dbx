@@ -966,7 +966,8 @@ const splitDataGridToolbar = computed(() => settingsStore.editorSettings.dataGri
 const compactDataGridToolbar = computed(() => dataGridTopbarOverflowCompact.value || (!splitDataGridToolbar.value && isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)));
 const responsiveDataGridToolbarActionCount = computed(() => (splitDataGridToolbar.value ? 0 : dataGridToolbarActionCollapseCount(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)));
 const compactDataGridToolbarActionCount = computed(() => Math.max(responsiveDataGridToolbarActionCount.value, dataGridTopbarOverflowActionCount.value));
-const compactDataGridToolbarActions = computed(() => (splitDataGridToolbar.value ? compactDataGridToolbarActionCount.value > 0 : compactDataGridToolbar.value));
+const compactDataGridToolbarLeading = computed(() => (splitDataGridToolbar.value ? compactDataGridToolbarActionCount.value > 0 : compactDataGridToolbar.value));
+const compactDataGridToolbarActions = computed(() => settingsStore.editorSettings.dataGridHideToolbarLabels || compactDataGridToolbarLeading.value);
 watch(splitDataGridToolbar, () => {
   resetDataGridTopbarOverflowCompact();
   nextTick(updateDataGridTopbarWidth);
@@ -15298,7 +15299,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           :class="splitDataGridToolbar ? 'grid h-16 grid-cols-[auto_minmax(0,1fr)] grid-rows-2' : 'flex h-8 items-center'"
         >
           <div v-if="hasResultToolbarLeadingSlot" data-grid-topbar-row="actions" class="flex shrink-0 items-center border-r" :class="splitDataGridToolbar ? 'col-start-1 row-start-1' : ''">
-            <slot name="result-toolbar-leading" :compact="compactDataGridToolbarActions" />
+            <slot name="result-toolbar-leading" :compact="compactDataGridToolbarLeading" />
           </div>
           <!-- Clip both axes instead of creating a hidden scroll container around the toolbar controls. -->
           <div data-grid-topbar-row="filters" class="data-grid-topbar-scroll min-w-0 overflow-clip" :class="splitDataGridToolbar ? 'data-grid-topbar-scroll--row-divider col-span-2 row-start-2' : 'flex-1'">
@@ -15402,6 +15403,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             data-grid-topbar-row="actions"
             :class="splitDataGridToolbar ? 'col-start-2 row-start-1' : 'ml-auto'"
             :compact-action-count="compactDataGridToolbarActionCount"
+            :compact="settingsStore.editorSettings.dataGridHideToolbarLabels"
             :refresh="refreshToolbarCapability"
             :auto-refresh="autoRefreshToolbarCapability"
             :add-row="addRowToolbarCapability"
@@ -15419,7 +15421,15 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                    banner line of its own. -->
               <Tooltip v-if="tableDataPreviewTruncated && tableDataPreviewNoticeHidden && !tableDataFullTextMode">
                 <TooltipTrigger as-child>
-                  <Button variant="ghost" size="sm" :disabled="tableDataFullTextLoading" class="data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5" @click="loadCurrentPageFullText">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    :disabled="tableDataFullTextLoading"
+                    :aria-label="t('grid.tableDataPreviewLoadPageShortTitle')"
+                    class="data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5"
+                    :class="{ 'data-grid-topbar-action-button--compact': compactDataGridToolbarActions }"
+                    @click="loadCurrentPageFullText"
+                  >
                     <Info class="data-grid-topbar-action-icon w-3 h-3 text-amber-600 dark:text-amber-400" />
                     <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbarActions }">{{ t("grid.tableDataPreviewLoadPageShort") }}</span>
                   </Button>
@@ -15466,6 +15476,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     size="sm"
                     :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbarActions ? 'data-grid-topbar-action-button--compact' : '', mongoJsonPreviewOpen ? 'text-primary bg-primary/10 hover:bg-primary/15' : '']"
                     :aria-pressed="mongoJsonPreviewOpen"
+                    :aria-label="t('grid.mongoJsonPreview')"
                     @click="toggleMongoJsonPreview"
                   >
                     <Code2 class="data-grid-topbar-action-icon w-3 h-3" />

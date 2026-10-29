@@ -2821,6 +2821,8 @@ export default withEnglishFallback({
     loadAllInToolbar: "แสดงโหลดทั้งหมดที่มุมขวาบน",
     showSaveResult: "แสดงบันทึกผลลัพธ์",
     warnIncompleteExport: "เตือนเมื่อส่งออกไม่ครบ",
+    defaultExportMode: "โหมดส่งออกเริ่มต้น",
+    hideToolbarLabels: "ซ่อนข้อความบนแถบเครื่องมือ",
     incompleteExportWarning: "หน้านี้ส่งออกเฉพาะ {count} แถวที่แสดงอยู่ และอาจไม่รวมข้อมูลทั้งหมด",
     showStatusSql: "แสดง SQL ที่ด้านล่าง",
     showStatusSqlHint: "แสดง SQL ในแถบสถานะด้านล่างของผลลัพธ์คิวรีและข้อมูลตารางทั้งหมด",

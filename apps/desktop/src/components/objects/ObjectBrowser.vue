@@ -165,7 +165,7 @@ import { autoRevealExportedPathIfConfigured, promptExportSavePath } from "@/lib/
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, xlsxHeaderUsesCommentRows, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { showSqlInsertModeDialog, type SqlInsertDialect, type SqlInsertMode } from "@/lib/export/sqlInsertMode";
-import { showExportExecutionModeDialog } from "@/lib/export/exportExecutionMode";
+import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
 import type { ManualExportMode } from "@/lib/export/manualExportQueue";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
@@ -3892,6 +3892,7 @@ function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<XlsxEx
       open: true,
       showHeaderOptions: hasComments,
       showExecutionMode: isTauriRuntime(),
+      initialExecutionMode: getDefaultExportExecutionMode(),
       onConfirm: (exportOptions: XlsxExportOptions) => {
         resolve(exportOptions);
         app.unmount();
@@ -3955,8 +3956,7 @@ async function exportTableData(
   const { connectionId, database, schema, catalog, tableName, identifierQuote, databaseType, settings } = captured;
   columnInfos = columnInfos?.map((column) => ({ ...column }));
   const native = isTauriRuntime();
-  const mode = native ? (selectedMode ?? (await showExportExecutionModeDialog())) : "immediate";
-  if (mode === null) return;
+  const mode = native ? (selectedMode ?? getDefaultExportExecutionMode()) : "immediate";
   const splitSqlOutput = format === "sql" && splitMaxMb !== undefined;
 
   // Save dialog first

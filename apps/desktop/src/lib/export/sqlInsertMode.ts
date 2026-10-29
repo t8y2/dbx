@@ -2,6 +2,7 @@ import { createApp } from "vue";
 import SqlInsertModeDialog from "@/components/export/SqlInsertModeDialog.vue";
 import i18n from "@/i18n";
 import type { ManualExportMode } from "@/lib/export/manualExportQueue";
+import { getDefaultExportExecutionMode } from "./exportExecutionMode";
 
 export type SqlInsertMode = "batch" | "single";
 export type SqlInsertDialect = "source" | "standard";
@@ -47,6 +48,7 @@ export function showSqlInsertModeDialog(options: { allowSplit?: boolean; columns
       allowSplit: options.allowSplit === true,
       columns: options.columns,
       showExecutionMode: options.showExecutionMode,
+      initialExecutionMode: options.showExecutionMode ? getDefaultExportExecutionMode() : "immediate",
       onConfirm: (options: SqlExportOptions) => finish(options),
       onCancel: () => finish(null),
     });

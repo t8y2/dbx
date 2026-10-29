@@ -302,7 +302,9 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       // When bypassing CodeMirror's matcher, supply our own highlight ranges so
       // the matched characters (Han substring or pinyin initials) stay marked.
       // Ranges must target the rendered text, which is displayLabel when set.
-      ...(bypassFilter && prefix ? { filter: false as const, getMatch: (option: { label: string; displayLabel?: string }) => completionMatchRanges(option.displayLabel ?? option.label, prefix) } : {}),
+      ...(bypassFilter && prefix
+        ? { filter: false as const, getMatch: (option: { label: string; displayLabel?: string }) => completionMatchRanges(option.displayLabel ?? option.label, prefix, typeof settingsStore !== "undefined" ? settingsStore?.editorSettings?.completionMatchMode : undefined) }
+        : {}),
     };
   }
 
@@ -350,18 +352,32 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
   // skip the second-stage filter exactly in the cases it would break.
   function shouldBypassCompletionFilter(prefix: string, items: Array<QueryCompletionItem | BatchColumnSelectionActionItem>): boolean {
     if (!prefix) return false;
+    if (typeof settingsStore !== "undefined" && settingsStore?.editorSettings?.completionMatchMode === "contains") return true;
     if (/\p{Script=Han}/u.test(prefix)) return true;
     if (/^[a-z0-9]+$/i.test(prefix) && items.some(itemHasHanText)) return true;
+    const matchMode = typeof settingsStore !== "undefined" ? settingsStore?.editorSettings?.completionMatchMode : undefined;
     return items.some((item) => {
       const renderedLabel = "displayLabel" in item && typeof item.displayLabel === "string" ? item.displayLabel : item.label;
       if (renderedLabel.toLowerCase().startsWith(prefix.toLowerCase())) return false;
-      if ("comment" in item && typeof item.comment === "string" && matchesIdentifierSearch(item.comment, prefix)) return true;
-      if (typeof item.detail === "string" && matchesIdentifierSearch(item.detail, prefix)) return true;
+      if ("comment" in item && typeof item.comment === "string" && matchesIdentifierSearch(item.comment, prefix, matchMode)) return true;
+      if (typeof item.detail === "string" && matchesIdentifierSearch(item.detail, prefix, matchMode)) return true;
       return false;
     });
   }
 
   function completionItemsForBypassedFilter(prefix: string, items: Array<QueryCompletionItem | BatchColumnSelectionActionItem>): Array<QueryCompletionItem | BatchColumnSelectionActionItem> {
+    const matchMode = typeof settingsStore !== "undefined" ? settingsStore?.editorSettings?.completionMatchMode : undefined;
+    if (matchMode === "contains") {
+      return items.filter((item) => {
+        if (isBatchColumnSelectionAction(item)) return true;
+        const renderedLabel = "displayLabel" in item && typeof item.displayLabel === "string" ? item.displayLabel : item.label;
+        if (completionMatchRanges(renderedLabel, prefix, "contains").length > 0) return true;
+        if (renderedLabel !== item.label && completionMatchRanges(item.label, prefix, "contains").length > 0) return true;
+        if ("comment" in item && typeof item.comment === "string" && matchesIdentifierSearch(item.comment, prefix, "contains")) return true;
+        if (typeof item.detail === "string" && matchesIdentifierSearch(item.detail, prefix, "contains")) return true;
+        return false;
+      });
+    }
     if ([...prefix].length !== 1 || !/^[a-z0-9]$/i.test(prefix)) return items;
     const normalized = prefix.toLowerCase();
     return items.filter((item) => {
@@ -371,8 +387,8 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       const renderedLabel = "displayLabel" in item && typeof item.displayLabel === "string" ? item.displayLabel : item.label;
       if (renderedLabel.toLowerCase().startsWith(normalized)) return true;
       if (itemHasHanText(item)) return true;
-      if ("comment" in item && typeof item.comment === "string" && matchesIdentifierSearch(item.comment, prefix)) return true;
-      if (typeof item.detail === "string" && matchesIdentifierSearch(item.detail, prefix)) return true;
+      if ("comment" in item && typeof item.comment === "string" && matchesIdentifierSearch(item.comment, prefix, matchMode)) return true;
+      if (typeof item.detail === "string" && matchesIdentifierSearch(item.detail, prefix, matchMode)) return true;
       return false;
     });
   }
@@ -936,6 +952,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
           sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
+          completionMatchMode: settingsStore.editorSettings.completionMatchMode,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
       }
@@ -1002,6 +1019,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
           sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
+          completionMatchMode: settingsStore.editorSettings.completionMatchMode,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
       }
@@ -1327,6 +1345,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
       sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
+      completionMatchMode: settingsStore.editorSettings.completionMatchMode,
     });
 
     return buildSqlCompletionResult(items, completionContext, fullDoc, position);
@@ -1866,6 +1885,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
       sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
+      completionMatchMode: settingsStore.editorSettings.completionMatchMode,
     });
 
     return buildSqlCompletionResult(items, completionContext, fullDoc, position);

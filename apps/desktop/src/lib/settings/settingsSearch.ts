@@ -186,6 +186,14 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     keywordKeys: ["settings.completionTriggerModeManual", "settings.completionTriggerModeRequirePrefix", "settings.completionTriggerModePositional"],
   },
   {
+    id: "editor-completion-match-mode",
+    category: "editor",
+    titleKey: "settings.completionMatchMode",
+    descriptionKey: "settings.completionMatchModeDescription",
+    targetId: "editor",
+    keywordKeys: ["settings.completionMatchModeContains", "settings.completionMatchModeFuzzy"],
+  },
+  {
     id: "editor-table-completion-schema-qualification",
     category: "editor",
     titleKey: "settings.tableCompletionSchemaQualification",

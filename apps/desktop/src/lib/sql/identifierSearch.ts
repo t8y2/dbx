@@ -1,10 +1,11 @@
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
+import type { SqlCompletionMatchMode } from "@/lib/sql/sqlCompletionMatchMode";
 
 /**
  * Scores identifier matches for completion and field pickers.
  * Higher scores are better; -1 means there is no match.
  */
-export function identifierMatchScore(candidate: string, query: string): number {
+export function identifierMatchScore(candidate: string, query: string, matchMode: SqlCompletionMatchMode = "fuzzy"): number {
   if (!query) return 1;
   const candidateLower = candidate.toLowerCase();
   const queryLower = query.toLowerCase();
@@ -12,10 +13,12 @@ export function identifierMatchScore(candidate: string, query: string): number {
   if (candidateLower === queryLower) return 3000 - candidateLower.length;
   if (candidateLower.startsWith(queryLower)) return 2000 - candidateLower.length;
 
-  const initials = identifierInitials(candidate);
-  if (initials && initials.startsWith(queryLower)) {
-    const exactInitialsBonus = initials === queryLower ? 400 : 0;
-    return 2400 + exactInitialsBonus - candidateLower.length;
+  if (matchMode === "fuzzy") {
+    const initials = identifierInitials(candidate);
+    if (initials && initials.startsWith(queryLower)) {
+      const exactInitialsBonus = initials === queryLower ? 400 : 0;
+      return 2400 + exactInitialsBonus - candidateLower.length;
+    }
   }
 
   if (/^[a-z0-9]+$/.test(queryLower) && containsHan(candidateLower)) {
@@ -34,6 +37,10 @@ export function identifierMatchScore(candidate: string, query: string): number {
   if (substringIndex >= 0) {
     const boundaryBonus = isIdentifierBoundary(candidate, substringIndex) ? 400 : Math.max(0, 180 - substringIndex * 12);
     return 900 + boundaryBonus - candidateLower.length;
+  }
+
+  if (matchMode === "contains") {
+    return -1;
   }
 
   let candidateIndex = 0;
@@ -56,8 +63,8 @@ export function identifierMatchScore(candidate: string, query: string): number {
   return 1200 + earlyMatchBonus - totalGap * 10 - candidateLower.length;
 }
 
-export function matchesIdentifierSearch(candidate: string, query: string): boolean {
-  return identifierMatchScore(candidate, query.trim()) >= 0;
+export function matchesIdentifierSearch(candidate: string, query: string, matchMode: SqlCompletionMatchMode = "fuzzy"): boolean {
+  return identifierMatchScore(candidate, query.trim(), matchMode) >= 0;
 }
 
 function identifierWords(candidate: string): string[] {

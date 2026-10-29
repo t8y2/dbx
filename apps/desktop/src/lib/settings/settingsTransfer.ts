@@ -157,6 +157,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "sortCompletionColumnsAlphabetically",
     "selectFirstCompletionOnOpen",
     "completionTriggerMode",
+    "completionMatchMode",
     "excludedCompletionItems",
     "wordWrap",
     "showWhitespace",

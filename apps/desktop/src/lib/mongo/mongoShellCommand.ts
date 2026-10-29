@@ -221,7 +221,7 @@ function findUnsupportedValueConstructor(argument: string): string | null {
       else if (char === quote) quote = null;
       continue;
     }
-    if (char === '"' || char === "'") {
+    if (char === '"' || char === "'" || char === "`") {
       quote = char;
       continue;
     }
@@ -1690,7 +1690,7 @@ function mongoCommentAwareBodyEnd(source: string, start: number, end: number): n
       bodyEnd = i;
       continue;
     }
-    if (char === '"' || char === "'") {
+    if (char === '"' || char === "'" || char === "`") {
       quote = char;
       i += 1;
       bodyEnd = i;

@@ -7996,6 +7996,7 @@ export default withEnglishFallback({
     batchRowsHint: "Righe generate e inserite per invio; i batch troppo grandi vengono divisi automaticamente",
     cancelInsert: "Annulla inserimento",
     cancelledLabel: "Annullato; le righe già scritte restano nella tabella",
+    partitionValuesUnsupported: "Impossibile generare dati in modo sicuro per la chiave di partizione ({expression}) della tabella {table}. Controllare la definizione della partizione e la configurazione del generatore: i valori richiesti potrebbero essere al di fuori dell'intervallo delle partizioni esistenti oppure l'espressione di partizione non supporta ancora la deduzione automatica.",
   },
   tableToolbox: {
     browserFiltered: "Anteprima web (risultato corrente)",

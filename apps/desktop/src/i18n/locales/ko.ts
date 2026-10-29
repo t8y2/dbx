@@ -8028,6 +8028,7 @@ export default withEnglishFallback({
     batchRowsHint: "한 번에 생성하고 삽입할 행 수입니다. 서버 한도를 넘으면 자동으로 분할됩니다",
     cancelInsert: "삽입 취소",
     cancelledLabel: "취소되었습니다. 이미 삽입된 행은 테이블에 남습니다",
+    partitionValuesUnsupported: "{table} 테이블의 파티션 키({expression})에 대해 안전하게 데이터를 생성할 수 없습니다. 파티션 정의와 생성기 구성을 확인하세요: 요청한 값이 기존 파티션 범위를 벗어났거나 파티션 표현식이 아직 자동 추론을 지원하지 않을 수 있습니다.",
   },
   tableToolbox: {
     browserFiltered: "웹 미리보기 (현재 결과)",

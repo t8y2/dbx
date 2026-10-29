@@ -8203,6 +8203,7 @@ export default withEnglishFallback({
     batchRowsHint: "Filas generadas e insertadas en cada envío; los lotes grandes se dividen automáticamente",
     cancelInsert: "Cancelar inserción",
     cancelledLabel: "Cancelado; las filas ya insertadas permanecen en la tabla",
+    partitionValuesUnsupported: "No es posible generar datos de forma segura para la clave de partición ({expression}) de la tabla {table}. Compruebe la definición de partición y la configuración del generador: es posible que los valores solicitados queden fuera del rango de las particiones existentes o que la expresión de partición todavía no permita la inferencia automática.",
   },
   tableToolbox: {
     browserFiltered: "Vista previa web (resultado actual)",

@@ -7110,6 +7110,7 @@ export default withEnglishFallback({
     batchRowsHint: "每次產生並寫入的列數；超過伺服端封包上限時會自動再拆分",
     cancelInsert: "取消插入",
     cancelledLabel: "已取消，已寫入的列保留在表中",
+    partitionValuesUnsupported: "無法為資料表 {table} 的分割區鍵（{expression}）安全產生資料。請檢查分割區定義與產生器設定：要求的值可能超出現有分割區範圍，或分割區運算式暫不支援自動推導。",
   },
   tableToolbox: {
     browserFiltered: "網頁預覽（目前結果）",

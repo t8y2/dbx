@@ -1964,6 +1964,13 @@ export default withEnglishFallback({
     sshTunnelTesting: "Проверка SSH-туннеля...",
     sshTunnelTestSuccess: "Подключение через SSH-туннель выполнено",
     advancedTab: "Дополнительно",
+    advancedConnectionBehavior: "Поведение подключения",
+    advancedOperationProtection: "Доступ и защита",
+    advancedObjectBrowsing: "Просмотр объектов",
+    advancedCompatibility: "Совместимость",
+    oracleSysdbaEnable: "Подключаться как администратор",
+    oracleSysdbaHint:
+      "Подключение с высокими административными привилегиями Oracle для запуска, остановки и восстановления базы данных. Для обычных запросов и разработки обычно не требуется. Учётная запись должна иметь привилегию SYSDBA. DBX автоматически включает этот режим для учётных записей SYS.",
     sshHost: "Хост SSH",
     sshHostPlaceholder: "ssh.example.com или псевдоним из ~/.ssh/config",
     sshUser: "Пользователь SSH",

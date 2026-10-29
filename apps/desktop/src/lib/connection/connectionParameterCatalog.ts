@@ -24,7 +24,7 @@ export interface ConnectionParameterDefinition {
   descriptionKey?: string;
   source: "dbx" | "driver";
   /** Existing controls edit the same url_params string, rather than separate copies. */
-  managedBy?: "tls" | "charset" | "legacyEncoding";
+  managedBy?: "tls" | "charset";
 }
 
 export interface ConnectionParameterMetadata {
@@ -56,7 +56,6 @@ const POSTGRES_PARAMETERS = [
   param("connect_timeout", "integer", "Connection timeout in seconds.", "连接超时时间，单位为秒。", { min: 1 }),
   param("options", "string", "Server startup options, such as -c search_path=app,public.", "服务端启动选项，例如 -c search_path=app,public。"),
   param("currentSchema", "string", "Default schema translated by DBX into PostgreSQL startup options.", "默认 Schema；DBX 将其转换为 PostgreSQL 启动选项。"),
-  param("stringtype", "enum", "String bind type used by DBX's PostgreSQL driver.", "DBX PostgreSQL 驱动的字符串绑定类型。", { choices: ["unspecified", "varchar"] }),
   param("sslmode", "enum", "TLS mode, shared with the TLS/SSL tab.", "TLS 连接模式，与 TLS/SSL 页共用配置。", { choices: ["disable", "prefer", "require", "verify-ca", "verify-full"], managedBy: "tls" }),
   param("sslrootcert", "file", "Root CA certificate path.", "根 CA 证书路径。", { managedBy: "tls" }),
   param("sslcert", "file", "Client certificate path.", "客户端证书路径。", { managedBy: "tls" }),
@@ -66,7 +65,6 @@ const POSTGRES_PARAMETERS = [
 const ORACLE_PARAMETERS = [
   param("DBX_LEGACY_CHARSET", "enum", "Historical byte compatibility for US7ASCII databases using the Thin driver.", "Thin 驱动对 US7ASCII 数据库历史字节的兼容编码。", {
     choices: ["ZHS16GBK", "ZHS32GB18030", "AL32UTF8", "ZHT16MSWIN950"],
-    managedBy: "legacyEncoding",
     descriptionKey: "connection.oracleLegacyCharsetHint",
   }),
 ];
@@ -84,11 +82,22 @@ export function connectionParameterSyntax(context: ConnectionParameterContext): 
 
 export function connectionParameterCatalog(context: ConnectionParameterContext): ConnectionParameterDefinition[] {
   switch (context.db_type) {
-    case "mysql":
+    case "mysql": {
+      const profile = context.driver_profile?.trim().toLowerCase() ?? "";
+      // ConnectionConfig::needs_bare_mysql() routes these profiles through a fixed
+      // Compatible setup mode. URL normalization also drops charset and may force
+      // cleartext authentication; advertising those as overrides would be misleading.
+      const bare = ["doris", "selectdb", "starrocks", "oceanbase", "manticoresearch"].includes(profile);
       return [
-        ...MYSQL_PARAMETERS.filter((definition) => definition.name !== "dataCharset" || !context.driver_profile || context.driver_profile === "mysql"),
-        ...(["doris", "selectdb", "starrocks"].includes(context.driver_profile ?? "") ? [param("catalog", "string", "External catalog selected before the database.", "进入数据库前切换的外部 Catalog。")] : []),
+        ...MYSQL_PARAMETERS.filter((definition) => {
+          if (definition.name === "dataCharset" && profile && profile !== "mysql") return false;
+          if (bare && ["charset", "dataCharset", "setupMode", "proxysql", "enable_cleartext_plugin"].includes(definition.name)) return false;
+          if (bare && definition.managedBy === "tls" && !["doris", "starrocks"].includes(profile)) return false;
+          return true;
+        }),
+        ...(["doris", "selectdb", "starrocks"].includes(profile) ? [param("catalog", "string", "External catalog selected before the database.", "进入数据库前切换的外部 Catalog。")] : []),
       ];
+    }
     case "postgres":
     case "redshift":
       return [...POSTGRES_PARAMETERS];

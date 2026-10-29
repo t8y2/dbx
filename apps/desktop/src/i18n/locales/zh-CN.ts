@@ -1491,6 +1491,7 @@ export default withEnglishFallback({
       sharedSetting: "此参数与连接表单中的专用设置共用同一份配置，应用后两处同步更新。",
       reset: "使用默认值",
       remove: "删除",
+      removeValue: "删除此值",
       addAnother: "再添加一个值",
       noMatches: "没有匹配的参数，可通过上方按钮添加自定义参数。",
       opaqueHint: "部分已有参数包含无法识别的转义或格式，将按原样保留；需要修改时请使用原始文本。",

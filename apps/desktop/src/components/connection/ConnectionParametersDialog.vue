@@ -55,6 +55,7 @@ const filteredRows = computed(() => {
   return rows.value.filter((row) => (filter.value !== "configured" || !!row.entry) && (filter.value !== "custom" || (!!row.entry && !row.definition)) && (!query || `${row.key} ${description(row.definition)}`.toLowerCase().includes(query)));
 });
 const selected = computed(() => rows.value.find((row) => row.id === selectedId.value));
+const selectedChoices = computed(() => selected.value?.definition?.choices ?? ["true", "false"]);
 const serialized = computed(() => writeConnectionParameters(document.value, entries.value));
 const externalChanged = computed(() => open.value && ((props.modelValue ?? "") !== sourceAtOpen.value || contextIdentity.value !== contextAtOpen.value));
 const sensitive = computed(() => rows.value.some((row) => !!row.entry && (row.definition?.secret || parameterIsSecret(row.key))));
@@ -120,11 +121,14 @@ function addEntry(row?: Row) {
   search.value = "";
   selectedId.value = entry.id;
 }
-function removeEntry() {
-  if (!selected.value?.entry) return;
-  const definition = selected.value.definition;
-  entries.value = entries.value.filter((entry) => entry.id !== selectedId.value);
-  selectedId.value = definition && rows.value.some((row) => row.id === `default:${definition.name}`) ? `default:${definition.name}` : (rows.value[0]?.id ?? "");
+function removeEntry(id = selectedId.value) {
+  const row = rows.value.find((row) => row.id === id);
+  if (!row?.entry) return;
+  const index = entries.value.findIndex((entry) => entry.id === id);
+  entries.value = entries.value.filter((entry) => entry.id !== id);
+  if (selectedId.value !== id) return;
+  const sibling = row.definition && rows.value.find((item) => item.definition === row.definition);
+  selectedId.value = sibling?.id ?? entries.value[index]?.id ?? entries.value[index - 1]?.id ?? rows.value[0]?.id ?? "";
 }
 function apply() {
   if (externalChanged.value || invalid.value) return;
@@ -188,7 +192,12 @@ function rowValue(row: Row): string {
                     <button type="button" class="block w-full cursor-pointer truncate text-left font-mono text-xs hover:underline focus-visible:underline" :title="row.key" @click="selectedId = row.id">{{ row.key || tr("newParameter") }}</button>
                   </td>
                   <td class="truncate px-3 py-2 font-mono text-xs" :class="row.entry ? '' : 'text-muted-foreground'">{{ rowValue(row) }}</td>
-                  <td class="px-2 py-2 text-xs text-muted-foreground">{{ !row.entry ? tr("default") : row.definition ? tr("configured") : tr("custom") }}</td>
+                  <td class="px-2 py-1 text-xs text-muted-foreground">
+                    <div class="flex items-center justify-between gap-1">
+                      <span>{{ !row.entry ? tr("default") : row.definition ? tr("configured") : tr("custom") }}</span>
+                      <Button v-if="row.entry && row.definition?.repeatable" type="button" variant="ghost" size="icon" class="size-6 shrink-0" :aria-label="`${tr('removeValue')} (${row.key})`" @click="removeEntry(row.id)"><Trash2 class="size-3.5" /></Button>
+                    </div>
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -211,18 +220,13 @@ function rowValue(row: Row): string {
             <div class="space-y-1.5">
               <Label for="connection-parameter-value">{{ tr("value") }}<span v-if="selected.definition?.required"> *</span></Label>
               <PasswordInput v-if="selected.definition?.secret || parameterIsSecret(selected.key)" id="connection-parameter-value" :model-value="selected.value" :disabled="selected.entry && !selected.entry.editable" @update:model-value="setValue($event || '')" />
-              <select
-                v-else-if="selected.definition?.choices || selected.definition?.type === 'boolean'"
-                id="connection-parameter-value"
-                class="h-8 w-full rounded-md border bg-background px-2 text-sm"
-                :value="selected.entry ? selected.value : ''"
-                :disabled="selected.entry && !selected.entry.editable"
-                @change="setValue(($event.target as HTMLSelectElement).value)"
-              >
-                <option v-if="!selected.entry" value="" disabled>{{ tr("default") }}</option>
-                <option v-if="selected.entry && !(selected.definition.choices || ['true', 'false']).includes(selected.value)" :value="selected.value">{{ selected.value || tr("emptyValue") }}</option>
-                <option v-for="value in selected.definition.choices || ['true', 'false']" :key="value" :value="value">{{ value }}</option>
-              </select>
+              <Select :key="selected.id" v-else-if="selected.definition?.choices || selected.definition?.type === 'boolean'" :model-value="selected.value || undefined" :disabled="selected.entry && !selected.entry.editable" @update:model-value="setValue(String($event))">
+                <SelectTrigger id="connection-parameter-value" class="w-full"><SelectValue :placeholder="selected.entry ? tr('emptyValue') : tr('default')" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-if="selected.entry && selected.value && !selectedChoices.includes(selected.value)" :value="selected.value">{{ selected.value }}</SelectItem>
+                  <SelectItem v-for="value in selectedChoices" :key="value" :value="value">{{ value }}</SelectItem>
+                </SelectContent>
+              </Select>
               <Input
                 v-else
                 id="connection-parameter-value"
@@ -236,7 +240,9 @@ function rowValue(row: Row): string {
             </div>
             <label v-if="selected.entry?.editable && !selected.definition" class="flex items-center gap-2 text-xs"><input type="checkbox" :checked="!selected.entry.hasEquals" @change="selected.entry.hasEquals = !($event.target as HTMLInputElement).checked" />{{ tr("bareFlag") }}</label>
             <div class="flex flex-wrap gap-2">
-              <Button v-if="selected.entry" type="button" size="sm" variant="outline" @click="removeEntry"><RotateCcw v-if="selected.definition" class="mr-1.5 size-3.5" /><Trash2 v-else class="mr-1.5 size-3.5" />{{ selected.definition ? tr("reset") : tr("remove") }}</Button>
+              <Button v-if="selected.entry" type="button" size="sm" variant="outline" @click="removeEntry()"
+                ><RotateCcw v-if="selected.definition && !selected.definition.repeatable" class="mr-1.5 size-3.5" /><Trash2 v-else class="mr-1.5 size-3.5" />{{ selected.definition?.repeatable ? tr("removeValue") : selected.definition ? tr("reset") : tr("remove") }}</Button
+              >
               <Button v-if="selected.definition?.repeatable" type="button" size="sm" variant="outline" @click="addEntry(selected)"><Copy class="mr-1.5 size-3.5" />{{ tr("addAnother") }}</Button>
             </div>
           </div>

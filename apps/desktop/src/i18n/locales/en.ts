@@ -1555,6 +1555,7 @@ export default {
       sharedSetting: "This parameter shares its value with an existing connection setting. Applying updates both views.",
       reset: "Use default",
       remove: "Remove",
+      removeValue: "Delete value",
       addAnother: "Add another value",
       noMatches: "No matching parameters. Custom parameters can be added above.",
       opaqueHint: "Some existing parameters contain an unrecognized escape or format. They are preserved unchanged; use raw text to edit them.",

@@ -101,6 +101,38 @@ describe("connection parameter editor transaction and legacy compatibility", () 
     await click("Apply");
     expect(state.applied).toEqual(["localInfilePath=/one&localInfilePath=%2Fthree%20%E4%B8%AD%E6%96%87.csv"]);
   });
+  it("deletes an added repeatable value without changing existing bytes", async () => {
+    const source = "unknown=%ZZ&localInfilePath=%2fone&flag";
+    const state = await mount(source);
+    await click("localInfilePath");
+    await click("Add another value");
+    await fill("connection-parameter-value", "/two");
+    await click("Delete value");
+    expect(valueInput().value).toBe("/one");
+    await click("Apply");
+    expect(state.applied).toEqual([source]);
+  });
+  it("deletes one repeated row directly while retaining the selected sibling", async () => {
+    const state = await mount("localInfilePath=/one&unknown=%ZZ&localInfilePath=%2ftwo");
+    const names = [...document.querySelectorAll<HTMLButtonElement>("button")].filter((element) => element.textContent?.trim() === "localInfilePath");
+    names[1].click();
+    await tick();
+    document.querySelector<HTMLButtonElement>('button[aria-label="Delete value (localInfilePath)"]')!.click();
+    await tick();
+    expect(valueInput().value).toBe("/two");
+    await click("Apply");
+    expect(state.applied).toEqual(["unknown=%ZZ&localInfilePath=%2ftwo"]);
+  });
+  it("can delete all repeatable values and leave the supported parameter unconfigured", async () => {
+    const state = await mount("localInfilePath=/one&localInfilePath=/two&unknown=%2f");
+    await click("localInfilePath");
+    await click("Delete value");
+    await click("Delete value");
+    expect(document.querySelector('button[aria-label="Delete value (localInfilePath)"]')).toBeNull();
+    expect(valueInput().value).toBe("");
+    await click("Apply");
+    expect(state.applied).toEqual(["unknown=%2f"]);
+  });
   it("adding a typed parameter does not persist all the displayed defaults", async () => {
     const state = await mount();
     await click("connect_timeout");

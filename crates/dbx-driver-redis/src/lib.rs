@@ -8,7 +8,7 @@ use redis::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     future::Future,
     sync::{Arc, OnceLock},
@@ -3681,15 +3681,21 @@ async fn read_string_preview_by_length<C>(
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    let Some(known_length) = redis_string_length(con, key).await else {
-        return Err(rejected);
+    let known_length = match redis_string_length(con, key).await {
+        Ok(length) => length,
+        // The fallback needs the length, and the reason it is missing belongs
+        // in the error: the rejection alone does not say that STRLEN was denied.
+        Err(error) => return Err(format!("{rejected} (the value length could not be read: {error})")),
     };
     match read_string_windows(con, key, preview_limit_bytes, Some(known_length)).await {
         Ok(result) => Ok(result),
         Err(error) if is_redis_out_of_bounds_error(&error) => {
             // The value shrank between the length read and the window read.
-            let Some(fresh_length) = redis_string_length(con, key).await else {
-                return Err(error);
+            let fresh_length = match redis_string_length(con, key).await {
+                Ok(length) => length,
+                Err(strlen_error) => {
+                    return Err(format!("{error} (the value length could not be read: {strlen_error})"))
+                }
             };
             read_string_windows(con, key, preview_limit_bytes, Some(fresh_length)).await
         }
@@ -3752,8 +3758,8 @@ where
         Some(total) => Some(total),
         // The budget was filled exactly, so the value may continue — STRLEN
         // settles that without materializing the rest in the backend or IPC
-        // layer.
-        None if at_budget => redis_string_length(con, key).await,
+        // layer. A server that denies STRLEN only leaves the size unknown.
+        None if at_budget => redis_string_length(con, key).await.ok(),
         None => Some(bytes.len() as u64),
     };
     let truncated = total_bytes.map_or(at_budget, |total| total > limit);
@@ -3764,12 +3770,12 @@ where
 }
 
 /// Read the length of a Redis string value.
-async fn redis_string_length<C>(con: &mut C, key: &[u8]) -> Option<u64>
+async fn redis_string_length<C>(con: &mut C, key: &[u8]) -> Result<u64, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    let length: i64 = redis::cmd("STRLEN").arg(key).query_async(con).await.ok()?;
-    u64::try_from(length).ok()
+    let length: i64 = redis::cmd("STRLEN").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
+    u64::try_from(length).map_err(|_| "Redis string length is negative".to_string())
 }
 
 /// Whether a server rejected a range because it reached past the value.
@@ -5313,25 +5319,61 @@ where
     C: ConnectionLike + Send + Sync + Unpin,
 {
     let count = count.max(1);
-    if let Some(page) = take_hash_overflow_page(scope, key, cursor, count, filter_query).await {
-        return Ok(page);
-    }
-    let (scan_cursor, previous_session) =
-        take_collection_scan_cursor(scope, key, cursor, RedisCollectionOverflowKind::Hash, filter_query).await?;
-    let scanned = if let Some(query) = filter_query {
-        hscan_filtered_page_raw(con, key, scan_cursor, count, query).await
-    } else {
-        hscan_page_raw(con, key, scan_cursor, count, None).await
+    let (buffered_cursor, mut items) = match take_hash_overflow_page(scope, key, cursor, count, filter_query).await {
+        Some((next, items)) => {
+            let has_more_buffered = {
+                let sessions = collection_overflow_sessions().lock().await;
+                match sessions.entries.get(&cursor).map(|s| &s.items) {
+                    Some(RedisCollectionOverflowItems::Hash(items)) => !items.is_empty(),
+                    _ => false,
+                }
+            };
+            let page_bytes: usize = items.iter().map(hash_item_page_bytes).sum();
+            if items.len() >= count || next == 0 || has_more_buffered || page_bytes >= COLLECTION_PAGE_MAX_BYTES {
+                return Ok((next, items));
+            }
+            (next, items)
+        }
+        None => (cursor, Vec::new()),
     };
-    let (next_cursor, mut items) = match scanned {
+
+    let (scan_cursor, previous_session) = if buffered_cursor == cursor {
+        take_collection_scan_cursor(scope, key, cursor, RedisCollectionOverflowKind::Hash, filter_query).await?
+    } else {
+        (buffered_cursor, None)
+    };
+
+    if cursor != 0 && scan_cursor == 0 {
+        return Ok((0, items));
+    }
+
+    let needed = count.saturating_sub(items.len()).max(1);
+    let scanned = if let Some(query) = filter_query {
+        hscan_filtered_page_raw(con, key, scan_cursor, needed, query).await
+    } else {
+        hscan_page_raw(con, key, scan_cursor, needed, None).await
+    };
+
+    let (next_cursor, scanned_items) = match scanned {
         Ok(page) => page,
         Err(error) => {
-            if let Some(session) = previous_session {
+            if let Some(mut session) = previous_session {
+                if !items.is_empty() {
+                    session.items = RedisCollectionOverflowItems::Hash(items);
+                }
                 collection_overflow_sessions().lock().await.reinsert(cursor, session);
             }
             return Err(error);
         }
     };
+
+    let mut seen: HashSet<String> = items.iter().map(|item| item.field.raw_base64.clone()).collect();
+    for item in scanned_items {
+        if seen.insert(item.field.raw_base64.clone()) {
+            items.push(item);
+        }
+    }
+
     let page_len = budgeted_page_len(&items, count, hash_item_page_bytes);
     let next_cursor = store_hash_overflow_page(scope, key, &mut items, page_len, next_cursor, filter_query).await;
     Ok((next_cursor, items))
@@ -5349,25 +5391,61 @@ where
     C: ConnectionLike + Send + Sync + Unpin,
 {
     let count = count.max(1);
-    if let Some(page) = take_set_overflow_page(scope, key, cursor, count, filter_query).await {
-        return Ok(page);
-    }
-    let (scan_cursor, previous_session) =
-        take_collection_scan_cursor(scope, key, cursor, RedisCollectionOverflowKind::Set, filter_query).await?;
-    let scanned = if let Some(query) = filter_query {
-        sscan_filtered_page_raw(con, key, scan_cursor, count, query).await
-    } else {
-        sscan_page_raw(con, key, scan_cursor, count).await
+    let (buffered_cursor, mut items) = match take_set_overflow_page(scope, key, cursor, count, filter_query).await {
+        Some((next, items)) => {
+            let has_more_buffered = {
+                let sessions = collection_overflow_sessions().lock().await;
+                match sessions.entries.get(&cursor).map(|s| &s.items) {
+                    Some(RedisCollectionOverflowItems::Set(items)) => !items.is_empty(),
+                    _ => false,
+                }
+            };
+            let page_bytes: usize = items.iter().map(set_item_page_bytes).sum();
+            if items.len() >= count || next == 0 || has_more_buffered || page_bytes >= COLLECTION_PAGE_MAX_BYTES {
+                return Ok((next, items));
+            }
+            (next, items)
+        }
+        None => (cursor, Vec::new()),
     };
-    let (next_cursor, mut items) = match scanned {
+
+    let (scan_cursor, previous_session) = if buffered_cursor == cursor {
+        take_collection_scan_cursor(scope, key, cursor, RedisCollectionOverflowKind::Set, filter_query).await?
+    } else {
+        (buffered_cursor, None)
+    };
+
+    if cursor != 0 && scan_cursor == 0 {
+        return Ok((0, items));
+    }
+
+    let needed = count.saturating_sub(items.len()).max(1);
+    let scanned = if let Some(query) = filter_query {
+        sscan_filtered_page_raw(con, key, scan_cursor, needed, query).await
+    } else {
+        sscan_page_raw(con, key, scan_cursor, needed).await
+    };
+
+    let (next_cursor, scanned_items) = match scanned {
         Ok(page) => page,
         Err(error) => {
-            if let Some(session) = previous_session {
+            if let Some(mut session) = previous_session {
+                if !items.is_empty() {
+                    session.items = RedisCollectionOverflowItems::Set(items);
+                }
                 collection_overflow_sessions().lock().await.reinsert(cursor, session);
             }
             return Err(error);
         }
     };
+
+    let mut seen: HashSet<String> = items.iter().map(|item| item.member.raw_base64.clone()).collect();
+    for item in scanned_items {
+        if seen.insert(item.member.raw_base64.clone()) {
+            items.push(item);
+        }
+    }
+
     let page_len = budgeted_page_len(&items, count, set_item_page_bytes);
     let next_cursor = store_set_overflow_page(scope, key, &mut items, page_len, next_cursor, filter_query).await;
     Ok((next_cursor, items))
@@ -5401,8 +5479,7 @@ async fn take_hash_overflow_page(
         RedisCollectionOverflowItems::Hash(items) => !items.is_empty(),
         RedisCollectionOverflowItems::Set(_) => false,
     };
-    let retain_cursor =
-        has_buffered_items || (session.followup_cursor != 0 && scope != &RedisOperationScope::default());
+    let retain_cursor = has_buffered_items || session.followup_cursor != 0;
     let next_cursor = if retain_cursor { cursor } else { session.followup_cursor };
     if retain_cursor {
         sessions.reinsert(cursor, session);
@@ -5438,8 +5515,7 @@ async fn take_set_overflow_page(
         RedisCollectionOverflowItems::Set(items) => !items.is_empty(),
         RedisCollectionOverflowItems::Hash(_) => false,
     };
-    let retain_cursor =
-        has_buffered_items || (session.followup_cursor != 0 && scope != &RedisOperationScope::default());
+    let retain_cursor = has_buffered_items || session.followup_cursor != 0;
     let next_cursor = if retain_cursor { cursor } else { session.followup_cursor };
     if retain_cursor {
         sessions.reinsert(cursor, session);
@@ -6401,6 +6477,163 @@ mod tests {
         assert_eq!(con.command_count("HSCAN"), pages);
     }
 
+    /// Regression test for #12640 follow-up:
+    /// In a Redis hash where initial HSCAN returns 201 items (COUNT is a hint), the
+    /// initial page takes 200 items and stores 1 item in the overflow session with followup_cursor != 0.
+    /// When the user clicks "Load more" (count = 200) for the first time, the driver must NOT return
+    /// just the 1 buffered item (200 -> 201). Instead, it must drain the 1 buffered item, continue
+    /// scanning the server for the remaining needed items, and return a full page of 200 items (200 -> 400).
+    #[tokio::test]
+    async fn scoped_hash_pagination_first_load_more_with_overflow_reaches_full_page() {
+        const TOTAL_FIELDS: usize = 500;
+        const PAGE: usize = 200;
+        let scope = super::RedisOperationScope { connection_id: "issue-12640-first-load-more-hash".to_string(), db: 0 };
+
+        let initial_pairs: Vec<(String, String)> =
+            (0..201).map(|i| (format!("field:{i}"), format!("value:{i}"))).collect();
+        let second_pairs: Vec<(String, String)> =
+            (201..401).map(|i| (format!("field:{i}"), format!("value:{i}"))).collect();
+        let third_pairs: Vec<(String, String)> =
+            (401..500).map(|i| (format!("field:{i}"), format!("value:{i}"))).collect();
+
+        let responses = vec![
+            bulk("hash"),
+            RedisRawValue::Int(-1),
+            RedisRawValue::Int(TOTAL_FIELDS as i64),
+            hscan_response_owned("100", initial_pairs),
+            httl_response(PAGE, -1),
+            hscan_response_owned("200", second_pairs),
+            httl_response(PAGE, -1),
+            hscan_response_owned("0", third_pairs),
+            httl_response(100, -1),
+        ];
+        let mut con = FakeRedisConnection::new(responses);
+
+        // Initial read: 200 items
+        let value = super::get_value_scoped(&mut con, b"hash-key", &scope).await.unwrap();
+        let RedisValueData::Hash { items: first_page, scan_cursor, total } = value.data else {
+            panic!("expected hash");
+        };
+        assert_eq!(total, TOTAL_FIELDS as u64);
+        assert_eq!(first_page.len(), PAGE);
+        assert_eq!(redis_blob_display_text(&first_page[0].field), "field:0");
+        assert_eq!(redis_blob_display_text(&first_page[199].field), "field:199");
+        let cursor = scan_cursor.expect("must offer continuation");
+        assert!(cursor >= super::COLLECTION_OVERFLOW_CURSOR_START);
+
+        let mut seen = first_page;
+
+        // First Load More: MUST return a full page of 200 items (NOT 1 item)!
+        let second_page =
+            super::load_more_collection_scoped(&mut con, b"hash-key", "hash", cursor, PAGE, None, None, &scope)
+                .await
+                .unwrap();
+        let RedisCollectionPage::Hash { items: p2_items, scan_cursor: c2 } = second_page else {
+            panic!("expected hash page");
+        };
+        assert_eq!(p2_items.len(), PAGE, "first load_more must return full page of 200 items, not +1");
+        assert_eq!(redis_blob_display_text(&p2_items[0].field), "field:200");
+        assert_eq!(redis_blob_display_text(&p2_items[199].field), "field:399");
+        seen.extend(p2_items);
+        assert_eq!(seen.len(), 400, "total loaded after first load_more must be 400 (200 -> 400)");
+
+        let cursor2 = c2.expect("must offer second continuation");
+        assert!(cursor2 >= super::COLLECTION_OVERFLOW_CURSOR_START);
+
+        // Second Load More: returns remaining 100 items (400..499)
+        let third_page =
+            super::load_more_collection_scoped(&mut con, b"hash-key", "hash", cursor2, PAGE, None, None, &scope)
+                .await
+                .unwrap();
+        let RedisCollectionPage::Hash { items: p3_items, scan_cursor: c3 } = third_page else {
+            panic!("expected hash page");
+        };
+        assert_eq!(p3_items.len(), 100);
+        assert_eq!(redis_blob_display_text(&p3_items[0].field), "field:400");
+        assert_eq!(redis_blob_display_text(&p3_items[99].field), "field:499");
+        seen.extend(p3_items);
+        assert_eq!(seen.len(), TOTAL_FIELDS);
+        assert_eq!(c3, None, "walk is complete");
+
+        let unique: std::collections::HashSet<_> = seen.iter().map(|item| item.field.raw_base64.clone()).collect();
+        assert_eq!(unique.len(), TOTAL_FIELDS, "every field arrives exactly once");
+        assert_eq!(con.command_count("HSCAN"), 3);
+    }
+
+    /// Regression test for #12640 follow-up on Redis sets:
+    /// SSCAN returning 201 items on initial load results in 1 item buffered in overflow session.
+    /// First load_more must return a full page of 200 items (200 -> 400).
+    #[tokio::test]
+    async fn scoped_set_pagination_first_load_more_with_overflow_reaches_full_page() {
+        const TOTAL_MEMBERS: usize = 500;
+        const PAGE: usize = 200;
+        let scope = super::RedisOperationScope { connection_id: "issue-12640-first-load-more-set".to_string(), db: 0 };
+
+        let initial_members: Vec<String> = (0..201).map(|i| format!("member:{i}")).collect();
+        let second_members: Vec<String> = (201..401).map(|i| format!("member:{i}")).collect();
+        let third_members: Vec<String> = (401..500).map(|i| format!("member:{i}")).collect();
+
+        let responses = vec![
+            bulk("set"),
+            RedisRawValue::Int(-1),
+            RedisRawValue::Int(TOTAL_MEMBERS as i64),
+            int_scan_response_owned("100", initial_members),
+            int_scan_response_owned("200", second_members),
+            int_scan_response_owned("0", third_members),
+        ];
+        let mut con = FakeRedisConnection::new(responses);
+
+        // Initial read: 200 items
+        let value = super::get_value_scoped(&mut con, b"set-key", &scope).await.unwrap();
+        let RedisValueData::Set { items: first_page, scan_cursor, total } = value.data else {
+            panic!("expected set");
+        };
+        assert_eq!(total, TOTAL_MEMBERS as u64);
+        assert_eq!(first_page.len(), PAGE);
+        assert_eq!(redis_blob_display_text(&first_page[0].member), "member:0");
+        assert_eq!(redis_blob_display_text(&first_page[199].member), "member:199");
+        let cursor = scan_cursor.expect("must offer continuation");
+        assert!(cursor >= super::COLLECTION_OVERFLOW_CURSOR_START);
+
+        let mut seen = first_page;
+
+        // First Load More: MUST return a full page of 200 items (NOT 1 item)!
+        let second_page =
+            super::load_more_collection_scoped(&mut con, b"set-key", "set", cursor, PAGE, None, None, &scope)
+                .await
+                .unwrap();
+        let RedisCollectionPage::Set { items: p2_items, scan_cursor: c2 } = second_page else {
+            panic!("expected set page");
+        };
+        assert_eq!(p2_items.len(), PAGE, "first load_more must return full page of 200 items, not +1");
+        assert_eq!(redis_blob_display_text(&p2_items[0].member), "member:200");
+        assert_eq!(redis_blob_display_text(&p2_items[199].member), "member:399");
+        seen.extend(p2_items);
+        assert_eq!(seen.len(), 400, "total loaded after first load_more must be 400 (200 -> 400)");
+
+        let cursor2 = c2.expect("must offer second continuation");
+        assert!(cursor2 >= super::COLLECTION_OVERFLOW_CURSOR_START);
+
+        // Second Load More: returns remaining 100 items (400..499)
+        let third_page =
+            super::load_more_collection_scoped(&mut con, b"set-key", "set", cursor2, PAGE, None, None, &scope)
+                .await
+                .unwrap();
+        let RedisCollectionPage::Set { items: p3_items, scan_cursor: c3 } = third_page else {
+            panic!("expected set page");
+        };
+        assert_eq!(p3_items.len(), 100);
+        assert_eq!(redis_blob_display_text(&p3_items[0].member), "member:400");
+        assert_eq!(redis_blob_display_text(&p3_items[99].member), "member:499");
+        seen.extend(p3_items);
+        assert_eq!(seen.len(), TOTAL_MEMBERS);
+        assert_eq!(c3, None, "walk is complete");
+
+        let unique: std::collections::HashSet<_> = seen.iter().map(|item| item.member.raw_base64.clone()).collect();
+        assert_eq!(unique.len(), TOTAL_MEMBERS, "every member arrives exactly once");
+        assert_eq!(con.command_count("SSCAN"), 3);
+    }
+
     #[tokio::test]
     async fn set_overflow_rejects_unknown_and_foreign_tokens_without_server_scan() {
         let scope = super::RedisOperationScope { connection_id: "set-scope-test".to_string(), db: 1 };
@@ -6513,6 +6746,82 @@ mod tests {
                 _ => panic!("expected collection"),
             }
             assert!(!super::collection_overflow_sessions().lock().await.entries.contains_key(&cursor));
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_overflow_fill_restores_buffer_after_scan_failure() {
+        for key_type in ["hash", "set"] {
+            for connection_id in ["", "retry-partial-overflow"] {
+                let scope = super::RedisOperationScope { connection_id: connection_id.into(), db: 0 };
+                let response = if key_type == "hash" {
+                    hscan_response("128", vec![("one", "value"), ("two", "value")])
+                } else {
+                    scan_response("128", vec!["one", "two"])
+                };
+                let mut first = FakeRedisConnection::new(vec![response, httl_response(1, -1)]);
+                let page =
+                    super::load_more_collection_scoped(&mut first, b"retry-key", key_type, 0, 1, None, None, &scope)
+                        .await
+                        .unwrap();
+                let cursor = match page {
+                    RedisCollectionPage::Hash { scan_cursor, .. } | RedisCollectionPage::Set { scan_cursor, .. } => {
+                        scan_cursor.unwrap()
+                    }
+                    _ => panic!("expected collection"),
+                };
+                let mut failed = FakeRedisConnection::with_results(vec![Err(redis::RedisError::from((
+                    redis::ErrorKind::Io,
+                    "temporary scan failure",
+                )))]);
+                assert!(super::load_more_collection_scoped(
+                    &mut failed,
+                    b"retry-key",
+                    key_type,
+                    cursor,
+                    2,
+                    None,
+                    None,
+                    &scope
+                )
+                .await
+                .is_err());
+                assert!(
+                    super::collection_overflow_sessions().lock().await.entries.contains_key(&cursor),
+                    "lost {key_type} buffer in scope {connection_id:?}"
+                );
+                let response = if key_type == "hash" {
+                    hscan_response("0", vec![("three", "value")])
+                } else {
+                    scan_response("0", vec!["three"])
+                };
+                let mut retry = FakeRedisConnection::new(vec![response, httl_response(2, -1)]);
+                let page = super::load_more_collection_scoped(
+                    &mut retry,
+                    b"retry-key",
+                    key_type,
+                    cursor,
+                    2,
+                    None,
+                    None,
+                    &scope,
+                )
+                .await
+                .unwrap();
+                let (names, next) = match page {
+                    RedisCollectionPage::Hash { items, scan_cursor } => {
+                        (items.iter().map(|item| redis_blob_display_text(&item.field)).collect::<Vec<_>>(), scan_cursor)
+                    }
+                    RedisCollectionPage::Set { items, scan_cursor } => (
+                        items.iter().map(|item| redis_blob_display_text(&item.member)).collect::<Vec<_>>(),
+                        scan_cursor,
+                    ),
+                    _ => panic!("expected collection"),
+                };
+                assert_eq!(names, vec!["two", "three"]);
+                assert_eq!(next, None);
+                assert!(retry.commands[0].contains("\r\n128\r\n"));
+            }
         }
     }
 
@@ -8411,10 +8720,50 @@ mod tests {
         let error = super::get_value(&mut con, b"message").await.unwrap_err();
 
         assert!(error.contains("out of bounds"), "{error}");
+        // The error also says why the fallback could not run.
+        assert!(error.contains("the value length could not be read"), "{error}");
+        assert!(error.contains("strlen"), "{error}");
         // One rejected window and one length read; the rejected window is not
         // requested again.
         assert_eq!(con.command_count("GETRANGE"), 1);
         assert_eq!(con.command_count("STRLEN"), 1);
+    }
+
+    #[tokio::test]
+    async fn string_value_reports_a_failed_length_read_after_the_value_shrinks() {
+        // The value shrank between the length read and the window read, and the
+        // fresh length read fails as well. The error has to say so instead of
+        // surfacing the bare rejection.
+        let out_of_bounds = || {
+            redis::RedisError::from((
+                redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+                "ERR",
+                "0-100 is out of bounds".to_string(),
+            ))
+        };
+        let denied = redis::RedisError::from((
+            redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+            "ERR",
+            "NOPERM this user has no permissions to run the 'strlen' command".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(bulk("string")),
+            Ok(RedisRawValue::Int(-1)),
+            Err(out_of_bounds()),
+            Ok(RedisRawValue::Int(100)),
+            Err(out_of_bounds()),
+            Err(denied),
+        ]);
+
+        let error = super::get_value(&mut con, b"message").await.unwrap_err();
+
+        assert!(error.contains("out of bounds"), "{error}");
+        assert!(error.contains("the value length could not be read"), "{error}");
+        assert!(error.contains("strlen"), "{error}");
+        // One rejected window, one bounded window and two length reads; the
+        // rejected window is not requested again.
+        assert_eq!(con.command_count("GETRANGE"), 2);
+        assert_eq!(con.command_count("STRLEN"), 2);
     }
 
     #[tokio::test]
@@ -12214,6 +12563,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

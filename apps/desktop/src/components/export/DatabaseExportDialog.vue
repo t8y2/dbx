@@ -487,7 +487,7 @@ async function startDesktopExport() {
   batchDatabaseTotal.value = 0;
   batchRowsExported.value = 0;
   exportProgress.value = { exportId: id, currentObject: "", objectIndex: 0, totalObjects: 0, rowsExported: 0, totalRows: null, status: "Running", error: null, preparing: true };
-  const ownsView = () => !disposed && exportId.value === id;
+  const ownsView = () => !task.removed && !disposed && exportId.value === id;
   const sync = () => {
     if (!ownsView()) return;
     desktopTaskStatus.value = task.status;
@@ -602,7 +602,7 @@ async function startDesktopExport() {
         exportProgress.value = final;
         exportWarning.value = firstError;
       }
-      if (!cancelled) {
+      if (!cancelled && !task.removed) {
         if (captured.allDatabases)
           notifyExportComplete({
             filePath: firstFile || destination,

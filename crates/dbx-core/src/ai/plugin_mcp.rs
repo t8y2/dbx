@@ -81,14 +81,21 @@ pub fn author_allows_external(manifest: &PluginManifest) -> bool {
     manifest.mcp_contribution().is_some_and(|mcp| mcp.external_tools)
 }
 
-/// The grant in force for a plugin: the saved one, or "not authorized".
-pub fn effective_grant(saved: Option<&PluginMcpGrant>) -> PluginMcpGrant {
-    saved.cloned().unwrap_or(PluginMcpGrant {
-        external: false,
-        ceiling: PluginMcpAccessLevel::Read,
-        approved_tools: Default::default(),
-        disabled_tools: Vec::new(),
-    })
+/// The grant in force for a plugin. A saved grant always wins. Without one,
+/// a plugin whose author opted into the external server (`external_tools`)
+/// runs under a read-only default: its declared read tools are exposed with
+/// zero setup, while write/full tools stay above the ceiling until the user
+/// grants them. Plugins that did not opt in stay fully unauthorized.
+pub fn effective_grant(manifest: &PluginManifest, saved: Option<&PluginMcpGrant>) -> PluginMcpGrant {
+    match saved {
+        Some(saved) => saved.clone(),
+        None => PluginMcpGrant {
+            external: author_allows_external(manifest),
+            ceiling: PluginMcpAccessLevel::Read,
+            approved_tools: Default::default(),
+            disabled_tools: Vec::new(),
+        },
+    }
 }
 
 /// Decides one tool's exposure under an effective grant.
@@ -148,7 +155,7 @@ pub fn exposed_tools(
     saved: Option<&PluginMcpGrant>,
     tools: Vec<RawPluginTool>,
 ) -> Vec<RawPluginTool> {
-    let grant = effective_grant(saved);
+    let grant = effective_grant(manifest, saved);
     tools
         .into_iter()
         .filter(|tool| tool_exposure(manifest, &grant, &tool.name).is_exposed())
@@ -233,7 +240,7 @@ pub fn plugin_view(
         Err(error) => (Vec::new(), Some(error)),
     };
     let contribution = manifest.mcp_contribution();
-    let grant = effective_grant(saved);
+    let grant = effective_grant(manifest, saved);
     let tool_views = tools
         .iter()
         .map(|tool| PluginMcpToolView {
@@ -561,11 +568,27 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_exposed_before_the_user_authorizes() {
-        assert!(exposed(&declared(), None).is_empty());
+    fn read_tools_work_without_a_grant_when_the_author_opts_in() {
+        // Zero-setup default: the author's `external_tools` opt-in exposes the
+        // declared read tier immediately; write/full wait above the ceiling.
+        assert_eq!(exposed(&declared(), None), ["list_dir"]);
         let view = plugin_view(&declared(), None, Ok(tools()));
+        assert!(!view.has_saved_grant);
+        assert!(view.grant.external);
+        assert_eq!(view.grant.ceiling, PluginMcpAccessLevel::Read);
+        assert_eq!(view.tools[0].exposure, PluginToolExposure::Exposed);
+        assert_eq!(view.tools[1].exposure, PluginToolExposure::AboveCeiling);
+        assert_eq!(view.tools[2].exposure, PluginToolExposure::AboveCeiling);
+    }
+
+    #[test]
+    fn nothing_is_exposed_when_the_author_did_not_opt_in() {
+        let legacy = manifest(serde_json::Value::Null);
+        assert!(exposed(&legacy, None).is_empty());
+        let view = plugin_view(&legacy, None, Ok(tools()));
         assert!(!view.has_saved_grant && !view.grant.external);
-        assert!(view.tools.iter().all(|tool| tool.exposure == PluginToolExposure::PluginDisabled));
+        // No contribution means no declarations: Undeclared, never Exposed.
+        assert!(view.tools.iter().all(|tool| tool.exposure == PluginToolExposure::Undeclared));
     }
 
     #[test]

@@ -679,8 +679,8 @@ export async function saveConnections(configs: ConnectionConfig[], removedIds: s
   return post("/api/connection/save", { configs });
 }
 
-export async function loadConnections(): Promise<ConnectionConfig[]> {
-  return get("/api/connection/list");
+export async function loadConnections(legacySidebarShowUserAdmin?: boolean): Promise<ConnectionConfig[]> {
+  return get(legacySidebarShowUserAdmin === undefined ? "/api/connection/list" : `/api/connection/list?legacySidebarShowUserAdmin=${legacySidebarShowUserAdmin}`);
 }
 
 export async function loadTunnelProfiles(): Promise<TunnelProfile[]> {
@@ -3449,6 +3449,9 @@ export async function importTableFile(request: TableImportRequest, onProgress: (
           rowsImported: progress.rowsImported,
           totalRows: progress.totalRows,
           elapsedMs: progress.elapsedMs,
+          rowsFailed: progress.rowsFailed ?? 0,
+          failures: progress.failures ?? [],
+          failuresTruncated: progress.failuresTruncated ?? false,
         };
         es.close();
         resolve(summary);

@@ -26,6 +26,7 @@ import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { usePlDebugStore } from "@/stores/plDebugStore";
 import { dispatchPlDebugStepShortcut } from "@/lib/editor/plDebugStepShortcut";
 import { useNavigationStore } from "@/stores/navigationStore";
@@ -248,6 +249,7 @@ const DriverStorePage = defineAsyncComponent(() => import("@/components/config/D
 const PluginCenterPage = defineAsyncComponent(() => import("@/components/plugins/PluginContributionsPanel.vue"));
 const PluginBottomDock = defineAsyncComponent(() => import("@/components/plugins/PluginBottomDock.vue"));
 const EditorSettingsPage = defineAsyncComponent(() => import("@/components/editor/EditorSettingsDialog.vue"));
+const TableCopyProgressDialog = defineAsyncComponent(() => import("@/components/objects/TableCopyProgressDialog.vue"));
 const UpdateDialog = defineAsyncComponent(() => import("@/components/layout/UpdateDialog.vue"));
 const CloseActionPromptDialog = defineAsyncComponent(() => import("@/components/layout/CloseActionPromptDialog.vue"));
 const AiRunsClosePromptDialog = defineAsyncComponent(() => import("@/components/layout/AiRunsClosePromptDialog.vue"));
@@ -324,6 +326,7 @@ connectionStore.setBeforeConnectHandler(async (config) => {
 const { message: toastMessage, visible: toastVisible, action: toastAction, toast } = useToast();
 const { isDark, themeMode, applyTheme, setThemeMode, writeRootToken } = useTheme();
 const { activeCount: activeBackgroundTaskCount, tasks: backgroundTasks, cancelTask: cancelBackgroundTask } = useExportTracker();
+const tableCopyTasks = useTableCopyTaskStore();
 const trackedUpdateTaskCount = computed(() => countActiveUpdateBlockingTasks(activeBackgroundTaskCount.value, queryStore.tabs));
 const {
   initialize: initializeUpdater,
@@ -338,6 +341,7 @@ const {
   isDownloadingUpdate,
   downloadProgress,
   updateDownloaded,
+  updateDownloadedVersion,
   isInstallingUpdate,
   updateReady,
   isIgnoringUpdate,
@@ -2491,7 +2495,7 @@ function confirmQuitWithActiveBackgroundTasks() {
   showBackgroundTasksClosePrompt.value = false;
   backgroundTasksQuitConfirmed = true;
   for (const task of backgroundTasks.value) {
-    if (task.status === "Running" || task.status === "Writing") void cancelBackgroundTask(task.exportId);
+    if (task.status === "Running" || task.status === "Writing" || (task.kind === "table-copy" && task.canCancel)) void cancelBackgroundTask(task.exportId);
   }
   void finishPendingAppClose(action);
 }
@@ -5807,7 +5811,6 @@ onUnmounted(() => {
             :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate dbx-panel bg-background', isAiPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[240px] max-w-full']"
             :style="isAiPanelMaximized ? {} : { width: aiPanelWidth + 'px' }"
           >
-            <div v-if="!isAiPanelMaximized" class="panel-resize-handle panel-resize-handle--left" @pointerdown="startAiPanelResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]" @mousedown="rememberAuxiliarySearchSurface('ai')">
               <AiAssistant
                 v-if="aiPanelReady"
@@ -5828,6 +5831,7 @@ onUnmounted(() => {
                 @close="closeRightSidebarPanel('ai')"
               />
             </div>
+            <div v-if="!isAiPanelMaximized" class="panel-resize-handle panel-resize-handle--left" @pointerdown="startAiPanelResize" />
           </div>
 
           <div
@@ -5836,7 +5840,6 @@ onUnmounted(() => {
             :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate dbx-panel bg-background', isHistoryPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[240px] max-w-full']"
             :style="isHistoryPanelMaximized ? {} : { width: historyWidth + 'px', maxWidth: 'calc(100% - 240px)' }"
           >
-            <div v-if="!isHistoryPanelMaximized" class="panel-resize-handle panel-resize-handle--left" @pointerdown="startHistoryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]" @mousedown="rememberAuxiliarySearchSurface('history')">
               <div data-history-panel class="h-full min-h-0">
                 <QueryHistory
@@ -5852,6 +5855,7 @@ onUnmounted(() => {
                 />
               </div>
             </div>
+            <div v-if="!isHistoryPanelMaximized" class="panel-resize-handle panel-resize-handle--left" @pointerdown="startHistoryResize" />
           </div>
 
           <div
@@ -5860,12 +5864,12 @@ onUnmounted(() => {
             :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate dbx-panel bg-background'"
             :style="{ width: sqlLibraryWidth + 'px' }"
           >
-            <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startSqlLibraryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]" @mousedown="rememberAuxiliarySearchSurface('sqlLibrary')">
               <div data-sql-library-panel class="h-full min-h-0">
                 <SqlLibraryPanel :locate-request="sqlLibraryLocateRequest" @locate-handled="finishSqlLibraryLocate" @close="closeRightSidebarPanel('sqlLibrary')" />
               </div>
             </div>
+            <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startSqlLibraryResize" />
           </div>
 
           <div
@@ -5874,10 +5878,10 @@ onUnmounted(() => {
             :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate dbx-panel bg-background'"
             :style="{ width: sqlFilePanelWidth + 'px' }"
           >
-            <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startSqlFilePanelResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
               <SqlFilePanel :locate-request="sqlFileLocateRequest" @locate-handled="finishSqlFileLocate" @close="closeRightSidebarPanel('sqlFile')" />
             </div>
+            <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startSqlFilePanelResize" />
           </div>
           <PluginShortcutBar v-if="!isDetachedWindowContext && !isZenMode && settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position.startsWith('right-')" :position="settingsStore.editorSettings.pluginShortcuts.position" />
         </div>
@@ -5930,6 +5934,7 @@ onUnmounted(() => {
           @open-database-search-target="openDatabaseSearchTarget"
           @open-diagram-target="openDiagramTarget"
         />
+        <TableCopyProgressDialog v-if="tableCopyTasks.open" />
         <MultiDbExecuteDialog
           v-model:open="showMultiDbExecuteDialog"
           :sql="multiExecuteSql"
@@ -5954,6 +5959,7 @@ onUnmounted(() => {
           :is-downloading-update="isDownloadingUpdate"
           :download-progress="downloadProgress"
           :update-downloaded="updateDownloaded"
+          :update-downloaded-version="updateDownloadedVersion"
           :is-preparing-update="isPreparingUpdate"
           :is-installing-update="isInstallingUpdate"
           :update-ready="updateReady"
@@ -5971,6 +5977,7 @@ onUnmounted(() => {
           :component-updates-updating="componentUpdates.updating.value"
           :updating-component="componentUpdates.updatingCategory.value"
           :is-updating-all="updatingAllUpdates || componentUpdates.updating.value"
+          @check-updates="checkAllUpdates"
           @open-latest-release="openLatestRelease"
           @change-download-source="changeUpdateDownloadSource"
           @download-in-background="downloadUpdateInBackground"

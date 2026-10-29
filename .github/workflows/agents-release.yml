@@ -1284,6 +1284,7 @@ jobs:
             java-version: "21"
             modules: "java.base,java.sql,java.sql.rowset,java.naming,java.management,java.desktop,java.security.jgss,java.security.sasl,jdk.security.auth,jdk.security.jgss,jdk.charsets,jdk.unsupported,java.scripting,java.compiler,jdk.crypto.ec"
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -1291,8 +1292,7 @@ jobs:
       - name: Build JRE for all platforms
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zstd
+          sudo python3 .github/scripts/ci-install-system-deps.py --group packaging
           MODULES="${{ matrix.modules }}"
           JLINK_OPTS="--strip-debug --no-header-files --no-man-pages --compress=zip-6"
           JRE_KEY="${{ matrix.jre-key }}"
@@ -1358,8 +1358,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install artifact tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zstd
+          sudo python3 .github/scripts/ci-install-system-deps.py --group packaging
       - name: Download and verify previous release artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1414,8 +1413,7 @@ jobs:
 
       - name: Install artifact tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zstd
+          sudo python3 .github/scripts/ci-install-system-deps.py --group packaging
 
       - name: Flatten artifacts
         run: |

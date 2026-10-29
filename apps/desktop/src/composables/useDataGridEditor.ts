@@ -592,7 +592,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const isConditionalUpdateActive = computed(() => conditionalUpdateExecution.value !== undefined);
 
   const hasBackendSaveTarget = computed(() => !!connectionId.value && !!tableMeta.value);
-  const useTransaction = computed(() => editable.value && supportsDataGridTransaction(resolvedDatabaseType.value) && (!!customSaveHandler?.value || hasBackendSaveTarget.value));
+  // External JDBC drivers have no batch-transaction path even when their dialect
+  // is inferred as a transactional engine (e.g. a driver reporting itself as H2),
+  // so the raw connection type decides whether saves run in a transaction (#12657).
+  const transactionDatabaseType = computed(() => (connectionStore.getConfig(connectionId.value ?? "")?.db_type === "jdbc" ? "jdbc" : resolvedDatabaseType.value));
+  const useTransaction = computed(() => editable.value && supportsDataGridTransaction(transactionDatabaseType.value) && (!!customSaveHandler?.value || hasBackendSaveTarget.value));
 
   if (hasPendingChanges.value && useTransaction.value) {
     transactionActive.value = true;

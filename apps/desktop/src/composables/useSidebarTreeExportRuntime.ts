@@ -457,7 +457,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         task.totalRows = result.rows.length;
         task.finishedAt = Date.now();
       }
-      if (!suppressDoneToast) {
+      if (!suppressDoneToast && !task?.removed) {
         notifyExportComplete({
           filePath: outputPath,
           message: t("grid.exported"),
@@ -588,7 +588,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         currentTask.status = "Done";
         currentTask.rowsExported = result.rows.length;
         currentTask.totalRows = result.rows.length;
-        if (!suppressDoneToast) {
+        if (!suppressDoneToast && !currentTask.removed) {
           notifyExportComplete({
             filePath: outputPath,
             message: t("grid.exported"),
@@ -643,7 +643,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         if (progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled") terminalProgress = progress;
         updateTableExportTask(currentTask.exportId, progress);
         if (progress.status === "Done") {
-          if (!suppressDoneToast) {
+          if (!suppressDoneToast && !currentTask.removed) {
             notifyExportComplete({
               filePath: request.filePath,
               message: t("grid.exported"),
@@ -651,7 +651,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
               toast,
             });
           }
-        } else if (progress.status === "Error") toast(t("grid.exportFailed", { message: translateBackendError(t, progress.errorMessage || "") }), 5000);
+        } else if (progress.status === "Error" && !currentTask.removed) toast(t("grid.exportFailed", { message: translateBackendError(t, progress.errorMessage || "") }), 5000);
       };
       await (operation ? api.startTableExport(request, onProgress, true) : api.startTableExport(request, onProgress)).catch((error) => {
         if (error instanceof SnapshotCompletionError && error.status === "failed") throw error;
@@ -761,7 +761,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
                   active.task = child;
                   active.cancel = cancelChild;
                   task.canCancel = child.canCancel !== false;
-                  if (child !== task) tracker.registerTaskCancelHandler(child.exportId, cancel);
+                  if (child !== task) tracker.registerTaskCancelHandler(child.exportId, cancel, task.exportId);
                 },
               };
               const succeeded = format === "json" ? await exportDataLegacyForTarget(target, outputDirectory, targets.length > 1, operation) : await exportTableData(target, format, { ...capturedOptions[index], suppressDoneToast: targets.length > 1, operation });
@@ -780,7 +780,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
               }
               if (error instanceof SnapshotCompletionError && error.status === "cancelled") break;
               failed = true;
-              toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
+              if (!task.removed) toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
             }
             if (active.task && active.task !== task) tracker.unregisterTaskCancelHandler(active.task.exportId);
             active.task = undefined;
@@ -789,7 +789,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
           }
           task.status = exported === targets.length ? "Done" : controller.signal.aborted ? "Cancelled" : failed ? "Error" : "Done";
           task.finishedAt = Date.now();
-          if (targets.length > 1 && exported > 0) toast(t("contextMenu.exportDataMultipleSuccess", { count: exported }));
+          if (!task.removed && targets.length > 1 && exported > 0) toast(t("contextMenu.exportDataMultipleSuccess", { count: exported }));
           return "settled";
         } finally {
           if (!unknown) {
@@ -866,14 +866,14 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
           task.status = "Done";
           task.rowsExported = summary.documentsExported;
           task.finishedAt = Date.now();
-          notifyExportComplete({ filePath: outputPath, message: t("grid.exported"), openFolderLabel: t("exportProgress.openFolder"), toast });
+          if (!task.removed) notifyExportComplete({ filePath: outputPath, message: t("grid.exported"), openFolderLabel: t("exportProgress.openFolder"), toast });
           return "settled";
         } catch (error) {
           task.errorMessage = error instanceof Error ? error.message : String(error);
           const status = error instanceof SnapshotCompletionError ? error.status : started ? "unknown" : "failed";
           task.status = status === "unknown" ? "Unknown" : status === "cancelled" ? "Cancelled" : "Error";
           task.finishedAt = status === "unknown" ? undefined : Date.now();
-          if (status !== "cancelled") toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
+          if (!task.removed && status !== "cancelled") toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
           return status === "unknown" ? "unknown" : "settled";
         } finally {
           if (task.status !== "Unknown") tracker.unregisterTaskCancelHandler(task.exportId);

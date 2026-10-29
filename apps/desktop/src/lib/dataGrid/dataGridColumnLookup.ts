@@ -1,4 +1,4 @@
-import { matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
+import { identifierMatchScore } from "@/lib/sql/identifierSearch";
 
 export interface DataGridColumnLookupItem {
   index: number;
@@ -53,12 +53,42 @@ export function buildDataGridColumnLookupItems(options: DataGridColumnLookupOpti
   });
 }
 
+export function scoreDataGridColumnLookupItem(item: DataGridColumnLookupItem, query: string): number {
+  const normalizedQuery = normalizedSearchText(query);
+  if (!normalizedQuery) return 1;
+  const nameScore = identifierMatchScore(item.name, normalizedQuery);
+  const sourceScore = item.sourceName ? identifierMatchScore(item.sourceName, normalizedQuery) : -1;
+  const commentScore = item.comment ? identifierMatchScore(item.comment, normalizedQuery) : -1;
+  const effectiveCommentScore = commentScore >= 0 ? Math.max(0, commentScore - 50) : -1;
+  return Math.max(nameScore, sourceScore, effectiveCommentScore);
+}
+
 export function filterDataGridColumnLookupItems<ColumnLookupItem extends DataGridColumnLookupItem>(items: readonly ColumnLookupItem[], query: string, matchMode: DataGridColumnLookupMatchMode = "fuzzy"): ColumnLookupItem[] {
   const normalizedQuery = normalizedSearchText(query);
   if (!normalizedQuery) return [...items];
+
   if (matchMode === "exact") {
     const normalizedQueryLower = normalizedQuery.toLocaleLowerCase();
-    return items.filter((item) => [item.name, item.sourceName].filter((value): value is string => !!value).some((value) => value.trim().toLocaleLowerCase() === normalizedQueryLower));
+    const scored: { item: ColumnLookupItem; score: number; order: number }[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const nameMatch = item.name.trim().toLocaleLowerCase() === normalizedQueryLower;
+      const sourceMatch = item.sourceName?.trim().toLocaleLowerCase() === normalizedQueryLower;
+      if (nameMatch || sourceMatch) {
+        const score = nameMatch ? 2 : 1;
+        scored.push({ item, score, order: i });
+      }
+    }
+    return scored.sort((a, b) => b.score - a.score || a.order - b.order).map((entry) => entry.item);
   }
-  return items.filter((item) => [item.name, item.sourceName, item.comment].filter((value): value is string => !!value).some((value) => matchesIdentifierSearch(value, normalizedQuery)));
+
+  const scored: { item: ColumnLookupItem; score: number; order: number }[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const score = scoreDataGridColumnLookupItem(item, normalizedQuery);
+    if (score >= 0) {
+      scored.push({ item, score, order: i });
+    }
+  }
+  return scored.sort((a, b) => b.score - a.score || a.order - b.order).map((entry) => entry.item);
 }

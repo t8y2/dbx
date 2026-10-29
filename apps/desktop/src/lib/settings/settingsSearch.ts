@@ -389,7 +389,6 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   },
   { id: "navigation-sidebar-scroll", category: "navigation", titleKey: "settings.sidebarAllowHorizontalScroll", descriptionKey: "settings.sidebarAllowHorizontalScrollDescription", targetId: "navigation" },
   { id: "navigation-sidebar-tooltips", category: "navigation", titleKey: "settings.sidebarShowTooltips", descriptionKey: "settings.sidebarShowTooltipsDescription", targetId: "navigation" },
-  { id: "navigation-sidebar-user-admin", category: "navigation", titleKey: "settings.sidebarShowUserAdmin", descriptionKey: "settings.sidebarShowUserAdminDescription", targetId: "navigation" },
   { id: "navigation-sidebar-indent", category: "navigation", titleKey: "settings.sidebarIndent", descriptionKey: "settings.sidebarIndentDescription", targetId: "navigation" },
   { id: "navigation-sidebar-font-size", category: "navigation", titleKey: "settings.sidebarFontSize", descriptionKey: "settings.sidebarFontSizeDescription", targetId: "navigation" },
   { id: "navigation-sidebar-density", category: "navigation", titleKey: "settings.sidebarDensity", descriptionKey: "settings.sidebarDensityDescription", targetId: "navigation" },

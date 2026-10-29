@@ -1056,7 +1056,6 @@ const editRedisDatabaseDisplayLimit = ref(settingsStore.editorSettings.redisData
 const editSidebarObjectInfoMode = ref<SidebarObjectInfoMode>(settingsStore.editorSettings.sidebarObjectInfoMode);
 const editSidebarAllowHorizontalScroll = ref(settingsStore.editorSettings.sidebarAllowHorizontalScroll);
 const editSidebarShowTooltips = ref(settingsStore.editorSettings.sidebarShowTooltips);
-const editSidebarShowUserAdmin = ref(settingsStore.editorSettings.sidebarShowUserAdmin);
 const editSidebarIndent = ref(settingsStore.editorSettings.sidebarIndent);
 const editSidebarFontSize = ref(settingsStore.editorSettings.sidebarFontSize);
 const editSidebarDensity = ref<SidebarDensity>(settingsStore.editorSettings.sidebarDensity);
@@ -1370,7 +1369,6 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarObjectInfoMode: editSidebarObjectInfoMode.value,
     sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
     sidebarShowTooltips: editSidebarShowTooltips.value,
-    sidebarShowUserAdmin: editSidebarShowUserAdmin.value,
     sidebarIndent: editSidebarIndent.value,
     sidebarFontSize: editSidebarFontSize.value,
     sidebarDensity: editSidebarDensity.value,
@@ -2082,7 +2080,6 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarObjectInfoMode.value = settingsStore.editorSettings.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll;
   editSidebarShowTooltips.value = settingsStore.editorSettings.sidebarShowTooltips;
-  editSidebarShowUserAdmin.value = settingsStore.editorSettings.sidebarShowUserAdmin;
   editSidebarIndent.value = settingsStore.editorSettings.sidebarIndent;
   editSidebarFontSize.value = settingsStore.editorSettings.sidebarFontSize;
   editSidebarDensity.value = settingsStore.editorSettings.sidebarDensity;
@@ -2254,7 +2251,6 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarObjectInfoMode: editSidebarObjectInfoMode,
   sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll,
   sidebarShowTooltips: editSidebarShowTooltips,
-  sidebarShowUserAdmin: editSidebarShowUserAdmin,
   sidebarIndent: editSidebarIndent,
   sidebarFontSize: editSidebarFontSize,
   sidebarDensity: editSidebarDensity,
@@ -2843,7 +2839,6 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
     editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
     editSidebarShowTooltips.value = DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips;
-    editSidebarShowUserAdmin.value = DEFAULT_EDITOR_SETTINGS.sidebarShowUserAdmin;
     editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
     editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
     editSidebarDensity.value = DEFAULT_EDITOR_SETTINGS.sidebarDensity;
@@ -3076,7 +3071,6 @@ function resetAllDefaults() {
   editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
   editSidebarShowTooltips.value = DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips;
-  editSidebarShowUserAdmin.value = DEFAULT_EDITOR_SETTINGS.sidebarShowUserAdmin;
   editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
   editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
   editSidebarDensity.value = DEFAULT_EDITOR_SETTINGS.sidebarDensity;
@@ -9955,17 +9949,6 @@ onUnmounted(() => {
                   </HelpTooltip>
                 </div>
                 <Switch id="sidebar-show-tooltips" v-model="editSidebarShowTooltips" />
-              </div>
-              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                <div class="flex items-center gap-2">
-                  <Label for="sidebar-show-user-admin">
-                    {{ t("settings.sidebarShowUserAdmin") }}
-                  </Label>
-                  <HelpTooltip :label="t('settings.sidebarShowUserAdmin')">
-                    {{ t("settings.sidebarShowUserAdminDescription") }}
-                  </HelpTooltip>
-                </div>
-                <Switch id="sidebar-show-user-admin" v-model="editSidebarShowUserAdmin" />
               </div>
               <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">

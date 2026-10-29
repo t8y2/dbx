@@ -484,6 +484,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -1398,7 +1400,13 @@ async fn remove_connection_pools_for_connection_ids(state: &AppState, connection
 }
 
 #[tauri::command]
-pub async fn load_connections(state: State<'_, Arc<AppState>>) -> Result<Vec<ConnectionResponse>, String> {
+pub async fn load_connections(
+    state: State<'_, Arc<AppState>>,
+    legacy_sidebar_show_user_admin: Option<bool>,
+) -> Result<Vec<ConnectionResponse>, String> {
+    if let Some(visible) = legacy_sidebar_show_user_admin {
+        state.storage.migrate_sidebar_user_admin_visibility(visible).await?;
+    }
     load_connection_responses(state.inner()).await
 }
 

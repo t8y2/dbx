@@ -2433,7 +2433,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const damengRoleNode = buildDamengRoleNode(connectionId, existingConnectionNode);
     const damengJobAdminNode = buildDamengJobAdminNode(connectionId, existingConnectionNode);
     const xuguTablespacesNode = buildXuguTablespacesNode(connectionId, existingConnectionNode);
-    return [...nonUtilityChildren, buildOracleDatabaseLinksNode(connectionId, existingConnectionNode), userAdminNode, xuguUserAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, buildDatabaseJobAdminNode(connectionId), xuguTablespacesNode].filter(Boolean) as TreeNode[];
+    return [...nonUtilityChildren, buildOracleDatabaseLinksNode(connectionId, existingConnectionNode), buildDatabaseJobAdminNode(connectionId), userAdminNode, xuguUserAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, xuguTablespacesNode].filter(Boolean) as TreeNode[];
   }
 
   function withSavedSqlRoot(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
@@ -11339,7 +11339,7 @@ export const useConnectionStore = defineStore("connection", () => {
         // 整体覆盖内存布局前，先落盘窗口内未写盘的分组编辑（防止 300ms 防抖窗口
         // 内的编辑被备份轮询/重载带回的旧快照静默回滚）。
         await flushTableVGroupPersist();
-        const [pinnedOrder, saved, , loadedTableVGroups] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(), tunnelProfileStore.init(), api.loadTableVGroups()]);
+        const [pinnedOrder, saved, , loadedTableVGroups] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(settingsStore.editorSettings.sidebarShowUserAdmin !== false), tunnelProfileStore.init(), api.loadTableVGroups()]);
         setPinnedTreeNodeOrder(pinnedOrder);
         await migrateTimeoutInheritance(saved);
         const loadedConnections = saved.map(normalizeConnection).map((loadedConfig) => {

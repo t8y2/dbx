@@ -384,3 +384,31 @@ describe("configurable SQL formatting rules (issue #8570)", () => {
     expect(result).toMatch(new RegExp(`${name}\\(a,\\n\\s*b\\)`));
   });
 });
+
+describe("Oracle formatting regressions #13650", () => {
+  const settings = { customRulesEnabled: true, listLayout: "vertical", selectListLayout: "vertical" } as const;
+
+  it.each([false, true])("aligns fields after standalone comments (tabs=%s)", async (useTabs) => {
+    const sql = "select a,\n-- h2.f_get_busnorgshortname(max(t.d_busno)) as busno,\nmax(t.bargainno) as bargainno,max(t.bargainid) as bargainid from t;";
+    const options = { ...settings, useTabs };
+    const result = await formatSqlText(sql, "oracle", options);
+    const lines = result.split("\n");
+    const comment = lines.find((line) => line.includes("-- h2."))!;
+    const field = lines.find((line) => line.includes("max(t.bargainno)"))!;
+    const next = lines.find((line) => line.includes("max(t.bargainid)"))!;
+    expect(comment.trimStart()).toBe("-- h2.f_get_busnorgshortname(max(t.d_busno)) as busno,");
+    expect(field.match(/^\s*/)?.[0]).toBe(next.match(/^\s*/)?.[0]);
+    expect(comment.match(/^\s*/)?.[0]).toBe(next.match(/^\s*/)?.[0]);
+    expect(result).not.toContain("\n\n--");
+    expect(tokenizeSqlSemantic(result, "oracle").map((token) => token.normalized)).toEqual(tokenizeSqlSemantic(sql, "oracle").map((token) => token.normalized));
+    expect(await formatSqlText(result, "oracle", options)).toBe(result);
+  });
+
+  it.each(["oracle", "postgres", "mysql"] as const)("aligns multiline CASE and END with the field in %s", async (dialect) => {
+    const sql = "select a.entryid,case when employeename like '测试%' then employeename else employeename end as result_label from employee_special_tl a;";
+    const result = await formatSqlText(sql, dialect, settings);
+    expect(result).toContain("\n       CASE\n         WHEN employeename LIKE '测试%' THEN\n           employeename\n         ELSE\n           employeename\n       END AS result_label");
+    expect(tokenizeSqlSemantic(result, dialect).map((token) => token.normalized)).toEqual(tokenizeSqlSemantic(sql, dialect).map((token) => token.normalized));
+    expect(await formatSqlText(result, dialect, settings)).toBe(result);
+  });
+});

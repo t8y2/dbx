@@ -655,6 +655,33 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     });
   });
 
+  it.each([undefined, true, false] as const)("saves and reopens two-state sidebar opt-outs without changing production protection (%s)", async (value) => {
+    visibleTab.value = "advanced";
+    backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: "oracle", installed: true }]);
+    const saved = savedConnection({ db_type: "oracle", driver_profile: "oracle", production_databases: undefined, show_database_links: false, show_native_jobs: value, show_user_admin: value });
+    await mountDialog(saved, "");
+    for (const field of ["show_native_jobs", "show_user_admin"] as const) {
+      const checkbox = document.querySelector<HTMLInputElement>(`#sidebar-${field}`)!;
+      expect(checkbox.type).toBe("checkbox");
+      expect(checkbox.checked).toBe(value !== false);
+      checkbox.click();
+      await settle();
+    }
+    expect(document.querySelector('input[type="radio"][name^="sidebar-"]')).toBeNull();
+    [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save")!.click();
+    await settle();
+    const submitted = store.updateConnection.mock.calls[0][0] as ConnectionConfig;
+    expect(submitted.show_native_jobs).toBe(value === false ? undefined : false);
+    expect(submitted.show_user_admin).toBe(value === false ? undefined : false);
+    expect(submitted.show_database_links).toBe(false);
+    expect(submitted.is_production).toBe(saved.is_production);
+    expect(submitted.production_databases).toEqual(saved.production_databases);
+    for (const app of mountedApps.splice(0)) app.unmount();
+    document.body.innerHTML = "";
+    await mountDialog(submitted, "");
+    for (const field of ["show_native_jobs", "show_user_admin"] as const) expect(document.querySelector<HTMLInputElement>(`#sidebar-${field}`)!.checked).toBe(value === false);
+  });
+
   it.each([true, false] as const)("preserves protected target settings through real Store load and Dialog save (%s DB links)", async (showDatabaseLinks) => {
     setActivePinia(createPinia());
     const saved = savedConnection({

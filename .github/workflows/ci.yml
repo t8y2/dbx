@@ -1003,6 +1003,10 @@ jobs:
     env:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
+      # Test binaries default to full debug info; the workspace-wide test build
+      # then fills the runner disk during linking (mold: failed to write).
+      # Backtraces stay usable via the minimal line tables.
+      CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
       # Deep async export tests exceed the Rust test harness's default thread stack on Linux.
       RUST_MIN_STACK: 8388608
       RUSTC_WRAPPER: sccache

@@ -8,8 +8,9 @@
 //! Security note (known limitation, flagged for maintainers in the PR): Dameng requires
 //! `USERID` to be the FIRST command-line argument — unlike Oracle, the password cannot be
 //! moved into the `PARFILE`. So the password is necessarily visible in the process list
-//! (`ps -ef`) for the duration of the run. `PARFILE` is still used for the non-sensitive
-//! parameters to keep the command line short and debuggable.
+//! (`ps -ef`) for the duration of the run. `PARFILE` keeps the schema/table parameters out
+//! of the process list; FILE/LOG travel on the command line because Windows dexp rejects
+//! forward-slash paths there (#13585).
 
 use crate::models::connection::DatabaseType;
 
@@ -79,32 +80,36 @@ pub fn userid_field_error(user: &str, password: &str) -> Option<&'static str> {
     })
 }
 
-/// Render a file/log path for a PARFILE line.
+/// Render a FILE/LOG path for the command line.
 ///
-/// Dameng's PARFILE parser treats a value verbatim: its own documentation lists `"` and `\`
-/// among the characters a FILE/LOG name may not contain, and the documented form is
-/// `FILE=db_str.dmp` (no quotes, forward slashes). Emitting the raw Windows path therefore
-/// breaks in two ways at once — the surrounding quotes are read as part of the file name, and
-/// a Drive letter's `\` can be consumed as an escape. Both failures happen before the tool
-/// writes its LOG file, so the caller only sees an empty log and cannot tell why.
+/// Dameng validates FILE/LOG as *file names*: its documentation lists `/` and `:`
+/// among the characters such a name may not contain. On Windows the tool does not
+/// treat a forward slash as a directory separator, so a normalised
+/// `D:/data/target.dmp` is rejected as "无效的文件路径" (#13585), while the native
+/// `D:\data\target.dmp` used in every documented Windows example is accepted.
+/// Windows-shaped paths therefore get the native separator back.
 ///
-/// Normalising to forward slashes removes the escape problem (both Windows and the tool accept
-/// them), and quotes are kept only when a space makes the value ambiguous.
-fn parfile_path_value(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    if normalized.contains(' ') {
-        format!("\"{normalized}\"")
+/// Nothing is quoted: [`build_command`] hands each value to `Command` as a single
+/// argv entry, so spaces survive without the `"` that Dameng also rejects.
+fn native_path_value(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let windows_shaped =
+        (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\'))
+            || path.starts_with("//");
+    if windows_shaped {
+        path.replace('/', "\\")
     } else {
-        normalized
+        path.to_string()
     }
 }
 
 /// Contents of the PARFILE: the non-sensitive parameters, one `KEY=value` per line.
-/// File/log paths are normalised to forward slashes (see [`parfile_path_value`]).
+///
+/// FILE/LOG are deliberately not written here. They travel as command-line
+/// arguments (see [`build_command`]) so Windows paths keep their native
+/// separators and never pass through the PARFILE value parser (#13585).
 pub fn build_parfile_contents(req: &DamengDumpRequest) -> String {
     let mut lines: Vec<String> = Vec::new();
-    lines.push(format!("FILE={}", parfile_path_value(&req.file_path)));
-    lines.push(format!("LOG={}", parfile_path_value(&req.log_path)));
     if !req.schemas.is_empty() {
         lines.push(format!("SCHEMAS={}", req.schemas.join(",")));
     }
@@ -131,13 +136,21 @@ pub fn build_parfile_contents(req: &DamengDumpRequest) -> String {
     text
 }
 
-/// The full argv (program + USERID + PARFILE). The caller writes `parfile_path` (with
-/// [`build_parfile_contents`]) before invoking. USERID must be the first argument.
+/// The full argv (program + USERID + PARFILE + FILE + LOG). The caller writes
+/// `parfile_path` (with [`build_parfile_contents`]) before invoking. USERID must be
+/// the first argument.
+///
+/// FILE/LOG are command-line arguments rather than PARFILE lines: on Windows dexp
+/// validates them as file names and rejects the forward-slash form as an invalid
+/// path (#13585). `Command` passes each argument verbatim, so a native path with
+/// spaces needs no quoting.
 pub fn build_command(req: &DamengDumpRequest, parfile_path: &str) -> Vec<String> {
     vec![
         req.tool_path.clone(),
         userid_token(&req.user, &req.password, &req.host, req.port),
         format!("PARFILE={parfile_path}"),
+        format!("FILE={}", native_path_value(&req.file_path)),
+        format!("LOG={}", native_path_value(&req.log_path)),
     ]
 }
 
@@ -258,39 +271,50 @@ mod tests {
     }
 
     #[test]
-    fn export_parfile_matches_real_invocation() {
+    fn export_parfile_leaves_paths_to_the_command_line() {
         let par = build_parfile_contents(&req(DamengDumpKind::Export));
-        assert_eq!(par, "FILE=/tmp/dbx_dcss.dmp\nLOG=/tmp/dbx_dcss.log\nSCHEMAS=DCSS\nTABLESPACE=N\nDROP=N\n");
+        assert_eq!(par, "SCHEMAS=DCSS\nTABLESPACE=N\nDROP=N\n");
+        assert!(!par.contains("FILE="), "FILE must not ride in the PARFILE: {par}");
+        assert!(!par.contains("LOG="), "LOG must not ride in the PARFILE: {par}");
     }
 
     #[test]
-    fn export_parfile_normalises_windows_paths() {
+    fn command_passes_windows_paths_with_native_separators() {
         let mut r = req(DamengDumpKind::Export);
         r.file_path = r"C:\Users\dbx\dump.dcss.dmp".to_string();
         r.log_path = r"C:\Users\dbx\AppData\Local\Temp\dbx-dameng-dump\task.log".to_string();
-        let par = build_parfile_contents(&r);
-        // Backslashes become forward slashes and the quotes are dropped: `"` is on Dameng's
-        // list of characters a FILE/LOG name may not contain (#12837).
-        assert!(par.contains(r"FILE=C:/Users/dbx/dump.dcss.dmp"), "got: {par}");
-        assert!(par.contains("LOG=C:/Users/dbx/AppData/Local/Temp/dbx-dameng-dump/task.log"), "got: {par}");
-        assert!(!par.contains('"'), "no quotes: {par}");
+        let argv = build_command(&r, r"C:\Users\dbx\AppData\Local\Temp\task.par");
+        assert!(argv.contains(&r"FILE=C:\Users\dbx\dump.dcss.dmp".to_string()), "got: {argv:?}");
+        assert!(
+            argv.contains(&r"LOG=C:\Users\dbx\AppData\Local\Temp\dbx-dameng-dump\task.log".to_string()),
+            "got: {argv:?}"
+        );
     }
 
     #[test]
-    fn export_parfile_quotes_only_when_a_space_needs_it() {
+    fn command_restores_backslashes_on_forward_slash_windows_paths() {
+        // #13585: the PARFILE path normaliser produced D:/data/... and dexp answered
+        // "无效的文件路径". The command line must carry the native form instead.
+        let mut r = req(DamengDumpKind::Import);
+        r.file_path = "D:/dumps/dcss.dmp".to_string();
+        let argv = build_command(&r, "/tmp/task.par");
+        assert!(argv.contains(&r"FILE=D:\dumps\dcss.dmp".to_string()), "got: {argv:?}");
+    }
+
+    #[test]
+    fn command_keeps_a_path_with_spaces_as_one_unquoted_argument() {
         let mut r = req(DamengDumpKind::Export);
         r.file_path = r"C:\Users\John Smith\dump.dmp".to_string();
-        let par = build_parfile_contents(&r);
-        assert!(par.contains(r#"FILE="C:/Users/John Smith/dump.dmp""#), "got: {par}");
-        assert!(!par.contains('\\'), "no backslashes survive: {par}");
+        let argv = build_command(&r, "/tmp/task.par");
+        assert!(argv.contains(&r"FILE=C:\Users\John Smith\dump.dmp".to_string()), "got: {argv:?}");
+        assert!(!argv.iter().any(|arg| arg.contains('"')), "quotes are invalid in FILE/LOG: {argv:?}");
     }
 
     #[test]
-    fn import_parfile_normalises_paths_too() {
-        let mut r = req(DamengDumpKind::Import);
-        r.file_path = r"D:\dumps\dcss.dmp".to_string();
-        let par = build_parfile_contents(&r);
-        assert!(par.contains("FILE=D:/dumps/dcss.dmp"), "got: {par}");
+    fn command_keeps_unix_paths_untouched() {
+        let argv = build_command(&req(DamengDumpKind::Export), "/tmp/dbx_dcss.par");
+        assert!(argv.contains(&"FILE=/tmp/dbx_dcss.dmp".to_string()), "got: {argv:?}");
+        assert!(argv.contains(&"LOG=/tmp/dbx_dcss.log".to_string()), "got: {argv:?}");
     }
 
     #[test]
@@ -336,11 +360,13 @@ mod tests {
     }
 
     #[test]
-    fn command_puts_userid_first_then_parfile() {
+    fn command_puts_userid_first_then_parfile_and_paths() {
         let argv = build_command(&req(DamengDumpKind::Export), "/tmp/dbx_dcss.par");
         assert_eq!(argv[0], "/opt/dmdbms/bin/dexp");
         assert_eq!(argv[1], "USERID=SYSDBA/Dameng123@127.0.0.1:5236");
         assert_eq!(argv[2], "PARFILE=/tmp/dbx_dcss.par");
+        assert_eq!(argv[3], "FILE=/tmp/dbx_dcss.dmp");
+        assert_eq!(argv[4], "LOG=/tmp/dbx_dcss.log");
     }
 
     #[test]

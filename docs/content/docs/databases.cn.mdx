@@ -26,6 +26,8 @@ DBX 的新建连接窗口提供 100+ 数据库和服务 profile。Profile 决定
 - Cloudflare D1、Turso、RQLite
 - H2 和通过 JDBC URL 访问的本地数据库
 
+自托管的 libSQL 服务器（`sqld`）使用 Turso 配置。主机填写服务器地址，例如 `http://127.0.0.1:8080`；除非服务器校验 JWT（`--auth-jwt-key-file`），否则 **Auth Token** 留空。未开启 SSL 时，`http://` 地址保持明文 HTTP；`libsql://` 地址和只填主机名时使用 HTTPS。
+
 Desktop 的文件路径属于本机。Docker/Web 的文件路径属于服务器容器或宿主机挂载目录；浏览器电脑上的路径不会自动映射到服务器。
 
 ### 专用数据模型和服务

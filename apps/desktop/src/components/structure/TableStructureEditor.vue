@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import PostgresForeignTableOptionsEditor from "@/components/structure/PostgresForeignTableOptionsEditor.vue";
+import { buildPostgresForeignTableOptions, emptyPostgresForeignTableDraft, restorePostgresForeignTableDraft, supportsPostgresForeignTableCreation } from "@/lib/table/postgresForeignTable";
 import { Compartment } from "@codemirror/state";
 import { keymap as codeMirrorKeymap } from "@codemirror/view";
 import { getStarRocksCapabilities } from "@/lib/table/starrocksCapabilities";
@@ -6,6 +8,7 @@ import { starRocksAlterOptionsFromDdl, starRocksColumnDefinitionLocked, type Sta
 import { getColumnDefaultValuePresets } from "@/lib/table/columnDefaultPresets";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import { compactDdlSql } from "@/lib/sql/ddlCompact";
+import { matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import { exactOracleTriggerMetadata, oracleTriggerReadOptions } from "@/lib/database/oracleTriggerIdentity";
 import { executeOracleTriggerStructurePlan, readOracleTriggerSource, verifyOracleTriggerDeletion, type OracleTriggerExecutionResult, type OracleTriggerSnapshot, type OracleTriggerTarget } from "@/lib/database/oracleTriggerPlan";
@@ -1453,6 +1456,7 @@ const structureDensityStyle = computed(() => {
     "--structure-cell-py": `${metric.cellPaddingY}px`,
     "--structure-header-py": `${metric.headerPaddingY}px`,
     "--structure-control-height": `${metric.controlHeight}px`,
+    "--structure-column-row-height": `${metric.controlHeight + metric.cellPaddingY * 2 + 1}px`,
     "--structure-control-px": `${metric.controlPaddingX}px`,
     "--structure-icon-size": `${metric.iconSize}px`,
     "--structure-checkbox-size": `${metric.checkboxSize}px`,
@@ -1677,6 +1681,18 @@ function onIndexColResize(e: MouseEvent, col: number) {
 
 const connection = computed(() => (props.connectionId ? store.getConfig(props.connectionId) : undefined));
 const databaseType = computed(() => tableStructureDatabaseTypeForConnection(connection.value));
+const postgresForeignTable = ref(emptyPostgresForeignTableDraft());
+const canCreateForeignTable = computed(() => !props.tableName && supportsPostgresForeignTableCreation(connection.value));
+const isCreatingForeignTable = computed(() => canCreateForeignTable.value && postgresForeignTable.value.enabled);
+
+function setCreateTableKind(kind: string) {
+  const foreign = kind === "foreign";
+  if (foreign && (columns.value.some((column) => !column.markedForDrop && (column.isPrimaryKey || column.extra.autoIncrement || column.extra.identity)) || indexes.value.some((index) => !index.markedForDrop) || foreignKeys.value.some((key) => !key.markedForDrop) || createPartitioningEnabled.value)) {
+    toast(t("postgresForeignTable.removeUnsupported"));
+    return;
+  }
+  postgresForeignTable.value.enabled = foreign;
+}
 const usesNativeMysqlIndexNames = computed(() => {
   const profile = connection.value?.driver_profile?.trim().toLowerCase();
   return databaseType.value === "mysql" && connection.value?.db_type === "mysql" && (!profile || profile === "mysql");
@@ -1684,7 +1700,10 @@ const usesNativeMysqlIndexNames = computed(() => {
 const supportsCharacterLengthUnits = computed(() => databaseType.value === "dameng" || databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle");
 const usesMysql8SafeDefaults = computed(() => databaseType.value === "mysql" && connection.value?.db_type === "mysql" && connection.value.driver_profile === "mysql");
 const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type, connection.value?.database_info?.productVersion, starrocksAlterContext.value?.model));
-const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(databaseType.value, { connectionType: connection.value?.db_type, exactIdentity: props.exactIdentity }));
+const tableMetadataCapabilities = computed(() => {
+  const capabilities = getTableMetadataCapabilities(databaseType.value, { connectionType: connection.value?.db_type, exactIdentity: props.exactIdentity });
+  return isCreatingForeignTable.value ? { ...capabilities, indexes: false, foreignKeys: false, constraints: false, partitions: false } : capabilities;
+});
 const structureDialect = computed(() => structureCapabilities.value.dialect);
 const isTableCommentDisabled = computed(() => !structureCapabilities.value.comment || (!isCreateMode.value && databaseType.value === "starrocks" && !getStarRocksCapabilities(connection.value?.database_info?.productVersion).tableComment));
 const dynamicDataTypeOptions = ref<string[]>([]);
@@ -2226,17 +2245,7 @@ const indexColLabels = computed(() => [
 const filteredColumnRowIds = computed(() => {
   const query = columnSearchText.value.trim().toLowerCase();
   if (!query) return new Set<string>();
-  return new Set(
-    columns.value
-      .filter((column) =>
-        [column.name, column.comment].some((value) =>
-          String(value ?? "")
-            .toLowerCase()
-            .includes(query),
-        ),
-      )
-      .map((column) => column.id),
-  );
+  return new Set(columns.value.filter((column) => columnMatchesSearch(column)).map((column) => column.id));
 });
 const columnSearchMatchCount = computed(() => (columnSearchText.value.trim() ? filteredColumnRowIds.value.size : 0));
 const filteredIndexRowIds = computed(() => {
@@ -2964,6 +2973,7 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     originalMysqlTableCollation: originalMysqlTableCollation.value,
     physicalOptions: cloneDraftValue(physicalOptions.value),
     starrocksPhysicalOptions: cloneDraftValue(starrocksPhysicalOptions.value),
+    postgresForeignTable: canCreateForeignTable.value ? cloneDraftValue(postgresForeignTable.value) : undefined,
     starrocksSortColumns: starrocksSortColumns.value ? [...starrocksSortColumns.value] : undefined,
     tableOwner: tableOwner.value,
     originalTableOwner: originalTableOwner.value,
@@ -3047,6 +3057,7 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   }
   ddlDraft.value = draft.ddlDraft ?? null;
   newTableName.value = draft.newTableName || "";
+  postgresForeignTable.value = restorePostgresForeignTableDraft(draft.postgresForeignTable);
   tableComment.value = draft.tableComment || "";
   originalTableComment.value = draft.originalTableComment || "";
   mysqlAutoIncrementValue.value = draft.mysqlAutoIncrementValue;
@@ -3225,6 +3236,7 @@ function hasPendingStructureChanges(includeExistingPrimaryKey = true, includeOra
   if (isCreateMode.value) {
     return (
       !!newTableName.value.trim() ||
+      isCreatingForeignTable.value ||
       !!tableComment.value.trim() ||
       mysqlTableEngine.value !== originalMysqlTableEngine.value ||
       hasTablePhysicalOptions(physicalOptions.value) ||
@@ -3739,7 +3751,11 @@ async function refreshSqlPreview() {
       isCreateMode.value
         ? createPartitioningEnabled.value
           ? api.buildCreatePartitionedTableSql({ options, partitioning: { kind: createPartitioningKind.value, columns: createPartitioningColumns.value, expression: createPartitioningExpression.value } })
-          : api.buildCreateTableSql(options, connection.value?.database_info?.productVersion, databaseType.value === "starrocks" ? buildStarRocksDialectOptions(starrocksPhysicalOptions.value) : undefined)
+          : api.buildCreateTableSql(
+              options,
+              connection.value?.database_info?.productVersion,
+              isCreatingForeignTable.value ? { postgresForeignTable: buildPostgresForeignTableOptions(postgresForeignTable.value) } : databaseType.value === "starrocks" ? buildStarRocksDialectOptions(starrocksPhysicalOptions.value) : undefined,
+            )
         : hasSqliteTypeChange.value
           ? api.previewSqliteTableStructureChange(props.connectionId, props.database, options)
           : databaseType.value === "starrocks"
@@ -3905,6 +3921,7 @@ function resetState() {
   ddlFetched.value = false;
   loadedMetadataFacets.clear();
   newTableName.value = "";
+  postgresForeignTable.value = emptyPostgresForeignTableDraft();
   tableComment.value = "";
   originalTableComment.value = "";
   mysqlAutoIncrementValue.value = undefined;
@@ -5003,6 +5020,13 @@ function applyColumnTemplate(templateId: string) {
     createId: uuid,
   });
   if (!templateColumns.length) return;
+  if (isCreatingForeignTable.value) {
+    for (const column of templateColumns) {
+      column.isPrimaryKey = false;
+      column.extra.autoIncrement = false;
+      column.extra.identity = undefined;
+    }
+  }
   const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
   columns.value.splice(insertAt, 0, ...templateColumns);
   const lastTemplateColumn = templateColumns[templateColumns.length - 1];
@@ -5444,21 +5468,12 @@ function columnRowClass(column: EditableStructureColumn, index: number) {
 function columnMatchesSearch(column: EditableStructureColumn): boolean {
   const query = columnSearchText.value.trim().toLowerCase();
   if (!query) return false;
-  return [column.name, column.comment].some((value) =>
-    String(value ?? "")
-      .toLowerCase()
-      .includes(query),
-  );
+  return [column.name, column.comment].some((value) => columnFieldMatchesSearch(value));
 }
 
 function columnFieldMatchesSearch(value: string | null | undefined): boolean {
   const query = columnSearchText.value.trim().toLowerCase();
-  return (
-    !!query &&
-    String(value ?? "")
-      .toLowerCase()
-      .includes(query)
-  );
+  return !!query && matchesIdentifierSearch(String(value ?? ""), query);
 }
 
 function columnSearchFieldClass(column: EditableStructureColumn, value: string | null | undefined) {
@@ -5881,6 +5896,7 @@ function isColumnCharsetDisabled(column: EditableStructureColumn): boolean {
 }
 
 function isPrimaryKeyDisabled(column: EditableStructureColumn): boolean {
+  if (isCreatingForeignTable.value) return true;
   if (column.markedForDrop) return true;
   if (isCreateMode.value || structureCapabilities.value.alterPrimaryKey) return false;
   if (!structureCapabilities.value.addPrimaryKey) return true;
@@ -8041,6 +8057,7 @@ watch(
     originalMysqlTableEngine,
     physicalOptions,
     starrocksPhysicalOptions,
+    postgresForeignTable,
     starrocksSortColumns,
     mysqlTableEngineLoading,
     mysqlTableEngineLoadError,
@@ -8255,9 +8272,21 @@ watch(
     />
 
     <div v-if="isCreateMode" class="flex shrink-0 items-center gap-2">
+      <template v-if="canCreateForeignTable">
+        <label class="shrink-0 font-medium text-muted-foreground">{{ t("postgresForeignTable.tableKind") }}</label>
+        <Select :model-value="isCreatingForeignTable ? 'foreign' : 'table'" :disabled="saving" @update:model-value="setCreateTableKind(String($event))">
+          <SelectTrigger data-create-table-kind class="w-36"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="table">{{ t("postgresForeignTable.regularTable") }}</SelectItem>
+            <SelectItem value="foreign">{{ t("postgresForeignTable.foreignTable") }}</SelectItem>
+          </SelectContent>
+        </Select>
+      </template>
       <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.tableName") }}</label>
       <Input v-model="newTableName" :placeholder="t('contextMenu.duplicateNamePlaceholder')" :class="[structureControlClass, 'max-w-[220px]']" />
     </div>
+
+    <PostgresForeignTableOptionsEditor v-if="isCreatingForeignTable" v-model="postgresForeignTable" :connection-id="props.connectionId" :database="props.database" :catalog="props.catalog" :disabled="saving" />
 
     <div class="flex shrink-0 items-center gap-2">
       <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.comment") }}</label>
@@ -8593,7 +8622,10 @@ watch(
               <RecycleScroller
                 ref="columnsScrollerRef"
                 class="structure-column-virtual-scroller structure-table-scroller h-full overflow-auto"
-                :style="{ '--structure-column-table-width': columnTableWidth + 'px' }"
+                :style="{
+                  '--structure-column-table-width': columnTableWidth + 'px',
+                  '--structure-column-row-height': structureColumnRowHeight + 'px',
+                }"
                 :items="columnVirtualRows"
                 :item-size="columnVirtualItemSize"
                 :min-item-size="structureColumnRowHeight"
@@ -8646,8 +8678,8 @@ watch(
                     </thead>
                   </table>
                 </template>
-                <template #default="{ item: { column, index }, active }">
-                  <table class="structure-column-virtual-row-table border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]">
+                <template #default="{ item: { column, index, size }, active }">
+                  <table class="structure-column-virtual-row-table border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ height: (size || structureColumnRowHeight) + 'px' }">
                     <colgroup>
                       <col v-for="(width, columnIndex) in visibleColWidths" :key="columnIndex" :style="{ width: width + 'px' }" />
                     </colgroup>
@@ -8658,6 +8690,7 @@ watch(
                         :data-column-row-index="index"
                         :data-column-id="column.id"
                         :data-column-row-active="active ? 'true' : 'false'"
+                        :style="{ height: (size || structureColumnRowHeight) + 'px' }"
                         @mousedown="onColumnRowMouseDown($event)"
                         @click="onColumnRowClick(column, $event)"
                         @focusin="onColumnRowActivate(column)"
@@ -8820,7 +8853,8 @@ watch(
                               <SelectTrigger
                                 :aria-label="t('structureEditor.lengthUnit')"
                                 :title="t('structureEditor.lengthUnit')"
-                                class="structure-grid-control h-[var(--structure-control-height)] w-16 shrink-0 rounded-[6px] px-[var(--structure-control-px)] font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
+                                size="sm"
+                                class="structure-grid-control h-[var(--structure-control-height)] w-16 shrink-0 rounded-[6px] px-[var(--structure-control-px)] py-0 font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
                               >
                                 <SelectValue :placeholder="t('structureEditor.unitPlaceholder')" />
                               </SelectTrigger>
@@ -9066,6 +9100,7 @@ watch(
                             <template v-else-if="structureDialect === 'postgres'">
                               <Select
                                 :model-value="column.extra.identity?.generation ?? 'none'"
+                                :disabled="isCreatingForeignTable"
                                 @update:model-value="
                                   (value: any) => {
                                     const generation = String(value ?? '');
@@ -9080,7 +9115,7 @@ watch(
                                   }
                                 "
                               >
-                                <SelectTrigger class="structure-grid-control h-[var(--structure-control-height)] w-28 rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
+                                <SelectTrigger size="sm" class="structure-grid-control h-[var(--structure-control-height)] w-28 rounded-[6px] px-[var(--structure-control-px)] py-0 text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
                                   <SelectValue />
                                 </SelectTrigger>
                                 <SelectContent>
@@ -9243,7 +9278,10 @@ watch(
                   </td>
                   <td :class="structureCellClass">
                     <Select v-if="indexTypeOptions.length > 0" :model-value="index.indexType || 'BTREE'" :disabled="!canEditIndexDraft(index)" data-index-type @update:model-value="(value: unknown) => onIndexTypeChange(index, value)">
-                      <SelectTrigger class="structure-grid-control h-[var(--structure-control-height)] w-full rounded-[6px] px-[var(--structure-control-px)] font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
+                      <SelectTrigger
+                        size="sm"
+                        class="structure-grid-control h-[var(--structure-control-height)] w-full rounded-[6px] px-[var(--structure-control-px)] py-0 font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
+                      >
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -10408,6 +10446,8 @@ watch(
 .structure-column-virtual-scroller :deep(.structure-column-virtual-row) {
   width: 100%;
   min-width: var(--structure-column-table-width);
+  min-height: var(--structure-column-row-height);
+  box-sizing: border-box;
 }
 
 .structure-column-virtual-scroller :deep(.structure-column-virtual-header-table),
@@ -10417,6 +10457,22 @@ watch(
   width: 100%;
   min-width: var(--structure-column-table-width);
   table-layout: fixed;
+  box-sizing: border-box;
+}
+
+.structure-column-virtual-scroller :deep(.structure-column-virtual-row-table) {
+  height: 100%;
+}
+
+.structure-column-virtual-scroller :deep(.structure-column-virtual-row-table tr) {
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.structure-column-virtual-scroller :deep(.structure-column-virtual-row-table td) {
+  height: var(--structure-column-row-height);
+  box-sizing: border-box;
+  vertical-align: middle;
 }
 
 .structure-vertical-scrollbar {
@@ -10481,10 +10537,23 @@ watch(
 
 /* Editable values behave like grid cells, not a row of independent pill controls. */
 .structure-edit-grid :deep(.structure-grid-control) {
+  height: var(--structure-control-height);
+  min-height: var(--structure-control-height);
+  max-height: var(--structure-control-height);
+  padding-top: 0;
+  padding-bottom: 0;
   border-color: transparent;
   border-radius: 0;
   background-color: transparent;
   box-shadow: none;
+}
+
+.structure-edit-grid :deep(.structure-grid-control[data-slot="select-trigger"]) {
+  height: var(--structure-control-height);
+  min-height: var(--structure-control-height);
+  max-height: var(--structure-control-height);
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 .structure-edit-grid > tbody > tr > td:hover,

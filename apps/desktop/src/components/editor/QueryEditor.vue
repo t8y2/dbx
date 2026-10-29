@@ -87,7 +87,7 @@ import { resolveSqlSingleQuoteKeyAction } from "@/lib/sql/sqlQuoteCaret";
 import { formatMongoShellText } from "@/lib/mongo/mongoFormatter";
 import { detectAndFormatElasticsearchRequests } from "@/lib/elasticsearch/elasticsearchFormatter";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { DEFAULT_EDITOR_SETTINGS, useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
 import { buildSelectStarExpansion, selectStarResultColumnsMatch } from "@/lib/sql/sqlCompletion";
@@ -142,6 +142,7 @@ import { scrollEditorLine } from "@/lib/editor/scrollEditorLine";
 import { createQueryEditorStringMouseSelection } from "@/lib/editor/queryEditorStringMouseSelection";
 import { createQueryEditorCompletionShortcutBindings } from "@/lib/editor/queryEditorCompletionShortcut";
 import { handleQueryEditorCompletionNavigation } from "@/lib/editor/queryEditorCompletionNavigation";
+import { createQueryEditorLineCommentShortcutBindings } from "@/lib/editor/queryEditorLineComment";
 import { createQueryEditorSelectionCaseShortcutBindings } from "@/lib/editor/queryEditorSelectionCaseShortcut";
 import { createQueryEditorExecutionShortcutBindings, createQueryEditorExecutionShortcutHandler, createQueryEditorPostCompositionKeyGuard } from "@/lib/editor/queryEditorExecutionShortcut";
 import { supportsPlDebugRoutine, supportsQueryEditorBlockComments, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
@@ -610,6 +611,7 @@ const zoomCommitScheduler = createEditorZoomCommitScheduler((fontSize) => {
   settingsStore.updateEditorSettings({ fontSize });
 });
 const wheelZoom = createEditorWheelZoomController();
+const EDITOR_ZOOM_TOAST_MS = 1500;
 
 const queryEditorAppearanceSettings = computed(() => {
   const settings = settingsStore.editorSettings;
@@ -684,6 +686,7 @@ function applyLiveFontSize(size: number) {
   // frame so that CSS variable changes remain smooth on every wheel tick,
   // while the CodeMirror measure → syncGutters path keeps gutters aligned.
   scheduleFontThemeReconfig(next, settingsStore.editorSettings.fontFamily);
+  toast(`${Math.round((next / DEFAULT_EDITOR_SETTINGS.fontSize) * 100)}%`, EDITOR_ZOOM_TOAST_MS);
 }
 
 function scheduleFontSizeCommit(size: number) {
@@ -1560,7 +1563,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.lowercaseSelection, () => convertSelectedSqlCase("lower")),
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.toggleCaseSelection, () => convertSelectedSqlCase("toggle")),
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.convertNamingStyle, () => convertSelectedNamingStyle()),
-        ...binding(shortcuts.toggleLineComment, (view) => codeMirrorRuntime.codeMirrorToggleLineComment?.(view) ?? false),
+        ...createQueryEditorLineCommentShortcutBindings(shortcuts.toggleLineComment, (view) => codeMirrorRuntime.codeMirrorToggleLineComment?.(view) ?? false),
         ...binding(shortcuts.toggleBlockComment, (view) => {
           if (!supportsQueryEditorBlockComments(props.databaseType)) return false;
           return codeMirrorRuntime.codeMirrorToggleBlockComment?.(view) ?? false;
@@ -2143,7 +2146,9 @@ async function flushImeComposition() {
 
 function defaultKeymapExtension() {
   if (!codeMirrorRuntime.editorViewModule || !codeMirrorRuntime.codeMirrorDefaultKeymap || !codeMirrorRuntime.codeMirrorToggleBlockComment) return [];
-  return codeMirrorRuntime.editorViewModule.keymap.of(defaultKeymapForGlobalShortcuts(codeMirrorRuntime.codeMirrorDefaultKeymap, settingsStore.editorSettings.shortcuts).filter((item) => item.run !== codeMirrorRuntime.codeMirrorToggleBlockComment));
+  return codeMirrorRuntime.editorViewModule.keymap.of(
+    defaultKeymapForGlobalShortcuts(codeMirrorRuntime.codeMirrorDefaultKeymap, settingsStore.editorSettings.shortcuts).filter((item) => item.run !== codeMirrorRuntime.codeMirrorToggleBlockComment && item.run !== codeMirrorRuntime.codeMirrorToggleLineComment),
+  );
 }
 
 const codeMirrorLifecycle = useQueryEditorCodeMirror({
@@ -3045,11 +3050,17 @@ onDeactivated(pauseQueryEditorBackgroundWork);
 
 onMounted(() => {
   if (typeof window === "undefined") return;
+  window.addEventListener("keydown", wheelZoom.recordModifiers, true);
+  window.addEventListener("keyup", wheelZoom.recordModifiers, true);
+  window.addEventListener("blur", wheelZoom.reset);
   documentState.attach();
   warmActiveTabConnection();
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("keydown", wheelZoom.recordModifiers, true);
+  window.removeEventListener("keyup", wheelZoom.recordModifiers, true);
+  window.removeEventListener("blur", wheelZoom.reset);
   pauseQueryEditorBackgroundWork();
   documentState.dispose();
   pointerInteractions.dispose();

@@ -1129,10 +1129,20 @@ pub async fn mcp_remove_connection(
         .await
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadConnectionsQuery {
+    legacy_sidebar_show_user_admin: Option<bool>,
+}
+
 pub async fn load_connections(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
+    Query(query): Query<LoadConnectionsQuery>,
 ) -> Result<Json<Vec<ConnectionResponse>>, AppError> {
+    if let Some(visible) = query.legacy_sidebar_show_user_admin {
+        state.app.storage.migrate_sidebar_user_admin_visibility(visible).await?;
+    }
     for _ in 0..3 {
         let allowed = {
             let current = state.app.configs.read().await;
@@ -1409,7 +1419,7 @@ mod tests {
         SaveConnectionsRequest,
     };
     use crate::state::WebState;
-    use axum::extract::State;
+    use axum::extract::{Query, State};
     use axum::http::HeaderMap;
     use axum::Json;
     use dbx_core::connection::{AppState, PoolKind};
@@ -1466,6 +1476,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -2743,6 +2755,37 @@ done
     }
 
     #[tokio::test]
+    async fn load_connections_migrates_visibility_only_for_an_explicit_client() {
+        let (state, dir) = test_web_state().await;
+        let mut config = sqlite_config("visibility", &dir.join("visibility.db").to_string_lossy());
+        config.show_user_admin = None;
+        state.app.storage.save_connections(&[config.clone()]).await.unwrap();
+        let _ = load_connections(State(state.clone()), HeaderMap::new(), Query(super::LoadConnectionsQuery::default()))
+            .await
+            .unwrap();
+        assert_eq!(state.app.storage.load_connections().await.unwrap()[0].show_user_admin, None);
+        let _ = load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(super::LoadConnectionsQuery { legacy_sidebar_show_user_admin: Some(false) }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.app.storage.load_connections().await.unwrap()[0].show_user_admin, Some(false));
+        config.show_user_admin = Some(true);
+        state.app.storage.save_connections(&[config]).await.unwrap();
+        let _ = load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(super::LoadConnectionsQuery { legacy_sidebar_show_user_admin: Some(false) }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.app.storage.load_connections().await.unwrap()[0].show_user_admin, Some(true));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn load_connections_drops_cached_pool_for_updated_config() {
         let (state, dir) = test_web_state().await;
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
@@ -2756,7 +2799,9 @@ done
             })
             .await;
 
-        let result = load_connections(State(state.clone()), HeaderMap::new()).await;
+        let result =
+            load_connections(State(state.clone()), HeaderMap::new(), Query(super::LoadConnectionsQuery::default()))
+                .await;
         assert!(result.is_ok());
 
         let configs = state.app.configs.read().await;

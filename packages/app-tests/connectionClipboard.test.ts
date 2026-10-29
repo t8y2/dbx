@@ -44,7 +44,7 @@ async function withConnectionStore(initialConnections: ConnectionConfig[], initi
 
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
-    if (url === "/api/connection/list") {
+    if (url.split("?")[0] === "/api/connection/list") {
       return new Response(JSON.stringify(savedConnections), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     if (url === "/api/layout/sidebar") {

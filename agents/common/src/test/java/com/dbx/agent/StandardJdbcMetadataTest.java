@@ -801,6 +801,37 @@ class StandardJdbcMetadataTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource(value = {
+        "/|A_B|A/_B",
+        "/|A%B|A/%B",
+        "/|A/B_%|A//B/_/%",
+        "\\|A\\B_%|A\\\\B\\_\\%",
+        "/|ACCOUNTS|ACCOUNTS",
+        "''|A_B|A_B"
+    }, delimiter = '|')
+    void completionEscapesExactParentTable(String escape, String table, String expectedPattern) {
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, (method, args) -> {
+            switch (method.getName()) {
+                case "getSearchStringEscape": return escape;
+                case "getColumns":
+                    assertEquals(expectedPattern, args[2]);
+                    assertEquals("ID%", args[3]);
+                    return rows(row("TABLE_NAME", table, "COLUMN_NAME", "ID", "TYPE_NAME", "INTEGER"));
+                default: return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = proxy(Connection.class, (method, args) ->
+            "getMetaData".equals(method.getName()) ? meta : defaultValue(method.getReturnType()));
+        CompletionAssistantRequest request = request("sales", "APP", "ID", Collections.singletonList(CompletionAssistantObjectKind.COLUMN), table);
+
+        CompletionAssistantResponse result = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(conn, profile, "sales", request);
+
+        assertEquals(1, result.getCandidates().size());
+        assertEquals("ID", result.getCandidates().get(0).getName());
+        assertEquals(table, result.getCandidates().get(0).getParent_name());
+    }
+
     private static Connection connection(
         ResultSet schemas,
         ResultSet tables,

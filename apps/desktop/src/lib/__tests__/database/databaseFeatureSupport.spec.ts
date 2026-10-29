@@ -364,6 +364,10 @@ describe("supportsTableImport", () => {
   it("enables openGauss table import", () => {
     expect(supportsTableImport("opengauss")).toBe(true);
   });
+
+  it("enables SAP HANA table import", () => {
+    expect(supportsTableImport("saphana")).toBe(true);
+  });
 });
 
 describe("supportsFieldLineage", () => {

@@ -44,32 +44,111 @@ const BASE_KEY_BY_CODE: Record<string, string> = {
   Comma: ",",
   Period: ".",
   Slash: "/",
+  NumpadDivide: "/",
+  NumpadMultiply: "*",
+  NumpadSubtract: "-",
+  NumpadAdd: "+",
+  NumpadDecimal: ".",
+  Numpad0: "0",
+  Numpad1: "1",
+  Numpad2: "2",
+  Numpad3: "3",
+  Numpad4: "4",
+  Numpad5: "5",
+  Numpad6: "6",
+  Numpad7: "7",
+  Numpad8: "8",
+  Numpad9: "9",
+};
+
+const CJK_OR_MUTATED_PUNCTUATION: Record<string, string> = {
+  "、": "/",
+  "·": "`",
+  "【": "[",
+  "】": "]",
+  "。": ".",
+  "，": ",",
+  "；": ";",
+  "：": ";",
+  "“": "'",
+  "”": "'",
+  "‘": "'",
+  "’": "'",
+  Divide: "/",
+  Multiply: "*",
+  Subtract: "-",
+  Add: "+",
+  Decimal: ".",
+  "÷": "/",
 };
 
 /**
- * The unshifted character for a shifted punctuation/digit press, or null when
- * the event is not one. Mirrors CodeMirror's `base[event.keyCode]` table, which
- * is what its keymap resolves `Shift-` bindings against.
+ * Physical unshifted character for a key press, or null when not applicable.
+ * Handles shifted punctuation/digit presses (mirroring CodeMirror keymap resolution),
+ * physical Slash / NumpadDivide, IME placeholders (Process / Unidentified), and
+ * CJK punctuation emitted by active input methods on Windows.
  */
-function baseKeyForShiftedEvent(event: ShortcutLikeEvent): string | null {
-  if (!event.shiftKey || event.key.length !== 1) return null;
-  const baseKey = BASE_KEY_BY_CODE[event.code ?? ""];
-  return baseKey && baseKey !== event.key ? baseKey : null;
+function baseKeyForEvent(event: ShortcutLikeEvent): string | null {
+  const code = event.code ?? "";
+
+  // Shifted punctuation/digit press (e.g. "?" on Slash -> "/", "!" on Digit1 -> "1")
+  if (event.shiftKey && event.key && event.key.length === 1) {
+    const baseKey = BASE_KEY_BY_CODE[code];
+    if (baseKey && baseKey !== event.key) return baseKey;
+  }
+
+  // Physical slash or numpad divide always resolves to "/"
+  if (code === "Slash" || code === "NumpadDivide") {
+    return "/";
+  }
+
+  // Known deformed or CJK punctuation produced by the physical key
+  if (event.key && CJK_OR_MUTATED_PUNCTUATION[event.key]) {
+    return CJK_OR_MUTATED_PUNCTUATION[event.key];
+  }
+
+  // IME placeholder key (Process / Unidentified) with recognized code
+  if (event.key === "Process" || event.key === "Unidentified") {
+    if (BASE_KEY_BY_CODE[code]) return BASE_KEY_BY_CODE[code];
+  }
+
+  // Numpad named keys like "Divide", "Multiply", "Add", etc.
+  if (code.startsWith("Numpad") && BASE_KEY_BY_CODE[code]) {
+    return BASE_KEY_BY_CODE[code];
+  }
+
+  return null;
 }
 
 function matchesShortcutKey(event: ShortcutLikeEvent, key: string, platform = globalThis.navigator?.platform || ""): boolean {
-  if (normalizeKey(event.key) === normalizeKey(key)) return true;
-  // Shortcuts store the unshifted character for shifted punctuation/digits (see
-  // baseKeyForShiftedEvent), so match those against the physical key too.
-  if (baseKeyForShiftedEvent(event) === normalizeKey(key)) return true;
+  const normalizedTarget = normalizeKey(key);
+  if (normalizeKey(event.key) === normalizedTarget) return true;
+
+  // Match against physical key / unshifted base key (shifted punctuation,
+  // Slash / NumpadDivide, IME Process / CJK punctuation, numpad keys)
+  const baseKey = baseKeyForEvent(event);
+  if (baseKey && normalizeKey(baseKey) === normalizedTarget) return true;
+
+  // Slash / NumpadDivide physical key match for "/"
+  if (normalizedTarget === "/" && (event.code === "Slash" || event.code === "NumpadDivide")) {
+    return true;
+  }
+
   // KeyboardEvent.code 回退：event.key 随布局/修饰键变形时按物理键位匹配
   // （macOS Option+字母 → 变形字符如 ⌥W="∑"；俄文等非拉丁布局 → "Ц"）。
   // 仅限 Alt 组合键场景
-  if (!event.altKey || !/^Key[A-Z]$/.test(event.code ?? "") || !/^[A-Z]$/i.test(key)) return false;
-  // 非 macOS 的 Ctrl+Alt 是 AltGr 特征：用户可能在输入字符（如波兰语
-  // AltGr+W → "ł"），按 code 强制匹配会让全局快捷键在打字时误触发
-  if (!isMacShortcutPlatform(platform) && event.ctrlKey) return false;
-  return event.code!.slice(3).toLowerCase() === key.toLowerCase();
+  if (event.altKey && /^Key[A-Z]$/.test(event.code ?? "") && /^[A-Z]$/i.test(key)) {
+    // 非 macOS 的 Ctrl+Alt 是 AltGr 特征：用户可能在输入字符（如波兰语
+    // AltGr+W → "ł"），按 code 强制匹配会让全局快捷键在打字时误触发
+    if (!isMacShortcutPlatform(platform) && event.ctrlKey) return false;
+    return event.code!.slice(3).toLowerCase() === key.toLowerCase();
+  }
+
+  if ((event.key === "Process" || event.key === "Unidentified") && /^Key[A-Z]$/.test(event.code ?? "") && /^[A-Z]$/i.test(key)) {
+    return event.code!.slice(3).toLowerCase() === key.toLowerCase();
+  }
+
+  return false;
 }
 
 function shortcutKeyName(key: string): string | null {
@@ -84,15 +163,17 @@ function shortcutKeyNameFromEvent(event: ShortcutLikeEvent, platform: string): s
   if (event.altKey && isMacShortcutPlatform(platform) && /^Key[A-Z]$/.test(event.code ?? "")) {
     return event.code!.slice(3);
   }
-  // Record "Shift+Mod+/" rather than "Shift+Mod+?" so the CodeMirror binding
-  // ("Shift-Ctrl-/") is one the keymap actually resolves for this key press.
-  const baseKey = baseKeyForShiftedEvent(event);
+  const baseKey = baseKeyForEvent(event);
   if (baseKey) return shortcutKeyName(baseKey);
+  if ((event.key === "Process" || event.key === "Unidentified") && /^Key[A-Z]$/.test(event.code ?? "")) {
+    return event.code!.slice(3).toUpperCase();
+  }
   return shortcutKeyName(event.key);
 }
 
 export function eventToShortcut(event: ShortcutLikeEvent, platform = globalThis.navigator?.platform || ""): string | null {
-  if (event.isComposing) return null;
+  const isSlashShortcut = (event.code === "Slash" || event.code === "NumpadDivide") && (!!event.ctrlKey || !!event.metaKey);
+  if (event.isComposing && !isSlashShortcut) return null;
 
   const key = shortcutKeyNameFromEvent(event, platform);
   if (!key) return null;
@@ -140,7 +221,8 @@ export function matchesModifierOnlyShortcut(event: Omit<ShortcutLikeEvent, "key"
 }
 
 export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string, platform = globalThis.navigator?.platform || ""): boolean {
-  if (event.isComposing || !shortcut) return false;
+  const isSlashShortcut = (event.code === "Slash" || event.code === "NumpadDivide") && (!!event.ctrlKey || !!event.metaKey);
+  if ((event.isComposing && !isSlashShortcut) || !shortcut) return false;
   const parts = parseShortcutParts(shortcut);
   const key = parts[parts.length - 1] ?? "";
   const modifiers = new Set(parts.slice(0, -1));

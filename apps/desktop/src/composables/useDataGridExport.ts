@@ -1946,11 +1946,34 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   async function exportMemoryResultSheetsXlsx(sheetsToExport: DataGridExportSheet[] | undefined, includeSqlSheet: boolean): Promise<boolean> {
     if (!isTauriRuntime()) return false;
-    const sheets = (sheetsToExport ?? allExportResults?.value ?? []).filter((sheet) => sheet.result.columns.length > 0);
+    let sheets = (sheetsToExport ?? allExportResults?.value ?? []).filter((sheet) => sheet.result.columns.length > 0);
     if (!sheets.length) return true;
+    // 导出全部结果集（sheetsToExport === undefined）时，当前激活结果集可能只持
+    // 有当前页：SQL 分页会把 tab.result 替换为当前页，而 allExportResults 直接
+    // 引用它（snapshotResult === props.result === 激活结果集）。此时重跑一次查询
+    // 拉全量，避免"导出所有数据"实际只导出当前页（#13726）。
+    const completedResultResults = new Set<QueryResult>();
+    if (sheetsToExport === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
+      const activeIndex = sheets.findIndex((sheet) => sheet.result === options.snapshotResult?.value);
+      if (activeIndex >= 0) {
+        // 用户要求全部数据：补全查询失败（含取消）时中止导出而不是静默回退到
+        // 当前页快照，否则会产出残缺文件；错误向上传播，与单结果导出路径
+        // （resultToExport 中的 fullExportResult 调用）一致，由统一 toast 提示。
+        const fullResult = await fullExportResult();
+        if (fullResult?.columns.length) {
+          sheets = sheets.map((sheet, index) => (index === activeIndex ? { ...sheet, result: fullResult } : sheet));
+          completedResultResults.add(fullResult);
+        }
+      }
+    }
+    // 补全后的激活 sheet 是重建对象（result 替换为全量结果），不再与
+    // allExportResults 中任一原对象共享引用，但其"仍是当前激活结果集"已由
+    // sourceCurrent() 通过 snapshotResult 引用一致性保证，故在此豁免，避免
+    // 补全后误报 "Export result context changed"。
+    const isSheetInAllExportResults = (sheet: DataGridExportSheet) => completedResultResults.has(sheet.result) || !!allExportResults?.value?.some((origin) => origin === sheet || origin.result === sheet.result);
     const sourceCurrent = captureExportConfirmationSource();
     const sources = sheets.map((sheet) => ({ sheet, result: sheet.result, rows: sheet.result.rows }));
-    const isCurrent = () => sourceCurrent() && sources.every(({ sheet, result, rows }) => sheet.result === result && sheet.result.rows === rows && (sheetsToExport !== undefined || !!allExportResults?.value?.includes(sheet)));
+    const isCurrent = () => sourceCurrent() && sources.every(({ sheet, result, rows }) => sheet.result === result && sheet.result.rows === rows && (sheetsToExport !== undefined || isSheetInAllExportResults(sheet)));
     const settings = { ...useSettingsStore().editorSettings };
     const title = currentExportTitle();
     const fileName = exportFileName("query-results", "xlsx", { allResults: true });
@@ -1985,7 +2008,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const resourcesCurrent = () =>
       !scopeDisposed &&
       sourceCurrent() &&
-      lobSources.every(({ sheet, result, rows }) => sheet.result === result && result.rows === rows && (sheetsToExport !== undefined || !!allExportResults?.value?.includes(sheet))) &&
+      lobSources.every(({ sheet, result, rows }) => sheet.result === result && result.rows === rows && (sheetsToExport !== undefined || isSheetInAllExportResults(sheet))) &&
       resources.every((resource) => {
         if (!connections) return true;
         const config = connections.getConfig(resource.connectionId);
@@ -2142,8 +2165,27 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
     await runExclusiveExport(async () => {
       try {
-        const sheets = (sheetsToExport ?? allExportResults?.value ?? []).filter((sheet) => sheet.result.columns.length > 0);
+        let sheets = (sheetsToExport ?? allExportResults?.value ?? []).filter((sheet) => sheet.result.columns.length > 0);
         if (sheets.length === 0) return;
+
+        // 与 exportMemoryResultSheetsXlsx 相同：导出全部结果集且激活结果集分页
+        // 未完整时，重跑查询拉全量，避免只导出当前页（#13726）。
+        const completedResultResults = new Set<QueryResult>();
+        if (sheetsToExport === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
+          const activeIndex = sheets.findIndex((sheet) => sheet.result === options.snapshotResult?.value);
+          if (activeIndex >= 0) {
+            // 与 exportMemoryResultSheetsXlsx 相同：补全失败（含取消）时中止导出，
+            // 不静默回退到当前页，错误由外层统一 toast 报错。
+            const fullResult = await fullExportResult();
+            if (fullResult?.columns.length) {
+              sheets = sheets.map((sheet, index) => (index === activeIndex ? { ...sheet, result: fullResult } : sheet));
+              completedResultResults.add(fullResult);
+            }
+          }
+        }
+        // 补全后的激活 sheet 是重建对象，不再与 allExportResults 共享引用，但
+        // snapshotResult 引用一致性已保证其仍为当前激活结果集，故豁免成员检查。
+        const isSheetInAllExportResults = (sheet: DataGridExportSheet) => completedResultResults.has(sheet.result) || !!allExportResults?.value?.some((origin) => origin === sheet || origin.result === sheet.result);
 
         let outputPath = exportFileName("query-results", "xlsx", { allResults: true });
         if (isTauriRuntime()) {
@@ -2161,7 +2203,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         const worksheets = [];
         for (const sheet of sheets) {
           const sourceRows = sheet.result.rows;
-          const rows = await materializeExportSnapshot(sheet.result, () => sheet.result.rows === sourceRows && (sheetsToExport !== undefined || !!allExportResults?.value?.includes(sheet)));
+          const rows = await materializeExportSnapshot(sheet.result, () => sheet.result.rows === sourceRows && (sheetsToExport !== undefined || isSheetInAllExportResults(sheet)));
           if (sheet.result.large_value_refs?.length || sheet.result.large_value_cells?.some((cell) => cell.value_ref)) assertSnapshotXlsxCellLengths(rows);
           worksheets.push({
             sheetName: sheet.sheetName,
@@ -2421,7 +2463,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (exportCancelHandler) {
       exportCancelHandler.value = () => tracker.cancelTask(exportId);
     }
-    const ownsView = () => !scopeDisposed && currentExportViewId === exportId;
+    const ownsView = () => !task.removed && !scopeDisposed && currentExportViewId === exportId;
     const updateView = () => {
       if (ownsView()) {
         if (exportProgressState) exportProgressState.value = { ...exportProgressState.value, status: task.status, startedAt: task.startedAt, finishedAt: task.finishedAt, errorMessage: task.errorMessage };
@@ -2470,7 +2512,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         });
         if (!terminalSeen) tracker.updateTableExportTask(exportId, progress);
         terminalSeen ||= progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled";
-        if (progress.status === "Done") {
+        if (progress.status === "Done" && !task.removed) {
           notifyExportSuccess(openAfterExport ? undefined : outputPath);
           if (openAfterExport && isTauriRuntime()) await api.openQueryResultTempFile(outputPath);
         }

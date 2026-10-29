@@ -3519,6 +3519,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -12543,16 +12545,11 @@ async fn get_object_source_once(
             }
         } else {
             match pool_handle.as_ref().ok_or("Pool not found")? {
-                PoolKind::Mysql(pool, MysqlMode::OceanBaseOracle)
-                    if matches!(object_type, db::ObjectSourceKind::Trigger) =>
-                {
-                    if options.is_exact() {
+                PoolKind::Mysql(pool, MysqlMode::OceanBaseOracle) => {
+                    if options.is_exact() && matches!(object_type, db::ObjectSourceKind::Trigger) {
                         return oracle_triggers::pool_reader(pool.clone()).await.source(schema, name).await;
                     }
-                    first_string_cell(
-                        db::mysql::execute_query(pool, &oracle_object_source_sql(schema, name, &object_type), true)
-                            .await?,
-                    )?
+                    db::ob_oracle::get_object_source(pool, schema, name, &object_type).await?
                 }
                 PoolKind::Mysql(pool, _) => {
                     mysql_object_source(pool, mysql_table_metadata_catalog(database, schema), name, &object_type)

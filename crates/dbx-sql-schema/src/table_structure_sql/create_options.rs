@@ -5,6 +5,22 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct CreateTableDialectOptions {
     pub starrocks: Option<StarRocksCreateOptions>,
+    pub postgres_foreign_table: Option<PostgresForeignTableCreateOptions>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresForeignTableCreateOptions {
+    pub server: String,
+    #[serde(default)]
+    pub options: Vec<PostgresForeignTableOption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresForeignTableOption {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -9,13 +9,12 @@ struct Fixture {
     channel: PlDebugAgentChannel,
 }
 
-impl Fixture {
-    async fn spawn(mode: &str) -> Self {
-        let directory = tempfile::tempdir().unwrap();
-        let script = directory.path().join("debug-agent.py");
-        std::fs::write(
-            &script,
-            r#"import json, os, pathlib, sys, time
+fn debug_agent_launch(mode: &str) -> (tempfile::TempDir, AgentLaunchSpec) {
+    let directory = tempfile::tempdir().unwrap();
+    let script = directory.path().join("debug-agent.py");
+    std::fs::write(
+        &script,
+        r#"import json, os, pathlib, sys, time
 root = pathlib.Path(sys.argv[1]); mode = sys.argv[2]
 pending = []; methods = []; cancel_count = 0; opens = 0
 def reply(req, result):
@@ -58,19 +57,38 @@ for line in sys.stdin:
         reply(req, {'running':bool(pending),'pending':len(pending),'genericCancels':cancel_count,
           'opens':opens,'agentSessionId':params.get('agentSessionId'),'methods':methods,'pid':os.getpid()})
 "#,
-        )
-        .unwrap();
-        let python = if cfg!(windows) { "python" } else { "python3" };
-        let runtime = AgentRuntimeClient::spawn(
-            AgentLaunchSpec::new(python).with_args([
-                script.to_string_lossy().to_string(),
-                directory.path().to_string_lossy().to_string(),
-                mode.to_string(),
-            ]),
-            "test",
-        )
-        .await
-        .unwrap();
+    )
+    .unwrap();
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let launch = AgentLaunchSpec::new(python).with_args([
+        script.to_string_lossy().to_string(),
+        directory.path().to_string_lossy().to_string(),
+        mode.to_string(),
+    ]);
+    (directory, launch)
+}
+
+impl Fixture {
+    async fn spawn(mode: &str) -> Self {
+        let (directory, launch) = debug_agent_launch(mode);
+        let runtime = AgentRuntimeClient::spawn(launch, "test").await.unwrap();
+        Self::assemble(directory, runtime)
+    }
+
+    /// The plain `AgentRuntimeClient::spawn` path leaves `startup_exit` unset,
+    /// so exit confirmation only exists on the startup-observed production
+    /// path; exit-confirmation tests must spawn through it.
+    async fn spawn_observed(mode: &str) -> Self {
+        let (directory, launch) = debug_agent_launch(mode);
+        let (startup, _cleanup) = crate::startup_cleanup::StartupCleanup::new_pair();
+        let runtime =
+            AgentRuntimeClient::spawn_before_observed(launch, "test", Instant::now() + TEST_TIMEOUT, &startup)
+                .await
+                .unwrap();
+        Self::assemble(directory, runtime)
+    }
+
+    fn assemble(directory: tempfile::TempDir, runtime: Arc<AgentRuntimeClient>) -> Self {
         runtime.increment_session_count();
         let channel = PlDebugAgentChannel::from_reserved(
             runtime.clone(),
@@ -364,6 +382,19 @@ async fn pl_debug_process_exit_requires_the_child_status_not_only_a_reaper_flag(
     assert!(!fixture.channel.wait_for_exit(Duration::from_millis(30)).await);
     assert!(fixture.channel.is_available());
     fixture.runtime.child_reaped.store(false, Ordering::Release);
+}
+
+#[tokio::test]
+async fn pl_debug_confirmed_process_exit_survives_child_lock_contention() {
+    use futures::FutureExt;
+
+    let fixture = Fixture::spawn_observed("normal").await;
+    fixture.channel.fail_stop();
+    assert!(fixture.channel.wait_for_exit(TEST_TIMEOUT).await);
+
+    // Another exit observer/reaper can own the lock after exit was confirmed.
+    let _child = fixture.runtime.child.lock().unwrap();
+    assert_eq!(fixture.channel.wait_for_exit(Duration::ZERO).now_or_never(), Some(true));
 }
 
 #[tokio::test]

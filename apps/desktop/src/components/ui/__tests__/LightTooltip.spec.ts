@@ -136,3 +136,120 @@ describe("LightTooltip nowrap overflow", () => {
     app.unmount();
   });
 });
+
+describe("LightTooltip positioning with clipping ancestors", () => {
+  it("anchors right-side tooltip to the clipping container boundary when trigger is wider (#13717)", async () => {
+    vi.useFakeTimers();
+
+    const root = defineComponent({
+      setup() {
+        return () =>
+          h(
+            "div",
+            { id: "scroll-container", style: { overflowX: "auto" } },
+            h(
+              LightTooltip,
+              { text: "Connection Details", side: "right", sideOffset: 8, delay: 0 },
+              {
+                default: () => h("div", { id: "tree-row" }, "Wide tree row"),
+              },
+            ),
+          );
+      },
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const app = createApp(root);
+    app.mount(container);
+
+    const scroller = container.querySelector<HTMLElement>("#scroll-container");
+    const row = container.querySelector<HTMLElement>("#tree-row");
+    expect(scroller).toBeTruthy();
+    expect(row).toBeTruthy();
+
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.id === "scroll-container") {
+        return { left: 0, right: 260, top: 50, bottom: 600, width: 260, height: 550 } as DOMRect;
+      }
+      if (this.id === "tree-row") {
+        return { left: 0, right: 600, top: 100, bottom: 128, width: 600, height: 28 } as DOMRect;
+      }
+      if (this.getAttribute("role") === "tooltip") {
+        return { left: 268, right: 388, top: 100, bottom: 128, width: 120, height: 28 } as DOMRect;
+      }
+      return { left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0 } as DOMRect;
+    });
+
+    vi.spyOn(row!, "matches").mockImplementation((selector) => selector === ":hover");
+    row?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await vi.runAllTimersAsync();
+    await nextTick();
+
+    const tooltip = document.querySelector<HTMLElement>("[role=tooltip]");
+    expect(tooltip).toBeTruthy();
+    // Clipped right edge is 260, offset is 8 -> left: 268px (NOT 608px)
+    expect(tooltip!.style.left).toBe("268px");
+    expect(tooltip!.style.top).toBe("114px");
+
+    app.unmount();
+  });
+
+  it("centers top-side tooltip over visible trigger width inside clipping container", async () => {
+    vi.useFakeTimers();
+
+    const root = defineComponent({
+      setup() {
+        return () =>
+          h(
+            "div",
+            { id: "scroll-container", style: { overflowX: "auto" } },
+            h(
+              LightTooltip,
+              { text: "Table Header", side: "top", sideOffset: 8, delay: 0 },
+              {
+                default: () => h("div", { id: "tree-row" }, "Wide header"),
+              },
+            ),
+          );
+      },
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const app = createApp(root);
+    app.mount(container);
+
+    const scroller = container.querySelector<HTMLElement>("#scroll-container");
+    const row = container.querySelector<HTMLElement>("#tree-row");
+    expect(scroller).toBeTruthy();
+    expect(row).toBeTruthy();
+
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.id === "scroll-container") {
+        return { left: 0, right: 260, top: 50, bottom: 600, width: 260, height: 550 } as DOMRect;
+      }
+      if (this.id === "tree-row") {
+        return { left: 0, right: 600, top: 100, bottom: 128, width: 600, height: 28 } as DOMRect;
+      }
+      if (this.getAttribute("role") === "tooltip") {
+        return { left: 100, right: 160, top: 64, bottom: 92, width: 60, height: 28 } as DOMRect;
+      }
+      return { left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0 } as DOMRect;
+    });
+
+    vi.spyOn(row!, "matches").mockImplementation((selector) => selector === ":hover");
+    row?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await vi.runAllTimersAsync();
+    await nextTick();
+
+    const tooltip = document.querySelector<HTMLElement>("[role=tooltip]");
+    expect(tooltip).toBeTruthy();
+    // Visible trigger rect has left: 0, right: 260 -> center is 130 (NOT 300)
+    // top: 100 - 8 = 92px
+    expect(tooltip!.style.left).toBe("130px");
+    expect(tooltip!.style.top).toBe("92px");
+
+    app.unmount();
+  });
+});

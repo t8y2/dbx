@@ -645,6 +645,25 @@ describe("TDengine table hierarchy", () => {
     expect(nodes[0].children?.[0].children?.map((node) => node.label)).toEqual(["device_a", "device_b"]);
   });
 
+  it("keeps all supertables visible at the root when a supertable has many child tables (#13728)", () => {
+    const childTables = Array.from({ length: 998 }, (_, i) => ({
+      name: `sub_${String(i).padStart(4, "0")}`,
+      table_type: "TABLE",
+      comment: null,
+      parent_name: "stable_b",
+    }));
+    const tables: TableInfo[] = [{ name: "stable_a", table_type: "STABLE", comment: null }, { name: "stable_b", table_type: "STABLE", comment: null }, { name: "stable_c", table_type: "STABLE", comment: null }, ...childTables.slice(0, 997)];
+
+    const nodes = buildTableTreeNodes({ ...context, tables });
+
+    expect(nodes.map((node) => node.label)).toEqual(["stable_a", "stable_b", "stable_c"]);
+    expect(nodes[1].children?.[0]).toMatchObject({
+      type: "group-partitions",
+      label: "tree.childTables",
+      objectCount: 997,
+    });
+  });
+
   it("attaches child tables loaded on later pages to the existing supertable", () => {
     const firstPage = buildTableTreeNodes({
       ...context,

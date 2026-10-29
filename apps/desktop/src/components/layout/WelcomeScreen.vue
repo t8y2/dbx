@@ -50,8 +50,8 @@ const importSourceItems = computed(() => [
   { value: "navicat", label: t("sidebar.importNavicat") },
   { value: "dbeaver", label: t("sidebar.importDbeaver") },
   { value: "datagrip", label: t("sidebar.importDatagrip") },
-  { value: "rdm", label: t("sidebar.importRdm") },
-  { value: "another-redis", label: t("sidebar.importAnotherRedis") },
+  { value: "rdm", label: t("sidebar.importRdm"), tooltip: "RedisDesktopManager" },
+  { value: "another-redis", label: t("sidebar.importAnotherRedis"), tooltip: "Another Redis Desktop Manager" },
 ]);
 
 function selectImportSource(source: string) {

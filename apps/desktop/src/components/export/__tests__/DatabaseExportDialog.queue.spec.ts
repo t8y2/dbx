@@ -207,3 +207,35 @@ it("does not release the queue when rollback completion is unknown", async () =>
   expect(next).not.toHaveBeenCalled();
   expect(tracker.tasks.value[0]!.errorMessage).toBe("rollback reply lost");
 });
+
+it.each([false, true])("recovers the UI lease without rolling back a still-running snapshot (batch: %s)", async (batch) => {
+  const tracker = useExportTracker();
+  const dialog = await mountDialog(batch);
+  await dialog.start();
+  await vi.waitFor(() => expect(operations).toHaveLength(1));
+  const root = tracker.tasks.value[0]!;
+  const next = vi.fn().mockResolvedValue("settled");
+  tracker.submitExportTask(tracker.addTask("next", "csv", "different-output.csv"), "queued", next);
+  vi.useFakeTimers();
+  try {
+    await tracker.cancelTask(root.exportId);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(root.canRecoverCancellation).toBe(true);
+    expect(mocks.rollback).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
+    tracker.recoverCancelledTask(root.exportId);
+    expect(next).toHaveBeenCalledOnce();
+    expect(mocks.rollback).not.toHaveBeenCalled();
+    expect(operations).toHaveLength(1);
+    mocks.toast.mockClear();
+    terminal(0, "Done");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.rollback).toHaveBeenCalledOnce();
+    expect(operations).toHaveLength(1);
+    expect(next).toHaveBeenCalledOnce();
+    expect(tracker.tasks.value).not.toContain(root);
+    expect(mocks.toast).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
+});

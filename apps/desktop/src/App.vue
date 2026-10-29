@@ -39,6 +39,7 @@ import { enforceRightSidebarPanelExclusivity, RIGHT_SIDEBAR_PANEL_IDS, transitio
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useToast } from "@/composables/useToast";
+import ToastHost from "@/components/common/ToastHost.vue";
 import { useTheme } from "@/composables/useTheme";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
 import { canDownloadAndInstallUpdate, useAppUpdater } from "@/composables/useAppUpdater";
@@ -324,7 +325,7 @@ connectionStore.setBeforeConnectHandler(async (config) => {
     await connectionStore.updateConnection(config);
   }
 });
-const { message: toastMessage, visible: toastVisible, action: toastAction, toast } = useToast();
+const { toast } = useToast();
 const { isDark, themeMode, applyTheme, setThemeMode, writeRootToken } = useTheme();
 const { activeCount: activeBackgroundTaskCount, tasks: backgroundTasks, cancelTask: cancelBackgroundTask } = useExportTracker();
 const tableCopyTasks = useTableCopyTaskStore();
@@ -6015,14 +6016,7 @@ onUnmounted(() => {
           }"
           @animationend="finishSqlLibraryFlyAnimation(sqlLibraryFlyAnimation.id)"
         />
-        <Transition name="toast">
-          <div v-if="toastVisible" class="fixed bottom-6 inset-x-0 mx-auto z-99999 w-max max-w-[90vw] sm:max-w-3xl px-4 py-2 rounded-lg bg-foreground text-background-solid text-sm shadow-lg select-text whitespace-pre-wrap break-words">
-            <span>{{ toastMessage }}</span>
-            <button v-if="toastAction" type="button" class="ml-3 shrink-0 rounded border border-background/40 bg-background/10 px-2 py-0.5 text-xs font-medium hover:bg-background/20" @click="toastAction.onClick()">
-              {{ toastAction.label }}
-            </button>
-          </div>
-        </Transition>
+        <ToastHost />
       </Teleport>
 
       <Dialog
@@ -6163,19 +6157,12 @@ onUnmounted(() => {
 }
 
 .sql-library-fly-icon {
+  --sql-library-fly-from-x: 0px;
+  --sql-library-fly-from-y: 0px;
+  --sql-library-fly-to-x: 0px;
+  --sql-library-fly-to-y: 0px;
   animation: sql-library-fly-in 560ms cubic-bezier(0.45, 0, 0.55, 1) both;
   will-change: transform, opacity;
-}
-
-.toast-enter-active,
-.toast-leave-active {
-  transition: 0.25s ease;
-  transition-property: transform, opacity;
-}
-.toast-enter-from,
-.toast-leave-to {
-  opacity: 0;
-  transform: translateY(100%) scale(0.95);
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -71,7 +71,7 @@ async function cancelSidebarDangerDialogRunning() {
     // Current cancelRunning implementations already swallow their own
     // rejections; this is a defensive fallback so the user still gets
     // feedback if a future implementation throws instead.
-    toast(t("contextMenu.tableOperationFailed", { message: error?.message || String(error) }), 5000);
+    toast(t("contextMenu.tableOperationFailed", { message: error?.message || String(error) }), { persistent: true });
   } finally {
     sidebarDangerDialogCancelling.value = false;
   }

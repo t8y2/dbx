@@ -7993,7 +7993,8 @@ export default withEnglishFallback({
     batchRowsHint: "Linhas geradas e inseridas por envio; lotes grandes são divididos automaticamente",
     cancelInsert: "Cancelar inserção",
     cancelledLabel: "Cancelado; as linhas já gravadas permanecem na tabela",
-    partitionValuesUnsupported: "Não é possível gerar dados com segurança para a chave de partição ({expression}) da tabela {table}. Verifique a definição de partição e a configuração do gerador: os valores solicitados podem exceder o intervalo das partições existentes, ou a expressão de partição ainda não tem suporte à inferência automática.",
+    partitionValuesUnsupported:
+      "Não é possível gerar dados com segurança para a chave de partição ({expression}) da tabela {table}. Verifique a definição de partição e a configuração do gerador: os valores solicitados podem exceder o intervalo das partições existentes, ou a expressão de partição ainda não tem suporte à inferência automática.",
   },
   tableToolbox: {
     browserFiltered: "Visualização web (resultado atual)",

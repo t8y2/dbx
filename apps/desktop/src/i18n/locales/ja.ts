@@ -8014,7 +8014,8 @@ export default withEnglishFallback({
     batchRowsHint: "1 回で生成・挿入する行数。上限を超える場合は自動的に分割されます",
     cancelInsert: "挿入をキャンセル",
     cancelledLabel: "キャンセルしました。書き込み済みの行はテーブルに残ります",
-    partitionValuesUnsupported: "テーブル {table} のパーティションキー（{expression}）に対して安全にデータを生成できません。パーティション定義とジェネレーター設定を確認してください。要求された値が既存のパーティション範囲を超えているか、パーティション式が自動推論にまだ対応していない可能性があります。",
+    partitionValuesUnsupported:
+      "テーブル {table} のパーティションキー（{expression}）に対して安全にデータを生成できません。パーティション定義とジェネレーター設定を確認してください。要求された値が既存のパーティション範囲を超えているか、パーティション式が自動推論にまだ対応していない可能性があります。",
   },
   tableToolbox: {
     browserFiltered: "ウェブプレビュー（現在の結果）",

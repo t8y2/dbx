@@ -234,6 +234,40 @@ describe("UpdateDialog active task guard", () => {
   });
 });
 
+describe("UpdateDialog prepared package without a remote update (#13562)", () => {
+  const upToDateInfo = {
+    current_version: "0.5.61",
+    latest_version: "0.5.61",
+    update_available: false,
+    portable_mode: false,
+    manual_update_only: false,
+    release_name: "DBX v0.5.61",
+    release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.61",
+    release_notes: "",
+  };
+
+  it("keeps the install action reachable when the remote reports no update", async () => {
+    const installDownloaded = vi.fn(async () => {});
+    await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 }, installDownloaded, { updateInfo: upToDateInfo });
+
+    const button = installDownloadedButton();
+    expect(button).toBeDefined();
+    expect(button?.disabled).toBe(false);
+    button?.click();
+    await flushDialog();
+
+    expect(installDownloaded).toHaveBeenCalledOnce();
+  });
+
+  it("labels the prepared package with its own version", async () => {
+    await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 }, undefined, { updateInfo: upToDateInfo, updateDownloadedVersion: "0.5.62" });
+
+    expect(document.body.textContent).toContain("v0.5.62 is downloaded");
+    expect(document.body.textContent).not.toContain("DBX is up to date");
+    expect(document.body.textContent).not.toContain("v0.5.61 is downloaded");
+  });
+});
+
 describe("UpdateDialog download progress", () => {
   it("keeps the downloading button at a fixed width as progress changes", async () => {
     const { state } = await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: 9 });
@@ -410,6 +444,43 @@ describe("UpdateDialog release notes safety", () => {
     });
     expect(document.body.textContent).not.toContain("dbx-cnb-mirror");
     expect(document.body.textContent).not.toContain("<!--");
+  });
+});
+
+describe("UpdateDialog changelog", () => {
+  it("shows the shared changelog even when the current version has no update", async () => {
+    const checkUpdates = vi.fn();
+    updateMocks.fetchChangelog.mockResolvedValue({
+      updatedAt: "2026-10-28",
+      releases: [{ tag: "v0.5.60", name: "DBX v0.5.60", date: "2026-10-28", sections: [{ type: "fixed", title: "Fixed", items: [{ title: "A useful fix", desc: "Details of the fix" }] }] }],
+    });
+    await mountDialog(0, {}, undefined, { updateInfo: null, "onCheck-updates": checkUpdates });
+
+    const changelogTab = document.body.querySelector<HTMLButtonElement>('[data-update-tab="changelog"]');
+    expect(changelogTab).not.toBeNull();
+    changelogTab?.click();
+    await flushDialog();
+    buttonWithText("0.5.60")?.click();
+    await flushDialog();
+
+    expect(document.body.textContent).toContain("A useful fix");
+    expect(document.body.textContent).toContain("Details of the fix");
+    expect(downloadButton()).toBeUndefined();
+    const checkButton = buttonWithText(i18n.global.t("updates.check"));
+    expect(checkButton).toBeDefined();
+    checkButton?.click();
+    expect(checkUpdates).toHaveBeenCalledOnce();
+  });
+
+  it("keeps client update actions available after returning from the changelog", async () => {
+    const { downloadInBackground } = await mountDialog(0);
+    document.body.querySelector<HTMLButtonElement>('[data-update-tab="changelog"]')?.click();
+    await flushDialog();
+    expect(downloadButton()).toBeUndefined();
+    document.body.querySelector<HTMLButtonElement>('[data-update-tab="app"]')?.click();
+    await flushDialog();
+    downloadButton()?.click();
+    expect(downloadInBackground).toHaveBeenCalledOnce();
   });
 });
 

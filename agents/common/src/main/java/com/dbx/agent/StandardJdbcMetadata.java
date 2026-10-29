@@ -494,11 +494,14 @@ public final class StandardJdbcMetadata {
                 if (!completionTableKindAllowed(kind, kinds) || !completionNameMatches(name, request)) {
                     continue;
                 }
+                // An unscoped lookup must keep the owner returned by JDBC so
+                // alias completion can load columns from that physical table.
+                String tableSchema = blankToNull(rs.getString("TABLE_SCHEM"));
                 result.add(new CompletionAssistantCandidate(
                     name,
                     kind,
                     request.getDatabase(),
-                    schema,
+                    tableSchema != null ? tableSchema : schema,
                     null,
                     null,
                     rs.getString("REMARKS"),
@@ -521,7 +524,7 @@ public final class StandardJdbcMetadata {
         if (table == null || table.trim().isEmpty()) {
             return;
         }
-        try (ResultSet rs = meta.getColumns(catalog, blankToNull(schema), table, completionPattern(meta, request))) {
+        try (ResultSet rs = meta.getColumns(catalog, blankToNull(schema), escapeSchemaPattern(meta, table, true), completionPattern(meta, request))) {
             while (rs.next() && result.size() < limit) {
                 String name = rs.getString("COLUMN_NAME");
                 if (!completionNameMatches(name, request)) {

@@ -113,6 +113,14 @@ describe("query editor table reference drop", () => {
       databaseType: "postgres",
     })!;
     expect(tableReferenceInsertText(postgres, undefined, commaNewline)).toBe('id,\n"OrderNo",\n"select"');
+
+    const clickhouse = createColumnReferencePayload({
+      connectionId: "conn-1",
+      database: "app-db",
+      columnNames: ["id", "created_at", "姓名", "prewhere", "order", "col$1"],
+      databaseType: "clickhouse",
+    })!;
+    expect(tableReferenceInsertText(clickhouse, undefined, commaNewline)).toBe("id,\ncreated_at,\n`姓名`,\n`prewhere`,\n`order`,\n`col$1`");
   });
 
   it("uses columnNameSeparator from the payload for multi-column sidebar drag", () => {

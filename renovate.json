@@ -150,6 +150,13 @@
       ],
       "enabled": false,
       "description": "pnpm packageManager stays on the version the ci.yml action-setup steps pin (10.34.7); bump it manually together with those pins (#12479)"
+    },
+    {
+      "paths": [
+        "flake.nix"
+      ],
+      "enabled": false,
+      "description": "Nix hashes must be updated manually with the CI-computed value; renovate's local pnpm environment computes a different dbx-desktop-pnpm-deps hash"
     }
   ]
 }

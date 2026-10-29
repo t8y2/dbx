@@ -1,9 +1,10 @@
+import { createResultKeyLocator } from "./resultKeyLocator";
 import * as api from "@/lib/backend/api";
 import type { CellValue } from "./cellValue";
 import { buildDataGridContextFilterCondition } from "./dataGridSql";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
-import type { ColumnInfo, DatabaseType } from "@/types/database";
+import type { ColumnInfo, DatabaseType, QueryResult } from "@/types/database";
 
 export interface LegacyLargeValueContext {
   databaseType: DatabaseType | undefined;
@@ -12,6 +13,8 @@ export interface LegacyLargeValueContext {
   tableMeta: { catalog?: string; database?: string; schema?: string; tableName: string; tableType?: string; columns: ColumnInfo[]; primaryKeys: string[] } | undefined;
   sourceColumns: string[];
   rows: CellValue[][];
+  rawKeyCells?: QueryResult["raw_key_cells"];
+  requiresOriginalKeys?: boolean;
   identifierQuote: string | undefined;
   serverVersion: string | undefined;
   includeDatabaseName: boolean;
@@ -63,9 +66,18 @@ export function chunkLegacyLargeValueRequests(requests: LegacyLargeValueCellRequ
   return chunks;
 }
 
+function contextKeyLocator(context: LegacyLargeValueContext, indexes: number[], options: ReaderOptions) {
+  return createResultKeyLocator({ columns: context.sourceColumns, rows: context.rows, raw_key_cells: context.rawKeyCells, affected_rows: 0, execution_time_ms: 0 }, indexes, context.requiresOriginalKeys === true, options.translate("grid.largeValueOriginalKeyUnavailable"));
+}
+
 export async function legacyLargeValueRowPredicate(context: LegacyLargeValueContext, sourceIndex: number, primaryKeyIndexes: number[], options: ReaderOptions): Promise<string> {
   const row = context.rows[sourceIndex];
   if (!row) throw new Error(options.translate("grid.largeValueRowUnavailable"));
+  const keyValues = contextKeyLocator(context, primaryKeyIndexes, options).values(sourceIndex);
+  return legacyLargeValueKeyPredicate(context, keyValues, options);
+}
+
+async function legacyLargeValueKeyPredicate(context: LegacyLargeValueContext, keyValues: CellValue[], options: ReaderOptions): Promise<string> {
   const table = context.tableMeta!;
   const conditions = await Promise.all(
     table.primaryKeys.map((columnName, index) =>
@@ -75,7 +87,7 @@ export async function legacyLargeValueRowPredicate(context: LegacyLargeValueCont
         columnName,
         columnInfo: table.columns.find((column) => column.name.toLocaleLowerCase() === columnName.toLocaleLowerCase()),
         mode: "equals",
-        value: row[primaryKeyIndexes[index]!] ?? null,
+        value: keyValues[index]!,
       }),
     ),
   );
@@ -87,7 +99,10 @@ export async function fetchLegacyLargeValueRequestChunk(context: LegacyLargeValu
   const table = context.tableMeta!;
   const sourceColumn = context.sourceColumns[columnIndex];
   if (!sourceColumn) throw new Error(options.translate("grid.largeValueColumnUnavailable"));
-  const predicates = await Promise.all(requests.map((request) => legacyLargeValueRowPredicate(context, request.sourceIndex, primaryKeyIndexes, options)));
+  // Reuse one index for the batch instead of rescanning all captured keys for
+  // every row's predicate and again for result matching.
+  const sourceLocator = contextKeyLocator(context, primaryKeyIndexes, options);
+  const predicates = await Promise.all(requests.map((request) => legacyLargeValueKeyPredicate(context, sourceLocator.values(request.sourceIndex), options)));
   const selectedColumns = [...new Set([...table.primaryKeys, sourceColumn])];
   const sql = await buildTableSelectSql({
     databaseType: context.databaseType,
@@ -107,10 +122,12 @@ export async function fetchLegacyLargeValueRequestChunk(context: LegacyLargeValu
     includeRowId: context.includeRowId,
   });
   beforeRead?.();
-  const results = await api.executeMulti(context.connectionId!, context.executionDatabase, sql, undefined, options.uuid(), { maxRows: requests.length, fetchSize: requests.length, timeoutSecs: context.timeoutSecs }).catch((error) => {
-    if (beforeRead) throw new SnapshotCompletionError("unknown", error instanceof Error ? error.message : String(error));
-    throw error;
-  });
+  const results = await api
+    .executeMulti(context.connectionId!, context.executionDatabase, sql, undefined, options.uuid(), { maxRows: requests.length, fetchSize: requests.length, ...(context.requiresOriginalKeys ? { resultKeyColumns: table.primaryKeys } : {}), timeoutSecs: context.timeoutSecs })
+    .catch((error) => {
+      if (beforeRead) throw new SnapshotCompletionError("unknown", error instanceof Error ? error.message : String(error));
+      throw error;
+    });
   const failures = results.filter((result) => result.execution_error);
   if (beforeRead && failures.length) {
     const unknown = failures.find((result) => result.error?.operationOutcome !== "not_started");
@@ -120,7 +137,7 @@ export async function fetchLegacyLargeValueRequestChunk(context: LegacyLargeValu
   const result = results[0];
   if (!result || result.execution_error) throw new Error(result?.error ? options.translateBackendError(result.error) : String(result?.rows?.[0]?.[0] ?? options.translate("grid.largeValueLoadFailed")));
   const resultIndexes = selectedColumns.map((column) => {
-    if (!beforeRead) return result.columns.findIndex((name) => name.toLocaleLowerCase() === column.toLocaleLowerCase());
+    if (!beforeRead && !context.requiresOriginalKeys) return result.columns.findIndex((name) => name.toLocaleLowerCase() === column.toLocaleLowerCase());
     const exact = result.columns.flatMap((name, index) => (name === column ? [index] : []));
     if (exact.length) return exact.length === 1 ? exact[0]! : -1;
     const folded = result.columns.flatMap((name, index) => (name.toLocaleLowerCase() === column.toLocaleLowerCase() ? [index] : []));
@@ -129,16 +146,16 @@ export async function fetchLegacyLargeValueRequestChunk(context: LegacyLargeValu
   if (resultIndexes.some((index) => index < 0)) throw new Error(options.translate("grid.largeValueColumnUnavailable"));
   const keyIndexes = resultIndexes.slice(0, table.primaryKeys.length);
   const valueIndex = resultIndexes[selectedColumns.indexOf(sourceColumn)]!;
-  if (beforeRead && result.large_value_cells?.some((cell) => cell.column_index === valueIndex || keyIndexes.includes(cell.column_index))) throw new Error(options.translate("grid.largeValueLoadFailed"));
+  if ((beforeRead || context.requiresOriginalKeys) && result.large_value_cells?.some((cell) => cell.column_index === valueIndex || keyIndexes.includes(cell.column_index))) throw new Error(options.translate("grid.largeValueLoadFailed"));
+  const resultLocator = createResultKeyLocator(result, keyIndexes, context.requiresOriginalKeys === true, options.translate("grid.largeValueOriginalKeyUnavailable"));
   const values = new Map<string, CellValue>();
-  for (const row of result.rows) {
-    const identity = legacyLargeValueIdentityKey(row, keyIndexes);
-    if (beforeRead && values.has(identity)) throw new Error(options.translate("grid.largeValueRowUnavailable"));
+  for (const [rowIndex, row] of result.rows.entries()) {
+    const identity = resultLocator.identity(rowIndex);
+    if ((beforeRead || context.requiresOriginalKeys) && values.has(identity)) throw new Error(options.translate("grid.largeValueRowUnavailable"));
     values.set(identity, row[valueIndex] ?? null);
   }
   for (const request of requests) {
-    const row = context.rows[request.sourceIndex];
-    const identity = row ? legacyLargeValueIdentityKey(row, primaryKeyIndexes) : "";
+    const identity = sourceLocator.identity(request.sourceIndex);
     if (!values.has(identity)) throw new Error(options.translate("grid.largeValueRowUnavailable"));
     const rowValues = resolved.get(request.rowId) ?? new Map<number, CellValue>();
     rowValues.set(columnIndex, values.get(identity) ?? null);
@@ -155,7 +172,11 @@ export async function resolveCapturedLegacyLargeValueCells(context: LegacyLargeV
   };
   try {
     check();
-    const keyIndexes = context.tableMeta?.primaryKeys.map((name) => context.sourceColumns.findIndex((column) => column.toLocaleLowerCase() === name.toLocaleLowerCase())) ?? [];
+    const keyIndexes =
+      context.tableMeta?.primaryKeys.map((name) => {
+        const indexes = context.sourceColumns.flatMap((column, index) => (column.toLocaleLowerCase() === name.toLocaleLowerCase() ? [index] : []));
+        return context.requiresOriginalKeys && indexes.length !== 1 ? -1 : (indexes[0] ?? -1);
+      }) ?? [];
     if (!["mysql", "postgres", "oracle", "db2"].includes(context.databaseType ?? "") || !context.tableMeta?.tableName || !keyIndexes.length || keyIndexes.some((index) => index < 0)) throw new Error(options.translate("grid.largeValueNeedsRowIdentifier"));
     const byColumn = new Map<number, LegacyLargeValueCellRequest[]>();
     for (const request of requests) {

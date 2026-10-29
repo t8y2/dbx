@@ -249,6 +249,18 @@ export function useDataGridColumnLayoutState(options: {
     schedulePersistColumnLayout();
   }
 
+  function showOnlyColumns(columnIndexes: Iterable<number>) {
+    const availableIndexes = toValue(options.displayableColumnIndexes);
+    const available = new Set(availableIndexes);
+    const requestedIndexes = [...new Set(columnIndexes)].filter((index) => Number.isInteger(index) && available.has(index));
+    if (requestedIndexes.length === 0) return;
+
+    const requested = new Set(requestedIndexes);
+    hiddenColumnIndexes.value = new Set(availableIndexes.filter((index) => !requested.has(index)));
+    autoHiddenNullColumnIndexes.value = new Set();
+    persistHiddenColumnKeys();
+  }
+
   function invertColumnVisibility() {
     hiddenColumnIndexes.value = invertedHiddenColumnIndexes([...toValue(options.displayableColumnIndexes)], hiddenColumnIndexes.value);
     autoHiddenNullColumnIndexes.value = new Set();
@@ -474,6 +486,7 @@ export function useDataGridColumnLayoutState(options: {
     toggleColumnVisibility,
     hideColumns,
     showAllColumns,
+    showOnlyColumns,
     invertColumnVisibility,
     showColumn,
     persistColumnOrder,

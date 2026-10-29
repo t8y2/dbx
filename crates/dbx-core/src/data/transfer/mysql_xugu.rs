@@ -564,6 +564,7 @@ pub(super) fn write_batches(
         limits,
         false,
         quote_column_names,
+        None,
     )
     .map(|batches| batches.into_iter().map(|(sql, _)| sql).collect())
 }

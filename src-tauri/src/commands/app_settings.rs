@@ -215,6 +215,123 @@ pub async fn load_mcp_global_policy(state: State<'_, Arc<AppState>>) -> Result<M
 }
 
 #[tauri::command]
+pub fn load_mcp_tool_catalog() -> dbx_core::mcp_catalog::McpToolCatalog {
+    dbx_mcp::DbxMcpServer::tool_catalog()
+}
+
+/// Plugin cards of the MCP capability tab (probes plugin sidecars).
+#[tauri::command]
+pub async fn list_plugin_mcp_views(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<dbx_core::plugin_mcp::PluginMcpView>, String> {
+    dbx_core::plugin_mcp::list_plugin_views(state.inner()).await
+}
+
+#[tauri::command]
+pub async fn load_plugin_mcp_view(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+) -> Result<dbx_core::plugin_mcp::PluginMcpView, String> {
+    dbx_core::plugin_mcp::plugin_view_for(state.inner(), &plugin_id).await
+}
+
+#[tauri::command]
+pub async fn list_mcp_plugin_scopes(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+    connection_id: String,
+) -> Result<serde_json::Value, String> {
+    let manifest = state
+        .plugins
+        .list_installed()?
+        .into_iter()
+        .find(|plugin| plugin.manifest.id == plugin_id)
+        .ok_or_else(|| format!("Plugin `{plugin_id}` is not installed."))?
+        .manifest;
+    let method = manifest
+        .mcp_contribution()
+        .and_then(|mcp| mcp.scope.as_ref())
+        .and_then(|scope| scope.list_method.as_deref())
+        .ok_or_else(|| "This plugin does not declare a scope list method.".to_string())?;
+    let policy = state.storage.load_enforced_mcp_policy().await?.policy();
+    let group_paths = match state.storage.load_sidebar_layout().await? {
+        Some(layout) => dbx_core::mcp_policy::connection_group_paths(&layout)
+            .map_err(|error| format!("MCP_POLICY_UNAVAILABLE: {error}"))?,
+        None => std::collections::HashMap::new(),
+    };
+    let connection = state
+        .storage
+        .load_connections()
+        .await?
+        .into_iter()
+        .find(|connection| connection.id == connection_id)
+        .ok_or_else(|| "CONNECTION_NOT_FOUND: connection is not available.".to_string())?;
+    if connection.plugin_id.as_deref() != Some(plugin_id.as_str()) {
+        return Err("CONNECTION_OUT_OF_SCOPE: connection is not owned by this plugin.".to_string());
+    }
+    if !dbx_core::mcp_policy::policy_allows_connection(&policy, group_paths.get(&connection.id), &connection.id) {
+        return Err("CONNECTION_OUT_OF_SCOPE: connection is not allowed by DBX MCP settings.".to_string());
+    }
+    let value = state
+        .plugin_host
+        .invoke::<serde_json::Value>(
+            &plugin_id,
+            method,
+            serde_json::json!({ "connectionId": connection.id }),
+            None,
+            Some(std::time::Duration::from_secs(8)),
+        )
+        .await?;
+    let values: Vec<String> = serde_json::from_value(
+        value
+            .get("values")
+            .cloned()
+            .ok_or_else(|| "Plugin scope list must return { values: string[] }.".to_string())?,
+    )
+    .map_err(|_| "Plugin scope list must return { values: string[] }.".to_string())?;
+    Ok(serde_json::json!({ "values": values }))
+}
+
+#[tauri::command]
+pub async fn save_plugin_mcp_grant(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+    grant: dbx_core::storage::PluginMcpGrant,
+    approve_current: bool,
+) -> Result<dbx_core::plugin_mcp::PluginMcpView, String> {
+    dbx_core::plugin_mcp::save_plugin_grant(state.inner(), &plugin_id, grant, approve_current).await
+}
+
+#[tauri::command]
+pub async fn load_mcp_access_policy(
+    state: State<'_, Arc<AppState>>,
+) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+    state.storage.load_mcp_access_policy().await
+}
+
+#[tauri::command]
+pub async fn set_mcp_plugin_scope_rule(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    kind: String,
+    value: Option<String>,
+    rule: Option<dbx_core::mcp_access::McpAccessRule>,
+    sub_scope: Option<dbx_core::mcp_access::McpSubScopeMode>,
+) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+    let access =
+        dbx_core::plugin_mcp::set_scope_rule(&state, &connection_id, &kind, value.as_deref(), rule, sub_scope).await?;
+    super::mcp_bridge::clear_mcp_sql_approvals();
+    Ok(access)
+}
+
+#[tauri::command]
+pub async fn reset_invalid_mcp_access_policy(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.storage.reset_invalid_mcp_access_policy().await?;
+    super::mcp_bridge::clear_mcp_sql_approvals();
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn save_mcp_global_policy(state: State<'_, Arc<AppState>>, policy: McpGlobalPolicy) -> Result<(), String> {
     state.storage.save_mcp_global_policy(&policy).await?;
     super::mcp_bridge::clear_mcp_sql_approvals();

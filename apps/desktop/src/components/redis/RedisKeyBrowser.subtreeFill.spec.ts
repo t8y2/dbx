@@ -413,7 +413,7 @@ function expandFirstGroupRow(host: HTMLElement) {
 }
 
 function clickLoadMore(host: HTMLElement) {
-  const loadMore = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("redis.loadMoreKeys") && !button.disabled);
+  const loadMore = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("redis.fetchMoreKeys") && !button.disabled);
   expect(loadMore, "load more button").toBeDefined();
   loadMore!.click();
 }
@@ -533,7 +533,7 @@ describe("RedisKeyBrowser prefix refresh (issue #13028)", () => {
     await settleThoroughly();
     expect(subtreeCalls()).toHaveLength(7);
     expect(leafVisible(host, "grp:old")).toBe(true);
-    expect(refreshGroupButton(host).title).toBe("redis.loadMoreKeys");
+    expect(refreshGroupButton(host).title).toBe("redis.fetchMoreKeys");
     await settleThoroughly();
     expect(subtreeCalls()).toHaveLength(7);
     mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [keyInfo("grp:fresh")], total_keys: 2 });
@@ -714,7 +714,7 @@ describe("RedisKeyBrowser prefix refresh (issue #13028)", () => {
     mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve({ cursor: cursor + 1, keys: [keyInfo("grp:old")], total_keys: 3 }));
     refreshGroupButton(host).click();
     await settleThoroughly();
-    expect(refreshGroupButton(host).title).toBe("redis.loadMoreKeys");
+    expect(refreshGroupButton(host).title).toBe("redis.fetchMoreKeys");
     host.querySelector<HTMLButtonElement>(`[data-viewer-${action}]`)!.click();
     await settleThoroughly();
     expect(refreshGroupButton(host).title).toBe("common.refresh");

@@ -205,6 +205,7 @@ import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } f
 import { buildPackageMemberNodes, markPackageNodesExpandable, packageMemberGroupOwnerId } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
 import { withoutSshLocalPorts } from "@/lib/connection/sshLocalPort";
+import { mysqlDataCharsetChanged, mysqlDataCharsetChangeBlocked } from "@/lib/connection/mysqlDataCharset";
 import { driverProfileObjectTreeProfileForConnection } from "@/lib/database/driverProfileExtensions";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
@@ -238,6 +239,15 @@ const CONNECTION_HEALTH_CHECK_TIMEOUT_MS = 5000;
 const CONNECTION_PREWARM_TTL_MS = 30_000;
 const DISCONNECT_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_KEEPALIVE_INTERVAL_SECS = 30;
+/**
+ * 被动重连退避/熔断（只作用于显式标了 `passive: true` 的后台路径，用户操作永远不拦）。
+ * 企业零信任/安全接入客户端会为每一次到受保护数据库的**新建连接**做一次授权检查，
+ * 失败时弹一个原生「警告」框——所以一次故障若被面板轮询、自动刷新、页签恢复反复重连，
+ * 用户看到的就是满屏弹框。这里把「失败后的被动重连」逐级收敛：第 1 次失败后 15s、
+ * 第 2 次 60s、第 3 次 5min 内不再发起 connectDb；第 4 次起**完全停止被动重连**，
+ * 直到任意一次成功连接（含用户手动连接）清空退避。
+ */
+const AUTOMATIC_RECONNECT_BACKOFF_MS = [15_000, 60_000, 300_000] as const;
 const METADATA_LIST_PAGE_CACHE_TTL_MS = 30_000;
 const METADATA_LIST_PAGE_CACHE_MAX_ENTRIES = 160;
 const SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS = 30_000;
@@ -334,7 +344,7 @@ function isFlatMqConnection(config: ConnectionConfig | undefined): boolean {
   return kind === "kafka" || kind === "rocketmq" || kind === "rabbitmq";
 }
 
-type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm";
+type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis";
 
 interface LocateTableTarget {
   catalog?: string;
@@ -641,6 +651,7 @@ export const useConnectionStore = defineStore("connection", () => {
     connectionId: string;
     database: string;
     schema?: string;
+    catalog?: string;
     tableName?: string;
     tableNames?: string[];
   } | null>(null);
@@ -730,6 +741,11 @@ export const useConnectionStore = defineStore("connection", () => {
     console.debug("[DBX][metadata-load:trace]", event);
   };
   const connectInFlight = new Map<string, Promise<void>>();
+  // 自动重连冷却：连接 id -> 冷却截止时间（Unix 毫秒）与最近一次失败。
+  // 只拦「自动/被动」重连；connect() 与 forceReconnect 会清掉它。
+  const automaticReconnectBlockedUntil = new Map<string, number>();
+  const automaticReconnectBlockedError = new Map<string, unknown>();
+  const automaticReconnectFailureCount = new Map<string, number>();
   const disconnectInFlight = new Map<string, Promise<void>>();
   const credentialCloseInFlight = new Map<string, Promise<void>>();
   const disconnectInFlightScoped = new Map<string, boolean>();
@@ -1613,6 +1629,34 @@ export const useConnectionStore = defineStore("connection", () => {
     return message;
   }
 
+  /** 自动重连退避中？（只用于非用户显式触发的重连，见 ensureConnected） */
+  function automaticReconnectCooldownRemainingMs(connectionId: string): number {
+    return Math.max(0, (automaticReconnectBlockedUntil.get(connectionId) ?? 0) - Date.now());
+  }
+
+  function clearAutomaticReconnectCooldown(connectionId: string) {
+    automaticReconnectBlockedUntil.delete(connectionId);
+    automaticReconnectBlockedError.delete(connectionId);
+    automaticReconnectFailureCount.delete(connectionId);
+  }
+
+  function noteAutomaticReconnectFailure(connectionId: string, error: unknown) {
+    const failures = (automaticReconnectFailureCount.get(connectionId) ?? 0) + 1;
+    automaticReconnectFailureCount.set(connectionId, failures);
+    automaticReconnectBlockedError.set(connectionId, error);
+    if (failures > AUTOMATIC_RECONNECT_BACKOFF_MS.length) {
+      // 连续多次失败：停止自动重连，等用户显式重试（避免第三方安全客户端被无限触发）。
+      automaticReconnectBlockedUntil.set(connectionId, Number.POSITIVE_INFINITY);
+      return;
+    }
+    automaticReconnectBlockedUntil.set(connectionId, Date.now() + AUTOMATIC_RECONNECT_BACKOFF_MS[failures - 1]);
+  }
+
+  function automaticReconnectCooldownError(connectionId: string): Error {
+    const lastError = automaticReconnectBlockedError.get(connectionId);
+    return lastError instanceof Error ? lastError : new Error(connectionErrorMessage(lastError));
+  }
+
   function markConnectionLost(connectionId: string, error: unknown) {
     connectedIds.value.delete(connectionId);
     clearEtcdAccessCapabilities(connectionId);
@@ -2389,7 +2433,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const damengRoleNode = buildDamengRoleNode(connectionId, existingConnectionNode);
     const damengJobAdminNode = buildDamengJobAdminNode(connectionId, existingConnectionNode);
     const xuguTablespacesNode = buildXuguTablespacesNode(connectionId, existingConnectionNode);
-    return [...nonUtilityChildren, buildOracleDatabaseLinksNode(connectionId, existingConnectionNode), userAdminNode, xuguUserAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, buildDatabaseJobAdminNode(connectionId), xuguTablespacesNode].filter(Boolean) as TreeNode[];
+    return [...nonUtilityChildren, buildOracleDatabaseLinksNode(connectionId, existingConnectionNode), buildDatabaseJobAdminNode(connectionId), userAdminNode, xuguUserAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, xuguTablespacesNode].filter(Boolean) as TreeNode[];
   }
 
   function withSavedSqlRoot(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
@@ -3481,15 +3525,6 @@ export const useConnectionStore = defineStore("connection", () => {
       .finally(() => staleTreeRefreshIds.delete(liveNode.id));
   }
 
-  /**
-   * 「连接后自动展开对象树」开关（#13302）：关闭时连接/数据库节点加载完成后不再强制展开，
-   * 默认关闭以避免模式多的库全量展开造成的元数据请求与渲染开销。手动展开不受影响：
-   * 用户点击节点时 UI 已先置位 isExpanded，这里的 gating 只拦「加载完成后代为展开」的路径。
-   */
-  function sidebarAutoExpandTreeOnConnect(): boolean {
-    return useSettingsStore().editorSettings.sidebarExpandTreeOnConnect;
-  }
-
   // The metadata tree cache must not persist UI state. isExpanded flags written
   // while a schema was expanded would replay that expansion on every cache hit
   // (a manual collapse never rewrites the cache), so opening a connection would
@@ -3536,7 +3571,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     const normalizedChildren = sortSidebarTreeChildrenForParent(targetNode, childrenWithLinkedServers, config?.db_type);
     setChildren(targetNode, targetNode.type === "connection" && targetNode.connectionId ? withSavedSqlRoot(targetNode.connectionId, normalizedChildren, targetNode) : normalizedChildren);
-    if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+    targetNode.isExpanded = true;
     logMetadataLoadTrace(metadataTraceLogger, trace, "cache-hit", {
       cacheStatus: decoded.isStale ? "stale" : "hit",
       resultCount: normalizedChildren.length,
@@ -4659,6 +4694,14 @@ export const useConnectionStore = defineStore("connection", () => {
     // Edit forms do not own server-derived hints. Retain the previous hint only
     // while its protected URL still refers to the same saved JDBC target.
     config = { ...config, jdbc_dialect: keepsSavedJdbcTarget ? previousConfig.jdbc_dialect : undefined };
+    if (mysqlDataCharsetChanged(previousConfig, config)) {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      if (mysqlDataCharsetChangeBlocked(useQueryStore().tabs, config.id)) throw new Error(i18n.global.t("connection.mysqlDataCharsetCloseTabs"));
+      // Retire the old decoding session before publishing a potentially writable
+      // config. Preserve SQL drafts and do not silently discard grid edits.
+      await disconnect(config.id, { skipTabHandling: true, markClosedByUser: false });
+      if (mysqlDataCharsetChangeBlocked(useQueryStore().tabs, config.id)) throw new Error(i18n.global.t("connection.mysqlDataCharsetCloseTabs"));
+    }
     const previousDatabase = previousConfig.database ?? "";
     const runtimeConfigChanged = connectionConfigFingerprint(previousConfig) !== connectionConfigFingerprint(config);
     const shouldReconnectPlugin = runtimeConfigChanged && previousConfig.db_type === "plugin" && config.db_type === "plugin" && connectedIds.value.has(config.id);
@@ -5053,7 +5096,7 @@ export const useConnectionStore = defineStore("connection", () => {
       // Schema loading records its own error on the node; keep the database list usable.
     }
     const liveNode = findNode(treeNodes.value, defaultNodeId);
-    if (sidebarAutoExpandTreeOnConnect() && liveNode) liveNode.isExpanded = true;
+    if (liveNode) liveNode.isExpanded = true;
   }
 
   async function reloadSchemaChildren(connectionId: string, database?: string) {
@@ -5219,6 +5262,8 @@ export const useConnectionStore = defineStore("connection", () => {
     const expectedConfigFingerprint = connectionConfigFingerprint(getConfig(config.id) ?? config);
     if (getBlockingDisconnectInFlight(config.id)) await waitForBlockingDisconnectInFlight(config.id);
     if (passwordChangeReconnectRequired.get(config.id) !== passwordChangeState) throw new Error(i18n.global.t("userAdmin.passwordChangedReconnect"));
+    // 用户显式连接：清掉自动重连冷却，保证“点连接/重试”永远真的会再试一次。
+    clearAutomaticReconnectCooldown(config.id);
     const localAttempt = beginLocalConnectionAttempt(config.id);
     const metadataRevision = connectionStateRevision(config.id);
     try {
@@ -5270,6 +5315,8 @@ export const useConnectionStore = defineStore("connection", () => {
       markConnectionHealthChecked(id);
       clearConnectionError(config.id);
       if (id !== config.id) clearConnectionError(id);
+      clearAutomaticReconnectCooldown(config.id);
+      if (id !== config.id) clearAutomaticReconnectCooldown(id);
 
       const existing = findConnectionNode(id);
       if (existing) {
@@ -5644,7 +5691,7 @@ export const useConnectionStore = defineStore("connection", () => {
    * `CONNECTION_CLOSED_BY_USER_MESSAGE`，让调用方停在"连接已关闭"的空态，而不是把连接
    * 偷偷连回来（这是"关闭连接后连接又自己回来"这类报告的根因）。
    */
-  async function ensureConnected(connectionId: string, options: { activate?: boolean; verifyHealth?: boolean; forceReconnect?: boolean; allowPasswordPrompt?: boolean; skipIfClosedByUser?: boolean } = {}) {
+  async function ensureConnected(connectionId: string, options: { activate?: boolean; verifyHealth?: boolean; forceReconnect?: boolean; allowPasswordPrompt?: boolean; skipIfClosedByUser?: boolean; passive?: boolean } = {}) {
     if (options.skipIfClosedByUser && isConnectionClosedByUser(connectionId)) throw new Error(CONNECTION_CLOSED_BY_USER_MESSAGE);
     if (passwordChangeReconnectRequired.has(connectionId)) throw new Error(i18n.global.t("userAdmin.passwordChangedReconnect"));
     if (!options.forceReconnect && connectedIds.value.has(connectionId)) {
@@ -5696,6 +5743,13 @@ export const useConnectionStore = defineStore("connection", () => {
       await existingConnect;
       if (options.activate !== false) activeConnectionId.value = connectionId;
       return;
+    }
+    // 被动重连退避：故障后后台路径（面板轮询/自动刷新/页签恢复，调用方显式传 passive）
+    // 在窗口内不再发起新的 connectDb。用户手动点击/显式重试永远不经过这里，不会被拦。
+    // 第三方安全/零信任客户端会为每次新连接做一次授权检查并弹原生框，这一步把
+    // “每个后台 tick 重连一次”收敛成少量失败，而不是一屏弹框。
+    if (options.passive && !options.forceReconnect && automaticReconnectCooldownRemainingMs(connectionId) > 0) {
+      throw automaticReconnectCooldownError(connectionId);
     }
     const localAttempt = beginLocalConnectionAttempt(connectionId);
     const metadataRevision = connectionStateRevision(connectionId);
@@ -5752,6 +5806,7 @@ export const useConnectionStore = defineStore("connection", () => {
     connectInFlight.set(connectionId, connectPromise);
     try {
       await connectPromise;
+      clearAutomaticReconnectCooldown(connectionId);
       ensureLocalConnectionAttemptActive(connectionId, localAttempt);
       if (options.activate !== false) activeConnectionId.value = connectionId;
     } catch (e) {
@@ -5769,6 +5824,8 @@ export const useConnectionStore = defineStore("connection", () => {
       // 记到连接节点上，也避免搜索每轮都重复报同一个错。
       if (isSidebarSearchLoad(connectionId) && !isSupersededConnectionAttempt(e)) recordSidebarSearchConnectionFailure(connectionId, e);
       else recordConnectionError(connectionId, e);
+      // 只有后台/被动路径的失败才计入退避；用户主动发起的失败不惩罚后续用户操作。
+      if (options.passive && !isSupersededConnectionAttempt(e)) noteAutomaticReconnectFailure(connectionId, e);
       clearConnectionNodeLoading(connectionId);
       throw e;
     } finally {
@@ -5995,7 +6052,7 @@ export const useConnectionStore = defineStore("connection", () => {
           const children = buildXuguTablespaceChildren(targetNode, tablespaces);
           setChildren(targetNode, children);
           targetNode.objectCount = children.length;
-          if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+          targetNode.isExpanded = true;
         } catch (error) {
           // Storage metadata is an optional, read-only enhancement. A user
           // without SYS_* view access should see an empty group rather than a
@@ -6005,7 +6062,7 @@ export const useConnectionStore = defineStore("connection", () => {
           if (targetNode) {
             setChildren(targetNode, []);
             targetNode.objectCount = 0;
-            if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+            targetNode.isExpanded = true;
           }
         } finally {
           finishTreeNodeLoad(load);
@@ -6203,7 +6260,7 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
           const liveNode = treeNodeLoadTarget(load);
-          if (sidebarAutoExpandTreeOnConnect() && liveNode) liveNode.isExpanded = true;
+          if (liveNode) liveNode.isExpanded = true;
           if (options?.force) void loadSidebarDatabaseStorage(connectionId, { force: true });
         } catch (e) {
           recordMetadataLoadError(connectionId, e, load);
@@ -6279,7 +6336,7 @@ export const useConnectionStore = defineStore("connection", () => {
       // reveal the rest on demand, unless the user explicitly asked to see all.
       const { visible, hasMore } = options?.showAll ? { visible: databaseNodes, hasMore: false } : limitRedisDatabaseList(databaseNodes, useSettingsStore().editorSettings.redisDatabaseDisplayLimit);
       setChildren(targetNode, withSavedSqlRoot(connectionId, hasMore ? [...visible, buildLoadMoreNode(targetNode, visible.length, databaseNodes.length - visible.length)] : visible, targetNode));
-      if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+      targetNode.isExpanded = true;
     });
   }
 
@@ -6323,7 +6380,7 @@ export const useConnectionStore = defineStore("connection", () => {
         );
       }
       setChildren(targetNode, withSavedSqlRoot(connectionId, children, targetNode));
-      if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+      targetNode.isExpanded = true;
     });
   }
 
@@ -6350,7 +6407,7 @@ export const useConnectionStore = defineStore("connection", () => {
           targetNode,
         ),
       );
-      if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+      targetNode.isExpanded = true;
     });
   }
 
@@ -6386,7 +6443,7 @@ export const useConnectionStore = defineStore("connection", () => {
           targetNode,
         ),
       );
-      if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+      targetNode.isExpanded = true;
     });
   }
 
@@ -6408,7 +6465,7 @@ export const useConnectionStore = defineStore("connection", () => {
         isExpanded: false,
       };
       setChildren(node, [consoleNode]);
-      if (sidebarAutoExpandTreeOnConnect()) node.isExpanded = true;
+      node.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
@@ -6457,7 +6514,7 @@ export const useConnectionStore = defineStore("connection", () => {
         );
       }
       const liveNode = treeNodeLoadTarget(load);
-      if (sidebarAutoExpandTreeOnConnect() && liveNode) liveNode.isExpanded = true;
+      if (liveNode) liveNode.isExpanded = true;
     });
   }
 
@@ -6508,7 +6565,7 @@ export const useConnectionStore = defineStore("connection", () => {
         });
       }
       setChildren(targetNode, children);
-      if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+      targetNode.isExpanded = true;
     });
   }
 
@@ -6572,7 +6629,7 @@ export const useConnectionStore = defineStore("connection", () => {
         ),
         { trustEmptyConnectionChildren: dbs.length > 0 && visibleDbs.length === 0 },
       );
-      if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e, load);
       throw e;
@@ -6608,7 +6665,7 @@ export const useConnectionStore = defineStore("connection", () => {
             isExpanded: false,
           })),
       );
-      if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e, load);
       throw e;
@@ -6686,7 +6743,7 @@ export const useConnectionStore = defineStore("connection", () => {
           targetNode,
         ),
       );
-      if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       const targetNode = treeNodeLoadTarget(load);
       if (targetNode && getConfig(connectionId)?.db_type === "meilisearch") {
@@ -6709,7 +6766,7 @@ export const useConnectionStore = defineStore("connection", () => {
             targetNode,
           ),
         );
-        if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+        targetNode.isExpanded = true;
       }
       recordMetadataLoadError(connectionId, e, load);
       throw e;
@@ -6740,7 +6797,7 @@ export const useConnectionStore = defineStore("connection", () => {
           targetNode,
         ),
       );
-      if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+      targetNode.isExpanded = true;
     });
   }
 
@@ -6766,7 +6823,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       setChildren(targetNode, isMilvus && database ? collectionChildren : withSavedSqlRoot(connectionId, collectionChildren, targetNode));
-      if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+      targetNode.isExpanded = true;
     });
   }
 
@@ -6804,7 +6861,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       setChildren(targetNode, children);
-      if (sidebarAutoExpandTreeOnConnect()) targetNode.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e, load);
       throw e;
@@ -6896,7 +6953,7 @@ export const useConnectionStore = defineStore("connection", () => {
           setChildren(targetNode, children);
           await savePersistedTreeChildren(cacheKey, children);
           const currentTargetNode = treeNodeLoadTarget(load);
-          if (sidebarAutoExpandTreeOnConnect() && currentTargetNode) currentTargetNode.isExpanded = true;
+          if (currentTargetNode) currentTargetNode.isExpanded = true;
         } catch (e) {
           recordMetadataLoadError(connectionId, e, load);
           throw e;
@@ -6936,7 +6993,7 @@ export const useConnectionStore = defineStore("connection", () => {
       setChildren(targetNode, children);
       await savePersistedTreeChildren(cacheKey, children);
       const currentTargetNode = treeNodeLoadTarget(load);
-      if (sidebarAutoExpandTreeOnConnect() && currentTargetNode) currentTargetNode.isExpanded = true;
+      if (currentTargetNode) currentTargetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e, load);
       throw e;
@@ -11097,7 +11154,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const { readFile } = await import("@tauri-apps/plugin-fs");
       const { decodeImportFileText } = await import("@/lib/common/decodeText");
       const path = await open({
-        filters: source === "navicat" ? [{ name: "Navicat Connection Export", extensions: ["ncx", "xml"] }] : [{ name: source === "rdm" ? "RedisDesktopManager JSON" : "DBX JSON", extensions: ["json"] }],
+        filters: source === "another-redis" ? [{ name: "Another Redis Desktop Manager", extensions: ["ano"] }] : source === "navicat" ? [{ name: "Navicat Connection Export", extensions: ["ncx", "xml"] }] : [{ name: source === "rdm" ? "RedisDesktopManager JSON" : "DBX JSON", extensions: ["json"] }],
         multiple: false,
       });
       if (!path) return null;
@@ -11109,7 +11166,7 @@ export const useConnectionStore = defineStore("connection", () => {
       content = await new Promise<string>((resolve, reject) => {
         const input = document.createElement("input");
         input.type = "file";
-        input.accept = source === "navicat" ? ".ncx,.xml" : ".json";
+        input.accept = source === "another-redis" ? ".ano" : source === "navicat" ? ".ncx,.xml" : ".json";
         input.onchange = () => {
           const file = input.files?.[0];
           if (!file) {
@@ -11126,6 +11183,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
 
     if (source === "rdm") return { content: JSON.stringify({ format: "rdm-import", content }), encrypted: false };
+    if (source === "another-redis") return { content: JSON.stringify({ format: "another-redis-import", content }), encrypted: false };
     if (content.trimStart().startsWith("<")) {
       return { content, encrypted: false };
     }
@@ -11143,6 +11201,11 @@ export const useConnectionStore = defineStore("connection", () => {
 
     if (!passphrase) {
       const payload: unknown = JSON.parse(content);
+      if (payload && typeof payload === "object" && "format" in payload && payload.format === "another-redis-import") {
+        if (!("content" in payload) || typeof payload.content !== "string") throw new Error("Another Redis Desktop Manager: invalid import payload.");
+        const { parseAnotherRedisImport } = await import("@/lib/imports/anotherRedisImport");
+        return parseAnotherRedisImport(payload.content);
+      }
       if (payload && typeof payload === "object" && "format" in payload && payload.format === "rdm-import") {
         if (!("content" in payload) || typeof payload.content !== "string") throw new Error("RedisDesktopManager: invalid import payload.");
         const { parseRedisDesktopManagerImport } = await import("@/lib/imports/redisDesktopManagerImport");
@@ -11276,7 +11339,7 @@ export const useConnectionStore = defineStore("connection", () => {
         // 整体覆盖内存布局前，先落盘窗口内未写盘的分组编辑（防止 300ms 防抖窗口
         // 内的编辑被备份轮询/重载带回的旧快照静默回滚）。
         await flushTableVGroupPersist();
-        const [pinnedOrder, saved, , loadedTableVGroups] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(), tunnelProfileStore.init(), api.loadTableVGroups()]);
+        const [pinnedOrder, saved, , loadedTableVGroups] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(settingsStore.editorSettings.sidebarShowUserAdmin !== false), tunnelProfileStore.init(), api.loadTableVGroups()]);
         setPinnedTreeNodeOrder(pinnedOrder);
         await migrateTimeoutInheritance(saved);
         const loadedConnections = saved.map(normalizeConnection).map((loadedConfig) => {

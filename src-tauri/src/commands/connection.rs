@@ -484,6 +484,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -1398,7 +1400,13 @@ async fn remove_connection_pools_for_connection_ids(state: &AppState, connection
 }
 
 #[tauri::command]
-pub async fn load_connections(state: State<'_, Arc<AppState>>) -> Result<Vec<ConnectionResponse>, String> {
+pub async fn load_connections(
+    state: State<'_, Arc<AppState>>,
+    legacy_sidebar_show_user_admin: Option<bool>,
+) -> Result<Vec<ConnectionResponse>, String> {
+    if let Some(visible) = legacy_sidebar_show_user_admin {
+        state.storage.migrate_sidebar_user_admin_visibility(visible).await?;
+    }
     load_connection_responses(state.inner()).await
 }
 
@@ -3017,10 +3025,7 @@ pub async fn unlock_connection_writes(
     connection_id: String,
     duration_secs: u64,
 ) -> Result<WriteUnlockState, String> {
-    if !state.configs.read().await.contains_key(&connection_id) {
-        return Err("Connection not found".to_string());
-    }
-    let remaining_ms = state.write_unlock_windows.unlock(&connection_id, duration_secs).await?;
+    let remaining_ms = dbx_core::query::unlock_connection_writes_core(&state, &connection_id, duration_secs).await?;
     Ok(WriteUnlockState { remaining_ms })
 }
 

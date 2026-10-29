@@ -82,6 +82,7 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     connectionStore.diagramSource = {
       connectionId: node.connectionId,
       database: node.database,
+      catalog: node.catalog,
       schema: node.schema,
       tableName: tableNames?.length ? tableNames[0] : node.type === "table" ? node.label : undefined,
       tableNames,

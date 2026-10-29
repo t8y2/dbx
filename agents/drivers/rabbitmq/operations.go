@@ -1267,6 +1267,7 @@ func peekedMessageFromDelivery(queue string, index int64, delivery amqp.Delivery
 		"deliveryTag":   delivery.DeliveryTag,
 		"timestamp":     int64(0),
 		"headers":       stringHeaders(delivery.Headers),
+		"properties":    deliveryProperties(delivery),
 		"payloadBase64": base64.StdEncoding.EncodeToString(delivery.Body),
 	}
 	if delivery.MessageId != "" {
@@ -1321,6 +1322,9 @@ func (s *server) sendMessage(params jsonObject) (any, error) {
 				publishing.Headers[key] = converted
 			}
 		}
+	}
+	if err := applyMessageProperties(&publishing, params); err != nil {
+		return nil, err
 	}
 	if err := channel.PublishWithContext(context.Background(), exchange, routingKey, false, false, publishing); err != nil {
 		return nil, err

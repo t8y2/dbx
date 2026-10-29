@@ -38,6 +38,14 @@ describe("dataGridConditionColumnOptions", () => {
     ]);
   });
 
+  it("backtick-quotes ClickHouse non-ASCII and keyword columns while keeping plain ASCII bare", () => {
+    expect(dataGridConditionColumnOptions(["姓名", "user_id", "final"], "clickhouse")).toEqual([
+      { name: "姓名", insertText: "`姓名`" },
+      { name: "user_id", insertText: "user_id" },
+      { name: "final", insertText: "`final`" },
+    ]);
+  });
+
   it("uses the active dialect identifier quote while preserving runtime overrides", () => {
     expect(dataGridConditionIdentifierQuote("postgres")).toBe('"');
     expect(dataGridConditionIdentifierQuote("oracle")).toBe('"');

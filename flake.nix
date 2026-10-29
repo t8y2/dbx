@@ -190,7 +190,7 @@
         # ------------------------------------------------------------------ #
         packages.dbx-desktop = pkgs.stdenv.mkDerivation (finalAttrs: {
           pname = "dbx-desktop";
-          version = "0.6.56";
+          version = "0.6.61";
 
           src = pkgs.lib.cleanSource ./.;
 
@@ -203,7 +203,7 @@
             fetcherVersion = 4;
             # Update with the hash reported by a failed fixed-output build:
             #   nix build .#dbx-pnpm-deps 2>&1 | grep 'got:'
-            hash = "sha256-3ezlS1rkd5zU25F4yZvKAjcsSBxv3DUAu6LPJuO72nE=";
+            hash = "sha256-lBkJNxk39G07brqQs2+W+jnoKd7Gi511VpxBq0A95kE=";
           };
 
           # ── Step 2: vendor Cargo dependencies ───────────────────────────── #

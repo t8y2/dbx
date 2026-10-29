@@ -2,7 +2,7 @@
 import { createApp, defineComponent, h, reactive, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
-import { isNewerRemoteVersion, resolveReleaseTagUrl, useAppUpdater } from "@/composables/useAppUpdater";
+import { effectiveUpdateInfo, isNewerRemoteVersion, isPreparedUpdateObsolete, resolveReleaseTagUrl, useAppUpdater } from "@/composables/useAppUpdater";
 const mocks = vi.hoisted(() => ({
   checkForUpdates: vi.fn(),
   downloadUpdate: vi.fn(),
@@ -87,6 +87,16 @@ describe("older version release pages", () => {
     expect(isNewerRemoteVersion("0.5.60", "v0.5.59")).toBe(true);
     expect(isNewerRemoteVersion("0.5.60", "v0.5.60")).toBe(false);
     expect(isNewerRemoteVersion("0.5.60", "v0.5.61")).toBe(false);
+  });
+});
+
+describe("prepared update reconciliation (#13562)", () => {
+  it("treats a package the running build already satisfies as obsolete", () => {
+    expect(isPreparedUpdateObsolete("0.5.60", "0.5.60")).toBe(true);
+    expect(isPreparedUpdateObsolete("0.5.59", "v0.5.60")).toBe(true);
+    expect(isPreparedUpdateObsolete("0.5.61", "0.5.60")).toBe(false);
+    expect(isPreparedUpdateObsolete("", "0.5.60")).toBe(false);
+    expect(isPreparedUpdateObsolete("0.5.61", "")).toBe(false);
   });
 });
 
@@ -467,6 +477,35 @@ describe("silent update lifecycle", () => {
     expect(updater.phase.value).toBe("ready");
   });
 
+  it("discards a prepared package the running build already satisfies", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    mocks.getAppVersion.mockResolvedValue("1.1.0");
+    mocks.checkForUpdates.mockResolvedValue({ ...info, current_version: "1.1.0", latest_version: "1.1.0", update_available: false });
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+
+    expect(mocks.discardDownloadedUpdate).toHaveBeenCalledWith("cached");
+    expect(updater.updateDownloaded.value).toBe(false);
+    expect(updater.hasUpdateAvailable.value).toBe(false);
+    expect(updater.updateInfo.value?.update_available).toBe(false);
+    expect(updater.phase.value).toBe("idle");
+  });
+
+  it("keeps a prepared package installable when the remote stops advertising it", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue({ ...cache, version: "1.2.0" });
+    mocks.checkForUpdates.mockResolvedValue({ ...info, latest_version: "1.1.0", update_available: false });
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+
+    expect(mocks.discardDownloadedUpdate).not.toHaveBeenCalled();
+    expect(updater.updateDownloaded.value).toBe(true);
+    expect(updater.updateDownloadedVersion.value).toBe("1.2.0");
+    expect(updater.updateInfo.value?.latest_version).toBe("1.1.0");
+    expect(updater.phase.value).toBe("ready");
+  });
+
   it("does not disturb an installation that starts while a recheck is in flight", async () => {
     mocks.getDownloadedUpdate.mockResolvedValue(cache);
     const gate = deferred<typeof info>();
@@ -556,5 +595,50 @@ describe("toolbar update entry visibility (#11041)", () => {
     expect(mocks.cancelUpdateDownload).toHaveBeenCalled();
     releaseDownload(cache);
     await background;
+  });
+});
+
+describe("ignoring a version (#13626)", () => {
+  it("stops the update dialog from offering the ignored release", async () => {
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+    expect(updater.updateInfo.value?.update_available).toBe(true);
+
+    await updater.ignoreCurrentVersion();
+    await flush();
+
+    expect(mocks.persist).toHaveBeenCalledWith({ ignoredUpdateVersion: "1.1.0" });
+    expect(updater.hasUpdateAvailable.value).toBe(false);
+    expect(updater.visibleUpdateInfo.value?.update_available).toBe(false);
+  });
+
+  it("keeps a newer release visible after an older one was ignored", async () => {
+    settings.ignoredUpdateVersion = "1.0.5";
+    mocks.checkForUpdates.mockResolvedValue({ ...info, latest_version: "1.1.0" });
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+
+    expect(updater.hasUpdateAvailable.value).toBe(true);
+    expect(updater.visibleUpdateInfo.value?.update_available).toBe(true);
+  });
+
+  it("discards an ignored cached package at startup and keeps the dialog quiet", async () => {
+    settings.ignoredUpdateVersion = "1.1.0";
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+
+    expect(mocks.discardDownloadedUpdate).toHaveBeenCalledWith("cached");
+    expect(updater.visibleUpdateInfo.value?.update_available).toBe(false);
+  });
+
+  it("keeps a prepared package visible even when its version is ignored", () => {
+    expect(effectiveUpdateInfo(info, "1.1.0", true)).toBe(info);
+    expect(effectiveUpdateInfo(info, "1.1.0", false)).toEqual({ ...info, update_available: false });
+    expect(effectiveUpdateInfo(info, "1.0.5", false)).toBe(info);
+    expect(effectiveUpdateInfo(null, "1.1.0", false)).toBeNull();
   });
 });

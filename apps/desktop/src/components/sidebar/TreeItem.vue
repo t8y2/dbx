@@ -43,6 +43,7 @@ import {
 import OracleDatabaseLinksDialog from "@/components/objects/OracleDatabaseLinksDialog.vue";
 const showDatabaseLinks = ref(false);
 import { useConnectionStore } from "@/stores/connectionStore";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -827,7 +828,7 @@ function measureTrailingCommentLayout() {
     trailingCommentMaxWidth.value = 0;
     return;
   }
-  trailingCommentMaxWidth.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll ? sidebarRightCommentMaxWidthPx : trailingCommentAvailableWidth(container.clientWidth, leading.scrollWidth);
+  trailingCommentMaxWidth.value = usesFullWidthLabel.value ? sidebarRightCommentMaxWidthPx : trailingCommentAvailableWidth(container.clientWidth, leading.scrollWidth);
 }
 
 function scheduleTrailingCommentMeasure() {
@@ -872,7 +873,7 @@ function formattedObjectStorage(): string {
 const alignedCommentLabelWidth = computed(() => (settingsStore.editorSettings.sidebarObjectInfoMode === "comment-aligned" && activeNode.value.type !== "connection" ? props.commentLabelWidth : undefined));
 
 function alignedCommentLeadingStyle(): { width: string } | { maxWidth: string } | undefined {
-  if (!settingsStore.editorSettings.sidebarAllowHorizontalScroll && settingsStore.editorSettings.sidebarObjectInfoMode === "comment-and-size" && trailingComment.value) {
+  if (!usesFullWidthLabel.value && settingsStore.editorSettings.sidebarObjectInfoMode === "comment-and-size" && trailingComment.value) {
     // Reserve the inline comment's margin so a long name cannot push into the size column.
     return { maxWidth: "max(0px, calc(100% - 1rem))" };
   }
@@ -888,6 +889,7 @@ const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(activeNode.valu
 
 const isCompactSidebar = computed(() => settingsStore.editorSettings.sidebarDensity === "compact");
 
+const isConnectionRow = computed(() => activeNode.value.type === "connection" || activeNode.value.type === "connection-group");
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0 tree-row-viewport"));
 
 const labelWidthClass = computed(() => {
@@ -915,7 +917,7 @@ const isConnecting = computed(() => activeNode.value.type === "connection" && !!
 // database colors entirely; the trailing green dot still marks active ones.
 const connectionIconInactiveClass = computed(() => (activeNode.value.type === "connection" && activeNode.value.connectionId && !connectionStore.connectedIds.has(activeNode.value.connectionId) ? "saturate-50 opacity-70" : ""));
 
-const isConnectionReadonly = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && (connectionStore.getConfig(activeNode.value.connectionId)?.read_only ?? false));
+const isConnectionReadonly = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && (mysqlDataCharsetEnabled(connectionStore.getConfig(activeNode.value.connectionId)) || (connectionStore.getConfig(activeNode.value.connectionId)?.read_only ?? false)));
 
 const databaseOpenVisual = computed(() => {
   const databaseOpen = isSidebarDatabaseOpenForVisual(activeNode.value, connectionStore.isTreeNodeChildrenLoaded, queryStore.openDatabaseKeys);
@@ -975,7 +977,6 @@ const tableSearchStyle = computed(() => {
   const color = connectionColor.value;
   const rowBackgroundColor = color ? hexToRgba(color, isActiveConnectionScope.value ? 0.14 : 0.08) : "transparent";
   return {
-    paddingLeft: paddingLeft.value,
     "--tree-table-search-row-bg": rowBackgroundColor,
     "--tree-table-search-input-bg": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.05 : 0.03) : "color-mix(in srgb, var(--background) 56%, transparent)",
     "--tree-table-search-border": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.12 : 0.08) : "color-mix(in srgb, var(--border) 36%, transparent)",
@@ -1556,8 +1557,9 @@ function onKeydown(event: KeyboardEvent) {
 </script>
 
 <template>
-  <div v-if="node.type === 'table-search-control'" data-sidebar-table-search-control class="tree-table-search-control pr-2" :class="isCompactSidebar ? 'h-6 py-0' : 'h-7 py-0.5'" :style="tableSearchStyle" @click.stop @dblclick.stop @mousedown.stop @keydown="onTableSearchControlKeydown">
-    <div class="tree-table-search-control__content flex w-full min-w-0 items-center gap-1.5">
+  <div v-if="node.type === 'table-search-control'" data-sidebar-table-search-control class="tree-table-search-control" :class="isCompactSidebar ? 'h-6 py-0' : 'h-7 py-0.5'" :style="tableSearchStyle" @click.stop @dblclick.stop @mousedown.stop @keydown="onTableSearchControlKeydown">
+    <!-- Keep indentation inside the viewport-sized content so trailing controls fit. -->
+    <div class="tree-table-search-control__content flex w-full min-w-0 items-center gap-1.5 pr-2" :style="{ paddingLeft }">
       <div class="relative min-w-0 flex-1">
         <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
         <Input
@@ -1657,7 +1659,17 @@ function onKeydown(event: KeyboardEvent) {
         >
           <div
             ref="trailingCommentLeadingRef"
-            :class="trailingComment ? (usesFullWidthLabel ? 'flex min-w-0 shrink-0 items-center gap-2' : 'flex max-w-full min-w-0 shrink-0 items-center gap-2') : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'"
+            :class="
+              trailingComment
+                ? usesFullWidthLabel
+                  ? 'flex min-w-0 shrink-0 items-center gap-2'
+                  : isConnectionRow
+                    ? 'flex max-w-full min-w-0 shrink items-center gap-2'
+                    : 'flex max-w-full min-w-0 shrink-0 items-center gap-2'
+                : formattedObjectStorage()
+                  ? 'flex min-w-0 flex-1 items-center gap-2'
+                  : 'contents'
+            "
             :style="alignedCommentLeadingStyle()"
           >
             <input
@@ -1676,7 +1688,7 @@ function onKeydown(event: KeyboardEvent) {
               :class="[
                 labelWidthClass,
                 {
-                  'flex-1': node.type === 'connection' && !trailingComment,
+                  'flex-1': isConnectionRow && !trailingComment,
                   'tree-connection-label': node.type === 'connection' || node.type === 'connection-group',
                   'tree-object-label': node.type !== 'connection' && node.type !== 'connection-group',
                   'font-semibold': isLoginUserNode(),

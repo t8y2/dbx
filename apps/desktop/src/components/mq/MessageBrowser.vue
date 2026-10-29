@@ -156,6 +156,10 @@ async function copyMessageHeaders(message: PeekedMessage) {
   await copyMessageText(JSON.stringify(message.headers, null, 2));
 }
 
+async function copyMessageProperties(message: PeekedMessage) {
+  await copyMessageText(JSON.stringify(message.properties, null, 2));
+}
+
 async function copyMessageText(text: string) {
   try {
     await copyToClipboard(text);
@@ -321,6 +325,18 @@ watch(kafkaStartPosition, () => {
           </div>
           <div class="message-headers-values">
             <span v-for="(value, key) in message.headers" :key="key">{{ key }}: {{ value }}</span>
+          </div>
+        </div>
+        <div v-if="mqSystemKind === 'rabbitmq' && Object.keys(message.properties || {}).length" class="message-headers" data-testid="message-properties">
+          <div class="message-headers-heading">
+            <span>{{ t("mqMessages.messageProperties") }}</span>
+            <Button type="button" variant="outline" size="sm" class="message-copy-action h-7 gap-1.5 px-2 text-xs" :aria-label="`${t('grid.copy')} ${t('mqMessages.messageProperties')}`" data-testid="copy-message-properties" @click="copyMessageProperties(message)">
+              <Copy :size="14" aria-hidden="true" />
+              {{ t("grid.copy") }}
+            </Button>
+          </div>
+          <div class="message-headers-values">
+            <span v-for="(value, key) in message.properties" :key="key">{{ key }}: {{ value }}</span>
           </div>
         </div>
       </article>

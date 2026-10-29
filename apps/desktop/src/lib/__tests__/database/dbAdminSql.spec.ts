@@ -218,7 +218,7 @@ describe("damengDuplicateTableCreateOptions", () => {
       ] as any,
     });
 
-    expect(options).toMatchObject({ databaseType: "dameng", schema: "APP", tableName: "ORDERS_COPY", tableComment: "orders clone" });
+    expect(options).toMatchObject({ databaseType: "dameng", schema: "APP", tableName: "orders_copy", tableComment: "orders clone" });
     expect(options.columns).toHaveLength(3);
     expect(options.columns[0]).toMatchObject({
       name: "ID",
@@ -288,11 +288,10 @@ describe("damengDuplicateTableCreateOptions", () => {
     expect(options.tableComment).toBe("empty clone");
   });
 
-  it("keeps unquoted Dameng target folding compatible with the data-copy path", () => {
+  it.each(["data_source_copy", "DATA_SOURCE_COPY", "Data_Source_copy", 'data"source_copy', "数据源_副本"])("preserves the requested Dameng clone name %s", (targetName) => {
     const columns = [{ name: "ID", data_type: "INT", is_nullable: false, column_default: null, is_primary_key: false, extra: null }] as any;
 
-    expect(damengDuplicateTableCreateOptions({ targetName: "orders_copy", columns, indexes: [] }).tableName).toBe("ORDERS_COPY");
-    expect(damengDuplicateTableCreateOptions({ targetName: "OrdersCopy", columns, indexes: [] }).tableName).toBe("OrdersCopy");
+    expect(damengDuplicateTableCreateOptions({ targetName, columns, indexes: [] }).tableName).toBe(targetName);
   });
 });
 
@@ -364,7 +363,7 @@ describe("buildDuplicateTableStructurePlan", () => {
       expect.objectContaining({
         databaseType: "dameng",
         schema: "SYSDBA",
-        tableName: "ORDERS_COPY",
+        tableName: "orders_copy",
       }),
     );
     expect(apiMock.buildDuplicateTableStructureSql).not.toHaveBeenCalled();

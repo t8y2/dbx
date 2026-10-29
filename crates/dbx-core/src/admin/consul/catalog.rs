@@ -36,9 +36,9 @@ pub struct ConsulCatalogNode {
     pub address: String,
     #[serde(default)]
     pub datacenter: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::health::null_as_default")]
     pub tagged_addresses: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::health::null_as_default")]
     pub node_meta: BTreeMap<String, String>,
     #[serde(default)]
     pub create_index: u64,

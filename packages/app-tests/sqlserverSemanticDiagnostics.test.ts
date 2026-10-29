@@ -67,7 +67,7 @@ test("sqlserver completion columns do not query using database name as schema fa
   globalThis.fetch = (async (input) => {
     const url = String(input);
     requests.push(url);
-    if (url === "/api/connection/list") {
+    if (url.split("?")[0] === "/api/connection/list") {
       return new Response(JSON.stringify([sqlServerConn()]), {
         status: 200,
         headers: { "Content-Type": "application/json" },

@@ -139,6 +139,11 @@ describe("connection query actions", () => {
 });
 
 describe("message queue query capabilities", () => {
+  it("advertises DynamoDB PartiQL execution and query entry points", () => {
+    expect(supportsQueryExecution("dynamodb")).toBe(true);
+    expect(supportsConnectionQueryActions("dynamodb")).toBe(true);
+    expect(supportsTransaction("dynamodb")).toBe(false);
+  });
   it("does not advertise query execution for broker surfaces", () => {
     expect(supportsQueryExecution("mq")).toBe(false);
     expect(supportsQueryExecution("mqtt")).toBe(false);
@@ -358,6 +363,10 @@ describe("supportsTableImport", () => {
 
   it("enables openGauss table import", () => {
     expect(supportsTableImport("opengauss")).toBe(true);
+  });
+
+  it("enables SAP HANA table import", () => {
+    expect(supportsTableImport("saphana")).toBe(true);
   });
 });
 

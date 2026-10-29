@@ -1,5 +1,6 @@
 const SIMPLE_LOWER_IDENTIFIER = /^[a-z_][a-z0-9_$]*$/;
 const SIMPLE_MYSQL_IDENTIFIER = /^[A-Za-z_$\u0080-\uFFFF][A-Za-z0-9_$\u0080-\uFFFF]*$/u;
+const SIMPLE_CLICKHOUSE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SIMPLE_DAMENG_IDENTIFIER = /^[A-Z_][A-Z0-9_]*$/;
 const SIMPLE_ORACLE_IDENTIFIER = /^[A-Z][A-Z0-9_$#]*$/;
 
@@ -311,6 +312,57 @@ const MYSQL_ONLY_RESERVED_IDENTIFIER_KEYWORDS = new Set([
   "xor",
   "year_month",
   "zerofill",
+]);
+
+// ClickHouse identifiers: bare identifiers cannot contain `$` or non-ASCII characters
+// and cannot match reserved keywords. Keywords outside PostgreSQL's set are listed here.
+const CLICKHOUSE_ONLY_RESERVED_IDENTIFIER_KEYWORDS = new Set([
+  "alias",
+  "alter",
+  "anti",
+  "asof",
+  "attach",
+  "between",
+  "by",
+  "cluster",
+  "codec",
+  "database",
+  "databases",
+  "delete",
+  "describe",
+  "detach",
+  "drop",
+  "engine",
+  "ephemeral",
+  "exchange",
+  "exists",
+  "explain",
+  "final",
+  "format",
+  "global",
+  "if",
+  "insert",
+  "interval",
+  "kill",
+  "materialized",
+  "optimize",
+  "partition",
+  "populate",
+  "prewhere",
+  "qualify",
+  "rename",
+  "replace",
+  "sample",
+  "semi",
+  "set",
+  "settings",
+  "show",
+  "system",
+  "totals",
+  "ttl",
+  "values",
+  "view",
+  "watch",
 ]);
 
 // Oracle 11g SQL reserved words. Ordinary unquoted Oracle identifiers are
@@ -677,6 +729,12 @@ export function requiresMysqlIdentifierQuote(identifier: string, additionalKeywo
   if (!SIMPLE_MYSQL_IDENTIFIER.test(identifier)) return true;
   const normalized = identifier.toLowerCase();
   return POSTGRES_RESERVED_IDENTIFIER_KEYWORDS.has(normalized) || additionalKeywords?.has(normalized) === true || MYSQL_ONLY_RESERVED_IDENTIFIER_KEYWORDS.has(normalized);
+}
+
+export function requiresClickhouseIdentifierQuote(identifier: string, additionalKeywords?: ReadonlySet<string>): boolean {
+  if (!SIMPLE_CLICKHOUSE_IDENTIFIER.test(identifier)) return true;
+  const normalized = identifier.toLowerCase();
+  return POSTGRES_RESERVED_IDENTIFIER_KEYWORDS.has(normalized) || additionalKeywords?.has(normalized) === true || CLICKHOUSE_ONLY_RESERVED_IDENTIFIER_KEYWORDS.has(normalized);
 }
 
 export function requiresOracleIdentifierQuote(identifier: string): boolean {

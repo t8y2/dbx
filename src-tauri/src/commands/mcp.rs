@@ -2730,9 +2730,10 @@ mod tests {
         let calls = std::fs::read_to_string(log_path).unwrap();
         assert!(calls.contains("npm root -g"));
         assert!(calls.contains("npm prefix -g"));
+        let canonical_npm_cli = canonical_runtime_path(&npm_cli_path).unwrap();
         assert!(calls
             .lines()
-            .any(|line| line == format!("{} install -g @dbx-app/mcp-server@latest", npm_cli_path.display())));
+            .any(|line| line == format!("{} install -g @dbx-app/mcp-server@latest", canonical_npm_cli.display())));
         assert!(!calls.contains("--registry"));
         assert!(calls.contains(&format!("PATH={}", canonical_runtime_path(&dir).unwrap().display())));
 

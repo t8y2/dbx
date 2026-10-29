@@ -49,7 +49,32 @@ export function sortSidebarTreeChildrenByNameKeepingTableVGroups(parent: Pick<Tr
 }
 
 function isBottomConnectionUtilityNode(child: TreeNode): boolean {
-  return child.type === "oracle-db-links" || child.type === "user-admin" || child.type === "xugu-user-admin" || child.type === "dameng-users" || child.type === "dameng-roles" || child.type === "dameng-job-admin" || child.type === "group-tablespaces";
+  return child.type === "oracle-db-links" || child.type === "database-job-admin" || child.type === "user-admin" || child.type === "xugu-user-admin" || child.type === "dameng-users" || child.type === "dameng-roles" || child.type === "dameng-job-admin" || child.type === "group-tablespaces";
+}
+
+function connectionChildSections(children: readonly TreeNode[]) {
+  const savedSqlNodes = children.filter((child) => child.type === "saved-sql-root");
+  const bottomUtilityNodes = children.filter(isBottomConnectionUtilityNode);
+  const utilityOrder = ["oracle-db-links", "database-job-admin", "user-admin", "xugu-user-admin"];
+  const utilityRank = (child: TreeNode) => (utilityOrder.includes(child.type) ? utilityOrder.indexOf(child.type) : utilityOrder.length);
+  bottomUtilityNodes.sort((left, right) => utilityRank(left) - utilityRank(right));
+  const regularChildren = children.filter((child) => child.type !== "saved-sql-root" && !isBottomConnectionUtilityNode(child));
+  return { savedSqlNodes, bottomUtilityNodes, regularChildren };
+}
+
+export function orderSidebarConnectionUtilitiesForDisplay(nodes: TreeNode[]): TreeNode[] {
+  const ordered = nodes.map((node) => {
+    if (!node.children) return node;
+    let children = node.children;
+    if (node.type === "connection-group") children = orderSidebarConnectionUtilitiesForDisplay(children);
+    else if (node.type === "connection") {
+      const { savedSqlNodes, regularChildren, bottomUtilityNodes } = connectionChildSections(children);
+      const next = [...savedSqlNodes, ...regularChildren, ...bottomUtilityNodes];
+      if (!next.every((child, index) => child === children[index])) children = next;
+    }
+    return children === node.children ? node : { ...node, children };
+  });
+  return ordered.every((node, index) => node === nodes[index]) ? nodes : ordered;
 }
 
 function orderSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">, children: readonly TreeNode[], databaseType?: DatabaseType): TreeNode[] {
@@ -70,9 +95,7 @@ function orderSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">, child
   }
 
   if (parent.type === "connection") {
-    const savedSqlNodes = normalized.filter((child) => child.type === "saved-sql-root");
-    const bottomUtilityNodes = normalized.filter(isBottomConnectionUtilityNode);
-    const regularChildren = normalized.filter((child) => child.type !== "saved-sql-root" && !isBottomConnectionUtilityNode(child));
+    const { savedSqlNodes, bottomUtilityNodes, regularChildren } = connectionChildSections(normalized);
     const withConnectionUtilityOrder = (children: TreeNode[]) => [...savedSqlNodes, ...children, ...bottomUtilityNodes];
 
     if (

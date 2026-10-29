@@ -196,6 +196,12 @@ export interface SchemaDiffCompareOptions {
   compareCharset: boolean;
   ignoreTableNameCase: boolean;
   ignoreColumnNameCase: boolean;
+  /**
+   * Drop the persisted object metadata cache for both endpoints before loading
+   * table details, so the compare reads the live structure. Turn off to reuse
+   * cached metadata (faster, but may hide changes made outside DBX).
+   */
+  refreshMetadata: boolean;
   tableIncludePattern: string;
   tableExcludePattern: string;
   tableFilterPriority: SchemaDiffTableFilterPriority;
@@ -286,6 +292,7 @@ export const DEFAULT_POSTGRES_OPTIONS: SchemaDiffCompareOptions = {
   compareCharset: true,
   ignoreTableNameCase: false,
   ignoreColumnNameCase: false,
+  refreshMetadata: true,
   tableIncludePattern: "",
   tableExcludePattern: "",
   tableFilterPriority: "exclude",
@@ -324,6 +331,7 @@ export const DEFAULT_MYSQL_OPTIONS: SchemaDiffCompareOptions = {
   compareCharset: true,
   ignoreTableNameCase: false,
   ignoreColumnNameCase: false,
+  refreshMetadata: true,
   tableIncludePattern: "",
   tableExcludePattern: "",
   tableFilterPriority: "exclude",

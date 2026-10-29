@@ -26,7 +26,7 @@ pub use operations::{
 pub use references::{native_job_references_core, native_job_references_with};
 pub use service::{
     native_job_list_core, native_job_list_with, native_job_open_context_core, native_job_open_context_with,
-    native_job_read_core, native_job_read_with, NativeJobRegistry, NativeJobRuntimeIdentity,
+    native_job_read_core, native_job_read_with, runtime_identity, NativeJobRegistry, NativeJobRuntimeIdentity,
 };
 
 pub type NativeJobCatalogRow = BTreeMap<String, Value>;

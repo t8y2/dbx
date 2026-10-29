@@ -73,11 +73,56 @@ describe("createEditorWheelZoomGestureGuard", () => {
 });
 
 describe("createEditorWheelZoomController", () => {
-  it("keeps mouse-notch zoom on the existing curve", () => {
+  it("limits a mouse notch to a five percent scale change", () => {
     const zoom = createEditorWheelZoomController();
     const event = { timeStamp: 10, ctrlKey: true, metaKey: false, deltaX: 0, deltaY: 120, deltaMode: 0 };
 
-    expect(zoom.nextFontSize(16, event)).toBe(fontSizeFromWheelDelta(16, 120));
+    expect(zoom.nextFontSize(16, event)).toBe(15.24);
+  });
+
+  it.each([
+    [-100, 0],
+    [-120, 0],
+    [-1000, 0],
+    [-3, 1],
+    [-1, 2],
+  ])("bounds wheel delta %s in mode %s to the same percentage step", (deltaY, deltaMode) => {
+    const zoom = createEditorWheelZoomController();
+    expect(zoom.nextFontSize(16, { ...pinchWheel(10, deltaY), deltaMode })).toBe(16.8);
+  });
+
+  it.each(["ctrlKey", "metaKey"] as const)("does not mistake a physical %s with fractional wheel delta for a pinch", (modifier) => {
+    const zoom = createEditorWheelZoomController();
+    zoom.recordModifiers({ ctrlKey: modifier === "ctrlKey", metaKey: modifier === "metaKey" });
+    expect(zoom.nextFontSize(16, { ...pinchWheel(10, -100.5), ctrlKey: modifier === "ctrlKey", metaKey: modifier === "metaKey" })).toBe(16.8);
+  });
+
+  it("does not promote a fractional plain scroll when Control is pressed mid-gesture", () => {
+    const zoom = createEditorWheelZoomController();
+    expect(zoom.nextFontSize(16, pinchWheel(10, -10.5, false))).toBeNull();
+    zoom.recordModifiers({ ctrlKey: true, metaKey: false });
+    expect(zoom.nextFontSize(16, pinchWheel(30, -10.5))).toBeNull();
+    expect(zoom.nextFontSize(16, pinchWheel(211, -100.5))).toBe(16.8);
+  });
+
+  it("restores pinch scaling after the physical modifier is released or the window loses focus", () => {
+    const zoom = createEditorWheelZoomController();
+    zoom.recordModifiers({ ctrlKey: true, metaKey: false });
+    zoom.recordModifiers({ ctrlKey: false, metaKey: false });
+    expect(zoom.nextFontSize(11, pinchWheel(1, -100 * Math.log(2)))).toBe(22);
+    zoom.recordModifiers({ ctrlKey: true, metaKey: false });
+    zoom.reset();
+    expect(zoom.nextFontSize(11, pinchWheel(2, -100 * Math.log(2)))).toBe(22);
+  });
+
+  it("reverses wheel steps without rounding drift and preserves the font limits", () => {
+    const zoom = createEditorWheelZoomController();
+    expect(zoom.nextFontSize(16, pinchWheel(10, -120))).toBe(16.8);
+    expect(zoom.nextFontSize(16.8, pinchWheel(20, 120))).toBe(16);
+    zoom.rebase();
+    expect(zoom.nextFontSize(24, pinchWheel(30, -120))).toBe(24);
+    zoom.rebase();
+    expect(zoom.nextFontSize(10, pinchWheel(40, 120))).toBe(10);
   });
 
   it("maps a trackpad pinch through Chromium's exp(-deltaY / 100) scale", () => {
@@ -107,5 +152,13 @@ describe("createEditorWheelZoomController", () => {
     zoom.holdScrollGesture(200);
     expect(zoom.nextFontSize(14, pinchWheel(250, -1.5))).toBeNull();
     expect(zoom.nextFontSize(14, pinchWheel(431, -1.5))).toBeGreaterThan(14);
+  });
+});
+
+describe("fontSizeFromWheelDelta", () => {
+  it("keeps small pixel movements gradual and ignores zero vertical delta", () => {
+    expect(fontSizeFromWheelDelta(16, 0)).toBe(16);
+    expect(fontSizeFromWheelDelta(16, -10)).toBeGreaterThan(16);
+    expect(fontSizeFromWheelDelta(16, -10)).toBeLessThan(16.1);
   });
 });

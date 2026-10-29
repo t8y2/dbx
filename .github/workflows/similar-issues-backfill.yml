@@ -32,7 +32,7 @@ jobs:
       matrix:
         chunk_index: [0, 1, 2]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Create DBX bot token
         id: app-token

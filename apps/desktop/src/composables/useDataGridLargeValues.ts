@@ -1,7 +1,7 @@
 import { computed, nextTick, onActivated, onDeactivated, ref, watch, type ComputedRef, type Ref } from "vue";
 import * as api from "@/lib/backend/api";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
-import { chunkLegacyLargeValueRequests, fetchLegacyLargeValueRequestChunk, legacyLargeValueIdentityKey as largeValueIdentityKey, legacyLargeValueRowPredicate, resolveCapturedLegacyLargeValueCells, type LegacyLargeValueContext } from "@/lib/dataGrid/legacyLargeValueExport";
+import { chunkLegacyLargeValueRequests, fetchLegacyLargeValueRequestChunk, legacyLargeValueRowPredicate, resolveCapturedLegacyLargeValueCells, type LegacyLargeValueContext } from "@/lib/dataGrid/legacyLargeValueExport";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { rowIdLocatorUnsupported } from "@/lib/table/tableRowIdSupport";
@@ -25,6 +25,8 @@ import {
   type ResultScopedRowCache,
 } from "@/lib/dataGrid/dataGridLargeValues";
 import { CANVAS_DATA_GRID_ROW_HEIGHT } from "@/lib/dataGrid/canvasDataGridRenderer";
+import { createResultKeyLocator } from "@/lib/dataGrid/resultKeyLocator";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 
 interface LargeValueRowItem {
   id: number;
@@ -148,10 +150,15 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     return largeValueCellsByKey.value.get(largeValueCellKey(item.sourceIndex, columnIndex))?.original_bytes;
   }
 
-  function formatGridItemCell(item: LargeValueRowItem, columnIndex: number): string {
+  function formatGridItemCell(item: LargeValueRowItem, columnIndex: number, includeSnapshotLabel = true): string {
     void visibleLargeValuePreviewVersion.value;
+    if (isPendingDecode(item, columnIndex)) return options.translate("grid.largeValuePendingDecode");
     const text = options.formatCellCached(visibleLargeValuePreviewValue(item, columnIndex, item.data[columnIndex] ?? null), columnIndex, largeValueOriginalBytes(item, columnIndex));
-    return snapshotReference(item, columnIndex) ? options.translate("grid.largeValueSnapshotPreview", { value: text }) : text;
+    return includeSnapshotLabel && snapshotReference(item, columnIndex) ? options.translate("grid.largeValueSnapshotPreview", { value: text }) : text;
+  }
+
+  function isPendingDecode(item: LargeValueRowItem | undefined, columnIndex: number): boolean {
+    return !!item && isLargeValuePreview(item, columnIndex) && largeValueCellsByKey.value.get(largeValueCellKey(item.sourceIndex!, columnIndex))?.pending_decode === true;
   }
 
   function snapshotReference(item: LargeValueRowItem | undefined, columnIndex: number): string | undefined {
@@ -205,12 +212,20 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
   }
 
   function formatGridItemCellForConfirmation(item: LargeValueRowItem, columnIndex: number): string {
+    if (isPendingDecode(item, columnIndex)) return options.translate("grid.largeValuePendingDecode");
     return options.formatCell(item.data[columnIndex], columnIndex, largeValueOriginalBytes(item, columnIndex), false);
+  }
+
+  function requiresOriginalKeys(result = options.result.value): boolean {
+    const id = options.connectionId.value;
+    return !!result.raw_key_cells?.length || !!result.large_value_cells?.some((cell) => cell.pending_decode) || (!!id && mysqlDataCharsetEnabled(options.getConnectionConfig(id)));
   }
 
   function largeValueSourceColumnIndex(columnName: string): number {
     const normalized = columnName.toLocaleLowerCase();
-    return options.resultSourceColumns.value.findIndex((column) => column.toLocaleLowerCase() === normalized);
+    const indexes = options.resultSourceColumns.value.flatMap((column, index) => (column.toLocaleLowerCase() === normalized ? [index] : []));
+    if (requiresOriginalKeys() && indexes.length !== 1) return -1;
+    return indexes[0] ?? -1;
   }
 
   function visibleLargeValuePreviewCache(result: QueryResult): ResultScopedRowCache<CellValue> {
@@ -304,7 +319,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       cache.touch(item.sourceIndex);
       const initialValues = new Map<number, { value: CellValue; revision: number }>();
       for (const columnIndex of targetColumnIndexes) {
-        if (!isLargeValuePreview(item, columnIndex) || cache.has(item.sourceIndex, columnIndex)) continue;
+        if (!isLargeValuePreview(item, columnIndex) || isPendingDecode(item, columnIndex) || cache.has(item.sourceIndex, columnIndex)) continue;
         initialValues.set(columnIndex, {
           value: item.data[columnIndex] ?? null,
           revision: visibleLargeValuePreviewCellRevision(sourceResult, item.sourceIndex, columnIndex),
@@ -330,6 +345,8 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       if (sourceColumn && !selectedColumns.some((column) => column.toLocaleLowerCase() === sourceColumn.toLocaleLowerCase())) selectedColumns.push(sourceColumn);
     }
     const selectedColumnTypes = selectedColumns.map((column) => tableMeta.columns.find((candidate) => candidate.name.toLocaleLowerCase() === column.toLocaleLowerCase())?.data_type ?? "");
+    const originalKeys = requiresOriginalKeys(sourceResult);
+    const sourceLocator = createResultKeyLocator(sourceResult, primaryKeyIndexes, originalKeys, options.translate("grid.largeValueOriginalKeyUnavailable"));
     const predicates = await Promise.all([...requests.values()].map((request) => largeValueRowPredicate(request.sourceIndex, primaryKeyIndexes)));
     if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || options.result.value !== sourceResult) return;
     const sql = await buildTableSelectSql({
@@ -377,22 +394,30 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     });
     if (resultColumnIndexes.some((index) => index < 0)) throw new Error(options.translate("grid.largeValueColumnUnavailable"));
     const resultPrimaryKeyIndexes = resultColumnIndexes.slice(0, tableMeta.primaryKeys.length);
-    const valuesByIdentity = new Map(result.rows.map((row) => [largeValueIdentityKey(row, resultPrimaryKeyIndexes), row]));
+    const resultLocator = createResultKeyLocator(result, resultPrimaryKeyIndexes, originalKeys, options.translate("grid.largeValueOriginalKeyUnavailable"));
+    const valuesByIdentity = new Map<string, { row: CellValue[]; rowIndex: number }>();
+    result.rows.forEach((row, rowIndex) => {
+      const identity = resultLocator.identity(rowIndex);
+      if (valuesByIdentity.has(identity)) throw new Error(options.translate("grid.largeValueOriginalKeyUnavailable"));
+      valuesByIdentity.set(identity, { row, rowIndex });
+    });
+    const resolvedLargeCells = largeValueCellMap(result);
     const currentLargeValueCells = largeValueCellMap(sourceResult);
     let changed = false;
     for (const request of requests.values()) {
       const currentRow = sourceResult.rows[request.sourceIndex];
       if (!currentRow) continue;
-      const identity = largeValueIdentityKey(currentRow, primaryKeyIndexes);
-      const resolvedRow = valuesByIdentity.get(identity);
-      if (!resolvedRow) continue;
+      const identity = sourceLocator.identity(request.sourceIndex);
+      const resolved = valuesByIdentity.get(identity);
+      if (!resolved) continue;
       for (const [columnIndex, initialValue] of request.initialValues) {
         if (!currentLargeValueCells.has(largeValueCellKey(request.sourceIndex, columnIndex)) || currentRow[columnIndex] !== initialValue.value || visibleLargeValuePreviewCellRevision(sourceResult, request.sourceIndex, columnIndex) !== initialValue.revision) continue;
         const sourceColumn = options.resultSourceColumns.value[columnIndex];
         const selectedIndex = selectedColumns.findIndex((column) => column.toLocaleLowerCase() === sourceColumn?.toLocaleLowerCase());
         const resultIndex = resultColumnIndexes[selectedIndex];
         if (resultIndex === undefined || resultIndex < 0) continue;
-        const previewValue = resolvedRow[resultIndex] ?? null;
+        if (resolvedLargeCells.get(largeValueCellKey(resolved.rowIndex, resultIndex))?.pending_decode) continue;
+        const previewValue = resolved.row[resultIndex] ?? null;
         cache.remember(request.sourceIndex, columnIndex, previewValue);
         changed = true;
       }
@@ -459,6 +484,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
   options.runtimeScope.addCleanup(pauseVisibleLargeValuePreviewHydration);
 
   function captureLegacyContext(sourceIndexes: number[]): LegacyLargeValueContext {
+    const selectedSourceIndexes = new Set(sourceIndexes);
     const connectionId = options.connectionId.value;
     const connection = connectionId ? options.getConnectionConfig(connectionId) : undefined;
     const tableMeta = options.tableMeta.value;
@@ -468,6 +494,8 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       executionDatabase: options.executionDatabase.value,
       tableMeta: tableMeta ? JSON.parse(JSON.stringify(tableMeta)) : undefined,
       sourceColumns: [...options.resultSourceColumns.value],
+      requiresOriginalKeys: requiresOriginalKeys(),
+      rawKeyCells: options.result.value.raw_key_cells?.filter((cell) => selectedSourceIndexes.has(cell.row_index)).map((cell) => ({ ...cell })),
       rows: sourceIndexes.reduce<CellValue[][]>((rows, index) => {
         const row = options.result.value.rows[index];
         if (row) rows[index] = JSON.parse(JSON.stringify(row));
@@ -784,6 +812,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
 
   return {
     captureSourceValues,
+    isPendingDecode,
     snapshotReference,
     captureSnapshotDownloadTarget,
     isSnapshotDownloadTargetCurrent,

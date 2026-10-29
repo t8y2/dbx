@@ -44,3 +44,77 @@ export function floatingArrowOffset(length: number, shift: number, padding = 8):
   const maximum = Math.max(padding, length - padding);
   return Math.min(Math.max(padding, length / 2 - shift), maximum);
 }
+
+function isClippingOverflow(overflow: string): boolean {
+  return overflow === "auto" || overflow === "scroll" || overflow === "hidden" || overflow === "clip";
+}
+
+/**
+ * Computes the visible intersection rectangle of a trigger element within all of
+ * its clipping ancestor containers (overflow: auto | scroll | hidden | clip).
+ * If the element is not clipped by any ancestor, returns its bounding client rect.
+ */
+export function visibleTriggerRect(el: HTMLElement): FloatingRect & { width: number; height: number } {
+  const rect = el.getBoundingClientRect();
+  let left = rect.left;
+  let right = rect.right;
+  let top = rect.top;
+  let bottom = rect.bottom;
+
+  if (typeof window === "undefined") {
+    return {
+      left,
+      right,
+      top,
+      bottom,
+      width: right - left,
+      height: bottom - top,
+    };
+  }
+
+  let parent: Element | null = el.parentElement;
+  while (parent && parent !== document.body && parent !== document.documentElement) {
+    const style = window.getComputedStyle(parent);
+    const overflowX = style.overflowX || style.overflow;
+    const overflowY = style.overflowY || style.overflow;
+    const clipsX = isClippingOverflow(overflowX);
+    const clipsY = isClippingOverflow(overflowY);
+
+    if (clipsX || clipsY) {
+      const parentRect = parent.getBoundingClientRect();
+      if (clipsX) {
+        left = Math.max(left, parentRect.left);
+        right = Math.min(right, parentRect.right);
+      }
+      if (clipsY) {
+        top = Math.max(top, parentRect.top);
+        bottom = Math.min(bottom, parentRect.bottom);
+      }
+    }
+    parent = parent.parentElement;
+  }
+
+  if (left > right) {
+    if (rect.right < left) {
+      right = left;
+    } else {
+      left = right;
+    }
+  }
+  if (top > bottom) {
+    if (rect.bottom < top) {
+      bottom = top;
+    } else {
+      top = bottom;
+    }
+  }
+
+  return {
+    left,
+    right,
+    top,
+    bottom,
+    width: right - left,
+    height: bottom - top,
+  };
+}

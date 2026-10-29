@@ -47,7 +47,7 @@ function Remove-McpReplacementTempFiles([string]$Directory) {
         if (!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return }
         Get-ChildItem -LiteralPath $Directory -Force -ErrorAction Stop | Where-Object {
             !$_.PSIsContainer -and !($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
-            $_.Name -imatch '\Adbx-mcp\.exe~RF[0-9a-f]+\.TMP\z'
+            $_.Name -imatch '\Adbx-mcp\.exe[~.]RF[0-9a-f]+\.TMP\z'
         } | ForEach-Object {
             # A running MCP process may still hold the old executable; retry on the next run.
             # A READONLY attribute makes [IO.File]::Delete throw, so one read-only

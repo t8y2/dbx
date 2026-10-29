@@ -1,7 +1,8 @@
 //! End-to-end external plugin-tools test against a real `.dbxp` package:
 //! install → opt-in-filtered discovery → merged `tools/list` → server
 //! dispatch of a connection-less tool through the real sidecar. The packaged
-//! plugin must declare `external_tools: true` to be exposed here.
+//! plugin must declare `external_tools: true` and the tool's access level in
+//! its `mcp.tools` map, and the user grant is saved below.
 //!
 //! The mechanism under test is plugin-agnostic; the ssh plugin is only the
 //! concrete vehicle available here (mirroring `plugin_tools_bridge.rs`).
@@ -28,6 +29,21 @@ async fn ssh_package_tools_are_detected_listed_and_dispatched() {
 
     let database_path = data_dir.path().join("dbx.db");
     let storage = dbx_core::storage::Storage::open(&database_path).await.unwrap();
+    // Nothing is exposed before the user authorizes the plugin. The packaged
+    // manifest must declare `ssh_list_known_hosts` with an access level.
+    storage
+        .save_plugin_mcp_grant(
+            "io.dbx.ssh",
+            dbx_core::storage::PluginMcpGrant {
+                external: true,
+                ceiling: dbx_core::storage::PluginMcpAccessLevel::Full,
+                approved_tools: [("ssh_list_known_hosts".to_string(), dbx_core::storage::PluginMcpAccessLevel::Full)]
+                    .into(),
+                disabled_tools: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
     drop(storage);
     // No saved connections: every tool below must bind connection-less.
     let backend = LocalBackend::open_with_app_version(&database_path, "0.7.0").await.unwrap();

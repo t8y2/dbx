@@ -1,4 +1,4 @@
-import { requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
+import { requiresClickhouseIdentifierQuote, requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
 import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
 import type { SqlSemanticToken } from "@/lib/sql/semantic/types";
 import { formatSqlForDisplay, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
@@ -31,8 +31,9 @@ type DdlColumnAttributePositions = {
 function canRenderUnquoted(identifier: string, dialect: SqlFormatDialect): boolean {
   switch (dialect) {
     case "mysql":
-    case "clickhouse":
       return !requiresMysqlIdentifierQuote(identifier);
+    case "clickhouse":
+      return !requiresClickhouseIdentifierQuote(identifier);
     case "postgres":
     case "sqlite":
     case "duckdb":

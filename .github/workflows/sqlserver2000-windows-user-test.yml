@@ -12,9 +12,11 @@ jobs:
     timeout-minutes: 120
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # Keep the Win7/Server 2012 R2 main-thread stack at 8 MiB: an env
+      # RUSTFLAGS replaces the .cargo/config.toml target rustflags.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -26,7 +28,7 @@ jobs:
           cache: pnpm
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"

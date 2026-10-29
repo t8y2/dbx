@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { createSidebarLabelMatcher, matchSidebarLabel } from "../../apps/desktop/src/lib/sidebar/sidebarSearch.ts";
+import { createSidebarLabelMatcher, matchSidebarLabel, type SidebarSearchMatchMode } from "../../apps/desktop/src/lib/sidebar/sidebarSearch.ts";
 import { compileSearchRegex, parseSlashDelimitedRegexQuery } from "../../apps/desktop/src/lib/common/searchPattern.ts";
 import { filterSidebarTree } from "../../apps/desktop/src/lib/sidebar/sidebarSearchTree.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
@@ -537,4 +537,143 @@ test("camelCase tokenization survives the real tree-search path (issue #5407)", 
   ];
   assert.equal(findTable(filterSidebarTree(mixedCaseTree, "userorderdetail", new Set()))?.label, "UserOrderDetail");
   assert.equal(findTable(filterSidebarTree(mixedCaseTree, "uod", new Set()))?.label, "UserOrderDetail");
+});
+
+// ── Foreground match modes (issue #13505) ──
+//
+// `fuzzy` is the default and must stay byte-for-byte identical to the ladder
+// above. `contains` drops the subsequence/abbreviation/concatenation tiers so
+// "101" no longer finds "1001". `edges` keeps only whole-label start/end
+// matches so a mid-name word stops matching.
+
+test("fuzzy remains the default match mode", () => {
+  // No options at all (every pre-#13505 call site) and an explicit "fuzzy"
+  // produce the same results.
+  assert.equal(matchSidebarLabel("1001", "101")?.kind, "fuzzy");
+  assert.equal(matchSidebarLabel("1001", "101")?.score, 40);
+  assert.equal(matchSidebarLabel("1001", "101", { matchMode: "fuzzy" })?.score, 40);
+  assert.equal(matchSidebarLabel("orders", "odr")?.kind, "fuzzy");
+  assert.equal(matchSidebarLabel("orders", "odr", { matchMode: "fuzzy" })?.score, 40);
+  assert.equal(matchSidebarLabel("system_exception_log", "exclog")?.score, 50);
+  assert.equal(matchSidebarLabel("del_order", "elo")?.score, 55);
+  assert.equal(createSidebarLabelMatcher("101")("1001")?.kind, "fuzzy");
+
+  // An out-of-union value (stale persisted state, plugin caller) must degrade to
+  // the documented default, not to the stricter `contains` ladder.
+  const unknownMode = "wildcard" as unknown as SidebarSearchMatchMode;
+  assert.equal(matchSidebarLabel("1001", "101", { matchMode: unknownMode })?.score, 40);
+});
+
+test("contains keeps literal containment and drops subsequence tiers", () => {
+  const contains = (label: string, query: string, score?: number) => {
+    const match = matchSidebarLabel(label, query, { matchMode: "contains" });
+    assert.equal(match?.score, score, `${label} / ${query}`);
+    return match;
+  };
+
+  // Dropped: in-order subsequences and cross-word/quasi tiers.
+  assert.equal(matchSidebarLabel("1001", "101", { matchMode: "contains" }), null);
+  assert.equal(matchSidebarLabel("t_1001", "101", { matchMode: "contains" }), null);
+  assert.equal(matchSidebarLabel("dwd_order_1001", "101", { matchMode: "contains" }), null);
+  assert.equal(matchSidebarLabel("orders", "odr", { matchMode: "contains" }), null);
+  assert.equal(matchSidebarLabel("system_exception_log", "sel", { matchMode: "contains" }), null);
+  // Word-segment prefix concatenation is a fuzzy-only tier too ("exc"+skip+"log").
+  assert.equal(matchSidebarLabel("system_exception_log", "exclog", { matchMode: "contains" }), null);
+
+  // Kept: exact, prefix, word-prefix, substring — all literal contiguous text.
+  assert.equal(contains("101", "101", 100)?.kind, "exact");
+  assert.equal(contains("1010", "101", 90)?.kind, "prefix");
+  assert.equal(contains("t_101", "101", 80)?.kind, "word-prefix");
+  assert.equal(contains("dwd_order_101", "101", 80)?.kind, "word-prefix");
+  assert.equal(contains("x101x", "101", 70)?.kind, "substring");
+  // Strict modes are literal: separator-blind tiers belong to fuzzy only.
+  assert.equal(matchSidebarLabel("del_order", "delo", { matchMode: "contains" }), null);
+  assert.equal(matchSidebarLabel("del_order", "elo", { matchMode: "contains" }), null);
+});
+
+test("edges only matches whole-label start and end", () => {
+  // Exact and prefix are unchanged.
+  assert.equal(matchSidebarLabel("101", "101", { matchMode: "edges" })?.kind, "exact");
+  assert.equal(matchSidebarLabel("101", "101", { matchMode: "edges" })?.score, 100);
+  assert.equal(matchSidebarLabel("1010", "101", { matchMode: "edges" })?.kind, "prefix");
+
+  // Direct suffix is a new tier; it cannot appear in fuzzy mode.
+  assert.equal(matchSidebarLabel("t_101", "101", { matchMode: "edges" })?.kind, "suffix");
+  assert.equal(matchSidebarLabel("t_101", "101", { matchMode: "edges" })?.score, 85);
+  assert.equal(matchSidebarLabel("del_order", "order", { matchMode: "edges" })?.kind, "suffix");
+  assert.equal(matchSidebarLabel("del_order", "order", { matchMode: "edges" })?.score, 85);
+
+  // Mid-name words stop matching, including plain subsequences.
+  assert.equal(matchSidebarLabel("1001", "101", { matchMode: "edges" }), null);
+  assert.equal(matchSidebarLabel("t_1001", "101", { matchMode: "edges" }), null);
+  assert.equal(matchSidebarLabel("dwd_order_1001", "101", { matchMode: "edges" }), null);
+  // `dwd_order_101` genuinely ends with the query, so `edges` keeps it as a
+  // suffix: the mode anchors on the label's start/end, not on the word count.
+  // Its `_detail` sibling is the mid-name case the mode rejects.
+  assert.equal(matchSidebarLabel("dwd_order_101", "101", { matchMode: "edges" })?.kind, "suffix");
+  assert.equal(matchSidebarLabel("dwd_order_101", "101", { matchMode: "edges" })?.score, 85);
+  assert.equal(matchSidebarLabel("dwd_order_101_detail", "101", { matchMode: "edges" }), null);
+
+  // Strict modes are literal: no separator-blind prefix/suffix variants.
+  assert.equal(matchSidebarLabel("del_order", "delo", { matchMode: "edges" }), null);
+  assert.equal(matchSidebarLabel("del_order", "elo", { matchMode: "edges" }), null);
+  assert.equal(matchSidebarLabel("del_order", "delorder", { matchMode: "edges" }), null);
+  assert.equal(matchSidebarLabel("del_order", "elorder", { matchMode: "edges" }), null);
+  assert.equal(matchSidebarLabel("del_order", "order", { matchMode: "edges" })?.kind, "suffix");
+  assert.equal(matchSidebarLabel("del_order", "order", { matchMode: "edges" })?.score, 85);
+});
+
+test("unknown match modes fall back to the fuzzy default", () => {
+  // Runtime values are typed, but the matcher is a public helper; an unexpected
+  // string must not silently degrade to the more restrictive `contains` ladder.
+  assert.equal(matchSidebarLabel("1001", "101", { matchMode: "bogus" as unknown as SidebarSearchMatchMode })?.kind, "fuzzy");
+  assert.equal(matchSidebarLabel("1001", "101", { matchMode: "bogus" as unknown as SidebarSearchMatchMode })?.score, 40);
+});
+
+test("regex mode keeps its semantics regardless of the plain-text mode", () => {
+  for (const matchMode of ["fuzzy", "contains", "edges"] as const) {
+    assert.equal(matchSidebarLabel("SYS_USER_LOG", "/^sys_.*_log$/", { regexMode: true, matchMode })?.kind, "regex");
+    assert.equal(matchSidebarLabel("sys_user_archive", "/^sys_.*_log$/", { regexMode: true, matchMode }), null);
+    assert.equal(matchSidebarLabel("orders", "[", { regexMode: true, matchMode }), null);
+  }
+});
+
+test("filterSidebarTree applies the match mode to labels, comments and aliases", () => {
+  const tree: TreeNode[] = [
+    {
+      id: "conn-1",
+      label: "My Connection",
+      type: "connection",
+      connectionId: "conn-1",
+      isExpanded: true,
+      children: [
+        {
+          id: "db-1",
+          label: "app_db",
+          type: "database",
+          connectionId: "conn-1",
+          database: "app_db",
+          isExpanded: true,
+          children: [
+            { id: "tbl-1001", label: "t_1001", type: "table", connectionId: "conn-1", database: "app_db" },
+            { id: "tbl-101", label: "t_101", type: "table", connectionId: "conn-1", database: "app_db" },
+            { id: "tbl-comment", label: "del_order", type: "table", connectionId: "conn-1", database: "app_db", comment: "101 archive" },
+            { id: "tbl-alias", label: "unrelated", type: "table", connectionId: "conn-1", database: "app_db", searchAliases: ["101"] },
+          ],
+        },
+      ],
+    },
+  ];
+  const labels = (mode: "fuzzy" | "contains" | "edges") => (filterSidebarTree(tree, "101", new Set(), undefined, { matchMode: mode })[0]?.children?.[0]?.children ?? []).map((node) => node.label).sort();
+
+  // The matcher sees every label uniformly: node label, table name, comment
+  // and search aliases. "del_order" only matches through its comment and
+  // "unrelated" only through its alias, so they prove both paths.
+  assert.deepEqual(labels("fuzzy"), ["del_order", "t_1001", "t_101", "unrelated"]);
+  // `contains` drops the in-order subsequence hit on t_1001 but keeps the
+  // comment and alias matches, which are literal containment.
+  assert.deepEqual(labels("contains"), ["del_order", "t_101", "unrelated"]);
+  // `edges` matches "101 archive" (comment prefix) and the exact alias, but
+  // t_101 is a suffix match while t_1001 has no edge.
+  assert.deepEqual(labels("edges"), ["del_order", "t_101", "unrelated"]);
 });

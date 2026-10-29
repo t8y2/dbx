@@ -68,6 +68,29 @@ const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positio
 const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
 const APP_APPEARANCE_SETTINGS_KEY: &str = "app_appearance";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
+/// Policy v2 (`dbx_core::mcp_access::McpAccessPolicy`). Written next to the
+/// v1 key on every save; v1 keeps a never-wider projection for hosts that
+/// only read v1 (an older standalone `dbx-mcp`).
+const MCP_ACCESS_POLICY_KEY: &str = "mcp_access_policy";
+/// Decode the authoritative policy without falling back after corruption.
+fn saved_mcp_access_policy(
+    settings: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<crate::mcp_access::McpAccessPolicy>, String> {
+    let Some(value) = settings.get(MCP_ACCESS_POLICY_KEY) else { return Ok(None) };
+    let mut access: crate::mcp_access::McpAccessPolicy =
+        serde_json::from_value(value.clone()).map_err(|e| format!("invalid MCP access policy: {e}"))?;
+    if access.version != crate::mcp_access::MCP_ACCESS_POLICY_VERSION {
+        return Err(format!("invalid MCP access policy version: {}", access.version));
+    }
+    if let Some(legacy) = settings
+        .get(MCP_GLOBAL_POLICY_KEY)
+        .and_then(|value| serde_json::from_value::<McpGlobalPolicy>(value.clone()).ok())
+    {
+        access.restore_legacy_salesforce_opt_ins(&legacy.normalized());
+    }
+    Ok(Some(access))
+}
+
 const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
 const WEB_MCP_SETTINGS_KEY: &str = "web_mcp_settings";
 const MAX_RETRIES_KEY: &str = "max_retries";
@@ -82,6 +105,10 @@ const AI_PLUGIN_TOOL_PLUGINS_KEY: &str = "ai_plugin_tool_plugins";
 /// excluded even if they reappear on the opt-in list, so a revocation
 /// survives restarts and plugin updates.
 const AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY: &str = "ai_plugin_tool_disabled_plugins";
+/// `{ pluginId: PluginMcpGrant }` — the user's decisions about a plugin's
+/// tools on the external `dbx` MCP server. Absent entries fall back to the
+/// manifest declaration (see `dbx_core::ai::plugin_mcp`).
+const PLUGIN_MCP_GRANTS_KEY: &str = "plugin_mcp_grants";
 /// `{ pluginId: [connectionId, ...] }` — connections a plugin may read through
 /// the `host.data:read` Host API. Written only after an explicit user consent.
 const PLUGIN_DATA_GRANTS_KEY: &str = "plugin_data_grants";
@@ -569,6 +596,56 @@ pub struct AppAppearanceSettingsPatch {
     pub corner_style: Option<String>,
 }
 
+/// Access ceiling the user granted a plugin's tools on the external `dbx`
+/// MCP server. Ordered: `Read < Write < Full`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginMcpAccessLevel {
+    Read,
+    Write,
+    Full,
+}
+
+/// The user's external MCP decision for one plugin. Built-in AI access keeps
+/// its own Plugin Center switch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMcpGrant {
+    /// Whether the plugin's tools are exposed on the external MCP server.
+    /// The manifest's `external_tools` remains an upper bound.
+    pub external: bool,
+    /// Highest access level the plugin's tools may reach.
+    pub ceiling: PluginMcpAccessLevel,
+    /// Tools the user has seen and accepted, with the access level each had
+    /// at that moment. A tool that needs more than read access waits for
+    /// confirmation when it is missing here (new after an update) or now
+    /// needs more than the level it was accepted at (escalated).
+    #[serde(default)]
+    pub approved_tools: std::collections::BTreeMap<String, PluginMcpAccessLevel>,
+    /// Tools the user switched off individually.
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
+}
+
+impl PluginMcpGrant {
+    pub fn normalized(mut self) -> Self {
+        self.approved_tools = std::mem::take(&mut self.approved_tools)
+            .into_iter()
+            .map(|(tool, level)| (tool.trim().to_string(), level))
+            .filter(|(tool, _)| !tool.is_empty())
+            .take(256)
+            .collect();
+        self.disabled_tools.retain(|tool| !tool.trim().is_empty());
+        for tool in self.disabled_tools.iter_mut() {
+            *tool = tool.trim().to_string();
+        }
+        self.disabled_tools.sort();
+        self.disabled_tools.dedup();
+        self.disabled_tools.truncate(256);
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct McpGlobalPolicy {
@@ -579,6 +656,9 @@ pub struct McpGlobalPolicy {
     /// This never relaxes read-only, connection, database-scope or production protections.
     #[serde(default)]
     pub prompt_high_risk_sql: bool,
+    /// Explicit call safety policy. Missing preserves the legacy boolean's meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_confirmation: Option<crate::mcp_access::McpConfirmPolicy>,
     pub allowed_connection_ids: Option<Vec<String>>,
     /// Stable sidebar group ids whose current descendant connections are
     /// exposed when an explicit connection scope is configured.
@@ -599,6 +679,8 @@ pub struct McpGlobalPolicy {
     pub group_policies: Vec<McpGroupPolicy>,
     #[serde(default)]
     pub query_timeout_secs: Option<u64>,
+    #[serde(default = "crate::mcp_access::McpPluginToolsMode::legacy_default")]
+    pub plugin_tools_mode: crate::mcp_access::McpPluginToolsMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -756,6 +838,9 @@ pub struct McpGlobalPolicyState {
     pub allow_dangerous_sql: bool,
     #[serde(default)]
     pub prompt_high_risk_sql: bool,
+    /// Explicit call safety policy. Missing preserves the legacy boolean's meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_confirmation: Option<crate::mcp_access::McpConfirmPolicy>,
     pub allowed_connection_ids: Option<Vec<String>>,
     #[serde(default)]
     pub allowed_group_ids: Vec<String>,
@@ -767,6 +852,8 @@ pub struct McpGlobalPolicyState {
     pub group_policies: Vec<McpGroupPolicy>,
     #[serde(default)]
     pub query_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub plugin_tools_mode: crate::mcp_access::McpPluginToolsMode,
 }
 
 impl McpGlobalPolicyState {
@@ -775,17 +862,27 @@ impl McpGlobalPolicyState {
             read_only: self.read_only,
             allow_dangerous_sql: self.allow_dangerous_sql,
             prompt_high_risk_sql: self.prompt_high_risk_sql,
+            call_confirmation: self.call_confirmation,
             allowed_connection_ids: self.allowed_connection_ids.clone(),
             allowed_group_ids: self.allowed_group_ids.clone(),
             allowed_tool_names: self.allowed_tool_names.clone(),
             connection_policies: self.connection_policies.clone(),
             group_policies: self.group_policies.clone(),
             query_timeout_secs: self.query_timeout_secs,
+            plugin_tools_mode: self.plugin_tools_mode,
         }
     }
 }
 
 impl McpGlobalPolicy {
+    pub fn confirmation_policy(&self) -> crate::mcp_access::McpConfirmPolicy {
+        self.call_confirmation.unwrap_or(if self.prompt_high_risk_sql {
+            crate::mcp_access::McpConfirmPolicy::Full
+        } else {
+            crate::mcp_access::McpConfirmPolicy::Off
+        })
+    }
+
     /// Produces the single fail-closed representation persisted by the MCP
     /// policy API. This protects the policy boundary even when a caller does
     /// not use the desktop settings form (for example, a Web API client).
@@ -916,13 +1013,18 @@ impl McpGlobalPolicy {
         Self {
             read_only: self.read_only,
             allow_dangerous_sql: !self.read_only && self.allow_dangerous_sql,
-            prompt_high_risk_sql: !self.read_only && self.prompt_high_risk_sql,
+            // Canonical v1 representation retains old booleans losslessly.
+            // Explicit Off clears legacy elevation; HighRisk never enables it.
+            prompt_high_risk_sql: self.confirmation_policy() == crate::mcp_access::McpConfirmPolicy::Full,
+            call_confirmation: (self.confirmation_policy() == crate::mcp_access::McpConfirmPolicy::HighRisk)
+                .then_some(crate::mcp_access::McpConfirmPolicy::HighRisk),
             allowed_connection_ids,
             allowed_group_ids,
             allowed_tool_names,
             connection_policies,
             group_policies,
             query_timeout_secs: self.query_timeout_secs,
+            plugin_tools_mode: self.plugin_tools_mode,
         }
     }
 }
@@ -3810,6 +3912,28 @@ fn normalized_string_list(value: Option<&serde_json::Value>) -> Vec<String> {
     values
 }
 
+fn plugin_mcp_grants_from(value: Option<&serde_json::Value>) -> HashMap<String, PluginMcpGrant> {
+    let Some(serde_json::Value::Object(grants)) = value else {
+        return HashMap::new();
+    };
+    grants
+        .iter()
+        .filter_map(|(plugin_id, grant)| {
+            let plugin_id = plugin_id.trim();
+            if plugin_id.is_empty() {
+                return None;
+            }
+            match serde_json::from_value::<PluginMcpGrant>(grant.clone()) {
+                Ok(grant) => Some((plugin_id.to_string(), grant.normalized())),
+                Err(error) => {
+                    warn!("[plugins] ignoring malformed MCP grant for {plugin_id}: {error}");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 fn normalized_setting_id(value: &str, label: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.chars().count() > 256 {
@@ -5256,12 +5380,14 @@ impl Storage {
             let dedicated_keys = [
                 APP_APPEARANCE_SETTINGS_KEY,
                 MCP_GLOBAL_POLICY_KEY,
+                MCP_ACCESS_POLICY_KEY,
                 WEB_MCP_SETTINGS_KEY,
                 MAX_RETRIES_KEY,
                 SQL_FILE_UPLOAD_MAX_MB_KEY,
                 HISTORY_RETENTION_LIMIT_KEY,
                 AI_PLUGIN_TOOL_PLUGINS_KEY,
                 PLUGIN_DATA_GRANTS_KEY,
+                PLUGIN_MCP_GRANTS_KEY,
                 MCP_HISTORY_RETENTION_LIMIT_KEY,
             ];
             for key in dedicated_keys {
@@ -5309,12 +5435,14 @@ impl Storage {
                         read_only: policy.read_only,
                         allow_dangerous_sql: policy.allow_dangerous_sql,
                         prompt_high_risk_sql: policy.prompt_high_risk_sql,
+                        call_confirmation: policy.call_confirmation,
                         allowed_connection_ids: policy.allowed_connection_ids,
                         allowed_group_ids: policy.allowed_group_ids,
                         allowed_tool_names: policy.allowed_tool_names,
                         connection_policies: policy.connection_policies,
                         group_policies: policy.group_policies,
                         query_timeout_secs: policy.query_timeout_secs,
+                        plugin_tools_mode: policy.plugin_tools_mode,
                     });
                 };
                 let settings = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
@@ -5326,12 +5454,14 @@ impl Storage {
                         read_only: policy.read_only,
                         allow_dangerous_sql: policy.allow_dangerous_sql,
                         prompt_high_risk_sql: policy.prompt_high_risk_sql,
+                        call_confirmation: policy.call_confirmation,
                         allowed_connection_ids: policy.allowed_connection_ids,
                         allowed_group_ids: policy.allowed_group_ids,
                         allowed_tool_names: policy.allowed_tool_names,
                         connection_policies: policy.connection_policies,
                         group_policies: policy.group_policies,
                         query_timeout_secs: policy.query_timeout_secs,
+                        plugin_tools_mode: policy.plugin_tools_mode,
                     });
                 };
                 let policy = serde_json::from_value::<McpGlobalPolicy>(value.clone())
@@ -5342,20 +5472,179 @@ impl Storage {
                     read_only: policy.read_only,
                     allow_dangerous_sql: policy.allow_dangerous_sql,
                     prompt_high_risk_sql: policy.prompt_high_risk_sql,
+                    call_confirmation: policy.call_confirmation,
                     allowed_connection_ids: policy.allowed_connection_ids,
                     allowed_group_ids: policy.allowed_group_ids,
                     allowed_tool_names: policy.allowed_tool_names,
                     connection_policies: policy.connection_policies,
                     group_policies: policy.group_policies,
                     query_timeout_secs: policy.query_timeout_secs,
+                    plugin_tools_mode: policy.plugin_tools_mode,
                 })
             })
             .await;
         result.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))
     }
 
+    /// The policy every MCP host enforces, in v1 shape. A saved v2 policy is
+    /// authoritative and projected (never wider); otherwise the saved v1
+    /// policy is used as is. Hosts read this instead of the raw v1 key so a
+    /// v2 policy written by the settings UI takes effect immediately, while
+    /// the v1 key keeps serving older standalone `dbx-mcp` binaries.
+    pub async fn load_enforced_mcp_policy(&self) -> Result<McpGlobalPolicyState, String> {
+        let settings = self.load_app_settings_json().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+        let Some(access) = saved_mcp_access_policy(&settings).map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?
+        else {
+            return self.load_mcp_global_policy().await;
+        };
+        let policy = access.to_v1();
+        Ok(McpGlobalPolicyState {
+            configured: settings.contains_key(MCP_GLOBAL_POLICY_KEY),
+            read_only: policy.read_only,
+            allow_dangerous_sql: policy.allow_dangerous_sql,
+            prompt_high_risk_sql: policy.prompt_high_risk_sql,
+            call_confirmation: policy.call_confirmation,
+            allowed_connection_ids: policy.allowed_connection_ids,
+            allowed_group_ids: policy.allowed_group_ids,
+            allowed_tool_names: policy.allowed_tool_names,
+            connection_policies: policy.connection_policies,
+            group_policies: policy.group_policies,
+            query_timeout_secs: policy.query_timeout_secs,
+            plugin_tools_mode: access.plugin_tools_mode,
+        })
+    }
+
+    /// The v2 access policy: the saved v2 value when present, else the
+    /// lossless mapping of the saved v1 policy (or the default).
+    pub async fn load_mcp_access_policy(&self) -> Result<crate::mcp_access::McpAccessPolicy, String> {
+        let settings = self.load_app_settings_json().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+        if let Some(access) = saved_mcp_access_policy(&settings).map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))? {
+            return Ok(access);
+        }
+        Ok(crate::mcp_access::McpAccessPolicy::from_v1(&self.load_mcp_global_policy().await?.policy()))
+    }
+
+    /// Explicit recovery only: preserve corrupt data and reset access to deny
+    /// all. Ordinary saves and runtime reads must continue to fail closed.
+    pub async fn reset_invalid_mcp_access_policy(&self) -> Result<(), String> {
+        self.with_conn(|conn| {
+            let mut settings = app_settings_map_from_conn(conn)?;
+            if saved_mcp_access_policy(&settings).is_ok() {
+                return Err("MCP policy is valid; recovery is not required".to_string());
+            }
+            let backup_key = format!("mcp_policy_recovery_backup_{}", Uuid::new_v4());
+            settings.insert(
+                backup_key,
+                serde_json::json!({
+                    "v1": settings.get(MCP_GLOBAL_POLICY_KEY),
+                    "v2": settings.get(MCP_ACCESS_POLICY_KEY),
+                }),
+            );
+            let access = crate::mcp_access::McpAccessPolicy {
+                default_access: crate::mcp_access::McpAccessLevel::Read,
+                visibility: crate::mcp_access::McpVisibilityMode::Selected,
+                allowed_tool_names: Some(Vec::new()),
+                ..Default::default()
+            };
+            settings.insert(
+                MCP_GLOBAL_POLICY_KEY.to_string(),
+                serde_json::to_value(access.to_v1()).map_err(|e| e.to_string())?,
+            );
+            settings
+                .insert(MCP_ACCESS_POLICY_KEY.to_string(), serde_json::to_value(access).map_err(|e| e.to_string())?);
+            write_app_settings_map(conn, &settings)
+        })
+        .await
+        .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))
+    }
+
+    /// Saves a v2 policy together with its never-wider v1 projection in one
+    /// write, so v1-only readers can never see a wider policy than v2.
+    pub async fn save_mcp_access_policy(&self, policy: &crate::mcp_access::McpAccessPolicy) -> Result<(), String> {
+        let access = serde_json::to_value(policy).map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+        let projected = serde_json::to_value(policy.to_v1()).map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+        self.with_conn(move |conn| {
+            let mut settings = app_settings_map_from_conn(conn)?;
+            settings.insert(MCP_ACCESS_POLICY_KEY.to_string(), access);
+            settings.insert(MCP_GLOBAL_POLICY_KEY.to_string(), projected);
+            write_app_settings_map(conn, &settings)
+        })
+        .await
+        .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))
+    }
+
+    /// Sets one plugin sub-scope rule (`kind` other than `database`) and the
+    /// connection's admission mode for that kind, in one write. Passing
+    /// `rule: None` removes the rule. Used by the access-control tree, which
+    /// otherwise edits the v1 draft; database rules stay on the v1 path.
+    pub async fn set_mcp_plugin_scope_rule(
+        &self,
+        connection_id: &str,
+        kind: &str,
+        value: Option<&str>,
+        rule: Option<crate::mcp_access::McpAccessRule>,
+        sub_scope: Option<crate::mcp_access::McpSubScopeMode>,
+    ) -> Result<crate::mcp_access::McpAccessPolicy, String> {
+        if kind.trim().is_empty() || kind.trim() == "database" {
+            return Err("A plugin scope kind other than `database` is required".to_string());
+        }
+        let connection_id = normalized_setting_id(connection_id, "connection id")?;
+        let kind = kind.trim().to_string();
+        let value = value.map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
+        self.with_conn(move |conn| {
+            // Read, merge and write under the same storage lock: edits on two
+            // connection rows must not overwrite one another's saved rules.
+            let mut settings = app_settings_map_from_conn(conn)?;
+            let mut access = if let Some(access) = saved_mcp_access_policy(&settings)? {
+                access
+            } else {
+                let policy = settings
+                    .get(MCP_GLOBAL_POLICY_KEY)
+                    .map(|value| serde_json::from_value::<McpGlobalPolicy>(value.clone()))
+                    .transpose()
+                    .map_err(|e| e.to_string())?
+                    .unwrap_or_default();
+                crate::mcp_access::McpAccessPolicy::from_v1(&policy)
+            };
+            if let Some(value) = value {
+                let target = crate::mcp_access::McpRuleTarget::Scope {
+                    connection_id: connection_id.clone(),
+                    scope: kind.clone(),
+                    value,
+                };
+                match rule {
+                    Some(rule) => {
+                        access.rules.insert(target, rule);
+                    }
+                    None => {
+                        access.rules.remove(&target);
+                    }
+                }
+            }
+            let connection =
+                access.rules.entry(crate::mcp_access::McpRuleTarget::Connection { id: connection_id }).or_default();
+            connection.sub_scope_kind = Some(kind);
+            if let Some(mode) = sub_scope {
+                connection.sub_scope = Some(mode);
+            }
+            settings
+                .insert(MCP_ACCESS_POLICY_KEY.to_string(), serde_json::to_value(&access).map_err(|e| e.to_string())?);
+            settings.insert(
+                MCP_GLOBAL_POLICY_KEY.to_string(),
+                serde_json::to_value(access.to_v1()).map_err(|e| e.to_string())?,
+            );
+            write_app_settings_map(conn, &settings)?;
+            Ok(access)
+        })
+        .await
+        .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))
+    }
+
+    /// Saves the v1 settings draft while preserving v2-only restrictions.
+    /// The merged policy also supplies the conservative v1 compatibility view.
     pub async fn save_mcp_global_policy(&self, policy: &McpGlobalPolicy) -> Result<(), String> {
-        let policy = serde_json::to_value(policy.normalized()).map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+        let rebuilt = crate::mcp_access::McpAccessPolicy::from_v1(policy);
+        let draft = policy.normalized();
         self.with_conn(move |conn| {
             let current: Option<String> = conn
                 .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
@@ -5366,7 +5655,19 @@ impl Storage {
                     .map_err(|e| format!("invalid app settings JSON: {e}"))?,
                 None => serde_json::Map::new(),
             };
+            // Keep rules only v2 can express (plugin sub-scopes) across v1 saves.
+            let previous = saved_mcp_access_policy(&settings)?;
+            let access = match previous {
+                Some(previous) => rebuilt.clone().with_v2_only_rules_from(&previous),
+                None => rebuilt.clone(),
+            };
+            // Preserve the v1 representation for ordinary v1 edits. Only a
+            // merge of v2-only rules needs a lossy compatibility projection.
+            let policy = if access == rebuilt { draft } else { access.to_v1() };
+            let policy = serde_json::to_value(policy).map_err(|e| e.to_string())?;
+            let access = serde_json::to_value(access).map_err(|e| e.to_string())?;
             settings.insert(MCP_GLOBAL_POLICY_KEY.to_string(), policy);
+            settings.insert(MCP_ACCESS_POLICY_KEY.to_string(), access);
             let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
             conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", [json])
                 .map(|_| ())
@@ -5475,6 +5776,36 @@ impl Storage {
         .await
     }
 
+    /// Every saved external MCP grant, keyed by plugin id. Malformed entries
+    /// are skipped so one broken record never hides the others.
+    pub async fn load_plugin_mcp_grants(&self) -> Result<HashMap<String, PluginMcpGrant>, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(plugin_mcp_grants_from(settings.get(PLUGIN_MCP_GRANTS_KEY)))
+    }
+
+    /// Replaces one plugin's external MCP grant (read-modify-write inside one
+    /// connection closure) and returns the stored value.
+    pub async fn save_plugin_mcp_grant(
+        &self,
+        plugin_id: &str,
+        grant: PluginMcpGrant,
+    ) -> Result<PluginMcpGrant, String> {
+        let plugin_id = normalized_setting_id(plugin_id, "plugin id")?;
+        let grant = grant.normalized();
+        self.with_conn(move |conn| {
+            let mut settings = app_settings_map_from_conn(conn)?;
+            let mut grants = match settings.remove(PLUGIN_MCP_GRANTS_KEY) {
+                Some(serde_json::Value::Object(grants)) => grants,
+                _ => serde_json::Map::new(),
+            };
+            grants.insert(plugin_id, serde_json::to_value(&grant).map_err(|error| error.to_string())?);
+            settings.insert(PLUGIN_MCP_GRANTS_KEY.to_string(), serde_json::Value::Object(grants));
+            write_app_settings_map(conn, &settings)?;
+            Ok(grant)
+        })
+        .await
+    }
+
     /// Drops everything the user granted to a plugin (AI tool access and data
     /// grants). Called after uninstall so a reinstall starts without consent.
     pub async fn forget_plugin_permissions(&self, plugin_id: &str) -> Result<(), String> {
@@ -5488,6 +5819,9 @@ impl Storage {
             disabled.retain(|candidate| candidate != &plugin_id);
             settings.insert(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY.to_string(), serde_json::json!(disabled));
             if let Some(serde_json::Value::Object(grants)) = settings.get_mut(PLUGIN_DATA_GRANTS_KEY) {
+                grants.remove(&plugin_id);
+            }
+            if let Some(serde_json::Value::Object(grants)) = settings.get_mut(PLUGIN_MCP_GRANTS_KEY) {
                 grants.remove(&plugin_id);
             }
             write_app_settings_map(conn, &settings)
@@ -7686,6 +8020,51 @@ impl Storage {
                 .query_row("SELECT COUNT(*) FROM connections", [], |row| row.get(0))
                 .map_err(|error| error.to_string())?;
             Ok(Some(count.max(0) as u64))
+        })
+        .await
+    }
+
+    pub async fn migrate_sidebar_user_admin_visibility(&self, legacy_show_user_admin: bool) -> Result<(), String> {
+        self.with_conn(move |conn| {
+            let tx =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+            let migrated: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM app_state WHERE key = 'sidebar_user_admin_visibility_migration_v1')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if migrated {
+                return Ok(());
+            }
+            if !legacy_show_user_admin {
+                let rows = {
+                    let mut stmt =
+                        tx.prepare("SELECT id, config_json FROM connections").map_err(|error| error.to_string())?;
+                    let rows = stmt
+                        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                        .map_err(|error| error.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+                };
+                for (id, json) in rows {
+                    let Ok(serde_json::Value::Object(mut config)) = serde_json::from_str(&json) else {
+                        continue;
+                    };
+                    config.insert("show_user_admin".into(), serde_json::Value::Bool(false));
+                    tx.execute(
+                        "UPDATE connections SET config_json = ?1 WHERE id = ?2",
+                        params![serde_json::to_string(&config).map_err(|error| error.to_string())?, id],
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+            }
+            tx.execute(
+                "INSERT INTO app_state (key, value_json) VALUES ('sidebar_user_admin_visibility_migration_v1', 'true')",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())
         })
         .await
     }
@@ -10107,9 +10486,13 @@ fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::{
+        app_settings_map_from_conn, plugin_mcp_grants_from, write_app_settings_map, PluginMcpAccessLevel,
+        PluginMcpGrant,
+    };
+    use super::{
         maybe_import_user_data_db, AppAppearanceSettingsPatch, DataDbImportResult, DesktopIconTheme, DesktopSettings,
         McpGlobalPolicy, McpGlobalPolicyState, Storage, SyncImportPlan, KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION,
-        MCP_GLOBAL_POLICY_KEY,
+        MCP_ACCESS_POLICY_KEY, MCP_GLOBAL_POLICY_KEY,
     };
     use crate::ai::{
         AiActiveModelSelection, AiAssistantMode, AiChatMessage, AiChatSelectionState, AiConversation,
@@ -10130,6 +10513,157 @@ mod tests {
     use rusqlite::{Connection, TransactionBehavior};
     use std::collections::BTreeMap;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    #[tokio::test]
+    async fn sidebar_user_admin_migration_preserves_other_fields_and_secrets() {
+        for legacy_visible in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+            let originals = vec![
+                ("missing", r#"{"show_database_links":false,"show_native_jobs":true,"future":{"value":42}}"#),
+                ("shown", r#"{"show_user_admin":true,"host":"unchanged"}"#),
+                ("hidden", r#"{"show_user_admin":false}"#),
+                ("broken", "not-json"),
+                ("array", "[]"),
+            ];
+            let inserted = originals.clone();
+            storage.with_conn(move |conn| {
+                for (id, json) in inserted {
+                    conn.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", [id, json]).map_err(|e| e.to_string())?;
+                }
+                conn.execute("INSERT INTO connection_secrets (connection_id, key, secret, secret_enc) VALUES ('missing', 'password', '', 'unchanged-ciphertext')", []).map_err(|e| e.to_string())?;
+                Ok(())
+            }).await.unwrap();
+            storage.migrate_sidebar_user_admin_visibility(legacy_visible).await.unwrap();
+            let (rows, secret) = storage
+                .with_conn(|conn| {
+                    let mut stmt = conn
+                        .prepare("SELECT id, config_json FROM connections ORDER BY id")
+                        .map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                        .map_err(|e| e.to_string())?
+                        .collect::<Result<BTreeMap<_, _>, _>>()
+                        .map_err(|e| e.to_string())?;
+                    let secret: String = conn
+                        .query_row(
+                            "SELECT secret_enc FROM connection_secrets WHERE connection_id = 'missing'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    Ok((rows, secret))
+                })
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), originals.len());
+            assert_eq!(secret, "unchanged-ciphertext");
+            for (id, original) in originals {
+                if legacy_visible || id == "broken" || id == "array" {
+                    assert_eq!(rows[id], original);
+                } else {
+                    let mut expected: serde_json::Value = serde_json::from_str(original).unwrap();
+                    expected["show_user_admin"] = serde_json::Value::Bool(false);
+                    assert_eq!(serde_json::from_str::<serde_json::Value>(&rows[id]).unwrap(), expected);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sidebar_user_admin_migration_keeps_later_choices_and_new_connections_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("storage.db");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        let mut config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "existing", "name": "Existing", "db_type": "oracle", "host": "localhost",
+            "port": 1521, "username": "test", "password": "", "save_password": false
+        }))
+        .unwrap();
+        storage.save_connections(&[config.clone()]).await.unwrap();
+        storage.migrate_sidebar_user_admin_visibility(false).await.unwrap();
+        assert_eq!(storage.load_connections().await.unwrap()[0].show_user_admin, Some(false));
+        config.show_user_admin = Some(true);
+        let mut added = config.clone();
+        added.id = "new".into();
+        added.show_user_admin = None;
+        storage.save_connections(&[config, added]).await.unwrap();
+        drop(storage);
+        let reopened = crate::persistence::test_storage::open(&path).await.unwrap();
+        reopened.migrate_sidebar_user_admin_visibility(false).await.unwrap();
+        let configs = reopened.load_connections().await.unwrap();
+        assert_eq!(configs.iter().find(|c| c.id == "existing").unwrap().show_user_admin, Some(true));
+        assert_eq!(configs.iter().find(|c| c.id == "new").unwrap().show_user_admin, None);
+    }
+
+    #[tokio::test]
+    async fn sidebar_user_admin_migration_rolls_back_updates_and_marker_before_retry() {
+        for failure in [
+            "CREATE TRIGGER reject_migration BEFORE UPDATE ON connections WHEN OLD.id = 'b' BEGIN SELECT RAISE(ABORT, 'injected update failure'); END;",
+            "CREATE TRIGGER reject_migration BEFORE INSERT ON app_state WHEN NEW.key = 'sidebar_user_admin_visibility_migration_v1' BEGIN SELECT RAISE(ABORT, 'injected marker failure'); END;",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+            storage.with_conn(move |conn| {
+                conn.execute_batch("INSERT INTO connections (id, config_json) VALUES ('a', '{}'), ('b', '{}');").map_err(|e| e.to_string())?;
+                conn.execute_batch(failure).map_err(|e| e.to_string())
+            }).await.unwrap();
+            assert!(storage.migrate_sidebar_user_admin_visibility(false).await.is_err());
+            storage.with_conn(|conn| {
+                let unchanged: i64 = conn.query_row("SELECT COUNT(*) FROM connections WHERE config_json = '{}'", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+                let marked: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM app_state WHERE key = 'sidebar_user_admin_visibility_migration_v1')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+                assert_eq!(unchanged, 2);
+                assert!(!marked);
+                conn.execute_batch("DROP TRIGGER reject_migration;").map_err(|e| e.to_string())
+            }).await.unwrap();
+            storage.migrate_sidebar_user_admin_visibility(false).await.unwrap();
+            storage.with_conn(|conn| {
+                let changed: i64 = conn.query_row("SELECT COUNT(*) FROM connections WHERE json_extract(config_json, '$.show_user_admin') = 0", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+                assert_eq!(changed, 2);
+                Ok(())
+            }).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn sidebar_user_admin_migration_first_client_wins_across_storage_instances() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("storage.db");
+        let first = crate::persistence::test_storage::open(&path).await.unwrap();
+        let second = crate::persistence::test_storage::open(&path).await.unwrap();
+        first
+            .with_conn(|conn| {
+                conn.execute_batch("INSERT INTO connections (id, config_json) VALUES ('a', '{}'), ('b', '{}');")
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap();
+        let (a, b) = tokio::join!(
+            first.migrate_sidebar_user_admin_visibility(false),
+            second.migrate_sidebar_user_admin_visibility(true)
+        );
+        a.unwrap();
+        b.unwrap();
+        let values = first
+            .with_conn(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT config_json FROM connections ORDER BY id").map_err(|e| e.to_string())?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap();
+        assert_eq!(values[0], values[1]);
+        second.migrate_sidebar_user_admin_visibility(false).await.unwrap();
+        let unchanged = first
+            .with_conn(|conn| {
+                conn.query_row("SELECT config_json FROM connections WHERE id = 'a'", [], |row| row.get::<_, String>(0))
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap();
+        assert_eq!(unchanged, values[0]);
+    }
 
     #[cfg(feature = "mq-admin")]
     #[tokio::test]
@@ -12335,6 +12869,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -12417,6 +12953,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -13344,12 +13882,14 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: false,
                 prompt_high_risk_sql: false,
+                call_confirmation: None,
                 allowed_connection_ids: None,
                 allowed_group_ids: Vec::new(),
                 allowed_tool_names: None,
                 connection_policies: Vec::new(),
                 group_policies: Vec::new(),
                 query_timeout_secs: None,
+                plugin_tools_mode: crate::mcp_access::McpPluginToolsMode::Flat,
             }
         );
 
@@ -13372,12 +13912,14 @@ mod tests {
                 read_only: true,
                 allow_dangerous_sql: false,
                 prompt_high_risk_sql: false,
+                call_confirmation: None,
                 allowed_connection_ids: Some(vec!["conn-1".to_string(), "conn-2".to_string()]),
                 allowed_group_ids: Vec::new(),
                 allowed_tool_names: None,
                 connection_policies: Vec::new(),
                 group_policies: Vec::new(),
                 query_timeout_secs: Some(120),
+                plugin_tools_mode: crate::mcp_access::McpPluginToolsMode::Flat,
             }
         );
         assert_eq!(storage.load_password_hash().await.unwrap().as_deref(), Some("preserved"));
@@ -13392,6 +13934,83 @@ mod tests {
         assert!(storage.load_mcp_global_policy().await.unwrap().read_only);
     }
 
+    #[tokio::test]
+    async fn mcp_plugin_tools_mode_preserves_new_saved_and_legacy_policies() {
+        use crate::mcp_access::{McpAccessPolicy, McpPluginToolsMode};
+        let path = temp_db_path("mcp-plugin-tools-mode");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        assert_eq!(McpAccessPolicy::default().plugin_tools_mode, McpPluginToolsMode::Flat);
+        assert_eq!(storage.load_mcp_global_policy().await.unwrap().plugin_tools_mode, McpPluginToolsMode::Flat);
+        assert_eq!(storage.load_mcp_access_policy().await.unwrap().plugin_tools_mode, McpPluginToolsMode::Flat);
+        // Unrelated saved settings do not turn a fresh MCP policy into a legacy one.
+        storage.save_password_hash("preserved").await.unwrap();
+        assert_eq!(storage.load_enforced_mcp_policy().await.unwrap().plugin_tools_mode, McpPluginToolsMode::Flat);
+
+        for mode in [McpPluginToolsMode::Auto, McpPluginToolsMode::Flat, McpPluginToolsMode::Lazy] {
+            storage
+                .save_mcp_global_policy(&McpGlobalPolicy { plugin_tools_mode: mode, ..Default::default() })
+                .await
+                .unwrap();
+            let access = storage.load_mcp_access_policy().await.unwrap();
+            assert_eq!(access.plugin_tools_mode, mode);
+            storage.save_mcp_access_policy(&access).await.unwrap();
+            assert_eq!(storage.load_mcp_global_policy().await.unwrap().plugin_tools_mode, mode);
+            assert_eq!(storage.load_enforced_mcp_policy().await.unwrap().plugin_tools_mode, mode);
+        }
+
+        for (key, mut value) in [
+            (MCP_GLOBAL_POLICY_KEY, serde_json::to_value(McpGlobalPolicy::default()).unwrap()),
+            (MCP_ACCESS_POLICY_KEY, serde_json::to_value(McpAccessPolicy::default()).unwrap()),
+        ] {
+            value.as_object_mut().unwrap().remove("pluginToolsMode");
+            let settings = serde_json::Map::from_iter([(key.to_string(), value)]);
+            // Seed the old persisted shape directly; the generic settings
+            // writer intentionally preserves the dedicated MCP policy keys.
+            storage.with_conn(move |conn| write_app_settings_map(conn, &settings)).await.unwrap();
+            let access = storage.load_mcp_access_policy().await.unwrap();
+            assert_eq!(access.plugin_tools_mode, McpPluginToolsMode::Auto, "legacy {key}");
+            assert_eq!(storage.load_enforced_mcp_policy().await.unwrap().plugin_tools_mode, McpPluginToolsMode::Auto);
+            storage.save_mcp_access_policy(&access).await.unwrap();
+            assert_eq!(storage.load_mcp_global_policy().await.unwrap().plugin_tools_mode, McpPluginToolsMode::Auto);
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_call_safety_preserves_legacy_storage_until_explicit_migration() {
+        use crate::mcp_access::{McpAccessPolicy, McpConfirmPolicy};
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&root.path().join("storage.db")).await.unwrap();
+        for key in [MCP_GLOBAL_POLICY_KEY, MCP_ACCESS_POLICY_KEY] {
+            let value = if key == MCP_GLOBAL_POLICY_KEY {
+                serde_json::json!({"readOnly": false, "promptHighRiskSql": true})
+            } else {
+                serde_json::json!({"version": 2, "defaultAccess": "write", "confirm": "full"})
+            };
+            let settings = serde_json::Map::from_iter([(key.to_string(), value)]);
+            storage.with_conn(move |conn| write_app_settings_map(conn, &settings)).await.unwrap();
+            assert_eq!(
+                storage.load_enforced_mcp_policy().await.unwrap().policy().confirmation_policy(),
+                McpConfirmPolicy::Full
+            );
+            let mut policy = storage.load_enforced_mcp_policy().await.unwrap().policy();
+            policy.query_timeout_secs = Some(20);
+            storage.save_mcp_global_policy(&policy).await.unwrap();
+            assert_eq!(storage.load_mcp_access_policy().await.unwrap().confirm, McpConfirmPolicy::Full);
+            policy.call_confirmation = Some(McpConfirmPolicy::HighRisk);
+            storage.save_mcp_global_policy(&policy).await.unwrap();
+            let saved = storage.load_mcp_global_policy().await.unwrap().policy();
+            assert!(!saved.prompt_high_risk_sql);
+            assert_eq!(saved.confirmation_policy(), McpConfirmPolicy::HighRisk);
+            let access = storage.load_mcp_access_policy().await.unwrap();
+            storage.save_mcp_access_policy(&access).await.unwrap();
+            assert_eq!(storage.load_enforced_mcp_policy().await.unwrap().policy(), saved);
+            assert_eq!(McpAccessPolicy::from_v1(&saved).confirm, McpConfirmPolicy::HighRisk);
+            policy.call_confirmation = Some(McpConfirmPolicy::Off);
+            storage.save_mcp_global_policy(&policy).await.unwrap();
+            assert_eq!(storage.load_mcp_access_policy().await.unwrap().confirm, McpConfirmPolicy::Off);
+        }
+    }
+
     #[test]
     fn legacy_mcp_policy_does_not_enable_high_risk_prompts() {
         let policy: McpGlobalPolicy =
@@ -13399,6 +14018,33 @@ mod tests {
                 .unwrap();
         assert!(!policy.prompt_high_risk_sql);
         assert!(!policy.normalized().prompt_high_risk_sql);
+    }
+
+    #[tokio::test]
+    async fn mcp_confirmation_survives_read_only_default_with_resource_overrides() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&root.path().join("storage.db")).await.unwrap();
+        let policy = McpGlobalPolicy {
+            read_only: true,
+            prompt_high_risk_sql: true,
+            connection_policies: vec![serde_json::from_value(serde_json::json!({
+                "connectionId": "dev", "readOnly": false,
+                "executionModeConfigured": true, "executionModePolicyVersion": 1
+            }))
+            .unwrap()],
+            ..Default::default()
+        };
+        storage.save_mcp_global_policy(&policy).await.unwrap();
+        let saved = storage.load_mcp_global_policy().await.unwrap().policy();
+        let enforced = storage.load_enforced_mcp_policy().await.unwrap().policy();
+        for value in [saved, enforced] {
+            assert!(value.read_only);
+            assert!(value.prompt_high_risk_sql);
+            assert!(!value.allow_dangerous_sql);
+        }
+        let access = storage.load_mcp_access_policy().await.unwrap();
+        assert_eq!(access.resolve(&[], "other", None).level, crate::mcp_access::McpAccessLevel::Read);
+        assert_eq!(access.resolve(&[], "dev", None).level, crate::mcp_access::McpAccessLevel::Write);
     }
 
     #[tokio::test]
@@ -14010,6 +14656,320 @@ mod tests {
         storage.set_ai_plugin_tool_plugin_enabled("io.dbx.kafka", true).await.unwrap();
         assert_eq!(storage.load_ai_plugin_tool_plugin_ids().await.unwrap(), ["io.dbx.kafka", "io.dbx.ssh"]);
         assert!(storage.load_ai_plugin_tool_disabled_plugin_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn plugin_mcp_grants_round_trip_and_survive_settings_rewrites() {
+        let path = temp_db_path("plugin-mcp-grants");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        assert!(storage.load_plugin_mcp_grants().await.unwrap().is_empty());
+
+        let grant = PluginMcpGrant {
+            external: true,
+            ceiling: PluginMcpAccessLevel::Write,
+            approved_tools: [
+                (" list_dir ".to_string(), PluginMcpAccessLevel::Read),
+                ("".to_string(), PluginMcpAccessLevel::Full),
+            ]
+            .into(),
+            disabled_tools: vec!["b".to_string(), " a ".to_string(), "b".to_string(), " ".to_string()],
+        };
+        let saved = storage.save_plugin_mcp_grant("io.dbx.ssh", grant).await.unwrap();
+        assert_eq!(saved.approved_tools.keys().collect::<Vec<_>>(), ["list_dir"], "names are trimmed, blanks dropped");
+        assert_eq!(saved.disabled_tools, ["a", "b"]);
+        storage
+            .save_plugin_mcp_grant(
+                "io.dbx.k8s",
+                PluginMcpGrant {
+                    external: false,
+                    ceiling: PluginMcpAccessLevel::Read,
+                    approved_tools: Default::default(),
+                    disabled_tools: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        // Whole-map settings writers keep the dedicated key.
+        storage.save_app_settings_json(&serde_json::Map::new()).await.unwrap();
+        let grants = storage.load_plugin_mcp_grants().await.unwrap();
+        assert_eq!(grants.get("io.dbx.ssh"), Some(&saved));
+        assert!(!grants["io.dbx.k8s"].external);
+
+        // Uninstall forgets only that plugin.
+        storage.forget_plugin_permissions("io.dbx.ssh").await.unwrap();
+        let grants = storage.load_plugin_mcp_grants().await.unwrap();
+        assert!(!grants.contains_key("io.dbx.ssh"));
+        assert!(grants.contains_key("io.dbx.k8s"));
+        assert!(storage.save_plugin_mcp_grant(" ", saved).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn mcp_visibility_and_database_edits_do_not_grant_dml_or_keep_stale_scopes() {
+        let storage = crate::persistence::test_storage::open(&temp_db_path("mcp-review-roundtrip")).await.unwrap();
+        let mut policy =
+            McpGlobalPolicy { allowed_connection_ids: Some(vec!["sf".into(), "sql".into()]), ..Default::default() };
+        storage.save_mcp_global_policy(&policy).await.unwrap();
+        assert!(!crate::mcp_policy::connection_allows_salesforce_dml(
+            &storage.load_enforced_mcp_policy().await.unwrap().policy(),
+            "sf"
+        ));
+        policy.connection_policies.push(
+            serde_json::from_value(serde_json::json!({
+                "connectionId": "sql", "executionModeConfigured": false, "executionModePolicyVersion": 1,
+                "databaseScope": "selected", "allowedDatabases": ["one"]
+            }))
+            .unwrap(),
+        );
+        storage.save_mcp_global_policy(&policy).await.unwrap();
+        assert!(!storage.load_mcp_access_policy().await.unwrap().sub_scope_visible("sql", "database", "two"));
+        policy.connection_policies.clear();
+        storage.save_mcp_global_policy(&policy).await.unwrap();
+        assert!(storage.load_mcp_access_policy().await.unwrap().sub_scope_visible("sql", "database", "two"));
+        assert!(!crate::mcp_policy::connection_allows_salesforce_dml(
+            &storage.load_enforced_mcp_policy().await.unwrap().policy(),
+            "sf"
+        ));
+    }
+
+    #[tokio::test]
+    async fn mcp_legacy_salesforce_opt_in_migrates_from_saved_v1_evidence() {
+        use crate::mcp_access::{McpAccessPolicy, McpRuleTarget, SALESFORCE_WRITE_TOOLSET};
+        let storage = crate::persistence::test_storage::open(&temp_db_path("mcp-legacy-dml")).await.unwrap();
+        for allowed in [false, true] {
+            let legacy: McpGlobalPolicy = serde_json::from_value(serde_json::json!({
+                "readOnly": false,
+                "connectionPolicies": [{"connectionId": "sf", "allowSalesforceDml": allowed,
+                    "readOnly": false, "executionModeConfigured": true, "executionModePolicyVersion": 1}]
+            }))
+            .unwrap();
+            let mut old_v2 = McpAccessPolicy::from_v1(&legacy);
+            old_v2
+                .rules
+                .get_mut(&McpRuleTarget::Connection { id: "sf".into() })
+                .unwrap()
+                .toolset_ceilings
+                .remove(SALESFORCE_WRITE_TOOLSET);
+            let v1_json = serde_json::to_value(&legacy).unwrap();
+            let v2_json = serde_json::to_value(&old_v2).unwrap();
+            storage
+                .with_conn(move |conn| {
+                    let mut settings = app_settings_map_from_conn(conn)?;
+                    settings.insert(MCP_GLOBAL_POLICY_KEY.into(), v1_json);
+                    settings.insert(MCP_ACCESS_POLICY_KEY.into(), v2_json);
+                    write_app_settings_map(conn, &settings)
+                })
+                .await
+                .unwrap();
+            let access = storage.load_mcp_access_policy().await.unwrap();
+            assert_eq!(crate::mcp_policy::connection_allows_salesforce_dml(&access.to_v1(), "sf"), allowed);
+            storage.save_mcp_access_policy(&access).await.unwrap();
+            assert_eq!(
+                crate::mcp_policy::connection_allows_salesforce_dml(
+                    &storage.load_enforced_mcp_policy().await.unwrap().policy(),
+                    "sf"
+                ),
+                allowed
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_explicit_recovery_backs_up_corruption_and_denies_all_tools() {
+        let storage = crate::persistence::test_storage::open(&temp_db_path("mcp-recovery")).await.unwrap();
+        storage.save_mcp_global_policy(&McpGlobalPolicy::default()).await.unwrap();
+        assert!(storage.reset_invalid_mcp_access_policy().await.is_err());
+        storage
+            .with_conn(|conn| {
+                let mut settings = app_settings_map_from_conn(conn)?;
+                settings.insert(MCP_ACCESS_POLICY_KEY.into(), serde_json::json!({"broken": true}));
+                settings.insert("unrelated".into(), serde_json::json!(42));
+                write_app_settings_map(conn, &settings)
+            })
+            .await
+            .unwrap();
+        assert!(storage.load_enforced_mcp_policy().await.is_err());
+        storage.reset_invalid_mcp_access_policy().await.unwrap();
+        let access = storage.load_mcp_access_policy().await.unwrap();
+        assert!(!access.connection_visible(&[], "any"));
+        assert_eq!(access.allowed_tool_names, Some(vec![]));
+        let settings = storage.load_app_settings_json().await.unwrap();
+        assert_eq!(settings["unrelated"], 42);
+        let backup = settings.iter().find(|(key, _)| key.starts_with("mcp_policy_recovery_backup_")).unwrap().1;
+        assert_eq!(backup["v2"], serde_json::json!({"broken": true}));
+        assert!(backup["v1"].is_object());
+        let before = settings;
+        assert!(storage.reset_invalid_mcp_access_policy().await.is_err());
+        assert_eq!(storage.load_app_settings_json().await.unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn mcp_v1_save_rejects_invalid_v2_without_overwriting_either_policy() {
+        let path = temp_db_path("mcp-invalid-v2-draft");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        storage.save_mcp_global_policy(&McpGlobalPolicy::default()).await.unwrap();
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!({ "version": 2, "defaultAccess": "invalid" }),
+            serde_json::json!({ "version": 2, "rules": [{ "target": { "kind": "unknown" } }] }),
+        ] {
+            storage
+                .with_conn(move |conn| {
+                    let mut settings = app_settings_map_from_conn(conn)?;
+                    settings.insert(super::MCP_ACCESS_POLICY_KEY.to_string(), invalid);
+                    write_app_settings_map(conn, &settings)
+                })
+                .await
+                .unwrap();
+            let before = storage.load_app_settings_json().await.unwrap();
+            let draft = McpGlobalPolicy { read_only: true, query_timeout_secs: Some(99), ..Default::default() };
+            let error = storage.save_mcp_global_policy(&draft).await.unwrap_err();
+            assert!(error.starts_with("MCP_POLICY_UNAVAILABLE: invalid MCP access policy:"), "{error}");
+            assert_eq!(storage.load_app_settings_json().await.unwrap(), before);
+            assert!(storage.load_mcp_access_policy().await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_v1_saves_preserve_immediate_scopes_but_allow_salesforce_dml_changes() {
+        use crate::mcp_access::{
+            McpAccessLevel, McpAccessRule, McpRuleTarget, McpSubScopeMode, SALESFORCE_WRITE_TOOLSET,
+        };
+        let path = temp_db_path("mcp-scope-draft-merge");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        let mut draft = McpGlobalPolicy { read_only: false, ..Default::default() };
+        let rule: crate::storage::McpConnectionPolicy = serde_json::from_value(serde_json::json!({
+            "connectionId": "nacos", "readOnly": false, "executionModeConfigured": true,
+            "executionModePolicyVersion": 1, "databaseScope": "all"
+        }))
+        .unwrap();
+        draft.connection_policies.push(rule);
+        storage.save_mcp_global_policy(&draft).await.unwrap();
+        storage
+            .set_mcp_plugin_scope_rule(
+                "nacos",
+                "namespace",
+                Some("dev"),
+                Some(McpAccessRule { visible: Some(true), access: Some(McpAccessLevel::Write), ..Default::default() }),
+                Some(McpSubScopeMode::Selected),
+            )
+            .await
+            .unwrap();
+        // Applying an already-open v1 form must not undo the immediate namespace save.
+        draft.query_timeout_secs = Some(42);
+        storage.save_mcp_global_policy(&draft).await.unwrap();
+        let access = storage.load_mcp_access_policy().await.unwrap();
+        assert_eq!(access.sub_scope_mode("nacos"), McpSubScopeMode::Selected);
+        assert!(!access.resolve(&[], "nacos", Some(("namespace", "prod"))).visible);
+        assert_eq!(
+            storage.load_mcp_global_policy().await.unwrap().policy(),
+            access.to_v1(),
+            "v1 readers must retain the saved scope restriction after a stale draft is applied"
+        );
+        // Mode-only rules also survive, even with an existing v1 connection rule.
+        storage.set_mcp_plugin_scope_rule("nacos", "namespace", None, None, Some(McpSubScopeMode::None)).await.unwrap();
+        storage.save_mcp_global_policy(&draft).await.unwrap();
+        assert_eq!(storage.load_mcp_access_policy().await.unwrap().sub_scope_mode("nacos"), McpSubScopeMode::None);
+        assert_eq!(
+            storage.load_mcp_global_policy().await.unwrap().policy(),
+            storage.load_mcp_access_policy().await.unwrap().to_v1()
+        );
+        for allowed in [true, false, true] {
+            draft.connection_policies[0].allow_salesforce_dml = allowed;
+            storage.save_mcp_global_policy(&draft).await.unwrap();
+            let access = storage.load_mcp_access_policy().await.unwrap();
+            assert_eq!(
+                access.toolset_ceiling("nacos", SALESFORCE_WRITE_TOOLSET) == Some(McpAccessLevel::Full),
+                allowed
+            );
+        }
+        // Two independent row saves retain both changes.
+        let (a, b) = tokio::join!(
+            storage.set_mcp_plugin_scope_rule(
+                "a",
+                "namespace",
+                Some("one"),
+                Some(McpAccessRule { visible: Some(true), ..Default::default() }),
+                Some(McpSubScopeMode::Selected)
+            ),
+            storage.set_mcp_plugin_scope_rule(
+                "b",
+                "namespace",
+                Some("two"),
+                Some(McpAccessRule { visible: Some(true), ..Default::default() }),
+                Some(McpSubScopeMode::Selected)
+            )
+        );
+        a.unwrap();
+        b.unwrap();
+        let access = storage.load_mcp_access_policy().await.unwrap();
+        for (id, value) in [("a", "one"), ("b", "two")] {
+            assert!(access.rules.contains_key(&McpRuleTarget::Scope {
+                connection_id: id.into(),
+                scope: "namespace".into(),
+                value: value.into()
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_access_policy_round_trips_and_keeps_v1_in_sync() {
+        use crate::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget};
+        let path = temp_db_path("mcp-access-policy");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        // Nothing saved: v2 is the mapping of the v1 default.
+        let default = storage.load_mcp_access_policy().await.unwrap();
+        assert_eq!(default, McpAccessPolicy::from_v1(&McpGlobalPolicy::default()));
+
+        // Saving v1 writes the matching v2.
+        let v1 = McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, ..Default::default() };
+        storage.save_mcp_global_policy(&v1).await.unwrap();
+        assert_eq!(storage.load_mcp_access_policy().await.unwrap().default_access, McpAccessLevel::Full);
+
+        // Saving v2 writes the never-wider v1 projection.
+        let mut v2 = McpAccessPolicy { default_access: McpAccessLevel::Write, ..Default::default() };
+        v2.rules.insert(
+            McpRuleTarget::Connection { id: "c".into() },
+            McpAccessRule { access: Some(McpAccessLevel::Read), ..Default::default() },
+        );
+        storage.save_mcp_access_policy(&v2).await.unwrap();
+        assert_eq!(storage.load_mcp_access_policy().await.unwrap(), v2);
+        let projected = storage.load_mcp_global_policy().await.unwrap().policy();
+        assert!(!projected.read_only && !projected.allow_dangerous_sql);
+        assert!(projected.connection_policies.iter().any(|rule| rule.connection_id == "c" && rule.read_only));
+
+        // Whole-map settings writers keep both keys.
+        storage.save_app_settings_json(&serde_json::Map::new()).await.unwrap();
+        assert_eq!(storage.load_mcp_access_policy().await.unwrap(), v2);
+
+        // Hosts enforce the v2 policy even if the v1 key was rewritten by an
+        // older writer with something wider.
+        let mut wider = projected.clone();
+        wider.read_only = false;
+        wider.allow_dangerous_sql = true;
+        wider.connection_policies.clear();
+        storage
+            .with_conn(move |conn| {
+                let mut settings = app_settings_map_from_conn(conn)?;
+                settings.insert(MCP_GLOBAL_POLICY_KEY.to_string(), serde_json::to_value(&wider).unwrap());
+                write_app_settings_map(conn, &settings)
+            })
+            .await
+            .unwrap();
+        let enforced = storage.load_enforced_mcp_policy().await.unwrap().policy();
+        assert!(!enforced.allow_dangerous_sql, "v2 stays authoritative");
+        assert!(enforced.connection_policies.iter().any(|rule| rule.connection_id == "c" && rule.read_only));
+    }
+
+    #[test]
+    fn malformed_plugin_mcp_grants_are_skipped() {
+        let grants = plugin_mcp_grants_from(Some(&serde_json::json!({
+            "io.ok": { "external": true, "ceiling": "read", "approvedTools": {}, "disabledTools": [] },
+            "io.bad": { "external": "yes" },
+            " ": { "external": true, "ceiling": "read" }
+        })));
+        assert_eq!(grants.keys().collect::<Vec<_>>(), ["io.ok"]);
+        assert!(plugin_mcp_grants_from(Some(&serde_json::json!([]))).is_empty());
     }
 
     #[tokio::test]

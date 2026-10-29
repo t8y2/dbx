@@ -7,6 +7,7 @@ import type { UpdateDownloadSource as SettingsUpdateDownloadSource } from "@/sto
 import type { UpdateDownloadProgress } from "@/lib/backend/tauri";
 import { currentLocale } from "@/i18n";
 import { shouldBlockAppUpdate } from "@/lib/app/appUpdateTaskGuard";
+import { isUpdatePreparationError, UpdatePreparationError } from "@/lib/app/updatePreparation";
 import { uuid } from "@/lib/common/utils";
 import { isUpdatePreviewMockEnabled, previewAppUpdateInfo } from "@/lib/updates/updatePreviewMock";
 
@@ -79,11 +80,36 @@ export function isUpdateIgnored(info: api.UpdateInfo | null, ignoredVersion: str
   return compareParsedUpdateVersions(parsedLatest, parsedIgnored) <= 0;
 }
 
+/**
+ * The update info as the UI should see it. An ignored version is hidden here
+ * rather than in each consumer: the dialog renders from `updateInfo` directly
+ * and only the toolbar badge consulted `isUpdateIgnored`, so "Ignore this
+ * version" cleared the badge but left the dialog still offering the release
+ * (#13626). A downloaded or prepared package is never hidden — the user
+ * already has it and the install action must stay reachable.
+ */
+export function effectiveUpdateInfo(info: api.UpdateInfo | null, ignoredVersion: string | undefined, hasPreparedUpdate: boolean): api.UpdateInfo | null {
+  if (!info || hasPreparedUpdate || !isUpdateIgnored(info, ignoredVersion)) return info;
+  return { ...info, update_available: false };
+}
+
 export function isNewerRemoteVersion(latest: string, cached: string): boolean {
   const parsedLatest = parseUpdateVersion(latest);
   const parsedCached = parseUpdateVersion(cached);
   if (!parsedLatest || !parsedCached) return normalizeUpdateVersion(latest) !== normalizeUpdateVersion(cached);
   return compareParsedUpdateVersions(parsedLatest, parsedCached) > 0;
+}
+
+/**
+ * A prepared package only stays meaningful while it is newer than the running
+ * build. Replacing the app outside this process (manual DMG/installer upgrade,
+ * or a bundle swapped by an external updater) leaves the old package in the
+ * update cache, and the badge then advertises a version the app already runs
+ * (#13562). An unknown version is never treated as obsolete.
+ */
+export function isPreparedUpdateObsolete(preparedVersion: string, currentVersion: string): boolean {
+  if (!preparedVersion || !currentVersion) return false;
+  return !isNewerRemoteVersion(preparedVersion, currentVersion);
 }
 
 export function normalizeUpdateDownloadSource(value: unknown): SettingsUpdateDownloadSource {
@@ -144,6 +170,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const checkingUpdates = computed(() => phase.value === "checking");
   const isDownloadingUpdate = computed(() => phase.value === "downloading");
   const updateDownloaded = computed(() => downloaded.value !== null);
+  const updateDownloadedVersion = computed(() => downloaded.value?.version ?? "");
   const isPreparingUpdate = computed(() => phase.value === "preparing");
   const isInstallingUpdate = computed(() => phase.value === "installing" || isPreparingUpdate.value);
   const updateReady = computed(() => phase.value === "restart");
@@ -154,6 +181,8 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   // explicit "Check for updates" action in settings keeps working.
   const updateEntryVisible = computed(() => settingsStore.editorSettings.toolbarItems?.checkUpdates !== false);
   const hasUpdateAvailable = computed(() => (updateDownloaded.value || updateReady.value || updateInfo.value?.update_available === true) && !isUpdateIgnored(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion));
+  /** What the update dialog renders: an ignored release stops offering itself. */
+  const visibleUpdateInfo = computed(() => effectiveUpdateInfo(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion, updateDownloaded.value || updateReady.value));
   const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
   let generation = 0;
   let activeDownload: Promise<void> | undefined;
@@ -253,7 +282,19 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       // Installation may have started while the check was in flight; only restore
       // the phase this check itself owns.
       if (phase.value === "checking") phase.value = downloaded.value ? "ready" : "idle";
-      if (!info.update_available) updateCheckMessage.value = t("updates.upToDate", { version: info.current_version });
+      if (!info.update_available) {
+        updateCheckMessage.value = t("updates.upToDate", { version: info.current_version });
+        // The remote no longer offers a newer release, but a package from an
+        // earlier download can still sit in the cache. Drop it once the running
+        // build already satisfies it, otherwise the update badge never clears
+        // and the dialog claims an update is downloaded with no way to install
+        // it (#13562).
+        const prepared = downloaded.value;
+        if (prepared && isPreparedUpdateObsolete(prepared.version, info.current_version)) {
+          await discardSupersededUpdate(prepared);
+          if (token !== generation || disposed) return;
+        }
+      }
       if (canDownloadAndInstallUpdate(info, isTauriRuntime()) && !isUpdateIgnored(info, settingsStore.editorSettings.ignoredUpdateVersion)) {
         const cached = downloaded.value;
         if (cached && !isNewerRemoteVersion(info.latest_version, cached.version)) {
@@ -403,7 +444,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     try {
       release = await options.prepareForUpdate?.();
       updatePreparationRelease = release;
-      if (shouldBlockAppUpdate(activeTaskCount.value)) throw new Error(t("updates.activeTasksBlockUpdate", { count: activeTaskCount.value }));
+      if (shouldBlockAppUpdate(activeTaskCount.value)) throw new UpdatePreparationError(t("updates.activeTasksBlockUpdate", { count: activeTaskCount.value }), "tasks");
       phase.value = "installing";
       if (!restartOnly && cache) {
         await api.installDownloadedUpdate(cache.cache_id, cache.version);
@@ -420,7 +461,11 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       phase.value = installed ? "restart" : "ready";
       updateCheckFailed.value = true;
       const message = error instanceof Error ? error.message : String(error);
-      updateCheckMessage.value = installed ? t("updates.restartFailed", { error: message }) : formatInstallError(message);
+      // A held-back update was never attempted: say that plainly and keep the
+      // reason (which dialog to close) instead of calling it an install failure.
+      if (installed) updateCheckMessage.value = t("updates.restartFailed", { error: message });
+      else if (isUpdatePreparationError(error)) updateCheckMessage.value = t("updates.updateBlocked", { error: message });
+      else updateCheckMessage.value = formatInstallError(message);
     } finally {
       // Successful handoff must keep every window frozen until the process exits.
       if (failed) {
@@ -463,6 +508,12 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
           else {
             setDownloaded(cache);
             updateInfo.value!.current_version = await api.getAppVersion();
+            // An upgrade that happened outside this process leaves the previous
+            // package in the cache. Adopting it would pin the dialog to "already
+            // up to date" while still advertising a downloaded update (#13562).
+            if (isPreparedUpdateObsolete(cache.version, updateInfo.value!.current_version)) {
+              await discardSupersededUpdate(cache);
+            }
           }
         }
       } catch (error) {
@@ -525,12 +576,14 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     phase,
     checkingUpdates,
     updateInfo,
+    visibleUpdateInfo,
     updateCheckMessage,
     updateCheckFailed,
     showUpdateDialog,
     isDownloadingUpdate,
     downloadProgress,
     updateDownloaded,
+    updateDownloadedVersion,
     isInstallingUpdate,
     isPreparingUpdate,
     updateReady,

@@ -479,7 +479,13 @@ mod tests {
         let (state, _dir) = web_state().await;
         let original = config();
         state.app.storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
-        let Json(mut listed) = connection::load_connections(State(state.clone()), HeaderMap::new()).await.unwrap();
+        let Json(mut listed) = connection::load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
         assert!(listed[0].config.password.starts_with(REFERENCE_PREFIX));
         assert_eq!(state.app.configs.read().await[&original.id].password, original.password);
         listed[0].config.name = "Renamed".into();
@@ -506,7 +512,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(state.app.storage.load_connections().await.unwrap()[0].password, "replacement");
-        let Json(mut listed) = connection::load_connections(State(state.clone()), HeaderMap::new()).await.unwrap();
+        let Json(mut listed) = connection::load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
         listed[0].config.save_password = false;
         let _ = connection::save_connections(
             State(state.clone()),
@@ -534,7 +546,13 @@ mod tests {
         .unwrap();
         state.app.storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
 
-        let Json(mut listed) = connection::load_connections(State(state.clone()), HeaderMap::new()).await.unwrap();
+        let Json(mut listed) = connection::load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
         let response_json = serde_json::to_value(&listed[0]).unwrap();
         assert_eq!(response_json["jdbc_dialect"], "oceanbase-oracle");
         assert!(listed[0].config.connection_string.as_deref().unwrap().starts_with(REFERENCE_PREFIX));
@@ -556,13 +574,25 @@ mod tests {
         assert!(serde_json::to_value(&persisted[0]).unwrap().get("jdbc_dialect").is_none());
 
         Arc::get_mut(&mut state).unwrap().password_viewer_enabled = true;
-        let Json(viewed) = connection::load_connections(State(state.clone()), HeaderMap::new()).await.unwrap();
+        let Json(viewed) = connection::load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
         assert_eq!(viewed[0].jdbc_dialect, Some(dbx_core::models::connection::JdbcDialectHint::OceanbaseOracle));
         assert_eq!(viewed[0].config.connection_string.as_deref(), original.connection_string.as_deref());
         assert_eq!(viewed[0].config.password, original.password);
         Arc::get_mut(&mut state).unwrap().password_viewer_enabled = false;
 
-        let Json(mut listed) = connection::load_connections(State(state.clone()), HeaderMap::new()).await.unwrap();
+        let Json(mut listed) = connection::load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
         assert_eq!(listed[0].jdbc_dialect, Some(dbx_core::models::connection::JdbcDialectHint::OceanbaseOracle));
         let mut changed_url = serde_json::to_value(listed.remove(0).config).unwrap();
         changed_url["connection_string"] = serde_json::json!("jdbc:oracle:thin:@host/service");
@@ -576,7 +606,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let Json(listed) = connection::load_connections(State(state.clone()), HeaderMap::new()).await.unwrap();
+        let Json(listed) = connection::load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
         assert!(listed[0].jdbc_dialect.is_none());
         assert_eq!(
             state.app.storage.load_connections().await.unwrap()[0].connection_string.as_deref(),
@@ -595,7 +631,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let Json(listed) = connection::load_connections(State(state.clone()), HeaderMap::new()).await.unwrap();
+        let Json(listed) = connection::load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
         assert!(listed[0].jdbc_dialect.is_none());
         assert!(state.app.storage.load_connections().await.unwrap()[0].connection_string.is_none());
     }

@@ -38,6 +38,9 @@ export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions)
   // the precision checks below so exact values survive as text.
   const useSampledValueType = normalizeDataType(options.columnInfo?.data_type) === "";
   const numericInput = isNumericColumnType(options.columnInfo?.data_type) || (useSampledValueType && typeof oldValue === "number");
+  // A cleared numeric cell is SQL NULL; Number("") and Number(" ") would
+  // otherwise silently turn it into zero (#13755).
+  if (numericInput && value.trim() === "") return null;
   const numericText = normalizeGroupedNumberText(value, options.columnInfo, oldValue, options.numberFormat ?? runtimeNumberFormat());
   // Neo4j INTEGER is always signed 64-bit. Keep its input as text until the
   // Cypher builder validates it, including values outside JavaScript's range.

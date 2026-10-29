@@ -593,8 +593,16 @@ fn build_executable_object_source_statements_with_mysql_validation_name(
         return Ok(vec![executable_oracle_view_ddl(input.schema.as_deref(), &input.name, source)]);
     }
 
-    if is_oracle_like(input.database_type)
-        && matches!(input.object_type, ObjectSourceKind::Function | ObjectSourceKind::Procedure)
+    if (is_oracle_like(input.database_type) || input.database_type == DatabaseType::OceanbaseOracle)
+        && matches!(
+            input.object_type,
+            ObjectSourceKind::Function
+                | ObjectSourceKind::Procedure
+                | ObjectSourceKind::Package
+                | ObjectSourceKind::PackageBody
+                | ObjectSourceKind::Type
+                | ObjectSourceKind::TypeBody
+        )
     {
         return Ok(vec![executable_oracle_routine_ddl(source)]);
     }
@@ -736,7 +744,12 @@ fn validate_oracle_object_source(
         source.to_string()
     } else if matches!(
         object_type,
-        ObjectSourceKind::Procedure | ObjectSourceKind::Function | ObjectSourceKind::Type | ObjectSourceKind::TypeBody
+        ObjectSourceKind::Procedure
+            | ObjectSourceKind::Function
+            | ObjectSourceKind::Package
+            | ObjectSourceKind::PackageBody
+            | ObjectSourceKind::Type
+            | ObjectSourceKind::TypeBody
     ) {
         format!("CREATE OR REPLACE {}", source.trim())
     } else {
@@ -1458,7 +1471,7 @@ fn executable_oracle_view_ddl(schema: Option<&str>, name: &str, source: &str) ->
 
 fn executable_oracle_routine_ddl(source: &str) -> String {
     let trimmed = source.trim();
-    if Regex::new(r"(?i)^(?:PROCEDURE|FUNCTION)\b").unwrap().is_match(trimmed) {
+    if Regex::new(r"(?i)^(?:PROCEDURE|FUNCTION|PACKAGE(?:\s+BODY)?|TYPE(?:\s+BODY)?)\b").unwrap().is_match(trimmed) {
         return ensure_semicolon(&format!("CREATE OR REPLACE {trimmed}"));
     }
     ensure_semicolon(trimmed)
@@ -3496,6 +3509,30 @@ mod tests {
             assert_eq!(
                 statements,
                 vec!["CREATE OR REPLACE FUNCTION refresh_cache RETURN NUMBER AS\nBEGIN\n  RETURN 1;\nEND;"]
+            );
+        }
+    }
+
+    #[test]
+    fn oceanbase_oracle_bare_package_body_source_saves_as_create_or_replace() {
+        let source = "PACKAGE BODY PAYROLL AS\n  PROCEDURE PROCESS IS BEGIN NULL; END;\nEND PAYROLL;";
+
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            let statements =
+                build_executable_object_source_statements(input(database_type, ObjectSourceKind::PackageBody, source))
+                    .unwrap();
+
+            assert_eq!(
+                statements,
+                vec![
+                    "CREATE OR REPLACE PACKAGE BODY PAYROLL AS\n  PROCEDURE PROCESS IS BEGIN NULL; END;\nEND PAYROLL;"
+                ]
+            );
+
+            let editable = build_editable_object_source(input(database_type, ObjectSourceKind::PackageBody, source));
+            assert_eq!(
+                editable,
+                "CREATE OR REPLACE PACKAGE BODY PAYROLL AS\n  PROCEDURE PROCESS IS BEGIN NULL; END;\nEND PAYROLL;"
             );
         }
     }

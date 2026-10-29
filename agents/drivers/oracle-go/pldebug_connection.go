@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	go_ora "github.com/sijms/go-ora/v2"
 )
 
 var errPLDebugAllocationUnknown = errors.New("PL/SQL physical connection release is unknown; isolate the original dedicated runtime")
@@ -18,11 +16,7 @@ func newPLDebugConnector(params connectParams) (driver.Connector, error) {
 	if usesOCIProfile(params) {
 		return newPLDebugOCIConnector(params)
 	}
-	dsn, err := buildDSNForConnect(params)
-	if err != nil {
-		return nil, err
-	}
-	return oracleQueryConnector{go_ora.NewConnector(dsn)}, nil
+	return newOracleThinConnector(params, nil)
 }
 
 type plDebugAllocation struct {

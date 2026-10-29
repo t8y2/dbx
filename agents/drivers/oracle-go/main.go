@@ -44,7 +44,7 @@ const oracleDatabaseVersionProbeTimeout = 3 * time.Second
 const oracleDatabaseVersionSQL = `
 SELECT VERSION
 FROM PRODUCT_COMPONENT_VERSION
-WHERE PRODUCT LIKE 'Oracle Database%'
+WHERE PRODUCT LIKE 'Oracle%Database%'
   AND ROWNUM = 1`
 
 const oracleDisableSegmentAttributesSQL = `BEGIN DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SEGMENT_ATTRIBUTES', FALSE); END;`
@@ -59,7 +59,7 @@ var (
 	oracleNotNullConstraintRegexp        = regexp.MustCompile(`(?i)^\s*\(*\s*(?:"((?:[^"]|"")*)"|([A-Z0-9_$#]+))\s+IS\s+NOT\s+NULL\s*\)*\s*$`)
 	oracleDatabaseVersionQueries         = []string{
 		oracleDatabaseVersionSQL,
-		`SELECT BANNER FROM V$VERSION WHERE BANNER LIKE 'Oracle Database%' AND ROWNUM = 1`,
+		`SELECT BANNER FROM V$VERSION WHERE BANNER LIKE 'Oracle%Database%' AND ROWNUM = 1`,
 	}
 	oracleStringConverters = map[int]converters.IStringConverter{
 		oracleCharsetZHS32GB18030: oracleGB18030Converter{},
@@ -469,6 +469,10 @@ type oracleColumnMeta struct {
 	Name          string
 	DataType      string
 	DataTypeOwner string
+	// GeometryPlaceholder projects a geometry column as a placeholder instead
+	// of converting it, for servers that cannot run the conversion function
+	// (see oracleGeometryFunctionFallbackSQL).
+	GeometryPlaceholder bool
 }
 
 type oracleColumnMetaLoader func(schema, table string) ([]oracleColumnMeta, error)
@@ -660,6 +664,8 @@ type server struct {
 	statementCtx           context.Context
 	statementCancel        context.CancelFunc
 	statementConn          *sql.Conn
+	statementSchema        string
+	repinnedStatementConn  *sql.Conn
 	plDebugMu              sync.Mutex
 	plDebugSessions        map[string]*plDebugSession
 	plAllocation           *plDebugAllocation
@@ -1130,6 +1136,9 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 			return nil, false, errors.New("not connected")
 		}
 		return map[string]bool{"ok": true}, false, pingDB(s.db, 5*time.Second)
+	case "connection_info":
+		result, err := s.connectionInfo()
+		return result, false, err
 	case "list_databases":
 		result, err := s.listDatabases()
 		return result, false, err
@@ -1378,6 +1387,9 @@ func oracleServerMajorVersionFromDriverConn(driverConn any) (int, bool) {
 	if guarded, ok := driverConn.(*oracleQueryConnection); ok {
 		driverConn = guarded.oracleThinConnection
 	}
+	if legacy, ok := driverConn.(*oracleLegacyConnection); ok {
+		driverConn = legacy.oracleThinConnection
+	}
 	conn, ok := driverConn.(*go_ora.Connection)
 	if !ok {
 		return 0, false
@@ -1585,19 +1597,15 @@ func openDB(params connectParams) (*sql.DB, error) {
 
 func openDBWithStringConverter(params connectParams, stringConverter converters.IStringConverter) (*sql.DB, error) {
 	if usesOCIProfile(params) {
-		// OCI 由 Oracle 客户端负责字符集转换（NLS_LANG 在进程环境里生效），
-		// go-ora 的 string converter 机制不适用于它。
+		// godror uses UTF-8 explicitly; NLS_LANG does not override its data
+		// encoding. Legacy US7ASCII byte interpretation belongs to Thin.
 		return openOCIDB(params)
 	}
-	dsn, err := buildDSNForConnect(params)
+	connector, err := newOracleThinConnector(params, stringConverter)
 	if err != nil {
 		return nil, err
 	}
-	connector := go_ora.NewConnector(dsn)
-	if stringConverter != nil {
-		go_ora.SetStringConverter(connector, stringConverter, nil)
-	}
-	db := sql.OpenDB(oracleQueryConnector{connector})
+	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(30 * time.Minute)
@@ -2024,6 +2032,17 @@ func (s *server) currentSchema() (string, error) {
 	// tables against the wrong owner (#11258).
 	if s.manualTx != nil {
 		if err := s.manualTx.QueryRow(sqlText).Scan(&schema); err != nil {
+			return "", err
+		}
+		return strings.ToUpper(schema), nil
+	}
+	// The connection pinned for a statement's DBMS_OUTPUT capture carries the
+	// statement's CURRENT_SCHEMA the same way.
+	if s.statementConn != nil {
+		if err := s.repinPoisonedStatementConn(); err != nil {
+			return "", err
+		}
+		if err := s.statementConn.QueryRowContext(s.statementContext(), sqlText).Scan(&schema); err != nil {
 			return "", err
 		}
 		return strings.ToUpper(schema), nil
@@ -4690,12 +4709,18 @@ func (s *server) runPagedOracleSelect(sqlText string, opts queryOptions, pageSiz
 	// including panics while reading Columns/ColumnTypes before the first page.
 	var ownedRows *sql.Rows
 	defer func() { s.closeRows(ownedRows) }()
+	originalSQL := sqlText
 	for attempt := 0; ; attempt++ {
 		// Only the first page may be retried: once rows have been returned the
 		// caller owns them and a second execution would duplicate data.
 		retrySQL := func(err error) (string, bool) {
-			if attempt != 0 || s.hasManualTransaction() || oracleSQLLocksRows(sqlText) {
+			if attempt > 1 || s.hasManualTransaction() || oracleSQLLocksRows(originalSQL) {
 				return "", false
+			}
+			if attempt == 1 {
+				// The retry itself failed. When it was a value rewrite the
+				// server cannot run, project geometry as placeholders instead.
+				return oracleGeometryFunctionFallbackSQL(originalSQL, s.loadOracleColumnMeta, err)
 			}
 			return oraclePagedRetrySQL(sqlText, s.loadOracleColumnMeta, err)
 		}
@@ -5031,13 +5056,22 @@ func (s *server) executeSelect(sqlText string, maxRows int, timeoutSecs int, def
 			return s.executeSelectOnce(query, maxRows, timeoutSecs, deferLOBs)
 		},
 		s.rewriteXMLTypeSelectSQL,
+		func(query string, err error) (string, bool) {
+			return oracleGeometryFunctionFallbackSQL(query, s.loadOracleColumnMeta, err)
+		},
 	)
 }
 
+// executeOracleSelectWithXMLTypeRetry retries a SELECT whose values could not
+// be decoded with the value rewrite. When the rewritten statement fails too,
+// fallback may supply one more statement for the original SQL (geometry
+// placeholders when the server cannot convert geometry); a nil fallback or a
+// failing fallback statement keeps the rewritten statement's error.
 func executeOracleSelectWithXMLTypeRetry(
 	sqlText string,
 	execute func(string) (queryResult, error),
 	rewrite func(string) (string, error),
+	fallback func(string, error) (string, bool),
 ) (queryResult, error) {
 	result, err := execute(sqlText)
 	if err == nil || !shouldRetryOracleXMLTypeRewrite(err) {
@@ -5047,12 +5081,27 @@ func executeOracleSelectWithXMLTypeRetry(
 	if rewriteErr != nil || rewritten == sqlText {
 		return result, err
 	}
-	return execute(rewritten)
+	result, err = execute(rewritten)
+	if err == nil || fallback == nil {
+		return result, err
+	}
+	placeholder, ok := fallback(sqlText, err)
+	if !ok {
+		return result, err
+	}
+	if placeholderResult, placeholderErr := execute(placeholder); placeholderErr == nil {
+		return placeholderResult, nil
+	}
+	return result, err
 }
 
 func shouldRetryOracleXMLTypeRewrite(err error) bool {
 	if err == nil {
 		return false
+	}
+	var decodeErr oracleProtocolDecodeError
+	if errors.As(err, &decodeErr) {
+		return true
 	}
 	message := err.Error()
 	return strings.Contains(message, "abnormal data representation for date") ||
@@ -5133,11 +5182,13 @@ func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeout
 	// A statement that keeps row locks while it runs is rewritten before the
 	// first attempt: when such a statement panics after the rows were locked,
 	// the locks stay behind and the retry below blocks on them until the query
-	// times out (issues #9344 / #9180).
-	if oracleSQLLocksRows(sqlText) {
+	// times out (issues #9344 / #9180). A manual transaction cannot retry at
+	// all: the panic leaves its session unusable and the transaction is rolled
+	// back (issue #13455).
+	if oracleSQLLocksRows(sqlText) || s.hasManualTransaction() {
 		rewritten, err := rewriteOracleSelectSQL(sqlText, s.loadOracleColumnMeta, deferLOBs)
 		if err == nil && rewritten != sqlText {
-			return s.queryRowsWithTimeout(rewritten, nil, timeoutSecs)
+			return s.queryOracleValueRewrite(sqlText, rewritten, timeoutSecs)
 		}
 		return s.queryRowsWithTimeout(sqlText, nil, timeoutSecs)
 	}
@@ -5164,20 +5215,7 @@ func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeout
 		if !s.hasManualTransaction() && errors.As(err, &panicErr) {
 			rewritten, rewriteErr := rewriteOracleSelectSQL(sqlText, s.loadOracleColumnMeta, false)
 			if rewriteErr == nil && rewritten != sqlText {
-				rewrittenRows, rewrittenErr := s.queryRowsWithTimeout(rewritten, nil, timeoutSecs)
-				if rewrittenErr == nil {
-					return rewrittenRows, nil
-				}
-				// When the server's ArcSDE extproc agent is broken, the
-				// SDE.ST_AsText rewrite itself fails with ORA-28595 and would
-				// hide the remaining columns; retry once with the placeholder
-				// projection so the query stays readable.
-				if placeholder, ok := oracleExtprocFallbackSQL(sqlText, s.loadOracleColumnMeta, rewrittenErr); ok {
-					if placeholderRows, placeholderErr := s.queryRowsWithTimeout(placeholder, nil, timeoutSecs); placeholderErr == nil {
-						return placeholderRows, nil
-					}
-				}
-				return nil, rewrittenErr
+				return s.queryOracleValueRewrite(sqlText, rewritten, timeoutSecs)
 			}
 		}
 		return nil, err
@@ -5204,7 +5242,7 @@ func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeout
 	// XMLTYPE keeps its metadata-triggered fallback so ordinary non-preview
 	// queries do not run dictionary probes.
 	s.closeRows(rows)
-	return s.queryRowsWithTimeout(rewritten, nil, timeoutSecs)
+	return s.queryOracleValueRewrite(sqlText, rewritten, timeoutSecs)
 }
 
 func oracleColumnTypeNamesContainXMLType(typeNames []string) bool {
@@ -5229,19 +5267,77 @@ func isOracleExtprocAgentFailure(err error) bool {
 	return strings.Contains(strings.ToUpper(err.Error()), "28595")
 }
 
-// oracleExtprocFallbackSQL returns the placeholder projection to retry with
-// when the panic-fallback SDE.ST_AsText rewrite failed because of a broken
-// extproc agent (ORA-28595). It reports false when the error is unrelated or
-// no placeholder rewrite applies.
-func oracleExtprocFallbackSQL(sqlText string, loadColumns oracleColumnMetaLoader, rewriteErr error) (string, bool) {
-	if !isOracleExtprocAgentFailure(rewriteErr) {
+// isOracleSpatialUnavailable reports whether err shows that the server cannot
+// run Oracle Spatial code, so SDO_UTIL.TO_WKTGEOMETRY fails for every value.
+// A missing or invalid MDSYS.SDO_GEOMETRY type body is reported as ORA-04067
+// with ORA-06508 (issue #13827). Matching stays deliberately narrow: one of
+// those ORA codes must appear together with an MDSYS.SDO_ unit name, so an
+// ORA-13xxx error about a single geometry does not match.
+func isOracleSpatialUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToUpper(err.Error())
+	if !strings.Contains(message, "MDSYS.SDO_") {
+		return false
+	}
+	return strings.Contains(message, "ORA-04067") || strings.Contains(message, "ORA-06508")
+}
+
+// isOracleGeometryFunctionFailure reports whether a value-rewritten statement
+// failed because the server cannot run the geometry conversion it calls:
+// SDE.ST_AsText behind a broken extproc agent, or SDO_UTIL.TO_WKTGEOMETRY
+// without a usable Oracle Spatial installation.
+func isOracleGeometryFunctionFailure(err error) bool {
+	return isOracleExtprocAgentFailure(err) || isOracleSpatialUnavailable(err)
+}
+
+// oracleGeometryFunctionFallbackSQL returns the statement to retry with when
+// the value rewrite of sqlText failed because the server cannot convert its
+// geometry columns. It keeps the value rewrite for the other columns and
+// projects geometry columns as placeholders, so the rest of the row stays
+// readable. It reports false when the error is unrelated or no rewrite applies.
+func oracleGeometryFunctionFallbackSQL(sqlText string, loadColumns oracleColumnMetaLoader, rewriteErr error) (string, bool) {
+	if !isOracleGeometryFunctionFailure(rewriteErr) {
 		return "", false
 	}
-	placeholder, err := rewriteOracleSelectSQL(sqlText, loadColumns, true)
+	placeholder, err := rewriteOracleSelectSQL(sqlText, oracleGeometryPlaceholderLoader(loadColumns), false)
 	if err != nil || placeholder == sqlText {
 		return "", false
 	}
 	return placeholder, true
+}
+
+func oracleGeometryPlaceholderLoader(loadColumns oracleColumnMetaLoader) oracleColumnMetaLoader {
+	return func(schema, table string) ([]oracleColumnMeta, error) {
+		columns, err := loadColumns(schema, table)
+		if err != nil {
+			return nil, err
+		}
+		marked := make([]oracleColumnMeta, len(columns))
+		for i, column := range columns {
+			column.GeometryPlaceholder = isOracleGeometryType(column)
+			marked[i] = column
+		}
+		return marked, nil
+	}
+}
+
+// queryOracleValueRewrite runs rewrittenSQL, the value rewrite of originalSQL.
+// When the server cannot run the rewrite's geometry conversion, it retries
+// once with geometry placeholders; otherwise it returns the rewritten
+// statement's error.
+func (s *server) queryOracleValueRewrite(originalSQL, rewrittenSQL string, timeoutSecs int) (*sql.Rows, error) {
+	rows, err := s.queryRowsWithTimeout(rewrittenSQL, nil, timeoutSecs)
+	if err == nil {
+		return rows, nil
+	}
+	if placeholder, ok := oracleGeometryFunctionFallbackSQL(originalSQL, s.loadOracleColumnMeta, err); ok {
+		if placeholderRows, placeholderErr := s.queryRowsWithTimeout(placeholder, nil, timeoutSecs); placeholderErr == nil {
+			return placeholderRows, nil
+		}
+	}
+	return nil, err
 }
 
 func (s *server) rewriteXMLTypeSelectSQL(sqlText string) (string, error) {
@@ -5645,6 +5741,9 @@ func oracleSDOGeometryExpression(columnRef, alias string) string {
 }
 
 func oracleGeometryExpression(column oracleColumnMeta, columnRef, alias string) string {
+	if column.GeometryPlaceholder {
+		return fmt.Sprintf("CASE WHEN %s IS NULL THEN NULL ELSE '%s' END AS %s", columnRef, oracleGeometryPlaceholder(column), alias)
+	}
 	if isOracleSDOGeometry(column) {
 		return oracleSDOGeometryExpression(columnRef, alias)
 	}
@@ -6131,6 +6230,9 @@ func (s *server) setSchema(schema string) error {
 	}
 	if s.statementConn != nil {
 		_, err := s.statementConn.ExecContext(s.statementContext(), sqlText)
+		if err == nil {
+			s.statementSchema = schema
+		}
 		return err
 	}
 	db, err := s.requireDB()
@@ -6141,12 +6243,55 @@ func (s *server) setSchema(schema string) error {
 	return err
 }
 
+// repinPoisonedStatementConn replaces the statement's pinned connection once a
+// driver panic or a response decode error has poisoned it, so the fallbacks of
+// the same statement do not fail on the dead session (issues #13455, #13667).
+// The fresh connection gets the statement's CURRENT_SCHEMA back; the
+// statement's owner closes it together with the original one.
+func (s *server) repinPoisonedStatementConn() error {
+	if s.manualTx != nil || s.statementConn == nil || !oracleConnPoisoned(s.statementConn) {
+		return nil
+	}
+	db, err := s.requireDB()
+	if err != nil {
+		return err
+	}
+	conn, err := db.Conn(s.statementContext())
+	if err != nil {
+		return err
+	}
+	if s.statementSchema != "" {
+		if _, err := conn.ExecContext(s.statementContext(), "ALTER SESSION SET CURRENT_SCHEMA = "+quoteIdentifier(s.statementSchema)); err != nil {
+			_ = conn.Close()
+			return err
+		}
+	}
+	if s.repinnedStatementConn != nil {
+		_ = s.repinnedStatementConn.Close()
+	}
+	s.repinnedStatementConn = conn
+	s.statementConn = conn
+	return nil
+}
+
+// takeRepinnedStatementConn hands a connection opened by
+// repinPoisonedStatementConn to the statement's owner.
+func (s *server) takeRepinnedStatementConn() *sql.Conn {
+	conn := s.repinnedStatementConn
+	s.repinnedStatementConn = nil
+	s.statementSchema = ""
+	return conn
+}
+
 func (s *server) queryRows(sqlText string, args []any) (*sql.Rows, error) {
 	return s.queryRowsWithTimeout(sqlText, args, 0)
 }
 
 func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs int) (rows *sql.Rows, queryErr error) {
 	if _, err := s.requireDB(); err != nil {
+		return nil, err
+	}
+	if err := s.repinPoisonedStatementConn(); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(s.statementContext())

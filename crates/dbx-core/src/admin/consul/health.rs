@@ -10,6 +10,14 @@ use super::catalog::{
 };
 use super::client::{client_for_state, ConsulClient};
 
+pub(super) fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ConsulHealthCheck {
@@ -29,7 +37,7 @@ pub struct ConsulHealthCheck {
     pub service_id: String,
     #[serde(default)]
     pub service_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub service_tags: Vec<String>,
     #[serde(default)]
     #[serde(rename = "Type")]
@@ -70,13 +78,13 @@ pub struct ConsulHealthService {
     pub id: String,
     #[serde(default)]
     pub service: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub tags: Vec<String>,
     #[serde(default)]
     pub address: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub tagged_addresses: BTreeMap<String, ConsulServiceAddress>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub meta: BTreeMap<String, String>,
     #[serde(default)]
     pub port: u16,
@@ -91,7 +99,7 @@ pub struct ConsulHealthService {
 pub struct ConsulServiceInstance {
     pub node: ConsulCatalogNode,
     pub service: ConsulHealthService,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub checks: Vec<ConsulHealthCheck>,
 }
 
@@ -213,4 +221,24 @@ pub async fn consul_health_state_core(
     options: ConsulReadOptions,
 ) -> Result<ConsulListResponse<Vec<ConsulHealthCheck>>, String> {
     client_for_state(state, connection_id).await?.health_state_checks(health_state, &options).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn health_response_accepts_absent_and_null_collections_without_changing_output_shape() {
+        for meta in [serde_json::json!(null), serde_json::json!({}), serde_json::json!({"env": "dev"})] {
+            let value = serde_json::json!({
+                "Node": {"NodeMeta": null, "TaggedAddresses": null},
+                "Service": {"Service": "api", "Meta": meta, "Tags": null, "TaggedAddresses": null},
+                "Checks": [{"ServiceTags": null}]
+            });
+            let parsed: ConsulServiceInstance = serde_json::from_value(value).unwrap();
+            assert!(serde_json::to_value(&parsed).unwrap()["Service"]["Meta"].is_object());
+        }
+        assert!(serde_json::from_value::<ConsulHealthService>(serde_json::json!({})).unwrap().meta.is_empty());
+        assert!(serde_json::from_value::<ConsulHealthService>(serde_json::json!({"Meta": 42})).is_err());
+    }
 }

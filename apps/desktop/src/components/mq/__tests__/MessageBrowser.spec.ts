@@ -151,6 +151,48 @@ afterEach(() => {
 });
 
 describe("MessageBrowser", () => {
+  it("shows and copies RabbitMQ standard properties separately from headers", async () => {
+    const properties = { content_type: "application/json", delivery_mode: "2", priority: "0", expiration: "60000", correlation_id: "rpc-13512" };
+    backend.mqPeekMessages.mockResolvedValueOnce([
+      {
+        position: 1,
+        messageId: "13512",
+        payloadBase64: "e30=",
+        payloadText: "{}",
+        properties,
+        headers: { "x-trace": "trace-13512" },
+      },
+    ]);
+    const browser = await mountBrowser("rabbitmq");
+    await loadMessages(browser);
+
+    const section = browser.querySelector('[data-testid="message-properties"]');
+    expect(section?.textContent).toContain("content_type: application/json");
+    expect(section?.textContent).toContain("priority: 0");
+    expect(section?.textContent).not.toContain("x-trace");
+    const copyButton = browser.querySelector<HTMLButtonElement>('[data-testid="copy-message-properties"]');
+    if (!copyButton) throw new Error("Properties copy button not found");
+    copyButton.click();
+    await flushUi();
+    expect(clipboard.copyToClipboard).toHaveBeenCalledWith(JSON.stringify(properties, null, 2));
+    expect(copyButton.getAttribute("aria-label")).toBe("grid.copy mqMessages.messageProperties");
+  });
+
+  it("does not show a RabbitMQ properties section for Kafka metadata", async () => {
+    const browser = await mountBrowser("kafka");
+    await loadMessages(browser);
+    expect(browser.textContent).toContain("mqMessages.metaPartition");
+    expect(browser.querySelector('[data-testid="message-properties"]')).toBeNull();
+  });
+
+  it("hides the RabbitMQ properties section when a message has no properties", async () => {
+    backend.mqPeekMessages.mockResolvedValueOnce([{ position: 1, payloadBase64: "e30=", payloadText: "{}", properties: {}, headers: {} }]);
+    const browser = await mountBrowser("rabbitmq");
+    await loadMessages(browser);
+    expect(browser.querySelector(".message-row")).not.toBeNull();
+    expect(browser.querySelector('[data-testid="message-properties"]')).toBeNull();
+  });
+
   it("copies a message's displayed payload", async () => {
     const browser = await mountBrowser();
 

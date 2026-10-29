@@ -84,6 +84,40 @@ async function mountPopover() {
   await nextTick();
 }
 
+describe("table copy background task", () => {
+  it("shares phase, elapsed time, details and cancellation without claiming a row percentage", async () => {
+    const tracker = useExportTracker();
+    const onOpen = vi.fn();
+    const cancel = vi.fn();
+    const task = tracker.addTableCopyTask("copy-task", "orders_copy", onOpen);
+    task.copyPhase = "data";
+    tracker.registerTaskCancelHandler(task.exportId, cancel);
+    await mountPopover();
+    expect(document.body.textContent).toContain("Table copy: orders_copy");
+    expect(document.body.textContent).toContain("Copying data");
+    expect(document.body.textContent).toContain("Elapsed:");
+    expect(document.body.textContent).not.toContain("0 rows");
+    expect(document.body.textContent).not.toContain("0%");
+    (document.querySelector('button[title="Open task"]') as HTMLButtonElement).click();
+    expect(onOpen).toHaveBeenCalledOnce();
+    (document.querySelector('button[title="Cancel"]') as HTMLButtonElement).click();
+    await nextTick();
+    expect(cancel).toHaveBeenCalledOnce();
+    task.status = "Unknown";
+    await nextTick();
+    expect(document.querySelector('button[title="Remove"]')).toBeNull();
+    tracker.removeTask(task.exportId);
+    expect(tracker.tasks.value).toContain(task);
+    task.status = "Done";
+    task.copyPhase = "succeeded";
+    task.canRemove = true;
+    task.canCancel = false;
+    task.affectedRows = 1000;
+    await nextTick();
+    expect(document.body.textContent).toContain("Database-confirmed copied rows: 1000");
+  });
+});
+
 describe("failure detail copy text", () => {
   it("formats a data-transfer failure from its authoritative fields", () => {
     expect(dataTransferFailureCopyText({ table: "users", error: "permission denied" })).toBe("users\npermission denied");
@@ -95,6 +129,26 @@ describe("failure detail copy text", () => {
 });
 
 describe("data dictionary background task", () => {
+  it("keeps a snapshot export active and preserves cancellation across preparation updates", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addTask("settlements", "csv", "/tmp/settlements.csv", "snapshot-task");
+    const progress = { exportId: task.exportId, tableName: "settlements", rowsExported: 0, totalRows: 20000, status: "PreparingSnapshot" as const };
+    tracker.updateTableExportTask(task.exportId, progress);
+    const cancel = vi.fn();
+    tracker.registerTaskCancelHandler(task.exportId, cancel);
+    await mountPopover();
+    expect(tracker.activeCount.value).toBe(1);
+    expect(document.body.textContent).toContain("Preparing a consistent export snapshot");
+    expect(document.querySelector('button[title="Cancel"]')).toBeTruthy();
+    await tracker.cancelTask(task.exportId);
+    expect(cancel).toHaveBeenCalledOnce();
+    // A delayed preparation event must not turn a cancelling task back into running.
+    tracker.unregisterTaskCancelHandler(task.exportId);
+    task.status = "Cancelling";
+    tracker.updateTableExportTask(task.exportId, progress);
+    expect(task.status).toBe("Cancelling");
+  });
+
   it("shows actual collected-object progress and retains the finished output after the wizard closes", async () => {
     const tracker = useExportTracker();
     tracker.addDataDictionaryTask("dictionary-task", "shop", 2);
@@ -660,7 +714,7 @@ describe("ExportProgressPopover file name and reveal action", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("does not offer deletion or animate progress for an unknown export", async () => {
+  it("requires confirmation before deleting an unknown export and does not animate it", async () => {
     const tracker = useExportTracker();
     const task = tracker.addTask("Query Result", "csv", "/tmp/unknown.csv");
     task.status = "Unknown";
@@ -668,8 +722,24 @@ describe("ExportProgressPopover file name and reveal action", () => {
     await mountPopover();
     expect(document.body.textContent).toContain("Export status unknown; the queue is blocked");
     expect(document.body.textContent).toContain("transport interrupted");
-    expect(document.body.querySelector('button[title="Delete"]')).toBeNull();
+    const remove = document.body.querySelector<HTMLButtonElement>('button[title="Remove"]');
+    expect(remove).not.toBeNull();
     expect(document.body.querySelector(".export-progress-indeterminate")).toBeNull();
+    remove!.click();
+    await nextTick();
+    expect(tracker.tasks.value).toContain(task);
+    expect(document.body.textContent).toContain(i18n.global.t("exportProgress.recoveryMessage"));
+    const dialog = document.body.querySelector('[role="dialog"]');
+    const cancel = Array.from(dialog!.querySelectorAll("button")).find((button) => button.textContent?.trim() === "Cancel");
+    cancel!.click();
+    await nextTick();
+    expect(tracker.tasks.value).toContain(task);
+    remove!.click();
+    await nextTick();
+    const confirm = Array.from(document.body.querySelector('[role="dialog"]')!.querySelectorAll("button")).find((button) => button.textContent?.trim() === i18n.global.t("exportProgress.recoveryConfirm"));
+    confirm!.click();
+    await nextTick();
+    expect(tracker.tasks.value).not.toContain(task);
   });
 
   it("shows the saved file name instead of the synthetic query-result label", async () => {
@@ -683,6 +753,38 @@ describe("ExportProgressPopover file name and reveal action", () => {
     expect(document.body.textContent).toContain("report-final.xlsx");
     expect(document.body.textContent).not.toContain("Query Result.sql");
     expect(document.body.textContent).not.toContain("Query Result.xlsx");
+  });
+
+  it("offers confirmed recovery independently of the cancel button and releases only after acceptance", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addTask("stalled", "csv", "/old/stalled.csv");
+    let finish!: (outcome: "settled") => void;
+    tracker.submitExportTask(
+      task,
+      "queued",
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const next = vi.fn(async () => "settled" as const);
+    tracker.submitExportTask(tracker.addTask("next", "csv", "/different/next.csv"), "queued", next);
+    task.status = "Cancelling";
+    task.canCancel = false;
+    task.canRecoverCancellation = true;
+    await mountPopover();
+    document.body.querySelector<HTMLButtonElement>('button[title="Remove"]')!.click();
+    await nextTick();
+    expect(next).not.toHaveBeenCalled();
+    const confirm = Array.from(document.body.querySelector('[role="dialog"]')!.querySelectorAll("button")).find((button) => button.textContent?.trim() === i18n.global.t("exportProgress.recoveryConfirm"));
+    expect(document.body.textContent).toContain(i18n.global.t("exportProgress.recoveryMessage"));
+    confirm!.click();
+    await nextTick();
+    expect(next).toHaveBeenCalledOnce();
+    expect(tracker.tasks.value).not.toContain(task);
+    finish("settled");
+    await Promise.resolve();
+    expect(next).toHaveBeenCalledOnce();
   });
 
   it("falls back to the table label when the task has no file path", async () => {

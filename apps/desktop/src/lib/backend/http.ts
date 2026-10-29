@@ -5,6 +5,7 @@ import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRest
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./damengDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
+import type { McpAccessPolicy, McpAccessRule, McpSubScopeMode, McpToolCatalog, PluginMcpGrant, PluginMcpView } from "@/types/mcpCatalog";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
 import type { NativeJobContext, NativeJobDetails, NativeJobList, NativeJobListRequest, NativeJobRequest, NativeJobOperationStatus, NativeJobPreparedPlan, NativeJobRef, NativeJobReferenceCatalog, NativeJobReferenceListRequest } from "@/lib/database/nativeJobs";
 import type { PlDebugBootstrap, PlDebugSessionRef, PlDebugStartIntent, PlDebugOperationRequest, PlDebugReadRequest, PlDebugReceipt, PlDebugSnapshot } from "@/lib/debug/plDebugProtocol";
@@ -183,6 +184,7 @@ import type {
   RedisValue,
   RedisKeysExpiryResult,
   RedisScanResult,
+  RedisKeyMetadata,
   RedisCommandResult,
   RedisSlowlogEntry,
   RedisNodeEndpoint,
@@ -677,8 +679,8 @@ export async function saveConnections(configs: ConnectionConfig[], removedIds: s
   return post("/api/connection/save", { configs });
 }
 
-export async function loadConnections(): Promise<ConnectionConfig[]> {
-  return get("/api/connection/list");
+export async function loadConnections(legacySidebarShowUserAdmin?: boolean): Promise<ConnectionConfig[]> {
+  return get(legacySidebarShowUserAdmin === undefined ? "/api/connection/list" : `/api/connection/list?legacySidebarShowUserAdmin=${legacySidebarShowUserAdmin}`);
 }
 
 export async function loadTunnelProfiles(): Promise<TunnelProfile[]> {
@@ -2570,6 +2572,50 @@ export async function loadMcpGlobalPolicy(): Promise<McpGlobalPolicy> {
   return get("/api/app-settings/mcp-policy");
 }
 
+export async function loadMcpToolCatalog(): Promise<McpToolCatalog> {
+  return get("/api/app-settings/mcp-tool-catalog");
+}
+
+export async function loadMcpAccessPolicy(): Promise<McpAccessPolicy> {
+  return get("/api/app-settings/mcp-access-policy");
+}
+
+export async function resetInvalidMcpAccessPolicy(): Promise<void> {
+  return post("/api/app-settings/mcp-access-policy/recover", {});
+}
+
+export async function setMcpPluginScopeRule(connectionId: string, kind: string, value: string | null, rule: McpAccessRule | null, subScope: McpSubScopeMode | null): Promise<McpAccessPolicy> {
+  const res = await fetch(apiUrl("/api/app-settings/mcp-access-policy/plugin-scope"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ connectionId, kind, value, rule, subScope }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+  return res.json();
+}
+
+export async function listPluginMcpViews(): Promise<PluginMcpView[]> {
+  return get("/api/app-settings/plugin-mcp");
+}
+
+export async function loadPluginMcpView(pluginId: string): Promise<PluginMcpView> {
+  return post("/api/app-settings/plugin-mcp/view", { pluginId });
+}
+
+export async function listMcpPluginScopes(pluginId: string, connectionId: string): Promise<{ values: string[] }> {
+  return post("/api/app-settings/plugin-mcp/scopes", { pluginId, connectionId });
+}
+
+export async function savePluginMcpGrant(pluginId: string, grant: PluginMcpGrant, approveCurrent: boolean): Promise<PluginMcpView> {
+  const res = await fetch(apiUrl("/api/app-settings/plugin-mcp/grant"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pluginId, grant, approveCurrent }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+  return res.json();
+}
+
 export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configured">): Promise<void> {
   const res = await fetch(apiUrl("/api/app-settings/mcp-policy"), {
     method: "PUT",
@@ -3403,6 +3449,9 @@ export async function importTableFile(request: TableImportRequest, onProgress: (
           rowsImported: progress.rowsImported,
           totalRows: progress.totalRows,
           elapsedMs: progress.elapsedMs,
+          rowsFailed: progress.rowsFailed ?? 0,
+          failures: progress.failures ?? [],
+          failuresTruncated: progress.failuresTruncated ?? false,
         };
         es.close();
         resolve(summary);
@@ -4016,6 +4065,14 @@ export async function redisScanKeysBatch(connectionId: string, db: number, curso
     count,
     maxIterations,
     includeTypes,
+  });
+}
+
+export async function redisKeyMetadataBatch(connectionId: string, db: number, keyRaws: string[]): Promise<RedisKeyMetadata[]> {
+  return post("/api/redis/key-metadata-batch", {
+    connectionId,
+    db,
+    keyRaws,
   });
 }
 

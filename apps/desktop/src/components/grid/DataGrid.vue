@@ -116,6 +116,7 @@ import { tableInfoTabForDrawerToggle } from "@/lib/table/tableInfoTabPreference"
 import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
 import * as api from "@/lib/backend/api";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
 import { resolveDataGridBusyStartedAt } from "@/lib/dataGrid/dataGridBusyElapsed";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
@@ -149,9 +150,12 @@ import { sumGridCountValues } from "@/lib/dataGrid/dataGridCountValue";
 import {
   buildVisibleTransposeRows,
   averageTransposeRecordWidth,
+  calculateTransposeInfoWidth,
   calculateTransposeRecordWidth,
+  defaultTransposeInfoWidth,
   defaultTransposeRecordWidth,
   minTransposeFieldWidth,
+  minTransposeInfoWidth,
   minTransposeRecordWidth,
   nextContextTransposeState,
   nextKeyboardTransposeState,
@@ -888,6 +892,8 @@ const columnTypeMap = computed(() => {
   return map;
 });
 const resolvedConnectionConfig = computed(() => connectionStore.getConfig(props.connectionId ?? ""));
+const compatibilityReadOnly = computed(() => mysqlDataCharsetEnabled(resolvedConnectionConfig.value));
+const effectiveEditable = computed(() => !!props.editable && !compatibilityReadOnly.value);
 const resolvedDatabaseType = computed(() => props.databaseType ?? effectiveDatabaseTypeForConnection(resolvedConnectionConfig.value));
 const tableRelationsSection = ref<ObjectDetailsSection>("dependencies");
 const tableDependencyTarget = computed(() => {
@@ -2490,6 +2496,7 @@ const {
   toggleColumnVisibility,
   hideColumns: hideColumnsInLayout,
   showAllColumns: showAllColumnsInLayout,
+  showOnlyColumns: showOnlyColumnsInLayout,
   invertColumnVisibility,
   showColumn,
   persistColumnOrder,
@@ -2990,6 +2997,16 @@ function hideSelectedColumns() {
 function showAllColumns() {
   applyColumnOrderChange(showAllColumnsInLayout);
   void nextTick(scheduleColumnLayoutRefresh);
+}
+
+function showOnlyColumns(columnIndexes: number[]) {
+  if (columnIndexes.length === 0) return;
+  applyColumnOrderChange(() => showOnlyColumnsInLayout(columnIndexes));
+  clearCellSelection();
+  void nextTick(() => {
+    scheduleColumnLayoutRefresh();
+    clampGridHorizontalScroll();
+  });
 }
 
 function getComparisonRows(): ReadonlyArray<ReadonlyArray<unknown>> {
@@ -3959,9 +3976,9 @@ watch(
     }
   },
 );
-const showQueryEditReadOnlyBadge = computed(() => isResultsContext.value && hasData.value && !props.editable && !!props.queryEditabilityReason);
+const showQueryEditReadOnlyBadge = computed(() => isResultsContext.value && hasData.value && !effectiveEditable.value && !!props.queryEditabilityReason);
 const queryEditReadOnlyReason = computed(() => (props.queryEditabilityReason ? t(`grid.queryEditUnsupported.${props.queryEditabilityReason}`) : ""));
-const showKeylessEditWarning = computed(() => !!props.editable && !!props.tableMeta && showsKeylessEditWarning(props.databaseType, props.tableMeta.primaryKeys ?? [], props.tableMeta.tableType));
+const showKeylessEditWarning = computed(() => !!effectiveEditable.value && !!props.tableMeta && showsKeylessEditWarning(props.databaseType, props.tableMeta.primaryKeys ?? [], props.tableMeta.tableType));
 type DataGridTableMeta = NonNullable<typeof props.tableMeta>;
 const hiveTableTransactional = ref<boolean | undefined>(undefined);
 const resultSourceColumns = computed(() => props.result.columns.map((column, index) => props.sourceColumns?.[index] ?? column));
@@ -3977,7 +3994,7 @@ const hasDataGridInsertTarget = computed(() => {
   if (handler) return handler.supportsInsert === true || handler.canInsert === true;
   return !!props.tableMeta && canInsertTableRows(props.databaseType);
 });
-const canInsertRows = computed(() => !!props.editable && hasDataGridInsertTarget.value);
+const canInsertRows = computed(() => !!effectiveEditable.value && hasDataGridInsertTarget.value);
 const canDeleteRows = computed(() => props.allowDeleteRows !== false && (!props.customSaveHandler || props.customSaveHandler.canDelete !== false));
 const canDeleteExistingRows = computed(() => !!props.customSaveHandler || canDeleteExistingTdengineRows(props.databaseType, props.tableMeta?.primaryKeys ?? []));
 watch(
@@ -4697,7 +4714,7 @@ watch(saveConfirmOpen, (isOpen) => {
 
 const editor = useDataGridEditor({
   result: computed(() => props.result),
-  editable: computed(() => props.editable),
+  editable: computed(() => effectiveEditable.value),
   databaseType: computed(() => props.databaseType),
   connectionId: computed(() => props.connectionId),
   database: computed(() => props.executionDatabase ?? props.database),
@@ -4940,7 +4957,7 @@ const saveActionMode = computed(() =>
 const previewLabelKey = computed(() => dataGridPreviewLabelKey(resolvedDatabaseType.value));
 const saveToolbarState = computed(() =>
   dataGridSaveToolbarState({
-    editable: props.editable,
+    editable: effectiveEditable.value,
     hasSaveTarget: hasDataGridSaveTarget.value,
     hasPendingChanges: hasPendingChanges.value,
     isSaving: isSaving.value,
@@ -4988,7 +5005,7 @@ function clearVirtualRowIdentifier() {
 const quickEntryEnabled = computed(() => settingsStore.editorSettings.dataGridQuickEntry);
 const showQuickEntryDraftRow = computed(() =>
   shouldShowQuickEntryDraftRow({
-    editable: !!props.editable,
+    editable: !!effectiveEditable.value,
     hasInsertTarget: hasDataGridInsertTarget.value,
     quickEntryEnabled: quickEntryEnabled.value,
     rowStatusFilter: rowStatusFilter.value,
@@ -4997,7 +5014,7 @@ const showQuickEntryDraftRow = computed(() =>
 );
 const showDataGridTopbar = computed(
   () =>
-    (useTransaction.value && !!props.editable && hasDataGridSaveTarget.value) ||
+    (useTransaction.value && !!effectiveEditable.value && hasDataGridSaveTarget.value) ||
     hasLocalColumnFilters.value ||
     canShowWhereSearch.value ||
     hasSearchBarSlot.value ||
@@ -5006,13 +5023,13 @@ const showDataGridTopbar = computed(
     showVirtualRowIdentifierControl.value ||
     showQueryEditReadOnlyBadge.value ||
     props.context !== "results" ||
-    (!!props.editable && hasDataGridSaveTarget.value) ||
+    (!!effectiveEditable.value && hasDataGridSaveTarget.value) ||
     transactionActive.value ||
     saveToolbarState.value.showActions,
 );
 
 function canEditRowItem(item: RowItem | undefined): boolean {
-  return !isConditionalUpdateActive.value && !!props.editable && !!item && !item.isDeleted && (item.isNew || item.isDraft || canEditExistingRows.value);
+  return !isConditionalUpdateActive.value && !!effectiveEditable.value && !!item && !item.isDeleted && (item.isNew || item.isDraft || canEditExistingRows.value);
 }
 
 function canEditCellItem(item: RowItem | undefined, columnIndex: number): boolean {
@@ -5283,7 +5300,7 @@ function canDeleteRowItem(item: RowItem | undefined): boolean {
   if (!item) return false;
   if (!item.isNew && canUseKeylessRowPredicate(props.databaseType, props.tableMeta?.primaryKeys ?? []) && hasUnsafeOpaqueAggregateStatePredicate(allColumnTypes.value, item.data)) return false;
   const canDelete = canDeleteGridRowItem({
-    editable: !!props.editable && canDeleteRows.value,
+    editable: !!effectiveEditable.value && canDeleteRows.value,
     isDraft: !!item.isDraft,
     isDeleted: item.isDeleted,
     isNew: item.isNew,
@@ -5507,7 +5524,7 @@ const addRowToolbarCapability = computed<DataGridToolbarAddRowCapability>(() => 
 const deleteRowToolbarTargetCount = computed(() => deletableRowIds(selectedOrCurrentRowIds()).length);
 const deleteRowToolbarState = computed(() =>
   dataGridDeleteRowToolbarState({
-    editable: !!props.editable,
+    editable: !!effectiveEditable.value,
     canDeleteRows: canDeleteRows.value,
     canDeleteExistingRows: canDeleteExistingRows.value,
     deletableTargetCount: deleteRowToolbarTargetCount.value,
@@ -6381,7 +6398,7 @@ const largeValueRuntimeInstance = useDataGridLargeValues({
   cloneRows: cloneEditorRows,
 });
 largeValueRuntime = largeValueRuntimeInstance;
-const { isLargeValuePreview, largeValueOriginalBytes, formatGridItemCell, formatGridItemCellForConfirmation, visibleLargeValuePreviewValue, resolveLargeValueCells, hydrateLargeValueCells, reportLargeValueLoadError, cloneRow, cloneRows } = largeValueRuntimeInstance;
+const { isLargeValuePreview, isPendingDecode, formatGridItemCell, formatGridItemCellForConfirmation, resolveLargeValueCells, hydrateLargeValueCells, reportLargeValueLoadError, cloneRow, cloneRows } = largeValueRuntimeInstance;
 
 // Pagination/refresh replaces tab.result without remounting the grid, so the
 // page-scoped full-text state must follow the result it was loaded for; the
@@ -7605,6 +7622,7 @@ function cellDetailFor(rowIndex: number, columnIndex: number): DataGridCellDetai
     }),
     databaseType: resolvedDatabaseType.value,
     isValuePreviewTruncated: isLargeValuePreview(item, columnIndex),
+    pendingDecodePlaceholder: isPendingDecode(item, columnIndex) ? t("grid.largeValuePendingDecode") : undefined,
   });
 }
 
@@ -7696,6 +7714,7 @@ const rowDetail = computed(() => {
         isDraft: !!item.isDraft,
       }),
     isValuePreviewTruncated: (columnIndex) => isLargeValuePreview(item, columnIndex),
+    pendingDecodePlaceholder: (columnIndex) => (isPendingDecode(item, columnIndex) ? t("grid.largeValuePendingDecode") : undefined),
   });
 });
 
@@ -7714,6 +7733,7 @@ const columnDetail = computed(() => {
           isDraft: !!item.isDraft,
         }),
         isValuePreviewTruncated: isLargeValuePreview(item, columnIndex),
+        pendingDecodePlaceholder: isPendingDecode(item, columnIndex) ? t("grid.largeValuePendingDecode") : undefined,
       })),
     columns: props.result.columns,
     columnIndex,
@@ -9373,7 +9393,7 @@ function drawCanvasGrid() {
     currentSearchMatch: currentSearchMatch.value,
     duplicateHighlightKeys: duplicateHighlightKeys.value,
     nullHighlightKeys: nullHighlightKeys.value,
-    formatCell: (value, columnIndex, row) => formatCellCached(visibleLargeValuePreviewValue(row, columnIndex, value), columnIndex, largeValueOriginalBytes(row, columnIndex)),
+    formatCell: (_value, columnIndex, row) => formatGridItemCell(row, columnIndex, false),
     isNullValue: (value) => value === null || (usesMongoDocumentGridValues.value && value === MONGO_DOCUMENT_GRID_NULL),
     newRowCellPlaceholder,
     isRowActive,
@@ -9724,6 +9744,7 @@ const {
   exportTxt,
   exportCurrentPageTxt,
 } = useDataGridExport({
+  mysqlDataCharsetReadOnly: compatibilityReadOnly,
   columns: visibleColumns,
   displayItems: visibleDisplayItems,
   allColumns: computed(() => props.result.columns),
@@ -10003,7 +10024,7 @@ const pageSizeMenuItems = computed(() =>
   })),
 );
 
-const exportMenuItems = computed(() => {
+const unrestrictedExportMenuItems = computed(() => {
   const hasFullResultExport = !!props.fullExportResult;
   const canIncludeSql = props.context === "results" && !!(props.exportSql || props.sql)?.trim();
   const canTransferToDatabase = props.context === "results" && !!props.transferQueryResult;
@@ -10173,11 +10194,26 @@ const exportMenuItems = computed(() => {
   ];
 });
 
+const exportMenuItems = computed(() => unrestrictedExportMenuItems.value.filter((item) => !compatibilityReadOnly.value || /(?:^|-)(?:csv|json|xlsx)(?:-with-sql)?$/.test(item.value)));
+
 function selectPageSizeMenuItem(value: string) {
   changePageSize(Number(value));
 }
 
+const exportWarning = computed(() => {
+  if (!settingsStore.editorSettings.warnIncompleteExport) return "";
+  const count = visibleDisplayItems.value.length;
+  const total = displayedTotalRowCount.value;
+  const partial = props.result.truncated === true || props.result.has_more === true || props.result.page_has_more === true || (props.pageOffset ?? 0) > 0 || props.result.rows.length > count || (typeof total === "number" && total > count);
+  return partial ? t("grid.incompleteExportWarning", { count }) : "";
+});
+const loadAllToolbarState = computed(() => ({
+  visible: props.paginationEnabled && props.loadAllRowsEnabled,
+  disabled: gridPaginationBusy.value || infiniteScrollLoading.value || props.result.rows.length === 0,
+}));
+
 function selectExportMenuItem(value: string) {
+  if (compatibilityReadOnly.value && !exportMenuItems.value.some((item) => item.value === value)) return;
   const actions: Record<string, () => void> = {
     database: () => props.transferQueryResult?.(),
     "page-csv": exportCurrentPageCsv,
@@ -10450,7 +10486,7 @@ function clipboardShortcut(event: KeyboardEvent, key: string): boolean {
 const clipboardNullText = computed(() => settingsStore.editorSettings.dataGridExtractorOptions.dsv.nullText);
 
 async function pasteClipboardIntoSelection() {
-  if (!props.editable) return;
+  if (!effectiveEditable.value) return;
   const operation = dataGridResultLifecycle.beginOperation();
   const lifecycle = gridClipboardLifecycle;
   const text = await readTextFromClipboard();
@@ -10505,7 +10541,7 @@ function batchAppendPasteTargetRowId(): number | null {
 }
 
 function canAppendPastedRows(): boolean {
-  return !!props.editable && batchAppendPasteTargetRowId() !== null;
+  return !!effectiveEditable.value && batchAppendPasteTargetRowId() !== null;
 }
 
 function batchAppendPasteError(reason: string): string {
@@ -10641,7 +10677,7 @@ function pasteRowsIntoSelection(rows: readonly (readonly (string | null)[])[]): 
 }
 
 function onGridPaste(event: ClipboardEvent) {
-  const intent = claimDataGridPaste(event, props.editable, !!selectedRange.value || hasColumnSelection.value || canAppendPastedRows());
+  const intent = claimDataGridPaste(event, effectiveEditable.value, !!selectedRange.value || hasColumnSelection.value || canAppendPastedRows());
   if (intent === "native") return;
   if (intent === "block") return;
   const text = event.clipboardData?.getData("text/plain");
@@ -10680,7 +10716,7 @@ function selectedRangeTargetsOnlyDraftRow(): boolean {
   return displayItemAt(range.startRow)?.isDraft === true;
 }
 
-const replaceAvailable = computed(() => !!props.editable && hasDataGridSaveTarget.value && canUpdateExistingRows.value && !resolvedConnectionConfig.value?.read_only && !isConditionalUpdateActive.value);
+const replaceAvailable = computed(() => !!effectiveEditable.value && hasDataGridSaveTarget.value && canUpdateExistingRows.value && !resolvedConnectionConfig.value?.read_only && !isConditionalUpdateActive.value);
 const replaceResolving = ref(false);
 const replaceBusy = computed(() => replaceResolving.value || isSaving.value || gridSurfaceBusy.value || props.loading === true);
 
@@ -10855,12 +10891,12 @@ function selectionHasEditableCells(): boolean {
 }
 
 function setSelectionNull() {
-  if (!props.editable || !selectionHasEditableCells()) return;
+  if (!effectiveEditable.value || !selectionHasEditableCells()) return;
   fillSelectionWithValue(null);
 }
 
 function openBulkEditDialog() {
-  if (!props.editable || !selectionHasEditableCells()) return;
+  if (!effectiveEditable.value || !selectionHasEditableCells()) return;
   const currentWhere = currentWhereInput()?.trim() ?? "";
   bulkEditValue.value = "";
   bulkEditScope.value = "selection";
@@ -11047,7 +11083,7 @@ function editableSelectionCells(): EditableSelectionCell[] {
 }
 
 function beginInlineBulkEdit(initialValue: string): boolean {
-  if (!props.editable) return false;
+  if (!effectiveEditable.value) return false;
   const target = editableSelectionCells()[0];
   if (!target || selectedCellCount.value <= 1) return false;
   const actualCol = actualColumnIndex(target.visibleCol);
@@ -11059,7 +11095,7 @@ function beginInlineBulkEdit(initialValue: string): boolean {
 }
 
 function applyGeneratedSelectionValue(kind: CellValueGenerationKind, generationOptions?: CellValueGenerationOptions | bigint): boolean {
-  if (!props.editable) return false;
+  if (!effectiveEditable.value) return false;
   const cells = editableSelectionCells();
   if (!cells.length) return false;
   const options = typeof generationOptions === "bigint" ? { startValue: generationOptions } : (generationOptions ?? {});
@@ -11104,7 +11140,7 @@ function generatedGridValue(kind: CellValueGenerationKind, value: string | null)
 }
 
 function openGenerateIncrementDialog(target: "selection" | "detail") {
-  if (target === "selection" && (!props.editable || !selectionHasEditableCells())) return;
+  if (target === "selection" && (!effectiveEditable.value || !selectionHasEditableCells())) return;
   if (target === "detail" && !activeCellDetail.value?.isEditable) return;
   generateIncrementTarget.value = target;
   generateIncrementStartValue.value = "1";
@@ -11233,7 +11269,7 @@ function generateSelectionMenuItems(disabled: boolean): ContextMenuItem[] {
 }
 
 async function cutSelection() {
-  if (!props.editable || !selectedRange.value) return;
+  if (!effectiveEditable.value || !selectedRange.value) return;
   const range = selectedRange.value;
   if (!(await copyWithExtractor("tsv"))) return;
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
@@ -11717,7 +11753,7 @@ function addRowFromArrowDown(): boolean {
 // 顺序对齐 DBeaver 的 ESC = Reset cell changes：先撤掉「刚新增且从未写入」的整行，
 // 再把单格的待保存改动回退为原值。多格 / 整行 / 整列选区不参与：一次 Esc 不应抹掉一整片改动。
 function cancelPendingRowOrRestoreCell(): boolean {
-  if (isTransposeMode.value || editingCell.value || !props.editable) return false;
+  if (isTransposeMode.value || editingCell.value || !effectiveEditable.value) return false;
   // 保存进行中不得改动待提交状态：这一轮保存的快照已经捕获了当前值，此刻回退只会让用户以为
   // 改动被撤销，数据库仍会写入（同层的 stageCellReplacements / rowPreparationIsCurrent 都做了
   // 同样的 !isSaving 门槛）。
@@ -11789,7 +11825,7 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "n") {
-    if (props.editable && hasDataGridInsertTarget.value && canInsertRows.value) {
+    if (effectiveEditable.value && hasDataGridInsertTarget.value && canInsertRows.value) {
       event.preventDefault();
       event.stopPropagation();
       addRow();
@@ -11922,13 +11958,13 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (clipboardShortcut(event, "x")) {
-    if (!props.editable || !selectedRange.value) return;
+    if (!effectiveEditable.value || !selectedRange.value) return;
     event.preventDefault();
     await cutSelection();
     return;
   }
   if (clipboardShortcut(event, "v")) {
-    const intent = claimDataGridPaste(event, props.editable, !!selectedRange.value || hasColumnSelection.value || canAppendPastedRows());
+    const intent = claimDataGridPaste(event, effectiveEditable.value, !!selectedRange.value || hasColumnSelection.value || canAppendPastedRows());
     if (intent === "native") return;
     // A focused grid owns the shortcut even when read-only; otherwise the webview may paste into the previously focused SQL editor.
     if (intent === "block") return;
@@ -12416,7 +12452,8 @@ const transposeReserveTypeLine = computed(() => showTransposeFieldMetadata.value
 const transposeReserveCommentLine = computed(() => showTransposeFieldMetadata.value && showTransposeColumnComments.value && transposeRows.value.some((row) => row.comment));
 const transposeRowHeight = computed(() => 30 + (transposeReserveTypeLine.value ? 14 : 0) + (transposeReserveCommentLine.value ? 14 : 0));
 const isTransposeMode = computed(() => showTranspose.value && transposeRows.value.length > 0);
-const transposeInfoWidth = computed(() => (transposeMetadataInInfoColumn.value ? 360 : 0));
+const transposeInfoWidthOverride = ref<number | null>(null);
+const transposeInfoWidth = computed(() => (transposeMetadataInInfoColumn.value ? (transposeInfoWidthOverride.value ?? defaultTransposeInfoWidth(columnWidthDensity.value)) : 0));
 const transposeTotalWidth = computed(() => transposePinnedWidth.value + transposeRecordOffsets.value[transposeRecordOffsets.value.length - 1] + transposeEndSpacerWidth.value + transposeInfoWidth.value);
 
 function transposeScrollElement(): HTMLElement | undefined {
@@ -12427,9 +12464,15 @@ function transposeScrollElement(): HTMLElement | undefined {
 
 function transposeFieldTitle(item: { column: string; type: string; comment?: string }): string {
   const details = [item.column];
-  if (showTransposeFieldMetadata.value && showColumnTypesInHeader.value && item.type) details.push(`${t("grid.columnType")}: ${item.type}`);
-  if (showTransposeFieldMetadata.value && showTransposeColumnComments.value && item.comment) details.push(`${t("grid.columnComment")}: ${item.comment}`);
+  if (showColumnTypesInHeader.value && item.type) details.push(`${t("grid.columnType")}: ${item.type}`);
+  if (showTransposeColumnComments.value && item.comment) details.push(`${t("grid.columnComment")}: ${item.comment}`);
   return details.join("\n");
+}
+
+function toggleTransposeFieldMetadata() {
+  settingsStore.updateEditorSettings({
+    dataGridShowTransposeFieldMetadata: !settingsStore.editorSettings.dataGridShowTransposeFieldMetadata,
+  });
 }
 
 function toggleTransposeColumnSort() {
@@ -12602,6 +12645,28 @@ function autoFitTransposeRecord(recordIndex: number) {
   const next = [...transposeRecordWidths.value];
   next[recordIndex] = calcTransposeRecordWidth(recordIndex);
   transposeRecordWidths.value = next;
+}
+
+function onTransposeInfoResizeStart(event: MouseEvent) {
+  event.preventDefault();
+  const startX = event.clientX;
+  const startWidth = transposeInfoWidth.value;
+  const onMove = (e: MouseEvent) => {
+    transposeInfoWidthOverride.value = Math.max(minTransposeInfoWidth(columnWidthDensity.value), startWidth + e.clientX - startX);
+    updateTransposeViewport();
+  };
+  const onUp = () => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+  };
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
+
+function autoFitTransposeInfo() {
+  const texts = visibleColumnIndexes.value.map((columnIndex) => columnInfoText(columnIndex, false));
+  transposeInfoWidthOverride.value = calculateTransposeInfoWidth(texts, { density: columnWidthDensity.value });
+  updateTransposeViewport();
 }
 
 function currentTransposeViewportRowIndex(): number {
@@ -14485,6 +14550,11 @@ watch(
 );
 
 defineExpose({
+  exportMenuItems,
+  exportWarning,
+  selectExportMenuItem,
+  loadAllToolbarState,
+  loadAllRowsAndGoToLast,
   tableInfoToolbarCapability,
   goToColumnToolbarCapability,
   useTransaction,
@@ -14524,6 +14594,7 @@ defineExpose({
   toggleColumnVisibility,
   hideColumns,
   showAllColumns,
+  showOnlyColumns,
   invertColumnVisibility,
   hasCustomColumnOrder,
   moveDisplayableColumn,
@@ -14689,6 +14760,7 @@ function buildExtractorContextItems(destination: "copy" | "export" = "copy"): Co
   let separatorPending = false;
   for (const extractor of DATA_GRID_COPY_EXTRACTOR_IDS) {
     if (destination === "copy" && !settingsStore.editorSettings.dataGridVisibleCopyExtractors.includes(extractor)) continue;
+    if (compatibilityReadOnly.value && (destination === "export" ? !["csv", "csv-with-headers", "json"].includes(extractor) : extractor.startsWith("sql-") || extractor === "where-clause")) continue;
     if (extractor === "raw" && !canCopyWithExtractor(extractor)) continue;
     const descriptor = DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor];
     if (descriptor.separatorBefore) {
@@ -14775,6 +14847,17 @@ function copySubmenu(): ContextMenuItem {
 }
 
 function exportSubmenu(): ContextMenuItem {
+  if (compatibilityReadOnly.value) {
+    return {
+      label: t("grid.export"),
+      icon: Upload,
+      children: [
+        { label: t("grid.exportCsv"), action: exportCsv },
+        { label: t("grid.exportXlsx"), action: exportXlsx },
+        { label: t("grid.exportJson"), action: exportJson },
+      ],
+    };
+  }
   const items: ContextMenuItem[] = [
     ...(props.context === "results" && props.transferQueryResult ? [{ label: t("grid.exportDatabase"), action: props.transferQueryResult }] : []),
     { label: t("grid.exportCsv"), action: exportCsv },
@@ -15037,7 +15120,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       hasCell: !!contextCell.value,
       hasColumn: !!contextColumn.value,
       headerColumn: !!contextHeaderColumn.value,
-      editable: props.editable,
+      editable: effectiveEditable.value,
       hasCellSelection: hasCellSelection.value,
       hasEditableSelection,
       hasSelection: hasCellSelection.value,
@@ -15091,7 +15174,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       },
     ],
     createDataGridRowContextMenuItems({
-      editable: props.editable,
+      editable: effectiveEditable.value,
       hasRow: !!row,
       canClone: !!row && canInsertRows.value && !row.isDraft,
       deleted: !!row?.isDeleted,
@@ -15202,6 +15285,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     @paste="onGridPaste"
     @focusin="onGridFocusIn"
   >
+    <p v-if="compatibilityReadOnly" class="shrink-0 border-b px-3 py-1 text-xs text-muted-foreground" :title="t('connection.mysqlDataCharsetReadOnly')">{{ t("connection.mysqlDataCharsetExportHint") }}</p>
     <CustomContextMenu :items="currentGridContextMenuItems" @open="onGridContextMenuOpen" @close="onGridContextMenuClose" v-slot="{ onContextMenu }">
       <div v-if="hasData || canShowWhereSearch" class="flex-1 flex flex-col overflow-hidden" @contextmenu="onContextMenu">
         <!-- Search bar -->
@@ -15219,7 +15303,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           <!-- Clip both axes instead of creating a hidden scroll container around the toolbar controls. -->
           <div data-grid-topbar-row="filters" class="data-grid-topbar-scroll min-w-0 overflow-clip" :class="splitDataGridToolbar ? 'data-grid-topbar-scroll--row-divider col-span-2 row-start-2' : 'flex-1'">
             <div class="data-grid-topbar flex items-stretch relative" :class="{ 'data-grid-topbar--compact': compactDataGridToolbar }">
-              <div v-if="useTransaction && editable && hasDataGridSaveTarget" class="flex items-center px-2 py-0.5 border-r shrink-0">
+              <div v-if="useTransaction && effectiveEditable && hasDataGridSaveTarget" class="flex items-center px-2 py-0.5 border-r shrink-0">
                 <Select :model-value="rowStatusFilter" @update:model-value="(value: any) => setRowStatusFilter(String(value))">
                   <SelectTrigger class="h-5 max-w-28 border-0 bg-transparent px-0 py-0 text-xs font-medium text-foreground/70 shadow-none focus-visible:ring-0 data-[state=open]:text-foreground dark:bg-transparent dark:hover:bg-transparent [&_svg]:size-3">
                     <SelectValue :placeholder="t('grid.filterRows')" />
@@ -15258,7 +15342,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   :history-scope="conditionHistoryScope"
                   :can-use-where-search="canUseWhereSearch"
                   :compact="compactDataGridToolbar"
-                  :leading-border="!!(useTransaction && editable && hasDataGridSaveTarget)"
+                  :leading-border="!!(useTransaction && effectiveEditable && hasDataGridSaveTarget)"
                   :filter-button-active="filterButtonActive"
                   :filter-button-count="filterButtonCount"
                   :sort-button-active="sortButtonActive"
@@ -15582,6 +15666,19 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   {{ multiRowTranspose ? t("grid.transposeMultiRow") : t("grid.transposeSingleRow") }}
                 </span>
                 <span class="flex-1" />
+                <Button
+                  data-grid-transpose-toggle-metadata
+                  variant="ghost"
+                  size="icon"
+                  class="h-5 w-5"
+                  :class="{ 'bg-muted text-foreground': showTransposeFieldMetadata }"
+                  :disabled="transposeMetadataInInfoColumn"
+                  :title="t('settings.dataGridShowTransposeFieldMetadata')"
+                  :aria-label="t('settings.dataGridShowTransposeFieldMetadata')"
+                  @click="toggleTransposeFieldMetadata"
+                >
+                  <TableProperties class="w-3 h-3" />
+                </Button>
                 <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="transposeActivePosition <= 0" @click="transposeNav(-1)">
                   <ChevronLeft class="w-3 h-3" />
                 </Button>
@@ -15651,8 +15748,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                         <div class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposeRecordResizeStart(recordIndex, $event)" @dblclick.stop="autoFitTransposeRecord(recordIndex)" />
                       </div>
                       <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
-                      <div v-if="transposeMetadataInInfoColumn" class="data-grid-header-cell shrink-0 border-r border-border px-3 py-1.5" :style="{ width: `${transposeInfoWidth}px` }">
-                        {{ t("grid.columnInfo") }}
+                      <div v-if="transposeMetadataInInfoColumn" class="data-grid-header-cell relative flex shrink-0 items-center border-r border-border px-3 py-1.5 truncate" :style="{ width: `${transposeInfoWidth}px` }">
+                        <span class="min-w-0 flex-1 truncate">{{ t("grid.columnInfo") }}</span>
+                        <div data-grid-transpose-info-resize-handle class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposeInfoResizeStart" @dblclick.stop="autoFitTransposeInfo" />
                       </div>
                     </div>
                   </template>
@@ -15679,7 +15777,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                           <span class="flex w-full min-w-0 items-center gap-1 overflow-hidden pr-5">
                             <KeyRound v-if="transposeColumnIndexKind(item.column) === 'primary'" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass('primary')" :title="transposeColumnIndexText('primary')" />
                             <Hash v-else-if="transposeColumnIndexKind(item.column)" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass(transposeColumnIndexKind(item.column)!)" :title="transposeColumnIndexText(transposeColumnIndexKind(item.column)!)" />
-                            <span class="min-w-0 flex-1 truncate font-medium leading-4">{{ item.column }}</span>
+                            <span data-grid-transpose-field-name class="min-w-0 flex-1 truncate font-medium leading-4">{{ item.column }}</span>
                           </span>
                           <template v-if="showTransposeFieldMetadata && showColumnTypesInHeader && item.type">
                             <span data-grid-transpose-type-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 select-none" :class="typeColorClass(item.type)" :title="item.type">
@@ -15699,11 +15797,11 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                           >
                             <span class="text-muted-foreground">{{ t("grid.columnName") }}</span>
                             <span class="min-w-0 break-all font-mono select-text">{{ item.column }}</span>
-                            <template v-if="showTransposeFieldMetadata && showColumnTypesInHeader && item.type">
+                            <template v-if="showColumnTypesInHeader && item.type">
                               <span class="text-muted-foreground">{{ t("grid.columnType") }}</span>
                               <span class="min-w-0 break-all font-mono select-text" :class="typeColorClass(item.type)">{{ item.type }}</span>
                             </template>
-                            <template v-if="showTransposeFieldMetadata && showTransposeColumnComments && item.comment">
+                            <template v-if="showTransposeColumnComments && item.comment">
                               <span class="text-muted-foreground">{{ t("grid.columnComment") }}</span>
                               <span class="min-w-0 whitespace-pre-wrap break-words select-text">{{ item.comment }}</span>
                             </template>
@@ -17223,7 +17321,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     <ErrorBanner v-if="saveError" variant="card" :title="t('grid.saveErrorTitle')" :message="saveError" copy-mode="label" dismissible @dismiss="saveError = ''" />
 
     <!-- Bottom status bar -->
-    <div v-if="!isErrorResult" class="grid grid-cols-[max-content_minmax(0,1fr)_max-content] items-center gap-2 px-3 py-1 border-t text-xs text-muted-foreground bg-muted/30 shrink-0" :class="{ 'relative max-sm:pt-7': selectedColumnInfo }">
+    <div v-if="!isErrorResult" class="grid grid-cols-[max-content_minmax(0,1fr)_minmax(0,max-content)] items-center gap-2 px-3 py-1 border-t text-xs text-muted-foreground bg-muted/30 shrink-0" :class="{ 'relative max-sm:pt-7': selectedColumnInfo }">
       <div class="flex min-w-0 items-center gap-2 overflow-hidden">
         <span v-if="hasData" class="shrink-0">
           {{
@@ -17255,7 +17353,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         <QueryTimingDetails v-if="isResultsContext" :result="result" :render-ms="resultViewUpdateMs" />
         <span v-else class="shrink-0">{{ formatQueryDuration(result.execution_time_ms) }}</span>
 
-        <template v-if="editable && hasDataGridSaveTarget">
+        <template v-if="effectiveEditable && hasDataGridSaveTarget">
           <span v-if="hasPendingChanges" class="shrink-0 text-foreground">
             {{ t("grid.pendingChanges", { count: pendingChangeCount }) }}
           </span>
@@ -17304,13 +17402,14 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         :infinite-scroll-enabled="infiniteScrollEnabled"
         :infinite-scroll-all-loaded="infiniteScrollAllLoaded"
         :load-all-rows-active="loadAllRowsActive"
-        :load-all-rows-enabled="loadAllRowsEnabled"
+        :load-all-rows-enabled="loadAllRowsEnabled && !(context === 'results' && hasResultToolbarActionsSlot && settingsStore.editorSettings.dataGridLoadAllInToolbar)"
         :can-load-all-rows="result.rows.length > 0"
-        :can-export="result.columns.length > 0"
+        :can-export="result.columns.length > 0 && !(context === 'results' && hasResultToolbarActionsSlot && settingsStore.editorSettings.dataGridExportInToolbar)"
         :page-size="pageSize"
         :default-page-size="defaultPageSize"
         :page-size-menu-items="pageSizeMenuItems"
         :export-menu-items="exportMenuItems"
+        :export-warning="exportWarning"
         :current-page="currentPage"
         :max-page="maximumPage"
         :can-go-next-page="canGoNextPage"

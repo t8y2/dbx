@@ -412,8 +412,15 @@ fn linux_nvidia_driver_from_state(
     proprietary_control_exists: bool,
     proprietary_proc_exists: bool,
     render_driver: Option<&str>,
+    prime_render_offload: bool,
 ) -> LinuxNvidiaDriver {
-    if proprietary_control_exists || proprietary_proc_exists {
+    // On hybrid laptops the proprietary module is loaded for the dGPU while the
+    // integrated GPU (i915/xe/amdgpu) drives the display and WebKit's renderer.
+    // Applying the NVIDIA workarounds there needlessly disables DMABuf and drops
+    // WebKitGTK to the slow shared-memory path (laggy scrolling everywhere).
+    let renders_on_nvidia =
+        prime_render_offload || render_driver.is_none_or(|driver| driver.eq_ignore_ascii_case("nvidia"));
+    if (proprietary_control_exists || proprietary_proc_exists) && renders_on_nvidia {
         LinuxNvidiaDriver::Proprietary
     } else if render_driver.is_some_and(|driver| driver.eq_ignore_ascii_case("nouveau")) {
         LinuxNvidiaDriver::Nouveau
@@ -613,6 +620,7 @@ fn apply_linux_webkit_rendering_workarounds() {
         std::path::Path::new("/dev/nvidiactl").exists(),
         std::path::Path::new("/proc/driver/nvidia/version").exists(),
         selected_device.and_then(|device| device.driver.as_deref()),
+        std::env::var_os("__NV_PRIME_RENDER_OFFLOAD").is_some_and(|value| value == "1"),
     );
     let has_hardware_render_device =
         render_devices.iter().any(|device| !linux_drm_driver_is_software_only(device.driver.as_deref()));
@@ -1533,13 +1541,19 @@ mod tests {
 
     #[test]
     fn classifies_linux_nvidia_driver_from_selected_renderer() {
-        assert_eq!(linux_nvidia_driver_from_state(true, false, None), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(false, true, None), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(true, false, Some("nouveau")), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("nouveau")), LinuxNvidiaDriver::Nouveau);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("i915")), LinuxNvidiaDriver::None);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("amdgpu")), LinuxNvidiaDriver::None);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, None), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, false, None, false), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(false, true, None, false), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(true, false, Some("nouveau"), false), LinuxNvidiaDriver::Nouveau);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("nouveau"), false), LinuxNvidiaDriver::Nouveau);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("i915"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("amdgpu"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, None, false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("nvidia"), false), LinuxNvidiaDriver::Proprietary);
+        // Hybrid laptops: the iGPU renders, so the proprietary dGPU module must not disable DMABuf.
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("i915"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("xe"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("amdgpu"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("i915"), true), LinuxNvidiaDriver::Proprietary);
     }
 
     fn drm_render_device(path: &str, driver: &str, boot_vga: bool) -> LinuxDrmRenderDevice {
@@ -1627,7 +1641,10 @@ mod tests {
 
         let selected = linux_selected_drm_render_device(None, &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("i915"));
-        assert_eq!(linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()), LinuxNvidiaDriver::None);
+        assert_eq!(
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
+            LinuxNvidiaDriver::None
+        );
     }
 
     #[test]
@@ -1640,7 +1657,7 @@ mod tests {
         let selected = linux_selected_drm_render_device(Some(Path::new("/dev/dri/renderD129")), &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("nouveau"));
         assert_eq!(
-            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()),
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
             LinuxNvidiaDriver::Nouveau
         );
 
@@ -1650,7 +1667,10 @@ mod tests {
         ];
         let selected = linux_selected_drm_render_device(Some(Path::new("/dev/dri/renderD128")), &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("i915"));
-        assert_eq!(linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()), LinuxNvidiaDriver::None);
+        assert_eq!(
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
+            LinuxNvidiaDriver::None
+        );
     }
 
     #[test]
@@ -1663,7 +1683,7 @@ mod tests {
         let selected = linux_selected_drm_render_device(None, &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("nouveau"));
         assert_eq!(
-            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()),
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
             LinuxNvidiaDriver::Nouveau
         );
     }
@@ -2367,6 +2387,14 @@ pub fn run() {
             commands::app_settings::save_pinned_tree_node_ids,
             commands::app_settings::load_mcp_global_policy,
             commands::app_settings::save_mcp_global_policy,
+            commands::app_settings::load_mcp_tool_catalog,
+            commands::app_settings::load_mcp_access_policy,
+            commands::app_settings::reset_invalid_mcp_access_policy,
+            commands::app_settings::set_mcp_plugin_scope_rule,
+            commands::app_settings::list_plugin_mcp_views,
+            commands::app_settings::load_plugin_mcp_view,
+            commands::app_settings::list_mcp_plugin_scopes,
+            commands::app_settings::save_plugin_mcp_grant,
             commands::mcp_bridge::respond_mcp_sql_approval,
             commands::background_image::save_background_image,
             commands::background_image::clear_background_image,
@@ -2683,6 +2711,7 @@ pub fn run() {
             commands::redis_cmd::redis_list_databases,
             commands::redis_cmd::redis_scan_keys,
             commands::redis_cmd::redis_scan_keys_batch,
+            commands::redis_cmd::redis_key_metadata_batch,
             commands::redis_cmd::redis_scan_values,
             commands::redis_cmd::redis_get_value,
             commands::redis_cmd::redis_get_raw_value,

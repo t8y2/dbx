@@ -135,6 +135,76 @@ afterEach(() => {
 });
 
 describe("SendMessagePanel post-send browsing", () => {
+  it("sends RabbitMQ standard properties separately from headers and preserves zero values", async () => {
+    const panel = await mountPanel("rabbitmq");
+    buttonByText(panel, "mqMessages.messageProperties").click();
+    buttonByText(panel, "mqMessages.messageHeaders").click();
+    await flushUi();
+    buttonByText(panel, "application/json").click();
+    const values = {
+      content_encoding: "utf-8",
+      priority: "0",
+      expiration: "0",
+      timestamp: "0",
+      correlation_id: "rpc-13512",
+      reply_to: "reply",
+      message_id: "message-13512",
+      type: "order.created",
+      user_id: "guest",
+      app_id: "dbx",
+    };
+    for (const [name, value] of Object.entries(values)) {
+      const input = panel.querySelector<HTMLInputElement>(`[data-rabbitmq-property="${name}"]`);
+      if (!input) throw new Error(`RabbitMQ property not found: ${name}`);
+      await setInputValue(input, value);
+    }
+    const deliveryMode = panel.querySelector<HTMLSelectElement>('[data-rabbitmq-property="delivery_mode"]');
+    if (!deliveryMode) throw new Error("Delivery mode not found");
+    deliveryMode.value = "2";
+    deliveryMode.dispatchEvent(new Event("change", { bubbles: true }));
+    const headers = panel.querySelector<HTMLTextAreaElement>(".headers-textarea");
+    if (!headers) throw new Error("Headers input not found");
+    await setInputValue(headers, "content_type: custom-header\nx-trace: trace-13512");
+    await sendMessage(panel, '{"orderId":13512}');
+
+    expect(backend.mqSendMessage).toHaveBeenCalledWith(
+      "mq-1",
+      expect.objectContaining({
+        properties: { content_type: "application/json", delivery_mode: "2", ...values },
+        headers: { content_type: "custom-header", "x-trace": "trace-13512" },
+      }),
+    );
+    expect(panel.querySelector<HTMLInputElement>('[data-rabbitmq-property="priority"]')?.getAttribute("max")).toBe("255");
+  });
+
+  it("omits empty RabbitMQ properties and clears them with the form", async () => {
+    const panel = await mountPanel("rabbitmq");
+    await sendMessage(panel, "without properties");
+    expect(backend.mqSendMessage.mock.calls[0]?.[1]).not.toHaveProperty("properties");
+
+    buttonByText(panel, "mqMessages.messageProperties").click();
+    await flushUi();
+    buttonByText(panel, "application/json").click();
+    const correlation = panel.querySelector<HTMLInputElement>('[data-rabbitmq-property="correlation_id"]');
+    if (!correlation) throw new Error("Correlation input not found");
+    await setInputValue(correlation, "  ");
+    await sendMessage(panel, "JSON properties");
+    expect(backend.mqSendMessage.mock.calls[1]?.[1].properties).toEqual({ content_type: "application/json" });
+
+    buttonByText(panel, "mqMessages.clear").click();
+    await flushUi();
+    expect(panel.querySelector<HTMLInputElement>('[data-rabbitmq-property="content_type"]')?.value).toBe("");
+    expect(correlation.value).toBe("");
+  });
+
+  it("does not offer or send RabbitMQ properties for Kafka", async () => {
+    const panel = await mountPanel("kafka");
+    expect(panel.textContent).not.toContain("mqMessages.messageProperties");
+    expect(panel.querySelector("[data-rabbitmq-property]")).toBeNull();
+    await sendMessage(panel, "Kafka payload");
+    expect(backend.mqSendMessage.mock.calls[0]?.[1]).not.toHaveProperty("properties");
+  });
+
   for (const system of ["kafka", "rabbitmq"] as const) {
     it(`keeps ${system} results unchanged after sending`, async () => {
       const panel = await mountPanel(system);

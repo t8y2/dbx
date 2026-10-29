@@ -14,7 +14,7 @@
 //! never cross the process boundary, and a connection saved for plugin A can
 //! never be reached through plugin B's tools.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -40,6 +40,12 @@ pub struct PluginToolProvider {
     pub plugin_id: String,
     pub plugin_name: String,
     pub tools: Vec<RawPluginTool>,
+    /// The plugin's declared sub-scope (`mcp.scope`): `(kind, argument)`.
+    pub scope: Option<(String, String)>,
+    pub scope_list_method: Option<String>,
+    /// Manifest-declared toolset for each listed tool. Tools without an
+    /// explicit declaration use the stable `default` toolset.
+    pub toolsets: BTreeMap<String, String>,
 }
 
 /// One externally exposed plugin tool.
@@ -49,9 +55,23 @@ pub struct PluginToolEntry {
     pub plugin_name: String,
     pub exposed_name: String,
     pub tool: RawPluginTool,
+    /// Declared sub-scope `(kind, argument)` of the owning plugin.
+    pub scope: Option<(String, String)>,
+    pub scope_list_method: Option<String>,
+    /// Manifest-declared toolset used for connection-level ceilings.
+    pub toolset: String,
     /// The plugin schema declares `connectionId`, so the host injects the
     /// bound connection's id into the forwarded arguments.
     pub injects_connection_id: bool,
+}
+
+impl PluginToolEntry {
+    /// A tool with a host-bound `connectionId` or a declared plugin scope must
+    /// run against one of the plugin's saved connections. Connection-less
+    /// tools deliberately keep working when a plugin has no connections.
+    pub fn requires_connection(&self) -> bool {
+        self.injects_connection_id || self.scope.is_some()
+    }
 }
 
 /// Whether `name` sits in the plugin-tool namespace (`dbx_<prefix>__<tool>`).
@@ -87,6 +107,9 @@ pub fn build_catalog(providers: &[PluginToolProvider]) -> Vec<PluginToolEntry> {
                 exposed_name: format!("dbx_{}", exposed_tool_name(prefix, &tool.name, &mut used)),
                 plugin_id: provider.plugin_id.clone(),
                 plugin_name: provider.plugin_name.clone(),
+                scope: provider.scope.clone(),
+                scope_list_method: provider.scope_list_method.clone(),
+                toolset: provider.toolsets.get(&tool.name).cloned().unwrap_or_else(|| "default".to_string()),
                 injects_connection_id: tool.input_schema.pointer("/properties/connectionId").is_some(),
                 tool: tool.clone(),
             });
@@ -235,6 +258,9 @@ mod tests {
 
     fn provider(plugin_id: &str, plugin_name: &str, tools: Value) -> PluginToolProvider {
         PluginToolProvider {
+            scope: None,
+            scope_list_method: None,
+            toolsets: BTreeMap::new(),
             plugin_id: plugin_id.to_string(),
             plugin_name: plugin_name.to_string(),
             tools: parse_tool_list(&tools),

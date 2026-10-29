@@ -17,9 +17,10 @@ import type { ComponentUpdateCategory } from "@/composables/useComponentUpdates"
 import { currentLocale } from "@/i18n";
 import { changelogLangFromLocale, createLatestRequestGuard, fetchChangelog, type ChangelogRelease } from "@/lib/app/changelog";
 import DriverInstallProgressCircle from "@/components/config/DriverInstallProgressCircle.vue";
+import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
 import { driverInstallProgressPercent, formatDriverInstallProgressText, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 
-type UpdateTab = "app" | ComponentUpdateCategory;
+type UpdateTab = "app" | "changelog" | ComponentUpdateCategory;
 
 const open = defineModel<boolean>("open", { required: true });
 
@@ -30,6 +31,7 @@ const props = withDefaults(
     isDownloadingUpdate: boolean;
     downloadProgress: number | null;
     updateDownloaded: boolean;
+    updateDownloadedVersion?: string;
     isInstallingUpdate: boolean;
     isPreparingUpdate?: boolean;
     updateReady: boolean;
@@ -64,10 +66,12 @@ const props = withDefaults(
     componentUpdatesUpdating: false,
     updatingComponent: null,
     isUpdatingAll: false,
+    updateDownloadedVersion: "",
   },
 );
 
 const emit = defineEmits<{
+  "check-updates": [];
   "open-latest-release": [];
   "download-in-background": [];
   "cancel-download": [];
@@ -85,6 +89,13 @@ const selectedTab = ref<UpdateTab>("app");
 const renderedNotes = ref("");
 
 const hasAppUpdate = computed(() => props.updateDownloaded || props.updateReady || props.updateInfo?.update_available === true);
+/**
+ * A prepared package must stay actionable even when the remote no longer
+ * reports that release as newest (yanked/rolled-back latest, mirror lag): the
+ * download already happened, so hiding the install button would strand the
+ * user with a permanent "downloaded" badge and no way to install it (#13562).
+ */
+const appUpdateActionsVisible = computed(() => props.updateInfo?.update_available === true || props.updateDownloaded || props.updateReady);
 const mcpAvailable = computed(() => (props.mcpUpdate ? mcpUpdateAvailability(props.mcpUpdate) === true : false));
 
 /** 历史版本每页条数（与更新日志一致，避免一次性铺开所有版本） */
@@ -117,11 +128,12 @@ const tabs = computed(() => {
   if (props.jdbcUpdate?.update_available) available.push({ id: "jdbc", label: t("settings.updateJdbc"), count: 1 });
   if (mcpAvailable.value) available.push({ id: "mcp", label: t("settings.updateMcp"), count: 1 });
   if (props.pluginUpdates.length) available.push({ id: "plugins", label: t("settings.updatePlugins"), count: props.pluginUpdates.length });
+  available.push({ id: "changelog", label: t("settings.changelogTitle"), count: 0 });
   return available;
 });
 const totalUpdateCount = computed(() => tabs.value.reduce((total, tab) => total + tab.count, 0));
 const hasComponentUpdates = computed(() => props.driverUpdates.length > 0 || props.jdbcUpdate?.update_available === true || mcpAvailable.value || props.pluginUpdates.length > 0);
-const selectedCategory = computed<ComponentUpdateCategory | null>(() => (selectedTab.value === "app" ? null : selectedTab.value));
+const selectedCategory = computed<ComponentUpdateCategory | null>(() => (selectedTab.value === "app" || selectedTab.value === "changelog" ? null : selectedTab.value));
 const selectedCategoryHasUpdate = computed(() => {
   if (selectedTab.value === "drivers") return props.driverUpdates.length > 0;
   if (selectedTab.value === "jdbc") return props.jdbcUpdate?.update_available === true;
@@ -334,7 +346,7 @@ watch(
 
       <div class="flex min-h-0 flex-1 flex-col">
         <div v-if="tabs.length" class="px-5 pb-2.5 pt-1.5">
-          <div role="tablist" :aria-label="t('updates.centerTitle')" class="inline-flex h-9 w-full items-center gap-1">
+          <div role="tablist" :aria-label="t('updates.centerTitle')" class="inline-flex h-9 w-full items-center gap-1 overflow-x-auto">
             <button
               v-for="tab in tabs"
               :key="tab.id"
@@ -354,7 +366,8 @@ watch(
         </div>
 
         <div data-update-scroll-region class="min-h-0 flex-1 overflow-auto px-5 py-4 text-sm">
-          <template v-if="selectedTab === 'app'">
+          <ChangelogPanel v-if="selectedTab === 'changelog'" :checking-updates="checkingUpdates || isInstallingUpdate" @check-updates="emit('check-updates')" />
+          <template v-else-if="selectedTab === 'app'">
             <div class="space-y-3">
               <p v-if="updateInfo?.update_available">
                 {{
@@ -364,7 +377,7 @@ watch(
                   })
                 }}
               </p>
-              <p v-else-if="!checkingUpdates" class="text-muted-foreground">
+              <p v-else-if="!checkingUpdates && !updateDownloaded && !updateReady" class="text-muted-foreground">
                 {{ updateCheckMessage || t("updates.upToDate", { version: updateInfo?.current_version || "" }) }}
               </p>
               <div
@@ -393,7 +406,7 @@ watch(
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("updates.checking") }}
             </p>
-            <p v-if="updateDownloaded && !isInstallingUpdate" class="mt-3">{{ t("updates.downloadedReady", { version: updateInfo?.latest_version }) }}</p>
+            <p v-if="updateDownloaded && !isInstallingUpdate" class="mt-3">{{ t("updates.downloadedReady", { version: updateDownloadedVersion || updateInfo?.latest_version }) }}</p>
             <p v-if="updateCheckFailed && updateInfo?.update_available" role="alert" class="mt-3 text-destructive">{{ updateCheckMessage }}</p>
 
             <div v-if="olderReleases.length || historyError" data-update-history class="mt-4 border-t pt-3">
@@ -511,15 +524,15 @@ watch(
               </SelectContent>
             </Select>
           </div>
-          <template v-if="updateInfo?.update_available">
-            <div class="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
+          <template v-if="appUpdateActionsVisible">
+            <div v-if="updateInfo?.update_available" class="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
               <Button v-if="canIgnoreVersion" variant="ghost" class="shrink-0" :disabled="isIgnoringUpdate" @click="emit('ignore-version')">
                 <Loader2 v-if="isIgnoringUpdate" class="h-4 w-4 animate-spin" />
                 {{ t("updates.ignoreVersion") }}
               </Button>
               <Button variant="outline" class="shrink-0" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
             </div>
-            <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop)">
+            <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop) || updateDownloaded || updateReady">
               <Button v-if="updateReady" class="shrink-0" :disabled="activeTaskCount > 0 || isIgnoringUpdate || isUpdatingAll" @click="emit('restart')">{{ t("updates.restart") }}</Button>
               <Button v-else-if="isInstallingUpdate" class="shrink-0" disabled>
                 <Loader2 class="h-4 w-4 animate-spin" />
@@ -543,7 +556,7 @@ watch(
           </template>
         </DialogFooter>
 
-        <DialogFooter v-else data-update-footer class="mx-0 mb-0 min-w-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
+        <DialogFooter v-else-if="selectedCategory" data-update-footer class="mx-0 mb-0 min-w-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
           <template v-if="isAnyComponentUpdating">
             <Button variant="ghost" class="shrink-0" @click="handleOpenChange(false)">{{ t("updates.updateInBackground") }}</Button>
             <Button class="shrink-0" disabled>

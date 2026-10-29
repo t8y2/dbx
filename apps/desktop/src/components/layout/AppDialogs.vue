@@ -284,6 +284,7 @@ watch(
     :prefill-connection-id="dialogs.diagramPrefillConnectionId.value"
     :prefill-database="dialogs.diagramPrefillDatabase.value"
     :prefill-schema="dialogs.diagramPrefillSchema.value"
+    :prefill-catalog="dialogs.diagramPrefillCatalog.value"
     :focus-table-name="dialogs.diagramFocusTableName.value"
     :focus-table-names="dialogs.diagramFocusTableNames.value"
     @open-target="emit('openDiagramTarget', $event)"

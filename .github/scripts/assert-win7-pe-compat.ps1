@@ -69,3 +69,7 @@ if ($violations.Count -gt 0) {
 }
 
 Write-Host "Windows 7 PE import audit passed: $BinaryPath"
+
+# The legacy env RUSTFLAGS also needs /STACK:8388608. Share the same audit as
+# standard x64/ARM64 releases so every Windows desktop target keeps this guard.
+& (Join-Path $PSScriptRoot "assert-windows-stack-reserve.ps1") -BinaryPath $BinaryPath

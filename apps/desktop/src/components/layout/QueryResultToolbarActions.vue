@@ -55,6 +55,7 @@ void refreshInstalledPlugins();
 
 <template>
   <div data-query-result-toolbar-actions class="flex shrink-0 items-center gap-1 border-r px-1">
+    <slot />
     <LightTooltip :text="t('explain.title')" :disabled="!compact" side="bottom" :delay="0" :close-delay="0" nowrap>
       <Button
         size="sm"

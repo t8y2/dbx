@@ -53,6 +53,38 @@ describe("complete local DataGrid results", () => {
       }),
     ).toBe(false);
   });
+
+  it("treats a short first page as incomplete when a known total exceeds the loaded rows (#13726)", () => {
+    // A first page shorter than the page limit is normally the last page, but
+    // when the known COUNT reports more rows than are loaded, more data is
+    // still pending. Marking it complete would make "export all" write only
+    // the loaded page instead of the full result set.
+    expect(
+      hasCompleteLocalDataGridResult({
+        isResultsContext: true,
+        rowCount: 300,
+        pageLimit: 500,
+        pageOffset: 0,
+        totalRowCount: 800,
+        truncated: false,
+        hasMore: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps a short first page complete when the known total matches the loaded rows", () => {
+    expect(
+      hasCompleteLocalDataGridResult({
+        isResultsContext: true,
+        rowCount: 300,
+        pageLimit: 500,
+        pageOffset: 0,
+        totalRowCount: 300,
+        truncated: false,
+        hasMore: false,
+      }),
+    ).toBe(true);
+  });
 });
 
 describe("DataGrid surface busy overlay", () => {

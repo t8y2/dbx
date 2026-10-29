@@ -3,9 +3,11 @@ import { reactive, ref, computed, watch, type ComponentPublicInstance } from "vu
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
+import { BackendErrorException } from "@/lib/backend/errorUtils";
 import type { ColumnGenerateConfig, TableGenerateConfig } from "@/lib/dataGrid/dataGenerate";
 import { defaultGeneratorParams, displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, supportsGeneratedMultiRowValues, UniqueValueGenerationError } from "@/lib/dataGrid/dataGenerate";
 import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { constrainMysqlGenerateColumns, mysqlGeneratePartitionQuery, MysqlGeneratePartitionError, type MysqlGeneratePartition } from "@/lib/dataGrid/mysqlGeneratePartitions";
 import { uniqueConstraintColumns } from "@/lib/table/uniqueConstraintColumns";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -443,6 +445,17 @@ async function fetchMaxValues(cfg: TableGenerateConfig): Promise<Record<string, 
   return starts;
 }
 
+async function constrainPartitionColumns(cfg: TableGenerateConfig, columns: ColumnGenerateConfig[]): Promise<ColumnGenerateConfig[]> {
+  if (dbType.value !== "mysql") return columns;
+  // Native MySQL listPartitions currently returns no metadata. Use the catalog
+  // directly, and propagate read failures rather than inserting unconstrained rows.
+  const result = await api.executeQuery(props.prefillConnectionId!, props.prefillDatabase!, mysqlGeneratePartitionQuery(cfg.schema || cfg.database, cfg.tableName), cfg.schema, undefined, { maxRows: 8192 });
+  if (result.execution_error || result.error) throw new BackendErrorException(result.error || "Partition metadata query failed.");
+  if (result.truncated || result.has_more) throw new MysqlGeneratePartitionError(cfg.tableName, "incomplete partition metadata");
+  const partitions: MysqlGeneratePartition[] = result.rows.map((row) => ({ method: String(row[0] ?? ""), expression: String(row[1] ?? ""), description: String(row[2] ?? "") }));
+  return constrainMysqlGenerateColumns({ ...cfg, columns, rowCount: normalizeRowCount(cfg.rowCount) }, partitions);
+}
+
 function buildSampleResult(cfg: TableGenerateConfig, columns: ColumnGenerateConfig[], targetRowCount: number): GeneratedTableResult {
   const sampleCount = Math.min(targetRowCount, PREVIEW_SAMPLE_ROWS);
   const result = generateTableData({ ...cfg, columns, rowCount: sampleCount }, dbType.value);
@@ -479,6 +492,7 @@ async function doGenerate() {
           return col;
         });
       }
+      columns = await constrainPartitionColumns(cfg, columns);
       results.push(buildSampleResult(cfg, columns, normalizeRowCount(cfg.rowCount)));
     }
   } catch (error) {
@@ -509,6 +523,7 @@ async function regenerate() {
   }
   generationError.value = "";
   try {
+    columns = await constrainPartitionColumns(cfg, columns);
     generatedResults.value[previewTableIndex.value] = buildSampleResult(cfg, columns, normalizeRowCount(cfg.rowCount));
   } catch (error) {
     generationError.value = generationErrorMessage(error);
@@ -516,6 +531,9 @@ async function regenerate() {
 }
 
 function generationErrorMessage(error: unknown): string {
+  if (error instanceof MysqlGeneratePartitionError) {
+    return t("dataGenerate.partitionValuesUnsupported", { table: error.table, expression: error.expression });
+  }
   if (error instanceof UniqueValueGenerationError) {
     return t("dataGenerate.uniqueExhausted", { table: error.tableName, column: error.columnName, attempts: error.attempts });
   }

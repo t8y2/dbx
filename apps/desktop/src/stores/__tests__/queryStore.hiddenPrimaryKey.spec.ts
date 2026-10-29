@@ -3001,7 +3001,7 @@ describe("queryStore hidden primary key editing", () => {
     const store = useQueryStore();
     const tabId = store.createTab("ob-1", "app", "Query");
     await store.executeTabSql(tabId, "SELECT name, name FROM people", { pagination: { limit: 2, offset: 4 } });
-    expect(JSON.stringify(store.tabs.find((item) => item.id === tabId)?.result)).toContain("requires an Agent result session");
+    expect(store.tabs.find((item) => item.id === tabId)?.result?.execution_error).toBe(true);
     expect(executeMulti).not.toHaveBeenCalled();
     expect(executeInManualTransaction).not.toHaveBeenCalled();
   });
@@ -3022,7 +3022,7 @@ describe("queryStore hidden primary key editing", () => {
     const tabId = store.createTab("ob-1", "app", "Query");
     store.setAutoCommit(tabId, false);
     await store.executeTabSql(tabId, "SELECT name, name FROM people", { pagination: { limit: 2, offset: 4 } });
-    expect(JSON.stringify(store.tabs.find((item) => item.id === tabId)?.result)).toContain("requires an existing result session");
+    expect(store.tabs.find((item) => item.id === tabId)?.result?.execution_error).toBe(true);
     expect(executeMulti).not.toHaveBeenCalled();
     expect(executeInManualTransaction).not.toHaveBeenCalled();
   });

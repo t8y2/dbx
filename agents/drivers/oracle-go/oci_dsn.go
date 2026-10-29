@@ -24,6 +24,11 @@ import (
 // TNS_ADMIN 指向 tnsnames.ora 所在目录 —— 两者都在 agent 进程启动时确定，
 // 连接建立之后无法更改。
 func buildOCIDSN(params connectParams) (string, error) {
+	check := params
+	check.DriverProfile = "oci"
+	if _, _, err := oracleLegacyOptions(check); err != nil {
+		return "", err
+	}
 	target := ociConnectTarget(params)
 	if target == "" {
 		return "", errors.New("OCI connection requires a host with a service name, or a TNS alias")

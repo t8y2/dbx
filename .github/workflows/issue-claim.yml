@@ -22,7 +22,7 @@ jobs:
            contains(github.event.comment.body, '/unclaim') ||
            contains(github.event.comment.body, '/close')) }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Create DBX bot token
         id: app-token

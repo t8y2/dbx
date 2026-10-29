@@ -25,7 +25,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -51,8 +51,7 @@ jobs:
 
       - name: Install native build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libfontconfig1-dev libsecret-1-dev
+          sudo python3 .github/scripts/ci-install-system-deps.py --group node-release
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -198,7 +197,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.MCP_RELEASE_TOKEN }}
@@ -319,7 +318,7 @@ jobs:
             binary: dbx.exe
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -407,8 +406,7 @@ jobs:
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libfontconfig1-dev
+          sudo python3 .github/scripts/ci-install-system-deps.py --group fontconfig
 
       - name: Setup Python for cargo-zigbuild
         if: runner.os == 'Linux'
@@ -476,7 +474,7 @@ jobs:
     needs: [prepare, publish-cli-platforms]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -572,7 +570,7 @@ jobs:
             binary: dbx-mcp.exe
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -660,8 +658,7 @@ jobs:
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libfontconfig1-dev
+          sudo python3 .github/scripts/ci-install-system-deps.py --group fontconfig
 
       - name: Setup Python for cargo-zigbuild
         if: runner.os == 'Linux'
@@ -781,7 +778,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [prepare, publish-mcp-platforms]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -839,7 +836,7 @@ jobs:
     runs-on: macos-15
     needs: [prepare, publish-mcp-server]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -903,7 +900,7 @@ jobs:
           )
 
       - name: Attest native release archives
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: release-assets/*
 
@@ -947,7 +944,7 @@ jobs:
     needs: [prepare, publish-cli, publish-mcp-github-release]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -1000,7 +997,7 @@ jobs:
           )
 
       - name: Attest native CLI release archives
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: release-assets/*
 
@@ -1016,7 +1013,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [prepare, publish-cli-github-release, publish-mcp-github-release]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Download MCP release checksums
         env:

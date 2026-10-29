@@ -1,4 +1,5 @@
 import { useConnectionStore } from "@/stores/connectionStore";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { hexToRgba } from "@/lib/common/color";
 import { isLegacyWebView } from "@/lib/ui/legacyWebView";
@@ -76,7 +77,8 @@ export function tabConnectionColor(connectionId: string): string {
 
 export function isConnectionReadonly(connectionId: string): boolean {
   const connectionStore = useConnectionStore();
-  return connectionStore.getConfig(connectionId)?.read_only ?? false;
+  const connection = connectionStore.getConfig(connectionId);
+  return mysqlDataCharsetEnabled(connection) || connection?.read_only === true;
 }
 
 function jdbcTargetLabel(connection: ConnectionConfig): string {
@@ -273,6 +275,10 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
   const compact = settingsStore.editorSettings.compactTabTitle;
   if (isPreviewTab(tab)) return tab.title;
   if (useConnectionStore().getConfig(tab.connectionId)?.db_type === "redis") {
+    // Redis query tabs normally identify their logical database (db0/db1), but a
+    // saved SQL file or external SQL file is a document: show its file title
+    // instead, otherwise every Redis file tab looks like the same database.
+    if (!tab.isDefaultQuery && (tab.savedSqlId || tab.externalSqlPath) && tab.title.trim()) return tab.title;
     return tab.database ? database : connectionDisplayName(tab.connectionId);
   }
   if (tab.mode === "data" && tab.tableMeta?.tableName) {

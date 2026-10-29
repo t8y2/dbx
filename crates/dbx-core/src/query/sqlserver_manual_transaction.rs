@@ -286,6 +286,7 @@ pub async fn begin(
     let id = format!("{PREFIX}{}", uuid::Uuid::new_v4());
     let metadata = SessionMetadata { lifecycle, driver, ends: state.sqlserver_transaction_ends.clone() };
     let session = TransactionSession {
+        mysql_data_charset: None,
         sqlserver: Some(metadata.clone()),
         connection: Arc::new(tokio::sync::Mutex::new(conn)),
         pool_key,
@@ -950,6 +951,7 @@ for line in sys.stdin:
         state.transaction_sessions.write().await.insert(
             id.clone(),
             TransactionSession {
+                mysql_data_charset: None,
                 sqlserver: Some(SessionMetadata {
                     lifecycle: state.connection_lifecycle_snapshot("mock-sqlserver"),
                     driver: DriverInfo::default(),

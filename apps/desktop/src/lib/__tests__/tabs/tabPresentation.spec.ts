@@ -1025,6 +1025,8 @@ describe("shared tab presentation helpers", () => {
     connectionStore.connections = [{ id: "redis-1", name: "Redis", db_type: "redis", driver_profile: "redis", color: "" } as ConnectionConfig];
     expect(tabDisplayTitle(queryTab({ connectionId: "redis-1", database: "0", mode: "redis", sql: "" }), translate)).toBe("db0");
     expect(tabDisplayTitle(queryTab({ connectionId: "redis-1", database: "1", mode: "redis", sql: "" }), translate)).toBe("db1");
+    expect(tabDisplayTitle(queryTab({ connectionId: "redis-1", database: "0", customTitle: true, savedSqlId: "sql-1", title: "Redis查询.sql" }), translate)).toBe("Redis查询.sql");
+    expect(tabDisplayTitle(queryTab({ connectionId: "redis-1", database: "0", customTitle: true, externalSqlPath: "/tmp/redis.sql", title: "redis.sql" }), translate)).toBe("redis.sql");
   });
 
   it("keeps source tab colors aligned with the sidebar object palette", () => {

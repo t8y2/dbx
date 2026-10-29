@@ -179,7 +179,7 @@ function connectionIconType(id: string) {
       {{ t("diagram.copyJoinSql") }}
     </Button>
 
-    <Button v-if="focusTableName && tablesCount > 0" variant="outline" size="sm" class="h-8 px-2 text-xs" @click="emit('toggle-show-all-tables')">
+    <Button v-if="focusTableName && tablesCount > 0" :disabled="loadingDiagram" variant="outline" size="sm" class="h-8 px-2 text-xs" @click="emit('toggle-show-all-tables')">
       {{ showAllTables ? t("diagram.relatedTables") : t("diagram.allTables") }}
     </Button>
 

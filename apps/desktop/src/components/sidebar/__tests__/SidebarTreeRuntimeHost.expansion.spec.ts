@@ -29,6 +29,19 @@ const connectionStore = {
     node.isExpanded = true;
   }),
   loadTables: vi.fn(async () => undefined),
+  loadDatabases: vi.fn(async () => undefined),
+  loadRedisDatabases: vi.fn(async () => undefined),
+  loadMongoDatabases: vi.fn(async () => undefined),
+  loadEtcdRoot: vi.fn(async () => undefined),
+  loadMilvusDatabases: vi.fn(async () => undefined),
+  loadElasticsearchIndices: vi.fn(async () => undefined),
+  loadMqttTopics: vi.fn(async () => undefined),
+  loadMqTenants: vi.fn(async () => undefined),
+  loadNacosNamespaces: vi.fn(async () => undefined),
+  loadDynamoDbTables: vi.fn(async () => undefined),
+  loadZooKeeperRoot: vi.fn(async () => undefined),
+  loadConsulRoot: vi.fn(async () => undefined),
+  loadVectorCollections: vi.fn(async () => undefined),
   loadCustomTypeChildren: vi.fn(async (node: TreeNode) => {
     node.hasMembers = true;
     node.children = [{ id: `${node.id}:attribute`, label: "STREET", type: "type-member", connectionId: node.connectionId, database: node.database }];
@@ -1343,5 +1356,183 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     expect(groupNode.isExpanded).toBe(false);
     expect(connectionNode.isExpanded).toBe(false);
     expect(databaseNode.isExpanded).toBe(false);
+  });
+
+  it("expands a connection on first click even when loader does not pre-set isExpanded (issue #13536)", async () => {
+    const databaseNode: TreeNode = {
+      id: "mysql:db1",
+      label: "db1",
+      type: "database",
+      connectionId: "mysql",
+      database: "db1",
+      isExpanded: false,
+      children: [],
+    };
+    const connectionNode = reactive<TreeNode>({
+      id: "mysql",
+      label: "MySQL Prod",
+      type: "connection",
+      connectionId: "mysql",
+      isExpanded: false,
+      children: [],
+    });
+
+    connectionStore.treeNodes = [connectionNode];
+    connectionStore.loadDatabases = vi.fn(async () => {
+      // This harness stubs the loader, so it only attaches children; the shared toggle path must still set expansion.
+      connectionNode.children = [databaseNode];
+    });
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const toggled = vi.fn((node: TreeNode, expanded: boolean) => {
+      syncSidebarTreeNodeExpansion(connectionStore.treeNodes, node, expanded);
+    });
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: connectionNode, depth: 0, onNodeToggled: toggled }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(connectionNode);
+    await vi.waitFor(() => expect(connectionNode.isExpanded).toBe(true));
+
+    expect(connectionStore.loadDatabases).toHaveBeenCalledWith("mysql", undefined);
+    expect(connectionStore.treeNodes[0].isExpanded).toBe(true);
+    expect(toggled).toHaveBeenCalledWith(connectionNode, true);
+  });
+
+  it("expands a connection during search on first click (issue #13536)", async () => {
+    const databaseNode: TreeNode = {
+      id: "mysql:db1",
+      label: "db1",
+      type: "database",
+      connectionId: "mysql",
+      database: "db1",
+      isExpanded: false,
+      children: [],
+    };
+    const connectionNode = reactive<TreeNode>({
+      id: "mysql",
+      label: "MySQL Prod",
+      type: "connection",
+      connectionId: "mysql",
+      isExpanded: false,
+      children: [],
+    });
+
+    connectionStore.treeNodes = [connectionNode];
+    connectionStore.loadDatabases = vi.fn(async () => {
+      connectionNode.children = [databaseNode];
+    });
+
+    const collapsedIds = ref(new Set<string>());
+    const projection = computed(() => filterSidebarTree(connectionStore.treeNodes, "MySQL", collapsedIds.value));
+    const handlers = searchHandlers(collapsedIds);
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup() {
+          provide(sidebarTreeContextKey, {
+            getVisibleNodes: () => projection.value,
+            getVisibleNodeIndex: () => 0,
+            isSearchProjectionActive: () => true,
+            getTreeLoadSearchOptions: () => ({ searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: "" }),
+          });
+          return () =>
+            h(SidebarTreeRuntimeHost, {
+              ref: host,
+              node: projection.value[0],
+              depth: 0,
+              onSearchToggle: handlers.onSearchToggle,
+              onNodeToggled: handlers.onNodeToggled,
+            });
+        },
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(projection.value[0]);
+    await vi.waitFor(() => expect(projection.value[0].isExpanded).toBe(true));
+
+    expect(connectionStore.loadDatabases).toHaveBeenCalledWith("mysql", {
+      searchFilter: "",
+      allowGlobalSearchMismatch: true,
+      expectedSidebarSearchQuery: "",
+    });
+    expect(connectionStore.treeNodes[0].isExpanded).toBe(true);
+    expect(projection.value[0].isExpanded).toBe(true);
+    expect(projection.value[0].children?.map((c) => c.label)).toEqual(["db1"]);
+  });
+
+  // #13579: the manual-expansion regression hit every connection type, not just
+  // SQL engines. The store loaders now always expand after loading, but this
+  // harness stubs each loader, so children arrive without pre-set isExpanded and
+  // the shared toggle path must still expand the connection node itself.
+  it.each([
+    { dbType: "redis", loader: "loadRedisDatabases" as const, childType: "redis-db" as const },
+    { dbType: "mongodb", loader: "loadMongoDatabases" as const, childType: "mongo-db" as const },
+    { dbType: "etcd", loader: "loadEtcdRoot" as const, childType: "etcd-root" as const },
+    { dbType: "milvus", loader: "loadMilvusDatabases" as const, childType: "vector-database" as const },
+    { dbType: "elasticsearch", loader: "loadElasticsearchIndices" as const, childType: "elasticsearch-index" as const },
+    { dbType: "mqtt", loader: "loadMqttTopics" as const, childType: "mqtt-topic" as const },
+    { dbType: "mq", loader: "loadMqTenants" as const, childType: "mq-tenant" as const },
+    { dbType: "nacos", loader: "loadNacosNamespaces" as const, childType: "nacos-namespace" as const, extraCallArgs: [undefined] },
+    { dbType: "dynamodb", loader: "loadDynamoDbTables" as const, childType: "dynamodb-table" as const },
+    { dbType: "zookeeper", loader: "loadZooKeeperRoot" as const, childType: "zookeeper-root" as const },
+    { dbType: "consul", loader: "loadConsulRoot" as const, childType: "consul-root" as const },
+    { dbType: "qdrant", loader: "loadVectorCollections" as const, childType: "vector-collection" as const },
+  ])("expands a $dbType connection on first click (issue #13579)", async ({ dbType, loader, childType, extraCallArgs }) => {
+    const connectionId = `${dbType}-conn`;
+    const child: TreeNode = {
+      id: `${connectionId}:child`,
+      label: `${dbType} child`,
+      type: childType,
+      connectionId,
+      isExpanded: false,
+      children: [],
+    };
+    const connectionNode = reactive<TreeNode>({
+      id: connectionId,
+      label: `${dbType} connection`,
+      type: "connection",
+      connectionId,
+      isExpanded: false,
+      children: [],
+    });
+
+    connectionStore.getConfig.mockReturnValue({ db_type: dbType, name: dbType } as ReturnType<typeof connectionStore.getConfig>);
+    connectionStore.treeNodes = [connectionNode];
+    const loaderMock = connectionStore[loader] as ReturnType<typeof vi.fn>;
+    loaderMock.mockImplementation(async () => {
+      connectionNode.children = [child];
+    });
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: connectionNode, depth: 0 }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(connectionNode);
+    await vi.waitFor(() => expect(connectionNode.isExpanded).toBe(true));
+
+    expect(loaderMock).toHaveBeenCalledWith(connectionId, ...(extraCallArgs ?? []));
+    expect(connectionNode.children?.map((node) => node.label)).toEqual([`${dbType} child`]);
   });
 });

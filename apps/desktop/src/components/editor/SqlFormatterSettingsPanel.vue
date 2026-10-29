@@ -813,52 +813,73 @@ onBeforeUnmount(() => {
           <p class="text-sm text-muted-foreground">{{ t("settings.sqlFormatterCustomRulesHint") }}</p>
           <div v-if="settings.customRulesEnabled" class="grid gap-4">
             <div class="grid gap-3 md:grid-cols-3">
-              <label class="space-y-1 text-sm"
-                >{{ t("settings.sqlFormatterListLayout")
-                }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings.listLayout" @change="updateOption('listLayout', ($event.target as HTMLSelectElement).value as any)">
-                  <option v-for="value in ruleEnums.layout" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</option>
-                </select></label
-              >
-              <label class="space-y-1 text-sm"
-                >{{ t("settings.sqlFormatterSelectListLayout")
-                }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings.selectListLayout" @change="updateOption('selectListLayout', ($event.target as HTMLSelectElement).value as any)">
-                  <option v-for="value in ruleEnums.layoutOverride" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</option>
-                </select></label
-              >
-              <label class="space-y-1 text-sm"
-                >{{ t("settings.sqlFormatterInsertListLayout")
-                }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings.insertListLayout" @change="updateOption('insertListLayout', ($event.target as HTMLSelectElement).value as any)">
-                  <option v-for="value in ruleEnums.layoutOverride" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</option>
-                </select></label
-              >
-              <label class="space-y-1 text-sm"
-                >{{ t("settings.sqlFormatterUpdateListLayout")
-                }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings.updateListLayout" @change="updateOption('updateListLayout', ($event.target as HTMLSelectElement).value as any)">
-                  <option v-for="value in ruleEnums.layoutOverride" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</option>
-                </select></label
-              >
-              <label class="space-y-1 text-sm"
-                >{{ t("settings.sqlFormatterListItemAlignment")
-                }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings.listItemAlignment" @change="updateOption('listItemAlignment', ($event.target as HTMLSelectElement).value as any)">
-                  <option v-for="value in ruleEnums.alignment" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</option>
-                </select></label
-              >
-              <label class="space-y-1 text-sm"
-                >{{ t("settings.sqlFormatterEmptyLineMode")
-                }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings.emptyLineMode" @change="updateOption('emptyLineMode', ($event.target as HTMLSelectElement).value as any)">
-                  <option v-for="value in ruleEnums.empty" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</option>
-                </select></label
-              >
+              <div class="space-y-1">
+                <Label for="sql-formatter-list-layout">{{ t("settings.sqlFormatterListLayout") }}</Label>
+                <Select :model-value="settings.listLayout" @update:model-value="(value) => updateOption('listLayout', value as SqlFormatterSettings['listLayout'])">
+                  <SelectTrigger id="sql-formatter-list-layout" class="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="value in ruleEnums.layout" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div class="space-y-1">
+                <Label for="sql-formatter-select-list-layout">{{ t("settings.sqlFormatterSelectListLayout") }}</Label>
+                <Select :model-value="settings.selectListLayout" @update:model-value="(value) => updateOption('selectListLayout', value as SqlFormatterSettings['selectListLayout'])">
+                  <SelectTrigger id="sql-formatter-select-list-layout" class="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="value in ruleEnums.layoutOverride" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div class="space-y-1">
+                <Label for="sql-formatter-insert-list-layout">{{ t("settings.sqlFormatterInsertListLayout") }}</Label>
+                <Select :model-value="settings.insertListLayout" @update:model-value="(value) => updateOption('insertListLayout', value as SqlFormatterSettings['insertListLayout'])">
+                  <SelectTrigger id="sql-formatter-insert-list-layout" class="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="value in ruleEnums.layoutOverride" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div class="space-y-1">
+                <Label for="sql-formatter-update-list-layout">{{ t("settings.sqlFormatterUpdateListLayout") }}</Label>
+                <Select :model-value="settings.updateListLayout" @update:model-value="(value) => updateOption('updateListLayout', value as SqlFormatterSettings['updateListLayout'])">
+                  <SelectTrigger id="sql-formatter-update-list-layout" class="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="value in ruleEnums.layoutOverride" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div class="space-y-1">
+                <Label for="sql-formatter-list-item-alignment">{{ t("settings.sqlFormatterListItemAlignment") }}</Label>
+                <Select :model-value="settings.listItemAlignment" @update:model-value="(value) => updateOption('listItemAlignment', value as SqlFormatterSettings['listItemAlignment'])">
+                  <SelectTrigger id="sql-formatter-list-item-alignment" class="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="value in ruleEnums.alignment" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div class="space-y-1">
+                <Label for="sql-formatter-empty-line-mode">{{ t("settings.sqlFormatterEmptyLineMode") }}</Label>
+                <Select :model-value="settings.emptyLineMode" @update:model-value="(value) => updateOption('emptyLineMode', value as SqlFormatterSettings['emptyLineMode'])">
+                  <SelectTrigger id="sql-formatter-empty-line-mode" class="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="value in ruleEnums.empty" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
             <details class="space-y-3">
               <summary class="cursor-pointer text-sm font-medium">{{ t("settings.sqlFormatterDmlRules") }}</summary>
               <div class="grid gap-3 pt-2 md:grid-cols-3">
-                <label v-for="{ key, titleKey } in dmlCommaRules" :key="key" class="space-y-1 text-sm"
-                  >{{ t(`settings.${titleKey}`)
-                  }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings[key]" @change="updateOption(key, ($event.target as HTMLSelectElement).value as any)">
-                    <option v-for="option in dmlCommaPositionOptions" :key="option.value" :value="option.value">{{ t(option.labelKey) }}</option>
-                  </select></label
-                >
+                <div v-for="{ key, titleKey } in dmlCommaRules" :key="key" class="space-y-1">
+                  <Label :for="`sql-formatter-${key}`">{{ t(`settings.${titleKey}`) }}</Label>
+                  <Select :model-value="settings[key]" @update:model-value="(value) => updateOption(key, value as SqlFormatterSettings['selectCommaPosition'])">
+                    <SelectTrigger :id="`sql-formatter-${key}`" class="w-full"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="option in dmlCommaPositionOptions" :key="option.value" :value="option.value">{{ t(option.labelKey) }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div v-for="{ key, titleKey } in dmlToggleRules" :key="key" class="flex items-center justify-between gap-3 rounded border px-3 py-2">
                   <Label :for="`sql-formatter-${key}`">{{ t(`settings.${titleKey}`) }}</Label
                   ><Switch :id="`sql-formatter-${key}`" :model-value="settings[key]" @update:model-value="(value: boolean) => updateOption(key, value as any)" />
@@ -868,12 +889,15 @@ onBeforeUnmount(() => {
             <details class="space-y-3">
               <summary class="cursor-pointer text-sm font-medium">{{ t("settings.sqlFormatterConditionRules") }}</summary>
               <div class="grid gap-3 pt-2 md:grid-cols-2">
-                <label v-for="{ key, titleKey } in conditionRules" :key="key" class="space-y-1 text-sm"
-                  >{{ t(`settings.${titleKey}`)
-                  }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings[key]" @change="updateOption(key, ($event.target as HTMLSelectElement).value as any)">
-                    <option v-for="value in ruleEnums.logical" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</option>
-                  </select></label
-                >
+                <div v-for="{ key, titleKey } in conditionRules" :key="key" class="space-y-1">
+                  <Label :for="`sql-formatter-${key}`">{{ t(`settings.${titleKey}`) }}</Label>
+                  <Select :model-value="settings[key]" @update:model-value="(value) => updateOption(key, value as SqlFormatterSettings['whereLogicalOperatorNewline'])">
+                    <SelectTrigger :id="`sql-formatter-${key}`" class="w-full"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="value in ruleEnums.logical" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div class="flex items-center justify-between gap-3 rounded border px-3 py-2">
                   <Label for="sql-formatter-newline-before-join-on">{{ t("settings.sqlFormatterNewlineBeforeJoinOn") }}</Label
                   ><Switch id="sql-formatter-newline-before-join-on" :model-value="settings.newlineBeforeJoinOn" @update:model-value="(value: boolean) => updateOption('newlineBeforeJoinOn', value)" />
@@ -882,17 +906,20 @@ onBeforeUnmount(() => {
             </details>
           </div>
           <div class="space-y-3 border-t pt-3">
-            <div class="flex items-center justify-between">
+            <div class="flex flex-wrap items-center justify-between gap-3">
               <h3 class="text-sm font-medium">{{ t("settings.sqlFormatterPreview") }}</h3>
-              <label class="text-sm"
-                >{{ t("settings.sqlFormatterPreviewDialect") }}
-                <select v-model="previewDialect" class="h-8 rounded border bg-background px-2">
-                  <option value="oracle">Oracle</option>
-                  <option value="postgres">PostgreSQL</option>
-                  <option value="mysql">MySQL</option>
-                  <option value="sqlserver">SQL Server</option>
-                </select></label
-              >
+              <div class="flex items-center gap-2">
+                <Label for="sql-formatter-preview-dialect" class="whitespace-nowrap">{{ t("settings.sqlFormatterPreviewDialect") }}</Label>
+                <Select v-model="previewDialect">
+                  <SelectTrigger id="sql-formatter-preview-dialect" class="w-36"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="oracle">Oracle</SelectItem>
+                    <SelectItem value="postgres">PostgreSQL</SelectItem>
+                    <SelectItem value="mysql">MySQL</SelectItem>
+                    <SelectItem value="sqlserver">SQL Server</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
             <textarea v-model="previewSql" :aria-label="t('settings.sqlFormatterPreviewSource')" class="min-h-28 w-full resize-y rounded-md border bg-background p-3 font-mono text-sm" spellcheck="false" />
             <p v-if="previewError" role="alert" class="text-sm text-destructive">{{ t("settings.sqlFormatterPreviewFailed", { message: previewError }) }}</p>

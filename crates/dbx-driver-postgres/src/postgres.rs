@@ -48,6 +48,9 @@ use crate::types::{
 pub const GAUSSDB_COMPATIBILITY_SQL: &str =
     "SELECT datcompatibility FROM pg_catalog.pg_database WHERE datname = current_database()";
 
+/// Identifier quote implied by the GaussDB database compatibility mode
+/// (`pg_database.datcompatibility`): MySQL-style modes need backticks while
+/// Oracle and PostgreSQL modes need double quotes.
 pub async fn gaussdb_identifier_quote(pool: &Pool) -> Option<String> {
     let timeout = super::connection_timeout();
     let client = checkout_postgres_client(pool, None, timeout).await.ok()?;
@@ -55,6 +58,17 @@ pub async fn gaussdb_identifier_quote(pool: &Pool) -> Option<String> {
     let row = tokio::time::timeout(timeout, client.query_opt(GAUSSDB_COMPATIBILITY_SQL, &[])).await.ok()?.ok()??;
     let compatibility_mode = row.try_get::<_, String>(0).ok()?;
     gaussdb_identifier_quote_for_compatibility_mode(&compatibility_mode).map(str::to_string)
+}
+
+/// Identifier quote for an openGauss database, derived from the same
+/// `datcompatibility` catalog value. openGauss exposes A/B/PG modes, so the
+/// MySQL-compatible (B) databases need backticks while A/PG need double quotes.
+pub async fn opengauss_identifier_quote(pool: &Pool) -> Option<String> {
+    opengauss_compatibility_mode(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|mode| gaussdb_identifier_quote_for_compatibility_mode(&mode).map(str::to_string))
 }
 
 pub fn gaussdb_identifier_quote_for_compatibility_mode(compatibility_mode: &str) -> Option<&'static str> {
@@ -142,6 +156,8 @@ pub struct PostgresTablePartitionLocalObjects {
     pub has_primary_key: bool,
     pub unique_constraints: BTreeSet<String>,
     pub foreign_keys: BTreeSet<String>,
+    /// Native definitions retained by the batched partition-tree DDL path.
+    pub foreign_key_definitions: BTreeMap<String, String>,
     pub indexes: BTreeSet<String>,
     /// CHECK constraints with a local definition on this partition, as
     /// reported by pg_constraint.conislocal. A merged constraint may remain
@@ -1544,7 +1560,7 @@ fn pg_error_to_string(err: impl Into<PgError>) -> String {
     let Some(db_error) = err.as_db_error() else {
         return err.to_string();
     };
-    let mut message = db_error.to_string();
+    let mut message = pg_db_error_to_string(db_error);
     // Carry the server-reported cursor position across the `db` layer's
     // `Result<_, String>` boundary; `query.rs` resolves it against the executed
     // statement and strips the suffix before the message reaches any client.
@@ -1561,7 +1577,7 @@ fn pg_error_to_string(err: impl Into<PgError>) -> String {
 /// be resolved against the user's SQL and point at the wrong place.
 fn pg_error_to_string_plain(err: impl Into<PgError>) -> String {
     let err = err.into();
-    err.as_db_error().map(ToString::to_string).unwrap_or_else(|| err.to_string())
+    err.as_db_error().map(pg_db_error_to_string).unwrap_or_else(|| err.to_string())
 }
 
 /// Tries each SQL tier in `tiers` in order (most-capable first), via `run`,
@@ -2182,6 +2198,7 @@ async fn execute_select_prepared(
         deferred_large_value_cells: Vec::new(),
         column_sortables: Vec::new(),
         spatial_columns,
+        raw_key_cells: Vec::new(),
         spatial_values,
         rows: result_rows,
         affected_rows: 0,
@@ -2292,6 +2309,7 @@ async fn execute_select_text(
         deferred_large_value_cells: Vec::new(),
         column_sortables: Vec::new(),
         spatial_columns,
+        raw_key_cells: Vec::new(),
         spatial_values,
         rows: result_rows,
         affected_rows: 0,
@@ -5774,7 +5792,13 @@ pub async fn get_table_partition_local_objects_for_relations_with_sql(
         let object_kind = row.try_get::<_, String>(1).unwrap_or_default();
         let object_name = row.try_get::<_, String>(2).unwrap_or_default();
         let object_type = row.try_get::<_, Option<String>>(3).ok().flatten().unwrap_or_default();
-        apply_partition_local_object_row(result.entry(relid).or_default(), &object_kind, object_name, &object_type);
+        let entry = result.entry(relid).or_default();
+        if object_kind == "constraint" && object_type == "f" {
+            if let Some(definition) = pg_row_try_optional_text(row, 4) {
+                entry.foreign_key_definitions.insert(object_name.clone(), definition);
+            }
+        }
+        apply_partition_local_object_row(entry, &object_kind, object_name, &object_type);
     }
     Ok(result)
 }
@@ -5787,23 +5811,24 @@ fn postgres_table_partition_local_objects_for_relations_query_tiers() -> [&'stat
 }
 
 pub fn postgres_table_partition_local_objects_for_relations_sql() -> &'static str {
-    "SELECT con.conrelid::bigint AS relid, 'constraint'::text AS object_kind, con.conname AS object_name, con.contype::text AS object_type \
+    "SELECT con.conrelid::bigint AS relid, 'constraint'::text AS object_kind, con.conname AS object_name, con.contype::text AS object_type, \
+            CASE WHEN con.contype = 'f' THEN pg_catalog.pg_get_constraintdef(con.oid, true) END AS definition \
      FROM pg_catalog.pg_constraint con \
      WHERE con.conrelid = ANY($1::bigint[]) AND con.contype IN ('p','u','f') \
        AND COALESCE(NULLIF(pg_catalog.row_to_json(con)->>'conparentid', '')::oid, 0) = 0 \
      UNION ALL \
-     SELECT con.conrelid::bigint, 'check'::text AS object_kind, con.conname AS object_name, NULL::text AS object_type \
+     SELECT con.conrelid::bigint, 'check'::text AS object_kind, con.conname AS object_name, NULL::text AS object_type, NULL::text \
      FROM pg_catalog.pg_constraint con \
      WHERE con.conrelid = ANY($1::bigint[]) AND con.contype = 'c' AND con.conislocal \
      UNION ALL \
-     SELECT ix.indrelid::bigint, 'index'::text AS object_kind, idx.relname AS object_name, NULL::text AS object_type \
+     SELECT ix.indrelid::bigint, 'index'::text AS object_kind, idx.relname AS object_name, NULL::text AS object_type, NULL::text \
      FROM pg_catalog.pg_index ix \
      JOIN pg_catalog.pg_class idx ON idx.oid = ix.indexrelid \
      WHERE ix.indrelid = ANY($1::bigint[]) \
        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid = idx.oid) \
      UNION ALL \
      SELECT a.attrelid::bigint, 'column_default'::text AS object_kind, a.attname AS object_name, \
-            CASE WHEN ad.oid IS NOT NULL THEN 'overridden' ELSE 'dropped' END AS object_type \
+            CASE WHEN ad.oid IS NOT NULL THEN 'overridden' ELSE 'dropped' END AS object_type, NULL::text \
      FROM pg_catalog.pg_attribute a \
      JOIN pg_catalog.pg_inherits i ON i.inhrelid = a.attrelid \
      JOIN pg_catalog.pg_attribute pa \
@@ -5826,22 +5851,23 @@ pub fn postgres_table_partition_local_objects_for_relations_sql() -> &'static st
 // compatibility tier can omit only that filter and keep the same batched
 // result shape.
 pub fn postgres_table_partition_local_objects_for_relations_compat_sql() -> &'static str {
-    "SELECT con.conrelid::bigint AS relid, 'constraint'::text AS object_kind, con.conname AS object_name, con.contype::text AS object_type \
+    "SELECT con.conrelid::bigint AS relid, 'constraint'::text AS object_kind, con.conname AS object_name, con.contype::text AS object_type, \
+            CASE WHEN con.contype = 'f' THEN pg_catalog.pg_get_constraintdef(con.oid, true) END AS definition \
      FROM pg_catalog.pg_constraint con \
      WHERE con.conrelid = ANY($1::bigint[]) AND con.contype IN ('p','u','f') \
      UNION ALL \
-     SELECT con.conrelid::bigint, 'check'::text AS object_kind, con.conname AS object_name, NULL::text AS object_type \
+     SELECT con.conrelid::bigint, 'check'::text AS object_kind, con.conname AS object_name, NULL::text AS object_type, NULL::text \
      FROM pg_catalog.pg_constraint con \
      WHERE con.conrelid = ANY($1::bigint[]) AND con.contype = 'c' AND con.conislocal \
      UNION ALL \
-     SELECT ix.indrelid::bigint, 'index'::text AS object_kind, idx.relname AS object_name, NULL::text AS object_type \
+     SELECT ix.indrelid::bigint, 'index'::text AS object_kind, idx.relname AS object_name, NULL::text AS object_type, NULL::text \
      FROM pg_catalog.pg_index ix \
      JOIN pg_catalog.pg_class idx ON idx.oid = ix.indexrelid \
      WHERE ix.indrelid = ANY($1::bigint[]) \
        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid = idx.oid) \
      UNION ALL \
      SELECT a.attrelid::bigint, 'column_default'::text AS object_kind, a.attname AS object_name, \
-            CASE WHEN ad.oid IS NOT NULL THEN 'overridden' ELSE 'dropped' END AS object_type \
+            CASE WHEN ad.oid IS NOT NULL THEN 'overridden' ELSE 'dropped' END AS object_type, NULL::text \
      FROM pg_catalog.pg_attribute a \
      JOIN pg_catalog.pg_inherits i ON i.inhrelid = a.attrelid \
      JOIN pg_catalog.pg_attribute pa \
@@ -8899,7 +8925,9 @@ fn postgres_query_body_dml(body: &SetExpr) -> Option<&Statement> {
 /// retrieval path. DML without `RETURNING` needs `execute` for its command
 /// tag/affected-row count, while DML with `RETURNING` produces a result set.
 pub fn postgres_statement_returns_rows(sql: &str) -> bool {
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "TABLE"]) {
+    // FETCH returns a cursor result set (including column metadata when empty),
+    // unlike MOVE, which only reports the number of cursor rows skipped.
+    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "TABLE", "FETCH"]) {
         return true;
     }
 
@@ -8960,6 +8988,7 @@ pub async fn execute_query_with_max_rows(
                 deferred_large_value_cells: Vec::new(),
                 column_sortables: Vec::new(),
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![],
                 affected_rows: affected,
@@ -9801,6 +9830,7 @@ async fn execute_query_with_max_rows_inner(
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![],
             affected_rows: affected,
@@ -12556,6 +12586,82 @@ mod tests {
         assert!(!postgres_requires_single_schema_search_path(
             "ERROR: syntax error at or near \"$\" in context \"SELECT * FROM t WHERE id = $1\", at line 1"
         ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn live_postgres_cursor_fetch_returns_result_sets() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect");
+        let client = pool.get().await.expect("checkout pinned session");
+        client
+            .batch_execute(
+                "CREATE OR REPLACE PROCEDURE pg_temp.open_test_cursors(INOUT c1 refcursor, INOUT c2 refcursor) \
+             LANGUAGE plpgsql AS $$ BEGIN \
+             OPEN c1 FOR SELECT 42::integer AS id, 'cursor value'::text AS label; \
+             OPEN c2 FOR SELECT 7::integer AS id WHERE false; END $$;",
+            )
+            .await
+            .expect("create session-local procedure");
+
+        // Exercise cached prepared, unnamed, and text-protocol execution on
+        // one pinned session, as required by transaction-scoped refcursors.
+        for (prefer_text, unnamed) in [(false, false), (false, true), (true, false)] {
+            client.batch_execute("BEGIN; CALL pg_temp.open_test_cursors('c1', 'c2')").await.expect("open cursors");
+            let result = execute_query_with_max_rows_inner(
+                &client,
+                "FETCH ALL FROM \"c1\"",
+                Some(100),
+                prefer_text,
+                None,
+                unnamed,
+            )
+            .await
+            .expect("fetch rows");
+            assert_eq!(result.columns, vec!["id", "label"]);
+            let expected_id = if prefer_text { serde_json::json!("42") } else { serde_json::json!(42) };
+            assert_eq!(
+                result.rows,
+                vec![vec![expected_id, serde_json::json!("cursor value")]],
+                "text={prefer_text}, unnamed={unnamed}"
+            );
+
+            for sql in ["FETCH ALL FROM c1", "FETCH ALL FROM c2"] {
+                let empty = execute_query_with_max_rows_inner(&client, sql, Some(100), prefer_text, None, unnamed)
+                    .await
+                    .expect("fetch empty cursor");
+                assert!(!empty.columns.is_empty(), "empty FETCH must retain column metadata: {sql}");
+                assert!(empty.rows.is_empty());
+            }
+            client.batch_execute("ROLLBACK").await.expect("rollback");
+        }
+    }
+
+    #[test]
+    fn postgres_statement_returns_rows_for_cursor_fetch() {
+        for sql in [
+            "FETCH ALL FROM \"c1\"",
+            "fetch next from c1",
+            "FETCH FORWARD 10 FROM c1",
+            "FETCH BACKWARD ALL IN c1",
+            "FETCH ABSOLUTE 2 FROM c1",
+            "FETCH RELATIVE -1 FROM c1",
+            "FETCH FIRST FROM c1",
+            "FETCH LAST FROM c1",
+            "FETCH 0 FROM c1",
+            "-- read a refcursor\n/* result set */ FETCH ALL FROM c1",
+        ] {
+            assert!(postgres_statement_returns_rows(sql), "expected cursor rows for: {sql}");
+        }
+        for sql in [
+            "MOVE ALL FROM c1",
+            "DECLARE c1 CURSOR FOR SELECT 1",
+            "CLOSE c1",
+            "FETCHING c1",
+            "DO $$ BEGIN FETCH c1 INTO value; END $$",
+        ] {
+            assert!(!postgres_statement_returns_rows(sql), "expected command result for: {sql}");
+        }
     }
 
     #[test]
@@ -16452,6 +16558,7 @@ mod tests {
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: Vec::new(),
+            raw_key_cells: Vec::new(),
             spatial_values: Vec::new(),
             rows: vec![vec![
                 serde_json::json!("amount"),

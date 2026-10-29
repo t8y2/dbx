@@ -1645,13 +1645,21 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         });
       }
     });
+    // The close-tab shortcut listens in the BUBBLE phase and yields to events a
+    // plugin input already consumed. A capture-phase listener runs before the
+    // focused control, so a terminal (xterm) handling Ctrl+W as "delete word"
+    // had the tab closed underneath it: the host posted closeTab before the
+    // terminal ever saw the key. Bubbling lets the focused control run first;
+    // xterm calls preventDefault()+stopPropagation() for the keys it sends, and
+    // any other consumer only needs preventDefault() to keep the tab open.
     addEventListener('keydown', (event) => {
+      if (event.defaultPrevented) return;
       const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
       if (key !== 'w' || (!event.metaKey && !event.ctrlKey) || event.altKey || event.shiftKey || event.isComposing) return;
       event.preventDefault();
       event.stopPropagation();
       parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'shortcut', shortcut: 'closeTab' }, '*');
-    }, true);
+    });
     parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'ready', features: ['workbench.close'] }, '*');
   })();`;
 }

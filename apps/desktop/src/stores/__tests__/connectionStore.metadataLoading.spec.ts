@@ -606,9 +606,6 @@ describe("connectionStore metadata loading", () => {
   }, 10_000);
 
   it("does not collapse a connection whose normal root load is already in flight", async () => {
-    // 用例覆盖「连接后自动展开」路径；#13302 把默认改为关闭后需显式开启。
-    const { useSettingsStore } = await import("@/stores/settingsStore");
-    useSettingsStore().editorSettings.sidebarExpandTreeOnConnect = true;
     let resolveDatabases!: (databases: Array<{ name: string; comment: null }>) => void;
     let markListStarted!: () => void;
     const listStarted = new Promise<void>((resolve) => {
@@ -895,8 +892,8 @@ describe("connectionStore metadata loading", () => {
     expect(connectionNode.children?.map((node) => [node.type, node.label, node.database, node.schema])).toEqual([
       ["schema", "DBX_TEST", "DBX_TEST", "DBX_TEST"],
       ["oracle-db-links", "tree.databaseLinks", "", undefined],
-      ["user-admin", "tree.userAdmin", "", undefined],
       ["database-job-admin", "tree.nativeJobs", "", undefined],
+      ["user-admin", "tree.userAdmin", "", undefined],
     ]);
 
     const linkRoot = connectionNode.children!.find((node) => node.type === "oracle-db-links")!;
@@ -951,8 +948,8 @@ describe("connectionStore metadata loading", () => {
 
     expect(connectionNode.children?.map((node) => [node.type, node.label])).toEqual([
       ["schema", "DBX_TEST"],
-      ["user-admin", "tree.userAdmin"],
       ["database-job-admin", "tree.nativeJobs"],
+      ["user-admin", "tree.userAdmin"],
     ]);
   });
 
@@ -3157,9 +3154,6 @@ describe("connectionStore metadata loading", () => {
   });
 
   it("finishes an expanding database when the connection refresh adds siblings", async () => {
-    // 用例覆盖「连接后自动展开」路径；#13302 把默认改为关闭后需显式开启。
-    const { useSettingsStore } = await import("@/stores/settingsStore");
-    useSettingsStore().editorSettings.sidebarExpandTreeOnConnect = true;
     let resolveSchemas!: (schemas: { name: string; comment: null }[]) => void;
     const listSchemaInfos = vi.fn(
       () =>
@@ -5037,9 +5031,6 @@ describe("connectionStore metadata loading", () => {
   });
 
   it("expands the catalogless default database on open and refreshes it after saving a schema filter", async () => {
-    // 用例覆盖「连接后自动展开」路径；#13302 把默认改为关闭后需显式开启。
-    const { useSettingsStore } = await import("@/stores/settingsStore");
-    useSettingsStore().editorSettings.sidebarExpandTreeOnConnect = true;
     const listDatabases = vi.fn().mockResolvedValue([]);
     const listSchemaInfos = vi.fn().mockResolvedValue([{ name: "APP_USER" }, { name: "APP_USER_ARCHIVE" }, { name: "SYS" }]);
 

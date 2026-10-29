@@ -75,6 +75,13 @@ fn build_create_table_sql_impl(
     server_version: Option<&str>,
     dialect_options: CreateTableDialectOptions,
 ) -> TableStructureSqlPlan {
+    let foreign_clause = match dialect_options.postgres_foreign_table.as_ref() {
+        Some(foreign) => match super::postgres_foreign_table::create_clause(&options, foreign) {
+            Ok(clause) => Some(clause),
+            Err(warnings) => return TableStructureSqlResult { statements: Vec::new(), warnings }.into(),
+        },
+        None => None,
+    };
     let create_dialect = create_table_dialect(&options, server_version, dialect_options);
     let capabilities;
     let dialect;
@@ -338,7 +345,9 @@ fn build_create_table_sql_impl(
         column_definitions.push(definition.clone());
     }
 
-    let mut create_table = format!("CREATE TABLE {table} (\n  {}\n)", column_definitions.join(",\n  "));
+    let is_foreign_table = foreign_clause.is_some();
+    let kind = if is_foreign_table { "FOREIGN TABLE" } else { "TABLE" };
+    let mut create_table = format!("CREATE {kind} {table} (\n  {}\n)", column_definitions.join(",\n  "));
     create_table.push_str(&create_dialect.after_columns(&options, &pk_list));
     create_table.push_str(&transwarp::create_table_suffix(&options, &active_columns, dialect));
     let mut create_table = match partition_clause {
@@ -348,6 +357,9 @@ fn build_create_table_sql_impl(
     create_table.push_str(&create_dialect.partition_clause(&active_columns));
     create_table.push_str(&create_dialect.after_partition(&active_columns, &pk_list));
     create_table.push_str(&create_dialect.sort_clause(&active_columns));
+    if let Some(clause) = foreign_clause {
+        create_table.push_str(&clause);
+    }
     statements.push(format!("{create_table};"));
 
     if let Some(engine) = options.mysql_engine.as_deref().map(str::trim).filter(|engine| !engine.is_empty()) {
@@ -381,7 +393,9 @@ fn build_create_table_sql_impl(
                     | StructureDialect::H2
                     | StructureDialect::SapHana
             ) {
-                statements.push(format!("COMMENT ON TABLE {table} IS {};", quote_string(&table_comment)));
+                let comment_kind =
+                    if dialect == StructureDialect::Postgres && is_foreign_table { "FOREIGN TABLE" } else { "TABLE" };
+                statements.push(format!("COMMENT ON {comment_kind} {table} IS {};", quote_string(&table_comment)));
             } else if dialect == StructureDialect::ClickHouse {
                 statements.push(format!("ALTER TABLE {table} MODIFY COMMENT {};", quote_string(&table_comment)));
             } else if dialect == StructureDialect::SqlServer {

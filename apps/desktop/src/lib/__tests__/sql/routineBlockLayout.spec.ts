@@ -97,3 +97,37 @@ describe("routine block layout", () => {
     }
   });
 });
+
+describe("Oracle package layout #13650", () => {
+  const sql =
+    "create or replace package body pkg is procedure p(p_date in date default sysdate) is cursor goods_cur is select * from goods for update; v_count number; v_log varchar2(200); begin v_count := 1; insert into logs(id, log) values(v_count,v_log); end p; procedure q is begin null; end q; end pkg;";
+
+  it.each([false, true])("indents member signatures, declarations and named ends (custom rules=%s)", async (customRulesEnabled) => {
+    const options = { customRulesEnabled };
+    const result = await formatSqlText(sql, "oracle", options);
+    expect(result).toMatch(/^CREATE OR replace PACKAGE BODY pkg IS\n  PROCEDURE p .* IS\n/);
+    expect(result).toContain("\n    CURSOR goods_cur IS\n      SELECT *\n      FROM goods\n      FOR UPDATE;\n    v_count number;");
+    expect(result).toContain("\n  BEGIN\n    v_count := 1;");
+    expect(result).toContain("\n  END p;\n  PROCEDURE q IS\n  BEGIN\n    NULL;\n  END q;\nEND pkg;");
+    expect(tokenStream(result, "oracle")).toEqual(tokenStream(sql, "oracle"));
+    expect(await formatSqlText(result, "oracle", options)).toBe(result);
+  });
+
+  it("keeps package initialization outside member bodies", async () => {
+    const source = "create or replace package body pkg is procedure p is begin null; end p; begin p; end pkg;";
+    const result = await formatSqlText(source, "oracle");
+    expect(result).toContain("\n  END p;\nBEGIN\n  p;\nEND pkg;");
+    expect(tokenStream(result, "oracle")).toEqual(tokenStream(source, "oracle"));
+    expect(await formatSqlText(result, "oracle")).toBe(result);
+  });
+});
+
+describe("Oracle package boundaries #13650", () => {
+  it.each([2, 4] as const)("keeps quoted member ends and nested blocks with indent=%s", async (tabWidth) => {
+    const source = 'create or replace package body "Pkg" is procedure "Run" is v number; begin if v > 0 then begin null; end; else null; end if; end "Run"; end "Pkg";';
+    const result = await formatSqlText(source, "oracle", { tabWidth });
+    expect(result).toContain(`\n${" ".repeat(tabWidth)}END "Run";\nEND "Pkg";`);
+    expect(tokenStream(result, "oracle")).toEqual(tokenStream(source, "oracle"));
+    expect(await formatSqlText(result, "oracle", { tabWidth })).toBe(result);
+  });
+});

@@ -3027,6 +3027,23 @@ mod tests {
     }
 
     #[test]
+    fn classifies_dynamodb_partiql_reads_and_writes_for_read_only_protection() {
+        assert!(!is_write_sql_for_database(
+            "SELECT * FROM \"items\" WHERE \"status\"='PENDING'",
+            DatabaseType::DynamoDb
+        ));
+        assert!(!is_write_sql_for_database("-- comment\nSELECT 'UPDATE' FROM \"items\"", DatabaseType::DynamoDb));
+        for statement in [
+            "INSERT INTO \"items\" VALUE {'pk':'x'}",
+            "UPDATE \"items\" SET flag=true WHERE pk='x'",
+            "DELETE FROM \"items\" WHERE pk='x'",
+            "SELECT * FROM \"items\"; DELETE FROM \"items\" WHERE pk='x'",
+        ] {
+            assert!(is_write_sql_for_database(statement, DatabaseType::DynamoDb), "{statement}");
+        }
+    }
+
+    #[test]
     fn classifies_search_engine_rest_writes() {
         assert!(!is_write_sql_for_database("GET /_cluster/health", DatabaseType::Easysearch));
         assert!(!is_write_sql_for_database(

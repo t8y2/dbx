@@ -58,6 +58,7 @@ import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCoun
 import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
 import { savedSqlBatchErrorMessage, savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
+import { getSavedSqlExpandedFolderIds, saveSavedSqlExpandedFolderIds } from "@/lib/savedSql/savedSqlUiState";
 import { ensureSqlExtension, extractCandidateDatabaseFromName, nextAvailableSqlName } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlImportTarget } from "@/lib/savedSql/savedSqlImportTarget";
 import { buildSavedSqlTreeRows, savedSqlFolderBranchMatches, type SavedSqlTreeRow } from "@/lib/savedSql/savedSqlTreeRows";
@@ -78,8 +79,13 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { databaseOptions, loadingDatabaseOptions, loadDatabaseOptions, catalogOptions, loadingCatalogOptions, loadCatalogOptions, catalogDatabaseOptions, loadingCatalogDatabaseOptions, loadCatalogDatabaseOptions } = useDatabaseOptions();
 
+const props = defineProps<{
+  locateRequest?: { id: number; fileId: string } | null;
+}>();
+
 const emit = defineEmits<{
   close: [];
+  "locate-handled": [id: number];
 }>();
 
 const UNFILED_DROP_TARGET_ID = "__sql-library-unfiled__";
@@ -425,29 +431,30 @@ const treeRows = computed<SavedSqlTreeRow[]>(() =>
 
 const hasAnyVisibleItem = computed(() => treeRows.value.length > 0);
 
-const collapsedFolders = ref<Set<string>>(new Set());
+const expandedFolders = ref<Set<string>>(getSavedSqlExpandedFolderIds());
 
-// Seed a default-collapsed state when the library first becomes non-empty so
-// opening the panel shows every directory collapsed instead of fully expanded.
-// Guarded so a later in-session folder add/delete does not re-collapse folders
-// the user has already expanded.
-const collapseDefaultsSeeded = ref(false);
+function saveExpandedFoldersState() {
+  saveSavedSqlExpandedFolderIds(expandedFolders.value);
+}
+
+// Prune deleted folder IDs when folder list is loaded or modified.
 watch(
   () => savedSqlStore.allFolders.map((folder) => folder.id),
   (folderIds) => {
-    if (collapseDefaultsSeeded.value || folderIds.length === 0) return;
-    collapseDefaultsSeeded.value = true;
-    collapsedFolders.value = new Set(folderIds);
+    if (folderIds.length === 0 || expandedFolders.value.size === 0) return;
+    const validIds = new Set(folderIds);
+    const pruned = new Set([...expandedFolders.value].filter((id) => validIds.has(id)));
+    if (pruned.size !== expandedFolders.value.size) {
+      expandedFolders.value = pruned;
+      saveExpandedFoldersState();
+    }
   },
-  { immediate: true },
 );
 
 function collapseAllFolders() {
-  // Collapse the whole tree: every folder currently known, including nested
-  // children, is marked collapsed in one shot.
-  const folderIds = savedSqlStore.allFoldersTreeOrder.map((folder) => folder.id);
-  if (folderIds.length === 0) return;
-  collapsedFolders.value = new Set(folderIds);
+  if (expandedFolders.value.size === 0) return;
+  expandedFolders.value = new Set();
+  saveExpandedFoldersState();
 }
 
 function hasAnyFolder(): boolean {
@@ -463,16 +470,17 @@ function toggleFolder(folderId: string) {
     const folder = savedSqlStore.allFolders.find((candidate) => candidate.id === folderId);
     if (folder && folderBranchMatchesQuery(folder)) return;
   }
-  const next = new Set(collapsedFolders.value);
+  const next = new Set(expandedFolders.value);
   if (next.has(folderId)) next.delete(folderId);
   else next.add(folderId);
-  collapsedFolders.value = next;
+  expandedFolders.value = next;
+  saveExpandedFoldersState();
 }
 
 function isFolderExpanded(folder: SavedSqlFolder) {
   // 搜索激活时,命中的分支自动展开以便直接看到匹配文件;否则遵循折叠状态。
   if (searchQuery.value && folderBranchMatchesQuery(folder)) return true;
-  return !collapsedFolders.value.has(folder.id);
+  return expandedFolders.value.has(folder.id);
 }
 
 async function openNewFolderInput(parentFolderId?: string) {
@@ -481,7 +489,8 @@ async function openNewFolderInput(parentFolderId?: string) {
   const connectionId = parent?.connectionId || connectionStore.connections[0]?.id;
   if (!connectionId) return;
   if (parent?.id) {
-    collapsedFolders.value = new Set([...collapsedFolders.value].filter((id) => id !== parent.id));
+    expandedFolders.value = new Set([...expandedFolders.value, parent.id]);
+    saveExpandedFoldersState();
   }
   try {
     const folder = await savedSqlStore.createFolder(connectionId, t("savedSql.newFolderDefault"), parent?.id);
@@ -496,7 +505,8 @@ async function openNewQueryInFolder(folder?: SavedSqlFolder) {
   const connectionId = folder?.connectionId || connectionStore.activeConnectionId || connectionStore.connections[0]?.id;
   if (!connectionId) return;
   if (folder?.id) {
-    collapsedFolders.value = new Set([...collapsedFolders.value].filter((id) => id !== folder.id));
+    expandedFolders.value = new Set([...expandedFolders.value, folder.id]);
+    saveExpandedFoldersState();
   }
 
   const folderFiles = folder ? savedSqlStore.filesInFolder(folder.id) : [];
@@ -541,21 +551,22 @@ const activeSavedSqlId = computed(() => queryStore.tabs.find((tab) => tab.id ===
 const libraryTree = ref<HTMLElement | null>(null);
 const currentSavedSqlFile = computed(() => (activeSavedSqlId.value ? savedSqlStore.getFile(activeSavedSqlId.value) : undefined));
 
-async function locateCurrentFile() {
-  const file = currentSavedSqlFile.value;
+async function locateFile(fileId: string) {
+  const file = savedSqlStore.getFile(fileId);
   if (!file) return;
   if (searchInputPending.value || !treeRows.value.some((row) => row.type === "file" && row.file.id === file.id)) {
     searchInput.value?.clear();
   }
-  const expanded = new Set(collapsedFolders.value);
+  const expanded = new Set(expandedFolders.value);
   const visited = new Set<string>();
   let folderId = file.folderId;
   while (folderId && !visited.has(folderId)) {
     visited.add(folderId);
-    expanded.delete(folderId);
+    expanded.add(folderId);
     folderId = savedSqlStore.allFolders.find((folder) => folder.id === folderId)?.parentFolderId;
   }
-  collapsedFolders.value = expanded;
+  expandedFolders.value = expanded;
+  saveExpandedFoldersState();
   clearSelection();
   activeItemId.value = file.id;
   activeItemType.value = "file";
@@ -564,6 +575,25 @@ async function locateCurrentFile() {
   const row = Array.from(libraryTree.value?.querySelectorAll<HTMLElement>("[data-sql-library-file]") ?? []).find((element) => element.dataset.sqlLibraryFile === file.id);
   row?.scrollIntoView({ block: "center", inline: "nearest" });
 }
+
+async function locateCurrentFile() {
+  const file = currentSavedSqlFile.value;
+  if (!file) return;
+  await locateFile(file.id);
+}
+
+watch(
+  [() => savedSqlStore.loadState, () => props.locateRequest],
+  async ([loadState, request]) => {
+    if (!request || loadState === "loading") return;
+    try {
+      await locateFile(request.fileId);
+    } finally {
+      emit("locate-handled", request.id);
+    }
+  },
+  { immediate: true, flush: "post" },
+);
 
 const hasCurrentSavedSqlExecutionTarget = computed(() => {
   const activeTab = queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId);
@@ -1611,6 +1641,12 @@ function showDropAfter(targetId: string) {
 function showDropInside(targetId: string) {
   return dragState.active && dragState.targetId === targetId && dragState.dropPosition === "inside";
 }
+
+defineExpose({
+  locateFile,
+  locateCurrentFile,
+  searchInput,
+});
 </script>
 
 <template>
@@ -1692,6 +1728,7 @@ function showDropInside(targetId: string) {
               <div
                 v-if="row.type === 'folder'"
                 class="relative flex cursor-default items-center gap-1 py-1.5 pr-2 text-[13px] group"
+                :data-sql-library-folder="row.folder.id"
                 :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
                 :class="[showDropInside(row.folder.id) ? 'ring-1 ring-primary/50 bg-primary/5' : folderRowClass(row.folder.id), isDraggingItem(row.folder.id) ? 'opacity-50' : '']"
                 @mousedown="handleDragMouseDown($event, row.folder.id, 'folder')"

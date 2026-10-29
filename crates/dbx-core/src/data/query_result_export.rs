@@ -23,13 +23,13 @@ use crate::database_export::{
 };
 use crate::models::connection::DatabaseType;
 use crate::query::{
-    await_stream_with_progress_timeout, canceled_error, close_query_session,
+    await_stream_with_progress_timeout, canceled_error, close_manual_transaction_query_session, close_query_session,
     execute_in_manual_transaction_with_options, execute_sql_statement_with_options, operation_budget_for_pool_key,
     ManualTransactionExecutionOptions, QueryExecutionOptions, StreamProgressClock, QUERY_CANCELED,
 };
 use crate::query_result_sql::{
-    build_query_pagination_execution_plan, has_top_level_top, top_level_top_row_count, QueryPagination,
-    QueryPaginationExecutionPlanOptions,
+    build_query_pagination_execution_plan, has_top_level_top, top_level_rownum_row_count, top_level_top_row_count,
+    QueryPagination, QueryPaginationExecutionPlanOptions,
 };
 use crate::table_export::TableExportProgress;
 use crate::transfer::keyset_pagination_sql_with_identifier_quote;
@@ -49,7 +49,9 @@ use tokio_util::sync::CancellationToken;
 
 const AGENT_UNBOUNDED_ROW_LIMIT: usize = i32::MAX as usize;
 const STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str =
-    "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
+    "Streaming export cannot page through this query. Export a single SELECT statement, or load the full result first and export the loaded rows.";
+const STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR: &str =
+    "A manual transaction cannot use a result cursor, and this query cannot be split into pages. Commit or roll back the transaction, then export again.";
 const HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str =
     "HighGo cannot safely paginate this query for export. Run and export a single SELECT statement that supports LIMIT/OFFSET.";
 const AGENT_SESSION_MISSING_ERROR: &str =
@@ -801,6 +803,39 @@ fn supports_streaming_offset_pagination(request: &QueryResultExportRequest, page
         && !first_sql.trim().eq_ignore_ascii_case(second_sql.trim())
 }
 
+/// Whether the export may open/continue an Agent result-session cursor.
+///
+/// The request decides whether the driver has an Agent cursor at all; inside a
+/// manual transaction the cursor additionally requires the transaction's own
+/// connection to be an Agent connection (native/external transaction
+/// connections only page with SQL). Kept separate from the lookup so the export
+/// policy stays unit-testable without an AppState.
+fn export_can_use_agent_cursor(request: &QueryResultExportRequest, txn_supports_agent_cursor: Option<bool>) -> bool {
+    request.use_agent_cursor && txn_supports_agent_cursor.unwrap_or(true)
+}
+
+/// Execution options for one export page read through the open manual
+/// transaction. Cursor pages must forward the page size and the result-session
+/// id, otherwise the transaction would return only the first page and later
+/// pages could never be reached; non-cursor pages stay bounded by their own
+/// page limit.
+fn manual_transaction_page_options(
+    request: &QueryResultExportRequest,
+    plan_limit: usize,
+    use_agent_result_session: bool,
+    agent_max_rows: usize,
+    session_id: Option<&str>,
+) -> ManualTransactionExecutionOptions {
+    ManualTransactionExecutionOptions {
+        max_rows: Some(if use_agent_result_session { agent_max_rows } else { plan_limit }),
+        page_size: use_agent_result_session.then_some(plan_limit),
+        result_session_id: if use_agent_result_session { session_id.map(str::to_owned) } else { None },
+        execution_id: request.execution_id.clone(),
+        timeout_secs: request.timeout_secs,
+        ..Default::default()
+    }
+}
+
 fn streaming_pagination_preflight_error(
     request: &QueryResultExportRequest,
     page_size: usize,
@@ -811,6 +846,14 @@ fn streaming_pagination_preflight_error(
     if has_keyset_plan || supports_streaming_offset_pagination(request, page_size) || has_single_execution_bound {
         return None;
     }
+    // A manual transaction without a usable Agent cursor forces the export
+    // through the transaction's own connection, where result-session cursors
+    // are unavailable. Committing the transaction is the fix, so say that
+    // instead of blaming the query shape. When the caller resolved an Agent
+    // cursor the export pages through it and stays supported.
+    if !use_agent_cursor && request.txn_session_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
+        return Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR);
+    }
     if request.database_type == DatabaseType::Highgo {
         return Some(HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR);
     }
@@ -819,21 +862,28 @@ fn streaming_pagination_preflight_error(
 
 /// Enforceable in-memory row bound for a single-execution export, or `None`
 /// when the query cannot be safely streamed in one shot without an Agent
-/// cursor. Kingbase SQL Server compatibility mode TOP queries cannot be
-/// rewritten with LIMIT/OFFSET; a concrete `TOP n` bounds the result and the
-/// user's export row limit caps it further. Percentage TOP / `WITH TIES` have
-/// no concrete row bound, so they are only single-execution-capable when a row
-/// limit is configured.
+/// cursor.
+///
+/// Two statement shapes bound their own rows: Kingbase SQL Server compatibility
+/// mode `TOP n` (which cannot be rewritten with LIMIT/OFFSET) and Oracle-family
+/// queries that already filter with `ROWNUM < n` / `ROWNUM <= n` (which the
+/// ROWNUM wrapper must not page again). Both can be exported with one bounded
+/// execution. Percentage TOP / `WITH TIES` have no concrete row bound, so they
+/// are only single-execution-capable when the export row limit caps them.
 fn single_execution_row_bound(request: &QueryResultExportRequest) -> Option<usize> {
-    if !has_top_level_top(&request.sql) {
-        return None;
-    }
-    match (top_level_top_row_count(&request.sql), request.row_limit) {
-        (Some(top), Some(row_limit)) => Some(top.min(row_limit)),
-        (Some(top), None) => Some(top),
-        (None, Some(row_limit)) => Some(row_limit),
-        (None, None) => None,
-    }
+    let explicit_bound = if has_top_level_top(&request.sql) {
+        match top_level_top_row_count(&request.sql) {
+            Some(top) => Some(top),
+            // TOP without a concrete literal is unbounded by itself; the export
+            // row limit is the only enforceable cap for such statements.
+            None => request.row_limit,
+        }
+    } else if matches!(request.database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+        top_level_rownum_row_count(&request.sql)
+    } else {
+        None
+    };
+    explicit_bound.map(|bound| request.row_limit.map_or(bound, |row_limit| bound.min(row_limit)))
 }
 
 /// Maps the frozen export header onto the column list a page reported.
@@ -1029,6 +1079,24 @@ async fn export_query_result_with_cleanup(
     on_progress: impl Fn(TableExportProgress),
     report_completion: bool,
 ) -> crate::table_export::ExportCompletion {
+    let policy_check: Result<(), String> = async {
+        crate::query::mysql_data_charset_policy::check_export(state, &request.connection_id, &request.format).await?;
+        if crate::query::mysql_data_charset_policy::enabled_for_connection(state, &request.connection_id).await? {
+            crate::query::check_read_only_for_connection_multi(
+                state,
+                &request.connection_id,
+                &[request.sql.as_str(), request.query_base_sql.as_str()],
+            )
+            .await?;
+            crate::query::check_read_only_for_connection_multi(state, &request.connection_id, &request.setup_sql)
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = policy_check {
+        return crate::table_export::ExportCompletion { result: Err(error), cleanup: Ok(()) };
+    }
     let mut session_id: Option<String> = None;
     let mut duckdb_snapshot = None;
     let result = export_query_result_core_inner(
@@ -1053,17 +1121,29 @@ async fn export_query_result_with_cleanup(
         Ok(())
     };
     if let Some(session_id) = session_id {
-        let cursor_close = close_query_session(
-            state,
-            &request.connection_id,
-            &request.database,
-            &session_id,
-            request.client_session_id.as_deref(),
-            None,
-        )
-        .await;
+        let txn_session_id = request.txn_session_id.as_deref().map(str::trim).filter(|id| !id.is_empty());
+        // A cursor opened through the manual transaction belongs to that
+        // transaction's connection. Closing it through the normal session pool
+        // cannot find it (and could disturb the transaction's own session).
+        let cursor_close = match txn_session_id {
+            Some(txn_session_id) => {
+                close_manual_transaction_query_session(state, &request.connection_id, txn_session_id, &session_id)
+                    .await
+                    .map(|_| ())
+            }
+            None => close_query_session(
+                state,
+                &request.connection_id,
+                &request.database,
+                &session_id,
+                request.client_session_id.as_deref(),
+                None,
+            )
+            .await
+            .map(|_| ()),
+        };
         if report_completion {
-            cleanup = cleanup.and(cursor_close.map(|_| ()));
+            cleanup = cleanup.and(cursor_close);
         }
     }
     if let Some(client_session_id) = request.client_session_id.as_deref() {
@@ -1106,9 +1186,21 @@ async fn export_query_result_core_inner(
     // The streaming fast paths below check out their own pooled connection, which
     // cannot see an open manual transaction. Inside a transaction the export pages
     // through the transaction's connection instead, the same way the result grid
-    // pages, and result-session cursors are not opened there.
+    // pages. An Agent transaction connection hosts the Agent result session as
+    // well, so keep the cursor there: Oracle 11g cannot offset-paginate a query
+    // whose ROWNUM wrapper is unsafe (an existing ROWNUM bound, wildcards,
+    // duplicate projections, ...), and disabling the cursor for transactional tabs
+    // made those exports fail with "streaming export is unsupported" even though
+    // the grid could page them. Native/external transaction connections have no
+    // cursor, so they keep SQL-only pagination.
     let txn_session_id = request.txn_session_id.as_deref().map(str::trim).filter(|id| !id.is_empty());
-    let use_agent_cursor = request.use_agent_cursor && txn_session_id.is_none();
+    let txn_supports_agent_cursor = match txn_session_id {
+        Some(txn_session_id) => {
+            Some(crate::query::manual_transaction_supports_agent_cursor(state, txn_session_id).await)
+        }
+        None => None,
+    };
+    let use_agent_cursor = export_can_use_agent_cursor(request, txn_supports_agent_cursor);
 
     if txn_session_id.is_none() {
         if try_export_postgres_query_result_stream(
@@ -1185,6 +1277,7 @@ async fn export_query_result_core_inner(
     let mut offset: usize = 0;
     let mut wrote_text_header = false;
     if request.database_type == DatabaseType::DuckDb && txn_session_id.is_none() {
+        on_progress(progress(request, 0, ExportStatus::PreparingSnapshot, None));
         let snapshot = duckdb_snapshot.insert(DuckDbExportSnapshot::new(
             &request.connection_id,
             &request.database,
@@ -1249,6 +1342,11 @@ async fn export_query_result_core_inner(
             (String::new(), this_page, false, false)
         } else if let Some(plan) = keyset_plan.as_ref() {
             (build_keyset_export_sql(plan, request, this_page), this_page, false, false)
+        } else if let Some(bound) = single_execution_bound {
+            // The statement already bounds its own rows (Kingbase TOP or an
+            // Oracle ROWNUM predicate), so one execution covers the export: no
+            // LIMIT/OFFSET rewrite and no cursor session are needed.
+            (request.sql.clone(), bound, false, true)
         } else {
             let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
                 sql: request.sql.clone(),
@@ -1301,12 +1399,13 @@ async fn export_query_result_core_inner(
                 &sql_to_execute,
                 &request.database,
                 request.schema.as_deref(),
-                ManualTransactionExecutionOptions {
-                    max_rows: Some(plan_limit),
-                    execution_id: request.execution_id.clone(),
-                    timeout_secs: request.timeout_secs,
-                    ..Default::default()
-                },
+                manual_transaction_page_options(
+                    request,
+                    plan_limit,
+                    use_agent_result_session,
+                    agent_max_rows,
+                    session_id.as_deref(),
+                ),
             )
             .await
             .and_then(|results| {
@@ -1865,7 +1964,7 @@ async fn try_export_mysql_query_result_stream(
 
     let progress_clock = Arc::new(StreamProgressClock::new());
     let progress_clock_for_stream = progress_clock.clone();
-    let stream_future = crate::db::mysql::stream_query_result_on_conn(
+    let stream_future = crate::db::mysql::stream_query_result_on_conn_with_data_charset(
         &mut conn,
         &request.sql,
         bare,
@@ -1873,6 +1972,7 @@ async fn try_export_mysql_query_result_stream(
         mysql_dialect,
         &export_cancelled,
         format.eq_ignore_ascii_case("sql"),
+        pool.data_charset(),
         |item| {
             if export_cancelled.load(Ordering::SeqCst)
                 || cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
@@ -3092,6 +3192,29 @@ mod tests {
     }
 
     #[test]
+    fn manual_transaction_export_reports_the_transaction_instead_of_the_query_shape() {
+        let mut req = request("csv", None, None);
+        req.database_type = DatabaseType::OceanbaseOracle;
+        req.sql = "SELECT * FROM users; SELECT 1".to_string();
+        req.query_base_sql = req.sql.clone();
+        // The frontend keeps use_agent_cursor set; the backend drops it for a
+        // manual transaction, which is what surfaces the error.
+        req.use_agent_cursor = true;
+        req.txn_session_id = Some("txn-1".to_string());
+
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 100, false, false, false),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
+        );
+
+        req.txn_session_id = None;
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 100, false, false, false),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+        );
+    }
+
+    #[test]
     fn agent_cursor_export_keeps_unrewritable_fallback_for_other_databases() {
         let mut req = request("csv", None, None);
         req.database_type = DatabaseType::Oracle;
@@ -3121,6 +3244,122 @@ mod tests {
                 streaming_pagination_preflight_error(&req, 100, false, false, req.use_agent_cursor),
                 Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
             );
+        }
+    }
+
+    #[test]
+    fn oracle_manual_transaction_export_keeps_the_agent_cursor() {
+        // Regression: exports inside a manual transaction page through the
+        // transaction's connection. An Agent transaction connection also hosts
+        // the result session, so disabling the cursor made Oracle 11g exports fail
+        // with the streaming-unsupported error whenever the ROWNUM wrapper cannot
+        // paginate the statement (here an existing `ROWNUM <` bound, as in "export
+        // current result set" for a grid whose query already bounds its rows).
+        let mut req = request("xlsx", None, None);
+        req.database_type = DatabaseType::Oracle;
+        req.sql = "SELECT FJFY, JCBW FROM T_YL_JCZD01 WHERE ROWNUM < 2000;".to_string();
+        req.query_base_sql = req.sql.clone();
+        req.use_agent_cursor = true;
+        req.txn_session_id = Some("oracle-txn-1".to_string());
+
+        let cursor = export_can_use_agent_cursor(&req, Some(true));
+        assert!(cursor);
+        assert!(!supports_streaming_offset_pagination(&req, 1000));
+        assert_eq!(streaming_pagination_preflight_error(&req, 1000, false, false, cursor), None);
+
+        // Without a usable cursor the manual transaction gets the
+        // transaction-specific guidance instead of the generic query-shape error.
+        let no_cursor = req.use_agent_cursor && req.txn_session_id.is_none();
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 1000, false, false, no_cursor),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
+        );
+
+        // A native/external transaction connection has no result cursor: keep the
+        // honest error instead of silently exporting only the first page.
+        let cursor = export_can_use_agent_cursor(&req, Some(false));
+        assert!(!cursor);
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 1000, false, false, cursor),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
+        );
+
+        // Drivers without an Agent cursor still get the honest error.
+        req.use_agent_cursor = false;
+        let cursor = export_can_use_agent_cursor(&req, None);
+        assert!(!cursor);
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 1000, false, false, cursor),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
+        );
+    }
+
+    #[test]
+    fn manual_transaction_export_pages_forward_the_cursor_session() {
+        let mut req = request("xlsx", None, None);
+        req.use_agent_cursor = true;
+        req.txn_session_id = Some("oracle-txn-1".to_string());
+
+        let first_cursor_page = manual_transaction_page_options(&req, 500, true, 10_000, None);
+        assert_eq!(first_cursor_page.page_size, Some(500));
+        assert_eq!(first_cursor_page.max_rows, Some(10_000));
+        assert!(first_cursor_page.result_session_id.is_none());
+
+        let cursor_page = manual_transaction_page_options(&req, 500, true, 10_000, Some("cursor-1"));
+        assert_eq!(cursor_page.page_size, Some(500));
+        assert_eq!(cursor_page.result_session_id.as_deref(), Some("cursor-1"));
+        assert_eq!(cursor_page.max_rows, Some(10_000));
+
+        // Server-side paginated pages keep their own bounded row count and must
+        // not open a cursor.
+        let bounded_page = manual_transaction_page_options(&req, 500, false, 10_000, None);
+        assert_eq!(bounded_page.max_rows, Some(500));
+        assert!(bounded_page.page_size.is_none());
+        assert!(bounded_page.result_session_id.is_none());
+    }
+
+    #[test]
+    fn oracle_rownum_bounded_export_streams_a_single_bounded_execution() {
+        // Regression for "export current result set" on Oracle 11g: a query that
+        // already bounds itself with ROWNUM cannot be ROWNUM-wrapped for offset
+        // pagination, and a manual transaction has no cursor page to fall back
+        // on. One bounded execution is enough, exactly like Kingbase TOP.
+        let mut req = request("xlsx", None, None);
+        req.database_type = DatabaseType::Oracle;
+        req.sql = "SELECT FJFY, JCBW FROM T_YL_JCZD01 WHERE ROWNUM < 2000;".to_string();
+        req.query_base_sql = req.sql.clone();
+        req.use_agent_cursor = false;
+        req.txn_session_id = Some("oracle-txn-1".to_string());
+
+        assert_eq!(single_execution_row_bound(&req), Some(1999));
+        assert_eq!(single_execution_page_limit(&req, 2000), Some(1999));
+        assert!(supports_single_execution_export(&req, 2000));
+        assert_eq!(streaming_pagination_preflight_error(&req, 2000, false, true, false), None);
+
+        // A page size smaller than the bound keeps the normal pagination path
+        // (and the transaction-specific error when neither cursor nor rewrite
+        // is available inside the open transaction).
+        assert_eq!(single_execution_page_limit(&req, 1000), None);
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 1000, false, false, false),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
+        );
+
+        // The export row limit caps the single execution.
+        req.row_limit = Some(500);
+        assert_eq!(single_execution_row_bound(&req), Some(500));
+    }
+
+    #[test]
+    fn rownum_bounds_only_apply_to_oracle_family_requests() {
+        let mut req = request("csv", None, None);
+        req.sql = "SELECT id FROM users WHERE ROWNUM < 10".to_string();
+        req.query_base_sql = req.sql.clone();
+        assert_eq!(single_execution_row_bound(&req), None);
+
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            req.database_type = database_type;
+            assert_eq!(single_execution_row_bound(&req), Some(9));
         }
     }
 

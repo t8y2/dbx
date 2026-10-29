@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { AlertTriangle, Loader2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
@@ -601,7 +602,7 @@ function createBridge() {
               databaseType: connection.db_type,
               connected,
               isConnected: connected,
-              readOnly: connection.read_only === true,
+              readOnly: mysqlDataCharsetEnabled(connection) || connection.read_only === true,
               database: connection.database,
               schema: connection.default_schema,
               providerId: connection.plugin_connection_provider ?? "",
@@ -626,7 +627,7 @@ function createBridge() {
               isConnected: connected,
               providerId: connection.plugin_connection_provider ?? "",
               connectionType: connection.plugin_connection_type,
-              readOnly: connection.read_only === true,
+              readOnly: mysqlDataCharsetEnabled(connection) || connection.read_only === true,
               database: connection.database,
               schema: connection.default_schema,
               // #193b — dock/tab titles bound to the connection (dock first), so plugins can label session rows after renamed terminals.
@@ -648,7 +649,7 @@ function createBridge() {
             databaseType: connection.db_type,
             connected,
             isConnected: connected,
-            readOnly: connection.read_only === true,
+            readOnly: mysqlDataCharsetEnabled(connection) || connection.read_only === true,
             database: connection.database,
             schema: connection.default_schema,
             providerId: connection.plugin_connection_provider ?? "",

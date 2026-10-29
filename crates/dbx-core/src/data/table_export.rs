@@ -735,6 +735,7 @@ async fn fetch_table_export_batch(
     }
     if *table_read_completed {
         return Ok(QueryResult {
+            raw_key_cells: Vec::new(),
             columns: col_names.to_vec(),
             column_types: Vec::new(),
             deferred_large_value_cells: Vec::new(),
@@ -1608,6 +1609,11 @@ async fn export_table_data_with_cleanup(
     on_progress: impl Fn(TableExportProgress),
     report_completion: bool,
 ) -> ExportCompletion {
+    if let Err(error) =
+        crate::query::mysql_data_charset_policy::check_export(state, &request.connection_id, &request.format).await
+    {
+        return ExportCompletion { result: Err(error), cleanup: Ok(()) };
+    }
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel_token = CancellationToken::new();
     let cancel_watcher =
@@ -1879,6 +1885,14 @@ async fn export_table_data_core_inner(
     }
 
     if db_type == DatabaseType::DuckDb {
+        on_progress(TableExportProgress {
+            export_id: request.export_id.clone(),
+            table_name: request.table_name.clone(),
+            rows_exported: 0,
+            total_rows,
+            status: ExportStatus::PreparingSnapshot,
+            error_message: None,
+        });
         let snapshot = duckdb_snapshot.insert(DuckDbExportSnapshot::new(
             &request.connection_id,
             &request.database,

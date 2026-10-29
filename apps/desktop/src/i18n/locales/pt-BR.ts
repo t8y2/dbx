@@ -2179,7 +2179,8 @@ export default withEnglishFallback({
     sshAgentKeyRefresh: "Atualizar",
     oracleLegacyCharset: "Codificação real do banco legado US7ASCII",
     oracleLegacyCharsetDisabled: "Desativado (conversão de conjunto de caracteres padrão)",
-    oracleLegacyCharsetHint: "Somente para driver Thin e banco legado US7ASCII: leia e grave campos de caracteres comuns usando a codificação real das gravações históricas, por exemplo, para chinês GBK escolha ZHS16GBK; campos de conjunto de caracteres nacional permanecem Unicode. Verifique primeiro os bytes originais; não presuma a codificação.",
+    oracleLegacyCharsetHint:
+      "Somente para driver Thin e banco legado US7ASCII: leia e grave campos de caracteres comuns usando a codificação real das gravações históricas, por exemplo, para chinês GBK escolha ZHS16GBK; campos de conjunto de caracteres nacional permanecem Unicode. Verifique primeiro os bytes originais; não presuma a codificação.",
   },
   editor: {
     duckdbDraining: "A consulta anterior do DuckDB ainda está sendo interrompida. Tente novamente em breve.",

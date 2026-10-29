@@ -2199,7 +2199,8 @@ export default withEnglishFallback({
     sshAgentKeyRefresh: "更新",
     oracleLegacyCharset: "US7ASCII 旧データベースの実際のエンコーディング",
     oracleLegacyCharsetDisabled: "オフ（標準文字セット変換）",
-    oracleLegacyCharsetHint: "Thin ドライバーと US7ASCII 旧データベースのみ対象：過去に書き込まれたときの実際のエンコーディングに従って通常の文字フィールドを読み書きします。たとえば GBK の中国語なら ZHS16GBK を選択します。各国語文字セットのフィールドは Unicode のままです。元のバイトを先に確認し、エンコーディングを推測しないでください。",
+    oracleLegacyCharsetHint:
+      "Thin ドライバーと US7ASCII 旧データベースのみ対象：過去に書き込まれたときの実際のエンコーディングに従って通常の文字フィールドを読み書きします。たとえば GBK の中国語なら ZHS16GBK を選択します。各国語文字セットのフィールドは Unicode のままです。元のバイトを先に確認し、エンコーディングを推測しないでください。",
   },
   editor: {
     duckdbDraining: "前回の DuckDB クエリはまだ停止処理中です。しばらくしてから再試行してください。",

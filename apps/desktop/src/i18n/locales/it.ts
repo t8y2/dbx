@@ -2180,7 +2180,8 @@ export default withEnglishFallback({
     sshAgentKeyRefresh: "Aggiorna",
     oracleLegacyCharset: "Codifica effettiva del database legacy US7ASCII",
     oracleLegacyCharsetDisabled: "Disattivato (conversione standard del set di caratteri)",
-    oracleLegacyCharsetHint: "Solo per il driver Thin e i database legacy US7ASCII: leggi e scrivi i campi di caratteri ordinari in base alla codifica effettiva usata al momento della scrittura storica, ad esempio per il cinese GBK seleziona ZHS16GBK; i campi del set di caratteri nazionale restano Unicode. Controlla prima i byte originali, non indovinare la codifica.",
+    oracleLegacyCharsetHint:
+      "Solo per il driver Thin e i database legacy US7ASCII: leggi e scrivi i campi di caratteri ordinari in base alla codifica effettiva usata al momento della scrittura storica, ad esempio per il cinese GBK seleziona ZHS16GBK; i campi del set di caratteri nazionale restano Unicode. Controlla prima i byte originali, non indovinare la codifica.",
   },
   editor: {
     duckdbDraining: "La query DuckDB precedente è ancora in fase di arresto. Riprova a breve.",

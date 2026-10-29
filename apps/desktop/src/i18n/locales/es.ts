@@ -2271,7 +2271,8 @@ export default withEnglishFallback({
     sshAgentKeyRefresh: "Actualizar",
     oracleLegacyCharset: "Codificación real de la base de datos antigua US7ASCII",
     oracleLegacyCharsetDisabled: "Desactivado (conversión de juego de caracteres estándar)",
-    oracleLegacyCharsetHint: "Solo para el controlador Thin y bases de datos antiguas US7ASCII: lee y escribe campos de caracteres normales según la codificación real usada al escribir históricamente; por ejemplo, para chino GBK elija ZHS16GBK; los campos de juego de caracteres nacional se mantienen en Unicode. Verifique primero los bytes originales; no adivine la codificación.",
+    oracleLegacyCharsetHint:
+      "Solo para el controlador Thin y bases de datos antiguas US7ASCII: lee y escribe campos de caracteres normales según la codificación real usada al escribir históricamente; por ejemplo, para chino GBK elija ZHS16GBK; los campos de juego de caracteres nacional se mantienen en Unicode. Verifique primero los bytes originales; no adivine la codificación.",
   },
   editor: {
     duckdbDraining: "La consulta anterior de DuckDB aún se está deteniendo. Vuelva a intentarlo en breve.",

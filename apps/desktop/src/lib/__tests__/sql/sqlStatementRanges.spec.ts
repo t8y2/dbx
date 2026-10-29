@@ -1097,6 +1097,75 @@ END;`;
   it("still splits Firebird ALTER TRIGGER metadata commands (#12407)", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges("ALTER TRIGGER TR_USERS INACTIVE; SELECT 1 FROM RDB$DATABASE;", "firebird"))).toEqual(["ALTER TRIGGER TR_USERS INACTIVE", "SELECT 1 FROM RDB$DATABASE"]);
   });
+
+  it("keeps Informix SPL function blocks together", () => {
+    const fn = `CREATE FUNCTION get_daily_seq2()
+RETURNING DATE, INTEGER;
+
+    DEFINE v_seq INTEGER;
+
+    SELECT seq_daily.NEXTVAL
+        INTO v_seq
+        FROM systables
+        WHERE tabid = 1;
+
+    RETURN TODAY, v_seq;
+
+END FUNCTION;`;
+    const sql = `${fn}\nSELECT 1 FROM systables;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "informix"))).toEqual([fn, "SELECT 1 FROM systables"]);
+    expect(hasMultipleExecutionTargets(fn, "informix")).toBe(false);
+    expect(executableStatementRanges(fn, "informix")).toHaveLength(1);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "v_seq"), "informix")?.sql).toBe(fn);
+    // GBase 8s is Informix-derived.
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "gbase8s"))).toEqual([fn, "SELECT 1 FROM systables"]);
+  });
+
+  it("keeps Informix SPL procedure bodies together", () => {
+    const procedure = `CREATE PROCEDURE daily_rollup()
+    DEFINE n INTEGER;
+
+    UPDATE daily_total SET n = 1;
+
+    IF n = 1 THEN
+        INSERT INTO daily_log VALUES (TODAY);
+    END IF;
+
+END PROCEDURE;`;
+    const sql = `${procedure}\nSELECT 1 FROM systables;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "informix"))).toEqual([procedure, "SELECT 1 FROM systables"]);
+    // The blank line before UPDATE must not start a new soft statement.
+    expect(statementRangeAtCursor(sql, indexOf(sql, "daily_total"), "informix")?.sql).toBe(procedure);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "daily_log"), "informix")?.sql).toBe(procedure);
+  });
+
+  it("keeps Informix external routines and DOCUMENT clauses together", () => {
+    const external = `CREATE FUNCTION ext_abs(i INT) RETURNS INT
+WITH (NOT VARIANT)
+EXTERNAL NAME 'abs'
+LANGUAGE C
+END FUNCTION;`;
+    const documented = `CREATE FUNCTION documented() RETURNING INT;
+    RETURN 1;
+END FUNCTION
+DOCUMENT 'returns one'
+WITH LISTING IN '/tmp/dbx_warn';`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${external}\nSELECT 1 FROM systables;`, "informix"))).toEqual([external, "SELECT 1 FROM systables"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${documented}\nSELECT 1 FROM systables;`, "informix"))).toEqual([documented, "SELECT 1 FROM systables"]);
+  });
+
+  it("still splits ordinary Informix statements at semicolons", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges("CREATE TABLE t (id INT); SELECT 1 FROM systables;", "informix"))).toEqual(["CREATE TABLE t (id INT)", "SELECT 1 FROM systables"]);
+  });
+
+  it("keeps Informix CREATE FUNCTION FROM / CREATE PROCEDURE FROM as plain statements", () => {
+    const sql = "CREATE FUNCTION FROM '/tmp/dbx.sql'; CREATE PROCEDURE FROM '/tmp/dbx.sql'; SELECT 1 FROM systables;";
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "informix"))).toEqual(["CREATE FUNCTION FROM '/tmp/dbx.sql'", "CREATE PROCEDURE FROM '/tmp/dbx.sql'", "SELECT 1 FROM systables"]);
+  });
 });
 
 describe("statementRangeAtCursor", () => {

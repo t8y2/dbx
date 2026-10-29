@@ -714,7 +714,8 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
         const isOraclePlSql = typeof resolvedOraclePlSqlStatementEnd === "number";
         const isSapHanaScriptBlock = isSapHanaScriptBlockDatabase(databaseType) && statementStart !== -1 && startsWithSapHanaScriptBlock(sql.slice(statementStart, i));
         const isFirebirdRoutineBlock = isFirebirdRoutineBlockDatabase(databaseType) && statementStart !== -1 && startsWithFirebirdRoutineBlock(sql.slice(statementStart, i));
-        if (isOraclePlSql || isSapHanaScriptBlock || isFirebirdRoutineBlock) {
+        const isInformixRoutineBlock = isInformixRoutineBlockDatabase(databaseType) && statementStart !== -1 && startsWithInformixRoutineBlock(sql.slice(statementStart, i));
+        if (isOraclePlSql || isSapHanaScriptBlock || isFirebirdRoutineBlock || isInformixRoutineBlock) {
           markContent(i);
           if (isOraclePlSql && i + 1 < resolvedOraclePlSqlStatementEnd) {
             i += 1;
@@ -725,6 +726,10 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
             continue;
           }
           if (isFirebirdRoutineBlock && !firebirdRoutineBlockIsComplete(sql.slice(statementStart, i + 1))) {
+            i += 1;
+            continue;
+          }
+          if (isInformixRoutineBlock && !informixRoutineBlockIsComplete(sql.slice(statementStart, i + 1))) {
             i += 1;
             continue;
           }
@@ -855,6 +860,7 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
   if (keepsOracleStyleBlockTogether(statement.sql, databaseType, parameterOptions)) return [statement];
   if (isSapHanaScriptBlockStatement(statement.sql, databaseType)) return [statement];
   if (isFirebirdRoutineBlockStatement(statement.sql, databaseType)) return [statement];
+  if (isInformixRoutineBlockStatement(statement.sql, databaseType)) return [statement];
   // Routine bodies contain top-level-looking SET/INSERT/SELECT lines that are not independent statements.
   if (isMysqlRoutineBlockDatabase(databaseType) && startsWithMysqlRoutineBlock(statement.sql, parameterOptions)) return [statement];
   // SQL Server control-flow batches use line-oriented BEGIN/EXEC tokens inside one IF/ELSE statement.
@@ -2120,6 +2126,15 @@ function isFirebirdRoutineBlockStatement(sql: string, databaseType?: DatabaseTyp
   return isFirebirdRoutineBlockDatabase(databaseType) && startsWithFirebirdRoutineBlock(sql);
 }
 
+function isInformixRoutineBlockDatabase(databaseType?: DatabaseType): boolean {
+  // GBase 8s is Informix-derived and accepts the same SPL routine syntax.
+  return databaseType === "informix" || databaseType === "gbase8s";
+}
+
+function isInformixRoutineBlockStatement(sql: string, databaseType?: DatabaseType): boolean {
+  return isInformixRoutineBlockDatabase(databaseType) && startsWithInformixRoutineBlock(sql);
+}
+
 function isMysqlRoutineBlockDatabase(databaseType?: DatabaseType): boolean {
   return !!databaseType && MYSQL_ROUTINE_BLOCK_DATABASES.has(databaseType);
 }
@@ -2584,6 +2599,47 @@ function firebirdRoutineBlockIsComplete(sql: string): boolean {
   }
 
   return sawBegin && blockDepth === 0 && caseDepth === 0 && tokens[tokens.length - 1]?.kind === "semicolon";
+}
+
+/**
+ * Informix SPL routines (`CREATE [OR REPLACE] [DBA] FUNCTION|PROCEDURE ... END
+ * FUNCTION|PROCEDURE`) list their body statements separated by semicolons, so the
+ * whole block must stay one executable statement. External routines share the
+ * same `END FUNCTION`/`END PROCEDURE` terminator, so every Informix routine block
+ * is recognized here.
+ */
+function informixRoutineObjectType(sql: string): "FUNCTION" | "PROCEDURE" | null {
+  const words = oraclePlSqlWords(sql);
+  if (words[0] !== "CREATE") return null;
+  let index = 1;
+  if (words[index] === "OR" && words[index + 1] === "REPLACE") index += 2;
+  if (words[index] === "DBA") index += 1;
+  const objectType = words[index];
+  if (objectType !== "FUNCTION" && objectType !== "PROCEDURE") return null;
+  // `CREATE FUNCTION FROM 'file'` / `CREATE PROCEDURE FROM 'file'` import a
+  // routine definition; they end at their own semicolon instead of waiting for
+  // an END FUNCTION/END PROCEDURE terminator.
+  if (words[index + 1] === "FROM") return null;
+  return objectType;
+}
+
+function startsWithInformixRoutineBlock(sql: string): boolean {
+  return informixRoutineObjectType(sql) !== null;
+}
+
+function informixRoutineBlockIsComplete(sql: string): boolean {
+  const objectType = informixRoutineObjectType(sql);
+  if (!objectType) return false;
+  const tokens = oraclePlSqlTokens(sql);
+  if (tokens[tokens.length - 1]?.kind !== "semicolon") return false;
+  // `END FUNCTION`/`END PROCEDURE` may be followed by a DOCUMENT / WITH LISTING IN
+  // clause before the statement terminator, so only the pair has to appear.
+  for (let index = 0; index + 1 < tokens.length; index += 1) {
+    if (tokens[index].kind === "word" && tokens[index].value === "END" && tokens[index + 1].kind === "word" && tokens[index + 1].value === objectType) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function oraclePlSqlBlockEnd(sql: string): number | null {

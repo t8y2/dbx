@@ -2340,6 +2340,12 @@ export default withEnglishFallback({
     oracleLegacyCharset: "ความเข้ากันได้ของการเข้ารหัสเดิม",
     oracleLegacyCharsetDisabled: "ค่าเริ่มต้น (แนะนำ)",
     oracleLegacyCharsetHint: "ใช้เฉพาะเมื่อข้อมูลเดิมในฐาน US7ASCII แสดงผิด ใช้ไดรเวอร์ Thin และเลือกการเข้ารหัสที่ตรวจสอบจากข้อมูลต้นฉบับแล้ว",
+    mqKafkaTlsCaCert: "ใบรับรอง CA (PEM)",
+    mqKafkaTlsClientCert: "ใบรับรองไคลเอนต์ (PEM)",
+    mqKafkaTlsClientKey: "คีย์ส่วนตัวของไคลเอนต์ (PEM)",
+    mqKafkaMtlsEnabled: "ใช้ใบรับรองไคลเอนต์ (mTLS)",
+    mqKafkaTlsClientCertPairRequired: "ต้องกรอกใบรับรองไคลเอนต์และคีย์ส่วนตัวเป็นคู่ หรือเว้นว่างทั้งสองรายการ",
+    mqKafkaMtlsHint: "เมื่อเลือกแล้ว ให้ระบุใบรับรองไคลเอนต์เพื่อยืนยันตัวตน; การกรอกเฉพาะใบรับรอง CA จะสามารถเชื่อมต่อ broker แบบ TLS ทางเดียวได้",
   },
   editor: {
     duckdbDraining: "Query DuckDB ก่อนหน้ายังหยุดไม่เสร็จ โปรดลองอีกครั้งในไม่ช้า",

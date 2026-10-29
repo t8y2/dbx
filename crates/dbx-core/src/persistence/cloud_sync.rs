@@ -1068,6 +1068,9 @@ fn clear_device_local_connection_paths(config: &mut ConnectionConfig) {
         DatabaseType::Cassandra => {
             clear_external_config_path_fields(config, "tls", &["truststore_path", "keystore_path"])
         }
+        DatabaseType::MessageQueue => {
+            clear_external_config_path_fields(config, "tls", &["ca_cert_path", "client_cert_path", "client_key_path"])
+        }
         _ => {}
     }
 }
@@ -1157,6 +1160,12 @@ fn preserve_local_transport_paths(remote: &mut ConnectionConfig, local: &Connect
             DatabaseType::Cassandra => {
                 preserve_external_config_path_fields(remote, local, "tls", &["truststore_path", "keystore_path"])
             }
+            DatabaseType::MessageQueue => preserve_external_config_path_fields(
+                remote,
+                local,
+                "tls",
+                &["ca_cert_path", "client_cert_path", "client_key_path"],
+            ),
             _ => {}
         }
     }
@@ -3422,13 +3431,13 @@ fn parent_collection_paths(remote_path: &str) -> Vec<String> {
 mod tests {
     use super::{
         apply_sensitive_payload, apply_sync_snapshot, build_sensitive_payload, build_sync_snapshot,
-        build_sync_snapshot_with_options, build_sync_snapshot_with_saved_secrets, decrypt_sensitive_payload,
-        describe_local_sync_state, encrypt_sensitive_payload, encrypt_snippet_snapshot, finalize_snippet_migration,
-        forget_webdav_sync_secrets_passphrase, gitee_snippet_payload, gitlab_instance_url, is_legacy_dbx_snapshot,
-        normalized_remote_path, parent_collection_paths, parse_legacy_dbx_snapshot, parse_snippet_snapshot,
-        prepare_legacy_snippet_snapshot, resolve_snippet_token, resolve_webdav_password,
-        resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup, save_snippet_sync_id,
-        save_snippet_sync_id_for_instance, save_snippet_token, save_webdav_password,
+        build_sync_snapshot_with_options, build_sync_snapshot_with_saved_secrets, clear_device_local_connection_paths,
+        decrypt_sensitive_payload, describe_local_sync_state, encrypt_sensitive_payload, encrypt_snippet_snapshot,
+        finalize_snippet_migration, forget_webdav_sync_secrets_passphrase, gitee_snippet_payload, gitlab_instance_url,
+        is_legacy_dbx_snapshot, normalized_remote_path, parent_collection_paths, parse_legacy_dbx_snapshot,
+        parse_snippet_snapshot, prepare_legacy_snippet_snapshot, preserve_local_transport_paths, resolve_snippet_token,
+        resolve_webdav_password, resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup,
+        save_snippet_sync_id, save_snippet_sync_id_for_instance, save_snippet_token, save_webdav_password,
         save_webdav_sync_secrets_preference, scrub_connection_secrets, snapshot_for_snippet_upload,
         snippet_file_content, snippet_provider_storage_key, snippet_response_id, snippet_saved_token_status,
         snippet_sync_settings, snippet_sync_settings_for_instance, validate_snippet_id,
@@ -3766,6 +3775,49 @@ mod tests {
             }
         }));
         config
+    }
+
+    fn kafka_mq_connection(id: &str) -> ConnectionConfig {
+        let mut config = postgres_connection(id, "");
+        config.name = "Kafka".to_string();
+        config.db_type = DatabaseType::MessageQueue;
+        config.port = 0;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "kafka",
+            "adminUrl": "",
+            "tls": {
+                "ca_cert_path": "/certs/ca-chain.pem",
+                "client_cert_path": "/certs/client.crt",
+                "client_key_path": "/certs/client.key"
+            }
+        }));
+        config
+    }
+
+    #[test]
+    fn kafka_tls_paths_are_cleared_from_sync_snapshot() {
+        let mut config = kafka_mq_connection("kafka");
+        clear_device_local_connection_paths(&mut config);
+        let tls = config.external_config.as_ref().and_then(|external| external.get("tls")).unwrap();
+        assert!(tls.get("ca_cert_path").is_none());
+        assert!(tls.get("client_cert_path").is_none());
+        assert!(tls.get("client_key_path").is_none());
+        // 密码类字段不存在、也不会被误伤（Kafka TLS 无密码）。
+        assert!(tls.get("truststore_password").is_none());
+    }
+
+    #[test]
+    fn kafka_tls_paths_survive_cloud_restore() {
+        // 远端快照在上传时已清空路径字段，但 tls section 本身保留为空对象，
+        // 恢复时据此把本机路径回填回去。
+        let mut remote = kafka_mq_connection("kafka");
+        remote.external_config = Some(serde_json::json!({ "systemKind": "kafka", "adminUrl": "", "tls": {} }));
+        let local = kafka_mq_connection("kafka");
+        preserve_local_transport_paths(&mut remote, &local);
+        let tls = remote.external_config.as_ref().and_then(|external| external.get("tls")).unwrap();
+        assert_eq!(tls["ca_cert_path"], "/certs/ca-chain.pem");
+        assert_eq!(tls["client_cert_path"], "/certs/client.crt");
+        assert_eq!(tls["client_key_path"], "/certs/client.key");
     }
 
     fn nacos_connection(id: &str, password: &str) -> ConnectionConfig {

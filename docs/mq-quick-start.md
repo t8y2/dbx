@@ -520,7 +520,24 @@ match mq_config.system_kind {
 ## 常见问题
 
 ### Q: 连接测试失败 "SSL certificate problem"
-A: 开发环境可设置 `tlsSkipVerify: true`，生产环境应配置正确的 CA 证书。
+A: 开发环境可设置 `tlsSkipVerify: true`，生产环境应配置正确的 CA 证书。Kafka 支持在下方 mTLS 条目中直接指定 PEM 证书文件。
+
+### Q: Kafka 双向认证（mTLS）如何配置？
+A: 在连接对话框 TLS 选项中填写三个 PEM 文件路径（也可通过文件浏览按钮选择），对应连接配置的 `tls` section：
+
+```json
+{
+  "tls": {
+    "ca_cert_path": "/certs/ca-chain.pem",
+    "client_cert_path": "/certs/client.crt",
+    "client_key_path": "/certs/client.key"
+  }
+}
+```
+
+- `ca_cert_path` 覆盖默认信任库，用于校验 broker 证书链；
+- `client_cert_path` + `client_key_path` 成对提供，用于 mTLS 客户端认证（kafka-clients >= 2.7，无需密码）；
+- 三个路径保存在本机，不会通过云同步复制到其他设备。
 
 ### Q: 权限不足 "Not authorized"
 A: 检查 token 是否有 `admin` 或相应的角色权限。

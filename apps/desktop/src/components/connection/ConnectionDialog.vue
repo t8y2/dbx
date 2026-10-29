@@ -144,6 +144,7 @@ import { savedMysqlTlsFormFields, supportsMysqlTlsOptions as mysqlTlsOptionsSupp
 import { copyDialogPasswordFieldValue, preventDialogDocumentSelectAll } from "@/lib/connection/dialogTextSelection";
 import { postgresLegacyTlsEnabled, postgresTlsModeForForm, setPostgresLegacyTlsEnabled } from "@/lib/connection/postgresTlsMode";
 import { buildMqKafkaConnectionExtra, mqKafkaConnectionTarget, resolveMqKafkaConnectionSource, type MqKafkaConnectionSource } from "@/lib/connection/mqKafkaConnection";
+import { buildKafkaTlsSection, kafkaTlsFromExternalConfig, type KafkaTlsConfig } from "@/lib/connection/kafkaTlsOptions";
 import { assertCompleteDatabaseCategories, databaseSelectionForCategory } from "@/lib/connection/databaseCategoryOptions";
 import { loadConnectionPickerView, saveConnectionPickerView, type DbPickerView } from "@/lib/connection/connectionPickerViewPreference";
 import { buildRocketMqConfig, hydrateRocketMqConfig, isRocketMqConfigValid, rocketMqConnectionTarget } from "@/lib/connection/rocketmqConfig";
@@ -1074,6 +1075,9 @@ const mqOauthAudience = ref("");
 const mqOauthScope = ref("");
 const mqTlsSkipVerify = ref(false);
 const mqPinnedVersion = ref(pinnedVersionToSelection(undefined));
+const kafkaTls = reactive<KafkaTlsConfig>(kafkaTlsFromExternalConfig(undefined));
+// mTLS 开关是派生态：由 cert/key 是否有值反推，不写入 external_config，旧连接零迁移。
+const mqKafkaMtlsEnabled = ref(false);
 const mqTokenSigningMode = ref<MqTokenSigningMode>("none");
 const mqTokenSigningKey = ref("");
 const MQ_DRIVER_LABELS: Record<MqSystemKind, string> = {
@@ -1117,6 +1121,22 @@ const mqKafkaSaslMechanismOptions = [
   { value: "SCRAM-SHA-256", label: "SCRAM-SHA-256" },
   { value: "SCRAM-SHA-512", label: "SCRAM-SHA-512" },
 ];
+const mqKafkaTlsVisible = computed(() => {
+  if (mqSystemKind.value !== "kafka") return false;
+  if (mqKafkaSecurityProtocol.value === "SSL" || mqKafkaSecurityProtocol.value === "SASL_SSL") return true;
+  if (mqKafkaSecurityProtocol.value !== MQ_KAFKA_SECURITY_PROTOCOL_AUTO) return false;
+  try {
+    // AUTO 协议下按 bootstrap 端口推断是否走 TLS；ZooKeeper 发现模式始终非 TLS。
+    return mqKafkaConnectionTarget({
+      connectionSource: mqKafkaConnectionSource.value,
+      bootstrapServers: mqKafkaBootstrapServers.value,
+      zookeeperServers: mqKafkaZooKeeperServers.value,
+      securityProtocol: "",
+    }).ssl;
+  } catch {
+    return false;
+  }
+});
 const nacosImplementation = ref<NacosImplementation>("nacos");
 // Nacos 2 and 3 expose different API planes. New connections must therefore
 // choose an explicit version instead of relying on endpoint-shape guessing.
@@ -1434,6 +1454,10 @@ function resetMqFields(config?: Partial<MqAdminConfig>) {
   mqKafkaKerberosServiceName.value = typeof properties["sasl.kerberos.service.name"] === "string" ? properties["sasl.kerberos.service.name"] : "kafka";
   mqKafkaKrb5ConfPath.value = typeof properties["java.security.krb5.conf"] === "string" ? properties["java.security.krb5.conf"] : "";
   mqTlsSkipVerify.value = !!config?.tlsSkipVerify;
+  // Kafka TLS PEM 路径来自顶层 tls section；无 config 时返回全空，顺带清空表单。
+  Object.assign(kafkaTls, kafkaTlsFromExternalConfig(config));
+  // 开关由 cert/key 反推：任一非空即勾选，兼容已存三字段的旧连接。
+  mqKafkaMtlsEnabled.value = !!(kafkaTls.client_cert_path.trim() || kafkaTls.client_key_path.trim());
   mqPinnedVersion.value = pinnedVersionToSelection(config?.pinnedVersion);
   const auth = (config?.auth || { kind: "none" }) as MqAuth;
   mqAuthKind.value = detectMqUiAuthKind({
@@ -2203,11 +2227,17 @@ function buildMqAdminConfig(): MqAdminConfig {
       }
     }
     if (Object.keys(properties).length) extra.properties = properties;
+    // TLS 区只在协议实际启用 TLS 时参与构建与校验（与表单显隐用同一判据）：
+    // PLAINTEXT 等场景下隐藏字段里的残留值不应触发误拦截，tls 也不落盘。
+    // 开关关闭时 cert/key 不落盘；半套配置在此硬拦截，错误沿 requireMqField 同一展示路径。
+    const kafkaTlsSection = mqKafkaTlsVisible.value ? buildKafkaTlsSection(kafkaTls, { clientCertEnabled: mqKafkaMtlsEnabled.value }) : { ok: true as const, tls: undefined };
+    if (!kafkaTlsSection.ok) throw new Error(t(kafkaTlsSection.messageKey));
     return {
       systemKind: mqSystemKind.value,
       adminUrl: "",
       auth: buildMqAuth(),
       tlsSkipVerify: mqTlsSkipVerify.value || undefined,
+      tls: kafkaTlsSection.tls,
       extra,
     };
   }
@@ -7304,6 +7334,23 @@ async function browseKafkaKerberosFile(target: "keytab" | "krb5") {
   }
 }
 
+async function browseKafkaTlsFile(target: "ca" | "clientCert" | "clientKey") {
+  if (isTauriRuntime()) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const titleKey = target === "ca" ? "connection.mqKafkaTlsCaCert" : target === "clientCert" ? "connection.mqKafkaTlsClientCert" : "connection.mqKafkaTlsClientKey";
+    const selected = await open({
+      title: t(titleKey),
+      multiple: false,
+      filters: [{ name: "PEM", extensions: ["crt", "cer", "pem", "key"] }],
+    });
+    if (selected && typeof selected === "string") {
+      if (target === "ca") kafkaTls.ca_cert_path = selected;
+      else if (target === "clientCert") kafkaTls.client_cert_path = selected;
+      else kafkaTls.client_key_path = selected;
+    }
+  }
+}
+
 async function browseDbFilePath() {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -8331,13 +8378,71 @@ function openExternalUrl(url: string) {
                         <Input v-model="mqOauthScope" class="col-span-3" />
                       </div>
                     </template>
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <!-- 跳过证书校验只在 Kafka TLS 协议下有意义，与下方 CA/mTLS 区共享可见性条件 -->
+                    <div v-if="mqSystemKind === 'kafka' && mqKafkaTlsVisible" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.mqTls") }}</Label>
                       <label class="col-span-3 inline-flex items-center gap-2">
                         <input type="checkbox" v-model="mqTlsSkipVerify" class="mr-0" />
                         <span class="text-sm text-muted-foreground">{{ t("connection.mqTlsSkipVerify") }}</span>
                       </label>
                     </div>
+                    <template v-if="mqSystemKind === 'kafka' && mqKafkaTlsVisible">
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelClass">{{ t("connection.mqKafkaTlsCaCert") }}</Label>
+                        <div class="col-span-3 flex items-center gap-1">
+                          <Input v-model="kafkaTls.ca_cert_path" class="flex-1" placeholder="/certs/ca-chain.pem" />
+                          <Tooltip v-if="isDesktop">
+                            <TooltipTrigger as-child>
+                              <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseKafkaTlsFile('ca')">
+                                <FolderOpen class="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{{ t("connection.mqKafkaTlsCaCert") }}</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </div>
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <span></span>
+                        <!-- 开关行：样式复用 redisSentinelTls checkbox 行；hint 段参照 mongo 的说明文字样式 -->
+                        <label class="col-span-3 inline-flex items-center gap-2">
+                          <input type="checkbox" v-model="mqKafkaMtlsEnabled" class="mr-0" />
+                          <span class="text-xs text-muted-foreground">{{ t("connection.mqKafkaMtlsEnabled") }}</span>
+                        </label>
+                      </div>
+                      <!-- hint 行：独立 grid 容器，第一列空 div 对齐 Label 列；Kerberos hint 行同结构 -->
+                      <div class="grid grid-cols-4 items-start gap-4">
+                        <div></div>
+                        <div class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.mqKafkaMtlsHint") }}</div>
+                      </div>
+                      <div v-if="mqKafkaMtlsEnabled" class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelClass">{{ t("connection.mqKafkaTlsClientCert") }}</Label>
+                        <div class="col-span-3 flex items-center gap-1">
+                          <Input v-model="kafkaTls.client_cert_path" class="flex-1" placeholder="/certs/client.crt" />
+                          <Tooltip v-if="isDesktop">
+                            <TooltipTrigger as-child>
+                              <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseKafkaTlsFile('clientCert')">
+                                <FolderOpen class="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{{ t("connection.mqKafkaTlsClientCert") }}</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </div>
+                      <div v-if="mqKafkaMtlsEnabled" class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelClass">{{ t("connection.mqKafkaTlsClientKey") }}</Label>
+                        <div class="col-span-3 flex items-center gap-1">
+                          <Input v-model="kafkaTls.client_key_path" class="flex-1" placeholder="/certs/client.key" />
+                          <Tooltip v-if="isDesktop">
+                            <TooltipTrigger as-child>
+                              <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseKafkaTlsFile('clientKey')">
+                                <FolderOpen class="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{{ t("connection.mqKafkaTlsClientKey") }}</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </div>
+                    </template>
                     <div v-if="mqSystemKind === 'pulsar'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.mqPinnedVersion") }}</Label>
                       <Select v-model="mqPinnedVersion">

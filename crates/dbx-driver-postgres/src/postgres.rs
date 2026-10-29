@@ -82,7 +82,7 @@ pub fn gaussdb_identifier_quote_for_compatibility_mode(compatibility_mode: &str)
 pub async fn opengauss_compatibility_mode(pool: &Pool) -> Result<Option<String>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let client = &EncodingClient::new(&client);
-    let row = postgres_query_one_cached(client, GAUSSDB_COMPATIBILITY_SQL, &[]).await.map_err(|e| e.to_string())?;
+    let row = postgres_query_one_cached(client, GAUSSDB_COMPATIBILITY_SQL, &[]).await.map_err(pg_error_to_string)?;
     Ok(row.try_get::<_, Option<String>>(0).ok().flatten().filter(|value| !value.trim().is_empty()))
 }
 
@@ -1557,17 +1557,17 @@ fn escape_tsvector_lexeme(value: &str) -> String {
 
 fn pg_error_to_string(err: impl Into<PgError>) -> String {
     let err = err.into();
-    let Some(db_error) = err.as_db_error() else {
-        return err.to_string();
-    };
-    let mut message = db_error.to_string();
-    // Carry the server-reported cursor position across the `db` layer's
-    // `Result<_, String>` boundary; `query.rs` resolves it against the executed
-    // statement and strips the suffix before the message reaches any client.
-    if let Some(tokio_postgres::error::ErrorPosition::Original(cursor)) = db_error.position() {
-        message.push_str(&crate::sql_error_position::encode_marker(*cursor));
+    if let Some(db_error) = err.as_db_error() {
+        let mut message = db_error.to_string();
+        // Carry the server-reported cursor position across the `db` layer's
+        // `Result<_, String>` boundary; `query.rs` resolves it against the executed
+        // statement and strips the suffix before the message reaches any client.
+        if let Some(tokio_postgres::error::ErrorPosition::Original(cursor)) = db_error.position() {
+            message.push_str(&crate::sql_error_position::encode_marker(*cursor));
+        }
+        return message;
     }
-    message
+    error_with_sources_to_string(&err)
 }
 
 /// Same as [`pg_error_to_string`] but never carries a cursor position.
@@ -1577,7 +1577,10 @@ fn pg_error_to_string(err: impl Into<PgError>) -> String {
 /// be resolved against the user's SQL and point at the wrong place.
 fn pg_error_to_string_plain(err: impl Into<PgError>) -> String {
     let err = err.into();
-    err.as_db_error().map(ToString::to_string).unwrap_or_else(|| err.to_string())
+    if let Some(db_error) = err.as_db_error() {
+        return db_error.to_string();
+    }
+    error_with_sources_to_string(&err)
 }
 
 /// Tries each SQL tier in `tiers` in order (most-capable first), via `run`,
@@ -1816,7 +1819,11 @@ fn pg_pool_error_to_string(err: PoolError) -> String {
 }
 
 fn should_retry_postgres_text_query(err: &PgError) -> bool {
-    let message = err.as_db_error().map(ToString::to_string).unwrap_or_else(|| err.to_string()).to_ascii_lowercase();
+    let message = err
+        .as_db_error()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| error_with_sources_to_string(err))
+        .to_ascii_lowercase();
     should_retry_postgres_text_query_message(&message)
 }
 
@@ -1834,7 +1841,8 @@ fn should_retry_postgres_stale_cache(err: &PgError) -> bool {
             db_error.message(),
         );
     }
-    should_retry_postgres_stale_cache_fields(None, None, &err.to_string())
+    let message = error_with_sources_to_string(err);
+    should_retry_postgres_stale_cache_fields(None, None, &message)
 }
 
 fn should_retry_postgres_stale_cache_fields(sqlstate: Option<&str>, routine: Option<&str>, message: &str) -> bool {
@@ -1850,7 +1858,8 @@ fn should_fallback_postgres_missing_prepared_statement(err: &PgError) -> bool {
             db_error.message(),
         );
     }
-    should_fallback_postgres_missing_prepared_statement_fields(None, &err.to_string())
+    let message = error_with_sources_to_string(err);
+    should_fallback_postgres_missing_prepared_statement_fields(None, &message)
 }
 
 fn should_fallback_postgres_missing_prepared_statement_fields(sqlstate: Option<&str>, message: &str) -> bool {
@@ -3932,7 +3941,7 @@ fn database_storage_sql() -> &'static str {
 pub async fn list_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let client = &EncodingClient::new(&client);
-    let rows = postgres_query_cached(client, list_databases_sql(), &[]).await.map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(client, list_databases_sql(), &[]).await.map_err(pg_error_to_string)?;
 
     Ok(rows.iter().map(|row| DatabaseInfo { name: pg_row_try_string(row, 0), ..Default::default() }).collect())
 }
@@ -3943,7 +3952,7 @@ pub async fn list_opengauss_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, 
     let rows = match postgres_query_cached(client, list_opengauss_databases_sql(), &[]).await {
         Ok(rows) => rows,
         Err(primary_error) => {
-            let primary_error = primary_error.to_string();
+            let primary_error = pg_error_to_string(primary_error);
             return postgres_query_cached(client, list_databases_sql(), &[])
                 .await
                 .map(|rows| {
@@ -3952,6 +3961,7 @@ pub async fn list_opengauss_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, 
                         .collect()
                 })
                 .map_err(|fallback_error| {
+                    let fallback_error = pg_error_to_string(fallback_error);
                     format!(
                         "openGauss database compatibility lookup failed: {primary_error}; database list fallback failed: {fallback_error}"
                     )
@@ -17573,6 +17583,109 @@ mod tests {
         );
         let other_schema = format!("CREATE OR REPLACE PROCEDURE other.p1{body}");
         assert_eq!(strip_routine_schema_qualifier(&other_schema, "cux"), other_schema);
+    }
+
+    #[test]
+    fn pg_error_to_string_preserves_underlying_sources_when_as_db_error_is_none() {
+        // The `port=invalid` config error chain is: "invalid connection
+        // string" caused by "invalid value for option `port`" — this
+        // tokio-postgres version does not expose the integer parse error as
+        // a deeper source, so assert the chain we actually get, joined.
+        let err = tokio_postgres::Config::from_str("port=invalid").unwrap_err();
+        let formatted = pg_error_to_string(err);
+        assert_eq!(
+            formatted, "invalid connection string: invalid value for option `port`",
+            "formatted error should chain all sources: {formatted}"
+        );
+
+        let err2 = tokio_postgres::Config::from_str("port=invalid").unwrap_err();
+        let plain = pg_error_to_string_plain(err2);
+        assert_eq!(
+            plain, "invalid connection string: invalid value for option `port`",
+            "plain formatted error should chain all sources: {plain}"
+        );
+    }
+
+    #[test]
+    fn error_with_sources_to_string_deduplicates_and_chains_all_levels() {
+        #[derive(Debug)]
+        struct TestCustomError {
+            msg: &'static str,
+            source: Option<Box<dyn std::error::Error + 'static>>,
+        }
+        impl std::fmt::Display for TestCustomError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.msg)
+            }
+        }
+        impl std::error::Error for TestCustomError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.source.as_deref()
+            }
+        }
+
+        let inner = TestCustomError { msg: "`V` field contained an invalid value", source: None };
+        let middle = TestCustomError { msg: "error parsing response from server", source: Some(Box::new(inner)) };
+        let outer = TestCustomError { msg: "error parsing response from server", source: Some(Box::new(middle)) };
+
+        assert_eq!(
+            error_with_sources_to_string(&outer),
+            "error parsing response from server: `V` field contained an invalid value"
+        );
+    }
+
+    #[tokio::test]
+    async fn pg_error_to_string_surfaces_server_error_even_with_non_standard_v_severity() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // NoTls skips the SSLRequest handshake, so the first message is
+            // the StartupMessage itself: read its length, then its body.
+            // (Reading an 8-byte SSLRequest first and replying 'N' hangs:
+            // the client is waiting for a framed message, not a bare byte.)
+            let mut len_bytes = [0u8; 4];
+            socket.read_exact(&mut len_bytes).await.unwrap();
+            let len = u32::from_be_bytes(len_bytes) as usize;
+            let mut startup_body = vec![0u8; len - 4];
+            socket.read_exact(&mut startup_body).await.unwrap();
+
+            // Send ErrorResponse message with invalid 'V' field
+            // 'E' + length (4 bytes) + fields + '\0'
+            let mut payload = Vec::new();
+            payload.push(b'S');
+            payload.extend_from_slice(b"ERROR\0");
+            payload.push(b'V');
+            payload.extend_from_slice(b"NON_STANDARD_SEVERITY\0");
+            payload.push(b'C');
+            payload.extend_from_slice(b"42P01\0");
+            payload.push(b'M');
+            payload.extend_from_slice(b"relation does not exist\0");
+            payload.push(0); // delimiter
+
+            let total_len = (payload.len() + 4) as u32;
+            let mut msg = Vec::new();
+            msg.push(b'E');
+            msg.extend_from_slice(&total_len.to_be_bytes());
+            msg.extend_from_slice(&payload);
+
+            socket.write_all(&msg).await.unwrap();
+        });
+
+        let config = format!("host=127.0.0.1 port={port} user=postgres dbname=test connect_timeout=3");
+        let client_err = match tokio_postgres::connect(&config, tokio_postgres::NoTls).await {
+            Ok(_) => panic!("connection must fail"),
+            Err(err) => err,
+        };
+
+        let formatted = pg_error_to_string(client_err);
+        assert_eq!(
+            formatted, "ERROR: relation does not exist",
+            "formatted error should surface the actual server message: {formatted}"
+        );
+
+        server.await.unwrap();
     }
 }
 

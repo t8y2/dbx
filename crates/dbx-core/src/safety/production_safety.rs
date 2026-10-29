@@ -899,6 +899,7 @@ mod tests {
             username: "root".to_string(),
             password: String::new(),
             database: None,
+            auth_method: None,
             default_schema: None,
             visible_databases: None,
             visible_database_patterns: None,

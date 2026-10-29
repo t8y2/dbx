@@ -341,6 +341,59 @@ fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(MAX_ROWS).max(1)
 }
 
+/// How the TDS login authenticates to SQL Server.
+///
+/// The Windows variants only exist when the crate is built with `windows-auth`
+/// on a Windows target; every other build rejects them with a platform message
+/// rather than silently falling back to SQL authentication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SqlServerAuthMode<'a> {
+    /// SQL Server login (`sa`, an application login, ...).
+    Sql { user: &'a str, pass: &'a str },
+    /// Authenticate as the Windows user running the DBX process (SSPI).
+    WindowsIntegrated,
+    /// Authenticate with explicit Windows credentials. `user` is a plain account
+    /// name or `DOMAIN\\user`; tiberius splits the domain when present.
+    Windows { user: &'a str, pass: &'a str },
+}
+
+impl SqlServerAuthMode<'_> {
+    /// Resolves the tiberius auth method, or a platform error when a Windows
+    /// mode was requested on a build without SSPI support.
+    fn resolve(self) -> Result<AuthMethod, String> {
+        match self {
+            SqlServerAuthMode::Sql { user, pass } => Ok(AuthMethod::sql_server(user, pass)),
+            SqlServerAuthMode::WindowsIntegrated => windows_integrated_auth(),
+            SqlServerAuthMode::Windows { user, pass } => windows_credentials_auth(user, pass),
+        }
+    }
+}
+
+#[cfg(all(windows, feature = "windows-auth"))]
+fn windows_integrated_auth() -> Result<AuthMethod, String> {
+    Ok(AuthMethod::Integrated)
+}
+
+#[cfg(not(all(windows, feature = "windows-auth")))]
+fn windows_integrated_auth() -> Result<AuthMethod, String> {
+    Err(SQLSERVER_WINDOWS_AUTH_PLATFORM_ERROR.to_string())
+}
+
+#[cfg(all(windows, feature = "windows-auth"))]
+fn windows_credentials_auth(user: &str, pass: &str) -> Result<AuthMethod, String> {
+    Ok(AuthMethod::windows(user, pass))
+}
+
+#[cfg(not(all(windows, feature = "windows-auth")))]
+fn windows_credentials_auth(_user: &str, _pass: &str) -> Result<AuthMethod, String> {
+    Err(SQLSERVER_WINDOWS_AUTH_PLATFORM_ERROR.to_string())
+}
+
+#[cfg(not(all(windows, feature = "windows-auth")))]
+const SQLSERVER_WINDOWS_AUTH_PLATFORM_ERROR: &str =
+    "Windows authentication requires DBX to run on Windows. Connect to this SQL Server with SQL Server
+     authentication, or run the desktop app on Windows.";
+
 pub async fn connect(
     host: &str,
     port: u16,
@@ -350,7 +403,8 @@ pub async fn connect(
     url_params: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
-    connect_with_port_explicit(host, port, false, user, pass, database, url_params, timeout).await
+    connect_with_port_explicit(host, port, false, SqlServerAuthMode::Sql { user, pass }, database, url_params, timeout)
+        .await
 }
 
 /// Connect with an explicit port flag and optional JDBC-style URL params.
@@ -362,25 +416,22 @@ pub async fn connect_with_port_explicit(
     host: &str,
     port: u16,
     port_explicit: bool,
-    user: &str,
-    pass: &str,
+    auth: SqlServerAuthMode<'_>,
     database: Option<&str>,
     url_params: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
     if sqlserver_native_encryption_disabled(url_params) {
         let skipped = "encryption was disabled by encrypt=false / sqlserverEncryption=disabled".to_string();
-        return try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
+        return try_connect_legacy_sqlserver_encryption(host, port, port_explicit, auth, database, timeout)
             .await
             .map_err(|fallback_errors| sqlserver_connect_failure_message(&skipped, &fallback_errors));
     }
 
-    match try_connect(host, port, port_explicit, user, pass, database, tiberius::EncryptionLevel::Required, timeout)
-        .await
-    {
+    match try_connect(host, port, port_explicit, auth, database, tiberius::EncryptionLevel::Required, timeout).await {
         Ok(client) => Ok(client),
         Err(encrypted_error) => {
-            try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
+            try_connect_legacy_sqlserver_encryption(host, port, port_explicit, auth, database, timeout)
                 .await
                 .map_err(|fallback_errors| sqlserver_connect_failure_message(&encrypted_error, &fallback_errors))
         }
@@ -474,14 +525,13 @@ async fn try_connect_legacy_sqlserver_encryption(
     host: &str,
     port: u16,
     port_explicit: bool,
-    user: &str,
-    pass: &str,
+    auth: SqlServerAuthMode<'_>,
     database: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, Vec<(&'static str, String)>> {
     let mut errors = Vec::new();
     for (label, encryption) in SQLSERVER_LEGACY_ENCRYPTION_FALLBACKS {
-        match try_connect(host, port, port_explicit, user, pass, database, encryption, timeout).await {
+        match try_connect(host, port, port_explicit, auth, database, encryption, timeout).await {
             Ok(client) => return Ok(client),
             Err(error) => errors.push((label, error)),
         }
@@ -512,12 +562,14 @@ async fn try_connect(
     host: &str,
     port: u16,
     port_explicit: bool,
-    user: &str,
-    pass: &str,
+    auth: SqlServerAuthMode<'_>,
     database: Option<&str>,
     encryption: tiberius::EncryptionLevel,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
+    // Resolve the auth method once so a Windows-auth request on a non-Windows
+    // build fails immediately instead of degrading to SQL authentication.
+    let auth_method = auth.resolve()?;
     let deadline = tokio::time::Instant::now() + timeout;
     let (mut current_host, parsed_port) = dbx_types::models::connection::normalize_sqlserver_host_port(host);
     let mut current_port = parsed_port.unwrap_or(port);
@@ -535,7 +587,7 @@ async fn try_connect(
         } else {
             config.port(current_port);
         }
-        config.authentication(AuthMethod::sql_server(user, pass));
+        config.authentication(auth_method.clone());
         if let Some(db) = database {
             config.database(db);
         }
@@ -4457,6 +4509,39 @@ fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::SqlServerAuthMode;
+    #[cfg(not(all(windows, feature = "windows-auth")))]
+    use super::{windows_credentials_auth, windows_integrated_auth};
+
+    #[test]
+    fn sql_auth_mode_resolves_without_any_platform_gate() {
+        let method = SqlServerAuthMode::Sql { user: "sa", pass: "secret" }.resolve();
+        assert!(method.is_ok());
+    }
+
+    /// Windows auth is only usable on a Windows build with `windows-auth`
+    /// enabled. Everywhere else the driver must refuse instead of silently
+    /// degrading to SQL authentication.
+    #[cfg(not(all(windows, feature = "windows-auth")))]
+    #[test]
+    fn windows_auth_modes_report_a_platform_error_without_windows_support() {
+        for error in [SqlServerAuthMode::WindowsIntegrated.resolve(), windows_integrated_auth()] {
+            let error = error.expect_err("Windows integrated auth must be rejected");
+            assert!(error.contains("requires DBX to run on Windows"), "{error}");
+        }
+        assert!(windows_credentials_auth("user", "secret").is_err());
+        assert!(SqlServerAuthMode::Windows { user: "user", pass: "secret" }.resolve().is_err());
+    }
+
+    #[cfg(all(windows, feature = "windows-auth"))]
+    #[test]
+    fn windows_auth_modes_resolve_on_windows() {
+        assert!(SqlServerAuthMode::WindowsIntegrated.resolve().is_ok());
+        assert!(SqlServerAuthMode::Windows { user: "DOMAIN\\user", pass: "secret" }.resolve().is_ok());
+        // A plain account name without a domain is accepted too.
+        assert!(SqlServerAuthMode::Windows { user: "user", pass: "secret" }.resolve().is_ok());
+    }
+
     #[test]
     fn row_limit_stopping_only_accepts_single_read_queries() {
         for sql in [
@@ -5320,8 +5405,7 @@ mod tests {
             "127.0.0.1",
             hop1_port,
             true,
-            "sa",
-            "password",
+            super::SqlServerAuthMode::Sql { user: "sa", pass: "password" },
             None,
             tiberius::EncryptionLevel::NotSupported,
             Duration::from_secs(3),
@@ -5381,8 +5465,7 @@ mod tests {
             "127.0.0.1",
             port1,
             true,
-            "sa",
-            "password",
+            super::SqlServerAuthMode::Sql { user: "sa", pass: "password" },
             None,
             tiberius::EncryptionLevel::NotSupported,
             Duration::from_secs(3),
@@ -5423,8 +5506,7 @@ mod tests {
             "127.0.0.1",
             hop1_port,
             true,
-            "sa",
-            "password",
+            super::SqlServerAuthMode::Sql { user: "sa", pass: "password" },
             None,
             tiberius::EncryptionLevel::NotSupported,
             Duration::from_secs(3),

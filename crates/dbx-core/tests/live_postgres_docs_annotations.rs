@@ -33,6 +33,7 @@ fn live_postgres_config(
         username: user.to_string(),
         password: password.to_string(),
         database: Some(database.to_string()),
+        auth_method: None,
         default_schema: None,
         visible_databases: None,
         visible_database_patterns: None,

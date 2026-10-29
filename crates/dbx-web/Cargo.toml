@@ -19,6 +19,9 @@ system-fonts = ["dbx-core/system-fonts"]
 # path; the web server never executes manual transactions, so it stays off by
 # default here.
 sqlserver-native-attention = ["dbx-core/sqlserver-native-attention"]
+# SQL Server Windows authentication (SSPI). Inert on non-Windows targets; a web
+# server on Linux only reports a clear platform error for these connections.
+sqlserver-windows-auth = ["dbx-core/sqlserver-windows-auth"]
 # Embed the frontend build output (../../dist) into the binary. When enabled
 # and DBX_STATIC_DIR is not set, the embedded files are served by default.
 # Requires the frontend to have been built before invoking cargo.

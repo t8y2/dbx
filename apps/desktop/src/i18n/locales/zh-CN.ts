@@ -9029,6 +9029,7 @@ export default withEnglishFallback({
     includeDefault: "包含默认值",
     includeNull: "包含 NULL",
     unique: "设置唯一",
+    partitionValuesUnsupported: "无法为表 {table} 的分区键（{expression}）安全造数。请检查分区定义和生成器配置：请求的值可能超出已有分区范围，或分区表达式暂不支持自动推导。",
     uniqueExhausted: "无法在 {attempts} 次尝试内为表 {table} 的字段 {column} 生成不重复值，请增大可选值范围或减少生成行数。",
     disableLinks: "禁用字段之间的数据链接",
     imageMode: "模式",

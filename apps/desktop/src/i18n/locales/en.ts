@@ -9063,6 +9063,7 @@ export default {
     includeDefault: "Include DEFAULT",
     includeNull: "Include NULL",
     unique: "Set unique",
+    partitionValuesUnsupported: "Cannot safely generate values for {table} partition key ({expression}). Check the partition definition and generator settings; the requested values may exceed existing partitions or use an unsupported partition expression.",
     uniqueExhausted: "Could not generate a distinct value for {table}.{column} within {attempts} attempts. Increase the available value range or generate fewer rows.",
     disableLinks: "Disable data links between columns",
     imageMode: "Mode",

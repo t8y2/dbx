@@ -553,6 +553,7 @@ mod tests {
             retain_source: false,
             conflict_policy: None,
             skip_duplicate_rows: false,
+            continue_on_error: false,
         };
         let summary = import_table_file_core(
             &state,

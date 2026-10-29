@@ -90,6 +90,29 @@ function foldedRangeCount(view: EditorView): number {
 }
 
 describe("QueryEditor component split integration", () => {
+  it("renders and remains editable when completion prefetch is enabled across scope changes", async () => {
+    const { host, view, props, connectionStore } = await mountEditor({ prefetchCompletion: true });
+    expect(host.querySelector(".cm-content")?.textContent).toContain("SELECT 1;");
+    const prefetch = vi.spyOn(connectionStore, "listCompletionTables").mockResolvedValue([]);
+    props.connectionId = "prefetch-test";
+    props.database = "demo";
+    await nextTick();
+    expect(prefetch).toHaveBeenCalled();
+    props.database = "updated";
+    props.catalog = "catalog";
+    props.schema = "public";
+    await nextTick();
+    expect(prefetch).toHaveBeenLastCalledWith("prefetch-test", "updated", "", expect.any(Number), undefined, false, "public", "catalog", { activateConnection: false });
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "\nSELECT 3;" } });
+    await vi.waitFor(() => expect(props.modelValue).toContain("SELECT 3;"));
+    expect(host.querySelector(".cm-editor")).toBe(view.dom);
+    prefetch.mockClear();
+    props.prefetchCompletion = false;
+    props.database = "disabled";
+    await nextTick();
+    expect(prefetch).not.toHaveBeenCalled();
+  });
+
   it("keeps composing Vim navigation and committed IME text out of the SQL model", async () => {
     const { view, props } = await mountEditor({}, true);
     const original = props.modelValue;

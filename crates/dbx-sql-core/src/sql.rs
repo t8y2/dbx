@@ -711,6 +711,8 @@ pub struct SqlStatementSplitter {
     pending_mysql_line_comment_dashes: bool,
     /// Open Oracle `q'...'` literal, if any.
     oracle_q_quote: OracleQQuoteState,
+    /// PL/SQL block state of the buffered statement, advanced at each `;`.
+    oracle_block: OraclePlSqlBlockTracker,
     custom_delimiter: Option<String>,
     stop_on_error: bool,
     pending_psql_command: Option<String>,
@@ -967,10 +969,10 @@ impl SqlStatementSplitter {
                             self.buffer.push(ch);
                         }
                     } else if !self.postgres_dollar_quoted_routine
-                        && keeps_oracle_style_block_together(self.options, &self.buffer)
+                        && self.oracle_block.keeps_block_together(self.options, &self.buffer)
                     {
                         self.buffer.push(ch);
-                        if oracle_plsql_block_is_complete(&self.buffer) {
+                        if self.oracle_block.is_complete(&self.buffer) {
                             self.push_current_statement(&mut statements);
                         }
                     } else if self.options.profile.supports_hana_script_blocks
@@ -1062,6 +1064,7 @@ impl SqlStatementSplitter {
                             });
                         }
                         self.buffer.clear();
+                        self.oracle_block.reset();
                         self.postgres_dollar_quoted_routine = false;
                         self.previous = None;
                         i += 1;
@@ -1089,6 +1092,7 @@ impl SqlStatementSplitter {
                             }
                         }
                         self.buffer.clear();
+                        self.oracle_block.reset();
                         self.postgres_dollar_quoted_routine = false;
                         self.previous = None;
                         i += 1;
@@ -1178,6 +1182,7 @@ impl SqlStatementSplitter {
             statements.push(SqlStatementWithControl { sql: statement.to_string(), stop_on_error: self.stop_on_error });
         }
         self.buffer.clear();
+        self.oracle_block.reset();
         self.postgres_dollar_quoted_routine = false;
         self.previous = None;
         self.pending_mysql_line_comment_dashes = false;
@@ -1553,6 +1558,8 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
     let mut custom_delimiter: Option<String> = None;
     let mut single_quote_escape_string = false;
     let mut postgres_dollar_quoted_routine = false;
+    let mut oracle_block = OraclePlSqlBlockTracker::default();
+    let mut oracle_block_start = 0;
 
     while i < sql.len() {
         if let Some(tag) = &dollar_quote_tag {
@@ -1706,10 +1713,14 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                     }
                     push_statement_range(&mut ranges, sql, start, i, options);
                 } else {
+                    if oracle_block_start != start {
+                        oracle_block.reset();
+                        oracle_block_start = start;
+                    }
                     let is_oracle_plsql =
-                        !postgres_dollar_quoted_routine && keeps_oracle_style_block_together(options, &sql[start..i]);
+                        !postgres_dollar_quoted_routine && oracle_block.keeps_block_together(options, &sql[start..i]);
                     if is_oracle_plsql {
-                        if !oracle_plsql_block_is_complete(&sql[start..i + ch.len_utf8()]) {
+                        if !oracle_block.is_complete(&sql[start..i + ch.len_utf8()]) {
                             i += ch.len_utf8();
                             continue;
                         }
@@ -3907,6 +3918,168 @@ impl FirebirdRoutineBlock {
     }
 }
 
+/// The BEGIN/END scope walk behind [`OraclePlSqlBlock::is_complete`], kept resumable so
+/// [`OraclePlSqlBlockTracker`] only walks the tokens added since its previous check.
+#[derive(Debug, Clone)]
+struct OraclePlSqlBlockWalk {
+    object_kind: Option<OraclePlSqlCreateObjectKind>,
+    scopes: Vec<OraclePlSqlScope>,
+    awaiting_routine_declarations: bool,
+    saw_begin: bool,
+    complete: bool,
+    next_index: usize,
+}
+
+impl OraclePlSqlBlockWalk {
+    fn new(block: &OraclePlSqlBlock) -> Self {
+        // Package/type specifications have declarations and an outer END with
+        // no BEGIN. Bodies also own an outer END beyond nested routine END
+        // pairs so an inner END cannot finish the object.
+        let object_kind = block.create_object_kind();
+        let scopes = match object_kind {
+            Some(OraclePlSqlCreateObjectKind::Body | OraclePlSqlCreateObjectKind::Spec) => {
+                vec![OraclePlSqlScope::Object]
+            }
+            None => Vec::new(),
+        };
+        Self {
+            object_kind,
+            scopes,
+            // A stored PROCEDURE/FUNCTION has no DECLARE keyword: its declare section
+            // starts right after its own IS/AS. Opening it there lets a local subprogram
+            // own its BEGIN ... END instead of ending the routine.
+            awaiting_routine_declarations: block.is_create_routine(),
+            saw_begin: false,
+            complete: false,
+            next_index: 0,
+        }
+    }
+
+    fn advance(&mut self, tokens: &[OraclePlSqlToken]) {
+        while self.next_index < tokens.len() {
+            self.step(tokens, self.next_index);
+            self.next_index += 1;
+        }
+    }
+
+    fn step(&mut self, tokens: &[OraclePlSqlToken], index: usize) {
+        let token = &tokens[index];
+        let scopes = &mut self.scopes;
+        if token.is_semicolon() {
+            if matches!(scopes.last(), Some(OraclePlSqlScope::RoutineHeader)) {
+                scopes.pop();
+            }
+            return;
+        }
+
+        if self.awaiting_routine_declarations && token.is_any_word(&["IS", "AS"]) {
+            self.awaiting_routine_declarations = false;
+            scopes.push(OraclePlSqlScope::Declaration);
+        } else if token.is_word("DECLARE") {
+            if !matches!(scopes.last(), Some(OraclePlSqlScope::Declaration)) {
+                scopes.push(OraclePlSqlScope::Declaration);
+            }
+        } else if token.is_any_word(&["PROCEDURE", "FUNCTION"])
+            && matches!(scopes.last(), Some(OraclePlSqlScope::Declaration | OraclePlSqlScope::Routine))
+        {
+            scopes.push(OraclePlSqlScope::RoutineHeader);
+        } else if token.is_any_word(&["IS", "AS"]) && matches!(scopes.last(), Some(OraclePlSqlScope::RoutineHeader)) {
+            *scopes.last_mut().unwrap() = OraclePlSqlScope::Routine;
+        } else if token.is_word("BEGIN") {
+            // A local routine's BEGIN belongs to that routine, not to the outer block.
+            if matches!(scopes.last(), Some(OraclePlSqlScope::Declaration | OraclePlSqlScope::Routine)) {
+                *scopes.last_mut().unwrap() = OraclePlSqlScope::Block;
+            } else {
+                scopes.push(OraclePlSqlScope::Block);
+            }
+            self.saw_begin = true;
+            self.complete = false;
+        } else if token.is_word("CASE") {
+            // Both CASE expressions and CASE statements own an END.
+            // The CASE token that follows END CASE is a suffix, not a scope start.
+            // Require source adjacency: `end ), (case` must open a new CASE scope.
+            if previous_adjacent_word(tokens, index) != Some("END") {
+                scopes.push(OraclePlSqlScope::Case);
+            }
+        } else if token.is_word("END") {
+            let next = next_adjacent_word(tokens, index);
+            if matches!(next, Some("IF" | "LOOP")) {
+                return;
+            }
+            if matches!(next, Some("CASE")) && !matches!(scopes.last(), Some(OraclePlSqlScope::Case)) {
+                return;
+            }
+            if scopes.pop().is_some() {
+                self.complete = scopes.is_empty();
+            }
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        match self.object_kind {
+            // Package/type objects complete on their outer END [name]; a package
+            // body may omit an initialization BEGIN when it has no executable
+            // initialization section.
+            Some(OraclePlSqlCreateObjectKind::Body | OraclePlSqlCreateObjectKind::Spec) => self.complete,
+            _ => self.saw_begin && self.complete,
+        }
+    }
+}
+
+/// Incremental [`keeps_oracle_style_block_together`] and [`oracle_plsql_block_is_complete`]
+/// for a statement that the splitters grow one statement-level `;` at a time. Re-tokenizing
+/// the whole statement at every inner `;` made splitting a large package body quadratic: a
+/// 370 KB DM8 package body spent minutes in the splitter before reaching the server (#13450).
+///
+/// The splitters only consult it at a `;` outside quotes and comments, so tokenizing the
+/// statement in slices that start or end at those semicolons yields the same tokens as
+/// tokenizing it whole.
+#[derive(Debug, Default)]
+struct OraclePlSqlBlockTracker {
+    block: OraclePlSqlBlock,
+    scanned_len: usize,
+    walk: Option<OraclePlSqlBlockWalk>,
+}
+
+impl OraclePlSqlBlockTracker {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn scan(&mut self, statement: &str) {
+        if statement.len() < self.scanned_len {
+            self.reset();
+        }
+        self.block.tokens.extend(oracle_plsql_tokens(&statement[self.scanned_len..]));
+        self.scanned_len = statement.len();
+    }
+
+    /// [`keeps_oracle_style_block_together`] for `statement_head`, the statement before the `;`.
+    fn keeps_block_together(&mut self, options: SqlParsingOptions, statement_head: &str) -> bool {
+        if !options.profile.supports_oracle_plsql_blocks && !options.profile.supports_oracle_style_routine_bodies {
+            return false;
+        }
+        self.scan(statement_head);
+        if options.profile.supports_oracle_plsql_blocks {
+            return self.block.starts_block();
+        }
+        self.block.starts_oracle_style_routine_body()
+    }
+
+    /// [`oracle_plsql_block_is_complete`] for `statement`, which ends with the `;`.
+    fn is_complete(&mut self, statement: &str) -> bool {
+        self.scan(statement);
+        if let Some(complete) = self.block.completion_without_block_walk() {
+            return complete;
+        }
+        let block = &self.block;
+        let walk = self.walk.get_or_insert_with(|| OraclePlSqlBlockWalk::new(block));
+        walk.advance(&block.tokens);
+        walk.is_complete()
+    }
+}
+
+#[derive(Debug, Default)]
 struct OraclePlSqlBlock {
     tokens: Vec<OraclePlSqlToken>,
 }
@@ -3989,15 +4162,26 @@ impl OraclePlSqlBlock {
     }
 
     fn is_complete(&self) -> bool {
+        if let Some(complete) = self.completion_without_block_walk() {
+            return complete;
+        }
+        let mut walk = OraclePlSqlBlockWalk::new(self);
+        walk.advance(&self.tokens);
+        walk.is_complete()
+    }
+
+    /// The completion rules decided by the statement header alone; `None` means the
+    /// BEGIN/END walk in [`OraclePlSqlBlockWalk`] decides.
+    fn completion_without_block_walk(&self) -> Option<bool> {
         if !self.starts_block() {
-            return false;
+            return Some(false);
         }
 
         // `WITH [FUNCTION|PROCEDURE ... END;] <main query>;` follows its own completion
-        // rule (see with_function_is_complete); the classic block walk below would fire
-        // at the declaration's `END;` and cut the main query off the statement.
+        // rule (see with_function_is_complete); the classic block walk would fire at the
+        // declaration's `END;` and cut the main query off the statement.
         if self.starts_with_function_declaration() {
-            return self.with_function_is_complete();
+            return Some(self.with_function_is_complete());
         }
 
         if self.tokens.first().is_some_and(|token| token.is_word("CREATE")) {
@@ -4008,86 +4192,10 @@ impl OraclePlSqlBlock {
                     .find(|token| token.is_any_word(&["BEGIN", "DECLARE", "COMPOUND", "CALL"]))
                     .is_some_and(|token| token.is_word("CALL"))
             {
-                return self.tokens.last().is_some_and(OraclePlSqlToken::is_semicolon);
+                return Some(self.tokens.last().is_some_and(OraclePlSqlToken::is_semicolon));
             }
         }
-
-        // Package/type specifications have declarations and an outer END with
-        // no BEGIN. Bodies also own an outer END beyond nested routine END
-        // pairs so an inner END cannot finish the object.
-        let object_kind = self.create_object_kind();
-        let mut scopes = match object_kind {
-            Some(OraclePlSqlCreateObjectKind::Body | OraclePlSqlCreateObjectKind::Spec) => {
-                vec![OraclePlSqlScope::Object]
-            }
-            None => Vec::new(),
-        };
-        // A stored PROCEDURE/FUNCTION has no DECLARE keyword: its declare section
-        // starts right after its own IS/AS. Opening it there lets a local subprogram
-        // own its BEGIN ... END instead of ending the routine.
-        let mut awaiting_routine_declarations = self.is_create_routine();
-        let mut saw_begin = false;
-        let mut complete = false;
-
-        for (index, token) in self.tokens.iter().enumerate() {
-            if token.is_semicolon() {
-                if matches!(scopes.last(), Some(OraclePlSqlScope::RoutineHeader)) {
-                    scopes.pop();
-                }
-                continue;
-            }
-
-            if awaiting_routine_declarations && token.is_any_word(&["IS", "AS"]) {
-                awaiting_routine_declarations = false;
-                scopes.push(OraclePlSqlScope::Declaration);
-            } else if token.is_word("DECLARE") {
-                if !matches!(scopes.last(), Some(OraclePlSqlScope::Declaration)) {
-                    scopes.push(OraclePlSqlScope::Declaration);
-                }
-            } else if token.is_any_word(&["PROCEDURE", "FUNCTION"])
-                && matches!(scopes.last(), Some(OraclePlSqlScope::Declaration | OraclePlSqlScope::Routine))
-            {
-                scopes.push(OraclePlSqlScope::RoutineHeader);
-            } else if token.is_any_word(&["IS", "AS"]) && matches!(scopes.last(), Some(OraclePlSqlScope::RoutineHeader))
-            {
-                *scopes.last_mut().unwrap() = OraclePlSqlScope::Routine;
-            } else if token.is_word("BEGIN") {
-                // A local routine's BEGIN belongs to that routine, not to the outer block.
-                if matches!(scopes.last(), Some(OraclePlSqlScope::Declaration | OraclePlSqlScope::Routine)) {
-                    *scopes.last_mut().unwrap() = OraclePlSqlScope::Block;
-                } else {
-                    scopes.push(OraclePlSqlScope::Block);
-                }
-                saw_begin = true;
-                complete = false;
-            } else if token.is_word("CASE") {
-                // Both CASE expressions and CASE statements own an END.
-                // The CASE token that follows END CASE is a suffix, not a scope start.
-                // Require source adjacency: `end ), (case` must open a new CASE scope.
-                if previous_adjacent_word(&self.tokens, index) != Some("END") {
-                    scopes.push(OraclePlSqlScope::Case);
-                }
-            } else if token.is_word("END") {
-                let next = next_adjacent_word(&self.tokens, index);
-                if matches!(next, Some("IF" | "LOOP")) {
-                    continue;
-                }
-                if matches!(next, Some("CASE")) && !matches!(scopes.last(), Some(OraclePlSqlScope::Case)) {
-                    continue;
-                }
-                if scopes.pop().is_some() {
-                    complete = scopes.is_empty();
-                }
-            }
-        }
-
-        match object_kind {
-            // Package/type objects complete on their outer END [name]; a package
-            // body may omit an initialization BEGIN when it has no executable
-            // initialization section.
-            Some(OraclePlSqlCreateObjectKind::Body | OraclePlSqlCreateObjectKind::Spec) => complete,
-            _ => saw_begin && complete,
-        }
+        None
     }
 
     fn starts_with_function_declaration(&self) -> bool {
@@ -7487,6 +7595,30 @@ SELECT 1;";
             ),
             vec![package_body, "SELECT * FROM goods"]
         );
+    }
+
+    #[test]
+    fn oracle_like_split_large_package_body_in_linear_time() {
+        // Every inner `;` used to re-tokenize the whole body so far, so a few hundred KB
+        // DM8 package body spent minutes in the splitter before reaching the server (#13450).
+        let routines = (0..300)
+            .map(|i| {
+                format!(
+                    "  PROCEDURE p{i}(p_id INT) IS\n    v_name VARCHAR2(100) := 'x;y';\n  BEGIN\n    IF p_id > 0 THEN\n      INSERT INTO orders VALUES (p_id);\n    END IF;\n    FOR r IN (SELECT id FROM orders WHERE id = p_id) LOOP\n      UPDATE orders SET name = v_name WHERE id = r.id;\n    END LOOP;\n  END p{i};\n"
+                )
+            })
+            .collect::<String>();
+        let package_body = format!("CREATE OR REPLACE PACKAGE BODY pkg_orders AS\n{routines}END pkg_orders;");
+        let sql = format!("{package_body}\nSELECT 1 FROM dual;");
+
+        let started = std::time::Instant::now();
+        let statements = split_sql_statements_for_database(&sql, DatabaseType::Dameng);
+        let cursor_statement = find_statement_at_cursor_for_database(&sql, 1, DatabaseType::Dameng);
+        let elapsed = started.elapsed();
+
+        assert_eq!(statements, vec![package_body.as_str(), "SELECT 1 FROM dual"]);
+        assert_eq!(cursor_statement, package_body);
+        assert!(elapsed < std::time::Duration::from_secs(2), "splitting took {elapsed:?}");
     }
 
     #[test]

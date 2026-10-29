@@ -633,7 +633,9 @@ pub async fn unlock_connection_writes(
     )
     .await?;
     let remaining_ms =
-        state.app.write_unlock_windows.unlock(&body.connection_id, body.duration_secs).await.map_err(AppError::from)?;
+        dbx_core::query::unlock_connection_writes_core(&state.app, &body.connection_id, body.duration_secs)
+            .await
+            .map_err(AppError::from)?;
     Ok(Json(WriteUnlockStateResponse { remaining_ms }))
 }
 
@@ -1127,10 +1129,20 @@ pub async fn mcp_remove_connection(
         .await
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadConnectionsQuery {
+    legacy_sidebar_show_user_admin: Option<bool>,
+}
+
 pub async fn load_connections(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
+    Query(query): Query<LoadConnectionsQuery>,
 ) -> Result<Json<Vec<ConnectionResponse>>, AppError> {
+    if let Some(visible) = query.legacy_sidebar_show_user_admin {
+        state.app.storage.migrate_sidebar_user_admin_visibility(visible).await?;
+    }
     for _ in 0..3 {
         let allowed = {
             let current = state.app.configs.read().await;
@@ -1407,7 +1419,7 @@ mod tests {
         SaveConnectionsRequest,
     };
     use crate::state::WebState;
-    use axum::extract::State;
+    use axum::extract::{Query, State};
     use axum::http::HeaderMap;
     use axum::Json;
     use dbx_core::connection::{AppState, PoolKind};
@@ -1464,6 +1476,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -2496,10 +2510,10 @@ done
         headers
     }
 
-    /// 回归：Web connect_db 不得把明文 no-save 密码写入全局 AppState.configs，
-    /// 且凭据严格按登录会话隔离——会话 B 无法复用/重建出会话 A 的密码。
+    /// Encrypted SQLite must scope no-save credentials when supported; the fast
+    /// bundled lane must reject encryption without retaining the attempted secret.
     #[tokio::test]
-    async fn connect_db_sanitizes_global_config_and_scopes_password_by_session() {
+    async fn connect_db_scopes_password_by_session_or_rejects_unavailable_sqlite_encryption() {
         let (state, dir) = test_web_state().await;
         let db_path = dir.join("a.db").to_string_lossy().to_string();
         std::fs::File::create(&db_path).unwrap();
@@ -2525,8 +2539,59 @@ done
             .await
         })
         .await;
+        // Another workspace member may enable encryption on dbx-core even when
+        // this crate's feature is off. In that case retain the positive checks.
+        // Explicit SQLCipher builds always require success; never swallow their errors.
+        #[cfg(not(feature = "sqlite-sqlcipher"))]
+        if let Err(error) = &result {
+            assert_eq!(
+                error.message,
+                "Encrypted SQLite support is not compiled in this build. Rebuild with the sqlite-sqlcipher or sqlite-multiple-ciphers feature."
+            );
+            assert!(state.app.pool_handle("conn-a").await.is_none());
+            assert!(!state.app.session_credentials.has("token-a", "conn-a"));
+            assert!(!state.app.session_credentials.has("token-b", "conn-a"));
+            if let Some(stored) = state.app.configs.read().await.get("conn-a") {
+                assert!(stored.password.is_empty());
+            }
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
         assert!(result.is_ok(), "{result:?}");
 
+        assert_session_password_is_scoped(&state).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Saving no-save credentials requires no encrypted driver. Keep the positive
+    /// owner-isolation contract covered even in the bundled SQLite fast lane.
+    #[tokio::test]
+    async fn save_connections_sanitizes_global_config_and_scopes_password_by_session() {
+        let (state, dir) = test_web_state().await;
+        let mut config = sqlite_config("conn-a", &dir.join("a.db").to_string_lossy());
+        config.db_type = DatabaseType::Postgres;
+        config.host = "127.0.0.1".to_string();
+        config.port = 5432;
+        config.save_password = false;
+        config.password = "hunter2".to_string();
+
+        let _ = save_connections(
+            State(state.clone()),
+            cookie_headers("token-a"),
+            Json(SaveConnectionsRequest { configs: vec![config], removed_ids: Vec::new() }),
+        )
+        .await
+        .unwrap();
+
+        assert_session_password_is_scoped(&state).await;
+        let persisted = state.app.storage.load_connections().await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].id, "conn-a");
+        assert!(persisted[0].password.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn assert_session_password_is_scoped(state: &Arc<WebState>) {
         // 全局运行态配置不含明文密码（泄露面消除）。
         let stored = state.app.configs.read().await.get("conn-a").cloned().unwrap();
         assert_eq!(stored.password, "");
@@ -2548,8 +2613,6 @@ done
             assert_eq!(db_config.password, "");
         })
         .await;
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -2692,6 +2755,37 @@ done
     }
 
     #[tokio::test]
+    async fn load_connections_migrates_visibility_only_for_an_explicit_client() {
+        let (state, dir) = test_web_state().await;
+        let mut config = sqlite_config("visibility", &dir.join("visibility.db").to_string_lossy());
+        config.show_user_admin = None;
+        state.app.storage.save_connections(&[config.clone()]).await.unwrap();
+        let _ = load_connections(State(state.clone()), HeaderMap::new(), Query(super::LoadConnectionsQuery::default()))
+            .await
+            .unwrap();
+        assert_eq!(state.app.storage.load_connections().await.unwrap()[0].show_user_admin, None);
+        let _ = load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(super::LoadConnectionsQuery { legacy_sidebar_show_user_admin: Some(false) }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.app.storage.load_connections().await.unwrap()[0].show_user_admin, Some(false));
+        config.show_user_admin = Some(true);
+        state.app.storage.save_connections(&[config]).await.unwrap();
+        let _ = load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(super::LoadConnectionsQuery { legacy_sidebar_show_user_admin: Some(false) }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.app.storage.load_connections().await.unwrap()[0].show_user_admin, Some(true));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn load_connections_drops_cached_pool_for_updated_config() {
         let (state, dir) = test_web_state().await;
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
@@ -2705,7 +2799,9 @@ done
             })
             .await;
 
-        let result = load_connections(State(state.clone()), HeaderMap::new()).await;
+        let result =
+            load_connections(State(state.clone()), HeaderMap::new(), Query(super::LoadConnectionsQuery::default()))
+                .await;
         assert!(result.is_ok());
 
         let configs = state.app.configs.read().await;

@@ -448,7 +448,23 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
           queryStore.clearInvalidDataTabSort(tab.id);
           const rebuiltColumnNames = tab.tableMeta?.columns.map((column) => column.name) ?? [];
           incomingSortMissing = rebuiltColumnNames.length > 0 && simpleDataGridOrderByReferencesMissingColumn(orderBy, rebuiltColumnNames);
-          if (incomingSortMissing) tab.orderByInput = undefined;
+          if (incomingSortMissing) {
+            // 移除 ORDER BY 时必须同步熄灭列头排序图标（issue #13350）：这里的
+            // 清理发生在元数据重建之后，clearInvalidDataTabSort 早已用旧列清单
+            // 判定过一次；若排序状态仍指向存活的列，它不会被前者清掉，只清
+            // orderByInput 会留下「图标亮、数据无序」的错位。字段集合与
+            // queryStore.clearInvalidDataTabSortState 的失效排序清理保持一致。
+            tab.orderByInput = undefined;
+            tab.resultSortColumn = undefined;
+            tab.resultSortColumnIndex = undefined;
+            tab.resultSortDirection = undefined;
+            tab.resultSortMode = undefined;
+            tab.resultSortedSql = undefined;
+            tab.resultLocalSortOriginalRows = undefined;
+            tab.resultLocalSortOriginalLargeValueCells = undefined;
+            tab.resultLocalSortOriginalMongoDocuments = undefined;
+            tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
+          }
           if (intent === "refresh" && !lifecycleStale) {
             void refreshDataTabTableMeta(tab, { force: false, trace: { traceId, elapsed } })
               .then(() => {

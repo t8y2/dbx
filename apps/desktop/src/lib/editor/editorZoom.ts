@@ -1,9 +1,13 @@
 export const EDITOR_MIN_FONT_SIZE = 10;
 export const EDITOR_MAX_FONT_SIZE = 24;
-const WHEEL_FONT_ZOOM_SENSITIVITY = 0.0015;
+const WHEEL_FONT_ZOOM_STEP = 1.05;
+const WHEEL_PIXELS_PER_STEP = 100;
+const WHEEL_LINES_PER_STEP = 3;
+const DOM_DELTA_LINE = 1;
+const DOM_DELTA_PAGE = 2;
 /**
  * Chromium turns a trackpad pinch into wheel events whose scale is
- * `exp(-deltaY / 100)`. Mouse notches stay on the coarser curve above.
+ * `exp(-deltaY / 100)`. Physical Ctrl/Cmd + wheel uses bounded percentage steps.
  */
 const PINCH_WHEEL_ZOOM_SENSITIVITY = 0.01;
 const WHEEL_GESTURE_IDLE_MS = 180;
@@ -41,7 +45,7 @@ export function createEditorWheelZoomGestureGuard(idleMs = WHEEL_GESTURE_IDLE_MS
   let gestureId = 0;
 
   return {
-    accepts(event: WheelZoomModifierEvent) {
+    accepts(event: WheelZoomModifierEvent, allowPinch = true) {
       const hasModifier = event.metaKey || event.ctrlKey;
       const eventTime = Number.isFinite(event.timeStamp) ? event.timeStamp : 0;
       if (eventTime < lastEventTime || eventTime - lastEventTime > idleMs) {
@@ -55,7 +59,7 @@ export function createEditorWheelZoomGestureGuard(idleMs = WHEEL_GESTURE_IDLE_MS
         if (plainScrollEvents === 0) plainScrollStartedAt = eventTime;
         plainScrollEvents += 1;
         plainScrollDistance += Math.abs(event.deltaY ?? 0);
-      } else if (!startedWithModifier && isSyntheticPinchWheel(event)) {
+      } else if (!startedWithModifier && allowPinch && isSyntheticPinchWheel(event)) {
         const prefixMs = plainScrollStartedAt === null ? Number.POSITIVE_INFINITY : eventTime - plainScrollStartedAt;
         if (plainScrollEvents > 0 && plainScrollDistance <= PINCH_PREFIX_DISTANCE && prefixMs <= PINCH_PREFIX_SCROLL_MS) {
           startedWithModifier = true;
@@ -96,8 +100,16 @@ function clampEditorFontSizeExact(value: number): number {
   return Math.min(EDITOR_MAX_FONT_SIZE, Math.max(EDITOR_MIN_FONT_SIZE, value));
 }
 
+function wheelFontZoomFactor(deltaY: number, deltaMode = 0): number {
+  const unitsPerStep = deltaMode === DOM_DELTA_LINE ? WHEEL_LINES_PER_STEP : deltaMode === DOM_DELTA_PAGE ? 1 : WHEEL_PIXELS_PER_STEP;
+  // Device scroll speed and event coalescing must not turn one wheel event into
+  // a jump to the font-size limit. Keep high-resolution input gradual below a notch.
+  const steps = Math.max(-1, Math.min(1, deltaY / unitsPerStep));
+  return WHEEL_FONT_ZOOM_STEP ** -steps;
+}
+
 export function fontSizeFromWheelDelta(currentFontSize: number, deltaY: number): number {
-  return clampEditorFontSize(currentFontSize * Math.exp(-deltaY * WHEEL_FONT_ZOOM_SENSITIVITY));
+  return clampEditorFontSize(currentFontSize * wheelFontZoomFactor(deltaY));
 }
 
 export function fontSizeFromGestureScale(startFontSize: number, scale: number): number {
@@ -108,10 +120,14 @@ export function createEditorWheelZoomController(idleMs = WHEEL_GESTURE_IDLE_MS) 
   const guard = createEditorWheelZoomGestureGuard(idleMs);
   let exactFontSize: number | null = null;
   let appliedGestureId = -1;
+  let physicalModifierPressed = false;
 
   return {
+    recordModifiers(event: Pick<KeyboardEvent, "ctrlKey" | "metaKey">) {
+      physicalModifierPressed = event.ctrlKey || event.metaKey;
+    },
     nextFontSize(currentFontSize: number, event: EditorWheelZoomEvent): number | null {
-      if (!guard.accepts(event)) {
+      if (!guard.accepts(event, !physicalModifierPressed)) {
         exactFontSize = null;
         appliedGestureId = guard.currentGestureId();
         return null;
@@ -122,8 +138,10 @@ export function createEditorWheelZoomController(idleMs = WHEEL_GESTURE_IDLE_MS) 
         exact = currentFontSize;
         appliedGestureId = gestureId;
       }
-      const sensitivity = isSyntheticPinchWheel(event) ? PINCH_WHEEL_ZOOM_SENSITIVITY : WHEEL_FONT_ZOOM_SENSITIVITY;
-      exact = clampEditorFontSizeExact(exact * Math.exp(-event.deltaY * sensitivity));
+      // A mouse wheel can also report fractional pixels (e.g. Windows scaling).
+      // A real keyboard modifier distinguishes that input from synthetic Ctrl pinch.
+      const factor = !physicalModifierPressed && isSyntheticPinchWheel(event) ? Math.exp(-event.deltaY * PINCH_WHEEL_ZOOM_SENSITIVITY) : wheelFontZoomFactor(event.deltaY, event.deltaMode);
+      exact = clampEditorFontSizeExact(exact * factor);
       exactFontSize = exact;
       return clampEditorFontSize(exact);
     },
@@ -139,6 +157,7 @@ export function createEditorWheelZoomController(idleMs = WHEEL_GESTURE_IDLE_MS) 
       guard.reset();
       exactFontSize = null;
       appliedGestureId = -1;
+      physicalModifierPressed = false;
     },
   };
 }

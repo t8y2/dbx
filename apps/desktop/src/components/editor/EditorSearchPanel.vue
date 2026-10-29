@@ -426,20 +426,28 @@ function doReplace() {
       r = iter.next();
     }
     if (target) {
-      const insertText = computeReplacementForMatch(v, target.from, target.to);
-      const tr = v.state.changeByRange((range) => {
-        if (range.from === target!.from && range.to === target!.to) {
-          return {
-            changes: { from: target!.from, to: target!.to, insert: insertText },
-            range: EditorSelection.range(target!.from, target!.from + insertText.length),
-          };
+      if (sel.from === target.from && sel.to === target.to) {
+        const insertText = computeReplacementForMatch(v, target.from, target.to);
+        const tr = v.state.update({
+          changes: { from: target.from, to: target.to, insert: insertText },
+        });
+        v.dispatch(tr);
+        searchScopeFrom = tr.changes.mapPos(searchScopeFrom);
+        searchScopeTo = tr.changes.mapPos(searchScopeTo);
+        const nextCursor = target.from + insertText.length;
+        const nextTarget = findSearchMatch(iterateAllMatches(v), nextCursor, "next");
+        if (nextTarget) {
+          v.dispatch({
+            selection: EditorSelection.range(nextTarget.from, nextTarget.to),
+            effects: EditorView.scrollIntoView(nextTarget.from, { y: "center" }),
+          });
         }
-        return { range };
-      });
-      v.dispatch(tr);
-      // Map scope through changes
-      searchScopeFrom = tr.changes.mapPos(searchScopeFrom);
-      searchScopeTo = tr.changes.mapPos(searchScopeTo);
+      } else {
+        v.dispatch({
+          selection: EditorSelection.range(target.from, target.to),
+          effects: EditorView.scrollIntoView(target.from, { y: "center" }),
+        });
+      }
     } else {
       // Wrap around to start of scope
       findInScope("next");
@@ -447,7 +455,7 @@ function doReplace() {
   } else {
     cmReplaceNext(v);
   }
-  updateMatchInfo(true);
+  updateMatchInfo();
 }
 
 function doReplaceAll() {
@@ -510,7 +518,7 @@ defineExpose({
         <button class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="showReplace ? t('editor.search.collapseReplace') : t('editor.search.expandReplace')" @click="showReplace = !showReplace">
           <ChevronRight class="h-4 w-4 transition-transform" :class="showReplace && 'rotate-90'" />
         </button>
-        <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
+        <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:bg-background-solid focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
           <input
             ref="searchInputRef"
             v-model="searchText"
@@ -574,7 +582,7 @@ defineExpose({
       </div>
       <div v-if="showReplace" class="flex items-center gap-1">
         <div class="h-7 w-7 shrink-0" />
-        <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
+        <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:bg-background-solid focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
           <input
             ref="replaceInputRef"
             v-model="replaceText"
@@ -653,6 +661,10 @@ defineExpose({
   border-color: var(--input);
   border-radius: var(--dbx-radius-fixed-5);
   box-shadow: 0 1px 0 color-mix(in srgb, var(--foreground) 3%, transparent) inset;
+}
+
+.editor-search-panel--editor :deep(.border-input:focus-within) {
+  background: var(--background-solid, var(--background));
 }
 
 .editor-search-panel--editor :deep(.focus-within\:border-ring:focus-within) {

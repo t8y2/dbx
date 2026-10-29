@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import * as api from "@/lib/backend/api";
@@ -183,6 +184,7 @@ const exportElapsedText = computed(() => {
 const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "solr", "couchdb", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "salesforce"].includes(c.db_type)));
 
 const canExport = computed(() => {
+  if (mysqlDataCharsetEnabled(store.getConfig(connectionId.value))) return false;
   const hasContent = includeStructure.value || includeData.value || includeObjects.value;
   if (!connectionId.value || !hasContent || isExporting.value) return false;
   if (exportAllDatabases.value) return selectedDatabases.value.length > 0 && !loadingMeta.value;
@@ -485,7 +487,7 @@ async function startDesktopExport() {
   batchDatabaseTotal.value = 0;
   batchRowsExported.value = 0;
   exportProgress.value = { exportId: id, currentObject: "", objectIndex: 0, totalObjects: 0, rowsExported: 0, totalRows: null, status: "Running", error: null, preparing: true };
-  const ownsView = () => !disposed && exportId.value === id;
+  const ownsView = () => !task.removed && !disposed && exportId.value === id;
   const sync = () => {
     if (!ownsView()) return;
     desktopTaskStatus.value = task.status;
@@ -600,7 +602,7 @@ async function startDesktopExport() {
         exportProgress.value = final;
         exportWarning.value = firstError;
       }
-      if (!cancelled) {
+      if (!cancelled && !task.removed) {
         if (captured.allDatabases)
           notifyExportComplete({
             filePath: firstFile || destination,
@@ -629,6 +631,7 @@ async function startDesktopExport() {
 }
 
 async function startExport() {
+  if (mysqlDataCharsetEnabled(store.getConfig(connectionId.value))) return;
   if (!canExport.value) return;
   if (isTauriRuntime()) {
     await startDesktopExport();
@@ -1145,6 +1148,7 @@ watch([includeStructure, includeData, insertDialect, insertMode, includeObjects,
       </DialogHeader>
 
       <div class="flex-1 min-h-0 overflow-auto space-y-4 py-2">
+        <p v-if="mysqlDataCharsetEnabled(store.getConfig(connectionId))" class="text-xs text-muted-foreground">{{ t("connection.mysqlDataCharsetExportHint") }}</p>
         <!-- Connection / Database / Schema Selection -->
         <div v-if="!isExporting && !exportDone && !exportError && !exportCancelled" class="space-y-3">
           <div class="space-y-1.5">

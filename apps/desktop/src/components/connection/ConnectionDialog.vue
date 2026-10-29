@@ -109,6 +109,7 @@ import {
   type ConnectionDeepLinkUpdate,
 } from "@/lib/connection/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
+import { MYSQL_DATA_CHARSETS, mysqlDataCharset, setMysqlDataCharset, mysqlDataCharsetValidation, supportsMysqlDataCharset } from "@/lib/connection/mysqlDataCharset";
 import { parseGaussdbHosts, serializeGaussdbHosts, type GaussdbHostEntry } from "@/lib/connection/gaussdbHosts";
 import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/database/h2Connection";
 import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/zookeeper/zookeeperConnection";
@@ -119,6 +120,9 @@ import { looksLikeMongoSrvHost, mongodbAuthFailureHint, mongoConnectionUsesOidc,
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
 import { supportsOracleDatabaseLinks } from "@/lib/database/oracleDatabaseLinks";
+import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
+import { nativeJobAdminSupported } from "@/lib/database/nativeJobAdmin";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
 import { DAMENG_BUILTIN_DRIVER_PROFILE, DAMENG_CUSTOM_DRIVER_PROFILE, DAMENG_DEFAULT_JDBC_DRIVER_CLASS, damengCustomJdbcUrl, damengDriverModeForConfig, defaultDamengJdbcUrl, type DamengDriverMode } from "@/lib/database/damengDriverOptions";
 import { doltSystemTablesVisible, isDoltDriverProfile, setDoltSystemTablesVisible } from "@/lib/database/doltProfile";
@@ -488,6 +492,8 @@ const defaultForm = (): ConnectionForm => ({
   read_only: false,
   show_system_schemas: false,
   show_database_links: true,
+  show_native_jobs: true,
+  show_user_admin: true,
   sidebar_auto_load_all_tables: false,
   is_production: false,
   production_databases: [],
@@ -697,6 +703,13 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 }
 
 const form = ref(defaultForm());
+const sidebarVisibilitySettings = computed(() => {
+  const config = { ...form.value, database_info: visibleTestDatabaseInfo.value ?? visibleSavedDatabaseInfo.value ?? undefined } as ConnectionConfig;
+  return [
+    { key: "show_native_jobs" as const, label: "connection.showNativeJobs", hint: "connection.showNativeJobsHint", supported: nativeJobAdminSupported(config) },
+    { key: "show_user_admin" as const, label: "connection.showUserAdmin", hint: "connection.showUserAdminHint", supported: connectionSupportsDatabaseUserAdmin(config) || effectiveDatabaseTypeForConnection(config) === "xugu" },
+  ].filter((setting) => setting.supported);
+});
 const supportsAutomaticTableLoading = computed(() => supportsDataDictionary(form.value.db_type) && !DIRECT_SIDEBAR_OBJECT_TYPES.has(form.value.db_type));
 const redisKeyTemplatesText = ref("");
 const noteTextareaRef = ref<HTMLTextAreaElement | null>(null);
@@ -3215,6 +3228,7 @@ watch(
         // Show the index the backend actually connects with; legacy dirty values
         // (e.g. redis-cli flags in the field) are healed when the form is saved.
         database: config.db_type === "redis" ? normalizeRedisDatabaseValue(config.database) || "" : config.database,
+        default_schema: config.default_schema,
         color: config.color || "",
         transport_layers: transportLayersForConfig(legacyConfig),
         connect_timeout_secs: config.connect_timeout_inherit === true ? settingsStore.editorSettings.globalConnectTimeoutSecs : config.connect_timeout_secs || 10,
@@ -3241,6 +3255,7 @@ watch(
         redis_cluster_nodes: config.redis_cluster_nodes || "",
         redis_key_separator: config.redis_key_separator ?? ":",
         redis_scan_page_size: config.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT,
+        redis_database_aliases: config.redis_database_aliases ? { ...config.redis_database_aliases } : undefined,
         redis_key_templates: normalizeRedisKeyTemplates(config.redis_key_templates),
         redis_key_filter: config.redis_key_filter ?? "",
         redis_key_grouping: config.redis_key_grouping,
@@ -3254,6 +3269,8 @@ watch(
         read_only: config.read_only || false,
         show_system_schemas: config.show_system_schemas || false,
         show_database_links: config.show_database_links !== false,
+        show_native_jobs: config.show_native_jobs !== false,
+        show_user_admin: config.show_user_admin !== false,
         sidebar_auto_load_all_tables: config.sidebar_auto_load_all_tables === true,
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
@@ -4088,6 +4105,16 @@ const firebirdCharset = computed({
   },
 });
 const FIREBIRD_DATA_CHARSET_OPTIONS = ["GBK", "GB18030", "BIG5"];
+const mysqlDataCharsetValue = computed({
+  get: () => mysqlDataCharset(form.value.url_params),
+  set: (value: string) => {
+    form.value.url_params = setMysqlDataCharset(form.value.url_params, value);
+  },
+});
+const mysqlDataCharsetItems = computed(() => {
+  const current = mysqlDataCharsetValue.value;
+  return current !== "default" && !MYSQL_DATA_CHARSETS.some((value) => value === current) ? [current, ...MYSQL_DATA_CHARSETS] : MYSQL_DATA_CHARSETS;
+});
 const firebirdDataCharsetItems = computed(() => {
   const current = getUrlParam(form.value.url_params, "dataCharset");
   return current && !FIREBIRD_DATA_CHARSET_OPTIONS.includes(current) ? [current, ...FIREBIRD_DATA_CHARSET_OPTIONS] : FIREBIRD_DATA_CHARSET_OPTIONS;
@@ -5589,11 +5616,15 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
   }
   if (!config.show_system_schemas) config.show_system_schemas = undefined;
   if (config.show_database_links !== false && !preserveExistingShowDatabaseLinks) config.show_database_links = undefined;
+  if (config.show_native_jobs !== false) config.show_native_jobs = undefined;
+  if (config.show_user_admin !== false) config.show_user_admin = undefined;
   if (!config.sidebar_auto_load_all_tables) config.sidebar_auto_load_all_tables = undefined;
   if (config.visible_schemas && Object.keys(config.visible_schemas).length === 0) config.visible_schemas = undefined;
   if (config.agent_java_options && config.agent_java_options.length === 0) config.agent_java_options = undefined;
   // Pasted credentials may carry invisible characters that trim() keeps (#9043).
   sanitizeConnectionCredentials(config);
+  const mysqlCharsetError = mysqlDataCharsetValidation(config);
+  if (mysqlCharsetError) throw new Error(t(mysqlCharsetError));
   return config as ConnectionConfig;
 }
 
@@ -6422,6 +6453,7 @@ function prefillDraftKey(draft: ConnectionDeepLinkDraft) {
     draft.oracleConnectionType,
     draft.useMongoUrl,
     draft.serviceConfig,
+    draft.mqConfig,
   ]);
 }
 
@@ -6483,6 +6515,7 @@ function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
   } else if (draft.serviceConfig?.kind === "nacos") {
     hydrateNacosFields(connectionDeepLinkServiceHydrationValue(draft.serviceConfig));
   }
+  if (draft.mqConfig) hydrateMqFields(draft.mqConfig);
   oracleTnsAdminPath.value = parseOracleTnsConnectionString(form.value.connection_string)?.tnsAdmin || "";
   selectedType.value = draft.driverProfile;
   if (form.value.db_type === "h2") {
@@ -8289,7 +8322,7 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelSmallClass">{{ t("connection.mqTls") }}</Label>
                       <label class="col-span-3 inline-flex items-center gap-2">
                         <input type="checkbox" v-model="mqTlsSkipVerify" class="mr-0" />
-                        <span class="text-xs text-muted-foreground">{{ t("connection.mqTlsSkipVerify") }}</span>
+                        <span class="text-sm text-muted-foreground">{{ t("connection.mqTlsSkipVerify") }}</span>
                       </label>
                     </div>
                     <div v-if="mqSystemKind === 'pulsar'" class="grid grid-cols-4 items-center gap-4">
@@ -8477,7 +8510,7 @@ function openExternalUrl(url: string) {
                         <Label :class="connectionLabelSmallClass">{{ t("connection.redisSentinelTls") }}</Label>
                         <label class="col-span-3 inline-flex items-center gap-2">
                           <input type="checkbox" v-model="form.redis_sentinel_tls" class="mr-0" />
-                          <span class="text-xs text-muted-foreground">{{ t("connection.redisSentinelTlsHint") }}</span>
+                          <span class="text-sm text-muted-foreground">{{ t("connection.redisSentinelTlsHint") }}</span>
                         </label>
                       </div>
                     </template>
@@ -9729,7 +9762,7 @@ function openExternalUrl(url: string) {
                           <Label :class="connectionLabelSmallClass">{{ t("connection.hiveTicketCache") }}</Label>
                           <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                             <input type="checkbox" v-model="hiveUseSubjectCredsOnlyFalse" class="mr-0" />
-                            <span class="text-xs text-muted-foreground">{{ t("connection.hiveTicketCacheFallback") }}</span>
+                            <span class="text-sm text-muted-foreground">{{ t("connection.hiveTicketCacheFallback") }}</span>
                           </label>
                         </div>
                         <div class="grid grid-cols-4 items-start gap-4">
@@ -9788,7 +9821,7 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelSmallClass">SYSDBA</Label>
                       <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                         <input type="checkbox" v-model="form.sysdba" class="mr-0" :disabled="isOracleSysUser(form)" />
-                        <span class="text-xs text-muted-foreground">as SYSDBA</span>
+                        <span class="text-sm text-muted-foreground">as SYSDBA</span>
                       </label>
                     </div>
 
@@ -9821,6 +9854,21 @@ function openExternalUrl(url: string) {
                           </SelectContent>
                         </Select>
                         <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.firebirdDataCharsetHint") }}</p>
+                      </div>
+                    </div>
+
+                    <div v-if="supportsMysqlDataCharset(form)" class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelTopClass">{{ t("connection.mysqlDataCharset") }}</Label>
+                      <div class="col-span-3 space-y-1.5">
+                        <Select v-model="mysqlDataCharsetValue">
+                          <SelectTrigger id="mysql-data-charset" class="h-9"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="default">{{ t("common.default") }}</SelectItem>
+                            <SelectItem v-for="charset in mysqlDataCharsetItems" :key="charset" :value="charset">{{ charset }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.mysqlDataCharsetHint") }}</p>
+                        <p v-if="mysqlDataCharsetValue !== 'default'" class="text-xs leading-5 text-muted-foreground">{{ t("connection.mysqlDataCharsetReadOnly") }} {{ t("connection.mysqlDataCharsetExportHint") }}</p>
                       </div>
                     </div>
 
@@ -9994,7 +10042,7 @@ function openExternalUrl(url: string) {
                       />
                       <div class="mt-1.5 flex shrink-0 items-center gap-2">
                         <div class="flex items-center gap-1">
-                          <Label for="connection-note-sidebar-visibility" class="text-xs font-normal text-muted-foreground">
+                          <Label for="connection-note-sidebar-visibility" class="text-sm font-normal text-muted-foreground">
                             {{ t("connection.noteShow") }}
                           </Label>
                           <Tooltip>
@@ -10020,7 +10068,7 @@ function openExternalUrl(url: string) {
                   <Label :class="connectionLabelSmallClass">SSL/TLS</Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="tlsEnabled" class="mr-0" />
-                    <span class="text-xs text-muted-foreground">{{ t("connection.sslEnable") }}</span>
+                    <span class="text-sm text-muted-foreground">{{ t("connection.sslEnable") }}</span>
                   </label>
                 </div>
 
@@ -10505,7 +10553,7 @@ function openExternalUrl(url: string) {
                         </div>
                         <label class="inline-flex shrink-0 items-center gap-2">
                           <Switch v-model="nacosHistoryEnabled" />
-                          <span class="text-xs text-muted-foreground">{{ t("nacos.nacosEnabled") }}</span>
+                          <span class="text-sm text-muted-foreground">{{ t("nacos.nacosEnabled") }}</span>
                         </label>
                       </div>
                       <div class="grid gap-1.5">
@@ -10546,7 +10594,7 @@ function openExternalUrl(url: string) {
                       </div>
                       <span class="inline-flex shrink-0 items-center gap-2">
                         <input v-model="nacosTlsSkipVerify" type="checkbox" class="mr-0" />
-                        <span class="text-xs text-muted-foreground">{{ t("connection.nacosTlsSkipVerify") }}</span>
+                        <span class="text-sm text-muted-foreground">{{ t("connection.nacosTlsSkipVerify") }}</span>
                       </span>
                     </label>
                   </div>
@@ -10797,6 +10845,13 @@ function openExternalUrl(url: string) {
                     <span class="text-xs text-muted-foreground">{{ t("connection.showDatabaseLinksHint") }}</span>
                   </label>
                 </div>
+                <div v-for="setting in sidebarVisibilitySettings" :key="setting.key" class="grid grid-cols-4 items-center gap-4">
+                  <Label :for="`sidebar-${setting.key}`" :class="connectionLabelSmallClass">{{ t(setting.label) }}</Label>
+                  <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                    <input :id="`sidebar-${setting.key}`" type="checkbox" v-model="form[setting.key]" :aria-label="t(setting.label)" class="mr-0" />
+                    <span class="text-xs text-muted-foreground">{{ t(setting.hint) }}</span>
+                  </label>
+                </div>
                 <div v-if="supportsAutomaticTableLoading" class="grid grid-cols-4 items-start gap-4">
                   <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.tableLoading") }}</Label>
                   <div class="col-span-3 grid gap-1.5">
@@ -10885,7 +10940,7 @@ function openExternalUrl(url: string) {
                   <div class="col-span-3 space-y-1">
                     <div class="flex items-center gap-2">
                       <Input id="redis-value-preview-limit-input" v-model.number="editRedisValuePreviewLimitKiB" type="number" :min="REDIS_VALUE_PREVIEW_LIMIT_KIB_MIN" :max="REDIS_VALUE_PREVIEW_LIMIT_KIB_MAX" step="1" class="h-8 w-32 text-xs" />
-                      <span class="text-xs text-muted-foreground">KiB</span>
+                      <span class="text-sm text-muted-foreground">KiB</span>
                     </div>
                     <p class="text-xs text-muted-foreground">{{ t("settings.redisValuePreviewLimitDescription") }}</p>
                   </div>
@@ -11107,7 +11162,7 @@ function openExternalUrl(url: string) {
                       <span />
                       <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                         <input type="checkbox" v-model="selectedSshLayer.expose_lan" class="mr-0" :disabled="selectedSshLayer.enabled === false" />
-                        <span class="text-xs text-muted-foreground">{{ t("connection.sshExposeLan") }}</span>
+                        <span class="text-sm text-muted-foreground">{{ t("connection.sshExposeLan") }}</span>
                       </label>
                     </div>
                     <div class="grid grid-cols-4 items-start gap-4">
@@ -11121,7 +11176,7 @@ function openExternalUrl(url: string) {
                       <span />
                       <label class="col-span-3 flex items-start gap-2 cursor-pointer">
                         <input type="checkbox" v-model="selectedSshLayer.allow_exec_channel_proxy" class="mt-0.5 mr-0" :disabled="selectedSshLayer.enabled === false" />
-                        <span class="text-xs text-muted-foreground">{{ t("connection.sshAllowExecChannelProxy") }}</span>
+                        <span class="text-sm text-muted-foreground">{{ t("connection.sshAllowExecChannelProxy") }}</span>
                       </label>
                     </div>
                     <div class="grid grid-cols-4 items-start gap-4">
@@ -11725,6 +11780,30 @@ html.dbx-legacy-webview.dark .connection-transport-layer-option--selected:hover 
 
 .connection-config-step :is([data-slot="input"], [data-slot="select-trigger"], [data-slot="tabs-list"], [data-slot="tabs-trigger"], textarea) {
   border-radius: var(--dbx-radius-fixed-4, 4px);
+}
+
+.connection-config-step .connection-form-body :is(label, button, [data-slot="input"], [data-slot="select-trigger"], textarea),
+.connection-config-step .connection-form-body label :is(.text-xs, .text-sm):not(.text-muted-foreground) {
+  font-size: var(--text-sm, 0.875rem);
+  line-height: var(--text-sm--line-height, 1.25rem);
+}
+
+.connection-config-step .connection-form-body [data-slot="label"]:not(.font-normal) {
+  font-weight: 500;
+}
+
+.connection-config-step .connection-form-body :is(label:not([data-slot="label"]), [data-slot="input"], [data-slot="select-trigger"], textarea) {
+  font-weight: 400;
+}
+
+.connection-config-step .connection-form-body label:not([data-slot="label"]) .font-medium {
+  font-weight: inherit;
+}
+
+.connection-config-step .connection-form-body :is(p, .text-xs.text-muted-foreground, [class~="text-[11px]"]) {
+  font-size: var(--text-xs, 0.75rem);
+  line-height: 1.25rem;
+  font-weight: 400;
 }
 
 .connection-dialog-content[data-wide="true"] .grid.grid-cols-4 {

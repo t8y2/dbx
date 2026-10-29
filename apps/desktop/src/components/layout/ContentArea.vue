@@ -21,6 +21,7 @@ import { provideTabUiState } from "@/lib/tabs/tabUiState";
 import { shouldPinResultRunOnClick } from "@/lib/tabs/resultRunPin";
 import {
   Check,
+  ChevronsDown,
   CheckSquare2,
   Columns3,
   Columns3Cog,
@@ -90,6 +91,9 @@ const OracleInvalidObjectsDialog = defineAsyncComponent(() => import("@/componen
 import { objectDependencyTarget, type ObjectDependencyTarget, type ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
 import DataGridFreezeFirstColumnControl from "@/components/grid/DataGridFreezeFirstColumnControl.vue";
 import DataGridStatusSqlControl from "@/components/grid/DataGridStatusSqlControl.vue";
+import DataGridExportOptionsControl from "@/components/grid/DataGridExportOptionsControl.vue";
+import DataGridExportMenu from "@/components/grid/DataGridExportMenu.vue";
+import type { LightDropdownItem } from "@/components/ui/LightDropdown.vue";
 import type { DataGridSqlPreview } from "@/components/grid/dataGridSqlPreview";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
 import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
@@ -232,9 +236,15 @@ import { isOracleFamilyTypeSource } from "@/lib/database/databaseObjectCapabilit
 import { requestOracleTypeManagement } from "@/lib/table/oracleTypeManagementRequest";
 import { sqlStatementParameterOptionsForCompatibility } from "@/lib/sql/sqlStatementRanges";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { isAiRedisConsoleTarget, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 type DataGridHandle = DataGridColumnLayoutHandle & {
+  exportMenuItems: LightDropdownItem[];
+  exportWarning: string;
+  selectExportMenuItem: (value: string) => void;
+  loadAllToolbarState: { visible: boolean; disabled: boolean };
+  loadAllRowsAndGoToLast: () => void;
   tableInfoToolbarCapability: DataGridToolbarActionCapability;
   goToColumnToolbarCapability: DataGridToolbarActionCapability;
   onToolbarRefresh: () => Promise<void> | void;
@@ -2802,6 +2812,7 @@ defineExpose({
                     <DataGridEmptyColumnsControl :count="dataGridRef?.allEmptyColumnCount" :column-count="dataGridRef?.displayableColumnCount" />
                     <DataGridFreezeFirstColumnControl />
                     <DataGridStatusSqlControl />
+                    <DataGridExportOptionsControl query-result />
                     <DataGridCopyFormatControl
                       :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
                       :current-value="dataGridRef?.defaultCopyPreference ?? ''"
@@ -2840,7 +2851,7 @@ defineExpose({
                 :active-view="activeOutputView"
                 :can-show-explain="canShowExplainOutput"
                 :can-show-profile="canShowProfile"
-                :can-export-archive="canExportResultArchive"
+                :can-export-archive="canExportResultArchive && settingsStore.editorSettings.showSaveResult"
                 :archive-exporting="resultArchiveExporting"
                 :compact="standaloneResultToolbarCompact"
                 :has-result="!!activeTab.result"
@@ -2848,7 +2859,23 @@ defineExpose({
                 @select-profile="selectOutputView(activeTab.id, 'profile')"
                 @export-archive="exportResultArchive"
                 @open-result-view="openPluginResultView"
-              />
+              >
+                <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
+                  <DataGridExportMenu v-if="settingsStore.editorSettings.dataGridExportInToolbar" :items="dataGridRef.exportMenuItems" :warning="dataGridRef.exportWarning" :label="t('grid.export')" :compact="standaloneResultToolbarCompact" :on-select="dataGridRef.selectExportMenuItem" />
+                  <Button
+                    v-if="settingsStore.editorSettings.dataGridLoadAllInToolbar && dataGridRef.loadAllToolbarState?.visible"
+                    variant="ghost"
+                    size="sm"
+                    class="h-5 shrink-0 gap-1 px-2 text-xs"
+                    :disabled="dataGridRef.loadAllToolbarState.disabled"
+                    :title="t('grid.loadAllAndGoToLastRow')"
+                    :aria-label="t('grid.loadAllAndGoToLastRow')"
+                    @click="dataGridRef.loadAllRowsAndGoToLast()"
+                  >
+                    <ChevronsDown class="h-3.5 w-3.5" /><span v-if="!standaloneResultToolbarCompact">{{ t("grid.loadAllRows") }}</span>
+                  </Button>
+                </template>
+              </QueryResultToolbarActions>
             </div>
 
             <div v-if="activeTab.redisMonitorActive" class="flex shrink-0 items-center justify-between border-b px-3 py-1 text-xs text-muted-foreground">
@@ -3141,7 +3168,7 @@ defineExpose({
                     :active-view="activeOutputView"
                     :can-show-explain="canShowExplainOutput"
                     :can-show-profile="canShowProfile"
-                    :can-export-archive="canExportResultArchive"
+                    :can-export-archive="canExportResultArchive && settingsStore.editorSettings.showSaveResult"
                     :archive-exporting="resultArchiveExporting"
                     :compact="compact"
                     :has-result="!!activeTab.result"
@@ -3149,7 +3176,23 @@ defineExpose({
                     @select-profile="selectOutputView(activeTab.id, 'profile')"
                     @export-archive="exportResultArchive"
                     @open-result-view="openPluginResultView"
-                  />
+                  >
+                    <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
+                      <DataGridExportMenu v-if="settingsStore.editorSettings.dataGridExportInToolbar" :items="dataGridRef.exportMenuItems" :warning="dataGridRef.exportWarning" :label="t('grid.export')" :compact="compact" :on-select="dataGridRef.selectExportMenuItem" />
+                      <Button
+                        v-if="settingsStore.editorSettings.dataGridLoadAllInToolbar && dataGridRef.loadAllToolbarState?.visible"
+                        variant="ghost"
+                        size="sm"
+                        class="h-5 shrink-0 gap-1 px-2 text-xs"
+                        :disabled="dataGridRef.loadAllToolbarState.disabled"
+                        :title="t('grid.loadAllAndGoToLastRow')"
+                        :aria-label="t('grid.loadAllAndGoToLastRow')"
+                        @click="dataGridRef.loadAllRowsAndGoToLast()"
+                      >
+                        <ChevronsDown class="h-3.5 w-3.5" /><span v-if="!compact">{{ t("grid.loadAllRows") }}</span>
+                      </Button>
+                    </template>
+                  </QueryResultToolbarActions>
                 </template>
                 <template v-if="activeTab.result && isQueryExecutionErrorResult(activeTab.result)" #error-actions="{ errorMessage }">
                   <QueryErrorActions
@@ -3284,7 +3327,7 @@ defineExpose({
                     <DropdownMenuSubContent>
                       <DropdownMenuItem @click="dataGridRef?.exportCsv()"> CSV </DropdownMenuItem>
                       <DropdownMenuItem @click="dataGridRef?.exportJson()"> JSON </DropdownMenuItem>
-                      <DropdownMenuItem @click="dataGridRef?.exportSql()"> SQL INSERT </DropdownMenuItem>
+                      <DropdownMenuItem v-if="!mysqlDataCharsetEnabled(activeConnection)" @click="dataGridRef?.exportSql()"> SQL INSERT </DropdownMenuItem>
                       <DropdownMenuItem @click="dataGridRef?.exportXlsx()"> XLSX </DropdownMenuItem>
                     </DropdownMenuSubContent>
                   </DropdownMenuPortal>
@@ -3545,6 +3588,7 @@ defineExpose({
               <DataGridEmptyColumnsControl :count="dataGridRef?.allEmptyColumnCount" :column-count="dataGridRef?.displayableColumnCount" />
               <DataGridFreezeFirstColumnControl />
               <DataGridStatusSqlControl />
+              <DataGridExportOptionsControl />
               <DataGridCopyFormatControl
                 :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
                 :current-value="dataGridRef?.defaultCopyPreference ?? ''"

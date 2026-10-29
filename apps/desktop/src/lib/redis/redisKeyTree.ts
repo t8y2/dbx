@@ -8,6 +8,25 @@ export function canBuildRedisFuzzyTree(loadedKeyCount: number): boolean {
   return loadedKeyCount <= REDIS_FUZZY_TREE_MAX_KEYS;
 }
 
+/**
+ * Membership of the "no expiry" filter.
+ *
+ * An unknown expiry means the expiry is *unknown*, not "it expires": rows
+ * loaded without inline metadata (the "fetch all" sweep skips TYPE/TTL for
+ * large keyspaces) must stay in the projection until a metadata backfill
+ * resolves them. Dropping them here would silently hide every unresolved key
+ * instead of showing it as "not yet known".
+ *
+ * The unknown TTL arrives in two shapes and both mean the same thing: the
+ * payload leaves the field out entirely (`undefined`) and the Rust side uses
+ * -2 as its "no answer" sentinel. They are normalised here so the predicate
+ * and the metadata backfill agree on what "unresolved" looks like.
+ */
+export function redisKeyPassesNoExpiryFilter(key: Pick<RedisKeyInfo, "ttl">): boolean {
+  const ttl = key.ttl ?? -2;
+  return ttl === -1 || ttl === -2;
+}
+
 export interface RedisKeyTreeLeafNode {
   kind: "leaf";
   id: string;
@@ -349,9 +368,9 @@ export async function buildRedisKeySnapshotCooperatively(
         flatKeyByRaw.set(key.key_raw, key);
         loadedKeyRaws.add(key.key_raw);
         flatKeys.push(key);
-        if (!config.noExpiryOnly || key.ttl === -1) filteredKeyCount++;
+        if (!config.noExpiryOnly || redisKeyPassesNoExpiryFilter(key)) filteredKeyCount++;
         if (treeState) appendRedisKeyUnsorted(treeState, key, config.db, separator);
-        if (filteredTreeState && key.ttl === -1) appendRedisKeyUnsorted(filteredTreeState, key, config.db, separator);
+        if (filteredTreeState && redisKeyPassesNoExpiryFilter(key)) appendRedisKeyUnsorted(filteredTreeState, key, config.db, separator);
       }
       controller.recordCompleted(end - offset);
     }
@@ -396,7 +415,7 @@ export async function buildRedisKeySnapshotCooperatively(
       const end = Math.min(offset + chunkSize, flatKeys.length);
       for (let index = offset; index < end; index++) {
         const key = flatKeys[index];
-        if (!config.noExpiryOnly || key.ttl === -1) visibleRows.push(redisKeyToFlatTreeRow(key, config.db));
+        if (!config.noExpiryOnly || redisKeyPassesNoExpiryFilter(key)) visibleRows.push(redisKeyToFlatTreeRow(key, config.db));
       }
       controller.recordCompleted(end - offset);
     }

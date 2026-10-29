@@ -2804,7 +2804,7 @@ html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false
   width: 7px;
   cursor: col-resize;
   touch-action: none;
-  z-index: 10;
+  z-index: 20;
   background: transparent;
 }
 .panel-resize-handle--right {

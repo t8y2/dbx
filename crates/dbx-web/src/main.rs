@@ -1015,6 +1015,7 @@ async fn serve() -> Result<(), String> {
         .route("/redis/list-databases", post(routes::redis::list_databases))
         .route("/redis/scan-keys", post(routes::redis::scan_keys))
         .route("/redis/scan-keys-batch", post(routes::redis::scan_keys_batch))
+        .route("/redis/key-metadata-batch", post(routes::redis::key_metadata_batch))
         .route("/redis/scan-values", post(routes::redis::scan_values))
         .route("/redis/get-value", post(routes::redis::get_value))
         .route("/redis/get-raw-value", post(routes::redis::get_raw_value))

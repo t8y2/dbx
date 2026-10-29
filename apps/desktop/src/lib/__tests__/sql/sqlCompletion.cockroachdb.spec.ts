@@ -78,6 +78,48 @@ describe("CockroachDB SQL completion (#13078)", () => {
     expect(labelsFor("SELECT a FROM t GROUP BY ROLL")).toContain("ROLLUP");
   });
 
+  it("offers SHOW and CRDB-specific SHOW clauses", () => {
+    expect(labelsFor("SHO")).toContain("SHOW");
+    expect(labelsFor("SHO", null)).toContain("SHOW");
+    expect(labelsFor("SHOW R")).toEqual(expect.arrayContaining(["RANGES", "REGIONS", "ROLES"]));
+    expect(labelsFor("SHOW J")).toContain("JOBS");
+    expect(labelsFor("SHOW Z")).toContain("ZONE CONFIGURATIONS");
+  });
+
+  it("prefers FROM after SHOW TABLES and object types after SHOW CREATE", () => {
+    expect(labelsFor("SHOW TABLES ")[0]).toBe("FROM");
+    expect(labelsFor("SHOW COLUMNS ")[0]).toBe("FROM");
+    expect(labelsFor("SHOW CREATE ")[0]).toBe("TABLE");
+    expect(labelsFor("SHOW CREATE V")[0]).toBe("VIEW");
+  });
+
+  it("offers common SQL keywords that were missing from the shared tables", () => {
+    expect(labelsFor("CREATE TEMP")).toEqual(expect.arrayContaining(["TEMP", "TEMPORARY"]));
+    expect(labelsFor("START TRANS")).toContain("TRANSACTION");
+    expect(labelsFor("CREATE SEQ")).toContain("SEQUENCE");
+    expect(labelsFor("DROP TABLE t CASC")).toContain("CASCADE");
+    expect(labelsFor("NULLS F")).toContain("FIRST");
+    expect(labelsFor("SHOW STAT")).toContain("STATISTICS");
+  });
+
+  it("keeps PG-only keywords out of MySQL connections", () => {
+    const mysql = (sql: string) => buildSqlCompletionItems(sql, sql.length, { databaseType: "mysql", tables: [], columnsByTable: new Map() }).map((item) => item.label);
+
+    expect(labelsFor("CREATE SEQ")).toContain("SEQUENCE");
+    expect(mysql("CREATE SEQ")).not.toContain("SEQUENCE");
+    expect(mysql("CREATE TEM")).toEqual(expect.arrayContaining(["TEMPORARY"]));
+  });
+
+  it.each(["STRING", "BYTES"])("preserves Spanner %s type completion without a CRDB profile", (type) => {
+    const sql = `CREATE TABLE t (value ${type.slice(0, 3)}`;
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "spanner",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+    expect(items.find((item) => item.label === type)?.detail).toBe("data type");
+  });
+
   it("returns signature help for CRDB functions", () => {
     const sql = "SELECT with_max_staleness(";
     const help = getSqlFunctionSignatureHelp(sql, sql.length, "postgres", "cockroachdb");

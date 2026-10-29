@@ -1916,6 +1916,7 @@ mod tests {
                 deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![vec![serde_json::json!("relation customer_orders does not exist")]],
                 affected_rows: 0,

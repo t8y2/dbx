@@ -737,6 +737,12 @@ pub async fn execute_sql_file_content(
     started_at: Instant,
     mut emit: impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        &request.connection_id,
+        crate::query::mysql_data_charset_policy::READ_ONLY,
+    )
+    .await?;
     if request.resolve_includes {
         let error = "SQL includes require local .sql file execution, not inline content".to_string();
         emit(sql_file_error_progress(&request.execution_id, started_at, error.clone()));
@@ -886,6 +892,12 @@ async fn execute_sql_file_paths_with_options(
     zip_package: bool,
     mut emit: impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        &request.connection_id,
+        crate::query::mysql_data_charset_policy::READ_ONLY,
+    )
+    .await?;
     let prepared;
     let mut expanded_request;
     let expanded_paths;

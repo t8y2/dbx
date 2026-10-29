@@ -2882,6 +2882,12 @@ pub async fn begin_database_backup_snapshot_core_for_export(
     database: &str,
     export_id: Option<&str>,
 ) -> Result<DatabaseBackupSnapshot, String> {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        connection_id,
+        crate::query::mysql_data_charset_policy::EXPORT_UNSUPPORTED,
+    )
+    .await?;
     let db_type = state
         .configs
         .read()
@@ -3510,13 +3516,32 @@ async fn ensure_export_destination_dir(
         save_export_destination_identity(state, dir, current_identity.as_ref()).await?;
         return Ok(current_identity);
     } else {
+        // The recorded state is `Option<Option<_>>`: an outer `Some` means the
+        // directory was previously used by dbx (or recorded when the schedule
+        // was configured); the inner value carries its filesystem identity.
         if recorded_identity.is_some() {
-            return Err(format!(
-                "Backup directory {} is missing. It was configured or previously used for exports to \
-                 this location, so dbx will not recreate it automatically -- if this is on a removable \
-                 or network drive, reconnect it and try again.",
-                dir.display()
-            ));
+            // Recreating the directory is only safe when it would land on the
+            // same filesystem it was recorded on, so compare the recorded
+            // identity against the destination's parent. A missing or
+            // differently-resolving parent keeps the fail-closed behavior for
+            // vanished removable/network mounts (#6327). A matching parent
+            // means dbx removed the empty leaf itself -- backup deletion
+            // cleans up the per-run directory once its files are gone -- and
+            // the next run must be able to recreate it (#13610). A record
+            // without a usable identity cannot prove the filesystem and also
+            // keeps failing closed.
+            let parent_identity = dir.parent().and_then(export_destination_identity_for_path);
+            let same_filesystem = recorded_identity.flatten().is_some_and(|recorded| {
+                !recorded_export_destination_identity_mismatch(&recorded, parent_identity.as_ref())
+            });
+            if !same_filesystem {
+                return Err(format!(
+                    "Backup directory {} is missing. It was configured or previously used for exports to \
+                     this location, so dbx will not recreate it automatically -- if this is on a removable \
+                     or network drive, reconnect it and try again.",
+                    dir.display()
+                ));
+            }
         }
         // A run-specific child directory is intentionally new on every
         // scheduled backup. Before creating it, still honor a recorded parent
@@ -3698,6 +3723,12 @@ pub async fn export_database_sql_core(
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        &request.connection_id,
+        crate::query::mysql_data_charset_policy::EXPORT_UNSUPPORTED,
+    )
+    .await?;
     let db_type = state
         .configs
         .read()
@@ -9272,6 +9303,37 @@ mod tests {
 
         assert!(result.is_err(), "a destination that existed before should not be silently recreated");
         assert!(!destination.exists(), "the backup directory must not be resurrected on the wrong filesystem");
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    // Regression test for #13610: deleting the last backup of a run removes the
+    // emptied per-run directory (`remove_empty_directories`), while its recorded
+    // destination identity survives in state. The next run into the same dated
+    // directory refused to recreate it even though dbx itself had removed the
+    // directory and the parent still resolved to the same filesystem. The
+    // vanished-mount refusals above stay intact: there the parent is missing,
+    // so the identity comparison fails closed.
+    #[tokio::test]
+    async fn ensure_export_destination_dir_recreates_a_recorded_destination_whose_parent_kept_the_same_filesystem() {
+        let scratch = std::env::temp_dir().join(format!("dbx-export-dest-cleaned-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let state = test_app_state(&scratch).await;
+
+        let destination = scratch.join("backups").join("mydb");
+        ensure_export_destination_dir(&state, &destination).await.expect("initial export should create the directory");
+        assert!(destination.is_dir());
+
+        // Simulates dbx's own cleanup after the last backup file in the
+        // directory is deleted: the empty run directory is removed, its parent
+        // stays.
+        std::fs::remove_dir(&destination).unwrap();
+        assert!(!destination.exists());
+
+        ensure_export_destination_dir(&state, &destination)
+            .await
+            .expect("a leaf directory dbx itself removed must be recreated when the parent still matches");
+        assert!(destination.is_dir());
 
         let _ = std::fs::remove_dir_all(&scratch);
     }

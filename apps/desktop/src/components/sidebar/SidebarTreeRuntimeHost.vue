@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { uuid } from "@/lib/common/utils";
 import { computed, defineAsyncComponent, nextTick, watch, onBeforeUnmount, onScopeDispose, inject, reactive, ref, shallowRef } from "vue";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -11,8 +12,10 @@ import { useSidebarConnectionMutationRuntime } from "@/composables/useSidebarCon
 import { useSidebarDatabaseSpecificMutationRuntime } from "@/composables/useSidebarDatabaseSpecificMutationRuntime";
 import { useSidebarTableMutationRuntime } from "@/composables/useSidebarTableMutationRuntime";
 import { useSidebarTreeExportRuntime } from "@/composables/useSidebarTreeExportRuntime";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useSidebarTreeToolRuntime } from "@/composables/useSidebarTreeToolRuntime";
 import { canDropDatabaseNode, notifyDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
+import { dropDatabaseOtherSessionCount } from "@/lib/database/dropDatabaseError";
 import { canDropDatabaseTables, canEmptyDatabaseTables, useDatabaseTableEmpty } from "@/composables/useDatabaseTableEmpty";
 import { useI18n } from "vue-i18n";
 import { launchPlDebug, openPlDebugRecovery } from "@/components/debug/plDebugLaunch";
@@ -5587,7 +5590,11 @@ async function createDuckDbAttachedDatabaseFile() {
     }
     await connectionStore.ensureVisibleDatabase(node.connectionId, name);
     await connectionStore.loadDatabases(node.connectionId, { force: true });
-    connectionStore.selectedTreeNodeId = `${node.connectionId}:${name}`;
+    const nodeId = `${node.connectionId}:${name}`;
+    connectionStore.connectionMultiSelectActive = false;
+    connectionStore.selectedTreeNodeId = nodeId;
+    connectionStore.selectedTreeNodeIds = [nodeId];
+    connectionStore.treeSelectionAnchorId = nodeId;
     toast(t("contextMenu.createDuckDbFileSuccess", { name }), 3000);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
@@ -5632,7 +5639,11 @@ async function attachSqliteDatabaseFile() {
     }
     await connectionStore.ensureVisibleDatabase(node.connectionId, name);
     await connectionStore.loadDatabases(node.connectionId, { force: true });
-    connectionStore.selectedTreeNodeId = `${node.connectionId}:${name}`;
+    const nodeId = `${node.connectionId}:${name}`;
+    connectionStore.connectionMultiSelectActive = false;
+    connectionStore.selectedTreeNodeId = nodeId;
+    connectionStore.selectedTreeNodeIds = [nodeId];
+    connectionStore.treeSelectionAnchorId = nodeId;
     toast(t("contextMenu.attachSqliteDatabaseSuccess", { name }), 3000);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
@@ -5816,7 +5827,10 @@ async function confirmDropDatabase() {
     notifyDatabaseBrowserMutation({ connectionId, database: node.database || node.label, operation: "drop-database" });
     queryStore.closeDatabaseTabs(connectionId, node.database || node.label);
   } catch (e: any) {
-    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+    const message = e?.message || String(e);
+    const otherSessions = dropDatabaseOtherSessionCount(message);
+    if (otherSessions === undefined) toast(t("contextMenu.tableOperationFailed", { message }), 5000);
+    else toast(otherSessions === null ? t("contextMenu.dropDatabaseInUse", { name: node.label }) : t("contextMenu.dropDatabaseInUseSessions", { name: node.label, count: otherSessions }), 5000);
   } finally {
     dropDatabaseLoading.value = false;
   }
@@ -5989,6 +6003,12 @@ async function confirmPasteTableImpl() {
   const mode = pasteTableMode.value;
   const copyData = pasteTableModeCopiesData(mode) && pasteTableDataCopySupported.value;
   showPasteDialog.value = false;
+  if (entries.every((entry) => entry.databaseType === "mysql")) {
+    const copies = entries.map((entry) => ({ ...entry, connection: { ...connectionStore.getConfig(entry.connectionId)! } }));
+    const completed = await useTableCopyTaskStore().run(copies, mode);
+    if (completed && shouldConsumeTableClipboard && connectionStore.treeClipboard === clipboardAtPasteStart) connectionStore.treeClipboard = null;
+    return;
+  }
   let successCount = 0;
   let pasteFailCount = 0;
   let firstPasteError: unknown;
@@ -7136,6 +7156,7 @@ function addToAiMenuItem(node: TreeNode): ContextMenuItem {
 }
 
 function exportDataSubmenu(includeSqlInsert = true): ContextMenuItem {
+  if (sidebarTableDataExportTargets(activeNode.value, connectionStore.treeNodes, acceptedSelectionIds ?? connectionStore.selectedTreeNodeIds).some((target) => mysqlDataCharsetEnabled(connectionStore.getConfig(target.connectionId ?? "")))) includeSqlInsert = false;
   const count = selectedDataExportTargetCount();
   const children: ContextMenuItem[] = [
     { label: "CSV", action: () => exportData("csv") },

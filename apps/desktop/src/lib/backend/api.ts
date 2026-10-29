@@ -667,6 +667,7 @@ export type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./da
 export const redisListDatabases = forward("redisListDatabases");
 export const redisScanKeys = forward("redisScanKeys");
 export const redisScanKeysBatch = forward("redisScanKeysBatch");
+export const redisKeyMetadataBatch = forward("redisKeyMetadataBatch");
 export const redisScanValues = forward("redisScanValues");
 export const redisGetValue = forward("redisGetValue");
 export const redisGetRawValue = forward("redisGetRawValue");
@@ -1127,6 +1128,7 @@ export type {
   RedisDatabaseInfo,
   RedisHashItem,
   RedisKeyInfo,
+  RedisKeyMetadata,
   RedisKeysExpiryResult,
   RedisListItem,
   RedisSetItem,
@@ -1227,6 +1229,7 @@ export type {
   TableImportRequest,
   TableImportSummary,
   TableImportProgress,
+  TableImportFailure,
   MongoImportFormat,
   MongoImportTypeMode,
   MongoImportInferredType,

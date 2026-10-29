@@ -959,14 +959,26 @@ fn completion_match_mode(candidate: &str, mask: &str, mode: &str) -> bool {
     }
 }
 
+/// 为元数据快照排序：保证所有根表（超级表 STABLE 和普通无父表 TABLE）排在前面，
+/// 随后是属于各超级表的子表（按超级表分组，组内按子表名排序）。
+///
+/// 修复 #13728：TDengine 下若将子表直接交错在对应超级表后面，当某个超级表拥有
+/// 大量子表（如 998 个甚至数万个）时，前端侧边栏按 1000 条分页请求首页，
+/// 后续的超级表（第 3 个超级表及更多）会被排到 1000 条之后，导致侧边栏丢超级表。
+/// 根表优先排序确保所有超级表与普通表优先出现在首页，子表再归属挂载。
 fn sort_tables_for_hierarchy(tables: &mut [TableInfo]) {
     tables.sort_by(|left, right| {
-        let left_group = left.parent_name.as_deref().unwrap_or(&left.name).to_ascii_lowercase();
-        let right_group = right.parent_name.as_deref().unwrap_or(&right.name).to_ascii_lowercase();
-        left_group
-            .cmp(&right_group)
-            .then_with(|| left.parent_name.is_some().cmp(&right.parent_name.is_some()))
-            .then_with(|| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()))
+        left.parent_name.is_some().cmp(&right.parent_name.is_some()).then_with(|| {
+            if left.parent_name.is_none() {
+                left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase())
+            } else {
+                let left_group = left.parent_name.as_deref().unwrap_or(&left.name).to_ascii_lowercase();
+                let right_group = right.parent_name.as_deref().unwrap_or(&right.name).to_ascii_lowercase();
+                left_group
+                    .cmp(&right_group)
+                    .then_with(|| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()))
+            }
+        })
     });
 }
 
@@ -1151,6 +1163,60 @@ mod tests {
         ];
         sort_tables_for_hierarchy(&mut tables);
         assert_eq!(tables.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec!["meters", "d1", "d2"]);
+    }
+
+    #[test]
+    fn sorts_supertables_before_child_tables_preventing_page_truncation() {
+        // #13728: 3 个超级表，其中 stable_b 有 998 个子表；
+        // 若按旧逻辑把子表排在 stable_b 之后，第 1000 个表后的 stable_c 会被截断到下一页。
+        let mut tables = vec![
+            TableInfo {
+                name: "stable_a".into(),
+                table_type: "STABLE".into(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "stable_b".into(),
+                table_type: "STABLE".into(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "stable_c".into(),
+                table_type: "STABLE".into(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+        for i in 0..998 {
+            tables.push(TableInfo {
+                name: format!("sub_{:04}", i),
+                table_type: "TABLE".into(),
+                comment: None,
+                parent_schema: None,
+                parent_name: Some("stable_b".into()),
+            });
+        }
+        sort_tables_for_hierarchy(&mut tables);
+        // 所有超级表必须优先排在前面，不被前一个超级表的子表挤占分页
+        assert_eq!(tables[0].name, "stable_a");
+        assert_eq!(tables[1].name, "stable_b");
+        assert_eq!(tables[2].name, "stable_c");
+        assert_eq!(tables[3].name, "sub_0000");
+        assert_eq!(tables[1000].name, "sub_0997");
+
+        let first_page = filter_tables(
+            &tables,
+            &MetadataListConstraints { limit: 1000, offset: 0, ..MetadataListConstraints::default() },
+        );
+        let first_page_names: Vec<&str> = first_page.iter().map(|t| t.name.as_str()).collect();
+        assert!(first_page_names.contains(&"stable_a"));
+        assert!(first_page_names.contains(&"stable_b"));
+        assert!(first_page_names.contains(&"stable_c"));
     }
 
     #[test]

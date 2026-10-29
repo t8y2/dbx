@@ -23,6 +23,14 @@ function fileWithSections(sections: Record<string, unknown>): string {
 }
 
 describe("settingsTransfer", () => {
+  it("does not export or reactivate the retired global user visibility setting", () => {
+    const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, sidebarShowUserAdmin: false });
+    expect(JSON.parse(text).settings.editor).not.toHaveProperty("sidebarShowUserAdmin");
+    const imported = parseSettingsTransferFile(fileWith({ sidebarShowUserAdmin: false, sidebarFontSize: 14 }));
+    expect(imported.ok).toBe(true);
+    if (imported.ok) expect(imported.value.editorSettings).not.toHaveProperty("sidebarShowUserAdmin");
+  });
+
   it("round-trips column comment placement as a data preference and rejects non-booleans", () => {
     const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, dataGridColumnCommentsInInfoArea: true, dataGridTransposeMetadataInInfoColumn: true });
     const result = parseSettingsTransferFile(text);

@@ -2,7 +2,7 @@
 import { createApp, defineComponent, h, reactive, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
-import { effectiveUpdateInfo, isNewerRemoteVersion, resolveReleaseTagUrl, useAppUpdater } from "@/composables/useAppUpdater";
+import { effectiveUpdateInfo, isNewerRemoteVersion, isPreparedUpdateObsolete, resolveReleaseTagUrl, useAppUpdater } from "@/composables/useAppUpdater";
 const mocks = vi.hoisted(() => ({
   checkForUpdates: vi.fn(),
   downloadUpdate: vi.fn(),
@@ -87,6 +87,16 @@ describe("older version release pages", () => {
     expect(isNewerRemoteVersion("0.5.60", "v0.5.59")).toBe(true);
     expect(isNewerRemoteVersion("0.5.60", "v0.5.60")).toBe(false);
     expect(isNewerRemoteVersion("0.5.60", "v0.5.61")).toBe(false);
+  });
+});
+
+describe("prepared update reconciliation (#13562)", () => {
+  it("treats a package the running build already satisfies as obsolete", () => {
+    expect(isPreparedUpdateObsolete("0.5.60", "0.5.60")).toBe(true);
+    expect(isPreparedUpdateObsolete("0.5.59", "v0.5.60")).toBe(true);
+    expect(isPreparedUpdateObsolete("0.5.61", "0.5.60")).toBe(false);
+    expect(isPreparedUpdateObsolete("", "0.5.60")).toBe(false);
+    expect(isPreparedUpdateObsolete("0.5.61", "")).toBe(false);
   });
 });
 
@@ -464,6 +474,35 @@ describe("silent update lifecycle", () => {
     await updater.checkUpdates({ silent: true });
     expect(mocks.discardDownloadedUpdate).not.toHaveBeenCalled();
     expect(mocks.downloadUpdate).toHaveBeenCalledOnce();
+    expect(updater.phase.value).toBe("ready");
+  });
+
+  it("discards a prepared package the running build already satisfies", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    mocks.getAppVersion.mockResolvedValue("1.1.0");
+    mocks.checkForUpdates.mockResolvedValue({ ...info, current_version: "1.1.0", latest_version: "1.1.0", update_available: false });
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+
+    expect(mocks.discardDownloadedUpdate).toHaveBeenCalledWith("cached");
+    expect(updater.updateDownloaded.value).toBe(false);
+    expect(updater.hasUpdateAvailable.value).toBe(false);
+    expect(updater.updateInfo.value?.update_available).toBe(false);
+    expect(updater.phase.value).toBe("idle");
+  });
+
+  it("keeps a prepared package installable when the remote stops advertising it", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue({ ...cache, version: "1.2.0" });
+    mocks.checkForUpdates.mockResolvedValue({ ...info, latest_version: "1.1.0", update_available: false });
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+
+    expect(mocks.discardDownloadedUpdate).not.toHaveBeenCalled();
+    expect(updater.updateDownloaded.value).toBe(true);
+    expect(updater.updateDownloadedVersion.value).toBe("1.2.0");
+    expect(updater.updateInfo.value?.latest_version).toBe("1.1.0");
     expect(updater.phase.value).toBe("ready");
   });
 

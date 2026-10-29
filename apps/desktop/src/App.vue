@@ -26,6 +26,7 @@ import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { usePlDebugStore } from "@/stores/plDebugStore";
 import { dispatchPlDebugStepShortcut } from "@/lib/editor/plDebugStepShortcut";
 import { useNavigationStore } from "@/stores/navigationStore";
@@ -248,6 +249,7 @@ const DriverStorePage = defineAsyncComponent(() => import("@/components/config/D
 const PluginCenterPage = defineAsyncComponent(() => import("@/components/plugins/PluginContributionsPanel.vue"));
 const PluginBottomDock = defineAsyncComponent(() => import("@/components/plugins/PluginBottomDock.vue"));
 const EditorSettingsPage = defineAsyncComponent(() => import("@/components/editor/EditorSettingsDialog.vue"));
+const TableCopyProgressDialog = defineAsyncComponent(() => import("@/components/objects/TableCopyProgressDialog.vue"));
 const UpdateDialog = defineAsyncComponent(() => import("@/components/layout/UpdateDialog.vue"));
 const CloseActionPromptDialog = defineAsyncComponent(() => import("@/components/layout/CloseActionPromptDialog.vue"));
 const AiRunsClosePromptDialog = defineAsyncComponent(() => import("@/components/layout/AiRunsClosePromptDialog.vue"));
@@ -324,6 +326,7 @@ connectionStore.setBeforeConnectHandler(async (config) => {
 const { message: toastMessage, visible: toastVisible, action: toastAction, toast } = useToast();
 const { isDark, themeMode, applyTheme, setThemeMode, writeRootToken } = useTheme();
 const { activeCount: activeBackgroundTaskCount, tasks: backgroundTasks, cancelTask: cancelBackgroundTask } = useExportTracker();
+const tableCopyTasks = useTableCopyTaskStore();
 const trackedUpdateTaskCount = computed(() => countActiveUpdateBlockingTasks(activeBackgroundTaskCount.value, queryStore.tabs));
 const {
   initialize: initializeUpdater,
@@ -338,6 +341,7 @@ const {
   isDownloadingUpdate,
   downloadProgress,
   updateDownloaded,
+  updateDownloadedVersion,
   isInstallingUpdate,
   updateReady,
   isIgnoringUpdate,
@@ -657,7 +661,7 @@ function updatePluginAiRecommendations(tabId: string, update: PluginAiRecommenda
 // iframe moved out of the DOM reloads from scratch, so KeepAlive/ContentArea
 // remounts flash the whole webview and drop its live session state.
 const mountedPluginWorkbenchTabs = computed(() => queryStore.tabs.filter((tab) => tab.mode === "plugin-workbench" && tab.pluginWorkbench));
-type PluginWorkbenchTabHandle = { refresh: () => Promise<unknown> };
+type PluginWorkbenchTabHandle = { refresh: () => Promise<unknown>; notifyLayout?: () => void };
 const pluginWorkbenchTabRefs = new Map<string, PluginWorkbenchTabHandle>();
 let detachedEventUnlisteners: Array<() => void> = [];
 let floatingEventUnlisteners: Array<() => void> = [];
@@ -2491,7 +2495,7 @@ function confirmQuitWithActiveBackgroundTasks() {
   showBackgroundTasksClosePrompt.value = false;
   backgroundTasksQuitConfirmed = true;
   for (const task of backgroundTasks.value) {
-    if (task.status === "Running" || task.status === "Writing") void cancelBackgroundTask(task.exportId);
+    if (task.status === "Running" || task.status === "Writing" || (task.kind === "table-copy" && task.canCancel)) void cancelBackgroundTask(task.exportId);
   }
   void finishPendingAppClose(action);
 }
@@ -5618,7 +5622,7 @@ onUnmounted(() => {
               </Dialog>
               <div
                 v-show="!driverStoreActive && !pluginCenterActive && !settingsStore.settingsPageActive"
-                class="flex min-h-0 min-w-0 flex-1"
+                class="relative flex min-h-0 min-w-0 flex-1"
                 :class="activeTab?.mode === 'plugin-workbench' && isVerticalTabPlacement ? (settingsStore.editorSettings.tabPlacement === 'right' ? 'flex-row-reverse' : 'flex-row') : 'flex-col'"
               >
                 <div class="flex min-h-0" :class="activeTab?.mode === 'plugin-workbench' ? (isVerticalTabPlacement ? 'h-full flex-none flex-col' : 'flex-none flex-col') : 'flex-1 flex-col'">
@@ -5780,21 +5784,24 @@ onUnmounted(() => {
                   </SqlEditorWorkspace>
                 </div>
                 <!-- Always-mounted plugin workbench layer: switching tabs only
-                       toggles visibility, so plugin webviews (SSH terminals) are
-                       never destroyed and reloaded. SqlEditorWorkspace no longer
-                       renders plugin tabs — this layer owns them. It in turn
-                       yields the layout (display:none) while a plugin tab is
-                       active, or both flex-1 siblings would split the column. -->
-                <div v-for="workbenchTab in mountedPluginWorkbenchTabs" :key="workbenchTab.id" v-show="activeTab && workbenchTab.id === activeTab.id" class="flex min-h-0 flex-1 flex-col">
-                  <PluginWorkbenchTab
-                    :ref="(element) => setPluginWorkbenchTabRef(workbenchTab.id, element)"
-                    :tab-id="workbenchTab.id"
-                    :plugin-id="workbenchTab.pluginWorkbench!.pluginId"
-                    :contribution-id="workbenchTab.pluginWorkbench!.contributionId"
-                    :context="workbenchTab.pluginWorkbench!.context"
-                    @close-tab="queryStore.closeTab(workbenchTab.id)"
-                    @recommendations="updatePluginAiRecommendations(workbenchTab.id, $event)"
-                  />
+                       toggles visibility without destroying iframes. Inactive
+                       tabs are preserved offscreen at full container bounds
+                       (visibility:hidden, absolute inset-0) rather than display:none,
+                       preventing terminal/layout collapse (0x0) during periodic
+                       background redraws (#13734). -->
+                <div v-if="mountedPluginWorkbenchTabs.length > 0" class="relative min-h-0 min-w-0" :class="activeTab?.mode === 'plugin-workbench' ? 'flex flex-1 flex-col' : 'pointer-events-none absolute inset-0 -z-10 invisible size-full'">
+                  <div v-for="workbenchTab in mountedPluginWorkbenchTabs" :key="workbenchTab.id" class="size-full min-h-0 flex-col" :class="activeTab && workbenchTab.id === activeTab.id ? 'relative flex flex-1' : 'pointer-events-none absolute inset-0 -z-10 invisible'">
+                    <PluginWorkbenchTab
+                      :ref="(element) => setPluginWorkbenchTabRef(workbenchTab.id, element)"
+                      :tab-id="workbenchTab.id"
+                      :active="activeTab?.id === workbenchTab.id"
+                      :plugin-id="workbenchTab.pluginWorkbench!.pluginId"
+                      :contribution-id="workbenchTab.pluginWorkbench!.contributionId"
+                      :context="workbenchTab.pluginWorkbench!.context"
+                      @close-tab="queryStore.closeTab(workbenchTab.id)"
+                      @recommendations="updatePluginAiRecommendations(workbenchTab.id, $event)"
+                    />
+                  </div>
                 </div>
               </div>
               <PluginBottomDock v-if="!isDetachedWindowContext" />
@@ -5807,7 +5814,6 @@ onUnmounted(() => {
             :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate dbx-panel bg-background', isAiPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[240px] max-w-full']"
             :style="isAiPanelMaximized ? {} : { width: aiPanelWidth + 'px' }"
           >
-            <div v-if="!isAiPanelMaximized" class="panel-resize-handle panel-resize-handle--left" @pointerdown="startAiPanelResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]" @mousedown="rememberAuxiliarySearchSurface('ai')">
               <AiAssistant
                 v-if="aiPanelReady"
@@ -5828,6 +5834,7 @@ onUnmounted(() => {
                 @close="closeRightSidebarPanel('ai')"
               />
             </div>
+            <div v-if="!isAiPanelMaximized" class="panel-resize-handle panel-resize-handle--left" @pointerdown="startAiPanelResize" />
           </div>
 
           <div
@@ -5836,7 +5843,6 @@ onUnmounted(() => {
             :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate dbx-panel bg-background', isHistoryPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[240px] max-w-full']"
             :style="isHistoryPanelMaximized ? {} : { width: historyWidth + 'px', maxWidth: 'calc(100% - 240px)' }"
           >
-            <div v-if="!isHistoryPanelMaximized" class="panel-resize-handle panel-resize-handle--left" @pointerdown="startHistoryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]" @mousedown="rememberAuxiliarySearchSurface('history')">
               <div data-history-panel class="h-full min-h-0">
                 <QueryHistory
@@ -5852,6 +5858,7 @@ onUnmounted(() => {
                 />
               </div>
             </div>
+            <div v-if="!isHistoryPanelMaximized" class="panel-resize-handle panel-resize-handle--left" @pointerdown="startHistoryResize" />
           </div>
 
           <div
@@ -5860,12 +5867,12 @@ onUnmounted(() => {
             :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate dbx-panel bg-background'"
             :style="{ width: sqlLibraryWidth + 'px' }"
           >
-            <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startSqlLibraryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]" @mousedown="rememberAuxiliarySearchSurface('sqlLibrary')">
               <div data-sql-library-panel class="h-full min-h-0">
                 <SqlLibraryPanel :locate-request="sqlLibraryLocateRequest" @locate-handled="finishSqlLibraryLocate" @close="closeRightSidebarPanel('sqlLibrary')" />
               </div>
             </div>
+            <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startSqlLibraryResize" />
           </div>
 
           <div
@@ -5874,10 +5881,10 @@ onUnmounted(() => {
             :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate dbx-panel bg-background'"
             :style="{ width: sqlFilePanelWidth + 'px' }"
           >
-            <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startSqlFilePanelResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
               <SqlFilePanel :locate-request="sqlFileLocateRequest" @locate-handled="finishSqlFileLocate" @close="closeRightSidebarPanel('sqlFile')" />
             </div>
+            <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startSqlFilePanelResize" />
           </div>
           <PluginShortcutBar v-if="!isDetachedWindowContext && !isZenMode && settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position.startsWith('right-')" :position="settingsStore.editorSettings.pluginShortcuts.position" />
         </div>
@@ -5930,6 +5937,7 @@ onUnmounted(() => {
           @open-database-search-target="openDatabaseSearchTarget"
           @open-diagram-target="openDiagramTarget"
         />
+        <TableCopyProgressDialog v-if="tableCopyTasks.open" />
         <MultiDbExecuteDialog
           v-model:open="showMultiDbExecuteDialog"
           :sql="multiExecuteSql"
@@ -5954,6 +5962,7 @@ onUnmounted(() => {
           :is-downloading-update="isDownloadingUpdate"
           :download-progress="downloadProgress"
           :update-downloaded="updateDownloaded"
+          :update-downloaded-version="updateDownloadedVersion"
           :is-preparing-update="isPreparingUpdate"
           :is-installing-update="isInstallingUpdate"
           :update-ready="updateReady"
@@ -5971,6 +5980,7 @@ onUnmounted(() => {
           :component-updates-updating="componentUpdates.updating.value"
           :updating-component="componentUpdates.updatingCategory.value"
           :is-updating-all="updatingAllUpdates || componentUpdates.updating.value"
+          @check-updates="checkAllUpdates"
           @open-latest-release="openLatestRelease"
           @change-download-source="changeUpdateDownloadSource"
           @download-in-background="downloadUpdateInBackground"

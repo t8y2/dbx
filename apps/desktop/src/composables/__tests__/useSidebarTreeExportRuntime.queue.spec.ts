@@ -236,6 +236,37 @@ describe("sidebar Mongo manual export queue", () => {
     expect(tracker.tasks.value[0]!.status).toBe("Done");
   });
 
+  it.each([false, true])("recovers the original lease from a cancelled table row and ignores late success (batch: %s)", async (batch) => {
+    const { runtime, tracker } = await tableFixture(batch);
+    await runtime.exportData("csv");
+    await vi.waitFor(() => expect(tables).toHaveLength(1));
+    const root = tracker.tasks.value[0]!;
+    const child = tracker.tasks.value.find((task) => task.exportId === tables[0]!.request.exportId)!;
+    const next = vi.fn().mockResolvedValue("settled");
+    tracker.submitExportTask(tracker.addTask("next", "csv", "C:/different/next.csv"), "queued", next);
+    vi.useFakeTimers();
+    try {
+      await tracker.cancelTask(child.exportId);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(child.canRecoverCancellation).toBe(true);
+      expect(next).not.toHaveBeenCalled();
+      tracker.recoverCancelledTask(child.exportId);
+      expect(root.removed).toBe(true);
+      expect(child.removed).toBe(true);
+      expect(next).toHaveBeenCalledOnce();
+      mocks.toast.mockClear();
+      finishTable(0, "Done");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(tables).toHaveLength(1);
+      expect(mocks.toast).not.toHaveBeenCalled();
+      expect(tracker.tasks.value).not.toContain(root);
+      expect(tracker.tasks.value).not.toContain(child);
+      expect(next).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each(["terminal", "transport"] as const)("does not release a cancelled table batch on cancel acknowledgement (%s)", async (outcome) => {
     const { runtime, tracker } = await tableFixture(true);
     await runtime.exportData("csv");

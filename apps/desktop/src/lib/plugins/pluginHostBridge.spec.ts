@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+// @vitest-environment happy-dom
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { reactive, readonly } from "vue";
 import { MAX_CONCURRENT_PLUGIN_DATA_QUERIES, PLUGIN_CLIPBOARD_AUDIT_CAPACITY, PluginHostBridge, clipboardReadGateAllows, createClipboardReadGate, pluginSandboxDocument, pluginSdkSource, recordClipboardRead } from "./pluginHostBridge";
 import type { InstalledPlugin, PluginResultViewContribution, PluginWorkbenchContribution } from "@/types/database";
@@ -1842,7 +1843,9 @@ describe("plugin SDK source", () => {
         onDragState: (listener: (active: boolean, position?: { x: number; y: number }) => void) => () => void;
         onDrop: (listener: (files: unknown[], drop: unknown) => void) => () => void;
       };
+      onLayout: (listener: (event: unknown) => void) => () => void;
     };
+    dispatchEvent: ReturnType<typeof vi.fn>;
     document: {
       dispatchEvent: ReturnType<typeof vi.fn>;
     };
@@ -1850,7 +1853,9 @@ describe("plugin SDK source", () => {
   }
 
   function loadSdk(posted: unknown[], initialTheme?: { appearance: "dark" | "light"; tokens: Record<string, string> }): SdkWindow {
-    const sandbox = {} as SdkWindow;
+    const sandbox = {
+      dispatchEvent: vi.fn(),
+    } as unknown as SdkWindow;
     const document = {
       documentElement: {
         dataset: {} as Record<string, string>,
@@ -2221,6 +2226,39 @@ describe("plugin SDK source", () => {
     await expect(bridge.requestWorkbenchClose(5000)).resolves.toBe(false);
     expect(messages.some((message) => message.type === "workbench/close")).toBe(true);
   });
+
+  it("notifies the plugin of layout recalculations and dispatches window resize inside SDK", () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+
+    bridge.notifyLayout();
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toEqual({
+      source: "dbx-host",
+      version: 1,
+      type: "layout",
+    });
+
+    const posted: unknown[] = [];
+    const sdk = loadSdk(posted);
+    let sdkListenerFired = false;
+
+    sdk.dbxPlugin!.onLayout(() => {
+      sdkListenerFired = true;
+    });
+
+    sdk.receiveHostMessage(messages[0]);
+
+    expect(sdk.dispatchEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "resize" }));
+    expect(sdk.document.dispatchEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "dbx-plugin-layout" }));
+    expect(sdkListenerFired).toBe(true);
+  });
 });
 
 describe("AI completion bridge", () => {
@@ -2406,5 +2444,101 @@ describe("AI completion bridge", () => {
     });
     bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready" } } as MessageEvent);
     expect(messages.some((m) => m.type === "init" && m.capabilities?.connectionsApi === true)).toBe(true);
+  });
+});
+
+// The plugin-side close shortcut has to cooperate with whatever the plugin's
+// focused control already did with the key. A terminal (xterm) turns Ctrl+W
+// into a control byte and claims the event; while the host registered its
+// listener in the CAPTURE phase it closed the tab before the terminal ever saw
+// the key. These tests boot the real injected SDK inside the DOM and dispatch a
+// bubbling keydown on a descendant node, because only real event propagation
+// shows the capture/bubble difference: a capture-phase listener runs before the
+// terminal textarea, a bubble-phase listener after it.
+describe("plugin close-tab shortcut vs. terminal key handling", () => {
+  const posted: unknown[] = [];
+  let booted = false;
+
+  // Boot once: every boot registers another window keydown listener, and stale
+  // listeners would answer the next test's keystrokes.
+  function bootSdk(): void {
+    if (booted) return;
+    booted = true;
+    const parent = { postMessage: (message: unknown) => posted.push(message) };
+    new Function("window", "parent", "addEventListener", "document", pluginSdkSource())(window, parent, window.addEventListener.bind(window), document);
+  }
+
+  function shortcuts(): Array<{ source?: string; type?: string; shortcut?: string }> {
+    return posted.filter((message) => (message as { type?: string }).type === "shortcut") as Array<{ source?: string; type?: string; shortcut?: string }>;
+  }
+
+  function mountTerminal(consume?: (event: { preventDefault: () => void; stopPropagation: () => void }) => void): HTMLTextAreaElement {
+    const container = document.createElement("div");
+    const textarea = document.createElement("textarea");
+    container.appendChild(textarea);
+    document.body.appendChild(container);
+    if (consume) textarea.addEventListener("keydown", consume);
+    return textarea;
+  }
+
+  function press(target: EventTarget, init: KeyboardEventInit, overrides?: Record<string, unknown>): KeyboardEvent {
+    const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+    for (const [name, value] of Object.entries(overrides || {})) Object.defineProperty(event, name, { value, configurable: true });
+    target.dispatchEvent(event);
+    return event;
+  }
+
+  beforeEach(() => {
+    bootSdk();
+    posted.length = 0;
+  });
+
+  it("keeps the tab open when the focused terminal consumes Ctrl+W", () => {
+    // xterm's shape: claim the key so the browser and the host both back off.
+    const textarea = mountTerminal((event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+
+    const event = press(textarea, { key: "w", ctrlKey: true });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(shortcuts()).toEqual([]);
+    textarea.parentElement?.remove();
+  });
+
+  it("keeps the tab open when a consumer only calls preventDefault", () => {
+    const textarea = mountTerminal((event) => event.preventDefault());
+
+    press(textarea, { key: "w", ctrlKey: true });
+
+    expect(shortcuts()).toEqual([]);
+    textarea.parentElement?.remove();
+  });
+
+  it("still closes the tab exactly once per unconsumed Ctrl+W or Cmd+W", () => {
+    const textarea = mountTerminal();
+
+    press(textarea, { key: "w", ctrlKey: true });
+    expect(shortcuts()).toHaveLength(1);
+    expect(shortcuts()[0]).toMatchObject({ source: "dbx-plugin", type: "shortcut", shortcut: "closeTab" });
+
+    press(textarea, { key: "w", metaKey: true });
+    expect(shortcuts()).toHaveLength(2);
+    expect(shortcuts()[1]).toMatchObject({ shortcut: "closeTab" });
+    textarea.parentElement?.remove();
+  });
+
+  it("leaves Tab, IME composition, and excluded modifier combinations alone", () => {
+    const textarea = mountTerminal();
+
+    press(textarea, { key: "Tab", ctrlKey: true });
+    press(textarea, { key: "w", ctrlKey: true, shiftKey: true });
+    press(textarea, { key: "w", ctrlKey: true, altKey: true });
+    press(textarea, { key: "w", ctrlKey: true }, { isComposing: true });
+    press(textarea, { key: "w" });
+
+    expect(shortcuts()).toEqual([]);
+    textarea.parentElement?.remove();
   });
 });

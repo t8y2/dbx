@@ -94,7 +94,9 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           path: ci
-          sparse-checkout: .github/ui-preview
+          sparse-checkout: |
+            .github/ui-preview
+            .github/scripts
           persist-credentials: false
       # the fork's code, on purpose: this job is the one meant to run it,
       # with a read-only token and no credentials left in the checkout
@@ -145,8 +147,7 @@ jobs:
       - name: Chromium, ffmpeg and fonts
         working-directory: ci/.github/ui-preview
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-noto-cjk fonts-noto-color-emoji
+          sudo python3 ../scripts/ci-install-system-deps.py --group preview
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: Record

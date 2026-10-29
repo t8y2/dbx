@@ -11,13 +11,17 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 
-const props = defineProps<{
-  tabId?: string;
-  pluginId: string;
-  contributionId: string;
-  connectionId?: string;
-  context?: PluginWorkbenchContext;
-}>();
+const props = withDefaults(
+  defineProps<{
+    tabId?: string;
+    active?: boolean;
+    pluginId: string;
+    contributionId: string;
+    connectionId?: string;
+    context?: PluginWorkbenchContext;
+  }>(),
+  { active: true },
+);
 
 const { t, locale: appLocale } = useI18n();
 const emit = defineEmits<{
@@ -158,10 +162,16 @@ function onGetTitle(): string {
   return "";
 }
 
+const hostRef = ref<{ requestClose: () => Promise<boolean>; notifyLayout?: () => void } | null>(null);
+
+function notifyLayout() {
+  hostRef.value?.notifyLayout?.();
+}
+
 onMounted(start);
 watch(() => [props.pluginId, props.contributionId, props.connectionId, props.context?.connectionId], start);
 
-defineExpose({ refresh });
+defineExpose({ refresh, notifyLayout });
 </script>
 
 <template>
@@ -174,7 +184,9 @@ defineExpose({ refresh });
     </div>
     <PluginWorkbenchHost
       v-else
+      ref="hostRef"
       class="min-h-0 flex-1"
+      :active="props.active"
       :plugin="entry.plugin"
       :contribution="entry.contribution"
       :context="hostContext"

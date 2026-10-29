@@ -250,6 +250,22 @@ open 'dbx://connection/new?type=r-nacos&url=http%3A%2F%2F127.0.0.1%3A8848%2Fnaco
 
 `nacos` 是 `nacos-v2` 的别名，`rnacos` 是 `r-nacos` 的别名。URL 模式会保留服务端点路径，顶层 `host`、`port`、`user`、`password`、`ssl` 会覆盖 `url` 中的对应值。Consul 的 `password` 表示 ACL token；Nacos 传入 `password` 时必须同时传入 `user`。省略 `v` 或使用 `v=1` 表示当前深链协议，其他版本会被拒绝。
 
+Kafka 连接预填示例：
+
+```bash
+open 'dbx://connection/new?v=1&type=kafka&name=ExampleKafka&host=broker.example.com&port=9092'
+open 'dbx://connection/new?v=1&type=kafka&bootstrap_servers=broker-a.example.com%3A9092%2Cbroker-b.example.com%3A9092'
+open 'dbx://connection/new?v=1&type=kafka&bootstrap_servers=broker.example.com%3A9093&security_protocol=SASL_SSL&sasl_mechanism=SCRAM-SHA-512&user=app'
+```
+
+Kafka 会打开已有的 **Apache Kafka** 连接表单。使用 `host` / `port`（默认 `127.0.0.1` / `9092`），或用 `bootstrap_servers` 提供完整 Broker 列表，两种形式不能混用。列表中每个地址都必须有端口，IPv6 需加方括号，例如 `[2001:db8::1]:9092`。请使用 `URLSearchParams` 等工具编码参数值，尤其是逗号、`+`、`&` 和凭据。
+
+- `security_protocol`：`PLAINTEXT`、`SSL`、`SASL_PLAINTEXT` 或 `SASL_SSL`。省略时先使用 Broker 列表中的协议前缀，否则根据 `user` / `sasl_mechanism` 推断 SASL，根据 `ssl` 推断 TLS。
+- `sasl_mechanism`：`PLAIN`（SASL 默认值）、`SCRAM-SHA-256` 或 `SCRAM-SHA-512`。`user` / `password` 回填 Kafka 认证字段，密码可不传，稍后在 DBX 内填写；凭据中的空格会保留。请避免在共享链接中放入密码。
+- TLS 与协议冲突、重复参数或不支持的 Kafka 字段会被拒绝。此预填入口不支持 Kafka `url`、ZooKeeper、Kerberos 或任意 Agent 属性。
+
+默认确认设置下，普通链接只打开表单供用户检查；已有的自动确认设置及 `one_time` 行为保持生效，此功能不会发送 Kafka 消息。Kafka 专用参数仅用于新建连接，下方按 ID 更新的入口仍采用原有参数白名单。
+
 ### 按 ID 更新已保存连接
 
 在同一个 `dbx://connection/new` 路由上增加 `id`，即可打开指定的已保存连接进行编辑。例如，堡垒机可以为已有连接传入新的登录凭据：

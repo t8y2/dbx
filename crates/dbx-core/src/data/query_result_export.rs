@@ -49,7 +49,9 @@ use tokio_util::sync::CancellationToken;
 
 const AGENT_UNBOUNDED_ROW_LIMIT: usize = i32::MAX as usize;
 const STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str =
-    "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
+    "Streaming export cannot page through this query. Export a single SELECT statement, or load the full result first and export the loaded rows.";
+const STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR: &str =
+    "A manual transaction cannot use a result cursor, and this query cannot be split into pages. Commit or roll back the transaction, then export again.";
 const HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str =
     "HighGo cannot safely paginate this query for export. Run and export a single SELECT statement that supports LIMIT/OFFSET.";
 const AGENT_SESSION_MISSING_ERROR: &str =
@@ -844,6 +846,14 @@ fn streaming_pagination_preflight_error(
     if has_keyset_plan || supports_streaming_offset_pagination(request, page_size) || has_single_execution_bound {
         return None;
     }
+    // A manual transaction without a usable Agent cursor forces the export
+    // through the transaction's own connection, where result-session cursors
+    // are unavailable. Committing the transaction is the fix, so say that
+    // instead of blaming the query shape. When the caller resolved an Agent
+    // cursor the export pages through it and stays supported.
+    if !use_agent_cursor && request.txn_session_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
+        return Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR);
+    }
     if request.database_type == DatabaseType::Highgo {
         return Some(HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR);
     }
@@ -1069,6 +1079,24 @@ async fn export_query_result_with_cleanup(
     on_progress: impl Fn(TableExportProgress),
     report_completion: bool,
 ) -> crate::table_export::ExportCompletion {
+    let policy_check: Result<(), String> = async {
+        crate::query::mysql_data_charset_policy::check_export(state, &request.connection_id, &request.format).await?;
+        if crate::query::mysql_data_charset_policy::enabled_for_connection(state, &request.connection_id).await? {
+            crate::query::check_read_only_for_connection_multi(
+                state,
+                &request.connection_id,
+                &[request.sql.as_str(), request.query_base_sql.as_str()],
+            )
+            .await?;
+            crate::query::check_read_only_for_connection_multi(state, &request.connection_id, &request.setup_sql)
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = policy_check {
+        return crate::table_export::ExportCompletion { result: Err(error), cleanup: Ok(()) };
+    }
     let mut session_id: Option<String> = None;
     let mut duckdb_snapshot = None;
     let result = export_query_result_core_inner(
@@ -1936,7 +1964,7 @@ async fn try_export_mysql_query_result_stream(
 
     let progress_clock = Arc::new(StreamProgressClock::new());
     let progress_clock_for_stream = progress_clock.clone();
-    let stream_future = crate::db::mysql::stream_query_result_on_conn(
+    let stream_future = crate::db::mysql::stream_query_result_on_conn_with_data_charset(
         &mut conn,
         &request.sql,
         bare,
@@ -1944,6 +1972,7 @@ async fn try_export_mysql_query_result_stream(
         mysql_dialect,
         &export_cancelled,
         format.eq_ignore_ascii_case("sql"),
+        pool.data_charset(),
         |item| {
             if export_cancelled.load(Ordering::SeqCst)
                 || cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
@@ -3163,6 +3192,29 @@ mod tests {
     }
 
     #[test]
+    fn manual_transaction_export_reports_the_transaction_instead_of_the_query_shape() {
+        let mut req = request("csv", None, None);
+        req.database_type = DatabaseType::OceanbaseOracle;
+        req.sql = "SELECT * FROM users; SELECT 1".to_string();
+        req.query_base_sql = req.sql.clone();
+        // The frontend keeps use_agent_cursor set; the backend drops it for a
+        // manual transaction, which is what surfaces the error.
+        req.use_agent_cursor = true;
+        req.txn_session_id = Some("txn-1".to_string());
+
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 100, false, false, false),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
+        );
+
+        req.txn_session_id = None;
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 100, false, false, false),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+        );
+    }
+
+    #[test]
     fn agent_cursor_export_keeps_unrewritable_fallback_for_other_databases() {
         let mut req = request("csv", None, None);
         req.database_type = DatabaseType::Oracle;
@@ -3215,12 +3267,12 @@ mod tests {
         assert!(!supports_streaming_offset_pagination(&req, 1000));
         assert_eq!(streaming_pagination_preflight_error(&req, 1000, false, false, cursor), None);
 
-        // The pre-fix policy disabled the cursor for every transactional export,
-        // which is exactly how the user's query produced the reported error.
-        let pre_fix_use_agent_cursor = req.use_agent_cursor && req.txn_session_id.is_none();
+        // Without a usable cursor the manual transaction gets the
+        // transaction-specific guidance instead of the generic query-shape error.
+        let no_cursor = req.use_agent_cursor && req.txn_session_id.is_none();
         assert_eq!(
-            streaming_pagination_preflight_error(&req, 1000, false, false, pre_fix_use_agent_cursor),
-            Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+            streaming_pagination_preflight_error(&req, 1000, false, false, no_cursor),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
         );
 
         // A native/external transaction connection has no result cursor: keep the
@@ -3229,7 +3281,7 @@ mod tests {
         assert!(!cursor);
         assert_eq!(
             streaming_pagination_preflight_error(&req, 1000, false, false, cursor),
-            Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
         );
 
         // Drivers without an Agent cursor still get the honest error.
@@ -3238,7 +3290,7 @@ mod tests {
         assert!(!cursor);
         assert_eq!(
             streaming_pagination_preflight_error(&req, 1000, false, false, cursor),
-            Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
         );
     }
 
@@ -3285,11 +3337,12 @@ mod tests {
         assert_eq!(streaming_pagination_preflight_error(&req, 2000, false, true, false), None);
 
         // A page size smaller than the bound keeps the normal pagination path
-        // (and the honest error when neither cursor nor rewrite is available).
+        // (and the transaction-specific error when neither cursor nor rewrite
+        // is available inside the open transaction).
         assert_eq!(single_execution_page_limit(&req, 1000), None);
         assert_eq!(
             streaming_pagination_preflight_error(&req, 1000, false, false, false),
-            Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
         );
 
         // The export row limit caps the single execution.

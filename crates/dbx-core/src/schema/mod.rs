@@ -3512,6 +3512,7 @@ mod tests {
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: Vec::new(),
+            raw_key_cells: Vec::new(),
             spatial_values: Vec::new(),
             rows,
             affected_rows: 0,
@@ -3644,6 +3645,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -4667,6 +4670,7 @@ done
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![
                 serde_json::json!("users"),
@@ -4698,6 +4702,7 @@ done
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![
                 serde_json::json!("orders"),
@@ -4728,6 +4733,7 @@ done
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!("users"), serde_json::json!("CREATE TABLE `users` (`id` bigint);\n")]],
             affected_rows: 0,
@@ -4755,6 +4761,7 @@ done
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![
                 serde_json::json!("active_users"),
@@ -4786,6 +4793,7 @@ done
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![
                 serde_json::json!("active_users"),
@@ -5881,6 +5889,7 @@ for line in sys.stdin:
             deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![
                 vec![serde_json::json!("daily_revenue"), serde_json::json!("BASE TABLE")],
@@ -5920,6 +5929,7 @@ for line in sys.stdin:
             deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![
                 vec![
@@ -6175,6 +6185,7 @@ for line in sys.stdin:
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!("Customer table")]],
             affected_rows: 0,
@@ -6196,6 +6207,7 @@ for line in sys.stdin:
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!("  ")]],
             affected_rows: 0,
@@ -6225,6 +6237,7 @@ for line in sys.stdin:
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!("18446744073709551615")]],
             affected_rows: 0,
@@ -6271,6 +6284,7 @@ for line in sys.stdin:
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![
                 vec![serde_json::json!("ORDERS"), serde_json::json!("Orders table")],
@@ -6604,6 +6618,7 @@ for line in sys.stdin:
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![
                 vec![
@@ -7193,6 +7208,7 @@ done
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows,
             affected_rows: 0,
@@ -7372,6 +7388,7 @@ done
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![
                 vec![
@@ -13022,16 +13039,11 @@ async fn get_object_source_once(
             }
         } else {
             match pool_handle.as_ref().ok_or("Pool not found")? {
-                PoolKind::Mysql(pool, MysqlMode::OceanBaseOracle)
-                    if matches!(object_type, db::ObjectSourceKind::Trigger) =>
-                {
-                    if options.is_exact() {
+                PoolKind::Mysql(pool, MysqlMode::OceanBaseOracle) => {
+                    if options.is_exact() && matches!(object_type, db::ObjectSourceKind::Trigger) {
                         return oracle_triggers::pool_reader(pool.clone()).await.source(schema, name).await;
                     }
-                    first_string_cell(
-                        db::mysql::execute_query(pool, &oracle_object_source_sql(schema, name, &object_type), true)
-                            .await?,
-                    )?
+                    db::ob_oracle::get_object_source(pool, schema, name, &object_type).await?
                 }
                 PoolKind::Mysql(pool, _) => {
                     mysql_object_source(pool, mysql_table_metadata_catalog(database, schema), name, &object_type)

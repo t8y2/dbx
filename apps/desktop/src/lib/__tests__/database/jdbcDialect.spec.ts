@@ -291,6 +291,9 @@ describe("jdbc dialect inference", () => {
     expect(connectionShouldLoadIdentifierQuote({ db_type: "kingbase" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "kyuubi" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" })).toBe(true);
+    // openGauss databases switch between backticks (B/MySQL mode) and double
+    // quotes (A/PG modes), so the quote has to come from the backend probe.
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "opengauss" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gbase8s", driver_profile: "gbase8s" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gbase", driver_profile: "gbase8a" })).toBe(false);
     // Cloud Spanner reports a backtick for GoogleSQL and a double quote for the

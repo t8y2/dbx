@@ -51,8 +51,7 @@ jobs:
 
       - name: Install native build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libfontconfig1-dev libsecret-1-dev
+          sudo python3 .github/scripts/ci-install-system-deps.py --group node-release
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -407,8 +406,7 @@ jobs:
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libfontconfig1-dev
+          sudo python3 .github/scripts/ci-install-system-deps.py --group fontconfig
 
       - name: Setup Python for cargo-zigbuild
         if: runner.os == 'Linux'
@@ -660,8 +658,7 @@ jobs:
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libfontconfig1-dev
+          sudo python3 .github/scripts/ci-install-system-deps.py --group fontconfig
 
       - name: Setup Python for cargo-zigbuild
         if: runner.os == 'Linux'

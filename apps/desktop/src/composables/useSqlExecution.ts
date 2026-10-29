@@ -27,6 +27,7 @@ import { expandSqlVariables } from "@/lib/sql/sqlVariables";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { assessProductionSql } from "@/lib/database/productionSafety";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { SqlExecutionDangerRequest } from "@/stores/sqlExecutionDangerStore";
 import type { ConnectionConfig, DatabaseType, QueryResult, QueryTab } from "@/types/database";
@@ -357,10 +358,10 @@ export function useSqlExecution(deps: {
       return notStarted("no-tab", context.tabId);
     }
     if (!(await ensureReadOnlyWriteAccess({ connection: context.connection, sql, source: t("production.sourceSqlEditor") }))) {
-      // The read-only unlock dialog was dismissed: the user saw UI, so the panel
-      // adds nothing (see aiSqlActionFeedback).
+      // Compatibility denial is a policy block; ordinary unlock dismissal
+      // remains cancellation. The shared guard owns the denial notification.
       cancelEditorViewportRequest(options.editorViewportRequestId);
-      return notStarted("cancelled", context.tabId);
+      return notStarted(mysqlDataCharsetEnabled(context.connection) ? "blocked" : "cancelled", context.tabId);
     }
     // Redis: block dangerous commands when toggle is on (scan entire batch for highest safety level)
     if (context.connection?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
@@ -658,7 +659,7 @@ export function useSqlExecution(deps: {
     if (cancelRequested()) return finish({ status: "cancelled" });
     if (!sql.trim()) return finish({ status: "failed", errorMessage: t("explain.emptySql") });
     if (!(await ensureReadOnlyWriteAccess({ connection, sql, source: t("production.sourceMultiDbSql") }))) {
-      return finish({ status: "skipped", errorMessage: t("dangerDialog.cancel") });
+      return finish({ status: "skipped", errorMessage: t(mysqlDataCharsetEnabled(connection) ? "connection.mysqlDataCharsetWriteBlocked" : "dangerDialog.cancel") });
     }
     if (requiresConnectionSelection(executionTab, connection)) {
       deps.onMissingConnection?.(executionTab.id);
@@ -1043,7 +1044,7 @@ export function useSqlExecution(deps: {
     const connection = connectionStore.getConfig(tab.connectionId);
     if (!(await ensureReadOnlyWriteAccess({ connection, sql, source: t("production.sourceSqlEditor") }))) {
       cancelEditorViewportRequest(editorViewportRequestId);
-      reportDeferredExecution(notStarted("cancelled", tab.id));
+      reportDeferredExecution(notStarted(mysqlDataCharsetEnabled(connection) ? "blocked" : "cancelled", tab.id));
       return;
     }
     try {

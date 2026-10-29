@@ -146,3 +146,31 @@ describe("MQTT 订阅编辑不覆盖发布 Topic (issue #11830)", () => {
     expect(publishTopicInput(container).value).toBe("device/new");
   });
 });
+
+it("restores and saves a display alias without changing the broker topic (#13720)", async () => {
+  mqttListSavedTopicConfigsMock.mockResolvedValue([{ topic: "device/status", alias: "设备状态", qos: "atmostonce", enabled: true }]);
+  const container = await mountConsole();
+  await openExistingSubscription(container);
+  const alias = document.querySelector<HTMLInputElement>("input[data-mqtt-topic-alias]");
+  expect(alias?.value).toBe("设备状态");
+  await setInputValue(alias!, "  温度传感器  ");
+  await saveSubscription();
+  const api = await import("@/lib/backend/api");
+  expect(api.mqttSaveTopicConfig).toHaveBeenCalledWith("mqtt-connection-1", "device/status", "atmostonce", false, true, "温度传感器");
+});
+
+it("allows clearing an existing alias (#13720)", async () => {
+  mqttListSavedTopicConfigsMock.mockResolvedValue([{ topic: "device/status", alias: "旧别名", qos: "atmostonce", enabled: true }]);
+  const container = await mountConsole();
+  await openExistingSubscription(container);
+  await setInputValue(document.querySelector<HTMLInputElement>("input[data-mqtt-topic-alias]")!, "");
+  await saveSubscription();
+  const api = await import("@/lib/backend/api");
+  expect(api.mqttSaveTopicConfig).toHaveBeenCalledWith("mqtt-connection-1", "device/status", "atmostonce", false, true, "");
+});
+
+it("starts a new subscription with an empty alias (#13720)", async () => {
+  const container = await mountConsole();
+  await openNewSubscription(container);
+  expect(document.querySelector<HTMLInputElement>("input[data-mqtt-topic-alias]")?.value).toBe("");
+});

@@ -2116,6 +2116,7 @@ export default withEnglishFallback({
     mqttSearchPayloadPlaceholder: "Cerca nel payload del messaggio...",
     mqttNoMatchingMessages: "Nessun messaggio caricato corrisponde a questo filtro del payload",
     mqttNoSavedSubscriptions: "Nessuna sottoscrizione salvata. Fai clic su «Nuova sottoscrizione» per aggiungerne una.",
+    mqttTopicAlias: "Alias (facoltativo)",
     mqttTopicFilter: "Filtro Topic",
     mqttTopicFilterPlaceholder: "es. device/+/status",
     mqttTopicFilterHint: "Sono supportati i caratteri jolly a livello singolo + e multilivello #.",

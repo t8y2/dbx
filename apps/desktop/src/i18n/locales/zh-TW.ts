@@ -2103,6 +2103,7 @@ export default withEnglishFallback({
     mqttSearchPayloadPlaceholder: "搜尋訊息 Payload...",
     mqttNoMatchingMessages: "沒有已載入訊息符合目前 Payload 篩選條件",
     mqttNoSavedSubscriptions: "尚無訂閱設定，請點擊「新增訂閱」加入。",
+    mqttTopicAlias: "別名（選填）",
     mqttTopicFilter: "Topic Filter",
     mqttTopicFilterPlaceholder: "例如 device/+/status",
     mqttTopicFilterHint: "支援單層萬用字元 + 和多層萬用字元 #。",

@@ -9,8 +9,8 @@ export async function mqttSubscribe(connectionId: string, topic: string, qos?: s
   return invoke("mqtt_subscribe", { connectionId, topic, qos: qos ?? null, noLocal: noLocal ?? false });
 }
 
-export async function mqttSaveTopicConfig(connectionId: string, topic: string, qos: string, noLocal: boolean, enabled = false) {
-  return invoke("mqtt_save_topic_config", { connectionId, config: { topic, qos, noLocal, enabled } });
+export async function mqttSaveTopicConfig(connectionId: string, topic: string, qos: string, noLocal: boolean, enabled = false, alias = "") {
+  return invoke("mqtt_save_topic_config", { connectionId, config: { topic, qos, noLocal, enabled, alias: alias.trim() } });
 }
 
 export async function mqttDeleteTopicConfig(connectionId: string, topic: string) {

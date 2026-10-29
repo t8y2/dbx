@@ -2101,6 +2101,7 @@ export default {
     mqttSearchPayloadPlaceholder: "Search message payload...",
     mqttNoMatchingMessages: "No loaded messages match this payload filter",
     mqttNoSavedSubscriptions: 'No saved subscriptions. Click "New subscription" to add one.',
+    mqttTopicAlias: "Alias (optional)",
     mqttTopicFilter: "Topic Filter",
     mqttTopicFilterPlaceholder: "e.g. device/+/status",
     mqttTopicFilterHint: "Single-level + and multi-level # wildcards are supported.",

@@ -2207,6 +2207,7 @@ export default withEnglishFallback({
     mqttSearchPayloadPlaceholder: "Buscar en el payload del mensaje...",
     mqttNoMatchingMessages: "Ningún mensaje cargado coincide con este filtro de payload",
     mqttNoSavedSubscriptions: "No hay suscripciones guardadas. Haz clic en «Nueva suscripción» para añadir una.",
+    mqttTopicAlias: "Alias (opcional)",
     mqttTopicFilter: "Filtro de Topic",
     mqttTopicFilterPlaceholder: "p. ej. device/+/status",
     mqttTopicFilterHint: "Se admiten los comodines de un nivel + y de varios niveles #.",

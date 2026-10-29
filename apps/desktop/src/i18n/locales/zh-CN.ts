@@ -2035,6 +2035,7 @@ export default withEnglishFallback({
     mqttSearchPayloadPlaceholder: "搜索消息 Payload...",
     mqttNoMatchingMessages: "没有已加载消息符合当前 Payload 筛选条件",
     mqttNoSavedSubscriptions: "暂无订阅配置，请点击“新建订阅”添加。",
+    mqttTopicAlias: "别名（可选）",
     mqttTopicFilter: "Topic Filter",
     mqttTopicFilterPlaceholder: "例如 device/+/status",
     mqttTopicFilterHint: "支持单层通配符 + 和多层通配符 #。",

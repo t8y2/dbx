@@ -466,6 +466,14 @@ pub async fn test_connection_with_info(
     run_temporary_connection_test(&state.app, config, true).await.map(Json).map_err(AppError::from)
 }
 
+pub async fn connection_parameters(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<ConnectRequest>,
+) -> Result<Json<dbx_core::connection::parameters::ConnectionParameterMetadata>, AppError> {
+    let config = state.resolve_connection_credentials(body.config).await?;
+    state.app.connection_parameter_metadata(&config).await.map(Json).map_err(AppError::from)
+}
+
 pub async fn test_ssh_tunnel(
     State(state): State<Arc<WebState>>,
     Json(body): Json<ConnectRequest>,

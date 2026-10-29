@@ -9,6 +9,9 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import SavePasswordCheckbox from "@/components/connection/SavePasswordCheckbox.vue";
+import ConnectionParametersDialog from "@/components/connection/ConnectionParametersDialog.vue";
+import { parseConnectionParameters, patchConnectionParameter } from "@/lib/connection/connectionParameterDocument";
+import { connectionParameterSyntax, type ConnectionParameterDefinition } from "@/lib/connection/connectionParameterCatalog";
 import { Label } from "@/components/ui/label";
 import { sidebarProductionBadgeScope } from "@/lib/sidebar/sidebarProductionBadge";
 import type { ProductionBadgeScope } from "@/types/database";
@@ -704,6 +707,41 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 }
 
 const form = ref(defaultForm());
+const parameterEditorOpen = ref(false);
+watch(open, (value) => {
+  if (!value) parameterEditorOpen.value = false;
+});
+const parameterDriverDefinitions = ref<ConnectionParameterDefinition[]>([]);
+const parameterMetadataLoading = ref(false);
+const parameterMetadataError = ref("");
+let parameterMetadataRequest = 0;
+watch([parameterEditorOpen, () => form.value.db_type, () => form.value.driver_profile, () => form.value.connection_string, () => form.value.url_params], async ([isOpen]) => {
+  const request = ++parameterMetadataRequest;
+  parameterDriverDefinitions.value = [];
+  parameterMetadataError.value = "";
+  parameterMetadataLoading.value = false;
+  if (!isOpen) return;
+  const runtime = databaseManifestEntry(form.value.db_type)?.runtimeMode;
+  if ((runtime === "native" || runtime === "file") && !form.value.driver_profile?.includes("legacy")) return;
+  if (form.value.db_type === "oracle") return;
+  parameterMetadataLoading.value = true;
+  try {
+    const config = { ...form.value, id: editingId.value || "parameter-metadata-draft" } as ConnectionConfig;
+    const metadata = await api.connectionParameters(config);
+    if (request !== parameterMetadataRequest) return;
+    parameterDriverDefinitions.value = metadata.parameters;
+    if (!metadata.available) parameterMetadataError.value = "unavailable";
+  } catch {
+    if (request === parameterMetadataRequest) parameterMetadataError.value = "unavailable";
+  } finally {
+    if (request === parameterMetadataRequest) parameterMetadataLoading.value = false;
+  }
+});
+const configuredParameterCount = computed(() => parseConnectionParameters(form.value.url_params || "", connectionParameterSyntax(form.value)).entries.length);
+function applyConnectionParameters(value: string) {
+  form.value.url_params = value;
+  resetTestState();
+}
 const sidebarVisibilitySettings = computed(() => {
   const config = { ...form.value, database_info: visibleTestDatabaseInfo.value ?? visibleSavedDatabaseInfo.value ?? undefined } as ConnectionConfig;
   return [
@@ -3996,12 +4034,6 @@ const tlsCapableDatabaseTypes = new Set<DatabaseType>([
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type) || supportsMysqlTlsTab(form.value.db_type, selectedType.value));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse" || form.value.db_type === "victoriametrics");
 const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase" && form.value.db_type !== "nebula");
-const genericUrlParamsHints = computed(() => {
-  const hints: string[] = [];
-  if (["mysql", "doris", "starrocks"].includes(form.value.db_type)) hints.push(t("connection.localInfilePathHint"));
-  if (form.value.db_type === "mysql") hints.push(t("connection.sessionVariablesHint"));
-  return hints;
-});
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => mysqlTlsOptionsSupported(form.value.db_type, selectedType.value));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
@@ -5682,22 +5714,11 @@ function setSqliteExtensionPaths(params: string | undefined, paths: string): str
 }
 
 function setUrlParam(params: string | undefined, key: string, value: string): string {
-  const parsed = new URLSearchParams((params || "").trim().replace(/^\?/, ""));
-  const normalized = value.trim();
-  if (normalized) {
-    parsed.set(key, normalized);
-  } else {
-    parsed.delete(key);
-  }
-  return parsed.toString();
+  return patchConnectionParameter(params, key, value.trim() || null);
 }
 
 function deleteUrlParams(params: string | undefined, keys: string[]): string {
-  const parsed = new URLSearchParams((params || "").trim().replace(/^\?/, ""));
-  for (const key of keys) {
-    parsed.delete(key);
-  }
-  return parsed.toString();
+  return keys.reduce((value, key) => patchConnectionParameter(value, key, null), params || "");
 }
 
 function mysqlTlsModeFromParams(params: string | undefined, ssl: boolean | undefined): string {
@@ -7513,7 +7534,7 @@ function openExternalUrl(url: string) {
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <Dialog :open="open && !parameterEditorOpen" @update:open="open = $event">
     <DialogContent
       :style="dialogContentStyle"
       class="connection-dialog-content"
@@ -9877,44 +9898,12 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
 
-                    <div v-if="supportsGenericUrlParams" class="connection-url-params-row grid grid-cols-4 items-start gap-4">
-                      <div :class="[connectionLabelClass, 'connection-url-params-label inline-flex min-h-8 items-center gap-1']">
-                        <Label for="connection-url-params">{{ t("connection.urlParams") }}</Label>
-                        <HelpTooltip v-if="genericUrlParamsHints.length" :label="genericUrlParamsHints.join('\n\n')" side="right" content-class="w-[min(400px,calc(100vw-32px))] max-w-none space-y-3 break-words">
-                          <p v-for="hint in genericUrlParamsHints" :key="hint">{{ hint }}</p>
-                        </HelpTooltip>
-                      </div>
-                      <div class="col-span-3 space-y-1.5">
-                        <Input
-                          id="connection-url-params"
-                          v-model="form.url_params"
-                          :placeholder="
-                            form.db_type === 'mysql'
-                              ? 'charset=utf8mb4'
-                              : form.db_type === 'doris' || form.db_type === 'starrocks'
-                                ? 'sessionVariables=query_timeout=60'
-                                : form.db_type === 'saphana'
-                                  ? 'databaseName=TENANT_DB'
-                                  : form.db_type === 'clickhouse'
-                                    ? 'secure=true'
-                                    : form.db_type === 'bigquery'
-                                      ? 'OAuthType=0;OAuthServiceAcctEmail=svc@project.iam.gserviceaccount.com;OAuthPvtKeyPath=/path/key.json'
-                                      : form.db_type === 'spanner'
-                                        ? 'credentials=/path/key.json;autocommit=true'
-                                        : form.db_type === 'informix'
-                                          ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
-                                          : form.db_type === 'spark'
-                                            ? 'catalog=paimon_catalog'
-                                            : form.db_type === 'cassandra'
-                                              ? 'localdatacenter=dc1'
-                                              : form.db_type === 'transwarp'
-                                                ? 'fetchSize=500;auth=noSasl'
-                                                : form.db_type === 'firebird'
-                                                  ? 'charSet=GBK'
-                                                  : 'sslmode=prefer'
-                          "
-                        />
-                      </div>
+                    <div v-if="supportsGenericUrlParams" class="grid grid-cols-4 items-center gap-4">
+                      <Label for="connection-parameters-open" :class="connectionLabelClass">{{ t("connection.parameterEditor.title") }}</Label>
+                      <Button id="connection-parameters-open" type="button" variant="outline" class="col-span-3 justify-between" @click="parameterEditorOpen = true">
+                        <span class="font-normal text-muted-foreground">{{ configuredParameterCount ? t("connection.parameterEditor.configuredCount", { count: configuredParameterCount }) : t("connection.parameterEditor.default") }}</span>
+                        <span>{{ t("connection.parameterEditor.configure") }}</span>
+                      </Button>
                     </div>
 
                     <div v-if="form.db_type === 'dameng'" class="grid grid-cols-4 items-start gap-4">
@@ -11420,6 +11409,8 @@ function openExternalUrl(url: string) {
       </DialogFooter>
     </DialogContent>
   </Dialog>
+
+  <ConnectionParametersDialog v-if="open" v-model:open="parameterEditorOpen" :model-value="form.url_params" :context="form" :definitions="parameterDriverDefinitions" :loading="parameterMetadataLoading" :metadata-error="parameterMetadataError" @apply="applyConnectionParameters" />
 
   <Dialog v-model:open="showConnectionErrorDialog">
     <DialogContent class="min-w-0 sm:max-w-[680px]">

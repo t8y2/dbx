@@ -1708,6 +1708,10 @@ export async function testConnection(config: ConnectionConfig): Promise<string> 
   return invokeBackend("test_connection", { config });
 }
 
+export async function connectionParameters(config: ConnectionConfig): Promise<import("@/lib/connection/connectionParameterCatalog").ConnectionParameterMetadata> {
+  return invokeBackend("connection_parameters", { config });
+}
+
 export async function testSshTunnel(config: ConnectionConfig): Promise<string> {
   return invokeBackend("test_ssh_tunnel", { config });
 }

@@ -38,6 +38,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CommonJavaCompatibilityTest {
     @Test
+    void connectionParameterMetadataDoesNotRequireOrValidateAConnection() {
+        MinimalAgent agent = new MinimalAgent() {
+            public Connection getConnection() { throw new AssertionError("Metadata must not use a physical connection"); }
+            public List<Map<String, Object>> describeConnectionParameters(ConnectParams params) {
+                return List.of(Map.of("name", "example", "type", "string", "source", "driver"));
+            }
+        };
+        JsonObject response = JsonParser.parseString(new JsonRpcServer(agent).handleRequest(
+            "{\"id\":1,\"method\":\"connection_parameters\",\"params\":{}}"
+        )).getAsJsonObject();
+        assertFalse(response.has("error"), response.toString());
+        assertEquals("example", response.getAsJsonArray("result").get(0).getAsJsonObject().get("name").getAsString());
+    }
+
+    @Test
     void emitsOptionalServerAuditTimeWithoutLeakingCursorBookkeeping() {
         Gson gson = new Gson();
         QueryPageResult page = new QueryPageResult();

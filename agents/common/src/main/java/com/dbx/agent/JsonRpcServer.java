@@ -276,6 +276,9 @@ public final class JsonRpcServer {
             }
             return result;
         }
+        if (AgentProtocol.METHOD_CONNECTION_PARAMETERS.equals(method)) {
+            return agent.describeConnectionParameters(gson.fromJson(params, ConnectParams.class));
+        }
         if (AgentProtocol.METHOD_VALIDATE_CONNECTION.equals(method)) {
             Connection conn = agent.getConnection();
             boolean valid = false;
@@ -831,6 +834,7 @@ public final class JsonRpcServer {
 
     private static boolean shouldValidateConnection(String method) {
         return !AgentProtocol.METHOD_HANDSHAKE.equals(method)
+            && !AgentProtocol.METHOD_CONNECTION_PARAMETERS.equals(method)
             && !AgentProtocol.METHOD_CONNECT.equals(method)
             && !AgentProtocol.METHOD_TEST_CONNECTION.equals(method)
             && !NativeJobSession.isControl(method)
@@ -853,6 +857,7 @@ public final class JsonRpcServer {
 
     private static boolean requiresConnectedConnection(String method) {
         return !AgentProtocol.PL_DEBUG_SESSION_METHODS.contains(method)
+            && !AgentProtocol.METHOD_CONNECTION_PARAMETERS.equals(method)
             && !AgentProtocol.METHOD_HANDSHAKE.equals(method)
             && !AgentProtocol.METHOD_CONNECT.equals(method)
             && !AgentProtocol.METHOD_TEST_CONNECTION.equals(method)

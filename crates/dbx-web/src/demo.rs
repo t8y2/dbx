@@ -41,6 +41,7 @@ const BLOCKED_EXACT: &[&str] = &[
     // 纯探测端点：body 携带完整连接配置，服务器会拨向任意主机
     "connection/test",
     "connection/test-info",
+    "connection/parameters",
     "connection/test-ssh-tunnel",
     "mq/test-connection",
     "nacos/test-connection",
@@ -196,6 +197,7 @@ mod tests {
             (Method::POST, "auth/change-password"),
             (Method::POST, "connection/test"),
             (Method::POST, "connection/test-info"),
+            (Method::POST, "connection/parameters"),
             (Method::POST, "connection/test-ssh-tunnel"),
             (Method::POST, "connection/save"),
             (Method::POST, "connection/mcp/add"),

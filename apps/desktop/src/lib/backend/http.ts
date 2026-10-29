@@ -539,6 +539,10 @@ export async function testConnection(config: ConnectionConfig): Promise<string> 
   return post("/api/connection/test", { config });
 }
 
+export async function connectionParameters(config: ConnectionConfig): Promise<import("@/lib/connection/connectionParameterCatalog").ConnectionParameterMetadata> {
+  return post("/api/connection/parameters", { config });
+}
+
 export async function testSshTunnel(config: ConnectionConfig): Promise<string> {
   return post("/api/connection/test-ssh-tunnel", { config });
 }

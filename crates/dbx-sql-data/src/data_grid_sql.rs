@@ -2889,6 +2889,10 @@ pub fn format_grid_sql_literal_with_identifier_quote(
     if text.is_empty() {
         return if database_type == Some(DatabaseType::SqlServer) { "N''" } else { "''" }.to_string();
     }
+    // YashanDB spatial columns are UDTs; bind the WKT through ST_GeomFromText.
+    if is_yashan_geometry_column(database_type, column_info) {
+        return format_yashan_geometry_literal(&text);
+    }
     // MySQL geometry columns: wrap WKT text with ST_GeomFromText()
     if is_mysql_geometry_literal_database(database_type)
         && column_info.map(|column| is_geometry_column_type(&column.data_type)).unwrap_or(false)
@@ -3441,9 +3445,11 @@ fn format_oracle_raw_literal_text(text: &str) -> Option<String> {
 fn is_geometry_column_type(data_type: &str) -> bool {
     let lower = data_type.to_ascii_lowercase();
     let base = lower.split('(').next().unwrap_or(&lower).trim();
+    let base = base.rsplit('.').next().unwrap_or(base).trim();
     matches!(
         base,
         "geometry"
+            | "st_geometry"
             | "point"
             | "linestring"
             | "polygon"
@@ -3452,6 +3458,40 @@ fn is_geometry_column_type(data_type: &str) -> bool {
             | "multipolygon"
             | "geometrycollection"
     )
+}
+
+fn is_yashan_geometry_column(database_type: Option<DatabaseType>, column_info: Option<&DataGridColumnInfo>) -> bool {
+    database_type == Some(DatabaseType::Yashandb)
+        && column_info.is_some_and(|column| is_geometry_column_type(&column.data_type))
+}
+
+/// Split `SRID=4326;POINT(...)` while leaving plain WKT untouched.
+fn split_ewkt_srid(text: &str) -> (&str, Option<u32>) {
+    let trimmed = text.trim();
+    let Some(prefix) = trimmed.get(..5) else {
+        return (trimmed, None);
+    };
+    if !prefix.eq_ignore_ascii_case("SRID=") {
+        return (trimmed, None);
+    }
+    let Some((srid_text, wkt)) = trimmed.get(5..).and_then(|rest| rest.split_once(';')) else {
+        return (trimmed, None);
+    };
+    match srid_text.trim().parse::<u32>() {
+        Ok(srid) if srid > 0 => (wkt.trim(), Some(srid)),
+        _ => (trimmed, None),
+    }
+}
+
+/// YashanDB requires the UDT constructor in DML; a bare WKT string literal is
+/// not implicitly cast to `ST_GEOMETRY`.
+fn format_yashan_geometry_literal(value: &str) -> String {
+    let (wkt, srid) = split_ewkt_srid(value);
+    let escaped = wkt.replace('\'', "''");
+    match srid {
+        Some(srid) => format!("ST_GeomFromText('{escaped}', {srid})"),
+        None => format!("ST_GeomFromText('{escaped}')"),
+    }
 }
 
 fn manticore_typed_attribute_value(text: &str, column_info: Option<&DataGridColumnInfo>) -> Option<Value> {
@@ -3867,6 +3907,16 @@ fn build_column_predicate_with_plain(
     if value.is_null() {
         return (format!("{ident} IS NULL"), None);
     }
+    if is_yashan_geometry_column(database_type, column_info) {
+        if empty_string_saves_as_null(value, column_info) {
+            return (format!("{ident} IS NULL"), None);
+        }
+        let literal = value
+            .as_str()
+            .map(format_yashan_geometry_literal)
+            .unwrap_or_else(|| format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote));
+        return (format!("ST_Equals({ident}, {literal}) = 1"), None);
+    }
     if let Some(predicate) = oceanbase_lob_predicate(database_type, &ident, value, column_info) {
         return (predicate, None);
     }
@@ -3900,6 +3950,12 @@ fn build_save_column_predicate(
     let ident = predicate_ident(database_type, column, identifier_quote);
     if value.is_null() || empty_string_saves_as_null(value, column_info) {
         format!("{ident} IS NULL")
+    } else if is_yashan_geometry_column(database_type, column_info) {
+        let literal = value
+            .as_str()
+            .map(format_yashan_geometry_literal)
+            .unwrap_or_else(|| format_grid_save_sql_literal(value, database_type, column_info, identifier_quote));
+        format!("ST_Equals({ident}, {literal}) = 1")
     } else if let Some(predicate) = oceanbase_lob_predicate(database_type, &ident, value, column_info) {
         predicate
     } else if use_binary_text_comparison && uses_mysql_binary_text_predicate(database_type, value, column_info) {
@@ -13045,5 +13101,69 @@ mod tests {
             include_database_name: true,
         })
         .is_empty());
+    }
+
+    fn yashan_geometry_save_options() -> DataGridSaveStatementOptions {
+        let mut options = mysql_people_save_options(1);
+        options.database_type = Some(DatabaseType::Yashandb);
+        options.identifier_quote = Some("\"".to_string());
+        options.table_meta.schema = Some("APP".to_string());
+        options.table_meta.table_name = "GEO".to_string();
+        options.table_meta.primary_keys = vec!["ID".to_string()];
+        options.table_meta.columns =
+            Some(vec![column("ID", "INTEGER", false, None), column("GEOM", "ST_GEOMETRY", true, None)]);
+        options.columns = vec!["ID".to_string(), "GEOM".to_string()];
+        options.rows = vec![vec![json!(1), json!("SRID=4326;POINT(1 2)")]];
+        options
+    }
+
+    #[test]
+    fn yashan_geometry_literals_use_st_geomfromtext_and_keep_srid() {
+        let info = column("GEOM", "ST_GEOMETRY", true, None);
+        assert_eq!(
+            format_grid_sql_literal(&json!("SRID=4326;POINT(1 2)"), Some(DatabaseType::Yashandb), Some(&info)),
+            "ST_GeomFromText('POINT(1 2)', 4326)"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("POINT(1 2)"), Some(DatabaseType::Yashandb), Some(&info)),
+            "ST_GeomFromText('POINT(1 2)')"
+        );
+
+        let mut options = yashan_geometry_save_options();
+        options.dirty_rows = vec![(0, vec![(1, json!("SRID=4326;POINT(3 4)"))])];
+        let save = prepare_data_grid_save(options);
+        assert_eq!(save.validation_error, None);
+        assert_eq!(save.statements.len(), 1);
+        assert!(save.statements[0].contains("ST_GeomFromText('POINT(3 4)', 4326)"), "{:?}", save.statements);
+        assert!(
+            save.rollback_statements[0].contains("ST_GeomFromText('POINT(1 2)', 4326)"),
+            "{:?}",
+            save.rollback_statements
+        );
+    }
+
+    #[test]
+    fn yashan_geometry_insert_and_keyless_predicates_use_st_geomfromtext() {
+        let mut options = yashan_geometry_save_options();
+        options.new_rows = vec![vec![json!(2), json!("SRID=4326;POINT(5 6)")]];
+        let save = prepare_data_grid_save(options);
+        assert_eq!(save.validation_error, None);
+        assert!(save.statements[0].contains("ST_GeomFromText('POINT(5 6)', 4326)"), "{:?}", save.statements);
+
+        let mut keyless = yashan_geometry_save_options();
+        keyless.table_meta.primary_keys.clear();
+        keyless.dirty_rows = vec![(0, vec![(1, json!("SRID=4326;POINT(3 4)"))])];
+        let save = prepare_data_grid_save(keyless);
+        assert_eq!(save.validation_error, None);
+        assert!(
+            save.statements[0].contains("ST_Equals(\"GEOM\", ST_GeomFromText('POINT(1 2)', 4326)) = 1"),
+            "{:?}",
+            save.statements
+        );
+        assert!(
+            save.rollback_statements[0].contains("ST_Equals(\"GEOM\", ST_GeomFromText('POINT(3 4)', 4326)) = 1"),
+            "{:?}",
+            save.rollback_statements
+        );
     }
 }

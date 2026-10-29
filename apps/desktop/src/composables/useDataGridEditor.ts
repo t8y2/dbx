@@ -7,6 +7,7 @@ import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
 import { focusDataGridEditorWithoutScrolling, preserveDataGridScrollPosition } from "@/lib/dataGrid/dataGridEditorFocus";
 import { normalizeDataGridSaveError } from "@/lib/dataGrid/dataGridSql";
+import { withYashanGeometrySrids } from "@/lib/dataGrid/dataGridSaveSpatial";
 import { isOpaqueAggregateStateColumnType } from "@/lib/dataGrid/binaryCellDownload";
 import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
 import type { GridNewRowMeta, GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
@@ -110,7 +111,13 @@ export interface DataGridSaveConfirmationRequest {
 }
 
 export interface UseDataGridEditorOptions {
-  result: ComputedRef<{ columns: string[]; rows: CellValue[][]; column_types?: string[] }>;
+  result: ComputedRef<{
+    columns: string[];
+    rows: CellValue[][];
+    column_types?: string[];
+    spatial_columns?: Array<{ column_index: number; srid: number | null }>;
+    spatial_values?: (number | null)[][];
+  }>;
   editable: ComputedRef<boolean | undefined>;
   databaseType: ComputedRef<DatabaseType | undefined>;
   connectionId: ComputedRef<string | undefined>;
@@ -1945,7 +1952,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function saveStatementOptions(snapshot = snapshotPendingSaveChanges()) {
     if (!tableMeta.value) return null;
-    return {
+    const options = {
       databaseType: resolvedDatabaseType.value,
       serverVersion: connectionStore.getConfig(connectionId.value ?? "")?.database_info?.productVersion,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId.value),
@@ -1958,6 +1965,12 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       newRows: snapshot.newRows,
       includeDatabaseName: includeDatabaseNameInSaveSql.value,
     };
+    return withYashanGeometrySrids(options, {
+      databaseType: resolvedDatabaseType.value,
+      columnTypes: result.value.column_types,
+      spatialColumns: result.value.spatial_columns,
+      spatialValues: result.value.spatial_values,
+    });
   }
 
   async function prepareSaveStatements(stmtOptions: NonNullable<ReturnType<typeof saveStatementOptions>>) {

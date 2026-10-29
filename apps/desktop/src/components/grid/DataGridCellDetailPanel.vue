@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import DataGridCellDetailTextPreview from "@/components/grid/DataGridCellDetailTextPreview.vue";
 import DataGridValueTransform from "@/components/grid/DataGridValueTransform.vue";
+import GeometryRawPopover from "@/components/grid/GeometryRawPopover.vue";
 import { computed, ref, toRef } from "vue";
 import { Code2, Copy, Download, Eye, FileDiff, FileUp, Pencil, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
@@ -198,6 +199,7 @@ defineExpose({ openSearch });
                 ><Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.geometryPreview')"><Eye class="h-3 w-3" /></Button></PopoverTrigger
               ><PopoverContent class="w-auto p-1.5" align="end"><canvas v-show="geometryPreviewOpen" ref="geometryCanvas" width="400" height="280" class="block rounded" /></PopoverContent
             ></Popover>
+            <GeometryRawPopover v-if="!editing && canPreviewCellGeometry(detail.value, detail.type)" :value="detail.value" :srid="detail.srid ?? null" :database-type="databaseType" size="xs" />
           </div>
         </div>
         <div v-if="detail.imagePreviewUrl && !editing" :style="transformOpen ? { display: 'none' } : null" :class="valueBesideImage ? 'col-start-2 row-start-2' : ''" class="shrink-0">

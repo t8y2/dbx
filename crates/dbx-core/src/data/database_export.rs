@@ -2073,20 +2073,17 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
         // dumps can drop the `db`. qualifier so the script replays against any
         // database the USE targets.
         let mysql_omit = options.omit_database_qualifier
-            && matches!(
-                table.database_type,
-                Some(DatabaseType::Mysql)
-                    | Some(DatabaseType::Goldendb)
-                    | Some(DatabaseType::Doris)
-                    | Some(DatabaseType::StarRocks)
-            );
+            && table.database_type.as_ref().is_some_and(supports_database_qualifier_omission);
+        // Both dialects must honor the flag: Source dialect prefers the passed
+        // pre-qualified name over the schema, so it has to be cleared too
+        // (#13601 review point 3).
         let inserts = build_export_insert_statements_excluding_with_dialect(
             BuildExportInsertStatementsOptions {
                 database_type: table.database_type,
                 identifier_quote: table.identifier_quote.clone(),
                 schema: if mysql_omit { None } else { table.schema.clone() },
                 table_name: table.table_name,
-                qualified_table_name: table.qualified_table_name,
+                qualified_table_name: if mysql_omit { None } else { table.qualified_table_name },
                 columns: table.columns,
                 column_types: table.column_types,
                 column_extras: table.column_extras,
@@ -3152,6 +3149,24 @@ fn write_database_export_rows<W: Write>(
     )
 }
 
+/// MySQL-family engines are the ones whose whole-database dump pairs a `USE`
+/// preamble with `db`.`table` targets; other engines ignore the flag so a
+/// persisted option can never strip a PostgreSQL/Oracle schema (#13601).
+fn supports_database_qualifier_omission(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::Doris | DatabaseType::StarRocks)
+}
+
+/// Strips the leading database qualifier from the rendered target name. The
+/// qualifier is built by `qualified_table` from the exported database's own
+/// parts (never parsed from user input), so the first dot is the separator
+/// even when the table name itself contains dots or backticks (#13601).
+fn strip_database_qualifier(qualified: &str) -> String {
+    match qualified.split_once('.') {
+        Some((_, rest)) => rest.to_string(),
+        None => qualified.to_string(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_database_export_rows_with_mode<W: Write>(
     file: &mut W,
@@ -3232,12 +3247,8 @@ fn write_database_export_rows_with_mode<W: Write>(
     // family: the export's `USE` preamble already sets the database, and a
     // `db`.`table` INSERT target pins the dump to one database (#13509).
     let qualified_table_name = crate::transfer::qualified_table(table, schema, db_type, None);
-    let qualified_table_name = if omit_database_qualifier
-        && matches!(
-            db_type,
-            DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::Doris | DatabaseType::StarRocks
-        ) {
-        qualified_table_name.rsplit_once('.').map(|(_, table)| table.to_string()).unwrap_or(qualified_table_name)
+    let qualified_table_name = if omit_database_qualifier && supports_database_qualifier_omission(db_type) {
+        strip_database_qualifier(&qualified_table_name)
     } else {
         qualified_table_name
     };
@@ -3249,8 +3260,14 @@ fn write_database_export_rows_with_mode<W: Write>(
             database_type: Some(*db_type),
             identifier_quote: None,
             // Standard dialect re-derives `db`.`table` from the schema, so the
-            // flag also has to blank it here (#13509).
-            schema: if omit_database_qualifier { None } else { (!schema.is_empty()).then(|| schema.to_string()) },
+            // flag also has to blank it there — but only for engines that own
+            // the flag; a persisted `true` must not strip a PostgreSQL schema
+            // (#13601).
+            schema: if omit_database_qualifier && supports_database_qualifier_omission(db_type) {
+                None
+            } else {
+                (!schema.is_empty()).then(|| schema.to_string())
+            },
             table_name: Some(table.to_string()),
             qualified_table_name: Some(qualified_table_name),
             columns: insert_columns.to_vec(),
@@ -8465,6 +8482,74 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
             "INSERT INTO \"dbo\".\"event]log\" (\"enabled\", \"path\") VALUES (TRUE, 'C:\\exports\\O''Hara');\n\n"
+        );
+    }
+
+    #[test]
+    fn qualifier_omission_strips_only_the_database_even_for_dotted_tables() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("orders.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // A table whose own name contains a dot renders as `app`.`order.items`;
+        // the strip removes the leading database, never the table (#13601).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1)]],
+            &["id".to_string()],
+            &[Some("int".to_string())],
+            &[None],
+            "order.items",
+            "app",
+            &DatabaseType::Mysql,
+            SqlInsertDialect::Standard,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO `order.items` (`id`) VALUES (1);
+
+"
+        );
+    }
+
+    #[test]
+    fn qualifier_omission_is_ignored_for_non_mysql_engines() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("users.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // A persisted `true` must not strip a PostgreSQL schema when the
+        // exported engine is not the MySQL family (#13601 review point 1).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1)]],
+            &["id".to_string()],
+            &[Some("int".to_string())],
+            &[None],
+            "users",
+            "app",
+            &DatabaseType::Postgres,
+            SqlInsertDialect::Standard,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO \"app\".\"users\" (\"id\") VALUES (1);
+
+"
         );
     }
 

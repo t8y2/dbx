@@ -76,8 +76,9 @@ At runtime only `oci.dll` is needed, located through `PATH`.
 
 Some old databases advertise `US7ASCII` while ordinary character columns contain
 unconverted GBK, GB18030, Big5 or UTF-8 bytes. Changing `NLS_LANG` cannot tell DBX
-how to interpret those bytes. Select the **Thin** driver and set **US7ASCII legacy
-encoding** to the historical encoding verified from the stored bytes. The same
+how to interpret those bytes. Select the **Thin** driver, open **Advanced**, and
+set **Legacy encoding compatibility** to the historical encoding verified from
+the stored bytes. Ordinary connections keep **Default (recommended)**. The same
 setting can be supplied in URL parameters:
 
 ```text

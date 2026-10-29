@@ -2178,10 +2178,9 @@ export default withEnglishFallback({
     sshAgentKeyHint: "Seleziona una chiave autorizzata per questo host. Il server limita il numero di tentativi di autenticazione su una singola connessione; provare tutte le chiavi dell'agente una per una potrebbe esaurire i tentativi prima di arrivare a quella corretta.",
     sshAgentKeyLoadFailed: "Impossibile leggere l'elenco delle identità dell'agente SSH: {error}",
     sshAgentKeyRefresh: "Aggiorna",
-    oracleLegacyCharset: "Codifica effettiva del database legacy US7ASCII",
-    oracleLegacyCharsetDisabled: "Disattivato (conversione standard del set di caratteri)",
-    oracleLegacyCharsetHint:
-      "Solo per il driver Thin e i database legacy US7ASCII: leggi e scrivi i campi di caratteri ordinari in base alla codifica effettiva usata al momento della scrittura storica, ad esempio per il cinese GBK seleziona ZHS16GBK; i campi del set di caratteri nazionale restano Unicode. Controlla prima i byte originali, non indovinare la codifica.",
+    oracleLegacyCharset: "Compatibilità codifica legacy",
+    oracleLegacyCharsetDisabled: "Predefinito (consigliato)",
+    oracleLegacyCharsetHint: "Solo per dati preesistenti in database US7ASCII. Usare il driver Thin e selezionare la codifica verificata dei dati originali.",
   },
   editor: {
     duckdbDraining: "La query DuckDB precedente è ancora in fase di arresto. Riprova a breve.",

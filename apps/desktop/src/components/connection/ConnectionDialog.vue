@@ -9598,22 +9598,6 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
 
-                    <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-start gap-4">
-                      <Label :class="connectionLabelSmallClass">{{ t("connection.oracleLegacyCharset") }}</Label>
-                      <div class="col-span-3 space-y-1">
-                        <Select :model-value="oracleLegacyCharsetSelection" @update:model-value="onOracleLegacyCharsetSelected">
-                          <SelectTrigger :aria-label="t('connection.oracleLegacyCharset')">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem :value="ORACLE_LEGACY_CHARSET_DISABLED">{{ t("connection.oracleLegacyCharsetDisabled") }}</SelectItem>
-                            <SelectItem v-for="charset in ORACLE_LEGACY_CHARSETS" :key="charset" :value="charset">{{ charset }}</SelectItem>
-                          </SelectContent>
-                        </Select>
-                        <p class="text-xs text-muted-foreground">{{ t("connection.oracleLegacyCharsetHint") }}</p>
-                      </div>
-                    </div>
-
                     <template v-if="form.db_type === 'oracle' && form.driver_profile === 'oci'">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelSmallClass">oci.dll</Label>
@@ -10872,6 +10856,23 @@ function openExternalUrl(url: string) {
                     <p class="text-xs text-muted-foreground">
                       {{ t("connection.docsNotesPathHint") }}
                     </p>
+                  </div>
+                </div>
+                <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">
+                    <span class="inline-flex items-center gap-1">{{ t("connection.oracleLegacyCharset") }} <HelpTooltip :label="t('connection.oracleLegacyCharsetHint')" /></span>
+                  </Label>
+                  <div class="col-span-3 space-y-1">
+                    <Select :model-value="oracleLegacyCharsetSelection" @update:model-value="onOracleLegacyCharsetSelected">
+                      <SelectTrigger class="w-full" :aria-label="t('connection.oracleLegacyCharset')">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem :value="ORACLE_LEGACY_CHARSET_DISABLED">{{ t("connection.oracleLegacyCharsetDisabled") }}</SelectItem>
+                        <SelectItem v-for="charset in ORACLE_LEGACY_CHARSETS" :key="charset" :value="charset">{{ charset }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p v-if="oracleLegacyCharsetSelection !== ORACLE_LEGACY_CHARSET_DISABLED" class="text-xs text-muted-foreground">{{ t("connection.oracleLegacyCharsetHint") }}</p>
                   </div>
                 </div>
                 <div v-if="!isPluginConnection" class="grid grid-cols-4 items-start gap-4 rounded-[6px] border border-red-500/25 bg-red-500/[0.035] px-3 py-2.5">

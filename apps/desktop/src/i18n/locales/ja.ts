@@ -2197,10 +2197,9 @@ export default withEnglishFallback({
     sshAgentKeyHint: "このホストで承認済みのキーを選択します。サーバーは単一接続での認証試行回数を制限するため、すべてのエージェントキーを順番に試すと、正しいキーに到達する前に試行回数を使い切る可能性があります。",
     sshAgentKeyLoadFailed: "SSH エージェントの identity リストを読み取れません：{error}",
     sshAgentKeyRefresh: "更新",
-    oracleLegacyCharset: "US7ASCII 旧データベースの実際のエンコーディング",
-    oracleLegacyCharsetDisabled: "オフ（標準文字セット変換）",
-    oracleLegacyCharsetHint:
-      "Thin ドライバーと US7ASCII 旧データベースのみ対象：過去に書き込まれたときの実際のエンコーディングに従って通常の文字フィールドを読み書きします。たとえば GBK の中国語なら ZHS16GBK を選択します。各国語文字セットのフィールドは Unicode のままです。元のバイトを先に確認し、エンコーディングを推測しないでください。",
+    oracleLegacyCharset: "旧データの文字コード互換",
+    oracleLegacyCharsetDisabled: "既定（推奨）",
+    oracleLegacyCharsetHint: "US7ASCII の旧データで文字化けする場合のみ使用します。Thin ドライバーで、元データを確認した文字コードを選択してください。",
   },
   editor: {
     duckdbDraining: "前回の DuckDB クエリはまだ停止処理中です。しばらくしてから再試行してください。",

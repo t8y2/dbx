@@ -103,11 +103,7 @@
     width: auto !important;
   }
 
-  html.dbx-legacy-webview [data-slot="dialog-content"].connection-dialog-content--config .connection-url-params-row--compact {
+  html.dbx-legacy-webview [data-slot="dialog-content"].connection-dialog-content--config .connection-url-params-row {
     align-items: center !important;
-  }
-
-  html.dbx-legacy-webview [data-slot="dialog-content"].connection-dialog-content--config .connection-url-params-row--with-hint .connection-url-params-label {
-    margin-top: 0.5rem !important;
   }
 }

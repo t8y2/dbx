@@ -359,9 +359,9 @@ pub struct TransferRequest {
     /// Key = source table name; value is either a bare `WHERE` predicate
     /// (`id <= 90000`) or a complete source `SELECT`
     /// (`select * from t_order where id <= 90000`) used as a derived table.
-    /// Missing or empty entries transfer the whole table. Only MySQL- and
-    /// PostgreSQL-family sources are supported (see
-    /// `transfer_table_filter_supported`).
+    /// Missing or empty entries transfer the whole table. Supported for the
+    /// MySQL, PostgreSQL, Oracle/Dameng and SQL Server families plus SQLite
+    /// (see `transfer_table_filter_supported`).
     #[serde(default)]
     pub table_filters: HashMap<String, String>,
     /// When true, rename the target table to a backup before creating it from the
@@ -7381,43 +7381,65 @@ pub fn pagination_sql_with_filter_order_and_identifier_quote(
             postgres_order_by_expression_with_identifier_quote(default_order_columns, db_type, identifier_quote)
         });
 
+    paged_select_sql(&col_list, &full_table, &where_clause, order_expression.as_deref(), db_type, offset, limit)
+}
+
+/// Builds one page of a source read for every dialect that expresses page
+/// bounds differently from `LIMIT`/`OFFSET`.
+///
+/// `from_sql` is the qualified source — a table, or a derived table when the
+/// caller reads through a user-supplied `SELECT` — and `where_clause` already
+/// carries its ` WHERE (...)` prefix (empty when the read has no filter). Both
+/// the export reads (`pagination_sql_with_filter_order*`) and the transfer row
+/// filter (`transfer_filter_page_sql`) go through here, so a dialect only has
+/// to be described once.
+#[allow(clippy::too_many_arguments)]
+fn paged_select_sql(
+    select_list: &str,
+    from_sql: &str,
+    where_clause: &str,
+    order_expression: Option<&str>,
+    db_type: &DatabaseType,
+    offset: u64,
+    limit: usize,
+) -> String {
     match db_type {
         DatabaseType::Iris => {
-            let order_by = format!(" ORDER BY {}", order_expression.as_deref().unwrap_or("%ID"));
-            build_iris_table_select_sql(&col_list, &full_table, &where_clause, &order_by, limit, offset)
+            let order_by = format!(" ORDER BY {}", order_expression.unwrap_or("%ID"));
+            build_iris_table_select_sql(select_list, from_sql, where_clause, &order_by, limit, offset)
         }
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
-            let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause}{order_by}");
-            oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
+            let base_sql = format!("SELECT {select_list} FROM {from_sql}{where_clause}{order_by}");
+            oracle_rownum_page_sql(select_list, base_sql, offset, limit)
         }
         DatabaseType::Informix => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             if offset == 0 {
-                format!("SELECT FIRST {limit} {col_list} FROM {full_table}{where_clause}{order_by}")
+                format!("SELECT FIRST {limit} {select_list} FROM {from_sql}{where_clause}{order_by}")
             } else {
-                format!("SELECT SKIP {offset} FIRST {limit} {col_list} FROM {full_table}{where_clause}{order_by}")
+                format!("SELECT SKIP {offset} FIRST {limit} {select_list} FROM {from_sql}{where_clause}{order_by}")
             }
         }
         DatabaseType::SqlServer => {
-            let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
-            let from_clause = format!("{full_table}{where_clause}");
-            sqlserver_row_number_page_sql(&col_list, &from_clause, &order_by, offset, limit)
+            let order_by = order_expression.unwrap_or("(SELECT NULL)");
+            let from_clause = format!("{from_sql}{where_clause}");
+            sqlserver_row_number_page_sql(select_list, &from_clause, order_by, offset, limit)
         }
         DatabaseType::Dameng => {
-            let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
+            let order_by = order_expression.unwrap_or("(SELECT NULL)");
             format!(
-                "SELECT {col_list} FROM {full_table}{where_clause} ORDER BY {order_by} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
+                "SELECT {select_list} FROM {from_sql}{where_clause} ORDER BY {order_by} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
             )
         }
         DatabaseType::Questdb => {
             let upper_bound = offset + limit as u64;
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
-            format!("SELECT {col_list} FROM {full_table}{where_clause}{order_by} LIMIT {offset}, {upper_bound}")
+            format!("SELECT {select_list} FROM {from_sql}{where_clause}{order_by} LIMIT {offset}, {upper_bound}")
         }
         _ => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
-            format!("SELECT {col_list} FROM {full_table}{where_clause}{order_by} LIMIT {limit} OFFSET {offset}")
+            format!("SELECT {select_list} FROM {from_sql}{where_clause}{order_by} LIMIT {limit} OFFSET {offset}")
         }
     }
 }
@@ -7463,8 +7485,11 @@ pub enum TransferTableFilter {
     Query(String),
 }
 
-/// Source engines that support per-table transfer filters. The paged fallback
-/// only relies on MySQL/PostgreSQL `LIMIT`/`OFFSET` semantics.
+/// Source engines that support per-table transfer filters.
+///
+/// A filter moves the read onto `paged_select_sql`, so a dialect can be enabled
+/// once that function builds a correct page for it: the same list gates the
+/// export reads, which is why every branch there is covered here.
 pub fn transfer_table_filter_supported(db_type: &DatabaseType) -> bool {
     matches!(
         db_type,
@@ -7475,6 +7500,11 @@ pub fn transfer_table_filter_supported(db_type: &DatabaseType) -> bool {
             | DatabaseType::Gaussdb
             | DatabaseType::OpenGauss
             | DatabaseType::Kwdb
+            | DatabaseType::Dameng
+            | DatabaseType::Oracle
+            | DatabaseType::OceanbaseOracle
+            | DatabaseType::SqlServer
+            | DatabaseType::Sqlite
     )
 }
 
@@ -7563,15 +7593,28 @@ fn transfer_filter_count_sql(
         TransferTableFilter::Predicate(predicate) => {
             count_sql_with_where(table, schema, db_type, Some(predicate.as_str()), catalog)
         }
-        TransferTableFilter::Query(query) => format!("SELECT COUNT(*) FROM ({query}) AS dbx_transfer_src"),
+        TransferTableFilter::Query(query) => {
+            format!("SELECT COUNT(*) FROM {}", transfer_filter_derived_table(query))
+        }
     }
+}
+
+/// Wraps a user-supplied source `SELECT` as a derived table.
+///
+/// Oracle and Dameng reject `AS` before a table alias while every other supported
+/// source accepts the alias without it, so the alias-less form covers them all.
+fn transfer_filter_derived_table(query: &str) -> String {
+    format!("({}) dbx_transfer_src", query.trim())
 }
 
 /// Builds one paged source read for a filtered table.
 ///
-/// MySQL/PostgreSQL share `LIMIT`/`OFFSET`, and the PK `ORDER BY` keeps OFFSET
-/// paging deterministic. Keyset/ctid/COPY paging are disabled while a filter is
-/// present because they build their own `WHERE`/`FROM` and would ignore it.
+/// Page bounds come from [`paged_select_sql`], so a filtered read pages exactly
+/// like the unfiltered export path: `ROWNUM` on Oracle, `OFFSET … FETCH` on
+/// Dameng, `ROW_NUMBER()` on SQL Server, and `LIMIT`/`OFFSET` elsewhere. The
+/// source primary key's `ORDER BY` keeps OFFSET paging deterministic.
+/// Keyset/ctid/COPY paging are disabled while a filter is present because they
+/// build their own `WHERE`/`FROM` and would ignore it.
 #[allow(clippy::too_many_arguments)]
 fn transfer_filter_page_sql(
     columns: &[String],
@@ -7590,24 +7633,16 @@ fn transfer_filter_page_sql(
     } else {
         columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ")
     };
-    let (from_sql, predicate) = match filter {
+    let (from_sql, where_clause) = match filter {
         TransferTableFilter::Predicate(predicate) => {
-            (qualified_table(table, schema, db_type, catalog), Some(predicate.trim().to_string()))
+            let predicate = predicate.trim();
+            let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
+            (qualified_table(table, schema, db_type, catalog), where_clause)
         }
-        TransferTableFilter::Query(query) => (format!("({query}) AS dbx_transfer_src"), None),
+        TransferTableFilter::Query(query) => (transfer_filter_derived_table(query), String::new()),
     };
-    let where_clause = match predicate.as_deref() {
-        Some(predicate) if !predicate.is_empty() => format!(" WHERE ({predicate})"),
-        _ => String::new(),
-    };
-    let order_clause = if order_by_columns.is_empty() {
-        String::new()
-    } else {
-        let columns =
-            order_by_columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
-        format!(" ORDER BY {columns}")
-    };
-    format!("SELECT {select_list} FROM {from_sql}{where_clause}{order_clause} LIMIT {limit} OFFSET {offset}")
+    let order_expression = postgres_order_by_expression(order_by_columns, db_type);
+    paged_select_sql(&select_list, &from_sql, &where_clause, order_expression.as_deref(), db_type, offset, limit)
 }
 
 pub fn keyset_pagination_sql(
@@ -13024,7 +13059,7 @@ where
     if table_filter.is_some() && should_copy_data(&request.content) && !transfer_table_filter_supported(source_db_type)
     {
         return Err(format!(
-            "Table filters are not supported for source database '{}'; only the MySQL and PostgreSQL families are supported",
+            "Table filters are not supported for source database '{}'; supported families are MySQL, PostgreSQL, Oracle, Dameng, SQL Server, and SQLite",
             source_db_type.as_str()
         ));
     }
@@ -21065,6 +21100,219 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             count_sql_with_where("users", "public", &DatabaseType::SapHana, Some("WHERE status = 'active'"), None);
 
         assert_eq!(sql, "SELECT COUNT(*) FROM \"public\".\"users\" WHERE (status = 'active')");
+    }
+
+    #[test]
+    fn transfer_table_filters_cover_every_paged_dialect() {
+        for db_type in [
+            DatabaseType::Mysql,
+            DatabaseType::Gbase,
+            DatabaseType::Postgres,
+            DatabaseType::Kingbase,
+            DatabaseType::Gaussdb,
+            DatabaseType::OpenGauss,
+            DatabaseType::Kwdb,
+            DatabaseType::Dameng,
+            DatabaseType::Oracle,
+            DatabaseType::OceanbaseOracle,
+            DatabaseType::SqlServer,
+            DatabaseType::Sqlite,
+        ] {
+            assert!(transfer_table_filter_supported(&db_type), "{db_type:?} should accept a row filter");
+        }
+        // Sources that page through their own cursor/streaming path stay out.
+        for db_type in [DatabaseType::Hive, DatabaseType::MongoDb, DatabaseType::Redis] {
+            assert!(!transfer_table_filter_supported(&db_type), "{db_type:?} should reject a row filter");
+        }
+    }
+
+    #[test]
+    fn transfer_filter_page_pages_sqlite_with_limit_offset() {
+        let sql = transfer_filter_page_sql(
+            &[String::from("id"), String::from("name")],
+            "users",
+            "main",
+            &DatabaseType::Sqlite,
+            None,
+            &TransferTableFilter::Predicate("id <= 90000".to_string()),
+            200,
+            100,
+            &[String::from("id")],
+            false,
+        );
+
+        assert_eq!(
+            sql,
+            r#"SELECT "id", "name" FROM "main"."users" WHERE (id <= 90000) ORDER BY "id" LIMIT 100 OFFSET 200"#
+        );
+    }
+
+    #[test]
+    fn transfer_filter_page_pages_dameng_with_offset_fetch() {
+        let sql = transfer_filter_page_sql(
+            &[String::from("id"), String::from("status")],
+            "users",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            None,
+            &TransferTableFilter::Predicate("status = 'active'".to_string()),
+            10_000,
+            2_000,
+            &[String::from("id")],
+            false,
+        );
+
+        assert_eq!(
+            sql,
+            r#"SELECT "id", "status" FROM "SYSDBA"."users" WHERE (status = 'active') ORDER BY "id" OFFSET 10000 ROWS FETCH NEXT 2000 ROWS ONLY"#
+        );
+        assert!(!sql.contains(" LIMIT "));
+    }
+
+    #[test]
+    fn transfer_filter_page_pages_dameng_without_a_primary_key() {
+        let sql = transfer_filter_page_sql(
+            &[String::from("id")],
+            "users",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            None,
+            &TransferTableFilter::Predicate("id > 0".to_string()),
+            0,
+            500,
+            &[],
+            false,
+        );
+
+        assert_eq!(
+            sql,
+            r#"SELECT "id" FROM "SYSDBA"."users" WHERE (id > 0) ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 500 ROWS ONLY"#
+        );
+    }
+
+    #[test]
+    fn transfer_filter_page_pages_oracle_with_rownum() {
+        let sql = transfer_filter_page_sql(
+            &[String::from("id"), String::from("status")],
+            "users",
+            "APP",
+            &DatabaseType::Oracle,
+            None,
+            &TransferTableFilter::Predicate("status = 'active'".to_string()),
+            10_000,
+            2_000,
+            &[String::from("id")],
+            false,
+        );
+
+        assert_eq!(
+            sql,
+            r#"SELECT "id", "status" FROM (SELECT dbx_inner.*, ROWNUM AS "__dbx_row_num" FROM (SELECT "id", "status" FROM "APP"."users" WHERE (status = 'active') ORDER BY "id") dbx_inner WHERE ROWNUM <= 12000) WHERE "__dbx_row_num" > 10000"#
+        );
+        assert!(!sql.contains("OFFSET"));
+    }
+
+    #[test]
+    fn transfer_filter_page_pages_sqlserver_with_row_number() {
+        let sql = transfer_filter_page_sql(
+            &[String::from("id"), String::from("status")],
+            "users",
+            "dbo",
+            &DatabaseType::SqlServer,
+            None,
+            &TransferTableFilter::Predicate("status = 'active'".to_string()),
+            10_000,
+            2_000,
+            &[String::from("id")],
+            false,
+        );
+
+        assert!(sql.contains("ROW_NUMBER() OVER (ORDER BY [id]) AS __dbx_row_num"), "{sql}");
+        assert!(sql.contains("FROM [dbo].[users] WHERE (status = 'active')"), "{sql}");
+        assert!(sql.contains("WHERE __dbx_row_num > 10000 AND __dbx_row_num <= 12000"), "{sql}");
+        assert!(!sql.contains("OFFSET"), "{sql}");
+    }
+
+    #[test]
+    fn transfer_filter_query_wraps_the_source_select_as_a_derived_table() {
+        let query = "SELECT * FROM app.users WHERE id <= 10";
+
+        let page = transfer_filter_page_sql(
+            &[String::from("id")],
+            "users",
+            "APP",
+            &DatabaseType::Oracle,
+            None,
+            &TransferTableFilter::Query(query.to_string()),
+            0,
+            100,
+            &[String::from("id")],
+            false,
+        );
+        // Oracle and Dameng reject AS before a table alias.
+        assert!(page.contains(&format!("FROM ({query}) dbx_transfer_src")), "{page}");
+        assert!(!page.contains(" AS dbx_transfer_src"), "{page}");
+
+        assert_eq!(
+            transfer_filter_count_sql(
+                "users",
+                "APP",
+                &DatabaseType::Oracle,
+                None,
+                &TransferTableFilter::Query(query.to_string()),
+            ),
+            format!("SELECT COUNT(*) FROM ({query}) dbx_transfer_src")
+        );
+    }
+
+    #[test]
+    fn transfer_filter_page_keeps_the_placeholder_select_for_generated_only_columns() {
+        let sql = transfer_filter_page_sql(
+            &[],
+            "users",
+            "main",
+            &DatabaseType::Sqlite,
+            None,
+            &TransferTableFilter::Predicate("id <= 9".to_string()),
+            0,
+            50,
+            &[],
+            true,
+        );
+
+        assert_eq!(sql, r#"SELECT 1 FROM "main"."users" WHERE (id <= 9) LIMIT 50 OFFSET 0"#);
+    }
+
+    /// The dialog hides the editor when the backend would reject a filter, so
+    /// the two lists are one contract split across languages.
+    #[test]
+    fn transfer_table_filter_types_match_the_desktop_list() {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        if !workspace.join("pnpm-workspace.yaml").exists() {
+            return; // packaged crate: the desktop sources are absent
+        }
+        let source =
+            std::fs::read_to_string(workspace.join("apps/desktop/src/components/transfer/transferTableFilters.ts"))
+                .expect("desktop table filter list");
+        let literal = source
+            .split("TRANSFER_TABLE_FILTER_TYPES = [")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("TRANSFER_TABLE_FILTER_TYPES array literal");
+        let declared: Vec<&str> = literal
+            .split(',')
+            .map(|entry| entry.trim().trim_matches(|c| c == '"' || c == '\''))
+            .filter(|entry| !entry.is_empty())
+            .collect();
+
+        for db_type in DatabaseType::ALL.iter() {
+            let in_desktop_list = declared.iter().any(|name| *name == db_type.as_str());
+            assert_eq!(
+                in_desktop_list,
+                transfer_table_filter_supported(db_type),
+                "{db_type:?}: the desktop list and transfer_table_filter_supported disagree"
+            );
+        }
     }
 
     #[test]

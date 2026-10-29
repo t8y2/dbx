@@ -7794,6 +7794,9 @@ export default withEnglishFallback({
       saveFailed: "Error al guardar: {message}",
       deleteFailed: "Error al eliminar: {message}",
     },
+    tableFilterCta: "Para tablas grandes, se puede añadir una condición WHERE para transferir solo parte de los datos",
+    tableFilterActiveHint: "Filtrado por condición",
+    tableFilterUnsupported: "La base de datos de origen actual no admite el filtrado de tablas; es compatible con MySQL, PostgreSQL, 达梦, Oracle, SQL Server y SQLite",
   },
   tableImport: {
     title: "Importar datos a tabla",

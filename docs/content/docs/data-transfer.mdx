@@ -55,7 +55,7 @@ This entry point lists target drivers with implemented transactional writes. It 
   <Step>
     ### Choose Tables
 
-    Select all, search, or choose a subset. A single request can only contain tables from one source context.
+    Select all, search, or choose a subset. A single request can only contain tables from one source context. For a large table, set a WHERE condition under **Per-table filters** to transfer only matching rows.
 
   </Step>
   <Step>
@@ -83,6 +83,7 @@ This entry point lists target drivers with implemented transactional writes. It 
 | Upsert | Updates or inserts by key when the target path supports it and a usable key is available |
 | Target table name case | Preserve, lowercase, or uppercase; transformed target names must remain unique |
 | Batch size | Controls paged reads and batched writes; the UI default is 1000 |
+| Per-table filters | Transfers only the rows matching a WHERE condition or a complete SELECT for a selected table; available for MySQL, PostgreSQL, Dameng, Oracle, OceanBase Oracle mode, SQL Server, and SQLite sources |
 | Operation timeout | Inherits the source and target connection query timeouts by default; override this transfer with `0`–`3600` seconds, where `0` means unlimited |
 
 If table creation is disabled, compatible target tables must already exist. Even with table creation enabled, cross-engine DDL may require manual changes when the target does not support a source type, default, constraint, or object.
@@ -90,6 +91,19 @@ If table creation is disabled, compatible target tables must already exist. Even
 The operation timeout does not cap the overall transfer duration. Drivers with incremental result streams treat it as an inactivity window that resets whenever data arrives; drivers that return a result all at once apply it to the total duration of each database operation. A custom value affects only this transfer and its saved task, not the connection or query-editor timeout settings.
 
 <Callout type="warn">**Rebuild structure and data** replaces existing target tables and their indexes, triggers, constraints, comments, and object permissions with source structure. The original table is renamed to a backup first, then dropped after a successful transfer. If any step fails, the backup table is retained and can be manually restored.</Callout>
+
+## Per-table Filters
+
+A large table does not have to move in full. The **Per-table filters** panel in the table step lets you add a condition per selected table, and DBX then reads only the matching rows:
+
+- Enter the predicate after `WHERE`, for example `id <= 90000` or `created_at >= '2025-01-01'`.
+- Or enter a complete `SELECT`, for example `select * from t_order where id <= 90000`. DBX reads it as a derived table, so its `JOIN`, `ORDER BY`, and `LIMIT` are preserved verbatim.
+
+Filters are stored per table; tables without a condition still transfer in full. Row counts in the progress center and in the results are the filtered counts.
+
+Supported sources: MySQL (including GBase), PostgreSQL (including KingBase, GaussDB, OpenGauss, and KWDB), Dameng, Oracle, OceanBase Oracle mode, SQL Server, and SQLite. Filtered reads page in primary-key order; without a primary key, the database decides the page order.
+
+<Callout type="warn">A filter must be a single statement — do not add extra `;` separators. A complete `SELECT` must run on its own and include the columns you transfer.</Callout>
 
 ## Structure SQL Preview
 

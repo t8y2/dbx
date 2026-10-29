@@ -7617,6 +7617,9 @@ export default withEnglishFallback({
       saveFailed: "保存に失敗しました：{message}",
       deleteFailed: "削除に失敗しました：{message}",
     },
+    tableFilterCta: "大きなテーブルは WHERE 条件を追加して一部のデータのみ転送できます",
+    tableFilterActiveHint: "条件で絞り込み済み",
+    tableFilterUnsupported: "現在のソースデータベースはテーブルフィルタをサポートしていません。サポート対象：MySQL、PostgreSQL、达梦、Oracle、SQL Server、SQLite",
   },
   tableImport: {
     title: "テーブルデータをインポート",

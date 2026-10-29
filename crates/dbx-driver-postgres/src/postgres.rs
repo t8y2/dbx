@@ -3188,6 +3188,7 @@ async fn connect_with_optional_local_timezone_with_max_connections(
     max_connections: usize,
 ) -> Result<Pool, String> {
     let url_with_keepalive = inject_postgres_keepalive_params(url);
+    let url_with_keepalive = inject_postgres_error_locale_params(&url_with_keepalive);
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
 
@@ -3488,6 +3489,71 @@ fn inject_postgres_keepalive_params(url: &str) -> String {
     let separator = if base.contains('?') { "&" } else { "?" };
     let injected =
         format!("{base}{separator}keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_retries=3");
+    if fragment.is_empty() {
+        injected
+    } else {
+        format!("{injected}#{fragment}")
+    }
+}
+
+/// Merge `lc_messages=C` into the PostgreSQL URL's `options` startup parameter
+/// (only when the user has not set a message locale themselves).
+///
+/// Servers with a localized `lc_messages` (a zh_CN installation, for instance)
+/// return localized error text for connection-time failures such as
+/// `pg_hba.conf` rejections, and the driver reads those server messages as
+/// UTF-8 while the localized bytes may be GB18030 — the dialog then shows
+/// replacement characters between the intact ASCII fragments (#13712).
+/// Forcing the `C` locale keeps server messages in plain ASCII so they stay
+/// readable regardless of the server's locale; users who prefer localized
+/// messages can set `lc_messages` in their own `options` and win.
+fn inject_postgres_error_locale_params(url: &str) -> String {
+    let (base, fragment) = url.split_once('#').map_or((url, ""), |(base, fragment)| (base, fragment));
+    let option_sets_locale = |options: &str| {
+        options.split_ascii_whitespace().any(|token| {
+            let token = token.trim_start_matches('-').to_ascii_lowercase().replace(['-', '_'], "");
+            token == "lcmessages" || token.starts_with("lcmessages=")
+        })
+    };
+    let has_message_locale = base.split('?').nth(1).is_some_and(|query| {
+        query.split('&').any(|parameter| {
+            let (raw_key, raw_value) = parameter.split_once('=').unwrap_or((parameter, ""));
+            if !raw_key.eq_ignore_ascii_case("options") {
+                return false;
+            }
+            option_sets_locale(&percent_decode_str(raw_value).decode_utf8_lossy())
+        })
+    });
+    if has_message_locale {
+        return url.to_string(); // User has explicitly configured the message locale
+    }
+    let locale_option = "-c%20lc_messages%3DC";
+    let injected = match base.split_once('?') {
+        // Append to the user's own options value: startup options are
+        // space-separated inside one `options` parameter. A query without an
+        // options parameter gains one of its own.
+        Some((prefix, query)) => {
+            let mut has_options = false;
+            let merged = query
+                .split('&')
+                .map(|parameter| {
+                    if parameter.split_once('=').is_some_and(|(key, _)| key.eq_ignore_ascii_case("options")) {
+                        has_options = true;
+                        format!("{parameter}%20{locale_option}")
+                    } else {
+                        parameter.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("&");
+            if has_options {
+                format!("{prefix}?{merged}")
+            } else {
+                format!("{prefix}?{query}&options={locale_option}")
+            }
+        }
+        None => format!("{base}?options={locale_option}"),
+    };
     if fragment.is_empty() {
         injected
     } else {
@@ -14280,6 +14346,52 @@ mod tests {
         assert_eq!(
             inject_postgres_keepalive_params(url),
             "postgres://localhost/app?sslmode=require&keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_retries=3#read-only"
+        );
+    }
+
+    // A localized server (lc_messages=zh_CN) returns GB18030 error text for
+    // startup failures such as pg_hba.conf rejections; the driver reads server
+    // messages as UTF-8, so the dialog shows replacement characters (#13712).
+    // The C locale keeps startup error text ASCII.
+    #[test]
+    fn inject_postgres_error_locale_params_adds_c_locale_when_options_missing() {
+        assert_eq!(
+            inject_postgres_error_locale_params("postgres://localhost/app?sslmode=require"),
+            "postgres://localhost/app?sslmode=require&options=-c%20lc_messages%3DC"
+        );
+    }
+
+    #[test]
+    fn inject_postgres_error_locale_params_appends_to_existing_options() {
+        assert_eq!(
+            inject_postgres_error_locale_params("postgres://localhost/app?options=-c%20search_path%3Dpublic"),
+            "postgres://localhost/app?options=-c%20search_path%3Dpublic%20-c%20lc_messages%3DC"
+        );
+        assert_eq!(
+            inject_postgres_error_locale_params(
+                "postgres://localhost/app?sslmode=require&options=-c%20TimeZone%3DUTC#fragment"
+            ),
+            "postgres://localhost/app?sslmode=require&options=-c%20TimeZone%3DUTC%20-c%20lc_messages%3DC#fragment"
+        );
+    }
+
+    #[test]
+    fn inject_postgres_error_locale_params_respects_user_locale() {
+        for options in [
+            "options=-c%20lc_messages%3Dzh_CN",
+            "options=--lc-messages%3Dzh_CN",
+            "options=-c%20search_path%3Dpublic%20-c%20LC_MESSAGES%3DC",
+        ] {
+            let url = format!("postgres://localhost/app?{options}");
+            assert_eq!(inject_postgres_error_locale_params(&url), url, "{options}");
+        }
+    }
+
+    #[test]
+    fn inject_postgres_error_locale_params_handles_url_without_query() {
+        assert_eq!(
+            inject_postgres_error_locale_params("postgres://localhost/app"),
+            "postgres://localhost/app?options=-c%20lc_messages%3DC"
         );
     }
 

@@ -11706,6 +11706,9 @@ function openExternalUrl(url: string) {
   /* Preserve every form section's natural height; the form viewport owns
    * scrolling and must never shrink cards into collapsed grid rows. */
   align-content: start;
+  /* Overlay scrollbars need padding too; older WebViews ignore gutter. */
+  padding-right: 1rem;
+  scrollbar-gutter: stable;
 }
 
 .connection-form-body--nacos {

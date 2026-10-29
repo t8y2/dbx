@@ -41,7 +41,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22.23.4
           registry-url: https://registry.npmjs.org
@@ -327,7 +327,7 @@ jobs:
             chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
           fi
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22.23.4
           registry-url: https://registry.npmjs.org
@@ -355,7 +355,7 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22.23.4
           registry-url: https://registry.npmjs.org
@@ -410,7 +410,7 @@ jobs:
     needs: [prepare, publish-launcher]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22.23.4
           registry-url: https://registry.npmjs.org

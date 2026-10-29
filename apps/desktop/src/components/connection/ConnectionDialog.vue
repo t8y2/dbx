@@ -714,28 +714,6 @@ const parameterDriverDefinitions = ref<ConnectionParameterDefinition[]>([]);
 const parameterMetadataLoading = ref(false);
 const parameterMetadataError = ref("");
 let parameterMetadataRequest = 0;
-watch([parameterEditorOpen, () => form.value.db_type, () => form.value.driver_profile, () => form.value.connection_string, () => form.value.url_params], async ([isOpen]) => {
-  const request = ++parameterMetadataRequest;
-  parameterDriverDefinitions.value = [];
-  parameterMetadataError.value = "";
-  parameterMetadataLoading.value = false;
-  if (!isOpen) return;
-  const runtime = databaseManifestEntry(form.value.db_type)?.runtimeMode;
-  if ((runtime === "native" || runtime === "file") && !form.value.driver_profile?.includes("legacy")) return;
-  if (form.value.db_type === "oracle") return;
-  parameterMetadataLoading.value = true;
-  try {
-    const config = { ...form.value, id: editingId.value || "parameter-metadata-draft" } as ConnectionConfig;
-    const metadata = await api.connectionParameters(config);
-    if (request !== parameterMetadataRequest) return;
-    parameterDriverDefinitions.value = metadata.parameters;
-    if (!metadata.available) parameterMetadataError.value = "unavailable";
-  } catch {
-    if (request === parameterMetadataRequest) parameterMetadataError.value = "unavailable";
-  } finally {
-    if (request === parameterMetadataRequest) parameterMetadataLoading.value = false;
-  }
-});
 const configuredParameterCount = computed(() => parseConnectionParameters(form.value.url_params || "", connectionParameterSyntax(form.value)).entries.length);
 function applyConnectionParameters(value: string) {
   form.value.url_params = value;
@@ -1341,6 +1319,29 @@ function parsedJdbcDriverPaths(): string[] {
     .map((value) => value.trim())
     .filter(Boolean);
 }
+
+watch([parameterEditorOpen, () => form.value.db_type, () => form.value.driver_profile, () => form.value.connection_string, () => form.value.url_params, () => form.value.jdbc_driver_class, jdbcDriverPathsInput], async ([isOpen]) => {
+  const request = ++parameterMetadataRequest;
+  parameterDriverDefinitions.value = [];
+  parameterMetadataError.value = "";
+  parameterMetadataLoading.value = false;
+  if (!isOpen) return;
+  const runtime = databaseManifestEntry(form.value.db_type)?.runtimeMode;
+  if ((runtime === "native" || runtime === "file") && !form.value.driver_profile?.includes("legacy")) return;
+  if (form.value.db_type === "oracle") return;
+  parameterMetadataLoading.value = true;
+  try {
+    const config = { ...form.value, id: editingId.value || "parameter-metadata-draft", jdbc_driver_paths: parsedJdbcDriverPaths() } as ConnectionConfig;
+    const metadata = await api.connectionParameters(config);
+    if (request !== parameterMetadataRequest) return;
+    parameterDriverDefinitions.value = metadata.parameters;
+    if (!metadata.available) parameterMetadataError.value = "unavailable";
+  } catch {
+    if (request === parameterMetadataRequest) parameterMetadataError.value = "unavailable";
+  } finally {
+    if (request === parameterMetadataRequest) parameterMetadataLoading.value = false;
+  }
+});
 
 function applyCustomColor(value: string) {
   form.value.color = value;
@@ -7999,6 +8000,13 @@ function openExternalUrl(url: string) {
                           </Button>
                         </div>
                       </div>
+                    </div>
+                    <div v-if="supportsGenericUrlParams" class="grid grid-cols-4 items-center gap-4">
+                      <Label for="connection-parameters-open" :class="connectionLabelClass">{{ t("connection.parameterEditor.title") }}</Label>
+                      <Button id="connection-parameters-open" type="button" variant="outline" class="col-span-3 justify-between" @click="parameterEditorOpen = true">
+                        <span class="font-normal text-muted-foreground">{{ configuredParameterCount ? t("connection.parameterEditor.configuredCount", { count: configuredParameterCount }) : t("connection.parameterEditor.default") }}</span>
+                        <span>{{ t("connection.parameterEditor.configure") }}</span>
+                      </Button>
                     </div>
                   </template>
 

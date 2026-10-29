@@ -43,6 +43,7 @@ const { store, settings, backend, actualStoreHolder } = vi.hoisted(() => ({
     redisListDatabases: vi.fn(),
     listSchemas: vi.fn(),
     testConnectionWithInfo: vi.fn(),
+    connectionParameters: vi.fn(),
     listDatabases: vi.fn(),
     listPlugins: vi.fn(),
     listJdbcDrivers: vi.fn(),
@@ -88,7 +89,7 @@ vi.mock("@/components/ui/dialog", async () => {
       () =>
         props.open ? h("section", [h("button", { "data-testid": "dismiss-dialog", onClick: () => emit("update:open", false) }, "Dismiss"), slots.default?.()]) : null,
   });
-  return { Dialog, DialogContent: passthrough, DialogHeader: passthrough, DialogTitle: passthrough, DialogFooter: passthrough };
+  return { Dialog, DialogContent: passthrough, DialogHeader: passthrough, DialogTitle: passthrough, DialogDescription: passthrough, DialogFooter: passthrough };
 });
 vi.mock("@/components/ui/button", async () => {
   const { defineComponent, h } = await import("vue");
@@ -835,6 +836,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     await settle();
     jdbcOption!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     await settle();
+    expect(document.querySelector("#connection-parameters-open")).toBeTruthy();
     const url = [...document.querySelectorAll<HTMLInputElement>("input")].find((input) => input.placeholder.startsWith("jdbc:"));
     expect(url).toBeTruthy();
     url!.value = "jdbc:example://host/db";
@@ -1033,5 +1035,64 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     await settle();
 
     expect(store.updateConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe("JDBC connection parameter entry and driver metadata", () => {
+  it("uses the current unsaved JAR selection and applies a driver property to the connection draft", async () => {
+    backend.connectionParameters.mockResolvedValue({
+      available: true,
+      parameters: [{ name: "ApplicationName", type: "string", source: "driver", description: "Application name reported to the server." }],
+    });
+    await mountDialog(
+      savedConnection({
+        db_type: "jdbc",
+        driver_profile: "jdbc",
+        driver_label: "JDBC",
+        host: "",
+        port: 0,
+        connection_string: "jdbc:postgresql://localhost/example",
+        jdbc_driver_class: "org.postgresql.Driver",
+        jdbc_driver_paths: ["/old/driver.jar"],
+        url_params: "unknown=%2f",
+      }),
+    );
+    const classpath = document.querySelector<HTMLTextAreaElement>(`textarea[placeholder="${i18n.global.t("connection.jdbcDriverPathsPlaceholder")}"]`);
+    expect(classpath).toBeTruthy();
+    classpath!.value = " /new/postgresql.jar \n/new/helper.jar";
+    classpath!.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    const entry = document.querySelector<HTMLButtonElement>("#connection-parameters-open");
+    expect(entry).toBeTruthy();
+    entry!.click();
+    await settle();
+    expect(backend.connectionParameters).toHaveBeenCalledWith(
+      expect.objectContaining({
+        db_type: "jdbc",
+        connection_string: "jdbc:postgresql://localhost/example",
+        jdbc_driver_class: "org.postgresql.Driver",
+        jdbc_driver_paths: ["/new/postgresql.jar", "/new/helper.jar"],
+      }),
+    );
+    const property = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "ApplicationName");
+    expect(property).toBeTruthy();
+    property!.click();
+    await settle();
+    const input = document.getElementById("connection-parameter-value") as HTMLInputElement;
+    input.value = "DBX metadata";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    const click = (text: string) => [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === text)!.click();
+    click("Apply");
+    await settle();
+    expect(store.updateConnection).not.toHaveBeenCalled();
+    click("Save");
+    await settle();
+    expect(store.updateConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url_params: "unknown=%2f&ApplicationName=DBX%20metadata",
+        jdbc_driver_paths: ["/new/postgresql.jar", "/new/helper.jar"],
+      }),
+    );
   });
 });

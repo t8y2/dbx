@@ -12868,6 +12868,7 @@ export default withEnglishFallback({
     resendMessage: "Отправить повторно",
     payloadCopied: "Скопировано",
     dlqConsumerGroupPlaceholder: "Группа потребителей (необязательно)",
+    decodePayload: "Декодировать",
   },
   mqMonitoring: {
     title: "Мониторинг",

@@ -422,12 +422,14 @@ func decodeThriftBinaryJSON(data []byte) (string, bool) {
 	return strings.TrimSuffix(buf.String(), "\n"), true
 }
 
-func decodeDeliveryPayloadText(body []byte) (string, bool) {
+func decodeDeliveryPayloadText(body []byte, decodePayload ...bool) (string, bool) {
 	if len(body) > 0 && isPrintableUTF8(body) {
 		return string(body), true
 	}
-	if decoded, ok := decodeThriftBinaryJSON(body); ok {
-		return decoded, true
+	if len(decodePayload) > 0 && decodePayload[0] {
+		if decoded, ok := decodeThriftBinaryJSON(body); ok {
+			return decoded, true
+		}
 	}
 	if utf8.Valid(body) {
 		return string(body), true

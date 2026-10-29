@@ -12617,6 +12617,7 @@ export default withEnglishFallback({
     loading: "加载中...",
     peekDefaultHint: "未指定分区时读取全部区，从各区 earliest 起。",
     count: "数量",
+    decodePayload: "解码",
     advancedFilter: "高级筛选（分区 / Offset）",
     partition: "分区",
     partitionPlaceholderAll: "留空=全部",

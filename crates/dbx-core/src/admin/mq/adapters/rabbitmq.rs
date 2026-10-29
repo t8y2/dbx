@@ -1124,13 +1124,18 @@ fn build_connection_params(cfg: &MqAdminConfig) -> Result<serde_json::Value, Str
 
 /// Map one agent peek message JSON to a `PeekedMessage`.
 fn peeked_message_from_json(idx: usize, m: &serde_json::Value) -> PeekedMessage {
+    peeked_message_from_json_with_options(idx, m, false)
+}
+
+fn peeked_message_from_json_with_options(idx: usize, m: &serde_json::Value, decode_payload: bool) -> PeekedMessage {
     let properties = m
         .get("properties")
         .and_then(|v| v.as_object())
         .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect())
         .unwrap_or_default();
     let payload_base64 = m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-    let payload_text = resolve_rabbitmq_payload_text(m.get("payloadText").and_then(|v| v.as_str()), &payload_base64);
+    let payload_text =
+        resolve_rabbitmq_payload_text(m.get("payloadText").and_then(|v| v.as_str()), &payload_base64, decode_payload);
     PeekedMessage {
         position: (idx + 1) as u32,
         message_id: m
@@ -1162,7 +1167,10 @@ fn is_printable_text(text: &str) -> bool {
     text.chars().all(|c| (c >= ' ' || matches!(c, '\t' | '\n' | '\r')) && c != '\u{7f}')
 }
 
-fn resolve_rabbitmq_payload_text(raw_text: Option<&str>, payload_base64: &str) -> Option<String> {
+fn resolve_rabbitmq_payload_text(raw_text: Option<&str>, payload_base64: &str, decode_payload: bool) -> Option<String> {
+    if !decode_payload {
+        return raw_text.map(String::from);
+    }
     if let Some(text) = raw_text {
         if !text.is_empty() && is_printable_text(text) {
             return Some(text.to_string());
@@ -1907,7 +1915,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn peeked_message_decodes_thrift_binary_protocol() {
+    fn peeked_message_decodes_thrift_binary_protocol_when_opted_in() {
         use base64::Engine as _;
         let strict_call = [
             0x80u8, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, b'p', b'i', b'n', b'g', 0x00, 0x00, 0x00, 0x07, 0x0b,
@@ -1917,7 +1925,10 @@ for line in sys.stdin:
             "deliveryTag": 9,
             "payloadBase64": base64::engine::general_purpose::STANDARD.encode(strict_call),
         });
-        let peeked = peeked_message_from_json(0, &msg);
+        let default_peeked = peeked_message_from_json(0, &msg);
+        assert!(default_peeked.payload_text.is_none());
+
+        let peeked = peeked_message_from_json_with_options(0, &msg, true);
         let decoded: serde_json::Value =
             serde_json::from_str(peeked.payload_text.as_deref().expect("decoded thrift")).expect("valid json");
         assert_eq!(decoded["method"], "ping");

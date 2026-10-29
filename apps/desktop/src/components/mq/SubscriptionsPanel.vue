@@ -55,6 +55,7 @@ const peekedMessages = ref<PeekedMessage[]>([]);
 const peekLoading = ref(false);
 const peekIncomplete = ref(false);
 const peekCount = ref(5);
+const decodePeekPayload = ref(false);
 let peekRequestVersion = 0;
 const deleteTarget = ref<SubscriptionInfo>();
 const showDeleteDialog = ref(false);
@@ -770,6 +771,10 @@ onBeforeUnmount(() => {
               {{ t("mqSubscriptions.count") }}
               <input v-model.number="peekCount" type="number" min="1" max="100" />
             </label>
+            <label class="peek-checkbox-control">
+              <input v-model="decodePeekPayload" data-testid="peek-decode-payload" type="checkbox" />
+              <span>{{ t("mqMessages.decodePayload") }}</span>
+            </label>
             <button @click="handlePeekMessages" :disabled="peekLoading" class="btn-sm">
               {{ peekLoading ? t("mqSubscriptions.loading") : t("mqSubscriptions.refresh") }}
             </button>
@@ -790,7 +795,7 @@ onBeforeUnmount(() => {
               <div v-if="Object.keys(message.properties).length" class="peek-properties">
                 <span v-for="(value, key) in message.properties" :key="key">{{ key }}={{ value }}</span>
               </div>
-              <pre class="peek-payload">{{ formatMqMessagePayload(message, { allowRawStructSniff: props.mqSystemKind === "rabbitmq" }) }}</pre>
+              <pre class="peek-payload">{{ formatMqMessagePayload(message, { decode: decodePeekPayload, allowRawStructSniff: decodePeekPayload }) }}</pre>
             </div>
           </div>
         </div>
@@ -1198,13 +1203,21 @@ button:disabled {
   font-size: 13px;
 }
 
-.peek-toolbar input {
+.peek-toolbar input:not([type="checkbox"]) {
   width: 96px;
   padding: 6px 8px;
   border: 1px solid var(--color-border);
   border-radius: var(--dbx-radius-fixed-4);
   background: var(--color-background);
   color: var(--color-text);
+}
+
+.peek-toolbar label.peek-checkbox-control {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  gap: 6px;
+  cursor: pointer;
 }
 
 .peek-results {

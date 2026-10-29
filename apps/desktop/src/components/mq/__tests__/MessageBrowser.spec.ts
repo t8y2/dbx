@@ -231,22 +231,43 @@ describe("MessageBrowser", () => {
     expect(clipboard.copyToClipboard).toHaveBeenCalledWith("AAE=");
   });
 
-  it("decodes thrift.TBinaryProtocol payloads when browsing RabbitMQ messages", async () => {
+  it("keeps payloads raw by default and decodes thrift.TBinaryProtocol only when toggled on", async () => {
     // Raw TSerializer struct: field 1 (string) = "hello", STOP -> base64 "CwABAAAABWhlbGxvAA=="
-    backend.mqPeekMessages.mockResolvedValueOnce([
-      {
-        position: 1,
-        messageId: "thrift-1",
-        payloadBase64: "CwABAAAABWhlbGxvAA==",
-        payloadText: "\u000b\u0000\u0001\u0000\u0000\u0000\u0005hello\u0000",
-        properties: {},
-        headers: {},
-      },
-    ]);
-    const browser = await mountBrowser("rabbitmq");
+    const rawPayloadText = "\u000b\u0000\u0001\u0000\u0000\u0000\u0005hello\u0000";
+    for (const systemKind of ["rabbitmq", "kafka"] as const) {
+      backend.mqPeekMessages.mockResolvedValueOnce([
+        {
+          position: 1,
+          messageId: "thrift-1",
+          payloadBase64: "CwABAAAABWhlbGxvAA==",
+          payloadText: rawPayloadText,
+          properties: {},
+          headers: {},
+        },
+      ]);
+      const browser = await mountBrowser(systemKind);
 
-    await loadMessages(browser);
-    expect(displayedPayloads(browser)).toEqual(['{\n  "1": "hello"\n}']);
+      await loadMessages(browser);
+      const decodeToggle = browser.querySelector<HTMLInputElement>('[data-testid="rabbitmq-decode-payload"]');
+      if (!decodeToggle) throw new Error(`Decode payload checkbox not found for ${systemKind}`);
+      expect(decodeToggle.checked).toBe(false);
+      expect(displayedPayloads(browser)).toEqual([rawPayloadText]);
+
+      decodeToggle.click();
+      await flushUi();
+      expect(decodeToggle.checked).toBe(true);
+      expect(displayedPayloads(browser)).toEqual(['{\n  "1": "hello"\n}']);
+
+      const copyButton = browser.querySelector<HTMLButtonElement>('[data-testid="copy-message-payload"]');
+      copyButton?.click();
+      await flushUi();
+      expect(clipboard.copyToClipboard).toHaveBeenLastCalledWith('{\n  "1": "hello"\n}');
+
+      decodeToggle.click();
+      await flushUi();
+      expect(decodeToggle.checked).toBe(false);
+      expect(displayedPayloads(browser)).toEqual([rawPayloadText]);
+    }
   });
 
   it("copies message headers as formatted JSON", async () => {

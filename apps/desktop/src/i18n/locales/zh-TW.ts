@@ -11622,6 +11622,7 @@ export default withEnglishFallback({
     resendMessage: "重新發送",
     payloadCopied: "已複製",
     dlqConsumerGroupPlaceholder: "消費組（可選）",
+    decodePayload: "解碼",
   },
   mqMonitoring: {
     title: "監控統計",

@@ -38,6 +38,7 @@ const incomplete = ref(false);
 const partition = ref<string | number>("");
 const offset = ref<string | number>("");
 const count = ref(20);
+const decodePayload = ref(false);
 const advancedExpanded = ref(false);
 const messageSearchQuery = ref("");
 type KafkaPeekStartPosition = NonNullable<PeekMessagesOptions["startPosition"]>;
@@ -143,9 +144,8 @@ function invalidateMessageRequest() {
 }
 
 function messagePayload(message: PeekedMessage): string {
-  // Raw-struct thrift sniffing is opt-in per MQ kind: only RabbitMQ's payload
-  // contract is thrift, so Kafka/RocketMQ keep the base64/text fallback.
-  return formatMqMessagePayload(message, { allowRawStructSniff: props.mqSystemKind === "rabbitmq" });
+  const enabled = decodePayload.value;
+  return formatMqMessagePayload(message, { decode: enabled, allowRawStructSniff: enabled });
 }
 
 async function copyMessagePayload(message: PeekedMessage) {
@@ -226,6 +226,10 @@ watch(kafkaStartPosition, () => {
       <label>
         <span>{{ t("mqMessages.count") }}</span>
         <input v-model.number="count" data-testid="peek-count" type="number" min="1" max="100" :disabled="loading" />
+      </label>
+      <label class="peek-checkbox-control">
+        <input v-model="decodePayload" data-testid="rabbitmq-decode-payload" type="checkbox" />
+        <span>{{ t("mqMessages.decodePayload") }}</span>
       </label>
       <label v-if="isKafka && !isMonitoring">
         <span>{{ t("mqMessages.startPosition") }}</span>
@@ -422,7 +426,7 @@ watch(kafkaStartPosition, () => {
   font-weight: 500;
 }
 
-.peek-controls input,
+.peek-controls input:not([type="checkbox"]),
 .peek-controls :deep(.message-browser-start-position) {
   height: 32px;
   width: 100%;
@@ -435,7 +439,16 @@ watch(kafkaStartPosition, () => {
   font-size: 13px;
 }
 
-.peek-controls input:focus,
+.peek-controls label.peek-checkbox-control {
+  flex-direction: row;
+  align-items: center;
+  align-self: end;
+  height: 32px;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.peek-controls input:not([type="checkbox"]):focus,
 .peek-controls :deep(.message-browser-start-position:focus-visible) {
   outline: none;
   border-color: var(--color-primary);

@@ -11363,6 +11363,7 @@ export default withEnglishFallback({
     resendMessage: "재전송",
     payloadCopied: "복사했습니다",
     dlqConsumerGroupPlaceholder: "컨슈머 그룹 (선택)",
+    decodePayload: "디코딩",
   },
   mqMonitoring: {
     title: "모니터링",

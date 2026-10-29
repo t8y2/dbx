@@ -3996,7 +3996,12 @@ const tlsCapableDatabaseTypes = new Set<DatabaseType>([
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type) || supportsMysqlTlsTab(form.value.db_type, selectedType.value));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse" || form.value.db_type === "victoriametrics");
 const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase" && form.value.db_type !== "nebula");
-const showGenericUrlParamsHint = computed(() => form.value.db_type === "mysql" || form.value.db_type === "doris" || form.value.db_type === "starrocks");
+const genericUrlParamsHints = computed(() => {
+  const hints: string[] = [];
+  if (["mysql", "doris", "starrocks"].includes(form.value.db_type)) hints.push(t("connection.localInfilePathHint"));
+  if (form.value.db_type === "mysql") hints.push(t("connection.sessionVariablesHint"));
+  return hints;
+});
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => mysqlTlsOptionsSupported(form.value.db_type, selectedType.value));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
@@ -9872,8 +9877,13 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
 
-                    <div v-if="supportsGenericUrlParams" class="connection-url-params-row grid grid-cols-4 items-start gap-4" :class="{ 'connection-url-params-row--compact': !showGenericUrlParamsHint, 'connection-url-params-row--with-hint': showGenericUrlParamsHint }">
-                      <Label for="connection-url-params" :class="[connectionLabelClass, 'connection-url-params-label min-h-8']">{{ t("connection.urlParams") }}</Label>
+                    <div v-if="supportsGenericUrlParams" class="connection-url-params-row grid grid-cols-4 items-start gap-4">
+                      <div :class="[connectionLabelClass, 'connection-url-params-label inline-flex min-h-8 items-center gap-1']">
+                        <Label for="connection-url-params">{{ t("connection.urlParams") }}</Label>
+                        <HelpTooltip v-if="genericUrlParamsHints.length" :label="genericUrlParamsHints.join('\n\n')" side="right" content-class="w-[min(400px,calc(100vw-32px))] max-w-none space-y-3 break-words">
+                          <p v-for="hint in genericUrlParamsHints" :key="hint">{{ hint }}</p>
+                        </HelpTooltip>
+                      </div>
                       <div class="col-span-3 space-y-1.5">
                         <Input
                           id="connection-url-params"
@@ -9904,12 +9914,6 @@ function openExternalUrl(url: string) {
                                                   : 'sslmode=prefer'
                           "
                         />
-                        <p v-if="showGenericUrlParamsHint" class="text-xs leading-5 text-muted-foreground">
-                          {{ t("connection.localInfilePathHint") }}
-                        </p>
-                        <p v-if="form.db_type === 'mysql'" class="text-xs leading-5 text-muted-foreground">
-                          {{ t("connection.sessionVariablesHint") }}
-                        </p>
                       </div>
                     </div>
 
@@ -10710,8 +10714,8 @@ function openExternalUrl(url: string) {
                     </p>
                   </div>
                 </div>
-                <section class="grid content-start gap-4 rounded-lg border p-4">
-                  <h3 class="text-sm font-medium">{{ t("connection.advancedConnectionBehavior") }}</h3>
+                <section class="connection-advanced-section grid content-start gap-4 rounded-lg border p-4">
+                  <h3 class="text-base font-bold">{{ t("connection.advancedConnectionBehavior") }}</h3>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.connectTimeout") }}</Label>
                     <div class="col-span-3 grid grid-cols-2 gap-2">
@@ -10819,8 +10823,8 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
                 </section>
-                <section class="grid content-start gap-4 rounded-lg border p-4">
-                  <h3 class="text-sm font-medium">{{ t("connection.advancedOperationProtection") }}</h3>
+                <section class="connection-advanced-section grid content-start gap-4 rounded-lg border p-4">
+                  <h3 class="text-base font-bold">{{ t("connection.advancedOperationProtection") }}</h3>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">
                       <span class="inline-flex items-center gap-1">{{ t("connection.readOnly") }} <HelpTooltip :label="t('connection.readOnlyExplanation')" /></span>
@@ -10886,8 +10890,11 @@ function openExternalUrl(url: string) {
                     </label>
                   </div>
                 </section>
-                <section v-if="supportsDoltSystemTables || isSchemaAware(form.db_type) || supportsOracleDatabaseLinks(form.db_type) || sidebarVisibilitySettings.length > 0 || supportsAutomaticTableLoading || form.db_type === 'redis'" class="grid content-start gap-4 rounded-lg border p-4">
-                  <h3 class="text-sm font-medium">{{ t("connection.advancedObjectBrowsing") }}</h3>
+                <section
+                  v-if="supportsDoltSystemTables || isSchemaAware(form.db_type) || supportsOracleDatabaseLinks(form.db_type) || sidebarVisibilitySettings.length > 0 || supportsAutomaticTableLoading || form.db_type === 'redis'"
+                  class="connection-advanced-section grid content-start gap-4 rounded-lg border p-4"
+                >
+                  <h3 class="text-base font-bold">{{ t("connection.advancedObjectBrowsing") }}</h3>
                   <div v-if="supportsDoltSystemTables" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.doltShowSystemTables") }}</Label>
                     <label class="col-span-3 flex items-center gap-2 cursor-pointer">
@@ -10964,8 +10971,8 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
                 </section>
-                <section v-if="form.db_type === 'oracle'" class="grid content-start gap-4 rounded-lg border p-4">
-                  <h3 class="text-sm font-medium">{{ t("connection.advancedCompatibility") }}</h3>
+                <section v-if="form.db_type === 'oracle'" class="connection-advanced-section grid content-start gap-4 rounded-lg border p-4">
+                  <h3 class="text-base font-bold">{{ t("connection.advancedCompatibility") }}</h3>
                   <div class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center gap-1">{{ t("connection.oracleLegacyCharset") }} <HelpTooltip :label="t('connection.oracleLegacyCharsetHint')" /></span>
@@ -11847,6 +11854,15 @@ html.dbx-legacy-webview.dark .connection-transport-layer-option--selected:hover 
 
 .connection-dialog-content[data-wide="true"] .grid.grid-cols-4 {
   grid-template-columns: minmax(5.5rem, 0.7fr) repeat(3, minmax(0, 1fr));
+}
+
+/* Group padding reduces the label space; keep short labels on one line. */
+.connection-dialog-content .connection-advanced-section > .grid.grid-cols-4 {
+  grid-template-columns: minmax(7.5rem, 1fr) repeat(3, minmax(0, 1fr));
+}
+
+.connection-advanced-section > .grid > [data-slot="label"] {
+  text-wrap: balance;
 }
 
 .connection-dialog-content[data-wide="true"] .connection-form-body {

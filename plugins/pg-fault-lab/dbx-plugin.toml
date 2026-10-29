@@ -1,0 +1,9 @@
+schema_version = 1
+
+[backend]
+language = "go"
+directory = "backend"
+binary = "dbx-pg-fault"
+
+[package]
+include = ["assets", "ui", "README.md", "PROTOCOL.md", "THIRD_PARTY_NOTICES.md", "LICENSE", "VALIDATION.md"]

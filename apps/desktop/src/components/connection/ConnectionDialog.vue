@@ -8001,7 +8001,7 @@ function openExternalUrl(url: string) {
                         </div>
                       </div>
                     </div>
-                    <div v-if="supportsGenericUrlParams" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="supportsGenericUrlParams" class="connection-parameters-row grid grid-cols-4 items-center gap-4">
                       <Label for="connection-parameters-open" :class="connectionLabelClass">{{ t("connection.parameterEditor.title") }}</Label>
                       <Button id="connection-parameters-open" type="button" variant="outline" class="col-span-3 justify-between" @click="parameterEditorOpen = true">
                         <span class="font-normal text-muted-foreground">{{ configuredParameterCount ? t("connection.parameterEditor.configuredCount", { count: configuredParameterCount }) : t("connection.parameterEditor.default") }}</span>
@@ -9898,7 +9898,7 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
 
-                    <div v-if="supportsGenericUrlParams" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="supportsGenericUrlParams" class="connection-parameters-row grid grid-cols-4 items-center gap-4">
                       <Label for="connection-parameters-open" :class="connectionLabelClass">{{ t("connection.parameterEditor.title") }}</Label>
                       <Button id="connection-parameters-open" type="button" variant="outline" class="col-span-3 justify-between" @click="parameterEditorOpen = true">
                         <span class="font-normal text-muted-foreground">{{ configuredParameterCount ? t("connection.parameterEditor.configuredCount", { count: configuredParameterCount }) : t("connection.parameterEditor.default") }}</span>

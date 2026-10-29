@@ -168,14 +168,6 @@ export function oracleDuplicateTableCreateOptions(options: { schema?: string | n
   };
 }
 
-function damengDuplicateTableName(targetName: string): string {
-  const hasLower = /[a-z]/.test(targetName);
-  const hasUpper = /[A-Z]/.test(targetName);
-  const hasSpecial = /[^a-zA-Z0-9_$#]/.test(targetName);
-  const hasInvalidStart = !/^[a-zA-Z_]/.test(targetName);
-  return (hasLower && hasUpper) || hasSpecial || hasInvalidStart ? targetName : targetName.toUpperCase();
-}
-
 function damengCloneIndexName(targetName: string, index: number): string {
   const normalized =
     targetName
@@ -200,7 +192,7 @@ export function damengDuplicateTableCreateOptions(options: { schema?: string | n
   return {
     databaseType: "dameng",
     schema: options.schema || undefined,
-    tableName: damengDuplicateTableName(options.targetName),
+    tableName: options.targetName,
     tableComment: options.tableComment || undefined,
     columns: createColumnDrafts(options.columns, "dameng").map((column, index) => ({
       ...column,

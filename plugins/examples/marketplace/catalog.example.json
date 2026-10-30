@@ -7,6 +7,14 @@
     "homepage": "https://plugins.example.com"
   },
   "generatedAt": "2026-07-28T00:00:00Z",
+  "compatibility": [
+    {
+      "pluginId": "dbx.example.hello",
+      "version": "1.0.0",
+      "dbx": ">=0.5.68",
+      "hostApi": "^1.0"
+    }
+  ],
   "plugins": [
     {
       "id": "dbx.example.hello",

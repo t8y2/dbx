@@ -82,6 +82,12 @@ export default withEnglishFallback({
   sidebarMenu,
   oracleIndex: { mixedDraft: "Oracle indeks dəyişikliklərini digər cədvəl quruluşu dəyişikliklərindən ayrıca tətbiq edin." },
   pluginPlatform: {
+    marketplaceStatus: { "requires-newer-dbx": "Needs newer DBX", incompatible: "Incompatible" },
+    requiresNewerDbx: "This version needs a newer DBX release.",
+    requiresNewerDbxWithRequirement: "This version requires {requirement}.",
+    pluginVersionIncompatible: "This version is not compatible with this DBX build.",
+    updateBlockedByNewerDbx: "This plugin version requires {requirement} (installed {current}).",
+    upgradeDbx: "Upgrade DBX",
     dataAccessConsent: '"{name}" "{connection}" bağlantısındakı məlumatları oxumaq istəyir. Bu bağlantı açıq olduqca plagin, Plagin Mərkəzində girişi ləğv edənə qədər orada yalnız oxuma sorğuları icra edə bilər. İcazə verilsin?',
     dataAccessConsentTitle: "Məlumat girişi sorğusu",
     mcpToolsBadge: "MCP alətləri",

@@ -110,6 +110,9 @@ const patterns: [RegExp, string][] = [
   // crates/dbx-plugin-runtime provenance guard (installer.rs / marketplace.rs)
   [/^Plugin update source change requires confirmation:/, "pluginPlatform.updateSourceChangeRequired"],
   [/^Plugin downgrade to version .+ is not allowed/, "pluginPlatform.updateDowngradeRejected"],
+  // crates/dbx-plugin-runtime manifest engine gate (manifest.rs validate_engine_requirement):
+  // "Plugin '{id}' is incompatible: Plugin requires DBX >=x, but {version} is installed".
+  [/Plugin requires ((?:DBX Host API|DBX) .+?), but (.+?) is installed/, "pluginPlatform.updateBlockedByNewerDbx"],
   [/^(.+?) driver is not installed\. Please install it from the Driver Manager\.$/, "connection.driverNotInstalled"],
   [/^JRE (.+?) runtime is not installed\. Please install it from the Driver Manager\.$/, "connection.jreNotInstalled"],
   [/^System Java runtime was not found:/, "connection.systemJavaNotFound"],
@@ -205,6 +208,7 @@ const patterns: [RegExp, string][] = [
 const paramNames: Record<string, string | string[]> = {
   "pluginPlatform.updateBlockedByConnections": "labels",
   "pluginPlatform.uninstallBlockedByConnections": ["plugin", "labels"],
+  "pluginPlatform.updateBlockedByNewerDbx": ["requirement", "current"],
   "connection.driverNotInstalled": "driver",
   "connection.jreNotInstalled": "jre",
   "ai.configNameExists": "name",

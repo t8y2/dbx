@@ -82,6 +82,12 @@ export default withEnglishFallback({
   sidebarMenu,
   oracleIndex: { mixedDraft: "Oracle indeks değişikliklerini diğer tablo yapısı değişikliklerinden ayrı uygulayın." },
   pluginPlatform: {
+    marketplaceStatus: { "requires-newer-dbx": "Daha yeni DBX gerekli", incompatible: "Uyumsuz" },
+    requiresNewerDbx: "Bu sürüm daha yeni bir DBX sürümü gerektiriyor.",
+    requiresNewerDbxWithRequirement: "Bu sürüm {requirement} gerektiriyor.",
+    pluginVersionIncompatible: "Bu sürüm bu DBX derlemesiyle uyumlu değil.",
+    updateBlockedByNewerDbx: "Bu eklenti sürümü {requirement} gerektiriyor (yüklü {current}).",
+    upgradeDbx: "DBX'i yükselt",
     dataAccessConsent: '"{name}", "{connection}" bağlantısındaki verileri okumak istiyor. Bu bağlantı açık olduğu sürece eklenti, Eklenti Merkezi\'nden erişimi iptal edene kadar bağlantıda salt okunur sorgular çalıştırabilir. İzin verilsin mi?',
     dataAccessConsentTitle: "Veri Erişim İsteği",
     mcpToolsBadge: "MCP araçları",

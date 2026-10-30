@@ -63,7 +63,10 @@ import {
   fetchPluginInstallCounts,
   filterMarketplacePluginListings,
   formatMarketplaceReleasedDate,
+  isEngineBlockedStatus,
+  markPluginRequiresNewerDbx,
   marketplaceHomepageUrl,
+  parsePluginIncompatibility,
   pluginSourceChange,
   resolveMarketplaceReleaseUrl,
   sortMarketplacePluginListings,
@@ -94,6 +97,9 @@ const emit = defineEmits<{
   newConnection: [pluginId: string, providerId: string];
   opened: [];
   pluginRuntimeReplaced: [pluginId: string];
+  // Opens the app update dialog: an update blocked by `engines.dbx` can only be resolved by
+  // upgrading DBX itself, so the hint needs a real action instead of dead text.
+  checkAppUpdate: [];
 }>();
 
 // lucide no longer ships brand icons; this stroke glyph keeps the 2px outline style of
@@ -392,6 +398,15 @@ function marketplaceActionClass(listing: MarketplacePluginListing): string {
   if (listing.status === "update") return "bg-blue-600/10 text-blue-700 hover:bg-blue-600/20 dark:bg-blue-400/10 dark:text-blue-400 dark:hover:bg-blue-400/20";
   if (listing.status === "install") return "bg-muted text-foreground hover:bg-accent";
   return "cursor-default bg-muted text-muted-foreground";
+}
+
+// Greyed-out update: the catalog (or the rejected install itself) proved this version cannot run on
+// the current build. Naming the requirement turns "why can't I update?" into an actionable hint.
+// "incompatible" means upgrading DBX would not help (upper bound, exact older version), so it must
+// not fall back to the "needs a newer DBX" wording.
+function pluginRequiresNewerDbxHint(listing: MarketplacePluginListing): string {
+  if (listing.requiredEngine) return t("pluginPlatform.requiresNewerDbxWithRequirement", { requirement: listing.requiredEngine });
+  return t(listing.status === "incompatible" ? "pluginPlatform.pluginVersionIncompatible" : "pluginPlatform.requiresNewerDbx");
 }
 
 let detailTrigger: HTMLElement | null = null;
@@ -718,15 +733,32 @@ function cancelUninstallDependents() {
 }
 
 async function installListing(listing: MarketplacePluginListing, allowSourceChange = false): Promise<PluginInstallResult> {
-  const result = await api.installMarketplacePlugin({
-    repositoryId: listing.repository.id,
-    pluginId: listing.plugin.id,
-    version: listing.plugin.latestVersion,
-    allowSourceChange: allowSourceChange || undefined,
-  });
-  notifyPluginRuntimeReplaced(result.plugin.manifest.id);
-  beaconPluginInstall(listing.plugin.id, listing.plugin.latestVersion, listing.status === "update" ? "update" : "install");
-  return result;
+  try {
+    const result = await api.installMarketplacePlugin({
+      repositoryId: listing.repository.id,
+      pluginId: listing.plugin.id,
+      version: listing.plugin.latestVersion,
+      allowSourceChange: allowSourceChange || undefined,
+    });
+    notifyPluginRuntimeReplaced(result.plugin.manifest.id);
+    beaconPluginInstall(listing.plugin.id, listing.plugin.latestVersion, listing.status === "update" ? "update" : "install");
+    return result;
+  } catch (cause) {
+    // The catalog did not announce an engine mismatch, but the package manifest refused the
+    // update. Remember the exact version so this card turns into the greyed "requires newer DBX"
+    // state instead of offering the same broken update again (single, batch, and confirm-retry
+    // all funnel through here).
+    const message = typeof cause === "string" ? cause : cause instanceof Error ? cause.message : String(cause);
+    const incompatibility = parsePluginIncompatibility(message);
+    if (incompatibility) {
+      markPluginRequiresNewerDbx(listing.repository.id, listing.plugin.id, listing.plugin.latestVersion, {
+        requirement: incompatibility.requirement,
+        hostApi: incompatibility.hostApi,
+        upgradeRequired: incompatibility.upgradeRequired,
+      });
+    }
+    throw cause;
+  }
 }
 
 async function installMarketplaceListing(listing: MarketplacePluginListing, options: { allowSourceChange?: boolean; skipSourceConfirmation?: boolean } = {}) {
@@ -1640,13 +1672,14 @@ onBeforeUnmount(() => {
                       >
                     </template>
                   </div>
+                  <div v-if="isEngineBlockedStatus(listing.status)" class="text-[11px] leading-4 text-amber-700 dark:text-amber-300">{{ pluginRequiresNewerDbxHint(listing) }}</div>
                   <div v-if="listingInstallCount(listing.plugin.id)" class="text-[11px] tabular-nums text-muted-foreground">{{ t("pluginPlatform.installCount", { count: formatInstallCount(listingInstallCount(listing.plugin.id)) }) }}</div>
                 </div>
                 <button
                   type="button"
                   class="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50"
                   :class="marketplaceActionClass(listing)"
-                  :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning"
+                  :disabled="listing.status === 'installed' || listing.status === 'unsupported' || isEngineBlockedStatus(listing.status) || mutationRunning"
                   @click.stop="installMarketplaceListing(listing)"
                 >
                   <Loader2 v-if="marketplaceInstallingKey === listing.key" class="size-3.5 animate-spin" />
@@ -1737,7 +1770,7 @@ onBeforeUnmount(() => {
                 type="button"
                 class="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50"
                 :class="marketplaceActionClass(listing)"
-                :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning"
+                :disabled="listing.status === 'installed' || listing.status === 'unsupported' || isEngineBlockedStatus(listing.status) || mutationRunning"
                 @click.stop="installMarketplaceListing(listing)"
               >
                 <Loader2 v-if="marketplaceInstallingKey === listing.key" class="size-3.5 animate-spin" />
@@ -2142,12 +2175,13 @@ onBeforeUnmount(() => {
                 <Button v-if="detailProviders.length && (detailShortcuts.length || detailConnections.length === 1)" variant="outline" size="sm" class="h-8 shrink-0 rounded-md px-3 text-xs" :disabled="detailOpening || mutationRunning" @click="detailChooseConnection = !detailChooseConnection">{{
                   t("pluginPlatform.chooseConnection")
                 }}</Button>
+                <Button v-if="selectedMarketplaceListing.status === 'requires-newer-dbx'" size="sm" variant="outline" class="h-8 shrink-0 gap-1.5 rounded-md px-3 text-xs" @click.stop="emit('checkAppUpdate')"> <ArrowUp class="size-3.5" />{{ t("pluginPlatform.upgradeDbx") }} </Button>
                 <Button
                   v-if="selectedMarketplaceListing.status !== 'installed'"
                   size="sm"
                   class="h-8 shrink-0 gap-1.5 rounded-md px-3 text-xs"
                   :class="marketplaceActionClass(selectedMarketplaceListing)"
-                  :disabled="selectedMarketplaceListing.status === 'unsupported' || mutationRunning"
+                  :disabled="selectedMarketplaceListing.status === 'unsupported' || isEngineBlockedStatus(selectedMarketplaceListing.status) || mutationRunning"
                   @click.stop="installMarketplaceListing(selectedMarketplaceListing)"
                 >
                   <Loader2 v-if="marketplaceInstallingKey === selectedMarketplaceListing.key" class="size-3.5 animate-spin" />
@@ -2158,6 +2192,13 @@ onBeforeUnmount(() => {
           </DialogHeader>
 
           <div class="min-h-0 overflow-y-auto px-6 py-4">
+            <div v-if="isEngineBlockedStatus(selectedMarketplaceListing.status)" class="mb-4 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-800 dark:text-amber-200">
+              <CircleAlert class="mt-0.5 size-4 shrink-0" />
+              <div class="min-w-0 flex-1 leading-5">{{ pluginRequiresNewerDbxHint(selectedMarketplaceListing) }}</div>
+              <!-- Only a newer DBX can satisfy a lower-bound requirement; the upgrade entry is hidden
+                   for "incompatible" (upper bound / exact older version) where it would be a dead end. -->
+              <Button v-if="selectedMarketplaceListing.status === 'requires-newer-dbx'" size="sm" variant="outline" class="h-7 shrink-0 px-2 text-xs" @click="emit('checkAppUpdate')">{{ t("pluginPlatform.upgradeDbx") }}</Button>
+            </div>
             <div v-if="detailChooseEntry" class="mb-4 flex flex-col gap-2 rounded-lg border p-3">
               <Button v-for="entry in detailShortcuts" :key="entry.id" variant="outline" class="justify-start" :disabled="entry.disabled || detailOpening || mutationRunning" @click="launchDetailEntry(entry)">{{ entry.label }}</Button>
             </div>

@@ -182,6 +182,7 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         attached_databases: Vec::new(),
         init_script: None,
         color: None,
+        environment: None,
         transport_layers: Vec::new(),
         connect_timeout_secs: 15,
         query_timeout_secs: 120,

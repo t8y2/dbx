@@ -3,6 +3,7 @@ package com.dbx.agent;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -151,9 +152,43 @@ public final class StandardJdbcMetadata {
                 && !configuredDatabase.trim().isEmpty()) {
                 appendRoutines(result, meta, profile.getEscapeSchemaWildcards(), configuredDatabase, schema, schema);
             }
+            // The generic JDBC table/routine metadata never lists Oracle triggers, so the
+            // schema "触发器" group is empty for JDBC Oracle connections unless we read them
+            // directly from the dictionary (#13498). Non-Oracle databases either lack the
+            // dictionary views or don't expose triggers this way, so the query is Oracle-only.
+            if (isOracle(meta)) {
+                try {
+                    result.addAll(new OracleTriggerReader(conn, oracleEngine(meta)).listSchemaObjects(schema));
+                } catch (SQLException ignored) {
+                    // Trigger metadata is best-effort; never fail the whole object group.
+                }
+            }
             result.sort(Comparator.comparing(ObjectInfo::getName));
             return normalized.filterObjects(result);
         });
+    }
+
+    private static boolean isOracle(DatabaseMetaData meta) {
+        try {
+            String productName = meta.getDatabaseProductName();
+            return productName != null
+                && (productName.toLowerCase(Locale.ROOT).contains("oracle")
+                    || productName.toLowerCase(Locale.ROOT).contains("oceanbase"));
+        } catch (Exception | AbstractMethodError ignored) {
+            return false;
+        }
+    }
+
+    private static String oracleEngine(DatabaseMetaData meta) {
+        try {
+            String productName = meta.getDatabaseProductName();
+            if (productName != null && productName.toLowerCase(Locale.ROOT).contains("oceanbase")) {
+                return "oceanbase-oracle";
+            }
+        } catch (Exception | AbstractMethodError ignored) {
+            // fall through to plain oracle
+        }
+        return "oracle";
     }
 
     public List<String> listDataTypes(Connection conn) {

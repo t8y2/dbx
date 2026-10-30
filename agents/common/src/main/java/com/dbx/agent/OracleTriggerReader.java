@@ -77,6 +77,24 @@ public final class OracleTriggerReader {
         object.setParent_name(parent == null ? null : parent.name());
     }
 
+    /**
+     * Schema-level trigger objects for the object tree's "触发器" group.
+     *
+     * <p>Unlike {@link #listTriggers}, this returns every trigger owned by the schema,
+     * including schema- and database-scoped triggers, as lightweight {@link ObjectInfo}
+     * rows that the tree expands and enriches on demand. The generic JDBC table/routine
+     * metadata never lists triggers, so the JDBC agent's schema object group is otherwise
+     * empty for Oracle connections (#13498).</p>
+     */
+    public List<ObjectInfo> listSchemaObjects(String owner) throws SQLException {
+        List<ObjectInfo> objects = new ArrayList<>();
+        for (TriggerInfo trigger : summaries("t.OWNER = ?", List.of(owner), false)) {
+            objects.add(new ObjectInfo(trigger.getName(), "TRIGGER", owner, null));
+        }
+        enrichObjects(objects, owner);
+        return objects;
+    }
+
     private TriggerInfo unavailable(ObjectInfo object, String owner, OracleTriggerMetadata.ReadState failure) {
         TriggerInfo trigger = new TriggerInfo(object.getName(), "", "");
         Map<String, OracleTriggerMetadata.ReadState> reads = new LinkedHashMap<>();

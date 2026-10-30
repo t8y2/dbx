@@ -31,6 +31,15 @@ import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
+  it("defaults the selection statistic to sum and validates every saved metric", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridSelectionSummaryMetric).toBe("sum");
+    expect(normalizeEditorSettings({}).dataGridSelectionSummaryMetric).toBe("sum");
+    expect(normalizeEditorSettings({ dataGridSelectionSummaryMetric: "unknown" as any }).dataGridSelectionSummaryMetric).toBe("sum");
+    for (const metric of ["sum", "average", "min", "max", "count", "distinct", "cells", "rows"] as const) {
+      expect(normalizeEditorSettings({ dataGridSelectionSummaryMetric: metric }).dataGridSelectionSummaryMetric).toBe(metric);
+    }
+  });
+
   it("retains only an explicit legacy sidebar value without creating a global default", () => {
     expect(DEFAULT_EDITOR_SETTINGS).not.toHaveProperty("sidebarShowUserAdmin");
     expect(normalizeEditorSettings({})).not.toHaveProperty("sidebarShowUserAdmin");
@@ -1731,6 +1740,28 @@ describe("settingsStore persisted settings initialization", () => {
   beforeEach(() => {
     vi.resetModules();
     setActivePinia(createPinia());
+  });
+
+  it("persists and restores the chosen selection statistic after restarting the store", async () => {
+    let persistedSettings: Record<string, unknown> | null = null;
+    const loadEditorSettings = vi.fn(async () => persistedSettings);
+    const saveEditorSettings = vi.fn(async (settings: Record<string, unknown>) => {
+      persistedSettings = JSON.parse(JSON.stringify(settings));
+    });
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    expect(store.editorSettings.dataGridSelectionSummaryMetric).toBe("sum");
+    store.updateEditorSettings({ dataGridSelectionSummaryMetric: "average" });
+    await store.persistEditorSettings();
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ dataGridSelectionSummaryMetric: "average" }));
+
+    setActivePinia(createPinia());
+    const restartedStore = useSettingsStore();
+    await restartedStore.initEditorSettings();
+    expect(restartedStore.editorSettings.dataGridSelectionSummaryMetric).toBe("average");
   });
 
   it.each(["persisted", "legacy"])("preserves a %s global opt-out through unrelated saves until connection migration", async (source) => {

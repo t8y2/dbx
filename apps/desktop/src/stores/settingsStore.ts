@@ -839,6 +839,8 @@ const DATA_GRID_RENDER_MODES = ["dom", "canvas"] as const;
 export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
 const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
 export type DataGridSearchMode = (typeof DATA_GRID_SEARCH_MODES)[number];
+const DATA_GRID_SELECTION_SUMMARY_METRICS = ["sum", "average", "min", "max", "count", "distinct", "cells", "rows"] as const;
+export type DataGridSelectionSummaryMetric = (typeof DATA_GRID_SELECTION_SUMMARY_METRICS)[number];
 const DATA_GRID_ROW_NUMBER_MODES = ["view", "source"] as const;
 export type DataGridRowNumberMode = (typeof DATA_GRID_ROW_NUMBER_MODES)[number];
 /** How a double click inside a SQL string literal picks text: the whole string value, or just one word. */
@@ -1091,6 +1093,7 @@ export interface EditorSettings {
   showResultSourceDatabase: boolean;
   /** Show SQL in the footer of query results and table data grids. */
   showDataGridStatusSql: boolean;
+  dataGridSelectionSummaryMetric: DataGridSelectionSummaryMetric;
   dataGridExportInToolbar: boolean;
   dataGridLoadAllInToolbar: boolean;
   showSaveResult: boolean;
@@ -1488,6 +1491,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showColumnHeaderTooltips: true,
   showResultSourceDatabase: true,
   showDataGridStatusSql: true,
+  dataGridSelectionSummaryMetric: "sum",
   dataGridExportInToolbar: false,
   dataGridLoadAllInToolbar: false,
   showSaveResult: true,
@@ -1747,6 +1751,10 @@ function normalizeDataGridRenderMode(value: unknown): DataGridRenderMode {
 
 function normalizeDataGridSearchMode(value: unknown): DataGridSearchMode {
   return DATA_GRID_SEARCH_MODES.includes(value as DataGridSearchMode) ? (value as DataGridSearchMode) : DEFAULT_EDITOR_SETTINGS.dataGridSearchMode;
+}
+
+function normalizeDataGridSelectionSummaryMetric(value: unknown): DataGridSelectionSummaryMetric {
+  return DATA_GRID_SELECTION_SUMMARY_METRICS.includes(value as DataGridSelectionSummaryMetric) ? (value as DataGridSelectionSummaryMetric) : DEFAULT_EDITOR_SETTINGS.dataGridSelectionSummaryMetric;
 }
 
 function normalizeDataGridRowNumberMode(value: unknown): DataGridRowNumberMode {
@@ -2197,6 +2205,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showColumnHeaderTooltips: settings.showColumnHeaderTooltips ?? DEFAULT_EDITOR_SETTINGS.showColumnHeaderTooltips,
     showResultSourceDatabase: settings.showResultSourceDatabase ?? DEFAULT_EDITOR_SETTINGS.showResultSourceDatabase,
     showDataGridStatusSql: settings.showDataGridStatusSql !== false,
+    dataGridSelectionSummaryMetric: normalizeDataGridSelectionSummaryMetric(settings.dataGridSelectionSummaryMetric),
     dataGridExportInToolbar: settings.dataGridExportInToolbar === true,
     dataGridLoadAllInToolbar: settings.dataGridLoadAllInToolbar === true,
     showSaveResult: settings.showSaveResult !== false,
@@ -3144,6 +3153,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showColumnTypesInHeader !== undefined) editorSettings.value.showColumnTypesInHeader = partial.showColumnTypesInHeader;
     if (partial.showColumnHeaderTooltips !== undefined) editorSettings.value.showColumnHeaderTooltips = partial.showColumnHeaderTooltips;
     if (partial.showResultSourceDatabase !== undefined) editorSettings.value.showResultSourceDatabase = partial.showResultSourceDatabase;
+    if (partial.dataGridSelectionSummaryMetric !== undefined) editorSettings.value.dataGridSelectionSummaryMetric = normalizeDataGridSelectionSummaryMetric(partial.dataGridSelectionSummaryMetric);
     if (partial.showDataGridStatusSql !== undefined) editorSettings.value.showDataGridStatusSql = partial.showDataGridStatusSql !== false;
     if (partial.dataGridExportInToolbar !== undefined) editorSettings.value.dataGridExportInToolbar = partial.dataGridExportInToolbar === true;
     if (partial.dataGridLoadAllInToolbar !== undefined) editorSettings.value.dataGridLoadAllInToolbar = partial.dataGridLoadAllInToolbar === true;

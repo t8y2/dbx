@@ -83,6 +83,22 @@ fn sqlserver_qualified_table_is_not_hidden_by_same_named_cte() {
 }
 
 #[test]
+fn sqlserver_cross_database_table_keeps_its_database() {
+    let sql = "select top 10 * from mk_passport_api.dbo.orders order by id desc";
+    let analysis = analyze_sql_references(sql, Some("sqlserver")).unwrap();
+
+    let tables: Vec<_> = analysis
+        .tables
+        .iter()
+        .map(|table| (table.database.as_deref(), table.schema.as_deref(), table.name.as_str()))
+        .collect();
+    assert_eq!(tables, vec![(Some("mk_passport_api"), Some("dbo"), "orders")]);
+
+    let analysis = analyze_sql_references("select * from dbo.orders", Some("sqlserver")).unwrap();
+    assert_eq!(analysis.tables[0].database, None);
+}
+
+#[test]
 fn nested_queries_inherit_and_shadow_cte_names() {
     let sql = "WITH source AS (SELECT * FROM dbo.outer_source) SELECT * FROM source WHERE EXISTS (WITH source AS (SELECT * FROM dbo.inner_source) SELECT * FROM source) AND EXISTS (SELECT * FROM source)";
     let analysis = analyze_sql_references(sql, Some("sqlserver")).unwrap();

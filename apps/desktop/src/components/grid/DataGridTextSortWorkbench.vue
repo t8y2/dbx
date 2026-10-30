@@ -11,6 +11,7 @@ import { DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_MAX, DATA_GRID_TEXT_FILTER_PANEL_HEI
 const props = defineProps<{
   height: number;
   sqlPreview: string;
+  previewLabel?: string;
   rules: readonly DataGridStructuredSortRule[];
   columns: readonly string[];
   commentByColumn?: ReadonlyMap<string, string>;
@@ -154,9 +155,9 @@ watch(
         <TooltipContent side="top">Shift+Enter</TooltipContent>
       </Tooltip>
       <div class="flex min-w-0 flex-1 items-center gap-1.5 border-l pl-2">
-        <span class="shrink-0 text-[11px] text-muted-foreground">{{ t("grid.sortSqlPreview") }}</span>
+        <span class="shrink-0 text-[11px] text-muted-foreground">{{ previewLabel ?? t("grid.sortSqlPreview") }}</span>
         <code class="min-w-0 flex-1 truncate px-1 text-[11px]" :class="sqlPreview ? 'text-foreground' : 'text-muted-foreground'" :title="previewText">{{ previewText }}</code>
-        <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="!sqlPreview" :aria-label="t('grid.copySortSql')" @click="emit('copySql')"><Copy class="h-3 w-3" /></Button>
+        <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="!sqlPreview" :aria-label="previewLabel ? `${t('grid.copy')} ${previewLabel}` : t('grid.copySortSql')" @click="emit('copySql')"><Copy class="h-3 w-3" /></Button>
       </div>
       <Button variant="outline" size="sm" class="h-6 shrink-0 px-1.5 text-xs" @click="emit('reset')"><RotateCcw class="mr-1 h-3 w-3" />{{ t("grid.sortBuilderReset") }}</Button>
       <Button variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs text-muted-foreground hover:text-destructive" :disabled="busy" @click="emit('clear')"><Trash2 class="mr-1 h-3 w-3" />{{ t("grid.clearSort") }}</Button>

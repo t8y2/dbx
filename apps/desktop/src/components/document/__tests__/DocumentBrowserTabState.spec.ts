@@ -2,6 +2,7 @@
 
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 const backend = vi.hoisted(() => ({
   documentFindDocuments: vi.fn(),
@@ -26,6 +27,8 @@ const dataGrid = vi.hoisted(() => ({
   localFiltersChange: undefined as ((filters: Record<string, string[]>) => void) | undefined,
   viewStateKey: undefined as string | undefined,
   viewGeneration: undefined as string | undefined,
+  sortColumn: undefined as string | undefined,
+  sortDirection: undefined as string | undefined,
 }));
 
 const settings = vi.hoisted(() => ({
@@ -43,6 +46,9 @@ const settings = vi.hoisted(() => ({
     exportBatchSize: 2,
     exportRowLimitEnabled: false,
     exportRowLimit: 100_000,
+    dataGridFilterEditorView: "quick" as "quick" | "conditions" | "text",
+    dataGridKeepFilterEditorExpanded: false,
+    dataGridTextFilterPanelHeight: 160,
   },
   updateEditorSettings: vi.fn(),
 }));
@@ -82,6 +88,8 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
       props: {
         result: { type: Object, required: true },
         pageOffset: { type: Number, required: false },
+        sortColumn: { type: String, required: false },
+        sortDirection: { type: String, required: false },
         pageLimit: { type: Number, required: false },
         pageSizePreference: { type: String, required: false },
         viewStateKey: { type: String, required: false },
@@ -115,6 +123,8 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
         });
         return () => {
           dataGrid.pageOffset = props.pageOffset;
+          dataGrid.sortColumn = props.sortColumn;
+          dataGrid.sortDirection = props.sortDirection;
           dataGrid.viewStateKey = props.viewStateKey;
           dataGrid.viewGeneration = props.viewGeneration;
           dataGrid.rowCount = (props.result as { rows: unknown[] }).rows.length;
@@ -125,6 +135,7 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
             // Rendering the real search-bar slot exposes the filter/sort inputs
             // the same way the actual grid toolbar does.
             h("div", slots["search-bar"]?.({ localFilterCount: 0, hasLocalColumnFilters: false, localFilterSummaries: [], clearLocalFilter: () => undefined })),
+            h("div", slots["query-workbenches"]?.()),
             h("div", { "data-testid": "data-grid" }, (props.result as { rows: unknown[] }).rows.length),
           ]);
         };
@@ -183,13 +194,14 @@ async function flushUi() {
 }
 
 async function mountBrowser(options: { databaseType?: "mongodb" | "elasticsearch"; stateKey?: string } = {}) {
-  app = createApp(DocumentBrowser, {
+  const browserProps = {
     connectionId: "conn-1",
     database: "test",
     collection: "docs",
     databaseType: options.databaseType ?? "mongodb",
     stateKey: options.stateKey,
-  });
+  };
+  app = createApp(defineComponent({ setup: () => () => h(TooltipProvider, {}, { default: () => h(DocumentBrowser, browserProps) }) }));
   app.mount(root!);
   await flushUi();
 }
@@ -245,6 +257,8 @@ beforeEach(async () => {
   dataGrid.viewGeneration = undefined;
   settings.editorSettings.infiniteScroll = false;
   settings.editorSettings.tableOpenPageSize = 2;
+  settings.editorSettings.dataGridFilterEditorView = "quick";
+  settings.editorSettings.dataGridKeepFilterEditorExpanded = false;
   resetBrowserStateCaches();
 
   root = document.createElement("div");
@@ -257,6 +271,76 @@ afterEach(() => {
   app = null;
   root = null;
   vi.unstubAllGlobals();
+});
+
+describe("MongoDB query controls (#13355)", () => {
+  it("shows feedback for an empty filter instead of silently running an unfiltered query", async () => {
+    await mountBrowser();
+    root!.querySelector<HTMLButtonElement>('button[aria-label="grid.filter"]')!.click();
+    await flushUi();
+    const apply = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "grid.applyFilter")!;
+    apply.click();
+    await flushUi();
+    expect(document.querySelector("[data-document-filter-builder-error]")?.textContent).toContain("grid.filterBuilderCompleteRuleFirst");
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+  });
+  it.each(["conditions", "text"] as const)("uses the %s sorting preference and synchronizes JSON, rules and header state", async (view) => {
+    settings.editorSettings.dataGridFilterEditorView = view;
+    settings.editorSettings.dataGridKeepFilterEditorExpanded = true;
+    await mountBrowser();
+    const [, sort] = queryTextareas();
+    typeInTextarea(sort!, '{"name":-1}');
+    await flushUi();
+    const selector = view === "conditions" ? "[data-grid-sort-workbench]" : "[data-grid-text-sort-workbench]";
+    const panel = root!.querySelector(selector)!;
+    expect(panel).not.toBeNull();
+    expect(panel.textContent).toContain("name");
+    expect(panel.textContent).toContain("DESC");
+    expect(dataGrid.sortColumn).toBe("name");
+    expect(dataGrid.sortDirection).toBe("desc");
+    const apply = [...panel.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "grid.sortBuilderApply")!;
+    apply.click();
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.calls.at(-1)?.[7]).toBe('{"name":-1}');
+    expect(root!.querySelector(selector)).not.toBeNull();
+  });
+
+  it("provides the quick sort popover next to the sort JSON", async () => {
+    await mountBrowser();
+    const toggle = root!.querySelector<HTMLButtonElement>('button[aria-label="grid.sort"]')!;
+    expect(toggle).not.toBeNull();
+    toggle.click();
+    await flushUi();
+    expect(document.body.textContent).toContain("grid.sortBuilderAddRule");
+  });
+
+  it("imports a typed find filter and replaces it through the panel", async () => {
+    await mountBrowser();
+    const [filter] = queryTextareas();
+    typeInTextarea(filter!, '{"name":"row_1"}');
+    await flushUi();
+    root!.querySelector<HTMLButtonElement>('button[aria-label="grid.filter"]')!.click();
+    await flushUi();
+    const input = [...document.querySelectorAll<HTMLInputElement>("input")].find((element) => element.value === "row_1")!;
+    expect(input).toBeDefined();
+    input.value = "row_2";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    const apply = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "grid.applyFilter")!;
+    apply.click();
+    await flushUi();
+    expect(JSON.parse(filter!.value)).toEqual({ name: "row_2" });
+    expect(JSON.parse(backend.documentFindDocuments.mock.calls.at(-1)![5]!)).toEqual({ name: "row_2" });
+  });
+
+  it("keeps incomplete JSON editable without executing it", async () => {
+    await mountBrowser();
+    const [filter] = queryTextareas();
+    typeInTextarea(filter!, '{"name":');
+    await flushUi();
+    expect(filter!.value).toBe('{"name":');
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("DocumentBrowser tab state (tab switch persistence)", () => {

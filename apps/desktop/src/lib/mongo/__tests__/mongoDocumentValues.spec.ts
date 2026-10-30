@@ -3,6 +3,7 @@ import type { ColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
 import {
   buildMongoCopyDocumentFromOriginal,
   buildMongoInsertDocument,
+  buildMongoUpdateDocument,
   mongoDocumentGridClipboardText,
   mongoDocumentGridColumnTypes,
   mongoDocumentGridDisplayText,
@@ -16,6 +17,25 @@ import {
 function dateFormatter(timezone: string | undefined): ColumnFormatterConfig {
   return { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ss", timezone };
 }
+
+describe("replacing whole Mongo typed cells (#13355)", () => {
+  it("retains ObjectId when its entire cell is replaced with the id text", () => {
+    expect(buildMongoUpdateDocument(new Map([[0, "507f1f77bcf86cd799439012"]]), ["owner"], { owner: { $oid: "507f1f77bcf86cd799439011" } })).toEqual({ $set: { owner: { $oid: "507f1f77bcf86cd799439012" } } });
+  });
+
+  it("retains BSON date when its entire cell is replaced", () => {
+    expect(buildMongoUpdateDocument(new Map([[0, "2026-10-24T00:00:00.000Z"]]), ["at"], { at: { $date: "2026-10-23T00:00:00.000Z" } })).toEqual({ $set: { at: { $date: "2026-10-24T00:00:00.000Z" } } });
+  });
+
+  it("rejects malformed structured values instead of silently changing BSON type", () => {
+    expect(() => buildMongoUpdateDocument(new Map([[0, '"$oid":"507f1f77bcf86cd799439012"']]), ["owner"], { owner: { $oid: "507f1f77bcf86cd799439011" } })).toThrow("Invalid MongoDB value");
+    expect(() => buildMongoUpdateDocument(new Map([[0, '{"nested":']]), ["value"], { value: { nested: 1 } })).toThrow("Invalid MongoDB value");
+  });
+
+  it("still permits an explicitly quoted string type change", () => {
+    expect(buildMongoUpdateDocument(new Map([[0, '"text"']]), ["value"], { value: { nested: 1 } })).toEqual({ $set: { value: "text" } });
+  });
+});
 
 describe("MongoDB document date display", () => {
   it("infers top-level Extended JSON dates as temporal columns", () => {

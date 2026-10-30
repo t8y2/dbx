@@ -8726,6 +8726,18 @@ export default withEnglishFallback({
     },
   },
   damengDump,
+  mongoScript: {
+    execute: "เรียกใช้เป็นสคริปต์ MongoDB",
+    executeTooltip: "เรียกใช้เป็นสคริปต์ MongoDB: JavaScript (ลูป ตัวแปร ฟังก์ชัน) พร้อมการเรียก db.* ทำงานได้นานสุด 10 นาที การเขียนจะไม่ถูกย้อนกลับ",
+    progressConfirmed: "การดำเนินการที่ยืนยันว่าเสร็จแล้ว: {count} รายการ (เขียน {writes} รายการ)",
+    progressUnknown: "ไม่ทราบผลลัพธ์ อาจถูกนำไปใช้แล้วหรือไม่ก็ได้: {operation}",
+    progressNotRolledBack: "การเขียนจะไม่ถูกย้อนกลับ",
+    messageUnknownWrite: "สคริปต์ดักจับการเขียนที่ล้มเหลว ไม่ทราบผลลัพธ์: {operation}",
+    messageUnknownWritesDropped: "สคริปต์ดักจับการเขียนที่ล้มเหลวเพิ่มอีก {count} รายการ ไม่ทราบผลลัพธ์",
+    timedOut: "สคริปต์ MongoDB หมดเวลาหลังจาก {ms} มิลลิวินาที",
+    productionSource: "สคริปต์ MongoDB",
+    useScriptAction: 'ข้อความนี้ดูเหมือนสคริปต์ JavaScript ใช้ "เรียกใช้เป็นสคริปต์ MongoDB" บนแถบเครื่องมือของตัวแก้ไข',
+  },
   mongo: {
     documents: "Documents {count} รายการ",
     addField: "เพิ่ม Field",

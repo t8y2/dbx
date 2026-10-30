@@ -2244,6 +2244,25 @@ fn is_update_operator_document(doc: &Document) -> bool {
     !doc.is_empty() && doc.keys().all(|key| key.starts_with('$'))
 }
 
+/// What an update or replace did, as the shell's `UpdateResult` reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MongoUpdateOutcome {
+    pub matched: u64,
+    pub modified: u64,
+    /// The upserted `_id` as canonical Extended JSON.
+    pub upserted_id: Option<serde_json::Value>,
+}
+
+impl From<mongodb::results::UpdateResult> for MongoUpdateOutcome {
+    fn from(result: mongodb::results::UpdateResult) -> Self {
+        Self {
+            matched: result.matched_count,
+            modified: result.modified_count,
+            upserted_id: result.upserted_id.map(Bson::into_canonical_extjson),
+        }
+    }
+}
+
 pub async fn update_documents(
     client: &Client,
     database: &str,
@@ -2253,6 +2272,20 @@ pub async fn update_documents(
     many: bool,
     options_json: Option<&str>,
 ) -> Result<u64, String> {
+    update_documents_detailed(client, database, collection, filter_json, update_json, many, options_json)
+        .await
+        .map(|outcome| outcome.modified)
+}
+
+pub async fn update_documents_detailed(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    filter_json: &str,
+    update_json: &str,
+    many: bool,
+    options_json: Option<&str>,
+) -> Result<MongoUpdateOutcome, String> {
     let filter_value: serde_json::Value =
         serde_json::from_str(filter_json).map_err(|e| format!("Invalid filter JSON: {e}"))?;
     let update_value: serde_json::Value =
@@ -2280,7 +2313,7 @@ pub async fn update_documents(
         }
         action.await.map_err(|e| e.to_string())?
     };
-    Ok(result.modified_count)
+    Ok(result.into())
 }
 
 /// Counts reported by `bulkWrite`, mirroring the shell's `BulkWriteResult`.
@@ -2440,6 +2473,19 @@ pub async fn replace_document(
     replacement_json: &str,
     options_json: Option<&str>,
 ) -> Result<u64, String> {
+    replace_document_detailed(client, database, collection, filter_json, replacement_json, options_json)
+        .await
+        .map(|outcome| outcome.modified)
+}
+
+pub async fn replace_document_detailed(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    filter_json: &str,
+    replacement_json: &str,
+    options_json: Option<&str>,
+) -> Result<MongoUpdateOutcome, String> {
     let filter_value: serde_json::Value =
         serde_json::from_str(filter_json).map_err(|e| format!("Invalid filter JSON: {e}"))?;
     let replacement_value: serde_json::Value =
@@ -2456,7 +2502,7 @@ pub async fn replace_document(
         action = action.upsert(upsert);
     }
     let result = action.await.map_err(|e| e.to_string())?;
-    Ok(result.modified_count)
+    Ok(result.into())
 }
 
 #[derive(Default, Deserialize)]

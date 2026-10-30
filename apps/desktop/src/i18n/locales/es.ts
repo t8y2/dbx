@@ -7316,6 +7316,18 @@ export default withEnglishFallback({
     downloadValueTextFileType: "Archivo de texto",
     downloadValueSuccess: "Valor de Redis descargado",
   },
+  mongoScript: {
+    execute: "Ejecutar como script de MongoDB",
+    executeTooltip: "Ejecutar como script de MongoDB: JavaScript (bucles, variables, funciones) con llamadas db.*. Se ejecuta como máximo 10 minutos. Las escrituras no se revierten.",
+    progressConfirmed: "Operaciones completadas confirmadas: {count} ({writes} escrituras).",
+    progressUnknown: "Resultado desconocido, puede que se haya aplicado o no: {operation}",
+    progressNotRolledBack: "Las escrituras no se revierten.",
+    messageUnknownWrite: "El script capturó una escritura fallida; su resultado es desconocido: {operation}",
+    messageUnknownWritesDropped: "El script capturó {count} escrituras fallidas más; su resultado es desconocido.",
+    timedOut: "El script de MongoDB superó el tiempo límite tras {ms} ms.",
+    productionSource: "Script de MongoDB",
+    useScriptAction: 'Parece un script de JavaScript. Usa "Ejecutar como script de MongoDB" en la barra de herramientas del editor.',
+  },
   mongo: {
     documents: "{count} documentos",
     addField: "Agregar campo",

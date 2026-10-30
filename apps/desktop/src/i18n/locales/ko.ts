@@ -7080,6 +7080,18 @@ export default withEnglishFallback({
     downloadValueTextFileType: "텍스트 파일",
     downloadValueSuccess: "Redis 값이 다운로드됨",
   },
+  mongoScript: {
+    execute: "MongoDB 스크립트로 실행",
+    executeTooltip: "MongoDB 스크립트로 실행: 반복문, 변수, 함수 등 JavaScript와 db.* 호출을 지원합니다. 최대 10분 동안 실행됩니다. 쓰기는 롤백되지 않습니다.",
+    progressConfirmed: "완료가 확인된 작업: {count}개 (쓰기 {writes}개).",
+    progressUnknown: "결과를 알 수 없음, 적용되었을 수도 있습니다: {operation}",
+    progressNotRolledBack: "쓰기는 롤백되지 않습니다.",
+    messageUnknownWrite: "스크립트가 실패한 쓰기를 처리했습니다. 결과를 알 수 없습니다: {operation}",
+    messageUnknownWritesDropped: "스크립트가 실패한 쓰기 {count}개를 추가로 처리했습니다. 결과를 알 수 없습니다.",
+    timedOut: "MongoDB 스크립트가 {ms}ms 후 시간 초과되었습니다.",
+    productionSource: "MongoDB 스크립트",
+    useScriptAction: 'JavaScript 스크립트로 보입니다. 편집기 도구 모음의 "MongoDB 스크립트로 실행"을 사용하세요.',
+  },
   mongo: {
     documents: "문서 {count}개",
     addField: "필드 추가",

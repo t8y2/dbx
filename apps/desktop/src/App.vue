@@ -1143,6 +1143,7 @@ const {
   suppressDangerConfirm,
   tryExecute,
   tryExecuteInNewResultTab,
+  tryExecuteMongoScript,
   doExecute,
   cancelActiveExecution,
   requestDangerConfirmation,
@@ -1211,6 +1212,17 @@ function requestActiveEditorExecuteInNewResultTab(source?: "pointer" | "keyboard
   void tryExecuteInNewResultTab(undefined, targetTabId ? { tabId: targetTabId } : undefined);
 }
 
+function requestActiveEditorExecuteMongoScript(source?: "pointer" | "keyboard", tabId?: string) {
+  const snapshot = pendingToolbarExecutionSnapshot.value;
+  pendingToolbarExecutionSnapshot.value = undefined;
+  const targetTabId = tabId ?? (source === "pointer" ? snapshot?.tabId : undefined);
+  if (source === "pointer" && snapshot && snapshot.tabId === targetTabId) {
+    void tryExecuteMongoScript(snapshot, { tabId: targetTabId });
+    return;
+  }
+  void tryExecuteMongoScript(undefined, targetTabId ? { tabId: targetTabId } : undefined);
+}
+
 const toolbarAgentDriverUpdateCount = computed(() => Math.max(agentDriverUpdateCount.value, componentUpdates.driverUpdateCount.value));
 const toolbarDriverUpdateCount = computed(() => toolbarAgentDriverUpdateCount.value);
 const toolbarJdbcUpdateAvailable = computed(() => componentUpdates.jdbcUpdateAvailable.value);
@@ -1261,6 +1273,7 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   toolbarExecute: requestActiveEditorExecute,
   toolbarExecuteAll: requestActiveEditorExecuteAll,
   toolbarExecuteInNewResultTab: requestActiveEditorExecuteInNewResultTab,
+  toolbarExecuteMongoScript: requestActiveEditorExecuteMongoScript,
   cancelExecution: (tabId: string) => cancelActiveExecution(tabId),
   explain: (tabId: string) => tryExplain(undefined, { tabId }),
   formatSql: formatActiveSql,

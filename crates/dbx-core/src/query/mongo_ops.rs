@@ -964,12 +964,56 @@ pub async fn mongo_update_documents_core(
     many: bool,
     options_json: Option<&str>,
 ) -> Result<u64, String> {
+    mongo_update_documents_detailed_core(
+        state,
+        connection_id,
+        database,
+        collection,
+        filter_json,
+        update_json,
+        many,
+        options_json,
+    )
+    .await
+    .map(|outcome| outcome.modified)
+}
+
+/// The Legacy Agent only reports how many documents changed, so its outcome repeats that
+/// count as the matched count and has no upserted `_id`.
+fn agent_update_outcome(result: &serde_json::Value) -> mongo_driver::MongoUpdateOutcome {
+    let modified = result.get("modified_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    mongo_driver::MongoUpdateOutcome {
+        matched: result.get("matched_count").and_then(|v| v.as_u64()).unwrap_or(modified),
+        modified,
+        upserted_id: result.get("upserted_id").filter(|id| !id.is_null()).cloned(),
+    }
+}
+
+/// `updateOne`/`updateMany` with the matched, modified and upserted counts.
+pub async fn mongo_update_documents_detailed_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    filter_json: &str,
+    update_json: &str,
+    many: bool,
+    options_json: Option<&str>,
+) -> Result<mongo_driver::MongoUpdateOutcome, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => {
-            mongo_driver::update_documents(client, database, collection, filter_json, update_json, many, options_json)
-                .await
+            mongo_driver::update_documents_detailed(
+                client,
+                database,
+                collection,
+                filter_json,
+                update_json,
+                many,
+                options_json,
+            )
+            .await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -983,7 +1027,7 @@ pub async fn mongo_update_documents_core(
                     "options_json": options_json,
                 }))
                 .await?;
-            Ok(result.get("modified_count").and_then(|v| v.as_u64()).unwrap_or(0))
+            Ok(agent_update_outcome(&result))
         }
         _ => Err("Not a MongoDB connection".to_string()),
     }
@@ -998,12 +1042,42 @@ pub async fn mongo_replace_document_core(
     replacement_json: &str,
     options_json: Option<&str>,
 ) -> Result<u64, String> {
+    mongo_replace_document_detailed_core(
+        state,
+        connection_id,
+        database,
+        collection,
+        filter_json,
+        replacement_json,
+        options_json,
+    )
+    .await
+    .map(|outcome| outcome.modified)
+}
+
+/// `replaceOne` with the matched, modified and upserted counts.
+pub async fn mongo_replace_document_detailed_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    filter_json: &str,
+    replacement_json: &str,
+    options_json: Option<&str>,
+) -> Result<mongo_driver::MongoUpdateOutcome, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => {
-            mongo_driver::replace_document(client, database, collection, filter_json, replacement_json, options_json)
-                .await
+            mongo_driver::replace_document_detailed(
+                client,
+                database,
+                collection,
+                filter_json,
+                replacement_json,
+                options_json,
+            )
+            .await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -1022,7 +1096,7 @@ pub async fn mongo_replace_document_core(
                     "options_json": options_json,
                 }))
                 .await?;
-            Ok(result.get("modified_count").and_then(|v| v.as_u64()).unwrap_or(0))
+            Ok(agent_update_outcome(&result))
         }
         _ => Err("Not a MongoDB connection".to_string()),
     }
@@ -1426,6 +1500,187 @@ pub async fn execute_mongo_command_core(
     }
 }
 
+/// Runs one mongo shell command for a MongoDB script and answers in a lossless shape:
+/// `{"docs":[..]}` with documents as Extended JSON (canonical where the driver provides it, so
+/// a document read and written back keeps its BSON types), `{"write":{..}}` with the shell's
+/// result counts, or a `{"columns","rows","affected"}` table for everything else.
+///
+/// Reads never silently drop documents: more than `max_rows` is an error, unless `truncate`
+/// is set (the script's completion value, which is only displayed).
+pub async fn execute_mongo_script_command_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    command: &MongoCommand,
+    max_rows: usize,
+    truncate: bool,
+) -> Result<serde_json::Value, String> {
+    use serde_json::{json, Value};
+
+    let max_rows = max_rows.max(1);
+    let documents = |result: MongoDocumentResult| result.extended_documents.unwrap_or(result.documents);
+    let bounded = |mut documents: Vec<Value>| {
+        if documents.len() <= max_rows {
+            return Ok(json!({ "docs": documents }));
+        }
+        if !truncate {
+            return Err(format!(
+                "MongoDB script: the operation returned more than {max_rows} documents (the per-operation script limit). Add .limit(), narrow the filter, or page through the collection by _id."
+            ));
+        }
+        documents.truncate(max_rows);
+        Ok(json!({ "docs": documents, "truncated": true }))
+    };
+    // One row more than the limit tells "exactly at the limit" from "over it".
+    let probe_rows = max_rows.saturating_add(1);
+
+    match command {
+        MongoCommand::InDatabase { database, command } => {
+            Box::pin(execute_mongo_script_command_core(state, connection_id, database, command, max_rows, truncate))
+                .await
+        }
+        MongoCommand::Find { collection, filter, projection, sort, collation, skip, limit } => {
+            let result = mongo_find_documents_without_total_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                *skip,
+                bounded_mongo_find_limit(*limit, probe_rows),
+                Some(filter),
+                projection.as_deref(),
+                sort.as_deref(),
+                collation.as_deref(),
+            )
+            .await?;
+            bounded(documents(result))
+        }
+        MongoCommand::FindOne { collection, filter, projection, options } => {
+            let result = mongo_find_one_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                Some(filter),
+                projection.as_deref(),
+                options.as_deref(),
+            )
+            .await?;
+            Ok(json!({ "docs": documents(result) }))
+        }
+        MongoCommand::Aggregate { collection, pipeline, options } => {
+            let result = mongo_aggregate_documents_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                pipeline,
+                Some(probe_rows),
+                options.as_deref(),
+            )
+            .await?;
+            bounded(documents(result))
+        }
+        MongoCommand::Distinct { collection, field, filter } => {
+            let result =
+                mongo_distinct_core(state, connection_id, database, collection, field, filter.as_deref()).await?;
+            bounded(documents(result))
+        }
+        MongoCommand::FindOneAndUpdate { collection, filter, update, options } => {
+            let result = mongo_find_one_and_update_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                filter,
+                update,
+                options.as_deref(),
+            )
+            .await?;
+            Ok(json!({ "docs": documents(result) }))
+        }
+        MongoCommand::FindOneAndReplace { collection, filter, replacement, options } => {
+            let result = mongo_find_one_and_replace_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                filter,
+                replacement,
+                options.as_deref(),
+            )
+            .await?;
+            Ok(json!({ "docs": documents(result) }))
+        }
+        MongoCommand::FindOneAndDelete { collection, filter, options } => {
+            let result =
+                mongo_find_one_and_delete_core(state, connection_id, database, collection, filter, options.as_deref())
+                    .await?;
+            Ok(json!({ "docs": documents(result) }))
+        }
+        MongoCommand::Insert { collection, documents } => {
+            let inserted = mongo_insert_documents_core(state, connection_id, database, collection, documents).await?;
+            Ok(json!({ "write": { "inserted": inserted } }))
+        }
+        MongoCommand::Update { collection, filter, update, options, many } => {
+            let outcome = mongo_update_documents_detailed_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                filter,
+                update,
+                *many,
+                options.as_deref(),
+            )
+            .await?;
+            Ok(json!({ "write": update_outcome_json(&outcome) }))
+        }
+        MongoCommand::Replace { collection, filter, replacement, options } => {
+            let outcome = mongo_replace_document_detailed_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                filter,
+                replacement,
+                options.as_deref(),
+            )
+            .await?;
+            Ok(json!({ "write": update_outcome_json(&outcome) }))
+        }
+        MongoCommand::Delete { collection, filter, many } => {
+            let deleted =
+                mongo_delete_documents_core(state, connection_id, database, collection, filter, *many).await?;
+            Ok(json!({ "write": { "deleted": deleted } }))
+        }
+        MongoCommand::BulkWrite { collection, operations, options } => {
+            let result =
+                mongo_bulk_write_core(state, connection_id, database, collection, operations, options.as_deref())
+                    .await?;
+            Ok(json!({ "write": {
+                "inserted": result.inserted_count,
+                "matched": result.matched_count,
+                "modified": result.modified_count,
+                "deleted": result.deleted_count,
+                "upserted": result.upserted_count,
+            } }))
+        }
+        command => {
+            let result = execute_mongo_command_core(state, connection_id, database, command, max_rows).await?;
+            Ok(json!({ "columns": result.columns, "rows": result.rows, "affected": result.affected_rows }))
+        }
+    }
+}
+
+fn update_outcome_json(outcome: &mongo_driver::MongoUpdateOutcome) -> serde_json::Value {
+    serde_json::json!({
+        "matched": outcome.matched,
+        "modified": outcome.modified,
+        "upsertedId": outcome.upserted_id,
+    })
+}
+
 fn bounded_mongo_find_limit(command_limit: i64, max_rows: usize) -> i64 {
     let max_rows = max_rows.max(1).min(i64::MAX as usize) as i64;
     if command_limit == 0 {
@@ -1468,7 +1723,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<serde_json::Value>>, affecte
     }
 }
 
-fn scalar_query_result(column: impl Into<String>, value: serde_json::Value) -> QueryResult {
+pub(crate) fn scalar_query_result(column: impl Into<String>, value: serde_json::Value) -> QueryResult {
     query_result(vec![column.into()], vec![vec![value]], 0)
 }
 
@@ -1551,7 +1806,7 @@ fn mongo_drop_indexes_query_result(
     query_result(vec!["name".to_string(), "status".to_string(), "message".to_string()], rows, affected_rows)
 }
 
-fn mongo_documents_query_result(documents: Vec<serde_json::Value>) -> QueryResult {
+pub(crate) fn mongo_documents_query_result(documents: Vec<serde_json::Value>) -> QueryResult {
     use serde_json::Value;
 
     if documents.is_empty() {

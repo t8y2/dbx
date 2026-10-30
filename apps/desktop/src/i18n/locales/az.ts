@@ -5981,6 +5981,18 @@ export default withEnglishFallback({
       },
     },
   },
+  mongoScript: {
+    execute: "MongoDB skripti kimi icra et",
+    executeTooltip: "MongoDB skripti kimi icra et: db.* çağırışları ilə JavaScript (dövrlər, dəyişənlər, funksiyalar). Ən çox 10 dəqiqə işləyir. Yazmalar geri qaytarılmır.",
+    progressConfirmed: "Tamamlandığı təsdiqlənən əməliyyatlar: {count} ({writes} yazma).",
+    progressUnknown: "Nəticə məlum deyil, tətbiq oluna bilər: {operation}",
+    progressNotRolledBack: "Yazmalar geri qaytarılmır.",
+    messageUnknownWrite: "Skript uğursuz yazmanı tutdu; nəticəsi məlum deyil: {operation}",
+    messageUnknownWritesDropped: "Skript daha {count} uğursuz yazmanı tutdu; nəticələri məlum deyil.",
+    timedOut: "MongoDB skriptinin vaxtı {ms} ms sonra bitdi.",
+    productionSource: "MongoDB skripti",
+    useScriptAction: 'Bu JavaScript skriptinə bənzəyir. Redaktor alətlər panelində "MongoDB skripti kimi icra et" düyməsindən istifadə edin.',
+  },
   mongo: {
     documents: "{count} sənəd",
     addField: "Sahə əlavə et",

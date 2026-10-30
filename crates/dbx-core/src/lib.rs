@@ -86,6 +86,7 @@ pub use persistence::history;
 pub use query::document_ops;
 pub use query::hbase_ops;
 pub use query::mongo_ops;
+pub use query::mongo_script;
 pub use query::object_cache;
 pub use safety::production_safety;
 pub mod query;

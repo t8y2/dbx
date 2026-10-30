@@ -248,6 +248,7 @@ const groupExecutableSql = computed(() => {
         @toolbar-execute="toolbar.toolbarExecute($event, activeTab.id)"
         @toolbar-execute-all="toolbar.toolbarExecuteAll($event, activeTab.id)"
         @toolbar-execute-in-new-result-tab="toolbar.toolbarExecuteInNewResultTab($event, activeTab.id)"
+        @toolbar-execute-mongo-script="toolbar.toolbarExecuteMongoScript($event, activeTab.id)"
         @multi-execute="toolbar.multiExecute()"
         @preview-changes="activeTab && toolbar.previewChanges(activeTab.id)"
         @cancel="activeTab && toolbar.cancelExecution(activeTab.id)"

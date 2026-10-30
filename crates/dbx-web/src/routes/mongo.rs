@@ -21,6 +21,46 @@ pub async fn parse_shell_command(
     dbx_core::mongo_shell::parse(&req.source).map(Json).map_err(AppError::from)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoExecuteScriptRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub source: String,
+    pub options: Option<dbx_core::mongo_script::MongoScriptOptions>,
+    pub execution_id: Option<String>,
+}
+
+/// Whether this build can run MongoDB scripts, so the UI only offers the action when it works.
+pub async fn script_available() -> Json<bool> {
+    Json(dbx_core::mongo_script::RUNTIME_AVAILABLE)
+}
+
+pub async fn execute_script(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoExecuteScriptRequest>,
+) -> Result<Json<dbx_core::types::QueryResult>, AppError> {
+    super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    // The script observes cancellation itself so it can report the operations that completed.
+    let registered = req
+        .execution_id
+        .as_ref()
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| state.app.running_queries.register(id.clone()));
+    let result = dbx_core::mongo_script::execute_mongo_script_core(
+        state.app.clone(),
+        &req.connection_id,
+        &database,
+        &req.source,
+        req.options.clone().unwrap_or_default(),
+        registered.as_ref().map(|query| query.token()),
+    )
+    .await?;
+    Ok(Json(result))
+}
+
 async fn run_cancellable<T, F>(state: &Arc<WebState>, execution_id: Option<String>, future: F) -> Result<T, AppError>
 where
     F: Future<Output = Result<T, String>>,

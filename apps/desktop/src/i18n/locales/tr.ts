@@ -5874,6 +5874,18 @@ export default withEnglishFallback({
       },
     },
   },
+  mongoScript: {
+    execute: "MongoDB betiği olarak çalıştır",
+    executeTooltip: "MongoDB betiği olarak çalıştır: db.* çağrılarıyla JavaScript (döngüler, değişkenler, fonksiyonlar). En fazla 10 dakika çalışır. Yazmalar geri alınmaz.",
+    progressConfirmed: "Tamamlandığı doğrulanan işlemler: {count} ({writes} yazma).",
+    progressUnknown: "Sonuç bilinmiyor, uygulanmış olabilir: {operation}",
+    progressNotRolledBack: "Yazmalar geri alınmaz.",
+    messageUnknownWrite: "Betik başarısız bir yazmayı yakaladı; sonucu bilinmiyor: {operation}",
+    messageUnknownWritesDropped: "Betik {count} başarısız yazmayı daha yakaladı; sonuçları bilinmiyor.",
+    timedOut: "MongoDB betiği {ms} ms sonra zaman aşımına uğradı.",
+    productionSource: "MongoDB betiği",
+    useScriptAction: 'Bu bir JavaScript betiğine benziyor. Çalıştırmak için düzenleyici araç çubuğundaki "MongoDB betiği olarak çalıştır" seçeneğini kullanın.',
+  },
   mongo: {
     documents: "{count} belge",
     addField: "Alan Ekle",

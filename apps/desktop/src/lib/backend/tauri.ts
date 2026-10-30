@@ -5221,6 +5221,21 @@ export async function mongoParseShellCommand(source: string): Promise<MongoComma
   return normalizeRustMongoCommand(raw);
 }
 
+export interface MongoScriptOptions {
+  maxRows?: number;
+  timeoutMs?: number;
+  /** The user confirmed production writes; the server still decides which operations are production writes. */
+  confirmedProductionWrites?: boolean;
+}
+
+export async function mongoScriptAvailable(): Promise<boolean> {
+  return invoke<boolean>("mongo_script_available");
+}
+
+export async function mongoExecuteScript(connectionId: string, database: string, source: string, options?: MongoScriptOptions, executionId?: string): Promise<QueryResult> {
+  return invoke<QueryResult>("mongo_execute_script", { connectionId, database, source, options, executionId });
+}
+
 export async function documentFindDocuments(
   connectionId: string,
   database: string,

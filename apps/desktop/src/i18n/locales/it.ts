@@ -7130,6 +7130,18 @@ export default withEnglishFallback({
     downloadValueTextFileType: "File di testo",
     downloadValueSuccess: "Valore Redis scaricato",
   },
+  mongoScript: {
+    execute: "Esegui come script MongoDB",
+    executeTooltip: "Esegui come script MongoDB: JavaScript (cicli, variabili, funzioni) con chiamate db.*. Viene eseguito al massimo per 10 minuti. Le scritture non vengono annullate.",
+    progressConfirmed: "Operazioni completate confermate: {count} ({writes} scritture).",
+    progressUnknown: "Esito sconosciuto, potrebbe essere stata applicata o meno: {operation}",
+    progressNotRolledBack: "Le scritture non vengono annullate.",
+    messageUnknownWrite: "Lo script ha intercettato una scrittura non riuscita; l'esito è sconosciuto: {operation}",
+    messageUnknownWritesDropped: "Lo script ha intercettato altre {count} scritture non riuscite; l'esito è sconosciuto.",
+    timedOut: "Lo script MongoDB è scaduto dopo {ms} ms.",
+    productionSource: "Script MongoDB",
+    useScriptAction: 'Sembra uno script JavaScript. Usa "Esegui come script MongoDB" nella barra degli strumenti dell\'editor.',
+  },
   mongo: {
     documents: "{count} documenti",
     addField: "Aggiungi Campo",

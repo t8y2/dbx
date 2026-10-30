@@ -8261,6 +8261,18 @@ export default withEnglishFallback({
   },
   mongoDump,
   damengDump,
+  mongoScript: {
+    execute: "作为 MongoDB 脚本执行",
+    executeTooltip: "作为 MongoDB 脚本执行：支持循环、变量、函数等 JavaScript 与 db.* 调用。最长运行 10 分钟。写入不会回滚。",
+    progressConfirmed: "已确认完成的操作：{count} 个（其中写入 {writes} 个）。",
+    progressUnknown: "结果未知，可能已执行也可能未执行：{operation}",
+    progressNotRolledBack: "已执行的写入不会回滚。",
+    messageUnknownWrite: "脚本捕获了一次失败的写入，其结果未知：{operation}",
+    messageUnknownWritesDropped: "脚本还捕获了 {count} 次失败的写入，其结果未知。",
+    timedOut: "MongoDB 脚本执行超时（{ms} 毫秒）。",
+    productionSource: "MongoDB 脚本",
+    useScriptAction: "这段内容看起来是 JavaScript 脚本，请使用编辑器工具栏中的“作为 MongoDB 脚本执行”来运行。",
+  },
   mongo: {
     documents: "{count} 个文档",
     addField: "添加字段",

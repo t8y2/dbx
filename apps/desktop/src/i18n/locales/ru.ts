@@ -8514,6 +8514,18 @@ export default withEnglishFallback({
       useridInvalid: "Имя пользователя или пароль подключения содержит / или {'@'}, что нельзя закодировать в аргументе USERID dexp/dimp; задача не была запущена.",
     },
   },
+  mongoScript: {
+    execute: "Выполнить как скрипт MongoDB",
+    executeTooltip: "Выполнить как скрипт MongoDB: JavaScript (циклы, переменные, функции) с вызовами db.*. Выполняется не более 10 минут. Записи не откатываются.",
+    progressConfirmed: "Подтверждённые выполненные операции: {count} (записей: {writes}).",
+    progressUnknown: "Результат неизвестен, операция могла быть применена: {operation}",
+    progressNotRolledBack: "Записи не откатываются.",
+    messageUnknownWrite: "Скрипт перехватил неудачную запись; её результат неизвестен: {operation}",
+    messageUnknownWritesDropped: "Скрипт перехватил ещё {count} неудачных записей; их результат неизвестен.",
+    timedOut: "Время выполнения скрипта MongoDB истекло через {ms} мс.",
+    productionSource: "Скрипт MongoDB",
+    useScriptAction: "Похоже на скрипт JavaScript. Используйте «Выполнить как скрипт MongoDB» на панели инструментов редактора.",
+  },
   mongo: {
     documents: "Документов: {count}",
     addField: "Добавить поле",

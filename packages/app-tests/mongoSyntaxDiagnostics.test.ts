@@ -142,3 +142,9 @@ test("keeps completed diagnostics while the cursor is in an unfinished command",
   const unfinished = underlined(source, 0).find((diagnostic) => diagnostic.severity === "error");
   assert.match(unfinished!.message, /unclosed/i);
 });
+
+test("a JavaScript script the executor runs in the script runtime is not underlined", () => {
+  for (const source of ['(function () {\n  var c = db.getCollection("a");\n  c.insertMany([{ n: 1 }]);\n  return c.find({}).toArray();\n})()', 'var rows = db.a.find({}).toArray();\nrows.forEach(function (d) { print(d._id); })']) {
+    assert.deepEqual(buildMongoSyntaxDiagnostics(source), [], source);
+  }
+});

@@ -399,10 +399,40 @@ fn mongo_extended_json_scalar_literal_is_valid(value: &serde_json::Value) -> boo
     if let Some(value) = wrapper.get("$numberLong").and_then(serde_json::Value::as_str) {
         return value.parse::<i64>().is_ok();
     }
-    wrapper
-        .get("$date")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
+    if let Some(value) = wrapper.get("$numberInt").and_then(serde_json::Value::as_str) {
+        return value.parse::<i32>().is_ok();
+    }
+    if let Some(value) = wrapper.get("$numberDouble").and_then(serde_json::Value::as_str) {
+        return matches!(value, "Infinity" | "-Infinity" | "NaN") || value.parse::<f64>().is_ok();
+    }
+    if let Some(value) = wrapper.get("$numberDecimal").and_then(serde_json::Value::as_str) {
+        return !value.trim().is_empty();
+    }
+    if let Some(value) = wrapper.get("$uuid").and_then(serde_json::Value::as_str) {
+        return value.len() == 36 && value.bytes().all(|byte| byte == b'-' || byte.is_ascii_hexdigit());
+    }
+    if let Some(binary) = wrapper.get("$binary").and_then(serde_json::Value::as_object) {
+        return binary.len() == 2
+            && binary.get("base64").is_some_and(serde_json::Value::is_string)
+            && binary.get("subType").is_some_and(serde_json::Value::is_string);
+    }
+    if let Some(timestamp) = wrapper.get("$timestamp").and_then(serde_json::Value::as_object) {
+        return timestamp.len() == 2
+            && timestamp.get("t").is_some_and(serde_json::Value::is_u64)
+            && timestamp.get("i").is_some_and(serde_json::Value::is_u64);
+    }
+    match wrapper.get("$date") {
+        Some(serde_json::Value::String(value)) => chrono::DateTime::parse_from_rfc3339(value).is_ok(),
+        // Canonical Extended JSON: {"$date": {"$numberLong": "<millis>"}}.
+        Some(serde_json::Value::Object(millis)) => {
+            millis.len() == 1
+                && millis
+                    .get("$numberLong")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| value.parse::<i64>().is_ok())
+        }
+        _ => false,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2774,6 +2804,31 @@ mod tests {
             let command = parse(command).unwrap();
             assert!(!command.has_effectively_unbounded_filter(), "{command:?}");
             assert_eq!(validate_safety(&command, true, false, false), Ok(()), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn extended_json_literals_in_write_filters_are_bounded() {
+        // MongoDB scripts send canonical Extended JSON, so typed literals must count as values.
+        for command in [
+            r#"db.items.deleteOne({n: {"$numberInt": "1"}})"#,
+            r#"db.items.deleteMany({n: {"$in": [{"$numberInt": "1"}, {"$numberInt": "2"}]}})"#,
+            r#"db.items.deleteMany({price: {"$numberDecimal": "1.10"}})"#,
+            r#"db.items.deleteMany({ratio: {"$numberDouble": "1.5"}})"#,
+            r#"db.items.updateMany({at: {"$date": {"$numberLong": "1600000000123"}}}, {$set: {a: 1}})"#,
+            r#"db.items.deleteMany({blob: {"$binary": {"base64": "AQID", "subType": "00"}}})"#,
+            r#"db.items.deleteMany({ts: {"$timestamp": {"t": 1, "i": 2}}})"#,
+            r#"db.items.deleteMany({key: {"$uuid": "123e4567-e89b-12d3-a456-426614174000"}})"#,
+        ] {
+            let parsed = parse(command).unwrap();
+            assert!(!parsed.has_effectively_unbounded_filter(), "{command}");
+            assert_eq!(validate_safety(&parsed, true, false, false), Ok(()), "{command}");
+        }
+        for command in [
+            r#"db.items.deleteMany({n: {"$numberInt": "not a number"}})"#,
+            r#"db.items.deleteMany({at: {"$date": {"$numberLong": "x"}}})"#,
+        ] {
+            assert!(parse(command).map_or(true, |parsed| parsed.has_effectively_unbounded_filter()), "{command}");
         }
     }
 

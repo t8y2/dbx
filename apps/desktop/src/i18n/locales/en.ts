@@ -8289,6 +8289,18 @@ export default {
   },
   mongoDump,
   damengDump,
+  mongoScript: {
+    execute: "Run as MongoDB script",
+    executeTooltip: "Run as MongoDB script: JavaScript (loops, variables, functions) with db.* calls. Runs for at most 10 minutes. Writes are not rolled back.",
+    progressConfirmed: "Confirmed completed operations: {count} ({writes} writes).",
+    progressUnknown: "Outcome unknown, it may or may not have been applied: {operation}",
+    progressNotRolledBack: "Writes are not rolled back.",
+    messageUnknownWrite: "A failed write was caught by the script; its outcome is unknown: {operation}",
+    messageUnknownWritesDropped: "{count} more failed writes were caught by the script; their outcome is unknown.",
+    timedOut: "MongoDB script timed out after {ms} ms.",
+    productionSource: "MongoDB script",
+    useScriptAction: 'This looks like a JavaScript script. Use "Run as MongoDB script" in the editor toolbar to run it.',
+  },
   mongo: {
     documents: "{count} documents",
     addField: "Add Field",

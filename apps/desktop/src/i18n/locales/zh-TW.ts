@@ -6242,6 +6242,18 @@ export default withEnglishFallback({
     keySearchHistoryForget: "從紀錄中移除",
     keySearchHistoryEmpty: "暫無歷史紀錄",
   },
+  mongoScript: {
+    execute: "以 MongoDB 腳本執行",
+    executeTooltip: "以 MongoDB 腳本執行：支援迴圈、變數、函式等 JavaScript 與 db.* 呼叫。最長執行 10 分鐘。寫入不會回滾。",
+    progressConfirmed: "已確認完成的操作：{count} 個（其中寫入 {writes} 個）。",
+    progressUnknown: "結果未知，可能已執行也可能未執行：{operation}",
+    progressNotRolledBack: "已執行的寫入不會回滾。",
+    messageUnknownWrite: "腳本捕獲了一次失敗的寫入，其結果未知：{operation}",
+    messageUnknownWritesDropped: "腳本還捕獲了 {count} 次失敗的寫入，其結果未知。",
+    timedOut: "MongoDB 腳本執行逾時（{ms} 毫秒）。",
+    productionSource: "MongoDB 腳本",
+    useScriptAction: "這段內容看起來是 JavaScript 腳本，請使用編輯器工具列中的「以 MongoDB 腳本執行」來執行。",
+  },
   mongo: {
     documents: "{count} 個文件",
     addField: "新增欄位",

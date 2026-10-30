@@ -3,6 +3,7 @@ pub use dbx_drivers::query_messages;
 pub mod document_ops;
 pub mod hbase_ops;
 pub mod mongo_ops;
+pub mod mongo_script;
 pub mod mysql_data_charset_policy;
 #[cfg(test)]
 mod mysql_data_charset_tests;

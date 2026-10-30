@@ -5228,6 +5228,21 @@ export async function mongoParseShellCommand(source: string): Promise<MongoComma
   return normalizeRustMongoCommand(raw);
 }
 
+export interface MongoScriptOptions {
+  maxRows?: number;
+  timeoutMs?: number;
+  /** The user confirmed production writes; the server still decides which operations are production writes. */
+  confirmedProductionWrites?: boolean;
+}
+
+export async function mongoScriptAvailable(): Promise<boolean> {
+  return get<boolean>("/api/mongo/script-available");
+}
+
+export async function mongoExecuteScript(connectionId: string, database: string, source: string, options?: MongoScriptOptions, executionId?: string): Promise<QueryResult> {
+  return post<QueryResult>("/api/mongo/execute-script", { connectionId, database, source, options, executionId });
+}
+
 export async function mongoFindOne(connectionId: string, database: string, collection: string, filter?: string, projection?: string, options?: string, executionId?: string): Promise<MongoDocumentResult> {
   return post("/api/mongo/find-one", {
     connectionId,

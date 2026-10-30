@@ -9,6 +9,7 @@
 import type { SqlTextSpan } from "@/types/database";
 import type { SqlSemanticDiagnostic } from "@/lib/sql/semantic/diagnostics";
 import { findMatchingParen, hasUnclosedMongoDelimiters, trimMongoOuterComments } from "@dbx-app/mongo-shell";
+import { looksLikeMongoScript } from "@/lib/mongo/mongoScript";
 import { bulkWriteFilters, describeMongoCommandParseFailure, isMongoCommandText, mongoFilterIsEffectivelyUnbounded, parseMongoCommand, splitMongoCommandTextRanges, type MongoCommand, type MongoTextRange } from "@/lib/mongo/mongoShellCommand";
 
 const UNCLOSED_MESSAGE = "MongoDB command has unclosed parentheses, brackets, braces, or strings.";
@@ -23,6 +24,9 @@ const COMMAND_HEAD = /^\s*db\s*(?:\.\s*(?:getCollection|getSiblingDB)\s*\([^)]*\
 export function buildMongoSyntaxDiagnostics(source: string, cursor = -1): SqlSemanticDiagnostic[] {
   const diagnostics: SqlSemanticDiagnostic[] = [];
   const segments = splitMongoCommandTextRanges(source);
+  // The executor hands JavaScript the structured parser cannot express (IIFE, var, forEach, ...)
+  // to the script runtime, so judging it with the command parser would underline valid scripts.
+  if (looksLikeMongoScript(source) && !segments.some((segment) => parseMongoCommand(segment.text))) return diagnostics;
   const current = segmentAtCursor(segments, cursor, source.length);
   // Shell users keep JS helper statements between commands (`var ids = [...]` feeding a
   // later `$in`). Those lines are not commands dbx can validate, and trying to diagnose

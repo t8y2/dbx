@@ -2350,6 +2350,86 @@ SELECT @value AS Message;`;
     expect(executeCurrentSql).toHaveBeenCalledTimes(1);
   });
 
+  describe("MongoDB script action", () => {
+    const script = '(function () { db.getSiblingDB("prod").users.updateOne({ _id: 1 }, { $set: { a: 1 } }); })()';
+
+    function setup(overrides: Partial<ConnectionConfig>) {
+      const activeTab = ref<QueryTab | undefined>({ ...queryTab("staging"), sql: script });
+      const activeConnection = ref<ConnectionConfig | undefined>({ ...connection("mongodb"), ...overrides });
+      const queryStore = useQueryStore();
+      const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+        if (activeTab.value) activeTab.value.result = { columns: ["result"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+      });
+      vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+      const execution = useSqlExecution({
+        activeTab: computed(() => activeTab.value),
+        activeConnection: computed(() => activeConnection.value),
+        executableSql: computed(() => script),
+        activeOutputView: ref<"result" | "summary" | "explain" | "chart">("result"),
+      });
+      return { execution, executeCurrentSql, productionSafetyStore: useProductionSafetyStore() };
+    }
+
+    it("runs without a production prompt when the connection has no production marker", async () => {
+      const { execution, executeCurrentSql, productionSafetyStore } = setup({});
+
+      await execution.tryExecuteMongoScript();
+
+      expect(productionSafetyStore.pending).toBeFalsy();
+      expect(executeCurrentSql).toHaveBeenCalledWith(script, expect.objectContaining({ mongoScript: { confirmedProductionWrites: false } }));
+    });
+
+    it("asks before a script that can reach a production database and forwards only the user's decision", async () => {
+      const { execution, executeCurrentSql, productionSafetyStore } = setup({ production_databases: ["prod"] });
+
+      const pending = execution.tryExecuteMongoScript();
+      await vi.waitFor(() => expect(productionSafetyStore.pending?.productionDatabases).toEqual(["prod"]));
+      expect(executeCurrentSql).not.toHaveBeenCalled();
+      productionSafetyStore.confirm();
+      await pending;
+
+      expect(executeCurrentSql).toHaveBeenCalledWith(script, expect.objectContaining({ mongoScript: { confirmedProductionWrites: true } }));
+    });
+
+    it("does not run when the production prompt is declined", async () => {
+      const { execution, executeCurrentSql, productionSafetyStore } = setup({ is_production: true });
+
+      const pending = execution.tryExecuteMongoScript();
+      await vi.waitFor(() => expect(productionSafetyStore.pending).toBeTruthy());
+      productionSafetyStore.cancel();
+
+      await expect(pending).resolves.toMatchObject({ status: "not-started" });
+      expect(executeCurrentSql).not.toHaveBeenCalled();
+    });
+
+    it("runs the whole editor, not just the statement under the cursor", async () => {
+      const full = "db.a.insertOne({ x: 1 });\ndb.a.updateOne({ x: 1 }, { $set: { y: 2 } });";
+      const { execution, executeCurrentSql } = setup({});
+
+      await execution.tryExecuteMongoScript({ fullSql: full, selectedSql: "", cursorPos: full.length, selectionFrom: full.length, selectionTo: full.length });
+
+      expect(executeCurrentSql).toHaveBeenCalledWith(full, expect.objectContaining({ mongoScript: expect.anything() }));
+    });
+
+    it("runs only the selection when there is one", async () => {
+      const full = "db.a.insertOne({ x: 1 });\ndb.a.updateOne({ x: 1 }, { $set: { y: 2 } });";
+      const selected = "db.a.insertOne({ x: 1 });";
+      const { execution, executeCurrentSql } = setup({});
+
+      await execution.tryExecuteMongoScript({ fullSql: full, selectedSql: selected, cursorPos: selected.length, selectionFrom: 0, selectionTo: selected.length });
+
+      expect(executeCurrentSql).toHaveBeenCalledWith(selected, expect.objectContaining({ mongoScript: expect.anything() }));
+    });
+
+    it("keeps ordinary execution off the script runtime", async () => {
+      const { execution, executeCurrentSql } = setup({});
+
+      await execution.tryExecute();
+
+      expect(executeCurrentSql).toHaveBeenCalledWith(script, expect.not.objectContaining({ mongoScript: expect.anything() }));
+    });
+  });
+
   describe("mode-dependent substitution variable prompt overrides", () => {
     it("openGauss A-mode disables substitution -> saved/reloaded -> does not prompt parameter dialog on &var", async () => {
       const sql = "SELECT * FROM t WHERE col = &var;";

@@ -1306,6 +1306,8 @@ async fn serve() -> Result<(), String> {
         )
         .route("/mongo/find-documents", post(routes::mongo::find_documents))
         .route("/mongo/parse-shell-command", post(routes::mongo::parse_shell_command))
+        .route("/mongo/execute-script", post(routes::mongo::execute_script))
+        .route("/mongo/script-available", get(routes::mongo::script_available))
         .route("/mongo/explain-find", post(routes::mongo::explain_find))
         .route("/mongo/find-one", post(routes::mongo::find_one))
         .route("/mongo/count-documents", post(routes::mongo::count_documents))

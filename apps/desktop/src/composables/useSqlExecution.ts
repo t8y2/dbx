@@ -1,6 +1,6 @@
 import { ref, watch, type Ref, type ComputedRef } from "vue";
 import { useI18n } from "vue-i18n";
-import { useQueryStore } from "@/stores/queryStore";
+import { useQueryStore, type MongoScriptExecution } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -25,7 +25,7 @@ import { isElasticsearchRestRequestText, parseElasticsearchRestRequestTarget, sp
 import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlParameterSyntax } from "@/lib/sql/sqlParameters";
 import { expandSqlVariables } from "@/lib/sql/sqlVariables";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
-import { assessProductionSql } from "@/lib/database/productionSafety";
+import { assessProductionSql, productionDatabases } from "@/lib/database/productionSafety";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
@@ -47,6 +47,8 @@ interface SqlExecutionOptions {
   editorViewportRequestId?: number;
   /** Tab that owns this execution request; resolved once, never re-read from the global active tab. */
   tabId?: string;
+  /** Run the text as a MongoDB script (explicit toolbar action only). */
+  mongoScript?: MongoScriptExecution;
 }
 
 /**
@@ -351,6 +353,24 @@ export function useSqlExecution(deps: {
     return tryExecute(sqlOverride, { ...options, openInNewResultTab: true });
   }
 
+  /** Runs the selection (or whole editor) through the MongoDB script runtime. */
+  function tryExecuteMongoScript(sqlOverride?: SqlExecutionOverride, options: SqlExecutionOptions = {}) {
+    return tryExecute(wholeMongoScript(sqlOverride, options.tabId), { ...options, mongoScript: {} });
+  }
+
+  /**
+   * A script runs as written: the selection, or else the whole editor. The "current statement"
+   * execute mode would otherwise run just the command under the cursor of a multi-line script.
+   */
+  function wholeMongoScript(sqlOverride: SqlExecutionOverride | undefined, tabId: string | undefined): SqlExecutionOverride | undefined {
+    if (typeof sqlOverride === "string") return sqlOverride;
+    if (isSqlExecutionSnapshot(sqlOverride)) return sqlOverride.selectedSql.trim() ? sqlOverride : sqlOverride.fullSql;
+    const tab = resolveExecutionTab(tabId);
+    const selection = tab?.editorSelection;
+    if (!tab || (selection && selection.anchor !== selection.head)) return sqlOverride;
+    return tab.sql;
+  }
+
   async function continueExecute(context: SqlExecutionContext, sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}): Promise<SqlExecutionOutcome> {
     const tab = resolveExecutionTab(context.tabId);
     if (!tab) {
@@ -362,6 +382,27 @@ export function useSqlExecution(deps: {
       // remains cancellation. The shared guard owns the denial notification.
       cancelEditorViewportRequest(options.editorViewportRequestId);
       return notStarted(mysqlDataCharsetEnabled(context.connection) ? "blocked" : "cancelled", context.tabId);
+    }
+    if (options.mongoScript && context.connection?.db_type === "mongodb") {
+      // A script can reach any database of the connection through getSiblingDB, so any
+      // production marker asks first. The backend still checks every operation's target.
+      const connection = context.connection;
+      const markedDatabases = productionDatabases(connection);
+      if (!connection.is_production && !markedDatabases.length) {
+        return doExecute(sql, sourceOffset, { ...options, mongoScript: { confirmedProductionWrites: false } });
+      }
+      const confirmed = await productionSafetyStore.requestConfirmation({
+        sql,
+        connectionName: connection.name,
+        database: tab.database,
+        productionDatabases: connection.is_production ? [] : markedDatabases,
+        source: t("mongoScript.productionSource"),
+      });
+      if (confirmed) {
+        return doExecute(sql, sourceOffset, { ...options, mongoScript: { confirmedProductionWrites: true } });
+      }
+      cancelEditorViewportRequest(options.editorViewportRequestId);
+      return notStarted("cancelled", context.tabId);
     }
     // Redis: block dangerous commands when toggle is on (scan entire batch for highest safety level)
     if (context.connection?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
@@ -518,11 +559,13 @@ export function useSqlExecution(deps: {
       cancelEditorViewportRequest(options.editorViewportRequestId);
       return notStarted("missing-database", executionTabId);
     }
-    const statementCount = splitSqlStatementRanges(
-      sql,
-      executionDatabaseType,
-      sqlStatementParameterOptionsForCompatibility(executionDatabaseType, executionDatabaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(tab.connectionId, tab.database) : executionDatabaseType === "kingbase" ? executionConnection?.database_info?.compatibilityMode : undefined),
-    ).length;
+    const statementCount = options.mongoScript
+      ? 1
+      : splitSqlStatementRanges(
+          sql,
+          executionDatabaseType,
+          sqlStatementParameterOptionsForCompatibility(executionDatabaseType, executionDatabaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(tab.connectionId, tab.database) : executionDatabaseType === "kingbase" ? executionConnection?.database_info?.compatibilityMode : undefined),
+        ).length;
     const redisConsoleSelected = executionDatabaseType === "redis" && tab.uiState?.redisResultViewMode === "console";
     // A single write/DDL statement has no result grid to show while it runs, so
     // it starts on the summary tab where the in-flight status is rendered
@@ -540,6 +583,7 @@ export function useSqlExecution(deps: {
     const producedResult = await queryStore.executeCurrentSql(sql, {
       tabId: executionTabId,
       ...(isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : {}),
+      ...(options.mongoScript ? { mongoScript: options.mongoScript } : {}),
       ...(sourceOffset !== undefined ? { sourceOffset } : {}),
       ...(options.openInNewResultTab ? { openInNewResultTab: true } : {}),
       ...(options.editorViewportRequestId !== undefined ? { onExecutionStarted: () => deps.onExecutionStarted?.(options.editorViewportRequestId!) } : {}),
@@ -1131,6 +1175,7 @@ export function useSqlExecution(deps: {
     suppressDangerConfirm,
     tryExecute,
     tryExecuteInNewResultTab,
+    tryExecuteMongoScript,
     doExecute,
     cancelActiveExecution,
     requestDangerConfirmation,

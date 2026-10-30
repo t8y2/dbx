@@ -81,6 +81,8 @@ import {
 } from "@/lib/mongo/mongoShellCommand";
 import { prepareMongoQueryText, type MongoQueryLanguage } from "@/lib/mongo/mongoSql";
 import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
+import { looksLikeMongoScript } from "@/lib/mongo/mongoScript";
+import { localizeMongoScriptError, localizeMongoScriptMessages, mongoScriptErrorReportsProgress } from "@/lib/mongo/mongoScriptErrors";
 import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
@@ -208,6 +210,9 @@ const QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR = "Streaming export is unsupported f
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
 const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
+// A canceled MongoDB script answers with the operations that already ran; give it longer
+// than an ordinary query before falling back to a bare "Query canceled".
+const MONGO_SCRIPT_CANCEL_SETTLE_TIMEOUT_MS = 30_000;
 const QUERY_METADATA_PREFLIGHT_BUDGET_MS = 1_000;
 const QUERY_METADATA_PREFLIGHT_TIMEOUT = Symbol("query-metadata-preflight-timeout");
 const SAVED_SQL_EDITOR_POSITION_PERSIST_DELAY_MS = 500;
@@ -228,6 +233,12 @@ export interface EditorWorkspacePersistState {
 
 export type QueryMetadataPatch = Pick<QueryTab, "queryAnalysis" | "querySourceColumns" | "queryWriteTargets" | "queryEditabilityReason" | "tableMeta" | "resultColumnComments" | "resultColumnTypeLabels" | "queryDisplaySourceColumns">;
 type QueryDisplayMetadataReady = Pick<QueryMetadataPatch, "resultColumnComments" | "resultColumnTypeLabels" | "queryDisplaySourceColumns">;
+
+/** An explicit request to run editor text as a MongoDB script. */
+export interface MongoScriptExecution {
+  /** The user confirmed production writes; the backend decides per operation which writes are production. */
+  confirmedProductionWrites?: boolean;
+}
 
 interface BatchSqlResumeOptions {
   batch: BatchSqlExecution;
@@ -1690,6 +1701,8 @@ export const useQueryStore = defineStore("query", () => {
   const savedSqlEditorPositionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const pendingTabSessionResets = new Map<string, Promise<void>>();
   const pendingResultRunRestores = new Map<string, string>();
+  // Executions currently running through the MongoDB script runtime.
+  const mongoScriptExecutionIds = new Set<string>();
   const pendingResultRunPreparations = new WeakMap<QueryTab, string>();
   const multiDbExecutionWorkers = new Map<string, QueryTab>();
   const multiDbExecutionWorkerScopes = new Map<string, Set<string>>();
@@ -6997,7 +7010,7 @@ export const useQueryStore = defineStore("query", () => {
     touchResult(tab);
   }
 
-  function clearAcknowledgedCancelIfStillRunning(id: string, executionId: string) {
+  function clearAcknowledgedCancelIfStillRunning(id: string, executionId: string, settleTimeoutMs = CANCEL_ACK_SETTLE_TIMEOUT_MS) {
     setTimeout(() => {
       const current = tabs.value.find((t) => t.id === id);
       if (!current || current.executionId !== executionId || !current.isCancelling) {
@@ -7020,7 +7033,7 @@ export const useQueryStore = defineStore("query", () => {
         touchResult(current);
       }
       clearLiveBatchSqlExecution(current, executionId);
-    }, CANCEL_ACK_SETTLE_TIMEOUT_MS);
+    }, settleTimeoutMs);
   }
 
   async function executeCurrentTab() {
@@ -7031,7 +7044,7 @@ export const useQueryStore = defineStore("query", () => {
     await executeCurrentSql(tab.sql);
   }
 
-  async function executeCurrentSql(sql: string, options?: { tabId?: string; skipRedisSafetyCheck?: boolean; sourceOffset?: number; openInNewResultTab?: boolean; onExecutionStarted?: () => void }) {
+  async function executeCurrentSql(sql: string, options?: { tabId?: string; skipRedisSafetyCheck?: boolean; mongoScript?: MongoScriptExecution; sourceOffset?: number; openInNewResultTab?: boolean; onExecutionStarted?: () => void }) {
     // Execution targets the requesting tab; only fall back to the global
     // active tab when the caller did not (or could not) capture one.
     const executionTabId = options?.tabId ?? activeTabId.value;
@@ -8146,6 +8159,8 @@ export const useQueryStore = defineStore("query", () => {
       replaceActiveResultInGroup?: boolean;
       retainDisplayedResult?: boolean;
       skipRedisSafetyCheck?: boolean;
+      /** Run the text through the MongoDB script runtime (explicit toolbar action only). */
+      mongoScript?: MongoScriptExecution;
       sourceOffset?: number;
       sourceTraceId?: string;
       skipEnsureConnected?: boolean;
@@ -8568,10 +8583,82 @@ export const useQueryStore = defineStore("query", () => {
         return producedResult;
       }
 
+      if (conn?.db_type === "mongodb" && options?.mongoScript && sql.trim()) {
+        // Only the explicit "Run as MongoDB script" action reaches the backend's embedded
+        // script runtime; ordinary execution never turns a parse failure into running code.
+        const scriptDatabase = executionTarget?.database ?? tab.database;
+        const scriptStartedAt = performance.now();
+        const scriptMaxRows = effectiveQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows);
+        queryExecutionLog("info", "mongo-script:start", { traceId, sqlLength: sql.length });
+        let scriptResult: QueryResult;
+        // Writes that already ran are reported in the error and must stay visible, even when
+        // the run was canceled and would otherwise fall back to the previous result.
+        let scriptReportsProgress = false;
+        mongoScriptExecutionIds.add(executionId);
+        try {
+          const scriptOptions = {
+            ...(scriptMaxRows ? { maxRows: scriptMaxRows } : {}),
+            // No query timeout means the server's longest allowed script run.
+            timeoutMs: queryTimeoutSecs > 0 ? queryTimeoutSecs * 1000 : Number.MAX_SAFE_INTEGER,
+            confirmedProductionWrites: options.mongoScript.confirmedProductionWrites === true,
+          };
+          const raw = await api.mongoExecuteScript(executionConnectionId, scriptDatabase ?? "", sql, scriptOptions, executionId);
+          const messages = localizeMongoScriptMessages(raw.messages, i18n.global.t);
+          scriptResult = markQueryResultRowsRaw(annotateQueryResultSource({ ...raw, ...(messages ? { messages } : {}), execution_time_ms: Math.round(performance.now() - scriptStartedAt) }, sql));
+        } catch (error: any) {
+          scriptReportsProgress = mongoScriptErrorReportsProgress(error instanceof Error ? error.message : String(error ?? ""));
+          scriptResult = annotateQueryResultSource(toErrorResult(error), sql);
+          const message = scriptResult.rows[0]?.[0];
+          if (typeof message === "string") scriptResult.rows[0]![0] = localizeMongoScriptError(message, i18n.global.t);
+        } finally {
+          mongoScriptExecutionIds.delete(executionId);
+        }
+        queryExecutionLog("info", "mongo-script:done", { traceId, elapsed: elapsed() });
+        const current = findExecutionTab(id);
+        if (current?.executionId === executionId) {
+          reconcileBatchSqlResults(current, executionId, [scriptResult]);
+          if (scriptReportsProgress) pendingResultRunRestores.delete(executionId);
+          else if (captureResultRun && current.isCancelling && restorePendingResultRun(current, executionId)) return false;
+          const previousDisplayedResults = [current.result, ...(current.results ?? [])];
+          current.results = undefined;
+          current.activeResultIndex = undefined;
+          current.result = scriptResult;
+          if (!captureResultRun && previousDisplayedResults.some(Boolean)) {
+            releaseReplacedResultLargeValues(current, ...previousDisplayedResults);
+          }
+          publishResultGeneration(current, "execute");
+          producedResult = current.result !== undefined;
+          touchResult(current);
+          current.queryAnalysis = undefined;
+          current.querySourceColumns = undefined;
+          current.queryWriteTargets = undefined;
+          current.resultColumnComments = undefined;
+          current.queryDisplaySourceColumns = undefined;
+          current.queryEditabilityReason = undefined;
+          current.mongoEditTarget = undefined;
+          current.tableMeta = undefined;
+          current.resultBaseSql = options?.resultBaseSql ?? sql;
+          current.resultSortedSql = options?.resultSortedSql;
+          current.resultPageSql = undefined;
+          current.resultPageLimit = undefined;
+          current.resultPageOffset = undefined;
+          current.resultExecutedPageLimit = undefined;
+          current.resultExecutedPageOffset = undefined;
+          current.resultCountSql = undefined;
+          current.resultSessionId = undefined;
+          current.resultClientSessionId = undefined;
+          current.resultTotalRowCount = undefined;
+          current.resultTotalRowCountLoading = false;
+          syncDisplayedResultRun(current, current.resultBaseSql ?? options?.resultBaseSql ?? sql, captureResultRun);
+        }
+        return producedResult;
+      }
+
       if (conn?.db_type === "mongodb" && mongoCommands.length === 0 && sql.trim()) {
         // Avoid falling through to the SQL executor, which only returns the generic
         // "Use MongoDB-specific commands" rejection and hides parse/syntax details.
-        throw new Error(describeMongoCommandParseFailure(sql));
+        const parseFailure = describeMongoCommandParseFailure(sql);
+        throw new Error(looksLikeMongoScript(sql) ? `${parseFailure}\n${i18n.global.t("mongoScript.useScriptAction")}` : parseFailure);
       }
 
       if (mongoCommands.length > 0) {
@@ -10466,7 +10553,7 @@ export const useQueryStore = defineStore("query", () => {
     try {
       const canceled = await withCancelQueryTimeout(api.cancelQuery(executionId));
       if (canceled) {
-        clearAcknowledgedCancelIfStillRunning(id, executionId);
+        clearAcknowledgedCancelIfStillRunning(id, executionId, mongoScriptExecutionIds.has(executionId) ? MONGO_SCRIPT_CANCEL_SETTLE_TIMEOUT_MS : CANCEL_ACK_SETTLE_TIMEOUT_MS);
       }
       if (!canceled) {
         const current = findExecutionTab(id);

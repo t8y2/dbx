@@ -7146,6 +7146,18 @@ export default withEnglishFallback({
     downloadValueTextFileType: "テキストファイル",
     downloadValueSuccess: "Redis 値をダウンロードしました",
   },
+  mongoScript: {
+    execute: "MongoDB スクリプトとして実行",
+    executeTooltip: "MongoDB スクリプトとして実行：ループ・変数・関数などの JavaScript と db.* 呼び出しに対応します。最長 10 分間実行されます。書き込みはロールバックされません。",
+    progressConfirmed: "完了が確認された操作：{count} 件（うち書き込み {writes} 件）。",
+    progressUnknown: "結果不明（適用された可能性があります）：{operation}",
+    progressNotRolledBack: "書き込みはロールバックされません。",
+    messageUnknownWrite: "スクリプトが失敗した書き込みを捕捉しました。結果は不明です：{operation}",
+    messageUnknownWritesDropped: "スクリプトがさらに {count} 件の失敗した書き込みを捕捉しました。結果は不明です。",
+    timedOut: "MongoDB スクリプトが {ms} ms でタイムアウトしました。",
+    productionSource: "MongoDB スクリプト",
+    useScriptAction: "JavaScript スクリプトのようです。エディターツールバーの「MongoDB スクリプトとして実行」で実行してください。",
+  },
   mongo: {
     documents: "{count}ドキュメント",
     addField: "フィールドを追加",

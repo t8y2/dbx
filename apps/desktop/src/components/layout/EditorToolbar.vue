@@ -32,6 +32,7 @@ import {
   WrapText,
   RefreshCw,
   UserRound,
+  Braces,
   Copy,
 } from "@lucide/vue";
 import { supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
@@ -61,6 +62,7 @@ import { formatShortcutDisplay, formatShortcutTooltip } from "@/lib/editor/short
 import { resolveNextEditorToolbarTier, type EditorToolbarTier } from "@/lib/tabs/editorToolbarLayout";
 import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
+import { useMongoScriptAvailable } from "@/lib/mongo/mongoScriptAvailability";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
@@ -107,6 +109,7 @@ const emit = defineEmits<{
   toolbarExecute: [source: "pointer" | "keyboard"];
   toolbarExecuteAll: [source: "pointer" | "keyboard"];
   toolbarExecuteInNewResultTab: [source: "pointer" | "keyboard"];
+  toolbarExecuteMongoScript: [source: "pointer" | "keyboard"];
   executePointerDown: [];
   cancel: [];
   previewChanges: [];
@@ -139,6 +142,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const mongoScriptAvailable = useMongoScriptAvailable();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
@@ -594,6 +598,10 @@ function onExecuteInNewResultTabClick(event: MouseEvent) {
   emit("toolbarExecuteInNewResultTab", event.detail > 0 ? "pointer" : "keyboard");
 }
 
+function onExecuteMongoScriptClick(event: MouseEvent) {
+  emit("toolbarExecuteMongoScript", event.detail > 0 ? "pointer" : "keyboard");
+}
+
 function changeEncoding(event: Event) {
   const select = event.target as HTMLSelectElement;
   const encoding = select.value as NonNullable<QueryTab["externalSqlEncoding"]>;
@@ -687,6 +695,23 @@ defineExpose({
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ executeInNewResultTabTooltip }}</TooltipContent>
+      </Tooltip>
+      <Tooltip v-if="activeConnection?.db_type === 'mongodb' && mongoScriptAvailable">
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200"
+            :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining || !executableSql.trim()"
+            :aria-label="t('mongoScript.execute')"
+            data-testid="execute-mongo-script"
+            @mousedown.prevent="onExecutePointerDown"
+            @click="onExecuteMongoScriptClick"
+          >
+            <Braces class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("mongoScript.executeTooltip") }}</TooltipContent>
       </Tooltip>
       <Tooltip v-if="showPreviewButton">
         <TooltipTrigger as-child>

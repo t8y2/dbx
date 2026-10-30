@@ -384,7 +384,7 @@ test("workspace Cargo flags preserve full versus fast coverage and strict clippy
     assert.ok(command.includes("--workspace"));
     assert.ok(command.includes("--locked"));
     for (const pkg of ["dbx", "dbx-core", "dbx-web"]) {
-      for (const feature of ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-sqlcipher"]) assert.ok(features.includes(`${pkg}/${feature}`));
+      for (const feature of ["duckdb-sidecar", "dynamodb", "mongo-script", "mq-admin", "sqlite-sqlcipher"]) assert.ok(features.includes(`${pkg}/${feature}`));
       assert.equal(features.includes(`${pkg}/system-fonts`), mode === "full");
     }
     assert.deepEqual(rustCommand("clippy", "workspace", mode).slice(-3), ["--", "-D", "warnings"]);

@@ -6633,6 +6633,18 @@ export default withEnglishFallback({
       },
     },
   },
+  mongoScript: {
+    execute: "Jalankan sebagai skrip MongoDB",
+    executeTooltip: "Jalankan sebagai skrip MongoDB: JavaScript (perulangan, variabel, fungsi) dengan panggilan db.*. Berjalan paling lama 10 menit. Penulisan tidak dibatalkan.",
+    progressConfirmed: "Operasi selesai yang terkonfirmasi: {count} ({writes} penulisan).",
+    progressUnknown: "Hasil tidak diketahui, mungkin sudah atau belum diterapkan: {operation}",
+    progressNotRolledBack: "Penulisan tidak dibatalkan.",
+    messageUnknownWrite: "Skrip menangkap penulisan yang gagal; hasilnya tidak diketahui: {operation}",
+    messageUnknownWritesDropped: "Skrip menangkap {count} penulisan gagal lainnya; hasilnya tidak diketahui.",
+    timedOut: "Skrip MongoDB melewati batas waktu setelah {ms} ms.",
+    productionSource: "Skrip MongoDB",
+    useScriptAction: 'Ini tampak seperti skrip JavaScript. Gunakan "Jalankan sebagai skrip MongoDB" di bilah alat editor.',
+  },
   mongo: {
     documents: "{count} dokumen",
     addField: "Tambah Field",

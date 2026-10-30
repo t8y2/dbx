@@ -1,5 +1,16 @@
 import type { QueryResult } from "@/types/database";
-import { mysqlUserAccount, normalizeStarrocksCatalog, POSTGRES_TABLE_PRIVILEGES, quoteMySqlIdentifier, quotePostgresIdentifier, type CreatePrincipalInput, type DatabaseTablePrivilegeGrant, type DatabaseUserAdminProvider, type DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
+import {
+  isPostgresGrantSchema,
+  mysqlUserAccount,
+  normalizeStarrocksCatalog,
+  POSTGRES_TABLE_PRIVILEGES,
+  quoteMySqlIdentifier,
+  quotePostgresIdentifier,
+  type CreatePrincipalInput,
+  type DatabaseTablePrivilegeGrant,
+  type DatabaseUserAdminProvider,
+  type DatabaseUserIdentity,
+} from "@/lib/database/databaseUserAdmin";
 
 export type AuthorizationAccountType = "standard" | "admin";
 export type AuthorizationPreset = "readWrite" | "readOnly" | "ddl" | "dml" | "custom";
@@ -281,11 +292,30 @@ export function buildGrantAuthorizationPlan(input: GrantAuthorizationPlanInput):
     const database = selection.database.trim();
     if (!database) continue;
     const model = input.provider.authorizationModel;
-    const targetScope = selection.tables !== undefined || model === "postgres" || model === "starrocks" ? "table" : "database";
-    const desiredPrivileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges, targetScope);
+    const schemaWideGrant = model === "postgres" && selection.tables === undefined;
+    const targetScope = schemaWideGrant || selection.tables !== undefined || model === "starrocks" ? "table" : "database";
+    const scopeForPrivileges = schemaWideGrant ? "database" : targetScope;
+    const desiredPrivileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges, scopeForPrivileges);
     if (desiredPrivileges.length === 0) continue;
 
     if (model === "postgres") {
+      if (schemaWideGrant) {
+        // Schema-wide changes reuse the creation flow: USAGE, current objects and
+        // ALTER DEFAULT PRIVILEGES for future objects. Granting only table
+        // privileges leaves the role unable to see the schema at all, and
+        // revoking only table privileges leaves the future-object grants behind.
+        const schemas = uniqueSchemas(selection.schemas ?? []);
+        if (schemas.length === 0) continue;
+        steps.push(
+          ...postgresDatabaseAuthorizationSteps(input.user, database, desiredPrivileges, schemas, "", steps.length, undefined, {
+            dependsOn: [],
+            grantOption: input.grantOption,
+            idPrefix: input.revoke ? "revoke" : "change",
+            revoke: input.revoke,
+          }),
+        );
+        continue;
+      }
       const targets = selection.tables === undefined ? uniqueSchemas(selection.schemas ?? []).map((schema) => ({ name: "*", schema })) : uniqueTables(selection.tables);
       for (const target of targets) {
         const schema = target.schema?.trim();
@@ -437,20 +467,33 @@ function adminPrincipalGrantSql(provider: DatabaseUserAdminProvider, principal: 
   return `ALTER ROLE ${quotePostgresIdentifier(principal.user)} SUPERUSER CREATEDB CREATEROLE;`;
 }
 
-function postgresDatabaseAuthorizationSteps(user: DatabaseUserIdentity, databaseName: string, privileges: string[], schemaNames: string[], createStepId: string, index: number, selectedTables?: AuthorizationTableSelection[]): AuthorizationPlanStep[] {
+interface PostgresAuthorizationStepsOptions {
+  dependsOn?: string[];
+  grantOption?: boolean;
+  idPrefix?: string;
+  revoke?: boolean;
+}
+
+function postgresDatabaseAuthorizationSteps(user: DatabaseUserIdentity, databaseName: string, privileges: string[], schemaNames: string[], createStepId: string, index: number, selectedTables?: AuthorizationTableSelection[], options: PostgresAuthorizationStepsOptions = {}): AuthorizationPlanStep[] {
   const role = quotePostgresIdentifier(user.user);
   const database = quotePostgresIdentifier(databaseName);
+  const dependsOn = options.dependsOn ?? [createStepId];
+  const idPrefix = options.idPrefix ?? "grant";
+  const revoke = options.revoke === true;
+  const withGrantOption = !revoke && options.grantOption ? " WITH GRANT OPTION" : "";
+  const verb = revoke ? "REVOKE" : "GRANT";
+  const grantee = revoke ? "FROM" : "TO";
   const privilegeSet = new Set(uniquePrivileges(privileges));
   const databasePrivileges = uniquePrivileges(["CONNECT", ...(privilegeSet.has("CREATE") ? ["CREATE"] : []), ...(privilegeSet.has("TEMPORARY") ? ["TEMPORARY"] : [])]);
-  const databaseStepId = `grant-database-${index}`;
+  const databaseStepId = `${idPrefix}-database-${index}`;
   const steps: AuthorizationPlanStep[] = [
     {
       id: databaseStepId,
-      label: `grant ${user.user} access to ${databaseName}`,
+      label: `${verb.toLowerCase()} ${user.user} access to ${databaseName}`,
       database: "",
-      sql: `GRANT ${databasePrivileges.join(", ")} ON DATABASE ${database} TO ${role};`,
-      dependsOn: [createStepId],
-      operation: "grantDatabase",
+      sql: `${verb} ${databasePrivileges.join(", ")} ON DATABASE ${database} ${grantee} ${role}${withGrantOption};`,
+      dependsOn,
+      operation: revoke ? "revokePrivileges" : "grantDatabase",
       subject: user.user,
       targetDatabase: databaseName,
     },
@@ -463,13 +506,14 @@ function postgresDatabaseAuthorizationSteps(user: DatabaseUserIdentity, database
     for (const [schemaIndex, schemaName] of schemas.entries()) {
       steps.push(
         authorizationObjectStep({
-          id: `grant-schema-${index}-${schemaIndex}`,
+          id: `${idPrefix}-schema-${index}-${schemaIndex}`,
           user,
           databaseName,
           schema: schemaName,
           objectScope: "schemas",
-          sql: `GRANT USAGE ON SCHEMA ${quotePostgresIdentifier(schemaName)} TO ${role};`,
-          dependsOn: [createStepId, databaseStepId],
+          sql: `${verb} USAGE ON SCHEMA ${quotePostgresIdentifier(schemaName)} ${grantee} ${role}${withGrantOption};`,
+          dependsOn: [...dependsOn, databaseStepId],
+          revoke,
         }),
       );
     }
@@ -478,14 +522,15 @@ function postgresDatabaseAuthorizationSteps(user: DatabaseUserIdentity, database
         const schemaName = table.schema!.trim();
         steps.push(
           authorizationObjectStep({
-            id: `grant-table-${index}-${tableIndex}`,
+            id: `${idPrefix}-table-${index}-${tableIndex}`,
             user,
             databaseName,
             schema: schemaName,
             objectScope: "tables",
-            sql: `GRANT ${tablePrivileges.join(", ")} ON TABLE ${quotePostgresIdentifier(schemaName)}.${quotePostgresIdentifier(table.name)} TO ${role};`,
-            dependsOn: [createStepId, databaseStepId],
+            sql: `${verb} ${tablePrivileges.join(", ")} ON TABLE ${quotePostgresIdentifier(schemaName)}.${quotePostgresIdentifier(table.name)} ${grantee} ${role}${withGrantOption};`,
+            dependsOn: [...dependsOn, databaseStepId],
             targetTable: table.name,
+            revoke,
           }),
         );
       }
@@ -501,67 +546,72 @@ function postgresDatabaseAuthorizationSteps(user: DatabaseUserIdentity, database
       const schema = quotePostgresIdentifier(schemaName);
       steps.push(
         authorizationObjectStep({
-          id: `grant-schema-${index}-${schemaIndex}`,
+          id: `${idPrefix}-schema-${index}-${schemaIndex}`,
           user,
           databaseName,
           schema: schemaName,
           objectScope: "schemas",
-          sql: `GRANT USAGE${privilegeSet.has("CREATE") ? ", CREATE" : ""} ON SCHEMA ${schema} TO ${role};`,
-          dependsOn: [createStepId, databaseStepId],
+          sql: `${verb} USAGE${privilegeSet.has("CREATE") ? ", CREATE" : ""} ON SCHEMA ${schema} ${grantee} ${role}${withGrantOption};`,
+          dependsOn: [...dependsOn, databaseStepId],
+          revoke,
         }),
       );
       if (tablePrivileges.length > 0) {
         const tablePrivilegeSql = tablePrivileges.join(", ");
         steps.push(
           authorizationObjectStep({
-            id: `grant-tables-${index}-${schemaIndex}`,
+            id: `${idPrefix}-tables-${index}-${schemaIndex}`,
             user,
             databaseName,
             schema: schemaName,
             objectScope: "tables",
-            sql: `GRANT ${tablePrivilegeSql} ON ALL TABLES IN SCHEMA ${schema} TO ${role};`,
-            dependsOn: [createStepId, databaseStepId],
+            sql: `${verb} ${tablePrivilegeSql} ON ALL TABLES IN SCHEMA ${schema} ${grantee} ${role}${withGrantOption};`,
+            dependsOn: [...dependsOn, databaseStepId],
+            revoke,
           }),
         );
       }
       if (sequencePrivileges) {
         steps.push(
           authorizationObjectStep({
-            id: `grant-sequences-${index}-${schemaIndex}`,
+            id: `${idPrefix}-sequences-${index}-${schemaIndex}`,
             user,
             databaseName,
             schema: schemaName,
             objectScope: "sequences",
-            sql: `GRANT ${sequencePrivileges} ON ALL SEQUENCES IN SCHEMA ${schema} TO ${role};`,
-            dependsOn: [createStepId, databaseStepId],
+            sql: `${verb} ${sequencePrivileges} ON ALL SEQUENCES IN SCHEMA ${schema} ${grantee} ${role}${withGrantOption};`,
+            dependsOn: [...dependsOn, databaseStepId],
+            revoke,
           }),
         );
       }
       if (privilegeSet.has("EXECUTE")) {
         steps.push(
           authorizationObjectStep({
-            id: `grant-functions-${index}-${schemaIndex}`,
+            id: `${idPrefix}-functions-${index}-${schemaIndex}`,
             user,
             databaseName,
             schema: schemaName,
             objectScope: "functions",
-            sql: `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ${schema} TO ${role};`,
-            dependsOn: [createStepId, databaseStepId],
+            sql: `${verb} EXECUTE ON ALL FUNCTIONS IN SCHEMA ${schema} ${grantee} ${role}${withGrantOption};`,
+            dependsOn: [...dependsOn, databaseStepId],
+            revoke,
           }),
         );
       }
     }
 
     const schemaPrivileges = privilegeSet.has("CREATE") ? "USAGE, CREATE" : "USAGE";
-    steps.push(authorizationFutureObjectStep({ id: `grant-default-schemas-${index}`, user, databaseName, objectScope: "schemas", privileges: schemaPrivileges, dependsOn: [createStepId, databaseStepId] }));
+    const defaultStepOptions = { dependsOn: [...dependsOn, databaseStepId], grantOption: options.grantOption, revoke };
+    steps.push(authorizationFutureObjectStep({ id: `${idPrefix}-default-schemas-${index}`, user, databaseName, objectScope: "schemas", privileges: schemaPrivileges, ...defaultStepOptions }));
     if (tablePrivileges.length > 0) {
-      steps.push(authorizationFutureObjectStep({ id: `grant-default-tables-${index}`, user, databaseName, objectScope: "tables", privileges: tablePrivileges.join(", "), dependsOn: [createStepId, databaseStepId] }));
+      steps.push(authorizationFutureObjectStep({ id: `${idPrefix}-default-tables-${index}`, user, databaseName, objectScope: "tables", privileges: tablePrivileges.join(", "), ...defaultStepOptions }));
     }
     if (sequencePrivileges) {
-      steps.push(authorizationFutureObjectStep({ id: `grant-default-sequences-${index}`, user, databaseName, objectScope: "sequences", privileges: sequencePrivileges, dependsOn: [createStepId, databaseStepId] }));
+      steps.push(authorizationFutureObjectStep({ id: `${idPrefix}-default-sequences-${index}`, user, databaseName, objectScope: "sequences", privileges: sequencePrivileges, ...defaultStepOptions }));
     }
     if (privilegeSet.has("EXECUTE")) {
-      steps.push(authorizationFutureObjectStep({ id: `grant-default-functions-${index}`, user, databaseName, objectScope: "functions", privileges: "EXECUTE", dependsOn: [createStepId, databaseStepId] }));
+      steps.push(authorizationFutureObjectStep({ id: `${idPrefix}-default-functions-${index}`, user, databaseName, objectScope: "functions", privileges: "EXECUTE", ...defaultStepOptions }));
     }
   }
   return steps;
@@ -576,16 +626,17 @@ interface AuthorizationObjectStepInput {
   dependsOn: string[];
   schema?: string;
   targetTable?: string;
+  revoke?: boolean;
 }
 
 function authorizationObjectStep(input: AuthorizationObjectStepInput): AuthorizationPlanStep {
   return {
     id: input.id,
-    label: `grant current ${input.objectScope} to ${input.user.user} in ${input.databaseName}`,
+    label: `${input.revoke ? "revoke" : "grant"} current ${input.objectScope} ${input.revoke ? "from" : "to"} ${input.user.user} in ${input.databaseName}`,
     database: input.databaseName,
     sql: input.sql,
     dependsOn: input.dependsOn,
-    operation: "grantCurrentObjects",
+    operation: input.revoke ? "revokePrivileges" : "grantCurrentObjects",
     subject: input.user.user,
     targetDatabase: input.databaseName,
     targetSchema: input.schema,
@@ -603,17 +654,20 @@ interface AuthorizationFutureObjectStepInput {
   privileges: string;
   dependsOn: string[];
   owner?: string;
+  grantOption?: boolean;
+  revoke?: boolean;
 }
 
 function authorizationFutureObjectStep(input: AuthorizationFutureObjectStepInput): AuthorizationPlanStep {
   const ownerSql = input.owner ? ` FOR ROLE ${quotePostgresIdentifier(input.owner)}` : "";
+  const withGrantOption = !input.revoke && input.grantOption ? " WITH GRANT OPTION" : "";
   return {
     id: input.id,
-    label: `grant future ${input.objectScope} from ${input.owner ?? "current role"} to ${input.user.user} in ${input.databaseName}`,
+    label: `${input.revoke ? "revoke" : "grant"} future ${input.objectScope} for ${input.owner ?? "current role"} ${input.revoke ? "from" : "to"} ${input.user.user} in ${input.databaseName}`,
     database: input.databaseName,
-    sql: `ALTER DEFAULT PRIVILEGES${ownerSql} GRANT ${input.privileges} ON ${input.objectScope.toUpperCase()} TO ${quotePostgresIdentifier(input.user.user)};`,
+    sql: `ALTER DEFAULT PRIVILEGES${ownerSql} ${input.revoke ? "REVOKE" : "GRANT"} ${input.privileges} ON ${input.objectScope.toUpperCase()} ${input.revoke ? "FROM" : "TO"} ${quotePostgresIdentifier(input.user.user)}${withGrantOption};`,
     dependsOn: input.dependsOn,
-    operation: "grantFutureObjects",
+    operation: input.revoke ? "revokePrivileges" : "grantFutureObjects",
     subject: input.user.user,
     targetDatabase: input.databaseName,
     objectScope: input.objectScope,
@@ -637,16 +691,7 @@ function postgresFullFutureObjectSteps(user: DatabaseUserIdentity, databaseName:
 }
 
 function uniqueSchemas(schemaNames: string[]): string[] {
-  return Array.from(
-    new Set(
-      schemaNames
-        .map((schema) => schema.trim())
-        .filter((schema) => {
-          const normalized = schema.toLowerCase();
-          return !!schema && normalized !== "information_schema" && normalized !== "sys_catalog" && !normalized.startsWith("pg_");
-        }),
-    ),
-  );
+  return Array.from(new Set(schemaNames.map((schema) => schema.trim()).filter(isPostgresGrantSchema)));
 }
 
 function uniquePrivileges(privileges: string[]): string[] {

@@ -19,7 +19,7 @@ import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
-import { grantsFromQueryResult, normalizeStarrocksCatalog, resolveDatabaseUserAdminProviderForConnection, type DatabaseTablePrivilegeGrant, type DatabaseUserIdentity, type PrivilegeScope } from "@/lib/database/databaseUserAdmin";
+import { grantsFromQueryResult, isPostgresGrantSchema, normalizeStarrocksCatalog, resolveDatabaseUserAdminProviderForConnection, type DatabaseTablePrivilegeGrant, type DatabaseUserIdentity, type PrivilegeScope } from "@/lib/database/databaseUserAdmin";
 import {
   authorizationPlanSql,
   authorizationPlanStatus,
@@ -61,6 +61,9 @@ interface DatabaseUserAdminTabUiState {
 
 const { initialState: restoredUiState, track: trackUiState } = useTabUiState<DatabaseUserAdminTabUiState>({}, "DatabaseUserAdmin");
 const privilegeScopes: PrivilegeScope[] = ["mysql", "database", "schema", "table", "role", "system"];
+// Baseline for the table-privilege diff; truncated reads must not silently
+// produce an incomplete authorization plan.
+const TABLE_GRANT_ROW_LIMIT = 10000;
 const users = ref<DatabaseUserIdentity[]>([]);
 const selectedUserKey = ref(restoredUiState.selectedUserKey ?? "");
 const grants = ref<string[]>([]);
@@ -147,6 +150,11 @@ const currentTableGrants = ref<DatabaseTablePrivilegeGrant[]>([]);
 const currentTableGrantsLoaded = ref(false);
 const currentTableGrantsLoading = ref(false);
 const tableGrantLoadError = ref("");
+// PostgreSQL 的 schema 级授权需要真实的 schema 列表，避免手输拼写错误授到错误 schema
+const privilegeSchemaOptions = ref<string[]>([]);
+const privilegeSchemasLoading = ref(false);
+const privilegeSchemasError = ref("");
+let privilegeSchemaRequestId = 0;
 let createPlanRequestId = 0;
 let tableGrantRequestId = 0;
 let databaseLoadPromise: Promise<void> | undefined;
@@ -379,7 +387,8 @@ async function loadCurrentTableGrants() {
     if (createDatabasesLoadError.value) throw new Error(createDatabasesLoadError.value);
     const grantsByDatabase = await Promise.all(
       createDatabases.value.map(async ({ database }) => {
-        const result = await api.executeQuery(connectionId, database, userProvider.tableGrantsSql!(user), undefined, undefined, { maxRows: 10000 });
+        const result = await api.executeQuery(connectionId, database, userProvider.tableGrantsSql!(user), undefined, undefined, { maxRows: TABLE_GRANT_ROW_LIMIT });
+        if (result.truncated || result.has_more || result.rows.length >= TABLE_GRANT_ROW_LIMIT) throw new Error(t("userAdmin.tableGrantsTruncated", { limit: TABLE_GRANT_ROW_LIMIT }));
         return userProvider.parseTableGrants!(result, { database });
       }),
     );
@@ -419,6 +428,27 @@ function authorizationDatabaseOptionKey(option: AuthorizationDatabaseOption): st
 async function preparePrivilegeScopeEditor() {
   if (createDatabases.value.length === 0) await loadDatabases();
   if (provider.value?.authorizationModel === "postgres" && !currentTableGrantsLoaded.value) await loadCurrentTableGrants();
+}
+
+async function loadPrivilegeSchemas() {
+  if (!isPostgres.value) return;
+  const database = props.connection.database || "postgres";
+  const identity = connectionIdentity.value;
+  const requestId = ++privilegeSchemaRequestId;
+  privilegeSchemasLoading.value = true;
+  privilegeSchemasError.value = "";
+  try {
+    const options = (await api.listSchemas(props.connection.id, database)).filter(isPostgresGrantSchema).sort((left, right) => left.localeCompare(right));
+    if (requestId !== privilegeSchemaRequestId || identity !== connectionIdentity.value) return;
+    privilegeSchemaOptions.value = options;
+    if (!options.includes(privilegeDatabase.value.trim())) privilegeDatabase.value = options.includes("public") ? "public" : (options[0] ?? "");
+  } catch (error: any) {
+    if (requestId !== privilegeSchemaRequestId || identity !== connectionIdentity.value) return;
+    privilegeSchemaOptions.value = [];
+    privilegeSchemasError.value = error?.message || String(error);
+  } finally {
+    if (requestId === privilegeSchemaRequestId && identity === connectionIdentity.value) privilegeSchemasLoading.value = false;
+  }
 }
 
 function selectUser(user: DatabaseUserIdentity) {
@@ -512,6 +542,7 @@ function authorizationSelectionsValid(selections: DatabaseAuthorizationSelection
   if (!userProvider) return false;
   return selections.every((selection) => {
     if (selection.tables !== undefined && selection.tables.length === 0) return false;
+    if (selection.tables === undefined && selection.schemas !== undefined && selection.schemas.length === 0) return false;
     const targetScope = selection.tables === undefined && userProvider.authorizationModel !== "starrocks" ? "database" : "table";
     const available = authorizationPrivileges(userProvider, targetScope);
     if (selection.preset !== "custom") return authorizationPresetPrivileges(userProvider, selection.preset, selection.privileges, targetScope).length > 0;
@@ -524,7 +555,8 @@ async function prepareAuthorizationSelections(selections: DatabaseAuthorizationS
   return Promise.all(
     selections.map(async (selection) => ({
       ...selection,
-      schemas: selection.tables === undefined ? await api.listSchemas(props.connection.id, selection.database) : Array.from(new Set(selection.tables.flatMap((table) => (table.schema ? [table.schema] : [])))),
+      // 显式的 schema 选择优先；未指定时回退到库内可授权 schema（排除 pg_catalog 等系统 schema）
+      schemas: selection.tables !== undefined ? Array.from(new Set(selection.tables.flatMap((table) => (table.schema ? [table.schema] : [])))) : (selection.schemas ?? (await api.listSchemas(props.connection.id, selection.database)).filter(isPostgresGrantSchema)),
     })),
   );
 }
@@ -817,7 +849,7 @@ async function previewCreateUser() {
         ? await Promise.all(
             createDatabaseAuthorizations.value.map(async (selection) => ({
               ...selection,
-              schemas: await api.listSchemas(props.connection.id, selection.database),
+              schemas: selection.schemas ?? (await api.listSchemas(props.connection.id, selection.database)).filter(isPostgresGrantSchema),
             })),
           )
         : createAccountType.value === "standard"
@@ -1092,6 +1124,10 @@ watch(
     usersRequestId++;
     grantsRequestId++;
     databaseRequestId++;
+    privilegeSchemaRequestId++;
+    privilegeSchemaOptions.value = [];
+    privilegeSchemasLoading.value = false;
+    privilegeSchemasError.value = "";
     databaseLoadPromise = undefined;
     createPlanRequestId++;
     previewGeneration++;
@@ -1158,6 +1194,7 @@ watch(
   (scope) => {
     resetPrivilegeDefaults(scope);
     syncPrivilegeSelectionFromGrants();
+    if (scope === "schema" && isPostgres.value) void loadPrivilegeSchemas();
   },
 );
 
@@ -1181,12 +1218,14 @@ watch(
 onMounted(() => {
   void loadUsers();
   if (usePrivilegeScopeEditor.value) void preparePrivilegeScopeEditor();
+  if (privilegeScope.value === "schema" && isPostgres.value) void loadPrivilegeSchemas();
 });
 onBeforeUnmount(() => {
   clearPendingSql();
   usersRequestId++;
   grantsRequestId++;
   databaseRequestId++;
+  privilegeSchemaRequestId++;
 });
 </script>
 
@@ -1348,7 +1387,26 @@ onBeforeUnmount(() => {
                 <label class="mb-2 block text-xs font-medium">
                   {{ isPostgres && privilegeScope !== "database" ? t("userAdmin.schema") : t("userAdmin.database") }}
                 </label>
-                <Input v-model="privilegeDatabase" class="mb-3 h-8 text-xs" :placeholder="isPostgres ? 'public' : '*'" />
+                <template v-if="isPostgres && privilegeScope === 'schema'">
+                  <Select v-model="privilegeDatabase">
+                    <SelectTrigger class="mb-1 h-8 text-xs" :disabled="privilegeSchemasLoading || privilegeSchemaOptions.length === 0">
+                      <SelectValue :placeholder="t('userAdmin.schema')" />
+                    </SelectTrigger>
+                    <SelectContent position="popper">
+                      <SelectItem v-for="schema in privilegeSchemaOptions" :key="schema" :value="schema">{{ schema }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p v-if="privilegeSchemasLoading" class="mb-3 mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                    <Loader2 class="h-3 w-3 animate-spin" />
+                    {{ t("userAdmin.loadingSchemas") }}
+                  </p>
+                  <p v-else-if="privilegeSchemasError" class="mb-3 mt-1 text-[11px] text-destructive">
+                    {{ t("userAdmin.loadSchemasFailed", { message: privilegeSchemasError }) }}
+                    <button type="button" class="ml-1 text-primary" @click="loadPrivilegeSchemas">{{ t("userAdmin.retry") }}</button>
+                  </p>
+                  <div v-else class="mb-2" />
+                </template>
+                <Input v-else v-model="privilegeDatabase" class="mb-3 h-8 text-xs" :placeholder="isPostgres ? 'public' : '*'" />
                 <template v-if="!isPostgres || privilegeScope === 'table'">
                   <label class="mb-2 block text-xs font-medium">{{ t("userAdmin.table") }}</label>
                   <Input v-model="privilegeTable" class="mb-3 h-8 text-xs" placeholder="*" />

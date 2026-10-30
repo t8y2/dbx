@@ -121,7 +121,7 @@ describe("database authorization plans", () => {
     expect(revoke.steps[0].sql).toBe('REVOKE SELECT ON TABLE "tenant"."orders" FROM "reader";');
   });
 
-  it("revokes existing PostgreSQL table privileges across a selected schema", () => {
+  it("revokes the full schema-wide grant including future objects", () => {
     const plan = buildGrantAuthorizationPlan({
       provider: postgresUserAdminProvider,
       user: { user: "reader", host: "LOGIN" },
@@ -129,9 +129,108 @@ describe("database authorization plans", () => {
       currentGrants: [{ database: "app_db", schema: "sales", table: "orders", privilege: "SELECT", grantOption: false }],
       revoke: true,
     });
+    const sql = authorizationPlanSql(plan);
+
+    expect(sql).toContain('REVOKE CONNECT ON DATABASE "app_db" FROM "reader";');
+    expect(sql).toContain('REVOKE USAGE ON SCHEMA "sales" FROM "reader";');
+    expect(sql).toContain('REVOKE SELECT ON ALL TABLES IN SCHEMA "sales" FROM "reader";');
+    expect(sql).toContain('REVOKE SELECT ON ALL SEQUENCES IN SCHEMA "sales" FROM "reader";');
+    expect(sql).toContain('ALTER DEFAULT PRIVILEGES REVOKE USAGE ON SCHEMAS FROM "reader";');
+    expect(sql).toContain('ALTER DEFAULT PRIVILEGES REVOKE SELECT ON TABLES FROM "reader";');
+    expect(sql).toContain('ALTER DEFAULT PRIVILEGES REVOKE SELECT ON SEQUENCES FROM "reader";');
+    expect(sql).not.toContain("WITH GRANT OPTION");
+  });
+
+  it("revokes schema creation and function grants symmetrically", () => {
+    const plan = buildGrantAuthorizationPlan({
+      provider: postgresUserAdminProvider,
+      user: { user: "writer", host: "LOGIN" },
+      databases: [{ database: "app_db", preset: "readWrite", schemas: ["app"] }],
+      grantOption: true,
+      revoke: true,
+    });
+    const sql = authorizationPlanSql(plan);
+
+    expect(sql).toContain('REVOKE CONNECT, CREATE, TEMPORARY ON DATABASE "app_db" FROM "writer";');
+    expect(sql).toContain('REVOKE USAGE, CREATE ON SCHEMA "app" FROM "writer";');
+    expect(sql).toContain('REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA "app" FROM "writer";');
+    expect(sql).toContain('ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM "writer";');
+    expect(sql).not.toContain("WITH GRANT OPTION");
+  });
+
+  it("grants PostgreSQL schema-wide read-only access with USAGE and future objects for existing users", () => {
+    const plan = buildGrantAuthorizationPlan({
+      provider: postgresUserAdminProvider,
+      user: { user: "reader", host: "LOGIN" },
+      databases: [{ database: "app_db", preset: "readOnly", schemas: ["public", "sales", "pg_catalog"] }],
+    });
+    const sql = authorizationPlanSql(plan);
+
+    expect(sql).toContain('GRANT CONNECT ON DATABASE "app_db" TO "reader";');
+    expect(sql).toContain('GRANT USAGE ON SCHEMA "public" TO "reader";');
+    expect(sql).toContain('GRANT USAGE ON SCHEMA "sales" TO "reader";');
+    expect(sql).toContain('GRANT SELECT ON ALL TABLES IN SCHEMA "sales" TO "reader";');
+    expect(sql).toContain('GRANT SELECT ON ALL SEQUENCES IN SCHEMA "sales" TO "reader";');
+    expect(sql).toContain('ALTER DEFAULT PRIVILEGES GRANT USAGE ON SCHEMAS TO "reader";');
+    expect(sql).toContain('ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO "reader";');
+    expect(sql).toContain('ALTER DEFAULT PRIVILEGES GRANT SELECT ON SEQUENCES TO "reader";');
+    expect(sql).not.toContain('SCHEMA "pg_catalog"');
+    expect(sql).not.toContain("EXECUTE");
+    // 编辑路径没有 create-user 步骤，依赖只能指向计划内真实存在的步骤
+    expect(plan.steps.every((step) => (step.dependsOn ?? []).every((id) => plan.steps.some((other) => other.id === id)))).toBe(true);
+  });
+
+  it("applies WITH GRANT OPTION to PostgreSQL schema-wide grants", () => {
+    const plan = buildGrantAuthorizationPlan({
+      provider: postgresUserAdminProvider,
+      user: { user: "delegator", host: "LOGIN" },
+      databases: [{ database: "app_db", preset: "readOnly", schemas: ["public"] }],
+      grantOption: true,
+    });
+    const sql = authorizationPlanSql(plan);
+
+    expect(sql).toContain('GRANT SELECT ON ALL TABLES IN SCHEMA "public" TO "delegator" WITH GRANT OPTION;');
+    expect(sql).toContain('GRANT USAGE ON SCHEMA "public" TO "delegator" WITH GRANT OPTION;');
+    expect(sql).toContain('ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO "delegator" WITH GRANT OPTION;');
+  });
+
+  it("includes schema creation and function grants for PostgreSQL read/write schema-wide grants", () => {
+    const plan = buildGrantAuthorizationPlan({
+      provider: postgresUserAdminProvider,
+      user: { user: "writer", host: "LOGIN" },
+      databases: [{ database: "app_db", preset: "readWrite", schemas: ["app"] }],
+    });
+    const sql = authorizationPlanSql(plan);
+
+    expect(sql).toContain('GRANT CONNECT, CREATE, TEMPORARY ON DATABASE "app_db" TO "writer";');
+    expect(sql).toContain('GRANT USAGE, CREATE ON SCHEMA "app" TO "writer";');
+    expect(sql).toContain('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA "app" TO "writer";');
+    expect(sql).toContain('GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA "app" TO "writer";');
+    expect(sql).toContain('ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO "writer";');
+  });
+
+  it("keeps explicit PostgreSQL table selections on the fine-grained diff path", () => {
+    const plan = buildGrantAuthorizationPlan({
+      provider: postgresUserAdminProvider,
+      user: { user: "reader", host: "LOGIN" },
+      databases: [{ database: "app_db", preset: "readOnly", tables: [{ schema: "sales", name: "orders" }] }],
+    });
+    const sql = authorizationPlanSql(plan);
 
     expect(plan.steps).toHaveLength(1);
-    expect(plan.steps[0].sql).toBe('REVOKE SELECT ON ALL TABLES IN SCHEMA "sales" FROM "reader";');
+    expect(sql).toContain('GRANT SELECT ON TABLE "sales"."orders" TO "reader";');
+    expect(sql).not.toContain("ON ALL TABLES");
+    expect(sql).not.toContain("ALTER DEFAULT PRIVILEGES");
+  });
+
+  it("skips PostgreSQL schema-wide grants when no schema is selected", () => {
+    const plan = buildGrantAuthorizationPlan({
+      provider: postgresUserAdminProvider,
+      user: { user: "reader", host: "LOGIN" },
+      databases: [{ database: "app_db", preset: "readOnly", schemas: [] }],
+    });
+
+    expect(plan.steps).toHaveLength(0);
   });
 
   it("keeps same-named PostgreSQL tables in distinct schemas when restoring grants", () => {

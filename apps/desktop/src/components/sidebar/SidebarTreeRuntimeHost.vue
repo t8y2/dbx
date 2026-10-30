@@ -157,6 +157,7 @@ import {
   canEditDatabaseProperties as canEditDatabasePropertiesForNode,
   connectionNamespaceCreationTarget,
   editableDatabasePropertyGroups,
+  editableSchemaPropertyGroups,
   supportsDatabaseSearch,
   supportsConnectionDatabaseBrowser,
   supportsConnectionQueryActions,
@@ -257,7 +258,8 @@ import {
 } from "@/lib/table/tableClipboard";
 import { selectedSidebarBatchTargets, selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes } from "@/lib/sidebar/sidebarTreeSelection";
 import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionEditTarget, selectedConnectionMoveTargets } from "@/lib/sidebar/sidebarConnectionSelection";
-import { connectionSupportsDatabaseUserAdmin, resolveDatabaseUserAdminProviderForConnection, type DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
+import { connectionSupportsDatabaseUserAdmin, postgresListRolesSql, resolveDatabaseUserAdminProviderForConnection, usersFromPostgresRolesResult, type DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
+import { buildDatabaseOwnerSql, buildGetDatabaseOwnerSql, buildGetSchemaOwnerSql, buildSchemaOwnerSql } from "@/lib/database/databaseOwnerEditing";
 import { authorizationPlanSql, authorizationPlanStatus, buildCreateDatabaseAuthorizationPlan, executeAuthorizationPlan, type AuthorizationPlan, type AuthorizationStepResult } from "@/lib/database/databaseAuthorizationPlan";
 import { connectionSupportsProcessList } from "@/lib/database/processListDrivers";
 import { connectionSupportsServerDashboard } from "@/lib/database/mysqlServerStatus";
@@ -433,6 +435,13 @@ import {
   editDatabaseCharset,
   editDatabaseCollation,
   editDatabaseCommentText,
+  editDatabaseOwner,
+  editDatabaseOwnerOriginal,
+  schemaOwner,
+  schemaOwnerOriginal,
+  ownerRoleOptions,
+  ownerRolesLoading,
+  ownerRolesLoadError,
   showEditSchemaCommentDialog,
   showCompileErrorDialog,
   compileErrorTitle,
@@ -802,6 +811,9 @@ function routeTreeItemDialogController(node = activeNode.value) {
   routedController.canSetCreateDatabaseCharset = routedCanSetCreateDatabaseCharset(canSetCreateDatabaseCharset.value, canSetCreateDatabaseLocale.value);
   routedController.canEditDatabaseCharsetCollation = canEditDatabaseCharsetCollation.value;
   routedController.canEditDatabaseComment = canEditDatabaseComment.value;
+  routedController.canEditDatabaseOwner = canEditDatabaseOwner.value;
+  routedController.canEditSchemaComment = canEditSchemaComment.value;
+  routedController.canEditSchemaOwner = canEditSchemaOwner.value;
   emit("open-dialog-controller", routedController);
 }
 
@@ -5103,6 +5115,8 @@ const canEditDatabaseCharsetCollation = computed(() => databasePropertyGroups.va
 
 const canEditDatabaseComment = computed(() => databasePropertyGroups.value.includes("databaseComment"));
 
+const canEditDatabaseOwner = computed(() => databasePropertyGroups.value.includes("owner"));
+
 const canRenameDatabase = computed(() => {
   const node = activeNode.value;
   if (node.type !== "database" || !node.database) return false;
@@ -5129,6 +5143,12 @@ const canDropSchema = computed(() => {
 const canEditSchemaComment = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
   return activeNode.value.type === "schema" && !!activeNode.value.database && !isXuguSyntheticTreeNode(config?.db_type, activeNode.value.type, activeNode.value.schema) && !connectionIsEffectivelyReadOnly(config) && supportsSchemaComment(effectiveDatabaseTypeForConnection(config));
+});
+
+const canEditSchemaOwner = computed(() => {
+  const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
+  const node = activeNode.value;
+  return node.type === "schema" && !!node.database && !isXuguSyntheticTreeNode(config?.db_type, node.type, node.schema) && !connectionIsEffectivelyReadOnly(config) && editableSchemaPropertyGroups(config, node).includes("owner");
 });
 
 const canBatchDropCascade = computed(() => {
@@ -5213,9 +5233,16 @@ function databasePropertyEditOptions() {
 
 async function refreshEditDatabasePropertiesPreviewSql() {
   editDatabasePropertiesPreviewSql.value = "";
+  const parts: string[] = [];
   const options = databasePropertyEditOptions();
-  if (!options) return;
-  editDatabasePropertiesPreviewSql.value = await buildUpdateDatabasePropertiesSql(options).catch(() => "");
+  if (options) {
+    const sql = await buildUpdateDatabasePropertiesSql(options).catch(() => "");
+    if (sql) parts.push(sql);
+  }
+  if (canEditDatabaseOwner.value && editDatabaseOwner.value && editDatabaseOwner.value !== editDatabaseOwnerOriginal.value) {
+    parts.push(buildDatabaseOwnerSql(databasePropertyName(), editDatabaseOwner.value));
+  }
+  editDatabasePropertiesPreviewSql.value = parts.join("\n");
 }
 
 async function loadDatabaseCharsetProperties() {
@@ -5240,6 +5267,52 @@ async function loadDatabaseCommentProperty() {
   editDatabaseCommentText.value = resultColumnValue(result, ["comment"]);
 }
 
+let ownerRolesRequestId = 0;
+
+async function loadOwnerRoles() {
+  const node = activeNode.value;
+  if (!node.connectionId) return;
+  const requestId = ++ownerRolesRequestId;
+  ownerRolesLoading.value = true;
+  ownerRolesLoadError.value = "";
+  try {
+    const result = await api.executeQuery(node.connectionId, node.database || "postgres", postgresListRolesSql(), undefined, undefined, { maxRows: 5000 });
+    if (requestId !== ownerRolesRequestId) return;
+    ownerRoleOptions.value = [
+      ...new Set(
+        usersFromPostgresRolesResult(result)
+          .map((role) => role.user)
+          .filter(Boolean),
+      ),
+    ];
+  } catch (error: any) {
+    if (requestId !== ownerRolesRequestId) return;
+    ownerRoleOptions.value = [];
+    ownerRolesLoadError.value = error?.message || String(error);
+  } finally {
+    if (requestId === ownerRolesRequestId) ownerRolesLoading.value = false;
+  }
+}
+
+async function loadDatabaseOwnerProperty() {
+  const node = activeNode.value;
+  if (!node.connectionId) return;
+  const result = await api.executeQuery(node.connectionId, databasePropertyName(), buildGetDatabaseOwnerSql(databasePropertyName()), undefined, undefined, { maxRows: 1 });
+  const owner = resultColumnValue(result, ["owner"]);
+  editDatabaseOwnerOriginal.value = owner;
+  editDatabaseOwner.value = owner;
+}
+
+async function loadSchemaOwnerProperty() {
+  const node = activeNode.value;
+  if (!node.connectionId || !node.database) return;
+  const schema = node.schema || node.label;
+  const result = await api.executeQuery(node.connectionId, node.database, buildGetSchemaOwnerSql(schema), node.schema, undefined, { maxRows: 1 });
+  const owner = resultColumnValue(result, ["owner"]);
+  schemaOwnerOriginal.value = owner;
+  schemaOwner.value = owner;
+}
+
 async function openEditDatabasePropertiesDialog() {
   const node = activeNode.value;
   if (!canEditDatabaseProperties.value || !node.connectionId) return;
@@ -5247,6 +5320,10 @@ async function openEditDatabasePropertiesDialog() {
   editDatabaseCharset.value = "utf8mb4";
   editDatabaseCollation.value = "utf8mb4_unicode_ci";
   editDatabaseCommentText.value = "";
+  editDatabaseOwner.value = "";
+  editDatabaseOwnerOriginal.value = "";
+  ownerRoleOptions.value = [];
+  ownerRolesLoadError.value = "";
   editDatabasePropertiesPreviewSql.value = "";
   createDatabaseCharsetOptions.value = fallbackCreateDatabaseCharset.charsets;
   createDatabaseCollationsByCharset.value = fallbackCreateDatabaseCharset.collationsByCharset;
@@ -5256,9 +5333,9 @@ async function openEditDatabasePropertiesDialog() {
     if (canEditDatabaseCharsetCollation.value) {
       await loadCreateDatabaseCharsetMetadata("edit");
       await loadDatabaseCharsetProperties().catch(() => undefined);
-    } else if (canEditDatabaseComment.value) {
-      await loadDatabaseCommentProperty().catch(() => undefined);
     }
+    if (canEditDatabaseComment.value) await loadDatabaseCommentProperty().catch(() => undefined);
+    if (canEditDatabaseOwner.value) await Promise.all([loadDatabaseOwnerProperty().catch(() => undefined), loadOwnerRoles().catch(() => undefined)]);
     await refreshEditDatabasePropertiesPreviewSql();
   } finally {
     editDatabasePropertiesLoading.value = false;
@@ -5280,9 +5357,13 @@ async function confirmEditDatabaseProperties() {
       name: node.database || node.label,
     };
     const options = propertyGroups.includes("charsetCollation") ? { ...base, charset: editDatabaseCharset.value, collation: editDatabaseCollation.value } : propertyGroups.includes("databaseComment") ? { ...base, comment: editDatabaseCommentText.value } : null;
-    if (!options) return;
-    const sql = await buildUpdateDatabasePropertiesSql(options);
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database || node.label });
+    const statements: string[] = [];
+    if (options) statements.push(await buildUpdateDatabasePropertiesSql(options));
+    if (propertyGroups.includes("owner") && editDatabaseOwner.value && editDatabaseOwner.value !== editDatabaseOwnerOriginal.value) {
+      statements.push(buildDatabaseOwnerSql(node.database || node.label, editDatabaseOwner.value));
+    }
+    if (statements.length === 0) return;
+    for (const sql of statements) await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database || node.label });
     toast(t("contextMenu.editDatabasePropertiesSuccess", { name: node.label }), 3000);
     showEditDatabasePropertiesDialog.value = false;
     await connectionStore.loadDatabases(node.connectionId, { force: true });
@@ -5293,25 +5374,33 @@ async function confirmEditDatabaseProperties() {
   }
 }
 
-watch([editDatabaseCharset, editDatabaseCollation, editDatabaseCommentText], () => {
+watch([editDatabaseCharset, editDatabaseCollation, editDatabaseCommentText, editDatabaseOwner], () => {
   if (showEditDatabasePropertiesDialog.value) void refreshEditDatabasePropertiesPreviewSql();
 });
 
 async function refreshSchemaCommentPreviewSql() {
   const node = activeNode.value;
-  if (!canEditSchemaComment.value) {
+  if (!canEditSchemaComment.value && !canEditSchemaOwner.value) {
     schemaCommentPreviewSql.value = "";
     return;
   }
-  schemaCommentPreviewSql.value = await buildUpdateDatabasePropertiesSql({
-    databaseType: currentDatabaseType(),
-    target: "schema",
-    name: node.schema || node.label,
-    comment: schemaCommentText.value,
-  }).catch(() => "");
+  const parts: string[] = [];
+  if (canEditSchemaComment.value) {
+    const sql = await buildUpdateDatabasePropertiesSql({
+      databaseType: currentDatabaseType(),
+      target: "schema",
+      name: node.schema || node.label,
+      comment: schemaCommentText.value,
+    }).catch(() => "");
+    if (sql) parts.push(sql);
+  }
+  if (canEditSchemaOwner.value && schemaOwner.value && schemaOwner.value !== schemaOwnerOriginal.value) {
+    parts.push(buildSchemaOwnerSql(node.schema || node.label, schemaOwner.value));
+  }
+  schemaCommentPreviewSql.value = parts.join("\n");
 }
 
-watch(schemaCommentText, () => {
+watch([schemaCommentText, schemaOwner], () => {
   if (showEditSchemaCommentDialog.value) void refreshSchemaCommentPreviewSql();
 });
 
@@ -5321,18 +5410,25 @@ function schemaCommentFromResult(result: { columns?: string[]; rows?: unknown[] 
 
 async function openEditSchemaCommentDialog() {
   const node = activeNode.value;
-  if (!canEditSchemaComment.value || !node.connectionId || !node.database) return;
+  if ((!canEditSchemaComment.value && !canEditSchemaOwner.value) || !node.connectionId || !node.database) return;
   schemaCommentText.value = "";
+  schemaOwner.value = "";
+  schemaOwnerOriginal.value = "";
+  ownerRoleOptions.value = [];
+  ownerRolesLoadError.value = "";
   schemaCommentLoading.value = true;
   showEditSchemaCommentDialog.value = true;
   try {
     await connectionStore.ensureConnected(node.connectionId);
-    const sql = buildGetSchemaCommentSql({
-      databaseType: currentDatabaseType(),
-      name: node.schema || node.label,
-    });
-    const result = await api.executeQuery(node.connectionId, node.database, sql, node.schema, undefined, { maxRows: 1 });
-    schemaCommentText.value = schemaCommentFromResult(result);
+    if (canEditSchemaComment.value) {
+      const sql = buildGetSchemaCommentSql({
+        databaseType: currentDatabaseType(),
+        name: node.schema || node.label,
+      });
+      const result = await api.executeQuery(node.connectionId, node.database, sql, node.schema, undefined, { maxRows: 1 });
+      schemaCommentText.value = schemaCommentFromResult(result);
+    }
+    if (canEditSchemaOwner.value) await Promise.all([loadSchemaOwnerProperty().catch(() => undefined), loadOwnerRoles().catch(() => undefined)]);
     await refreshSchemaCommentPreviewSql();
   } catch {
     schemaCommentText.value = "";
@@ -5344,17 +5440,26 @@ async function openEditSchemaCommentDialog() {
 
 async function confirmEditSchemaComment() {
   const node = sidebarFormTarget.value ?? activeNode.value;
-  if (!canEditSchemaComment.value || !node.connectionId || !node.database || schemaCommentLoading.value) return;
+  if ((!canEditSchemaComment.value && !canEditSchemaOwner.value) || !node.connectionId || !node.database || schemaCommentLoading.value) return;
   schemaCommentLoading.value = true;
   try {
     await connectionStore.ensureConnected(node.connectionId);
-    const sql = await buildUpdateDatabasePropertiesSql({
-      databaseType: databaseTypeForNode(node),
-      target: "schema",
-      name: node.schema || node.label,
-      comment: schemaCommentText.value,
-    });
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    const statements: string[] = [];
+    if (canEditSchemaComment.value) {
+      statements.push(
+        await buildUpdateDatabasePropertiesSql({
+          databaseType: databaseTypeForNode(node),
+          target: "schema",
+          name: node.schema || node.label,
+          comment: schemaCommentText.value,
+        }),
+      );
+    }
+    if (canEditSchemaOwner.value && schemaOwner.value && schemaOwner.value !== schemaOwnerOriginal.value) {
+      statements.push(buildSchemaOwnerSql(node.schema || node.label, schemaOwner.value));
+    }
+    if (statements.length === 0) return;
+    for (const sql of statements) await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     toast(t("contextMenu.editSchemaCommentSuccess", { name: node.label }), 3000);
     showEditSchemaCommentDialog.value = false;
     await connectionStore.loadSchemas(node.connectionId, node.database, { force: true });
@@ -7009,8 +7114,16 @@ function databaseDialogCapabilities() {
     editDatabaseCollation,
     canEditDatabaseComment: canEditDatabaseComment.value,
     editDatabaseCommentText,
+    canEditDatabaseOwner: canEditDatabaseOwner.value,
+    editDatabaseOwner,
+    ownerRoleOptions,
+    ownerRolesLoading,
+    ownerRolesLoadError,
     editDatabasePropertiesPreviewSql,
     confirmEditDatabaseProperties,
+    canEditSchemaComment: canEditSchemaComment.value,
+    canEditSchemaOwner: canEditSchemaOwner.value,
+    schemaOwner,
   };
 }
 
@@ -7642,8 +7755,8 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canCreateSchema.value) {
       items.push({ sidebarActionId: "contextMenu.createSchema", label: t("contextMenu.createSchema"), action: openCreateSchemaDialog, icon: Plus });
     }
-    if (canEditSchemaComment.value) {
-      items.push({ sidebarActionId: "contextMenu.editSchemaComment", label: t("contextMenu.editSchemaComment"), action: openEditSchemaCommentDialog, icon: SquarePen });
+    if (canEditSchemaComment.value || canEditSchemaOwner.value) {
+      items.push({ sidebarActionId: "contextMenu.editSchemaComment", label: t("contextMenu.editSchemaProperties"), action: openEditSchemaCommentDialog, icon: SquarePen });
     }
     if (canOpenSqlFileExecution.value) {
       items.push({ sidebarActionId: "sqlFile.title", label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });

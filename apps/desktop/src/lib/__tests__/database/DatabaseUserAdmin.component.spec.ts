@@ -104,6 +104,7 @@ vi.mock("@lucide/vue", () => {
     ChevronDown: Icon,
     Globe2: Icon,
     KeyRound: Icon,
+    Layers: Icon,
     Lock: Icon,
     Loader2: Icon,
     Plus: Icon,
@@ -1048,6 +1049,71 @@ describe("DatabaseUserAdmin PostgreSQL create-user table grants", () => {
     expect(root?.textContent).not.toContain("ON ALL TABLES");
   });
 
+  it("lists grantable schemas and excludes deselected schemas from the schema-wide preview", async () => {
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.executeQuery.mockResolvedValueOnce({ columns: ["user", "host", "plugin"], rows: [["postgres", "LOGIN", "SUPERUSER"]] }).mockResolvedValueOnce({ columns: ["line"], rows: [["Role: postgres"]] });
+    mocks.listDatabases.mockResolvedValue([{ name: "app-db" }]);
+    mocks.listSchemas.mockResolvedValue(["sales", "audit", "pg_catalog", "information_schema"]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(DatabaseUserAdmin, { connection: postgresConnection });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledTimes(2));
+
+    findButton("userAdmin.newUser")?.click();
+    await vi.waitFor(() => expect(findDialogButton("app-db")).toBeDefined());
+    findDialogButton("app-db")?.click();
+    const password = root.querySelector<HTMLInputElement>('[data-password-input="true"]');
+    password!.value = "test-password";
+    password!.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    await vi.waitFor(() => expect(mocks.listSchemas).toHaveBeenCalledWith("postgres", "app-db"));
+    await vi.waitFor(() => expect(findDialogButton("sales")).toBeDefined());
+    expect(findDialogButton("audit")).toBeDefined();
+    expect(findDialogButton("pg_catalog")).toBeUndefined();
+    expect(findDialogButton("information_schema")).toBeUndefined();
+
+    findDialogButton("sales")?.click();
+    await nextTick();
+    findDialogButton("userAdmin.previewSql")?.click();
+
+    await vi.waitFor(() => expect(root?.textContent).toContain('GRANT USAGE ON SCHEMA "audit"'));
+    expect(root?.textContent).not.toContain('"sales"');
+    expect(root?.textContent).not.toContain("pg_catalog");
+    expect(root?.textContent).toContain('ON ALL TABLES IN SCHEMA "audit"');
+  });
+
+  it("keeps system schemas out of the all-schemas preview", async () => {
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.executeQuery.mockResolvedValueOnce({ columns: ["user", "host", "plugin"], rows: [["postgres", "LOGIN", "SUPERUSER"]] }).mockResolvedValueOnce({ columns: ["line"], rows: [["Role: postgres"]] });
+    mocks.listDatabases.mockResolvedValue([{ name: "app-db" }]);
+    mocks.listSchemas.mockResolvedValue(["sales", "audit", "pg_catalog", "information_schema"]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(DatabaseUserAdmin, { connection: postgresConnection });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledTimes(2));
+
+    findButton("userAdmin.newUser")?.click();
+    await vi.waitFor(() => expect(findDialogButton("app-db")).toBeDefined());
+    findDialogButton("app-db")?.click();
+    const password = root.querySelector<HTMLInputElement>('[data-password-input="true"]');
+    password!.value = "test-password";
+    password!.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    findDialogButton("userAdmin.previewSql")?.click();
+
+    await vi.waitFor(() => expect(root?.textContent).toContain('GRANT USAGE ON SCHEMA "audit"'));
+    expect(root?.textContent).toContain('GRANT USAGE ON SCHEMA "sales"');
+    expect(root?.textContent).not.toContain("pg_catalog");
+    expect(root?.textContent).not.toContain("information_schema");
+    expect(root?.textContent).toContain('GRANT SELECT ON ALL TABLES IN SCHEMA "audit"');
+    expect(root?.textContent).toContain("ALTER DEFAULT PRIVILEGES");
+  });
+
   it("loads an existing schema-qualified grant and executes its revoke in the target database", async () => {
     mocks.tabUiState = { privilegeScope: "table" };
     mocks.ensureConnected.mockResolvedValue(undefined);
@@ -1075,6 +1141,27 @@ describe("DatabaseUserAdmin PostgreSQL create-user table grants", () => {
     await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalled());
     expect(mocks.executeMulti.mock.calls[0][1]).toBe("app-db");
     expect(mocks.executeMulti.mock.calls[0][2]).toBe('REVOKE SELECT ON TABLE "sales"."orders" FROM "reader";');
+  });
+
+  it("blocks the table grant diff when the baseline is truncated", async () => {
+    mocks.tabUiState = { privilegeScope: "table" };
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.executeQuery.mockImplementation(async (_connectionId, _database, sql) => {
+      if (sql.includes('r.rolname AS "user"')) return { columns: ["user", "host", "plugin"], rows: [["reader", "LOGIN", ""]] };
+      if (sql.includes("FROM information_schema.table_privileges") && !sql.includes("UNION ALL")) return { columns: ["schema", "table", "privilege", "grant_option"], rows: [["sales", "orders", "SELECT", "NO"]], truncated: true };
+      return { columns: ["line"], rows: [["Role: reader"]] };
+    });
+    mocks.listDatabases.mockResolvedValue([{ name: "app-db" }]);
+    mocks.listSchemas.mockResolvedValue(["sales"]);
+    mocks.listTables.mockResolvedValue([{ name: "orders", table_type: "BASE TABLE" }]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(DatabaseUserAdmin, { connection: postgresConnection });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(root?.textContent).toContain("userAdmin.tableGrantsTruncated"));
+    expect(findButton("userAdmin.revoke")?.disabled).toBe(true);
   });
 });
 

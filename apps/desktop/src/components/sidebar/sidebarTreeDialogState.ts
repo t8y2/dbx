@@ -202,6 +202,14 @@ export const editDatabasePropertiesPreviewSql = ref("");
 export const editDatabaseCharset = ref("utf8mb4");
 export const editDatabaseCollation = ref("utf8mb4_unicode_ci");
 export const editDatabaseCommentText = ref("");
+/** Owner editing (PostgreSQL ALTER DATABASE ... OWNER TO); shared role list for both dialogs. */
+export const editDatabaseOwner = ref("");
+export const editDatabaseOwnerOriginal = ref("");
+export const schemaOwner = ref("");
+export const schemaOwnerOriginal = ref("");
+export const ownerRoleOptions = ref<string[]>([]);
+export const ownerRolesLoading = ref(false);
+export const ownerRolesLoadError = ref("");
 export const showEditSchemaCommentDialog = ref(false);
 export const showCompileErrorDialog = ref(false);
 export const compileErrorTitle = ref("");
@@ -283,6 +291,13 @@ export function resetSidebarTreeDialogState() {
   meilisearchCreateIndexLoading.value = false;
   resetMongoIndexManager();
   vacuumTableExecuting.value = false;
+  editDatabaseOwner.value = "";
+  editDatabaseOwnerOriginal.value = "";
+  schemaOwner.value = "";
+  schemaOwnerOriginal.value = "";
+  ownerRoleOptions.value = [];
+  ownerRolesLoading.value = false;
+  ownerRolesLoadError.value = "";
   sidebarTreeDialogOwner.value = null;
   sidebarDangerTarget.value = null;
   sidebarFormTarget.value = null;

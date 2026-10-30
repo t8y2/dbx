@@ -2,7 +2,7 @@ import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/datab
 import { supportsCreateDatabaseCharset } from "@/lib/database/createDatabaseSql";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 
-export type DatabasePropertyEditGroup = "charsetCollation" | "databaseComment" | "schemaComment";
+export type DatabasePropertyEditGroup = "charsetCollation" | "databaseComment" | "schemaComment" | "owner";
 
 export interface DatabasePropertyEditingEntry {
   database?: DatabasePropertyEditGroup[];
@@ -18,7 +18,7 @@ const POSTGRES_COMMENT_TYPES = new Set<DatabaseType>(["postgres", "gaussdb", "kw
 
 export const DATABASE_PROPERTY_EDITING_MATRIX = {
   mysql: { database: ["charsetCollation"] },
-  postgres: { database: ["databaseComment"], schema: ["schemaComment"] },
+  postgres: { database: ["databaseComment", "owner"], schema: ["schemaComment", "owner"] },
   sqlite: { deferred: "file-backed database properties are not edited in-place" },
   rqlite: { deferred: "single SQLite-compatible database per node" },
   turso: { deferred: "remote libSQL database lifecycle is provider-managed" },
@@ -47,13 +47,13 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   databend: { deferred: "database property editing not verified for first pass" },
   redshift: { deferred: "comment catalog compatibility not verified for first pass" },
   dameng: { deferred: "schema/user settings need a dedicated workflow" },
-  gaussdb: { database: ["databaseComment"], schema: ["schemaComment"] },
-  kingbase: { database: ["databaseComment"], schema: ["schemaComment"] },
-  highgo: { database: ["databaseComment"], schema: ["schemaComment"] },
-  uxdb: { database: ["databaseComment"], schema: ["schemaComment"] },
-  vastbase: { database: ["databaseComment"], schema: ["schemaComment"] },
+  gaussdb: { database: ["databaseComment", "owner"], schema: ["schemaComment", "owner"] },
+  kingbase: { database: ["databaseComment", "owner"], schema: ["schemaComment", "owner"] },
+  highgo: { database: ["databaseComment", "owner"], schema: ["schemaComment", "owner"] },
+  uxdb: { database: ["databaseComment", "owner"], schema: ["schemaComment", "owner"] },
+  vastbase: { database: ["databaseComment", "owner"], schema: ["schemaComment", "owner"] },
   goldendb: { database: ["charsetCollation"] },
-  kwdb: { database: ["databaseComment"], schema: ["schemaComment"] },
+  kwdb: { database: ["databaseComment", "owner"], schema: ["schemaComment", "owner"] },
   yashandb: { database: ["databaseComment"], schema: ["schemaComment"] },
   databricks: { deferred: "catalog/schema properties need warehouse-specific handling" },
   saphana: { deferred: "schema properties need product-specific handling" },
@@ -61,7 +61,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   vertica: { deferred: "schema properties need product-specific handling" },
   firebird: { deferred: "database files are managed through connection provisioning" },
   exasol: { deferred: "schema properties need product-specific handling" },
-  opengauss: { database: ["databaseComment"], schema: ["schemaComment"] },
+  opengauss: { database: ["databaseComment", "owner"], schema: ["schemaComment", "owner"] },
   "oceanbase-oracle": { deferred: "Oracle-mode schemas are users; use a dedicated user workflow" },
   questdb: { deferred: "single database model in DBX" },
   gbase: { deferred: "schema properties need product-specific handling" },

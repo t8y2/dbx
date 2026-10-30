@@ -393,11 +393,11 @@ describe("database property editing", () => {
     expect(editableDatabasePropertyGroups({ db_type: "jdbc", driver_profile: "mysql" }, { type: "database", database: "app" })).toEqual([]);
   });
 
-  it("allows PostgreSQL-style comment edits on supported database and schema nodes", () => {
-    expect(editableDatabasePropertyGroups({ db_type: "postgres" }, { type: "database", database: "postgres" })).toEqual(["databaseComment"]);
-    expect(editableDatabasePropertyGroups({ db_type: "kingbase" }, { type: "database", database: "TEST" })).toEqual(["databaseComment"]);
-    expect(editableSchemaPropertyGroups({ db_type: "postgres" }, { type: "schema", database: "postgres", schema: "public" })).toEqual(["schemaComment"]);
-    expect(editableSchemaPropertyGroups({ db_type: "highgo" }, { type: "schema", database: "postgres", schema: "public" })).toEqual(["schemaComment"]);
+  it("allows PostgreSQL-style comment and owner edits on supported database and schema nodes", () => {
+    expect(editableDatabasePropertyGroups({ db_type: "postgres" }, { type: "database", database: "postgres" })).toEqual(["databaseComment", "owner"]);
+    expect(editableDatabasePropertyGroups({ db_type: "kingbase" }, { type: "database", database: "TEST" })).toEqual(["databaseComment", "owner"]);
+    expect(editableSchemaPropertyGroups({ db_type: "postgres" }, { type: "schema", database: "postgres", schema: "public" })).toEqual(["schemaComment", "owner"]);
+    expect(editableSchemaPropertyGroups({ db_type: "highgo" }, { type: "schema", database: "postgres", schema: "public" })).toEqual(["schemaComment", "owner"]);
   });
 
   it("hides property editing for read-only, unsupported, and wrong tree nodes", () => {

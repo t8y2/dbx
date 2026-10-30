@@ -13,6 +13,7 @@ import {
   nativeMysqlUserAdminProvider,
   postgresTableGrantsResult,
   postgresTableGrantsSql,
+  postgresShowGrantsSql,
   postgresUserAdminProvider,
   resolveDatabaseUserAdminProviderForConnection,
   starrocksTableGrantsResult,
@@ -298,5 +299,28 @@ describe("database user admin providers", () => {
     expect(sql).toContain("WHERE r.rolname = 'role''o'");
     expect(sql).not.toContain("pg_catalog");
     expect(sql).not.toContain("pg_roles");
+  });
+
+  it("lists PostgreSQL sequence, function and default privileges", () => {
+    const sql = postgresShowGrantsSql({ user: "role'o", host: "LOGIN" });
+
+    expect(sql).toContain("'Sequence: '");
+    expect(sql).toContain("'Function: '");
+    expect(sql).toContain("'Default privileges: '");
+    expect(sql).toContain("pg_catalog.aclexplode(c.relacl)");
+    expect(sql).toContain("pg_catalog.aclexplode(p.proacl)");
+    expect(sql).toContain("pg_catalog.aclexplode(d.defaclacl)");
+    expect(sql).toContain("CROSS JOIN pg_catalog.pg_default_acl d");
+    expect(sql).toContain("WHERE r.rolname = 'role''o'");
+  });
+
+  it("keeps PostgreSQL-compatible providers on the portable grants query", () => {
+    const provider = getDatabaseUserAdminProvider("opengauss");
+
+    expect(provider).not.toBeNull();
+    const sql = provider!.showGrantsSql({ user: "reader", host: "LOGIN" });
+    expect(sql).toContain("FROM information_schema.role_table_grants");
+    expect(sql).not.toContain("aclexplode");
+    expect(sql).not.toContain("pg_default_acl");
   });
 });

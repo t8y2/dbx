@@ -121,7 +121,7 @@ function parseNavicatPort(value: string, fallback: number) {
   return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
 }
 
-async function parseSshTunnel(values: Record<string, string>): Promise<({ type: "ssh" } & SshTunnelConfig) | null> {
+async function parseSshTunnel(values: Record<string, string>, importWinePasswords = false): Promise<({ type: "ssh" } & SshTunnelConfig) | null> {
   const enabled = getAny(values, ["ssh", "useSsh", "sshEnabled", "enableSsh", "useSshTunnel", "sshTunnelEnabled"]);
   if (!truthyNavicatFlag(enabled)) return null;
 
@@ -133,8 +133,8 @@ async function parseSshTunnel(values: Record<string, string>): Promise<({ type: 
   const authValue = normalizeKey(getAny(values, ["sshAuthenMethod", "sshAuthMethod", "sshAuthenticationMethod", "sshAuthentication", "sshAuthType"]));
   const keyPath = getAny(values, ["sshPrivateKey", "sshKeyFile", "sshKeyPath", "sshIdentityFile", "sshTunnelPrivateKey"]);
   const usesKey = authValue.includes("key") || (!authValue.includes("password") && !!keyPath);
-  const password = usesKey ? "" : await decryptNavicatPassword(getAny(values, ["sshPassword", "sshTunnelPassword"]));
-  const keyPassphrase = usesKey ? await decryptNavicatPassword(getAny(values, ["sshPassphrase", "sshKeyPassphrase", "sshPrivateKeyPassphrase"])) : "";
+  const password = usesKey ? "" : importWinePasswords && "dbxwinesshpassword" in values ? values.dbxwinesshpassword : await decryptNavicatPassword(getAny(values, ["sshPassword", "sshTunnelPassword"]));
+  const keyPassphrase = usesKey ? (importWinePasswords && "dbxwinesshpassphrase" in values ? values.dbxwinesshpassphrase : await decryptNavicatPassword(getAny(values, ["sshPassphrase", "sshKeyPassphrase", "sshPrivateKeyPassphrase"]))) : "";
 
   return {
     type: "ssh",
@@ -280,7 +280,7 @@ function buildMongoReplicaSetConnectionString(opts: {
   return `${scheme}${userInfo}${hosts}${path}${query ? `?${query}` : ""}`;
 }
 
-async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | null> {
+async function parseConnection(node: ParsedNode, importWinePasswords = false): Promise<ConnectionConfig | null> {
   const rawType = getAny(node.values, ["connType", "databaseType", "driver", "dbType", "connectionType", "type"]);
   const portValue = Number(getAny(node.values, ["port", "serverPort"]));
   const port = Number.isFinite(portValue) && portValue > 0 ? portValue : undefined;
@@ -316,12 +316,13 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
   const isOracleLike = effectiveProfile.dbType === "oracle" || effectiveProfile.dbType === "oceanbase-oracle";
   const oracleConnectionType = isOracleLike && getAny(node.values, ["sid"]) ? "sid" : isOracleLike ? "service_name" : undefined;
   const username = getAny(node.values, ["user", "username", "userName", "uid"]) || profile.user;
-  const password = await decryptNavicatPassword(getAny(node.values, ["password"]));
+  const recoveredWinePassword = importWinePasswords && "dbxwinepassword" in node.values;
+  const password = recoveredWinePassword ? node.values.dbxwinepassword : await decryptNavicatPassword(getAny(node.values, ["password"]));
   const keepaliveValue = Number(getAny(node.values, ["keepAliveInterval", "keepaliveInterval", "keepAliveTime", "keepaliveTime"]));
   const keepaliveFlag = getAny(node.values, ["keepAlive", "keepalive", "useKeepAlive", "enableKeepAlive"]);
   const keepaliveEnabled = !keepaliveFlag || truthyNavicatFlag(keepaliveFlag);
   const keepaliveInterval = Number.isFinite(keepaliveValue) && keepaliveValue > 0 && keepaliveEnabled ? keepaliveValue : 0;
-  const sshTunnel = await parseSshTunnel(node.values);
+  const sshTunnel = await parseSshTunnel(node.values, importWinePasswords);
 
   const config: PartialConnection = {
     name,
@@ -333,13 +334,14 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
     port: port || effectiveProfile.port,
     username,
     password,
+    ...(recoveredWinePassword ? { save_password: true } : {}),
     database: database || undefined,
     color: "",
     transport_layers: sshTunnel ? [sshTunnel] : [],
     connect_timeout_secs: 10,
     query_timeout_secs: DEFAULT_QUERY_TIMEOUT_SECS,
     keepalive_interval_secs: keepaliveInterval,
-    ssl: false,
+    ssl: truthyNavicatFlag(getAny(node.values, ["ssl", "useSsl"])),
     oracle_connection_type: oracleConnectionType,
     connection_string: undefined,
     jdbc_driver_class: undefined,
@@ -374,17 +376,60 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
   return { ...config, id: uuid() };
 }
 
-export async function parseNavicatConnections(content: string): Promise<ConnectionConfig[]> {
-  const doc = new DOMParser().parseFromString(content, "application/xml");
-  const parserError = doc.querySelector("parsererror");
-  if (parserError) throw new Error("Invalid Navicat connection file");
+function readNavicatJsonNodes(content: string): ParsedNode[] {
+  const nodes: ParsedNode[] = [];
+  let visited = 0;
+  function visit(value: unknown, tag: string, depth: number) {
+    if (depth > 32 || ++visited > 20000) throw new Error("Navicat connection file is too deeply nested or too large");
+    if (Array.isArray(value)) {
+      for (const entry of value) visit(entry, tag, depth + 1);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const record = value as Record<string, unknown>;
+    const values: Record<string, string> = {};
+    const addValues = (entry: Record<string, unknown>) => {
+      for (const [key, scalar] of Object.entries(entry)) {
+        if (["string", "number", "boolean"].includes(typeof scalar)) values[normalizeKey(key)] = String(scalar);
+      }
+    };
+    // Native stores may place connection fields inside a general/settings block.
+    for (const key of ["general", "connection", "configuration", "settings"]) {
+      const nested = Object.entries(record).find(([name]) => normalizeKey(name) === key)?.[1];
+      if (nested && typeof nested === "object" && !Array.isArray(nested)) addValues(nested as Record<string, unknown>);
+    }
+    addValues(record);
+    const host = getAny(values, ["host", "server", "hostname", "serverHost", "address"]);
+    if (host || getSqlitePath(values)) {
+      if (!getAny(values, ["name", "connectionName", "connName", "caption", "title"])) values.name = tag;
+      nodes.push({ tag, values, members: [] });
+      return;
+    }
+    for (const [key, nested] of Object.entries(record)) {
+      if (nested && typeof nested === "object") visit(nested, key, depth + 1);
+    }
+  }
+  visit(JSON.parse(content), "Connection", 0);
+  return nodes;
+}
+
+export async function parseNavicatConnections(content: string, importWinePasswords = false): Promise<ConnectionConfig[]> {
+  let nodes: ParsedNode[];
+  const trimmed = content.trimStart();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    nodes = readNavicatJsonNodes(trimmed);
+  } else {
+    const doc = new DOMParser().parseFromString(content, "application/xml");
+    const parserError = doc.querySelector("parsererror");
+    if (parserError) throw new Error("Invalid Navicat connection file");
+    nodes = Array.from(doc.querySelectorAll("*")).map(readNode);
+  }
 
   const seen = new Set<string>();
   const configs: ConnectionConfig[] = [];
-  for (const element of Array.from(doc.querySelectorAll("*"))) {
-    const node = readNode(element);
+  for (const node of nodes) {
     if (!isConnectionCandidate(node)) continue;
-    const config = await parseConnection(node);
+    const config = await parseConnection(node, importWinePasswords);
     if (!config) continue;
     const key = [config.name, config.db_type, config.host, config.port, config.database || "", config.connection_string || ""].join("\u0000");
     if (seen.has(key)) continue;

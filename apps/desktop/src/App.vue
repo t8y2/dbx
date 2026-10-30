@@ -388,6 +388,7 @@ function updateBlockingConfigState(): UpdateBlockingConfigState {
     dangerDialog: showDangerDialog.value,
     multiDbExecuteDialog: showMultiDbExecuteDialog.value,
     transferDialog: dialogs.showTransferDialog.value,
+    installedConnectionsDialog: dialogs.showInstalledConnectionsDialog.value,
     sqlFileDialog: dialogs.showSqlFileDialog.value,
     tableImportDialog: dialogs.showTableImportDialog.value,
     mongoImportDialog: dialogs.showMongoImportDialog.value,

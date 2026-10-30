@@ -9,6 +9,7 @@ import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import { connectionDriverLabel, connectionIconType, connectionRedactedNameLabel, connectionRedactedOptionSubtitle } from "@/lib/connection/connectionPresentation";
 import type { WelcomePageMode } from "@/stores/settingsStore";
 import type { ConnectionConfig } from "@/types/database";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 export interface WelcomeSavedSqlHistoryItem {
   id: string;
@@ -41,11 +42,12 @@ const emit = defineEmits<{
   "open-settings": [];
 }>();
 
-type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis";
+type ImportSource = "installed" | "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis";
 
 const { t } = useI18n();
 
 const importSourceItems = computed(() => [
+  ...(isTauriRuntime() ? [{ value: "installed", label: t("installedImport.fromApps") }] : []),
   { value: "dbx", label: t("sidebar.importDbx") },
   { value: "navicat", label: t("sidebar.importNavicat") },
   { value: "dbeaver", label: t("sidebar.importDbeaver") },
@@ -199,7 +201,7 @@ function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
             <button class="flex min-w-0 items-center gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('show-history')">
               <History class="h-4 w-4 shrink-0" /> <span class="min-w-0 truncate">{{ t("history.title") }}</span>
             </button>
-            <button class="flex min-w-0 items-center gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('import-config', 'dbx')">
+            <button class="flex min-w-0 items-center gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('import-config', isTauriRuntime() ? 'installed' : 'dbx')">
               <Download class="h-4 w-4 shrink-0" /> <span class="min-w-0 truncate">{{ t("sidebar.import") }}</span>
             </button>
             <div class="mt-2 min-w-0 overflow-hidden rounded-md bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">

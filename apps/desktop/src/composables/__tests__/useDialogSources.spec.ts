@@ -229,4 +229,24 @@ describe("useDialogSources", () => {
     await dialogs.onExportConfirm("passphrase");
     expect(getRememberedExportPassphrase()).toBe("passphrase");
   });
+
+  it("limits the DataGrip Keychain lookup to the selected rows and the connections this import created", async () => {
+    const alpha = { ...conn("dg-alpha"), name: "Alpha", host: "alpha.example" };
+    const beta = { ...conn("dg-beta"), name: "Beta", host: "beta.example" };
+    mocks.store.connections = [conn("existing")];
+    mocks.store.applyConnectionsImport.mockImplementation(async (preview: { connections: ConnectionConfig[] }) => {
+      mocks.store.connections = [...mocks.store.connections, ...preview.connections.map((connection) => ({ ...connection, id: `new-${connection.id}` }))];
+      return { count: preview.connections.length };
+    });
+    const content = JSON.stringify({ format: "datagrip-import", dataSources: "<project/>" });
+    const group = { source: "datagrip" as const, label: "DataGrip", path: "/datagrip/dataSources.xml", content, preview: { connections: [alpha, beta] } };
+    const dialogs = await mountDialogs();
+
+    await dialogs.onInstalledConnectionsSelected([{ group, connectionIds: ["dg-alpha"] }]);
+
+    expect(mocks.store.applyConnectionsImport.mock.calls[0][0].connections.map((connection: ConnectionConfig) => connection.name)).toEqual(["Alpha"]);
+    expect(mocks.store.applyDataGripKeychainPasswords).toHaveBeenCalledTimes(1);
+    expect(mocks.store.applyDataGripKeychainPasswords).toHaveBeenCalledWith({ payload: JSON.parse(content), selected: [alpha], connectionIds: ["new-dg-alpha"] });
+    expect(mocks.store.parseConnectionsImport).not.toHaveBeenCalled();
+  });
 });

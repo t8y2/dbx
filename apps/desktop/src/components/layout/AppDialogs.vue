@@ -21,6 +21,7 @@ const DamengDumpDialog = defineAsyncComponent(() => import("@/components/documen
 const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
 const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
 const ConfigConnectionSelectDialog = defineAsyncComponent(() => import("@/components/config/ConfigConnectionSelectDialog.vue"));
+const InstalledConnectionsDialog = defineAsyncComponent(() => import("@/components/config/InstalledConnectionsDialog.vue"));
 const DatabaseSearchDialog = defineAsyncComponent(() => import("@/components/search/DatabaseSearchDialog.vue"));
 const SshHostKeyPromptDialog = defineAsyncComponent(() => import("@/components/ssh/SshHostKeyPromptDialog.vue"));
 const ConnectionPasswordPromptDialog = defineAsyncComponent(() => import("@/components/connection/ConnectionPasswordPromptDialog.vue"));
@@ -354,6 +355,7 @@ watch(
     :prefill-all-databases="dialogs.databaseExportAllDatabases.value"
     @open-connection-settings="emit('openConnectionSettings', $event, 'advanced')"
   />
+  <InstalledConnectionsDialog v-if="dialogs.showInstalledConnectionsDialog.value" v-model:open="dialogs.showInstalledConnectionsDialog.value" :busy="dialogs.applyingImportSelection.value" :read-file="dialogs.readInstalledConnectionFile" @confirm="dialogs.onInstalledConnectionsSelected" />
   <ConfigConnectionSelectDialog
     v-if="dialogs.showConfigConnectionSelectDialog.value"
     :open="dialogs.showConfigConnectionSelectDialog.value"

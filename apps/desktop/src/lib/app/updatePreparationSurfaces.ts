@@ -18,6 +18,7 @@ export interface UpdateBlockingConfigState {
   dangerDialog: boolean;
   multiDbExecuteDialog: boolean;
   transferDialog: boolean;
+  installedConnectionsDialog: boolean;
   sqlFileDialog: boolean;
   tableImportDialog: boolean;
   mongoImportDialog: boolean;
@@ -58,6 +59,7 @@ export const UPDATE_BLOCKING_CONFIG_SURFACES: readonly UpdateBlockingConfigSurfa
   { id: "dangerDialog", open: (state) => state.dangerDialog, label: (_state, translate) => translate("dangerDialog.title") },
   { id: "multiDbExecuteDialog", open: (state) => state.multiDbExecuteDialog, label: (_state, translate) => translate("multiDbExecute.title") },
   { id: "transferDialog", open: (state) => state.transferDialog, label: (_state, translate) => translate("transfer.title") },
+  { id: "installedConnectionsDialog", open: (state) => state.installedConnectionsDialog, label: (_state, translate) => translate("installedImport.title") },
   { id: "sqlFileDialog", open: (state) => state.sqlFileDialog, label: (_state, translate) => translate("sqlFile.title") },
   { id: "tableImportDialog", open: (state) => state.tableImportDialog, label: (_state, translate) => translate("tableImport.title") },
   { id: "mongoImportDialog", open: (state) => state.mongoImportDialog, label: (_state, translate) => translate("mongo.import.title") },

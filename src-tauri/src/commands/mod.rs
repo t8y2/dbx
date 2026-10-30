@@ -8,6 +8,7 @@ pub mod cc_switch;
 pub mod cloud_sync;
 pub mod config_cmd;
 pub mod connection;
+pub mod connection_discovery;
 #[allow(dead_code, unused_imports)]
 mod connection_secrets;
 pub mod csv_export;

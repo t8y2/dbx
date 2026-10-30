@@ -16,6 +16,7 @@ import { applyConnectionMultiSelection, emptyConnectionMultiSelection, isExitCon
 import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useToast } from "@/composables/useToast";
 import type { QueryTab, TreeNode } from "@/types/database";
 import type { ObjectDependencyTarget } from "@/lib/database/objectDependencyDetails";
@@ -27,7 +28,7 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  import: [source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis"];
+  import: [source: "installed" | "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis"];
   export: [];
   startResize: [event: PointerEvent];
   collapse: [];
@@ -37,7 +38,7 @@ const emit = defineEmits<{
   "open-dependency-object": [context: ObjectDependencyTarget, target: SqlObjectNavigationTarget];
 }>();
 
-type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis";
+type ImportSource = "installed" | "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
@@ -50,6 +51,7 @@ const showCreateSelectedGroupDialog = ref(false);
 const selectedGroupName = ref("");
 const UNGROUPED_GROUP_VALUE = "__ungrouped";
 const importSourceItems = computed(() => [
+  ...(isTauriRuntime() ? [{ value: "installed", label: t("installedImport.fromApps") }] : []),
   { value: "dbx", label: t("sidebar.importDbx") },
   { value: "navicat", label: t("sidebar.importNavicat") },
   { value: "dbeaver", label: t("sidebar.importDbeaver") },

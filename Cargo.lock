@@ -2166,6 +2166,7 @@ dependencies = [
 name = "dbx"
 version = "0.6.62"
 dependencies = [
+ "aes-gcm 0.10.3",
  "anyhow",
  "axum",
  "base64 0.22.1",

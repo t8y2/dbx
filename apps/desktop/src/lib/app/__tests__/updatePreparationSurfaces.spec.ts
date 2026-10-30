@@ -13,6 +13,7 @@ const closedState: UpdateBlockingConfigState = {
   dangerDialog: false,
   multiDbExecuteDialog: false,
   transferDialog: false,
+  installedConnectionsDialog: false,
   sqlFileDialog: false,
   tableImportDialog: false,
   mongoImportDialog: false,

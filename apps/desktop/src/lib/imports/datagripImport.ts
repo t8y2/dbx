@@ -691,13 +691,18 @@ export function getDataGripUuidMap(payload: DataGripImportPayload): Map<string, 
     const port = parsed.port || profile.port;
     const database = parsed.database || "";
     const name = fragment.name || database || host || profile.label;
-    const dedupKey = [name, host, port, database].join("\u0000");
+    const dedupKey = dataGripKeychainKey({ name, host, port, database });
     if (seen.has(dedupKey)) continue;
     seen.add(dedupKey);
     uuidMap.set(dedupKey, fragment.uuid);
   }
 
   return uuidMap;
+}
+
+/** Dedup key (name\0host\0port\0db) matching a connection to its getDataGripUuidMap entry. */
+export function dataGripKeychainKey(connection: Pick<ConnectionConfig, "name" | "host" | "port" | "database">): string {
+  return [connection.name, connection.host, connection.port, connection.database || ""].join("\u0000");
 }
 
 /** Build the macOS Keychain service name for a DataGrip data source UUID. */

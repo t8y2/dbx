@@ -2700,6 +2700,13 @@ async function applySettings() {
 }
 
 async function applySettingsAndClose() {
+  // With nothing staged there is nothing to persist, so the button only closes.
+  // It used to be disabled in that state, which read as "the button does
+  // nothing" (#13862).
+  if (!hasChanges()) {
+    closeSettings();
+    return;
+  }
   if (await applySettingsForResult()) {
     closeSettings();
   }
@@ -13842,7 +13849,7 @@ LIMIT 100;</pre>
         <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
           {{ t("settings.apply") }}
         </Button>
-        <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettingsAndClose">
+        <Button :disabled="hasApplyBlocker" @click="applySettingsAndClose">
           {{ t("settings.applyAndClose") }}
         </Button>
       </DialogFooter>
@@ -13918,7 +13925,7 @@ LIMIT 100;</pre>
         <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
           {{ t("settings.apply") }}
         </Button>
-        <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettingsAndClose">
+        <Button :disabled="hasApplyBlocker" @click="applySettingsAndClose">
           {{ t("settings.applyAndClose") }}
         </Button>
       </DialogFooter>
@@ -13943,7 +13950,7 @@ LIMIT 100;</pre>
         <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
           {{ t("settings.apply") }}
         </Button>
-        <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettingsAndClose">
+        <Button :disabled="hasApplyBlocker" @click="applySettingsAndClose">
           {{ t("settings.applyAndClose") }}
         </Button>
       </DialogFooter>

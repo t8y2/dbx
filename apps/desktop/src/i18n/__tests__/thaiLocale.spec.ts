@@ -30,8 +30,8 @@ describe("Thai locale", () => {
   it("registers Thai detection and the language menu option", () => {
     expect(normalizeLocale("th")).toBe("th");
     expect(localeFromLanguageTag("th_TH")).toBe("th");
-    expect(detectLocaleFromLanguages(["fr-FR", "th-TH"])).toBe("th");
-    expect(detectLocaleFromLanguages(["fr-FR"])).toBe("en");
+    expect(detectLocaleFromLanguages(["de-DE", "th-TH"])).toBe("th");
+    expect(detectLocaleFromLanguages(["de-DE"])).toBe("en");
     expect(LOCALE_OPTIONS).toContainEqual(expect.objectContaining({ value: "th", flag: "🇹🇭", label: "ภาษาไทย" }));
   });
 

@@ -3,6 +3,7 @@ import { createI18n } from "vue-i18n";
 import az from "../locales/az";
 import en from "../locales/en";
 import es from "../locales/es";
+import fr from "../locales/fr";
 import id from "../locales/id";
 import itLocale from "../locales/it";
 import ja from "../locales/ja";
@@ -23,9 +24,9 @@ import zhTW from "../locales/zh-TW";
 vi.mock("../locales/fallback", () => ({ withEnglishFallback: (messages: Record<string, unknown>) => messages }));
 
 type Messages = Record<string, unknown>;
-type Locale = "az" | "en" | "es" | "id" | "it" | "ja" | "ko" | "pt-BR" | "pl" | "ru" | "th" | "tr" | "zh-CN" | "zh-TW";
+type Locale = "az" | "en" | "es" | "fr" | "id" | "it" | "ja" | "ko" | "pt-BR" | "pl" | "ru" | "th" | "tr" | "zh-CN" | "zh-TW";
 
-const declared: Record<Locale, Messages> = { az, en, es, id, it: itLocale, ja, ko, "pt-BR": ptBR, pl, ru, th, tr, "zh-CN": zhCN, "zh-TW": zhTW };
+const declared: Record<Locale, Messages> = { az, en, es, fr, id, it: itLocale, ja, ko, "pt-BR": ptBR, pl, ru, th, tr, "zh-CN": zhCN, "zh-TW": zhTW };
 const ALL_LOCALES = Object.keys(declared) as Locale[];
 const EXCEPT_AZ_TR = ALL_LOCALES.filter((locale) => locale !== "az" && locale !== "tr");
 
@@ -103,7 +104,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   {
     feature: "Xugu field lineage scope and coverage",
     keys: under("lineage", ["xuguScopeNotice", "xuguPartialCoverage"]),
-    locales: ["en", "es", "it", "ja", "ko", "pt-BR", "ru", "zh-CN", "zh-TW"],
+    locales: ["en", "es", "fr", "it", "ja", "ko", "pt-BR", "ru", "zh-CN", "zh-TW"],
     translated: true,
   },
   { feature: "transfer bulk select", keys: under("transfer", ["bulkSelectObjects", "bulkSelectTitle", "bulkSelectHint", "bulkSelectPlaceholder", "bulkSelectConfirm", "bulkSelectMatched", "bulkSelectUnmatched", "noMatchingObjects"]), translated: true },
@@ -137,7 +138,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   {
     feature: "MQTT message direction filter (#11848)",
     keys: under("connection", ["mqttMessageDirectionFilterLabel", "mqttDirectionFilterAll", "mqttDirectionFilterReceived", "mqttDirectionFilterSent"]),
-    locales: ["en", "az", "es", "id", "it", "ja", "ko", "pt-BR", "ru", "tr", "zh-CN", "zh-TW"],
+    locales: ["en", "az", "es", "fr", "id", "it", "ja", "ko", "pt-BR", "ru", "tr", "zh-CN", "zh-TW"],
     translated: true,
   },
   { feature: "sidebar search skip hint", keys: ["sidebar.searchConnectionSkipped"] },

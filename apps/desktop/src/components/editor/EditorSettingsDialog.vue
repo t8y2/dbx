@@ -57,6 +57,7 @@ import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import type { ForeignKeyCardTrigger } from "@/lib/dataGrid/foreignKeyCard";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
@@ -883,6 +884,7 @@ const editMultiStatementDefaultView = ref<MultiStatementDefaultView>(settingsSto
 const editDefaultExplainView = ref<DefaultExplainView>(settingsStore.editorSettings.defaultExplainView);
 const editDataGridAutoTransposeSingleRow = ref(settingsStore.editorSettings.dataGridAutoTransposeSingleRow);
 const editDataGridCellDetailButtonVisible = ref(settingsStore.editorSettings.dataGridCellDetailButtonVisible);
+const editForeignKeyCardTrigger = ref<ForeignKeyCardTrigger>(settingsStore.editorSettings.foreignKeyCardTrigger);
 const editDataGridCellDetailDialogDefault = ref(settingsStore.editorSettings.dataGridCellDetailDialogDefault);
 const editDataGridCrosshairHighlight = ref(settingsStore.editorSettings.dataGridCrosshairHighlight);
 const editDataGridCrosshairRowBg = ref(settingsStore.editorSettings.dataGridCrosshairRowBg);
@@ -1312,6 +1314,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     defaultExplainView: editDefaultExplainView.value,
     dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow.value,
     dataGridCellDetailButtonVisible: editDataGridCellDetailButtonVisible.value,
+    foreignKeyCardTrigger: editForeignKeyCardTrigger.value,
     dataGridCellDetailDialogDefault: editDataGridCellDetailDialogDefault.value,
     dataGridCrosshairHighlight: editDataGridCrosshairHighlight.value,
     dataGridCrosshairRowBg: editDataGridCrosshairRowBg.value,
@@ -2018,6 +2021,7 @@ function syncEditorSettingsDraftFromStore() {
   editDefaultExplainView.value = settingsStore.editorSettings.defaultExplainView;
   editDataGridAutoTransposeSingleRow.value = settingsStore.editorSettings.dataGridAutoTransposeSingleRow;
   editDataGridCellDetailButtonVisible.value = settingsStore.editorSettings.dataGridCellDetailButtonVisible;
+  editForeignKeyCardTrigger.value = settingsStore.editorSettings.foreignKeyCardTrigger;
   editDataGridCellDetailDialogDefault.value = settingsStore.editorSettings.dataGridCellDetailDialogDefault;
   editDataGridCrosshairHighlight.value = settingsStore.editorSettings.dataGridCrosshairHighlight;
   editDataGridCrosshairRowBg.value = settingsStore.editorSettings.dataGridCrosshairRowBg;
@@ -2196,6 +2200,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   defaultExplainView: editDefaultExplainView,
   dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow,
   dataGridCellDetailButtonVisible: editDataGridCellDetailButtonVisible,
+  foreignKeyCardTrigger: editForeignKeyCardTrigger,
   dataGridCellDetailDialogDefault: editDataGridCellDetailDialogDefault,
   dataGridCrosshairHighlight: editDataGridCrosshairHighlight,
   dataGridCrosshairRowBg: editDataGridCrosshairRowBg,
@@ -2881,6 +2886,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDefaultExplainView.value = DEFAULT_EDITOR_SETTINGS.defaultExplainView;
     editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
     editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
+    editForeignKeyCardTrigger.value = DEFAULT_EDITOR_SETTINGS.foreignKeyCardTrigger;
     editDataGridCellDetailDialogDefault.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailDialogDefault;
     editDataGridCrosshairHighlight.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
     editDataGridCrosshairRowBg.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairRowBg;
@@ -3022,6 +3028,7 @@ function resetAllDefaults() {
   editDefaultExplainView.value = DEFAULT_EDITOR_SETTINGS.defaultExplainView;
   editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
   editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
+  editForeignKeyCardTrigger.value = DEFAULT_EDITOR_SETTINGS.foreignKeyCardTrigger;
   editDataGridCellDetailDialogDefault.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailDialogDefault;
   editDataGridCrosshairHighlight.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
   editDataGridCrosshairRowBg.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairRowBg;
@@ -10642,6 +10649,25 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="data-grid-cell-detail-button-visible" v-model="editDataGridCellDetailButtonVisible" />
+                </div>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="foreign-key-card-trigger">
+                      {{ t("settings.foreignKeyCardTrigger") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.foreignKeyCardTriggerDescription") }}
+                    </p>
+                  </div>
+                  <Select v-model="editForeignKeyCardTrigger">
+                    <SelectTrigger id="foreign-key-card-trigger" class="w-[160px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="click">{{ t("settings.foreignKeyCardTriggerClick") }}</SelectItem>
+                      <SelectItem value="hover">{{ t("settings.foreignKeyCardTriggerHover") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">

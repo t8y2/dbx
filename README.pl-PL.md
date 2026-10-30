@@ -2,7 +2,7 @@
 
 # DBX — zarządzanie bazami danych
 
-**Ponad 100 baz danych w lekkiej aplikacji o rozmiarze około 25 MB.**
+**Jedno narzędzie do zarządzania ponad 100 bazami danych.**
 
 Aplikacja desktopowa, Docker, interfejs wiersza poleceń (CLI), wbudowany asystent AI i serwer MCP.
 

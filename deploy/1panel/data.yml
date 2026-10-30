@@ -1,18 +1,18 @@
 name: DBX
 tags:
   - 工具
-title: 轻量级数据库管理工具
-description: 轻量级数据库管理工具，支持 25+ 种数据库
+title: 数据库管理工具
+description: 一个工具管理 100+ 种数据库
 additionalProperties:
   key: dbx
   name: DBX
   tags:
     - Tool
-  shortDescZh: 轻量级数据库管理工具，支持 25+ 种数据库
-  shortDescEn: Lightweight database manager supporting 25+ databases
+  shortDescZh: 一个工具管理 100+ 种数据库
+  shortDescEn: One tool to manage 100+ databases
   description:
-    en: Lightweight database manager supporting 25+ databases
-    zh: 轻量级数据库管理工具，支持 25+ 种数据库
+    en: One tool to manage 100+ databases
+    zh: 一个工具管理 100+ 种数据库
   type: tool
   crossVersionUpdate: true
   limit: 0

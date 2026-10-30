@@ -1,3 +1,4 @@
+import { shouldReportOracleCompilationErrors } from "@/lib/query/oracleCompilationErrors";
 import { ref, watch, type Ref, type ComputedRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { useQueryStore } from "@/stores/queryStore";
@@ -836,7 +837,9 @@ export function useSqlExecution(deps: {
         const results: NonNullable<QueryTab["results"]> = [];
         for (const [statementIndex, statement] of (statements.length ? statements : [{ sql, from: 0, to: sql.length }]).entries()) {
           if (cancelRequested()) return await failedManualResult("cancelled");
-          const statementResults = await api.executeInManualTransaction(manualSessionId, statement.sql, executionTab.database, executionTab.schema, maxRows);
+          const statementResults = await (shouldReportOracleCompilationErrors(databaseType, statement.sql)
+            ? api.executeInManualTransaction(manualSessionId, statement.sql, executionTab.database, executionTab.schema, maxRows, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
+            : api.executeInManualTransaction(manualSessionId, statement.sql, executionTab.database, executionTab.schema, maxRows));
           results.push(
             ...statementResults.map((result) => ({
               ...result,

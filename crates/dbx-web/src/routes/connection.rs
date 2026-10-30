@@ -488,6 +488,10 @@ pub async fn connect_db(
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<String>, AppError> {
     let config = state.resolve_connection_credentials(body.config).await?;
+    // #9108: an MCP-forwarded connect creates the pool that introspection and
+    // SQL then reuse, so the configuration-database target check has to run
+    // before the pool exists — the schema routes only re-check their own calls.
+    super::mcp_policy::ensure_connection_target(&state, &headers, &config)?;
     // 演示模式：只允许连接已保存的连接，端点身份以存储为准，防止伪造 body
     // 配置把服务器拨向任意主机（见 demo 模块）。
     if state.demo_mode {

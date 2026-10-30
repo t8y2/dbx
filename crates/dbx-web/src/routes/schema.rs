@@ -66,8 +66,10 @@ pub struct DatabaseStorageRequest {
 
 pub async fn list_databases(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Query(q): Query<SchemaQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    super::mcp_policy::ensure_connection_target_for_id(&state, &headers, &q.connection_id).await?;
     let result = dbx_core::schema::list_databases_core(&state.app, &q.connection_id).await.map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
@@ -237,8 +239,10 @@ pub async fn list_schemas(
 
 pub async fn list_tables(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Query(q): Query<SchemaQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    super::mcp_policy::ensure_connection_target_for_id(&state, &headers, &q.connection_id).await?;
     let database = q.database.as_deref().unwrap_or("");
     let schema = q.schema.as_deref().unwrap_or("");
     let object_types = q.object_types.as_ref().map(|value| {
@@ -298,8 +302,10 @@ pub async fn list_tables(
 
 pub async fn list_objects(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Query(q): Query<SchemaQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    super::mcp_policy::ensure_connection_target_for_id(&state, &headers, &q.connection_id).await?;
     let database = q.database.unwrap_or_default();
     let schema = q.schema.unwrap_or_default();
     let connection_id = q.connection_id;
@@ -415,8 +421,10 @@ pub async fn completion_assistant_search(
 
 pub async fn get_object_source(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Query(q): Query<SchemaQuery>,
 ) -> Result<Json<dbx_core::db::ObjectSource>, AppError> {
+    super::mcp_policy::ensure_connection_target_for_id(&state, &headers, &q.connection_id).await?;
     let database = q.database.as_deref().unwrap_or("");
     let schema = q.schema.as_deref().unwrap_or("");
     let name = q.table.as_deref().unwrap_or("");
@@ -585,8 +593,10 @@ pub async fn get_plugin_table_metadata(
 
 pub async fn list_columns(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Query(q): Query<SchemaQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    super::mcp_policy::ensure_connection_target_for_id(&state, &headers, &q.connection_id).await?;
     let database = q.database.as_deref().unwrap_or("");
     let schema = q.schema.as_deref().unwrap_or("");
     let table = q.table.as_deref().unwrap_or("");

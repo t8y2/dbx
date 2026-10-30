@@ -31,10 +31,15 @@ async function loadSchemas() {
   loadingSchemas.value = true;
   try {
     schemas.value = await api.listSchemas(props.connectionId, props.database);
-    if (schemas.value.length === 0) schemas.value = ["main"];
+    // MySQL and its compat modes expose no schema list: the database itself is
+    // the schema that listTables/getColumns filter on. Falling back to SQLite's
+    // "main" left the table and column dropdowns empty (#13879).
+    if (schemas.value.length === 0) schemas.value = [props.database];
+    if (!props.params.fkSchema) props.params.fkSchema = schemas.value[0];
     if (props.params.fkSchema) await loadTables();
   } catch {
-    schemas.value = ["main"];
+    schemas.value = [props.database];
+    if (!props.params.fkSchema) props.params.fkSchema = props.database;
   } finally {
     loadingSchemas.value = false;
   }

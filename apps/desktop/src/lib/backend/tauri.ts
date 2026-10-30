@@ -5901,6 +5901,13 @@ export interface TaskRunListQuery {
   cursor?: TaskRunCursor | null;
   taskType?: TaskType;
   status?: TaskRunStatus;
+  startedAtFrom?: string;
+  /** Exclusive upper bound for the run's start timestamp. */
+  startedAtBefore?: string;
+  /** Literal search across the saved source endpoint snapshot. */
+  sourceQuery?: string;
+  /** Literal search across the saved target endpoint snapshot. */
+  targetQuery?: string;
 }
 
 export interface TaskRunPage {

@@ -190,8 +190,14 @@ public final class DdlBuilder {
             if (index.getIs_primary()) {
                 continue;
             }
-            String unique = index.getIs_unique() ? "UNIQUE " : "";
-            String using = notBlank(index.getIndex_type()) ? " USING " + index.getIndex_type() : "";
+            // Spanner renders full-text indexes as `CREATE SEARCH INDEX name ON table (cols)`.
+            // Its grammar has neither `CREATE UNIQUE SEARCH INDEX` nor `CREATE INDEX ... USING`,
+            // so both the uniqueness prefix and the USING clause must stay out of the
+            // statement (#13881); the keyword sits where UNIQUE would.
+            boolean searchIndex = "SEARCH".equalsIgnoreCase(index.getIndex_type());
+            String search = searchIndex ? "SEARCH " : "";
+            String unique = !searchIndex && index.getIs_unique() ? "UNIQUE " : "";
+            String using = !searchIndex && notBlank(index.getIndex_type()) ? " USING " + index.getIndex_type() : "";
             List<String> quotedColumns = new ArrayList<>();
             List<String> directions = index.getKey_directions();
             for (int columnIndex = 0; columnIndex < index.getColumns().size(); columnIndex++) {
@@ -217,6 +223,7 @@ public final class DdlBuilder {
             }
             String filter = notBlank(index.getFilter()) ? " WHERE " + index.getFilter() : "";
             ddl.append("\nCREATE ");
+            ddl.append(search);
             ddl.append(unique);
             ddl.append("INDEX ");
             ddl.append(quoteIdent(index.getName(), useBacktick));

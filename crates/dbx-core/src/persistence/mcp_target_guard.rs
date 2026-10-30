@@ -451,10 +451,11 @@ mod tests {
     #[test]
     fn allows_double_slash_paths_on_posix() {
         // Outside Windows `//x` is an ordinary path with no drive aliasing, so
-        // the UNC rule must not reject it.
+        // the UNC rule must not reject it. `display()` already yields an
+        // absolute path on POSIX, so prefixing one slash gives `//tmp/...`.
         let directory = temp_dir();
         let config_db = directory.path().join("dbx.db");
-        let host = format!("//{}/app.db", directory.path().display().trim_start_matches('/'));
+        let host = format!("/{}/app.db", directory.path().display());
         assert!(ensure_mcp_target_allowed(&config_db, &sqlite_connection(&host)).is_ok(), "{host}");
     }
 }

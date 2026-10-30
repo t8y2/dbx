@@ -36,18 +36,20 @@ pub(super) async fn enrich(
         }
     };
     for trigger in triggers.iter_mut().filter(|trigger| incomplete(trigger)) {
-        let mut rows = inventory.rows.iter().filter(|row| {
-            row.first().and_then(serde_json::Value::as_str) == Some(schema)
-                && row.get(1).and_then(serde_json::Value::as_str) == Some(trigger.name.as_str())
-        });
+        // The listing admits triggers owned by other schemas (TABLE_OWNER
+        // match), so rows are keyed by name here and the row's actual OWNER is
+        // recorded instead of being required to equal the queried schema
+        // (#13498 review).
+        let mut rows = inventory
+            .rows
+            .iter()
+            .filter(|row| row.get(1).and_then(serde_json::Value::as_str) == Some(trigger.name.as_str()));
         let row =
             rows.next().ok_or_else(|| format!("{schema}.{}: trigger identity changed; compare again", trigger.name))?;
-        if rows.next().is_some()
-            || row.get(2).and_then(serde_json::Value::as_str) != Some(schema)
-            || row.get(3).and_then(serde_json::Value::as_str) != Some(table)
-        {
+        if rows.next().is_some() || row.get(3).and_then(serde_json::Value::as_str) != Some(table) {
             return Err(format!("{schema}.{}: trigger table identity changed; compare again", trigger.name));
         }
+        let trigger_owner = row.first().and_then(serde_json::Value::as_str).unwrap_or(schema);
         let enabled = match row.get(4).and_then(serde_json::Value::as_str) {
             Some("ENABLED") => true,
             Some("DISABLED") => false,
@@ -63,12 +65,15 @@ pub(super) async fn enrich(
             return Err(format!("{schema}.{}: trigger firing state changed; compare again", trigger.name));
         }
         let missing_source = trigger.statement.as_deref().is_none_or(|source| source.trim().is_empty());
+        // A cross-schema trigger's ALL_SOURCE rows live under its actual OWNER,
+        // so both the source lookup and the identity check use trigger_owner
+        // rather than the queried schema (#13498 review).
         let source = if missing_source {
             match get_object_source_core(
                 state,
                 connection_id,
                 database,
-                schema,
+                trigger_owner,
                 &trigger.name,
                 db::ObjectSourceKind::Trigger,
                 None,
@@ -97,7 +102,7 @@ pub(super) async fn enrich(
             }
         };
         if source.name != trigger.name
-            || source.schema.as_deref() != Some(schema)
+            || source.schema.as_deref() != Some(trigger_owner)
             || source.object_type != db::ObjectSourceKind::Trigger
         {
             return Err(format!("{schema}.{}: trigger source identity changed; compare again", trigger.name));

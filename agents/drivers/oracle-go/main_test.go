@@ -2750,11 +2750,13 @@ func TestOracleListTriggersSQLLoadsSourceWithoutLongColumns(t *testing.T) {
 	if strings.Contains(sqlText, "TRIGGER_BODY") {
 		t.Fatalf("trigger listing should avoid Oracle LONG trigger bodies, got: %s", oracleListTriggersSQL)
 	}
-	// TABLE_OWNER scopes to the base table's schema; filtering on the trigger's
-	// own OWNER dropped cross-schema triggers whose USER_OBJECTS row was visible
-	// (issue #13498). OWNER stays as an OR so owner-scoped nodes keep working.
-	if !strings.Contains(sqlText, "T.TABLE_OWNER = :1") || !strings.Contains(sqlText, "T.TABLE_NAME = :2") {
-		t.Fatalf("trigger listing should scope by the base table owner and table, got: %s", oracleListTriggersSQL)
+	// Strict TABLE_OWNER scoping matches every sibling trigger path (the Rust
+	// reader, the Java agent, the DDL loader in this file, DBeaver) and keeps
+	// oracle_table_triggers' inventory OWNER match intact; an OR OWNER branch
+	// would list same-named tables in other schemas and then hard-fail that
+	// inventory check (#13498 review).
+	if !strings.Contains(sqlText, "T.TABLE_OWNER = :1") || !strings.Contains(sqlText, "T.TABLE_NAME = :2") || strings.Contains(sqlText, "T.OWNER = :1") {
+		t.Fatalf("trigger listing should scope strictly by the base table owner and table, got: %s", oracleListTriggersSQL)
 	}
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bitColumnShape, defaultGeneratorParams, findGeneratorKey, formatGeneratedValue, generateValue, isBooleanColumnType, normalizeColumnDataType } from "@/lib/dataGrid/dataGenerate";
+import { bitColumnShape, defaultGeneratorParams, findGeneratorKey, formatGeneratedValue, generateTableData, generateValue, isBooleanColumnType, normalizeColumnDataType } from "@/lib/dataGrid/dataGenerate";
 
 // Column metadata reports the full SQL type, modifiers included. The generator
 // used to compare that raw string, so `time(3)` / `bit(1)` columns missed every
@@ -152,5 +152,50 @@ describe("bit-string generation honors the declared width (#13014)", () => {
     expect(formatGeneratedValue("10101010", "sqlserver", "bit(8)")).toBe("'10101010'");
     // Non-bit columns are untouched.
     expect(formatGeneratedValue("10101010", "postgres", "varchar(8)")).toBe("'10101010'");
+  });
+});
+
+describe("the full generate pipeline emits writable bit literals (#13014)", () => {
+  function bitTableConfig() {
+    const columns = [
+      { columnName: "enabled_flag", dataType: "bit(1)" },
+      { columnName: "plain_mask", dataType: "bit(8)" },
+      { columnName: "flags", dataType: "bit varying(8)" },
+    ].map(({ columnName, dataType }) => {
+      const generatorKey = findGeneratorKey(columnName, dataType);
+      return {
+        columnName,
+        dataType,
+        rowCount: 3,
+        generatorKey,
+        generatorParams: defaultGeneratorParams(columnName, { dataType }, generatorKey),
+      };
+    });
+    return { tableName: "dbx_bit_gen", schema: "public", database: "postgres", rowCount: 3, columns };
+  }
+
+  it("keeps the generator selection for each bit width", () => {
+    expect(bitTableConfig().columns.map((column) => column.generatorKey)).toEqual(["enum", "bitmask", "bitmask"]);
+  });
+
+  it("writes B'...' literals with the declared width for PostgreSQL", () => {
+    const { sql } = generateTableData(bitTableConfig(), "postgres");
+    expect(sql).toContain("INSERT INTO");
+    expect(sql).toContain("dbx_bit_gen");
+    const rows = sql.slice(sql.indexOf("VALUES")).match(/B'[01]+'/g) ?? [];
+    expect(rows.length).toBeGreaterThanOrEqual(6);
+    for (const literal of rows) expect(literal).toMatch(/^B'[01]+'$/);
+    // Every bit(1) value is one bit and every bit(8) value is eight.
+    const [flag, mask] = [rows[0], rows[1]];
+    expect(flag).toMatch(/^B'[01]'$/);
+    expect(mask).toMatch(/^B'[01]{8}'$/);
+  });
+
+  it("writes b'...' literals for MySQL", () => {
+    const { sql } = generateTableData(bitTableConfig(), "mysql");
+    const rows = sql.match(/b'[01]+'/g) ?? [];
+    expect(rows.length).toBeGreaterThanOrEqual(6);
+    expect(rows[0]).toMatch(/^b'[01]'$/);
+    expect(rows[1]).toMatch(/^b'[01]{8}'$/);
   });
 });

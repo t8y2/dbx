@@ -12,6 +12,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, DatabaseBackup, FileCode, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, Maximize2, Minimize2, Plus, RefreshCw, Square, Trash2, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -37,7 +38,7 @@ import {
 import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview } from "@/lib/import/importSource";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { uniqueKeyModelColumns } from "@/lib/table/tableEditing";
-import { metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
 import { schemaOptionsForConnection } from "@/composables/useSchemaOptions";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
@@ -1342,6 +1343,30 @@ async function goNext() {
   wizardStep.value = nextTableImportWizardStep(wizardStep.value);
 }
 
+async function refreshImportedTable(target: Pick<api.TableImportRequest, "connectionId" | "database" | "schema" | "table">) {
+  try {
+    store.invalidateMetadataCache(target.connectionId, target.database, target.schema || undefined, target.table);
+    // Respect an explicit disconnect while an import finishes in the background.
+    if (!store.connectedIds.has(target.connectionId)) return;
+    const schema = target.schema || undefined;
+    // MySQL metadata uses the database as schema; open data tabs may omit it.
+    const schemaCandidates = [...new Set([schema, connectionObjectTreeNodeSchema(store.getConfig(target.connectionId), target.database, schema)])];
+    await useQueryStore().refreshDataTabsForTable({ connectionId: target.connectionId, database: target.database, schema, schemaCandidates, name: target.table }, { skipPendingChanges: true });
+  } catch (error) {
+    // Refresh failure must not turn committed writes into a failed import.
+    console.warn("[DBX][table-import:refresh-data-failed]", error);
+  }
+}
+
+async function importTableFileAndRefresh(request: api.TableImportRequest, onProgress: (progress: api.TableImportProgress) => void) {
+  try {
+    return await api.importTableFile(request, onProgress);
+  } finally {
+    // Truncate or earlier batches can commit even when import fails/cancels.
+    void refreshImportedTable(request);
+  }
+}
+
 async function startImport() {
   saveActiveBatchTask();
   if (!canImport.value) return;
@@ -1355,6 +1380,7 @@ async function startImport() {
   const currentPreview = preview.value;
   const tableName = targetTableName.value;
   if (!canImport.value || !currentPreview || !props.prefillConnectionId || !tableName) return;
+  const target = { connectionId: props.prefillConnectionId, database: props.prefillDatabase || "", schema: targetSchema.value, table: tableName };
   backgroundMode.value = true;
   running.value = true;
   progressPercentFloor.value = 0;
@@ -1376,13 +1402,10 @@ async function startImport() {
   };
 
   try {
-    const summary = await api.importTableFile(
+    const summary = await importTableFileAndRefresh(
       {
         importId: importId.value,
-        connectionId: props.prefillConnectionId,
-        database: props.prefillDatabase || "",
-        schema: targetSchema.value,
-        table: tableName,
+        ...target,
         filePath: currentPreview.filePath,
         sourceRef: currentPreview.sourceRef || null,
         sourceFormat: sourceFormat.value,
@@ -1413,9 +1436,8 @@ async function startImport() {
       failuresTruncated: summary.failuresTruncated ?? false,
     };
     toast(importSummaryMessage(summary.rowsImported, summary.rowsFailed ?? 0), 2500);
-    store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined, tableName);
     if (targetMode.value === "create") {
-      store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined).catch((error) => {
+      store.refreshObjectListTreeNode(target.connectionId, target.database, target.schema || undefined).catch((error) => {
         console.warn("[DBX][table-import:refresh-created-table-failed]", error);
       });
     }
@@ -1495,13 +1517,11 @@ async function startBatchImport() {
         throw new Error(validation.errors[0] || "Target table name is required");
       }
 
-      const summary = await api.importTableFile(
+      const target = { connectionId: props.prefillConnectionId, database: props.prefillDatabase || "", schema: targetSchema.value, table: task.tableName };
+      const summary = await importTableFileAndRefresh(
         {
           importId: importId.value,
-          connectionId: props.prefillConnectionId,
-          database: props.prefillDatabase || "",
-          schema: targetSchema.value,
-          table: task.tableName,
+          ...target,
           filePath: task.preview.filePath,
           sourceRef: task.preview.sourceRef || null,
           sourceFormat: task.format,
@@ -1547,7 +1567,6 @@ async function startBatchImport() {
       completedFailureList = [...completedFailureList, ...(summary.failures ?? [])];
       completedFailuresTruncated ||= summary.failuresTruncated ?? false;
       completedBytes += task.preview.sizeBytes;
-      store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined, task.tableName);
     }
     refreshImportElapsedClock();
     progress.value = {

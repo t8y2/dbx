@@ -20,7 +20,9 @@ const mocks = vi.hoisted(() => ({
   importTableFile: vi.fn<(request: TableImportRequest, onProgress: (progress: TableImportProgress) => void) => Promise<TableImportSummary>>(),
   releaseTableImportSource: vi.fn().mockResolvedValue(undefined),
   previewSqlFile: vi.fn(),
-  store: { sqlFileSource: null as unknown },
+  refreshDataTabsForTable: vi.fn().mockResolvedValue(1),
+  invalidateMetadataCache: vi.fn(),
+  store: { sqlFileSource: null as unknown, connectedIds: new Set<string>() },
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -35,9 +37,13 @@ vi.mock("@/stores/connectionStore", () => ({
         return undefined;
       },
       ensureConnected: mocks.ensureConnected,
-      invalidateMetadataCache: vi.fn(),
+      invalidateMetadataCache: mocks.invalidateMetadataCache,
       refreshObjectListTreeNode: vi.fn().mockResolvedValue(undefined),
     }),
+}));
+
+vi.mock("@/stores/queryStore", () => ({
+  useQueryStore: () => ({ refreshDataTabsForTable: mocks.refreshDataTabsForTable }),
 }));
 
 vi.mock("@/stores/settingsStore", () => ({
@@ -289,7 +295,9 @@ beforeEach(() => {
   });
   mocks.releaseTableImportSource.mockReset().mockResolvedValue(undefined);
   mocks.previewSqlFile.mockReset();
+  mocks.refreshDataTabsForTable.mockReset().mockResolvedValue(1);
   mocks.store.sqlFileSource = null;
+  mocks.store.connectedIds = new Set(["connection-1", "mysql-1", "postgres-1", "sqlserver-1", "duckdb-1"]);
 });
 
 afterEach(() => {
@@ -299,6 +307,77 @@ afterEach(() => {
 });
 
 describe("TableImportDialog batch selection", () => {
+  it.each([
+    ["mysql-1", "main"],
+    ["postgres-1", "public"],
+  ])("refreshes the existing %s table only after import finishes", async (connectionId, schema) => {
+    let finish!: (summary: TableImportSummary) => void;
+    mocks.previewTableImportFile.mockResolvedValue(delimitedPreview());
+    mocks.importTableFile.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
+    await mountSourceDialog(connectionId, { prefillTable: "existing_target", prefillSchema: schema });
+    await selectFiles([new File(["id,name\n1,a"], "rows.csv")]);
+    await startImport();
+    expect(mocks.refreshDataTabsForTable).not.toHaveBeenCalled();
+
+    finish({ importId: "finished-import", rowsImported: 2, totalRows: 2, elapsedMs: 2 });
+    await flushAsyncUpdates();
+    expect(mocks.refreshDataTabsForTable).toHaveBeenCalledExactlyOnceWith({ connectionId, database: "main", schema, schemaCandidates: connectionId === "mysql-1" ? [schema, undefined] : [schema], name: "existing_target" }, { skipPendingChanges: true });
+    expect(mocks.invalidateMetadataCache).toHaveBeenCalledWith(connectionId, "main", schema, "existing_target");
+    expect(document.body.textContent).toContain("Import complete");
+  });
+
+  it("keeps a successful import successful when refreshing its data tab fails", async () => {
+    mocks.refreshDataTabsForTable.mockRejectedValueOnce(new Error("refresh unavailable"));
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      mocks.previewTableImportFile.mockResolvedValue(delimitedPreview());
+      await mountDialog([new File(["id,name\n1,a"], "rows.csv")]);
+      await startImport();
+      expect(mocks.refreshDataTabsForTable).toHaveBeenCalledTimes(1);
+      expect(document.body.textContent).toContain("Import complete");
+      expect(document.body.textContent).not.toContain("refresh unavailable");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("does not reconnect retained data tabs after the user disconnects during import", async () => {
+    let finish!: (summary: TableImportSummary) => void;
+    mocks.previewTableImportFile.mockResolvedValue(delimitedPreview());
+    mocks.importTableFile.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
+    await mountSourceDialog("mysql-1", { prefillTable: "existing_target" });
+    await selectFiles([new File(["id,name\n1,a"], "rows.csv")]);
+    await startImport();
+    mocks.store.connectedIds.delete("mysql-1");
+    finish({ importId: "finished-import", rowsImported: 2, totalRows: 2, elapsedMs: 2 });
+    await flushAsyncUpdates();
+    expect(mocks.invalidateMetadataCache).toHaveBeenCalledWith("mysql-1", "main", "main", "existing_target");
+    expect(mocks.refreshDataTabsForTable).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Import complete");
+  });
+
+  it.each([0, 1])("refreshes after a failed import that may have truncated or written rows (rowsImported: %s)", async (rowsImported) => {
+    mocks.previewTableImportFile.mockResolvedValue(delimitedPreview());
+    mocks.importTableFile.mockImplementationOnce(async (request, onProgress) => {
+      onProgress({ importId: request.importId, status: "error", rowsImported, totalRows: 2, elapsedMs: 1 });
+      throw new Error("write failed");
+    });
+    await mountSourceDialog("mysql-1", { prefillTable: "existing_target" });
+    await selectFiles([new File(["id,name\n1,a"], "rows.csv")]);
+    await startImport();
+    expect(mocks.refreshDataTabsForTable).toHaveBeenCalledExactlyOnceWith({ connectionId: "mysql-1", database: "main", schema: "main", schemaCandidates: ["main", undefined], name: "existing_target" }, { skipPendingChanges: true });
+    expect(document.body.textContent).toContain("write failed");
+  });
+
+  it("refreshes only attempted batch targets, including a partially failed task", async () => {
+    mocks.importTableFile.mockImplementationOnce(async (request) => ({ importId: request.importId, rowsImported: 2, totalRows: 2, elapsedMs: 1 }));
+    mocks.importTableFile.mockRejectedValueOnce(new Error("second task failed"));
+    await mountDialog();
+    await startImport();
+    expect(mocks.refreshDataTabsForTable.mock.calls.map(([target]) => target.name)).toEqual(["rows_First", "rows_Second"]);
+    expect(document.body.textContent).toContain("second task failed");
+  });
+
   it.each([false, true])("blocks import when every sheet is empty (single sheet: %s)", async (singleSheet) => {
     mocks.previewTableImportFile.mockResolvedValue({ ...workbookPreview("First"), sheets: singleSheet ? ["First"] : sheets, columns: ["id"], rows: [], totalRows: 0 });
     await mountDialog();

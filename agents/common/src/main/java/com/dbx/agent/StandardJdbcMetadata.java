@@ -3,7 +3,6 @@ package com.dbx.agent;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -159,7 +158,7 @@ public final class StandardJdbcMetadata {
             if (isOracle(meta)) {
                 try {
                     result.addAll(new OracleTriggerReader(conn, oracleEngine(meta)).listSchemaObjects(schema));
-                } catch (SQLException ignored) {
+                } catch (Exception | AbstractMethodError ignored) {
                     // Trigger metadata is best-effort; never fail the whole object group.
                 }
             }

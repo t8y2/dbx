@@ -89,9 +89,10 @@ public final class OracleTriggerReader {
     public List<ObjectInfo> listSchemaObjects(String owner) throws SQLException {
         List<ObjectInfo> objects = new ArrayList<>();
         for (TriggerInfo trigger : summaries("t.OWNER = ?", List.of(owner), false)) {
-            objects.add(new ObjectInfo(trigger.getName(), "TRIGGER", owner, null));
+            ObjectInfo object = new ObjectInfo(trigger.getName(), "TRIGGER", owner, null);
+            attach(object, trigger);
+            objects.add(object);
         }
-        enrichObjects(objects, owner);
         return objects;
     }
 

@@ -307,6 +307,7 @@ import {
   buildMcpTraeConfig,
   buildMcpVsCodeConfig,
   buildMcpWorkBuddyConfig,
+  buildMcpAntigravityConfig,
   mcpWebBackendUrl,
   type McpLaunchConfig,
   preferMcpNativeLaunch,
@@ -4197,7 +4198,7 @@ async function exportDebugLogs() {
 }
 
 // ---------- MCP Server ----------
-type McpConfigTab = "claude" | "cursor" | "codebuddy" | "zcode" | "trae" | "vscode" | "windsurf" | "codex" | "deepseek-harness" | "opencode" | "pi" | "cherry-studio" | "qoder" | "workbuddy";
+type McpConfigTab = "claude" | "cursor" | "codebuddy" | "zcode" | "trae" | "vscode" | "windsurf" | "codex" | "deepseek-harness" | "opencode" | "pi" | "cherry-studio" | "qoder" | "workbuddy" | "antigravity";
 type McpCopyKind = "install" | "uninstall" | "http-endpoint" | "http-token" | "http-config" | `${McpConfigTab}-config`;
 type McpTransportTab = "stdio" | "http";
 type McpManagementTab = "access" | "capabilities" | "permissions";
@@ -5200,6 +5201,7 @@ const mcpDeepSeekHarnessRecommendedConfig = computed(() => buildMcpDeepSeekHarne
 const mcpOpenCodeRecommendedConfig = computed(() => buildMcpOpenCodeConfig(mcpLaunchConfig.value));
 const mcpPiRecommendedConfig = computed(() => buildMcpPiConfig(mcpLaunchConfig.value));
 const mcpWorkBuddyRecommendedConfig = computed(() => buildMcpWorkBuddyConfig(mcpLaunchConfig.value));
+const mcpAntigravityRecommendedConfig = computed(() => buildMcpAntigravityConfig(mcpLaunchConfig.value));
 
 const mcpStatusTone = computed<"ok" | "warning" | "muted">(() => {
   if (!mcpStatus.value) return "muted";
@@ -13311,6 +13313,7 @@ LIMIT 100;</pre>
                         <TabsTrigger value="cherry-studio" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Cherry Studio</TabsTrigger>
                         <TabsTrigger value="qoder" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Qoder</TabsTrigger>
                         <TabsTrigger value="workbuddy" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">WorkBuddy</TabsTrigger>
+                        <TabsTrigger value="antigravity" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Antigravity</TabsTrigger>
                       </TabsList>
 
                       <TabsContent value="claude" class="m-0">
@@ -13512,6 +13515,21 @@ LIMIT 100;</pre>
                             <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpWorkBuddyRecommendedConfig }}</code></pre>
                             <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('workbuddy-config', mcpWorkBuddyRecommendedConfig)">
                               <CheckCircle2 v-if="mcpCopied === 'workbuddy-config'" class="h-3.5 w-3.5 text-green-500" />
+                              <Copy v-else class="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      </TabsContent>
+
+                      <TabsContent value="antigravity" class="m-0">
+                        <div class="space-y-2">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                            {{ t("settings.mcpAntigravityConfigPath") }}
+                          </div>
+                          <div class="relative rounded-md border bg-background p-3">
+                            <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpAntigravityRecommendedConfig }}</code></pre>
+                            <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('antigravity-config', mcpAntigravityRecommendedConfig)">
+                              <CheckCircle2 v-if="mcpCopied === 'antigravity-config'" class="h-3.5 w-3.5 text-green-500" />
                               <Copy v-else class="h-3.5 w-3.5" />
                             </Button>
                           </div>

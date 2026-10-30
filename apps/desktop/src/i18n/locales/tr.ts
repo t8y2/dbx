@@ -8925,6 +8925,7 @@ export default withEnglishFallback({
     mcpTraeConfigPath: "TRAE: Ayarlar > MCP > Ekle > Elle Ekle, ardından JSON yapılandırmasını yapıştırın.",
     mcpQoderConfigPath: "Qoder: Ayarlar > MCP > Elle Ekle, ardından JSON yapılandırmasını yapıştırın.",
     mcpWorkBuddyConfigPath: "WorkBuddy: kenar çubuğunda Eklentiler'i açın, MCP Servers (sağ üst) > MCP'yi Yapılandır ile JSON'u yapıştırın; ya da ~/.workbuddy/mcp.json (genel) veya proje içindeki .workbuddy/mcp.json dosyasına kaydedin.",
+    mcpAntigravityConfigPath: "Antigravity: ~/.gemini/config/mcp_config.json (genel) veya proje içindeki .gemini/config/mcp_config.json dosyasına kaydedin.",
     mcpCherryStudioConfigPath: "Cherry Studio: Ayarlar > MCP Sunucuları > Sunucu Ekle > JSON İçe Aktar, ardından yapılandırmayı yapıştırın.",
     mcpVsCodeConfigPath: "VS Code/Copilot, çalışma alanında .vscode/mcp.json ya da kullanıcı profilinde mcp.json kullanabilir.",
     mcpWindsurfConfigPath: "Windsurf, ~/.codeium/windsurf/mcp_config.json kullanabilir.",

@@ -10263,6 +10263,7 @@ export default withEnglishFallback({
     mcpTraeConfigPath: "TRAE: 설정 > MCP > 추가 > 수동 추가 후 JSON 설정을 붙여넣으세요.",
     mcpQoderConfigPath: "Qoder: 설정 > MCP > 수동 추가 후 JSON 설정을 붙여넣으세요.",
     mcpWorkBuddyConfigPath: "WorkBuddy: 사이드바의 플러그인 → 오른쪽 위 MCP 서버 > MCP 구성에 JSON을 붙여넣어 저장하세요. 또는 ~/.workbuddy/mcp.json(전역) 또는 프로젝트의 .workbuddy/mcp.json에 저장하세요.",
+    mcpAntigravityConfigPath: "Antigravity: 전역 ~/.gemini/config/mcp_config.json 또는 프로젝트의 .gemini/config/mcp_config.json에 저장하세요.",
     mcpCherryStudioConfigPath: "Cherry Studio: 설정 > MCP 서버 > 서버 추가 > JSON 가져오기 후 설정을 붙여넣으세요.",
     mcpVsCodeConfigPath: "VS Code/Copilot은 작업 영역의 .vscode/mcp.json 또는 사용자 프로필의 mcp.json을 사용할 수 있습니다.",
     mcpWindsurfConfigPath: "Windsurf는 ~/.codeium/windsurf/mcp_config.json을 사용할 수 있습니다.",

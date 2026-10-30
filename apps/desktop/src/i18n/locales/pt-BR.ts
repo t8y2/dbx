@@ -10114,6 +10114,7 @@ export default withEnglishFallback({
     mcpTraeConfigPath: "TRAE: Configurações > MCP > Adicionar > Adicionar manualmente; depois cole a configuração JSON.",
     mcpQoderConfigPath: "Qoder: Configurações > MCP > Adicionar manualmente; depois cole a configuração JSON.",
     mcpWorkBuddyConfigPath: "WorkBuddy: abra Plugins na barra lateral, clique em MCP Servers (canto superior direito) > Configurar MCP e cole o JSON; ou salve em ~/.workbuddy/mcp.json (global) ou em .workbuddy/mcp.json do projeto.",
+    mcpAntigravityConfigPath: "Antigravity: salve em ~/.gemini/config/mcp_config.json (global) ou em .gemini/config/mcp_config.json do projeto.",
     mcpCherryStudioConfigPath: "Cherry Studio: Configurações > Servidores MCP > Adicionar servidor > Importar JSON; depois cole a configuração.",
     mcpVsCodeConfigPath: "O VS Code/Copilot pode usar .vscode/mcp.json no workspace ou mcp.json no perfil do usuário.",
     mcpWindsurfConfigPath: "O Windsurf pode usar ~/.codeium/windsurf/mcp_config.json.",

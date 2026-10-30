@@ -53,6 +53,11 @@ pub struct SqlReferenceAnalysis {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SqlTableReference {
     pub name: String,
+    /// Database part of a three-part name such as SQL Server's `db.dbo.orders`.
+    /// Without it the editor looked the table up in the current database and
+    /// flagged cross-database references as unknown (#13947).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     pub schema: Option<String>,
     pub alias: Option<String>,
     pub span: SqlTextSpan,
@@ -1758,8 +1763,16 @@ fn table_reference_from_name(
     let parts: Vec<&Ident> = name.0.iter().filter_map(ObjectNamePart::as_ident).collect();
     let table = parts.last()?;
     let schema = if parts.len() >= 2 { parts.get(parts.len() - 2).map(|ident| ident.value.clone()) } else { None };
+    let database = if parts.len() >= 3 { parts.get(parts.len() - 3).map(|ident| ident.value.clone()) } else { None };
 
-    Some(SqlTableReference { name: table.value.clone(), schema, alias, span: table.span.into(), scope_id: scope_id? })
+    Some(SqlTableReference {
+        name: table.value.clone(),
+        database,
+        schema,
+        alias,
+        span: table.span.into(),
+        scope_id: scope_id?,
+    })
 }
 
 fn object_name_last_ident(name: &ObjectName) -> Option<&Ident> {

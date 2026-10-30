@@ -965,7 +965,7 @@ const rowStyle = computed(() => {
   const backgroundColor = hexToRgba(color, isActiveConnectionScope.value ? 0.14 : 0.08);
   return {
     paddingLeft: paddingLeft.value,
-    paddingRight: props.isStickyContext && !showProductionBadge.value ? "72px" : showProductionRowMarker.value ? "8px" : trailingComment.value ? "12px" : undefined,
+    paddingRight: props.isStickyContext && !showProductionBadge.value ? "72px" : showProductionRowMarker.value || (activeNode.value.type === "connection" && showProductionBadge.value) ? "8px" : trailingComment.value ? "12px" : undefined,
     "--tree-connection-row-bg": backgroundColor,
     "--tree-connection-row-hover-bg": hexToRgba(color, isActiveConnectionScope.value ? 0.2 : 0.16),
     "--tree-connection-active-bg": hexToRgba(color, 0.18),
@@ -1724,7 +1724,7 @@ function onKeydown(event: KeyboardEvent) {
               <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
             </button>
             <Pin v-else-if="isPinned" class="h-3 w-3 shrink-0 fill-current text-primary" aria-hidden="true" />
-            <ProductionContextBadge v-if="showProductionBadge && !showProductionRowMarker" compact />
+            <ProductionContextBadge v-if="showProductionBadge && !showProductionRowMarker && node.type !== 'connection'" compact />
             <span
               v-if="
                 (node.type === 'group-tables' ||
@@ -1777,6 +1777,7 @@ function onKeydown(event: KeyboardEvent) {
         </div>
         <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
+        <ProductionContextBadge v-if="showProductionBadge && !showProductionRowMarker && node.type === 'connection'" class="ml-auto shrink-0" compact />
         <ReadOnlySessionControl v-if="isConnectionReadonly && activeNode.connectionId" :connection-id="activeNode.connectionId" show-label />
         <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
         <span v-if="formattedObjectStorage()" class="ml-auto shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ formattedObjectStorage() }}</span>

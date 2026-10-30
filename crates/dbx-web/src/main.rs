@@ -937,6 +937,7 @@ async fn serve() -> Result<(), String> {
             "/query/build-routine-rename-object-source-statements",
             post(routes::query::build_routine_rename_object_source_statements),
         )
+        .route("/query/build-routine-copy-object-source-sql", post(routes::query::build_routine_copy_object_source_sql))
         .route("/query/rewrite-oracle-routine-references", post(routes::query::rewrite_oracle_routine_references))
         .route("/query/rewrite-oracle-table-references", post(routes::query::rewrite_oracle_table_references))
         .route("/query/build-view-ddl-sql", post(routes::query::build_view_ddl_sql))

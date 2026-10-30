@@ -369,6 +369,7 @@ export const fingerprintOracleRoutineObjectSource = forward("fingerprintOracleRo
 export const buildExecutableObjectSourceSql = forward("buildExecutableObjectSourceSql");
 export const buildEditableObjectSource = forward("buildEditableObjectSource");
 export const buildRoutineRenameObjectSourceStatements = forward("buildRoutineRenameObjectSourceStatements");
+export const buildRoutineCopyObjectSourceSql = forward("buildRoutineCopyObjectSourceSql");
 export const rewriteOracleRoutineReferences = forward("rewriteOracleRoutineReferences");
 export const rewriteOracleTableReferences = forward("rewriteOracleTableReferences");
 export const parseOracleObjectName = forward("parseOracleObjectName");

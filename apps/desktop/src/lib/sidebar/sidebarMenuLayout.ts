@@ -88,7 +88,7 @@ const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
     "diff.title",
     "dataDictionary.title",
   ],
-  copy: ["contextMenu.copyName", "contextMenu.copyConnectionInfo", "contextMenu.copyStructureAs", "contextMenu.copyFinalProxyPort", "contextMenu.copyTable", "contextMenu.pasteTable"],
+  copy: ["contextMenu.copyName", "contextMenu.copyConnectionInfo", "contextMenu.copyStructureAs", "contextMenu.copyFinalProxyPort", "contextMenu.copyTable", "contextMenu.pasteTable", "contextMenu.copyRoutine", "contextMenu.pasteRoutineTitle"],
   organize: [
     "contextMenu.setDefaultDatabase",
     "contextMenu.clearDefaultDatabase",

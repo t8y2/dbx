@@ -42,6 +42,7 @@ import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilit
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionDisconnectTargets, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { formatSidebarTableCopyText } from "@/lib/sidebar/sidebarTableNameCopy";
+import { routineClipboardEntryForSelection, routineClipboardPasteTarget } from "@/lib/table/routineClipboard";
 import { pruneTreeSelectionToVisibleNodeIds } from "@/lib/sidebar/sidebarTreeSelection";
 import { sidebarUserAdminVisibility } from "@/lib/sidebar/sidebarUserAdminVisibility";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
@@ -2769,8 +2770,14 @@ function copySelectedSidebarNames(): boolean {
     return true;
   }
   const tableNodes = nodes.filter((node) => node.type === "table" && !!node.connectionId && !!node.database);
-  store.treeClipboard =
-    tableNodes.length > 0
+  const routine = routineClipboardEntryForSelection(
+    nodes,
+    (node) => effectiveDatabaseTypeForConnection(node.connectionId ? store.getConfig(node.connectionId) : undefined),
+    (node) => connectionObjectTreeNodeSchema(store.getConfig(node.connectionId!), node.database!, node.schema),
+  );
+  store.treeClipboard = routine
+    ? { kind: "routine-copy", routine }
+    : tableNodes.length > 0
       ? {
           kind: "table-copy",
           tables: tableNodes.map((node) => ({
@@ -2811,6 +2818,11 @@ function requestSelectedSidebarPaste(): boolean {
       })
       .catch((e: any) => toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000));
     return true;
+  }
+  if (clipboard?.kind === "routine-copy") {
+    const selectedNode = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : undefined;
+    if (!selectedNode || !routineClipboardPasteTarget(clipboard.routine, selectedNode, (node) => connectionObjectTreeNodeSchema(store.getConfig(node.connectionId!), node.database!, node.schema || (node.type === "schema" ? node.label : undefined)))) return false;
+    return pasteHandlerRegistry.request(selectedNodeId!);
   }
   if (clipboard?.kind !== "table-copy" || clipboard.tables.length === 0 || !selectedNodeId) return false;
 

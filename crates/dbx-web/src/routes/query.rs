@@ -309,6 +309,12 @@ pub struct BuildRoutineRenameObjectSourceRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BuildRoutineCopyObjectSourceRequest {
+    pub input: dbx_core::object_source_sql::RoutineCopyObjectSourceInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RewriteOracleRoutineReferencesRequest {
     pub input: dbx_core::object_source_sql::OracleRoutineReferenceRewriteInput,
 }
@@ -1408,6 +1414,12 @@ pub async fn build_routine_rename_object_source_statements(
     dbx_core::object_source_sql::build_routine_rename_object_source_statements(req.input)
         .map(Json)
         .map_err(AppError::from)
+}
+
+pub async fn build_routine_copy_object_source_sql(
+    Json(req): Json<BuildRoutineCopyObjectSourceRequest>,
+) -> Result<Json<String>, AppError> {
+    dbx_core::object_source_sql::build_routine_copy_object_source_sql(req.input).map(Json).map_err(AppError::from)
 }
 
 pub async fn rewrite_oracle_routine_references(

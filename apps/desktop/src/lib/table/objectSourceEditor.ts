@@ -31,6 +31,10 @@ export type BuildRoutineRenameObjectSourceInput = BuildEditableObjectSourceSqlIn
   newName: string;
 };
 
+export type RoutineCopyObjectSourceInput = BuildEditableObjectSourceSqlInput & {
+  newName: string;
+};
+
 export type RewriteOracleRoutineReferencesInput = {
   databaseType: DatabaseType;
   callerType: Extract<ObjectSourceKind, "VIEW" | "PROCEDURE" | "FUNCTION">;
@@ -78,6 +82,10 @@ export function supportsSourceBackedRoutineRename(databaseType: DatabaseType | u
 
 export function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
   return api.buildRoutineRenameObjectSourceStatements(input);
+}
+
+export function buildRoutineCopyObjectSourceSql(input: RoutineCopyObjectSourceInput): Promise<string> {
+  return api.buildRoutineCopyObjectSourceSql(input);
 }
 
 export function fingerprintOracleRoutineObjectSource(input: FingerprintOracleRoutineObjectSourceInput): Promise<string> {

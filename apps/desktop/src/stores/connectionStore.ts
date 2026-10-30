@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { cancelSchemaDiffTasksForConnection } from "@/lib/schema/schemaDiffCancellation";
 import type { SqlFilePreview } from "@/lib/backend/api";
+import type { RoutineClipboardEntry } from "@/lib/table/routineClipboard";
 import { uuid } from "@/lib/common/utils";
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { ref, computed, watch, markRaw, reactive } from "vue";
@@ -419,6 +420,10 @@ interface TreeClipboardConnectionEntry {
 }
 
 export type TreeClipboard =
+  | {
+      kind: "routine-copy";
+      routine: RoutineClipboardEntry;
+    }
   | {
       kind: "table-copy";
       tables: TreeClipboardTableEntry[];

@@ -308,7 +308,7 @@ import type {
 import type { BuildTableSelectSqlOptions } from "@/lib/table/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/database/databaseSearch";
 import type { DatabaseStructureSearchSql, DatabaseStructureSearchSqlOptions } from "@/lib/database/databaseStructureSearch";
-import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput, FingerprintOracleRoutineObjectSourceInput, RewriteOracleRoutineReferencesInput, ValidateOracleExecutableObjectSourceInput } from "@/lib/table/objectSourceEditor";
+import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput, FingerprintOracleRoutineObjectSourceInput, RewriteOracleRoutineReferencesInput, RoutineCopyObjectSourceInput, ValidateOracleExecutableObjectSourceInput } from "@/lib/table/objectSourceEditor";
 import type { OracleTriggerSqlInput, PreparedOracleTriggerSql } from "@/lib/database/oracleTriggerSql";
 import type { OracleTableReferenceRewriteInput, OracleViewRenameSource, OracleViewRenameSourceInput, OracleViewRenameSourceReview } from "@/types/database";
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
@@ -2174,6 +2174,10 @@ export async function buildRoutineRenameObjectSourceStatements(input: BuildRouti
   return post("/api/query/build-routine-rename-object-source-statements", {
     input,
   });
+}
+
+export async function buildRoutineCopyObjectSourceSql(input: RoutineCopyObjectSourceInput): Promise<string> {
+  return post("/api/query/build-routine-copy-object-source-sql", { input });
 }
 
 export async function rewriteOracleRoutineReferences(input: RewriteOracleRoutineReferencesInput): Promise<string> {

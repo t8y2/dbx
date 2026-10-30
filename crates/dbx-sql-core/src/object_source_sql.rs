@@ -8,6 +8,8 @@ use crate::models::connection::DatabaseType;
 use crate::sql::{oracle_plsql_block_is_complete, split_sql_statements_for_database};
 use crate::types::ObjectSourceKind;
 
+mod routine_copy;
+pub use routine_copy::{build_routine_copy_object_source_sql, RoutineCopyObjectSourceInput};
 mod oracle_indexes;
 mod oracle_trigger;
 pub use oracle_trigger::{

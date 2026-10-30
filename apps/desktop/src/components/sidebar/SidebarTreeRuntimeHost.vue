@@ -13,6 +13,7 @@ import { useSidebarDatabaseSpecificMutationRuntime } from "@/composables/useSide
 import { useSidebarTableMutationRuntime } from "@/composables/useSidebarTableMutationRuntime";
 import { useSidebarTreeExportRuntime } from "@/composables/useSidebarTreeExportRuntime";
 import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
+import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 import { useSidebarTreeToolRuntime } from "@/composables/useSidebarTreeToolRuntime";
 import { canDropDatabaseNode, notifyDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
 import { dropDatabaseOtherSessionCount } from "@/lib/database/dropDatabaseError";
@@ -235,7 +236,8 @@ import { prepareOracleViewRename, executeOracleViewRename, OracleViewRenameFailu
 import { prepareOracleRoutineRename, executeOracleRoutineRename, OracleRoutineRenameFailure, type OracleRoutineRenamePlan } from "@/lib/table/oracleRoutineRename";
 import { prepareOracleTableRename, executeOracleTableRename, OracleTableRenameFailure, type OracleTableRenamePlan } from "@/lib/table/oracleTableRename";
 import { prepareOraclePackageSaveAsExecution, OraclePackageSaveAsFailure, prepareOraclePackageSaveAs, type OraclePackageSaveAsPlan } from "@/lib/table/oraclePackageSaveAs";
-import { buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { buildRoutineCopyObjectSourceSql, buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { routineClipboardEntryForSelection, routineClipboardPasteTarget, supportsRoutineClipboardDatabase } from "@/lib/table/routineClipboard";
 import { freezeSourceIdentities } from "@/lib/table/objectSourceIdentity";
 import { buildViewDdl } from "@/lib/table/viewDdl";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
@@ -364,6 +366,12 @@ import {
   duplicateTableName,
   duplicateStructureSource,
   showPasteDialog,
+  showPasteRoutineDialog,
+  pasteRoutineName,
+  pasteRoutineLoading,
+  pasteRoutineError,
+  pasteRoutineSource,
+  pasteRoutineTarget,
   pasteTableMode,
   pasteTableEntries,
   pasteTableFromClipboard,
@@ -1519,6 +1527,93 @@ function normalizeTreeClipboardSchema(connectionId: string, database: string, sc
   return connectionObjectTreeNodeSchema(connectionStore.getConfig(connectionId), database, schema);
 }
 
+function routineClipboardSchema(node: TreeNode): string | undefined {
+  return node.connectionId && node.database ? normalizeTreeClipboardSchema(node.connectionId, node.database, node.schema || (node.type === "schema" ? node.label : undefined)) : node.schema;
+}
+
+function canPasteRoutineToNode(node: TreeNode): boolean {
+  const clipboard = connectionStore.treeClipboard;
+  return clipboard?.kind === "routine-copy" && supportsRoutineClipboardDatabase(databaseTypeForNode(node)) && !connectionIsEffectivelyReadOnly(connectionStore.getConfig(node.connectionId || "")) && !!routineClipboardPasteTarget(clipboard.routine, node, routineClipboardSchema);
+}
+
+function openPasteRoutineDialog(): boolean {
+  if (pasteRoutineLoading.value || !canPasteRoutineToNode(activeNode.value)) return false;
+  const clipboard = connectionStore.treeClipboard;
+  if (clipboard?.kind !== "routine-copy") return false;
+  const scope = routineClipboardPasteTarget(clipboard.routine, activeNode.value, routineClipboardSchema);
+  if (!scope) return false;
+  pasteRoutineSource.value = { ...clipboard.routine };
+  pasteRoutineTarget.value = { ...createSidebarActionTarget(activeNode.value), ...scope };
+  pasteRoutineName.value = `${clipboard.routine.name}_copy`;
+  pasteRoutineError.value = "";
+  showPasteRoutineDialog.value = true;
+  return true;
+}
+
+async function confirmPasteRoutine() {
+  const source = pasteRoutineSource.value;
+  const target = pasteRoutineTarget.value;
+  if (!source || !target || !showPasteRoutineDialog.value || pasteRoutineLoading.value) return;
+  const newName = pasteRoutineName.value.trim();
+  if (!newName || newName === source.name) {
+    pasteRoutineError.value = t("contextMenu.pasteRoutineInvalidName");
+    return;
+  }
+  const config = connectionStore.getConfig(source.connectionId);
+  const databaseType = effectiveDatabaseTypeForConnection(config);
+  if (!config || !supportsRoutineClipboardDatabase(databaseType) || connectionIsEffectivelyReadOnly(config) || !routineClipboardPasteTarget(source, target, routineClipboardSchema)) {
+    pasteRoutineError.value = t("contextMenu.pasteRoutineUnavailable");
+    return;
+  }
+  const configIdentity = connectionConfigFingerprint(config);
+  const owner = sidebarTreeDialogOwner.value;
+  const ownsDialog = () => pasteRoutineSource.value === source && pasteRoutineTarget.value === target;
+  const isCurrent = () => {
+    const currentConfig = connectionStore.getConfig(source.connectionId);
+    return (
+      ownsDialog() &&
+      showPasteRoutineDialog.value &&
+      pasteRoutineName.value.trim() === newName &&
+      sidebarTreeDialogOwner.value === owner &&
+      !!currentConfig &&
+      connectionConfigFingerprint(currentConfig) === configIdentity &&
+      effectiveDatabaseTypeForConnection(currentConfig) === databaseType &&
+      !connectionIsEffectivelyReadOnly(currentConfig)
+    );
+  };
+  pasteRoutineLoading.value = true;
+  pasteRoutineError.value = "";
+  try {
+    await connectionStore.ensureConnected(source.connectionId);
+    if (!isCurrent()) return;
+    const raw = await api.getObjectSource(source.connectionId, source.database, source.schema || source.database, source.name, source.objectType, source.signature);
+    if (!isCurrent()) return;
+    if (raw.editable === false || raw.object_type !== source.objectType) throw new Error(t("contextMenu.pasteRoutineUnavailable"));
+    const sql = await buildRoutineCopyObjectSourceSql({ databaseType: databaseType!, objectType: source.objectType, schema: source.schema, name: source.name, newName, source: raw.source });
+    if (!isCurrent()) return;
+    const result = await executeTreeNodeSqlWithProductionGuard(target, sql, {
+      database: source.database,
+      schema: source.schema,
+      isCancelledBeforeDispatch: () => !isCurrent(),
+    });
+    if (!result) return;
+    if (result.execution_error || result.error) throw result.error || new Error(t("contextMenu.pasteRoutineUnavailable"));
+    // Creation has succeeded. Close before refreshing so a refresh error never offers
+    // a retry that could dispatch the same CREATE twice.
+    if (ownsDialog()) showPasteRoutineDialog.value = false;
+    toast(t("contextMenu.pasteRoutineSuccess", { name: newName }), 3000);
+    try {
+      await connectionStore.refreshObjectListTreeNode(source.connectionId, source.database, source.schema);
+    } catch (error) {
+      toast(t("contextMenu.pasteRoutineRefreshFailed", { message: translateBackendError(t, error) }), 5000);
+    }
+  } catch (error) {
+    if (ownsDialog() && showPasteRoutineDialog.value) pasteRoutineError.value = translateBackendError(t, error);
+  } finally {
+    if (ownsDialog()) pasteRoutineLoading.value = false;
+  }
+}
+
 function normalizedTreeClipboardTableEntries(): TableClipboardTableContext[] {
   const clipboard = connectionStore.treeClipboard;
   if (clipboard?.kind !== "table-copy") return [];
@@ -1566,6 +1661,7 @@ function requestPasteTreeClipboard(): boolean {
   ensureDangerDialogRouting();
   routeTreeItemDialogController();
   const clipboard = connectionStore.treeClipboard;
+  if (clipboard?.kind === "routine-copy") return openPasteRoutineDialog();
   if (clipboard?.kind === "saved-sql-copy") {
     const target = savedSqlPasteTargetForNode(activeNode.value);
     if (!target || clipboard.fileIds.length === 0) return false;
@@ -2958,6 +3054,11 @@ async function copySelectedNames() {
 }
 
 function updateTreeClipboardForNodes(nodes: TreeNode[]) {
+  const routine = routineClipboardEntryForSelection(nodes, databaseTypeForNode, routineClipboardSchema);
+  if (routine) {
+    connectionStore.treeClipboard = { kind: "routine-copy", routine };
+    return;
+  }
   const tableNodes = nodes.filter((node): node is DuplicateStructureSource => node.type === "table" && !!node.connectionId && !!node.database && typeof node.label === "string");
   if (tableNodes.length === 0) {
     connectionStore.treeClipboard = null;
@@ -6966,6 +7067,11 @@ function objectDialogCapabilities() {
     duplicateTableName,
     confirmDuplicateStructure,
     showPasteDialog,
+    showPasteRoutineDialog,
+    pasteRoutineName,
+    pasteRoutineLoading,
+    pasteRoutineError,
+    confirmPasteRoutine,
     pasteTableEntries,
     pasteTableMode,
     pasteTableFromClipboard,
@@ -8729,7 +8835,17 @@ function treeItemMenuItems(): ContextMenuItem[] {
     autoIncrementMenuAction,
   };
   for (const factory of sidebarMenuFactories) {
-    if (factory(factoryContext)) return items;
+    if (factory(factoryContext)) {
+      const selected = selectedTreeNodesInVisibleOrder();
+      const copyNodes = selected.length > 1 && selected.some((candidate) => candidate.id === node.id) ? selected : [node];
+      if (routineClipboardEntryForSelection(copyNodes, databaseTypeForNode, routineClipboardSchema)) {
+        items.push({ sidebarActionId: "contextMenu.copyRoutine", label: t("contextMenu.copyRoutine"), action: copySelectedNames, icon: Copy });
+      }
+      if (canPasteRoutineToNode(node)) {
+        items.push({ sidebarActionId: "contextMenu.pasteRoutineTitle", label: t("contextMenu.pasteRoutineTitle"), action: () => requestPasteTreeClipboard(), icon: Clipboard, shortcut: shortcutPaste.value });
+      }
+      return items;
+    }
   }
 
   // 10. Universal Copy Name (for all types except connection)

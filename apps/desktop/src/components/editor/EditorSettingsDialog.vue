@@ -276,6 +276,7 @@ import { normalizeExcludedCompletionItems } from "@/lib/editor/excludedCompletio
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 import { REDIS_DATABASE_DISPLAY_LIMIT_MIN, REDIS_DATABASE_DISPLAY_LIMIT_MAX, REDIS_DATABASE_DISPLAY_LIMIT_OPTIONS } from "@/lib/redis/redisDatabaseAlias";
 import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
+import { applySnippetRangeSelection } from "@/lib/sql/snippetRangeSelection";
 import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
 import { buildQueryEditorLineNumbersExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
@@ -531,12 +532,13 @@ function onLocaleOpenChange(open: boolean) {
   if (!open) restoreLocaleOptionPreview();
 }
 
-const appThemePaletteOptions = computed((): Array<{ value: AppThemePalette; label: string; previewColor: string }> =>
-  APP_THEME_PALETTES.map((palette) => ({
-    value: palette.value,
-    label: t(palette.labelKey),
-    previewColor: palette.previewColor,
-  })),
+const appThemePaletteOptions = computed(
+  (): Array<{ value: AppThemePalette; label: string; previewColor: string }> =>
+    APP_THEME_PALETTES.map((palette) => ({
+      value: palette.value,
+      label: t(palette.labelKey),
+      previewColor: palette.previewColor,
+    })),
 );
 const selectedThemePaletteOption = computed(() => appThemePaletteOptions.value.find((option) => option.value === themePalette.value) ?? appThemePaletteOptions.value[0]);
 const selectedLocaleOption = computed(() => LOCALE_OPTIONS.find((locale) => locale.value === currentLocale()) ?? LOCALE_OPTIONS[0]);
@@ -1151,6 +1153,76 @@ function editableSnippet(snippet: SqlSnippet): SqlSnippet {
 const editSnippets = ref<SqlSnippet[]>(settingsStore.editorSettings.snippets.map(editableSnippet));
 const editSnippetTriggerKey = ref<SnippetTriggerKey>(settingsStore.editorSettings.snippetTriggerKey);
 
+// --- Snippet filter ---
+const snippetFilter = ref("");
+
+const visibleSnippets = computed(() => {
+  const query = snippetFilter.value.trim().toLocaleLowerCase();
+  if (!query) return editSnippets.value;
+  return editSnippets.value.filter((snippet) => snippet.label.toLocaleLowerCase().includes(query) || snippet.prefix.toLocaleLowerCase().includes(query) || snippet.body.toLocaleLowerCase().includes(query));
+});
+
+// --- Snippet bulk selection ---
+const selectedSnippetIds = ref<Set<string>>(new Set());
+
+const selectedSnippetCount = computed(() => editSnippets.value.reduce((count, snippet) => count + (selectedSnippetIds.value.has(snippet.id) ? 1 : 0), 0));
+// Select-all follows the current filter (it selects exactly the visible rows);
+// rows hidden by the filter keep their selection state.
+const allSnippetsSelected = computed(() => visibleSnippets.value.length > 0 && visibleSnippets.value.every((snippet) => selectedSnippetIds.value.has(snippet.id)));
+
+// Anchor for shift range selection: the last plain-clicked checkbox row. It
+// never drives rendering, so it does not need to be reactive.
+let snippetSelectionAnchorId: string | undefined;
+// Whether this click can form a range: the change handler spreads the clicked
+// row's post-toggle state across the whole span from the anchor. Nothing here
+// is preventDefault'ed — canceled checkbox clicks rebound after the render
+// falls back on WebView2, so the range logic rides the native toggle instead:
+// whatever the clicked row toggles to, the whole range follows, and the visual
+// state can never diverge from the selection set.
+let snippetRangeClickPending = false;
+
+function handleSnippetCheckboxClick(event: MouseEvent, snippet: SqlSnippet) {
+  snippetRangeClickPending = event.shiftKey && !!applySnippetRangeSelection(selectedSnippetIds.value, visibleSnippets.value, snippetSelectionAnchorId, snippet.id);
+  if (!snippetRangeClickPending) snippetSelectionAnchorId = snippet.id;
+}
+
+function handleSnippetCheckboxChange(snippet: SqlSnippet, checked: boolean) {
+  const pending = snippetRangeClickPending;
+  snippetRangeClickPending = false;
+  const next = pending ? applySnippetRangeSelection(selectedSnippetIds.value, visibleSnippets.value, snippetSelectionAnchorId, snippet.id, checked) : null;
+  if (next) {
+    // A range formed: the anchor stays put so further shift-clicks can extend
+    // other spans; the anchor row is an endpoint of this span, so its checked
+    // state unifies with the span and :checked aligns it on the next render.
+    selectedSnippetIds.value = next;
+    return;
+  }
+  // Plain toggle, or a shift-click with no usable anchor (nothing plain-clicked
+  // yet, the anchor filtered out or deleted, or the clicked row is the anchor
+  // itself)
+  const update = new Set(selectedSnippetIds.value);
+  if (checked) update.add(snippet.id);
+  else update.delete(snippet.id);
+  selectedSnippetIds.value = update;
+}
+
+function toggleAllSnippetsSelected(checked: boolean) {
+  const next = new Set(selectedSnippetIds.value);
+  for (const snippet of visibleSnippets.value) {
+    if (checked) next.add(snippet.id);
+    else next.delete(snippet.id);
+  }
+  selectedSnippetIds.value = next;
+}
+
+function deleteSelectedSnippets() {
+  const deletable = editSnippets.value.filter((snippet) => selectedSnippetIds.value.has(snippet.id));
+  if (deletable.length === 0) return;
+  if (!window.confirm(`Delete ${deletable.length} selected snippet${deletable.length === 1 ? "" : "s"}?`)) return;
+  editSnippets.value = editSnippets.value.filter((snippet) => !selectedSnippetIds.value.has(snippet.id));
+  selectedSnippetIds.value = new Set();
+}
+
 function editableSqlShortcut(action: SqlShortcutAction): SqlShortcutAction {
   const next: SqlShortcutAction = { ...action, enabled: action.enabled !== false };
   if (action.kind === "select-limit" || action.id === BUILTIN_SQL_SHORTCUT_SELECT_LIMIT_ID) {
@@ -1634,6 +1706,7 @@ function setSnippetEnabled(id: string, enabled: boolean) {
 
 function deleteSnippet(id: string) {
   editSnippets.value = editSnippets.value.filter((s) => s.id !== id);
+  selectedSnippetIds.value.delete(id);
 }
 
 function confirmDeleteSnippet(snippet: SqlSnippet) {
@@ -11463,10 +11536,16 @@ onUnmounted(() => {
                 <p class="text-sm text-muted-foreground">
                   {{ t("settings.snippetsDescription") }}
                 </p>
-                <Button variant="outline" size="sm" @click="openAddSnippetDialog">
-                  <Plus class="mr-2 h-4 w-4" />
-                  {{ t("settings.snippetsAdd") }}
-                </Button>
+                <div class="flex shrink-0 items-center gap-2">
+                  <Button v-if="selectedSnippetCount > 0" variant="outline" size="sm" @click="deleteSelectedSnippets">
+                    <Trash2 class="mr-2 h-4 w-4" />
+                    {{ t("settings.snippetsDeleteSelected", { count: selectedSnippetCount }) }}
+                  </Button>
+                  <Button variant="outline" size="sm" @click="openAddSnippetDialog">
+                    <Plus class="mr-2 h-4 w-4" />
+                    {{ t("settings.snippetsAdd") }}
+                  </Button>
+                </div>
               </div>
 
               <div data-settings-search-id="snippet-trigger-key" :class="['settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('snippet-trigger-key')]">
@@ -11494,13 +11573,30 @@ onUnmounted(() => {
 SELECT t.*
 FROM ${1:table} t
 WHERE t.del_flag = 0
-LIMIT 100;</pre>
+LIMIT 100;</pre
+                >
+              </div>
+
+              <div class="flex items-center gap-2">
+                <div class="relative w-full max-w-sm">
+                  <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input v-model="snippetFilter" :placeholder="t('settings.snippetsFilterPlaceholder')" class="pl-8" autocomplete="off" spellcheck="false" />
+                </div>
+                <p v-if="snippetFilter.trim()" class="whitespace-nowrap text-xs text-muted-foreground">
+                  {{ t("settings.snippetsFilterCount", { shown: visibleSnippets.length, total: editSnippets.length }) }}
+                </p>
+                <Button v-if="snippetFilter" variant="ghost" size="sm" class="h-7 shrink-0 px-2" :aria-label="t('settings.snippetsFilterClear')" @click="snippetFilter = ''">
+                  <X class="h-3.5 w-3.5" />
+                </Button>
               </div>
 
               <div class="overflow-x-auto rounded-md border">
-                <table class="w-full min-w-[720px] text-sm">
+                <table class="w-full min-w-[760px] text-sm">
                   <thead>
                     <tr class="border-b bg-muted/50">
+                      <th class="px-3 py-2 w-10">
+                        <input type="checkbox" class="h-3.5 w-3.5 accent-primary" :checked="allSnippetsSelected" :aria-label="t('settings.snippetsSelectAll')" @change="toggleAllSnippetsSelected(($event.target as HTMLInputElement).checked)" />
+                      </th>
                       <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
                         {{ t("settings.snippetsLabel") }}
                       </th>
@@ -11517,7 +11613,22 @@ LIMIT 100;</pre>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="snippet in editSnippets" :key="snippet.id" class="border-b last:border-b-0 hover:bg-muted/30" :class="snippet.enabled === false ? 'text-muted-foreground' : ''">
+                    <tr v-if="visibleSnippets.length === 0" class="hover:bg-muted/30">
+                      <td colspan="6" class="px-3 py-8 text-center text-sm text-muted-foreground">
+                        {{ t("settings.snippetsFilterNoMatch") }}
+                      </td>
+                    </tr>
+                    <tr v-for="snippet in visibleSnippets" :key="snippet.id" class="border-b last:border-b-0 hover:bg-muted/30" :class="snippet.enabled === false ? 'text-muted-foreground' : ''">
+                      <td class="px-3 py-2">
+                        <input
+                          type="checkbox"
+                          class="h-3.5 w-3.5 accent-primary"
+                          :checked="selectedSnippetIds.has(snippet.id)"
+                          :aria-label="t('settings.snippetsSelectSnippet')"
+                          @click="handleSnippetCheckboxClick($event, snippet)"
+                          @change="handleSnippetCheckboxChange(snippet, ($event.target as HTMLInputElement).checked)"
+                        />
+                      </td>
                       <td class="px-3 py-2">{{ snippet.label }}</td>
                       <td class="px-3 py-2">
                         <Badge variant="outline" class="h-5 rounded-md px-1.5 text-[11px] font-mono text-muted-foreground">

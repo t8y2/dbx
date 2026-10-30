@@ -12121,6 +12121,7 @@ export default withEnglishFallback({
     mcpTraeConfigPath: "TRAE: Settings > MCP > Add > Add Manually แล้ววางการกำหนดค่า JSON",
     mcpQoderConfigPath: "Qoder: Settings > MCP > Add Manually แล้ววางการกำหนดค่า JSON",
     mcpWorkBuddyConfigPath: "WorkBuddy: เปิด Plugins ใน Sidebar คลิก MCP Servers (ด้านขวาบน) > Configure MCP แล้ววาง JSON หรือบันทึกเป็น ~/.workbuddy/mcp.json (รวม) หรือ .workbuddy/mcp.json ในโปรเจกต์",
+    mcpAntigravityConfigPath: "Antigravity: บันทึกเป็น ~/.gemini/config/mcp_config.json (ส่วนกลาง) หรือ .gemini/config/mcp_config.json ในโปรเจกต์",
     mcpCherryStudioConfigPath: "Cherry Studio: Settings > MCP Servers > Add Server > Import JSON แล้ววางการกำหนดค่า",
     mcpVsCodeConfigPath: "VS Code/Copilot ใช้ .vscode/mcp.json ใน Workspace หรือ mcp.json ในโปรไฟล์ผู้ใช้ได้",
     mcpWindsurfConfigPath: "Windsurf ใช้ ~/.codeium/windsurf/mcp_config.json ได้",

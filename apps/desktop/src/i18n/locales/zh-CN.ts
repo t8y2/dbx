@@ -11301,6 +11301,7 @@ export default withEnglishFallback({
     mcpTraeConfigPath: "TRAE：设置 > MCP > 添加 > 手动添加，然后粘贴 JSON 配置。",
     mcpQoderConfigPath: "Qoder：设置 > MCP > 手动添加，然后粘贴 JSON 配置。",
     mcpWorkBuddyConfigPath: "WorkBuddy：侧边栏 插件 → 右上角 MCP 服务器 → 配置 MCP，粘贴 JSON 保存；或写入 ~/.workbuddy/mcp.json（全局）或项目目录 .workbuddy/mcp.json。",
+    mcpAntigravityConfigPath: "Antigravity：写入 ~/.gemini/config/mcp_config.json（全局）或项目目录 .gemini/config/mcp_config.json。",
     mcpCherryStudioConfigPath: "Cherry Studio：设置 > MCP 服务器 > 添加服务器 > 导入 JSON，然后粘贴配置。",
     mcpVsCodeConfigPath: "VS Code/Copilot 可放在工作区 .vscode/mcp.json 或用户配置文件 mcp.json。",
     mcpWindsurfConfigPath: "Windsurf 可放在 ~/.codeium/windsurf/mcp_config.json。",

@@ -8967,6 +8967,7 @@ export default withEnglishFallback({
     mcpTraeConfigPath: "TRAE：設定 > MCP > 新增 > 手動新增，然後貼上 JSON 設定。",
     mcpQoderConfigPath: "Qoder：設定 > MCP > 手動新增，然後貼上 JSON 設定。",
     mcpWorkBuddyConfigPath: "WorkBuddy：側邊欄 插件 → 右上角 MCP 伺服器 → 設定 MCP，貼上 JSON 儲存；或寫入 ~/.workbuddy/mcp.json（全域）或專案目錄 .workbuddy/mcp.json。",
+    mcpAntigravityConfigPath: "Antigravity：寫入 ~/.gemini/config/mcp_config.json（全域）或專案目錄 .gemini/config/mcp_config.json。",
     mcpCherryStudioConfigPath: "Cherry Studio：設定 > MCP 伺服器 > 新增伺服器 > 匯入 JSON，然後貼上設定。",
     mcpVsCodeConfigPath: "VS Code/Copilot 可放在工作區 .vscode/mcp.json 或使用者設定檔 mcp.json。",
     mcpWindsurfConfigPath: "Windsurf 可放在 ~/.codeium/windsurf/mcp_config.json。",

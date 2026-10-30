@@ -858,3 +858,32 @@ fn oracle_syntax_errors_are_still_reported() {
         .expect_err("a real Oracle syntax error must still be reported");
     assert!(error.contains("sql parser error"), "unexpected error: {error}");
 }
+
+#[test]
+fn sqlserver_three_part_name_keeps_the_database_qualifier() {
+    // #13947: dropping `mk_passport_api` made the editor look the table up in the
+    // current database only, so a valid cross-database query was flagged as an
+    // unknown table.
+    let analysis =
+        analyze_sql_references("select top 10 * from mk_passport_api.dbo.orders order by id desc", Some("sqlserver"))
+            .unwrap();
+    let orders = analysis
+        .tables
+        .iter()
+        .find(|table| table.name.eq_ignore_ascii_case("orders"))
+        .expect("orders must be reported as a table reference");
+
+    assert_eq!(orders.database.as_deref(), Some("mk_passport_api"));
+    assert_eq!(orders.schema.as_deref(), Some("dbo"));
+}
+
+#[test]
+fn two_part_name_has_no_database_qualifier() {
+    // MySQL reads `db.table` as database.table, so the middle qualifier stays the
+    // schema slot and nothing may be lifted into `database`.
+    let analysis = analyze_sql_references("select * from shop.orders", Some("mysql")).unwrap();
+    let orders = analysis.tables.iter().find(|table| table.name.eq_ignore_ascii_case("orders")).unwrap();
+
+    assert_eq!(orders.database, None);
+    assert_eq!(orders.schema.as_deref(), Some("shop"));
+}

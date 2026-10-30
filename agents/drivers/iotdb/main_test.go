@@ -376,3 +376,51 @@ func (s *blockingIoTDBSession) Close() error {
 	}
 	return nil
 }
+
+func TestTimeoutMillisecondsMapsNoLimitToExplicitZero(t *testing.T) {
+	// dbx's "no limit" setting is 0. IoTDB falls back to the server default
+	// query_timeout_threshold (60000 ms) when the timeout is absent and only
+	// disables it for an explicit 0, so the mapping must send 0 (#13935).
+	noLimit := timeoutMilliseconds(0)
+	if noLimit == nil || *noLimit != 0 {
+		t.Fatalf("timeoutMilliseconds(0) = %v, want pointer to 0", noLimit)
+	}
+	positive := timeoutMilliseconds(90)
+	if positive == nil || *positive != 90000 {
+		t.Fatalf("timeoutMilliseconds(90) = %v, want pointer to 90000", positive)
+	}
+	if negative := timeoutMilliseconds(-1); negative != nil {
+		t.Fatalf("timeoutMilliseconds(-1) = %v, want nil", *negative)
+	}
+}
+
+type timeoutRecordingSession struct {
+	received []*int64
+}
+
+func (s *timeoutRecordingSession) ExecuteQueryStatement(_ context.Context, _ string, timeoutMs *int64) (*client.SessionDataSet, error) {
+	s.received = append(s.received, timeoutMs)
+	return nil, errors.New("recorded")
+}
+
+func (s *timeoutRecordingSession) ExecuteNonQueryStatement(context.Context, string) error {
+	return errors.New("not implemented")
+}
+
+func (s *timeoutRecordingSession) Close() error { return nil }
+
+func TestQueryValuesSendsExplicitZeroTimeoutForNoLimit(t *testing.T) {
+	recording := &timeoutRecordingSession{}
+	connected := &sessionClient{session: recording, dialect: client.TreeSqlDialect}
+	server := &server{client: connected}
+
+	_, _ = server.queryValues("SELECT value FROM root.dbx_13935.d", "", 10, 0)
+
+	if len(recording.received) != 1 {
+		t.Fatalf("ExecuteQueryStatement calls = %d, want 1", len(recording.received))
+	}
+	timeout := recording.received[0]
+	if timeout == nil || *timeout != 0 {
+		t.Fatalf("query timeout = %v, want pointer to 0 so IoTDB disables the server default", timeout)
+	}
+}

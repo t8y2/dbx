@@ -20,6 +20,7 @@ export const GeneratorHierarchy: GeneratorNode[] = [
       { key: "time", label: "时间" },
       { key: "sequence", label: "序列" },
       { key: "enum", label: "枚举" },
+      { key: "bitmask", label: "位串" },
       { key: "text", label: "文本" },
       { key: "image", label: "图像或二进制" },
       { key: "foreign_key", label: "外键" },
@@ -125,6 +126,9 @@ export interface GeneratorParams {
   sequenceCycle?: boolean;
   // enum
   values?: string;
+  // bit string
+  bitWidth?: number;
+  bitVarying?: boolean;
   // regex
   pattern?: string;
   rawPattern?: boolean;
@@ -1229,6 +1233,30 @@ export function isBooleanColumnType(dataType: string): boolean {
   return BOOLEAN_COLUMN_TYPE_RE.test(normalizeColumnDataType(raw));
 }
 
+const BIT_COLUMN_TYPE_RE = /^(bit|varbit)(?:\s+varying)?\s*(?:\(\s*(\d+)\s*\))?$/;
+
+export interface BitColumnShape {
+  /** Number of bits the column stores; 1 for a bare `bit`. */
+  width: number;
+  /** `bit varying` / `varbit` accept any length up to `width`. */
+  varying: boolean;
+}
+
+/**
+ * Width and variability of a `bit` family column, or null for every other type.
+ * PostgreSQL and MySQL keep the declared width in the type text (`bit(8)`,
+ * `bit varying(8)`, `varbit(8)`), and a value written to those columns must
+ * have exactly that many bits, so the generator needs the width rather than
+ * just the bare type name (#13014). The raw type text is parsed here because
+ * {@link normalizeColumnDataType} strips the parenthesized modifier.
+ */
+export function bitColumnShape(dataType: string): BitColumnShape | null {
+  const match = BIT_COLUMN_TYPE_RE.exec(dataType.toLowerCase().replace(/\s+/g, " ").trim());
+  if (!match) return null;
+  const varying = match[1] === "varbit" || /varying/.test(match[0]);
+  return { width: match[2] ? Number(match[2]) : 1, varying };
+}
+
 /**
  * `serial` and its aliases are the only types whose name contains "serial":
  * PostgreSQL's `serial` / `smallserial` / `bigserial` pseudo-type (and the
@@ -1252,10 +1280,14 @@ export function findGeneratorKey(columnName: string, dataType: string, isAutoInc
   const isDateTime = type.includes("date") || type.includes("timestamp") || /^time\b/.test(type);
   const isBinary = type.includes("binary") || type.includes("blob") || type.includes("bytea");
   const isBoolType = isBooleanColumnType(dataType);
+  const bitShape = bitColumnShape(dataType);
   const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_-]?/i.test(columnName);
+  // A wider `bit(n)` / `bit varying(n)` column stores a bit string of exactly
+  // n bits, so it gets its own generator that honours the width; only `bit(1)`
+  // (and the bare `bit` boolean spellings) stay on the 0/1 enum. Checked before
+  // the numeric/date/binary split because `varbit` matches none of them.
+  if (bitShape && (bitShape.varying || bitShape.width > 1)) return "bitmask";
   if (isNumeric || isDateTime || isBinary) {
-    // A `bit` / `bit(n)` column only accepts 0/1 at every width, so it stays on
-    // the enum generator instead of receiving a random integer that overflows it.
     if (isBoolType || /^bit\b/.test(type) || (isNumeric && isBoolName)) return "enum";
     if (/status|state/i.test(columnName)) return "enum";
     if (isNumeric) return "number";
@@ -1512,6 +1544,13 @@ function buildDefaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, ge
     return params;
   }
 
+  if (generatorKey === "bitmask") {
+    const shape = bitColumnShape(attrs.dataType);
+    params.bitWidth = shape?.width ?? 8;
+    params.bitVarying = shape?.varying ?? false;
+    return params;
+  }
+
   // --- 其他生成器的默认参数（确保保存/加载配置时所有参数都被覆盖） ---
   if (generatorKey === "full_name") {
     params.nameFormat = "full";
@@ -1722,6 +1761,16 @@ export function generateValue(columnName: string, dataType: string, generatorKey
     if (vals.length === 0) return pick(["A", "B", "C", "D", "E"]);
     return vals[Math.floor(Math.random() * vals.length)];
   }
+  if (key === "bitmask") {
+    // A fixed `bit(n)` column rejects any value whose length differs from n,
+    // while `bit varying(n)` accepts 1..n bits; the width comes from the column
+    // declaration, falling back to the parameter panel value (#13014).
+    const shape = bitColumnShape(dataType);
+    const width = Math.max(1, params?.bitWidth ?? shape?.width ?? 8);
+    const varying = params?.bitVarying ?? shape?.varying ?? false;
+    const length = varying ? 1 + Math.floor(Math.random() * width) : width;
+    return Array.from({ length }, () => (Math.random() < 0.5 ? "0" : "1")).join("");
+  }
   if (key === "text") {
     const fmt = params?.textFormat ?? "lorem";
     if (fmt === "bcrypt") {
@@ -1857,6 +1906,8 @@ export function formatGeneratedValue(value: unknown, databaseType?: DatabaseType
   if (typeof value === "number") return String(value);
   if (typeof value === "boolean") return value ? "1" : "0";
   const stringValue = String(value);
+  const bitLiteral = formatBitStringLiteral(stringValue, databaseType, dataType);
+  if (bitLiteral) return bitLiteral;
   if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && dataType) {
     const temporalValue = formatOracleTemporalValue(stringValue, dataType);
     if (temporalValue) return temporalValue;
@@ -1872,6 +1923,22 @@ export function formatGeneratedValue(value: unknown, databaseType?: DatabaseType
     return quoteGeneratedString(jsonText);
   }
   return quoteGeneratedString(stringValue);
+}
+
+const POSTGRES_BIT_LITERAL_DATABASES = new Set<string>(["postgres", "kingbase", "highgo", "uxdb", "vastbase", "gaussdb", "opengauss", "redshift", "kwdb"]);
+const MYSQL_BIT_LITERAL_DATABASES = new Set<string>(["mysql", "doris", "starrocks", "goldendb", "databend", "sundb", "gbase"]);
+
+/**
+ * Bit strings need their dialect literal: PostgreSQL reads `B'1010'` and MySQL
+ * `b'1010'`, and MySQL rejects a bare `'1010'` for a `BIT(n)` column while
+ * PostgreSQL coerces it (#13014). Unknown dialects keep the quoted string so
+ * this never emits a literal the target cannot parse.
+ */
+function formatBitStringLiteral(value: string, databaseType: DatabaseType | undefined, dataType: string | undefined): string | null {
+  if (!databaseType || !dataType || !bitColumnShape(dataType) || !/^[01]+$/.test(value)) return null;
+  if (POSTGRES_BIT_LITERAL_DATABASES.has(databaseType)) return `B'${value}'`;
+  if (MYSQL_BIT_LITERAL_DATABASES.has(databaseType)) return `b'${value}'`;
+  return null;
 }
 
 function isJsonType(dataType: string | undefined): boolean {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultGeneratorParams, findGeneratorKey, generateValue, isBooleanColumnType, normalizeColumnDataType } from "@/lib/dataGrid/dataGenerate";
+import { bitColumnShape, defaultGeneratorParams, findGeneratorKey, formatGeneratedValue, generateValue, isBooleanColumnType, normalizeColumnDataType } from "@/lib/dataGrid/dataGenerate";
 
 // Column metadata reports the full SQL type, modifiers included. The generator
 // used to compare that raw string, so `time(3)` / `bit(1)` columns missed every
@@ -45,7 +45,10 @@ describe("findGeneratorKey honors the column type with modifiers (#12994)", () =
     ["date", "datetime"],
     ["bit", "enum"],
     ["bit(1)", "enum"],
-    ["bit(8)", "enum"],
+    ["bit(8)", "bitmask"],
+    ["bit varying(8)", "bitmask"],
+    ["varbit(8)", "bitmask"],
+    ["bit varying", "bitmask"],
     ["bool", "enum"],
     ["boolean", "enum"],
     ["tinyint(1)", "enum"],
@@ -97,5 +100,57 @@ describe("generated values match the declared column type (#12994)", () => {
 
   it("falls back to a clock time when a TIME column has no generator key", () => {
     expect(generateValue("starts_at", "time(3)", undefined, 0)).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+  });
+});
+
+// PostgreSQL `bit(n)` stores exactly n bits and `bit varying(n)` up to n, while
+// MySQL `BIT(n)` only accepts a bit-value literal. The generator keeps the
+// declared width and formats the literal per dialect (#13014 review).
+describe("bit-string generation honors the declared width (#13014)", () => {
+  it("parses the width and variability of the bit family", () => {
+    expect(bitColumnShape("bit")).toEqual({ width: 1, varying: false });
+    expect(bitColumnShape("bit(1)")).toEqual({ width: 1, varying: false });
+    expect(bitColumnShape("bit(8)")).toEqual({ width: 8, varying: false });
+    expect(bitColumnShape("bit varying(8)")).toEqual({ width: 8, varying: true });
+    expect(bitColumnShape("varbit(8)")).toEqual({ width: 8, varying: true });
+    expect(bitColumnShape("varchar(8)")).toBeNull();
+  });
+
+  it("emits exactly n bits for a fixed-width column, whatever the name", () => {
+    for (const columnName of ["plain_mask", "enabled_flag"]) {
+      const params = defaultGeneratorParams(columnName, { dataType: "bit(8)" }, "bitmask");
+      for (let row = 0; row < 20; row += 1) {
+        const value = String(generateValue(columnName, "bit(8)", "bitmask", row, params));
+        expect(value).toMatch(/^[01]{8}$/);
+      }
+    }
+  });
+
+  it("emits 1..n bits for bit varying and keeps bit(1) on the 0/1 enum", () => {
+    const params = defaultGeneratorParams("flags", { dataType: "bit varying(8)" }, "bitmask");
+    for (let row = 0; row < 20; row += 1) {
+      const value = String(generateValue("flags", "bit varying(8)", "bitmask", row, params));
+      expect(value).toMatch(/^[01]{1,8}$/);
+    }
+    expect(findGeneratorKey("enabled_flag", "bit(1)")).toBe("enum");
+    expect(findGeneratorKey("enabled_flag", "bit")).toBe("enum");
+  });
+
+  it("generates a bit string even when the generator key is missing", () => {
+    // generateValue re-derives the key from the type, so the fallback path has
+    // to produce a legal width too.
+    const value = String(generateValue("plain_mask", "bit(8)", undefined, 0));
+    expect(value).toMatch(/^[01]{8}$/);
+  });
+
+  it("formats the bit-string literal per dialect", () => {
+    expect(formatGeneratedValue("10101010", "postgres", "bit(8)")).toBe("B'10101010'");
+    expect(formatGeneratedValue("10101010", "kingbase", "bit(8)")).toBe("B'10101010'");
+    expect(formatGeneratedValue("10101010", "mysql", "bit(8)")).toBe("b'10101010'");
+    expect(formatGeneratedValue("101", "mysql", "bit varying(8)")).toBe("b'101'");
+    // Unknown dialects keep the plain quoted string rather than an unparseable literal.
+    expect(formatGeneratedValue("10101010", "sqlserver", "bit(8)")).toBe("'10101010'");
+    // Non-bit columns are untouched.
+    expect(formatGeneratedValue("10101010", "postgres", "varchar(8)")).toBe("'10101010'");
   });
 });

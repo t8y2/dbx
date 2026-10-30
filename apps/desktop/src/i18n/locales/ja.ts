@@ -1119,6 +1119,8 @@ export default withEnglishFallback({
     rateLimited: "GitHubのアップデート確認が一時的に制限されています。リリースページで手動確認できます。",
     openRelease: "リリースページを開く",
     ignoreVersion: "このバージョンを無視",
+    versionIgnored: "DBX {version} は無視されています。",
+    restoreIgnoredVersion: "無視を解除",
     downloadInBackground: "バックグラウンドでダウンロード",
     cancelDownload: "ダウンロードをキャンセル",
     activeTasksBlockUpdate: "{count} 件のタスクが実行中です。完了してから DBX を更新してください。",

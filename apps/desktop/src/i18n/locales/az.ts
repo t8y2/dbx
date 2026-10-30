@@ -450,6 +450,8 @@ export default withEnglishFallback({
     rateLimited: "GitHub yeniləmə yoxlamalarının tezliyi müvəqqəti məhdudlaşdırılıb. Əl ilə yoxlamaq üçün buraxılış səhifəsini aça bilərsiniz.",
     openRelease: "Buraxılışı aç",
     ignoreVersion: "Bu versiyanı nəzərə alma",
+    versionIgnored: "DBX {version} nəzərə alınmır.",
+    restoreIgnoredVersion: "Nəzərə almamağı dayandır",
     downloadInBackground: "Arxa planda endir",
     cancelDownload: "Endirməni ləğv et",
     activeTasksBlockUpdate: "{count} tapşırıq hələ də icra edilir. DBX-i yeniləməzdən əvvəl onların bitməsini gözləyin.",

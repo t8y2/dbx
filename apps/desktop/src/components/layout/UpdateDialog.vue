@@ -32,6 +32,8 @@ const props = withDefaults(
     downloadProgress: number | null;
     updateDownloaded: boolean;
     updateDownloadedVersion?: string;
+    /** Version the user ignored that is currently suppressing an available release. */
+    ignoredReleaseVersion?: string;
     isInstallingUpdate: boolean;
     isPreparingUpdate?: boolean;
     updateReady: boolean;
@@ -67,6 +69,7 @@ const props = withDefaults(
     updatingComponent: null,
     isUpdatingAll: false,
     updateDownloadedVersion: "",
+    ignoredReleaseVersion: "",
   },
 );
 
@@ -78,6 +81,7 @@ const emit = defineEmits<{
   "install-downloaded": [];
   restart: [];
   "ignore-version": [];
+  "restore-ignored-version": [];
   "change-download-source": [source: UpdateDownloadSource];
   "install-component-updates": [category: ComponentUpdateCategory];
   "update-all": [];
@@ -378,7 +382,13 @@ watch(
                 }}
               </p>
               <p v-else-if="!checkingUpdates && !updateDownloaded && !updateReady" class="text-muted-foreground">
-                {{ updateCheckMessage || t("updates.upToDate", { version: updateInfo?.current_version || "" }) }}
+                <template v-if="ignoredReleaseVersion">
+                  {{ t("updates.versionIgnored", { version: ignoredReleaseVersion }) }}
+                  <button type="button" data-update-restore-ignored class="text-primary underline underline-offset-2 hover:text-primary/80" :disabled="isIgnoringUpdate" @click="emit('restore-ignored-version')">
+                    {{ t("updates.restoreIgnoredVersion") }}
+                  </button>
+                </template>
+                <template v-else>{{ updateCheckMessage || t("updates.upToDate", { version: updateInfo?.current_version || "" }) }}</template>
               </p>
               <div
                 v-if="updateInfo?.update_available && updateInfo.release_notes"

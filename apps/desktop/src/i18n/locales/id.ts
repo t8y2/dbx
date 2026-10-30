@@ -637,6 +637,8 @@ export default withEnglishFallback({
     rateLimited: "Pemeriksaan pembaruan GitHub sementara dibatasi. Anda masih dapat membuka halaman rilis untuk memeriksa secara manual.",
     openRelease: "Buka Rilis",
     ignoreVersion: "Abaikan versi ini",
+    versionIgnored: "DBX {version} diabaikan.",
+    restoreIgnoredVersion: "Berhenti mengabaikan",
     downloadInBackground: "Unduh di Latar Belakang",
     cancelDownload: "Batalkan Unduhan",
     activeTasksBlockUpdate: "{count} tugas masih berjalan. Tunggu hingga selesai sebelum memperbarui DBX.",

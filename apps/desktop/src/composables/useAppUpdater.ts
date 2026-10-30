@@ -183,6 +183,12 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const hasUpdateAvailable = computed(() => (updateDownloaded.value || updateReady.value || updateInfo.value?.update_available === true) && !isUpdateIgnored(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion));
   /** What the update dialog renders: an ignored release stops offering itself. */
   const visibleUpdateInfo = computed(() => effectiveUpdateInfo(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion, updateDownloaded.value || updateReady.value));
+  /**
+   * The ignored version that is currently suppressing an available release.
+   * Without it the dialog fell through to "up to date", which is untrue while a
+   * newer release exists (#13880), and there was no way to undo the ignore.
+   */
+  const ignoredReleaseVersion = computed(() => (updateDownloaded.value || updateReady.value || !isUpdateIgnored(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion) ? "" : (settingsStore.editorSettings.ignoredUpdateVersion ?? "")));
   const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
   let generation = 0;
   let activeDownload: Promise<void> | undefined;
@@ -433,6 +439,19 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       isIgnoringUpdate.value = false;
     }
   }
+  /** Undoes "ignore this version" so the release is offered again (#13880). */
+  async function restoreIgnoredVersion() {
+    if (!settingsStore.editorSettings.ignoredUpdateVersion || isIgnoringUpdate.value) return;
+    isIgnoringUpdate.value = true;
+    try {
+      await settingsStore.updateEditorSettingsAndPersist({ ignoredUpdateVersion: "" });
+      await checkUpdates({ silent: true });
+    } catch (error) {
+      fail(error);
+    } finally {
+      isIgnoringUpdate.value = false;
+    }
+  }
   async function performInstall(restartOnly: boolean) {
     if (!isTauriRuntime() || isInstallingUpdate.value || isIgnoringUpdate.value || (!restartOnly && !downloaded.value)) return;
     const cache = downloaded.value;
@@ -597,6 +616,8 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     openLatestRelease,
     changeUpdateDownloadSource,
     ignoreCurrentVersion,
+    restoreIgnoredVersion,
+    ignoredReleaseVersion,
     downloadUpdateInBackground,
     cancelDownload,
     installDownloadedUpdate,

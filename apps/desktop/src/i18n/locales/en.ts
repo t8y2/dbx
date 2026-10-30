@@ -1333,6 +1333,8 @@ export default {
     rateLimited: "GitHub update checks are temporarily rate limited. You can still open the release page to check manually.",
     openRelease: "Open Release",
     ignoreVersion: "Ignore this version",
+    versionIgnored: "DBX {version} is ignored.",
+    restoreIgnoredVersion: "Stop ignoring",
     downloadInBackground: "Download in Background",
     cancelDownload: "Cancel Download",
     activeTasksBlockUpdate: "{count} task(s) are still running. Wait for them to finish before updating DBX.",

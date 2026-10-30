@@ -697,6 +697,8 @@ export default withEnglishFallback({
     rateLimited: "Sprawdzanie aktualizacji w GitHub jest tymczasowo ograniczone. Możesz ręcznie otworzyć stronę wydania.",
     openRelease: "Otwórz stronę wydania",
     ignoreVersion: "Ignoruj tę wersję",
+    versionIgnored: "Wersja DBX {version} jest ignorowana.",
+    restoreIgnoredVersion: "Przestań ignorować",
     downloadInBackground: "Pobieraj w tle",
     cancelDownload: "Anuluj pobieranie",
     activeTasksBlockUpdate: "Wciąż działają zadania ({count}). Zaczekaj na ich zakończenie przed aktualizacją DBX.",

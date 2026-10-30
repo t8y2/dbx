@@ -1192,6 +1192,8 @@ export default withEnglishFallback({
     rateLimited: "การตรวจสอบอัปเดต GitHub ถูกจำกัดอัตราชั่วคราว คุณยังเปิดหน้า Release เพื่อตรวจสอบด้วยตนเองได้",
     openRelease: "เปิด Release",
     ignoreVersion: "ไม่ต้องใช้เวอร์ชันนี้",
+    versionIgnored: "DBX {version} ถูกเพิกเฉยอยู่",
+    restoreIgnoredVersion: "เลิกเพิกเฉย",
     downloadInBackground: "ดาวน์โหลดเบื้องหลัง",
     cancelDownload: "ยกเลิกการดาวน์โหลด",
     activeTasksBlockUpdate: "ยังมีงาน {count} รายการกำลังทำงาน รอให้เสร็จก่อนอัปเดต DBX",

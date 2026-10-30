@@ -1269,6 +1269,8 @@ export default withEnglishFallback({
     rateLimited: "GitHub 更新检查暂时触发频率限制。你仍然可以打开下载页手动查看。",
     openRelease: "打开下载页",
     ignoreVersion: "忽略此版本",
+    versionIgnored: "已忽略 DBX {version}。",
+    restoreIgnoredVersion: "不再忽略",
     downloadInBackground: "后台下载",
     cancelDownload: "取消下载",
     activeTasksBlockUpdate: "有 {count} 个任务正在执行，请等待任务完成后再更新 DBX。",

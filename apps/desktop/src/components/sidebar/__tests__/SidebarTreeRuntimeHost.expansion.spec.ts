@@ -845,6 +845,17 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     expect(connectionStore.releaseCollapsedTreeNodeChildren).not.toHaveBeenCalled();
   });
 
+  it("clears the collapsed marker of a search table whose children are not loaded (#13856)", () => {
+    // Search results list the table before its column/index groups exist, and
+    // collapse-all seeds every expandable id; expanding must clear the table's
+    // own id even without children, or the groups stay hidden.
+    const table: TreeNode = { id: "sqlserver:app:dbo:orders", label: "orders", type: "table", connectionId: "sqlserver", database: "app", schema: "dbo", isExpanded: false };
+    const collapsedIds = ref(new Set([table.id]));
+    const handlers = searchHandlers(collapsedIds);
+    handlers.onSearchToggle(table);
+    expect(collapsedIds.value.has(table.id)).toBe(false);
+  });
+
   it("expands a collapsed search projection without reloading its live subtree", async () => {
     const tableGroup: TreeNode = {
       id: "mysql:basic:__tables",

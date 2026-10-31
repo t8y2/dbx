@@ -3870,6 +3870,7 @@ export default withEnglishFallback({
     transposeSingleRow: "仅选中",
     transposeMultiRow: "高亮选中",
     transposeMultiRowHint: "仅选中：只转置选中的行，未选择时转置全部已加载行。高亮选中：转置全部已加载行，并高亮选中的行。",
+    totalPages: "共 {count} 页",
     rowsPerPageShort: " 行/页",
     columnDetails: "列详情",
     tableInfo: "表属性",

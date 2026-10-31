@@ -3358,6 +3358,7 @@ export default withEnglishFallback({
     transposeSingleRow: "Só selecionadas",
     transposeMultiRow: "Destacar seleção",
     transposeMultiRowHint: "Só selecionadas: transpõe as linhas selecionadas ou todas as linhas carregadas quando não há seleção. Destacar seleção: transpõe todas as linhas carregadas e destaca a seleção.",
+    totalPages: "{count} páginas",
     rowsPerPageShort: " linhas",
     columnDetails: "Detalhes da Coluna",
     tableInfo: "Informações da Tabela",

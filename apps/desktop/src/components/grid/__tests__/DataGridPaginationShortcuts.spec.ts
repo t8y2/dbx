@@ -751,3 +751,76 @@ describe("DataGrid multi-chunk load-all run", () => {
     expect(paginate).toHaveBeenCalledTimes(3);
   });
 });
+
+describe("total page count in the result footer (#13848)", () => {
+  function pageCount(host: HTMLElement) {
+    return host.querySelector("[data-pagination-total-pages]");
+  }
+
+  it("shows the total before the page-size menu and rounds a partial last page up", async () => {
+    const { host } = mountGrid({ totalRowCount: 251, pageOffset: 0 });
+    await settle();
+    const total = pageCount(host);
+    expect(total?.textContent).toBe(i18n.global.t("grid.totalPages", { count: 3 }));
+    expect(total?.nextElementSibling?.textContent).toContain("100");
+  });
+
+  it("updates when the page size or exact result count changes", async () => {
+    const { host, gridState } = mountGrid({ totalRowCount: 251, pageOffset: 0 });
+    await settle();
+    gridState.value = { pageLimit: 200 };
+    await settle();
+    expect(pageCount(host)?.textContent).toBe(i18n.global.t("grid.totalPages", { count: 2 }));
+    gridState.value = { pageLimit: 200, totalRowCount: 50 };
+    await settle();
+    expect(pageCount(host)?.textContent).toBe(i18n.global.t("grid.totalPages", { count: 1 }));
+  });
+
+  it("does not invent a total when more rows exist and the count is unknown", async () => {
+    const { host, gridState } = mountGrid({ pageOffset: 0 });
+    gridState.value = {
+      totalRowCount: undefined,
+      result: markRaw({ columns: ["id"], rows: Array.from({ length: 100 }, (_, i) => [i]), affected_rows: 0, execution_time_ms: 0, has_more: true, page_has_more: true }),
+    };
+    await settle();
+    expect(pageCount(host)).toBeNull();
+  });
+
+  it("does not present an estimated count as an exact total", async () => {
+    const { host, gridState } = mountGrid({ totalRowCount: 1000, pageOffset: 0 });
+    gridState.value = {
+      totalRowCountIsExact: false,
+      result: markRaw({ columns: ["id"], rows: Array.from({ length: 100 }, (_, i) => [i]), affected_rows: 0, execution_time_ms: 0, has_more: true, page_has_more: true }),
+    };
+    await settle();
+    expect(pageCount(host)).toBeNull();
+  });
+
+  it("shows the last page once the backend confirms there are no more pages", async () => {
+    const { host, gridState } = mountGrid({ pageOffset: 200 });
+    gridState.value = {
+      totalRowCount: undefined,
+      result: markRaw({ columns: ["id"], rows: [[201]], affected_rows: 0, execution_time_ms: 0, page_has_more: false }),
+    };
+    await settle();
+    expect(pageCount(host)?.textContent).toBe(i18n.global.t("grid.totalPages", { count: 3 }));
+  });
+
+  it("keeps empty results consistent with the existing single-page navigation", async () => {
+    const { host } = mountGrid({ totalRowCount: 0, pageOffset: 0, empty: true });
+    await settle();
+    expect(pageCount(host)?.textContent).toBe(i18n.global.t("grid.totalPages", { count: 1 }));
+  });
+
+  it("hides the page count when pagination is disabled", async () => {
+    const { host } = mountGrid({ paginationEnabled: false });
+    await settle();
+    expect(pageCount(host)).toBeNull();
+  });
+
+  it("hides the page count in infinite-scroll mode", async () => {
+    const { host } = mountGrid({ infiniteScroll: true });
+    await settle();
+    expect(pageCount(host)).toBeNull();
+  });
+});

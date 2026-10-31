@@ -3361,6 +3361,7 @@ export default withEnglishFallback({
     transposeSingleRow: "選択のみ",
     transposeMultiRow: "選択を強調",
     transposeMultiRowHint: "選択のみ：選択した行を転置し、未選択なら読み込み済みの全行を転置します。選択を強調：読み込み済みの全行を転置し、選択を強調表示します。",
+    totalPages: "全 {count} ページ",
     rowsPerPageShort: " 行",
     columnDetails: "列詳細",
     tableInfo: "テーブル情報",

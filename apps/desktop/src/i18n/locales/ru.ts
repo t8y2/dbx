@@ -3604,6 +3604,7 @@ export default withEnglishFallback({
     transposeSingleRow: "Только выбранные",
     transposeMultiRow: "Выделить выбранные",
     transposeMultiRowHint: "Только выбранные: транспонировать выбранные строки, а при отсутствии выбора — все загруженные строки. Выделить выбранные: транспонировать все загруженные строки и подсветить выбранные.",
+    totalPages: "Всего страниц: {count}",
     rowsPerPageShort: " строк",
     columnDetails: "Сведения о столбце",
     tableInfo: "Информация о таблице",

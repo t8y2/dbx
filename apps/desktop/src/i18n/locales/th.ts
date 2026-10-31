@@ -3754,6 +3754,7 @@ export default withEnglishFallback({
     transposeSingleRow: "เฉพาะที่เลือก",
     transposeMultiRow: "ไฮไลต์ที่เลือก",
     transposeMultiRowHint: "เฉพาะที่เลือก: สลับแถวที่เลือก หรือทุกแถวที่โหลดเมื่อไม่ได้เลือกสิ่งใด ไฮไลต์ที่เลือก: สลับทุกแถวที่โหลดและไฮไลต์ Selection",
+    totalPages: "ทั้งหมด {count} หน้า",
     rowsPerPageShort: " แถว",
     columnDetails: "รายละเอียดคอลัมน์",
     tableInfo: "ข้อมูลตาราง",

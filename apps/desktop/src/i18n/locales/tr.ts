@@ -2675,6 +2675,7 @@ export default withEnglishFallback({
     transposeSingleRow: "Yalnız seçilen",
     transposeMultiRow: "Seçileni vurgula",
     transposeMultiRowHint: "Yalnız seçilen: seçili satırları, seçim yoksa yüklenen tüm satırları devrik gösterir. Seçileni vurgula: yüklenen tüm satırları devrik gösterir ve seçimi vurgular.",
+    totalPages: "Toplam {count} sayfa",
     rowsPerPageShort: " satır",
     columnDetails: "Sütun Ayrıntıları",
     tableInfo: "Tablo Bilgisi",

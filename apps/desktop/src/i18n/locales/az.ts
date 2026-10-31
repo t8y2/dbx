@@ -2683,6 +2683,7 @@ export default withEnglishFallback({
     transposeSingleRow: "Yalnız seçilmiş",
     transposeMultiRow: "Seçiləni vurğula",
     transposeMultiRowHint: "Yalnız seçilmiş: seçilmiş sətirləri, seçim olmadıqda isə bütün yüklənmiş sətirləri transponə edir. Seçiləni vurğula: bütün yüklənmiş sətirləri transponə edir və seçimi vurğulayır.",
+    totalPages: "Cəmi {count} səhifə",
     rowsPerPageShort: " sətir",
     columnDetails: "Sütunun təfərrüatları",
     tableInfo: "Cədvəl haqqında məlumat",

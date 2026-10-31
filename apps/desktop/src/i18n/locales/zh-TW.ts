@@ -3340,6 +3340,7 @@ export default withEnglishFallback({
     transposeSingleRow: "僅選取",
     transposeMultiRow: "醒目選取",
     transposeMultiRowHint: "僅選取：只轉置選取的列，未選取時轉置全部已載入列。醒目選取：轉置全部已載入列，並醒目顯示選取的列。",
+    totalPages: "共 {count} 頁",
     rowsPerPageShort: " 筆/頁",
     columnDetails: "欄位詳情",
     tableInfo: "資料表屬性",

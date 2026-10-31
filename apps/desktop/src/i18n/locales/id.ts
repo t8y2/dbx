@@ -2984,6 +2984,7 @@ export default withEnglishFallback({
     transposeSingleRow: "Hanya pilihan",
     transposeMultiRow: "Sorot pilihan",
     transposeMultiRowHint: "Hanya pilihan: transpos baris yang dipilih, atau semua baris yang dimuat jika tidak ada pilihan. Sorot pilihan: transpos semua baris yang dimuat dan sorot pilihan.",
+    totalPages: "{count} halaman",
     rowsPerPageShort: " baris",
     columnDetails: "Detail Kolom",
     tableInfo: "Info Tabel",

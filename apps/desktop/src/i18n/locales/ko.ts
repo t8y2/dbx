@@ -3469,6 +3469,7 @@ export default withEnglishFallback({
     transposeSingleRow: "선택만",
     transposeMultiRow: "선택 강조",
     transposeMultiRowHint: "선택만: 선택한 행을 전치하며, 선택이 없으면 로드된 모든 행을 전치합니다. 선택 강조: 로드된 모든 행을 전치하고 선택 항목을 강조합니다.",
+    totalPages: "총 {count}페이지",
     rowsPerPageShort: "행",
     columnDetails: "컬럼 상세",
     tableInfo: "테이블 정보",

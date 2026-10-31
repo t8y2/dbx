@@ -3360,6 +3360,7 @@ export default withEnglishFallback({
     transposeSingleRow: "Solo selezione",
     transposeMultiRow: "Evidenzia selezione",
     transposeMultiRowHint: "Solo selezione: traspone le righe selezionate o tutte le righe caricate se non vi è alcuna selezione. Evidenzia selezione: traspone tutte le righe caricate ed evidenzia la selezione.",
+    totalPages: "{count} pagine",
     rowsPerPageShort: " righe",
     columnDetails: "Dettagli Colonna",
     tableInfo: "Informazioni Tabella",

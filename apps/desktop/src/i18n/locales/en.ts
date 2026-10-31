@@ -3939,6 +3939,7 @@ export default {
     transposeSingleRow: "Selected only",
     transposeMultiRow: "Highlight selected",
     transposeMultiRowHint: "Selected only: transpose selected rows, or all loaded rows when nothing is selected. Highlight selected: transpose all loaded rows and highlight the selection.",
+    totalPages: "{count} pages",
     rowsPerPageShort: " rows",
     columnDetails: "Column Details",
     tableInfo: "Table Info",

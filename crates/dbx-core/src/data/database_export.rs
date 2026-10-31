@@ -247,10 +247,14 @@ struct DatabaseExportObjectCounts {
     tables: usize,
     views: usize,
     sequences: usize,
+    /// Oracle/Kingbase/Vastbase sequences, collected only when they are exported.
+    standalone_sequences: usize,
     extensions: usize,
     enums: usize,
     procedures: usize,
     functions: usize,
+    /// Package specs and bodies, collected only when they are exported.
+    packages: usize,
     triggers: usize,
     events: usize,
 }
@@ -260,12 +264,19 @@ fn exports_database_tables(request: &DatabaseExportRequest) -> bool {
 }
 
 fn exports_database_routines(request: &DatabaseExportRequest) -> bool {
-    // Routine export is schema-wide, so an explicit table selection must not
-    // add unrelated procedures or functions to either execution or progress.
-    exports_schema_wide_objects(request)
+    // An explicit selection narrows routines to the selected names, so a
+    // table-only selection still adds no procedures or functions (#13940).
+    request.include_objects
 }
 
-/// Schema-wide objects (routines, triggers, events) are exported as a whole. An explicit
+/// Packages are exported for engines whose package source replays as PL/SQL
+/// units terminated by a `/` line (see `build_export_object_source_sql`).
+fn exports_package_objects(request: &DatabaseExportRequest, db_type: DatabaseType) -> bool {
+    request.include_objects
+        && matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng)
+}
+
+/// Schema-wide objects (MySQL triggers and events) are exported as a whole. An explicit
 /// table selection must not add unrelated objects to either execution or progress.
 fn exports_schema_wide_objects(request: &DatabaseExportRequest) -> bool {
     request.include_objects && request.selected_tables.is_empty()
@@ -310,6 +321,7 @@ fn database_export_total_objects(request: &DatabaseExportRequest, counts: &Datab
     if request.include_structure {
         total += counts.sequences + counts.extensions + counts.enums;
     }
+    total += counts.standalone_sequences + counts.packages;
     if request.include_objects {
         total += counts.views;
     }
@@ -4351,10 +4363,14 @@ async fn export_database_sql_core_inner(
     let mut triggers: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut events: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut standalone_sequences: Vec<crate::types::ObjectInfo> = Vec::new();
+    let mut packages: Vec<crate::types::ObjectInfo> = Vec::new();
+    let mut package_bodies: Vec<crate::types::ObjectInfo> = Vec::new();
+    let collects_routines = exports_database_routines(request);
     let collects_schema_wide_objects = exports_schema_wide_objects(request);
     let collects_standalone_sequences = exports_standalone_sequence_objects(request, db_type);
+    let collects_packages = exports_package_objects(request, db_type);
 
-    if collects_schema_wide_objects || collects_standalone_sequences {
+    if collects_routines || collects_schema_wide_objects || collects_standalone_sequences || collects_packages {
         match crate::schema::list_objects_core(
             state,
             &request.connection_id,
@@ -4380,16 +4396,29 @@ async fn export_database_sql_core_inner(
                         }
                         continue;
                     }
-                    if !collects_schema_wide_objects {
+                    if ot == "PACKAGE" || ot == "PACKAGE_BODY" || ot == "PACKAGE BODY" {
+                        if collects_packages {
+                            if ot == "PACKAGE" {
+                                packages.push(obj.clone())
+                            } else {
+                                package_bodies.push(obj.clone())
+                            }
+                        }
                         continue;
                     }
-                    if ot.contains("PROCEDURE") {
+                    if collects_routines && ot.contains("PROCEDURE") {
                         procedures.push(obj.clone());
-                    } else if ot.contains("FUNCTION") {
+                    } else if collects_routines && ot.contains("FUNCTION") {
                         functions.push(obj.clone());
-                    } else if exports_mysql_trigger_objects(db_type) && ot.contains("TRIGGER") {
+                    } else if collects_schema_wide_objects
+                        && exports_mysql_trigger_objects(db_type)
+                        && ot.contains("TRIGGER")
+                    {
                         triggers.push(obj.clone());
-                    } else if exports_mysql_trigger_objects(db_type) && ot.contains("EVENT") {
+                    } else if collects_schema_wide_objects
+                        && exports_mysql_trigger_objects(db_type)
+                        && ot.contains("EVENT")
+                    {
                         events.push(obj.clone());
                     }
                 }
@@ -4400,9 +4429,13 @@ async fn export_database_sql_core_inner(
     }
 
     if !request.selected_tables.is_empty() {
-        standalone_sequences.retain(|s| request.selected_tables.contains(&s.name));
-        procedures.retain(|p| request.selected_tables.contains(&p.name));
-        functions.retain(|f| request.selected_tables.contains(&f.name));
+        let selected_names: HashSet<&str> = request.selected_tables.iter().map(String::as_str).collect();
+        let selected = |object: &crate::types::ObjectInfo| selected_names.contains(object.name.as_str());
+        standalone_sequences.retain(selected);
+        procedures.retain(selected);
+        functions.retain(selected);
+        packages.retain(selected);
+        package_bodies.retain(selected);
     }
 
     // A determinate total must describe the same object categories guarded by
@@ -4412,12 +4445,13 @@ async fn export_database_sql_core_inner(
         &DatabaseExportObjectCounts {
             tables: tables.len(),
             views: views.len(),
-            sequences: postgres_sequences.iter().filter(|sequence| !sequence.created_by_table).count()
-                + standalone_sequences.len(),
+            sequences: postgres_sequences.iter().filter(|sequence| !sequence.created_by_table).count(),
+            standalone_sequences: standalone_sequences.len(),
             extensions: postgres_extensions.len(),
             enums: postgres_enums.len(),
             procedures: procedures.len(),
             functions: functions.len(),
+            packages: packages.len() + package_bodies.len(),
             triggers: triggers.len(),
             events: events.len(),
         },
@@ -5118,17 +5152,27 @@ async fn export_database_sql_core_inner(
             object_index += 1;
         }
 
-        // Export procedures
-        for procedure in &procedures {
+        // Package specs go first because standalone routines may call into them;
+        // package bodies go last because they may call standalone routines.
+        let routine_objects = packages
+            .iter()
+            .map(|object| (object, ObjectSourceKind::Package, "package"))
+            .chain(procedures.iter().map(|object| (object, ObjectSourceKind::Procedure, "procedure")))
+            .chain(functions.iter().map(|object| (object, ObjectSourceKind::Function, "function")))
+            .chain(package_bodies.iter().map(|object| (object, ObjectSourceKind::PackageBody, "package body")));
+        // Oracle's package DDL also carries the body; it is held back for the body's slot
+        // instead of being written with the spec or fetched a second time.
+        let mut deferred_package_bodies: HashMap<String, String> = HashMap::new();
+        for (routine, object_type, kind_label) in routine_objects {
             if is_export_cancelled(&request.export_id).await {
                 return Err("Export cancelled".to_string());
             }
 
-            let proc_name = &procedure.name;
+            let routine_name = &routine.name;
 
             on_progress(ExportProgress {
                 export_id: request.export_id.clone(),
-                current_object: proc_name.clone(),
+                current_object: routine_name.clone(),
                 object_index,
                 total_objects,
                 rows_exported: total_rows_exported,
@@ -5140,24 +5184,42 @@ async fn export_database_sql_core_inner(
                 error_summary: None,
             });
 
-            match crate::schema::get_object_source_core(
-                state,
-                &request.connection_id,
-                &request.database,
-                &request.schema,
-                proc_name,
-                crate::db::ObjectSourceKind::Procedure,
-                procedure.signature.as_deref(),
-                None,
-            )
-            .await
-            {
-                Ok(obj_source) => {
+            let deferred_body = if object_type == ObjectSourceKind::PackageBody {
+                deferred_package_bodies.remove(routine_name)
+            } else {
+                None
+            };
+            let routine_source = match deferred_body {
+                Some(body) => Ok(body),
+                None => crate::schema::get_object_source_core(
+                    state,
+                    &request.connection_id,
+                    &request.database,
+                    &request.schema,
+                    routine_name,
+                    object_type.clone(),
+                    routine.signature.as_deref(),
+                    None,
+                )
+                .await
+                .map(|obj_source| obj_source.source),
+            };
+            match routine_source {
+                Ok(routine_source) => {
+                    let routine_source = if object_type == ObjectSourceKind::Package {
+                        let (spec, body) = crate::object_source_sql::split_package_spec_and_body(&routine_source);
+                        if let Some(body) = body {
+                            deferred_package_bodies.insert(routine_name.clone(), body.to_string());
+                        }
+                        spec.to_string()
+                    } else {
+                        routine_source
+                    };
                     let source = build_database_export_object_source_sql(
                         db_type,
-                        &ObjectSourceKind::Procedure,
-                        proc_name,
-                        &obj_source.source,
+                        &object_type,
+                        routine_name,
+                        &routine_source,
                         &request.schema,
                         request.drop_table_if_exists,
                     );
@@ -5169,7 +5231,7 @@ async fn export_database_sql_core_inner(
                     record_export_error(
                         &mut file,
                         request.fail_on_error,
-                        format!("exporting procedure {proc_name}: {e}"),
+                        format!("exporting {kind_label} {routine_name}: {e}"),
                         &mut lenient_errors,
                     )?;
                 }
@@ -5177,65 +5239,21 @@ async fn export_database_sql_core_inner(
 
             object_index += 1;
         }
-
-        // Export functions
-        for function in &functions {
-            if is_export_cancelled(&request.export_id).await {
-                return Err("Export cancelled".to_string());
-            }
-
-            let func_name = &function.name;
-
-            on_progress(ExportProgress {
-                export_id: request.export_id.clone(),
-                current_object: func_name.clone(),
-                object_index,
-                total_objects,
-                rows_exported: total_rows_exported,
-                total_rows: None,
-                status: ExportStatus::Running,
-                error: None,
-                preparing: false,
-                error_count: 0,
-                error_summary: None,
-            });
-
-            match crate::schema::get_object_source_core(
-                state,
-                &request.connection_id,
-                &request.database,
+        // A body that arrived with its spec but has no listed slot of its own is still written.
+        let mut unlisted_package_bodies: Vec<_> = deferred_package_bodies.into_iter().collect();
+        unlisted_package_bodies.sort();
+        for (name, body) in unlisted_package_bodies {
+            let source = build_database_export_object_source_sql(
+                db_type,
+                &ObjectSourceKind::PackageBody,
+                &name,
+                &body,
                 &request.schema,
-                func_name,
-                crate::db::ObjectSourceKind::Function,
-                function.signature.as_deref(),
-                None,
-            )
-            .await
-            {
-                Ok(obj_source) => {
-                    let source = build_database_export_object_source_sql(
-                        db_type,
-                        &ObjectSourceKind::Function,
-                        func_name,
-                        &obj_source.source,
-                        &request.schema,
-                        request.drop_table_if_exists,
-                    );
-                    if !source.is_empty() {
-                        writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
-                    }
-                }
-                Err(e) => {
-                    record_export_error(
-                        &mut file,
-                        request.fail_on_error,
-                        format!("exporting function {func_name}: {e}"),
-                        &mut lenient_errors,
-                    )?;
-                }
+                request.drop_table_if_exists,
+            );
+            if !source.is_empty() {
+                writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
             }
-
-            object_index += 1;
         }
 
         // Export triggers and events after routines: a trigger body may call a routine,
@@ -5790,6 +5808,7 @@ mod tests {
             functions: 1,
             triggers: 2,
             events: 1,
+            ..Default::default()
         };
 
         let cases = [
@@ -5818,9 +5837,9 @@ mod tests {
     }
 
     #[test]
-    fn export_progress_total_excludes_schema_routines_for_selected_tables() {
-        // Counts are already filtered to the selected table/view set before
-        // workload calculation; schema-wide routines remain intentionally out.
+    fn export_progress_total_counts_selected_routines_but_not_schema_wide_objects() {
+        // Counts are already filtered to the selection before workload
+        // calculation, so selected routines count while triggers/events stay out.
         let counts = DatabaseExportObjectCounts {
             tables: 1,
             views: 1,
@@ -5831,10 +5850,70 @@ mod tests {
             functions: 5,
             triggers: 2,
             events: 3,
+            ..Default::default()
         };
-        let request = export_request(true, true, true, vec!["users".to_string(), "active_users".to_string()]);
+        let request = export_request(true, true, true, vec!["users".to_string(), "refresh_cache".to_string()]);
 
-        assert_eq!(database_export_total_objects(&request, &counts), 5);
+        assert_eq!(database_export_total_objects(&request, &counts), 14);
+    }
+
+    #[test]
+    fn export_progress_total_counts_collected_standalone_sequences_and_packages() {
+        // These lists are only filled when their objects are exported, so they always
+        // count, including the objects-only export that used to report 10/7 (#13940).
+        let counts = DatabaseExportObjectCounts {
+            views: 2,
+            standalone_sequences: 3,
+            procedures: 3,
+            functions: 2,
+            packages: 4,
+            ..Default::default()
+        };
+
+        assert_eq!(database_export_total_objects(&export_request(false, false, true, Vec::new()), &counts), 14);
+    }
+
+    #[test]
+    fn routines_and_packages_follow_include_objects_even_with_a_selection() {
+        use super::{exports_database_routines, exports_package_objects};
+
+        let selected = || vec!["PRC_CLEAR_ORDERS".to_string()];
+        let cases = [
+            (
+                "objects only, selection",
+                DatabaseType::Oracle,
+                export_request(false, false, true, selected()),
+                true,
+                true,
+            ),
+            (
+                "objects only, whole schema",
+                DatabaseType::Oracle,
+                export_request(false, false, true, Vec::new()),
+                true,
+                true,
+            ),
+            ("structure only", DatabaseType::Oracle, export_request(true, false, false, Vec::new()), false, false),
+            (
+                "oceanbase oracle",
+                DatabaseType::OceanbaseOracle,
+                export_request(false, false, true, selected()),
+                true,
+                true,
+            ),
+            ("dameng", DatabaseType::Dameng, export_request(false, false, true, selected()), true, true),
+            (
+                "postgres has no packages",
+                DatabaseType::Postgres,
+                export_request(false, false, true, selected()),
+                true,
+                false,
+            ),
+        ];
+        for (name, db_type, request, routines, packages) in cases {
+            assert_eq!(exports_database_routines(&request), routines, "{name}");
+            assert_eq!(exports_package_objects(&request, db_type), packages, "{name}");
+        }
     }
 
     #[test]

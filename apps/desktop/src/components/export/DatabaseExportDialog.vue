@@ -14,7 +14,7 @@ import type { ExportProgress } from "@/lib/backend/api";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { buildAllDatabaseExportPlan, filterExportableSchemas, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
-import { buildSelectedTablesPayload, isDatabaseExportTableSelectionValid } from "@/lib/export/databaseExportSelection";
+import { databaseExportSelectedTablesRequest, isDatabaseExportTableSelectionValid } from "@/lib/export/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { promptExportSavePath } from "@/lib/export/exportPath";
 import { useToast } from "@/composables/useToast";
@@ -64,6 +64,9 @@ const schemas = ref<string[]>([]);
 const loadingMeta = ref(false);
 const tables = ref<string[]>([]);
 const selectedTables = ref<string[]>([]);
+// Set when the dialog opens with non-table objects picked in the object browser;
+// that selection is then sent even when only "views / routines / sequences" is checked.
+const explicitObjectSelection = ref(false);
 const loadingTables = ref(false);
 const tableFilter = ref("");
 const filteredTables = computed(() => {
@@ -206,6 +209,15 @@ const canExport = computed(() => {
   );
 });
 
+function selectedTablesRequest(): string[] | undefined {
+  if (isPostgresAllSchemas.value) return undefined;
+  return databaseExportSelectedTablesRequest(tables.value, selectedTables.value, {
+    includeStructure: includeStructure.value,
+    includeData: includeData.value,
+    explicitObjectSelection: explicitObjectSelection.value,
+  });
+}
+
 const selectedTableSet = computed(() => new Set(selectedTables.value));
 const selectedDatabaseSet = computed(() => new Set(selectedDatabases.value));
 const filteredDatabases = computed(() => {
@@ -337,6 +349,7 @@ async function loadTables(preferredTable = "", preferredTables: string[] = []) {
   tableError.value = null;
   tables.value = [];
   selectedTables.value = [];
+  explicitObjectSelection.value = false;
   try {
     const tableInfos = await api.listTables(connectionId.value, database.value, schema.value);
     const names = sortDatabaseTableNames(tableInfos.map((table) => table.name));
@@ -348,6 +361,7 @@ async function loadTables(preferredTable = "", preferredTables: string[] = []) {
     const nonTablePrefills = preferredTables.filter((name) => !names.includes(name) || viewTypeNames.has(name));
     if (nonTablePrefills.length > 0) {
       includeObjects.value = true;
+      explicitObjectSelection.value = true;
     }
     const matchedTableNames = names.filter((name) => preferredSet.has(name));
     selectedTables.value = preferredSet.size > 0 || nonTablePrefills.length > 0 ? [...matchedTableNames, ...nonTablePrefills] : preferredTable && names.includes(preferredTable) ? [preferredTable] : [...names];
@@ -428,7 +442,7 @@ async function startDesktopExport() {
     mode: executionMode.value,
     split: splitSqlOutput.value,
     request: {
-      selectedTables: !isPostgresAllSchemas.value && (includeStructure.value || includeData.value) ? buildSelectedTablesPayload(tables.value, selectedTables.value) : undefined,
+      selectedTables: selectedTablesRequest(),
       includeStructure: includeStructure.value,
       includeData: includeData.value,
       insertDialect: insertDialect.value,
@@ -709,7 +723,7 @@ async function startExport() {
           database: database.value,
           schema: isPostgresAllSchemas.value ? "" : schema.value,
           filePath,
-          selectedTables: !isPostgresAllSchemas.value && (includeStructure.value || includeData.value) ? buildSelectedTablesPayload(tables.value, selectedTables.value) : undefined,
+          selectedTables: selectedTablesRequest(),
           includeStructure: includeStructure.value,
           includeData: includeData.value,
           insertDialect: insertDialect.value,
@@ -1003,6 +1017,7 @@ function resetState() {
   schemas.value = [];
   tables.value = [];
   selectedTables.value = [];
+  explicitObjectSelection.value = false;
   tableError.value = null;
   pendingPrefillTable.value = "";
   pendingPrefillTables.value = [];

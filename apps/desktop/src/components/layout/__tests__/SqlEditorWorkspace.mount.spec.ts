@@ -24,6 +24,7 @@ const groupFocusSearchCalls = vi.hoisted(() => [] as Array<Element | null>);
 const resultHandleModRCalls = vi.hoisted(() => [] as Element[]);
 const resultFocusSearchCalls = vi.hoisted(() => [] as boolean[]);
 const groupExecutionCalls = vi.hoisted(() => ({ capture: [] as string[], request: [] as string[] }));
+const queryFocusCalls = vi.hoisted(() => ({ editor: [] as string[], grid: [] as string[], cancelled: 0 }));
 
 vi.mock("@/components/layout/EditorGroup.vue", () => ({
   default: {
@@ -31,6 +32,10 @@ vi.mock("@/components/layout/EditorGroup.vue", () => ({
     props: ["groupId", "tabIds", "activeTabId", "contentSuppressed"],
     emits: ["execute"],
     methods: {
+      focusSqlEditor(this: { groupId: string }) {
+        queryFocusCalls.editor.push(this.groupId);
+        return true;
+      },
       previewStatementRange(tabId: string, range: unknown) {
         editorPreviewCalls.push({ tabId, range });
         return true;
@@ -86,6 +91,13 @@ vi.mock("@/components/layout/QueryResultSurface.vue", () => ({
     props: ["activeTab"],
     emits: ["previewStatement", "focusStatement"],
     methods: {
+      focusResultGrid(this: { activeTab: { id: string } }) {
+        queryFocusCalls.grid.push(this.activeTab.id);
+        return true;
+      },
+      cancelResultGridFocus() {
+        queryFocusCalls.cancelled++;
+      },
       handleModRTarget(target: Element) {
         resultHandleModRCalls.push(target);
         return true;
@@ -152,7 +164,7 @@ describe("SqlEditorWorkspace mount contract", () => {
     });
     app.use(pinia);
     app.use(i18n);
-    const vm = app.mount(host) as unknown as { toggleResultsPane: () => boolean };
+    const vm = app.mount(host) as unknown as { toggleResultsPane: () => boolean; focusResultGrid: () => boolean; focusSqlEditor: () => boolean };
     return {
       store,
       host,
@@ -165,6 +177,9 @@ describe("SqlEditorWorkspace mount contract", () => {
   }
 
   beforeEach(() => {
+    queryFocusCalls.editor.length = 0;
+    queryFocusCalls.grid.length = 0;
+    queryFocusCalls.cancelled = 0;
     document.body.innerHTML = "";
     localStorage.removeItem("dbx-shared-results-pane-size");
     editorPreviewCalls.length = 0;
@@ -184,6 +199,54 @@ describe("SqlEditorWorkspace mount contract", () => {
       locale: "en",
       messages: { en: {} },
     });
+  });
+
+  it("expands a hidden result pane before focusing its active grid", async () => {
+    const { host, vm, cleanup } = mountOutputWorkspace([tab("tab-a")]);
+    vm.toggleResultsPane();
+    await nextTick();
+    expect(host.querySelector("[data-shared-result-surface]")).toBeNull();
+    expect(vm.focusResultGrid()).toBe(true);
+    expect(queryFocusCalls.grid).toEqual([]);
+    await nextTick();
+    expect(host.querySelector("[data-shared-result-surface]")).not.toBeNull();
+    expect(queryFocusCalls.grid).toEqual(["tab-a"]);
+    cleanup();
+  });
+
+  it.each([undefined, { columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 }, { ...tab("message").result!, server_message: true }])("does not open or focus output without an active tabular result", async (result) => {
+    const { vm, cleanup } = mountOutputWorkspace([{ ...tab("tab-a"), result }]);
+    expect(vm.focusResultGrid()).toBe(false);
+    await nextTick();
+    expect(queryFocusCalls.grid).toEqual([]);
+    cleanup();
+  });
+
+  it("returns to the active editor group and cancels queued grid focus", async () => {
+    const { vm, store, cleanup } = mountOutputWorkspace([tab("tab-a"), tab("tab-b")]);
+    store.groups = [
+      { id: "g1", tabIds: ["tab-a"], activeTabId: "tab-a" },
+      { id: "g2", tabIds: ["tab-b"], activeTabId: "tab-b" },
+    ];
+    store.focusedGroupId = "g2";
+    store.activeTabId = "tab-b";
+    await nextTick();
+    expect(vm.focusResultGrid()).toBe(true);
+    expect(vm.focusSqlEditor()).toBe(true);
+    await nextTick();
+    expect(queryFocusCalls.editor).toEqual(["g2"]);
+    expect(queryFocusCalls.grid).toEqual([]);
+    expect(queryFocusCalls.cancelled).toBe(1);
+    cleanup();
+  });
+
+  it("does not focus a different tab when the active tab changes before the pane mounts", async () => {
+    const { vm, store, cleanup } = mountOutputWorkspace([tab("tab-a"), tab("tab-b")]);
+    expect(vm.focusResultGrid()).toBe(true);
+    store.activateTabInGroup("g1", "tab-b");
+    await nextTick();
+    expect(queryFocusCalls.grid).toEqual([]);
+    cleanup();
   });
 
   it("routes toolbar execution to the requested tab's editor group", async () => {

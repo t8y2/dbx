@@ -11136,6 +11136,8 @@ export default {
     shortcutResetUiZoom: "Reset UI zoom",
     shortcutRefreshData: "Refresh data",
     shortcutToggleResultsPane: "Toggle results pane",
+    shortcutFocusResultGrid: "Focus result grid",
+    shortcutFocusSqlEditor: "Focus SQL editor",
     shortcutToggleTranspose: "Toggle transpose view",
     shortcutCancelSearch: "Cancel search",
     shortcutToggleSidebar: "Toggle sidebar",

@@ -14549,7 +14549,18 @@ watch(
   { flush: "post" },
 );
 
+function focusGrid(): boolean {
+  if (!gridRef.value || visibleColumns.value.length === 0) return false;
+  if (displayItems.value.length > 0 && !hasCellSelection.value && !hasRowSelection.value && !hasColumnSelection.value) {
+    selectSingleCell(0, 0);
+    scrollCellIntoView(0, 0);
+  }
+  gridRef.value.focus({ preventScroll: true });
+  return true;
+}
+
 defineExpose({
+  focusGrid,
   exportMenuItems,
   exportWarning,
   selectExportMenuItem,

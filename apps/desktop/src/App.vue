@@ -171,6 +171,8 @@ import {
   isSwitchToNextTabShortcut,
   isSwitchToPreviousTabShortcut,
   isToggleResultsPaneShortcut,
+  isFocusResultGridShortcut,
+  isFocusSqlEditorShortcut,
   isToggleAiPanelShortcut,
   isToggleSidebarShortcut,
   isToggleZenModeShortcut,
@@ -4836,6 +4838,17 @@ async function handleKeydown(e: KeyboardEvent) {
   if (isToggleResultsPaneShortcut(e, shortcuts) && contentAreaRef.value?.toggleResultsPane()) {
     e.preventDefault();
     e.stopPropagation();
+    return;
+  }
+  if (isFocusResultGridShortcut(e, shortcuts) || isFocusSqlEditorShortcut(e, shortcuts)) {
+    const target = e.target instanceof Element ? e.target : null;
+    if (!showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value && !target?.closest('[role="dialog"], [role="alertdialog"]')) {
+      const focused = isFocusResultGridShortcut(e, shortcuts) ? contentAreaRef.value?.focusResultGrid() : contentAreaRef.value?.focusSqlEditor();
+      if (focused) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }
     return;
   }
   if (isNewQueryShortcut(e, shortcuts)) {

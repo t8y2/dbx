@@ -9701,6 +9701,8 @@ export default withEnglishFallback({
     shortcutResetUiZoom: "Resetuj powiększenie interfejsu",
     shortcutRefreshData: "Odśwież dane",
     shortcutToggleResultsPane: "Przełącz panel wyników",
+    shortcutFocusResultGrid: "Przenieś fokus do tabeli wyników",
+    shortcutFocusSqlEditor: "Przenieś fokus do edytora SQL",
     shortcutToggleTranspose: "Przełącz widok transpozycji",
     shortcutCancelSearch: "Anuluj wyszukiwanie",
     shortcutToggleSidebar: "Przełącz pasek boczny",

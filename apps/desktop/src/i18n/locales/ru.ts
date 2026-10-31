@@ -11258,6 +11258,8 @@ export default withEnglishFallback({
     shortcutResetUiZoom: "Сбросить масштаб интерфейса",
     shortcutRefreshData: "Обновить данные",
     shortcutToggleResultsPane: "Переключить панель результатов",
+    shortcutFocusResultGrid: "Перевести фокус на таблицу результатов",
+    shortcutFocusSqlEditor: "Перевести фокус в редактор SQL",
     shortcutToggleTranspose: "Переключить транспонированный вид",
     shortcutCancelSearch: "Отменить поиск",
     shortcutToggleSidebar: "Переключить боковую панель",

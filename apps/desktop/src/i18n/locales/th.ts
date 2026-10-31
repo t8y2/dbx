@@ -11626,6 +11626,8 @@ export default withEnglishFallback({
     shortcutResetUiZoom: "รีเซ็ตการซูม UI",
     shortcutRefreshData: "รีเฟรชข้อมูล",
     shortcutToggleResultsPane: "สลับแผงผลลัพธ์",
+    shortcutFocusResultGrid: "โฟกัสตารางผลลัพธ์",
+    shortcutFocusSqlEditor: "โฟกัสตัวแก้ไข SQL",
     shortcutToggleTranspose: "สลับมุมมอง Transpose",
     shortcutCancelSearch: "ยกเลิกการค้นหา",
     shortcutToggleSidebar: "สลับ Sidebar",

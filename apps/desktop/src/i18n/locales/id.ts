@@ -9326,6 +9326,8 @@ export default withEnglishFallback({
     shortcutResetUiZoom: "Reset zoom UI",
     shortcutRefreshData: "Segarkan data",
     shortcutToggleResultsPane: "Aktifkan/nonaktifkan panel hasil",
+    shortcutFocusResultGrid: "Fokus ke tabel hasil",
+    shortcutFocusSqlEditor: "Fokus ke editor SQL",
     shortcutToggleTranspose: "Aktifkan/nonaktifkan tampilan transpos",
     shortcutCancelSearch: "Batalkan pencarian",
     shortcutToggleSidebar: "Aktifkan/nonaktifkan bilah sisi",

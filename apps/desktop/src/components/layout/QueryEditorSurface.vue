@@ -25,6 +25,7 @@ const bindings = computed(() => ({ ...surfaceProps.value, ...contentEmits }));
 const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
 
 defineExpose<QueryEditorSurfaceHandle>({
+  focusSqlEditor: () => contentAreaRef.value?.focusSqlEditor() ?? false,
   focusSearch: (target: Element | null = null) => contentAreaRef.value?.focusSearch(target) ?? false,
   focusWhere: () => contentAreaRef.value?.focusWhere() ?? false,
   openGoToColumn: () => contentAreaRef.value?.openGoToColumn() ?? false,

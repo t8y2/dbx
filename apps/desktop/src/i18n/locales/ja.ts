@@ -9607,6 +9607,8 @@ export default withEnglishFallback({
     shortcutResetUiZoom: "UIズームをリセット",
     shortcutRefreshData: "データを更新",
     shortcutToggleResultsPane: "結果ペインを切替",
+    shortcutFocusResultGrid: "結果グリッドにフォーカス",
+    shortcutFocusSqlEditor: "SQL エディターにフォーカス",
     shortcutToggleTranspose: "転置ビューを切替",
     shortcutCancelSearch: "検索をキャンセル",
     shortcutToggleSidebar: "サイドバーを切替",

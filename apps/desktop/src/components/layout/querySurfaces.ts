@@ -13,6 +13,7 @@ export interface StatementRange {
 }
 
 export interface QueryEditorSurfaceHandle {
+  focusSqlEditor(): boolean;
   focusSearch(target?: Element | null): boolean;
   focusWhere(): boolean;
   openGoToColumn(): boolean;
@@ -50,6 +51,8 @@ export interface QueryEditorSurfaceHandle {
 }
 
 export interface QueryResultSurfaceHandle {
+  focusResultGrid(): boolean;
+  cancelResultGridFocus(): void;
   focusSearch(target?: Element | null): boolean;
   refreshData(target?: Element | null): boolean;
   toggleResultsPane(): boolean;

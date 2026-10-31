@@ -9867,6 +9867,8 @@ export default withEnglishFallback({
     shortcutResetUiZoom: "Restablecer zoom de interfaz",
     shortcutRefreshData: "Actualizar datos",
     shortcutToggleResultsPane: "Alternar panel de resultados",
+    shortcutFocusResultGrid: "Enfocar la tabla de resultados",
+    shortcutFocusSqlEditor: "Enfocar el editor SQL",
     shortcutToggleTranspose: "Alternar vista transpuesta",
     shortcutCancelSearch: "Cancelar búsqueda",
     shortcutCopySidebarSelection: "Copiar selección de la barra lateral",

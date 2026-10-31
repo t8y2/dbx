@@ -8518,6 +8518,8 @@ export default withEnglishFallback({
     shortcutResetUiZoom: "İnterfeysin miqyasını sıfırla",
     shortcutRefreshData: "Məlumatları yenilə",
     shortcutToggleResultsPane: "Nəticələr panelini aç/bağla",
+    shortcutFocusResultGrid: "Nəticə cədvəlinə fokuslan",
+    shortcutFocusSqlEditor: "SQL redaktoruna fokuslan",
     shortcutToggleTranspose: "Transpozisiya görünüşünü aç/bağla",
     shortcutCancelSearch: "Axtarışı ləğv et",
     shortcutToggleSidebar: "Yan paneli aç/bağla",

@@ -9778,6 +9778,8 @@ export default withEnglishFallback({
     shortcutResetUiZoom: "UI 확대/축소 재설정",
     shortcutRefreshData: "데이터 새로고침",
     shortcutToggleResultsPane: "결과 창 전환",
+    shortcutFocusResultGrid: "결과 그리드에 포커스",
+    shortcutFocusSqlEditor: "SQL 편집기에 포커스",
     shortcutToggleTranspose: "전치 보기 전환",
     shortcutCancelSearch: "검색 취소",
     shortcutToggleSidebar: "사이드바 전환",

@@ -8712,6 +8712,8 @@ export default withEnglishFallback({
     shortcutResetUiZoom: "重設全域介面縮放",
     shortcutRefreshData: "重新整理資料",
     shortcutToggleResultsPane: "切換結果面板",
+    shortcutFocusResultGrid: "聚焦結果表格",
+    shortcutFocusSqlEditor: "聚焦 SQL 編輯器",
     shortcutToggleTranspose: "切換轉置檢視",
     shortcutCancelSearch: "取消搜尋",
     shortcutCopySidebarSelection: "複製側邊欄選取項",

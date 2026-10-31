@@ -9628,6 +9628,8 @@ export default withEnglishFallback({
     shortcutResetUiZoom: "Reimposta zoom UI",
     shortcutRefreshData: "Aggiorna dati",
     shortcutToggleResultsPane: "Attiva/disattiva pannello risultati",
+    shortcutFocusResultGrid: "Sposta il focus sulla griglia dei risultati",
+    shortcutFocusSqlEditor: "Sposta il focus sull’editor SQL",
     shortcutToggleTranspose: "Attiva/disattiva vista trasposta",
     shortcutCancelSearch: "Annulla ricerca",
     shortcutToggleSidebar: "Attiva/disattiva barra laterale",

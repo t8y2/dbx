@@ -76,6 +76,7 @@ const activeSurfaceRef = ref<QueryEditorSurfaceHandle | null>(null);
 const toolbarRef = ref<InstanceType<typeof EditorToolbar> | null>(null);
 
 defineExpose({
+  focusSqlEditor: () => activeSurfaceRef.value?.focusSqlEditor() ?? false,
   focusSearch: (target: Element | null = null) => activeSurfaceRef.value?.focusSearch(target) ?? false,
   openConnectionPicker: () => toolbarRef.value?.openConnectionPicker() ?? false,
   openDatabasePicker: () => toolbarRef.value?.openDatabasePicker() ?? false,

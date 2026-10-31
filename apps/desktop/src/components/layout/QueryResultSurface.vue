@@ -28,6 +28,8 @@ const bindings = computed(() => ({ ...surfaceProps.value, ...contentEmits }));
 const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
 
 defineExpose<QueryResultSurfaceHandle>({
+  focusResultGrid: () => contentAreaRef.value?.focusResultGrid() ?? false,
+  cancelResultGridFocus: () => contentAreaRef.value?.cancelResultGridFocus(),
   focusSearch: (target: Element | null = null) => contentAreaRef.value?.focusSearch(target) ?? false,
   refreshData: () => contentAreaRef.value?.refreshData() ?? false,
   toggleResultsPane: () => contentAreaRef.value?.toggleResultsPane() ?? false,

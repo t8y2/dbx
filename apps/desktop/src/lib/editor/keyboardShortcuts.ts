@@ -339,6 +339,14 @@ export function isToggleResultsPaneShortcut(event: ShortcutLikeEvent, shortcuts?
   return matchesShortcut(event, actionShortcut("toggleResultsPane", shortcuts));
 }
 
+export function isFocusResultGridShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("focusResultGrid", shortcuts));
+}
+
+export function isFocusSqlEditorShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("focusSqlEditor", shortcuts));
+}
+
 export function isModRShortcut(event: ShortcutLikeEvent): boolean {
   return matchesShortcut(event, "Mod+R");
 }

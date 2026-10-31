@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { computed, ref, shallowRef, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab, restoredDataTabReloadFilters } from "@/lib/table/tableDataRefresh";
@@ -11,7 +11,7 @@ import { extractGraphCells, graphPropertyFromUpdateResult, type GraphEdge, type 
 import { graphAdapterForDatabase } from "@/lib/graph/graphAdapters";
 import { queryResultMessages } from "@/lib/query/queryResultMessages";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
-import { hasQueryOutput as tabHasQueryOutput } from "@/lib/query/queryOutput";
+import { hasFocusableQueryResult, hasQueryOutput as tabHasQueryOutput } from "@/lib/query/queryOutput";
 import { batchResultInsertRequest } from "@/lib/query/queryResultBatchInsert";
 import { batchSqlRecoveryState, type BatchSqlRecoveryAction } from "@/lib/query/batchSqlRecovery";
 import type { CSSProperties } from "vue";
@@ -250,6 +250,7 @@ type DataGridHandle = DataGridColumnLayoutHandle & {
   onToolbarRefresh: () => Promise<void> | void;
   focusSearch: (target?: Element | null) => boolean;
   focusWhere: () => boolean;
+  focusGrid: () => boolean;
   openGoToColumn: () => boolean;
   openCellDetailSearch: () => boolean;
   nullColumnsHidden: boolean;
@@ -1186,6 +1187,44 @@ function toggleResultsPane(): boolean {
   resultsPaneOpen.value = !resultsPaneOpen.value;
   return true;
 }
+
+function focusSqlEditor(): boolean {
+  return props.activeTab.mode === "query" && !props.resultOnly && (queryEditorRef.value?.focusEditor?.() ?? false);
+}
+
+const pendingGridFocus = shallowRef<{ tabId: string; result: QueryResult; source: Element | null }>();
+function cancelResultGridFocus() {
+  pendingGridFocus.value = undefined;
+}
+
+function focusResultGrid(): boolean {
+  if (props.editorOnly || !hasFocusableQueryResult(props.activeTab) || activeElasticsearchJsonResponse.value || redisResultViewMode.value !== "grid") return false;
+  pendingGridFocus.value = { tabId: props.activeTab.id, result: props.activeTab.result!, source: document.activeElement };
+  if (!props.resultOnly) resultsPaneOpen.value = true;
+  showElasticsearchRawJson.value = false;
+  selectOutputView(props.activeTab.id, "result");
+  return true;
+}
+
+// The grid is async and may not exist until a collapsed pane or another output
+// view has rendered. Fulfil only the current request, without stealing focus
+// after the user switches tabs, results, or another control.
+watch(
+  [pendingGridFocus, dataGridRef, () => props.activeTab.id, () => props.activeTab.result, () => props.activeOutputView],
+  () => {
+    const request = pendingGridFocus.value;
+    if (!request) return;
+    if (props.activeTab.id !== request.tabId || props.activeTab.result !== request.result || props.activeOutputView !== "result" || (document.activeElement !== request.source && document.activeElement !== document.body)) {
+      cancelResultGridFocus();
+      return;
+    }
+    if (dataGridRef.value) {
+      cancelResultGridFocus();
+      dataGridRef.value.focusGrid();
+    }
+  },
+  { flush: "post" },
+);
 
 /**
  * The "hide results" chevron. In the shared result surface (result-only) the
@@ -2185,6 +2224,9 @@ function locateExecutionSummaryError(item: ExecutionSummaryItem) {
 }
 
 defineExpose({
+  focusSqlEditor,
+  focusResultGrid,
+  cancelResultGridFocus,
   focusSearch,
   focusWhere,
   openGoToColumn,

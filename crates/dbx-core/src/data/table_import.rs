@@ -15997,6 +15997,50 @@ mod tests {
     }
 
     #[test]
+    fn xugu_import_insert_batches_preserve_backslashes_and_json_text() {
+        let columns = vec!["V".to_string(), "L".to_string(), "J".to_string()];
+        let types = vec![
+            ("V".to_string(), "VARCHAR(500)".to_string()),
+            ("L".to_string(), "CLOB".to_string()),
+            ("J".to_string(), "JSON".to_string()),
+        ];
+        let mappings = columns
+            .iter()
+            .map(|name| TableImportColumnMapping {
+                source_column: name.clone(),
+                target_column: name.clone(),
+                target_data_type: None,
+                generator: None,
+            })
+            .collect::<Vec<_>>();
+        let text = "中文\\path\\o'clock\\\nnext\tline";
+        let document = r#"{"path":"C:\\tmp\\file","line":"a\nb","quote":"\"O'Brien\""}"#;
+        let data = ParsedImportFile {
+            columns,
+            rows: vec![
+                vec![serde_json::json!(text), serde_json::json!(text), serde_json::json!(document)],
+                vec![serde_json::json!(""), serde_json::Value::Null, serde_json::Value::Null],
+            ],
+            total_rows: 2,
+            effective_encoding: None,
+        };
+        let batches =
+            build_import_insert_batches(&data, &mappings, &types, "ESCAPE_TEST", "APP", &DatabaseType::Xugu, 500)
+                .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].row_count, 2);
+        assert_eq!(
+            batches[0].sql,
+            format!(
+                "INSERT INTO \"APP\".\"ESCAPE_TEST\" (\"V\", \"L\", \"J\") VALUES\n({}, {}, {})\n('', NULL, NULL)",
+                crate::transfer::quote_string_literal(text),
+                crate::transfer::quote_string_literal(text),
+                crate::transfer::quote_string_literal(document)
+            )
+        );
+    }
+
+    #[test]
     fn table_import_generator_parses_supported_keys() {
         assert_eq!(TableImportGenerator::parse("uuid"), Some(TableImportGenerator::Uuid));
         assert_eq!(TableImportGenerator::parse("uuid_v4"), Some(TableImportGenerator::Uuid));

@@ -520,9 +520,9 @@ fn unsafe_text_predicate(column: &db::ColumnInfo) -> String {
 fn value_literal(value: &serde_json::Value, kind: Option<&str>) -> String {
     if let Some(text) = value.as_str() {
         if kind.is_some_and(|k| matches!(normalize_xugu_type_name(k).as_str(), "CHAR" | "VARCHAR" | "CLOB" | "JSON")) {
-            // Native Xugu ordinary string literals retain backslashes. The
-            // generic formatter's MySQL-style backslash escaping changes text
-            // and JSON escapes, so keep this correction local to this pair.
+            // Native Xugu ordinary string literals retain backslashes. Keep
+            // the adapter's explicit text contract; the generic Xugu target
+            // formatter follows the same rule for transfer/import callers.
             return quote_string_literal(text);
         }
     }

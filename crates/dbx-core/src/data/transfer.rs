@@ -2861,6 +2861,7 @@ fn keeps_backslash_literal(target_db: &DatabaseType) -> bool {
         DatabaseType::Oracle
             | DatabaseType::OceanbaseOracle
             | DatabaseType::Dameng
+            | DatabaseType::Xugu
             | DatabaseType::Sqlite
             | DatabaseType::Rqlite
             | DatabaseType::Turso
@@ -15695,6 +15696,57 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         assert_eq!(
             escape_value_typed(&json!(r"C:\tmp\o'clock"), &DatabaseType::Mysql, Some("varchar(64)")),
             r"'C:\\tmp\\o''clock'"
+        );
+    }
+
+    #[test]
+    fn xugu_transfer_preserves_text_and_json_escape_sequences() {
+        let values = [
+            "".to_string(),
+            r"C:\tmp\o'clock\".to_string(),
+            r"\\server\share\\file".to_string(),
+            "中文\nactual\ttab\r\nnext".to_string(),
+            r"literal\n\r\t\u4e2d".to_string(),
+            r#"{"path":"C:\\tmp\\o'clock","quoted":"\"value\"","newline":"a\nb","unicode":"\u4e2d"}"#.to_string(),
+            "中文\\'\"\n".repeat(25_000),
+        ];
+        for kind in [None, Some("VARCHAR(500)"), Some("CHAR(500)"), Some("CLOB"), Some("JSON"), Some("XML")] {
+            for text in &values {
+                assert_eq!(
+                    escape_value_typed(&json!(text), &DatabaseType::Xugu, kind),
+                    quote_string_literal(text),
+                    "Xugu literal must retain source characters for {kind:?}"
+                );
+            }
+            assert_eq!(escape_value_typed(&serde_json::Value::Null, &DatabaseType::Xugu, kind), "NULL");
+        }
+    }
+
+    #[test]
+    fn xugu_insert_preserves_text_without_modifying_binary_literals() {
+        let text = r"C:\tmp\o'clock\";
+        let document = r#"{"path":"C:\\tmp","line":"a\nb"}"#;
+        let sql = generate_insert_typed(
+            &["ID".into(), "V".into(), "L".into(), "J".into(), "B".into()],
+            &[
+                Some("INT".into()),
+                Some("VARCHAR(100)".into()),
+                Some("CLOB".into()),
+                Some("JSON".into()),
+                Some("BLOB".into()),
+            ],
+            &[vec![json!(1), json!(text), json!(text), json!(document), json!("0x005C27FF")]],
+            "ESCAPE_TEST",
+            "APP",
+            &DatabaseType::Xugu,
+            None,
+        );
+        assert_eq!(
+            sql,
+            format!(
+                "INSERT INTO \"APP\".\"ESCAPE_TEST\" (\"ID\", \"V\", \"L\", \"J\", \"B\") VALUES\n(1, {}, {}, {}, X'005C27FF')",
+                quote_string_literal(text), quote_string_literal(text), quote_string_literal(document)
+            )
         );
     }
 

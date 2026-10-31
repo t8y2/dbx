@@ -8198,6 +8198,8 @@ export default withEnglishFallback({
     sqlCompletionSection: "SQL tamamlama",
     insertSpaceAfterCompletion: "Tamamlamadan sonra boşluk ekle",
     insertSpaceAfterCompletionDescription: "Bir anahtar sözcük, tablo veya sütun tamamlaması kabul edildikten sonra, sonraki karakter izin veriyorsa boşluk ekle",
+    snippetCompletionSingleLine: "Tamamlama parçalarını tek satırda ekle",
+    snippetCompletionSingleLineDescription: "Yerleşik bir parça kabul edildiğinde çok satırlı şablon yerine tek satırda eklenir; özel parçalar yazdığınız satır sonlarını korur",
     sortCompletionColumnsAlphabetically: "Tamamlama sütunlarını alfabetik sırala",
     sortCompletionColumnsAlphabeticallyDescription: "Tablo alanlarını özgün veritabanı sırasında tutmak için kapatın",
     selectFirstCompletionOnOpen: "İlk tamamlamayı otomatik seç",

@@ -9631,6 +9631,8 @@ export default withEnglishFallback({
     linuxFloatingFrameDescription: "在支援的桌面上自動啟用透明邊框。視窗閃爍時可關閉，套用並重新啟動 DBX 後生效。環境變數設定優先。",
     showConnectionGroupPath: "顯示查詢連線完整群組路徑",
     showConnectionGroupPathDescription: "開啟後，查詢頁面右上角的連線選擇器會在連線名稱前顯示完整群組路徑；關閉後僅顯示連線名稱。",
+    snippetCompletionSingleLine: "補全片段以單行插入",
+    snippetCompletionSingleLineDescription: "接受內建片段時以單行插入，不再套用多行範本；自訂片段仍依你書寫的換行原樣插入",
   },
   driverStore: {
     jreDirRemoveFailed: "無法刪除舊的 JRE 目錄：{path}（原始錯誤：{error}）",

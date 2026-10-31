@@ -10511,6 +10511,8 @@ export default withEnglishFallback({
     shortcutExecuteAllSql: "Esegui tutto il SQL",
     showConnectionGroupPath: "Mostra il percorso completo del gruppo per le connessioni query",
     showConnectionGroupPathDescription: "Se attivato, il selettore di connessione nell'angolo in alto a destra della pagina query mostrerà il percorso completo del gruppo prima del nome della connessione; se disattivato, mostrerà solo il nome della connessione.",
+    snippetCompletionSingleLine: "Inserisci i frammenti di completamento su una singola riga",
+    snippetCompletionSingleLineDescription: "Quando accetti un frammento predefinito, viene inserito su una singola riga anziché applicare un modello su più righe; i frammenti personalizzati vengono comunque inseriti con le interruzioni di riga esattamente come le hai scritte",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

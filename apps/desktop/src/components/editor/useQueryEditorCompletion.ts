@@ -936,6 +936,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
           sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
+          snippetSingleLine: settingsStore.editorSettings.snippetCompletionSingleLine,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
       }
@@ -1002,6 +1003,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
           sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
+          snippetSingleLine: settingsStore.editorSettings.snippetCompletionSingleLine,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
       }
@@ -1327,6 +1329,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
       sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
+      snippetSingleLine: settingsStore.editorSettings.snippetCompletionSingleLine,
     });
 
     return buildSqlCompletionResult(items, completionContext, fullDoc, position);
@@ -1866,6 +1869,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
       sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
+      snippetSingleLine: settingsStore.editorSettings.snippetCompletionSingleLine,
     });
 
     return buildSqlCompletionResult(items, completionContext, fullDoc, position);

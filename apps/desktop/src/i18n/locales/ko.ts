@@ -9571,6 +9571,8 @@ export default withEnglishFallback({
     sqlCompletionSection: "SQL 자동 완성",
     insertSpaceAfterCompletion: "완성 후 공백 삽입",
     insertSpaceAfterCompletionDescription: "다음 문자가 허용할 때 키워드, 테이블 또는 컬럼 완성을 수락한 후 공백을 추가합니다",
+    snippetCompletionSingleLine: "완성 스니펫을 한 줄로 삽입",
+    snippetCompletionSingleLineDescription: "기본 제공 스니펫을 수락하면 여러 줄 템플릿 대신 한 줄로 삽입합니다. 사용자 지정 스니펫은 작성한 줄바꿈을 그대로 유지합니다",
     selectFirstCompletionOnOpen: "첫 번째 자동 완성 후보 자동 선택",
     selectFirstCompletionOnOpenDescription: "활성화하면 후보 목록이 열릴 때 첫 항목을 선택하고 Enter 또는 Tab으로 적용합니다. 비활성화하면 Enter는 줄을 바꾸고 Tab은 첫 후보를 적용합니다.",
     completionTriggerMode: "SQL 자동 완성 트리거 모드",

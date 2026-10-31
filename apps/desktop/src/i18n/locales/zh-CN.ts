@@ -10861,6 +10861,8 @@ export default withEnglishFallback({
     sqlCompletionSection: "SQL 补全",
     insertSpaceAfterCompletion: "补全后自动添加空格",
     insertSpaceAfterCompletionDescription: "选择关键字、表名或列名补全后，在后续字符允许时自动追加空格",
+    snippetCompletionSingleLine: "补全片段按单行插入",
+    snippetCompletionSingleLineDescription: "接受内置片段时按单行插入，不再套用多行模板；自定义片段仍按你书写的换行原样插入",
     sortCompletionColumnsAlphabetically: "按字母顺序排列补全字段",
     sortCompletionColumnsAlphabeticallyDescription: "关闭后，表字段将保持数据库中的原始顺序",
     selectFirstCompletionOnOpen: "自动选中首个补全候选",

@@ -9496,6 +9496,8 @@ export default withEnglishFallback({
     sqlCompletionSection: "Autouzupełnianie SQL",
     insertSpaceAfterCompletion: "Wstawiaj spację po uzupełnieniu",
     insertSpaceAfterCompletionDescription: "Dołączaj spację po zaakceptowaniu słowa kluczowego, tabeli lub kolumny, jeśli kolejny znak na to pozwala",
+    snippetCompletionSingleLine: "Wstawiaj fragmenty uzupełnienia w jednej linii",
+    snippetCompletionSingleLineDescription: "Zaakceptowanie wbudowanego fragmentu wstawia go w jednej linii zamiast szablonu wielowierszowego; własne fragmenty zachowują wpisane podziały wierszy",
     sortCompletionColumnsAlphabetically: "Sortuj kolumny uzupełniania alfabetycznie",
     sortCompletionColumnsAlphabeticallyDescription: "Wyłącz, aby zachować pola tabeli w ich pierwotnej kolejności z bazy danych",
     selectFirstCompletionOnOpen: "Automatycznie zaznaczaj pierwsze dopasowanie",

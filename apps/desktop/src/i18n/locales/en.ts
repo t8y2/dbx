@@ -10899,6 +10899,8 @@ export default {
     sqlCompletionSection: "SQL completion",
     insertSpaceAfterCompletion: "Insert a space after completion",
     insertSpaceAfterCompletionDescription: "Append a space after accepting a keyword, table, or column completion when the next character allows it",
+    snippetCompletionSingleLine: "Insert snippet completions on a single line",
+    snippetCompletionSingleLineDescription: "Accepting a built-in snippet inserts it on one line instead of its multi-line template; custom snippets keep the line breaks you wrote",
     sortCompletionColumnsAlphabetically: "Sort completion columns alphabetically",
     sortCompletionColumnsAlphabeticallyDescription: "Turn off to keep table fields in their original database order",
     selectFirstCompletionOnOpen: "Automatically select the first completion",

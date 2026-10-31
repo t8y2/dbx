@@ -1265,6 +1265,23 @@ describe("normalizeEditorSettings - completionTriggerMode", () => {
   });
 });
 
+describe("normalizeEditorSettings - snippetCompletionSingleLine", () => {
+  it("defaults built-in snippet completions to a single line", () => {
+    expect(normalizeEditorSettings({}).snippetCompletionSingleLine).toBe(true);
+  });
+
+  it("keeps an explicit multi-line opt-out", () => {
+    expect(normalizeEditorSettings({ snippetCompletionSingleLine: false }).snippetCompletionSingleLine).toBe(false);
+    expect(normalizeEditorSettings({ snippetCompletionSingleLine: true }).snippetCompletionSingleLine).toBe(true);
+  });
+
+  it("falls back to the default for non-boolean values", () => {
+    expect(normalizeEditorSettings({ snippetCompletionSingleLine: "no" } as any).snippetCompletionSingleLine).toBe(true);
+    expect(normalizeEditorSettings({ snippetCompletionSingleLine: null } as any).snippetCompletionSingleLine).toBe(true);
+    expect(normalizeEditorSettings({ snippetCompletionSingleLine: 0 } as any).snippetCompletionSingleLine).toBe(true);
+  });
+});
+
 describe("normalizeEditorSettings - tabLayout", () => {
   it("defaults tabLayout to scroll", () => {
     expect(normalizeEditorSettings({}).tabLayout).toBe("scroll");

@@ -10484,6 +10484,8 @@ export default withEnglishFallback({
     sqlCompletionSection: "SQL 補完",
     insertSpaceAfterCompletion: "補全後に自動でスペースを挿入",
     insertSpaceAfterCompletionDescription: "キーワード、テーブル名、列名の補全確定時、次の文字が許容する場合に自動でスペースを補填します",
+    snippetCompletionSingleLine: "補完スニペットを単一行で挿入",
+    snippetCompletionSingleLineDescription: "組み込みスニペットを確定すると、複数行のテンプレートではなく 1 行で挿入します。カスタムスニペットは入力した改行のまま挿入されます",
     selectFirstCompletionOnOpen: "最初の補完候補を自動選択",
     selectFirstCompletionOnOpenDescription: "有効にすると、候補一覧を開いた時に先頭項目を選択し、Enter または Tab で確定します。無効にすると、Enter は改行し、Tab で先頭候補を確定します。",
     completionTriggerMode: "SQL補完トリガーモード",

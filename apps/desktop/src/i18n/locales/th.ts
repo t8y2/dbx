@@ -11394,6 +11394,8 @@ export default withEnglishFallback({
     sqlCompletionSection: "การเติม SQL",
     insertSpaceAfterCompletion: "แทรกช่องว่างหลังการเติม",
     insertSpaceAfterCompletionDescription: "เพิ่มช่องว่างหลังยอมรับการเติม Keyword ตาราง หรือคอลัมน์ เมื่ออักขระถัดไปอนุญาต",
+    snippetCompletionSingleLine: "แทรก Snippet ของการเติมในบรรทัดเดียว",
+    snippetCompletionSingleLineDescription: "เมื่อยอมรับ Snippet ที่มีมาให้ ระบบจะแทรกเป็นบรรทัดเดียวแทนแม่แบบหลายบรรทัด ส่วน Snippet ที่คุณสร้างเองยังคงการขึ้นบรรทัดใหม่ตามที่เขียนไว้",
     sortCompletionColumnsAlphabetically: "เรียงคอลัมน์รายการเติมตามตัวอักษร",
     sortCompletionColumnsAlphabeticallyDescription: "ปิดเพื่อคงฟิลด์ตารางตามลำดับเดิมของฐานข้อมูล",
     selectFirstCompletionOnOpen: "เลือกผลลัพธ์แรกอัตโนมัติ",

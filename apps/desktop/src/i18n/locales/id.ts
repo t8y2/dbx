@@ -9093,6 +9093,8 @@ export default withEnglishFallback({
     sqlCompletionSection: "Pelengkapan SQL",
     insertSpaceAfterCompletion: "Sisipkan spasi setelah pelengkapan",
     insertSpaceAfterCompletionDescription: "Tambahkan spasi setelah menerima pelengkapan kata kunci, tabel, atau kolom jika karakter berikutnya memungkinkan",
+    snippetCompletionSingleLine: "Sisipkan potongan pelengkapan dalam satu baris",
+    snippetCompletionSingleLineDescription: "Saat menerima potongan bawaan, teks disisipkan dalam satu baris alih-alih templat multi-baris; potongan kustom tetap memakai baris baru yang Anda tulis",
     sortCompletionColumnsAlphabetically: "Urutkan kolom pelengkapan secara alfabet",
     sortCompletionColumnsAlphabeticallyDescription: "Nonaktifkan untuk mempertahankan bidang tabel dalam urutan database aslinya",
     selectFirstCompletionOnOpen: "Pilih kandidat pertama secara otomatis",

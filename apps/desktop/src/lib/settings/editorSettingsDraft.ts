@@ -180,6 +180,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "clickTableNavigationTarget",
   "objectBrowserAutoOpenDetailPanel",
   "completionTriggerMode",
+  "snippetCompletionSingleLine",
   "excludedCompletionItems",
   "defaultTransactionMode",
   "keepExplicitTransactionInAutoCommit",

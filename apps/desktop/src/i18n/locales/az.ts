@@ -8290,6 +8290,8 @@ export default withEnglishFallback({
     sqlCompletionSection: "SQL tamamlaması",
     insertSpaceAfterCompletion: "Tamamlamadan sonra boşluq daxil et",
     insertSpaceAfterCompletionDescription: "Açar söz, cədvəl və ya sütun tamamlamasını qəbul etdikdən sonra növbəti simvol imkan verirsə, boşluq əlavə et",
+    snippetCompletionSingleLine: "Tamamlama parçalarını tək sətirdə daxil et",
+    snippetCompletionSingleLineDescription: "Daxili parça qəbul edildikdə çoxsətirli şablon yerinə tək sətirdə daxil edilir; fərdi parçalar yazdığınız sətir keçidləri ilə qalır",
     sortCompletionColumnsAlphabetically: "Tamamlama sütunlarını əlifba sırası ilə sırala",
     sortCompletionColumnsAlphabeticallyDescription: "Cədvəl sahələrini verilənlər bazasındakı ilkin ardıcıllıqda saxlamaq üçün söndürün",
     selectFirstCompletionOnOpen: "İlk tamamlamanı avtomatik seç",

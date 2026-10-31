@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildSnippetItemsForTest, buildSqlCompletionItems } from "@/lib/sql/sqlCompletion";
+import { buildSnippetItemsForTest, buildSqlCompletionItems, collapseSnippetBodyToSingleLine } from "@/lib/sql/sqlCompletion";
 import { DEFAULT_SQL_SNIPPETS, MANTICORESEARCH_SQL_SNIPPETS } from "@/lib/sql/sqlSnippetTemplates";
 import type { SqlSnippet } from "@/types/database";
 
@@ -63,7 +63,7 @@ describe("buildSnippetItems", () => {
   });
 
   it("uses CodeMirror placeholders for the built-in select snippet", () => {
-    const items = buildSnippetItemsForTest("sel", [BUILTIN_SELECT]);
+    const items = buildSnippetItemsForTest("sel", [BUILTIN_SELECT], undefined, undefined, false);
 
     expect(items[0].detail).toBe("SELECT *\nFROM table\nLIMIT 100;");
     expect(items[0].apply).toBe("SELECT *\nFROM ${table}\nLIMIT 100;");
@@ -86,7 +86,7 @@ describe("buildSnippetItems", () => {
     ["firebird", "SELECT *\nFROM table\nROWS 100;", "SELECT *\nFROM ${table}\nROWS 100;"],
     ["jdbc", "SELECT *\nFROM table;", "SELECT *\nFROM ${table};"],
   ] as const)("uses the %s row limit syntax in the built-in select snippet", (databaseType, detail, apply) => {
-    const items = buildSnippetItemsForTest("sel", [BUILTIN_SELECT], undefined, databaseType);
+    const items = buildSnippetItemsForTest("sel", [BUILTIN_SELECT], undefined, databaseType, false);
 
     expect(items[0].detail).toBe(detail);
     expect(items[0].apply).toBe(apply);
@@ -97,6 +97,7 @@ describe("buildSnippetItems", () => {
       tables: [],
       columnsByTable: new Map(),
       databaseType: "oracle",
+      snippetSingleLine: false,
     });
 
     const snippet = items.find((item) => item.type === "snippet" && item.label === "select *");
@@ -197,7 +198,7 @@ describe("buildSnippetItems", () => {
 
   it("preserves a customized built-in select body instead of replacing it with a dialect default", () => {
     const customized = { ...BUILTIN_SELECT, body: "SELECT *\nFROM table\nLIMIT 7;" };
-    const items = buildSnippetItemsForTest("sel", [customized], undefined, "oracle");
+    const items = buildSnippetItemsForTest("sel", [customized], undefined, "oracle", false);
 
     expect(items[0].detail).toBe("SELECT *\nFROM table\nLIMIT 7;");
     expect(items[0].apply).toBe("SELECT *\nFROM ${table}\nLIMIT 7;");
@@ -224,19 +225,19 @@ describe("buildSnippetItems", () => {
   });
 
   it("replaces placeholder words but preserves uppercase SQL keywords", () => {
-    const items = buildSnippetItemsForTest("ct", [BUILTIN_CREATE_TABLE]);
+    const items = buildSnippetItemsForTest("ct", [BUILTIN_CREATE_TABLE], undefined, undefined, false);
 
     expect(items[0].apply).toBe("CREATE TABLE ${table} (\n  ${column} ${type}\n);");
   });
 
   it("adds placeholders across built-in update snippets", () => {
-    const items = buildSnippetItemsForTest("upd", [BUILTIN_UPDATE]);
+    const items = buildSnippetItemsForTest("upd", [BUILTIN_UPDATE], undefined, undefined, false);
 
     expect(items[0].apply).toBe("UPDATE ${table}\nSET ${column} = ${value}\nWHERE ${condition};");
   });
 
   it("uses ALTER TABLE UPDATE for ClickHouse", () => {
-    const items = buildSnippetItemsForTest("upd", [BUILTIN_UPDATE], undefined, "clickhouse");
+    const items = buildSnippetItemsForTest("upd", [BUILTIN_UPDATE], undefined, "clickhouse", false);
 
     expect(items[0].detail).toBe("ALTER TABLE table\nUPDATE column = value\nWHERE condition;");
     expect(items[0].apply).toBe("ALTER TABLE ${table}\nUPDATE ${column} = ${value}\nWHERE ${condition};");
@@ -257,28 +258,28 @@ describe("buildSnippetItems", () => {
     ["cassandra", "ALTER TABLE table\nADD column type;", "ALTER TABLE ${table}\nADD ${column} ${type};"],
     ["teradata", "ALTER TABLE table\nADD column type;", "ALTER TABLE ${table}\nADD ${column} ${type};"],
   ] as const)("uses the %s ADD COLUMN syntax in the built-in alter-table snippet", (databaseType, detail, apply) => {
-    const items = buildSnippetItemsForTest("at", [BUILTIN_ALTER_TABLE], undefined, databaseType);
+    const items = buildSnippetItemsForTest("at", [BUILTIN_ALTER_TABLE], undefined, databaseType, false);
 
     expect(items[0].detail).toBe(detail);
     expect(items[0].apply).toBe(apply);
   });
 
   it("keeps keyword casing separate from editable placeholders", () => {
-    const items = buildSnippetItemsForTest("sel", [BUILTIN_SELECT], "lower");
+    const items = buildSnippetItemsForTest("sel", [BUILTIN_SELECT], "lower", undefined, false);
 
     expect(items[0].detail).toBe("select *\nfrom table\nlimit 100;");
     expect(items[0].apply).toBe("select *\nfrom ${table}\nlimit 100;");
   });
 
   it("determines placeholders from original casing even when keywords are lowercased", () => {
-    const items = buildSnippetItemsForTest("ct", [BUILTIN_CREATE_TABLE], "lower");
+    const items = buildSnippetItemsForTest("ct", [BUILTIN_CREATE_TABLE], "lower", undefined, false);
 
     expect(items[0].detail).toBe("create table table (\n  column type\n);");
     expect(items[0].apply).toBe("create table ${table} (\n  ${column} ${type}\n);");
   });
 
   it("wraps repeated placeholder words in CTE snippets", () => {
-    const items = buildSnippetItemsForTest("cte", [BUILTIN_CTE]);
+    const items = buildSnippetItemsForTest("cte", [BUILTIN_CTE], undefined, undefined, false);
 
     expect(items[0].apply).toBe("WITH ${name} AS (\n  SELECT ${columns}\n  FROM ${table}\n)\nSELECT *\nFROM ${name};");
   });
@@ -289,7 +290,7 @@ describe("buildSnippetItems", () => {
     [BUILTIN_CASE, "CASE\n  WHEN ${condition} THEN ${value}\n  ELSE ${default}\nEND"],
     [BUILTIN_CREATE_INDEX, "CREATE INDEX ${idx_name}\nON ${table} (${column});"],
   ])("adds placeholders for built-in %s snippet", (snippet, expectedApply) => {
-    const items = buildSnippetItemsForTest(snippet.prefix, [snippet]);
+    const items = buildSnippetItemsForTest(snippet.prefix, [snippet], undefined, undefined, false);
 
     expect(items[0].apply).toBe(expectedApply);
   });
@@ -361,5 +362,57 @@ describe("snippet ranking", () => {
     const firstNonSequence = items.findIndex((item) => item.type !== "sequence");
     expect(firstSequence).toBeGreaterThanOrEqual(0);
     expect(firstSequence).toBeLessThan(firstNonSequence);
+  });
+});
+
+describe("single-line snippet insertion (#13598)", () => {
+  it.each([
+    [BUILTIN_SELECT, "SELECT * FROM ${table} LIMIT 100;", "SELECT * FROM table LIMIT 100;"],
+    [BUILTIN_CREATE_TABLE, "CREATE TABLE ${table} (${column} ${type});", "CREATE TABLE table (column type);"],
+    [BUILTIN_UPDATE, "UPDATE ${table} SET ${column} = ${value} WHERE ${condition};", "UPDATE table SET column = value WHERE condition;"],
+    [BUILTIN_CTE, "WITH ${name} AS (SELECT ${columns} FROM ${table}) SELECT * FROM ${name};", "WITH name AS (SELECT columns FROM table) SELECT * FROM name;"],
+    [BUILTIN_CASE, "CASE WHEN ${condition} THEN ${value} ELSE ${default} END", "CASE WHEN condition THEN value ELSE default END"],
+  ])("joins the built-in %s body onto one line by default", (snippet, expectedApply, expectedDetail) => {
+    const items = buildSnippetItemsForTest(snippet.prefix, [snippet]);
+
+    expect(items[0].apply).toBe(expectedApply);
+    expect(items[0].detail).toBe(expectedDetail);
+  });
+
+  it("keeps keyword casing and placeholders intact on the joined line", () => {
+    const items = buildSnippetItemsForTest("sel", [BUILTIN_SELECT], "lower");
+
+    expect(items[0].apply).toBe("select * from ${table} limit 100;");
+  });
+
+  it("leaves custom snippets exactly as authored", () => {
+    const custom: SqlSnippet[] = [{ id: "custom", label: "custom select", prefix: "cs", body: "SELECT *\nFROM custom;" }];
+    const items = buildSnippetItemsForTest("cs", custom);
+
+    expect(items[0].apply).toBe("SELECT *\nFROM custom;");
+    expect(items[0].detail).toBe("SELECT *\nFROM custom;");
+  });
+
+  it("collapses only the line breaks a template introduces", () => {
+    expect(collapseSnippetBodyToSingleLine("EXISTS (\n  SELECT 1\n  FROM table\n  WHERE condition\n)")).toBe("EXISTS (SELECT 1 FROM table WHERE condition)");
+    expect(collapseSnippetBodyToSingleLine("JOIN ${table} ON ${left_column} = ${right_column}")).toBe("JOIN ${table} ON ${left_column} = ${right_column}");
+  });
+
+  it("keeps the authored template when the provider opts into multi-line snippets", () => {
+    const items = buildSqlCompletionItems("sel", 3, {
+      tables: [],
+      columnsByTable: new Map(),
+      snippetSingleLine: false,
+    });
+    const snippet = items.find((item) => item.type === "snippet" && item.label === "select *");
+
+    expect(snippet?.apply).toBe("SELECT *\nFROM ${table}\nLIMIT 100;");
+  });
+
+  it("uses single-line built-in snippets through the provider by default", () => {
+    const items = buildSqlCompletionItems("sel", 3, { tables: [], columnsByTable: new Map() });
+    const snippet = items.find((item) => item.type === "snippet" && item.label === "select *");
+
+    expect(snippet?.apply).toBe("SELECT * FROM ${table} LIMIT 100;");
   });
 });

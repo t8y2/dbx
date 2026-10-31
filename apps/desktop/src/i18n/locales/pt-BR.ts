@@ -10506,6 +10506,8 @@ export default withEnglishFallback({
     shortcutExecuteAllSql: "Executar todo o SQL",
     showConnectionGroupPath: "Mostrar caminho completo do grupo da conexão de consulta",
     showConnectionGroupPathDescription: "Quando ativado, o seletor de conexão no canto superior direito da página de consulta exibirá o caminho completo do grupo antes do nome da conexão; quando desativado, exibirá apenas o nome da conexão.",
+    snippetCompletionSingleLine: "Inserir snippets de conclusão em linha única",
+    snippetCompletionSingleLineDescription: "Ao aceitar snippets integrados, inserir em linha única em vez de aplicar o modelo multilinhas; snippets personalizados ainda são inseridos com as quebras de linha exatamente como você as escreveu",
   },
   driverStore: {
     jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",

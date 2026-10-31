@@ -11025,6 +11025,8 @@ export default withEnglishFallback({
     sqlCompletionSection: "Автодополнение SQL",
     insertSpaceAfterCompletion: "Вставлять пробел после автодополнения",
     insertSpaceAfterCompletionDescription: "Добавлять пробел после принятия автодополнения ключевого слова, таблицы или столбца, если следующий символ это позволяет",
+    snippetCompletionSingleLine: "Вставлять сниппеты автодополнения одной строкой",
+    snippetCompletionSingleLineDescription: "Встроенный сниппет при принятии вставляется одной строкой вместо многострочного шаблона; пользовательские сниппеты сохраняют ваши переносы строк",
     sortCompletionColumnsAlphabetically: "Сортировать столбцы в автодополнении по алфавиту",
     sortCompletionColumnsAlphabeticallyDescription: "Отключите, чтобы сохранять исходный порядок полей таблицы в базе данных",
     selectFirstCompletionOnOpen: "Автоматически выбирать первое автодополнение",

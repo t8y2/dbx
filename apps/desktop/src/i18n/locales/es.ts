@@ -9645,6 +9645,8 @@ export default withEnglishFallback({
     sqlCompletionSection: "Autocompletado SQL",
     insertSpaceAfterCompletion: "Insertar un espacio después de completar",
     insertSpaceAfterCompletionDescription: "Añade un espacio tras aceptar una sugerencia de palabra clave, tabla o columna cuando el siguiente carácter lo permite",
+    snippetCompletionSingleLine: "Insertar fragmentos de autocompletado en una sola línea",
+    snippetCompletionSingleLineDescription: "Al aceptar un fragmento integrado se inserta en una sola línea en lugar de su plantilla multilínea; los fragmentos personalizados conservan los saltos de línea que escribiste",
     sortCompletionColumnsAlphabetically: "Ordenar alfabéticamente las columnas del autocompletado",
     sortCompletionColumnsAlphabeticallyDescription: "Desactívalo para mantener los campos de las tablas en su orden original de la base de datos",
     selectFirstCompletionOnOpen: "Seleccionar automáticamente la primera sugerencia",

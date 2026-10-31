@@ -800,6 +800,7 @@ const tableCompletionSchemaQualificationDescription = computed(() => {
   return t(key);
 });
 const editInsertSpaceAfterCompletion = ref(settingsStore.editorSettings.insertSpaceAfterCompletion);
+const editSnippetCompletionSingleLine = ref(settingsStore.editorSettings.snippetCompletionSingleLine);
 const editSqlServerSpaceConfirmsCompletion = ref(settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion);
 const editFunctionCompletionIncludeParams = ref(settingsStore.editorSettings.functionCompletionIncludeParams);
 const editSequenceCompletionEnabled = ref(settingsStore.editorSettings.sequenceCompletionEnabled);
@@ -1254,6 +1255,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     autoAliasTables: editAutoAliasTables.value,
     tableCompletionSchemaQualification: editTableCompletionSchemaQualification.value,
     insertSpaceAfterCompletion: editInsertSpaceAfterCompletion.value,
+    snippetCompletionSingleLine: editSnippetCompletionSingleLine.value,
     sqlServerSpaceConfirmsCompletion: editSqlServerSpaceConfirmsCompletion.value,
     functionCompletionIncludeParams: editFunctionCompletionIncludeParams.value,
     sequenceCompletionEnabled: editSequenceCompletionEnabled.value,
@@ -1959,6 +1961,7 @@ function syncEditorSettingsDraftFromStore() {
   editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
   editTableCompletionSchemaQualification.value = settingsStore.editorSettings.tableCompletionSchemaQualification;
   editInsertSpaceAfterCompletion.value = settingsStore.editorSettings.insertSpaceAfterCompletion;
+  editSnippetCompletionSingleLine.value = settingsStore.editorSettings.snippetCompletionSingleLine;
   editSqlServerSpaceConfirmsCompletion.value = settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion;
   editFunctionCompletionIncludeParams.value = settingsStore.editorSettings.functionCompletionIncludeParams;
   editSequenceCompletionEnabled.value = settingsStore.editorSettings.sequenceCompletionEnabled;
@@ -2141,6 +2144,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   autoAliasTables: editAutoAliasTables,
   tableCompletionSchemaQualification: editTableCompletionSchemaQualification,
   insertSpaceAfterCompletion: editInsertSpaceAfterCompletion,
+  snippetCompletionSingleLine: editSnippetCompletionSingleLine,
   sqlServerSpaceConfirmsCompletion: editSqlServerSpaceConfirmsCompletion,
   functionCompletionIncludeParams: editFunctionCompletionIncludeParams,
   sequenceCompletionEnabled: editSequenceCompletionEnabled,
@@ -2759,6 +2763,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
     editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
     editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
+    editSnippetCompletionSingleLine.value = DEFAULT_EDITOR_SETTINGS.snippetCompletionSingleLine;
     editSqlServerSpaceConfirmsCompletion.value = DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion;
     editFunctionCompletionIncludeParams.value = DEFAULT_EDITOR_SETTINGS.functionCompletionIncludeParams;
     editSequenceCompletionEnabled.value = DEFAULT_EDITOR_SETTINGS.sequenceCompletionEnabled;
@@ -2965,6 +2970,7 @@ function resetAllDefaults() {
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
   editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
   editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
+  editSnippetCompletionSingleLine.value = DEFAULT_EDITOR_SETTINGS.snippetCompletionSingleLine;
   editSqlServerSpaceConfirmsCompletion.value = DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion;
   editFunctionCompletionIncludeParams.value = DEFAULT_EDITOR_SETTINGS.functionCompletionIncludeParams;
   editSequenceCompletionEnabled.value = DEFAULT_EDITOR_SETTINGS.sequenceCompletionEnabled;
@@ -8482,6 +8488,16 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="editor-insert-space-after-completion" v-model="editInsertSpaceAfterCompletion" class="mt-0.5" />
+                </div>
+
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-snippet-completion-single-line">{{ t("settings.snippetCompletionSingleLine") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.snippetCompletionSingleLineDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-snippet-completion-single-line" v-model="editSnippetCompletionSingleLine" class="mt-0.5" />
                 </div>
 
                 <div v-if="showSqlServerSpaceConfirmsCompletion" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">

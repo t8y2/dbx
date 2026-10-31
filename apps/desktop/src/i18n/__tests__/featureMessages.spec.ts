@@ -165,6 +165,11 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "SQL formatter layout style", keys: under("settings", ["sqlFormatterLayoutStyle", "sqlFormatterLayoutStyleDbx", "sqlFormatterLayoutStyleClassic"]) },
   { feature: "sidebar table structure shortcut", keys: ["settings.shortcutEditSidebarTableStructure"], locales: ALL_LOCALES.filter((locale) => locale !== "th") },
   { feature: "MySQL AUTO_INCREMENT warnings", keys: under("structureEditor", ["mysqlAutoIncrementSingleColumn", "mysqlAutoIncrementRequiresIndex", "mysqlAutoIncrementRequiresNativeColumn"]) },
+  {
+    feature: "single-line snippet completion (#13598)",
+    keys: under("settings", ["snippetCompletionSingleLine", "snippetCompletionSingleLineDescription"]),
+    translated: true,
+  },
 ];
 
 function lookup(messages: unknown, path: string): unknown {

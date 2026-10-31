@@ -1081,7 +1081,9 @@ const gridRows = computed(() => {
 const visibleSelectableRows = computed(() => filteredRows.value);
 const selectedTableRows = computed(() => {
   const ids = selectedTableIds.value;
-  return selectableRows.value.filter((row) => ids.has(row.id));
+  // Resolve against the currently visible filter only — sticky ids from a
+  // previous objectFilter must not leak into export/drop/copy (#13940).
+  return visibleSelectableRows.value.filter((row) => ids.has(row.id));
 });
 const selectedTableCount = computed(() => selectedTableRows.value.length);
 const hasSelectedSchemaIndexes = computed(() => selectedTableRows.value.some((row) => row.type === "INDEX"));
@@ -3331,13 +3333,15 @@ function toggleTableSelection(row: ObjectBrowserRow) {
 }
 
 function toggleVisibleTableSelection() {
-  const next = new Set(selectedTableIds.value);
   if (allVisibleTablesSelected.value) {
+    const next = new Set(selectedTableIds.value);
     for (const row of visibleSelectableRows.value) next.delete(row.id);
-  } else {
-    for (const row of visibleSelectableRows.value) next.add(row.id);
+    setSelectedTableIds(next);
+    return;
   }
-  setSelectedTableIds(next);
+  // Replace (do not union) so select-all never reintroduces sticky ids from
+  // another objectFilter after a filter switch (#13940).
+  setSelectedTableIds(new Set(visibleSelectableRows.value.map((row) => row.id)));
 }
 
 function clearTableSelection() {
@@ -5498,6 +5502,9 @@ function selectObjectFilter(filter: ObjectFilter) {
   const wasServerPaged = usesServerObjectPaging.value;
   userHasSelectedFilter.value = true;
   objectFilter.value = filter;
+  // Switching type filter clears selection — the visible list changes, so a
+  // sticky Set would otherwise export the wrong object kinds (#13940).
+  clearTableSelection();
   emit("filterChange", filter);
   if (wasServerPaged || usesServerObjectPaging.value) void loadObjects();
 }

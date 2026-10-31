@@ -726,6 +726,22 @@ export const useConnectionStore = defineStore("connection", () => {
     return connectionGroupIdForSelection(sidebarLayout.value, selectedNodeId, selectedNode?.connectionId);
   });
   let layoutPersistTimer: ReturnType<typeof setTimeout> | null = null;
+  let sidebarLayoutSyncTimer: ReturnType<typeof setInterval> | null = null;
+  let sidebarLayoutSyncInFlight = false;
+  let sidebarLayoutPersistInFlight: Promise<void> | null = null;
+  /** Tail of the save chain: writes must land in the order they were issued. */
+  let sidebarLayoutSaveChain: Promise<unknown> = Promise.resolve();
+  /** Issued writes, so a rollback knows whether a newer write already won. */
+  let sidebarLayoutSaveVersion = 0;
+  /** JSON of the layout we know the storage holds. Anything else in memory is an
+   *  unsaved local edit, and a poll that reads the old row must not revert it. */
+  let sidebarLayoutPersisted: string | null = null;
+  /** Bumped by every local edit, persist and adoption. A poll that started in an
+   *  older revision is discarded instead of reverting what changed meanwhile. */
+  let sidebarLayoutRevision = 0;
+  let sidebarLayoutSyncTarget: Window | null = null;
+  let sidebarLayoutSyncDocument: Document | null = null;
+  let sidebarLayoutSyncTick: (() => void) | null = null;
   const staleTreeRefreshIds = new Set<string>();
   const activeTreeRefreshGenerations = new Map<string, number>();
   let nextTreeRefreshGeneration = 0;
@@ -4463,6 +4479,9 @@ export const useConnectionStore = defineStore("connection", () => {
     } else {
       nextConnections.push(normalized);
       const groupId = targetGroupId !== undefined ? targetGroupId : newConnectionGroupId.value;
+      // Bump before the assignment: the persist below awaits, and a poll that read
+      // the pre-add connection list must not reconcile the new entry away.
+      sidebarLayoutRevision += 1;
       sidebarLayout.value = appendConnectionToLayout(sidebarLayout.value, normalized.id, groupId);
     }
     await persistConnections(nextConnections);
@@ -4613,8 +4632,11 @@ export const useConnectionStore = defineStore("connection", () => {
     const nextConnections = connections.value.filter((c) => !removedIds.has(c.id));
     let nextLayout = sidebarLayout.value;
     for (const id of removedIds) nextLayout = removeConnectionFromSidebarLayout(nextLayout, id);
-    await persistConnectionDeletion(nextConnections, nextLayout);
-    applyConnectionRemoval(removedIds, nextConnections, nextLayout);
+    const applyDeletion = (layout: SidebarLayout) => [...removedIds].reduce((current, id) => removeConnectionFromSidebarLayout(current, id), layout);
+    await persistConnectionDeletion(nextConnections, applyDeletion);
+    // Re-apply against the live layout: an edit that landed while the write was in
+    // flight must survive, and removing connections is a pure transform of the tree.
+    applyConnectionRemoval(removedIds, nextConnections, applyDeletion(sidebarLayout.value));
     // 连接已不存在，"用户已关闭"标记没有意义，留着只会泄漏失效 id。
     for (const id of removedIds) clearConnectionClosedByUser(id);
     purgeTableVGroupsForConnections(removedIds);
@@ -10524,7 +10546,10 @@ export const useConnectionStore = defineStore("connection", () => {
     });
   }
 
-  async function persistConnectionDeletion(nextConnections: ConnectionConfig[], nextLayout: SidebarLayout) {
+  // Applies the deletion while the connection rows are being persisted, because a
+  // sidebar edit that lands in between must not be overwritten by a snapshot this
+  // call captured before its awaits.
+  async function persistConnectionDeletion(nextConnections: ConnectionConfig[], applyLayout: (layout: SidebarLayout) => SidebarLayout): Promise<SidebarLayout> {
     const previousConnections = connections.value;
     const previousLayout = sidebarLayout.value;
     const previousConnectTimeoutIds = [...settingsStore.editorSettings.connectTimeoutInheritConnectionIds];
@@ -10537,12 +10562,27 @@ export const useConnectionStore = defineStore("connection", () => {
     const nextConnectionIds = new Set(nextConnections.map((connection) => connection.id));
     const removedConnectionIds = previousConnections.filter((connection) => !nextConnectionIds.has(connection.id)).map((connection) => connection.id);
     const timeoutSettingsChanged = !sameIds(nextConnectTimeoutIds, previousConnectTimeoutIds) || !sameIds(nextQueryTimeoutIds, previousQueryTimeoutIds);
-    const layoutChanged = nextLayout !== previousLayout;
+    let appliedLayout = previousLayout;
     let connectionsPersisted = false;
     let timeoutSettingsPersisted = false;
     let layoutSaveStarted = false;
+    let layoutSaveVersion = 0;
 
+    let revisionAfterOwnSave = sidebarLayoutRevision;
     try {
+      // Drop the members from the live layout first: a debounced snapshot taken
+      // while the connection writes below are in flight would otherwise still
+      // contain them and put the deleted rows back on disk.
+      const targetLayout = applyLayout(sidebarLayout.value);
+      if (targetLayout !== sidebarLayout.value) {
+        sidebarLayout.value = targetLayout;
+        sidebarLayoutRevision += 1;
+        rebuildTreeNodes();
+        layoutSaveStarted = true;
+        const queued = queueSidebarLayoutSave(targetLayout);
+        layoutSaveVersion = queued.version;
+        revisionAfterOwnSave = sidebarLayoutRevision;
+      }
       if (connectionsChanged) {
         await persistConnections(nextConnections, removedConnectionIds);
         connectionsPersisted = true;
@@ -10551,15 +10591,17 @@ export const useConnectionStore = defineStore("connection", () => {
         await persistTimeoutInheritanceIds(nextConnectTimeoutIds, nextQueryTimeoutIds);
         timeoutSettingsPersisted = true;
       }
-      if (layoutChanged) {
-        layoutSaveStarted = true;
-        await api.saveSidebarLayout(nextLayout);
+      if (layoutSaveStarted) {
+        await sidebarLayoutSaveChain;
+        appliedLayout = targetLayout;
       }
     } catch (error) {
       const rollbackErrors: unknown[] = [];
-      if (layoutSaveStarted) {
+      // A newer write already reflects a newer decision; restoring the layout we
+      // tried to delete would land after it and undo the user's latest edit.
+      if (layoutSaveStarted && layoutSaveVersion === sidebarLayoutSaveVersion && revisionAfterOwnSave === sidebarLayoutRevision) {
         try {
-          await api.saveSidebarLayout(previousLayout);
+          await queueSidebarLayoutSave(previousLayout).promise;
         } catch (rollbackError) {
           rollbackErrors.push(rollbackError);
         }
@@ -10586,6 +10628,7 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       throw error;
     }
+    return appliedLayout;
   }
 
   async function applyGlobalTimeouts({ connectTimeoutSecs, queryTimeoutSecs }: { connectTimeoutSecs?: number; queryTimeoutSecs?: number }) {
@@ -10645,12 +10688,140 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  /** Writes are serialized, because a save that started earlier must land before
+   *  the next one: an older snapshot committing after a newer one would leave the
+   *  row stale and the poll would then adopt it over the newer local layout. */
+  function queueSidebarLayoutSave(layout: SidebarLayout): { promise: Promise<void>; version: number } {
+    sidebarLayoutRevision += 1;
+    sidebarLayoutSaveVersion += 1;
+    const version = sidebarLayoutSaveVersion;
+    const snapshot = JSON.stringify(layout);
+    const revision = sidebarLayoutRevision;
+    const run = () => api.saveSidebarLayout(layout);
+    // A write that fails once is retried before the guard opens again: the poll
+    // only adopts remote layouts while memory matches the disk, so a save that
+    // never retries would freeze external sync until the next local edit.
+    const write = (retriesLeft: number): Promise<void> => {
+      const save = sidebarLayoutSaveChain.then(run, run);
+      sidebarLayoutSaveChain = save.then(
+        () => undefined,
+        () => undefined,
+      );
+      return save.catch((error: unknown) => {
+        if (retriesLeft === 0 || version !== sidebarLayoutSaveVersion) throw error;
+        return new Promise<void>((resolve, reject) => {
+          // Each attempt owns its timer: cancelling another save's timer would leave
+          // that save's promise pending forever (an awaiting deletion would hang).
+          setTimeout(() => {
+            if (version !== sidebarLayoutSaveVersion) {
+              reject(error);
+              return;
+            }
+            resolve();
+          }, 1000);
+        }).then(() => write(retriesLeft - 1));
+      });
+    };
+    const tracked = write(3).then(() => {
+      // Only a save that still describes the current layout counts as persisted;
+      // if the user edited meanwhile, the guard stays closed until the follow-up
+      // save lands.
+      if (revision === sidebarLayoutRevision) sidebarLayoutPersisted = snapshot;
+    });
+    sidebarLayoutPersistInFlight = tracked;
+    // Settling is not an edit: bumping the revision here would invalidate the
+    // snapshot of the next queued save, so two overlapping saves would leave the
+    // watermark stale and the poll would refuse to adopt remote changes forever.
+    const settle = () => {
+      if (sidebarLayoutPersistInFlight === tracked) sidebarLayoutPersistInFlight = null;
+    };
+    tracked.then(settle, settle);
+    return { promise: tracked, version };
+  }
+
   function persistSidebarLayoutDebounced() {
     if (layoutPersistTimer) clearTimeout(layoutPersistTimer);
     layoutPersistTimer = setTimeout(() => {
-      api.saveSidebarLayout(sidebarLayout.value).catch(() => {});
       layoutPersistTimer = null;
+      void queueSidebarLayoutSave(sidebarLayout.value).promise.catch(() => {});
     }, 300);
+  }
+
+  /** Read the persisted layout once and adopt it when another process (MCP
+   *  server, CLI, another window) rewrote it. Exported through the store so the
+   *  ordering rules below are covered by a spec instead of by a live timer.
+   *
+   *  A poll never wins over a local edit: it is skipped while a persist is
+   *  queued or in flight, discarded when anything bumped the revision during the
+   *  read, and ignored when memory holds a layout the storage does not have yet. */
+  async function syncSidebarLayoutOnce(): Promise<void> {
+    if (sidebarLayoutSyncInFlight || layoutPersistTimer || sidebarLayoutPersistInFlight) return;
+    const revision = sidebarLayoutRevision;
+    const local = JSON.stringify(sidebarLayout.value);
+    if (sidebarLayoutPersisted !== null && local !== sidebarLayoutPersisted) return;
+    sidebarLayoutSyncInFlight = true;
+    try {
+      const remote = await api.loadSidebarLayout();
+      if (!remote || revision !== sidebarLayoutRevision) return;
+      const remoteJson = JSON.stringify(remote);
+      if (remoteJson === local) {
+        sidebarLayoutPersisted = local;
+        return;
+      }
+      const reconciled = reconcileLayout(
+        connections.value.map((c) => c.id),
+        remote,
+      );
+      const next = JSON.stringify(reconciled);
+      if (next === local) {
+        sidebarLayoutPersisted = local;
+        return;
+      }
+      sidebarLayoutRevision += 1;
+      sidebarLayout.value = reconciled;
+      sidebarLayoutPersisted = next;
+      rebuildTreeNodes();
+    } catch {
+      // Transient read failures are expected while another process rewrites the layout.
+    } finally {
+      sidebarLayoutSyncInFlight = false;
+    }
+  }
+
+  /** Watch for layout changes made outside the app. The interval only runs while
+   *  the window is visible, and a focus change syncs immediately, so a hidden
+   *  window or the web build does not poll in the background forever. */
+  function startSidebarLayoutSync(intervalMs = 1500) {
+    if (import.meta.env.MODE === "test") return;
+    if (sidebarLayoutSyncTimer) return;
+    const tick = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void syncSidebarLayoutOnce();
+    };
+    sidebarLayoutSyncTick = tick;
+    sidebarLayoutSyncTimer = setInterval(tick, intervalMs);
+    if (typeof window !== "undefined") {
+      sidebarLayoutSyncTarget = window;
+      sidebarLayoutSyncTarget.addEventListener("focus", tick);
+    }
+    if (typeof document !== "undefined") {
+      sidebarLayoutSyncDocument = document;
+      sidebarLayoutSyncDocument.addEventListener("visibilitychange", tick);
+    }
+  }
+
+  function stopSidebarLayoutSync() {
+    if (sidebarLayoutSyncTimer) clearInterval(sidebarLayoutSyncTimer);
+    sidebarLayoutSyncTimer = null;
+    if (sidebarLayoutSyncTarget && sidebarLayoutSyncTick) {
+      sidebarLayoutSyncTarget.removeEventListener("focus", sidebarLayoutSyncTick);
+    }
+    sidebarLayoutSyncTarget = null;
+    if (sidebarLayoutSyncDocument && sidebarLayoutSyncTick) {
+      sidebarLayoutSyncDocument.removeEventListener("visibilitychange", sidebarLayoutSyncTick);
+    }
+    sidebarLayoutSyncDocument = null;
+    sidebarLayoutSyncTick = null;
   }
 
   /** 表分组的 scope 一律从「解析到的容器」派生：simple 显示模式下表行带 schema
@@ -10831,6 +11002,10 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function updateLayoutAndRebuild(nextLayout: SidebarLayout) {
+    // Bump before touching the layout: a poll that started while this edit was in
+    // flight must not be allowed to overwrite it just because the debounce has not
+    // fired yet.
+    sidebarLayoutRevision += 1;
     sidebarLayout.value = nextLayout;
     rebuildTreeNodes();
     persistSidebarLayoutDebounced();
@@ -10847,10 +11022,16 @@ export const useConnectionStore = defineStore("connection", () => {
     const nextConnections = removedConnectionIds.size ? connections.value.filter((connection) => !removedConnectionIds.has(connection.id)) : connections.value;
     let layoutAfterConnectionRemoval = previousLayout;
     for (const id of removedConnectionIds) layoutAfterConnectionRemoval = removeConnectionFromSidebarLayout(layoutAfterConnectionRemoval, id);
-    const nextLayout = deleteGroupsOp(layoutAfterConnectionRemoval, uniqueGroupIds);
+    let nextLayout = deleteGroupsOp(layoutAfterConnectionRemoval, uniqueGroupIds);
     if (nextLayout === previousLayout && nextConnections === connections.value) return [];
 
-    await persistConnectionDeletion(nextConnections, nextLayout);
+    const applyGroupDeletion = (layout: SidebarLayout) => {
+      let next = layout;
+      for (const id of removedConnectionIds) next = removeConnectionFromSidebarLayout(next, id);
+      return deleteGroupsOp(next, uniqueGroupIds);
+    };
+    await persistConnectionDeletion(nextConnections, applyGroupDeletion);
+    nextLayout = applyGroupDeletion(sidebarLayout.value);
     if (removedConnectionIds.size) {
       applyConnectionRemoval(removedConnectionIds, nextConnections, nextLayout);
       purgeTableVGroupsForConnections(removedConnectionIds);
@@ -11369,18 +11550,38 @@ export const useConnectionStore = defineStore("connection", () => {
         syncTimeoutInheritanceBackup();
         // 旧版本写下的行可能缺字段（如 version），一律归一化后再进内存，避免脏数据被原样写回。
         tableVGroupLayouts.value = Object.fromEntries(Object.entries(loadedTableVGroups ?? {}).map(([scopeKey, layout]) => [scopeKey, normalizeTableVGroupLayoutOp(layout)]));
+        // The read below can span an edit and its save; capture the revision so a
+        // snapshot that predates either is not adopted as the truth on disk.
+        const layoutRevisionBeforeRead = sidebarLayoutRevision;
         const savedLayout = await api.loadSidebarLayout();
         const currentLayout = sidebarLayout.value.groups.length || sidebarLayout.value.order.length ? sidebarLayout.value : null;
-        sidebarLayout.value = reconcileLayout(
-          connections.value.map((c) => c.id),
-          savedLayout ?? currentLayout,
-        );
+        const hasPendingLayoutWrite = layoutPersistTimer !== null || sidebarLayoutPersistInFlight !== null;
+        const editedWhileReading = layoutRevisionBeforeRead !== sidebarLayoutRevision;
+        sidebarLayout.value =
+          hasPendingLayoutWrite || editedWhileReading
+            ? reconcileLayout(
+                connections.value.map((c) => c.id),
+                sidebarLayout.value,
+              )
+            : reconcileLayout(
+                connections.value.map((c) => c.id),
+                savedLayout ?? currentLayout,
+              );
+        if (hasPendingLayoutWrite || editedWhileReading) {
+          // Keep the live layout, but make sure a poll that started before this
+          // reload cannot adopt the same stale snapshot afterwards.
+          sidebarLayoutRevision += 1;
+        } else {
+          sidebarLayoutRevision += 1;
+          sidebarLayoutPersisted = JSON.stringify(sidebarLayout.value);
+        }
         rebuildTreeNodes();
       })().finally(() => {
         initFromDiskPromise = null;
       });
     }
     await initFromDiskPromise;
+    startSidebarLayoutSync();
   }
 
   function addEphemeralConnection(config: ConnectionConfig) {
@@ -11419,6 +11620,8 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshAllTree,
     reloadFromDisk,
     collapseAllTreeNodes,
+    syncSidebarLayoutOnce,
+    stopSidebarLayoutSync,
     refreshSidebarObjectPagination,
     refreshTreeNode,
     refreshConnectionTreeNode,

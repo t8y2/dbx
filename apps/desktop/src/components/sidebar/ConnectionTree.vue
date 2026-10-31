@@ -55,7 +55,7 @@ import {
   findSidebarNodeForTarget,
   findNodePathForTarget,
   scrollTopForSidebarNode,
-  shouldScrollActiveSidebarSelection,
+  planActiveSidebarSelection,
   type ActiveTabSidebarTarget,
   type SidebarNodeScrollAlign,
 } from "@/lib/sidebar/sidebarActiveTabTarget";
@@ -2533,13 +2533,23 @@ function currentTreeScroller(): HTMLElement | null {
   return ((useVirtualTree.value ? treeScrollerRef.value?.$el : plainTreeScrollerRef.value) as HTMLElement | undefined) ?? null;
 }
 
-async function selectActiveTabSidebarNode(options: { scroll: boolean }) {
+// Tab whose row the passive selection already revealed and scrolled to. A later
+// tree update keeps selecting it but never re-expands its ancestors, so collapsing a
+// connection that hosts the active tab now sticks (#13895).
+let revealedActiveTabId: string | null = null;
+
+async function selectActiveTabSidebarNode(options: { scroll: boolean; reveal: boolean }) {
   if (!settingsStore.editorSettings.autoSelectActiveSidebarNode) return;
   const tab = activeTab.value;
   if (!tab) return;
 
   let match = findSidebarNodeForActiveTab(tab, flatNodes.value);
-  if (!match) {
+  // Expanding hidden ancestors is only correct while the row is still being revealed.
+  // On a plain tree update (the user collapsing a connection, loading a sibling) the
+  // match is hidden precisely because the user closed it, and reopening the path here
+  // undid the collapse: connections were the visible symptom because their children
+  // stay registered as loaded, which let the expand path open them again.
+  if (!match && options.reveal) {
     const target = activeTabSidebarTarget(tab);
     const nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
     if (nodePath && nodePath.length > 0) {
@@ -2551,6 +2561,8 @@ async function selectActiveTabSidebarNode(options: { scroll: boolean }) {
   }
   if (!match) return;
   if (activeTab.value?.id !== tab.id) return;
+
+  revealedActiveTabId = tab.id;
 
   if (store.connectionMultiSelectActive || store.selectedTreeNodeId !== match.id || store.treeSelectionAnchorId !== match.id || store.selectedTreeNodeIds.length !== 1 || store.selectedTreeNodeIds[0] !== match.id) {
     store.selectedTreeNodeId = match.id;
@@ -2582,14 +2594,14 @@ async function selectActiveTabSidebarNode(options: { scroll: boolean }) {
 watch(
   [() => activeTab.value?.id ?? null, flatNodes, () => settingsStore.editorSettings.autoSelectActiveSidebarNode],
   ([activeTabId, _nodes, autoSelectEnabled], [previousActiveTabId, _previousNodes, previousAutoSelectEnabled]) => {
-    void selectActiveTabSidebarNode({
-      scroll: shouldScrollActiveSidebarSelection({
-        activeTabId,
-        previousActiveTabId,
-        autoSelectEnabled,
-        previousAutoSelectEnabled,
-      }),
+    const plan = planActiveSidebarSelection({
+      activeTabId,
+      previousActiveTabId,
+      autoSelectEnabled,
+      previousAutoSelectEnabled,
+      revealedTabId: revealedActiveTabId,
     });
+    void selectActiveTabSidebarNode({ scroll: plan.scroll, reveal: plan.reveal });
   },
   { flush: "post" },
 );

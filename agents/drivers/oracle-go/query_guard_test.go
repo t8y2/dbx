@@ -265,6 +265,7 @@ func TestOracleQueryDecodeErrorRetiresConnectionButServerErrorDoesNot(t *testing
 		retired bool
 	}{
 		{"ttc", errors.New("TTC error: received code 112 during response reading"), true},
+		{"date", errors.New("abnormal data representation for date"), true},
 		{"number", errors.New("invalid NUMBER"), true},
 		{"int64", errors.New("invalid size for GetInt64: 9"), true},
 		{"server", errors.New("ORA-00942: table or view does not exist"), false},

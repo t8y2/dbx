@@ -92,6 +92,7 @@ func isOracleProtocolDecodeFailure(err error) bool {
 	}
 	message := err.Error()
 	return strings.Contains(message, "TTC error: received code ") ||
+		strings.Contains(message, "abnormal data representation for date") ||
 		strings.Contains(message, "invalid size for GetInt") ||
 		strings.Contains(message, "invalid NUMBER")
 }

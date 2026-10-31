@@ -252,6 +252,17 @@ describe("DataGrid go-to-column shortcut", () => {
     expect(host.querySelector('[data-grid-topbar-row="filters"].data-grid-topbar-scroll--row-divider')).not.toBeNull();
   });
 
+  it("keeps SQL result panes on a single toolbar row even when the split layout is selected", async () => {
+    const { host, settingsStore } = mountGrid({ context: "results", slots: { "result-toolbar-leading": () => h("span", { "data-test-toolbar-leading": "" }, "Results") } });
+    settingsStore.updateEditorSettings({ dataGridToolbarLayout: "split" });
+    await settle();
+
+    const topbar = host.querySelector<HTMLElement>("[data-grid-toolbar-layout]");
+    expect(topbar?.classList.contains("flex")).toBe(true);
+    expect(topbar?.classList.contains("grid")).toBe(false);
+    expect(host.querySelector('[data-grid-topbar-row="filters"].data-grid-topbar-scroll--row-divider')).toBeNull();
+  });
+
   it("keeps split toolbar labels expanded below the single-row breakpoint and resets layout history", async () => {
     mockToolbarGeometry({ width: 800, filters: 600, actions: 600 });
     const { host, settingsStore } = mountGrid();

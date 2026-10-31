@@ -7529,7 +7529,7 @@ export default withEnglishFallback({
     objectTypeEvent: "Eventos",
     objectDataOnlyDisabled: "Objetos que não são tabelas não são transferidos no modo apenas dados",
     objectCrossFamilyDisabled: "A transferência entre bancos suporta apenas sequências (DDL simples; corpos de views não são traduzidos)",
-    xuguPairOnly: "Direções compatíveis: Xugu para Xugu ou MySQL para Xugu (somente tabelas e dados).",
+    xuguPairOnly: "Direções compatíveis: Xugu para Xugu ou MySQL/PostgreSQL para Xugu (somente tabelas e dados).",
     xuguAppendOverwriteOnly: "A primeira fase da transferência do Xugu aceita apenas inclusão e sobrescrita; upsert e reconstrução ainda não são compatíveis.",
     xuguPreserveTableNames: "A transferência de estrutura do Xugu exige preservar maiúsculas e minúsculas nos nomes das tabelas de origem para evitar referências incorretas de chaves estrangeiras.",
     crossFamilyViewHint: "Transferência de views entre bancos: selecione também as tabelas das quais a view depende ou garanta que elas já existam no banco de destino",

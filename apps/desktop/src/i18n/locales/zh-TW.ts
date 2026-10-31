@@ -6637,7 +6637,7 @@ export default withEnglishFallback({
     objectTypeEvent: "事件",
     objectDataOnlyDisabled: "僅資料模式不傳輸非表物件",
     objectCrossFamilyDisabled: "跨庫僅支援序列傳輸（純DDL；檢視查詢體無法翻譯）",
-    xuguPairOnly: "虛谷支援的傳輸方向：虛谷到虛谷，或 MySQL 到虛谷（僅表結構和資料）。",
+    xuguPairOnly: "虛谷支援的傳輸方向：虛谷到虛谷，或 MySQL/PostgreSQL 到虛谷（僅表結構和資料）。",
     xuguAppendOverwriteOnly: "虛谷第一階段僅支援追加或覆蓋；暫不支援更新插入和重建。",
     xuguPreserveTableNames: "虛谷結構傳輸目前要求保留來源資料表名稱大小寫，以避免外鍵引用錯位。",
     crossFamilyViewHint: "跨庫檢視傳輸：請同時選擇檢視依賴的表，或確保目標庫已存在這些表",

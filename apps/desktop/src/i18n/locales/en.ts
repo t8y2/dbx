@@ -8775,7 +8775,7 @@ export default {
     objectTypeEvent: "Events",
     objectDataOnlyDisabled: "Non-table objects are not transferred in data-only mode",
     objectCrossFamilyDisabled: "Cross-database transfer supports sequences only (plain DDL; view query bodies cannot be translated)",
-    xuguPairOnly: "Supported Xugu directions: Xugu to Xugu, or MySQL to Xugu (tables and data only).",
+    xuguPairOnly: "Supported Xugu directions: Xugu to Xugu, or MySQL/PostgreSQL to Xugu (tables and data only).",
     xuguAppendOverwriteOnly: "The first Xugu transfer phase supports append and overwrite only; upsert and rebuild are not supported yet.",
     xuguPreserveTableNames: "Xugu structure transfer currently requires preserving source table-name casing to avoid mismatched foreign-key references.",
     crossFamilyViewHint: "Cross-database view transfer: select the tables the view depends on as well, or make sure they already exist in the target database",

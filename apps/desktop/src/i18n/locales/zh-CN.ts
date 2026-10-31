@@ -8741,7 +8741,7 @@ export default withEnglishFallback({
     objectTypeEvent: "事件",
     objectDataOnlyDisabled: "仅数据模式不传输非表对象",
     objectCrossFamilyDisabled: "跨库仅支持序列传输（纯DDL；视图查询体无法翻译）",
-    xuguPairOnly: "虚谷支持的传输方向：虚谷到虚谷，或 MySQL 到虚谷（仅表结构和数据）。",
+    xuguPairOnly: "虚谷支持的传输方向：虚谷到虚谷，或 MySQL/PostgreSQL 到虚谷（仅表结构和数据）。",
     xuguAppendOverwriteOnly: "虚谷一期仅支持追加或覆盖；暂不支持更新插入和重建。",
     xuguPreserveTableNames: "虚谷结构传输暂要求保留源表名大小写，以避免外键引用错位。",
     crossFamilyViewHint: "跨库视图传输：请同时选择视图依赖的表，或确保目标库已存在这些表",

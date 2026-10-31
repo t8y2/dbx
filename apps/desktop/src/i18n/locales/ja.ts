@@ -7541,7 +7541,7 @@ export default withEnglishFallback({
     objectTypeEvent: "イベント",
     objectDataOnlyDisabled: "データのみモードではテーブル以外のオブジェクトは転送されません",
     objectCrossFamilyDisabled: "データベース間転送はシーケンスのみサポートします（単純なDDL。ビューの本文は翻訳されません）",
-    xuguPairOnly: "対応する転送方向：Xugu から Xugu、または MySQL から Xugu（テーブル定義とデータのみ）。",
+    xuguPairOnly: "対応する転送方向：Xugu から Xugu、または MySQL/PostgreSQL から Xugu（テーブル定義とデータのみ）。",
     xuguAppendOverwriteOnly: "Xugu 転送の第 1 段階では追加と上書きのみをサポートしています。upsert と再構築はまだサポートされていません。",
     xuguPreserveTableNames: "外部キー参照の不一致を防ぐため、Xugu の構造転送ではソーステーブル名の大文字・小文字を保持する必要があります。",
     crossFamilyViewHint: "データベース間ビュー転送：ビューが依存するテーブルも選択するか、ターゲットDBに既に存在することを確認してください",

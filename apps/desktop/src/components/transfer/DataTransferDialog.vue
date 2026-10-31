@@ -163,7 +163,7 @@ const treeSelection = computed<Record<string, string[]>>({
 
 const treeGroups = computed(() =>
   (Object.keys(objectGroups.value) as TransferObjectKind[])
-    .filter((kind) => !(sourceTransferType.value === "mysql" && targetTransferType.value === "xugu") || kind === "TABLE")
+    .filter((kind) => !(["mysql", "postgres"].includes(sourceTransferType.value ?? "") && targetTransferType.value === "xugu") || kind === "TABLE")
     .map((kind) => ({
       kind,
       label: t(OBJECT_KIND_LABEL_KEY[kind]),
@@ -303,6 +303,7 @@ function connectionType(id: string): DatabaseType | undefined {
 // Keep in sync with `transfer_table_filter_supported` in dbx-core.
 const tableFilterSupported = computed(() => {
   const type = connectionType(sourceConnectionId.value);
+  if (type === "postgres" && connectionType(targetConnectionId.value) === "xugu") return false;
   return type === "mysql" || type === "gbase" || type === "postgres" || type === "kingbase" || type === "gaussdb" || type === "opengauss" || type === "kwdb";
 });
 
@@ -338,7 +339,7 @@ function requestedTableFilters(): Record<string, string> | undefined {
 
 const sourceTransferType = computed(() => transferDatabaseTypeForConnection(store.getConfig(sourceConnectionId.value)));
 const targetTransferType = computed(() => transferDatabaseTypeForConnection(store.getConfig(targetConnectionId.value)));
-const isXuguTransferPair = computed(() => targetTransferType.value === "xugu" && (sourceTransferType.value === "xugu" || sourceTransferType.value === "mysql"));
+const isXuguTransferPair = computed(() => targetTransferType.value === "xugu" && ["xugu", "mysql", "postgres"].includes(sourceTransferType.value ?? ""));
 
 function structureOverwriteSupported(): boolean {
   if (transferContent.value !== "structureOnly") return true;

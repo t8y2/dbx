@@ -7143,7 +7143,7 @@ export default withEnglishFallback({
     objectTypeEvent: "Zdarzenia",
     objectDataOnlyDisabled: "Obiekty inne niż tabele nie są transferowane w trybie samych danych",
     objectCrossFamilyDisabled: "Transfer między różnymi silnikami baz obsługuje tylko sekwencje (zwykły DDL; treść zapytań widoków nie może być tłumaczona)",
-    xuguPairOnly: "Obsługiwane kierunki: Xugu do Xugu lub MySQL do Xugu (tylko tabele i dane).",
+    xuguPairOnly: "Obsługiwane kierunki: Xugu do Xugu lub MySQL/PostgreSQL do Xugu (tylko tabele i dane).",
     xuguAppendOverwriteOnly: "Pierwszy etap transferu Xugu obsługuje tylko dopisywanie i nadpisywanie. Aktualizacja lub ponowne tworzenie nie są jeszcze obsługiwane.",
     xuguPreserveTableNames: "Transfer struktury Xugu wymaga obecnie zachowania wielkości liter w nazwach tabel źródłowych, aby uniknąć błędnych odwołań kluczy obcych.",
     crossFamilyViewHint: "Transfer widoków między różnymi bazami: zaznacz również tabele, od których zależy widok, lub upewnij się, że istnieją już w docelowej bazie",

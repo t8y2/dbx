@@ -7118,6 +7118,7 @@ export default withEnglishFallback({
     objectTypeEvent: "Event",
     objectDataOnlyDisabled: "Objek selain tabel tidak ditransfer dalam mode hanya-data",
     objectCrossFamilyDisabled: "Transfer lintas database hanya mendukung sekuens (DDL biasa; isi kueri tampilan tidak dapat diterjemahkan)",
+    xuguPairOnly: "Arah transfer yang didukung: Xugu ke Xugu, atau MySQL/PostgreSQL ke Xugu (hanya tabel dan data).",
     crossFamilyViewHint: "Transfer tampilan lintas database: pilih juga tabel yang menjadi dependensi tampilan tersebut, atau pastikan tabel itu sudah ada di database target",
     objectUnsupportedDisabled: "Database ini tidak mendukung transfer tipe objek ini",
     skippedExistingObjects: "Melewati {count} objek yang sudah ada",

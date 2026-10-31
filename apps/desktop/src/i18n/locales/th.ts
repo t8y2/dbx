@@ -9315,7 +9315,7 @@ export default withEnglishFallback({
     objectTypeEvent: "Events",
     objectDataOnlyDisabled: "ไม่ถ่ายโอน Object ที่ไม่ใช่ Table ใน Mode เฉพาะข้อมูล",
     objectCrossFamilyDisabled: "การถ่ายโอนข้ามฐานข้อมูลรองรับเฉพาะ Sequences (DDL ธรรมดา ไม่สามารถแปล Body ของ View Query)",
-    xuguPairOnly: "ทิศทางที่รองรับ: Xugu ไป Xugu หรือ MySQL ไป Xugu (เฉพาะโครงสร้างตารางและข้อมูล)",
+    xuguPairOnly: "ทิศทางที่รองรับ: Xugu ไป Xugu หรือ MySQL/PostgreSQL ไป Xugu (เฉพาะโครงสร้างตารางและข้อมูล)",
     xuguAppendOverwriteOnly: "Phase แรกของการถ่ายโอน Xugu รองรับเฉพาะ Append และ Overwrite ยังไม่รองรับ Upsert และ Rebuild",
     xuguPreserveTableNames: "การถ่ายโอน Structure ของ Xugu ตอนนี้ต้องคงตัวพิมพ์เล็กใหญ่ของชื่อ Table ต้นทางเพื่อหลีกเลี่ยง Reference Foreign Key ไม่ตรงกัน",
     crossFamilyViewHint: "การถ่ายโอน View ข้ามฐานข้อมูล: เลือก Tables ที่ View ขึ้นต่อด้วย หรือยืนยันว่ามีอยู่ในฐานข้อมูลเป้าหมายแล้ว",

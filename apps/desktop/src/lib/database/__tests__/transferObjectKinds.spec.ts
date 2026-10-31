@@ -68,6 +68,8 @@ describe("transferObjectKinds", () => {
     expect(isTransferPairSupported("xugu", "xugu")).toBe(true);
     expect(isTransferPairSupported("xugu", "postgres")).toBe(false);
     expect(isTransferPairSupported("mysql", "xugu")).toBe(true);
+    expect(isTransferPairSupported("postgres", "xugu")).toBe(true);
+    for (const engine of ["kingbase", "opengauss", "gaussdb", "highgo", "vastbase"] as const) expect(isTransferPairSupported(engine, "xugu")).toBe(false);
     expect(isTransferPairSupported("xugu", "mysql")).toBe(false);
     expect(isTransferPairSupported("doris", "xugu")).toBe(false);
     expect(isTransferPairSupported("starrocks", "xugu")).toBe(false);

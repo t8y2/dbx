@@ -6461,6 +6461,7 @@ export default withEnglishFallback({
     objectTypeEvent: "Hadisələr",
     objectDataOnlyDisabled: "Yalnız məlumat rejimində cədvəl olmayan obyektlər köçürülmür",
     objectCrossFamilyDisabled: "Verilənlər bazaları arasında köçürmə yalnız ardıcıllıqları dəstəkləyir (sadə DDL; görünüş sorğularının gövdələri çevrilə bilməz)",
+    xuguPairOnly: "Dəstəklənən istiqamətlər: Xugu-dan Xugu-ya və ya MySQL/PostgreSQL-dən Xugu-ya (yalnız cədvəllər və məlumatlar).",
     crossFamilyViewHint: "Verilənlər bazaları arasında görünüşün köçürülməsi: görünüşün asılı olduğu cədvəlləri də seçin və ya onların hədəf verilənlər bazasında artıq mövcud olduğuna əmin olun",
     objectUnsupportedDisabled: "Bu verilənlər bazası bu obyekt növünün köçürülməsini dəstəkləmir",
     skippedExistingObjects: "{count} mövcud obyekt ötürüldü",

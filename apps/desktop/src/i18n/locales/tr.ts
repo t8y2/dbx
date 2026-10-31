@@ -6353,6 +6353,7 @@ export default withEnglishFallback({
     objectTypeEvent: "Olaylar",
     objectDataOnlyDisabled: "Yalnızca veri modunda tablo dışı nesneler aktarılmaz",
     objectCrossFamilyDisabled: "Veritabanları arası aktarım yalnızca dizileri destekler (düz DDL; görünüm sorgu gövdeleri çevrilemez)",
+    xuguPairOnly: "Desteklenen aktarım yönleri: Xugu'dan Xugu'ya veya MySQL/PostgreSQL'den Xugu'ya (yalnızca tablolar ve veriler).",
     crossFamilyViewHint: "Veritabanları arası görünüm aktarımı: görünümün bağlı olduğu tabloları da seçin ya da hedef veritabanında zaten var olduklarından emin olun",
     objectUnsupportedDisabled: "Bu veritabanı bu nesne türünün aktarılmasını desteklemiyor",
     skippedExistingObjects: "Var olan {count} nesne atlandı",

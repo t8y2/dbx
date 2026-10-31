@@ -7559,7 +7559,7 @@ export default withEnglishFallback({
     objectTypeEvent: "이벤트",
     objectDataOnlyDisabled: "데이터 전용 모드에서는 테이블이 아닌 개체는 전송되지 않습니다",
     objectCrossFamilyDisabled: "데이터베이스 간 전송은 시퀀스만 지원합니다(단순 DDL, 뷰 본문은 변환되지 않음)",
-    xuguPairOnly: "지원되는 전송 방향: Xugu에서 Xugu 또는 MySQL에서 Xugu(테이블 구조 및 데이터만).",
+    xuguPairOnly: "지원되는 전송 방향: Xugu에서 Xugu 또는 MySQL/PostgreSQL에서 Xugu(테이블 구조 및 데이터만).",
     xuguAppendOverwriteOnly: "Xugu 전송 1단계에서는 추가와 덮어쓰기만 지원하며, upsert와 재구성은 아직 지원하지 않습니다.",
     xuguPreserveTableNames: "외래 키 참조가 잘못되는 것을 방지하려면 Xugu 구조 전송 시 원본 테이블 이름의 대소문자를 유지해야 합니다.",
     crossFamilyViewHint: "데이터베이스 간 뷰 전송: 뷰가 의존하는 테이블도 선택하거나 대상 DB에 이미 존재하는지 확인하세요",

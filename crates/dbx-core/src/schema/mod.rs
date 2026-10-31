@@ -1028,6 +1028,64 @@ pub async fn list_tables_core(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::TableInfo>, String> {
+    list_tables_core_impl(
+        state,
+        connection_id,
+        database,
+        schema,
+        filter,
+        limit,
+        offset,
+        object_types,
+        table_name_filter,
+        false,
+    )
+    .await
+}
+
+/// Sidebar table-tree variant of [`list_tables_core`]: for PostgreSQL-family
+/// connections `limit`/`offset` count top-level relations, and every partition
+/// below a returned root is included in the same page. Other drivers ignore
+/// the flag and keep row-based pagination.
+pub async fn list_table_roots_page_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
+) -> Result<Vec<db::TableInfo>, String> {
+    list_tables_core_impl(
+        state,
+        connection_id,
+        database,
+        schema,
+        filter,
+        limit,
+        offset,
+        object_types,
+        table_name_filter,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn list_tables_core_impl(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
+    page_table_roots: bool,
+) -> Result<Vec<db::TableInfo>, String> {
     let db_config = connection_config(state, connection_id).await;
     if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
         validate_oceanbase_metadata_page(limit, offset)?;
@@ -1053,6 +1111,7 @@ pub async fn list_tables_core(
                 object_types,
                 table_name_filter,
                 metadata_session.client_session_id(),
+                page_table_roots,
             )
         },
     )
@@ -2523,6 +2582,7 @@ fn message_queue_topic_tables(topics: Vec<crate::mq::TopicInfo>) -> Vec<db::Tabl
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn list_tables_once(
     state: &AppState,
     connection_id: &str,
@@ -2534,6 +2594,7 @@ async fn list_tables_once(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
     client_session_id: Option<&str>,
+    page_table_roots: bool,
 ) -> Result<Vec<db::TableInfo>, String> {
     let pool_key =
         state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
@@ -2922,17 +2983,25 @@ async fn list_tables_once(
                 db::cloudberry::list_tables_filtered(p, schema, filter, None, None)
                     .await
                     .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
+            } else if page_table_roots {
+                db::cloudberry::list_table_roots_page_filtered(p, schema, filter, limit, offset).await
             } else {
                 db::cloudberry::list_tables_filtered(p, schema, filter, limit, offset).await
             }
         }
         PoolKind::Postgres(p) => {
             if requests_table_objects_only(object_types) && table_name_filter.is_none_or(TableNameFilter::is_empty) {
-                db::postgres::list_table_objects_filtered(p, schema, filter, limit, offset).await
+                if page_table_roots {
+                    db::postgres::list_table_roots_page_filtered(p, schema, filter, limit, offset, true).await
+                } else {
+                    db::postgres::list_table_objects_filtered(p, schema, filter, limit, offset).await
+                }
             } else if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
                 db::postgres::list_tables_filtered(p, schema, filter, None, None)
                     .await
                     .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
+            } else if page_table_roots {
+                db::postgres::list_table_roots_page_filtered(p, schema, filter, limit, offset, false).await
             } else {
                 db::postgres::list_tables_filtered(p, schema, filter, limit, offset).await
             }

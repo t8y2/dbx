@@ -260,6 +260,7 @@ pub async fn list_tables(
     catalog: Option<String>,
     table_name_filter: Option<dbx_core::schema::TableNameFilter>,
     exact_identity: Option<bool>,
+    page_table_roots: Option<bool>,
 ) -> Result<Vec<db::TableInfo>, String> {
     if exact_identity.unwrap_or(false) {
         return dbx_core::schema::exact_metadata::tables(
@@ -281,6 +282,20 @@ pub async fn list_tables(
             &connection_id,
             &catalog,
             &database,
+            filter.as_deref(),
+            limit,
+            offset,
+            object_types.as_deref(),
+            table_name_filter.as_ref(),
+        )
+        .await;
+    }
+    if page_table_roots.unwrap_or(false) {
+        return dbx_core::schema::list_table_roots_page_core(
+            &state,
+            &connection_id,
+            &database,
+            &schema,
             filter.as_deref(),
             limit,
             offset,

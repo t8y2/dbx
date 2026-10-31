@@ -5,6 +5,7 @@ import { buildGetDatabaseCommentSql } from "@/lib/database/dbAdminSql";
 import {
   defaultAutoCommitForDbType,
   isSchemaAware,
+  pagesTablePartitionsWithRootPage,
   supportsConnectionQueryActions,
   supportsConnectionScopedQueryExecution,
   supportsConnectionDatabaseBrowser,
@@ -459,5 +460,23 @@ describe("database namespace creation", () => {
     expect(databaseNodeNamespaceCreationTarget({ db_type: "goldendb" }, { type: "database", database: "app" })).toBeNull();
     expect(databaseNodeNamespaceCreationTarget({ db_type: "duckdb" }, { type: "database", database: "main" })).toBeNull();
     expect(databaseNodeNamespaceCreationTarget({ db_type: "jdbc" }, { type: "database", database: "main" })).toBeNull();
+  });
+});
+
+describe("root-paged table partitions", () => {
+  it("enables root paging only for native PostgreSQL-protocol drivers", () => {
+    for (const dbType of ["postgres", "redshift", "gaussdb", "kwdb", "opengauss"] as const) {
+      expect(pagesTablePartitionsWithRootPage({ db_type: dbType })).toBe(true);
+    }
+    expect(pagesTablePartitionsWithRootPage({ db_type: "postgres", driver_profile: "cloudberry" })).toBe(true);
+    expect(pagesTablePartitionsWithRootPage({ db_type: "mysql" })).toBe(false);
+    expect(pagesTablePartitionsWithRootPage({ db_type: "kingbase" })).toBe(false);
+    expect(pagesTablePartitionsWithRootPage(undefined)).toBe(false);
+  });
+
+  it("keeps GaussDB's external M/JDBC driver on row-based paging", () => {
+    expect(pagesTablePartitionsWithRootPage({ db_type: "gaussdb", driver_profile: "gaussdb-m" })).toBe(false);
+    expect(pagesTablePartitionsWithRootPage({ db_type: "gaussdb", driver_profile: "GAUSSDB-M" })).toBe(false);
+    expect(pagesTablePartitionsWithRootPage({ db_type: "gaussdb", driver_profile: "gaussdb" })).toBe(true);
   });
 });

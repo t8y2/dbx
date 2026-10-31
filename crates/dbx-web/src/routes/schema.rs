@@ -34,6 +34,7 @@ pub struct SchemaQuery {
     pub execution_id: Option<String>,
     pub identity_mode: Option<dbx_core::schema::MetadataIdentityMode>,
     pub exact_identity: Option<bool>,
+    pub page_table_roots: Option<bool>,
     pub separate_indexes: Option<bool>,
     pub explicit_owner: Option<String>,
 }
@@ -270,6 +271,20 @@ pub async fn list_tables(
             &q.connection_id,
             &catalog,
             database,
+            q.filter.as_deref(),
+            q.limit,
+            q.offset,
+            object_types.as_deref(),
+            table_name_filter.as_ref(),
+        )
+        .await
+        .map_err(AppError::from)?
+    } else if q.page_table_roots.unwrap_or(false) {
+        dbx_core::schema::list_table_roots_page_core(
+            &state.app,
+            &q.connection_id,
+            database,
+            schema,
             q.filter.as_deref(),
             q.limit,
             q.offset,

@@ -9,6 +9,7 @@ import { gaussdbConnectionMode } from "@/lib/database/jdbcDialect";
 import { exactOracleTriggerMetadata, exactOracleTriggerNodeMetadata, oracleTriggerIdentityKey, oracleTriggerReadOptions, oracleTriggerObjectReadOptions } from "@/lib/database/oracleTriggerIdentity";
 import { nativeJobAdminEngine } from "@/lib/database/nativeJobAdmin";
 import { supportsSchemaIndexManagement } from "@/lib/database/databaseObjectCapabilities";
+import { pagesTablePartitionsWithRootPage } from "@/lib/database/databaseFeatureSupport";
 import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import type {
   ColumnInfo,
@@ -163,6 +164,7 @@ import {
   mergeTableInfosIntoObjects,
   mergeTableTreePageChildren,
   objectGroupRefreshParentId,
+  partitionPageTables,
   objectTypesForGroupNode,
   tablePartitionGroups,
   syncTablePartitionGroups,
@@ -2665,8 +2667,15 @@ export const useConnectionStore = defineStore("connection", () => {
     return (sidebarTableNameFilterRevisions.get(options.tableNameFilterScopeKey) ?? 0) === options.expectedTableNameFilterRevision;
   }
 
-  function listTablesWithOptionalTableNameFilter(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: DatabaseObjectTreeKind[], catalog?: string, tableNameFilter?: TableNameFilter) {
-    if (tableNameFilter) return api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes, catalog, tableNameFilter);
+  function listTablesWithOptionalTableNameFilter(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: DatabaseObjectTreeKind[], catalog?: string, tableNameFilter?: TableNameFilter, pageTableRoots?: boolean) {
+    // Only append the root-paging flag when the caller opts in so every other
+    // caller keeps the exact argument list its backend contract already had.
+    if (tableNameFilter) return pageTableRoots ? api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes, catalog, tableNameFilter, undefined, true) : api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes, catalog, tableNameFilter);
+    if (pageTableRoots) {
+      if (catalog) return api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes, catalog, undefined, undefined, true);
+      if (objectTypes) return api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes, undefined, undefined, undefined, true);
+      return api.listTables(connectionId, database, schema, filter, limit, offset, undefined, undefined, undefined, undefined, true);
+    }
     if (catalog) return api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes, catalog);
     if (objectTypes) return api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes);
     return api.listTables(connectionId, database, schema, filter, limit, offset);
@@ -3078,6 +3087,10 @@ export const useConnectionStore = defineStore("connection", () => {
     // like unfiltered loads, instead of silently stopping at the first budget
     // window. Global sidebar search keeps the bounded single-shot fetch.
     const paginate = options.pagedSearch || !searchFilter || getConfig(options.node.connectionId)?.db_type === "oceanbase-oracle";
+    // PostgreSQL-family backends can count only top-level relations against the
+    // page size and return every partition below them, so one page fully loads
+    // the partition groups it shows (issue #13860).
+    const rootPaged = paginate && !searchFilter && tableNameFilterIsEmpty(tableNameFilter) && pagesTablePartitionsWithRootPage(getConfig(options.node.connectionId));
     const fetchLimit = paginate ? options.pageSize + 1 : SIDEBAR_TABLE_SEARCH_RESULT_BUDGET;
     const fetchOffset = paginate ? options.offset : undefined;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
@@ -3094,11 +3107,12 @@ export const useConnectionStore = defineStore("connection", () => {
         sidebarDisplayMode: "grouped",
         extra: tableNameFilterMetadataExtra(tableNameFilter, sourceRevision),
       }),
-      () => listTablesWithOptionalTableNameFilter(options.node.connectionId!, options.node.database!, options.querySchema, searchFilter, fetchLimit, fetchOffset, options.objectTypes, options.node.catalog, tableNameFilter),
+      () => listTablesWithOptionalTableNameFilter(options.node.connectionId!, options.node.database!, options.querySchema, searchFilter, fetchLimit, fetchOffset, options.objectTypes, options.node.catalog, tableNameFilter, rootPaged),
       { force: options.force },
     );
-    const hasMore = paginate ? tables.length > options.pageSize : false;
-    const pageTables = hasMore ? tables.slice(0, options.pageSize) : tables;
+    const anchorTables = rootPaged ? tables.filter((table) => !table.parent_name) : tables;
+    const hasMore = paginate ? anchorTables.length > options.pageSize : false;
+    const pageTables = rootPaged ? partitionPageTables(tables, options.pageSize) : hasMore ? tables.slice(0, options.pageSize) : tables;
     if (tableListSourceRevision(options.node.connectionId) === sourceRevision) {
       indexCompletionTables(options.node.connectionId, options.node.database, options.effectiveSchema, tableInfosToCompletionTables(pageTables, options.effectiveSchema));
     }
@@ -3115,9 +3129,9 @@ export const useConnectionStore = defineStore("connection", () => {
       children,
       objectCount: children.length,
       hasMore,
-      nextOffset: options.offset + pageTables.length,
-      loadMoreParent: lastTable?.parent_name ? { schema: lastTable.parent_schema, name: lastTable.parent_name } : undefined,
-      ...tablePageAnchors(tables, options.pageSize, hasMore, options.effectiveSchema),
+      nextOffset: options.offset + (rootPaged ? Math.min(anchorTables.length, options.pageSize) : pageTables.length),
+      loadMoreParent: rootPaged ? undefined : lastTable?.parent_name ? { schema: lastTable.parent_schema, name: lastTable.parent_name } : undefined,
+      ...tablePageAnchors(anchorTables, options.pageSize, hasMore, options.effectiveSchema),
     };
   }
 
@@ -3360,6 +3374,7 @@ export const useConnectionStore = defineStore("connection", () => {
       return { children, objectCount: children.length, hasMore, nextOffset: options.offset + pageObjects.length, firstAnchor: anchor(objects[0]), nextAnchor: hasMore ? anchor(objects[options.pageSize]) : undefined };
     }
     const paginate = options.pagedSearch || !searchFilter || getConfig(options.connectionId)?.db_type === "oceanbase-oracle";
+    const rootPaged = paginate && !searchFilter && tableNameFilterIsEmpty(tableNameFilter) && pagesTablePartitionsWithRootPage(getConfig(options.connectionId));
     const fetchLimit = paginate ? options.pageSize + 1 : SIDEBAR_TABLE_SEARCH_RESULT_BUDGET;
     const fetchOffset = paginate ? options.offset : undefined;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
@@ -3375,11 +3390,12 @@ export const useConnectionStore = defineStore("connection", () => {
         sidebarDisplayMode: "simple",
         extra: tableNameFilterMetadataExtra(tableNameFilter, sourceRevision),
       }),
-      () => listTablesWithOptionalTableNameFilter(options.connectionId, options.database, options.querySchema, searchFilter, fetchLimit, fetchOffset, undefined, undefined, tableNameFilter),
+      () => listTablesWithOptionalTableNameFilter(options.connectionId, options.database, options.querySchema, searchFilter, fetchLimit, fetchOffset, undefined, undefined, tableNameFilter, rootPaged),
       { force: options.force },
     );
-    const hasMore = paginate ? tables.length > options.pageSize : false;
-    const pageTables = hasMore ? tables.slice(0, options.pageSize) : tables;
+    const anchorTables = rootPaged ? tables.filter((table) => !table.parent_name) : tables;
+    const hasMore = paginate ? anchorTables.length > options.pageSize : false;
+    const pageTables = rootPaged ? partitionPageTables(tables, options.pageSize) : hasMore ? tables.slice(0, options.pageSize) : tables;
     if (tableListSourceRevision(options.connectionId) === sourceRevision) {
       indexCompletionTables(options.connectionId, options.database, options.effectiveSchema, tableInfosToCompletionTables(pageTables, options.effectiveSchema));
     }
@@ -3396,9 +3412,9 @@ export const useConnectionStore = defineStore("connection", () => {
       children,
       objectCount: children.length,
       hasMore,
-      nextOffset: options.offset + pageTables.length,
-      loadMoreParent: lastTable?.parent_name ? { schema: lastTable.parent_schema, name: lastTable.parent_name } : undefined,
-      ...tablePageAnchors(tables, options.pageSize, hasMore, options.effectiveSchema),
+      nextOffset: options.offset + (rootPaged ? Math.min(anchorTables.length, options.pageSize) : pageTables.length),
+      loadMoreParent: rootPaged ? undefined : lastTable?.parent_name ? { schema: lastTable.parent_schema, name: lastTable.parent_name } : undefined,
+      ...tablePageAnchors(anchorTables, options.pageSize, hasMore, options.effectiveSchema),
     };
   }
 

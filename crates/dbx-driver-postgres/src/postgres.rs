@@ -4021,7 +4021,7 @@ pub async fn list_tables_filtered(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Vec<TableInfo>, String> {
-    list_tables_filtered_by_kind(pool, schema, filter, limit, offset, false).await
+    list_tables_filtered_by_kind(pool, schema, filter, limit, offset, false, false).await
 }
 
 /// Lists only table-like relations, excluding views and materialized views while
@@ -4033,7 +4033,32 @@ pub async fn list_table_objects_filtered(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Vec<TableInfo>, String> {
-    list_tables_filtered_by_kind(pool, schema, filter, limit, offset, true).await
+    list_tables_filtered_by_kind(pool, schema, filter, limit, offset, true, false).await
+}
+
+/// Sidebar pagination variant: `limit`/`offset` count top-level relations and
+/// every partition below a returned root is included in the same page. Used by
+/// the table tree only; other callers keep row-based pagination.
+pub async fn list_table_roots_page_filtered(
+    pool: &Pool,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    table_objects_only: bool,
+) -> Result<Vec<TableInfo>, String> {
+    list_tables_filtered_by_kind(pool, schema, filter, limit, offset, table_objects_only, true).await
+}
+
+fn postgres_table_info_from_row(row: &Row) -> TableInfo {
+    TableInfo {
+        name: pg_row_try_string(row, 0),
+        table_type: pg_row_try_string(row, 1),
+        valid: None,
+        comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
+        parent_schema: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
+        parent_name: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
+    }
 }
 
 async fn list_tables_filtered_by_kind(
@@ -4043,6 +4068,7 @@ async fn list_tables_filtered_by_kind(
     limit: Option<usize>,
     offset: Option<usize>,
     table_objects_only: bool,
+    page_table_roots: bool,
 ) -> Result<Vec<TableInfo>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let filter = filter.unwrap_or("").trim();
@@ -4053,28 +4079,42 @@ async fn list_tables_filtered_by_kind(
     let offset_param = offset.and_then(|value| i64::try_from(value).ok()).unwrap_or(0);
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let client = &EncodingClient::new(&client);
+    let params: &[(&(dyn tokio_postgres::types::ToSql + Sync), Type)] =
+        &[(&schema, Type::VARCHAR), (&filter_pattern, Type::VARCHAR), (&fuzzy_filter_pattern, Type::VARCHAR)];
+    if page_table_roots && filter.is_empty() {
+        if let Some(limit) = limit_param {
+            let roots_sql = postgres_table_roots_page_sql(limit, offset_param, table_objects_only);
+            // The roots query only takes the schema: PostgreSQL rejects a bind
+            // message whose parameter count does not match the statement.
+            let root_params: [(&(dyn tokio_postgres::types::ToSql + Sync), Type); 1] = [(&schema, Type::VARCHAR)];
+            // The pagination literals make this SQL vary by page. Use an unnamed
+            // typed query so each load stays one round trip without growing the
+            // statement cache.
+            let roots = client.query_typed(&roots_sql, &root_params).await.map_err(|e| e.to_string())?;
+            let partitioned_roots: Vec<i64> =
+                roots.iter().filter_map(|row| row.try_get::<_, Option<i64>>(5).ok().flatten()).collect();
+            let mut tables: Vec<TableInfo> = roots.iter().map(postgres_table_info_from_row).collect();
+            if !partitioned_roots.is_empty() {
+                let descendants_sql = postgres_partition_descendants_sql(table_objects_only);
+                let descendant_params: [(&(dyn tokio_postgres::types::ToSql + Sync), Type); 2] =
+                    [(&schema, Type::VARCHAR), (&partitioned_roots, Type::INT8_ARRAY)];
+                let descendants =
+                    client.query_typed(&descendants_sql, &descendant_params).await.map_err(|e| e.to_string())?;
+                tables.extend(descendants.iter().map(postgres_table_info_from_row));
+            }
+            return Ok(tables);
+        }
+    }
     let sql = if table_objects_only {
         postgres_table_objects_sql(limit_param, offset_param)
     } else {
         postgres_tables_sql(limit_param, offset_param)
     };
-    let params: &[(&(dyn tokio_postgres::types::ToSql + Sync), Type)] =
-        &[(&schema, Type::VARCHAR), (&filter_pattern, Type::VARCHAR), (&fuzzy_filter_pattern, Type::VARCHAR)];
     // The pagination literals make this SQL vary by page. Use an unnamed typed
     // query so each load stays one round trip without growing the statement cache.
     let rows = client.query_typed(&sql, params).await.map_err(|e| e.to_string())?;
 
-    Ok(rows
-        .iter()
-        .map(|row| TableInfo {
-            name: pg_row_try_string(row, 0),
-            table_type: pg_row_try_string(row, 1),
-            valid: None,
-            comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
-            parent_schema: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
-            parent_name: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
-        })
-        .collect())
+    Ok(rows.iter().map(postgres_table_info_from_row).collect())
 }
 
 pub async fn completion_assistant_search(
@@ -6387,6 +6427,82 @@ fn postgres_tables_sql(limit: Option<i64>, offset: i64) -> String {
 
 fn postgres_table_objects_sql(limit: Option<i64>, offset: i64) -> String {
     postgres_tables_sql_with_kind(limit, offset, true)
+}
+
+/// Sidebar table paging counts top-level relations, not every relation in the
+/// schema. Partition children are appended to the page that contains their
+/// root, so a default page size of 100 shows 100 tables even when a schema also
+/// contains 1,600 partitions (issue #13860).
+///
+/// The roots query is deliberately plain SQL: pre-10 servers (Redshift) have no
+/// declarative partitions, so it must keep working there. Only the follow-up
+/// descendant query needs `WITH RECURSIVE`, and it is skipped entirely when the
+/// page contains no partitioned root.
+fn postgres_table_roots_page_sql(limit: i64, offset: i64, table_objects_only: bool) -> String {
+    let relation_kinds = if table_objects_only { "'r','f','p'" } else { "'r','v','m','f','p'" };
+    format!(
+        "SELECT c.relname AS table_name, \
+         CASE c.relkind WHEN 'r' THEN 'BASE TABLE' WHEN 'v' THEN 'VIEW' \
+           WHEN 'm' THEN 'MATERIALIZED_VIEW' WHEN 'f' THEN 'FOREIGN TABLE' \
+           WHEN 'p' THEN 'BASE TABLE' END AS table_type, \
+         obj_description(c.oid) AS table_comment, \
+         NULL::text AS parent_schema, \
+         NULL::text AS parent_name, \
+         CASE WHEN c.relkind = 'p' THEN c.oid::bigint END AS partitioned_oid \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relkind IN ({relation_kinds}) \
+           AND NOT EXISTS ( \
+             SELECT 1 \
+             FROM pg_catalog.pg_inherits i \
+             JOIN pg_catalog.pg_class parent ON parent.oid = i.inhparent \
+             JOIN pg_catalog.pg_namespace parent_n ON parent_n.oid = parent.relnamespace \
+             WHERE i.inhrelid = c.oid AND parent.relkind = 'p' AND parent_n.nspname = n.nspname \
+           ) \
+         ORDER BY c.relname \
+         LIMIT {limit} OFFSET {offset}"
+    )
+}
+
+/// Every descendant partition of the partitioned roots on the current page,
+/// at any depth. `$2` is the `bigint[]` of root OIDs returned by
+/// [`postgres_table_roots_page_sql`].
+fn postgres_partition_descendants_sql(table_objects_only: bool) -> String {
+    let relation_kinds = if table_objects_only { "'r','f','p'" } else { "'r','v','m','f','p'" };
+    format!(
+        "WITH RECURSIVE partition_tree AS ( \
+           SELECT i.inhrelid AS oid \
+           FROM pg_catalog.pg_inherits i \
+           JOIN pg_catalog.pg_class parent ON parent.oid = i.inhparent \
+           JOIN pg_catalog.pg_class child ON child.oid = i.inhrelid \
+           JOIN pg_catalog.pg_namespace child_n ON child_n.oid = child.relnamespace \
+           WHERE i.inhparent = ANY($2::bigint[]) AND parent.relkind = 'p' \
+             AND child_n.nspname = $1 \
+           UNION ALL \
+           SELECT i.inhrelid \
+           FROM partition_tree tree \
+           JOIN pg_catalog.pg_inherits i ON i.inhparent = tree.oid \
+           JOIN pg_catalog.pg_class parent ON parent.oid = i.inhparent \
+           JOIN pg_catalog.pg_class child ON child.oid = i.inhrelid \
+           JOIN pg_catalog.pg_namespace child_n ON child_n.oid = child.relnamespace \
+           WHERE parent.relkind = 'p' AND child_n.nspname = $1 \
+         ) \
+         SELECT c.relname AS table_name, \
+                CASE c.relkind WHEN 'r' THEN 'BASE TABLE' WHEN 'v' THEN 'VIEW' \
+                  WHEN 'm' THEN 'MATERIALIZED_VIEW' WHEN 'f' THEN 'FOREIGN TABLE' \
+                  WHEN 'p' THEN 'BASE TABLE' END AS table_type, \
+                obj_description(c.oid) AS table_comment, \
+                pn.nspname AS parent_schema, \
+                pc.relname AS parent_name \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
+         JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent AND pc.relkind = 'p' \
+         JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
+         WHERE n.nspname = $1 AND c.relkind IN ({relation_kinds}) \
+           AND c.oid IN (SELECT oid FROM partition_tree) \
+         ORDER BY c.relname"
+    )
 }
 
 fn postgres_tables_sql_with_kind(limit: Option<i64>, offset: i64, table_objects_only: bool) -> String {
@@ -14561,6 +14677,36 @@ mod tests {
 
         assert!(sql.contains("c.relkind IN ('r','f','p')"));
         assert!(sql.contains("LIMIT 101 OFFSET 100"));
+    }
+
+    #[test]
+    fn postgres_table_roots_page_sql_counts_top_level_relations() {
+        let sql = postgres_table_roots_page_sql(101, 100, true);
+
+        assert!(sql.contains("c.relkind IN ('r','f','p')"));
+        assert!(sql.contains("NOT EXISTS"));
+        assert!(sql.contains("parent.relkind = 'p'"));
+        assert!(sql.contains("parent_n.nspname = n.nspname"));
+        assert!(sql.contains("LIMIT 101 OFFSET 100"));
+        assert!(sql.contains("CASE WHEN c.relkind = 'p' THEN c.oid::bigint END AS partitioned_oid"));
+        assert!(sql.contains("NULL::text AS parent_schema"));
+        assert!(sql.contains("NULL::text AS parent_name"));
+        // Root paging must stay usable on servers without recursive CTEs.
+        assert!(!sql.contains("WITH RECURSIVE"));
+    }
+
+    #[test]
+    fn postgres_partition_descendants_sql_walks_every_partition_level() {
+        let sql = postgres_partition_descendants_sql(false);
+
+        assert!(sql.contains("WITH RECURSIVE partition_tree AS"));
+        assert!(sql.contains("i.inhparent = ANY($2::bigint[])"));
+        assert!(sql.contains("i.inhparent = tree.oid"));
+        assert!(sql.contains("child_n.nspname = $1"));
+        assert!(sql.contains("c.oid IN (SELECT oid FROM partition_tree)"));
+        assert!(sql.contains("pn.nspname AS parent_schema"));
+        assert!(sql.contains("pc.relname AS parent_name"));
+        assert!(sql.contains("c.relkind IN ('r','v','m','f','p')"));
     }
 
     #[test]

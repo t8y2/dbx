@@ -1924,6 +1924,7 @@ export async function listTables(
   catalog?: string,
   tableNameFilter?: import("@/types/database").TableNameFilter,
   exactIdentity?: boolean,
+  pageTableRoots?: boolean,
 ): Promise<TableInfo[]> {
   return invoke("list_tables", {
     connectionId,
@@ -1936,6 +1937,7 @@ export async function listTables(
     catalog,
     tableNameFilter,
     ...(exactIdentity ? { exactIdentity: true } : {}),
+    ...(pageTableRoots ? { pageTableRoots: true } : {}),
   });
 }
 

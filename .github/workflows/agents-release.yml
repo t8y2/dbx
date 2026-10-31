@@ -169,7 +169,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.20.14"
+          go-version: "1.27.3"
       - name: Test Oracle native agent
         working-directory: agents/drivers/oracle-go
         run: go test ./...
@@ -199,7 +199,7 @@ jobs:
       - name: Set up Go for Windows 7-compatible Oracle agent
         uses: actions/setup-go@v7
         with:
-          go-version: "1.20.14"
+          go-version: "1.27.3"
           cache-dependency-path: agents/drivers/oracle-go/go.sum
       - name: Build Windows 7-compatible Oracle agent
         shell: bash
@@ -307,7 +307,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.20.14"
+          go-version: "1.27.3"
       - name: Test Xugu native agent
         working-directory: agents/drivers/xugu
         run: GONOSUMDB=gitee.com/XuguDB/go-xugu-driver go test ./...
@@ -347,7 +347,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.20.14"
+          go-version: "1.27.3"
       - name: Test RabbitMQ native agent
         working-directory: agents/drivers/rabbitmq
         run: go test ./...
@@ -377,7 +377,7 @@ jobs:
       - name: Set up Go for Windows 7-compatible RabbitMQ agent
         uses: actions/setup-go@v7
         with:
-          go-version: "1.20.14"
+          go-version: "1.27.3"
           cache-dependency-path: agents/drivers/rabbitmq/go.sum
       - name: Build Windows 7-compatible RabbitMQ agent
         shell: bash
@@ -680,7 +680,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.20.14"
+          go-version: "1.27.3"
       - name: Test Kingbase native agent
         working-directory: agents/drivers/kingbase-go
         run: go test ./...
@@ -928,7 +928,7 @@ jobs:
           python-version: "3.15"
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
         shell: bash
@@ -1159,7 +1159,7 @@ jobs:
           components: rust-src
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
         shell: bash

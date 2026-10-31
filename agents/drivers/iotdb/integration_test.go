@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/apache/iotdb-client-go/v2/client"
 )
 
 func TestLiveIoTDBAgentTreeAndTable(t *testing.T) {
@@ -420,15 +422,53 @@ func TestLiveIoTDBNoLimitQueryDisablesServerTimeout(t *testing.T) {
 	server := liveIoTDBServer(t, connectParams{Database: "root.dbx_timeout"})
 	defer server.disconnect()
 
+	// Seed 50000 rows through a direct client session so the paged result read
+	// (fetchSize 1000 → 50 fetch pages) takes well over any tightened
+	// query_timeout_threshold; every page fetch must carry the query's own
+	// timeout budget or the read dies mid-way (#13935 review round 2).
+	seedRows := 50000
+	seedSession := client.NewSession(&client.Config{
+		Host:      envOr("DBX_IOTDB_HOST", "127.0.0.1"),
+		Port:      strconv.Itoa(envIntOr("DBX_IOTDB_PORT", defaultIoTDBPort)),
+		UserName:  envOr("DBX_IOTDB_USER", "root"),
+		Password:  envOr("DBX_IOTDB_PASSWORD", "root"),
+		FetchSize: 1000,
+		TimeZone:  client.DefaultTimeZone,
+	})
+	if err := seedSession.Open(false, 10000); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	defer func() { _ = seedSession.Close() }()
+	tabletRows := 5000
+	tablet, tabletErr := client.NewTablet("root.dbx_timeout.d1", []*client.MeasurementSchema{
+		{Measurement: "s0", DataType: client.INT64},
+	}, tabletRows)
+	if tabletErr != nil {
+		t.Fatalf("seed tablet: %v", tabletErr)
+	}
+	for batch := 0; batch < seedRows/tabletRows; batch++ {
+		for index := 0; index < tabletRows; index++ {
+			tablet.SetTimestamp(int64(batch)*int64(tabletRows)+int64(index), index)
+			if err := tablet.SetValueAt(int64(batch*tabletRows+index), 0, index); err != nil {
+				t.Fatalf("seed value: %v", err)
+			}
+		}
+		tablet.RowSize = tabletRows
+		if err := seedSession.InsertTablet(tablet, true); err != nil {
+			t.Fatalf("seed tablet %d: %v", batch, err)
+		}
+		tablet.Reset()
+	}
+
 	result, err := server.executeQuery(queryOptions{
 		SQL:         "SELECT s0 FROM root.dbx_timeout.d1",
-		MaxRows:     100,
+		MaxRows:     seedRows,
 		TimeoutSecs: 0,
 	})
 	if err != nil {
-		t.Fatalf("timeoutSecs=0 must disable the tightened server timeout: %v", err)
+		t.Fatalf("timeoutSecs=0 must carry the budget through every fetch page: %v", err)
 	}
-	if len(result.Rows) == 0 {
-		t.Fatalf("expected the seeded rows to come back, got %d rows", len(result.Rows))
+	if len(result.Rows) != seedRows {
+		t.Fatalf("expected %d rows through all fetch pages, got %d", seedRows, len(result.Rows))
 	}
 }

@@ -5391,6 +5391,11 @@ export default withEnglishFallback({
     enableTriggerSuccess: 'เปิดใช้งานทริกเกอร์ "{name}" แล้ว',
     disableTriggerSuccess: 'ปิดใช้งานทริกเกอร์ "{name}" แล้ว',
     copyPasswordText: "รหัสผ่าน (ข้อความต้นฉบับ)",
+    foreignKeyChecks: "การตรวจสอบ Foreign Key",
+    foreignKeyChecksDefault: "ค่าเริ่มต้น",
+    foreignKeyChecksEnable: "เปิดใช้งาน",
+    foreignKeyChecksDisable: "ปิดใช้งาน",
+    foreignKeyChecksHint: "โดยค่าเริ่มต้นจะใช้การตั้งค่าของเซสชัน เมื่อปิดใช้งาน จะดำเนินการด้วย SET FOREIGN_KEY_CHECKS = 0 และสามารถจัดการตารางที่ถูกอ้างอิงในลำดับใดก็ได้ หลังจากดำเนินการแล้วจะคืนค่าเดิม",
   },
   visibleDatabases: {
     title: "ฐานข้อมูลที่มองเห็นได้",

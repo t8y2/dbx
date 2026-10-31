@@ -5120,6 +5120,11 @@ export default withEnglishFallback({
     enableTriggerSuccess: "トリガー「{name}」を有効化しました",
     disableTriggerSuccess: "トリガー「{name}」を無効化しました",
     copyPasswordText: "パスワード（原文）",
+    foreignKeyChecks: "外部キーチェック",
+    foreignKeyChecksDefault: "デフォルト",
+    foreignKeyChecksEnable: "有効",
+    foreignKeyChecksDisable: "無効",
+    foreignKeyChecksHint: "デフォルトではセッション設定を引き継ぎます。無効時は SET FOREIGN_KEY_CHECKS = 0 で実行し、参照されるテーブルを任意の順序で処理できます。実行後は元の値に戻します。",
   },
   visibleDatabases: {
     title: "表示するデータベース",

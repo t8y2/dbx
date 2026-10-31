@@ -210,6 +210,8 @@ import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
+import { foreignKeyChecksPreview, foreignKeyChecksTargetResults, isForeignKeyChecksOverride, runForeignKeyChecksBatch, supportsForeignKeyChecksOption, type ForeignKeyChecksMode } from "@/lib/table/foreignKeyChecks";
+import ForeignKeyChecksSelect from "@/components/objects/ForeignKeyChecksSelect.vue";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { matchesTableNameFilter } from "@/lib/table/tableVGroup";
 import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
@@ -617,6 +619,26 @@ const batchTruncateCascade = ref(false);
 const showBatchEmptyConfirm = ref(false);
 const batchEmptyPreviewSql = ref("");
 const batchEmptyPlan = ref<BatchTableEmptyPlanItem<ObjectBrowserRow>[]>([]);
+// Navicat-style "Foreign Key Checks: Default / Enable / Disable" for batch truncate / empty / drop.
+const batchForeignKeyChecks = ref<ForeignKeyChecksMode>("default");
+const supportsBatchForeignKeyChecks = computed(() => supportsForeignKeyChecksOption(effectiveDatabaseType.value));
+const batchForeignKeyChecksOverride = computed(() => isForeignKeyChecksOverride(batchForeignKeyChecks.value, effectiveDatabaseType.value));
+const batchDropDisplaySql = computed(() => foreignKeyChecksPreview(batchDropPreviewSql.value, batchForeignKeyChecks.value, effectiveDatabaseType.value));
+const batchTruncateDisplaySql = computed(() => foreignKeyChecksPreview(batchTruncatePreviewSql.value, batchForeignKeyChecks.value, effectiveDatabaseType.value));
+const batchEmptyDisplaySql = computed(() => foreignKeyChecksPreview(batchEmptyPreviewSql.value, batchForeignKeyChecks.value, effectiveDatabaseType.value));
+
+/** Run one statement per row with the chosen FOREIGN_KEY_CHECKS on a single session. */
+async function runObjectBrowserForeignKeyChecksBatch<T>(plan: readonly { target: T; sql: string }[], onProgress?: (completed: number) => void) {
+  const mode = batchForeignKeyChecks.value;
+  if (mode === "default") throw new Error("Foreign key checks override is not selected");
+  const results = await runForeignKeyChecksBatch(
+    plan.map(({ sql }) => sql),
+    mode,
+    (sql, progress, options) => api.executeMultiWithProgress(props.connection.id, props.database, sql, progress, undefined, { continueOnError: options.continueOnError }),
+    (progress) => onProgress?.(progress.completed),
+  );
+  return foreignKeyChecksTargetResults(plan, results);
+}
 // Paste table dialog state
 const showPasteDialog = ref(false);
 const pasteTableMode = ref<PasteTableMode>("structure-and-data");
@@ -3554,6 +3576,7 @@ function requestBatchDropTables() {
     return;
   }
   batchDropCascade.value = false;
+  batchForeignKeyChecks.value = "default";
   batchDropProgress.value = { completed: 0, total: 0 };
   batchDropPreviewSql.value = "";
   showBatchDropConfirm.value = true;
@@ -3583,9 +3606,16 @@ async function confirmBatchDropTables() {
         sql: await buildDropSqlForRow(target, { cascade: useCascade }),
       })),
     );
-    batchSql = plan.map(({ sql }) => sql).join(";\n");
-    const result = await executeObjectBrowserSqlWithProductionGuard(batchSql, () =>
-      runBatchTableDrop({
+    const useForeignKeyChecks = batchForeignKeyChecksOverride.value;
+    batchSql = useForeignKeyChecks ? foreignKeyChecksPreview(plan.map(({ sql }) => sql).join("\n"), batchForeignKeyChecks.value, effectiveDatabaseType.value) : plan.map(({ sql }) => sql).join(";\n");
+    const result = await executeObjectBrowserSqlWithProductionGuard(batchSql, async () => {
+      if (useForeignKeyChecks) {
+        const outcome = await runObjectBrowserForeignKeyChecksBatch(plan, (completed) => {
+          batchDropProgress.value = { completed, total: targets.length };
+        });
+        return { succeeded: outcome.succeeded, failed: outcome.failed[0]?.error };
+      }
+      return runBatchTableDrop({
         databaseType: effectiveDatabaseType.value,
         plan,
         executeStatement: (sql) => api.executeQuery(props.connection.id, props.database, sql),
@@ -3593,8 +3623,8 @@ async function confirmBatchDropTables() {
         onProgress: (progress) => {
           batchDropProgress.value = { completed: Math.min(progress.completed, targets.length), total: targets.length };
         },
-      }),
-    );
+      });
+    });
     if (!result) return;
 
     batchDropRecorded = true;
@@ -3652,6 +3682,7 @@ async function refreshBatchTruncatePreviewSql() {
 function requestBatchTruncateTables() {
   if (selectedTableCount.value === 0 || !supportsTruncateTable.value) return;
   batchTruncateCascade.value = false;
+  batchForeignKeyChecks.value = "default";
   batchTruncatePreviewSql.value = "";
   void refreshBatchTruncatePreviewSql();
   showBatchTruncateConfirm.value = true;
@@ -3693,8 +3724,16 @@ async function confirmBatchTruncateTables() {
         sql: await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade })),
       })),
     );
-    batchSql = statements.map(({ sql }) => sql).join(";\n");
+    const useForeignKeyChecks = batchForeignKeyChecksOverride.value;
+    batchSql = useForeignKeyChecks ? foreignKeyChecksPreview(statements.map(({ sql }) => sql).join("\n"), batchForeignKeyChecks.value, effectiveDatabaseType.value) : statements.map(({ sql }) => sql).join(";\n");
     const executed = await executeObjectBrowserSqlWithProductionGuard(batchSql, async () => {
+      if (useForeignKeyChecks) {
+        const outcome = await runObjectBrowserForeignKeyChecksBatch(statements.map((item) => ({ target: item.row, sql: item.sql })));
+        if (outcome.succeeded.length) await refreshMutatedTableDataTabsForRows(outcome.succeeded);
+        const failure = outcome.failed[0];
+        if (failure) throw new Error(`${failure.target.name}: ${failure.error.message}`);
+        return true;
+      }
       await runBatchTableTruncate(
         statements,
         async ({ sql }) => {
@@ -3749,6 +3788,7 @@ function requestBatchEmptyTables() {
   if (targets.length === 0) return;
   batchEmptyPlan.value = [];
   batchEmptyPreviewSql.value = "";
+  batchForeignKeyChecks.value = "default";
   void refreshBatchEmptyPreviewSql(targets)
     .then(() => {
       showBatchEmptyConfirm.value = true;
@@ -3764,8 +3804,14 @@ async function confirmBatchEmptyTables() {
   if (plan.length === 0) return;
   const start = Date.now();
   const asynchronousMutation = effectiveDatabaseType.value === "clickhouse";
-  const reviewSql = plan.map(({ sql }) => sql).join(";\n");
-  const result = await executeObjectBrowserSqlWithProductionGuard(reviewSql, () => {
+  const useForeignKeyChecks = batchForeignKeyChecksOverride.value;
+  const reviewSql = useForeignKeyChecks ? foreignKeyChecksPreview(plan.map(({ sql }) => sql).join("\n"), batchForeignKeyChecks.value, effectiveDatabaseType.value) : plan.map(({ sql }) => sql).join(";\n");
+  const result = await executeObjectBrowserSqlWithProductionGuard(reviewSql, async () => {
+    if (useForeignKeyChecks) {
+      // Keep the plan items as targets so the existing empty-result feedback stays unchanged.
+      const outcome = await runObjectBrowserForeignKeyChecksBatch(plan.map((item) => ({ target: item, sql: item.sql })));
+      return { succeeded: outcome.succeeded, failed: outcome.failed.map(({ target, error }) => ({ target, error: error.message })) };
+    }
     return runBatchTableEmpty(plan, async ({ sql }) => {
       await api.executeQuery(props.connection.id, props.database, sql);
     });
@@ -6834,7 +6880,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     v-model:open="showBatchDropConfirm"
     :title="batchDropConfirmTitle"
     :message="batchDropConfirmMessage"
-    :sql="batchDropPreviewSql"
+    :sql="batchDropDisplaySql"
     :confirm-label="t('objects.dropSelected')"
     :loading="batchDropExecuting && !batchTriggerDropRequested"
     :confirm-disabled="batchTriggerDropRequested && (!batchTriggerDropPreview?.isCurrent() || browserTriggerBusy)"
@@ -6853,6 +6899,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <div class="h-full bg-primary transition-[width] duration-200" :style="{ width: `${batchDropProgressPercent}%` }" />
         </div>
       </div>
+      <ForeignKeyChecksSelect v-if="supportsBatchForeignKeyChecks && !batchTriggerDropRequested" v-model="batchForeignKeyChecks" :disabled="batchDropExecuting" />
       <label v-if="canBatchDropCascade" class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
         <input v-model="batchDropCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshBatchDropPreviewSql()" />
         <span class="grid gap-0.5">
@@ -6867,12 +6914,13 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     v-model:open="showBatchTruncateConfirm"
     :title="t('objects.confirmBatchTruncateTitle')"
     :message="t('objects.confirmBatchTruncateMessage', { count: selectedTableCount })"
-    :sql="batchTruncatePreviewSql"
+    :sql="batchTruncateDisplaySql"
     :confirm-label="t('objects.truncateSelected')"
     @confirm="confirmBatchTruncateTables"
   >
-    <template v-if="canBatchTruncateCascade" #options>
-      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+    <template v-if="canBatchTruncateCascade || supportsBatchForeignKeyChecks" #options>
+      <ForeignKeyChecksSelect v-if="supportsBatchForeignKeyChecks" v-model="batchForeignKeyChecks" />
+      <label v-if="canBatchTruncateCascade" class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
         <input v-model="batchTruncateCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshBatchTruncatePreviewSql()" />
         <span class="grid gap-0.5">
           <span class="font-medium text-foreground">{{ t("contextMenu.truncateTableCascade") }}</span>
@@ -6886,10 +6934,14 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     v-model:open="showBatchEmptyConfirm"
     :title="t('contextMenu.confirmBatchEmptyTitle', { count: batchEmptyPlan.length })"
     :message="t('contextMenu.confirmBatchEmptyMessage', { count: batchEmptyPlan.length })"
-    :sql="batchEmptyPreviewSql"
+    :sql="batchEmptyDisplaySql"
     :confirm-label="t('contextMenu.batchEmpty', { count: batchEmptyPlan.length })"
     @confirm="confirmBatchEmptyTables"
-  />
+  >
+    <template v-if="supportsBatchForeignKeyChecks" #options>
+      <ForeignKeyChecksSelect v-model="batchForeignKeyChecks" />
+    </template>
+  </DangerConfirmDialog>
 
   <OraclePackageSaveAsDialog
     :open="packageSaveAsOpen"

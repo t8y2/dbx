@@ -5278,6 +5278,11 @@ export default withEnglishFallback({
     copyPasswordConfirmMessage: "El texto copiado contendrá la contraseña guardada en texto sin formato. ¿Continuar?",
     copyPasswordConfirmAction: "Copiar",
     copyPasswordText: "Contraseña (texto original)",
+    foreignKeyChecks: "Comprobación de claves foráneas",
+    foreignKeyChecksDefault: "Predeterminado",
+    foreignKeyChecksEnable: "Habilitar",
+    foreignKeyChecksDisable: "Deshabilitar",
+    foreignKeyChecksHint: "De forma predeterminada, se usa la configuración de la sesión. Al deshabilitarla, se ejecuta con SET FOREIGN_KEY_CHECKS = 0, lo que permite procesar las tablas referenciadas en cualquier orden; después de la ejecución, se restaura el valor original.",
   },
   visibleDatabases: {
     title: "Bases de datos visibles",

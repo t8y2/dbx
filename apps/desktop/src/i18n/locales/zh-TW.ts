@@ -5076,6 +5076,11 @@ export default withEnglishFallback({
     copyPasswordConfirmMessage: "複製的內容將包含明文密碼，任何能存取剪貼簿的程式或使用者都可以看到。是否繼續？",
     copyPasswordConfirmAction: "繼續複製",
     copyPasswordText: "密碼（原文）",
+    foreignKeyChecks: "外鍵檢查",
+    foreignKeyChecksDefault: "預設",
+    foreignKeyChecksEnable: "啟用",
+    foreignKeyChecksDisable: "停用",
+    foreignKeyChecksHint: "預設沿用工作階段設定。停用時以 SET FOREIGN_KEY_CHECKS = 0 執行，可依任意順序處理被參照的資料表；執行後還原原值。",
   },
   visibleDatabases: {
     title: "顯示資料庫",

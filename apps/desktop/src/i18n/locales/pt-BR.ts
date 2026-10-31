@@ -5097,6 +5097,11 @@ export default withEnglishFallback({
     enableTriggerSuccess: 'Trigger "{name}" ativado',
     disableTriggerSuccess: 'Trigger "{name}" desativado',
     copyPasswordText: "Senha (texto original)",
+    foreignKeyChecks: "Verificação de chaves estrangeiras",
+    foreignKeyChecksDefault: "Padrão",
+    foreignKeyChecksEnable: "Ativar",
+    foreignKeyChecksDisable: "Desativar",
+    foreignKeyChecksHint: "Por padrão, segue a configuração da sessão. Quando desativado, executa com SET FOREIGN_KEY_CHECKS = 0, permitindo processar as tabelas referenciadas em qualquer ordem; após a execução, o valor original é restaurado.",
   },
   visibleDatabases: {
     title: "Bancos de dados visíveis",

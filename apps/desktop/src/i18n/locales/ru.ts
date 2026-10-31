@@ -5218,6 +5218,11 @@ export default withEnglishFallback({
     enableTriggerSuccess: "Триггер «{name}» включён",
     disableTriggerSuccess: "Триггер «{name}» отключён",
     copyPasswordText: "Пароль (исходный текст)",
+    foreignKeyChecks: "Проверка внешних ключей",
+    foreignKeyChecksDefault: "По умолчанию",
+    foreignKeyChecksEnable: "Включить",
+    foreignKeyChecksDisable: "Отключить",
+    foreignKeyChecksHint: "По умолчанию используется параметр сеанса. При отключении выполняется с SET FOREIGN_KEY_CHECKS = 0, что позволяет обрабатывать таблицы, на которые есть ссылки, в любом порядке; после выполнения исходное значение восстанавливается.",
   },
   visibleDatabases: {
     title: "Видимые базы данных",

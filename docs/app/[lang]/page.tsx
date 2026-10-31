@@ -38,13 +38,13 @@ function formatStars(count: number) {
 function metrics(starLabel: string) {
   return {
     en: [
-      { value: "~25 MB", label: "desktop installer" },
+      { value: "One tool", label: "for every database you use" },
       { value: "100+", label: "database engines" },
       { value: "3 modes", label: "desktop, Docker and CLI" },
       { value: starLabel, label: "GitHub stars, fully open-source" },
     ],
     cn: [
-      { value: "~25 MB", label: "桌面安装包" },
+      { value: "一个工具", label: "管理你用的所有数据库" },
       { value: "100+", label: "数据库引擎" },
       { value: "3 种模式", label: "桌面、Docker 与 CLI" },
       { value: starLabel, label: "GitHub Star，完全开源" },
@@ -358,7 +358,7 @@ const localizedTestimonials = testimonials;
 
 const i18nText = {
   en: {
-    heroTitle: "25 MB to manage 100+ databases!",
+    heroTitle: "One tool to manage 100+ databases!",
     heroSubtitle: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
     download: "Download DBX",
     downloadName: "Download DBX",
@@ -411,7 +411,7 @@ const i18nText = {
     docker: "Docker setup",
   },
   cn: {
-    heroTitle: "25MB，管理100+种数据库！",
+    heroTitle: "一个工具，管理100+种数据库！",
     heroSubtitle: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
     download: "下载 DBX",
     downloadName: "下载 DBX",
@@ -467,11 +467,11 @@ const i18nText = {
 
 const landingMeta = {
   en: {
-    title: "DBX - 25 MB to manage 100+ databases!",
+    title: "DBX - One tool to manage 100+ databases!",
     description: "Manage MySQL, PostgreSQL, SQLite, Redis and 100+ data systems with DBX, a free open-source database client. Desktop, Docker self-hosting, optional AI and MCP.",
   },
   cn: {
-    title: "DBX - 25MB，管理100+种数据库！",
+    title: "DBX - 一个工具，管理100+种数据库！",
     description: "DBX 是免费开源的数据库管理工具，支持 MySQL、PostgreSQL、SQLite、Redis 等 100+ 种数据系统，提供 SQL 编辑、可选 AI 助手、MCP 和 Docker 自托管，覆盖 Windows、macOS 与 Linux。",
   },
 };

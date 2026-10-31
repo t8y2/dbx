@@ -9,12 +9,12 @@ import { i18n, resolveLang } from "@/lib/i18n";
 const LOCALE_MAP: Record<string, { locale: string; title: string; description: string }> = {
   en: {
     locale: "en_US",
-    title: "DBX - 25 MB to manage 100+ databases",
+    title: "DBX - One tool to manage 100+ databases",
     description: DEFAULT_DESCRIPTION,
   },
   cn: {
     locale: "zh_CN",
-    title: "DBX - 25MB，管理100+种数据库",
+    title: "DBX - 一个工具，管理100+种数据库",
     description: "DBX 是免费开源的数据库管理工具，支持 MySQL、PostgreSQL、SQLite、Redis 等 100+ 种数据系统，提供 SQL 编辑、AI 助手、MCP 与 Docker 自托管。",
   },
 };

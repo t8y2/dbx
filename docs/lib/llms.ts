@@ -25,7 +25,7 @@ export function llmsIndex(pages: LlmPage[]): string {
     [
       "# DBX",
       `> ${DEFAULT_DESCRIPTION}`,
-      "DBX is an Apache-2.0 database client, not a database server. The desktop app is approximately 25 MB; optional drivers, JRE packages, and plugins add downloads. Database capabilities vary by driver and engine.",
+      "DBX is an Apache-2.0 database client, not a database server. One tool covers 100+ database engines; optional drivers, JRE packages, and plugins add downloads. Database capabilities vary by driver and engine.",
       "The built-in AI assistant uses the provider you configure. MCP exposes selected DBX connections under access policies. Do not assume all features work with every database or that AI requests stay on the device.",
       "## Official sources",
       `- [English website](${SITE_URL}/en)`,

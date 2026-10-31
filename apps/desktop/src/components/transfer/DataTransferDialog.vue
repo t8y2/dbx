@@ -163,7 +163,7 @@ const treeSelection = computed<Record<string, string[]>>({
 
 const treeGroups = computed(() =>
   (Object.keys(objectGroups.value) as TransferObjectKind[])
-    .filter((kind) => !(sourceTransferType.value === "mysql" && targetTransferType.value === "xugu") || kind === "TABLE")
+    .filter((kind) => !((sourceTransferType.value === "mysql" || sourceTransferType.value === "oracle") && targetTransferType.value === "xugu") || kind === "TABLE")
     .map((kind) => ({
       kind,
       label: t(OBJECT_KIND_LABEL_KEY[kind]),
@@ -338,7 +338,7 @@ function requestedTableFilters(): Record<string, string> | undefined {
 
 const sourceTransferType = computed(() => transferDatabaseTypeForConnection(store.getConfig(sourceConnectionId.value)));
 const targetTransferType = computed(() => transferDatabaseTypeForConnection(store.getConfig(targetConnectionId.value)));
-const isXuguTransferPair = computed(() => targetTransferType.value === "xugu" && (sourceTransferType.value === "xugu" || sourceTransferType.value === "mysql"));
+const isXuguTransferPair = computed(() => targetTransferType.value === "xugu" && (sourceTransferType.value === "xugu" || sourceTransferType.value === "mysql" || sourceTransferType.value === "oracle"));
 
 function structureOverwriteSupported(): boolean {
   if (transferContent.value !== "structureOnly") return true;

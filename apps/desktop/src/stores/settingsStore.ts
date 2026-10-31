@@ -50,6 +50,7 @@ import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateField
 import { type DataTabReuseMode, DEFAULT_DATA_TAB_REUSE_MODE, normalizeDataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
 import { normalizeTableHoverLookupMode, type TableHoverLookupMode } from "@/lib/editor/hoverTableLookup";
 import { normalizeCompletionTriggerMode, type SqlCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { DEFAULT_SQL_COMPLETION_MATCH_MODE, normalizeCompletionMatchMode, type SqlCompletionMatchMode } from "@/lib/sql/sqlCompletionMatchMode";
 import { normalizeExcludedCompletionItems } from "@/lib/editor/excludedCompletions";
 import { DEFAULT_SQL_TABLE_COMPLETION_SCHEMA_QUALIFICATION, normalizeSqlTableCompletionSchemaQualification, type SqlTableCompletionSchemaQualification } from "@/lib/sql/sqlCompletionSchemaQualification";
 import { DEFAULT_CSV_QUOTE_MODE, normalizeCsvQuoteMode, type CsvQuoteMode } from "@/lib/export/csvQuoteMode";
@@ -77,6 +78,7 @@ export type {
   QueryResultExportFileNameSource,
   SavedSqlOpenTargetMode,
   AiSqlApplyTargetMode,
+  SqlCompletionMatchMode,
   SqlCompletionTriggerMode,
   SqlTableCompletionSchemaQualification,
   TableHoverLookupMode,
@@ -1285,6 +1287,7 @@ export interface EditorSettings {
   showTableDdlHoverPreview: boolean;
   tableHoverLookupMode: TableHoverLookupMode;
   clickTableNavigationTarget: ClickTableNavigationTarget;
+  completionMatchMode: SqlCompletionMatchMode;
   completionTriggerMode: SqlCompletionTriggerMode;
   /** Completion labels (case-insensitive) the user never wants suggested. */
   excludedCompletionItems: string[];
@@ -1643,6 +1646,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showTableDdlHoverPreview: true,
   tableHoverLookupMode: "fallback",
   clickTableNavigationTarget: "data",
+  completionMatchMode: DEFAULT_SQL_COMPLETION_MATCH_MODE,
   completionTriggerMode: "positional",
   excludedCompletionItems: [],
   defaultTransactionMode: "auto",
@@ -2412,6 +2416,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showTableDdlHoverPreview: typeof settings.showTableDdlHoverPreview === "boolean" ? settings.showTableDdlHoverPreview : DEFAULT_EDITOR_SETTINGS.showTableDdlHoverPreview,
     tableHoverLookupMode: normalizeTableHoverLookupMode(settings.tableHoverLookupMode, DEFAULT_EDITOR_SETTINGS.tableHoverLookupMode),
     clickTableNavigationTarget: normalizeClickTableNavigationTarget(settings.clickTableNavigationTarget),
+    completionMatchMode: normalizeCompletionMatchMode(settings.completionMatchMode),
     completionTriggerMode: normalizeCompletionTriggerMode(settings.completionTriggerMode),
     excludedCompletionItems: normalizeExcludedCompletionItems(settings.excludedCompletionItems),
     defaultTransactionMode: normalizeDefaultTransactionMode(settings.defaultTransactionMode),
@@ -3323,6 +3328,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showTableDdlHoverPreview !== undefined) editorSettings.value.showTableDdlHoverPreview = partial.showTableDdlHoverPreview === true;
     if (partial.tableHoverLookupMode !== undefined) editorSettings.value.tableHoverLookupMode = normalizeTableHoverLookupMode(partial.tableHoverLookupMode, DEFAULT_EDITOR_SETTINGS.tableHoverLookupMode);
     if (partial.clickTableNavigationTarget !== undefined) editorSettings.value.clickTableNavigationTarget = normalizeClickTableNavigationTarget(partial.clickTableNavigationTarget);
+    if (partial.completionMatchMode !== undefined) editorSettings.value.completionMatchMode = normalizeCompletionMatchMode(partial.completionMatchMode);
     if (partial.completionTriggerMode !== undefined) editorSettings.value.completionTriggerMode = normalizeCompletionTriggerMode(partial.completionTriggerMode);
     if (partial.excludedCompletionItems !== undefined) editorSettings.value.excludedCompletionItems = normalizeExcludedCompletionItems(partial.excludedCompletionItems);
     if (partial.defaultTransactionMode !== undefined) editorSettings.value.defaultTransactionMode = normalizeDefaultTransactionMode(partial.defaultTransactionMode);

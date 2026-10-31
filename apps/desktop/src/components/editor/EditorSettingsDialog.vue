@@ -127,6 +127,7 @@ import {
   type WebLogoPosition,
   type SnippetTriggerKey,
   type SqlCompletionTriggerMode,
+  type SqlCompletionMatchMode,
   type SqlTableCompletionSchemaQualification,
   type TableHoverLookupMode,
   normalizeTabMaxWidth,
@@ -807,7 +808,15 @@ const showSqlServerSpaceConfirmsCompletion = computed(() => hasSqlServerConnecti
 const editSortCompletionColumnsAlphabetically = ref(settingsStore.editorSettings.sortCompletionColumnsAlphabetically);
 const editSelectFirstCompletionOnOpen = ref(settingsStore.editorSettings.selectFirstCompletionOnOpen);
 const editCompletionTriggerMode = ref<SqlCompletionTriggerMode>(settingsStore.editorSettings.completionTriggerMode);
+const editCompletionMatchMode = ref<SqlCompletionMatchMode>(settingsStore.editorSettings.completionMatchMode);
 const editExcludedCompletionItems = ref(settingsStore.editorSettings.excludedCompletionItems.join("\n"));
+const completionMatchModeDescription = computed(() => {
+  const key = {
+    contains: "settings.completionMatchModeContainsDescription",
+    fuzzy: "settings.completionMatchModeFuzzyDescription",
+  }[editCompletionMatchMode.value];
+  return t(key);
+});
 const completionTriggerModeDescription = computed(() => {
   const key = {
     manual: "settings.completionTriggerModeManualDescription",
@@ -1260,6 +1269,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sortCompletionColumnsAlphabetically: editSortCompletionColumnsAlphabetically.value,
     selectFirstCompletionOnOpen: editSelectFirstCompletionOnOpen.value,
     completionTriggerMode: editCompletionTriggerMode.value,
+    completionMatchMode: editCompletionMatchMode.value,
     excludedCompletionItems: normalizeExcludedCompletionItems(editExcludedCompletionItems.value),
     wordWrap: editWordWrap.value,
     showWhitespace: editShowWhitespace.value,
@@ -1965,6 +1975,7 @@ function syncEditorSettingsDraftFromStore() {
   editSortCompletionColumnsAlphabetically.value = settingsStore.editorSettings.sortCompletionColumnsAlphabetically;
   editSelectFirstCompletionOnOpen.value = settingsStore.editorSettings.selectFirstCompletionOnOpen;
   editCompletionTriggerMode.value = settingsStore.editorSettings.completionTriggerMode;
+  editCompletionMatchMode.value = settingsStore.editorSettings.completionMatchMode;
   editExcludedCompletionItems.value = settingsStore.editorSettings.excludedCompletionItems.join("\n");
   editWordWrap.value = settingsStore.editorSettings.wordWrap;
   editShowWhitespace.value = settingsStore.editorSettings.showWhitespace;
@@ -2284,6 +2295,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   clickTableNavigationTarget: editClickTableNavigationTarget,
   objectBrowserAutoOpenDetailPanel: editObjectBrowserAutoOpenDetailPanel,
   completionTriggerMode: editCompletionTriggerMode,
+  completionMatchMode: editCompletionMatchMode,
   excludedCompletionItems: editExcludedCompletionItems,
   defaultTransactionMode: editDefaultTransactionMode,
   keepExplicitTransactionInAutoCommit: editKeepExplicitTransactionInAutoCommit,
@@ -2765,6 +2777,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
     editSelectFirstCompletionOnOpen.value = DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen;
     editCompletionTriggerMode.value = DEFAULT_EDITOR_SETTINGS.completionTriggerMode;
+    editCompletionMatchMode.value = DEFAULT_EDITOR_SETTINGS.completionMatchMode;
     editExcludedCompletionItems.value = DEFAULT_EDITOR_SETTINGS.excludedCompletionItems.join("\n");
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
     editShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.showWhitespace;
@@ -2970,6 +2983,7 @@ function resetAllDefaults() {
   editSequenceCompletionEnabled.value = DEFAULT_EDITOR_SETTINGS.sequenceCompletionEnabled;
   editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
   editSelectFirstCompletionOnOpen.value = DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen;
+  editCompletionMatchMode.value = DEFAULT_EDITOR_SETTINGS.completionMatchMode;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
   editShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.showWhitespace;
   editDdlOpenMode.value = DEFAULT_EDITOR_SETTINGS.ddlOpenMode;
@@ -3242,6 +3256,12 @@ function onDefaultTransactionModeChange(v: any) {
 function onCompletionTriggerModeChange(v: any) {
   if (v === "manual" || v === "require-prefix" || v === "positional") {
     editCompletionTriggerMode.value = v;
+  }
+}
+
+function onCompletionMatchModeChange(v: any) {
+  if (v === "contains" || v === "fuzzy") {
+    editCompletionMatchMode.value = v;
   }
 }
 
@@ -8427,6 +8447,24 @@ onUnmounted(() => {
                       <SelectItem value="manual">{{ t("settings.completionTriggerModeManual") }}</SelectItem>
                       <SelectItem value="require-prefix">{{ t("settings.completionTriggerModeRequirePrefix") }}</SelectItem>
                       <SelectItem value="positional">{{ t("settings.completionTriggerModePositional") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="settings-item flex items-start justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-completion-match-mode>
+                  <div class="min-w-0 space-y-1">
+                    <Label>{{ t("settings.completionMatchMode") }}</Label>
+                    <p class="text-xs leading-tight text-muted-foreground">
+                      {{ completionMatchModeDescription }}
+                    </p>
+                  </div>
+                  <Select :model-value="editCompletionMatchMode" @update:model-value="onCompletionMatchModeChange">
+                    <SelectTrigger class="h-8 w-44 shrink-0">
+                      <SelectValue :placeholder="t('settings.completionMatchMode')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="contains">{{ t("settings.completionMatchModeContains") }}</SelectItem>
+                      <SelectItem value="fuzzy">{{ t("settings.completionMatchModeFuzzy") }}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>

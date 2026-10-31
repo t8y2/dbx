@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { VueFlow, useVueFlow, type NodeChange, type EdgeChange, type NodeDragEvent, type EdgeMouseEvent, type NodeMouseEvent, type NodeTypesObject, type EdgeTypesObject, type ViewportTransform } from "@vue-flow/core";
+import { VueFlow, useVueFlow, PanOnScrollMode, type NodeChange, type EdgeChange, type NodeDragEvent, type EdgeMouseEvent, type NodeMouseEvent, type NodeTypesObject, type EdgeTypesObject, type ViewportTransform } from "@vue-flow/core";
 import { Background } from "@vue-flow/background";
 import { MiniMap } from "@vue-flow/minimap";
 import "@vue-flow/core/dist/style.css";
@@ -30,7 +30,7 @@ import { createDraftTable } from "@/lib/diagram/draft-table";
 import { cardinalityPairFromChoice } from "@/lib/diagram/cardinality";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { supportsTableStructureEditing } from "@/lib/database/databaseFeatureSupport";
-import { loadDraftTables, saveDraftTables, loadPersistedLayers, savePersistedLayers, loadPersistedPositions, savePersistedPositions, hasUsablePersistedPositions, loadLiveTablePatches, saveLiveTablePatches, applyLiveTablePatches } from "@/lib/diagram/draft-storage";
+import { loadDraftTables, saveDraftTables, loadPersistedLayers, savePersistedLayers, loadPersistedPositions, savePersistedPositions, loadLiveTablePatches, saveLiveTablePatches, applyLiveTablePatches } from "@/lib/diagram/draft-storage";
 import type { InspectorTarget } from "@/types/diagram";
 import DiagramInspector from "./DiagramInspector.vue";
 import DiagramSyncDialog from "./DiagramSyncDialog.vue";
@@ -47,6 +47,10 @@ import { CARD_WIDTH, CARD_HEADER_HEIGHT, COLUMN_ROW_HEIGHT, CARD_BOTTOM_PADDING,
 import { sizeLayerToFit, findLayerAtPoint, placeNewLayer } from "@/lib/diagram/size-layer";
 import { computeLtrAutoLayout } from "@/lib/diagram/ltr-auto-layout";
 import { computeLayoutWithLayers } from "@/lib/diagram/elk-layout";
+import { buildLayoutGraph } from "@/lib/diagram/layout-scope";
+import { FOCUSED_TABLE_COLOR, isFocusedTable } from "@/lib/diagram/focused-table";
+import { DIAGRAM_MIN_ZOOM, DIAGRAM_MAX_ZOOM } from "@/lib/diagram/diagramZoom";
+import { createDiagramGestureHandlers } from "@/lib/diagram/diagram-gestures";
 import type { ObstacleRect, Point } from "@/lib/diagram/edge-obstacle-router";
 import type { DiagramNode, DiagramEdge, MatchResult, LayerLayoutMode, HistorySnapshot } from "@/types/diagram";
 import { ChevronDown, ChevronRight, Loader2, Network, Plus, Trash2, X } from "@lucide/vue";
@@ -329,6 +333,11 @@ const positions = ref<Record<string, DiagramPosition>>({});
 const showAllTables = ref(false);
 type DiagramLoadMode = "focused" | "full";
 const loadedDiagramScope = ref<DiagramLoadMode>("full");
+const requestedDiagramScope = ref<DiagramLoadMode | null>(null);
+const focusedLayoutIdentities = ref(new Set<string>());
+const isLayingOut = ref(false);
+const layoutBusy = computed(() => requestedDiagramScope.value !== null || isLayingOut.value);
+let layoutGeneration = 0;
 let persistedTableSnapshot: DiagramTable[] = [];
 let diagramLoadGeneration = 0;
 let initializationGeneration = 0;
@@ -339,7 +348,7 @@ const focusedRoots = computed(() => {
 });
 const diagramMode = ref<"table" | "engineering">("table");
 
-const FIT_VIEW_OPTIONS = { padding: 0.15, duration: 150, minZoom: 0.05, maxZoom: 2 } as const;
+const FIT_VIEW_OPTIONS = { padding: 0.15, duration: 150, minZoom: DIAGRAM_MIN_ZOOM, maxZoom: DIAGRAM_MAX_ZOOM } as const;
 
 /** Vue Flow fitView — no-op in engineering mode (Vue Flow unmounted). */
 function fitDiagramView() {
@@ -496,7 +505,7 @@ const visibleRelationships = computed(() => {
 });
 
 /** Tables/edges currently drawn on the canvas (excludes members of hidden layers). */
-const canvasVisibleTables = computed(() => visibleTables.value.filter((table) => isTableCanvasVisible(getTableKey(table), layerStore.layers) || isTableCanvasVisible(table.name, layerStore.layers)));
+const canvasVisibleTables = computed(() => visibleTables.value.filter((table) => isTableCanvasVisible(getTableKey(table), layerStore.layers, canUseUnqualifiedTableName(table) ? table.name : undefined)));
 
 const canvasVisibleRelationships = computed(() => visibleRelationships.value.filter((rel) => isTableCanvasVisible(rel.sourceTable, layerStore.layers) && isTableCanvasVisible(rel.targetTable, layerStore.layers)));
 
@@ -566,7 +575,14 @@ const canvasSize = computed(() => {
   return { width, height };
 });
 
-const engineeringDiagram = computed(() => buildEngineeringDiagram(visibleTables.value, visibleRelationships.value, positions.value));
+const focusedNodeIds = computed(() => new Set(tables.value.filter((table) => isFocusedTable(table, focusedRoots.value)).map(getTableKey)));
+const engineeringDiagram = computed(() =>
+  buildEngineeringDiagram(
+    visibleTables.value.map((table) => ({ ...table, name: getTableKey(table) })),
+    visibleRelationships.value,
+    positions.value,
+  ),
+);
 const engineeringConnections = computed(() => buildEngineeringDiagramConnections(engineeringDiagram.value));
 const virtualizeTableDiagram = computed(() => visibleTables.value.length > LARGE_TABLE_DIAGRAM_THRESHOLD);
 const virtualizeEngineeringDiagram = computed(() => engineeringDiagram.value.entities.length + engineeringDiagram.value.attributes.length + engineeringDiagram.value.relationships.length > LARGE_ENGINEERING_DIAGRAM_THRESHOLD);
@@ -629,81 +645,106 @@ function handleLayerChanged() {
   syncVueFlowNodes();
 }
 
-async function applyAutoLayout(options?: { skipHistory?: boolean }) {
+async function applyAutoLayout(options?: { skipHistory?: boolean; initial?: boolean }) {
+  if (!open.value || isLayingOut.value || (requestedDiagramScope.value !== null && !options?.initial)) return;
   const generation = diagramLoadGeneration;
-  await nextTick();
-  if (!open.value || generation !== diagramLoadGeneration) return;
-  const layoutTables = canvasVisibleTables.value;
+  const layoutRun = ++layoutGeneration;
+  const scope = loadedDiagramScope.value;
+  const active = () => open.value && generation === diagramLoadGeneration && layoutRun === layoutGeneration && scope === loadedDiagramScope.value;
+  // Snapshot before yielding: a scope switch must never feed the old graph to a new layout.
+  const graph = deepCloneJson(buildLayoutGraph(canvasVisibleTables.value, canvasVisibleRelationships.value, layerStore.layers, getTableKey, scope === "focused" ? focusedLayoutIdentities.value : undefined));
+  const layoutTables = graph.tables;
   if (layoutTables.length === 0) return;
-
-  if (!options?.skipHistory) recordHistory();
-
   const diagramNodes: DiagramNode[] = layoutTables.map((table) => {
     const key = getTableKey(table);
     return {
       id: key,
       type: "table",
-      position: positions.value[key] || positions.value[table.name] ? { ...(positions.value[key] || positions.value[table.name]) } : { x: 0, y: 0 },
+      position: { ...(positions.value[key] ?? { x: 0, y: 0 }) },
       data: { table },
     };
   });
-  const diagramEdges: DiagramEdge[] = canvasVisibleRelationships.value.map((rel) => ({
+  const diagramEdges: DiagramEdge[] = graph.relationships.map((rel) => ({
     id: rel.id,
     source: rel.sourceTable,
     target: rel.targetTable,
     data: { relationship: rel },
   }));
 
-  // Only pass visible layers into ELK so hidden layers are not reflowed
-  const layoutLayers = layerStore.layers.filter((l) => l.visible && canLayoutLayer(l));
-  const result = await computeLayoutWithLayers(diagramNodes, diagramEdges, layoutLayers);
-  if (!open.value || generation !== diagramLoadGeneration) return;
-
-  // Freeze positions for tables in hidden layers
-  const nextPositions: Record<string, DiagramPosition> = { ...positions.value };
-  for (const node of result.nodes) {
-    nextPositions[node.id] = { ...node.position };
-  }
-  positions.value = nextPositions;
-
-  for (const layout of result.layerLayouts) {
-    const layer = layerStore.layers.find((l) => l.id === layout.layerId);
-    if (!layer) continue;
-    layer.position = { x: layout.x, y: layout.y };
-    layer.width = layout.width;
-    layer.height = layout.height;
-  }
-
-  const canvasEdgeIds = new Set(canvasVisibleRelationships.value.map((r) => r.id));
-  const nextWaypoints: Record<string, Point[]> = {};
-  const nextHandleHints: Record<string, { sourceHandle?: string; targetHandle?: string }> = {};
-  // Keep waypoints for edges that touch hidden tables
-  for (const [id, wp] of Object.entries(edgeWaypoints.value)) {
-    if (!canvasEdgeIds.has(id)) nextWaypoints[id] = wp;
-  }
-  for (const [id, hint] of Object.entries(edgeHandleHints.value)) {
-    if (!canvasEdgeIds.has(id)) nextHandleHints[id] = hint;
-  }
-  for (const edge of result.edges) {
-    if (edge.waypoints && edge.waypoints.length >= 2) {
-      nextWaypoints[edge.id] = edge.waypoints.map((p) => ({ x: p.x, y: p.y }));
-    }
-    if (edge.sourceHandle || edge.targetHandle) {
-      nextHandleHints[edge.id] = {
-        sourceHandle: edge.sourceHandle,
-        targetHandle: edge.targetHandle,
+  isLayingOut.value = true;
+  try {
+    await nextTick();
+    if (!active()) return;
+    let result: Awaited<ReturnType<typeof computeLayoutWithLayers>>;
+    try {
+      result = await computeLayoutWithLayers(diagramNodes, diagramEdges, graph.layers);
+    } catch (error: any) {
+      if (!active()) return;
+      toast(error?.message || String(error), 5000);
+      const fallback = computeLtrAutoLayout({
+        tables: layoutTables.map((table) => ({ ...table, name: getTableKey(table) })),
+        positions: Object.fromEntries(diagramNodes.map((node) => [node.id, node.position])),
+        layers: graph.layers,
+        paneWidth: diagramPaneWidth(),
+        relationships: graph.relationships,
+      });
+      result = {
+        nodes: diagramNodes.map((node) => ({ ...node, position: fallback.positions[node.id] ?? node.position })),
+        edges: diagramEdges,
+        layerLayouts: fallback.layers.map((layer) => ({ layerId: layer.id, layerName: layer.name, color: layer.color, x: layer.position?.x ?? 0, y: layer.position?.y ?? 0, width: layer.width ?? 240, height: layer.height ?? 100 })),
       };
     }
-  }
-  edgeWaypoints.value = nextWaypoints;
-  edgeHandleHints.value = nextHandleHints;
+    if (!active()) return;
+    if (!options?.skipHistory) recordHistory();
 
-  // Only size free layers; do not move auto-laid-out tables (would invalidate waypoints)
-  fitAllFreeLayers();
-  syncVueFlowNodes();
-  await nextTick();
-  fitDiagramView();
-  persistDraftAndLayers();
+    // Freeze positions for tables in hidden layers
+    const nextPositions: Record<string, DiagramPosition> = { ...positions.value };
+    for (const node of result.nodes) {
+      nextPositions[node.id] = { ...node.position };
+    }
+    positions.value = nextPositions;
+
+    for (const layout of result.layerLayouts) {
+      const layer = layerStore.layers.find((l) => l.id === layout.layerId);
+      if (!layer) continue;
+      layer.position = { x: layout.x, y: layout.y };
+      layer.width = layout.width;
+      layer.height = layout.height;
+    }
+
+    const canvasEdgeIds = new Set(graph.relationships.map((r) => r.id));
+    const nextWaypoints: Record<string, Point[]> = {};
+    const nextHandleHints: Record<string, { sourceHandle?: string; targetHandle?: string }> = {};
+    // Keep waypoints for edges that touch hidden tables
+    for (const [id, wp] of Object.entries(edgeWaypoints.value)) {
+      if (!canvasEdgeIds.has(id)) nextWaypoints[id] = wp;
+    }
+    for (const [id, hint] of Object.entries(edgeHandleHints.value)) {
+      if (!canvasEdgeIds.has(id)) nextHandleHints[id] = hint;
+    }
+    for (const edge of result.edges) {
+      if (edge.waypoints && edge.waypoints.length >= 2) {
+        nextWaypoints[edge.id] = edge.waypoints.map((p) => ({ x: p.x, y: p.y }));
+      }
+      if (edge.sourceHandle || edge.targetHandle) {
+        nextHandleHints[edge.id] = {
+          sourceHandle: edge.sourceHandle,
+          targetHandle: edge.targetHandle,
+        };
+      }
+    }
+    edgeWaypoints.value = nextWaypoints;
+    edgeHandleHints.value = nextHandleHints;
+
+    // The result already sizes eligible free layers. Do not touch other layer geometry.
+    syncVueFlowNodes();
+    persistDraftAndLayers();
+    await nextTick();
+    if (!active()) return;
+    fitDiagramView();
+  } finally {
+    if (layoutRun === layoutGeneration) isLayingOut.value = false;
+  }
 }
 
 async function handleFocusLayer(layerId: string) {
@@ -786,6 +827,7 @@ function handleCreateDraftTable(payload: { name: string; layerId: string | null;
   const draft = createDraftTable(payload.name, { withDefaultId: payload.withDefaultId, databaseType: selectedConnection.value?.db_type });
   draft.schema = selectedSchemas.value[0] || schema.value || undefined;
   tables.value = [...tables.value, draft];
+  focusedLayoutIdentities.value.add(diagramIdentityKey(draft));
   const targetLayerId = payload.layerId || layerStore.activeLayerId;
   const targetLayer = targetLayerId ? layerStore.layers.find((l) => l.id === targetLayerId) : undefined;
 
@@ -1000,7 +1042,7 @@ async function handleSyncedDraftTables(_names: string[]) {
 
 function syncVueFlowNodes() {
   const heights = tableHeightsMap();
-  const tableNodes = toVueFlowNodes(visibleTables.value, positions.value, isMultiSchema.value);
+  const tableNodes = toVueFlowNodes(visibleTables.value, positions.value, isMultiSchema.value, (table) => isFocusedTable(table, focusedRoots.value), visibleRelationships.value);
   const layerNodes = toVueFlowLayerNodes(layerStore.layers);
   const vueEdges = toVueFlowEdges(visibleRelationships.value, positions.value, edgeWaypoints.value, heights, edgeHandleHints.value);
   setNodes([...layerNodes, ...tableNodes]);
@@ -1476,6 +1518,10 @@ async function loadDiagram(options: { mode?: DiagramLoadMode; force?: boolean } 
   const context = diagramContextKey();
   const active = () => open.value && generation === diagramLoadGeneration && context === diagramContextKey();
   const mode = options.mode ?? (focusedRoots.value.length && !showAllTables.value ? "focused" : "full");
+  const initializeLayout = !options.force || tables.value.length === 0 || mode !== loadedDiagramScope.value;
+  requestedDiagramScope.value = mode;
+  layoutGeneration++;
+  isLayingOut.value = false;
   if (tables.value.length === 0) loadedDiagramScope.value = mode;
   const request: FocusedDiagramLoadRequest = {
     connectionId: connectionId.value,
@@ -1524,16 +1570,19 @@ async function loadDiagram(options: { mode?: DiagramLoadMode; force?: boolean } 
     }
     if (!active()) return;
     loadedTableCount.value = totalTableCount.value = liveTables.length;
-    await applyLoadedDiagramTables(liveTables, mode, active);
+    await applyLoadedDiagramTables(liveTables, mode, active, initializeLayout);
     if (active() && failedTableCount.value > 0) toast(t("diagram.partialError", { count: failedTableCount.value }), 5000);
   } catch (error: any) {
     if (active()) toast(error?.message || String(error), 5000);
   } finally {
-    if (active()) loadingDiagram.value = false;
+    if (active()) {
+      loadingDiagram.value = false;
+      requestedDiagramScope.value = null;
+    }
   }
 }
 
-async function applyLoadedDiagramTables(liveTables: DiagramTable[], mode: DiagramLoadMode, active: () => boolean) {
+async function applyLoadedDiagramTables(liveTables: DiagramTable[], mode: DiagramLoadMode, active: () => boolean, initializeLayout = true) {
   const schemaKey = effectiveSchemaKey.value;
   const drafts = loadDraftTables(connectionId.value, database.value, schemaKey);
   const identity = (table: DiagramTable) => diagramIdentityKey({ ...table, schema: table.schema ?? selectedSchemas.value[0] ?? schema.value });
@@ -1543,6 +1592,7 @@ async function applyLoadedDiagramTables(liveTables: DiagramTable[], mode: Diagra
   const nextTables = applyLiveTablePatches([...liveTables, ...pendingDrafts], patches, selectedSchemas.value.length === 1 ? selectedSchemas.value[0] : undefined);
   tables.value = nextTables;
   loadedDiagramScope.value = mode;
+  focusedLayoutIdentities.value = new Set(liveTables.map(diagramIdentityKey));
   showAllTables.value = mode === "full" && focusedRoots.value.length > 0;
   positions.value = {};
   // Metadata reconciliation must not be mistaken for an edit to a saved live patch.
@@ -1569,40 +1619,35 @@ async function applyLoadedDiagramTables(liveTables: DiagramTable[], mode: Diagra
   loadingDiagram.value = false;
   await nextTick();
   if (!active()) return;
-  await restoreOrInitializeLayout(active);
+  await restoreOrInitializeLayout(active, initializeLayout);
   if (active()) graphStore.clearHistory();
 }
 
 async function handleToggleShowAllTables(): Promise<void> {
-  if (loadingDiagram.value || !focusedRoots.value.length) return;
+  if (loadingDiagram.value || layoutBusy.value || !focusedRoots.value.length) return;
   await loadDiagram({ mode: showAllTables.value ? "focused" : "full" });
 }
 
-/** Restore saved table positions, or run layer-aware LTR layout when none exist. */
-async function restoreOrInitializeLayout(active: () => boolean = () => true) {
+/** Saved positions seed free layers; every newly opened scope still gets auto-layout. */
+async function restoreOrInitializeLayout(active: () => boolean = () => true, initializeLayout = true) {
   const schemaKey = effectiveSchemaKey.value;
-  const tableKeys = tables.value.map((t) => getTableKey(t));
-  const tableNames = tables.value.map((t) => t.name);
   const savedPositions = loadPersistedPositions(connectionId.value, database.value, schemaKey);
-
-  if (hasUsablePersistedPositions(savedPositions, tableKeys) || hasUsablePersistedPositions(savedPositions, tableNames)) {
-    const next: Record<string, DiagramPosition> = {};
-    for (const table of tables.value) {
-      const key = getTableKey(table);
-      const pos = savedPositions[key] || (canUseUnqualifiedTableName(table) ? savedPositions[table.name] : undefined);
-      if (pos) next[key] = { ...pos };
-    }
-    positions.value = next;
-    fillMissingTablePositions();
-    fitAllLayers();
-    persistDraftAndLayers();
-    syncVueFlowNodes();
-    await nextTick();
-    fitDiagramView();
-    return;
+  const next: Record<string, DiagramPosition> = {};
+  for (const table of tables.value) {
+    const key = getTableKey(table);
+    const pos = savedPositions[key] || (canUseUnqualifiedTableName(table) ? savedPositions[table.name] : undefined);
+    if (pos) next[key] = { ...pos };
   }
-
-  await applyInitialLayerAwareLayout(active);
+  positions.value = next;
+  fillMissingTablePositions();
+  syncVueFlowNodes();
+  await nextTick();
+  if (!active()) return;
+  if (initializeLayout) await applyAutoLayout({ skipHistory: true, initial: true });
+  else {
+    persistDraftAndLayers();
+    fitDiagramView();
+  }
 }
 
 /** Place tables that have no saved position into their layer (or canvas grid). */
@@ -1651,64 +1696,6 @@ function fillMissingTablePositions() {
   }
 }
 
-async function applyInitialLayerAwareLayout(active: () => boolean = () => true) {
-  await nextTick();
-  if (!active()) return;
-  const layoutTables = canvasVisibleTables.value;
-  if (layoutTables.length === 0) {
-    syncVueFlowNodes();
-    return;
-  }
-
-  // Free layers with no member positions cannot preserve relative layout — treat as auto for init.
-  const layersForLayout = layerStore.layers
-    .filter((l) => l.visible && canLayoutLayer(l))
-    .map((l) => {
-      const hasMemberPos = l.tableNames.some((name) => positions.value[name]);
-      if ((l.layoutMode ?? "auto") === "free" && !hasMemberPos) {
-        return { ...l, layoutMode: "auto" as const };
-      }
-      return l;
-    });
-
-  const result = computeLtrAutoLayout({
-    tables: layoutTables.map((table) => ({ ...table, name: getTableKey(table) })),
-    positions: positions.value,
-    layers: layersForLayout,
-    paneWidth: diagramPaneWidth(),
-    relationships: canvasVisibleRelationships.value.map((r) => ({
-      sourceTable: r.sourceTable,
-      targetTable: r.targetTable,
-    })),
-  });
-
-  const nextPositions: Record<string, DiagramPosition> = { ...positions.value, ...result.positions };
-  for (const table of layoutTables) {
-    const key = getTableKey(table);
-    if (result.positions[table.name] && !nextPositions[key]) {
-      nextPositions[key] = result.positions[table.name];
-    }
-    if (result.positions[key] && !nextPositions[table.name] && canUseUnqualifiedTableName(table)) {
-      nextPositions[table.name] = result.positions[key];
-    }
-  }
-  positions.value = nextPositions;
-
-  for (const updated of result.layers) {
-    const layer = layerStore.layers.find((l) => l.id === updated.id);
-    if (!layer) continue;
-    layer.position = updated.position ? { ...updated.position } : layer.position;
-    layer.width = updated.width;
-    layer.height = updated.height;
-  }
-
-  fitAllFreeLayers();
-  persistDraftAndLayers();
-  syncVueFlowNodes();
-  await nextTick();
-  fitDiagramView();
-}
-
 function requestRefreshDiagram() {
   if (!diagramReady.value || loadingDiagram.value) return;
   showRefreshConfirm.value = true;
@@ -1723,6 +1710,9 @@ async function initialize() {
   namespaceGeneration++;
   const generation = ++initializationGeneration;
   diagramLoadGeneration++;
+  layoutGeneration++;
+  isLayingOut.value = false;
+  requestedDiagramScope.value = null;
   loadingDiagram.value = false;
   loadingDatabases.value = false;
   loadingSchemas.value = false;
@@ -1784,6 +1774,16 @@ function zoomIn() {
   if (diagramMode.value !== "table") return;
   vfZoomIn({ duration: 150 });
 }
+
+const diagramGestures = createDiagramGestureHandlers({
+  getPane: () => (open.value && diagramMode.value === "table" ? diagramPaneRef.value : null),
+  getViewport,
+  setViewport: (viewport) => {
+    void setViewport(viewport);
+  },
+});
+const handleDiagramWheel = diagramGestures.wheel;
+watch([open, diagramMode, diagramPaneRef], () => diagramGestures.reset(), { flush: "sync" });
 
 function zoomOut() {
   if (diagramMode.value !== "table") return;
@@ -2135,6 +2135,9 @@ watch(
   diagramContextKey,
   () => {
     diagramLoadGeneration++;
+    layoutGeneration++;
+    isLayingOut.value = false;
+    requestedDiagramScope.value = null;
     loadingDiagram.value = false;
   },
   { flush: "sync" },
@@ -2155,6 +2158,9 @@ watch(
       void setupFullscreenListeners();
     } else {
       diagramLoadGeneration++;
+      layoutGeneration++;
+      isLayingOut.value = false;
+      requestedDiagramScope.value = null;
       initializationGeneration++;
       namespaceGeneration++;
       loadingDiagram.value = false;
@@ -2209,6 +2215,9 @@ onMounted(() => {
 
 onUnmounted(() => {
   diagramLoadGeneration++;
+  layoutGeneration++;
+  isLayingOut.value = false;
+  requestedDiagramScope.value = null;
   initializationGeneration++;
   namespaceGeneration++;
   window.removeEventListener("keydown", handleKeydown);
@@ -2249,6 +2258,7 @@ onUnmounted(() => {
         :loading-databases="loadingDatabases"
         :loading-schemas="loadingSchemas"
         :loading-diagram="loadingDiagram"
+        :layout-busy="layoutBusy"
         :diagram-ready="diagramReady"
         :tables-count="visibleTables.length"
         :relationships-count="visibleRelationships.length"
@@ -2313,7 +2323,7 @@ onUnmounted(() => {
             <div v-else-if="visibleTables.length === 0 && tables.length > 0" class="h-full flex items-center justify-center text-sm text-muted-foreground">
               {{ t("diagram.noMatches") }}
             </div>
-            <div v-else-if="diagramMode === 'table'" ref="diagramPaneRef" class="relative w-full h-full">
+            <div v-else-if="diagramMode === 'table'" ref="diagramPaneRef" class="relative w-full h-full" @wheel.capture="handleDiagramWheel" @gesturestart.capture="diagramGestures.gestureStart" @gesturechange.capture="diagramGestures.gestureChange" @gestureend.capture="diagramGestures.gestureEnd">
               <div v-if="tables.length === 0" class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-muted/30 text-sm text-muted-foreground pointer-events-none">
                 <p class="max-w-md text-center px-4 pointer-events-none">{{ t("diagram.emptyDesignHint") }}</p>
                 <Button v-if="canCreateDraftTable" type="button" size="sm" class="pointer-events-auto" @click="showCreateTableDialog = true">
@@ -2327,9 +2337,15 @@ onUnmounted(() => {
                 :edges="edges"
                 :node-types="nodeTypes"
                 :edge-types="edgeTypes"
-                :min-zoom="0.05"
-                :max-zoom="2"
-                :fit-view-options="{ padding: 0.15, minZoom: 0.05, maxZoom: 2 }"
+                :min-zoom="DIAGRAM_MIN_ZOOM"
+                :max-zoom="DIAGRAM_MAX_ZOOM"
+                :fit-view-options="FIT_VIEW_OPTIONS"
+                :pan-on-scroll="true"
+                :pan-on-scroll-mode="PanOnScrollMode.Free"
+                :zoom-on-scroll="false"
+                :zoom-on-pinch="true"
+                zoom-activation-key-code="Control"
+                :prevent-scrolling="true"
                 :only-render-visible-elements="virtualizeTableDiagram"
                 :pan-mode="isSpacePressed ? 'always' : undefined"
                 class="diagram-flow w-full h-full"
@@ -2378,8 +2394,7 @@ onUnmounted(() => {
                   v-for="entity in engineeringRenderSlice.entities"
                   :key="entity.id"
                   class="absolute flex cursor-pointer items-center justify-center border border-blue-500/70 bg-blue-100/80 px-3 text-center text-sm font-semibold text-blue-950 shadow-sm dark:bg-blue-950/35 dark:text-blue-100"
-                  :class="entity.name === focusTableName ? 'ring-2 ring-primary/40' : ''"
-                  :style="{ width: `${entity.width}px`, height: `${entity.height}px`, transform: `translate(${entity.x}px, ${entity.y}px)` }"
+                  :style="{ width: `${entity.width}px`, height: `${entity.height}px`, transform: `translate(${entity.x}px, ${entity.y}px)`, ...(focusedNodeIds.has(entity.name) ? { backgroundColor: FOCUSED_TABLE_COLOR, borderColor: FOCUSED_TABLE_COLOR, color: 'white' } : {}) }"
                   @dblclick.stop="openTableData(entity.name)"
                 >
                   <span class="truncate">{{ entity.name }}</span>

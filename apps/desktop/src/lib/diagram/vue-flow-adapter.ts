@@ -21,9 +21,23 @@ export function isTableCanvasVisible(tableName: string, layers: DiagramLayer[], 
 }
 
 /** positions are absolute canvas coordinates; converted to relative when parented to a visible layer */
-export function toVueFlowNodes(tables: DiagramTable[], positions?: Record<string, { x: number; y: number }>, isMultiSchema = false): Node<{ table: DiagramTable; isMultiSchema?: boolean }>[] {
+export function toVueFlowNodes(
+  tables: DiagramTable[],
+  positions?: Record<string, { x: number; y: number }>,
+  isMultiSchema = false,
+  isFocused?: (table: DiagramTable) => boolean,
+  relationships: (DiagramRelationship | InferredRelationship)[] = [],
+): Node<{ table: DiagramTable; isMultiSchema?: boolean; isFocused?: boolean; relationships: (DiagramRelationship | InferredRelationship)[] }>[] {
   const layerStore = useLayerStore();
   const layers = layerStore.layers;
+  const relationshipsByTable = new Map<string, (DiagramRelationship | InferredRelationship)[]>();
+  for (const relationship of relationships) {
+    for (const key of new Set([relationship.sourceTable, relationship.targetTable])) {
+      const incident = relationshipsByTable.get(key) ?? [];
+      incident.push(relationship);
+      relationshipsByTable.set(key, incident);
+    }
+  }
 
   // Track raw name frequencies to avoid ambiguous fallback when multiple schemas have identical table names
   const rawNameCounts = new Map<string, number>();
@@ -56,7 +70,7 @@ export function toVueFlowNodes(tables: DiagramTable[], positions?: Record<string
         parentNode: visibleParent?.id,
         expandParent: false,
         zIndex: TABLE_Z_INDEX,
-        data: { table, isMultiSchema },
+        data: { table, isMultiSchema, isFocused: isFocused?.(table) ?? false, relationships: relationshipsByTable.get(tableId) ?? [] },
       };
     });
 }

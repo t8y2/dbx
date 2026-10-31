@@ -450,6 +450,8 @@ export default withEnglishFallback({
     rateLimited: "GitHub güncelleme denetimleri geçici olarak hız sınırına takıldı. Yine de sürüm sayfasını açıp elle denetleyebilirsiniz.",
     openRelease: "Sürümü Aç",
     ignoreVersion: "Bu sürümü yoksay",
+    versionIgnored: "DBX {version} yoksayılıyor.",
+    restoreIgnoredVersion: "Yoksaymayı bırak",
     downloadInBackground: "Arka Planda İndir",
     cancelDownload: "İndirmeyi İptal Et",
     activeTasksBlockUpdate: "{count} görev hâlâ çalışıyor. DBX'i güncellemeden önce bitmelerini bekleyin.",

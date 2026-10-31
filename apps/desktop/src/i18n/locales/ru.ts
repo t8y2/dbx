@@ -1092,6 +1092,8 @@ export default withEnglishFallback({
     rateLimited: "Проверка обновлений на GitHub временно ограничена по частоте. Вы по-прежнему можете открыть страницу релиза и проверить вручную.",
     openRelease: "Открыть релиз",
     ignoreVersion: "Игнорировать эту версию",
+    versionIgnored: "Версия DBX {version} игнорируется.",
+    restoreIgnoredVersion: "Не игнорировать",
     downloadInBackground: "Загрузить в фоне",
     cancelDownload: "Отменить загрузку",
     activeTasksBlockUpdate: "Ещё выполняется задач: {count}. Дождитесь их завершения перед обновлением DBX.",

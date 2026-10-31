@@ -641,4 +641,39 @@ describe("ignoring a version (#13626)", () => {
     expect(effectiveUpdateInfo(info, "1.0.5", false)).toBe(info);
     expect(effectiveUpdateInfo(null, "1.1.0", false)).toBeNull();
   });
+
+  it("reports the ignored version instead of claiming the app is up to date", async () => {
+    settings.ignoredUpdateVersion = "1.1.0";
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+
+    expect(updater.ignoredReleaseVersion.value).toBe("1.1.0");
+    expect(updater.visibleUpdateInfo.value?.update_available).toBe(false);
+  });
+
+  it("offers the release again once the ignore is undone", async () => {
+    settings.ignoredUpdateVersion = "1.1.0";
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+    mocks.checkForUpdates.mockClear();
+
+    await updater.restoreIgnoredVersion();
+    await flush();
+
+    expect(mocks.persist).toHaveBeenCalledWith({ ignoredUpdateVersion: "" });
+    expect(updater.ignoredReleaseVersion.value).toBe("");
+    expect(updater.hasUpdateAvailable.value).toBe(true);
+    expect(updater.visibleUpdateInfo.value?.update_available).toBe(true);
+  });
+
+  it("clears the reported ignored version when a newer release is published", async () => {
+    settings.ignoredUpdateVersion = "1.0.5";
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+
+    expect(updater.ignoredReleaseVersion.value).toBe("");
+  });
 });

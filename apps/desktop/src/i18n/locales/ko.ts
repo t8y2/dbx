@@ -1125,6 +1125,8 @@ export default withEnglishFallback({
     rateLimited: "GitHub 업데이트 확인이 일시적으로 제한되었습니다. 릴리스 페이지를 직접 열어 수동으로 확인할 수 있습니다.",
     openRelease: "릴리스 열기",
     ignoreVersion: "이 버전 무시",
+    versionIgnored: "DBX {version} 버전을 무시하고 있습니다.",
+    restoreIgnoredVersion: "무시 해제",
     downloadInBackground: "백그라운드에서 다운로드",
     cancelDownload: "다운로드 취소",
     activeTasksBlockUpdate: "{count}개의 작업이 아직 실행 중입니다. DBX를 업데이트하려면 작업이 완료될 때까지 기다려 주세요.",

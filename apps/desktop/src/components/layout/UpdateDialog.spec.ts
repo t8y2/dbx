@@ -67,6 +67,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
   const downloadInBackground = vi.fn();
   const cancelDownload = vi.fn();
   const ignoreVersion = vi.fn();
+  const restoreIgnoredVersion = vi.fn();
   const container = document.createElement("div");
   document.body.append(container);
   const app = createApp(
@@ -117,6 +118,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
             "onCancel-download": cancelDownload,
             "onInstall-downloaded": handleInstallDownloaded,
             "onIgnore-version": ignoreVersion,
+            "onRestore-ignored-version": restoreIgnoredVersion,
           });
       },
     }),
@@ -126,7 +128,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
   app.mount(container);
   await flushDialog();
 
-  return { state, downloadInBackground, cancelDownload, installDownloaded, ignoreVersion };
+  return { state, downloadInBackground, cancelDownload, installDownloaded, ignoreVersion, restoreIgnoredVersion };
 }
 
 function buttonWithText(text: string): HTMLButtonElement | undefined {
@@ -812,5 +814,21 @@ describe("UpdateDialog aggregate update center", () => {
     // Footer button shows batch progress Upgrading (1/3) or Updating (1/3)
     const footer = document.body.querySelector("[data-update-footer]");
     expect(footer?.textContent).toMatch(/1\/3/);
+  });
+
+  it("says the version is ignored instead of claiming it is up to date, and can undo it", async () => {
+    // App.vue passes visibleUpdateInfo, i.e. the ignored release already reports update_available: false.
+    const { restoreIgnoredVersion } = await mountDialog(0, {}, undefined, {
+      ignoredReleaseVersion: "0.5.61",
+      updateInfo: { current_version: "0.5.60", latest_version: "0.5.61", update_available: false, portable_mode: false, manual_update_only: false, release_name: "v0.5.61", release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.61", release_notes: "" },
+    });
+
+    expect(document.body.textContent).toContain("DBX 0.5.61 is ignored.");
+    expect(document.body.textContent).not.toContain("up to date");
+
+    document.querySelector<HTMLButtonElement>("[data-update-restore-ignored]")!.click();
+    await flushDialog();
+
+    expect(restoreIgnoredVersion).toHaveBeenCalledOnce();
   });
 });

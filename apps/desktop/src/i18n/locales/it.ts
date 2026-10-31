@@ -1118,6 +1118,8 @@ export default withEnglishFallback({
     rateLimited: "Le verifiche degli aggiornamenti di GitHub sono temporaneamente limitate. Puoi comunque aprire la pagina delle release per verificare manualmente.",
     openRelease: "Apri Release",
     ignoreVersion: "Ignora questa versione",
+    versionIgnored: "DBX {version} è ignorata.",
+    restoreIgnoredVersion: "Non ignorare",
     downloadInBackground: "Scarica in background",
     cancelDownload: "Annulla download",
     activeTasksBlockUpdate: "Ci sono {count} attività in esecuzione. Attendi che terminino prima di aggiornare DBX.",

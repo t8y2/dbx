@@ -563,6 +563,12 @@ fn accepts_current_app_when_min_version_is_not_newer() {
 }
 
 #[test]
+fn accepts_promoted_beta_for_same_base_minimum_version() {
+    assert!(is_app_version_compatible("0.6.60", "0.6.60-beta.20261029.1"));
+    assert!(!is_app_version_compatible("0.6.61", "0.6.60-beta.20261029.1"));
+}
+
+#[test]
 fn atomic_replace_moves_download_into_place() {
     let dir = test_path("atomic");
     std::fs::create_dir_all(&dir).unwrap();

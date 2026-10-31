@@ -144,15 +144,19 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
     const releaseWin7Job = releaseWorkflow.slice(releaseWorkflow.indexOf("  build-windows-7-offline:"), releaseWorkflow.indexOf("  static-browser:"));
     const ciWin7Job = ciWorkflow.slice(ciWorkflow.indexOf("  windows-win7-bundle:"), ciWorkflow.indexOf("  duckdb-windows-driver:"));
 
-    for (const job of [releaseWin7Job, ciWin7Job]) {
-      expect(job).toContain("RUSTC_WRAPPER: sccache");
-      expect(job).toContain("SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}");
-      expect(job).toContain("SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1");
-      expect(job).toContain('SCCACHE_IDLE_TIMEOUT: "0"');
-      expect(job).toContain("mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba");
-      expect(job).toContain('version: "v0.16.0"');
-      expect(job).not.toMatch(/^\s+(?:CC|CXX):/m);
+    expect(releaseWin7Job).toContain("swatinem/rust-cache@v2");
+    expect(releaseWin7Job).not.toMatch(/RUSTC_WRAPPER|SCCACHE_|sccache/i);
+    for (const line of [
+      "RUSTC_WRAPPER: sccache",
+      "SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}",
+      "SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1",
+      'SCCACHE_IDLE_TIMEOUT: "0"',
+      "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba",
+      'version: "v0.16.0"',
+    ]) {
+      expect(ciWin7Job).toContain(line);
     }
+    expect(ciWin7Job).not.toMatch(/^\s+(?:CC|CXX):/m);
     expect(releaseWin7Job).not.toContain("CARGO_PROFILE_RELEASE_");
     expect(ciWin7Job).toContain('CARGO_PROFILE_RELEASE_LTO: "off"');
     expect(ciWin7Job).toContain('CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"');

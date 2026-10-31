@@ -4,14 +4,25 @@ use serde::{Deserialize, Serialize};
 
 const LATEST_JSON_GITHUB_PATH: &str = "https://github.com/t8y2/dbx/releases/latest/download/latest.json";
 const LATEST_JSON_R2_PATH: &str = "releases/latest/latest.json";
+const LATEST_JSON_STABLE_R2_PATH: &str = "releases/stable/latest.json";
+const LATEST_JSON_BETA_R2_PATH: &str = "releases/beta/latest.json";
 const LATEST_JSON_CNB_PATH: &str = "https://cnb.cool/dbxio.com/dbx/-/releases/latest/download/latest.json";
 const LATEST_EN_NOTES_R2_PATH: &str = "changelog/latest-en.json";
 const GITHUB_RELEASE_API_PREFIX: &str = "https://api.github.com/repos/t8y2/dbx/releases/tags/v";
-const RELEASE_URL_PREFIX: &str = "https://github.com/t8y2/dbx/releases/tag/v";
+
+fn default_promoted() -> bool {
+    true
+}
 
 #[derive(Debug, Deserialize)]
 pub struct TauriRelease {
     pub version: String,
+    #[serde(default)]
+    pub channel: UpdateChannel,
+    #[serde(default)]
+    pub release_tag: Option<String>,
+    #[serde(default = "default_promoted")]
+    pub is_promoted: bool,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
@@ -48,25 +59,52 @@ pub struct UpdateInfo {
     pub release_name: String,
     pub release_url: String,
     pub release_notes: String,
+    pub channel: UpdateChannel,
+    pub release_tag: String,
+    pub is_promoted: bool,
 }
 
 pub async fn fetch_latest_release(locale: &str, source: crate::DownloadSource) -> Result<TauriRelease, String> {
+    fetch_latest_release_for_channel(locale, source, UpdateChannel::Stable).await
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Beta,
+}
+
+pub async fn fetch_latest_release_for_channel(
+    locale: &str,
+    source: crate::DownloadSource,
+    channel: UpdateChannel,
+) -> Result<TauriRelease, String> {
     let client = build_update_http_client()?;
 
-    let candidates = update_check_candidates(source);
+    let candidates = update_check_candidates(source, channel);
     let resp = fetch_first_available(&client, &candidates).await?;
 
     let mut release = resp.json::<TauriRelease>().await.map_err(|e| format!("Failed to parse update response: {e}"))?;
-    if let Ok(github) = fetch_github_release_metadata(&client, &release.version).await {
+    let identity_version = release_identity_version(&release).to_string();
+    if let Ok(github) = fetch_github_release_metadata(&client, &identity_version).await {
         release.github = Some(github);
     }
     // 非中文界面用户额外拉取英文 release notes；失败/版本不匹配则保持 None，上层回退中文。
     if !is_chinese_locale(locale) {
-        if let Ok(notes_en) = fetch_latest_release_notes_en(&client, &release.version).await {
+        if let Ok(notes_en) = fetch_latest_release_notes_en(&client, &identity_version).await {
             release.notes_en = Some(notes_en);
         }
     }
     Ok(release)
+}
+
+/// A promoted beta publishes the stable base version in `version` but keeps its
+/// beta tag in `release_tag`; GitHub metadata and R2 release notes are both keyed
+/// by that tag.
+fn release_identity_version(release: &TauriRelease) -> &str {
+    release.release_tag.as_deref().unwrap_or(&release.version)
 }
 
 async fn fetch_first_available(client: &reqwest::Client, candidates: &[String]) -> Result<reqwest::Response, String> {
@@ -87,17 +125,36 @@ async fn fetch_first_available(client: &reqwest::Client, candidates: &[String]) 
     Err(format!("Failed to check updates: {}", errors.join("; ")))
 }
 
-fn update_check_candidates(source: crate::DownloadSource) -> Vec<String> {
+fn update_check_candidates(source: crate::DownloadSource, channel: UpdateChannel) -> Vec<String> {
+    let r2_path = match channel {
+        UpdateChannel::Stable => LATEST_JSON_STABLE_R2_PATH,
+        UpdateChannel::Beta => LATEST_JSON_BETA_R2_PATH,
+    };
     match source {
         crate::DownloadSource::Official => {
-            vec![format!("{}{LATEST_JSON_R2_PATH}", crate::R2_CDN_BASE), LATEST_JSON_GITHUB_PATH.to_string()]
+            if matches!(channel, UpdateChannel::Beta) {
+                vec![format!("{}{}", crate::R2_CDN_BASE, r2_path)]
+            } else {
+                vec![
+                    format!("{}{}", crate::R2_CDN_BASE, r2_path),
+                    format!("{}{LATEST_JSON_R2_PATH}", crate::R2_CDN_BASE),
+                    LATEST_JSON_GITHUB_PATH.to_string(),
+                ]
+            }
         }
         // CNB exposes a moving latest release, so checking CNB does not need an official-source version first.
-        crate::DownloadSource::Cnb => vec![
-            LATEST_JSON_CNB_PATH.to_string(),
-            format!("{}{LATEST_JSON_R2_PATH}", crate::R2_CDN_BASE),
-            LATEST_JSON_GITHUB_PATH.to_string(),
-        ],
+        crate::DownloadSource::Cnb => {
+            if matches!(channel, UpdateChannel::Beta) {
+                vec![format!("{}{}", crate::R2_CDN_BASE, r2_path)]
+            } else {
+                vec![
+                    format!("{}{}", crate::R2_CDN_BASE, r2_path),
+                    LATEST_JSON_CNB_PATH.to_string(),
+                    format!("{}{LATEST_JSON_R2_PATH}", crate::R2_CDN_BASE),
+                    LATEST_JSON_GITHUB_PATH.to_string(),
+                ]
+            }
+        }
     }
 }
 
@@ -163,6 +220,7 @@ async fn fetch_github_release_metadata(
 
 pub fn build_update_info(release: TauriRelease, current_version: &str) -> UpdateInfo {
     let latest_version = normalize_version(&release.version);
+    let update_available = is_channel_update_available(release.channel, &latest_version, current_version);
     let github = release.github.as_ref();
     let release_notes = non_empty(release.notes_en.as_deref())
         .map(ToOwned::to_owned)
@@ -173,13 +231,13 @@ pub fn build_update_info(release: TauriRelease, current_version: &str) -> Update
         .and_then(|metadata| non_empty(metadata.name.as_deref()))
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("DBX v{latest_version}"));
+    let release_tag = release.release_tag.unwrap_or_else(|| format!("v{latest_version}"));
     let release_url = github
         .and_then(|metadata| non_empty(metadata.html_url.as_deref()))
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("{RELEASE_URL_PREFIX}{latest_version}"));
-
+        .unwrap_or_else(|| format!("https://github.com/t8y2/dbx/releases/tag/{release_tag}"));
     UpdateInfo {
-        update_available: is_newer_version(&latest_version, current_version),
+        update_available,
         portable_mode: false,
         manual_update_only: false,
         current_version: current_version.to_string(),
@@ -187,7 +245,40 @@ pub fn build_update_info(release: TauriRelease, current_version: &str) -> Update
         release_url,
         release_notes,
         latest_version,
+        channel: release.channel,
+        release_tag,
+        is_promoted: release.is_promoted,
     }
+}
+
+pub fn is_channel_update_available(channel: UpdateChannel, latest_version: &str, current_version: &str) -> bool {
+    // A promoted beta keeps its prerelease version inside the installed binary,
+    // while the stable manifest intentionally exposes the base version. Treat
+    // that pair as the same release so switching back to stable never offers
+    // the already-installed artifact again.
+    if matches!(channel, UpdateChannel::Stable) {
+        let latest = normalize_version(latest_version);
+        let current = normalize_version(current_version);
+        let latest_base = latest.split(['-', '+']).next().unwrap_or_default();
+        let current_base = current.split(['-', '+']).next().unwrap_or_default();
+        if !latest.contains('-') && current.contains('-') && latest_base == current_base {
+            return false;
+        }
+    }
+    if is_newer_version(latest_version, current_version) {
+        return true;
+    }
+    if matches!(channel, UpdateChannel::Beta) {
+        // SemVer ranks `0.6.60-beta.N` below `0.6.60`. A user who explicitly
+        // opts into beta must still be able to move from the stable build of
+        // that base version to its beta builds.
+        let latest = normalize_version(latest_version);
+        let current = normalize_version(current_version);
+        let latest_base = latest.split(['-', '+']).next().unwrap_or_default();
+        let current_base = current.split(['-', '+']).next().unwrap_or_default();
+        return latest.contains('-') && latest_base == current_base && !current.contains('-');
+    }
+    false
 }
 
 fn canonical_release_notes(notes: Option<&str>) -> Option<String> {
@@ -212,7 +303,10 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_update_info, GithubReleaseMetadata, TauriRelease};
+    use super::{
+        build_update_info, normalize_version, release_identity_version, GithubReleaseMetadata, TauriRelease,
+        UpdateChannel,
+    };
 
     #[test]
     fn parses_jdbc_plugin_metadata_from_latest_json() {
@@ -234,12 +328,17 @@ mod tests {
         assert_eq!(jdbc.version, "0.1.3");
         assert_eq!(jdbc.protocol_version, 1);
         assert_eq!(jdbc.url, "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip");
+        assert_eq!(release.channel, UpdateChannel::Stable);
+        assert!(release.is_promoted);
     }
 
     #[test]
     fn update_info_prefers_github_release_metadata() {
         let release = TauriRelease {
             version: "0.5.3".to_string(),
+            channel: UpdateChannel::Stable,
+            release_tag: None,
+            is_promoted: false,
             notes: Some("See the assets below to download and install.".to_string()),
             jdbc_plugin: None,
             github: Some(GithubReleaseMetadata {
@@ -263,6 +362,9 @@ mod tests {
         // 非中文界面用户：notes_en 命中时优先于 GitHub 中文 body，应用内更新提示展示英文
         let release = TauriRelease {
             version: "0.5.3".to_string(),
+            channel: UpdateChannel::Stable,
+            release_tag: None,
+            is_promoted: false,
             notes: Some("See the assets below to download and install.".to_string()),
             jdbc_plugin: None,
             github: Some(GithubReleaseMetadata {
@@ -282,6 +384,9 @@ mod tests {
     fn update_info_ignores_generated_notes_when_curated_notes_are_unavailable() {
         let release = TauriRelease {
             version: "0.5.3".to_string(),
+            channel: UpdateChannel::Stable,
+            release_tag: None,
+            is_promoted: false,
             notes: Some("## What's Changed\n* generated item".to_string()),
             jdbc_plugin: None,
             github: None,
@@ -294,21 +399,93 @@ mod tests {
     }
 
     #[test]
+    fn beta_release_url_uses_the_prerelease_tag_without_github_metadata() {
+        let release = TauriRelease {
+            version: "0.6.60-beta.20261028.1".to_string(),
+            channel: UpdateChannel::Beta,
+            release_tag: Some("v0.6.60-beta.20261028.1".to_string()),
+            is_promoted: false,
+            notes: None,
+            jdbc_plugin: None,
+            github: None,
+            notes_en: None,
+        };
+
+        let info = build_update_info(release, "0.6.59");
+
+        assert_eq!(info.release_url, "https://github.com/t8y2/dbx/releases/tag/v0.6.60-beta.20261028.1");
+    }
+
+    #[test]
+    fn release_identity_follows_the_tag_of_a_promoted_beta() {
+        let promoted = TauriRelease {
+            version: "0.6.60".to_string(),
+            channel: UpdateChannel::Stable,
+            release_tag: Some("v0.6.60-beta.20261028.1".to_string()),
+            is_promoted: true,
+            notes: None,
+            jdbc_plugin: None,
+            github: None,
+            notes_en: None,
+        };
+        // latest-en.json is keyed by the tag, so a promoted beta must not be matched by its base version.
+        assert_eq!(normalize_version(release_identity_version(&promoted)), "0.6.60-beta.20261028.1");
+
+        let legacy = TauriRelease { release_tag: None, ..promoted };
+        assert_eq!(release_identity_version(&legacy), "0.6.60");
+    }
+
+    #[test]
+    fn stable_channel_does_not_reoffer_the_promoted_beta_build() {
+        let release = TauriRelease {
+            version: "0.6.60".to_string(),
+            channel: UpdateChannel::Stable,
+            release_tag: Some("v0.6.60-beta.20261028.1".to_string()),
+            is_promoted: true,
+            notes: None,
+            jdbc_plugin: None,
+            github: None,
+            notes_en: None,
+        };
+
+        let info = build_update_info(release, "0.6.60-beta.20261028.1");
+
+        assert!(!info.update_available);
+    }
+
+    #[test]
+    fn beta_channel_offers_same_base_prerelease_from_stable_build() {
+        assert!(super::is_channel_update_available(UpdateChannel::Beta, "0.6.60-beta.20261028.1", "0.6.60"));
+        assert!(super::is_channel_update_available(
+            UpdateChannel::Beta,
+            "0.6.60-beta.20261028.2",
+            "0.6.60-beta.20261028.1"
+        ));
+        assert!(!super::is_channel_update_available(UpdateChannel::Stable, "0.6.60", "0.6.60-beta.20261028.1"));
+    }
+
+    #[test]
     fn update_check_candidates_follow_selected_source() {
         assert_eq!(
-            super::update_check_candidates(crate::DownloadSource::Official),
+            super::update_check_candidates(crate::DownloadSource::Official, UpdateChannel::Stable),
             vec![
+                "https://dl.dbxio.com/releases/stable/latest.json",
                 "https://dl.dbxio.com/releases/latest/latest.json",
                 "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
             ]
         );
         assert_eq!(
-            super::update_check_candidates(crate::DownloadSource::Cnb),
+            super::update_check_candidates(crate::DownloadSource::Cnb, UpdateChannel::Stable),
             vec![
+                "https://dl.dbxio.com/releases/stable/latest.json",
                 "https://cnb.cool/dbxio.com/dbx/-/releases/latest/download/latest.json",
                 "https://dl.dbxio.com/releases/latest/latest.json",
                 "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
             ]
+        );
+        assert_eq!(
+            super::update_check_candidates(crate::DownloadSource::Official, UpdateChannel::Beta)[0],
+            "https://dl.dbxio.com/releases/beta/latest.json"
         );
     }
 }

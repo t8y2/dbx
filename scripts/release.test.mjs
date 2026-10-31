@@ -9,6 +9,8 @@ import { isDesktopVersionOnlyCargoLockChange } from "./release-lock.mjs";
 const repoRoot = new URL("..", import.meta.url).pathname;
 const releaseScript = join(repoRoot, "scripts/release.mjs");
 const releaseWorkflow = join(repoRoot, ".github/workflows/release.yml");
+const appPublishWorkflow = join(repoRoot, ".github/workflows/publish-packages.yml");
+const dailyBetaWorkflow = join(repoRoot, ".github/workflows/daily-beta-release.yml");
 const packagesWorkflow = join(repoRoot, ".github/workflows/mcp-release.yml");
 const vsignConfigPath = join(repoRoot, "src-tauri/tauri.vsign.conf.json");
 const appImageBundlerSetup = join(repoRoot, ".github/scripts/prepare-appimage-bundler.sh");
@@ -70,6 +72,56 @@ test("rollback dry-run prints all affected channels without invoking GitHub", ()
   assert.match(result.stdout, /sync-cnb-release-assets\.yml/);
   assert.match(result.stdout, /rollback-docker-latest\.yml/);
   assert.match(result.stdout, /does not downgrade clients/);
+});
+
+test("app release workflows preserve beta tags and stable package URLs", () => {
+  const release = readFileSync(releaseWorkflow, "utf8");
+  const publish = readFileSync(appPublishWorkflow, "utf8");
+  const daily = readFileSync(dailyBetaWorkflow, "utf8");
+
+  assert.ok(release.includes("$version = $tagVersion -replace '-beta\\..*$', ''"));
+  assert.match(release, /--draft=false --prerelease/);
+  assert.match(publish, /__TAG__/);
+  assert.match(publish, /needs: \[publish-stable-alias, validate-candidate\]/);
+  assert.match(publish, /releases\/latest\/download\/\$\{PRODUCT_NAME\}_\\\$version/);
+  assert.match(publish, /Publish stable manifest to GitHub Release/);
+  assert.match(publish, /prepare-channel-manifest\.mjs[\s\S]+stable \"\$TAG\" true/);
+  assert.match(publish, /gh release upload \"\$TAG\" \"\$manifest_dir\/latest\.json\"/);
+  assert.match(publish, /prune-r2-releases\.sh stable "\$\{\{ needs\.upload-r2\.outputs\.tag \}\}"/);
+  assert.match(release, /prune-r2-releases\.sh beta "\$\{\{ inputs\.release_tag \|\| github\.ref_name \}\}"/);
+  assert.match(release, /gh release edit "\$\{RELEASE_TAG\}" --repo "\$\{GITHUB_REPOSITORY\}" --draft=false --prerelease\n/);
+  assert.doesNotMatch(release, /--draft=false --prerelease=false --latest/);
+  assert.match(release, /if: \$\{\{ !contains\(env\.RELEASE_TAG, '-beta\.'\) \}\}\n[\s\S]+gh workflow run publish-packages\.yml[\s\S]+-f tag="\$\{RELEASE_TAG\}"/);
+  assert.match(release, /permissions:\n      contents: write\n      actions: write/);
+  assert.match(publish, /approve-promotion:[\s\S]+if: \$\{\{ contains\(inputs\.tag, '-beta\.'\) \}\}[\s\S]+environment: release-promotion/);
+  assert.match(publish, /needs\.approve-promotion\.result/);
+  assert.match(publish, /edit_args\+=\(--title "DBX v\$\{\{ needs\.validate-candidate\.outputs\.version \}\}"\)/);
+  assert.match(publish, /sync-source-version:[\s\S]+needs: \[validate-candidate, promote-release\][\s\S]+ref: main[\s\S]+MCP_RELEASE_TOKEN/);
+  assert.match(publish, /set-release-version\.mjs "v\$\{VERSION\}"/);
+  assert.match(publish, /promote-docker:[\s\S]+is_beta == 'true'[\s\S]+needs: \[validate-candidate, promote-release\]/);
+  assert.match(publish, /imagetools create -t "\$\{image\}:\$\{STABLE_VERSION\}" -t "\$\{image\}:latest" "\$\{image\}:\$\{source_version\}"/);
+  assert.doesNotMatch(publish, /Stable publication requires a non-prerelease/);
+  assert.doesNotMatch(publish, /no promotion needed/);
+  assert.match(release, /prepare-msi-config\.mjs "\$\{env:RELEASE_TAG\}" src-tauri\/tauri\.msi-version\.conf\.json/);
+  assert.match(release, /--config src-tauri\/tauri\.msi-version\.conf\.json/);
+  assert.doesNotMatch(release, /--bundles nsis' \|\| ''/);
+  assert.match(release, /if \(\$msiInstallers\.Count -eq 0\)/);
+  assert.match(publish, /x64-setup\.exe arm64-setup\.exe x64_en-US\.msi arm64_en-US\.msi/);
+  assert.match(daily, /schedule:/);
+  assert.match(daily, /gh release create "\$tag"/);
+  assert.match(daily, /-beta\.\$\{date_suffix\}\.\$\{sequence\}/);
+  assert.match(daily, /gh workflow run release\.yml/);
+  assert.match(daily, /MCP_RELEASE_TOKEN/);
+  assert.match(daily, /matches stable; publishing a daily beta build/);
+  assert.match(daily, /next_patch="\$\{BASH_REMATCH\[1\]\}\.\$\{BASH_REMATCH\[2\]\}\.\$\(\(BASH_REMATCH\[3\] \+ 1\)\)"/);
+  assert.match(daily, /sort -V \| tail -n 1/);
+  assert.match(daily, /force:[\s\S]+type: boolean/);
+  assert.match(daily, /compare\/\$\{built_tag\}\.\.\.\$\{GITHUB_SHA\}/);
+  assert.match(daily, /contains\("\[skip ci\]"\) \| not/);
+  assert.match(daily, /No new commits since \$\{built_tag\}; skipping the daily beta build/);
+  assert.match(release, /workflow_dispatch:/);
+  assert.match(release, /release_tag:/);
+  assert.match(release, /RELEASE_TAG:/);
 });
 
 test("rollback dispatches each distribution workflow after validation", () => {

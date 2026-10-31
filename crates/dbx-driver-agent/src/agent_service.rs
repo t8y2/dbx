@@ -2751,7 +2751,7 @@ pub fn ensure_driver_app_version(
 }
 
 pub fn is_app_version_compatible(min_app_version: &str, current_version: &str) -> bool {
-    !dbx_platform::version::is_newer_version(min_app_version, current_version)
+    dbx_platform::version::is_version_compatible(min_app_version, current_version)
 }
 
 pub fn download_temp_path(dest: &std::path::Path) -> std::path::PathBuf {

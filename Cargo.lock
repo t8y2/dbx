@@ -2631,6 +2631,7 @@ dependencies = [
  "futures",
  "nix 0.31.3",
  "reqwest 0.12.28",
+ "semver",
  "serde",
  "tokio",
  "uuid",

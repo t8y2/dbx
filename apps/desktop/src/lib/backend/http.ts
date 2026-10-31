@@ -174,6 +174,7 @@ import type {
   UpdateInfo,
   DownloadedUpdate,
   UpdateDownloadSource,
+  UpdateChannel,
   RedisCollectionPage,
   RedisBlob,
   RedisDatabaseInfo,
@@ -5837,10 +5838,11 @@ export async function deleteHistoryEntry(id: string): Promise<void> {
 // Updates
 // ---------------------------------------------------------------------------
 
-export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource): Promise<UpdateInfo> {
+export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource, channel: UpdateChannel = "stable"): Promise<UpdateInfo> {
   const params = new URLSearchParams();
   if (locale) params.set("locale", locale);
   if (source) params.set("source", source);
+  params.set("channel", channel);
   const query = params.size > 0 ? `?${params.toString()}` : "";
   return get(`/api/update/check${query}`);
 }
@@ -5910,7 +5912,7 @@ export async function getSystemProxyUrl(): Promise<string | null> {
   return null;
 }
 
-export async function downloadUpdate(_source: UpdateDownloadSource, _latestVersion: string, _attemptId: string, _releaseNotes?: string): Promise<DownloadedUpdate> {
+export async function downloadUpdate(_source: UpdateDownloadSource, _latestVersion: string, _attemptId: string, _releaseNotes?: string, _channel: UpdateChannel = "stable", _releaseTag?: string): Promise<DownloadedUpdate> {
   throw new Error("In-app update downloads are only available in the desktop app.");
 }
 

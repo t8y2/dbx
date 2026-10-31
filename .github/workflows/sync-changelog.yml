@@ -91,22 +91,44 @@ jobs:
           cp updater-assets/latest.json cnb-assets/latest.json
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
             --json tagName,name,body,targetCommitish,isPrerelease,isDraft > updater-release.json
+          CHANNEL="stable"
+          if [ "$(jq -r '.isPrerelease' updater-release.json)" = "true" ]; then
+            CHANNEL="beta"
+          fi
           node .github/scripts/sync-cnb-release.mjs \
             --github-release updater-release.json \
             --assets-dir cnb-assets \
             --overwrite-existing
 
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          # Derive the R2 manifest from the GitHub release latest.json (notes already
-          # injected above) instead of re-reading the R2 copy, so every sync also
-          # heals a stale or partial R2 manifest.
-          jq --arg tag "$TAG" '
+          # Start from the immutable channel manifest so changelog refreshes keep
+          # the release metadata and platform assets produced by the release job.
+          aws s3 cp "s3://${R2_BUCKET_NAME}/releases/${CHANNEL}/${TAG}/latest.json" r2-versioned.json \
+            --endpoint-url "$ENDPOINT" --cache-control no-cache
+          jq --arg tag "$TAG" --arg channel "$CHANNEL" --arg notes "$NOTES" '
+            .notes = $notes |
             (.platforms[]?.url?) |= (
-              sub("https://github\\.com/t8y2/dbx/releases/download/" + $tag + "/"; "https://dl.dbxio.com/releases/latest/")
+              sub("\\?.*$"; "")
+              | if startswith("https://github.com/t8y2/dbx/releases/download/" + $tag + "/")
+                then sub("https://github\\.com/t8y2/dbx/releases/download/" + $tag + "/"; "https://dl.dbxio.com/releases/" + $channel + "/" + $tag + "/")
+                else .
+                end
               + "?v=" + $tag
             )
-          ' updater-assets/latest.json > r2-latest.json
-          aws s3 cp r2-latest.json "s3://${R2_BUCKET_NAME}/releases/${TAG}/latest.json" \
+          ' r2-versioned.json > r2-latest.json
+          # Versioned manifests are immutable history. Release/promotion creates
+          # that object; changelog refreshes only the channel's moving aliases.
+          aws s3api head-object \
+            --bucket "$R2_BUCKET_NAME" \
+            --key "releases/${CHANNEL}/${TAG}/latest.json" \
+            --endpoint-url "$ENDPOINT" >/dev/null
+          aws s3 cp r2-latest.json "s3://${R2_BUCKET_NAME}/releases/${CHANNEL}/latest/latest.json" \
             --endpoint-url "$ENDPOINT" --content-type application/json --cache-control no-cache
-          aws s3 cp r2-latest.json "s3://${R2_BUCKET_NAME}/releases/latest/latest.json" \
-            --endpoint-url "$ENDPOINT" --content-type application/json --cache-control no-cache
+          if [ "$CHANNEL" = "stable" ]; then
+            for alias in latest; do
+              aws s3 cp r2-latest.json "s3://${R2_BUCKET_NAME}/releases/${alias}/latest.json" \
+                --endpoint-url "$ENDPOINT" --content-type application/json --cache-control no-cache
+            done
+            aws s3 cp r2-latest.json "s3://${R2_BUCKET_NAME}/releases/stable/latest.json" \
+              --endpoint-url "$ENDPOINT" --content-type application/json --cache-control no-cache
+          fi

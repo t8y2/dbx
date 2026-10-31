@@ -19,12 +19,19 @@ pub struct UpdateCheckParams {
     pub locale: Option<String>,
     #[serde(default)]
     pub source: Option<dbx_core::DownloadSource>,
+    #[serde(default)]
+    pub channel: Option<dbx_core::update::UpdateChannel>,
 }
 
 pub async fn check_for_updates(Query(params): Query<UpdateCheckParams>) -> Result<Json<serde_json::Value>, AppError> {
     let locale = params.locale.unwrap_or_else(|| "zh-CN".to_string());
-    let release =
-        update::fetch_latest_release(&locale, params.source.unwrap_or_default()).await.map_err(AppError::from)?;
+    let release = update::fetch_latest_release_for_channel(
+        &locale,
+        params.source.unwrap_or_default(),
+        params.channel.unwrap_or_default(),
+    )
+    .await
+    .map_err(AppError::from)?;
     let info = update::build_update_info(release, env!("CARGO_PKG_VERSION"));
     Ok(Json(serde_json::to_value(info).map_err(|e| AppError::from(e.to_string()))?))
 }

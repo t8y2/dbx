@@ -110,11 +110,18 @@ const historyRequest = createLatestRequestGuard();
 const fallbackVersion = ref("");
 const changelogLang = computed(() => changelogLangFromLocale(locale.value || currentLocale()));
 const currentVersion = computed(() => props.updateInfo?.current_version || fallbackVersion.value);
+const stableDowngradeBlocked = computed(() => {
+  const current = currentVersion.value.trim().replace(/^v/i, "");
+  const latest = (props.updateInfo?.latest_version ?? "").trim().replace(/^v/i, "");
+  const currentBase = current.split(/[+-]/, 1)[0];
+  const latestBase = latest.split(/[+-]/, 1)[0];
+  return props.updateInfo?.channel === "stable" && current.includes("-") && !props.updateInfo.update_available && Boolean(currentBase && latestBase) && isNewerRemoteVersion(currentBase, latestBase);
+});
 // 只保留低于当前版本的发布记录：新版本走“客户端更新”，这里专用于回退
 const olderReleases = computed(() => {
   const current = currentVersion.value;
   if (!current) return [];
-  return historyReleases.value.filter((release) => isNewerRemoteVersion(current, release.tag));
+  return historyReleases.value.filter((release) => !release.tag.includes("-beta.") && isNewerRemoteVersion(current, release.tag));
 });
 const visibleOlderReleases = computed(() => olderReleases.value.slice(0, historyVisibleCount.value));
 const hasMoreOlderReleases = computed(() => historyVisibleCount.value < olderReleases.value.length);
@@ -370,6 +377,12 @@ watch(
           <ChangelogPanel v-if="selectedTab === 'changelog'" :checking-updates="checkingUpdates || isInstallingUpdate" @check-updates="emit('check-updates')" />
           <template v-else-if="selectedTab === 'app'">
             <div class="space-y-3">
+              <div v-if="updateInfo?.channel === 'beta'" class="inline-flex rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                {{ t("updates.betaChannelBadge") }}
+              </div>
+              <p v-if="stableDowngradeBlocked" class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                {{ t("updates.stableDowngradeBlocked") }}
+              </p>
               <p v-if="updateInfo?.update_available">
                 {{
                   t("updates.availableMessage", {

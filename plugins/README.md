@@ -358,6 +358,15 @@ Connection providers may add ordered custom actions before DBX-owned lifecycle b
 
 A workbench opens in a normal persistent DBX tab. The iframe is loaded with `sandbox="allow-scripts"`, a restrictive CSP, no Tauri object, no parent DOM access, and no direct network access. The host injects `window.dbxPlugin`:
 
+Opening a saved plugin connection normally reuses its existing workbench. The
+native **New Query** action instead creates a new tab with a fresh
+`context.workbenchId` and `context.newQuery: true`. When invoked from a workbench
+on the same connection, `context.sourceWorkbenchId` identifies the source tab so
+the plugin can inherit its location without copying query results or document
+drafts. Plugins should restore saved state by workbench id, initialize a new
+query with blank/default input, and keep each tab's requests and editing state
+independent. Restoring a tab must not automatically execute a query.
+
 - `ready` / `context` / `locale` — `locale` is the current DBX locale such as `en` or `zh-CN`
 - `theme` — `{ appearance: "light" | "dark", tokens }` with the resolved DBX design tokens; theme changes are pushed live through env updates, and the SDK applies them to the plugin document root
 - `onContext(listener)` — context changes are pushed live; the iframe is not reloaded, so plugin UI state survives navigation

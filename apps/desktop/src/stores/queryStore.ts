@@ -4623,7 +4623,7 @@ export const useQueryStore = defineStore("query", () => {
     return registerOpenTab(tab);
   }
 
-  async function openPluginConnection(connectionId: string) {
+  async function openPluginConnection(connectionId: string, options: { forceNew?: boolean; sourceWorkbenchId?: string } = {}) {
     const connectionStore = useConnectionStore();
     const connection = connectionStore.getConfig(connectionId);
     if (!connection || connection.db_type !== "plugin") throw new Error("Plugin connection config not found");
@@ -4639,11 +4639,16 @@ export const useQueryStore = defineStore("query", () => {
       return openPluginWorkbench(pluginId, workbench.contribution.id, {
         title: connection.name,
         connectionId,
+        forceNew: options.forceNew,
         context: {
           connectionId,
           providerId,
           connectionType: connection.plugin_connection_type,
           workbenchId: uuid(),
+          // An explicit New Query creates a blank, independent workspace.
+          // Plugins may resolve their own current scope from the source id;
+          // never copy arbitrary source context (results, drafts or secrets).
+          ...(options.forceNew ? { newQuery: true, ...(options.sourceWorkbenchId ? { sourceWorkbenchId: options.sourceWorkbenchId } : {}) } : {}),
           connection: {
             id: connection.id,
             name: connection.name,

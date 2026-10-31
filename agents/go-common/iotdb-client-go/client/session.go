@@ -518,7 +518,7 @@ func (s *Session) ExecuteStatementWithContext(ctx context.Context, sql string) (
 		return nil, statusErr
 	}
 
-	return s.genDataSet(sql, resp)
+	return s.genDataSet(sql, resp, nil)
 }
 
 // ExecuteQueryStatementWithContext combines the cancellable context of
@@ -554,7 +554,7 @@ func (s *Session) ExecuteQueryStatementWithContext(ctx context.Context, sql stri
 		return nil, statusErr
 	}
 
-	return s.genDataSet(sql, resp)
+	return s.genDataSet(sql, resp, timeoutMs)
 }
 
 func (s *Session) ExecuteStatement(sql string, opts ...Option) (*SessionDataSet, error) {
@@ -1063,7 +1063,7 @@ func (s *Session) ExecuteRawDataQuery(paths []string, startTime int64, endTime i
 		}
 	}
 
-	return s.genDataSet("", resp)
+	return s.genDataSet("", resp, nil)
 }
 
 func (s *Session) ExecuteUpdateStatement(sql string) (*SessionDataSet, error) {
@@ -1083,10 +1083,10 @@ func (s *Session) ExecuteUpdateStatement(sql string) (*SessionDataSet, error) {
 		}
 	}
 
-	return s.genDataSet(sql, resp)
+	return s.genDataSet(sql, resp, nil)
 }
 
-func (s *Session) genDataSet(sql string, resp *rpc.TSExecuteStatementResp) (*SessionDataSet, error) {
+func (s *Session) genDataSet(sql string, resp *rpc.TSExecuteStatementResp, timeoutMs *int64) (*SessionDataSet, error) {
 	var queryId int64
 	if resp.QueryId == nil {
 		queryId = 0
@@ -1097,8 +1097,11 @@ func (s *Session) genDataSet(sql string, resp *rpc.TSExecuteStatementResp) (*Ses
 	if resp.MoreData != nil {
 		moreData = *resp.MoreData
 	}
+	// timeoutMs must ride along: every later fetchResults page rebuilds its
+	// request from the data set's timeout, so a nil here would make paged
+	// queries fall back to the server's query_timeout_threshold (#13935).
 	return NewSessionDataSet(sql, resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap,
-		queryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, nil, moreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList())
+		queryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, moreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList())
 }
 
 func (s *Session) genInsertTabletsReq(tablets []*Tablet, isAligned bool) (*rpc.TSInsertTabletsReq, error) {

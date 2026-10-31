@@ -43,6 +43,8 @@ import { isObjectDependencySection } from "@/lib/database/objectDependencyDetail
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
 
 interface SqlExecutionOptions {
+  mongoScriptExecution?: boolean;
+  dangerousMongoScriptConfirmed?: boolean;
   openInNewResultTab?: boolean;
   editorViewportRequestId?: number;
   /** Tab that owns this execution request; resolved once, never re-read from the global active tab. */
@@ -202,12 +204,14 @@ export function useSqlExecution(deps: {
   const sqlParameterDatabaseType = ref<DatabaseType | undefined>();
   const sqlParameterEnabledSyntaxes = ref<SqlParameterSyntax[]>([]);
   const pendingSourceOffset = ref<number | undefined>();
-  const pendingDangerKind = ref<"sql" | "redis">("sql");
+  const pendingDangerKind = ref<"sql" | "redis" | "mongo-script">("sql");
   const pendingDangerSourceOffset = ref<number | undefined>();
   const pendingOpenInNewResultTab = ref(false);
   const pendingSqlParameterEditorViewportRequestId = ref<number | undefined>();
   const pendingDangerEditorViewportRequestId = ref<number | undefined>();
   const pendingDangerTabId = ref<string | undefined>();
+  const pendingMongoScriptTarget = ref<string>();
+  const mongoScriptTarget = (tab: QueryTab) => JSON.stringify([tab.connectionId, tab.catalog, tab.database, tab.schema]);
   const pendingSqlParameterTabId = ref<string | undefined>();
   let pendingSqlParameterContinuation: ((sql: string, sourceOffset?: number) => Promise<void> | void) | undefined;
 
@@ -252,7 +256,12 @@ export function useSqlExecution(deps: {
     return { tabId: tab.id, connection: resolveExecutionConnection(tabId) };
   }
 
-  async function resolvedExecutableSql(source: SqlExecutionOverride | undefined, context: SqlExecutionContext): Promise<{ sql: string; sourceOffset?: number; editorViewportRequestId?: number }> {
+  async function resolvedExecutableSql(source: SqlExecutionOverride | undefined, context: SqlExecutionContext, rawScript = false): Promise<{ sql: string; sourceOffset?: number; editorViewportRequestId?: number }> {
+    if (rawScript) {
+      if (typeof source === "string") return { sql: source };
+      if (isSqlExecutionSnapshot(source)) return { sql: source.selectedSql.trim() ? source.selectedSql : source.fullSql, sourceOffset: source.selectedSql.trim() ? source.selectionFrom : 0, editorViewportRequestId: source.editorViewportRequestId };
+      return { sql: resolveExecutionTab(context.tabId)?.sql ?? "" };
+    }
     const atSetEnabled = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, context.connection?.db_type, settingsStore.editorSettings.sqlVariableSubstitutionEnabled).atSet;
     const databaseType = kingbaseSqlDatabaseType(context.connection) ?? effectiveDatabaseTypeForConnection(context.connection) ?? context.connection?.db_type;
     const expand = (sql: string, declarationSql?: string) => (atSetEnabled ? expandSqlVariables(sql, { declarationSql, databaseType }).sql : sql);
@@ -308,7 +317,7 @@ export function useSqlExecution(deps: {
       cancelEditorViewportRequest(options.editorViewportRequestId);
       return notStarted("no-tab", options.tabId);
     }
-    const { sql, sourceOffset, editorViewportRequestId: snapshotRequestId } = await resolvedExecutableSql(sqlOverride, context);
+    const { sql, sourceOffset, editorViewportRequestId: snapshotRequestId } = await resolvedExecutableSql(sqlOverride, context, options.mongoScriptExecution === true);
     const editorViewportRequestId = snapshotRequestId ?? options.editorViewportRequestId;
     const executionOptions = { ...options, editorViewportRequestId, tabId: context.tabId };
     if (!sql.trim()) {
@@ -341,7 +350,7 @@ export function useSqlExecution(deps: {
       const state = queryStore.oracleTriggerSourceState(tab.id);
       return ok || (state?.result !== previousResult && state?.result?.steps.some((step) => step.receipt !== undefined)) ? { status: "started", ok, tabId: tab.id, errorMessage: state?.error } : notStarted("blocked", tab.id);
     }
-    if (supportsSqlTemplateParameters(context.connection, sql) && prepareSqlParameterDialog(sql, sourceOffset, executionOptions)) {
+    if (!options.mongoScriptExecution && supportsSqlTemplateParameters(context.connection, sql) && prepareSqlParameterDialog(sql, sourceOffset, executionOptions)) {
       return deferred("parameters", context.tabId);
     }
     return continueExecute(context, sql, sourceOffset, executionOptions);
@@ -349,6 +358,10 @@ export function useSqlExecution(deps: {
 
   function tryExecuteInNewResultTab(sqlOverride?: SqlExecutionOverride, options: SqlExecutionOptions = {}) {
     return tryExecute(sqlOverride, { ...options, openInNewResultTab: true });
+  }
+
+  function tryExecuteMongoScript(sqlOverride?: SqlExecutionOverride, options: SqlExecutionOptions = {}) {
+    return tryExecute(sqlOverride, { ...options, mongoScriptExecution: true });
   }
 
   async function continueExecute(context: SqlExecutionContext, sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}): Promise<SqlExecutionOutcome> {
@@ -362,6 +375,19 @@ export function useSqlExecution(deps: {
       // remains cancellation. The shared guard owns the denial notification.
       cancelEditorViewportRequest(options.editorViewportRequestId);
       return notStarted(mysqlDataCharsetEnabled(context.connection) ? "blocked" : "cancelled", context.tabId);
+    }
+    if (options.mongoScriptExecution === true && context.connection?.db_type === "mongodb" && options.dangerousMongoScriptConfirmed !== true) {
+      dangerSql.value = sql;
+      pendingDangerSql.value = sql;
+      pendingDangerKind.value = "mongo-script";
+      pendingMongoScriptTarget.value = mongoScriptTarget(tab);
+      pendingDangerSourceOffset.value = sourceOffset;
+      pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
+      pendingDangerEditorViewportRequestId.value = options.editorViewportRequestId;
+      pendingDangerTabId.value = context.tabId;
+      suppressDangerConfirm.value = false;
+      showDangerDialog.value = true;
+      return deferred("danger", context.tabId);
     }
     // Redis: block dangerous commands when toggle is on (scan entire batch for highest safety level)
     if (context.connection?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
@@ -518,11 +544,17 @@ export function useSqlExecution(deps: {
       cancelEditorViewportRequest(options.editorViewportRequestId);
       return notStarted("missing-database", executionTabId);
     }
-    const statementCount = splitSqlStatementRanges(
-      sql,
-      executionDatabaseType,
-      sqlStatementParameterOptionsForCompatibility(executionDatabaseType, executionDatabaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(tab.connectionId, tab.database) : executionDatabaseType === "kingbase" ? executionConnection?.database_info?.compatibilityMode : undefined),
-    ).length;
+    const statementCount =
+      options.mongoScriptExecution === true
+        ? 1
+        : splitSqlStatementRanges(
+            sql,
+            executionDatabaseType,
+            sqlStatementParameterOptionsForCompatibility(
+              executionDatabaseType,
+              executionDatabaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(tab.connectionId, tab.database) : executionDatabaseType === "kingbase" ? executionConnection?.database_info?.compatibilityMode : undefined,
+            ),
+          ).length;
     const redisConsoleSelected = executionDatabaseType === "redis" && tab.uiState?.redisResultViewMode === "console";
     // A single write/DDL statement has no result grid to show while it runs, so
     // it starts on the summary tab where the in-flight status is rendered
@@ -540,6 +572,8 @@ export function useSqlExecution(deps: {
     const producedResult = await queryStore.executeCurrentSql(sql, {
       tabId: executionTabId,
       ...(isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : {}),
+      ...(options.mongoScriptExecution ? { mongoScriptExecution: true } : {}),
+      ...(options.dangerousMongoScriptConfirmed ? { dangerousMongoScriptConfirmed: true } : {}),
       ...(sourceOffset !== undefined ? { sourceOffset } : {}),
       ...(options.openInNewResultTab ? { openInNewResultTab: true } : {}),
       ...(options.editorViewportRequestId !== undefined ? { onExecutionStarted: () => deps.onExecutionStarted?.(options.editorViewportRequestId!) } : {}),
@@ -1023,6 +1057,8 @@ export function useSqlExecution(deps: {
     const sql = pendingDangerSql.value;
     const sourceOffset = pendingDangerSourceOffset.value;
     const kind = pendingDangerKind.value;
+    const confirmedMongoTarget = pendingMongoScriptTarget.value;
+    pendingMongoScriptTarget.value = undefined;
     const openInNewResultTab = pendingOpenInNewResultTab.value;
     const editorViewportRequestId = pendingDangerEditorViewportRequestId.value;
     const tabId = pendingDangerTabId.value;
@@ -1041,14 +1077,26 @@ export function useSqlExecution(deps: {
       reportDeferredExecution(notStarted("no-tab", tabId));
       return;
     }
+    if (kind === "mongo-script" && confirmedMongoTarget !== mongoScriptTarget(tab)) {
+      cancelEditorViewportRequest(editorViewportRequestId);
+      reportDeferredExecution(notStarted("cancelled", tab.id));
+      return;
+    }
     const connection = connectionStore.getConfig(tab.connectionId);
     if (!(await ensureReadOnlyWriteAccess({ connection, sql, source: t("production.sourceSqlEditor") }))) {
       cancelEditorViewportRequest(editorViewportRequestId);
       reportDeferredExecution(notStarted(mysqlDataCharsetEnabled(connection) ? "blocked" : "cancelled", tab.id));
       return;
     }
+    // The write-unlock guard can await another dialog. Consent remains tied to
+    // the same Mongo target even if the editor changes during that wait.
+    if (kind === "mongo-script" && (resolveExecutionTab(tab.id) !== tab || confirmedMongoTarget !== mongoScriptTarget(tab))) {
+      cancelEditorViewportRequest(editorViewportRequestId);
+      reportDeferredExecution(notStarted("cancelled", tab.id));
+      return;
+    }
     try {
-      reportDeferredExecution(await doExecute(sql, sourceOffset, { openInNewResultTab, editorViewportRequestId, tabId: tab.id }));
+      reportDeferredExecution(await doExecute(sql, sourceOffset, { openInNewResultTab, editorViewportRequestId, tabId: tab.id, ...(kind === "mongo-script" ? { mongoScriptExecution: true, dangerousMongoScriptConfirmed: true } : {}) }));
     } catch (error) {
       reportDeferredExecutionFailure(error, tab.id);
     }
@@ -1113,6 +1161,7 @@ export function useSqlExecution(deps: {
     // Same dismissal contract as the parameter dialog: a tab id still pending here
     // means the user closed the dialog instead of confirming it.
     const abandonedTabId = pendingDangerTabId.value;
+    pendingMongoScriptTarget.value = undefined;
     pendingDangerSql.value = "";
     pendingDangerSourceOffset.value = undefined;
     pendingDangerKind.value = "sql";
@@ -1127,10 +1176,12 @@ export function useSqlExecution(deps: {
   return {
     dangerSql,
     pendingDangerSql,
+    pendingDangerKind,
     showDangerDialog,
     suppressDangerConfirm,
     tryExecute,
     tryExecuteInNewResultTab,
+    tryExecuteMongoScript,
     doExecute,
     cancelActiveExecution,
     requestDangerConfirmation,

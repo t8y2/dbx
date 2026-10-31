@@ -98,6 +98,7 @@ import type { DetachedTabHandoff } from "@/lib/app/detachedTabHandoff";
 import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
+import type { MongoScriptRequest, MongoScriptResult } from "@/lib/mongo/mongoScript";
 import type { MongoBulkWriteResult } from "@/lib/mongo/mongoShellCommand";
 import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
@@ -5227,6 +5228,10 @@ export async function mongoFindOne(connectionId: string, database: string, colle
 export async function mongoParseShellCommand(source: string): Promise<MongoCommand> {
   const raw = await invoke<Record<string, unknown>>("mongo_parse_shell_command", { source });
   return normalizeRustMongoCommand(raw);
+}
+
+export async function mongoExecuteScript(request: MongoScriptRequest): Promise<MongoScriptResult> {
+  return invoke("mongo_execute_script", { request });
 }
 
 export async function documentFindDocuments(

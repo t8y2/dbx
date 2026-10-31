@@ -2,6 +2,7 @@
 import { computed, nextTick, onUnmounted, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
 import {
+  Braces,
   Play,
   FastForward,
   SquarePlay,
@@ -105,6 +106,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  executeMongoScript: [];
   toolbarExecute: [source: "pointer" | "keyboard"];
   toolbarExecuteAll: [source: "pointer" | "keyboard"];
   toolbarExecuteInNewResultTab: [source: "pointer" | "keyboard"];
@@ -687,6 +689,14 @@ defineExpose({
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ executeInNewResultTabTooltip }}</TooltipContent>
+      </Tooltip>
+      <Tooltip v-if="activeConnection?.db_type === 'mongodb' && mongoQueryLanguage !== 'sql'">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining || !activeTab.sql.trim()" :aria-label="t('mongoScript.confirmTitle')" @mousedown.prevent @click="emit('executeMongoScript')">
+            <Braces class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("mongoScript.confirmTitle") }}</TooltipContent>
       </Tooltip>
       <Tooltip v-if="showPreviewButton">
         <TooltipTrigger as-child>

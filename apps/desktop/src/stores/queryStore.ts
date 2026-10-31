@@ -79,6 +79,7 @@ import {
   splitSiblingDbPrefix,
   type MongoAggregateSafetyOptions,
 } from "@/lib/mongo/mongoShellCommand";
+import { clampMongoScriptMaxRows, mongoScriptResultToQueryResult, translateMongoScriptError } from "@/lib/mongo/mongoScript";
 import { prepareMongoQueryText, type MongoQueryLanguage } from "@/lib/mongo/mongoSql";
 import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
 import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
@@ -6974,7 +6975,7 @@ export const useQueryStore = defineStore("query", () => {
     // Single funnel for every query execution failure, so backend messages DBX
     // knows about are shown in the active locale rather than as raw English.
     const error = normalizeBackendError(e) ?? undefined;
-    const message = translateBackendError(i18n.global.t, e, e instanceof Error ? e.message : undefined);
+    const message = translateMongoScriptError(i18n.global.t, e) ?? translateBackendError(i18n.global.t, e, e instanceof Error ? e.message : undefined);
     return markQueryResultRowsRaw({
       columns: ["Error"],
       execution_error: true,
@@ -7041,7 +7042,7 @@ export const useQueryStore = defineStore("query", () => {
     await executeCurrentSql(tab.sql);
   }
 
-  async function executeCurrentSql(sql: string, options?: { tabId?: string; skipRedisSafetyCheck?: boolean; sourceOffset?: number; openInNewResultTab?: boolean; onExecutionStarted?: () => void }) {
+  async function executeCurrentSql(sql: string, options?: { tabId?: string; mongoScriptExecution?: boolean; dangerousMongoScriptConfirmed?: boolean; skipRedisSafetyCheck?: boolean; sourceOffset?: number; openInNewResultTab?: boolean; onExecutionStarted?: () => void }) {
     // Execution targets the requesting tab; only fall back to the global
     // active tab when the caller did not (or could not) capture one.
     const executionTabId = options?.tabId ?? activeTabId.value;
@@ -8156,6 +8157,8 @@ export const useQueryStore = defineStore("query", () => {
       replaceActiveResultInGroup?: boolean;
       retainDisplayedResult?: boolean;
       skipRedisSafetyCheck?: boolean;
+      mongoScriptExecution?: boolean;
+      dangerousMongoScriptConfirmed?: boolean;
       sourceOffset?: number;
       sourceTraceId?: string;
       skipEnsureConnected?: boolean;
@@ -8355,10 +8358,11 @@ export const useQueryStore = defineStore("query", () => {
       const executionTarget = resumedExecutionTarget ?? options?.executionTarget;
       const usesExternalExecutionTarget = !!executionTarget;
       let conn = connStore.getConfig(executionConnectionId);
+      const mongoScriptRequested = options?.mongoScriptExecution === true;
       let mongoGeneratedShell: string | undefined;
       let mongoSqlConsidered = false;
       const applyMongoSql = (dbType: string | undefined) => {
-        if (mongoSqlConsidered || dbType !== "mongodb") return;
+        if (mongoScriptRequested || mongoSqlConsidered || dbType !== "mongodb") return;
         mongoSqlConsidered = true;
         const prepared = prepareMongoQueryText(sqlToExecute, tab.mongoQueryLanguage, dbType, tab.mongoGeneratedShell);
         if (!prepared.generatedShell) return;
@@ -8370,12 +8374,17 @@ export const useQueryStore = defineStore("query", () => {
         tab.mongoGeneratedShell = prepared.sql;
       };
       applyMongoSql(conn?.db_type);
-      const parsedMongoCommands = conn?.db_type === "mongodb" ? splitMongoCommandRanges(sqlToExecute) : undefined;
+      const parsedMongoCommands = conn?.db_type === "mongodb" && !mongoScriptRequested ? splitMongoCommandRanges(sqlToExecute) : undefined;
       let mongoCommands = parsedMongoCommands ?? [];
       const mongoNeedsConnection = mongoCommands.some(({ command }) => command.kind !== "use");
 
       if (options?.skipEnsureConnected) {
         queryExecutionLog("info", "ensure-connected:skip", { traceId, elapsed: elapsed(), reason: "caller" });
+      } else if (conn?.db_type === "mongodb" && !mongoScriptRequested && mongoCommands.length === 0 && sql.trim()) {
+        // Keep ordinary parser failures local. In particular, never ensure a
+        // connection (or enter QuickJS) merely because the command parser
+        // rejected malformed or unsupported input.
+        throw new Error(describeMongoCommandParseFailure(sql));
       } else if (conn?.db_type === "mongodb" && mongoCommands.length > 0 && !mongoNeedsConnection) {
         queryExecutionLog("info", "ensure-connected:skip", { traceId, elapsed: elapsed(), reason: "mongo-use-only" });
       } else {
@@ -8388,9 +8397,15 @@ export const useQueryStore = defineStore("query", () => {
         queryExecutionLog("info", "ensure-connected:done", { traceId, elapsed: elapsed() });
       }
       conn = connStore.getConfig(executionConnectionId);
-      if (parsedMongoCommands === undefined && conn?.db_type === "mongodb") {
+      if (mongoScriptRequested && conn?.db_type !== "mongodb") {
+        throw new Error("MongoDB JavaScript execution requires a MongoDB connection.");
+      }
+      if (!mongoScriptRequested && parsedMongoCommands === undefined && conn?.db_type === "mongodb") {
         applyMongoSql(conn.db_type);
         mongoCommands = splitMongoCommandRanges(sqlToExecute);
+      }
+      if (conn?.db_type === "mongodb" && !mongoScriptRequested && mongoCommands.length === 0 && sql.trim()) {
+        throw new Error(describeMongoCommandParseFailure(sql));
       }
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
       if (effectiveDbType === "mysql") {
@@ -8424,9 +8439,10 @@ export const useQueryStore = defineStore("query", () => {
       );
       const useAgentCursor = usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile);
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
+      const isMongoScriptExecution = conn?.db_type === "mongodb" && mongoScriptRequested;
       if (!batchResume) {
         const statementExecution =
-          tab.mode === "query"
+          tab.mode === "query" && !isMongoScriptExecution
             ? createBatchSqlExecution(
                 executionId,
                 tab.sql,
@@ -8448,6 +8464,105 @@ export const useQueryStore = defineStore("query", () => {
       queryExecutionLog("info", "previous-session-close:start", { traceId, elapsed: elapsed() });
       await previousResultSessionClose;
       queryExecutionLog("info", "previous-session-close:done", { traceId, elapsed: elapsed() });
+
+      if (isMongoScriptExecution) {
+        const isScriptExecutionCurrent = () => {
+          const current = findExecutionTab(id);
+          return current === tab && current.executionId === executionId && !current.isCancelling && (current.cancelRequestCount ?? 0) === cancelRequestCountAtStart && manualTransactionTargetEpoch(current) === executionTargetEpoch;
+        };
+        if (!isScriptExecutionCurrent()) return false;
+        queryExecutionLog("info", "mongo-script:start", { traceId, sqlLength: sql.length });
+        const scriptStartedAt = performance.now();
+        executionDispatched = true;
+        const scriptResult = await api.mongoExecuteScript({
+          connectionId: executionConnectionId,
+          database: executionDatabase,
+          source: sql,
+          executionId,
+          maxRows: clampMongoScriptMaxRows(normalizeResultPageSize(settingsStore.editorSettings.pageSize)),
+          timeoutSecs: queryTimeoutSecs,
+          dangerousOperationConfirmed: options?.dangerousMongoScriptConfirmed === true,
+        });
+        if (!isScriptExecutionCurrent()) {
+          // A stop request can race with a successfully completed write. Keep
+          // the confirmed outcome visible without replacing a newer result.
+          if (scriptResult.operationCount > 0) {
+            useToast().toast(
+              i18n.global.t("mongoScript.summaryValue", {
+                succeeded: scriptResult.succeededOperationCount,
+                attempted: scriptResult.operationCount,
+                database: scriptResult.currentDatabase,
+              }),
+              10000,
+            );
+          }
+          if (findExecutionTab(id) === tab && tab.executionId === executionId && captureResultRun) restorePendingResultRun(tab, executionId);
+          return false;
+        }
+        const result = markQueryResultRowsRaw(
+          annotateQueryResultSource(
+            mongoScriptResultToQueryResult(scriptResult, performance.now() - scriptStartedAt, {
+              typeColumn: i18n.global.t("mongoScript.typeColumn"),
+              valueColumn: i18n.global.t("mongoScript.valueColumn"),
+              textOutput: i18n.global.t("mongoScript.textOutput"),
+              jsonOutput: i18n.global.t("mongoScript.jsonOutput"),
+              finalValue: i18n.global.t("mongoScript.finalValue"),
+              summary: i18n.global.t("mongoScript.summary"),
+              summaryValue: ({ succeeded, attempted, database }) => i18n.global.t("mongoScript.summaryValue", { succeeded, attempted, database }),
+              outputTruncated: i18n.global.t("mongoScript.outputTruncated"),
+            }),
+            sql,
+            executionDatabase,
+            effectiveDbType,
+            options?.sourceOffset === undefined ? undefined : { from: options.sourceOffset, to: options.sourceOffset + sql.length },
+          ),
+        );
+        const current = findExecutionTab(id);
+        if (current?.executionId === executionId) {
+          if (captureResultRun && current.isCancelling && restorePendingResultRun(current, executionId)) return false;
+          const previousDisplayedResults = [current.result, ...(current.results ?? [])];
+          clearResultNavigationState(current);
+          current.results = undefined;
+          current.activeResultIndex = undefined;
+          result.sourceExecutionId = executionId;
+          current.result = result;
+          if (!captureResultRun && previousDisplayedResults.some(Boolean)) releaseReplacedResultLargeValues(current, ...previousDisplayedResults);
+          publishResultGeneration(current, "execute");
+          current.resultEditorFingerprint = executionEditorFingerprint;
+          producedResult = true;
+          touchResult(current);
+          current.queryAnalysis = undefined;
+          current.querySourceColumns = undefined;
+          current.queryWriteTargets = undefined;
+          current.resultColumnComments = undefined;
+          current.resultColumnTypeLabels = undefined;
+          current.queryDisplaySourceColumns = undefined;
+          current.queryEditabilityReason = undefined;
+          current.mongoEditTarget = undefined;
+          current.tableMeta = undefined;
+          current.resultBaseSql = options?.resultBaseSql ?? sql;
+          current.resultSortedSql = undefined;
+          current.resultPageSql = undefined;
+          current.resultPageLimit = undefined;
+          current.resultPageOffset = undefined;
+          current.resultCountSql = undefined;
+          current.resultSessionId = undefined;
+          current.resultClientSessionId = undefined;
+          current.resultTotalRowCount = undefined;
+          current.resultTotalRowCountLoading = false;
+          if (lockedResultRunId === null || current.activeResultRunId === lockedResultRunId) {
+            syncDisplayedResultRun(current, current.resultBaseSql, captureResultRun);
+          }
+          if (!usesExternalExecutionTarget && current.database !== scriptResult.currentDatabase) current.database = scriptResult.currentDatabase;
+        }
+        queryExecutionLog("info", "mongo-script:done", {
+          traceId,
+          operationCount: scriptResult.operationCount,
+          succeededOperationCount: scriptResult.succeededOperationCount,
+          elapsed: elapsed(),
+        });
+        return producedResult;
+      }
 
       // Redis command execution — split multi-line input into individual commands
       if (conn?.db_type === "redis") {
@@ -8576,12 +8691,6 @@ export const useQueryStore = defineStore("query", () => {
           void connStore.refreshRedisDbKeyCounts(executionConnectionId);
         }
         return producedResult;
-      }
-
-      if (conn?.db_type === "mongodb" && mongoCommands.length === 0 && sql.trim()) {
-        // Avoid falling through to the SQL executor, which only returns the generic
-        // "Use MongoDB-specific commands" rejection and hides parse/syntax details.
-        throw new Error(describeMongoCommandParseFailure(sql));
       }
 
       if (mongoCommands.length > 0) {
@@ -9880,6 +9989,12 @@ export const useQueryStore = defineStore("query", () => {
       }
     } catch (e: any) {
       queryExecutionLog("error", "error", { traceId, elapsed: elapsed(), error: e });
+      // Cancellation may have cleared execution ownership already. Script writes
+      // can still have completed, so never hide their progress/unknown-outcome
+      // report behind result restoration or the stale-result guard.
+      if (options?.mongoScriptExecution && executionDispatched && (tab.isCancelling || (tab.cancelRequestCount ?? 0) !== cancelRequestCountAtStart || tab.executionId !== executionId || findExecutionTab(id) !== tab || manualTransactionTargetEpoch(tab) !== executionTargetEpoch)) {
+        useToast().toast(translateMongoScriptError(i18n.global.t, e) ?? translateBackendError(i18n.global.t, e), 10000);
+      }
       // Sync connection state if the error indicates a lost connection
       useConnectionStore().recordConnectionLostError(executionConnectionId ?? tab.connectionId, e);
       if (findExecutionTab(id) !== tab || tab.executionId !== executionId || manualTransactionTargetEpoch(tab) !== executionTargetEpoch) return false;
@@ -9915,7 +10030,7 @@ export const useQueryStore = defineStore("query", () => {
       const current = findExecutionTab(id);
       if (current?.executionId === executionId) {
         failBatchSqlExecution(current, executionId, e, current.isCancelling === true);
-        const restoredRetainedResult = captureResultRun && (current.isCancelling || !executionDispatched) && restorePendingResultRun(current, executionId);
+        const restoredRetainedResult = captureResultRun && (!executionDispatched || (current.isCancelling && !options?.mongoScriptExecution)) && restorePendingResultRun(current, executionId);
         if (restoredRetainedResult) {
           queryExecutionLog("info", "retained-result:restored-after-abort", { traceId, elapsed: elapsed() });
           return false;

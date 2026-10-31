@@ -34,6 +34,7 @@ defineExpose<QueryEditorSurfaceHandle>({
   requestQueryEditorExecute: () => contentAreaRef.value?.requestQueryEditorExecute() ?? false,
   requestQueryEditorExecuteAll: () => contentAreaRef.value?.requestQueryEditorExecuteAll() ?? false,
   captureQueryEditorExecutionSnapshot: () => contentAreaRef.value?.captureQueryEditorExecutionSnapshot(),
+  requestQueryEditorExecuteMongoScript: () => contentAreaRef.value?.requestQueryEditorExecuteMongoScript() ?? false,
   requestQueryEditorExecuteInNewResultTab: () => contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab() ?? false,
   requestQueryEditorPreviewChanges: (stackSql?: string) => Promise.resolve(contentAreaRef.value?.requestQueryEditorPreviewChanges(stackSql) ?? false),
   shouldBlockQueryEditorExecutionShortcut: (event: KeyboardEvent) => contentAreaRef.value?.shouldBlockQueryEditorExecutionShortcut(event) ?? false,

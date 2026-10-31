@@ -207,6 +207,7 @@ const emit = defineEmits<{
   execute: [source: SqlExecutionOverride];
   executeInNewResultTab: [source: SqlExecutionOverride];
   explain: [];
+  executeMongoScript: [source: SqlExecutionOverride];
   exportQuery: [payload: { sql: string; format: "csv" | "xlsx" | "txt"; columnComments?: (string | null)[] }];
   save: [];
   clickTable: [target: SqlObjectNavigationTarget];
@@ -365,6 +366,19 @@ const structurePeekPanels = ref<StructurePeekPanelState[]>([]);
 let structurePeekRequestSeq = 0;
 let structurePeekZIndexSeq = 50;
 let structurePeekCascadeSeq = 0;
+
+function requestExecuteMongoScript() {
+  const currentView = view.value;
+  if (!currentView) return false;
+  currentView.focus();
+  if (!currentView.state.selection.main.empty) {
+    emit("executeMongoScript", sqlExecutionSnapshotFromView(currentView));
+  } else {
+    const sql = currentView.state.doc.toString();
+    emit("executeMongoScript", sqlExecutionSnapshotForRange(currentView, { sql, from: 0, to: sql.length }));
+  }
+  return true;
+}
 
 function bringStructurePeekToFront(panelId: string) {
   const panel = structurePeekPanels.value.find((item) => item.id === panelId);
@@ -3192,6 +3206,7 @@ defineExpose({
   requestExecute,
   requestExecuteAll,
   requestExecuteInNewResultTab,
+  requestExecuteMongoScript,
   requestPreviewChanges,
   captureExecutionSnapshot,
   pasteClipboardAsSqlInCondition,

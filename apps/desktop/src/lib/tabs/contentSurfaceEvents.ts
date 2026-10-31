@@ -17,6 +17,7 @@ export const contentSurfaceEventNames = [
   "previewChangesAvailable",
   "execute",
   "executeInNewResultTab",
+  "executeMongoScript",
   "saveSql",
   "cancel",
   "explain",

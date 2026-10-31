@@ -25,6 +25,7 @@ export interface QueryEditorSurfaceHandle {
   requestQueryEditorExecuteAll(): boolean;
   captureQueryEditorExecutionSnapshot(): SqlExecutionSnapshot | undefined;
   requestQueryEditorExecuteInNewResultTab(): boolean;
+  requestQueryEditorExecuteMongoScript(): boolean;
   requestQueryEditorPreviewChanges(stackSql?: string): Promise<boolean>;
   shouldBlockQueryEditorExecutionShortcut(event: KeyboardEvent): boolean;
   cancelQueryEditorExecutionViewport(requestId: number): boolean;
@@ -90,6 +91,7 @@ export interface ContentAreaSurfaceEmits {
   sendSelectionToAi: [tabId: string, sql: string];
   previewChangesAvailable: [tabId: string, value: boolean];
   execute: [tabId: string, sqlOverride?: SqlExecutionOverride];
+  executeMongoScript: [tabId: string, sqlOverride?: SqlExecutionOverride];
   executeInNewResultTab: [tabId: string, sqlOverride?: SqlExecutionOverride];
   saveSql: [tabId: string];
   cancel: [tabId: string];

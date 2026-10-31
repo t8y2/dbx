@@ -134,7 +134,7 @@ test("core forwards capability flags without enabling driver defaults or test ho
   for (const dependency of core.dependencies.filter((dep) => dep.kind !== "dev")) {
     assert.ok(!dependency.features.includes("test-support"));
   }
-  assert.deepEqual(core.features.default, ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-sqlcipher", "system-fonts"]);
+  assert.deepEqual(core.features.default, ["duckdb-sidecar", "dynamodb", "mongo-js-runtime", "mq-admin", "sqlite-sqlcipher", "system-fonts"]);
 });
 
 test("code generators and runtime assets belong to their implementation crates", () => {

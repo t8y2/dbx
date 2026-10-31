@@ -455,6 +455,8 @@ pub struct AppState {
     pub configs: RwLock<HashMap<String, ConnectionConfig>>,
     pub running_queries: RunningQueries,
     pub routine_operations: crate::schema::oracle_routines::RoutineOperationRegistry,
+    #[cfg(feature = "mongo-js-runtime")]
+    pub(crate) mongo_script_admission: Arc<crate::mongo_script::MongoScriptRuntimeAdmission>,
     pub tunnels: TunnelManager,
     pub proxy_tunnels: ProxyTunnelManager,
     pub http_tunnels: HttpTunnelManager,
@@ -2100,6 +2102,8 @@ impl AppState {
             configs: RwLock::new(HashMap::new()),
             running_queries: RunningQueries::default(),
             routine_operations: crate::schema::oracle_routines::RoutineOperationRegistry::default(),
+            #[cfg(feature = "mongo-js-runtime")]
+            mongo_script_admission: Arc::new(crate::mongo_script::MongoScriptRuntimeAdmission::default()),
             tunnels: TunnelManager::new(data_dir),
             proxy_tunnels: ProxyTunnelManager::new(),
             http_tunnels: HttpTunnelManager::new(),

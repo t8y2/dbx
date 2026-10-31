@@ -527,9 +527,21 @@ func isTreeTimeColumn(dialect string, columns []string, index int) bool {
 	return dialect == client.TreeSqlDialect && index == 0 && len(columns) > 0 && strings.EqualFold(columns[0], "Time")
 }
 
+// noLimitTimeoutMs is what dbx's "no limit" setting (timeoutSecs = 0) maps to.
+// IoTDB's per-query timeout has no true "disable" value on the wire: probing
+// 1.3.7 shows 0 and negatives both fall back to the server's
+// query_timeout_threshold (60 s default — the cause of #13935), so a no-limit
+// run sends a 100-year budget instead, which bounds deadline arithmetic far
+// below int64 overflow while never firing.
+const noLimitTimeoutMs = int64(100 * 365 * 24 * time.Hour / time.Millisecond)
+
 func timeoutMilliseconds(timeoutSecs int) *int64 {
-	if timeoutSecs <= 0 {
+	if timeoutSecs < 0 {
 		return nil
+	}
+	if timeoutSecs == 0 {
+		value := noLimitTimeoutMs
+		return &value
 	}
 	value := int64(timeoutSecs) * 1000
 	return &value

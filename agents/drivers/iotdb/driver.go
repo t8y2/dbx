@@ -22,16 +22,32 @@ type iotdbSession interface {
 	Close() error
 }
 
-type nativeIoTDBSession struct {
-	session *client.Session
+// The narrow surface nativeIoTDBSession needs from the vendored client.
+// Keeping it an interface lets adapter tests assert that the per-query
+// timeout reaches the session layer instead of being dropped (#13935).
+type clientQuerySession interface {
+	ExecuteQueryStatementWithContext(context.Context, string, *int64) (*client.SessionDataSet, error)
+	ExecuteStatementWithContext(context.Context, string) (*client.SessionDataSet, error)
+	Close() error
 }
 
-func (s *nativeIoTDBSession) ExecuteQueryStatement(ctx context.Context, sql string, _ *int64) (*client.SessionDataSet, error) {
-	return executeIoTDBStatement(ctx, s.session, sql)
+type nativeIoTDBSession struct {
+	session clientQuerySession
+}
+
+func (s *nativeIoTDBSession) ExecuteQueryStatement(ctx context.Context, sql string, timeoutMs *int64) (*client.SessionDataSet, error) {
+	return executeIoTDBStatement(ctx, func() (*client.SessionDataSet, error) {
+		// #13935: the timeout must ride inside the RPC — 0 explicitly disables
+		// the server's query_timeout_threshold, an omitted value falls back to
+		// the 60 s server default. The old adapter dropped it here.
+		return s.session.ExecuteQueryStatementWithContext(ctx, sql, timeoutMs)
+	})
 }
 
 func (s *nativeIoTDBSession) ExecuteNonQueryStatement(ctx context.Context, sql string) error {
-	dataset, err := executeIoTDBStatement(ctx, s.session, sql)
+	dataset, err := executeIoTDBStatement(ctx, func() (*client.SessionDataSet, error) {
+		return s.session.ExecuteStatementWithContext(ctx, sql)
+	})
 	if err != nil {
 		return err
 	}
@@ -45,7 +61,7 @@ func (s *nativeIoTDBSession) Close() error {
 	return s.session.Close()
 }
 
-func executeIoTDBStatement(ctx context.Context, session *client.Session, sql string) (dataset *client.SessionDataSet, err error) {
+func executeIoTDBStatement(ctx context.Context, run func() (*client.SessionDataSet, error)) (dataset *client.SessionDataSet, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -57,7 +73,7 @@ func executeIoTDBStatement(ctx context.Context, session *client.Session, sql str
 			err = fmt.Errorf("IoTDB Go client panicked while executing statement: %v", recovered)
 		}
 	}()
-	return session.ExecuteStatementWithContext(ctx, sql)
+	return run()
 }
 
 type connectionConfig struct {

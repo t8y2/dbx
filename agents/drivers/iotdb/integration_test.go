@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/apache/iotdb-client-go/v2/client"
 )
 
 func TestLiveIoTDBAgentTreeAndTable(t *testing.T) {
@@ -405,4 +407,68 @@ func (b *synchronizedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.builder.String()
+}
+
+// #13935: with the server's query_timeout_threshold tightened (the live
+// environment sets it to 1 ms — see the issue's rclone/export scenario for the
+// 60 s default pain point), a "no limit" (timeoutSecs=0) query must still
+// complete because the adapter forwards an explicit 0, which disables the
+// server timeout. Before the fix the adapter omitted the timeout and every
+// query died with error 720 (Current query is time out).
+func TestLiveIoTDBNoLimitQueryDisablesServerTimeout(t *testing.T) {
+	if os.Getenv("DBX_IOTDB_LIVE") != "1" {
+		t.Skip("set DBX_IOTDB_LIVE=1 to run against a real IoTDB server")
+	}
+	server := liveIoTDBServer(t, connectParams{Database: "root.dbx_timeout"})
+	defer server.disconnect()
+
+	// Seed 50000 rows through a direct client session so the paged result read
+	// (fetchSize 1000 → 50 fetch pages) takes well over any tightened
+	// query_timeout_threshold; every page fetch must carry the query's own
+	// timeout budget or the read dies mid-way (#13935 review round 2).
+	seedRows := 50000
+	seedSession := client.NewSession(&client.Config{
+		Host:      envOr("DBX_IOTDB_HOST", "127.0.0.1"),
+		Port:      strconv.Itoa(envIntOr("DBX_IOTDB_PORT", defaultIoTDBPort)),
+		UserName:  envOr("DBX_IOTDB_USER", "root"),
+		Password:  envOr("DBX_IOTDB_PASSWORD", "root"),
+		FetchSize: 1000,
+		TimeZone:  client.DefaultTimeZone,
+	})
+	if err := seedSession.Open(false, 10000); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	defer func() { _ = seedSession.Close() }()
+	tabletRows := 5000
+	tablet, tabletErr := client.NewTablet("root.dbx_timeout.d1", []*client.MeasurementSchema{
+		{Measurement: "s0", DataType: client.INT64},
+	}, tabletRows)
+	if tabletErr != nil {
+		t.Fatalf("seed tablet: %v", tabletErr)
+	}
+	for batch := 0; batch < seedRows/tabletRows; batch++ {
+		for index := 0; index < tabletRows; index++ {
+			tablet.SetTimestamp(int64(batch)*int64(tabletRows)+int64(index), index)
+			if err := tablet.SetValueAt(int64(batch*tabletRows+index), 0, index); err != nil {
+				t.Fatalf("seed value: %v", err)
+			}
+		}
+		tablet.RowSize = tabletRows
+		if err := seedSession.InsertTablet(tablet, true); err != nil {
+			t.Fatalf("seed tablet %d: %v", batch, err)
+		}
+		tablet.Reset()
+	}
+
+	result, err := server.executeQuery(queryOptions{
+		SQL:         "SELECT s0 FROM root.dbx_timeout.d1",
+		MaxRows:     seedRows,
+		TimeoutSecs: 0,
+	})
+	if err != nil {
+		t.Fatalf("timeoutSecs=0 must carry the budget through every fetch page: %v", err)
+	}
+	if len(result.Rows) != seedRows {
+		t.Fatalf("expected %d rows through all fetch pages, got %d", seedRows, len(result.Rows))
+	}
 }

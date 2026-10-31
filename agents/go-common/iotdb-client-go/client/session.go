@@ -518,7 +518,43 @@ func (s *Session) ExecuteStatementWithContext(ctx context.Context, sql string) (
 		return nil, statusErr
 	}
 
-	return s.genDataSet(sql, resp)
+	return s.genDataSet(sql, resp, nil)
+}
+
+// ExecuteQueryStatementWithContext combines the cancellable context of
+// ExecuteStatementWithContext with the per-query timeout of
+// ExecuteQueryStatement: timeoutMs travels in TSExecuteStatementReq.Timeout so
+// the server applies it (0 disables query_timeout_threshold; absent falls back
+// to the server default), while ctx cancels the underlying RPC. Reconnect-once
+// and status verification keep the legacy error handling.
+func (s *Session) ExecuteQueryStatementWithContext(ctx context.Context, sql string, timeoutMs *int64) (*SessionDataSet, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	request := rpc.TSExecuteStatementReq{
+		SessionId:   s.sessionId,
+		Statement:   sql,
+		StatementId: s.requestStatementId,
+		FetchSize:   &s.config.FetchSize,
+		Timeout:     timeoutMs,
+	}
+	resp, err := s.client.ExecuteQueryStatementV2(ctx, &request)
+
+	if err != nil && resp == nil {
+		if s.reconnect() {
+			request.SessionId = s.sessionId
+			request.StatementId = s.requestStatementId
+			resp, err = s.client.ExecuteQueryStatementV2(ctx, &request)
+		}
+	}
+	if resp == nil {
+		return nil, err
+	}
+	if statusErr := VerifySuccess(resp.Status); statusErr != nil {
+		return nil, statusErr
+	}
+
+	return s.genDataSet(sql, resp, timeoutMs)
 }
 
 func (s *Session) ExecuteStatement(sql string, opts ...Option) (*SessionDataSet, error) {
@@ -1027,7 +1063,7 @@ func (s *Session) ExecuteRawDataQuery(paths []string, startTime int64, endTime i
 		}
 	}
 
-	return s.genDataSet("", resp)
+	return s.genDataSet("", resp, nil)
 }
 
 func (s *Session) ExecuteUpdateStatement(sql string) (*SessionDataSet, error) {
@@ -1047,10 +1083,10 @@ func (s *Session) ExecuteUpdateStatement(sql string) (*SessionDataSet, error) {
 		}
 	}
 
-	return s.genDataSet(sql, resp)
+	return s.genDataSet(sql, resp, nil)
 }
 
-func (s *Session) genDataSet(sql string, resp *rpc.TSExecuteStatementResp) (*SessionDataSet, error) {
+func (s *Session) genDataSet(sql string, resp *rpc.TSExecuteStatementResp, timeoutMs *int64) (*SessionDataSet, error) {
 	var queryId int64
 	if resp.QueryId == nil {
 		queryId = 0
@@ -1061,8 +1097,11 @@ func (s *Session) genDataSet(sql string, resp *rpc.TSExecuteStatementResp) (*Ses
 	if resp.MoreData != nil {
 		moreData = *resp.MoreData
 	}
+	// timeoutMs must ride along: every later fetchResults page rebuilds its
+	// request from the data set's timeout, so a nil here would make paged
+	// queries fall back to the server's query_timeout_threshold (#13935).
 	return NewSessionDataSet(sql, resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap,
-		queryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, nil, moreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList())
+		queryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, moreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList())
 }
 
 func (s *Session) genInsertTabletsReq(tablets []*Tablet, isAligned bool) (*rpc.TSInsertTabletsReq, error) {

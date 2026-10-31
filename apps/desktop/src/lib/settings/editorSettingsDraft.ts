@@ -65,6 +65,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "tabGroupMode",
   "tabSortMode",
   "tabMaxWidth",
+  "tabDoubleClickAction",
   "tabGroupRows",
   "showColumnCommentsInHeader",
   "dataGridColumnCommentsInInfoArea",
@@ -216,6 +217,7 @@ function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unkn
   if (key === "csvNullMode") return normalizeCsvNullMode(value);
   if (key === "backgroundImage") return normalizeBackgroundImageSettings(value);
   if (key === "snippetTriggerKey") return value === "space" || value === "both" ? value : "tab";
+  if (key === "tabDoubleClickAction") return value === "close" ? "close" : "default";
   if (key === "webLogoPosition") return value === "right" || value === "hidden" ? value : "left";
   if (key === "aiSqlApplyTargetMode") return normalizeAiSqlApplyTargetMode(value);
   if (key === "colorizeConnectionTabsScope") return value === "active" ? "active" : "all";

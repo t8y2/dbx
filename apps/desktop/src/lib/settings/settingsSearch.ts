@@ -323,6 +323,14 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "appearance-layout", category: "appearance", titleKey: "settings.appLayout", targetId: "appearance", keywordKeys: ["settings.appLayoutSeparated", "settings.appLayoutClassic", "settings.appLayoutSeparatedDescription", "settings.appLayoutClassicDescription"] },
   { id: "appearance-tab-layout", category: "appearance", titleKey: "settings.tabLayout", targetId: "appearance", keywordKeys: ["settings.tabLayoutScroll", "settings.tabLayoutWrap", "settings.tabLayoutScrollDescription", "settings.tabLayoutWrapDescription"] },
   {
+    id: "appearance-tab-double-click-action",
+    category: "appearance",
+    titleKey: "settings.tabDoubleClickAction",
+    descriptionKey: "settings.tabDoubleClickActionDescription",
+    targetId: "appearance",
+    keywordKeys: ["settings.tabDoubleClickActionDefault", "settings.tabDoubleClickActionClose", "contextMenu.renameTab"],
+  },
+  {
     id: "appearance-tab-max-width",
     category: "appearance",
     titleKey: "settings.tabMaxWidth",

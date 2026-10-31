@@ -3456,7 +3456,8 @@ pub async fn verify_export_destination_identity(
         .transpose()?
         .flatten();
     if recorded.as_ref().is_some_and(|identity| {
-        recorded_export_destination_identity_mismatch(identity, export_destination_identity_for_path(dir).as_ref())
+        let current = export_destination_identity_for_path(dir);
+        destination_identity_mismatch_is_hard_error(dir, identity, current.as_ref())
     }) {
         return Err(format!("Backup directory now resolves to a different filesystem: {}", dir.display()));
     }
@@ -3507,7 +3508,8 @@ async fn ensure_recorded_export_destination_ancestor(
             }
             if let Some(recorded_identity) = recorded_identity {
                 let current_identity = export_destination_identity_for_path(candidate);
-                if recorded_export_destination_identity_mismatch(&recorded_identity, current_identity.as_ref()) {
+                if destination_identity_mismatch_is_hard_error(candidate, &recorded_identity, current_identity.as_ref())
+                {
                     return Err(format!(
                         "Backup directory {} now resolves to a different filesystem than the configured parent {}. Refusing to create a child directory automatically -- make sure the correct removable or network drive is connected before running the backup.",
                         dir.display(),
@@ -3548,7 +3550,7 @@ async fn ensure_export_destination_dir(
     if dir.is_dir() {
         let current_identity = export_destination_identity_for_path(dir);
         if let Some(Some(recorded_identity)) = recorded_identity.as_ref() {
-            if recorded_export_destination_identity_mismatch(recorded_identity, current_identity.as_ref()) {
+            if destination_identity_mismatch_is_hard_error(dir, recorded_identity, current_identity.as_ref()) {
                 return Err(format!(
                     "Backup directory {} now resolves to a different filesystem than the last \
                      successful export to this location. Refusing to write here automatically -- \
@@ -3577,7 +3579,11 @@ async fn ensure_export_destination_dir(
             // keeps failing closed.
             let parent_identity = dir.parent().and_then(export_destination_identity_for_path);
             let same_filesystem = recorded_identity.flatten().is_some_and(|recorded| {
-                !recorded_export_destination_identity_mismatch(&recorded, parent_identity.as_ref())
+                // The leaf itself is missing, so the remount check runs against
+                // the parent path — the closest surviving witness of the
+                // filesystem the leaf was recorded on.
+                let witness = dir.parent().unwrap_or(dir);
+                !destination_identity_mismatch_is_hard_error(witness, &recorded, parent_identity.as_ref())
             });
             if !same_filesystem {
                 return Err(format!(
@@ -3615,6 +3621,68 @@ fn recorded_export_destination_identity_mismatch(
     }
 
     export_destination_identity_mismatch(Some(recorded), current)
+}
+
+/// Pure predicate over Linux `statfs` `f_type` magic numbers: the network
+/// filesystem family whose device identity changes on every remount (issue
+/// #14018). Everything else — ext4, btrfs, xfs, tmpfs, overlay, … — keeps the
+/// strict identity check.
+fn linux_f_type_is_network_filesystem(f_type: i64) -> bool {
+    matches!(
+        f_type as u64,
+        0x65735546 // FUSE_SUPER_MAGIC: rclone, sshfs, s3fs, …
+            | 0x00006969 // NFS_SUPER_MAGIC
+            | 0xFF534D42 // CIFS_MAGIC_NUMBER
+            | 0xFE534D42 // SMB2_MAGIC_NUMBER
+            | 0x0000517B // SMB_SUPER_MAGIC
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn unix_path_sits_on_network_filesystem(path: &std::path::Path) -> bool {
+    let Some(text) = path.to_str() else { return false };
+    let Ok(c_path) = std::ffi::CString::new(text) else { return false };
+    let mut buf: nix::libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c_path` is a NUL-terminated string owned by this call and `buf`
+    // is a fully-initialized statfs buffer the kernel fills in.
+    let result = unsafe { nix::libc::statfs(c_path.as_ptr(), &mut buf) };
+    if result != 0 {
+        return false;
+    }
+    linux_f_type_is_network_filesystem(buf.f_type)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unix_path_sits_on_network_filesystem(_path: &std::path::Path) -> bool {
+    // Network-filesystem detection is only implemented for Linux, where the
+    // Docker/Web backup deployments with rclone/NFS mounts live (#14018).
+    // macOS and Windows keep the strict identity check.
+    false
+}
+
+/// Whether an identity mismatch at `path` must fail the operation. FUSE-based
+/// network mounts (rclone, sshfs, …) and NFS/CIFS/SMB remounts get a fresh
+/// `st_dev` on every mount, so the recorded device identity never matches
+/// afterwards even though the storage behind the path is still the user's
+/// (#14018); such mismatches are logged and accepted. Every other mismatch —
+/// and a vanished path anywhere along the chain — keeps the #6327 fail-closed
+/// behavior so a replaced mount can never silently receive backups.
+fn destination_identity_mismatch_is_hard_error(
+    path: &std::path::Path,
+    recorded: &ExportDestinationIdentity,
+    current: Option<&ExportDestinationIdentity>,
+) -> bool {
+    if !recorded_export_destination_identity_mismatch(recorded, current) {
+        return false;
+    }
+    if unix_path_sits_on_network_filesystem(path) {
+        log::warn!(
+            "[db:export][destination] {} sits on a network filesystem whose identity changed (remount); accepting the new filesystem instead of failing the operation",
+            path.display()
+        );
+        return false;
+    }
+    true
 }
 
 /// Whether a destination's identity, checked once via [`ensure_export_destination_dir`]
@@ -5460,20 +5528,21 @@ mod tests {
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
         build_export_insert_statements_excluding, build_export_object_source_sql, build_export_sql_insert,
         create_database_export_writer, database_export_query_options_for_timeout, database_export_select_sql,
-        database_export_total_objects, decode_unicode_escapes_for_export, drop_table_if_exists_sql,
-        ensure_export_destination_dir, export_destination_identity_mismatch, extract_postgres_deferred_foreign_keys,
-        filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
-        format_mysql_spatial_export_literal, format_postgres_spatial_export_literal_with_srid,
+        database_export_total_objects, decode_unicode_escapes_for_export, destination_identity_mismatch_is_hard_error,
+        drop_table_if_exists_sql, ensure_export_destination_dir, export_destination_identity_mismatch,
+        extract_postgres_deferred_foreign_keys, filter_export_table_infos, format_export_sql_literal,
+        format_export_table_ddl, format_mysql_spatial_export_literal, format_postgres_spatial_export_literal_with_srid,
         format_xugu_spatial_export_literal, generate_postgres_enum_ddl, generate_postgres_extension_ddl,
         generate_postgres_sequence_create_ddl, generate_postgres_sequence_post_table_ddl,
         generate_postgres_sequence_setval_sql, is_dameng_auto_increment_ddl, is_postgres_extension_member_routine,
-        mysql_database_export_preamble, mysql_view_dependencies_from_rows, mysql_view_dependencies_sql,
-        normalize_export_table_ddl, record_export_destination_identity, record_export_error,
-        replace_database_export_select_list, sort_export_views_by_dependencies, split_postgres_export_table_ddl,
-        write_database_export_rows, write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions,
-        BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions, DatabaseExportObjectCounts,
-        DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql, PostgresExportEnum,
-        PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
+        linux_f_type_is_network_filesystem, mysql_database_export_preamble, mysql_view_dependencies_from_rows,
+        mysql_view_dependencies_sql, normalize_export_table_ddl, record_export_destination_identity,
+        record_export_error, replace_database_export_select_list, sort_export_views_by_dependencies,
+        split_postgres_export_table_ddl, write_database_export_rows, write_database_export_rows_with_mode,
+        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
+        DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions,
+        ExportDestinationIdentity, ExportedTableSql, PostgresExportEnum, PostgresExportExtension,
+        PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
         DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
         POSTGRES_EXPORT_SEQUENCES_SQL,
     };
@@ -9449,6 +9518,34 @@ mod tests {
     // that is temporarily gone at write time would be silently recreated on
     // the local root filesystem, and the backup would "succeed" while writing
     // to the wrong disk.
+
+    // #14018: the remount relaxation only applies to the network filesystem
+    // family whose device identity changes on every mount. Parameterized over
+    // the full magic set plus out-of-family members so the polarity is locked
+    // by assertions, not comments.
+    #[test]
+    fn linux_f_type_is_network_filesystem_covers_exactly_the_remount_family() {
+        for f_type in [0x65735546i64, 0x6969, 0xFF534D42, 0xFE534D42, 0x517B] {
+            assert!(linux_f_type_is_network_filesystem(f_type), "f_type {f_type:#x} must relax");
+        }
+        for f_type in [0xEF53i64, 0x9123683E, 0x58465342, 0x01021994, 0x794C7630, 0x0, -1] {
+            assert!(!linux_f_type_is_network_filesystem(f_type), "f_type {f_type:#x} must keep the strict check");
+        }
+    }
+
+    #[test]
+    fn destination_identity_mismatch_keeps_failing_closed_outside_network_filesystems() {
+        // On a platform without network-filesystem detection (and for local
+        // paths everywhere), an identity mismatch keeps the fail-closed
+        // behavior; the relaxation is gated on statfs, not on the identity
+        // values themselves.
+        let recorded = ExportDestinationIdentity::Device(12345);
+        let other = ExportDestinationIdentity::Device(67890);
+        let path = std::env::temp_dir();
+        assert!(destination_identity_mismatch_is_hard_error(&path, &recorded, Some(&other)));
+        assert!(destination_identity_mismatch_is_hard_error(&path, &recorded, None));
+        assert!(!destination_identity_mismatch_is_hard_error(&path, &recorded, Some(&recorded)));
+    }
 
     #[tokio::test]
     async fn ensure_export_destination_dir_creates_a_never_before_seen_local_directory() {

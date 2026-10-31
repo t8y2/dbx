@@ -2045,7 +2045,10 @@ pub fn run() {
             let t = Instant::now();
             append_startup_probe(format!("opening storage file=dbx.db data_dir_mode={data_dir_mode}"));
             let storage = tauri::async_runtime::block_on(async {
-                let mut s = Storage::open_unmigrated(&db_path).await.expect("Failed to open storage");
+                let mut s = Storage::open_unmigrated(&db_path)
+                    .await
+                    .expect("Failed to open storage")
+                    .with_desktop_credential_recovery();
                 if portable_mode {
                     s = s.with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
                     match s.prepare_portable_secret_key().await {
@@ -2427,6 +2430,8 @@ pub fn run() {
             commands::cloud_sync::migration_start,
             commands::cloud_sync::migration_retry,
             commands::cloud_sync::migration_cleanup_backups,
+            commands::cloud_sync::migration_prepare_credential_reset,
+            commands::cloud_sync::migration_reset_credentials,
             commands::cloud_sync::webdav_password_status,
             commands::cloud_sync::save_webdav_saved_password,
             commands::cloud_sync::forget_webdav_saved_password,

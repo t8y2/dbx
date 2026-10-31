@@ -53,6 +53,10 @@ use crate::persistence::task_history::{
 use crate::prompt_template::PromptTemplate;
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 
+#[path = "credential_reset.rs"]
+mod credential_reset;
+pub use credential_reset::{CredentialResetFailure, CredentialResetPreparation, CredentialResetReport};
+
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
 const URL_PARAMS_SECRET_KEY: &str = "url_params";
@@ -273,6 +277,8 @@ pub struct Storage {
     /// Without this, each consumer can prompt a locked Secret Service again.
     secret_key_error_cache: Arc<Mutex<Option<CachedSecretKeyError>>>,
     migration_failure: Arc<Mutex<Option<MigrationFailure>>>,
+    desktop_credential_recovery: bool,
+    credential_reset_confirmation: Arc<Mutex<Option<credential_reset::Confirmation>>>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -367,6 +373,12 @@ pub struct MigrationPreflight {
     pub state: MigrationState,
     pub needs_migration: bool,
     pub key_recovery_required: bool,
+    #[serde(default)]
+    pub encrypted_record_count: usize,
+    #[serde(default)]
+    pub credential_reset_allowed: bool,
+    #[serde(default)]
+    pub credential_reset_blocked_reason: Option<String>,
     pub key_provider_available: bool,
     pub key_status: MigrationKeyStatus,
     /// Desktop may provision a new local key only for plaintext-only data.
@@ -1565,6 +1577,8 @@ impl Storage {
             secret_codec_cache: Arc::new(Mutex::new(None)),
             secret_key_error_cache: Arc::new(Mutex::new(None)),
             migration_failure: Arc::new(Mutex::new(None)),
+            desktop_credential_recovery: false,
+            credential_reset_confirmation: Arc::new(Mutex::new(None)),
         };
         // Best-effort: switching journal mode is itself a lock-sensitive
         // operation, so a transient failure here (e.g. another process
@@ -2129,11 +2143,14 @@ impl Storage {
                 self.cache_secret_codec_if_unchanged(resolved.codec, key_files_before);
             }
         }
-        let preflight = MigrationPreflight {
+        let mut preflight = MigrationPreflight {
             migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
             state,
             needs_migration,
             key_recovery_required,
+            encrypted_record_count: encrypted.max(0) as usize,
+            credential_reset_allowed: false,
+            credential_reset_blocked_reason: None,
             key_provider_available,
             key_status,
             key_creation_allowed,
@@ -2157,6 +2174,8 @@ impl Storage {
             persistent_key_configured: key_provider_available,
             key_source,
         };
+        preflight.credential_reset_blocked_reason = self.credential_reset_blocked_reason(&preflight);
+        preflight.credential_reset_allowed = preflight.credential_reset_blocked_reason.is_none();
         Ok(preflight)
     }
 

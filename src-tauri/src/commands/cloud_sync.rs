@@ -15,6 +15,7 @@ use dbx_core::cloud_sync::{
     WebDavClient, WebDavConfig, WebDavPasswordStatus, WebDavSyncSecretsStatus, WebDavSyncSummary,
 };
 use dbx_core::storage::DesktopSettings;
+use dbx_core::storage::{CredentialResetFailure, CredentialResetPreparation, CredentialResetReport};
 use dbx_core::storage::{MigrationPreflight, MigrationReport};
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -42,13 +43,18 @@ pub struct SnippetDownloadResult {
 #[tauri::command]
 pub async fn migration_status(
     state: State<'_, Arc<AppState>>,
+    gate: State<'_, Arc<crate::migration_gate::MigrationGate>>,
     retry: Option<bool>,
 ) -> Result<MigrationPreflight, String> {
-    if retry.unwrap_or(false) {
+    let result = if retry.unwrap_or(false) {
         state.storage.retry_data_migration_inspection().await
     } else {
         state.storage.inspect_data_migration().await
-    }
+    };
+    // Restoring the original key must release the native gate too, not just
+    // hide the frontend recovery screen.
+    gate.set_ready(result.as_ref().is_ok_and(|status| status.is_ready()));
+    result
 }
 
 #[tauri::command]
@@ -74,6 +80,27 @@ pub async fn migration_retry(
 #[tauri::command]
 pub async fn migration_cleanup_backups(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.storage.cleanup_migration_backups().await
+}
+
+#[tauri::command]
+pub async fn migration_prepare_credential_reset(
+    state: State<'_, Arc<AppState>>,
+) -> Result<CredentialResetPreparation, CredentialResetFailure> {
+    state.storage.prepare_credential_reset().await
+}
+
+#[tauri::command]
+pub async fn migration_reset_credentials(
+    state: State<'_, Arc<AppState>>,
+    gate: State<'_, Arc<crate::migration_gate::MigrationGate>>,
+    confirmation_token: String,
+    confirmed: bool,
+) -> Result<CredentialResetReport, CredentialResetFailure> {
+    gate.set_ready(false);
+    let result = state.storage.reset_credentials(confirmation_token, confirmed).await;
+    // A successful reset still needs the regular startup initialization. The
+    // frontend's subsequent status check drives the existing startup flow.
+    result
 }
 
 #[tauri::command]

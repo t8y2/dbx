@@ -20,6 +20,14 @@ describe("WebDAV sync HTTP API", () => {
     return { url, body: JSON.parse(String(init.body)) as Record<string, unknown> };
   }
 
+  it("rejects credential reset in web mode without issuing HTTP requests", async () => {
+    const fetchMock = stubFetch();
+    const { migrationPrepareCredentialReset, migrationResetCredentials } = await import("@/lib/backend/http");
+    await expect(migrationPrepareCredentialReset()).rejects.toThrow("Windows desktop");
+    await expect(migrationResetCredentials("token", true)).rejects.toThrow("Windows desktop");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   const config = {
     endpoint: "https://dav.example.com/remote.php/dav/files/alice/",
     username: "alice",

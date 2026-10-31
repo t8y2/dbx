@@ -88,7 +88,7 @@ function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> 
   return tauriInvoke<T>(command, args);
 }
 
-import type { MigrationPreflight, MigrationReport } from "./migration";
+import type { MigrationPreflight, MigrationReport, CredentialResetPreparation, CredentialResetReport } from "./migration";
 export type { MigrationPreflight, MigrationReport } from "./migration";
 export const migrationStatus = (retry = false): Promise<MigrationPreflight> => invoke("migration_status", { retry });
 export const migrationStart = (): Promise<MigrationReport> => invoke("migration_start");
@@ -7160,3 +7160,6 @@ export * from "@/lib/backend/nacos-tauri";
 export async function openQueryResultTempFile(path: string): Promise<void> {
   return invoke("open_query_result_temp_file", { path });
 }
+
+export const migrationPrepareCredentialReset = (): Promise<CredentialResetPreparation> => invoke("migration_prepare_credential_reset");
+export const migrationResetCredentials = (confirmationToken: string, confirmed: boolean): Promise<CredentialResetReport> => invoke("migration_reset_credentials", { confirmationToken, confirmed });

@@ -710,6 +710,15 @@ pub fn classify_sql_risk_for_database(sql: &str, database_type: DatabaseType) ->
             crate::query_execution_sql::SearchEngineQueryRisk::Dangerous => SqlRisk::Ddl,
         });
     }
+    // A whole-input console client command never reaches the server as written:
+    // metadata commands resolve client-side or as generated SELECTs and are
+    // read-only; EXEC wraps an opaque PL/SQL block and stays gated as a write.
+    if let Some(command) = crate::console_command::parse_console_command_for_database(sql.trim(), database_type) {
+        return Ok(match command {
+            crate::console_command::ConsoleCommand::Execute { .. } => SqlRisk::Write,
+            _ => SqlRisk::ReadOnly,
+        });
+    }
     let database_type_name = format!("{database_type:?}");
     let normalized = normalize_dialect(&database_type_name);
     classify_sql_risk_with_database(sql, normalized, Some(database_type))
@@ -2333,5 +2342,55 @@ mod tests {
             assert!(is_dangerous_sql_for_database(statement, database_type), "{statement}");
             assert!(is_write_sql_for_database(statement, database_type), "{statement}");
         }
+    }
+
+    #[test]
+    fn disql_commands_do_not_weaken_write_and_native_set_gates() {
+        for sql in ["DESC t", "SHOW USER", "PROMPT hi", "SET TIMING ON", "RUN", "EXIT"] {
+            assert_eq!(classify_sql_risk_for_database(sql, DatabaseType::Dameng).unwrap(), SqlRisk::ReadOnly, "{sql}");
+        }
+        assert_eq!(classify_sql_risk_for_database("EXEC p(1)", DatabaseType::Dameng).unwrap(), SqlRisk::Write);
+        for sql in ["SET SCHEMA DBX_TEST", "SET TIME ZONE '+08:00'", "SET TRANSACTION READ ONLY"] {
+            assert_ne!(classify_sql_risk_for_database(sql, DatabaseType::Dameng).unwrap(), SqlRisk::ReadOnly, "{sql}");
+        }
+    }
+
+    #[test]
+    fn classifies_console_client_commands_by_nature() {
+        // psql console commands are metadata reads.
+        for statement in ["\\dt", "\\d+ emp", "\\d", "\\dt t*"] {
+            assert_eq!(
+                classify_sql_risk_for_database(statement, DatabaseType::Postgres).unwrap(),
+                SqlRisk::ReadOnly,
+                "{statement}"
+            );
+        }
+        // SQL*Plus metadata and client-side commands are read-only...
+        for statement in
+            ["DESC emp", "SHOW USER", "SET TIMING ON", "SET HEADING OFF", "PROMPT hi", "EXIT", "RUN", "SPOOL out.txt"]
+        {
+            assert_eq!(
+                classify_sql_risk_for_database(statement, DatabaseType::Oracle).unwrap(),
+                SqlRisk::ReadOnly,
+                "{statement}"
+            );
+        }
+        // ...but EXEC wraps an opaque PL/SQL block and stays write-gated.
+        assert_eq!(
+            classify_sql_risk_for_database("EXEC do_maintenance", DatabaseType::Oracle).unwrap(),
+            SqlRisk::Write
+        );
+        // Server SQL that merely starts with a console verb stays on the SQL
+        // path and keeps its normal (gated) classification.
+        assert_ne!(
+            classify_sql_risk_for_database("SET TRANSACTION READ ONLY", DatabaseType::Oracle).unwrap(),
+            SqlRisk::ReadOnly
+        );
+        assert_ne!(
+            classify_sql_risk_for_database("SET CONSTRAINTS ALL DEFERRED", DatabaseType::Oracle).unwrap(),
+            SqlRisk::ReadOnly
+        );
+        // Databases without console syntax are unaffected.
+        assert_eq!(classify_sql_risk_for_database("DESC emp", DatabaseType::Mysql).unwrap(), SqlRisk::ReadOnly);
     }
 }

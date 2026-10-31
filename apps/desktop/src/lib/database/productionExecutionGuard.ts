@@ -8,20 +8,27 @@ export interface ProductionSqlExecutionGuardOptions<T> {
   connection?: ConnectionConfig;
   database?: string | null;
   sql: string;
+  /** Parsed executable SQL for classification; the original sql remains the review text. */
+  assessmentSql?: string;
   source?: string;
   /** Allows the owning editor to cancel only its pending confirmation on close/switch. */
   scopeId?: string;
+  isCurrent?: () => boolean;
   execute: () => Promise<T>;
   /** Offload large generated scripts while preserving the same safety assessment. */
   analyzeInBackground?: boolean;
 }
 
 export async function executeWithProductionSqlGuard<T>(options: ProductionSqlExecutionGuardOptions<T>): Promise<T | undefined> {
-  const backgroundAssessment = options.analyzeInBackground && options.sql.length > 64 * 1024 ? await assessProductionSqlInBackground({ sql: options.sql, connection: options.connection, database: options.database }) : undefined;
-  if (!(await ensureReadOnlyWriteAccess({ connection: options.connection, sql: options.sql, source: options.source, treatAsMutation: backgroundAssessment?.isMutation }))) {
+  if (options.isCurrent?.() === false) return undefined;
+  const sql = options.assessmentSql ?? options.sql;
+  const backgroundAssessment = options.analyzeInBackground && sql.length > 64 * 1024 ? await assessProductionSqlInBackground({ sql, connection: options.connection, database: options.database }) : undefined;
+  if (options.isCurrent?.() === false) return undefined;
+  if (!(await ensureReadOnlyWriteAccess({ connection: options.connection, sql, source: options.source, treatAsMutation: backgroundAssessment?.isMutation, scopeId: options.scopeId }))) {
     return undefined;
   }
-  const assessment = backgroundAssessment ?? assessProductionSql(options.sql, options.connection, options.database);
+  if (options.isCurrent?.() === false) return undefined;
+  const assessment = backgroundAssessment ?? assessProductionSql(sql, options.connection, options.database);
   if (assessment.active && assessment.isMutation) {
     // Centralize production write confirmation so secondary tool surfaces cannot
     // bypass the same explicit review step used by the SQL editor.
@@ -35,6 +42,7 @@ export async function executeWithProductionSqlGuard<T>(options: ProductionSqlExe
     });
     if (!confirmed) return undefined;
   }
+  if (options.isCurrent?.() === false) return undefined;
   return options.execute();
 }
 

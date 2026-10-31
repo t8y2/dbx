@@ -13482,6 +13482,18 @@ export default withEnglishFallback({
     noEligibleColumns: "Nessuna colonna supportata",
     bucketCountHint: "Il database determina automaticamente il numero di bucket in base alle risorse del cluster e al volume dei dati; non è fisso. Inserire un numero per fissarlo per ogni partizione.",
   },
+  console: {
+    title: "Interfaccia a riga di comando",
+    welcome: "Connesso a {name}. Inserisci comandi SQL o client, premi Enter per eseguire; le istruzioni incomplete continuano con ->; EXIT per uscire. ↑/↓ per scorrere la cronologia, Ctrl+C per annullare o svuotare.",
+    noPreviousStatement: "Nessuna istruzione precedente da rieseguire.",
+    exitAcknowledged: "EXIT confermato, chiusura dell'interfaccia a riga di comando in corso.",
+    paste: "Incolla",
+    copy: "Copia",
+    clipboardFailed: "Operazione con gli appunti non riuscita: {message}",
+    running: "Esecuzione in corso…",
+    unsupportedType: "L'interfaccia a riga di comando SQL non è supportata per questo tipo di connessione.",
+    executionNotSent: "Esecuzione annullata o bloccata da un criterio di sicurezza; l'istruzione non è stata inviata al database.",
+  },
   tableCopyTask: {
     backgroundFinished: "Copia tabella: {status}. Puoi visualizzare i dettagli in «Attività in background».",
     backgroundStarted: "Copia avviata. Puoi controllare l'avanzamento in «Attività in background» nella parte superiore.",

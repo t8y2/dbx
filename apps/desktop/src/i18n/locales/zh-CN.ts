@@ -1025,6 +1025,18 @@ export default withEnglishFallback({
     logoutDescription: "退出当前会话并返回登录页面",
     logoutConfirm: "确定要退出登录吗？",
   },
+  console: {
+    title: "命令列界面",
+    welcome: "已连接 {name}。输入 SQL 或客户端命令，Enter 执行；未完成的语句以 -> 续行；EXIT 退出。↑/↓ 翻阅历史，Ctrl+C 取消或清空。",
+    noPreviousStatement: "没有可重新执行的上一条语句。",
+    exitAcknowledged: "EXIT 已确认，正在关闭命令列界面。",
+    paste: "粘贴",
+    copy: "复制",
+    clipboardFailed: "剪贴板操作失败：{message}",
+    executionNotSent: "执行已取消或被安全策略阻止，未向数据库发送语句。",
+    running: "执行中…",
+    unsupportedType: "此连接类型不支持 SQL 命令列界面",
+  },
   toolbar: {
     fileEncoding: "文件编码",
     encodingAuto: "自动",

@@ -864,6 +864,18 @@ export default withEnglishFallback({
     logoutDescription: "結束目前工作階段並返回登入頁面",
     logoutConfirm: "確定要登出嗎？",
   },
+  console: {
+    title: "命令列介面",
+    welcome: "已連線 {name}。輸入 SQL 或用戶端命令，Enter 執行；未完成的語句以 -> 續行；EXIT 結束。↑/↓ 翻閱歷史，Ctrl+C 取消或清空。",
+    noPreviousStatement: "沒有可重新執行的上一條語句。",
+    running: "執行中…",
+    unsupportedType: "此連線類型不支援 SQL 命令列介面",
+    exitAcknowledged: "EXIT 已確認，正在關閉命令列介面。",
+    paste: "貼上",
+    copy: "複製",
+    clipboardFailed: "剪貼簿操作失敗：{message}",
+    executionNotSent: "執行已取消或被安全策略阻止，未向資料庫傳送語句。",
+  },
   toolbar: {
     fileEncoding: "檔案編碼",
     encodingAuto: "自動",

@@ -122,6 +122,7 @@ function preloadDataGridComponent() {
 }
 
 const QueryEditor = defineAsyncComponent({ loader: () => import("@/components/editor/QueryEditor.vue"), loadingComponent: QueryLoadingState, delay: 0 });
+const ConsoleTerminal = defineAsyncComponent(() => import("@/components/console/ConsoleTerminal.vue"));
 const DataGrid = defineAsyncComponent(loadDataGridComponent);
 const DataGridSqlPreviewDialog = defineAsyncComponent(() => import("@/components/grid/DataGridSqlPreviewDialog.vue"));
 const QueryResultTransferDialog = defineAsyncComponent(() => import("@/components/transfer/QueryResultTransferDialog.vue"));
@@ -3231,6 +3232,14 @@ defineExpose({
           </div>
         </Pane>
       </Splitpanes>
+    </template>
+
+    <!-- Command console (命令列界面): Navicat-style terminal for the tab's
+         connection. -->
+    <template v-else-if="activeTab.mode === 'console'">
+      <div class="flex flex-1 min-h-0 flex-col">
+        <ConsoleTerminal :tab="activeTab" />
+      </div>
     </template>
 
     <!-- Data mode: full-height grid -->

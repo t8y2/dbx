@@ -13519,6 +13519,18 @@ export default withEnglishFallback({
     noEligibleColumns: "対応する列がありません",
     bucketCountHint: "自動バケット数は、クラスターのリソースとデータ量に応じてデータベースが決定し、固定ではありません。数値を入力すると各パーティションに指定の数を使用します。",
   },
+  console: {
+    title: "コマンドラインインターフェース",
+    welcome: "{name} に接続しました。SQL またはクライアントコマンドを入力し、Enter で実行します。未完了のステートメントは -> で続行し、EXIT で終了します。↑/↓ で履歴を参照し、Ctrl+C でキャンセルまたはクリアします。",
+    noPreviousStatement: "再実行できる前回のステートメントはありません。",
+    exitAcknowledged: "EXIT を確認しました。コマンドラインインターフェースを閉じています。",
+    paste: "貼り付け",
+    copy: "コピー",
+    clipboardFailed: "クリップボード操作に失敗しました：{message}",
+    running: "実行中…",
+    unsupportedType: "この接続タイプでは SQL コマンドラインインターフェースはサポートされていません。",
+    executionNotSent: "実行はキャンセルされたか、セキュリティポリシーによってブロックされたため、データベースにステートメントは送信されませんでした。",
+  },
   tableCopyTask: {
     backgroundFinished: "テーブルのコピー：{status}。「バックグラウンドタスク」で詳細を確認できます。",
     backgroundStarted: "コピーを開始しました。上部の「バックグラウンドタスク」で進行状況を確認できます。",

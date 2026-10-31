@@ -328,6 +328,18 @@ describe("exact trigger bound source tabs", () => {
     expect(rpc.executeQuery).not.toHaveBeenCalled();
   });
 
+  it("keeps trigger safeguards when slash resolves a previous console statement", async () => {
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    useConnectionStore().connections[0].db_type = "oracle";
+    raw.trigger!.oracle_metadata!.engine = "oracle";
+    const { store, id, tab } = await open();
+    tab.lastConsoleSql = "DROP TABLE Parent.T";
+    await store.executeTabSql(id, "/");
+    expect(store.oracleTriggerSourceState(id)?.error).toBeTruthy();
+    expect(tab.sql).toBe(ddl);
+    expect(rpc.executeQuery).not.toHaveBeenCalled();
+  });
+
   it("cancels the source confirmation on tab switch without executing its DDL", async () => {
     const { store, id, tab } = await open();
     const { useSqlExecutionDangerStore } = await import("@/stores/sqlExecutionDangerStore");

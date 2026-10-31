@@ -18,10 +18,9 @@ import { defaultViewForResult, statementRunsWithoutResultGrid } from "@/lib/quer
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
 import { isRedisCommentLine } from "@/lib/redis/redisCommandTokenizer";
-import { isDangerousSolrRequest } from "@/lib/solr/solrRequestRisk";
-import { isDangerousCouchDbRequest } from "@/lib/couchdb/couchdbRequestRisk";
+import { isDangerousSql, stripSqlComments } from "@/lib/sql/sqlExecutionSafety";
 import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
-import { isElasticsearchRestRequestText, parseElasticsearchRestRequestTarget, splitSqlStatementRanges, sqlStatementParameterOptionsForCompatibility } from "@/lib/sql/sqlStatementRanges";
+import { isElasticsearchRestRequestText, splitSqlStatementRanges, sqlStatementParameterOptionsForCompatibility } from "@/lib/sql/sqlStatementRanges";
 import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlParameterSyntax } from "@/lib/sql/sqlParameters";
 import { expandSqlVariables } from "@/lib/sql/sqlVariables";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
@@ -40,7 +39,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import type { SqlExecutionDeferredReason, SqlExecutionNotStartedReason, SqlExecutionOutcome } from "@/lib/sql/sqlExecutionOutcome";
 import { isObjectDependencySection } from "@/lib/database/objectDependencyDetails";
 
-const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
+export { isDangerousSql, stripSqlComments } from "@/lib/sql/sqlExecutionSafety";
 
 interface SqlExecutionOptions {
   openInNewResultTab?: boolean;
@@ -80,13 +79,6 @@ interface TargetSqlExecutionInput {
   manualTransaction?: boolean;
 }
 
-export function stripSqlComments(sql: string): string {
-  return sql
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/--.*$/gm, " ")
-    .replace(/#.*$/gm, " ");
-}
-
 /**
  * Detached copy of a result for the merged multi-source view.
  *
@@ -106,44 +98,6 @@ export function snapshotResultForMerge(result: QueryResult | undefined): QueryRe
     local_column_filters: undefined,
     local_hidden_column_keys: undefined,
   };
-}
-
-const ELASTICSEARCH_TRANSIENT_DELETE_PATHS = [/^\/_search\/scroll\/?$/i, /^\/_pit\/?$/i, /^\/_async_search\/[^/?]+\/?$/i];
-const ELASTICSEARCH_DESTRUCTIVE_POST_PATHS = [/(?:^|\/)_(?:delete_by_query|update_by_query|bulk)(?:\/|$)/i, /^\/_reindex(?:\/|$)/i, /^\/_aliases(?:\/|$)/i, /\/_restore(?:\/|$)/i];
-
-function isDangerousElasticsearchRequest(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD", path: string): boolean {
-  const pathname = path.split("?", 1)[0].replace(/\/+$/, "") || "/";
-  if (method === "DELETE") return !ELASTICSEARCH_TRANSIENT_DELETE_PATHS.some((pattern) => pattern.test(pathname));
-  if (method === "PUT" || method === "PATCH") return true;
-  return method === "POST" && ELASTICSEARCH_DESTRUCTIVE_POST_PATHS.some((pattern) => pattern.test(pathname));
-}
-
-function isDangerousMeilisearchRequest(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD", path: string): boolean {
-  if (method === "GET" || method === "HEAD") return false;
-  if (method === "DELETE" || method === "PUT" || method === "PATCH") return true;
-  const pathname = path.split("?", 1)[0].replace(/\/+$/, "") || "/";
-  return !(pathname === "/multi-search" || /\/search$/i.test(pathname) || /\/facet-search$/i.test(pathname) || /\/similar$/i.test(pathname) || /\/documents\/fetch$/i.test(pathname));
-}
-
-export function isDangerousSql(sql: string, databaseType?: DatabaseType): boolean {
-  if (databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "solr" || databaseType === "couchdb") {
-    const requests = splitSqlStatementRanges(sql, databaseType)
-      .map((statement) => parseElasticsearchRestRequestTarget(statement.sql))
-      .filter((request): request is NonNullable<typeof request> => request !== null);
-    if (requests.length > 0) {
-      return requests.some((request) =>
-        databaseType === "meilisearch"
-          ? isDangerousMeilisearchRequest(request.method, request.path)
-          : databaseType === "solr"
-            ? isDangerousSolrRequest(request.method, request.path)
-            : databaseType === "couchdb"
-              ? isDangerousCouchDbRequest(request.method, request.path)
-              : isDangerousElasticsearchRequest(request.method, request.path),
-      );
-    }
-  }
-  const cleaned = stripSqlComments(sql);
-  return cleaned.split(";").some((stmt) => DANGER_RE.test(stmt));
 }
 
 function primarySqlOperation(sql: string): string {

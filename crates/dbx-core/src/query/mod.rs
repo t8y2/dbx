@@ -1,5 +1,6 @@
 pub mod batch_progress;
 pub use dbx_drivers::query_messages;
+mod console_commands;
 pub mod document_ops;
 pub mod hbase_ops;
 pub mod mongo_ops;
@@ -3000,6 +3001,45 @@ pub(crate) async fn execute_sql_statement_with_options_typed_with_outcome(
     options: QueryExecutionOptions,
 ) -> Result<(db::QueryResult, Option<MysqlAutoCommitTransaction>), QueryExecutionError> {
     let db_type = connection_database_type(state, connection_id).await;
+    // Console client commands (SQL*Plus, psql) execute client-side even on the
+    // single-statement entry, so refreshes of a DESC result and external
+    // callers behave exactly like the batch path.
+    if let Some(family) = db_type.and_then(dbx_sql::sql::console_command_family_for_database) {
+        if let Some(command) =
+            db_type.and_then(|db| dbx_sql::console_command::parse_console_command_for_database(sql, db))
+        {
+            return match console_commands::execute_console_command(
+                state,
+                connection_id,
+                database,
+                schema,
+                command,
+                family,
+                // There is no batch context here; a lone `RUN` cannot rerun.
+                None,
+            )
+            .await
+            {
+                // Rewritten SQL (EXEC, SHOW USER, `\d`) goes back through this
+                // entry so object-cache invalidation and timing apply to it.
+                console_commands::ConsoleExecution::Sql(sql) => {
+                    Box::pin(execute_sql_statement_with_options_typed_with_outcome(
+                        state,
+                        connection_id,
+                        database,
+                        &sql,
+                        schema,
+                        cancel_token,
+                        options,
+                    ))
+                    .await
+                }
+                console_commands::ConsoleExecution::Result(result) => Ok((result, None)),
+                console_commands::ConsoleExecution::Stop(result) => Ok((result, None)),
+                console_commands::ConsoleExecution::Error(message) => Err(QueryExecutionError::Legacy(message)),
+            };
+        }
+    }
     let invalidate = crate::object_cache::sql_may_change_object_metadata(sql, db_type);
     let mut transaction = None;
     // Same contract as the multi-statement entry point: a single statement is
@@ -4032,6 +4072,24 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
         return Ok(vec![empty_query_result(0).into()]);
     }
 
+    // Console client commands (SQL*Plus, psql) are client-side: they can never
+    // join a server transaction, so reject the combination up front instead of
+    // executing half the batch.
+    let console_command_family = split_db_type.and_then(dbx_sql::sql::console_command_family_for_database);
+    if options.use_transaction == Some(true)
+        && console_command_family.is_some()
+        && statements.iter().any(|statement| {
+            split_db_type
+                .is_some_and(|db| dbx_sql::console_command::parse_console_command_for_database(statement, db).is_some())
+        })
+    {
+        return Err(
+            "use_transaction cannot be combined with console client commands (DESC, EXEC, SET, PROMPT, \\d, ...): they execute client-side and cannot join a server transaction. Run the batch without use_transaction."
+                .to_string()
+                .into(),
+        );
+    }
+
     // Check the transaction request before database-specific fast paths. Otherwise
     // a backend such as SQL Server or HTTP SQLite can return successful
     // auto-commit results while the API has promised a rollbackable batch.
@@ -4161,6 +4219,8 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
     // therefore reads a bounded first page without retaining those cursors.
     let statement_options = options_for_sequential_statements(&options, statements.len(), db_type);
     let mut results = Vec::with_capacity(statements.len());
+    // Text of the last statement that actually executed, for `RUN` reruns.
+    let mut last_executed_statement: Option<String> = None;
     for (statement_index, stmt) in statements.iter().enumerate() {
         if is_canceled(&cancel_token) {
             let error = canceled_query_execution_error();
@@ -4171,12 +4231,95 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
             ));
             break;
         }
+
+        // Console client commands (SQL*Plus, psql) resolve client-side; EXEC,
+        // SHOW USER, `\d` and `\dt` rewrite to SQL that then runs through the
+        // normal statement path below.
+        let resolved_statement: String;
+        let effective_stmt: &str = match (console_command_family, split_db_type) {
+            (Some(family), Some(console_db_type)) => {
+                match dbx_sql::console_command::parse_console_command_for_database(stmt, console_db_type) {
+                    None => stmt,
+                    Some(command) => {
+                        match console_commands::execute_console_command(
+                            state,
+                            connection_id,
+                            database,
+                            schema,
+                            command,
+                            family,
+                            last_executed_statement.as_deref(),
+                        )
+                        .await
+                        {
+                            console_commands::ConsoleExecution::Sql(sql) => {
+                                resolved_statement = sql;
+                                &resolved_statement
+                            }
+                            console_commands::ConsoleExecution::Result(result) => {
+                                report_execute_multi_progress(
+                                    progress.as_ref(),
+                                    statement_index,
+                                    statements.len(),
+                                    &result,
+                                    true,
+                                    None,
+                                );
+                                results.push(ExecuteMultiResult::success_with_index_and_optional_server_large_values(
+                                    result,
+                                    statement_index,
+                                    options.table_data_preview,
+                                ));
+                                continue;
+                            }
+                            console_commands::ConsoleExecution::Error(message) => {
+                                let result = error_query_result(message.clone());
+                                report_execute_multi_progress(
+                                    progress.as_ref(),
+                                    statement_index,
+                                    statements.len(),
+                                    &result,
+                                    false,
+                                    None,
+                                );
+                                // Like SQL*Plus SP2 messages, a console failure is
+                                // reported per statement but does not abort the
+                                // script.
+                                results.push(ExecuteMultiResult::execution_error_with_backend(
+                                    result,
+                                    Some(statement_index),
+                                    QueryExecutionError::Legacy(message).into_backend_error(),
+                                ));
+                                continue;
+                            }
+                            console_commands::ConsoleExecution::Stop(result) => {
+                                report_execute_multi_progress(
+                                    progress.as_ref(),
+                                    statement_index,
+                                    statements.len(),
+                                    &result,
+                                    true,
+                                    None,
+                                );
+                                results.push(ExecuteMultiResult::success_with_index_and_optional_server_large_values(
+                                    result,
+                                    statement_index,
+                                    options.table_data_preview,
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => stmt,
+        };
         let execution = if complete_sqlserver_agent_batch {
             Box::pin(sqlserver_agent_batch::execute(
                 state,
                 &pool_key,
                 database,
-                stmt,
+                effective_stmt,
                 schema,
                 cancel_token.clone(),
                 statement_options.clone(),
@@ -4187,7 +4330,7 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
                 state,
                 connection_id,
                 database,
-                stmt,
+                effective_stmt,
                 schema,
                 cancel_token.clone(),
                 statement_options.clone(),
@@ -4197,6 +4340,7 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
         };
         match execution {
             Ok(batch_results) => {
+                last_executed_statement = Some(effective_stmt.to_string());
                 for result in batch_results {
                     report_execute_multi_progress(
                         progress.as_ref(),
@@ -4223,7 +4367,7 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
                 }
             }
             Err(error) => {
-                let action = query_execution_error_action(db_type, stmt, &error);
+                let action = query_execution_error_action(db_type, effective_stmt, &error);
                 let result = error_query_result(error.clone().into_legacy_string());
                 let backend_error = error.into_backend_error();
                 report_execute_multi_progress(
@@ -14530,5 +14674,268 @@ for line in sys.stdin:
         });
 
         assert!(!mysql_error_is_syntax_error(&polardbx_non_parser_error));
+    }
+
+    mod console_command_integration_tests {
+        use super::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        /// Fake PostgreSQL wire server (same duplex pattern as the manual
+        /// transaction snapshot tests) that records every executed statement and
+        /// answers each with an empty completion. Console-command rewrites can
+        /// then be verified through the real driver path without a server.
+        struct RecordingConnect {
+            commands: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl deadpool_postgres::Connect for RecordingConnect {
+            fn connect(
+                &self,
+                config: &tokio_postgres::Config,
+            ) -> futures::future::BoxFuture<
+                '_,
+                Result<(tokio_postgres::Client, tokio::task::JoinHandle<()>), tokio_postgres::Error>,
+            > {
+                let mut config = config.clone();
+                config.user("test").ssl_mode(tokio_postgres::config::SslMode::Disable);
+                let commands = Arc::clone(&self.commands);
+                Box::pin(async move {
+                    let (client_socket, mut server_socket) = tokio::io::duplex(8192);
+                    tokio::spawn(async move {
+                        let startup_length = server_socket.read_u32().await.unwrap();
+                        let mut startup = vec![0; startup_length as usize - 4];
+                        server_socket.read_exact(&mut startup).await.unwrap();
+                        server_socket.write_all(b"R\0\0\0\x08\0\0\0\0Z\0\0\0\x05I").await.unwrap();
+                        let mut statement = String::new();
+                        while let Ok(message_type) = server_socket.read_u8().await {
+                            let length = server_socket.read_u32().await.unwrap();
+                            let mut payload = vec![0; length as usize - 4];
+                            server_socket.read_exact(&mut payload).await.unwrap();
+                            let (response_type, response) = match message_type {
+                                b'P' => {
+                                    statement =
+                                        String::from_utf8(payload.split(|byte| *byte == 0).nth(1).unwrap().to_vec())
+                                            .unwrap();
+                                    (b'1', Vec::new())
+                                }
+                                b'B' => (b'2', Vec::new()),
+                                b'D' => {
+                                    if payload.first() == Some(&b'S') {
+                                        server_socket.write_all(b"t\0\0\0\x06\0\0").await.unwrap();
+                                    }
+                                    (b'n', Vec::new())
+                                }
+                                b'E' => {
+                                    commands.lock().unwrap().push(statement.clone());
+                                    let tag = if statement.starts_with("SELECT") { "SELECT 0" } else { "OK" };
+                                    (b'C', format!("{tag}\0").into_bytes())
+                                }
+                                b'S' => (b'Z', vec![b'I']),
+                                b'C' => (b'3', Vec::new()),
+                                b'X' => break,
+                                other => panic!("unexpected PostgreSQL message: {other}"),
+                            };
+                            server_socket.write_u8(response_type).await.unwrap();
+                            server_socket.write_u32((response.len() + 4) as u32).await.unwrap();
+                            server_socket.write_all(&response).await.unwrap();
+                        }
+                    });
+                    let (client, connection) = config.connect_raw(client_socket, tokio_postgres::NoTls).await?;
+                    let task = tokio::spawn(async move {
+                        let _ = connection.await;
+                    });
+                    Ok((client, task))
+                })
+            }
+        }
+
+        /// State with a Postgres connection whose pool is backed by the fake
+        /// server. `db_type` picks the console family: Postgres exercises the
+        /// psql rewrites through the driver; Oracle exercises the fully
+        /// client-side SQL*Plus commands, which never touch the pool.
+        async fn console_state(db_type: DatabaseType) -> (AppState, Arc<Mutex<Vec<String>>>, tempfile::TempDir) {
+            let directory = tempfile::tempdir().unwrap();
+            let state = AppState::new(
+                crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap(),
+            );
+            let config = test_connection_config(db_type);
+            state.configs.write().await.insert(config.id.clone(), config);
+            let commands = Arc::new(Mutex::new(Vec::new()));
+            let manager = deadpool_postgres::Manager::from_connect(
+                tokio_postgres::Config::new(),
+                RecordingConnect { commands: Arc::clone(&commands) },
+                deadpool_postgres::ManagerConfig::default(),
+            );
+            let pool = deadpool_postgres::Pool::builder(manager).max_size(1).build().unwrap();
+            state
+                .update_connection_pools(|connections| {
+                    connections.insert("conn-1".to_string(), PoolKind::Postgres(pool));
+                })
+                .await;
+            (state, commands, directory)
+        }
+
+        #[tokio::test]
+        async fn psql_console_commands_rewrite_to_catalog_sql_through_the_driver() {
+            let (state, commands, _directory) = console_state(DatabaseType::Postgres).await;
+            let results = execute_multi_core_with_options_for_client_and_progress_typed(
+                &state,
+                "conn-1",
+                "",
+                "\\timing on\n\\d emp\n\\dt t*\nSELECT 1;",
+                None,
+                None,
+                QueryExecutionOptions::default(),
+                None,
+            )
+            .await
+            .unwrap();
+
+            let recorded = commands.lock().unwrap().join(";\n");
+            assert!(recorded.contains("pg_attribute"), "describe rewrite missing: {recorded}");
+            assert!(recorded.contains("c.relname = 'emp'"), "describe rewrite missing: {recorded}");
+            assert!(recorded.contains("pg_class"), "list rewrite missing: {recorded}");
+            assert!(recorded.contains("LIKE 't%'"), "list pattern missing: {recorded}");
+            assert!(!recorded.contains("\\timing"), "ignorable controls must be blanked: {recorded}");
+            assert!(!recorded.contains("\\d "), "console commands must not reach the server: {recorded}");
+            // `\d emp`, `\dt t*` and `SELECT 1` each produced one result.
+            assert_eq!(results.len(), 3);
+            assert!(results.iter().all(|result| !result.execution_error), "{recorded}");
+        }
+
+        #[tokio::test]
+        async fn sqlplus_server_statements_keep_their_sql_semantics() {
+            let (state, commands, _directory) = console_state(DatabaseType::Oracle).await;
+            let results = execute_multi_core_with_options_for_client_and_progress_typed(
+                &state,
+                "conn-1",
+                "",
+                "SET CONSTRAINTS ALL DEFERRED;\nEXEC p(1); -- note\nSELECT 1;",
+                None,
+                None,
+                QueryExecutionOptions::default(),
+                None,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(results.len(), 3);
+            assert!(results.iter().all(|result| !result.execution_error));
+            let recorded = commands.lock().unwrap();
+            assert!(recorded.iter().any(|sql| sql == "SET CONSTRAINTS ALL DEFERRED"), "{recorded:?}");
+            assert!(recorded.iter().any(|sql| sql == "BEGIN\np(1);\nEND; -- note"), "{recorded:?}");
+        }
+
+        #[tokio::test]
+        async fn sqlplus_client_side_commands_resolve_without_touching_the_pool() {
+            let (state, commands, _directory) = console_state(DatabaseType::Oracle).await;
+            let results = execute_multi_core_with_options_for_client_and_progress_typed(
+                &state,
+                "conn-1",
+                "",
+                "PROMPT step 1\nSET TIMING ON\nSPOOL out.txt\nRUN\nEXIT\nSELECT 1;",
+                None,
+                None,
+                QueryExecutionOptions::default(),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // EXIT stops the batch, so the trailing SELECT never executes and
+            // nothing ever reaches the (fake) server.
+            assert_eq!(results.len(), 5);
+            let indexes = results.iter().map(|result| result.statement_index).collect::<Vec<_>>();
+            assert_eq!(indexes, vec![Some(0), Some(1), Some(2), Some(3), Some(4)]);
+            assert_eq!(results[0].result.columns, vec!["Message"]);
+            assert_eq!(results[0].result.rows[0][0], serde_json::json!("step 1"));
+            let set_text = results[1].result.rows[0][0].as_str().unwrap().to_string();
+            assert!(set_text.contains("SET TIMING ON"), "{set_text}");
+            let spool_text = results[2].result.rows[0][0].as_str().unwrap().to_string();
+            assert!(spool_text.contains("SPOOL") && spool_text.contains("not supported"), "{spool_text}");
+            // RUN without a previously executed statement is a reported error
+            // that does not abort the script.
+            assert!(results[3].execution_error);
+            assert!(results[3].result.rows[0][0].as_str().unwrap().contains("RUN"));
+            assert_eq!(results[4].result.columns, vec!["Message"]);
+            assert!(commands.lock().unwrap().is_empty(), "client-side commands must not reach the server");
+        }
+
+        #[tokio::test]
+        async fn disql_commands_share_dispatch_without_swallowing_native_set() {
+            let (state, commands, _directory) = console_state(DatabaseType::Dameng).await;
+            let results = execute_multi_core_with_options_for_client_and_progress_typed(
+                &state,
+                "conn-1",
+                "",
+                "PROMPT DM8\nSET TIMING ON\nSET SCHEMA DBX_TEST;\nEXEC p(1); -- note\nRUN\nSHOW USER\nEXIT\nSELECT 99;",
+                None,
+                None,
+                QueryExecutionOptions::default(),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(results.len(), 7);
+            assert!(results.iter().all(|result| !result.execution_error));
+            assert_eq!(results[0].result.rows[0][0], "DM8");
+            let warning = results[1].result.rows[0][0].as_str().unwrap();
+            assert!(warning.contains("not implemented") && warning.contains("not applied"), "{warning}");
+            let recorded = commands.lock().unwrap();
+            assert!(recorded.iter().any(|sql| sql == "SET SCHEMA DBX_TEST"), "{recorded:?}");
+            assert_eq!(recorded.iter().filter(|sql| sql.as_str() == "BEGIN\np(1);\nEND; -- note").count(), 2);
+            assert!(recorded.iter().any(|sql| sql == "SELECT USER FROM DUAL"));
+            assert!(!recorded.iter().any(|sql| sql.contains("SELECT 99")));
+        }
+
+        #[tokio::test]
+        async fn disql_console_batches_keep_the_transaction_guard() {
+            let (state, commands, _directory) = console_state(DatabaseType::Dameng).await;
+            let error = execute_multi_core_with_options_for_client_and_progress_typed(
+                &state,
+                "conn-1",
+                "",
+                "PROMPT DM8\nSELECT 1;",
+                None,
+                None,
+                QueryExecutionOptions { use_transaction: Some(true), ..Default::default() },
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.into_legacy_string().contains("use_transaction"));
+            assert!(commands.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn single_statement_entry_resolves_console_commands() {
+            let (state, _commands, _directory) = console_state(DatabaseType::Oracle).await;
+            let result = execute_sql_statement_with_options_typed(
+                &state,
+                "conn-1",
+                "",
+                "PROMPT solo",
+                None,
+                None,
+                QueryExecutionOptions::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.columns, vec!["Message"]);
+            assert_eq!(result.rows[0][0], serde_json::json!("solo"));
+
+            let error = execute_sql_statement_with_options_typed(
+                &state,
+                "conn-1",
+                "",
+                "RUN",
+                None,
+                None,
+                QueryExecutionOptions::default(),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.into_legacy_string().contains("RUN"), "unexpected error");
+        }
     }
 }

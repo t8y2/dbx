@@ -23,6 +23,12 @@ const MYSQL_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "doris",
 const POSTGRES_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss", "questdb"]);
 const ORACLE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["oracle", "dameng", "yashandb", "oscar", "oceanbase-oracle"]);
 const SQLITE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["sqlite", "rqlite", "turso", "cloudflare-d1"]);
+// SQL*Plus console commands the backend executes client-side; enabled for the
+// supported client families (mirrors CONSOLE_COMMAND_DATABASES in
+// lib/sql/sqlStatementRanges.ts). Highlighting only — parsing and dispatch
+// live in dbx-sql-core.
+const SQLPLUS_CONSOLE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["oracle", "yashandb", "dameng"]);
+const SQLPLUS_CONSOLE_KEYWORDS = "describe prompt show spool quit";
 // Non-MySQL-wire dialects whose servers still interpret backslash escapes in string
 // literals; the mysql-family types are covered by isMysql at the define() site. Mirrors
 // BACKSLASH_ESCAPE_STRING_DIALECTS in lib/sql/sqlStatementRanges.ts so the editor
@@ -405,7 +411,9 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
 
   return langSql.SQLDialect.define({
     ...baseDialect.spec,
-    keywords: [baseKeywords, commonKeywords, isClickHouse ? CLICKHOUSE_KEYWORDS : "", isPostgres ? POSTGRES_PLPGSQL_KEYWORDS : "", isSqlServer ? SQLSERVER_KEYWORDS : ""].filter(Boolean).join(" "),
+    keywords: [baseKeywords, commonKeywords, isClickHouse ? CLICKHOUSE_KEYWORDS : "", isPostgres ? POSTGRES_PLPGSQL_KEYWORDS : "", isSqlServer ? SQLSERVER_KEYWORDS : "", isPlsql && databaseType && SQLPLUS_CONSOLE_CODEMIRROR_DATABASE_TYPES.has(databaseType) ? SQLPLUS_CONSOLE_KEYWORDS : ""]
+      .filter(Boolean)
+      .join(" "),
     types: [baseTypes, isClickHouse ? CLICKHOUSE_TYPES : "", isPostgres ? POSTGRES_PLPGSQL_TYPES : ""].filter(Boolean).join(" ") || undefined,
     builtin: [baseBuiltin, isClickHouse ? CLICKHOUSE_BUILTINS : "", isPostgres ? `${POSTGRES_BUILTINS} ${POSTGRES_PLPGSQL_BUILTIN}` : "", isMysql ? MYSQL_BUILTINS : "", driverProfileSqlBuiltinTerms(driverProfile)].filter(Boolean).join(" ") || undefined,
     // T-SQL temp tables (#local / ##global) otherwise tokenize the leading

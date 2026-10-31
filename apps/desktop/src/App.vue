@@ -218,6 +218,7 @@ import { objectBrowserTablesToAiTreeNodes } from "@/lib/ai/objectBrowserToAiTarg
 import { aiTargetFromTab, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 import { queryErrorSelection, type AiExternalContextRequest } from "@/lib/ai/aiExternalContext";
 import { isSchemaAware, isSingleDatabase, supportsConnectionQueryActions, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
+import { supportsSqlConsole } from "@/lib/console/consoleFormat";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { canFormatSqlForDatabaseType, formatSqlForEditing, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { formatSqlSnapshotForSave } from "@/lib/sql/sqlFormatOnSave";
@@ -1043,6 +1044,39 @@ function supportsGenericNewQuery(connection: ConnectionConfig | undefined): bool
 }
 
 const canCreateNewQuery = computed(() => connectionStore.connections.some((connection) => supportsGenericNewQuery(connection)));
+
+// The command console is a SQL surface: document/search/key-value editors
+// (mongo, redis, ...) have their own workbenches and must not offer it.
+function supportsSqlConsoleConnection(connection: ConnectionConfig | undefined): boolean {
+  if (!connection) return false;
+  if (quickConnectionOpenTarget(connection).kind !== "query") return false;
+  return supportsSqlConsole(effectiveDatabaseTypeForConnection(connection) ?? connection.db_type);
+}
+
+const canOpenConsole = computed(() => connectionStore.connections.some((connection) => supportsSqlConsoleConnection(connection)));
+
+/// Opens the 命令列界面 for the current context: the active tab's connection
+/// first (carrying its database/schema), then the active sidebar connection,
+/// then the first SQL-capable connection.
+async function openConsole() {
+  const candidates = [activeTab.value?.connectionId, connectionStore.activeConnectionId, ...connectionStore.connections.map((connection) => connection.id)];
+  const connectionId = candidates.find((id) => !!id && supportsSqlConsoleConnection(connectionStore.getConfig(id)));
+  if (!connectionId) return;
+  try {
+    await connectionStore.ensureConnected(connectionId);
+  } catch {
+    // Open the console anyway; connection failures surface as terminal output.
+  }
+  const tab = activeTab.value;
+  const sameConnection = tab && tab.connectionId === connectionId ? tab : undefined;
+  const conn = connectionStore.getConfig(connectionId);
+  queryStore.openConsoleTab({
+    connectionId,
+    database: sameConnection?.database || conn?.database || "",
+    ...(sameConnection?.schema ? { schema: sameConnection.schema } : {}),
+    ...(sameConnection?.catalog ? { catalog: sameConnection.catalog } : {}),
+  });
+}
 
 // Oracle manual-mode indicator derived from the RESOLVED database type (an
 // Oracle connection uses the agent runtime but reports db_type "oracle"), so
@@ -5469,12 +5503,14 @@ onUnmounted(() => {
           :has-mcp-update-available="showMcpSettingsUpdateBadge"
           :has-connections="connectionStore.connections.length > 0"
           :can-new-query="canCreateNewQuery"
+          :can-open-console="canOpenConsole"
           :has-sql-file-connections="hasSqlFileConnections"
           :immediate-syncing="immediateSyncing"
           :show-logout="!isDesktop && needsAuth"
           @new-connection="showConnectionDialog = true"
           @expand-sidebar="setSidebarOpen(true)"
           @new-query="newQuery({ preferredSource: lastFocusedSidebarSurface ? 'sidebar' : undefined })"
+          @open-console="openConsole"
           @set-theme-mode="setThemeMode"
           @toggle-ai="toggleRightSidebarPanel('ai')"
           @toggle-history="toggleRightSidebarPanel('history')"

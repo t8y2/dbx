@@ -13941,6 +13941,18 @@ export default withEnglishFallback({
     noEligibleColumns: "No hay columnas compatibles",
     bucketCountHint: "La base de datos determina automáticamente el número de buckets según los recursos del clúster y el volumen de datos; no es fijo. Introduzca un número para fijarlo por partición.",
   },
+  console: {
+    title: "Interfaz de línea de comandos",
+    welcome: "Conectado a {name}. Introduzca SQL o comandos de cliente; pulse Enter para ejecutar; las sentencias incompletas continúan con ->; EXIT para salir. Use ↑/↓ para recorrer el historial y Ctrl+C para cancelar o borrar.",
+    noPreviousStatement: "No hay una sentencia anterior para volver a ejecutar.",
+    exitAcknowledged: "EXIT confirmado; cerrando la interfaz de línea de comandos.",
+    paste: "Pegar",
+    copy: "Copiar",
+    clipboardFailed: "Error en la operación del portapapeles: {message}",
+    running: "Ejecutando…",
+    unsupportedType: "Este tipo de conexión no admite la interfaz de línea de comandos SQL",
+    executionNotSent: "La ejecución se canceló o fue bloqueada por la política de seguridad; no se envió ninguna sentencia a la base de datos.",
+  },
   tableCopyTask: {
     backgroundFinished: "Copia de tabla: {status}. Puedes ver los detalles en «Tareas en segundo plano».",
     backgroundStarted: "La copia ha comenzado; puedes consultar el progreso en «Tareas en segundo plano» en la parte superior.",

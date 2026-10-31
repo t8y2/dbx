@@ -133,6 +133,10 @@ Being able to connect does not imply Table Import support. If the action is abse
 
 ## Failure and Cancellation
 
+### Continue After Failed Rows
+
+By default a failed statement aborts the whole import. **Continue after failed rows** changes that: a failed multi-row batch is retried row by row, and the import keeps going while every failed row is reported with its target table, source row number, and error. The summary shows "imported N rows, M failed", and the failed-row list (up to the first 1000 entries) can be copied for a follow-up fix. Rows in a failing batch are written one by one, so imports with errors run slower. The option is off by default.
+
 - Parsing failures usually indicate an incorrect encoding, delimiter, title row, JSON shape, or worksheet setting
 - Write failures usually come from type mismatches, required columns, key conflicts, privileges, or target schema differences
 - Cancellation stops later batches, but already committed batches are not guaranteed to roll back

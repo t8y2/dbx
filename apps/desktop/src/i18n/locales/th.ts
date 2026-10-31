@@ -947,6 +947,7 @@ export default withEnglishFallback({
     logout: "ออกจากระบบ",
     logoutDescription: "จบเซสชันปัจจุบันและกลับไปหน้าล็อกอิน",
     logoutConfirm: "คุณแน่ใจหรือไม่ว่าต้องการออกจากระบบ?",
+    or: "หรือ",
   },
   toolbar: {
     fileEncoding: "การเข้ารหัสไฟล์",

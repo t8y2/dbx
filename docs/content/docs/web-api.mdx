@@ -31,7 +31,7 @@ Protected routes require a session cookie named `dbx_session`.
 GET /api/auth/check
 ```
 
-Example response:
+Example response (Password auth):
 
 ```json
 {
@@ -41,11 +41,45 @@ Example response:
 }
 ```
 
+Example response (with OIDC configured):
+
+```json
+{
+  "authenticated": false,
+  "required": true,
+  "setup_required": false,
+  "oidc": {
+    "enabled": true,
+    "button_label": "Sign in with SSO",
+    "password_disabled": false
+  }
+}
+```
+
+Example response (when authenticated):
+
+```json
+{
+  "authenticated": true,
+  "required": true,
+  "setup_required": false,
+  "user": {
+    "sub": "user-12345",
+    "email": "user@example.com",
+    "name": "Jane Doe",
+    "role": "Admin",
+    "method": "oidc"
+  }
+}
+```
+
 | Field | Meaning |
 | --- | --- |
-| `required` | Password protection is enabled |
-| `setup_required` | First-run password setup is still needed |
+| `required` | Authentication protection is active (via password or OIDC) |
+| `setup_required` | First-run password setup is still needed (only `true` when neither password nor OIDC is configured) |
 | `authenticated` | Current request already has a valid session |
+| `oidc` | Present when OIDC SSO is enabled, containing UI metadata (`button_label`, `password_disabled`) |
+| `user` | Present when authenticated, providing user profile info and login `method` (`password` or `oidc`) |
 
 ### First-Run Setup
 
@@ -57,6 +91,8 @@ Content-Type: application/json
   "password": "your-password"
 }
 ```
+
+<Callout type="info">First-run setup is only active when both password hash and OIDC configuration are absent (`setup_required: true`). When OIDC is configured, first-run setup is bypassed in favor of IdP login. To use password auth alongside OIDC, supply `DBX_PASSWORD` in your environment.</Callout>
 
 ### Login
 
@@ -73,6 +109,68 @@ On success, the response sets `Set-Cookie: dbx_session=...`. Reuse that cookie o
 
 Five consecutive login failures trigger an approximately 60-second lockout. Sessions live in the current Web process and require login again after restart. The cookie is `HttpOnly`, uses `SameSite=Lax`, and follows `DBX_PUBLIC_BASE_PATH` for its path.
 
+### OIDC / Single Sign-On (SSO)
+
+DBX Web supports OpenID Connect (OIDC) with Authorization Code Flow + PKCE (RFC 7636), automatic IdP discovery, and CEL admission control.
+
+#### 1. Initiate OIDC Login
+
+```http
+GET /api/auth/oidc/start
+```
+
+Redirects the browser to the Identity Provider (IdP) authorization endpoint with PKCE code challenge and CSRF state parameter.
+
+#### 2. OIDC Callback
+
+```http
+GET /api/auth/oidc/callback?code=...&state=...
+```
+
+The IdP redirects back to this callback endpoint. DBX exchanges the authorization code for tokens, verifies the `id_token` signature against IdP JWKS, checks admission policies, creates a session cookie, and redirects the user to the root application (`/`).
+
+**Redirect URI configuration on IdP:**
+```text
+<DBX_PUBLIC_URL>/api/auth/oidc/callback
+```
+
+#### 3. CEL Admission Gatekeeper & Role Mapping
+
+<Callout type="warn">**Current Limitation (Multi-User & Multi-Role Support)**: CEL admission gatekeeping currently controls whether a user is allowed to log in (admission pass/fail). However, full multi-user credential isolation and fine-grained multi-role RBAC enforcement are still under development and tracked in [Issue #8627](https://github.com/t8y2/dbx/issues/8627). At present, all admitted users share the same instance workspace and connections. Returning custom role strings from CEL serves as schema preparation for upcoming RBAC releases.</Callout>
+
+DBX Web uses [Google Common Expression Language (CEL)](https://github.com/google/cel-spec) via `DBX_OIDC_ADMISSION_EXPR` to control admission and assign user roles based on IdP token claims.
+
+**Context Variable:**
+- `claims`: Map of merged claims from `id_token` and `userinfo` (e.g. `claims.sub`, `claims.email`, `claims.groups`, `claims.roles`, `claims.email_verified`).
+
+**Evaluation Rules & Return Types:**
+- **`bool`**:
+  - `true`: Admitted with default role `"Admin"`.
+  - `false`: Rejected with HTTP 403 (`access_denied`).
+- **`string`**:
+  - Non-empty string: Admitted with the returned string as the user's role (e.g. `"Admin"`, `"Developer"`, `"Viewer"`).
+  - Empty string `""` or `null`: Rejected with HTTP 403 (`access_denied`).
+
+**Filter Execution Pipeline:**
+1. `DBX_OIDC_ALLOWED_DOMAINS`: If set, validates that `claims.email` ends with one of the allowed domains.
+2. `DBX_OIDC_ADMISSION_EXPR`: If set, evaluates the CEL expression against `claims`.
+3. If no admission expression is set, any valid authenticated user is admitted with role `"Admin"`.
+
+**Common Examples:**
+```bash
+# Allow only users in the 'admin' group
+DBX_OIDC_ADMISSION_EXPR='"admin" in claims.groups'
+
+# Require verified email address
+DBX_OIDC_ADMISSION_EXPR='claims.email_verified == true'
+
+# Allow specific department with email domain check
+DBX_OIDC_ADMISSION_EXPR='claims.email.endsWith("@company.com") && ("infra" in claims.departments)'
+
+# Dynamic Role Mapping based on group membership
+DBX_OIDC_ADMISSION_EXPR='"infra-admins" in claims.groups ? "Admin" : "devs" in claims.groups ? "Developer" : ""'
+```
+
 ### Logout
 
 ```http
@@ -81,6 +179,8 @@ Cookie: dbx_session=...
 ```
 
 ### Environment Variables
+
+#### Core & Web
 
 | Variable | Purpose |
 | --- | --- |
@@ -92,8 +192,24 @@ Cookie: dbx_session=...
 | `DBX_MAX_UPLOAD_MB` | Override the general request and uploaded-file limit; default 1024 MB. Multipart routes reserve fixed protocol overhead (set at least `4096` for a 4 GiB file) |
 | `DBX_AGENT_DIR` | Override the Web Agent/driver directory; defaults to `agents` under the data directory |
 | `DBX_STATIC_DIR` | Override the Web static asset directory |
+| `DBX_WEB_COOKIE_SECURE=1` | Explicitly enforce `Secure` flag on session cookies (useful behind TLS reverse proxies) |
 | `RUST_LOG` | Configure Rust backend log filtering; the default is `dbx_web=info,tower_http=info` |
 | `RUST_BACKTRACE=1` | Include Rust backtraces when an error reports one |
+
+#### OIDC / SSO Configuration
+
+| Variable | Required | Purpose |
+| --- | :---: | --- |
+| `DBX_PUBLIC_URL` | **Yes** (when OIDC enabled) | Public base URL of DBX (e.g. `https://dbx.example.com`, no trailing slash) |
+| `DBX_OIDC_ISSUER` | **Yes** (enables OIDC) | OpenID Provider Issuer URL containing `.well-known/openid-configuration` |
+| `DBX_OIDC_CLIENT_ID` | **Yes** | Client ID registered with the IdP |
+| `DBX_OIDC_CLIENT_SECRET` | No | Client Secret (for confidential clients) |
+| `DBX_OIDC_SCOPES` | No | Space-separated OAuth scopes (default: `openid profile email`) |
+| `DBX_OIDC_BUTTON_LABEL` | No | Custom text on the SSO button (default: `Sign in with SSO`) |
+| `DBX_OIDC_DISABLE_PASSWORD` | No | Set `true` to hide the password login form and enforce SSO only |
+| `DBX_OIDC_ALLOWED_DOMAINS` | No | Comma-separated list of allowed email domains (e.g. `example.com,company.org`) |
+| `DBX_OIDC_ADMISSION_EXPR` | No | [CEL](https://github.com/google/cel-spec) expression for claims admission/RBAC (e.g. `'admin' in claims.groups`) |
+| `DBX_COOKIE_SECURE` | No | Override cookie `Secure` flag (auto-enabled when `DBX_PUBLIC_URL` starts with `https://`) |
 
 ## Logging and Troubleshooting
 

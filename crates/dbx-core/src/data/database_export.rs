@@ -1316,6 +1316,58 @@ pub(crate) fn is_geometry_spatial_column_type(column_type: &str) -> bool {
     matches!(base, "geometry" | "geography")
 }
 
+// PostgreSQL database export streams carry only values, not the spatial
+// metadata used by grid exports. Preserve PostGIS's canonical HEXEWKB text
+// behind a marker so normal query decoding cannot turn it into display WKT.
+const POSTGRES_SPATIAL_EXPORT_PREFIX: &str = "DBX_PG_EWKB:";
+
+fn is_postgres_spatial_export_type(column_type: &str) -> bool {
+    // Catalog array types may include a scalar typmod before the array suffix.
+    // Their text representation is an array literal, not a single HEXEWKB value.
+    if column_type.trim_end().ends_with("[]") {
+        return false;
+    }
+    let mut quoted = false;
+    let mut start = 0;
+    let mut end = column_type.len();
+    for (index, ch) in column_type.char_indices() {
+        match ch {
+            '"' => quoted = !quoted,
+            '.' if !quoted => start = index + 1,
+            '(' if !quoted => {
+                end = index;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let name = column_type[start..end].trim();
+    if let Some(name) = name.strip_prefix('"').and_then(|name| name.strip_suffix('"')) {
+        matches!(name, "geometry" | "geography")
+    } else {
+        name.eq_ignore_ascii_case("geometry") || name.eq_ignore_ascii_case("geography")
+    }
+}
+
+fn postgres_spatial_export_hex<'a>(
+    value: &'a Value,
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+) -> Result<Option<&'a str>, String> {
+    if database_type != Some(DatabaseType::Postgres) || !column_type.is_some_and(is_postgres_spatial_export_type) {
+        return Ok(None);
+    }
+    let Some(hex) = value.as_str().and_then(|text| text.strip_prefix(POSTGRES_SPATIAL_EXPORT_PREFIX)) else {
+        return Ok(None);
+    };
+    if hex.is_empty() || hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Invalid PostgreSQL spatial export value: expected hexadecimal EWKB".to_string());
+    }
+    // Do not use the display WKB decoder to validate/re-encode: PostGIS also
+    // supports curves and surfaces that the preview decoder does not support.
+    Ok(Some(hex))
+}
+
 /// Xugu returns spatial values as readable WKT/EWKT text. Plain WKT is
 /// accepted by the server, but it cannot carry a non-zero SRID; database
 /// exports therefore select EWKT and replay it through the Xugu constructor.
@@ -1724,7 +1776,12 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
             } else {
                 value
             };
-            let literal = if insert_dialect == SqlInsertDialect::Standard {
+            let literal = if let Some(hex) = postgres_spatial_export_hex(value, options.database_type, column_type)? {
+                // PostGIS accepts canonical HEXEWKB for both geometry and
+                // geography. A literal also works in Standard SQL mode and
+                // does not depend on the extension's schema/search_path.
+                quote_standard_export_sql_string(hex)
+            } else if insert_dialect == SqlInsertDialect::Standard {
                 format_standard_sql_literal(value, options.database_type)
             } else if let Some(literal) =
                 crate::data_grid_sql::format_oracle_lob_export_literal(value, options.database_type, column_type)?
@@ -3078,6 +3135,19 @@ fn database_export_select_list(columns: &[String], column_types: &[Option<String
                 && column_types.get(index).and_then(|value| value.as_deref()).is_some_and(is_mysql_spatial_export_type)
             {
                 mysql_spatial_export_marker_expression(column)
+            } else if *db_type == DatabaseType::Postgres
+                && column_types
+                    .get(index)
+                    .and_then(|value| value.as_deref())
+                    .is_some_and(is_postgres_spatial_export_type)
+            {
+                let quoted = quote_identifier(column, db_type);
+                // PostGIS's text output is HEXEWKB, including SRID and Z/M.
+                // The text cast needs no extension function or type lookup.
+                // Do not alias this expression to the source column: ORDER BY
+                // would then sort the hex text instead of the spatial key used
+                // by WHERE. Export writers use catalog names and positional rows.
+                format!("'{POSTGRES_SPATIAL_EXPORT_PREFIX}' || {quoted}::text")
             } else if *db_type == DatabaseType::Xugu
                 && column_types
                     .get(index)
@@ -5014,8 +5084,17 @@ async fn export_database_sql_core_inner(
                         total_rows_exported += row_count as u64;
                         if use_keyset {
                             if let Some(last_row) = result.rows.last() {
-                                last_primary_key_values =
-                                    primary_key_indices.iter().map(|&index| last_row[index].clone()).collect();
+                                last_primary_key_values = primary_key_indices
+                                    .iter()
+                                    .map(|&index| {
+                                        let value = &last_row[index];
+                                        let column_type = col_types.get(index).and_then(|value| value.as_deref());
+                                        // Keep the internal marker out of the next WHERE boundary.
+                                        // A spatial key compares using the original canonical value.
+                                        Ok(postgres_spatial_export_hex(value, Some(db_type), column_type)?
+                                            .map_or_else(|| value.clone(), |hex| Value::String(hex.to_string())))
+                                    })
+                                    .collect::<Result<Vec<_>, String>>()?;
                             }
                         } else {
                             offset += row_count as u64;
@@ -6535,6 +6614,112 @@ mod tests {
         ));
         assert!(sql.contains("WHERE `id` > 7"), "sql: {sql}");
         assert!(sql.contains("ORDER BY `id` ASC LIMIT 1000"), "sql: {sql}");
+    }
+
+    #[test]
+    fn postgres_spatial_export_type_preserves_quoted_identifier_boundaries() {
+        for data_type in
+            ["geometry", "GEOGRAPHY(Point,4326)", "spatial.geometry", "\"spatial.schema(1)\".\"geometry\"(PointZ,4326)"]
+        {
+            assert!(super::is_postgres_spatial_export_type(data_type), "{data_type}");
+        }
+        for data_type in [
+            "text",
+            "geometry[]",
+            "geometry(Point,4326)[]",
+            "geography(Point,4326)[]",
+            "\"spatial\".\"geometry\"(PointZ,4326)[]",
+            "\"fake.geometry\"",
+            "spatial.\"fake.geometry\"",
+            "\"GEOMETRY\"",
+        ] {
+            assert!(!super::is_postgres_spatial_export_type(data_type), "{data_type}");
+        }
+    }
+
+    #[test]
+    fn postgres_spatial_database_export_preserves_canonical_ewkb_in_both_dialects() {
+        let hex = "0101000020E6100000000000000000F03F0000000000000040";
+        for dialect in [SqlInsertDialect::Source, SqlInsertDialect::Standard] {
+            let mut output = Vec::new();
+            super::write_database_export_rows_with_mode(
+                &mut output,
+                &[vec![json!(format!("DBX_PG_EWKB:{hex}")), Value::Null, json!("DBX_PG_EWKB:not geometry")]],
+                &["shape".into(), "location".into(), "label".into()],
+                &[Some("geometry(Point,4326)".into()), Some("geography".into()), Some("text".into())],
+                &[],
+                "places",
+                "public",
+                &DatabaseType::Postgres,
+                dialect,
+                Default::default(),
+                false,
+                None,
+            )
+            .unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains(&format!("VALUES ('{hex}', NULL, 'DBX_PG_EWKB:not geometry');")), "{output}");
+        }
+    }
+
+    #[test]
+    fn postgres_spatial_database_export_rejects_corrupt_internal_values() {
+        for value in ["DBX_PG_EWKB:", "DBX_PG_EWKB:0", "DBX_PG_EWKB:xx", "DBX_PG_EWKB:00');--"] {
+            let mut output = Vec::new();
+            let error = write_database_export_rows(
+                &mut output,
+                &[vec![json!(value)]],
+                &["shape".into()],
+                &[Some("geometry".into())],
+                &[],
+                "places",
+                "public",
+                &DatabaseType::Postgres,
+                SqlInsertDialect::Source,
+            )
+            .unwrap_err();
+            assert!(error.contains("expected hexadecimal EWKB"));
+            assert!(output.is_empty());
+        }
+        let marker = json!("DBX_PG_EWKB:0101000000000000000000F03F0000000000000040");
+        for (db, column_type) in [
+            (Some(DatabaseType::Mysql), Some("geometry")),
+            (Some(DatabaseType::Xugu), Some("geometry")),
+            (Some(DatabaseType::Postgres), Some("text")),
+            (Some(DatabaseType::Postgres), Some("geometry(Point,4326)[]")),
+            (Some(DatabaseType::Postgres), Some("geography(Point,4326)[]")),
+            (Some(DatabaseType::Postgres), None),
+            (None, Some("geometry")),
+        ] {
+            assert!(super::postgres_spatial_export_hex(&marker, db, column_type).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn postgres_spatial_export_projection_handles_qualified_types_and_quoted_identifiers() {
+        let columns = vec!["id".into(), "shape\"quoted".into(), "location".into(), "label".into()];
+        let types = vec![
+            Some("int".into()),
+            Some("\"spatial\".\"geometry\"(PointZ,4326)".into()),
+            Some("spatial.geography".into()),
+            Some("text".into()),
+        ];
+        let sql = database_export_select_sql(&columns, &types, "places", "public", &DatabaseType::Postgres);
+        assert_eq!(sql, "SELECT \"id\", 'DBX_PG_EWKB:' || \"shape\"\"quoted\"::text, 'DBX_PG_EWKB:' || \"location\"::text, \"label\" FROM \"public\".\"places\"");
+        let paged = crate::transfer::keyset_pagination_sql_with_identifier_quote(
+            &columns,
+            "places",
+            "public",
+            &DatabaseType::Postgres,
+            &["id".into()],
+            &[json!(7)],
+            2,
+            None,
+        );
+        let rewritten = replace_database_export_select_list(paged, &columns, &types, &DatabaseType::Postgres);
+        assert!(rewritten.contains("WHERE \"id\" > 7"), "{rewritten}");
+        assert!(rewritten.contains("ORDER BY \"id\" ASC LIMIT 2"), "{rewritten}");
+        assert!(rewritten.contains("'DBX_PG_EWKB:' || \"location\"::text"));
     }
 
     #[test]

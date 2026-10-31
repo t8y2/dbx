@@ -2665,6 +2665,9 @@ async function persistSettings() {
     sidebar_table_page_size: editSidebarTablePageSize.value,
   });
   editMetadataCacheMaxMemoryMb.value = settingsStore.desktopSettings.metadata_cache_max_memory_mb;
+  // 同理：≤0 会被 normalizeDesktopSettings 回退默认值，回填草稿避免 hasChanges() 粘住
+  // （与 #9881 快捷键 / #13233 超时同一类）。
+  editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
   desktopCloseBehaviorResetPending.value = false;
   hasImportedSettingsPendingApply.value = false;
   if (sidebarObjectDisplayChanged) {

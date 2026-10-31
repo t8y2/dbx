@@ -1019,6 +1019,13 @@ describe("normalizeDesktopSettings", () => {
     expect(normalizeDesktopSettings({ metadata_cache_max_memory_mb: 513 }).metadata_cache_max_memory_mb).toBe(64);
   });
 
+  it("falls back non-positive sidebar table page sizes to the default", () => {
+    expect(normalizeDesktopSettings({}).sidebar_table_page_size).toBe(1000);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: 500 }).sidebar_table_page_size).toBe(500);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: 0 }).sidebar_table_page_size).toBe(1000);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: -10 }).sidebar_table_page_size).toBe(1000);
+  });
+
   it("defaults DuckDB worker process isolation to disabled for old settings", () => {
     expect(normalizeDesktopSettings({}).duckdb_worker_process_isolation).toBe(false);
   });

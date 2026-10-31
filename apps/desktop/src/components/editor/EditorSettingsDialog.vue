@@ -247,6 +247,8 @@ import {
   SNIPPET_AUTO_UPLOAD_CONFIG_CHANGED_EVENT,
   SNIPPET_LAST_UPLOAD_CHANGED_EVENT,
   writeSnippetAutoUploadFields,
+  readSnippetSyncSecretPreferences,
+  writeSnippetSyncSecretPreferences,
   writeSnippetLastSuccessfulUpload,
   writeSnippetAutoUploadSelection,
   writeSnippetRemoteContentHash,
@@ -5436,8 +5438,9 @@ const snippetAutoUploadIntervalHint = computed(() => {
   return t("settings.syncAutoUploadScheduleHint", { interval: formatted.interval });
 });
 const snippetSecretsPassphrase = ref("");
-const snippetIncludeSecrets = ref(false);
-const snippetRestoreSecrets = ref(false);
+const initialSnippetSecretPreferences = readSnippetSyncSecretPreferences(snippetProvider.value, activeSnippetInstanceUrl.value);
+const snippetIncludeSecrets = ref(initialSnippetSecretPreferences.includeSecrets);
+const snippetRestoreSecrets = ref(initialSnippetSecretPreferences.restoreSecrets);
 const snippetBusy = ref<"" | "test" | "upload" | "download" | "migrate" | "cleanup">("");
 const snippetMessage = ref("");
 const snippetError = ref(false);
@@ -5607,7 +5610,7 @@ function commitSnippetInstance() {
   if (snippetInstanceUrl.value === activeSnippetInstanceUrl.value) return;
   activeSnippetInstanceUrl.value = snippetInstanceUrl.value;
   localStorage.setItem("dbx-gitlab-instance-url", activeSnippetInstanceUrl.value);
-  syncSnippetAutoUploadPreference();
+  syncSnippetPreferences();
   window.dispatchEvent(new Event(SNIPPET_AUTO_UPLOAD_CONFIG_CHANGED_EVENT));
   snippetRememberToken.value = localStorage.getItem(snippetPreferenceKey()) === "true";
   snippetRememberPassphrase.value = localStorage.getItem(snippetPassphrasePreferenceKey()) === "true";
@@ -5691,10 +5694,13 @@ async function clearSnippetSavedPassphrase() {
   }
 }
 
-function syncSnippetAutoUploadPreference() {
+function syncSnippetPreferences() {
   const config = readSnippetAutoUploadConfig();
   snippetAutoUploadEnabled.value = config.enabled;
   snippetAutoUploadIntervalMinutes.value = config.intervalMinutes;
+  const secretPreferences = readSnippetSyncSecretPreferences(snippetProvider.value, activeSnippetInstanceUrl.value);
+  snippetIncludeSecrets.value = secretPreferences.includeSecrets;
+  snippetRestoreSecrets.value = secretPreferences.restoreSecrets;
 }
 
 async function runSnippetAction(kind: "test" | "upload" | "download" | "migrate" | "cleanup", action: () => Promise<string>, persistCurrentSnippetId = true) {
@@ -6191,7 +6197,7 @@ watch(
       snippetToken.value = "";
       snippetPassphrase.value = "";
       webdavSecretsPassphrase.value = "";
-      syncSnippetAutoUploadPreference();
+      syncSnippetPreferences();
       await refreshWebDavPasswordStatus();
       await refreshWebDavSyncSecretsStatus();
       await refreshSnippetTokenStatus();
@@ -6292,6 +6298,9 @@ watch(snippetRememberPassphrase, async (remember) => {
     }
   }
 });
+watch([snippetIncludeSecrets, snippetRestoreSecrets], () => {
+  writeSnippetSyncSecretPreferences(snippetProvider.value, activeSnippetInstanceUrl.value, { includeSecrets: snippetIncludeSecrets.value, restoreSecrets: snippetRestoreSecrets.value });
+});
 watch([snippetAutoUploadEnabled, snippetAutoUploadIntervalMinutes], () => {
   snippetAutoUploadIntervalMinutes.value = normalizedSnippetAutoUploadInterval(snippetAutoUploadIntervalMinutes.value);
   const persisted = readSnippetAutoUploadConfig();
@@ -6314,7 +6323,7 @@ watch(snippetProvider, (provider) => {
   void refreshSnippetTokenStatus();
   void refreshSnippetPassphraseStatus();
   void refreshSnippetSyncSettings(provider);
-  syncSnippetAutoUploadPreference();
+  syncSnippetPreferences();
   window.dispatchEvent(new Event(SNIPPET_AUTO_UPLOAD_CONFIG_CHANGED_EVENT));
 });
 
@@ -6364,8 +6373,8 @@ watch(
 );
 
 onMounted(() => {
-  syncSnippetAutoUploadPreference();
-  window.addEventListener(SNIPPET_AUTO_UPLOAD_CONFIG_CHANGED_EVENT, syncSnippetAutoUploadPreference);
+  syncSnippetPreferences();
+  window.addEventListener(SNIPPET_AUTO_UPLOAD_CONFIG_CHANGED_EVENT, syncSnippetPreferences);
   window.addEventListener("blur", modifierDoubleTapRecorder.reset);
   document.addEventListener("visibilitychange", modifierDoubleTapRecorder.reset);
   window.addEventListener("pointerdown", modifierDoubleTapRecorder.cancel, true);
@@ -6385,7 +6394,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-  window.removeEventListener(SNIPPET_AUTO_UPLOAD_CONFIG_CHANGED_EVENT, syncSnippetAutoUploadPreference);
+  window.removeEventListener(SNIPPET_AUTO_UPLOAD_CONFIG_CHANGED_EVENT, syncSnippetPreferences);
   window.removeEventListener("blur", modifierDoubleTapRecorder.reset);
   document.removeEventListener("visibilitychange", modifierDoubleTapRecorder.reset);
   window.removeEventListener("pointerdown", modifierDoubleTapRecorder.cancel, true);

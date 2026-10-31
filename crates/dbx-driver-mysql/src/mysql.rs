@@ -7612,10 +7612,16 @@ fn skip_sql_whitespace_and_comments(bytes: &[u8], mut i: usize) -> usize {
     }
 }
 
-fn mysql_list_indexes_sql(database: &str, table: &str, include_expression: bool) -> String {
+fn mysql_list_indexes_sql(
+    database: &str,
+    table: &str,
+    include_expression: bool,
+    include_index_comment: bool,
+) -> String {
     let expression_column = if include_expression { "EXPRESSION, " } else { "" };
+    let comment_column = if include_index_comment { ", INDEX_COMMENT" } else { "" };
     format!(
-        "SELECT INDEX_NAME, COLUMN_NAME, {expression_column}SEQ_IN_INDEX, NON_UNIQUE, INDEX_TYPE, INDEX_COMMENT \
+        "SELECT INDEX_NAME, COLUMN_NAME, {expression_column}SEQ_IN_INDEX, NON_UNIQUE, INDEX_TYPE{comment_column} \
          FROM information_schema.STATISTICS \
          WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
          ORDER BY INDEX_NAME, SEQ_IN_INDEX",
@@ -7643,65 +7649,85 @@ fn mysql_statistics_expression_is_unsupported(error: &mysql_async::Error) -> boo
 
 pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
     let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
-    let expression_sql = mysql_list_indexes_sql(database, table, true);
-    let legacy_sql = mysql_list_indexes_sql(database, table, false);
-    let (result, include_expression) = match conn.query_iter(&expression_sql).await {
-        Ok(result) => (result, true),
-        Err(error) if mysql_statistics_expression_is_unsupported(&error) => {
-            // MySQL 5.7 and older compatible servers do not expose EXPRESSION; keep the legacy metadata path.
-            log::debug!("MySQL index expressions are unavailable, retrying without EXPRESSION: {error}");
-            (conn.query_iter(&legacy_sql).await.map_err(|e| e.to_string())?, false)
-        }
-        Err(error) => return Err(error.to_string()),
-    };
-    let mut indexes = Vec::new();
-    let mut index_positions = HashMap::new();
-
-    result
-        .for_each_and_drop(|row| {
-            let name = get_str_by_name(&row, "INDEX_NAME");
-            let index_position = if let Some(index_position) = index_positions.get(&name) {
-                *index_position
-            } else {
-                let index_position = indexes.len();
-                index_positions.insert(name.clone(), index_position);
-                indexes.push(IndexInfo {
-                    owner: None,
-                    key_directions: Vec::new(),
-                    visibility: None,
-                    key_metadata_complete: false,
-                    name: name.clone(),
-                    columns: Vec::new(),
-                    is_unique: get_opt_i32(&row, "NON_UNIQUE").unwrap_or(1) == 0,
-                    is_primary: name == "PRIMARY",
-                    filter: None,
-                    index_type: Some(get_str_by_name(&row, "INDEX_TYPE")),
-                    included_columns: None,
-                    comment: get_opt_str(&row, "INDEX_COMMENT").filter(|value| !value.is_empty()),
-                    key_is_expression: Vec::new(),
-                    column_opclasses: vec![],
-                    key_options: Vec::new(),
-                    constraint_backed: false,
-                });
-                index_position
-            };
-
-            let index_part = if include_expression {
-                get_opt_str(&row, "EXPRESSION")
-                    .filter(|value| !value.trim().is_empty())
-                    .map(|expression| format!("({})", expression.trim()))
-                    .or_else(|| get_opt_str(&row, "COLUMN_NAME").filter(|value| !value.is_empty()))
-            } else {
-                get_opt_str(&row, "COLUMN_NAME").filter(|value| !value.is_empty())
-            };
-            if let Some(index_part) = index_part {
-                indexes[index_position].columns.push(index_part);
+    // Column sets shrink in steps: MySQL 8+ carries both EXPRESSION and
+    // INDEX_COMMENT, 5.5–5.7 lost EXPRESSION, and 5.0/5.1 also lack
+    // INDEX_COMMENT — each gap reports ER_BAD_FIELD_ERROR (1054), so the
+    // query walks down the ladder until the server accepts it (#14021).
+    let column_sets = [(true, true), (false, true), (false, false)];
+    let mut last_unsupported_error: Option<mysql_async::Error> = None;
+    for (with_expression, with_comment) in column_sets {
+        let sql = mysql_list_indexes_sql(database, table, with_expression, with_comment);
+        let result = match conn.query_iter(&sql).await {
+            Ok(result) => result,
+            Err(error) if mysql_statistics_expression_is_unsupported(&error) => {
+                log::debug!(
+                    "MySQL STATISTICS columns are unavailable (expression={with_expression}, comment={with_comment}), retrying with a smaller column set: {error}"
+                );
+                last_unsupported_error = Some(error);
+                continue;
             }
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+            Err(error) => return Err(error.to_string()),
+        };
+        let include_expression = with_expression;
+        let include_index_comment = with_comment;
+        let mut indexes = Vec::new();
+        let mut index_positions = HashMap::new();
 
-    Ok(indexes)
+        result
+            .for_each_and_drop(|row| {
+                let name = get_str_by_name(&row, "INDEX_NAME");
+                let index_position = if let Some(index_position) = index_positions.get(&name) {
+                    *index_position
+                } else {
+                    let index_position = indexes.len();
+                    index_positions.insert(name.clone(), index_position);
+                    indexes.push(IndexInfo {
+                        owner: None,
+                        key_directions: Vec::new(),
+                        visibility: None,
+                        key_metadata_complete: false,
+                        name: name.clone(),
+                        columns: Vec::new(),
+                        is_unique: get_opt_i32(&row, "NON_UNIQUE").unwrap_or(1) == 0,
+                        is_primary: name == "PRIMARY",
+                        filter: None,
+                        index_type: Some(get_str_by_name(&row, "INDEX_TYPE")),
+                        included_columns: None,
+                        comment: if include_index_comment {
+                            get_opt_str(&row, "INDEX_COMMENT").filter(|value| !value.is_empty())
+                        } else {
+                            // MySQL 5.0/5.1 STATISTICS has no INDEX_COMMENT column (#14021).
+                            None
+                        },
+                        key_is_expression: Vec::new(),
+                        column_opclasses: vec![],
+                        key_options: Vec::new(),
+                        constraint_backed: false,
+                    });
+                    index_position
+                };
+
+                let index_part = if include_expression {
+                    get_opt_str(&row, "EXPRESSION")
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|expression| format!("({})", expression.trim()))
+                        .or_else(|| get_opt_str(&row, "COLUMN_NAME").filter(|value| !value.is_empty()))
+                } else {
+                    get_opt_str(&row, "COLUMN_NAME").filter(|value| !value.is_empty())
+                };
+                if let Some(index_part) = index_part {
+                    indexes[index_position].columns.push(index_part);
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        return Ok(indexes);
+    }
+    Err(match last_unsupported_error {
+        Some(error) => error.to_string(),
+        None => "MySQL STATISTICS metadata query failed on every known column set".to_string(),
+    })
 }
 
 pub async fn show_create_table_ddl(pool: &MySqlPool, database: &str, table: &str) -> Result<String, String> {
@@ -10693,12 +10719,25 @@ mod tests {
 
     #[test]
     fn mysql_index_metadata_query_has_expression_compatibility_fallback() {
-        let with_expression = mysql_list_indexes_sql("db", "users", true);
+        let with_expression = mysql_list_indexes_sql("db", "users", true, true);
         assert!(with_expression.contains("EXPRESSION, SEQ_IN_INDEX"));
+        assert!(with_expression.contains("INDEX_COMMENT"));
 
-        let without_expression = mysql_list_indexes_sql("db", "users", false);
+        let without_expression = mysql_list_indexes_sql("db", "users", false, true);
         assert!(!without_expression.contains("EXPRESSION"));
+        assert!(without_expression.contains("INDEX_COMMENT"));
         assert!(without_expression.contains("ORDER BY INDEX_NAME, SEQ_IN_INDEX"));
+    }
+
+    #[test]
+    fn mysql_index_metadata_query_has_minimal_column_set_for_mysql_5_0() {
+        // MySQL 5.0/5.1 STATISTICS predates both EXPRESSION (8.0) and
+        // INDEX_COMMENT (5.5); the minimal set must select neither (#14021).
+        let minimal = mysql_list_indexes_sql("db", "users", false, false);
+        assert!(!minimal.contains("EXPRESSION"));
+        assert!(!minimal.contains("INDEX_COMMENT"));
+        assert!(minimal.contains("INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE, INDEX_TYPE"));
+        assert!(minimal.contains("ORDER BY INDEX_NAME, SEQ_IN_INDEX"));
     }
 
     #[test]

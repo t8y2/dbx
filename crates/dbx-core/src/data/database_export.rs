@@ -9450,6 +9450,48 @@ mod tests {
     // the local root filesystem, and the backup would "succeed" while writing
     // to the wrong disk.
 
+    // #14007 review: `omit_database_qualifier` only strips the `db.` qualifier
+    // from the generated INSERT statements — it must not touch anything else
+    // (in particular a `USE` preamble written by the export preamble stays
+    // authoritative), and it applies to MySQL-family tables only.
+    #[tokio::test]
+    async fn omit_database_qualifier_strips_only_insert_qualifiers() {
+        let sql = build_database_sql_export(BuildDatabaseSqlExportOptions {
+            database_name: "shop".to_string(),
+            exported_at: None,
+            tables: vec![ExportedTableSql {
+                display_name: "orders".to_string(),
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: Some("`".to_string()),
+                schema: None,
+                table_name: Some("orders".to_string()),
+                qualified_table_name: Some("`shop`.`orders`".to_string()),
+                ddl: Some("CREATE TABLE `orders` (`id` INT);".to_string()),
+                columns: vec!["id".to_string()],
+                column_types: vec![Some("int".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!(1)]],
+                truncated: false,
+            }],
+            row_limit_per_table: None,
+            insert_batch_size: None,
+            insert_dialect: SqlInsertDialect::Source,
+            connection_id: None,
+            database: Some("shop".to_string()),
+            schema: None,
+            omit_auto_increment: false,
+            omit_database_qualifier: true,
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert!(sql.contains("INSERT INTO `orders`"), "INSERT loses the db. qualifier: {sql}");
+        assert!(!sql.contains("`shop`.`orders`"), "no qualified INSERT target may remain: {sql}");
+        assert!(sql.contains("CREATE TABLE `orders`"), "DDL keeps its original form: {sql}");
+    }
+
     #[tokio::test]
     async fn ensure_export_destination_dir_creates_a_never_before_seen_local_directory() {
         let scratch = std::env::temp_dir().join(format!("dbx-export-dest-new-{}", uuid::Uuid::new_v4()));

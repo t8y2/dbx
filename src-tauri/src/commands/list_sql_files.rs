@@ -170,11 +170,18 @@ fn managed_directory(root_path: &str, directory_path: &str) -> Result<PathBuf, S
 
 fn managed_file(root_path: &str, file_path: &str) -> Result<PathBuf, String> {
     let root = canonical_directory(Path::new(root_path), "SQL root folder")?;
-    let file = std::fs::canonicalize(file_path).map_err(|error| format!("Failed to resolve file: {error}"))?;
-    if !file.starts_with(&root) {
+    let path = Path::new(file_path);
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let parent = canonical_directory(parent, "SQL file parent folder")?;
+    if !parent.starts_with(&root) {
         return Err("File is outside the opened root folder".to_string());
     }
-    if !file.is_file() {
+    // Resolve the parent only: renaming/deleting a file link must affect the
+    // selected entry, while files reached through an outside folder stay blocked.
+    let file_name = path.file_name().ok_or_else(|| "Failed to resolve SQL file name".to_string())?;
+    let file = parent.join(file_name);
+    let metadata = std::fs::metadata(&file).map_err(|error| format!("Failed to inspect SQL file: {error}"))?;
+    if !metadata.is_file() {
         return Err("Only files can be managed here".to_string());
     }
     Ok(file)
@@ -248,8 +255,8 @@ fn scan_sql_files_with_diagnostics(
         return vec![];
     }
 
-    // Canonicalize only the top-level folder once per scan to guard against
-    // symlink loops; doing it for every subdir doubled the stat cost.
+    // Track the current ancestry to stop symlink loops while allowing multiple
+    // display paths to the same directory to retain their own children.
     let canonical = std::fs::canonicalize(dir).ok();
     if let Some(ref c) = canonical {
         let c_str = c.to_string_lossy().to_string();
@@ -268,6 +275,9 @@ fn scan_sql_files_with_diagnostics(
                     reason: "unreadable".to_string(),
                 });
             }
+            if let Some(ref canonical) = canonical {
+                visited.remove(canonical.to_string_lossy().as_ref());
+            }
             return entries;
         }
     };
@@ -285,7 +295,14 @@ fn scan_sql_files_with_diagnostics(
                 continue;
             }
         };
-        let file_type = match entry.file_type() {
+        let path = entry.path();
+        let file_type = match entry.file_type().and_then(|file_type| {
+            if file_type.is_symlink() {
+                std::fs::metadata(&path).map(|metadata| metadata.file_type())
+            } else {
+                Ok(file_type)
+            }
+        }) {
             Ok(ft) => ft,
             Err(_) => {
                 if let Some(skipped) = skipped_files.as_deref_mut() {
@@ -297,7 +314,6 @@ fn scan_sql_files_with_diagnostics(
                 continue;
             }
         };
-        let path = entry.path();
         let name = match path.file_name().and_then(|n| n.to_str()) {
             Some(name) => name.to_string(),
             None => continue,
@@ -336,6 +352,9 @@ fn scan_sql_files_with_diagnostics(
         }
     });
 
+    if let Some(ref canonical) = canonical {
+        visited.remove(canonical.to_string_lossy().as_ref());
+    }
     entries
 }
 
@@ -478,16 +497,12 @@ fn search_sql_text(path: String, text: &str, query: &str, remaining_matches: &mu
     result
 }
 
-fn read_sql_search_file(root: &Path, path: &Path) -> Result<String, &'static str> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| "unreadable")?;
+fn read_sql_search_file(path: &Path) -> Result<String, &'static str> {
+    let metadata = std::fs::metadata(path).map_err(|_| "unreadable")?;
     if !metadata.file_type().is_file() {
         return Err("notRegularFile");
     }
-    let canonical = std::fs::canonicalize(path).map_err(|_| "unreadable")?;
-    if !canonical.starts_with(root) {
-        return Err("outsideRoot");
-    }
-    let file = std::fs::File::open(&canonical).map_err(|_| "unreadable")?;
+    let file = std::fs::File::open(path).map_err(|_| "unreadable")?;
     let metadata = file.metadata().map_err(|_| "unreadable")?;
     if !metadata.is_file() {
         return Err("notRegularFile");
@@ -505,7 +520,6 @@ fn read_sql_search_file(root: &Path, path: &Path) -> Result<String, &'static str
 
 fn search_sql_entries(
     entries: Vec<SqlFileEntry>,
-    root: &Path,
     query: &str,
     visited_files: &mut HashSet<String>,
     remaining_matches: &mut usize,
@@ -513,7 +527,7 @@ fn search_sql_entries(
 ) {
     for entry in entries {
         if entry.is_dir {
-            search_sql_entries(entry.children, root, query, visited_files, remaining_matches, result);
+            search_sql_entries(entry.children, query, visited_files, remaining_matches, result);
             continue;
         }
         // Preserve the same display-path identities as the tree, including on
@@ -521,7 +535,9 @@ fn search_sql_entries(
         if !visited_files.insert(entry.path.clone()) {
             continue;
         }
-        match read_sql_search_file(root, Path::new(&entry.path)) {
+        // Candidates come only from the bounded tree scan. Follow links just
+        // as opening a tree entry does, retaining its display path in results.
+        match read_sql_search_file(Path::new(&entry.path)) {
             Ok(text) => {
                 let file = search_sql_text(entry.path, &text, query, remaining_matches);
                 if file.total_matches > 0 {
@@ -552,13 +568,10 @@ pub async fn search_sql_file_contents(
         let mut visited_files = HashSet::new();
         let mut remaining_matches = MAX_SEARCH_MATCHES;
         for root in roots {
-            let canonical = match canonical_directory(Path::new(&root), "SQL root folder") {
-                Ok(path) => path,
-                _ => {
-                    result.skipped_files.push(SkippedSqlSearchFile { path: root, reason: "unreadable".to_string() });
-                    continue;
-                }
-            };
+            if canonical_directory(Path::new(&root), "SQL root folder").is_err() {
+                result.skipped_files.push(SkippedSqlSearchFile { path: root, reason: "unreadable".to_string() });
+                continue;
+            }
             let entries = scan_sql_files_with_diagnostics(
                 Path::new(&root),
                 0,
@@ -569,7 +582,7 @@ pub async fn search_sql_file_contents(
             );
             // Even after the preview budget is exhausted, scan every candidate
             // so content-only files remain visible and line counts stay exact.
-            search_sql_entries(entries, &canonical, &query, &mut visited_files, &mut remaining_matches, &mut result);
+            search_sql_entries(entries, &query, &mut visited_files, &mut remaining_matches, &mut result);
         }
         result
     })
@@ -612,12 +625,19 @@ pub async fn rename_sql_file_in_folder(
         let file = managed_file(&root_path, &file_path)?;
         let target =
             file.parent().ok_or_else(|| "Failed to resolve SQL file parent folder".to_string())?.join(&file_name);
-        if target.exists() {
-            let existing = std::fs::canonicalize(&target)
-                .map_err(|error| format!("Failed to resolve SQL file target: {error}"))?;
-            if existing != file {
-                return Err("A SQL file with this name already exists".to_string());
+        match std::fs::symlink_metadata(&target) {
+            Ok(metadata) => {
+                if target == file {
+                    return Ok(display_path);
+                }
+                // Keep case-only file renames, but never replace a link,
+                // including a dangling link or one pointing to the source.
+                if !metadata.file_type().is_file() || std::fs::canonicalize(&target).ok().as_ref() != Some(&file) {
+                    return Err("A SQL file with this name already exists".to_string());
+                }
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Failed to inspect SQL file target: {error}")),
         }
         std::fs::rename(&file, &target).map_err(|error| format!("Failed to rename SQL file: {error}"))?;
         Ok(display_path)
@@ -710,6 +730,99 @@ pub async fn delete_sql_folder_in_folder(root_path: String, folder_path: String)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_link_mutations_preserve_the_link_targets() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!("dbx-sql-file-links-{}", uuid::Uuid::new_v4()));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let root_string = root.to_string_lossy().into_owned();
+        for (label, target, link_target) in [
+            ("inside-relative", root.join("target.sql"), PathBuf::from("target.sql")),
+            ("outside-relative", base.join("target.sql"), PathBuf::from("../target.sql")),
+            ("inside-absolute", root.join("target.sql"), root.join("target.sql")),
+            ("outside-absolute", base.join("target.sql"), base.join("target.sql")),
+        ] {
+            std::fs::write(&target, "SELECT 1;").unwrap();
+            let link = root.join(format!("{label}-link.sql"));
+            symlink(&link_target, &link).unwrap();
+
+            let renamed = rename_sql_file_in_folder(
+                root_string.clone(),
+                link.to_string_lossy().into_owned(),
+                format!("{label}-renamed.sql"),
+            )
+            .await
+            .unwrap();
+            assert!(std::fs::symlink_metadata(&renamed).unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read_link(&renamed).unwrap(), link_target);
+            assert!(std::fs::symlink_metadata(&link).is_err());
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "SELECT 1;");
+
+            delete_sql_file_in_folder(root_string.clone(), renamed.clone()).await.unwrap();
+            assert!(std::fs::symlink_metadata(&renamed).is_err());
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "SELECT 1;");
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_renames_do_not_replace_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("dbx-sql-file-link-target-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.sql");
+        std::fs::write(&source, "SELECT 1;").unwrap();
+        for (name, target) in [("dangling.sql", "missing.sql"), ("alias.sql", "source.sql")] {
+            let link = root.join(name);
+            symlink(target, &link).unwrap();
+            let result = rename_sql_file_in_folder(
+                root.to_string_lossy().into_owned(),
+                source.to_string_lossy().into_owned(),
+                name.to_string(),
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(std::fs::read_link(&link).unwrap(), Path::new(target));
+            assert_eq!(std::fs::read_to_string(&source).unwrap(), "SELECT 1;");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn linked_directories_keep_file_management_within_the_root() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!("dbx-sql-folder-link-manage-{}", uuid::Uuid::new_v4()));
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("target.sql"), "SELECT 1;").unwrap();
+        let link = root.join("linked");
+        symlink(&outside, &link).unwrap();
+        let root_string = root.to_string_lossy().into_owned();
+        let link_string = link.to_string_lossy().into_owned();
+        let file_string = link.join("target.sql").to_string_lossy().into_owned();
+
+        assert!(create_sql_file_in_folder(root_string.clone(), link_string.clone(), "new.sql".into()).await.is_err());
+        assert!(rename_sql_file_in_folder(root_string.clone(), file_string.clone(), "renamed.sql".into())
+            .await
+            .is_err());
+        assert!(delete_sql_file_in_folder(root_string.clone(), file_string).await.is_err());
+        assert!(rename_sql_folder_in_folder(root_string.clone(), link_string.clone(), "renamed".into()).await.is_err());
+        assert!(delete_sql_folder_in_folder(root_string, link_string).await.is_err());
+        assert_eq!(std::fs::read_to_string(outside.join("target.sql")).unwrap(), "SELECT 1;");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn content_search_groups_matching_lines_and_uses_utf16_editor_columns() {
@@ -849,6 +962,137 @@ mod tests {
 
         assert_eq!(names, vec!["query.sql", "script.sh", "tool.py"]);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn relative_file_paths(root: &Path, entries: &[SqlFileEntry]) -> Vec<String> {
+        fn collect(root: &Path, entries: &[SqlFileEntry], paths: &mut Vec<String>) {
+            for entry in entries {
+                if entry.is_dir {
+                    collect(root, &entry.children, paths);
+                } else {
+                    paths.push(Path::new(&entry.path).strip_prefix(root).unwrap().to_string_lossy().into_owned());
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        collect(root, entries, &mut paths);
+        paths.sort();
+        paths
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_sql_files_follows_link_targets_without_losing_directory_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = std::env::temp_dir().join(format!("dbx-sql-links-{}", uuid::Uuid::new_v4()));
+        let root = workspace.join("root");
+        let shared = workspace.join("shared");
+        std::fs::create_dir_all(root.join("inside")).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(root.join("normal.sql"), "SELECT 1;").unwrap();
+        std::fs::write(root.join("inside/internal.sql"), "SELECT 2;").unwrap();
+        std::fs::write(shared.join("linked.sql"), "SELECT 3;").unwrap();
+        symlink("../shared", root.join("relative-folder")).unwrap();
+        symlink(&shared, root.join("absolute-folder")).unwrap();
+        symlink("../shared/linked.sql", root.join("relative-file.sql")).unwrap();
+        symlink(shared.join("linked.sql"), root.join("absolute-file.sql")).unwrap();
+        symlink("inside", root.join("internal-folder")).unwrap();
+        symlink("inside/internal.sql", root.join("internal-file.sql")).unwrap();
+
+        let filter = compile_file_filter(DEFAULT_FILE_FILTER).unwrap();
+        let entries = scan_sql_files_with_directories(&root, 0, &mut HashSet::new(), &filter, true);
+
+        assert_eq!(
+            relative_file_paths(&root, &entries),
+            vec![
+                "absolute-file.sql",
+                "absolute-folder/linked.sql",
+                "inside/internal.sql",
+                "internal-file.sql",
+                "internal-folder/internal.sql",
+                "normal.sql",
+                "relative-file.sql",
+                "relative-folder/linked.sql",
+            ]
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_sql_files_stops_link_cycles_and_skips_broken_and_pruned_links() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = std::env::temp_dir().join(format!("dbx-sql-link-cycles-{}", uuid::Uuid::new_v4()));
+        let root = workspace.join("root");
+        let shared = workspace.join("shared");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(root.join("normal.sql"), "SELECT 1;").unwrap();
+        std::fs::write(root.join("nested/child.sql"), "SELECT 2;").unwrap();
+        std::fs::write(shared.join("excluded.sql"), "SELECT 3;").unwrap();
+        symlink(".", root.join("self")).unwrap();
+        symlink("..", root.join("nested/parent")).unwrap();
+        symlink("missing.sql", root.join("broken.sql")).unwrap();
+        symlink("missing-folder", root.join("broken-folder")).unwrap();
+        symlink(&shared, root.join("node_modules")).unwrap();
+
+        let filter = compile_file_filter(DEFAULT_FILE_FILTER).unwrap();
+        let entries = scan_sql_files_with_directories(&root, 0, &mut HashSet::new(), &filter, true);
+
+        assert_eq!(relative_file_paths(&root, &entries), vec!["nested/child.sql", "normal.sql"]);
+        assert!(!entries
+            .iter()
+            .any(|entry| matches!(entry.name.as_str(), "broken.sql" | "broken-folder" | "node_modules")));
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn content_search_follows_links_and_keeps_tree_display_paths() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = std::env::temp_dir().join(format!("dbx-sql-link-search-{}", uuid::Uuid::new_v4()));
+        let root = workspace.join("root");
+        let shared = workspace.join("shared");
+        std::fs::create_dir_all(root.join("inside")).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(root.join("normal.sql"), "SELECT needle;").unwrap();
+        std::fs::write(root.join("inside/internal.sql"), "SELECT needle;").unwrap();
+        std::fs::write(shared.join("linked.sql"), "SELECT needle;").unwrap();
+        symlink("../shared", root.join("relative-folder")).unwrap();
+        symlink(&shared, root.join("absolute-folder")).unwrap();
+        symlink("../shared/linked.sql", root.join("relative-file.sql")).unwrap();
+        symlink(shared.join("linked.sql"), root.join("absolute-file.sql")).unwrap();
+        symlink("inside", root.join("internal-folder")).unwrap();
+        symlink("normal.sql", root.join("internal-file.sql")).unwrap();
+
+        let result =
+            search_sql_file_contents(vec![root.to_string_lossy().into_owned()], None, "needle".into()).await.unwrap();
+        let mut paths = result
+            .files
+            .iter()
+            .map(|file| Path::new(&file.path).strip_prefix(&root).unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "absolute-file.sql",
+                "absolute-folder/linked.sql",
+                "inside/internal.sql",
+                "internal-file.sql",
+                "internal-folder/internal.sql",
+                "normal.sql",
+                "relative-file.sql",
+                "relative-folder/linked.sql",
+            ]
+        );
+        assert!(result.files.iter().all(|file| file.total_matches == 1));
+        assert!(result.skipped_files.is_empty());
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]

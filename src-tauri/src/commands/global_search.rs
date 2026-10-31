@@ -183,7 +183,7 @@ fn search_root(request: &GlobalSearchRequest, root: &str) -> Vec<GlobalSearchMat
         .git_ignore(respect_ignore_rules)
         .git_global(respect_ignore_rules)
         .git_exclude(respect_ignore_rules)
-        .follow_links(false);
+        .follow_links(true);
     // Depth 0 is the root itself, so callers measure "levels below the root".
     // `None` keeps the historical unbounded walk (Quick Open).
     builder.max_depth(request.max_depth);
@@ -494,5 +494,45 @@ mod tests {
             vec!["deep.sql".to_string(), "top.sql".to_string()]
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn follows_symbolic_links_without_revisiting_ancestors_or_pruned_directories() {
+        use std::os::unix::fs::symlink;
+
+        let base = temp_dir("symlinks");
+        let root = base.join("root");
+        let other = base.join("other");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(root.join("normal.sql"), "SELECT needle;\n").unwrap();
+        std::fs::write(other.join("linked.sql"), "SELECT needle;\n").unwrap();
+        symlink("../other/linked.sql", root.join("relative-file.sql")).unwrap();
+        symlink(other.join("linked.sql"), root.join("absolute-file.sql")).unwrap();
+        symlink("../other", root.join("relative-folder")).unwrap();
+        symlink(&other, root.join("absolute-folder")).unwrap();
+        symlink("../root", other.join("cycle")).unwrap();
+        symlink("../missing.sql", root.join("dangling.sql")).unwrap();
+        symlink("../other", root.join("node_modules")).unwrap();
+
+        let mut request = req(&[root.to_str().unwrap()], "needle");
+        request.extensions = Some(vec!["sql".to_string()]);
+        request.respect_ignore_rules = Some(false);
+        let results = search_root(&request, root.to_str().unwrap());
+        let paths: HashSet<_> = results.iter().map(|result| result.path.clone()).collect();
+        let expected: HashSet<_> = [
+            "normal.sql",
+            "relative-file.sql",
+            "absolute-file.sql",
+            "relative-folder/linked.sql",
+            "absolute-folder/linked.sql",
+        ]
+        .into_iter()
+        .map(|path| root.join(path).to_string_lossy().into_owned())
+        .collect();
+        assert_eq!(paths, expected);
+        assert_eq!(results.len(), expected.len());
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

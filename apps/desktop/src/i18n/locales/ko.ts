@@ -5161,6 +5161,9 @@ export default withEnglishFallback({
     loadMore: "더 불러오기...",
     extensions: "확장",
     eventTriggers: "이벤트 트리거",
+    foreignDataWrappers: "외부 데이터 래퍼",
+    foreignServers: "외부 서버",
+    userMappings: "사용자 매핑",
   },
   eventTrigger: {
     detailsTitle: "이벤트 트리거 세부 정보",
@@ -5172,6 +5175,38 @@ export default withEnglishFallback({
     enabled: "활성화됨",
     tags: "태그",
     definition: "정의",
+  },
+
+  foreignDataWrapper: {
+    detailsTitle: "외부 데이터 래퍼 세부 정보",
+    viewDetails: "세부 정보 보기",
+    name: "이름",
+    owner: "소유자",
+    handler: "핸들러",
+    validator: "유효성 검사기",
+    options: "옵션",
+    definition: "DDL",
+  },
+
+  foreignServer: {
+    detailsTitle: "외부 서버 세부 정보",
+    viewDetails: "세부 정보 보기",
+    name: "이름",
+    owner: "소유자",
+    foreignDataWrapper: "외부 데이터 래퍼",
+    type: "유형",
+    version: "버전",
+    options: "옵션",
+    definition: "DDL",
+  },
+
+  userMapping: {
+    detailsTitle: "사용자 매핑 세부 정보",
+    viewDetails: "세부 정보 보기",
+    userName: "사용자",
+    serverName: "서버",
+    options: "옵션",
+    definition: "DDL",
   },
 
   extension: {

@@ -4614,6 +4614,9 @@ export default withEnglishFallback({
     loadMore: "Muat lebih banyak...",
     extensions: "Ekstensi",
     eventTriggers: "Trigger Event",
+    foreignDataWrappers: "Wrapper Data Eksternal",
+    foreignServers: "Server Eksternal",
+    userMappings: "Pemetaan Pengguna",
   },
   eventTrigger: {
     detailsTitle: "Detail Trigger Event",
@@ -4624,6 +4627,38 @@ export default withEnglishFallback({
     function: "Fungsi",
     enabled: "Diaktifkan",
     tags: "Tag",
+    definition: "Definisi",
+  },
+
+  foreignDataWrapper: {
+    detailsTitle: "Detail Wrapper Data Eksternal",
+    viewDetails: "Lihat detail",
+    name: "Nama",
+    owner: "Pemilik",
+    handler: "Handler",
+    validator: "Validator",
+    options: "Opsi",
+    definition: "Definisi",
+  },
+
+  foreignServer: {
+    detailsTitle: "Detail Server Eksternal",
+    viewDetails: "Lihat detail",
+    name: "Nama",
+    owner: "Pemilik",
+    foreignDataWrapper: "Wrapper Data Eksternal",
+    type: "Tipe",
+    version: "Versi",
+    options: "Opsi",
+    definition: "Definisi",
+  },
+
+  userMapping: {
+    detailsTitle: "Detail Pemetaan Pengguna",
+    viewDetails: "Lihat detail",
+    userName: "Pengguna",
+    serverName: "Server",
+    options: "Opsi",
     definition: "Definisi",
   },
 

@@ -4270,6 +4270,9 @@ export default withEnglishFallback({
     loadMore: "Daha çox yüklə...",
     extensions: "Genişləndirmələr",
     eventTriggers: "Hadisə tetikleyiciləri",
+    foreignDataWrappers: "Xarici məlumat sarmalayıcıları",
+    foreignServers: "Xarici serverlər",
+    userMappings: "İstifadəçi xəritələndirmələri",
   },
   eventTrigger: {
     detailsTitle: "Hadisə tetikleyicisi detalı",
@@ -4281,6 +4284,38 @@ export default withEnglishFallback({
     enabled: "Aktiv",
     tags: "Etiketlər",
     definition: "Tərif",
+  },
+
+  foreignDataWrapper: {
+    detailsTitle: "Xarici məlumat sarmalayıcısı detalı",
+    viewDetails: "Detalları gör",
+    name: "Ad",
+    owner: "Sahib",
+    handler: "İşləyici",
+    validator: "Yoxlayıcı",
+    options: "Seçimlər",
+    definition: "DDL",
+  },
+
+  foreignServer: {
+    detailsTitle: "Xarici server detalı",
+    viewDetails: "Detalları gör",
+    name: "Ad",
+    owner: "Sahib",
+    foreignDataWrapper: "Xarici məlumat sarmalayıcısı",
+    type: "Növ",
+    version: "Versiya",
+    options: "Seçimlər",
+    definition: "DDL",
+  },
+
+  userMapping: {
+    detailsTitle: "İstifadəçi xəritələndirməsi detalı",
+    viewDetails: "Detalları gör",
+    userName: "İstifadəçi",
+    serverName: "Server",
+    options: "Seçimlər",
+    definition: "DDL",
   },
 
   extension: {

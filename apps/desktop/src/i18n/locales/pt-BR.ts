@@ -5224,6 +5224,9 @@ export default withEnglishFallback({
     loadMore: "Carregar mais...",
     extensions: "Extensões",
     eventTriggers: "Gatilhos de evento",
+    foreignDataWrappers: "Empacotadores de dados externos",
+    foreignServers: "Servidores externos",
+    userMappings: "Mapeamentos de usuário",
     types: "Tipos",
     gridfs: "GridFS",
     doltSystemTables: "Tabelas de sistema do Dolt",
@@ -11351,6 +11354,38 @@ export default withEnglishFallback({
     enabled: "Habilitado",
     tags: "Etiquetas",
     definition: "Definição",
+  },
+
+  foreignDataWrapper: {
+    detailsTitle: "Detalhes do empacotador de dados externos",
+    viewDetails: "Ver detalhes",
+    name: "Nome",
+    owner: "Proprietário",
+    handler: "Manipulador",
+    validator: "Validador",
+    options: "Opções",
+    definition: "DDL",
+  },
+
+  foreignServer: {
+    detailsTitle: "Detalhes do servidor externo",
+    viewDetails: "Ver detalhes",
+    name: "Nome",
+    owner: "Proprietário",
+    foreignDataWrapper: "Empacotador de dados externos",
+    type: "Tipo",
+    version: "Versão",
+    options: "Opções",
+    definition: "DDL",
+  },
+
+  userMapping: {
+    detailsTitle: "Detalhes do mapeamento de usuário",
+    viewDetails: "Ver detalhes",
+    userName: "Usuário",
+    serverName: "Servidor",
+    options: "Opções",
+    definition: "DDL",
   },
 
   extension: {

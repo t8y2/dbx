@@ -5522,6 +5522,9 @@ export default withEnglishFallback({
     loadMore: "โหลดเพิ่มเติม...",
     extensions: "Extensions",
     eventTriggers: "Event Triggers",
+    foreignDataWrappers: "Foreign Data Wrappers",
+    foreignServers: "Foreign Servers",
+    userMappings: "User Mappings",
   },
   eventTrigger: {
     detailsTitle: "รายละเอียด Event Trigger",
@@ -5532,6 +5535,38 @@ export default withEnglishFallback({
     function: "Function",
     enabled: "เปิดใช้งาน",
     tags: "Tags",
+    definition: "Definition",
+  },
+
+  foreignDataWrapper: {
+    detailsTitle: "รายละเอียด Foreign Data Wrapper",
+    viewDetails: "ดูรายละเอียด",
+    name: "ชื่อ",
+    owner: "เจ้าของ",
+    handler: "Handler",
+    validator: "Validator",
+    options: "Options",
+    definition: "Definition",
+  },
+
+  foreignServer: {
+    detailsTitle: "รายละเอียด Foreign Server",
+    viewDetails: "ดูรายละเอียด",
+    name: "ชื่อ",
+    owner: "เจ้าของ",
+    foreignDataWrapper: "Foreign Data Wrapper",
+    type: "ชนิด",
+    version: "เวอร์ชัน",
+    options: "Options",
+    definition: "Definition",
+  },
+
+  userMapping: {
+    detailsTitle: "รายละเอียด User Mapping",
+    viewDetails: "ดูรายละเอียด",
+    userName: "ผู้ใช้",
+    serverName: "Server",
+    options: "Options",
     definition: "Definition",
   },
   extension: {

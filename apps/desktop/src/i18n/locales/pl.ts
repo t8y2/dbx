@@ -4666,6 +4666,9 @@ export default withEnglishFallback({
     loadMore: "Wczytaj więcej...",
     extensions: "Rozszerzenia",
     eventTriggers: "Wyzwalacze zdarzeń",
+    foreignDataWrappers: "Opakowania danych zewnętrznych",
+    foreignServers: "Serwery zewnętrzne",
+    userMappings: "Mapowania użytkowników",
   },
   eventTrigger: {
     detailsTitle: "Szczegóły wyzwalacza zdarzeń",
@@ -4676,6 +4679,38 @@ export default withEnglishFallback({
     function: "Funkcja",
     enabled: "Włączone",
     tags: "Tagi",
+    definition: "Definicja",
+  },
+
+  foreignDataWrapper: {
+    detailsTitle: "Szczegóły opakowania danych zewnętrznych",
+    viewDetails: "Pokaż szczegóły",
+    name: "Nazwa",
+    owner: "Właściciel",
+    handler: "Obsługa",
+    validator: "Walidator",
+    options: "Opcje",
+    definition: "Definicja",
+  },
+
+  foreignServer: {
+    detailsTitle: "Szczegóły serwera zewnętrznego",
+    viewDetails: "Pokaż szczegóły",
+    name: "Nazwa",
+    owner: "Właściciel",
+    foreignDataWrapper: "Opakowanie danych zewnętrznych",
+    type: "Typ",
+    version: "Wersja",
+    options: "Opcje",
+    definition: "Definicja",
+  },
+
+  userMapping: {
+    detailsTitle: "Szczegóły mapowania użytkownika",
+    viewDetails: "Pokaż szczegóły",
+    userName: "Użytkownik",
+    serverName: "Serwer",
+    options: "Opcje",
     definition: "Definicja",
   },
 

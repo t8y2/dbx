@@ -188,7 +188,7 @@ fn event_triggers_sql(catalog: ExtensionCatalog) -> String {
          COALESCE(r.rolname, '') AS owner, \
          COALESCE(format('%I.%I(%s)', pn.nspname, p.proname, pg_get_function_arguments(p.oid)), '') AS function, \
          e.evtenabled::text AS enabled, \
-         NULL::text AS tags, \
+         COALESCE(array_to_string(e.evttags, ','), '') AS tags, \
          obj_description(e.oid, 'pg_event_trigger') AS comment, \
          NULL::text AS source \
          FROM {cat}.pg_event_trigger e \
@@ -197,6 +197,18 @@ fn event_triggers_sql(catalog: ExtensionCatalog) -> String {
          LEFT JOIN {cat}.pg_namespace pn ON pn.oid = p.pronamespace \
          ORDER BY e.evtname"
     )
+}
+
+fn query_result_cell_string_list(row: &[serde_json::Value], index: usize) -> Option<Vec<String>> {
+    let cell = row.get(index)?;
+    match cell {
+        serde_json::Value::Array(arr) => Some(arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()),
+        serde_json::Value::String(s) if s.is_empty() => None,
+        serde_json::Value::String(s) => {
+            Some(s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
+        }
+        _ => None,
+    }
 }
 
 fn event_trigger_infos_from_query_result(result: db::QueryResult) -> Vec<db::EventTriggerInfo> {
@@ -211,9 +223,218 @@ fn event_trigger_infos_from_query_result(result: db::QueryResult) -> Vec<db::Eve
                 owner: query_result_cell_string(&row, 2).filter(|s| !s.is_empty()),
                 function: query_result_cell_string(&row, 3).filter(|s| !s.is_empty()),
                 enabled: query_result_cell_string(&row, 4).filter(|s| !s.is_empty()),
-                tags: None,
+                tags: query_result_cell_string_list(&row, 5).filter(|v| !v.is_empty()),
                 comment: query_result_cell_string(&row, 6).filter(|s| !s.is_empty()),
                 source: None,
+            })
+        })
+        .collect()
+}
+
+/// Lists Foreign Data Wrappers over a Kingbase agent connection.
+/// Reuses the sys/pg catalog fallback pattern from `list_extensions`.
+pub(super) async fn list_foreign_data_wrappers(
+    client: Arc<db::agent_driver::PooledAgentClient>,
+    database: &str,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::ForeignDataWrapperInfo>, String> {
+    let result = query_result_with_catalog_fallback(
+        client,
+        database,
+        fdw_options_sql(ExtensionCatalog::Sys),
+        fdw_options_sql(ExtensionCatalog::Pg),
+        10_000,
+        timeout_duration,
+    )
+    .await?;
+    Ok(fdw_infos_from_query_result(result))
+}
+
+pub(super) async fn list_foreign_servers(
+    client: Arc<db::agent_driver::PooledAgentClient>,
+    database: &str,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::ForeignServerInfo>, String> {
+    let result = query_result_with_catalog_fallback(
+        client,
+        database,
+        foreign_servers_sql(ExtensionCatalog::Sys),
+        foreign_servers_sql(ExtensionCatalog::Pg),
+        10_000,
+        timeout_duration,
+    )
+    .await?;
+    Ok(server_infos_from_query_result(result))
+}
+
+pub(super) async fn list_user_mappings(
+    client: Arc<db::agent_driver::PooledAgentClient>,
+    database: &str,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::UserMappingInfo>, String> {
+    let result = query_result_with_catalog_fallback(
+        client,
+        database,
+        user_mappings_sql(ExtensionCatalog::Sys),
+        user_mappings_sql(ExtensionCatalog::Pg),
+        10_000,
+        timeout_duration,
+    )
+    .await?;
+    Ok(mapping_infos_from_query_result(result))
+}
+
+fn fdw_options_sql(catalog: ExtensionCatalog) -> String {
+    let cat = catalog.catalog_name();
+    format!(
+        "SELECT fdw.fdwname, \
+         COALESCE(r.rolname, '') AS owner, \
+         COALESCE(format('%I.%I', hn.nspname, h.proname), '') AS handler, \
+         COALESCE(format('%I.%I', vn.nspname, v.proname), '') AS validator, \
+         fdw.fdwoptions AS options, \
+         obj_description(fdw.oid, 'pg_foreign_data_wrapper') AS comment \
+         FROM {cat}.pg_foreign_data_wrapper fdw \
+         LEFT JOIN {cat}.pg_roles r ON r.oid = fdw.fdwowner \
+         LEFT JOIN {cat}.pg_proc h ON h.oid = fdw.fdwhandler \
+         LEFT JOIN {cat}.pg_namespace hn ON hn.oid = h.pronamespace \
+         LEFT JOIN {cat}.pg_proc v ON v.oid = fdw.fdwvalidator \
+         LEFT JOIN {cat}.pg_namespace vn ON vn.oid = v.pronamespace \
+         ORDER BY fdw.fdwname"
+    )
+}
+
+fn foreign_servers_sql(catalog: ExtensionCatalog) -> String {
+    let cat = catalog.catalog_name();
+    format!(
+        "SELECT srv.srvname, \
+         COALESCE(r.rolname, '') AS owner, \
+         fdw.fdwname AS foreign_data_wrapper, \
+         srv.srvtype AS server_type, \
+         srv.srvversion AS server_version, \
+         srv.srvoptions AS options, \
+         obj_description(srv.oid, 'pg_foreign_server') AS comment \
+         FROM {cat}.pg_foreign_server srv \
+         LEFT JOIN {cat}.pg_roles r ON r.oid = srv.srvowner \
+         LEFT JOIN {cat}.pg_foreign_data_wrapper fdw ON fdw.oid = srv.srvfdw \
+         ORDER BY srv.srvname"
+    )
+}
+
+fn user_mappings_sql(catalog: ExtensionCatalog) -> String {
+    // pg_user_mappings is a public view; even on Kingbase it exists.
+    // Use the same view name; the catalog prefix only affects tables.
+    // umoptions are surfaced in plaintext on purpose: the view itself masks
+    // options from non-privileged users server-side, so what the agent
+    // returns is owner/superuser-equivalent information (same deliberate
+    // choice as psql \deu+ / DBeaver).
+    let _cat = catalog.catalog_name();
+    "SELECT um.umid::text AS oid, \
+       COALESCE(um.usename, '') AS user_name, \
+       um.srvname AS server_name, \
+       um.umoptions AS options \
+     FROM pg_catalog.pg_user_mappings um \
+     ORDER BY um.srvname, um.usename"
+        .to_string()
+}
+
+/// Splits a PostgreSQL `text[]` cell into its string elements.
+///
+/// The Kingbase agent marshals array columns as the raw array literal
+/// (`{host=localhost,port=5432}`) instead of a JSON array, so FDW/server/mapping
+/// option cells arrive as strings. Quoted elements keep embedded `,`, `"` and
+/// `\` intact; a plain comma-separated string (e.g. `array_to_string` output
+/// from another agent build) is also accepted so both marshalling shapes stay
+/// readable.
+fn parse_pg_array_literal_strings(literal: &str) -> Vec<String> {
+    let trimmed = literal.trim();
+    let Some(inner) = trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else {
+        return trimmed.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
+    };
+    if inner.is_empty() {
+        return vec![];
+    }
+    let mut elements = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for char in inner.chars() {
+        if escaped {
+            current.push(char);
+            escaped = false;
+        } else if char == '\\' {
+            escaped = true;
+        } else if char == '"' {
+            in_quotes = !in_quotes;
+        } else if !in_quotes && char == ',' {
+            elements.push(std::mem::take(&mut current));
+        } else {
+            current.push(char);
+        }
+    }
+    elements.push(current);
+    elements
+}
+
+fn query_result_cell_option_pairs(row: &[serde_json::Value], index: usize) -> Vec<(String, String)> {
+    let strings: Vec<String> = match row.get(index) {
+        Some(serde_json::Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        Some(serde_json::Value::String(s)) => parse_pg_array_literal_strings(s),
+        _ => return vec![],
+    };
+    strings
+        .into_iter()
+        .filter_map(|option| option.split_once('=').map(|(key, value)| (key.to_string(), value.to_string())))
+        .collect()
+}
+
+fn fdw_infos_from_query_result(result: db::QueryResult) -> Vec<db::ForeignDataWrapperInfo> {
+    result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let name = query_result_cell_string(&row, 0)?;
+            Some(db::ForeignDataWrapperInfo {
+                name,
+                owner: query_result_cell_string(&row, 1).filter(|s| !s.is_empty()),
+                handler: query_result_cell_string(&row, 2).filter(|s| !s.is_empty()),
+                validator: query_result_cell_string(&row, 3).filter(|s| !s.is_empty()),
+                options: query_result_cell_option_pairs(&row, 4),
+                comment: query_result_cell_string(&row, 5).filter(|s| !s.is_empty()),
+            })
+        })
+        .collect()
+}
+
+fn server_infos_from_query_result(result: db::QueryResult) -> Vec<db::ForeignServerInfo> {
+    result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let name = query_result_cell_string(&row, 0)?;
+            Some(db::ForeignServerInfo {
+                name,
+                owner: query_result_cell_string(&row, 1).filter(|s| !s.is_empty()),
+                foreign_data_wrapper: query_result_cell_string(&row, 2).unwrap_or_default(),
+                server_type: query_result_cell_string(&row, 3).filter(|s| !s.is_empty()),
+                server_version: query_result_cell_string(&row, 4).filter(|s| !s.is_empty()),
+                options: query_result_cell_option_pairs(&row, 5),
+                comment: query_result_cell_string(&row, 6).filter(|s| !s.is_empty()),
+            })
+        })
+        .collect()
+}
+
+fn mapping_infos_from_query_result(result: db::QueryResult) -> Vec<db::UserMappingInfo> {
+    result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let oid = query_result_cell_string(&row, 0)?;
+            Some(db::UserMappingInfo {
+                oid,
+                user_name: query_result_cell_string(&row, 1).unwrap_or_default(),
+                server_name: query_result_cell_string(&row, 2).unwrap_or_default(),
+                options: query_result_cell_option_pairs(&row, 3),
             })
         })
         .collect()
@@ -304,5 +525,48 @@ mod tests {
         assert_eq!(extensions[0].version, "1.0");
         assert_eq!(extensions[0].comment.as_deref(), Some("KingBase utilities"));
         assert_eq!(extensions[0].schema.as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn pg_array_literal_strings_parse_elements() {
+        assert_eq!(parse_pg_array_literal_strings("{host=localhost,port=5432}"), vec!["host=localhost", "port=5432"]);
+        assert_eq!(parse_pg_array_literal_strings("{\"pa,ss=word\",opt=2}"), vec!["pa,ss=word", "opt=2"]);
+        assert_eq!(parse_pg_array_literal_strings("{\"quote\\\"\"}"), vec!["quote\""]);
+        assert_eq!(parse_pg_array_literal_strings("{}"), Vec::<String>::new());
+        assert_eq!(parse_pg_array_literal_strings(""), Vec::<String>::new());
+        assert_eq!(parse_pg_array_literal_strings("a=1, b=2"), vec!["a=1", "b=2"]);
+    }
+
+    #[test]
+    fn option_pairs_parse_array_literal_cells() {
+        let row = vec![serde_json::json!("{host=localhost,port=5432}")];
+        assert_eq!(
+            query_result_cell_option_pairs(&row, 0),
+            vec![("host".to_string(), "localhost".to_string()), ("port".to_string(), "5432".to_string())]
+        );
+    }
+
+    #[test]
+    fn option_pairs_keep_commas_inside_quoted_elements() {
+        let row = vec![serde_json::json!("{\"value=a,b\"}")];
+        assert_eq!(query_result_cell_option_pairs(&row, 0), vec![("value".to_string(), "a,b".to_string())]);
+    }
+
+    #[test]
+    fn option_pairs_parse_json_array_cells() {
+        let row = vec![serde_json::json!(["user=admin", "pa,ss=word"])];
+        assert_eq!(
+            query_result_cell_option_pairs(&row, 0),
+            vec![("user".to_string(), "admin".to_string()), ("pa,ss".to_string(), "word".to_string())]
+        );
+    }
+
+    #[test]
+    fn option_pairs_skip_null_and_unequal_cells() {
+        assert_eq!(query_result_cell_option_pairs(&[serde_json::Value::Null], 0), Vec::<(String, String)>::new());
+        assert_eq!(
+            query_result_cell_option_pairs(&[serde_json::json!("{a=1,plain}")], 0),
+            vec![("a".to_string(), "1".to_string())]
+        );
     }
 }

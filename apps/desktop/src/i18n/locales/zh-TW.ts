@@ -5204,6 +5204,9 @@ export default withEnglishFallback({
     loadMore: "載入更多...",
     extensions: "擴展",
     eventTriggers: "事件觸發器",
+    foreignDataWrappers: "外部資料包裝器",
+    foreignServers: "外部伺服器",
+    userMappings: "使用者對應",
     types: "類型",
     gridfs: "GridFS",
   },
@@ -11331,6 +11334,38 @@ export default withEnglishFallback({
     enabled: "啟用狀態",
     tags: "標籤",
     definition: "定義",
+  },
+
+  foreignDataWrapper: {
+    detailsTitle: "外部資料包裝器詳情",
+    viewDetails: "查看詳情",
+    name: "名稱",
+    owner: "擁有者",
+    handler: "處理器",
+    validator: "驗證器",
+    options: "選項",
+    definition: "DDL",
+  },
+
+  foreignServer: {
+    detailsTitle: "外部伺服器詳情",
+    viewDetails: "查看詳情",
+    name: "名稱",
+    owner: "擁有者",
+    foreignDataWrapper: "外部資料包裝器",
+    type: "型別",
+    version: "版本",
+    options: "選項",
+    definition: "DDL",
+  },
+
+  userMapping: {
+    detailsTitle: "使用者對應詳情",
+    viewDetails: "查看詳情",
+    userName: "使用者",
+    serverName: "伺服器",
+    options: "選項",
+    definition: "DDL",
   },
 
   extension: {

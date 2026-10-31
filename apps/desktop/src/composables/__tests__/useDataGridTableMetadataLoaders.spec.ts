@@ -107,7 +107,7 @@ describe("useDataGridTableMetadataLoaders", () => {
   it.each(["oracle", "oceanbase-oracle"] as const)("passes independent indexes with the exact %s source-table scope", async (type) => {
     const { loaders, settingsStore } = ddlFixture(type);
     settingsStore.editorSettings.separateDdlIndexes = true;
-    await loaders.fetchDdl();
+    await loaders.fetchDdl(false);
     expect(mocks.loadObjectDdl).toHaveBeenCalledWith(expect.objectContaining({ connectionId: "source", database: "table-db", schema: "Exact Owner", catalog: "catalog", tableName: "First", separateIndexes: true }), { force: false });
   });
 

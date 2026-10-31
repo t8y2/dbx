@@ -430,7 +430,7 @@ function sqlTextPositionToOffset(sql: string, line: number, column: number): num
   if (line < 1 || line > lines.length) return null;
   let offset = 0;
   for (let index = 0; index < line - 1; index += 1) {
-    offset += lines[index].length + 1;
+    offset = sql.indexOf("\n", offset) + 1;
   }
   return Math.min(offset + Math.max(column, 0), offset + lines[line - 1].length);
 }

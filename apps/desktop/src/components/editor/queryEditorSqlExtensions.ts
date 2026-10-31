@@ -70,6 +70,9 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   const SQL_SIGNATURE_HELP_WINDOW_CHARS = options.signatureHelpWindowChars;
 
   const diagnosticTheme = EditorView.baseTheme({
+    ".cm-sql-error.cm-sql-error.cm-sql-error, .cm-sql-error.cm-sql-error.cm-sql-error *": {
+      color: "var(--dbx-editor-diagnostic-error, var(--dbx-sql-unknown-object-color, #e5484d)) !important",
+    },
     ".cm-sql-error": {
       textDecoration: "underline wavy var(--dbx-editor-diagnostic-error, var(--destructive))",
       textUnderlineOffset: "3px",

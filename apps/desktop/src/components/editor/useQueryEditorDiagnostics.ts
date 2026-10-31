@@ -22,6 +22,7 @@ import { buildSqlServerRoutineSyntaxDiagnostics } from "@/lib/sql/sqlServerRouti
 import { needsDiagnosticCaretReanchor } from "@/lib/editor/queryEditorDiagnosticCaretAnchor";
 import { metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
+import { analyzeSqlDiagnosticReferences } from "@/lib/sql/sqlDiagnosticKeywordRecovery";
 import type { SqlUnknownObjectSpan } from "@/lib/editor/codemirrorSqlUnknownObjectHighlights";
 import {
   areSqlSemanticDiagnosticsEqual,
@@ -437,26 +438,25 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
     for (const range of diagnosticRanges) {
       if (mysqlRoutineAnalysis?.routineRanges.some((routineRange) => rangesOverlap(routineRange, range))) continue;
       try {
-        const analysis = await api.analyzeSqlReferences(
-          range.sql,
-          sqlReferenceAnalysisDialectFor({
-            databaseType: props.databaseType,
-            identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
-            fallbackDialect: props.databaseType === "kingbase" ? (options.sqlSyntaxDialect?.() ?? sqlBehaviorDialect() ?? "postgres") : (props.formatDialect ?? props.dialect ?? "generic"),
-          }),
-        );
+        const referenceDialect = sqlReferenceAnalysisDialectFor({
+          databaseType: props.databaseType,
+          identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
+          fallbackDialect: props.databaseType === "kingbase" ? (options.sqlSyntaxDialect?.() ?? sqlBehaviorDialect() ?? "postgres") : (props.formatDialect ?? props.dialect ?? "generic"),
+        });
+        const { analysis, keywordDiagnostic } = await analyzeSqlDiagnosticReferences(range.sql, referenceDialect, (statement) => api.analyzeSqlReferences(statement, referenceDialect));
         if (runId !== semanticDiagnosticRunId) return;
+        if (keywordDiagnostic) nextDiagnostics.push(...offsetSqlSemanticDiagnostics([keywordDiagnostic], range, sql));
 
         const semanticCursor = Math.max(0, Math.min(currentView.state.selection.main.head - range.from, range.sql.length));
         const semanticModel =
-          SEMANTIC_SQL_COMPLETION_ENABLED && !backgroundAnalysis
+          SEMANTIC_SQL_COMPLETION_ENABLED && !backgroundAnalysis && !keywordDiagnostic
             ? buildSqlSemanticModel(range.sql, semanticCursor, {
                 databaseType: props.databaseType,
                 dialect: sqlBehaviorDialect(),
               })
             : null;
         const semanticAnalysis =
-          SEMANTIC_SQL_COMPLETION_ENABLED && backgroundAnalysis
+          SEMANTIC_SQL_COMPLETION_ENABLED && backgroundAnalysis && !keywordDiagnostic
             ? (await diagnosticAnalysisWorker.analyze({ sql: range.sql, cursor: semanticCursor, databaseType: props.databaseType, dialect: sqlBehaviorDialect(), visibleRanges: [], referenceAnalysis: analysis }))?.referenceAnalysis
             : semanticModel
               ? mergeSqlSemanticReferenceAnalysis(analysis, semanticModel)
@@ -580,23 +580,27 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
 
       const statementSpans: SqlUnknownObjectSpan[] = [];
       try {
-        const analysis = await api.analyzeSqlReferences(
-          range.sql,
-          sqlReferenceAnalysisDialectFor({
-            databaseType: props.databaseType,
-            identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
-            fallbackDialect: props.databaseType === "kingbase" ? (options.sqlSyntaxDialect?.() ?? sqlBehaviorDialect() ?? "postgres") : (props.formatDialect ?? props.dialect ?? "generic"),
-          }),
-        );
+        const referenceDialect = sqlReferenceAnalysisDialectFor({
+          databaseType: props.databaseType,
+          identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
+          fallbackDialect: props.databaseType === "kingbase" ? (options.sqlSyntaxDialect?.() ?? sqlBehaviorDialect() ?? "postgres") : (props.formatDialect ?? props.dialect ?? "generic"),
+        });
+        const { analysis, keywordDiagnostic } = await analyzeSqlDiagnosticReferences(range.sql, referenceDialect, (statement) => api.analyzeSqlReferences(statement, referenceDialect));
         if (currentView.state.doc !== doc) return [];
+        if (keywordDiagnostic) {
+          const [diagnostic] = offsetSqlSemanticDiagnostics([keywordDiagnostic], range, sql);
+          const offsetRange = sqlTextSpanToRange(sql, diagnostic.span);
+          if (offsetRange) statementSpans.push(offsetRange);
+        }
 
         const semanticCursor = Math.max(0, Math.min(currentView.state.selection.main.head - range.from, range.sql.length));
-        const semanticModel = SEMANTIC_SQL_COMPLETION_ENABLED
-          ? buildSqlSemanticModel(range.sql, semanticCursor, {
-              databaseType: props.databaseType,
-              dialect: sqlBehaviorDialect(),
-            })
-          : null;
+        const semanticModel =
+          SEMANTIC_SQL_COMPLETION_ENABLED && !keywordDiagnostic
+            ? buildSqlSemanticModel(range.sql, semanticCursor, {
+                databaseType: props.databaseType,
+                dialect: sqlBehaviorDialect(),
+              })
+            : null;
         const semanticAnalysis = semanticModel ? mergeSqlSemanticReferenceAnalysis(analysis, semanticModel) : analysis;
         const metadataScope = semanticDiagnosticMetadataScope(sql, range);
         const scopedAnalysis = {
@@ -632,8 +636,13 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
           const offsetRange = sqlTextSpanToRange(sql, diagnostic.span);
           if (offsetRange) statementSpans.push(offsetRange);
         }
-      } catch {
-        // A failed parse must not colour anything.
+      } catch (error) {
+        const diagnostic = buildSqlParserErrorDiagnostic(error, range.sql);
+        if (diagnostic) {
+          const [offsetDiagnostic] = offsetSqlSemanticDiagnostics([diagnostic], range, sql);
+          const offsetRange = sqlTextSpanToRange(sql, offsetDiagnostic.span);
+          if (offsetRange) statementSpans.push(offsetRange);
+        }
       }
 
       analyzedStatements += 1;

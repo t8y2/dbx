@@ -10,6 +10,12 @@ const span = (startColumn: number, endColumn: number): SqlTextSpan => ({
 });
 
 describe("sqlTextSpanToOffsetRange inclusive column semantics", () => {
+  it("preserves CRLF offsets before a diagnostic token", () => {
+    const sql = "-- comment\r\nSELECT * FRO rules\r\nWHERE missing = 1";
+    const range = sqlTextSpanToOffsetRange(sql, { start_line: 3, start_column: 7, end_line: 3, end_column: 13 });
+    expect(range).toEqual({ from: sql.indexOf("missing"), to: sql.indexOf("missing") + "missing".length });
+  });
+
   it("converts 1-based inclusive single-character and multi-character spans to exact 0-based slice ranges", () => {
     const sql = "SELECT id, name AS user_name FROM users;";
 

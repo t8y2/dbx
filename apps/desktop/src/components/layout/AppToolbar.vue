@@ -2,7 +2,34 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, LogOut, CloudDownload, Package, PlugZap, FileDown, FolderTree, Pin, PinOff, CalendarClock, Waypoints, RefreshCw } from "@lucide/vue";
+import {
+  ChevronsRight,
+  DatabaseZap,
+  FilePlus2,
+  FolderOpen,
+  Moon,
+  Sun,
+  SunMoon,
+  History,
+  Bot,
+  ArrowLeftRight,
+  FileCode,
+  BookMarked,
+  GitCompareArrows,
+  TableProperties,
+  Settings,
+  LogOut,
+  CloudDownload,
+  Package,
+  PlugZap,
+  FileDown,
+  FolderTree,
+  Pin,
+  PinOff,
+  CalendarClock,
+  Waypoints,
+  RefreshCw,
+} from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown, { type LightDropdownItem } from "@/components/ui/LightDropdown.vue";
@@ -63,6 +90,7 @@ const emit = defineEmits<{
   "expand-sidebar": [];
   "new-connection": [];
   "new-query": [];
+  "open-sql-editor-file": [];
   "set-theme-mode": [mode: AppThemeMode];
   "toggle-ai": [];
   "toggle-history": [];
@@ -176,6 +204,7 @@ function onToolbarDblClick(e: MouseEvent) {
 const toolbarEl = ref<HTMLElement>();
 const newConnectionLabelEl = ref<HTMLElement>();
 const toolbarCollapsed = ref(false);
+const openSqlFileInMore = ref(false);
 const pluginCenterGroup = ref<HTMLElement | null>(null);
 const showPluginCenterShortcuts = computed(() => settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position === "plugin-center");
 const shouldReserveTrafficLightInset = computed(() => shouldReserveMacTrafficLightInset(isMac, isFullscreen.value, isDesktop));
@@ -184,8 +213,12 @@ function checkToolbarWidth() {
   const el = toolbarEl.value;
   if (!el) return;
   const screenWidth = window.visualViewport?.width ?? window.innerWidth;
-  const threshold = screenWidth / 2;
+  // Full-width narrow windows also need to collapse so More stays reachable.
+  const threshold = Math.max(screenWidth / 2, 640);
   toolbarCollapsed.value = el.clientWidth < threshold;
+  // Keep the new file action from squeezing the existing primary controls in
+  // a narrow window, where the threshold above may not collapse them.
+  openSqlFileInMore.value = el.clientWidth < 960;
 }
 
 // ──────────── Right-side overflow detection ────────────
@@ -461,6 +494,15 @@ type ToolbarMenuItem = LightDropdownItem & { action: () => void };
 function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenuItem[] {
   const items: ToolbarMenuItem[] = [];
 
+  if (includeVisiblePrimaryItems || openSqlFileInMore.value) {
+    items.push({
+      value: "open-sql-editor-file",
+      label: t("toolbar.openSql"),
+      icon: FolderOpen,
+      action: () => emit("open-sql-editor-file"),
+      disabled: false,
+    });
+  }
   if (includeVisiblePrimaryItems || !toolbarItems.value.dataTransfer) {
     items.push({
       value: "transfer",
@@ -609,6 +651,11 @@ const toolbarStyle = computed(() => {
     </Tooltip>
 
     <template v-if="!toolbarCollapsed">
+      <Button v-if="!openSqlFileInMore" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('open-sql-editor-file')">
+        <FolderOpen class="h-3.5 w-3.5" />
+        <span :class="toolbarTextLabelClass">{{ t("toolbar.openSql") }}</span>
+      </Button>
+
       <Button v-if="toolbarItems.dataTransfer" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('open-transfer')" :disabled="!hasConnections">
         <ArrowLeftRight class="h-3.5 w-3.5" />
         <span :class="toolbarTextLabelClass">{{ t("transfer.dataTransfer") }}</span>

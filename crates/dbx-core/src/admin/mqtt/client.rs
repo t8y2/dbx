@@ -1336,7 +1336,7 @@ fn build_transport(
 }
 
 fn certificate_tls_configuration(auth: &MqttAuth, mode: MqttTlsVerificationMode) -> Result<TlsConfiguration, String> {
-    let MqttAuth::Certificate { ca_cert_path, client_cert_path, client_key_path } = auth else {
+    let MqttAuth::Certificate { ca_cert_path, client_cert_path, client_key_path, .. } = auth else {
         return Err("MQTT 证书认证配置无效".to_string());
     };
     let client_cert_path = client_cert_path.as_deref().filter(|path| !path.trim().is_empty());
@@ -1450,13 +1450,13 @@ impl ServerCertVerifier for NoCertificateVerification {
 }
 
 fn apply_credentials_v4(options: &mut MqttOptionsV4, auth: &MqttAuth) {
-    if let MqttAuth::Password { username, password } = auth {
+    if let Some((username, password)) = auth.credentials() {
         options.set_credentials(username, password);
     }
 }
 
 fn apply_credentials_v5(options: &mut MqttOptionsV5, auth: &MqttAuth) {
-    if let MqttAuth::Password { username, password } = auth {
+    if let Some((username, password)) = auth.credentials() {
         options.set_credentials(username, password);
     }
 }
@@ -1783,8 +1783,41 @@ mod tests {
     }
 
     #[test]
+    fn certificate_auth_preserves_credentials_for_both_protocols() {
+        let auth: MqttAuth = serde_json::from_value(serde_json::json!({
+            "kind": "certificate", "username": "device", "password": "secret",
+            "clientCertPath": "/client.crt", "clientKeyPath": "/client.key"
+        }))
+        .unwrap();
+        let mut v4 = MqttOptionsV4::new("dbx-test", "localhost", 8883);
+        let mut v5 = MqttOptionsV5::new("dbx-test", "localhost", 8883);
+        apply_credentials_v4(&mut v4, &auth);
+        apply_credentials_v5(&mut v5, &auth);
+        let expected = Some(("device".to_string(), "secret".to_string()));
+        assert_eq!(v4.credentials(), expected);
+        assert_eq!(v5.credentials(), expected);
+    }
+
+    #[test]
+    fn certificate_auth_without_credentials_remains_anonymous() {
+        let auth: MqttAuth = serde_json::from_value(serde_json::json!({ "kind": "certificate" })).unwrap();
+        let mut v4 = MqttOptionsV4::new("dbx-test", "localhost", 8883);
+        let mut v5 = MqttOptionsV5::new("dbx-test", "localhost", 8883);
+        apply_credentials_v4(&mut v4, &auth);
+        apply_credentials_v5(&mut v5, &auth);
+        assert_eq!(v4.credentials(), None);
+        assert_eq!(v5.credentials(), None);
+    }
+
+    #[test]
     fn certificate_auth_allows_server_only_tls() {
-        let auth = MqttAuth::Certificate { ca_cert_path: None, client_cert_path: None, client_key_path: None };
+        let auth = MqttAuth::Certificate {
+            username: String::new(),
+            password: String::new(),
+            ca_cert_path: None,
+            client_cert_path: None,
+            client_key_path: None,
+        };
 
         let transport =
             build_transport(MqttTransport::Tcp, Some(MqttTlsVerificationMode::VerifyServerCert), &auth).unwrap();
@@ -1795,11 +1828,15 @@ mod tests {
     #[test]
     fn certificate_auth_requires_client_certificate_and_key_as_a_pair() {
         let missing_cert = MqttAuth::Certificate {
+            username: String::new(),
+            password: String::new(),
             ca_cert_path: None,
             client_cert_path: None,
             client_key_path: Some("client.key".to_string()),
         };
         let missing_key = MqttAuth::Certificate {
+            username: String::new(),
+            password: String::new(),
             ca_cert_path: None,
             client_cert_path: Some("client.crt".to_string()),
             client_key_path: None,

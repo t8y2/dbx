@@ -80,7 +80,7 @@ By default, table-level `AUTO_INCREMENT=N` is preserved. Omit Auto Increment rem
 
 ### MySQL Table Name Prefix
 
-MySQL-family data inserts qualify every table with its source database (`db.table`). **Omit database prefix in table names** drops that qualifier from the generated `INSERT` statements, so the target database is decided by the `USE` preamble or by the database the replay session selects — the same file initializes any database without edits. The switch applies to MySQL-family data inserts only (MySQL, GoldenDB, Doris, StarRocks), shows when data export is enabled, and is off by default.
+MySQL-family data inserts qualify every table with its source database (`db.table`). **Omit database prefix in table names** drops that qualifier from the generated `INSERT` statements. Without a `USE` preamble the rows go to whatever database the replay session selects; when the export also writes a `USE` statement, that line still switches the context back to the source database, so targeting a different database requires editing or removing it. The switch applies to MySQL-family data inserts only (MySQL, GoldenDB, Doris, StarRocks), shows when data export is enabled, and is off by default.
 
 ## Data Writing and Consistency
 

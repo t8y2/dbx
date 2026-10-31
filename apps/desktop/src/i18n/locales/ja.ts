@@ -1319,6 +1319,7 @@ export default withEnglishFallback({
     matchPreviewLimit: "一致する全 {total} 行のうち、先頭 {limit} 行のみプレビューできます。",
   },
   connection: {
+    groupPath: "グループパス",
     mysqlDataCharsetWriteBlocked: "データ文字セット互換モードでは読み取り専用が強制されます。書き込みや一時的なロック解除はできません。",
     mysqlDataCharsetUnsupported: "dataCharset はネイティブ MySQL プロファイル専用です。MariaDB、TiDB、その他のデータベースプロファイルには対応していません。",
     mysqlDataCharsetCloseTabs: "データ文字セットを変更する前に、この接続のデータ・構造タブを閉じ、クエリ結果を消去してください。実行中のクエリとトランザクションを先に終了してください。SQL の下書きは保持され、保存前に旧接続が切断されます。",

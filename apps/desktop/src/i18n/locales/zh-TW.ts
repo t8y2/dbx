@@ -1305,6 +1305,7 @@ export default withEnglishFallback({
   },
 
   connection: {
+    groupPath: "群組路徑",
     mysqlDataCharsetWriteBlocked: "資料字元集相容模式強制唯讀，無法執行寫入，也不能暫時解鎖。",
     mysqlDataCharsetUnsupported: "dataCharset 僅支援原生 MySQL 設定，不支援 MariaDB、TiDB 或其他資料庫設定。",
     mysqlDataCharsetCloseTabs: "修改資料字元集前，請關閉此連線的資料/結構頁並清除查詢結果，先結束執行中的查詢及交易。SQL 草稿可保留；儲存前將中斷舊連線。",

@@ -789,10 +789,12 @@ describe("EditorToolbar mount contract", () => {
     host.remove();
   });
 
-  it("renders the active connection group path and sanitized detail preview", async () => {
+  it("keeps the complete deep group path available in the sanitized detail preview", async () => {
     const connectionStore = useConnectionStore();
     const settingsStore = useSettingsStore();
     settingsStore.editorSettings.showConnectionGroupPath = true;
+    const longGroupName = "Production".repeat(30);
+    const fullGroupPath = `${longGroupName}/Asia Pacific/Orders`;
     const connection = {
       id: "conn-grouped",
       name: "orders",
@@ -808,14 +810,15 @@ describe("EditorToolbar mount contract", () => {
     connectionStore.connections = [connection];
     connectionStore.sidebarLayout = {
       groups: [
-        { id: "group-prod", name: "Production", collapsed: false },
+        { id: "group-prod", name: longGroupName, collapsed: false },
+        { id: "group-region", name: "Asia Pacific", collapsed: false },
         { id: "group-orders", name: "Orders", collapsed: false },
       ],
       order: [
         {
           type: "group",
           id: "group-prod",
-          children: [{ type: "group", id: "group-orders", children: [{ type: "connection", id: connection.id }] }],
+          children: [{ type: "group", id: "group-region", children: [{ type: "group", id: "group-orders", children: [{ type: "connection", id: connection.id }] }] }],
         },
       ],
     };
@@ -852,33 +855,58 @@ describe("EditorToolbar mount contract", () => {
     await nextTick();
 
     const groupPath = host.querySelector<HTMLElement>("[data-connection-group-path]");
-    expect(groupPath?.textContent).toContain("Production / Orders /");
-    expect(groupPath?.classList.contains("min-w-0")).toBe(true);
-    expect(groupPath?.classList.contains("flex-1")).toBe(false);
-    expect(groupPath?.classList.contains("max-w-[50%]")).toBe(true);
-    expect(groupPath?.classList.contains("shrink")).toBe(true);
-    expect(groupPath?.classList.contains("truncate")).toBe(true);
-    const connectionName = groupPath?.nextElementSibling;
-    expect(connectionName?.classList.contains("shrink")).toBe(true);
-    expect(connectionName?.classList.contains("flex-1")).toBe(false);
+    expect(groupPath?.parentElement?.parentElement?.getAttribute("aria-label")).toBe(`${fullGroupPath}/orders`);
+    expect(groupPath?.textContent).toBe(fullGroupPath);
+    expect(groupPath?.classList.contains("shrink-0")).toBe(true);
+    expect(groupPath?.classList.contains("max-w-[50%]")).toBe(false);
+    expect(groupPath?.nextElementSibling?.textContent).toBe("/");
+    const connectionName = groupPath?.nextElementSibling?.nextElementSibling;
+    expect(connectionName?.classList.contains("truncate")).toBe(true);
+    expect(connectionName?.classList.contains("flex-1")).toBe(true);
     expect(host.textContent).toContain("orders");
     expect(host.textContent).toContain("postgres://alice:***@db.example.com:5432/app");
     expect(host.textContent).not.toContain("postgres://alice:secret@db.example.com:5432/app");
+    const detailPath = host.querySelector<HTMLElement>("[data-connection-detail-group-path]");
+    expect(detailPath?.textContent).toBe(fullGroupPath);
+    expect(detailPath?.previousElementSibling?.textContent).toBe("connection.groupPath");
+    expect(detailPath?.parentElement?.classList.contains("border-b")).toBe(false);
+    expect(detailPath?.classList.contains("truncate")).toBe(false);
+    expect(detailPath?.classList.contains("[overflow-wrap:anywhere]")).toBe(true);
+    const detailPanel = detailPath?.parentElement?.parentElement;
+    expect(detailPanel?.classList.contains("max-w-[min(22rem,calc(100vw-24px))]")).toBe(true);
+    expect(detailPanel?.classList.contains("max-w-[min(28rem,calc(100vw-24px))]")).toBe(false);
+    expect(detailPanel?.classList.contains("overflow-y-auto")).toBe(true);
+    expect(detailPanel?.classList.contains("max-h-[min(32rem,calc(100vh-24px))]")).toBe(true);
 
     settingsStore.editorSettings.showConnectionGroupPath = false;
     await nextTick();
     expect(host.querySelector("[data-connection-group-path]")).toBeNull();
+    expect(host.querySelector("[data-connection-detail-group-path]")).toBeNull();
+    expect(host.textContent).not.toContain(longGroupName);
     expect(host.textContent).toContain("orders");
 
     const tooltip = host.querySelector<HTMLElement>('[data-test="connection-tooltip"]');
     const pickerToggle = host.querySelector<HTMLButtonElement>('[data-test="toggle-connection-picker"]');
     expect(tooltip?.dataset.disabled).toBe("false");
+    settingsStore.editorSettings.showConnectionGroupPath = true;
+    await nextTick();
+    expect(host.querySelector("[data-connection-detail-group-path]")?.textContent).toBe(fullGroupPath);
     pickerToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await nextTick();
     expect(tooltip?.dataset.disabled).toBe("true");
     pickerToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await nextTick();
     expect(tooltip?.dataset.disabled).toBe("false");
+
+    connectionStore.sidebarLayout.groups[0]!.name = "Staging";
+    await nextTick();
+    expect(host.querySelector("[data-connection-detail-group-path]")?.textContent).toBe("Staging/Asia Pacific/Orders");
+
+    connectionStore.sidebarLayout.order = [{ type: "connection", id: connection.id }];
+    await nextTick();
+    expect(host.querySelector("[data-connection-group-path]")).toBeNull();
+    expect(host.querySelector("[data-connection-detail-group-path]")).toBeNull();
+    expect(host.textContent).toContain("postgres://alice:***@db.example.com:5432/app");
 
     app.unmount();
     host.remove();

@@ -1320,6 +1320,7 @@ export default withEnglishFallback({
   },
 
   connection: {
+    groupPath: "Caminho do grupo",
     mysqlDataCharsetWriteBlocked: "O modo de compatibilidade do conjunto de caracteres impõe acesso somente leitura. Gravações e desbloqueio temporário não estão disponíveis.",
     mysqlDataCharsetUnsupported: "dataCharset é compatível apenas com o perfil MySQL nativo, não com MariaDB, TiDB ou outros perfis de banco de dados.",
     mysqlDataCharsetCloseTabs: "Antes de alterar o conjunto de caracteres, feche as abas de dados/estrutura e limpe os resultados desta conexão. Finalize consultas e transações ativas. Rascunhos SQL são preservados; a conexão anterior é desconectada antes de salvar.",

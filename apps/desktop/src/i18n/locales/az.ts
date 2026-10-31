@@ -640,6 +640,7 @@ export default withEnglishFallback({
   },
 
   connection: {
+    groupPath: "Qrup yolu",
     mysqlDataCharsetWriteBlocked: "Məlumat kodlaması uyğunluq rejimi yalnız oxuma girişini məcburi edir. Yazma və müvəqqəti kilid açma mümkün deyil.",
     mysqlDataCharsetUnsupported: "dataCharset yalnız yerli MySQL profili üçün dəstəklənir; MariaDB, TiDB və digər profillər üçün deyil.",
     mysqlDataCharsetCloseTabs: "Məlumat kodlamasını dəyişməzdən əvvəl bu bağlantının məlumat/struktur vərəqlərini bağlayın və sorğu nəticələrini təmizləyin. Aktiv sorğuları və tranzaksiyaları bitirin. SQL qaralamaları saxlanılır; yadda saxlamazdan əvvəl köhnə bağlantı kəsiləcək.",

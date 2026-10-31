@@ -835,6 +835,7 @@ export default withEnglishFallback({
   },
 
   connection: {
+    groupPath: "Jalur grup",
     mysqlDataCharsetWriteBlocked: "Mode kompatibilitas pengodean data mewajibkan akses hanya baca. Penulisan dan pembukaan kunci sementara tidak tersedia.",
     mysqlDataCharsetUnsupported: "dataCharset hanya didukung oleh profil MySQL native, bukan MariaDB, TiDB, atau profil lainnya.",
     mysqlDataCharsetCloseTabs: "Sebelum mengubah pengodean data, tutup tab data/struktur koneksi ini dan hapus hasil kueri. Selesaikan kueri dan transaksi aktif terlebih dahulu. Draf SQL tetap disimpan; koneksi lama akan diputus sebelum penyimpanan.",

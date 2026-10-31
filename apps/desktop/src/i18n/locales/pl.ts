@@ -896,6 +896,7 @@ export default withEnglishFallback({
   },
 
   connection: {
+    groupPath: "Ścieżka grupy",
     title: "Nowe połączenie",
     name: "Nazwa",
     namePlaceholder: "Nazwa połączenia; jeśli pusta, zostanie utworzona automatycznie",

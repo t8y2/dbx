@@ -44,6 +44,7 @@ import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import ConnectionDetailContent from "@/components/connection/ConnectionDetailContent.vue";
+import ConnectionGroupPath from "@/components/connection/ConnectionGroupPath.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -279,10 +280,10 @@ const activeConnectionValue = computed(() => props.activeConnection?.id || "");
 const activeConnectionDetailRows = computed(() => (props.activeConnection ? connectionDetailRows(props.activeConnection, t) : []));
 const activeConnectionGroupPath = computed(() => {
   const connection = props.activeConnection;
-  if (!connection) return "";
-  return findConnectionGroupPath(connectionStore.sidebarLayout, connection.id)?.join(" / ") || "";
+  if (!connection) return [];
+  return findConnectionGroupPath(connectionStore.sidebarLayout, connection.id) ?? [];
 });
-const visibleConnectionGroupPath = computed(() => (settingsStore.editorSettings.showConnectionGroupPath ? activeConnectionGroupPath.value : ""));
+const visibleConnectionGroupPath = computed(() => (settingsStore.editorSettings.showConnectionGroupPath ? activeConnectionGroupPath.value.join("/") : ""));
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
 // Salesforce identity badge. A Salesforce tab talks to one live org and every grid
 // save is a real REST write, so the signed-in user stays visible next to the
@@ -1054,16 +1055,25 @@ defineExpose({
             @update:open="(open: boolean) => (connectionPickerOpen = open)"
           >
             <template #trigger-label="{ label }">
-              <div v-if="activeConnection" class="flex min-w-0 items-center gap-1.5">
+              <div v-if="activeConnection" class="flex min-w-0 items-center gap-0.5">
                 <DatabaseIcon :db-type="connectionIconType(activeConnection)" class="h-3.5 w-3.5 shrink-0" />
-                <span v-if="visibleConnectionGroupPath" data-connection-group-path class="min-w-0 max-w-[50%] shrink truncate text-muted-foreground">{{ visibleConnectionGroupPath }} /</span>
-                <span :class="visibleConnectionGroupPath ? 'min-w-0 shrink truncate' : 'min-w-0 flex-1 truncate'">{{ label }}</span>
+                <ConnectionGroupPath v-if="visibleConnectionGroupPath" :segments="activeConnectionGroupPath" :connection-name="label" />
+                <span v-else class="min-w-0 flex-1 truncate">{{ label }}</span>
                 <ProductionContextBadge v-if="showConnectionProductionBadge" compact />
               </div>
               <span v-else class="truncate text-muted-foreground">{{ t("editor.selectConnection") }}</span>
             </template>
           </ConnectionTreeSelect>
-          <template #content><ConnectionDetailContent :rows="activeConnectionDetailRows" /></template>
+          <template #content>
+            <ConnectionDetailContent :rows="activeConnectionDetailRows" :class="['max-w-[min(22rem,calc(100vw-24px))]', visibleConnectionGroupPath ? 'max-h-[min(32rem,calc(100vh-24px))] overflow-y-auto overscroll-contain' : undefined]">
+              <template v-if="visibleConnectionGroupPath" #header>
+                <div class="mb-1 grid grid-cols-[max-content_minmax(0,1fr)] gap-2 text-xs leading-5">
+                  <div class="text-muted-foreground">{{ t("connection.groupPath") }}</div>
+                  <div data-connection-detail-group-path class="whitespace-pre-wrap font-mono text-foreground/90 [overflow-wrap:anywhere]">{{ visibleConnectionGroupPath }}</div>
+                </div>
+              </template>
+            </ConnectionDetailContent>
+          </template>
         </LightTooltip>
       </div>
       <div v-if="showCatalogSelector" class="flex shrink-0 items-center gap-1">

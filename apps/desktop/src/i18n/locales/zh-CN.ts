@@ -1470,6 +1470,7 @@ export default withEnglishFallback({
   },
 
   connection: {
+    groupPath: "分组路径",
     parameterEditor: {
       title: "连接参数",
       description: "配置当前连接的参数，点击“应用”后更新连接草稿。",

@@ -640,6 +640,7 @@ export default withEnglishFallback({
   },
 
   connection: {
+    groupPath: "Grup yolu",
     mysqlDataCharsetWriteBlocked: "Veri karakter kümesi uyumluluk modu salt okunur erişimi zorunlu kılar. Yazma ve geçici kilit açma kullanılamaz.",
     mysqlDataCharsetUnsupported: "dataCharset yalnızca yerel MySQL profilinde desteklenir; MariaDB, TiDB veya diğer profillerde desteklenmez.",
     mysqlDataCharsetCloseTabs: "Veri karakter kümesini değiştirmeden önce bu bağlantının veri/yapı sekmelerini kapatın ve sorgu sonuçlarını temizleyin. Önce etkin sorguları ve işlemleri tamamlayın. SQL taslakları korunur; kaydetmeden önce eski bağlantı kesilir.",

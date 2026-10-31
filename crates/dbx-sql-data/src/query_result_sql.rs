@@ -455,6 +455,15 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
             .unwrap_or_else(|| err("unsupported"));
     }
     if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb)) {
+        // The count query runs on a separate pooled session, so a statement that
+        // references session variables (`@a`, `@@version`) counts with a variable
+        // state the user never set there — `WHERE x.id = @a` silently counts 0
+        // instead of the rows the user sees (#13998). Decline the count rather
+        // than reporting a wrong total; strings, comments and quoted identifiers
+        // never hold a variable reference and are skipped.
+        if mysql_statement_references_session_variable(&statement) {
+            return err("session-variable");
+        }
         return mysql_count_sql(&statement)
             .map(|sql| ok(format!("{execution_hint}{sql}")))
             .unwrap_or_else(|| err("unsupported"));
@@ -508,6 +517,82 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
         "{execution_hint}{}",
         derived_table_sql("SELECT COUNT(*) AS dbx_total_rows FROM", &wrapped_sql, &format!("{alias};"))
     ))
+}
+
+/// Whether a top-level `@` appears in `sql`: MySQL user variables (`@a`) and
+/// system variables (`@@version`) resolve per session, so a COUNT wrapper
+/// executed on a different session cannot reproduce the rows the user sees
+/// (#13998). Quoted strings, comments, quoted identifiers and dollar-quoted
+/// bodies are skipped — an `@` inside them (an email address, a column named
+/// with `@`) is not a variable reference.
+fn mysql_statement_references_session_variable(sql: &str) -> bool {
+    let mut i = 0;
+    while i < sql.len() {
+        let ch = next_char(sql, i);
+        let next = next_char_at(sql, i + ch.len_utf8());
+
+        if ch == '-' && next == Some('-') {
+            i += 2;
+            while i < sql.len() && next_char(sql, i) != '\n' {
+                i += next_char(sql, i).len_utf8();
+            }
+            continue;
+        }
+
+        if ch == '#' {
+            i += 1;
+            while i < sql.len() && next_char(sql, i) != '\n' {
+                i += next_char(sql, i).len_utf8();
+            }
+            continue;
+        }
+
+        if ch == '/' && next == Some('*') {
+            i += 2;
+            while i < sql.len() {
+                let current = next_char(sql, i);
+                let following = next_char_at(sql, i + current.len_utf8());
+                if current == '*' && following == Some('/') {
+                    i += 2;
+                    break;
+                }
+                i += current.len_utf8();
+            }
+            continue;
+        }
+
+        if ch == '$' {
+            if let Some(end) = skip_sql_dollar_quoted(sql, i) {
+                i = end;
+                continue;
+            }
+        }
+
+        if matches!(ch, '\'' | '"' | '`') {
+            i = skip_sql_quoted(sql, i, ch);
+            continue;
+        }
+
+        if ch == '[' {
+            i = skip_sql_bracket_identifier(sql, i);
+            continue;
+        }
+
+        if ch == '@' {
+            // `@@name` is a system variable: server-scoped and reproducible on
+            // the count session (existing pagination contracts count over them).
+            // Only a user variable (`@name`) carries session state the count
+            // session cannot reproduce.
+            if next == Some('@') {
+                i += 2;
+                continue;
+            }
+            return true;
+        }
+
+        i += ch.len_utf8();
+    }
+    false
 }
 
 pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildResult {
@@ -6287,6 +6372,56 @@ WHERE u.id = picked.id;
         assert_eq!(
             result.sql.unwrap(),
             "SELECT COUNT(*) AS dbx_total_rows FROM TATFY WHERE UpdateDate = '2026-07-30' AND UpdateTime > '08:00:00';"
+        );
+    }
+
+    #[test]
+    fn mysql_count_query_declines_session_variables() {
+        for sql in [
+            "SELECT x.id FROM table_x x WHERE x.id=@a",
+            // A multi-statement script never counted (single-statement guard);
+            // pinned here so the variable guard cannot loosen it either.
+            "SET @a=1; SELECT x.id FROM table_x x WHERE x.id=@a",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            assert!(!result.ok, "expected a declined count for {sql}");
+            assert_eq!(result.sql, None, "declined count for {sql} must not carry SQL");
+        }
+    }
+
+    #[test]
+    fn mysql_count_query_allows_system_variables_and_at_signs_outside_variables() {
+        for sql in [
+            // System variables are server-scoped and reproducible on the count
+            // session; counting over them is an existing contract.
+            "SELECT @@version",
+            "SELECT 'a@b.com' AS email FROM table_x",
+            "SELECT `col@name` FROM table_x",
+            "SELECT /* @a */ id FROM table_x WHERE id = 1",
+            "SELECT id FROM table_x WHERE email = 'x@y' AND id = 1",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            assert!(result.ok, "an @ outside a user variable must still count: {sql}");
+            assert!(result.sql.unwrap_or_default().contains("COUNT(*)"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn mysql_count_query_still_wraps_plain_selects() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "SELECT x.id FROM table_x x WHERE x.id = 1".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT x.id FROM table_x x WHERE x.id = 1) `dbx_count`;"
         );
     }
 

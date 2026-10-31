@@ -521,6 +521,42 @@ func (s *Session) ExecuteStatementWithContext(ctx context.Context, sql string) (
 	return s.genDataSet(sql, resp)
 }
 
+// ExecuteQueryStatementWithContext combines the cancellable context of
+// ExecuteStatementWithContext with the per-query timeout of
+// ExecuteQueryStatement: timeoutMs travels in TSExecuteStatementReq.Timeout so
+// the server applies it (0 disables query_timeout_threshold; absent falls back
+// to the server default), while ctx cancels the underlying RPC. Reconnect-once
+// and status verification keep the legacy error handling.
+func (s *Session) ExecuteQueryStatementWithContext(ctx context.Context, sql string, timeoutMs *int64) (*SessionDataSet, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	request := rpc.TSExecuteStatementReq{
+		SessionId:   s.sessionId,
+		Statement:   sql,
+		StatementId: s.requestStatementId,
+		FetchSize:   &s.config.FetchSize,
+		Timeout:     timeoutMs,
+	}
+	resp, err := s.client.ExecuteQueryStatementV2(ctx, &request)
+
+	if err != nil && resp == nil {
+		if s.reconnect() {
+			request.SessionId = s.sessionId
+			request.StatementId = s.requestStatementId
+			resp, err = s.client.ExecuteQueryStatementV2(ctx, &request)
+		}
+	}
+	if resp == nil {
+		return nil, err
+	}
+	if statusErr := VerifySuccess(resp.Status); statusErr != nil {
+		return nil, statusErr
+	}
+
+	return s.genDataSet(sql, resp)
+}
+
 func (s *Session) ExecuteStatement(sql string, opts ...Option) (*SessionDataSet, error) {
 
 	options := ApplyOptions(opts...)

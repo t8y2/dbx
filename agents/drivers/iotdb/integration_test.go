@@ -406,3 +406,29 @@ func (b *synchronizedBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.builder.String()
 }
+
+// #13935: with the server's query_timeout_threshold tightened (the live
+// environment sets it to 1 ms — see the issue's rclone/export scenario for the
+// 60 s default pain point), a "no limit" (timeoutSecs=0) query must still
+// complete because the adapter forwards an explicit 0, which disables the
+// server timeout. Before the fix the adapter omitted the timeout and every
+// query died with error 720 (Current query is time out).
+func TestLiveIoTDBNoLimitQueryDisablesServerTimeout(t *testing.T) {
+	if os.Getenv("DBX_IOTDB_LIVE") != "1" {
+		t.Skip("set DBX_IOTDB_LIVE=1 to run against a real IoTDB server")
+	}
+	server := liveIoTDBServer(t, connectParams{Database: "root.dbx_timeout"})
+	defer server.disconnect()
+
+	result, err := server.executeQuery(queryOptions{
+		SQL:         "SELECT s0 FROM root.dbx_timeout.d1",
+		MaxRows:     100,
+		TimeoutSecs: 0,
+	})
+	if err != nil {
+		t.Fatalf("timeoutSecs=0 must disable the tightened server timeout: %v", err)
+	}
+	if len(result.Rows) == 0 {
+		t.Fatalf("expected the seeded rows to come back, got %d rows", len(result.Rows))
+	}
+}

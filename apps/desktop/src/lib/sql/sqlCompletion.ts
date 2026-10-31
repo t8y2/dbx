@@ -2193,6 +2193,29 @@ class SqlCompletionProvider {
       if (this.databaseType === "clickhouse") {
         this.items.push(...buildClickHouseFunctionItems(context.prefix, context.openingParenAfterCursor, "table", this.input.functionCompletionIncludeParams));
       }
+      // SQL Server table-valued functions are relation sources used directly in
+      // FROM/JOIN (`FROM dbo.Split(@csv)`), so they belong in the table
+      // candidate set alongside tables and views (#13131). The completion
+      // assistant reports the return kind through dataType: IF/TF/FT functions
+      // come back as "table" while scalar FN/FS functions carry their return
+      // type name, so only the "table" kind is admitted here and unknown
+      // categories stay conservative (#13394 review). Scalar functions remain
+      // in the routine context only.
+      if (this.databaseType === "sqlserver") {
+        const tableValuedFunctionObjects = (this.input.objects ?? []).filter((object) => object.type === "function" && object.dataType?.trim().toLowerCase() === "table");
+        const tableValuedFunctions = tableValuedFunctionObjects.map((object) => ({ name: object.name, schema: object.schema, type: "function" as const, detail: object.signature ?? "FUNCTION" }));
+        const signaturesByLabel = new Map(tableValuedFunctionObjects.map((object) => [object.name.toLowerCase(), object.signature]));
+        const tableItems = buildTableItems(context, tableValuedFunctions, this.dialect, false, context.referencedTables, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase, this.identifierDialect);
+        // A table-valued function must be invoked as a call, so insert the
+        // parameterized form whenever the assistant exposes its signature.
+        this.items.push(
+          ...tableItems.map((item) => {
+            const signature = signaturesByLabel.get(item.label.toLowerCase());
+            if (!signature) return item;
+            return { ...item, apply: buildRoutineApply(item.apply || item.label, signature, this.input.functionCompletionIncludeParams) };
+          }),
+        );
+      }
       if (isOracleLikeDatabase(this.databaseType)) {
         this.items.push(...buildOracleTableFunctionItems(context.prefix, this.input.keywordCase, this.input.functionCase, this.input.functionCompletionIncludeParams));
       }

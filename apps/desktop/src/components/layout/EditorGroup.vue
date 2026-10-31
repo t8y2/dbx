@@ -22,6 +22,7 @@ import { GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, QueryEditorSurfaceHandle, StatementRange } from "./querySurfaces";
 import type { QueryTab, TableInfoTab } from "@/types/database";
 import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import type { SqlSaveDestination } from "@/lib/tabs/sqlTabSaveTarget";
 
 defineOptions({ inheritAttrs: false });
 
@@ -257,7 +258,7 @@ const groupExecutableSql = computed(() => {
         @fold-all="activeSurfaceRef?.foldAll?.()"
         @unfold-all="activeSurfaceRef?.unfoldAll?.()"
         @toggle-sql-keyword-case="activeTab && toolbar.toggleSqlKeywordCase(activeTab.id)"
-        @save-sql="(tabId: string) => toolbar.saveSql(tabId)"
+        @save-sql="(tabId: string, destination?: SqlSaveDestination) => toolbar.saveSql(tabId, destination)"
         @change-encoding="changeExternalSqlEncoding"
         @open-sql="toolbar.openSqlFile()"
         @import-result-archive="toolbar.importResultArchive()"

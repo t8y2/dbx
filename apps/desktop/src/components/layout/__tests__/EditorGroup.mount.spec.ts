@@ -243,6 +243,8 @@ describe("EditorGroup mount contract", () => {
     (toolbar as any).__vueParentComponent.emit("cancel");
     (toolbar as any).__vueParentComponent.emit("explain");
     (toolbar as any).__vueParentComponent.emit("saveSql", queryId);
+    (toolbar as any).__vueParentComponent.emit("saveSql", queryId, "local");
+    (toolbar as any).__vueParentComponent.emit("saveSql", queryId, "library");
     // #11828: the keyword-case toggle must carry the acting tab, otherwise App
     // cannot tell which editor to re-case (the button used to take no tab).
     (toolbar as any).__vueParentComponent.emit("toggleSqlKeywordCase");
@@ -253,7 +255,9 @@ describe("EditorGroup mount contract", () => {
     expect(actions.toolbarExecuteInNewResultTab).toHaveBeenCalledWith("pointer", queryId);
     expect(actions.cancelExecution).toHaveBeenCalledWith(queryId);
     expect(actions.explain).toHaveBeenCalledWith(queryId);
-    expect(actions.saveSql).toHaveBeenCalledWith(queryId);
+    expect(actions.saveSql).toHaveBeenCalledWith(queryId, undefined);
+    expect(actions.saveSql).toHaveBeenCalledWith(queryId, "local");
+    expect(actions.saveSql).toHaveBeenCalledWith(queryId, "library");
     expect(actions.toggleSqlKeywordCase).toHaveBeenCalledWith(queryId);
 
     // Data tab: no SQL toolbar — the data grid carries its own built-in bar.

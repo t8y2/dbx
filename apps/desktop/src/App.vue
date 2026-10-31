@@ -182,7 +182,7 @@ import {
 } from "@/lib/editor/keyboardShortcuts";
 import { normalizeShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import { DBX_VIM_ACTION_EVENT, type DbxVimActionEvent } from "@/lib/editor/vimDbxActions";
-import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
+import { canSaveSqlTab, type SqlSaveDestination } from "@/lib/tabs/sqlTabSaveTarget";
 import { initialTabSwitcherSelection, moveTabSwitcherSelection, tabSwitcherOrder } from "@/lib/tabs/tabSwitcher";
 import { createModifierDoubleTapShortcutController, isModifierDoubleTapShortcut, matchesModifierDoubleTapShortcut } from "@/lib/editor/modifierDoubleTapShortcut";
 import { createTabSwitcherKeyboardController } from "@/lib/tabs/tabSwitcherKeyboard";
@@ -604,6 +604,7 @@ const queryEditorObjectSourceTarget = ref<{
 } | null>(null);
 const showSaveSqlDialog = ref(false);
 const saveSqlDialogTabId = ref<string | null>(null);
+const sqlSaveInFlight = new Set<string>();
 const sqlLibrarySaveFeedbackId = ref(0);
 const saveSqlConfirmButtonRef = ref<HTMLElement | { $el?: HTMLElement } | null>(null);
 const sqlLibraryFlyAnimation = ref<{
@@ -1267,7 +1268,7 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   formatSql: formatActiveSql,
   compressSql: compressActiveSql,
   toggleSqlKeywordCase,
-  saveSql: (tabId: string) => void openSaveSqlDialog(tabId),
+  saveSql: (tabId: string, destination?: SqlSaveDestination) => void openSaveSqlDialog(tabId, destination),
   saveAllTabs: (tabIds?: string[]) => void handleSaveAllTabs(tabIds),
   openSqlFile,
   importResultArchive,
@@ -2411,11 +2412,11 @@ function finishSqlLibraryFlyAnimation(animationId: number) {
   sqlLibrarySaveFeedbackId.value += 1;
 }
 
-function closePendingSavedTab() {
-  if (!pendingSaveAndCloseTabId.value) return;
+function closePendingSavedTab(tabId: string) {
+  if (pendingSaveAndCloseTabId.value !== tabId) return;
   const closeId = pendingSaveAndCloseTabId.value;
   pendingSaveAndCloseTabId.value = null;
-  saveSqlDialogTabId.value = null;
+  if (saveSqlDialogTabId.value === tabId) saveSqlDialogTabId.value = null;
   if (pendingPrevActiveTabId.value) queryStore.activateTab(pendingPrevActiveTabId.value);
   pendingPrevActiveTabId.value = null;
   const shouldCloseTab = pendingSaveShouldCloseTab.value;
@@ -2654,47 +2655,51 @@ async function formattedSqlForSave(tab: QueryTab): Promise<string> {
 async function saveTabForCloseAll(tabId: string): Promise<boolean> {
   const tab = queryStore.tabs.find((t) => t.id === tabId);
   if (!tab) return true;
-  queryStore.activateTab(tabId);
+  return (
+    (await runSqlTabSave(tab.id, async () => {
+      queryStore.activateTab(tabId);
 
-  if (tab.mode === "structure") {
-    await nextTick();
-    return (await contentAreaRef.value?.applyTableStructureChanges?.()) === true;
-  }
-  if (!canSaveSqlTab(tab)) return true;
-
-  if (tab.objectSource) return saveActiveObjectSource(tab);
-
-  if (await saveExternalSqlPath(tab)) return !queryStore.isTabDirty(tab);
-
-  const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
-  const target = savedSqlTargetForSave(tab);
-  let saveName = existing?.name || defaultSavedSqlName(tab.title);
-  for (let attempt = 0; attempt < SAVE_SQL_NAME_ATTEMPTS; attempt++) {
-    try {
-      const saved = await savedSqlStore.saveFile({
-        id: existing?.id,
-        connectionId: target.connectionId,
-        folderId: existing?.folderId,
-        name: saveName,
-        database: target.database,
-        catalog: target.catalog,
-        schema: target.schema,
-        sql: await formattedSqlForSave(tab),
-      });
-      queryStore.linkSavedSql(tab.id, saved.id, saved.name);
-      queryStore.markTabClean(tab);
-      return true;
-    } catch (e: any) {
-      const conflict = e as { code?: unknown; suggestedName?: unknown } | null;
-      if (conflict?.code === "SAVED_SQL_NAME_CONFLICT" && typeof conflict.suggestedName === "string" && conflict.suggestedName !== saveName && attempt < SAVE_SQL_NAME_ATTEMPTS - 1) {
-        saveName = conflict.suggestedName;
-        continue;
+      if (tab.mode === "structure") {
+        await nextTick();
+        return (await contentAreaRef.value?.applyTableStructureChanges?.()) === true;
       }
-      toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(e, t) }), 5000);
+      if (!canSaveSqlTab(tab)) return true;
+
+      if (tab.objectSource) return saveActiveObjectSource(tab);
+
+      if (await saveExternalSqlPath(tab)) return !queryStore.isTabDirty(tab);
+
+      const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
+      const target = savedSqlTargetForSave(tab);
+      let saveName = existing?.name || defaultSavedSqlName(tab.title);
+      for (let attempt = 0; attempt < SAVE_SQL_NAME_ATTEMPTS; attempt++) {
+        try {
+          const saved = await savedSqlStore.saveFile({
+            id: existing?.id,
+            connectionId: target.connectionId,
+            folderId: existing?.folderId,
+            name: saveName,
+            database: target.database,
+            catalog: target.catalog,
+            schema: target.schema,
+            sql: await formattedSqlForSave(tab),
+          });
+          queryStore.linkSavedSql(tab.id, saved.id, saved.name);
+          queryStore.markTabClean(tab);
+          return true;
+        } catch (e: any) {
+          const conflict = e as { code?: unknown; suggestedName?: unknown } | null;
+          if (conflict?.code === "SAVED_SQL_NAME_CONFLICT" && typeof conflict.suggestedName === "string" && conflict.suggestedName !== saveName && attempt < SAVE_SQL_NAME_ATTEMPTS - 1) {
+            saveName = conflict.suggestedName;
+            continue;
+          }
+          toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(e, t) }), 5000);
+          return false;
+        }
+      }
       return false;
-    }
-  }
-  return false;
+    })) ?? false
+  );
 }
 
 async function handleSaveAllPendingTabClose() {
@@ -2744,99 +2749,129 @@ async function handleSaveAllTabs(targetTabIds?: string[]) {
 async function handleSaveTab(tabId: string) {
   const tab = queryStore.tabs.find((t) => t.id === tabId);
   if (!tab) return;
-  if (tab.mode === "structure") {
+  if (sqlSaveInFlight.has(tabId)) {
+    if (pendingAppCloseAction.value) queryStore.requestAppCloseConfirmation();
+    else {
+      queryStore.pendingCloseTabId = tabId;
+      queryStore.resumeCloseConfirm();
+    }
+    return;
+  }
+  await runSqlTabSave(tab.id, async () => {
+    if (tab.mode === "structure") {
+      queryStore.activateTab(tabId);
+      await nextTick();
+      if (await contentAreaRef.value?.applyTableStructureChanges?.()) {
+        completePendingTabSave(tabId);
+      } else {
+        queryStore.resumeCloseConfirm();
+      }
+      return;
+    }
+    if (!canSaveSqlTab(tab)) return;
+    const closeAfterSave = pendingAppCloseAction.value === null;
+    pendingSaveShouldCloseTab.value = closeAfterSave;
+    if (tab.objectSource) {
+      const saved = await saveActiveObjectSource(tab);
+      if (saved) completePendingTabSave(tabId);
+      else if (pendingAppCloseAction.value) cancelPendingAppClose();
+      return;
+    }
+    if (await saveExternalSqlPath(tab, { closeAfterSave })) {
+      if (!closeAfterSave) continuePendingAppCloseAfterSave();
+      return;
+    }
+    const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
+    if (existing) {
+      try {
+        const target = savedSqlTargetForSave(tab);
+        const updated = await savedSqlStore.saveFile({
+          id: existing.id,
+          connectionId: target.connectionId,
+          folderId: existing.folderId,
+          name: existing.name,
+          database: target.database,
+          catalog: target.catalog,
+          schema: target.schema,
+          sql: await formattedSqlForSave(tab),
+        });
+        queryStore.linkSavedSql(tab.id, updated.id, updated.name);
+        queryStore.markTabClean(tab);
+        notifySqlLibrarySaved();
+        completePendingTabSave(tabId);
+      } catch (error) {
+        toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
+        queryStore.resumeCloseConfirm();
+      }
+      return;
+    }
+    // No existing saved SQL — open save dialog, then close after save
+    const prevActive = queryStore.activeTabId;
     queryStore.activateTab(tabId);
-    await nextTick();
-    if (await contentAreaRef.value?.applyTableStructureChanges?.()) {
-      completePendingTabSave(tabId);
-    } else {
-      queryStore.resumeCloseConfirm();
-    }
-    return;
-  }
-  if (!canSaveSqlTab(tab)) return;
-  const closeAfterSave = pendingAppCloseAction.value === null;
-  pendingSaveShouldCloseTab.value = closeAfterSave;
-  if (tab.objectSource) {
-    const saved = await saveActiveObjectSource(tab);
-    if (saved) completePendingTabSave(tabId);
-    else if (pendingAppCloseAction.value) cancelPendingAppClose();
-    return;
-  }
-  if (await saveExternalSqlPath(tab, { closeAfterSave })) {
-    if (!closeAfterSave) continuePendingAppCloseAfterSave();
-    return;
-  }
-  const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
-  if (existing) {
-    try {
-      const target = savedSqlTargetForSave(tab);
-      const updated = await savedSqlStore.saveFile({
-        id: existing.id,
-        connectionId: target.connectionId,
-        folderId: existing.folderId,
-        name: existing.name,
-        database: target.database,
-        catalog: target.catalog,
-        schema: target.schema,
-        sql: await formattedSqlForSave(tab),
-      });
-      queryStore.linkSavedSql(tab.id, updated.id, updated.name);
-      queryStore.markTabClean(tab);
-      notifySqlLibrarySaved();
-      completePendingTabSave(tabId);
-    } catch (error) {
-      toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
-      queryStore.resumeCloseConfirm();
-    }
-    return;
-  }
-  // No existing saved SQL — open save dialog, then close after save
-  const prevActive = queryStore.activeTabId;
-  queryStore.activateTab(tabId);
-  saveSqlDialogTabId.value = tabId;
-  resetSaveSqlFolderSelection(ROOT_SAVED_SQL_FOLDER);
-  setAutoSaveSqlName(tab);
-  pendingSaveAndCloseTabId.value = tabId;
-  pendingPrevActiveTabId.value = prevActive;
-  showSaveSqlDialog.value = true;
+    saveSqlDialogTabId.value = tabId;
+    resetSaveSqlFolderSelection(ROOT_SAVED_SQL_FOLDER);
+    setAutoSaveSqlName(tab);
+    pendingSaveAndCloseTabId.value = tabId;
+    pendingPrevActiveTabId.value = prevActive;
+    showSaveSqlDialog.value = true;
+  });
 }
 
-async function openSaveSqlDialog(tabId?: string) {
+async function runSqlTabSave<T>(tabId: string, operation: () => Promise<T>): Promise<T | undefined> {
+  // A second destination must not race an outstanding write or native save dialog.
+  if (sqlSaveInFlight.has(tabId)) return;
+  sqlSaveInFlight.add(tabId);
+  try {
+    return await operation();
+  } finally {
+    sqlSaveInFlight.delete(tabId);
+  }
+}
+
+async function openSaveSqlDialog(tabId?: string, destination?: SqlSaveDestination) {
   const tab = tabId ? queryStore.tabs.find((candidate) => candidate.id === tabId) : activeTab.value;
   if (!tab || !canSaveSqlTab(tab) || isObjectDependencySection(tab)) return;
-  saveSqlDialogTabId.value = tab.id;
-  if (tab.objectSource) {
-    await saveActiveObjectSource(tab);
-    return;
-  }
-  if (await saveExternalSqlPath(tab)) return;
-  const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
-  if (existing) {
-    try {
-      const target = savedSqlTargetForSave(tab);
-      const updated = await savedSqlStore.saveFile({
-        id: existing.id,
-        connectionId: target.connectionId,
-        folderId: existing.folderId,
-        name: existing.name,
-        database: target.database,
-        catalog: target.catalog,
-        schema: target.schema,
-        sql: await formattedSqlForSave(tab),
-      });
-      queryStore.linkSavedSql(tab.id, updated.id, updated.name);
-      queryStore.markTabClean(tab);
-      notifySqlLibrarySaved();
-    } catch (error) {
-      toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
+  if (destination && (tab.objectSource || tab.sourceLoad || tab.mode === "structure")) return;
+  if (destination === "local" && !isDesktop) return;
+  await runSqlTabSave(tab.id, async () => {
+    saveSqlDialogTabId.value = tab.id;
+    if (tab.objectSource) {
+      await saveActiveObjectSource(tab);
+      return;
     }
-    return;
-  }
+    if (destination === "local") {
+      if (await saveExternalSqlPath(tab)) return;
+      await saveExternalSqlTabAs(tab);
+      return;
+    }
+    if (destination !== "library" && (await saveExternalSqlPath(tab))) return;
+    const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
+    if (existing) {
+      try {
+        const target = savedSqlTargetForSave(tab);
+        const updated = await savedSqlStore.saveFile({
+          id: existing.id,
+          connectionId: target.connectionId,
+          folderId: existing.folderId,
+          name: existing.name,
+          database: target.database,
+          catalog: target.catalog,
+          schema: target.schema,
+          sql: await formattedSqlForSave(tab),
+        });
+        queryStore.linkSavedSql(tab.id, updated.id, updated.name);
+        queryStore.markTabClean(tab);
+        notifySqlLibrarySaved();
+      } catch (error) {
+        toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
+      }
+      return;
+    }
 
-  resetSaveSqlFolderSelection(ROOT_SAVED_SQL_FOLDER);
-  setAutoSaveSqlName(tab);
-  showSaveSqlDialog.value = true;
+    resetSaveSqlFolderSelection(ROOT_SAVED_SQL_FOLDER);
+    setAutoSaveSqlName(tab);
+    showSaveSqlDialog.value = true;
+  });
 }
 
 async function saveActiveObjectSource(tab: QueryTab): Promise<boolean> {
@@ -2909,8 +2944,8 @@ async function handleSaveSqlNewFolderConfirm(): Promise<boolean> {
 const SAVE_SQL_NAME_ATTEMPTS = 3;
 
 /** The free name a name conflict points at, or undefined when the caller picked the name. */
-function autoAdjustedSaveName(error: unknown, attemptedName: string): string | undefined {
-  if (autoGeneratedSaveSqlName.value === null || saveSqlName.value !== autoGeneratedSaveSqlName.value) return undefined;
+function autoAdjustedSaveName(error: unknown, attemptedName: string, allowNameAdjustment: boolean): string | undefined {
+  if (!allowNameAdjustment) return undefined;
   const conflict = error as { code?: unknown; suggestedName?: unknown } | null;
   if (conflict?.code !== "SAVED_SQL_NAME_CONFLICT" || typeof conflict.suggestedName !== "string") return undefined;
   if (conflict.suggestedName === attemptedName) return undefined;
@@ -2918,58 +2953,67 @@ function autoAdjustedSaveName(error: unknown, attemptedName: string): string | u
 }
 
 async function confirmSaveSqlToLibrary() {
-  if (saveSqlFolderCreationPending.value) return;
-  if (isCreatingSaveSqlFolder.value) {
-    if (saveSqlNewFolderName.value.trim()) {
-      const created = await handleSaveSqlNewFolderConfirm();
-      if (!created || saveSqlFolderCreationPending.value) return;
-    } else {
-      cancelCreateSaveSqlFolder();
-    }
-  }
   const tab = saveSqlDialogTab();
-  const name = saveSqlName.value.trim();
-  if (!tab || !tab.sql.trim() || !name) return;
-  const flyOrigin = elementCenter(saveSqlConfirmButtonElement());
-  const target = savedSqlTargetForSave(tab);
-  const sql = await formattedSqlForSave(tab);
-  let saveName = defaultSavedSqlName(name);
-  let adjusted = false;
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const saved = await savedSqlStore.saveFile({
-        id: tab.savedSqlId,
-        connectionId: target.connectionId,
-        folderId: selectedSaveSqlFolderId(),
-        name: saveName,
-        database: target.database,
-        catalog: target.catalog,
-        schema: target.schema,
-        sql,
-      });
-      queryStore.linkSavedSql(tab.id, saved.id, saved.name);
-      queryStore.markTabClean(tab);
-      showSaveSqlDialog.value = false;
-      saveSqlDialogTabId.value = null;
-      closePendingSavedTab();
-      if (!adjusted) void notifyNewSqlLibrarySaved(flyOrigin);
-      else {
-        toast(t("savedSql.nameAdjusted", { name: saved.name }), 3000);
-        sqlLibrarySaveFeedbackId.value += 1;
+  if (!tab) return;
+  await runSqlTabSave(tab.id, async () => {
+    if (saveSqlFolderCreationPending.value) return;
+    if (isCreatingSaveSqlFolder.value) {
+      if (saveSqlNewFolderName.value.trim()) {
+        const created = await handleSaveSqlNewFolderConfirm();
+        if (!created || saveSqlFolderCreationPending.value) return;
+      } else {
+        cancelCreateSaveSqlFolder();
       }
-      return;
-    } catch (e: any) {
-      const retryName = attempt < SAVE_SQL_NAME_ATTEMPTS - 1 ? autoAdjustedSaveName(e, saveName) : undefined;
-      if (!retryName) {
-        toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(e, t) }), 5000);
-        return;
-      }
-      adjusted = true;
-      saveName = retryName;
-      saveSqlName.value = retryName;
-      autoGeneratedSaveSqlName.value = retryName;
     }
-  }
+    const name = saveSqlName.value.trim();
+    if (!canSaveSqlTab(tab) || !name) return;
+    const folderId = selectedSaveSqlFolderId();
+    const allowNameAdjustment = autoGeneratedSaveSqlName.value !== null && saveSqlName.value === autoGeneratedSaveSqlName.value;
+    const flyOrigin = elementCenter(saveSqlConfirmButtonElement());
+    const target = savedSqlTargetForSave(tab);
+    const sql = await formattedSqlForSave(tab);
+    let saveName = defaultSavedSqlName(name);
+    let adjusted = false;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const saved = await savedSqlStore.saveFile({
+          id: tab.savedSqlId,
+          connectionId: target.connectionId,
+          folderId,
+          name: saveName,
+          database: target.database,
+          catalog: target.catalog,
+          schema: target.schema,
+          sql,
+        });
+        queryStore.linkSavedSql(tab.id, saved.id, saved.name);
+        queryStore.markTabClean(tab);
+        if (saveSqlDialogTabId.value === tab.id) {
+          showSaveSqlDialog.value = false;
+          saveSqlDialogTabId.value = null;
+        }
+        closePendingSavedTab(tab.id);
+        if (!adjusted) void notifyNewSqlLibrarySaved(flyOrigin);
+        else {
+          toast(t("savedSql.nameAdjusted", { name: saved.name }), 3000);
+          sqlLibrarySaveFeedbackId.value += 1;
+        }
+        return;
+      } catch (e: any) {
+        const retryName = attempt < SAVE_SQL_NAME_ATTEMPTS - 1 ? autoAdjustedSaveName(e, saveName, allowNameAdjustment) : undefined;
+        if (!retryName) {
+          toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(e, t) }), 5000);
+          return;
+        }
+        adjusted = true;
+        saveName = retryName;
+        if (saveSqlDialogTabId.value === tab.id && saveSqlName.value === autoGeneratedSaveSqlName.value) {
+          saveSqlName.value = retryName;
+          autoGeneratedSaveSqlName.value = retryName;
+        }
+      }
+    }
+  });
 }
 
 async function saveExternalSqlTabAs(tab: QueryTab): Promise<boolean> {
@@ -2987,9 +3031,12 @@ async function saveExternalSqlTabAs(tab: QueryTab): Promise<boolean> {
     if (!saved) return false;
     queryStore.linkExternalSqlPath(tab.id, saved.path, sqlFileTitleFromPath(saved.path), saved.version, tab.externalSqlEncoding);
     rememberExternalSqlFileTarget(saved.path, { connectionId: tab.connectionId, database: tab.database, catalog: tab.catalog, schema: tab.schema });
-    invalidateSaveSqlFolderSelection();
-    showSaveSqlDialog.value = false;
-    closePendingSavedTab();
+    if (saveSqlDialogTabId.value === tab.id) {
+      invalidateSaveSqlFolderSelection();
+      showSaveSqlDialog.value = false;
+      saveSqlDialogTabId.value = null;
+    }
+    closePendingSavedTab(tab.id);
     toast(t("savedSql.saved"), 2000);
     return true;
   } catch (e: any) {
@@ -3000,7 +3047,11 @@ async function saveExternalSqlTabAs(tab: QueryTab): Promise<boolean> {
 
 async function saveActiveSqlAsLocalFile() {
   const tab = saveSqlDialogTabId.value ? queryStore.tabs.find((candidate) => candidate.id === saveSqlDialogTabId.value) : activeTab.value;
-  if (tab) await saveExternalSqlTabAs(tab);
+  if (tab) {
+    await runSqlTabSave(tab.id, async () => {
+      await saveExternalSqlTabAs(tab);
+    });
+  }
 }
 
 function applyExternalSqlTarget(tab: QueryTab, target: ExternalSqlFileTarget) {

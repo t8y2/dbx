@@ -2,7 +2,10 @@
 import { createApp, h, nextTick, reactive, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const runtime = vi.hoisted(() => ({ desktop: false }));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => runtime.desktop }));
 
 vi.mock("@/components/ui/button", () => ({
   Button: {
@@ -96,6 +99,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { resolveExecutableSql, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import { EditorView } from "@codemirror/view";
+import type { QueryTab } from "@/types/database";
 
 function createHost(): HTMLDivElement {
   const host = document.createElement("div");
@@ -106,9 +110,11 @@ function createHost(): HTMLDivElement {
 describe("EditorToolbar mount contract", () => {
   let pinia: ReturnType<typeof createPinia>;
   let i18n: ReturnType<typeof createI18n>;
+  const saveToolbarApps: ReturnType<typeof createApp>[] = [];
 
   beforeEach(() => {
     document.body.innerHTML = "";
+    runtime.desktop = false;
     pinia = createPinia();
     setActivePinia(pinia);
     i18n = createI18n({
@@ -116,6 +122,121 @@ describe("EditorToolbar mount contract", () => {
       locale: "en",
       messages: { en: {} },
     });
+  });
+
+  afterEach(() => {
+    for (const app of saveToolbarApps.splice(0)) app.unmount();
+  });
+
+  function mountSaveToolbar(overrides: Partial<QueryTab> = {}) {
+    const activeTab = reactive({ id: "save-tab", title: "SQL", connectionId: "", database: "demo", sql: "SELECT 1", mode: "query", ...overrides } as QueryTab);
+    const onSaveSql = vi.fn();
+    const host = createHost();
+    const app = createApp({
+      setup: () => () => h(EditorToolbar, { activeTab, executableSql: activeTab.sql, sqlKeywordCase: "preserve", onSaveSql }),
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    saveToolbarApps.push(app);
+    const button = (key: string) => host.querySelector<HTMLButtonElement>(`button[aria-label="${key}"]`);
+    return { activeTab, onSaveSql, host, button };
+  }
+
+  it("offers separate local and library saves on desktop and emits the acting tab and destination", async () => {
+    runtime.desktop = true;
+    const { activeTab, onSaveSql, button } = mountSaveToolbar();
+    await nextTick();
+
+    expect(button("savedSql.saveToFile")?.textContent).toBe("savedSql.saveToFile");
+    expect(button("savedSql.saveToLibrary")?.textContent).toBe("savedSql.saveToLibrary");
+    button("savedSql.saveToFile")?.click();
+    button("savedSql.saveToLibrary")?.click();
+    expect(onSaveSql.mock.calls).toEqual([
+      ["save-tab", "local"],
+      ["save-tab", "library"],
+    ]);
+
+    activeTab.id = "other-group-tab";
+    activeTab.savedSqlId = "saved-entry";
+    await nextTick();
+    button("savedSql.saveToFile")?.click();
+    expect(onSaveSql).toHaveBeenLastCalledWith("other-group-tab", "local");
+  });
+
+  it("offers only an explicit library save in the web runtime", async () => {
+    const { onSaveSql, button } = mountSaveToolbar();
+    await nextTick();
+
+    expect(button("savedSql.saveToFile")).toBeNull();
+    expect(button("toolbar.saveSql")).toBeNull();
+    expect(button("savedSql.saveToLibrary")?.disabled).toBe(false);
+    button("savedSql.saveToLibrary")?.click();
+    expect(onSaveSql).toHaveBeenCalledExactlyOnceWith("save-tab", "library");
+  });
+
+  it("disables both destinations for a blank new query and allows empty edits to an existing target", async () => {
+    runtime.desktop = true;
+    const { activeTab, onSaveSql, button } = mountSaveToolbar({ sql: "  \n " });
+    await nextTick();
+    for (const key of ["savedSql.saveToFile", "savedSql.saveToLibrary"]) {
+      expect(button(key)?.disabled).toBe(true);
+      button(key)?.click();
+    }
+    expect(onSaveSql).not.toHaveBeenCalled();
+
+    activeTab.externalSqlPath = "/tmp/existing.sql";
+    await nextTick();
+    expect(button("savedSql.saveToFile")?.disabled).toBe(false);
+    expect(button("savedSql.saveToLibrary")?.disabled).toBe(false);
+    button("savedSql.saveToFile")?.click();
+    expect(onSaveSql).toHaveBeenLastCalledWith("save-tab", "local");
+
+    activeTab.externalSqlPath = undefined;
+    activeTab.savedSqlId = "saved-entry";
+    await nextTick();
+    expect(button("savedSql.saveToFile")?.disabled).toBe(false);
+    expect(button("savedSql.saveToLibrary")?.disabled).toBe(false);
+    button("savedSql.saveToLibrary")?.click();
+    expect(onSaveSql).toHaveBeenLastCalledWith("save-tab", "library");
+  });
+
+  it.each([{ objectSource: { name: "sample_view", objectType: "VIEW" as const } }, { sourceLoad: { startedAt: 1, request: { name: "sample_view", objectType: "VIEW" as const } } }])("keeps object source saves on the existing destination-free action: %j", async (sourceState) => {
+    runtime.desktop = true;
+    const { activeTab, onSaveSql, button } = mountSaveToolbar(sourceState);
+    await nextTick();
+    expect(button("savedSql.saveToFile")).toBeNull();
+    expect(button("savedSql.saveToLibrary")).toBeNull();
+    expect(button("objects.saveSource")?.disabled).toBe(false);
+    button("objects.saveSource")?.click();
+    expect(onSaveSql).toHaveBeenCalledExactlyOnceWith("save-tab");
+
+    activeTab.sql = "";
+    await nextTick();
+    expect(button("objects.saveSource")?.disabled).toBe(true);
+    button("objects.saveSource")?.click();
+    expect(onSaveSql).toHaveBeenCalledTimes(1);
+  });
+
+  it("condenses save labels with the measured toolbar while keeping both destination actions", async () => {
+    runtime.desktop = true;
+    const { host, onSaveSql, button } = mountSaveToolbar();
+    const root = host.querySelector<HTMLElement>(".app-editor-toolbar")!;
+    const actions = root.firstElementChild as HTMLElement;
+    Object.defineProperty(root, "clientWidth", { configurable: true, value: 320 });
+    Object.defineProperty(actions, "clientWidth", { configurable: true, value: 320 });
+    Object.defineProperty(actions, "scrollWidth", { configurable: true, value: 640 });
+
+    await vi.waitFor(() => expect(button("savedSql.saveToFile")?.querySelector("span")).toBeNull());
+    expect(button("savedSql.saveToLibrary")?.querySelector("span")).toBeNull();
+    expect(button("savedSql.saveToFile")?.classList.contains("w-6")).toBe(true);
+    expect(button("savedSql.saveToLibrary")?.classList.contains("w-6")).toBe(true);
+    button("savedSql.saveToFile")?.click();
+    button("savedSql.saveToLibrary")?.click();
+    expect(onSaveSql.mock.calls).toEqual([
+      ["save-tab", "local"],
+      ["save-tab", "library"],
+    ]);
   });
 
   it("emits toolbarExecute instead of execute when the run button is clicked", async () => {
@@ -744,6 +865,7 @@ describe("EditorToolbar mount contract", () => {
     const app = createApp(EditorToolbar, {
       activeTab: {
         id: "tab-shortcut",
+        savedSqlId: "saved-shortcut",
         title: "SQL",
         connectionId: "conn-shortcut",
         sql: "SELECT 1",
@@ -773,7 +895,7 @@ describe("EditorToolbar mount contract", () => {
     const tooltips = [...host.querySelectorAll(".app-editor-toolbar span")].map((el) => el.textContent?.trim() ?? "");
     expect(tooltips.some((text) => text.includes("toolbar.explainPlan (") && text.includes("E)"))).toBe(true);
     expect(tooltips.some((text) => text.includes("toolbar.formatSql (") && text.includes("F)"))).toBe(true);
-    expect(tooltips.some((text) => text.includes("toolbar.saveSql (") && text.includes("S)"))).toBe(true);
+    expect(tooltips.some((text) => text.includes("savedSql.saveToLibrary (") && text.includes("S)"))).toBe(true);
 
     app.unmount();
     host.remove();

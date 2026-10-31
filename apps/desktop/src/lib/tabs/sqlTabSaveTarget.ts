@@ -1,5 +1,7 @@
 import type { QueryTab } from "@/types/database";
 
+export type SqlSaveDestination = "local" | "library";
+
 /** Tab fields that decide whether its SQL can be persisted. */
 export type SqlTabSaveTarget = Pick<QueryTab, "externalSqlPath" | "savedSqlId" | "sql" | "objectSource">;
 

@@ -14,6 +14,7 @@ import {
   AlignLeft,
   GitBranch,
   Save,
+  LibraryBig,
   FolderOpen,
   X,
   Shield,
@@ -59,7 +60,8 @@ import { hexToRgba } from "@/lib/common/color";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { formatShortcutDisplay, formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 import { resolveNextEditorToolbarTier, type EditorToolbarTier } from "@/lib/tabs/editorToolbarLayout";
-import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
+import { canSaveSqlTab, type SqlSaveDestination } from "@/lib/tabs/sqlTabSaveTarget";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -117,7 +119,7 @@ const emit = defineEmits<{
   foldAll: [];
   unfoldAll: [];
   toggleSqlKeywordCase: [];
-  saveSql: [tabId: string];
+  saveSql: [tabId: string, destination?: SqlSaveDestination];
   "change-encoding": [value: NonNullable<QueryTab["externalSqlEncoding"]>];
   openSql: [];
   importResultArchive: [];
@@ -143,6 +145,7 @@ const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const isDesktop = isTauriRuntime();
 const showMongoSqlToggle = computed(() => props.activeConnection?.db_type === "mongodb" && props.activeTab.mode === "query");
 const mongoQueryLanguage = computed(() => props.activeTab.mongoQueryLanguage ?? "shell");
 
@@ -215,7 +218,7 @@ watch(toolbarTier, () => {
 // The visible control set also changes with connection type and transaction
 // state; re-measure when those do.
 watch(
-  () => [props.activeConnection?.id, props.activeConnection?.db_type, props.txnSessionId, props.activeTab.isExecuting, props.activeTab.isExplaining] as const,
+  () => [props.activeConnection?.id, props.activeConnection?.db_type, props.txnSessionId, props.activeTab.isExecuting, props.activeTab.isExplaining, props.activeTab.mode, !!props.activeTab.objectSource, !!props.activeTab.sourceLoad] as const,
   () => {
     void nextTick(scheduleToolbarMeasurement);
   },
@@ -345,7 +348,7 @@ const hasDefaultDatabaseOption = computed(() => activeDatabaseOptions.value.incl
 const schemaDatabaseKey = computed(() => props.activeTab.database || (isSingleDb.value ? "_" : ""));
 const saveTooltip = computed(() => {
   let label = t("toolbar.saveSql");
-  if (props.activeTab.objectSource) label = t("objects.saveSource");
+  if (props.activeTab.objectSource || props.activeTab.sourceLoad) label = t("objects.saveSource");
   else if (props.activeTab.externalSqlPath) label = t("toolbar.saveSqlFile");
   return formatShortcutTooltip(label, settingsStore.editorSettings.shortcuts.saveSql);
 });
@@ -353,6 +356,12 @@ const explainPlanTooltip = computed(() => formatShortcutTooltip(t("toolbar.expla
 const formatSqlTooltip = computed(() => formatShortcutTooltip(t("toolbar.formatSql"), settingsStore.editorSettings.shortcuts.formatSql));
 const exPasteSqlInConditionTooltip = computed(() => formatShortcutTooltip(t("toolbar.exPasteSqlInCondition"), settingsStore.editorSettings.shortcuts.exPasteSqlInCondition));
 const isObjectSourceTab = computed(() => !!props.activeTab.objectSource || !!props.activeTab.sourceLoad);
+const showSaveDestinations = computed(() => props.activeTab.mode === "query" && !isObjectSourceTab.value && !isObjectDependencySection(props.activeTab));
+function saveDestinationTooltip(destination: SqlSaveDestination): string {
+  const label = t(destination === "local" ? "savedSql.saveToFile" : "savedSql.saveToLibrary");
+  const currentDestination = props.activeTab.externalSqlPath ? "local" : props.activeTab.savedSqlId ? "library" : undefined;
+  return currentDestination === destination ? formatShortcutTooltip(label, settingsStore.editorSettings.shortcuts.saveSql) : label;
+}
 const objectSourceRefreshing = computed(() => !!props.activeTab.sourceLoad && !props.activeTab.sourceLoad.error);
 
 function refreshObjectSource() {
@@ -844,9 +853,52 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.blockDangerousRedisCommands") }}</TooltipContent>
       </Tooltip>
-      <Tooltip>
+      <template v-if="showSaveDestinations">
+        <Tooltip v-if="isDesktop">
+          <TooltipTrigger as-child>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-6 shrink-0 gap-1 text-xs text-blue-600 hover:bg-blue-500/10 hover:text-blue-700 dark:text-blue-300 dark:hover:text-blue-200"
+              :class="toolbarTier === 0 ? 'px-2' : 'w-6 p-0'"
+              :disabled="!canSaveSql"
+              :aria-label="t('savedSql.saveToFile')"
+              @click="emit('saveSql', props.activeTab.id, 'local')"
+            >
+              <Save class="h-3.5 w-3.5 shrink-0" />
+              <span v-if="toolbarTier === 0">{{ t("savedSql.saveToFile") }}</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{{ saveDestinationTooltip("local") }}</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-6 shrink-0 gap-1 text-xs text-blue-600 hover:bg-blue-500/10 hover:text-blue-700 dark:text-blue-300 dark:hover:text-blue-200"
+              :class="toolbarTier === 0 ? 'px-2' : 'w-6 p-0'"
+              :disabled="!canSaveSql"
+              :aria-label="t('savedSql.saveToLibrary')"
+              @click="emit('saveSql', props.activeTab.id, 'library')"
+            >
+              <LibraryBig class="h-3.5 w-3.5 shrink-0" />
+              <span v-if="toolbarTier === 0">{{ t("savedSql.saveToLibrary") }}</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{{ saveDestinationTooltip("library") }}</TooltipContent>
+        </Tooltip>
+      </template>
+      <Tooltip v-else>
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-blue-600 hover:bg-blue-500/10 hover:text-blue-700 dark:text-blue-300 dark:hover:text-blue-200" :disabled="!canSaveSql" @click="emit('saveSql', props.activeTab.id)">
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6 text-blue-600 hover:bg-blue-500/10 hover:text-blue-700 dark:text-blue-300 dark:hover:text-blue-200"
+            :disabled="!canSaveSql"
+            :aria-label="isObjectSourceTab ? t('objects.saveSource') : t('toolbar.saveSql')"
+            @click="emit('saveSql', props.activeTab.id)"
+          >
             <Save class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>

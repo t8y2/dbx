@@ -209,6 +209,10 @@ struct SqlDialectProfile {
     supports_postgres_dollar_quoted_routines: bool,
     supports_hana_script_blocks: bool,
     supports_firebird_routine_blocks: bool,
+    /// Informix SPL routines (`CREATE [DBA] FUNCTION|PROCEDURE ... END FUNCTION|PROCEDURE`).
+    /// The body is a sequence of SPL statements separated by semicolons, so only the
+    /// terminating `END FUNCTION;`/`END PROCEDURE;` closes the statement.
+    supports_informix_routine_blocks: bool,
     supports_go_batch_separator: bool,
     keeps_sqlserver_module_batch_at_cursor: bool,
     /// Whether a top-level T-SQL control-flow batch (`IF`/`WHILE` with a block
@@ -241,6 +245,7 @@ impl Default for SqlDialectProfile {
             supports_postgres_dollar_quoted_routines: false,
             supports_hana_script_blocks: false,
             supports_firebird_routine_blocks: false,
+            supports_informix_routine_blocks: false,
             supports_go_batch_separator: false,
             keeps_sqlserver_module_batch_at_cursor: false,
             keeps_sqlserver_control_flow_batches: false,
@@ -308,6 +313,10 @@ impl SqlDialectProfile {
 
         if matches!(db_type, DatabaseType::Firebird) {
             return Self::firebird();
+        }
+
+        if matches!(db_type, DatabaseType::Informix | DatabaseType::Gbase8s) {
+            return Self::informix();
         }
 
         if matches!(db_type, DatabaseType::DuckDb) {
@@ -417,6 +426,10 @@ impl SqlDialectProfile {
 
     fn firebird() -> Self {
         Self { supports_backslash_escaped_quotes: false, supports_firebird_routine_blocks: true, ..Self::default() }
+    }
+
+    fn informix() -> Self {
+        Self { supports_informix_routine_blocks: true, ..Self::default() }
     }
 
     fn is_mysql_compatible_database(db_type: DatabaseType) -> bool {
@@ -989,6 +1002,17 @@ impl SqlStatementSplitter {
                         if firebird_routine_block_is_complete(&self.buffer) {
                             self.push_current_statement(&mut statements);
                         }
+                    } else if self.options.profile.supports_informix_routine_blocks
+                        && starts_with_informix_routine_block(&self.buffer)
+                    {
+                        // Informix SPL bodies are semicolon-separated statements; the
+                        // whole CREATE FUNCTION/PROCEDURE block ends at END FUNCTION;
+                        // or END PROCEDURE;. Keep the terminating semicolon, like the
+                        // Firebird block splitter above.
+                        self.buffer.push(ch);
+                        if informix_routine_block_is_complete(&self.buffer) {
+                            self.push_current_statement(&mut statements);
+                        }
                     } else if keeps_sqlserver_control_flow_batch(self.options, &self.buffer) {
                         // T-SQL does not end a control-flow batch at a semicolon
                         // (#9336, #13051, #13514): the inner `;` stays in the
@@ -1465,6 +1489,9 @@ fn split_statement_range_at_blank_lines(
     if options.profile.supports_firebird_routine_blocks && starts_with_firebird_routine_block(&statement.text) {
         return vec![statement.clone()];
     }
+    if options.profile.supports_informix_routine_blocks && starts_with_informix_routine_block(&statement.text) {
+        return vec![statement.clone()];
+    }
 
     let mut ranges = Vec::new();
     let mut scanner = SqlScanner::with_profile(options.profile);
@@ -1737,6 +1764,17 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                         && starts_with_firebird_routine_block(&sql[start..i])
                     {
                         if !firebird_routine_block_is_complete(&sql[start..i + ch.len_utf8()]) {
+                            i += ch.len_utf8();
+                            continue;
+                        }
+                        push_statement_range(&mut ranges, sql, start, i + ch.len_utf8(), options);
+                    } else if options.profile.supports_informix_routine_blocks
+                        && starts_with_informix_routine_block(&sql[start..i])
+                    {
+                        // Keep every internal `;` of the SPL body; the statement ends
+                        // at the `;` after END FUNCTION/END PROCEDURE (or at the end of
+                        // a DOCUMENT/WITH LISTING IN clause that follows it).
+                        if !informix_routine_block_is_complete(&sql[start..i + ch.len_utf8()]) {
                             i += ch.len_utf8();
                             continue;
                         }
@@ -3979,6 +4017,87 @@ impl FirebirdRoutineBlock {
     }
 }
 
+fn starts_with_informix_routine_block(sql: &str) -> bool {
+    InformixRoutineBlock::parse(sql).starts_block()
+}
+
+fn informix_routine_block_is_complete(sql: &str) -> bool {
+    InformixRoutineBlock::parse(sql).is_complete()
+}
+
+/// An Informix SPL routine: `CREATE [OR REPLACE] [DBA] FUNCTION|PROCEDURE ...`
+/// whose body is a list of SPL statements separated by semicolons and whose
+/// terminator is `END FUNCTION` or `END PROCEDURE`.
+///
+/// Unlike PL/SQL, an SPL routine has no `BEGIN`; the body starts right after the
+/// `RETURNING` (or procedure parameter) clause's semicolon, so a plain
+/// semicolon-counting splitter turns the header and every body statement into
+/// separately executable fragments. External routines use the same
+/// `END FUNCTION`/`END PROCEDURE` terminator, so every Informix routine block is
+/// kept whole here.
+struct InformixRoutineBlock {
+    tokens: Vec<OraclePlSqlToken>,
+}
+
+impl InformixRoutineBlock {
+    fn parse(sql: &str) -> Self {
+        Self { tokens: oracle_plsql_tokens(sql) }
+    }
+
+    fn object_kind_index(&self) -> usize {
+        let mut index = 1;
+        if self.tokens.get(index).is_some_and(|token| token.is_word("OR"))
+            && self.tokens.get(index + 1).is_some_and(|token| token.is_word("REPLACE"))
+        {
+            index += 2;
+        }
+        if self.tokens.get(index).is_some_and(|token| token.is_word("DBA")) {
+            index += 1;
+        }
+        index
+    }
+
+    fn object_kind(&self) -> Option<&str> {
+        self.tokens.get(self.object_kind_index()).and_then(OraclePlSqlToken::as_word)
+    }
+
+    fn starts_block(&self) -> bool {
+        let Some(first) = self.tokens.first().and_then(OraclePlSqlToken::as_word) else {
+            return false;
+        };
+        if first != "CREATE" {
+            return false;
+        }
+        let object_index = self.object_kind_index();
+        if !self.tokens.get(object_index).is_some_and(|token| token.is_any_word(&["FUNCTION", "PROCEDURE"])) {
+            return false;
+        }
+        // `CREATE FUNCTION FROM 'file'` / `CREATE PROCEDURE FROM 'file'` import a
+        // routine definition; they end at their own semicolon instead of waiting
+        // for an END FUNCTION/END PROCEDURE terminator.
+        !self.tokens.get(object_index + 1).is_some_and(|token| token.is_word("FROM"))
+    }
+
+    fn is_complete(&self) -> bool {
+        let Some(kind) = self.object_kind() else {
+            return false;
+        };
+        if !matches!(kind, "FUNCTION" | "PROCEDURE") {
+            return false;
+        }
+        if !self.tokens.last().is_some_and(OraclePlSqlToken::is_semicolon) {
+            return false;
+        }
+        // `END FUNCTION`/`END PROCEDURE` closes the body. It can be followed by a
+        // DOCUMENT / WITH LISTING IN clause before the statement terminator, so
+        // only the pair has to appear; strings and comments are already tokenized
+        // away by `oracle_plsql_tokens`.
+        self.tokens.iter().enumerate().any(|(index, token)| {
+            token.is_word("END") && self.tokens.get(index + 1).and_then(OraclePlSqlToken::as_word) == Some(kind)
+        })
+    }
+}
+
 /// The BEGIN/END scope walk behind [`OraclePlSqlBlock::is_complete`], kept resumable so
 /// [`OraclePlSqlBlockTracker`] only walks the tokens added since its previous check.
 #[derive(Debug, Clone)]
@@ -6119,6 +6238,7 @@ SELECT 2;";
         assert!(!default.supports_oracle_style_routine_bodies);
         assert!(!default.supports_hana_script_blocks);
         assert!(!default.supports_firebird_routine_blocks);
+        assert!(!default.supports_informix_routine_blocks);
         assert!(!default.supports_slash_line_block_delimiter);
         assert!(!default.supports_go_batch_separator);
         assert!(!default.keeps_sqlserver_module_batch_at_cursor);
@@ -6200,6 +6320,12 @@ SELECT 2;";
         assert_eq!(firebird, SqlDialectProfile::firebird());
         assert!(firebird.supports_firebird_routine_blocks);
         assert!(!firebird.supports_backslash_escaped_quotes);
+
+        for db_type in [DatabaseType::Informix, DatabaseType::Gbase8s] {
+            let informix = SqlDialectProfile::for_database_type(db_type);
+            assert_eq!(informix, SqlDialectProfile::informix());
+            assert!(informix.supports_informix_routine_blocks);
+        }
 
         for db_type in [DatabaseType::Jdbc, DatabaseType::Hive] {
             let profile = SqlDialectProfile::for_database_type(db_type);
@@ -6413,6 +6539,132 @@ SELECT 2 FROM RDB$DATABASE;";
         assert_eq!(
             find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Firebird),
             "CREATE OR ALTER TRIGGER \"WL_FYD_TP_AU\" FOR \"WL_FYD\" ACTIVE\nAFTER UPDATE\nas\nbegin\n  /* Trigger text */\n  IF ( COALESCE(NEW.QSTPS,0) <> COALESCE(OLD.QSTPS,0) ) THEN\n  BEGIN\n    UPDATE WL_FYD SET ZT='完成' WHERE ID= NEW.ID;\n  END\nend;"
+        );
+    }
+
+    #[test]
+    fn informix_split_keeps_spl_function_block_together() {
+        let function = "\
+CREATE FUNCTION get_daily_seq2()
+RETURNING DATE, INTEGER;
+
+    DEFINE v_seq INTEGER;
+
+    SELECT seq_daily.NEXTVAL
+        INTO v_seq
+        FROM systables
+        WHERE tabid = 1;
+
+    RETURN TODAY, v_seq;
+
+END FUNCTION;";
+        let sql = format!("{function}\nSELECT 1 FROM systables;");
+
+        assert_eq!(
+            split_sql_statements_for_database(&sql, DatabaseType::Informix),
+            vec![function.to_string(), "SELECT 1 FROM systables".to_string()]
+        );
+    }
+
+    #[test]
+    fn informix_split_keeps_spl_procedure_body_together() {
+        let procedure = "\
+CREATE PROCEDURE daily_rollup()
+    DEFINE n INTEGER;
+
+    UPDATE daily_total SET n = 1;
+
+    IF n = 1 THEN
+        INSERT INTO daily_log VALUES (TODAY);
+    END IF;
+
+END PROCEDURE;";
+        let sql = format!("{procedure}\nSELECT 1 FROM systables;");
+
+        assert_eq!(
+            split_sql_statements_for_database(&sql, DatabaseType::Informix),
+            vec![procedure.to_string(), "SELECT 1 FROM systables".to_string()]
+        );
+    }
+
+    #[test]
+    fn informix_split_keeps_external_function_block_together() {
+        let function = "\
+CREATE FUNCTION ext_abs(i INT) RETURNS INT
+WITH (NOT VARIANT)
+EXTERNAL NAME 'abs'
+LANGUAGE C
+END FUNCTION;";
+        let sql = format!("{function}\nSELECT 1 FROM systables;");
+
+        assert_eq!(
+            split_sql_statements_for_database(&sql, DatabaseType::Informix),
+            vec![function.to_string(), "SELECT 1 FROM systables".to_string()]
+        );
+    }
+
+    #[test]
+    fn informix_split_keeps_document_clause_inside_the_routine() {
+        let function = "\
+CREATE FUNCTION documented() RETURNING INT;
+    RETURN 1;
+END FUNCTION
+DOCUMENT 'returns one'
+WITH LISTING IN '/tmp/dbx_warn';";
+        let sql = format!("{function}\nSELECT 1 FROM systables;");
+
+        assert_eq!(
+            split_sql_statements_for_database(&sql, DatabaseType::Informix),
+            vec![function.to_string(), "SELECT 1 FROM systables".to_string()]
+        );
+    }
+
+    #[test]
+    fn informix_cursor_statement_returns_whole_spl_procedure() {
+        let procedure = "\
+CREATE PROCEDURE daily_rollup()
+    DEFINE n INTEGER;
+
+    UPDATE daily_total SET n = 1;
+
+    IF n = 1 THEN
+        INSERT INTO daily_log VALUES (TODAY);
+    END IF;
+
+END PROCEDURE;";
+        let sql = format!("{procedure}\nSELECT 1 FROM systables;");
+        let cursor = sql.find("UPDATE daily_total").unwrap();
+
+        assert_eq!(find_statement_at_cursor_for_database(&sql, cursor, DatabaseType::Informix), procedure);
+        assert_eq!(
+            find_statement_at_cursor_for_database(&sql, sql.find("daily_log").unwrap(), DatabaseType::Informix),
+            procedure
+        );
+    }
+
+    #[test]
+    fn informix_plain_statements_still_split_at_semicolons() {
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE TABLE t (id INT); SELECT 1 FROM systables;",
+                DatabaseType::Informix
+            ),
+            vec!["CREATE TABLE t (id INT)", "SELECT 1 FROM systables"]
+        );
+    }
+
+    #[test]
+    fn informix_create_function_from_is_not_a_routine_block() {
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE FUNCTION FROM '/tmp/dbx.sql'; CREATE PROCEDURE FROM '/tmp/dbx.sql'; SELECT 1 FROM systables;",
+                DatabaseType::Informix
+            ),
+            vec![
+                "CREATE FUNCTION FROM '/tmp/dbx.sql'",
+                "CREATE PROCEDURE FROM '/tmp/dbx.sql'",
+                "SELECT 1 FROM systables"
+            ]
         );
     }
 

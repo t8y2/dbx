@@ -84,6 +84,7 @@ const includeObjects = ref(savedOptions.includeObjects);
 const includeCreateDatabase = ref(savedOptions.includeCreateDatabase);
 const dropTableIfExists = ref(savedOptions.dropTableIfExists);
 const omitAutoIncrement = ref(savedOptions.omitAutoIncrement);
+const omitDatabaseQualifier = ref(savedOptions.omitDatabaseQualifier);
 const preserveOriginalLanguage = ref(savedOptions.preserveOriginalLanguage);
 const splitSqlOutput = ref(savedOptions.splitSqlOutput);
 const splitSqlPartMaxMb = ref(savedOptions.splitSqlPartMaxMb);
@@ -101,6 +102,7 @@ function applyStoredExportOptions() {
   includeCreateDatabase.value = saved.includeCreateDatabase;
   dropTableIfExists.value = saved.dropTableIfExists;
   omitAutoIncrement.value = saved.omitAutoIncrement;
+  omitDatabaseQualifier.value = saved.omitDatabaseQualifier;
   preserveOriginalLanguage.value = saved.preserveOriginalLanguage;
   splitSqlOutput.value = saved.splitSqlOutput;
   splitSqlPartMaxMb.value = saved.splitSqlPartMaxMb;
@@ -116,6 +118,7 @@ function persistExportOptions() {
     includeCreateDatabase: includeCreateDatabase.value,
     dropTableIfExists: dropTableIfExists.value,
     omitAutoIncrement: omitAutoIncrement.value,
+    omitDatabaseQualifier: omitDatabaseQualifier.value,
     preserveOriginalLanguage: preserveOriginalLanguage.value,
     splitSqlOutput: splitSqlOutput.value,
     splitSqlPartMaxMb: normalizedSplitSqlPartMaxMb(),
@@ -434,6 +437,7 @@ async function startDesktopExport() {
       includeCreateDatabase: includeCreateDatabase.value,
       dropTableIfExists: dropTableIfExists.value,
       omitAutoIncrement: omitAutoIncrement.value,
+      omitDatabaseQualifier: omitDatabaseQualifier.value,
       preserveOriginalLanguage: preserveOriginalLanguage.value,
       batchSize: 1000,
       splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
@@ -714,6 +718,7 @@ async function startExport() {
           includeCreateDatabase: includeCreateDatabase.value,
           dropTableIfExists: dropTableIfExists.value,
           omitAutoIncrement: omitAutoIncrement.value,
+          omitDatabaseQualifier: omitDatabaseQualifier.value,
           preserveOriginalLanguage: preserveOriginalLanguage.value,
           snapshotSessionId,
           batchSize: 1000,
@@ -865,6 +870,7 @@ async function startAllDatabasesExport() {
               includeCreateDatabase: includeCreateDatabase.value,
               dropTableIfExists: dropTableIfExists.value,
               omitAutoIncrement: omitAutoIncrement.value,
+              omitDatabaseQualifier: omitDatabaseQualifier.value,
               preserveOriginalLanguage: preserveOriginalLanguage.value,
               snapshotSessionId,
               batchSize: 1000,
@@ -1130,7 +1136,7 @@ watch(
   { immediate: true },
 );
 
-watch([includeStructure, includeData, insertDialect, insertMode, includeObjects, includeCreateDatabase, dropTableIfExists, omitAutoIncrement, preserveOriginalLanguage, splitSqlOutput, splitSqlPartMaxMb], () => {
+watch([includeStructure, includeData, insertDialect, insertMode, includeObjects, includeCreateDatabase, dropTableIfExists, omitAutoIncrement, omitDatabaseQualifier, preserveOriginalLanguage, splitSqlOutput, splitSqlPartMaxMb], () => {
   if (open.value) {
     persistExportOptions();
   }
@@ -1291,6 +1297,11 @@ watch([includeStructure, includeData, insertDialect, insertMode, includeObjects,
               <CheckSquare v-if="omitAutoIncrement" class="w-3.5 h-3.5 text-primary shrink-0" />
               <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
               {{ t("databaseExport.omitAutoIncrement") }}
+            </div>
+            <div v-if="includeData && isMysqlFamily" class="flex items-center gap-2 cursor-pointer text-xs" @click="omitDatabaseQualifier = !omitDatabaseQualifier">
+              <CheckSquare v-if="omitDatabaseQualifier" class="w-3.5 h-3.5 text-primary shrink-0" />
+              <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
+              {{ t("databaseExport.omitDatabaseQualifier") }}
             </div>
             <div v-if="includeData" class="flex items-center gap-2 cursor-pointer text-xs" @click="preserveOriginalLanguage = !preserveOriginalLanguage">
               <CheckSquare v-if="preserveOriginalLanguage" class="w-3.5 h-3.5 text-primary shrink-0" />

@@ -15,7 +15,7 @@ import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
 import { canDownloadAndInstallUpdate, isNewerRemoteVersion, resolveReleaseTagUrl } from "@/composables/useAppUpdater";
 import type { ComponentUpdateCategory } from "@/composables/useComponentUpdates";
 import { currentLocale } from "@/i18n";
-import { changelogLangFromLocale, createLatestRequestGuard, fetchChangelog, type ChangelogRelease } from "@/lib/app/changelog";
+import { changelogLangFromLocale, createLatestRequestGuard, fetchChangelogIndex, type ChangelogReleaseSummary } from "@/lib/app/changelog";
 import DriverInstallProgressCircle from "@/components/config/DriverInstallProgressCircle.vue";
 import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
 import { driverInstallProgressPercent, formatDriverInstallProgressText, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
@@ -102,7 +102,8 @@ const mcpAvailable = computed(() => (props.mcpUpdate ? mcpUpdateAvailability(pro
 const HISTORY_PAGE_SIZE = 10;
 const historyLoading = ref(false);
 const historyError = ref("");
-const historyReleases = ref<ChangelogRelease[]>([]);
+/** 只需要版本号与日期，因此读轻量索引而不是整份更新日志正文 */
+const historyReleases = ref<ChangelogReleaseSummary[]>([]);
 const historyVisibleCount = ref(HISTORY_PAGE_SIZE);
 const historyRequest = createLatestRequestGuard();
 /** 弹窗可能在“检查更新”完成前打开，这里保存单独取到的应用版本用于比较 */
@@ -229,7 +230,7 @@ async function loadOlderReleases() {
     if (!props.updateInfo?.current_version && !fallbackVersion.value) {
       fallbackVersion.value = await getAppVersion().catch(() => "");
     }
-    const data = await fetchChangelog(changelogLang.value);
+    const data = await fetchChangelogIndex(changelogLang.value);
     if (!historyRequest.isCurrent(requestId)) return;
     historyReleases.value = data.releases;
   } catch (error) {

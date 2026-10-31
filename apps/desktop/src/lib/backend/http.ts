@@ -5850,6 +5850,16 @@ export async function fetchChangelog(lang?: string): Promise<import("@/lib/app/c
   return get(`/api/changelog${query}`);
 }
 
+export async function fetchChangelogIndex(lang?: string): Promise<import("@/lib/app/changelog").ChangelogIndexData> {
+  const query = lang ? `?lang=${encodeURIComponent(lang)}` : "";
+  return get(`/api/changelog/index${query}`);
+}
+
+export async function fetchChangelogRelease(lang: string | undefined, tag: string): Promise<import("@/lib/app/changelog").ChangelogRelease> {
+  const query = lang ? `?lang=${encodeURIComponent(lang)}` : "";
+  return get(`/api/changelog/releases/${encodeURIComponent(tag)}${query}`);
+}
+
 export async function checkMcpServerStatus(): Promise<import("@/lib/backend/tauri").McpServerStatus> {
   return {
     installed: false,

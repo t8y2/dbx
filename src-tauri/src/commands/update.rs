@@ -382,6 +382,21 @@ pub async fn fetch_changelog(lang: Option<String>) -> Result<dbx_core::changelog
 }
 
 #[tauri::command]
+pub async fn fetch_changelog_index(lang: Option<String>) -> Result<dbx_core::changelog::ChangelogIndex, String> {
+    let lang = lang.unwrap_or_else(|| "en".to_string());
+    dbx_core::changelog::fetch_changelog_index(&lang).await
+}
+
+#[tauri::command]
+pub async fn fetch_changelog_release(
+    lang: Option<String>,
+    tag: String,
+) -> Result<dbx_core::changelog::ChangelogRelease, String> {
+    let lang = lang.unwrap_or_else(|| "en".to_string());
+    dbx_core::changelog::fetch_changelog_release(&lang, &tag).await
+}
+
+#[tauri::command]
 pub async fn get_system_proxy_url() -> Option<String> {
     tauri::async_runtime::spawn_blocking(dbx_core::update::system_proxy_url).await.ok().flatten()
 }

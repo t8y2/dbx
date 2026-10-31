@@ -96,7 +96,7 @@ describe("EditorGroup mount contract", () => {
 
   it.each(["query", "data"] as const)("reuses hot %s tabs and remounts evicted surfaces", async (mode) => {
     const store = useQueryStore();
-    const tabIds = ["tab-a", "tab-b", "tab-c", "tab-d"];
+    const tabIds = ["tab-a", "tab-b", "tab-c", "tab-d", "tab-e", "tab-f", "tab-g"];
     store.tabs = tabIds.map((tabId) => tab(tabId, mode));
     const activeTabId = ref("tab-a");
     const host = createHost();
@@ -109,13 +109,11 @@ describe("EditorGroup mount contract", () => {
             activeTabId: activeTabId.value,
             activeTab: tab(activeTabId.value, mode),
             activeConnection: undefined,
-            executableSql: "SELECT 1",
+            hasExecutableSql: true,
             activeOutputView: "result",
             formatSqlRequest: null,
             compressSqlRequest: null,
             keywordCaseRequest: null,
-            selectedSql: "",
-            cursorPos: 0,
             blockDangerousRedisCommands: false,
           });
       },
@@ -126,36 +124,35 @@ describe("EditorGroup mount contract", () => {
     app.mount(host);
     await nextTick();
 
-    activeTabId.value = "tab-b";
-    await nextTick();
+    for (const tabId of ["tab-b", "tab-c", "tab-d", "tab-e", "tab-f"]) {
+      activeTabId.value = tabId;
+      await nextTick();
+    }
+    expect(lifecycle.surfaceCreated).toBe(6);
+    expect(lifecycle.surfaceUnmounted).toBe(0);
+
     activeTabId.value = "tab-a";
     await nextTick();
-
-    expect(lifecycle.surfaceCreated).toBe(2);
+    expect(lifecycle.surfaceCreated).toBe(6);
     expect(lifecycle.surfaceUnmounted).toBe(0);
 
-    activeTabId.value = "tab-c";
+    activeTabId.value = "tab-g";
     await nextTick();
-    expect(lifecycle.surfaceCreated).toBe(3);
-    expect(lifecycle.surfaceUnmounted).toBe(0);
-
-    activeTabId.value = "tab-d";
-    await nextTick();
-    expect(lifecycle.surfaceCreated).toBe(4);
+    expect(lifecycle.surfaceCreated).toBe(7);
     expect(lifecycle.surfaceUnmounted).toBe(1);
 
     activeTabId.value = "tab-a";
     await nextTick();
-    expect(lifecycle.surfaceCreated).toBe(4);
+    expect(lifecycle.surfaceCreated).toBe(7);
     expect(lifecycle.surfaceUnmounted).toBe(1);
 
     activeTabId.value = "tab-b";
     await nextTick();
-    expect(lifecycle.surfaceCreated).toBe(5);
+    expect(lifecycle.surfaceCreated).toBe(8);
     expect(lifecycle.surfaceUnmounted).toBe(2);
 
     app.unmount();
-    expect(lifecycle.surfaceUnmounted).toBe(5);
+    expect(lifecycle.surfaceUnmounted).toBe(8);
     host.remove();
   });
 
@@ -171,13 +168,11 @@ describe("EditorGroup mount contract", () => {
       // Global active tab is intentionally different from the group active tab.
       activeTab: tab("tab-a"),
       activeConnection: undefined,
-      executableSql: "SELECT 1",
+      hasExecutableSql: true,
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
       keywordCaseRequest: null,
-      selectedSql: "",
-      cursorPos: 0,
       blockDangerousRedisCommands: false,
     });
     app.use(pinia);
@@ -217,13 +212,11 @@ describe("EditorGroup mount contract", () => {
       activeTabId: queryId,
       activeTab: tab(queryId),
       activeConnection: undefined,
-      executableSql: "SELECT 1",
+      hasExecutableSql: true,
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
       keywordCaseRequest: null,
-      selectedSql: "",
-      cursorPos: 0,
       blockDangerousRedisCommands: false,
     });
     app.provide(EDITOR_TOOLBAR_ACTIONS, actions);
@@ -269,13 +262,11 @@ describe("EditorGroup mount contract", () => {
       activeTabId: dataId,
       activeTab: tab(queryId),
       activeConnection: undefined,
-      executableSql: "SELECT 1",
+      hasExecutableSql: true,
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
       keywordCaseRequest: null,
-      selectedSql: "",
-      cursorPos: 0,
       blockDangerousRedisCommands: false,
     });
     app2.provide(EDITOR_TOOLBAR_ACTIONS, actions);

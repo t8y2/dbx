@@ -3718,6 +3718,14 @@ export async function fetchChangelog(lang?: string): Promise<import("@/lib/app/c
   return invoke("fetch_changelog", { lang });
 }
 
+export async function fetchChangelogIndex(lang?: string): Promise<import("@/lib/app/changelog").ChangelogIndexData> {
+  return invoke("fetch_changelog_index", { lang });
+}
+
+export async function fetchChangelogRelease(lang: string | undefined, tag: string): Promise<import("@/lib/app/changelog").ChangelogRelease> {
+  return invoke("fetch_changelog_release", { lang, tag });
+}
+
 export async function getSystemProxyUrl(): Promise<string | null> {
   return invoke("get_system_proxy_url");
 }
@@ -6695,6 +6703,7 @@ export interface DatabaseExportRequest {
   includeCreateDatabase?: boolean;
   dropTableIfExists?: boolean;
   omitAutoIncrement?: boolean;
+  omitDatabaseQualifier?: boolean;
   preserveOriginalLanguage?: boolean;
   failOnError?: boolean;
   preventOverwrite?: boolean;

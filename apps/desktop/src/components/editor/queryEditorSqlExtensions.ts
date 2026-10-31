@@ -5,7 +5,7 @@ import { type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, statementGutterStartIndexHasStartAt } from "@/lib/sql/executableStatementRangeCache";
 import { createDeferredEditorTask } from "@/lib/editor/deferredEditorTask";
 import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
-import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
+import { expandToBoundedSqlStatementWindow } from "@/lib/sql/insertValueHints";
 import { createSqlSignatureTooltipDom } from "@/lib/editor/sqlSignatureTooltip";
 import { getSqlFunctionSignatureHelp } from "@/lib/sql/sqlCompletion";
 import { shellLineCommentTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
@@ -452,7 +452,9 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
                 continue;
               }
 
-              const next = expandToSqlStatementWindow(sql, visibleRange.from, visibleRange.to, dialectId);
+              // Colouring only needs the neighbourhood of what is on screen; the exact window would
+              // re-lex and re-tokenize a whole 100k-value IN list or INSERT on every typing pause.
+              const next = expandToBoundedSqlStatementWindow(sql, visibleRange.from, visibleRange.to, dialectId);
               const cachedWindow = this.cachedWindows.find((candidate) => candidate.from <= next.from && candidate.to >= next.to);
               if (cachedWindow) {
                 if (!windows.includes(cachedWindow)) windows.push(cachedWindow);
@@ -517,7 +519,7 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
 
   function createViewDecorations() {
     const currentStatementFrameExtension = currentStatementFrameLayer(
-      { layer, RectangleMarker },
+      { layer, RectangleMarker, ViewPlugin },
       (view) => {
         if (!settingsStore.editorSettings.showCurrentStatementFrame) return null;
         if (view.state.selection.ranges.some((range) => !range.empty)) return null;

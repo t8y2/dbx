@@ -209,6 +209,7 @@ import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
 import { useUiFontFamilyPreview } from "@/composables/useUiFontFamilyPreview";
 import { createUiScaleApplyQueue } from "@/lib/app/uiScaleApplyQueue";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
+import { subscribeSavedSqlLibraryChanges } from "@/lib/savedSql/savedSqlLibraryEvents";
 import { savedSqlDefaultTargetForWrite } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
@@ -886,7 +887,7 @@ async function handleDetachedReturnRequested(payload: unknown) {
 async function initDetachedWindow() {
   if (!isDetachedWindowContext || !detachedContextTabId) return;
   await settingsStore.initEditorSettings();
-  await connectionStore.initFromDisk();
+  await Promise.all([settingsStore.initDesktopSettings(), connectionStore.initFromDisk(), initSavedSqlEditorPositions(), savedSqlStore.initFromStorage()]);
   const handoff = await api.loadDetachedTabHandoff(detachedContextTabId);
   if (!handoff) {
     toast(t("tabs.detachedTabUnavailable"), 5000);
@@ -902,6 +903,11 @@ async function initDetachedWindow() {
 
 async function setupDetachedWindowEvents() {
   if (!isDesktop) return;
+  try {
+    detachedEventUnlisteners.push(await subscribeSavedSqlLibraryChanges(() => savedSqlStore.refreshFromStorage()));
+  } catch (error) {
+    console.warn("[DBX][saved-sql:subscribe:error]", error);
+  }
   const { listen } = await import("@tauri-apps/api/event");
   const events: Array<[string, (payload: unknown) => Promise<void>]> = isDetachedWindowContext
     ? [
@@ -5356,6 +5362,9 @@ onMounted(async () => {
       .catch(() => {});
     return;
   }
+  // Subscribe before the initial library read so a detached-window save cannot
+  // fall between the startup snapshot and listener registration.
+  await setupDetachedWindowEvents().catch((error) => console.warn("[DBX][detached-tab:subscribe:error]", error));
   desktopOpenTabsRestorationBarrier = createOpenTabsRestorationBarrier();
   void initApp();
   setupFileDrop().catch(() => {});
@@ -5379,7 +5388,6 @@ onMounted(async () => {
     void openPendingPluginInstallLinks();
   });
   setupCloseActionPromptListener();
-  void setupDetachedWindowEvents();
   void setupFloatingWindowEvents();
   console.log(`[STARTUP] onMounted sync done: ${(performance.now() - mountStart).toFixed(0)}ms`);
 });

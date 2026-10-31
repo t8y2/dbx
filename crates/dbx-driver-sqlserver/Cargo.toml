@@ -11,6 +11,11 @@ publish = false
 # agent driver workspaces resolve tiberius from crates.io and must keep this
 # off; SqlServerClient::send_attention then degrades to a no-op.
 native-attention = []
+# Windows authentication (SSPI integrated security and explicit Windows
+# credentials). tiberius gates its `winauth` dependency to cfg(windows), so
+# enabling this on another target is inert and the Windows auth modes simply do
+# not exist there.
+windows-auth = ["tiberius/winauth"]
 
 [dependencies]
 dbx-driver-support = { path = "../dbx-driver-support" }

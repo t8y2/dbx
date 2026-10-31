@@ -152,6 +152,21 @@ pub enum ProductionBadgeScope {
     Table,
 }
 
+/// Serialized `ConnectionConfig::auth_method` values for SQL Server.
+pub const SQLSERVER_AUTH_WINDOWS_INTEGRATED: &str = "windows-integrated";
+pub const SQLSERVER_AUTH_WINDOWS: &str = "windows";
+
+/// Resolved SQL Server login mode; see [`ConnectionConfig::sqlserver_auth_method`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlServerAuthMethod {
+    /// SQL Server authentication (default).
+    Sql,
+    /// Windows integrated (SSPI) authentication as the DBX process user.
+    WindowsIntegrated,
+    /// Explicit Windows credentials from username/password.
+    Windows,
+}
+
 #[derive(Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
@@ -172,6 +187,12 @@ pub struct ConnectionConfig {
     pub username: String,
     pub password: String,
     pub database: Option<String>,
+    /// SQL Server login mode: absent/`sql` keeps SQL Server authentication,
+    /// `windows-integrated` uses the Windows user running DBX (SSPI), and
+    /// `windows` uses the explicit Windows credentials in username/password.
+    /// Ignored for the legacy compatibility driver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_method: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_schema: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -753,6 +774,8 @@ struct ConnectionConfigData {
     pub password: String,
     pub database: Option<String>,
     #[serde(default)]
+    pub auth_method: Option<String>,
+    #[serde(default)]
     pub default_schema: Option<String>,
     #[serde(default)]
     pub visible_databases: Option<Vec<String>>,
@@ -888,6 +911,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             username: data.username,
             password: data.password,
             database: data.database,
+            auth_method: data.auth_method,
             default_schema: data.default_schema,
             visible_databases: data.visible_databases,
             visible_database_patterns: data.visible_database_patterns,
@@ -1253,6 +1277,29 @@ impl ConnectionConfig {
                 config.driver_label = Some("SQL Server legacy compatibility component".to_string());
                 config.url_params = without_sqlserver_legacy_compatibility_param(config.url_params.as_deref());
             }
+            // The legacy compatibility agent keeps its own jTDS login handling,
+            // so a Windows auth choice does not apply to it. Drop the field for
+            // that profile and normalize the native driver's saved value.
+            if config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("sqlserver-legacy"))
+            {
+                config.auth_method = None;
+            } else {
+                config.auth_method = match config.auth_method.as_deref().map(str::trim) {
+                    Some(value) if value.eq_ignore_ascii_case(SQLSERVER_AUTH_WINDOWS_INTEGRATED) => {
+                        Some(SQLSERVER_AUTH_WINDOWS_INTEGRATED.to_string())
+                    }
+                    Some(value) if value.eq_ignore_ascii_case(SQLSERVER_AUTH_WINDOWS) => {
+                        Some(SQLSERVER_AUTH_WINDOWS.to_string())
+                    }
+                    _ => None,
+                };
+            }
+            // Windows integrated auth stores no password. Do this after the
+            // legacy-profile drop above so a legacy connection never loses a
+            // password it still needs for its jTDS login.
+            if config.uses_sqlserver_windows_integrated_auth() {
+                config.password.clear();
+            }
         }
         if config.db_type == DatabaseType::Mysql
             && config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("tdengine"))
@@ -1277,6 +1324,32 @@ impl ConnectionConfig {
             return mongo_connection_string_uses_oidc(connection_string);
         }
         self.url_params.as_deref().is_some_and(mongo_url_params_use_oidc)
+    }
+
+    /// Normalized SQL Server authentication mode. Only the native driver honours
+    /// this; the legacy compatibility agent keeps its own jTDS login handling.
+    pub fn sqlserver_auth_method(&self) -> SqlServerAuthMethod {
+        if self.db_type != DatabaseType::SqlServer {
+            return SqlServerAuthMethod::Sql;
+        }
+        match self.auth_method.as_deref().map(str::trim) {
+            Some(value) if value.eq_ignore_ascii_case(SQLSERVER_AUTH_WINDOWS_INTEGRATED) => {
+                SqlServerAuthMethod::WindowsIntegrated
+            }
+            Some(value) if value.eq_ignore_ascii_case(SQLSERVER_AUTH_WINDOWS) => SqlServerAuthMethod::Windows,
+            _ => SqlServerAuthMethod::Sql,
+        }
+    }
+
+    /// True when the connection authenticates without storing a password.
+    pub fn uses_sqlserver_windows_integrated_auth(&self) -> bool {
+        self.sqlserver_auth_method() == SqlServerAuthMethod::WindowsIntegrated
+    }
+
+    /// True for any SQL Server Windows authentication mode (integrated or
+    /// explicit credentials).
+    pub fn uses_sqlserver_windows_auth(&self) -> bool {
+        !matches!(self.sqlserver_auth_method(), SqlServerAuthMethod::Sql)
     }
 
     pub fn uses_redis_sentinel(&self) -> bool {
@@ -1338,7 +1411,13 @@ impl ConnectionConfig {
             DatabaseType::Turso => turso_http_url(self, raw_host, port),
             DatabaseType::CloudflareD1 => cloudflare_d1_api_url(self),
             DatabaseType::SqlServer => {
-                format!("server=tcp:{host},{port};database={}", self.database.as_deref().unwrap_or("master"))
+                let database = self.database.as_deref().unwrap_or("master");
+                match self.sqlserver_auth_method() {
+                    SqlServerAuthMethod::WindowsIntegrated => {
+                        format!("server=tcp:{host},{port};database={database};integratedSecurity=true")
+                    }
+                    _ => format!("server=tcp:{host},{port};database={database}"),
+                }
             }
             DatabaseType::MongoDb => {
                 let is_tunneled = host != self.host.as_str() || port != self.port;
@@ -1517,12 +1596,18 @@ impl ConnectionConfig {
             DatabaseType::Rqlite => rqlite_http_url(self, raw_host, port),
             DatabaseType::Turso => turso_http_url(self, raw_host, port),
             DatabaseType::CloudflareD1 => cloudflare_d1_api_url(self),
-            DatabaseType::SqlServer => format!(
-                "server=tcp:{host},{port};user={};password={};database={}",
-                self.username,
-                self.password,
-                self.database.as_deref().unwrap_or("master")
-            ),
+            DatabaseType::SqlServer => {
+                let database = self.database.as_deref().unwrap_or("master");
+                match self.sqlserver_auth_method() {
+                    SqlServerAuthMethod::WindowsIntegrated => {
+                        format!("server=tcp:{host},{port};database={database};integratedSecurity=true")
+                    }
+                    _ => format!(
+                        "server=tcp:{host},{port};user={};password={};database={database}",
+                        self.username, self.password
+                    ),
+                }
+            }
             DatabaseType::MongoDb => {
                 let is_tunneled = host != self.host.as_str() || port != self.port;
                 if let Some(cs) = self.connection_string.as_deref().filter(|s| !s.is_empty()) {
@@ -3465,6 +3550,7 @@ mod tests {
             username: username.to_string(),
             password: password.to_string(),
             database: database.map(str::to_string),
+            auth_method: None,
             default_schema: None,
             visible_databases: None,
             visible_database_patterns: None,
@@ -4367,6 +4453,75 @@ mod tests {
         assert_eq!(canonical.driver_profile.as_deref(), Some("sqlserver"));
         assert_eq!(canonical.driver_label.as_deref(), Some("SQL Server"));
         assert_eq!(canonical.url_params.as_deref(), Some("applicationName=dbx&encrypt=false"));
+    }
+
+    #[test]
+    fn sqlserver_auth_method_defaults_and_normalizes() {
+        use super::SqlServerAuthMethod;
+
+        let mut config = mysql_config("sa", "secret", Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        assert_eq!(config.sqlserver_auth_method(), SqlServerAuthMethod::Sql);
+        assert!(!config.uses_sqlserver_windows_auth());
+
+        // Case-insensitive and whitespace-tolerant values normalize to the canonical form.
+        config.auth_method = Some("  WINDOWS-INTEGRATED ".to_string());
+        assert_eq!(config.canonicalized().auth_method.as_deref(), Some("windows-integrated"));
+        assert_eq!(config.sqlserver_auth_method(), SqlServerAuthMethod::WindowsIntegrated);
+        assert!(config.uses_sqlserver_windows_integrated_auth());
+
+        config.auth_method = Some("Windows".to_string());
+        assert_eq!(config.canonicalized().auth_method.as_deref(), Some("windows"));
+        assert_eq!(config.sqlserver_auth_method(), SqlServerAuthMethod::Windows);
+        assert!(config.uses_sqlserver_windows_auth());
+        assert!(!config.uses_sqlserver_windows_integrated_auth());
+
+        // Unknown values fall back to SQL authentication and are dropped on save.
+        config.auth_method = Some("kerberos".to_string());
+        assert_eq!(config.sqlserver_auth_method(), SqlServerAuthMethod::Sql);
+        assert_eq!(config.canonicalized().auth_method, None);
+
+        // The field never applies to other database types.
+        let mut mysql = mysql_config("root", "secret", Some("app"));
+        mysql.auth_method = Some("windows-integrated".to_string());
+        assert_eq!(mysql.sqlserver_auth_method(), SqlServerAuthMethod::Sql);
+    }
+
+    #[test]
+    fn sqlserver_windows_integrated_drops_password_on_canonicalize() {
+        let mut config = mysql_config("", "secret", Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.auth_method = Some("windows-integrated".to_string());
+
+        assert!(config.canonicalized().password.is_empty());
+    }
+
+    #[test]
+    fn sqlserver_legacy_profile_ignores_windows_auth_choice() {
+        let mut config = mysql_config("sa", "secret", Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.driver_profile = Some("sqlserver-legacy".to_string());
+        config.auth_method = Some("windows-integrated".to_string());
+
+        let canonical = config.canonicalized();
+
+        assert_eq!(canonical.auth_method, None);
+        // The password survives because the legacy agent keeps its own login handling.
+        assert_eq!(canonical.password, "secret");
+    }
+
+    #[test]
+    fn sqlserver_redacted_url_reflects_windows_integrated_without_credentials() {
+        let mut config = mysql_config("sa", "secret", Some("appdb"));
+        config.db_type = DatabaseType::SqlServer;
+        config.host = "db.example.com".to_string();
+        config.port = 1433;
+        config.auth_method = Some("windows-integrated".to_string());
+
+        let url = config.redacted_connection_url_with_host("db.example.com", 1433);
+        assert!(url.contains("integratedSecurity=true"), "{url}");
+        assert!(!url.contains("user="), "{url}");
+        assert!(!url.contains("secret"), "{url}");
     }
 
     #[test]

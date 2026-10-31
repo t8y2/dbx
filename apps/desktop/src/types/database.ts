@@ -9,6 +9,9 @@ import type { OracleRoutinePlanDraft } from "@/types/schemaDiff";
 
 export type { DatabaseType } from "@/types/generated/databaseTypes";
 
+/** SQL Server login mode stored on {@link ConnectionConfig.auth_method}. */
+export type SqlServerAuthMethod = "sql" | "windows-integrated" | "windows";
+
 export interface OracleViewRenameSourceInput {
   source: string;
   owner: string;
@@ -153,6 +156,13 @@ export interface ConnectionConfig {
   username: string;
   password: string;
   database?: string;
+  /**
+   * SQL Server login mode. Absent/`sql` keeps SQL Server authentication;
+   * `windows-integrated` uses the Windows user running DBX (no password);
+   * `windows` uses the explicit Windows credentials in username/password
+   * (a plain account name or `DOMAIN\user`). Ignored by the legacy driver.
+   */
+  auth_method?: SqlServerAuthMethod;
   default_schema?: string;
   visible_databases?: string[];
   visible_database_patterns?: string[];

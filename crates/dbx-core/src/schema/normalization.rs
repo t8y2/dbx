@@ -159,6 +159,7 @@ mod tests {
             username: "user".to_string(),
             password: "secret".to_string(),
             database: Some("demo".to_string()),
+            auth_method: None,
             default_schema: None,
             visible_databases: None,
             visible_database_patterns: None,

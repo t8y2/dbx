@@ -30,6 +30,7 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         username: "postgres".to_string(),
         password: String::new(),
         database: Some(database.to_string()),
+        auth_method: None,
         default_schema: None,
         visible_databases: None,
         visible_database_patterns: None,

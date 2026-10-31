@@ -14,7 +14,7 @@ import { parseConnectionParameters, patchConnectionParameter } from "@/lib/conne
 import { connectionParameterSyntax, type ConnectionParameterDefinition } from "@/lib/connection/connectionParameterCatalog";
 import { Label } from "@/components/ui/label";
 import { sidebarProductionBadgeScope } from "@/lib/sidebar/sidebarProductionBadge";
-import type { ProductionBadgeScope } from "@/types/database";
+import type { ProductionBadgeScope, SqlServerAuthMethod } from "@/types/database";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { HelpTooltip, Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -3264,6 +3264,7 @@ watch(
         port: config.db_type === "sqlserver" ? (parseSqlServerHostPort(config.host, config.port).port ?? config.port) : profile === "tdengine" && (config.port === 0 || config.port === 6030) ? 6041 : config.port,
         username: config.username,
         password: config.password,
+        auth_method: config.auth_method,
         // Show the index the backend actually connects with; legacy dirty values
         // (e.g. redis-cli flags in the field) are healed when the form is saved.
         database: config.db_type === "redis" ? normalizeRedisDatabaseValue(config.database) || "" : config.database,
@@ -4604,6 +4605,21 @@ const mongoAuthMechanism = computed({
   },
 });
 const mongoUsesOidc = computed(() => mongoConnectionUsesOidc(mongoUseUrl.value ? undefined : form.value.url_params, mongoUseUrl.value ? form.value.connection_string : undefined));
+// SQL Server login mode. `sql` (default) keeps the username/password fields;
+// `windows-integrated` logs in as the Windows user running DBX and needs no
+// password; `windows` uses the explicit Windows credentials below.
+const sqlServerAuthMethod = computed({
+  get: () => (form.value.auth_method ?? "sql") as SqlServerAuthMethod,
+  set: (value: SqlServerAuthMethod) => {
+    form.value.auth_method = value === "sql" ? undefined : value;
+    if (value === "windows-integrated") {
+      form.value.password = "";
+    }
+    resetTestState();
+  },
+});
+const sqlServerUsesWindowsAuth = computed(() => sqlServerAuthMethod.value !== "sql");
+const sqlServerUsesWindowsIntegrated = computed(() => sqlServerAuthMethod.value === "windows-integrated");
 const mongoTlsAllowInvalidCertificates = computed({
   get: () => mongoUrlParamIsTrue(form.value.url_params, "tlsAllowInvalidCertificates"),
   set: (value: boolean) => {
@@ -5334,6 +5350,16 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     if (parsed.portExplicit && parsed.port !== undefined) {
       config.port = parsed.port;
       setSqlServerPortExplicit(config, true);
+    }
+    // Windows auth applies to the native driver only; the legacy compatibility
+    // agent keeps its own jTDS login handling, so drop the field for it.
+    const authMethod = config.auth_method === "sql" ? undefined : config.auth_method;
+    if (sqlServerUsesLegacyCompatibility(config)) {
+      config.auth_method = undefined;
+    } else {
+      config.auth_method = authMethod;
+      if (authMethod === "windows-integrated") config.password = "";
+      config.username = authMethod === "windows-integrated" ? "" : config.username.trim();
     }
     if (!connectionUpdateExternalConfigPreserved(config)) config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
@@ -9604,17 +9630,35 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
 
-                    <div v-if="form.db_type !== 'meilisearch' && form.db_type !== 'spanner' && !(form.db_type === 'elasticsearch' && elasticsearchAuthType === 'apiKey')" class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
-                      <Input v-model="form.username" class="col-span-3" />
+                    <div v-if="form.db_type === 'sqlserver'" class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.sqlServerAuthMethod") }}</Label>
+                      <Select v-model="sqlServerAuthMethod">
+                        <SelectTrigger class="col-span-3">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="sql">{{ t("connection.sqlServerAuthSql") }}</SelectItem>
+                          <SelectItem value="windows-integrated">{{ t("connection.sqlServerAuthWindowsIntegrated") }}</SelectItem>
+                          <SelectItem value="windows">{{ t("connection.sqlServerAuthWindows") }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div v-if="form.db_type === 'sqlserver' && sqlServerUsesWindowsIntegrated" class="grid grid-cols-4 items-start gap-4">
+                      <span />
+                      <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.sqlServerAuthWindowsIntegratedHint") }}</p>
                     </div>
 
-                    <div v-if="form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="form.db_type !== 'meilisearch' && form.db_type !== 'spanner' && !(form.db_type === 'elasticsearch' && elasticsearchAuthType === 'apiKey') && !sqlServerUsesWindowsIntegrated" class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
+                      <Input v-model="form.username" class="col-span-3" :placeholder="form.db_type === 'sqlserver' && sqlServerUsesWindowsAuth ? t('connection.sqlServerWindowsUserPlaceholder') : undefined" />
+                    </div>
+
+                    <div v-if="form.db_type !== 'spanner' && !sqlServerUsesWindowsIntegrated" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ form.db_type === "meilisearch" || (form.db_type === "elasticsearch" && elasticsearchAuthType === "apiKey") ? t("connection.mqAuthApiKey") : t("connection.password") }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" :placeholder="form.db_type === 'elasticsearch' && elasticsearchAuthType === 'apiKey' ? 'Base64(id:api_key)' : undefined" />
                     </div>
 
-                    <SavePasswordCheckbox v-if="form.db_type !== 'spanner'" v-model="form.save_password" />
+                    <SavePasswordCheckbox v-if="form.db_type !== 'spanner' && !sqlServerUsesWindowsIntegrated" v-model="form.save_password" />
 
                     <div v-if="form.db_type !== 'hbase' && form.db_type !== 'meilisearch' && form.db_type !== 'solr' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ databaseLabel }}</Label>

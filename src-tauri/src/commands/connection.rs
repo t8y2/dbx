@@ -477,6 +477,7 @@ mod tests {
             username: "mongouser".to_string(),
             password: "secret".to_string(),
             database: Some("RestCloud_V45PUB_Gateway".to_string()),
+            auth_method: None,
             default_schema: None,
             visible_databases: None,
             visible_database_patterns: None,

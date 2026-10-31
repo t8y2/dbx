@@ -23,6 +23,7 @@ fn mysql_config(username: &str, password: &str, database: Option<&str>) -> Conne
         username: username.to_string(),
         password: password.to_string(),
         database: database.map(str::to_string),
+        auth_method: None,
         default_schema: None,
         visible_databases: None,
         visible_database_patterns: None,

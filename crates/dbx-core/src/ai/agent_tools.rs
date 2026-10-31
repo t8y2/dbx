@@ -2069,6 +2069,7 @@ for line in sys.stdin:
             username: "APP_USER".to_string(),
             password: String::new(),
             database: Some(database.to_string()),
+            auth_method: None,
             default_schema: None,
             visible_databases: None,
             visible_database_patterns: None,

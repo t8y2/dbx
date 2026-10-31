@@ -36,7 +36,8 @@ use crate::db::transport_layer_tunnel::ResolvedTransportLayers;
 use crate::models::connection::{
     database_info_from_protocol_value, parse_jdbc_host_port, parse_mongo_first_host, rewrite_jdbc_url_host,
     validate_jdbc_transport_url, ConnectionConfig, ConnectionIdleClosedEvent, ConnectionLivenessFailureKind,
-    ConnectionLivenessMessage, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig,
+    ConnectionLivenessMessage, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, SqlServerAuthMethod,
+    TransportLayerConfig,
 };
 use crate::mongo_oidc::MongoOidcBrowserOpener;
 use crate::nacos::config::{NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD};
@@ -1411,6 +1412,22 @@ pub fn sqlserver_uses_legacy_driver(config: &ConnectionConfig) -> bool {
         .is_some_and(|profile| profile.eq_ignore_ascii_case(db::sqlserver::SQLSERVER_LEGACY_DRIVER_PROFILE))
 }
 
+/// Maps the saved SQL Server auth choice onto the driver's auth mode.
+///
+/// The caller must have run the config through `canonicalized()` so the
+/// `auth_method` value is normalized before it reaches the driver.
+fn sqlserver_driver_auth_mode(config: &ConnectionConfig) -> db::sqlserver::SqlServerAuthMode<'_> {
+    match config.sqlserver_auth_method() {
+        SqlServerAuthMethod::WindowsIntegrated => db::sqlserver::SqlServerAuthMode::WindowsIntegrated,
+        SqlServerAuthMethod::Windows => {
+            db::sqlserver::SqlServerAuthMode::Windows { user: &config.username, pass: &config.password }
+        }
+        SqlServerAuthMethod::Sql => {
+            db::sqlserver::SqlServerAuthMode::Sql { user: &config.username, pass: &config.password }
+        }
+    }
+}
+
 fn metadata_pool_database<'a>(config: Option<&ConnectionConfig>, database: Option<&'a str>) -> Option<&'a str> {
     if config.is_some_and(sqlserver_uses_legacy_driver) {
         // The legacy SQL Server Agent switches catalogs on the borrowed JDBC connection for
@@ -2408,8 +2425,7 @@ impl AppState {
             host,
             port,
             config.sqlserver_port_explicit(),
-            &config.username,
-            &config.password,
+            sqlserver_driver_auth_mode(config),
             config.database.as_deref(),
             config.url_params.as_deref(),
             connect_timeout,
@@ -2449,8 +2465,7 @@ impl AppState {
             host,
             port,
             config.sqlserver_port_explicit(),
-            &config.username,
-            &config.password,
+            sqlserver_driver_auth_mode(config),
             config.database.as_deref(),
             config.url_params.as_deref(),
             connect_timeout,
@@ -9070,6 +9085,7 @@ mod tests {
             username: "root".to_string(),
             password: "secret".to_string(),
             database: database.map(str::to_string),
+            auth_method: None,
             default_schema: None,
             visible_databases: None,
             visible_database_patterns: None,
@@ -12733,6 +12749,7 @@ sleep 30
             username: "dbx".to_string(),
             password: "dbx".to_string(),
             database: None,
+            auth_method: None,
             default_schema: None,
             visible_databases: None,
             visible_database_patterns: None,

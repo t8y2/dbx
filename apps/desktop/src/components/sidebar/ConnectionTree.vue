@@ -2529,7 +2529,7 @@ function currentTreeScroller(): HTMLElement | null {
 
 // Tab whose row the passive selection already revealed and scrolled to. A later
 // tree update keeps selecting it but never re-expands its ancestors, so collapsing a
-// connection that hosts the active tab now sticks (#13895, #13839, #13849).
+// connection that hosts the active tab now sticks (#13895).
 let revealedActiveTabId: string | null = null;
 
 async function selectActiveTabSidebarNode(options: { scroll: boolean; reveal: boolean }) {

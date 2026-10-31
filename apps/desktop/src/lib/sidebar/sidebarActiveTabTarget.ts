@@ -424,7 +424,7 @@ export interface ActiveSidebarSelectionPlan {
 }
 
 /**
- * Decides what the passive auto-selection may do on a tree update.
+ * Decides what the passive auto-selection may do on a tree update (#13895).
  *
  * The tree map changes for reasons that have nothing to do with the active tab —
  * collapsing a group, loading a sibling's metadata, filtering — so a selection
@@ -432,6 +432,10 @@ export interface ActiveSidebarSelectionPlan {
  * user just collapsed. The one exception is a tab whose row has not been revealed
  * yet (`revealedTabId`): the restored tab of a session, or a tab opened before its
  * metadata arrived, still has to be expanded and scrolled to once it shows up.
+ *
+ * Scope: this governs the passive selection only. Whether clicking a row or its
+ * arrow expands, collapses, or opens something is the click handler's business and
+ * is deliberately not decided here.
  */
 export function planActiveSidebarSelection(options: {
   activeTabId: string | null | undefined;

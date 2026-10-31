@@ -130,7 +130,7 @@ describe("passive active-tab selection", () => {
   it("only selects on a tree update that keeps an already revealed tab", () => {
     // Collapsing a connection, loading a sibling's metadata, or changing a filter
     // all rebuild the flat tree while the active tab stays the same. Revealing here
-    // would reopen the group the user just collapsed (#13895, #13839, #13849).
+    // would reopen the group the user just collapsed (#13895).
     const plan = planActiveSidebarSelection({ ...enabled, activeTabId: "tab-a", previousActiveTabId: "tab-a", revealedTabId: "tab-a" });
 
     expect(plan).toEqual({ moved: false, scroll: false, reveal: false });

@@ -6,7 +6,8 @@ import { createI18n } from "vue-i18n";
 import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { toggleLineComment, undo } from "@codemirror/commands";
-import { foldedRanges } from "@codemirror/language";
+import { ensureSyntaxTree, foldable, foldedRanges, syntaxTree } from "@codemirror/language";
+import { diagnosticCount, forceLinting } from "@codemirror/lint";
 import { closeCompletion, completionStatus, currentCompletions, selectedCompletionIndex, startCompletion } from "@codemirror/autocomplete";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import QueryEditor from "../QueryEditor.vue";
@@ -90,6 +91,44 @@ function foldedRangeCount(view: EditorView): number {
 }
 
 describe("QueryEditor component split integration", () => {
+  it.each(["elasticsearch", "easysearch"] as const)("enables nested JSON folding and linting for %s without changing execution text", async (databaseType) => {
+    const text = 'POST /orders/_search\n{\n  "query": {\n    "match_all": {}\n  }\n}';
+    const { editor, view, onExecute } = await mountEditor({ databaseType, modelValue: text });
+    ensureSyntaxTree(view.state, text.length, 5000);
+    const line = view.state.doc.line(3);
+    expect(foldable(view.state, line.from, line.to)).not.toBeNull();
+    expect(syntaxTree(view.state).resolveInner(text.indexOf('"query"') + 1).name).toBe("PropertyName");
+    expect(editor.requestExecute({ bypassPicker: true })).toBe(true);
+    expect(onExecute.mock.calls[0][0].selectedSql).toBe(text);
+
+    const close = text.lastIndexOf("}");
+    view.dispatch({ changes: { from: close, insert: "," } });
+    await nextTick();
+    forceLinting(view);
+    await vi.waitFor(() => expect(diagnosticCount(view.state)).toBe(1));
+    view.dispatch({ changes: { from: close, to: close + 1, insert: "" } });
+    await nextTick();
+    forceLinting(view);
+    await vi.waitFor(() => expect(diagnosticCount(view.state)).toBe(0));
+  });
+
+  it("reconfigures REST JSON and SQL languages on the existing editor", async () => {
+    const { view, props } = await mountEditor({ modelValue: 'POST /orders/_search\n{ "query": {} }' });
+    props.databaseType = "elasticsearch";
+    await nextTick();
+    await vi.waitFor(() => {
+      ensureSyntaxTree(view.state, view.state.doc.length, 5000);
+      expect(syntaxTree(view.state).resolveInner(props.modelValue.indexOf('"query"') + 1).name).toBe("PropertyName");
+    });
+    props.databaseType = "mysql";
+    props.modelValue = "SELECT 1";
+    await nextTick();
+    await vi.waitFor(() => {
+      ensureSyntaxTree(view.state, view.state.doc.length, 5000);
+      expect(syntaxTree(view.state).resolveInner(2).name).toBe("Keyword");
+    });
+  });
+
   it("renders and remains editable when completion prefetch is enabled across scope changes", async () => {
     const { host, view, props, connectionStore } = await mountEditor({ prefetchCompletion: true });
     expect(host.querySelector(".cm-content")?.textContent).toContain("SELECT 1;");

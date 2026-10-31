@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { Check, ChevronLeft, ChevronRight, ChevronsDown, ChevronsLeft, ChevronsRight, Loader2 } from "@lucide/vue";
+import { Check, Copy, ChevronDown, ChevronLeft, ChevronRight, ChevronsDown, ChevronsLeft, ChevronsRight, Loader2, Sigma } from "@lucide/vue";
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import LightDropdown, { type LightDropdownItem } from "@/components/ui/LightDropdown.vue";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE } from "@/lib/dataGrid/paginationPageSize";
+import { useSettingsStore, type DataGridSelectionSummaryMetric } from "@/stores/settingsStore";
 import DataGridExportMenu from "@/components/grid/DataGridExportMenu.vue";
 
 const { t } = useI18n();
+const settingsStore = useSettingsStore();
 
 const props = withDefaults(
   defineProps<{
@@ -67,12 +71,23 @@ const emit = defineEmits<{
   copySelectionSummary: [text: string];
 }>();
 
-// 拖拽选区中聚合值显示为占位符 "…"，此时不给复制入口，避免复制出一个假值
-const selectionSummaryValueClass = computed(() => (props.selectionSummaryPending ? "" : "cursor-pointer transition-colors hover:text-foreground"));
+const selectionMetrics = computed<Array<{ key: DataGridSelectionSummaryMetric; label: string; value: string }>>(() => [
+  { key: "sum", label: t("grid.selectionStatisticsSum"), value: props.selectionSummarySumText },
+  { key: "average", label: t("grid.selectionStatisticsAverage"), value: props.selectionSummaryAverageText },
+  { key: "min", label: t("grid.selectionStatisticsMin"), value: props.selectionSummaryMinText },
+  { key: "max", label: t("grid.selectionStatisticsMax"), value: props.selectionSummaryMaxText },
+  { key: "count", label: t("grid.selectionStatisticsCount"), value: props.selectionSummaryPending ? "…" : String(props.selectionSummaryCount ?? 0) },
+  { key: "distinct", label: t("grid.selectionStatisticsDistinct"), value: props.selectionSummaryPending ? "…" : String(props.selectionSummaryDistinctCount ?? 0) },
+  { key: "cells", label: t("grid.selectionStatisticsCells"), value: String(props.selectionSummary?.cellCount ?? 0) },
+  { key: "rows", label: t("grid.selectionStatisticsRows"), value: String(props.selectionSummary?.rowCount ?? 0) },
+]);
 
-// Aggregates truncate when the footer runs out of room (long numbers, narrow windows), so the tooltip carries the full value.
-function selectionSummaryValueTitle(text: string) {
-  return props.selectionSummaryPending ? undefined : `${t("grid.copyValue")}: ${text}`;
+const selectedMetric = computed(() => selectionMetrics.value.find((metric) => metric.key === settingsStore.editorSettings.dataGridSelectionSummaryMetric) ?? selectionMetrics.value[0]!);
+const selectedMetricText = computed(() => `${selectedMetric.value.label}: ${selectedMetric.value.value}`);
+
+function selectSummaryMetric(key: string) {
+  const metric = selectionMetrics.value.find((item) => item.key === key);
+  if (metric) settingsStore.updateEditorSettings({ dataGridSelectionSummaryMetric: metric.key });
 }
 
 function copySelectionSummaryValue(text: string) {
@@ -114,58 +129,58 @@ function handlePageInputKeydown(event: KeyboardEvent) {
 
 <template>
   <div class="flex min-w-0 items-center justify-end gap-1">
-    <div v-if="selectionSummary" class="flex min-w-0 items-center gap-3 overflow-hidden tabular-nums">
-      <button
-        type="button"
-        class="min-w-0 truncate text-left"
-        :class="selectionSummaryValueClass"
-        :title="selectionSummaryValueTitle(t('grid.selectionSum', { value: selectionSummarySumText }))"
-        :disabled="selectionSummaryPending"
-        data-selection-summary-sum
-        @click="copySelectionSummaryValue(selectionSummarySumText)"
-      >
-        <span v-if="!selectionSummaryPending" class="sr-only">{{ t("grid.copyValue") }}: </span>{{ t("grid.selectionSum", { value: selectionSummarySumText }) }}
-      </button>
-      <button
-        type="button"
-        class="min-w-0 truncate text-left"
-        :class="selectionSummaryValueClass"
-        :title="selectionSummaryValueTitle(t('grid.selectionAverage', { value: selectionSummaryAverageText }))"
-        :disabled="selectionSummaryPending"
-        data-selection-summary-average
-        @click="copySelectionSummaryValue(selectionSummaryAverageText)"
-      >
-        <span v-if="!selectionSummaryPending" class="sr-only">{{ t("grid.copyValue") }}: </span>{{ t("grid.selectionAverage", { value: selectionSummaryAverageText }) }}
-      </button>
-      <button
-        type="button"
-        class="min-w-0 truncate text-left"
-        :class="selectionSummaryValueClass"
-        :title="selectionSummaryValueTitle(t('grid.selectionMin', { value: selectionSummaryMinText }))"
-        :disabled="selectionSummaryPending"
-        data-selection-summary-min
-        @click="copySelectionSummaryValue(selectionSummaryMinText)"
-      >
-        <span v-if="!selectionSummaryPending" class="sr-only">{{ t("grid.copyValue") }}: </span>{{ t("grid.selectionMin", { value: selectionSummaryMinText }) }}
-      </button>
-      <button
-        type="button"
-        class="min-w-0 truncate text-left"
-        :class="selectionSummaryValueClass"
-        :title="selectionSummaryValueTitle(t('grid.selectionMax', { value: selectionSummaryMaxText }))"
-        :disabled="selectionSummaryPending"
-        data-selection-summary-max
-        @click="copySelectionSummaryValue(selectionSummaryMaxText)"
-      >
-        <span v-if="!selectionSummaryPending" class="sr-only">{{ t("grid.copyValue") }}: </span>{{ t("grid.selectionMax", { value: selectionSummaryMaxText }) }}
-      </button>
-      <div class="flex shrink-0 items-center gap-1">
-        <span v-if="selectionSummaryCount" class="shrink-0">{{ t("grid.selectionCount", { count: selectionSummaryCount }) }}</span>
-        <span v-if="selectionSummaryDistinctCount" class="shrink-0">{{ t("grid.selectionDistinct", { count: selectionSummaryDistinctCount }) }}</span>
-        <span class="shrink-0">{{ t("grid.selectionCells", { count: selectionSummary.cellCount }) }}</span>
-        <span class="shrink-0">{{ t("grid.rows", { count: selectionSummary.rowCount }) }}</span>
-      </div>
-    </div>
+    <Popover v-if="selectionSummary">
+      <PopoverTrigger as-child>
+        <button
+          type="button"
+          class="inline-flex h-5 max-w-36 shrink-0 items-center gap-1 rounded px-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          :aria-label="t('grid.selectionStatistics')"
+          :title="`${t('grid.selectionStatistics')}: ${selectedMetricText}`"
+          data-selection-summary-trigger
+        >
+          <Sigma class="h-3 w-3 shrink-0" aria-hidden="true" />
+          <span class="truncate tabular-nums">{{ selectedMetricText }}</span>
+          <ChevronDown class="h-3 w-3 shrink-0" aria-hidden="true" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent side="top" align="end" :collision-padding="8" class="w-64 max-w-[calc(100vw-1rem)] max-h-[var(--reka-popover-content-available-height)] overflow-y-auto gap-1 p-2 text-xs" :aria-label="t('grid.selectionStatistics')" data-selection-summary-details @click.stop>
+        <div class="flex items-center justify-between gap-3 border-b px-2 pb-2 pt-1">
+          <span class="shrink-0 text-muted-foreground">{{ t("grid.selectionStatisticsDisplayLabel") }}</span>
+          <Select :model-value="selectedMetric.key" data-selection-summary-display-control @update:model-value="selectSummaryMetric(String($event ?? ''))">
+            <SelectTrigger size="sm" class="h-7 min-w-0 flex-1 text-xs" :aria-label="t('grid.selectionStatisticsDisplayLabel')" data-selection-summary-display>
+              <SelectValue>{{ selectedMetric.label }}</SelectValue>
+            </SelectTrigger>
+            <SelectContent align="end" class="max-h-72" :hide-scroll-buttons="true">
+              <SelectItem v-for="metric in selectionMetrics" :key="metric.key" :value="metric.key" class="text-xs">{{ metric.label }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <dl class="divide-y divide-border/50 tabular-nums" :aria-busy="selectionSummaryPending">
+          <div v-for="metric in selectionMetrics" :key="metric.key">
+            <dt class="sr-only">{{ metric.label }}</dt>
+            <dd class="relative min-w-0">
+              <button
+                type="button"
+                class="group grid w-full min-w-0 cursor-pointer grid-cols-[auto_minmax(0,1fr)_12px] items-baseline gap-3 rounded px-2 py-1.5 text-left hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:text-muted-foreground"
+                :title="selectionSummaryPending ? undefined : `${t('grid.copyValue')}: ${metric.label}: ${metric.value}`"
+                :disabled="selectionSummaryPending"
+                :data-selection-summary-copy="metric.key"
+                :data-selection-summary-sum="metric.key === 'sum' ? '' : undefined"
+                :data-selection-summary-average="metric.key === 'average' ? '' : undefined"
+                :data-selection-summary-min="metric.key === 'min' ? '' : undefined"
+                :data-selection-summary-max="metric.key === 'max' ? '' : undefined"
+                @click="copySelectionSummaryValue(metric.value)"
+              >
+                <span v-if="!selectionSummaryPending" class="sr-only">{{ t("grid.copyValue") }}: </span>
+                <span class="text-muted-foreground">{{ metric.label }}</span>
+                <span class="min-w-0 break-all text-right font-medium" :data-selection-summary-value="metric.key">{{ metric.value }}</span>
+                <Copy class="h-3 w-3 self-center opacity-0 group-hover:opacity-70 group-focus-visible:opacity-70" aria-hidden="true" />
+              </button>
+            </dd>
+          </div>
+        </dl>
+      </PopoverContent>
+    </Popover>
     <Loader2 class="w-3 h-3 shrink-0 text-muted-foreground" :class="loading ? 'animate-spin' : 'invisible'" aria-hidden="true" />
     <template v-if="paginationEnabled && (infiniteScrollEnabled || loadAllRowsActive || infiniteScrollAllLoaded)">
       <span v-if="infiniteScrollAllLoaded" class="text-xs text-muted-foreground shrink-0">{{ t("grid.allLoaded") }}</span>

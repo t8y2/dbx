@@ -1,6 +1,6 @@
 {
   "name": "dbx",
-  "version": "0.6.60",
+  "version": "0.6.62",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -68,6 +68,7 @@
     "@codemirror/view": "6.43.0",
     "@dbx-app/mongo-shell": "workspace:^",
     "@internationalized/date": "^3.12.2",
+    "@lezer/common": "1.5.3",
     "@lezer/highlight": "^1.2.3",
     "@lucide/vue": "1.62.0",
     "@msgpack/msgpack": "^3.1.3",

@@ -666,6 +666,19 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return properties;
     }
 
+    @Override
+    public final List<Map<String, Object>> describeConnectionParameters(ConnectParams params) {
+        return unchecked(() -> {
+            loadDriver(params);
+            String url = buildJdbcUrl(params);
+            return JdbcConnectionParameters.describe(connectionMetadataDriver(url), url, buildConnectionProperties(params));
+        });
+    }
+
+    protected Driver connectionMetadataDriver(String jdbcUrl) throws Exception {
+        return DriverManager.getDriver(jdbcUrl);
+    }
+
     protected Connection openTestConnection(ConnectParams params) throws Exception {
         return openConnection(params);
     }

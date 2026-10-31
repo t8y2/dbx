@@ -1,7 +1,10 @@
 import { syntaxTree, syntaxTreeAvailable } from "@codemirror/language";
 import type { EditorState, Text } from "@codemirror/state";
 import { matchDollarQuoteTag } from "@/lib/sql/semantic/tokens";
-import { expandToSqlStatementWindow, type TextRange } from "@/lib/sql/insertValueHints";
+import type { TextRange } from "@/lib/sql/insertValueHints";
+import { isEditorStatePlausibleFor, registerEditorStatementWindowResolver, resolveSqlStatementWindow } from "@/lib/sql/sqlStatementWindow";
+
+export { isEditorStatePlausibleFor, resolveSqlStatementWindow };
 
 // `@lezer/common` (the package that declares `SyntaxNode`) is a transitive dependency, not a
 // direct one, so pnpm's strict linking doesn't expose it for a direct type-only import here.
@@ -41,10 +44,6 @@ type SyntaxNode = ReturnType<ReturnType<typeof syntaxTree>["resolve"]>;
 // as a safety check rather than as the primary boundary-finding mechanism.
 const DOLLAR_QUOTE_DISTRUST_LOOKBACK = 32 * 1024;
 
-export function isEditorStatePlausibleFor(state: EditorState, sql: string): boolean {
-  return state.doc.length === sql.length;
-}
-
 function hasUnresolvedDollarQuoteBefore(doc: Text, from: number, lookback: number): boolean {
   const scanStart = Math.max(0, from - lookback);
   const slice = doc.sliceString(scanStart, from);
@@ -64,15 +63,6 @@ function hasUnresolvedDollarQuoteBefore(doc: Text, from: number, lookback: numbe
   // PostgreSQL closes a dollar-quoted body only with the exact opening delimiter. A different
   // tagged marker inside the body is ordinary text and must not accidentally balance the guard.
   return openTag !== null;
-}
-
-export function resolveSqlStatementWindow(sql: string, cursor: number, editorState: EditorState | undefined, dialectId: string): TextRange {
-  const safeCursor = Math.max(0, Math.min(cursor, sql.length));
-  if (editorState && isEditorStatePlausibleFor(editorState, sql)) {
-    const window = resolveStatementWindowFromSyntaxTree(editorState, safeCursor);
-    if (window) return window;
-  }
-  return expandToSqlStatementWindow(sql, safeCursor, safeCursor, dialectId);
 }
 
 /** Finds the nearest enclosing `Statement` node for `cursor`, resolving the trailing-whitespace
@@ -138,3 +128,5 @@ export function resolveLexicalLeafFromSyntaxTree(state: EditorState, cursor: num
     inStringLiteral: node.name === "String",
   };
 }
+
+registerEditorStatementWindowResolver(resolveStatementWindowFromSyntaxTree);

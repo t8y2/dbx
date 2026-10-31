@@ -1,3 +1,4 @@
+import { patchConnectionParameter } from "./connectionParameterDocument";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
 export type MysqlDataCharsetConnection = Pick<Partial<ConnectionConfig>, "db_type" | "driver_profile" | "url_params">;
@@ -21,11 +22,7 @@ export function mysqlDataCharset(params?: string): string {
 }
 
 export function setMysqlDataCharset(params: string | undefined, value: string): string {
-  const parsed = parameters(params);
-  const keys = [...parsed.keys()]; // Snapshot before deleting: live iteration skips adjacent duplicate keys.
-  for (const key of keys) if (key.trim().toLowerCase() === "datacharset") parsed.delete(key);
-  if (value !== "default" && value.trim()) parsed.set("dataCharset", value.trim().toUpperCase());
-  return parsed.toString();
+  return patchConnectionParameter(params, "dataCharset", value !== "default" && value.trim() ? value.trim().toUpperCase() : null, { caseInsensitive: true });
 }
 
 // Fail closed for unsupported values too; connection validation rejects

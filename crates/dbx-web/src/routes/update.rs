@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use axum::{extract::Query, extract::State, Json};
+use axum::{
+    extract::{Path, Query, State},
+    Json,
+};
 use dbx_core::{changelog, update};
 
 use crate::error::AppError;
@@ -38,4 +41,21 @@ pub async fn fetch_changelog(
     let lang = params.lang.unwrap_or_else(|| "en".to_string());
     let data = changelog::fetch_changelog(&lang).await.map_err(AppError::from)?;
     Ok(Json(data))
+}
+
+pub async fn fetch_changelog_index(
+    Query(params): Query<ChangelogParams>,
+) -> Result<Json<changelog::ChangelogIndex>, AppError> {
+    let lang = params.lang.unwrap_or_else(|| "en".to_string());
+    let index = changelog::fetch_changelog_index(&lang).await.map_err(AppError::from)?;
+    Ok(Json(index))
+}
+
+pub async fn fetch_changelog_release(
+    Path(tag): Path<String>,
+    Query(params): Query<ChangelogParams>,
+) -> Result<Json<changelog::ChangelogRelease>, AppError> {
+    let lang = params.lang.unwrap_or_else(|| "en".to_string());
+    let release = changelog::fetch_changelog_release(&lang, &tag).await.map_err(AppError::from)?;
+    Ok(Json(release))
 }

@@ -145,6 +145,7 @@ async fn live_postgres_all_schema_export_restores_one_sql_file() {
             include_create_database: false,
             drop_table_if_exists: false,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             preserve_original_language: false,
             fail_on_error: true,
             prevent_overwrite: false,

@@ -161,7 +161,7 @@ const testI18nMessages = {
       loadedMembers: "{loaded} / {total} members loaded",
       loadedItems: "{loaded} / {total} items loaded",
       loadedFields: "{loaded} / {total} fields loaded",
-      loadMoreKeys: "Load more",
+      fetchMoreKeys: "Load more",
       fields: "{count} fields",
       ttlSecond: "{count}s",
       collectionSearching: "Searching",

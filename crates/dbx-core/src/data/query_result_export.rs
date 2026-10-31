@@ -846,10 +846,12 @@ fn streaming_pagination_preflight_error(
     if has_keyset_plan || supports_streaming_offset_pagination(request, page_size) || has_single_execution_bound {
         return None;
     }
-    // A manual transaction forces the export through the transaction's own
-    // connection, where result-session cursors are unavailable. Committing the
-    // transaction is the fix, so say that instead of blaming the query shape.
-    if request.txn_session_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
+    // A manual transaction without a usable Agent cursor forces the export
+    // through the transaction's own connection, where result-session cursors
+    // are unavailable. Committing the transaction is the fix, so say that
+    // instead of blaming the query shape. When the caller resolved an Agent
+    // cursor the export pages through it and stays supported.
+    if !use_agent_cursor && request.txn_session_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
         return Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR);
     }
     if request.database_type == DatabaseType::Highgo {
@@ -3265,12 +3267,12 @@ mod tests {
         assert!(!supports_streaming_offset_pagination(&req, 1000));
         assert_eq!(streaming_pagination_preflight_error(&req, 1000, false, false, cursor), None);
 
-        // The pre-fix policy disabled the cursor for every transactional export,
-        // which is exactly how the user's query produced the reported error.
-        let pre_fix_use_agent_cursor = req.use_agent_cursor && req.txn_session_id.is_none();
+        // Without a usable cursor the manual transaction gets the
+        // transaction-specific guidance instead of the generic query-shape error.
+        let no_cursor = req.use_agent_cursor && req.txn_session_id.is_none();
         assert_eq!(
-            streaming_pagination_preflight_error(&req, 1000, false, false, pre_fix_use_agent_cursor),
-            Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+            streaming_pagination_preflight_error(&req, 1000, false, false, no_cursor),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
         );
 
         // A native/external transaction connection has no result cursor: keep the
@@ -3279,7 +3281,7 @@ mod tests {
         assert!(!cursor);
         assert_eq!(
             streaming_pagination_preflight_error(&req, 1000, false, false, cursor),
-            Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
         );
 
         // Drivers without an Agent cursor still get the honest error.
@@ -3288,7 +3290,7 @@ mod tests {
         assert!(!cursor);
         assert_eq!(
             streaming_pagination_preflight_error(&req, 1000, false, false, cursor),
-            Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
         );
     }
 
@@ -3335,11 +3337,12 @@ mod tests {
         assert_eq!(streaming_pagination_preflight_error(&req, 2000, false, true, false), None);
 
         // A page size smaller than the bound keeps the normal pagination path
-        // (and the honest error when neither cursor nor rewrite is available).
+        // (and the transaction-specific error when neither cursor nor rewrite
+        // is available inside the open transaction).
         assert_eq!(single_execution_page_limit(&req, 1000), None);
         assert_eq!(
             streaming_pagination_preflight_error(&req, 1000, false, false, false),
-            Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
         );
 
         // The export row limit caps the single execution.

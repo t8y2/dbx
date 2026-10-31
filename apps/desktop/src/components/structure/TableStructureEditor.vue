@@ -8843,7 +8843,8 @@ watch(
                                 @update:model-value="(v: string | number) => updatePostgresGeometryColumn(column, postgresGeometryTypeValue(column.dataType), String(v))"
                               />
                             </div>
-                            <p v-if="!postgresGeometryTypeValue(column.dataType) && postgresGeometrySridValue(column.dataType)" class="text-[length:var(--structure-font-size)] text-muted-foreground leading-tight">
+                            <!-- The virtual row reserves exactly one line for this hint, so it must not wrap (#13835). -->
+                            <p v-if="!postgresGeometryTypeValue(column.dataType) && postgresGeometrySridValue(column.dataType)" class="truncate text-[length:var(--structure-font-size)] text-muted-foreground leading-tight" :title="t('structureEditor.geometryEmptyTypeHint')">
                               {{ t("structureEditor.geometryEmptyTypeHint") }}
                             </p>
                           </div>

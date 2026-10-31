@@ -239,6 +239,7 @@ pub struct NacosRegisterInstanceRequest {
     pub group_name: Option<String>,
     pub cluster_name: Option<String>,
     pub weight: Option<f64>,
+    #[schemars(extend("type" = "object"))]
     pub metadata: Option<serde_json::Value>,
 }
 
@@ -10695,6 +10696,7 @@ mod tests {
             ("dbx_execute_and_show", &["database"]),
             ("dbx_add_connection", &["port", "database", "driver_profile"]),
             ("dbx_remove_connection", &["connection_id", "connection_name"]),
+            ("dbx_nacos_register_instance", &["metadata"]),
             ("dbx_execute_redis_command", &["db"]),
             ("dbx_get_schema_context", &["database", "schema", "max_tables"]),
         ];
@@ -10731,6 +10733,23 @@ mod tests {
                 );
                 assert!(!required.iter().any(|required| *required == field), "{tool_name}.{field} must stay optional");
             }
+        }
+    }
+
+    #[test]
+    fn nacos_register_instance_metadata_preserves_optional_json() {
+        for metadata in [
+            None,
+            Some(json!(null)),
+            Some(json!({})),
+            Some(json!({"region": "local", "weight": 2, "ready": true, "tags": ["blue"], "nested": {"value": null}})),
+        ] {
+            let mut arguments = json!({"service_name": "api", "ip": "127.0.0.1", "port": 8080});
+            if let Some(value) = &metadata {
+                arguments["metadata"] = value.clone();
+            }
+            let request: NacosRegisterInstanceRequest = serde_json::from_value(arguments).unwrap();
+            assert_eq!(request.metadata, metadata.filter(|value| !value.is_null()));
         }
     }
 

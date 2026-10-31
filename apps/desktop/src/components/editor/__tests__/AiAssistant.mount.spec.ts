@@ -2098,4 +2098,65 @@ describe("AiAssistant mount", () => {
 
     expect(errors.map(String)).toEqual([]);
   });
+
+  it.each([false, true])("docks approvals and clears them on resolution or stop (cancel=%s)", async (cancel) => {
+    let emit!: (event: { type: string; [key: string]: unknown }) => void;
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      emit = onEvent;
+      await running;
+      onEvent({ type: "agent_end" });
+      return "Finished";
+    };
+    aiAssistantMountApi.conversations = [storedConversation({ assistantMode: "agent" })];
+    const { container, panelRef, errors } = await mountPanel(true, CONN_A, configureAiPanel);
+    panelRef.value!.selectConversationById("conv-a");
+    await settle();
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.value = "Test tool approvals";
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+    const request = (id: string) => {
+      emit({ type: "tool_call_start", tool_call_id: id, tool_name: "plugin__ssh_exec", args: { command: "printf approval_dock_test" } });
+      emit({ type: "tool_approval_required", tool_call_id: id, approval_id: id, plugin_name: "Test plugin", plugin_tool: "ssh_exec", connection_name: "ConnA", args: { command: "printf approval_dock_test" }, timeout_secs: 60 });
+    };
+    try {
+      request("done");
+      emit({ type: "tool_approval_resolved", tool_call_id: "done", approval_id: "done", outcome: "approved" });
+      request("pending");
+      emit({ type: "text_delta", delta: "Long streamed response. ".repeat(100) });
+      await vi.waitFor(() => expect(container.querySelector("[data-ai-tool-approval-dock]")).not.toBeNull());
+      const dock = container.querySelector("[data-ai-tool-approval-dock]")!;
+      expect(dock.closest('[data-slot="scroll-area-viewport"]')).toBeNull();
+      expect(dock.querySelectorAll("[data-ai-tool-approval]")).toHaveLength(1);
+      expect(dock.textContent).toContain("printf approval_dock_test");
+      expect(container.querySelectorAll("[data-ai-tool-approval]")).toHaveLength(2);
+      const composer = container.querySelector(".ai-prompt-context-container")!;
+      expect(dock.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+      if (cancel) {
+        sendControl(container).click();
+      } else {
+        emit({ type: "tool_approval_resolved", tool_call_id: "pending", approval_id: "pending", outcome: "denied" });
+      }
+      await vi.waitFor(() => expect(container.querySelector("[data-ai-tool-approval-dock]")).toBeNull());
+      expect(container.querySelectorAll("[data-ai-tool-approval]")).toHaveLength(2);
+      if (cancel) {
+        const cards = [...container.querySelectorAll("[data-ai-tool-approval]")];
+        expect(cards.every((card) => card.querySelector("button") === null)).toBe(true);
+        expect(cards.at(-1)?.textContent).toContain(i18n.global.t("ai.toolApproval.status.cancelled"));
+        request("late");
+        await settle();
+        expect(container.querySelector("[data-ai-tool-approval-dock]")).toBeNull();
+      }
+      expect(errors.map(String)).toEqual([]);
+    } finally {
+      finish();
+      await settle();
+    }
+  });
 });

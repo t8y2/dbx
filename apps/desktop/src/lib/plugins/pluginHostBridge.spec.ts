@@ -1843,9 +1843,7 @@ describe("plugin SDK source", () => {
         onDragState: (listener: (active: boolean, position?: { x: number; y: number }) => void) => () => void;
         onDrop: (listener: (files: unknown[], drop: unknown) => void) => () => void;
       };
-      onLayout: (listener: (event: unknown) => void) => () => void;
     };
-    dispatchEvent: ReturnType<typeof vi.fn>;
     document: {
       dispatchEvent: ReturnType<typeof vi.fn>;
     };
@@ -1853,9 +1851,7 @@ describe("plugin SDK source", () => {
   }
 
   function loadSdk(posted: unknown[], initialTheme?: { appearance: "dark" | "light"; tokens: Record<string, string> }): SdkWindow {
-    const sandbox = {
-      dispatchEvent: vi.fn(),
-    } as unknown as SdkWindow;
+    const sandbox = {} as SdkWindow;
     const document = {
       documentElement: {
         dataset: {} as Record<string, string>,
@@ -2225,39 +2221,6 @@ describe("plugin SDK source", () => {
 
     await expect(bridge.requestWorkbenchClose(5000)).resolves.toBe(false);
     expect(messages.some((message) => message.type === "workbench/close")).toBe(true);
-  });
-
-  it("notifies the plugin of layout recalculations and dispatches window resize inside SDK", () => {
-    const messages: any[] = [];
-    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
-    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, {
-      invoke: vi.fn(),
-      notify: vi.fn(),
-      sendBinary: vi.fn(),
-      readAsset: vi.fn(),
-    });
-
-    bridge.notifyLayout();
-    expect(messages).toHaveLength(1);
-    expect(messages[0]).toEqual({
-      source: "dbx-host",
-      version: 1,
-      type: "layout",
-    });
-
-    const posted: unknown[] = [];
-    const sdk = loadSdk(posted);
-    let sdkListenerFired = false;
-
-    sdk.dbxPlugin!.onLayout(() => {
-      sdkListenerFired = true;
-    });
-
-    sdk.receiveHostMessage(messages[0]);
-
-    expect(sdk.dispatchEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "resize" }));
-    expect(sdk.document.dispatchEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "dbx-plugin-layout" }));
-    expect(sdkListenerFired).toBe(true);
   });
 });
 

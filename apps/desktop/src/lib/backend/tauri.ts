@@ -1708,6 +1708,10 @@ export async function testConnection(config: ConnectionConfig): Promise<string> 
   return invokeBackend("test_connection", { config });
 }
 
+export async function connectionParameters(config: ConnectionConfig): Promise<import("@/lib/connection/connectionParameterCatalog").ConnectionParameterMetadata> {
+  return invokeBackend("connection_parameters", { config });
+}
+
 export async function testSshTunnel(config: ConnectionConfig): Promise<string> {
   return invokeBackend("test_ssh_tunnel", { config });
 }
@@ -3712,6 +3716,14 @@ export async function checkForUpdates(locale?: string, source?: UpdateDownloadSo
 
 export async function fetchChangelog(lang?: string): Promise<import("@/lib/app/changelog").ChangelogData> {
   return invoke("fetch_changelog", { lang });
+}
+
+export async function fetchChangelogIndex(lang?: string): Promise<import("@/lib/app/changelog").ChangelogIndexData> {
+  return invoke("fetch_changelog_index", { lang });
+}
+
+export async function fetchChangelogRelease(lang: string | undefined, tag: string): Promise<import("@/lib/app/changelog").ChangelogRelease> {
+  return invoke("fetch_changelog_release", { lang, tag });
 }
 
 export async function getSystemProxyUrl(): Promise<string | null> {
@@ -6691,6 +6703,7 @@ export interface DatabaseExportRequest {
   includeCreateDatabase?: boolean;
   dropTableIfExists?: boolean;
   omitAutoIncrement?: boolean;
+  omitDatabaseQualifier?: boolean;
   preserveOriginalLanguage?: boolean;
   failOnError?: boolean;
   preventOverwrite?: boolean;

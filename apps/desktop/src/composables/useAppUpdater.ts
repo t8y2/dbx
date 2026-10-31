@@ -7,6 +7,7 @@ import type { UpdateDownloadSource as SettingsUpdateDownloadSource } from "@/sto
 import type { UpdateDownloadProgress } from "@/lib/backend/tauri";
 import { currentLocale } from "@/i18n";
 import { shouldBlockAppUpdate } from "@/lib/app/appUpdateTaskGuard";
+import { isUpdatePreparationError, UpdatePreparationError } from "@/lib/app/updatePreparation";
 import { uuid } from "@/lib/common/utils";
 import { isUpdatePreviewMockEnabled, previewAppUpdateInfo } from "@/lib/updates/updatePreviewMock";
 
@@ -443,7 +444,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     try {
       release = await options.prepareForUpdate?.();
       updatePreparationRelease = release;
-      if (shouldBlockAppUpdate(activeTaskCount.value)) throw new Error(t("updates.activeTasksBlockUpdate", { count: activeTaskCount.value }));
+      if (shouldBlockAppUpdate(activeTaskCount.value)) throw new UpdatePreparationError(t("updates.activeTasksBlockUpdate", { count: activeTaskCount.value }), "tasks");
       phase.value = "installing";
       if (!restartOnly && cache) {
         await api.installDownloadedUpdate(cache.cache_id, cache.version);
@@ -460,7 +461,11 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       phase.value = installed ? "restart" : "ready";
       updateCheckFailed.value = true;
       const message = error instanceof Error ? error.message : String(error);
-      updateCheckMessage.value = installed ? t("updates.restartFailed", { error: message }) : formatInstallError(message);
+      // A held-back update was never attempted: say that plainly and keep the
+      // reason (which dialog to close) instead of calling it an install failure.
+      if (installed) updateCheckMessage.value = t("updates.restartFailed", { error: message });
+      else if (isUpdatePreparationError(error)) updateCheckMessage.value = t("updates.updateBlocked", { error: message });
+      else updateCheckMessage.value = formatInstallError(message);
     } finally {
       // Successful handoff must keep every window frozen until the process exits.
       if (failed) {

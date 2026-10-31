@@ -337,6 +337,8 @@ jobs:
     runs-on: windows-2022
     env:
       CARGO_INCREMENTAL: "0"
+      # Environment flags override target rustflags; retain the 8 MiB stack.
+      RUSTFLAGS: -C link-arg=/STACK:8388608
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
       VSIGN_CERT_HASH: ${{ vars.VSIGN_CERT_HASH }}
@@ -457,6 +459,10 @@ jobs:
           # No assetNamePattern: the default Tauri CLI names already produce
           # DBX_[version]_x64/arm64-setup.exe and keep the _en-US.msi names.
           args: --target ${{ matrix.target }} --config src-tauri/tauri.vsign.conf.json
+
+      - name: Verify Windows executable stack reserve
+        shell: pwsh
+        run: ./.github/scripts/assert-windows-stack-reserve.ps1 -BinaryPath "target/${{ matrix.target }}/release/dbx.exe"
 
       - name: Verify Windows bundles
         shell: pwsh

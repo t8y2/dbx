@@ -618,16 +618,20 @@ jobs:
           set -euo pipefail
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
           source="s3://${R2_BUCKET_NAME}/releases/stable/${TAG}/"
+          # Bucket-to-bucket copies: R2 does not implement GetObjectTagging, which
+          # the CLI's default --copy-props calls for multipart copies. Copy only the
+          # metadata (content-type, ...) that CopyObject can carry over.
           for alias in stable/latest latest; do
             aws s3 sync "${source}" "s3://${R2_BUCKET_NAME}/releases/${alias}/" \
               --endpoint-url "${endpoint}" \
+              --copy-props metadata-directive \
               --cache-control "no-cache" \
               --delete
           done
           aws s3 cp "${source}latest.json" "s3://${R2_BUCKET_NAME}/releases/stable/latest.json" \
-            --endpoint-url "${endpoint}" --cache-control "no-cache"
+            --endpoint-url "${endpoint}" --copy-props metadata-directive --cache-control "no-cache"
           aws s3 cp "${source}latest.json" "s3://${R2_BUCKET_NAME}/releases/latest/latest.json" \
-            --endpoint-url "${endpoint}" --cache-control "no-cache"
+            --endpoint-url "${endpoint}" --copy-props metadata-directive --cache-control "no-cache"
 
       - name: Keep latest five versioned releases in R2
         continue-on-error: true

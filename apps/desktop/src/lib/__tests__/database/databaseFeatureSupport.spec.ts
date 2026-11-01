@@ -17,6 +17,8 @@ import {
   supportsQueryExecution,
   supportsQueryTargetDatabaseListing,
   supportsQueryEditorBlockComments,
+  supportsShowSystemDatabases,
+  supportsShowSystemObjectsSetting,
   supportsSqlInListPaste,
   supportsTableImport,
   supportsTableVacuum,
@@ -32,6 +34,21 @@ import {
 describe("schema awareness", () => {
   it("keeps SQLite database aliases separate from schema-capable databases", () => {
     expect(isSchemaAware("sqlite")).toBe(false);
+  });
+
+  it("offers the show-system-objects setting on both levels", () => {
+    // MySQL-family engines keep information_schema/performance_schema/mysql/sys
+    // as databases, so the setting has to be reachable without schemaAware.
+    expect(supportsShowSystemObjectsSetting("mysql")).toBe(true);
+    expect(supportsShowSystemDatabases("mysql")).toBe(true);
+    expect(supportsShowSystemDatabases("doris")).toBe(true);
+    expect(supportsShowSystemDatabases("starrocks")).toBe(true);
+    expect(supportsShowSystemDatabases("goldendb")).toBe(true);
+    // Schema-aware engines still get the setting, but through the schema level:
+    // their database list stays blacklist-filtered (template0/template1).
+    expect(supportsShowSystemObjectsSetting("postgres")).toBe(true);
+    expect(supportsShowSystemDatabases("postgres")).toBe(false);
+    expect(supportsShowSystemObjectsSetting("manticoresearch")).toBe(false);
   });
 
   it("puts Cloud Spanner in both schema sets because they gate different surfaces", () => {

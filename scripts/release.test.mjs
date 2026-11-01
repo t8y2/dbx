@@ -106,7 +106,8 @@ test("app release workflows preserve beta tags and stable package URLs", () => {
   assert.match(release, /--config src-tauri\/tauri\.msi-version\.conf\.json/);
   assert.doesNotMatch(release, /--bundles nsis' \|\| ''/);
   assert.match(release, /if \(\$msiInstallers\.Count -eq 0\)/);
-  assert.match(publish, /x64-setup\.exe arm64-setup\.exe x64_en-US\.msi arm64_en-US\.msi/);
+  assert.match(publish, /stable-asset-aliases\.mjs pairs/);
+  assert.match(publish, /stable-asset-aliases\.mjs apply/);
   assert.match(daily, /schedule:/);
   assert.match(daily, /gh release create "\$tag"/);
   assert.match(daily, /-beta\.\$\{date_suffix\}\.\$\{sequence\}/);

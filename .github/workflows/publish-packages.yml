@@ -350,6 +350,11 @@ jobs:
             --clobber
           ls -lh assets/
 
+      - name: Add stable package aliases for R2
+        # promote-release adds these to the GitHub Release only after this job, so
+        # the immutable R2 directory has to get them here as well.
+        run: node .github/scripts/stable-asset-aliases.mjs apply "${{ steps.version.outputs.tag }}" assets
+
       - name: Validate latest.json completeness
         run: |
           LATEST_JSON="assets/latest.json"
@@ -476,13 +481,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag_version="${TAG#v}"
-          base_version="${tag_version%%-beta.*}"
           mkdir -p "$RUNNER_TEMP/stable-package-assets"
           assets_json="$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json assets)"
-          for suffix in arm64.dmg x64.dmg x64-setup.exe arm64-setup.exe x64_en-US.msi arm64_en-US.msi; do
-            source="DBX_${tag_version}_${suffix}"
-            target="DBX_${base_version}_${suffix}"
+          while read -r source target; do
             if ! jq -e --arg name "$target" '.assets[] | select(.name == $name)' <<<"$assets_json" >/dev/null; then
               if ! jq -e --arg name "$source" '.assets[] | select(.name == $name)' <<<"$assets_json" >/dev/null; then
                 echo "::error::Missing beta package asset $source."
@@ -492,7 +493,7 @@ jobs:
               cp "$RUNNER_TEMP/stable-package-assets/$source" "$RUNNER_TEMP/stable-package-assets/$target"
               gh release upload "$TAG" "$RUNNER_TEMP/stable-package-assets/$target" --repo "${GITHUB_REPOSITORY}" --clobber
             fi
-          done
+          done < <(node .github/scripts/stable-asset-aliases.mjs pairs "$TAG")
 
       - name: Sync promoted release to CNB
         env:

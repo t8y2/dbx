@@ -8622,6 +8622,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlwaysDescription: "中繼資料提供結構描述名稱時一律插入。",
     autoAliasTables: "自動加入資料表別名",
     autoAliasTablesDescription: "在 FROM 或 JOIN 中選擇資料表補全時，自動插入類似 order_items AS oi 的資料表別名。",
+    batchColumnSelectionIncludeComments: "批次插入欄位時包含註解",
+    batchColumnSelectionIncludeCommentsDescription: "從補全清單批次插入 SELECT 欄位時，附帶資料庫欄位註解。",
     sqlServerSpaceConfirmsCompletion: "空格確認補全（SQL Server 習慣）",
     sqlServerSpaceConfirmsCompletionDescription: "補全清單開啟時，按空格直接採用選取的關鍵字、資料表或欄名，並保留空格。Enter 與 Tab 維持原本行為。",
     functionCompletionIncludeParams: "函數補全帶參數範例",

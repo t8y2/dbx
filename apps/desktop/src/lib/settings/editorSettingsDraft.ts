@@ -33,6 +33,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showInsertValueHints",
   "showConnectionGroupPath",
   "autoAliasTables",
+  "batchColumnSelectionIncludeComments",
   "tableCompletionSchemaQualification",
   "insertSpaceAfterCompletion",
   "sqlServerSpaceConfirmsCompletion",

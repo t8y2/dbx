@@ -11002,6 +11002,8 @@ export default {
     tableCompletionSchemaQualificationAlwaysDescription: "Include the schema whenever it is available in metadata.",
     autoAliasTables: "Automatically add table aliases",
     autoAliasTablesDescription: "When selecting a table completion in FROM or JOIN, insert a generated alias such as order_items AS oi.",
+    batchColumnSelectionIncludeComments: "Include comments when inserting selected columns",
+    batchColumnSelectionIncludeCommentsDescription: "Include database column comments when inserting SELECT columns in bulk from the completion list.",
     sqlServerSpaceConfirmsCompletion: "Space confirms completion (SQL Server style)",
     sqlServerSpaceConfirmsCompletionDescription: "While the completion list is open, pressing Space accepts the selected keyword, table, or column and keeps the trailing space. Enter and Tab behave as before.",
     functionCompletionIncludeParams: "Include parameter examples in function completion",

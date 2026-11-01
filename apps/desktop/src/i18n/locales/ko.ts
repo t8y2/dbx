@@ -9660,6 +9660,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlwaysDescription: "메타데이터에 스키마가 있으면 항상 삽입합니다.",
     autoAliasTables: "자동으로 테이블 별칭 추가",
     autoAliasTablesDescription: "FROM이나 JOIN에서 테이블 완성을 선택할 때 order_items AS oi 같은 생성된 별칭을 삽입합니다.",
+    batchColumnSelectionIncludeComments: "선택한 열을 삽입할 때 주석 포함",
+    batchColumnSelectionIncludeCommentsDescription: "자동 완성 목록에서 SELECT 열을 일괄 삽입할 때 데이터베이스 열 주석을 포함합니다.",
     sqlServerSpaceConfirmsCompletion: "공백으로 완성 확정(SQL Server 방식)",
     sqlServerSpaceConfirmsCompletionDescription: "완성 목록이 열려 있을 때 공백을 누르면 선택한 키워드, 테이블 또는 컬럼을 확정하고 공백을 유지합니다. Enter와 Tab은 기존과 동일하게 동작합니다.",
     functionCompletionIncludeParams: "함수 완성 시 매개변수 예시 포함",

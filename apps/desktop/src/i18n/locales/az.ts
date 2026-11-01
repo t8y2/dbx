@@ -8391,6 +8391,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlwaysDescription: "Sxem metadata-da olduqda həmişə əlavə edir.",
     autoAliasTables: "Cədvəl ləqəblərini avtomatik əlavə et",
     autoAliasTablesDescription: "FROM və ya JOIN daxilində cədvəl tamamlaması seçilərkən order_items AS oi kimi yaradılmış ləqəb daxil et.",
+    batchColumnSelectionIncludeComments: "Seçilmiş sütunları daxil edərkən şərhləri əlavə et",
+    batchColumnSelectionIncludeCommentsDescription: "Tamamlama siyahısından SELECT sütunlarını toplu şəkildə daxil edərkən verilənlər bazası sütunlarının şərhlərini əlavə et.",
     sqlServerSpaceConfirmsCompletion: "Boşluqla tamamlamanı təsdiqlə (SQL Server üslubu)",
     sqlServerSpaceConfirmsCompletionDescription: "Tamamlama siyahısı açıqkən boşluq düyməsini basmaq seçilmiş açar sözü, cədvəli və ya sütunu təsdiqləyir və boşluğu saxlayır. Enter və Tab əvvəlki kimi işləyir.",
     functionCompletionIncludeParams: "Funksiya tamamlamasında parametr nümunələrini daxil et",

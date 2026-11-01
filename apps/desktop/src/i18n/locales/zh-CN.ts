@@ -10964,6 +10964,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlwaysDescription: "元数据提供模式名时始终插入。",
     autoAliasTables: "自动添加表别名",
     autoAliasTablesDescription: "补全 FROM 或 JOIN 表名时自动添加别名。",
+    batchColumnSelectionIncludeComments: "批量插入字段时包含注释",
+    batchColumnSelectionIncludeCommentsDescription: "从补全列表批量插入 SELECT 字段时，附带数据库字段注释。",
     sqlServerSpaceConfirmsCompletion: "空格确认补全（SQL Server 习惯）",
     sqlServerSpaceConfirmsCompletionDescription: "补全列表打开时，按空格直接采用选中的关键字、表名或列名，并保留空格。Enter 和 Tab 保持原有行为。",
     functionCompletionIncludeParams: "函数补全带参数示例",

@@ -11497,6 +11497,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlwaysDescription: "รวม Schema ทุกครั้งที่มีใน Metadata",
     autoAliasTables: "เพิ่ม Alias ตารางอัตโนมัติ",
     autoAliasTablesDescription: "เมื่อเลือกการเติมตารางใน FROM หรือ JOIN ให้แทรก Alias ที่สร้างขึ้น เช่น order_items AS oi",
+    batchColumnSelectionIncludeComments: "รวมความคิดเห็นเมื่อแทรกคอลัมน์ที่เลือก",
+    batchColumnSelectionIncludeCommentsDescription: "รวมความคิดเห็นของคอลัมน์ในฐานข้อมูลเมื่อแทรกหลายคอลัมน์ SELECT จากรายการเติมข้อความอัตโนมัติ",
     sqlServerSpaceConfirmsCompletion: "ใช้ Space เพื่อยืนยันการเติม (รูปแบบ SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "ขณะรายการเติมเปิดอยู่ กด Space เพื่อยอมรับ Keyword ตาราง หรือคอลัมน์ที่เลือกและคงช่องว่างต่อท้ายไว้ Enter และ Tab ทำงานเหมือนเดิม",
     functionCompletionIncludeParams: "รวมตัวอย่างพารามิเตอร์ในการเติม Function",

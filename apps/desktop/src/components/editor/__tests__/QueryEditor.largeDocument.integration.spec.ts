@@ -13,6 +13,7 @@ const analysisProbe = vi.hoisted(() => ({
   documentLengths: [] as number[],
   documentLineCounts: [] as number[],
   backgroundDocuments: [] as string[],
+  foldRequests: [] as boolean[],
   backgroundGate: null as Promise<void> | null,
   failAtLength: Number.POSITIVE_INFINITY,
   failAtLineCount: Number.POSITIVE_INFINITY,
@@ -55,6 +56,7 @@ vi.mock("@/lib/sql/sqlStatementAnalysisWorker", async () => {
         async analyze(request: import("@/lib/sql/sqlStatementAnalysis").SqlStatementAnalysisRequest) {
           const current = ++generation;
           analysisProbe.backgroundDocuments.push(request.sql);
+          analysisProbe.foldRequests.push(request.includeFolds === true);
           if (analysisProbe.backgroundGate) await analysisProbe.backgroundGate;
           await Promise.resolve();
           if (current !== generation) return null;
@@ -102,6 +104,7 @@ beforeEach(() => {
   analysisProbe.documentLengths = [];
   analysisProbe.documentLineCounts = [];
   analysisProbe.backgroundDocuments = [];
+  analysisProbe.foldRequests = [];
   analysisProbe.backgroundGate = null;
   analysisProbe.failAtLength = Number.POSITIVE_INFINITY;
   analysisProbe.failAtLineCount = Number.POSITIVE_INFINITY;
@@ -270,6 +273,9 @@ describe("QueryEditor large document mode", () => {
 
     expect(host.firstElementChild?.getAttribute("data-large-document-mode")).toBe("true");
     expect(view.state.facet(language)).toBeInstanceOf(StreamLanguage);
+    // Fold ranges would need a second full Lezer parse in the analysis worker, so they are skipped too.
+    await vi.waitFor(() => expect(analysisProbe.foldRequests.length).toBeGreaterThan(0));
+    expect(analysisProbe.foldRequests).not.toContain(true);
 
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "SELECT 1;" }, userEvent: "input" });
     await nextTick();
@@ -287,5 +293,7 @@ describe("QueryEditor large document mode", () => {
     const { view } = await mountEditor(source, { databaseType: "mysql", dialect: "mysql" });
     expect(view.state.facet(language)).not.toBeInstanceOf(StreamLanguage);
     expect(view.state.facet(language)).not.toBeNull();
+    await vi.waitFor(() => expect(analysisProbe.foldRequests.length).toBeGreaterThan(0));
+    expect(analysisProbe.foldRequests).not.toContain(false);
   });
 });

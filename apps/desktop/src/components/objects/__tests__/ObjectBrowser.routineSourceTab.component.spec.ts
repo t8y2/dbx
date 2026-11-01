@@ -11,9 +11,12 @@ const mocks = vi.hoisted(() => ({
   listSchemas: vi.fn(),
   getObjectSource: vi.fn(),
   buildEditableObjectSource: vi.fn(),
+  buildDropObjectSql: vi.fn(),
+  contextMenuAction: "",
   ensureConnected: vi.fn(),
   openObjectSourceTabPending: vi.fn(),
   toast: vi.fn(),
+  typePanelRefresh: vi.fn(),
   editorSettings: {
     shortcuts: { refreshData: "F5" },
     objectBrowserViewMode: "list",
@@ -29,12 +32,14 @@ vi.mock("@/lib/backend/api", () => ({
   listObjectStatistics: vi.fn().mockResolvedValue([]),
   getObjectSource: (...args: unknown[]) => mocks.getObjectSource(...args),
   buildEditableObjectSource: (...args: unknown[]) => mocks.buildEditableObjectSource(...args),
+  buildDropObjectSql: (...args: unknown[]) => mocks.buildDropObjectSql(...args),
 }));
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     treeClipboard: null,
     ensureConnected: mocks.ensureConnected,
     getConfig: () => connection,
+    tableNameFilterForScope: () => undefined,
     orderByPinnedTreeNodes: (rows: unknown[]) => rows,
   }),
 }));
@@ -69,15 +74,31 @@ vi.mock("@/components/ui/searchable-select", () => ({ SearchableSelect: { render
 vi.mock("@/components/ui/ToolbarOverflowMenu.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/ui/CustomContextMenu.vue", () => ({
   default: defineComponent({
-    setup(_, { slots }) {
-      return () => slots.default?.({ onContextMenu: () => undefined, isOpen: false });
+    props: { items: { type: [Array, Function], default: () => [] } },
+    setup(props, { slots }) {
+      return () =>
+        slots.default?.({
+          onContextMenu: () => {
+            const items = typeof props.items === "function" ? props.items() : props.items;
+            items.find((item: { label?: string }) => item.label === mocks.contextMenuAction)?.action?.();
+          },
+          isOpen: false,
+        });
     },
   }),
 }));
 vi.mock("@/components/editor/QueryEditor.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/editor/DangerConfirmDialog.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/objects/ProcedureExecutionDialog.vue", () => ({ default: { render: () => null } }));
-vi.mock("@/components/objects/CustomTypeInfoPanel.vue", () => ({ default: { render: () => null } }));
+vi.mock("@/components/objects/CustomTypeInfoPanel.vue", () => ({
+  default: defineComponent({
+    props: { name: { type: String, default: "" } },
+    setup(props, { expose }) {
+      expose({ selectTab: vi.fn(), refresh: mocks.typePanelRefresh });
+      return () => h("div", { "data-custom-type-panel": true }, props.name);
+    },
+  }),
+}));
 vi.mock("@/components/export/XlsxHeaderDialog.vue", () => ({ default: { render: () => null } }));
 
 const connection = {
@@ -97,6 +118,9 @@ const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
 beforeEach(() => {
   vi.clearAllMocks();
+  connection.db_type = "mysql";
+  mocks.contextMenuAction = "";
+  mocks.buildDropObjectSql.mockResolvedValue('DROP PROCEDURE "app"."sp_daily_report"();');
   mocks.listObjects.mockResolvedValue([
     { name: "sp_daily_report", schema: "app", object_type: "PROCEDURE", signature: "IN day DATE" },
     { name: "fn_total", schema: "app", object_type: "FUNCTION", signature: "" },
@@ -120,13 +144,13 @@ afterEach(() => {
   invalidateObjectBrowserRowsCache({});
 });
 
-async function mountBrowser() {
+async function mountBrowser(browserConnection: ConnectionConfig = connection, readyName = "sp_daily_report") {
   const host = document.createElement("div");
   document.body.append(host);
-  const app = createApp({ setup: () => () => h(ObjectBrowser, { connection, database: "app" }) });
+  const app = createApp({ setup: () => () => h(ObjectBrowser, { connection: browserConnection, database: "app" }) });
   mountedApps.push({ app, host });
   app.mount(host);
-  await vi.waitFor(() => expect(host.textContent).toContain("sp_daily_report"));
+  await vi.waitFor(() => expect(host.textContent).toContain(readyName));
   return host;
 }
 
@@ -141,6 +165,47 @@ function click(row: HTMLElement, detail: number) {
 }
 
 describe("ObjectBrowser routine double click", () => {
+  it("opens Oracle TYPE details and reads TYPE_BODY through the existing source panel", async () => {
+    const oracleConnection = { ...connection, id: "oracle-1", db_type: "oracle" } as ConnectionConfig;
+    mocks.listObjects.mockResolvedValue([
+      { name: "address_type", schema: "app", object_type: "TYPE" },
+      { name: "address_type_body", schema: "app", object_type: "TYPE_BODY" },
+    ]);
+    mocks.getObjectSource.mockResolvedValue({ source: "CREATE TYPE BODY app.address_type_body AS ...;", editable: false });
+    const host = await mountBrowser(oracleConnection, "address_type");
+
+    click(rowFor(host, "address_type"), 1);
+    await vi.waitFor(() => expect(host.textContent).toContain("address_type"));
+    const refresh = host.querySelector<HTMLButtonElement>('button[title^="grid.refresh"]');
+    refresh?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await vi.waitFor(() => expect(mocks.typePanelRefresh).toHaveBeenCalledTimes(1));
+
+    click(rowFor(host, "address_type_body"), 1);
+    await vi.waitFor(() => expect(mocks.getObjectSource).toHaveBeenCalledWith("oracle-1", "app", "app", "address_type_body", "TYPE_BODY", undefined));
+    expect(mocks.buildEditableObjectSource).not.toHaveBeenCalled();
+  });
+
+  it.each(["", "v integer", "v INOUT integer"])("keeps the selected Kingbase overload in its DROP preview (%j)", async (signature) => {
+    connection.db_type = "kingbase";
+    mocks.listObjects.mockResolvedValue([{ name: "sp_daily_report", schema: "app", object_type: "PROCEDURE", signature }]);
+    mocks.contextMenuAction = "contextMenu.dropProcedure";
+    const host = await mountBrowser();
+
+    rowFor(host, "sp_daily_report").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+
+    await vi.waitFor(() =>
+      expect(mocks.buildDropObjectSql).toHaveBeenCalledWith(
+        expect.objectContaining({
+          databaseType: "kingbase",
+          objectType: "PROCEDURE",
+          schema: "app",
+          name: "sp_daily_report",
+          signature,
+        }),
+      ),
+    );
+  });
+
   it("keeps a reopened source panel independent of the previous late response", async () => {
     const host = await mountBrowser();
     vi.useFakeTimers();

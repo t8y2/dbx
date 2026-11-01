@@ -27,6 +27,10 @@ defineSlots<{
 // between, and swinging straight into their menus is what makes the menu feel
 // unusable.
 const SUBMENU_SWITCH_DELAY_MS = 300;
+// Travelling along the menu onto a neighbouring row is a deliberate request for
+// that row's submenu, so the hand-over only waits long enough to ignore a row
+// that was merely crossed on the way to another one.
+const SUBMENU_HANDOVER_DELAY_MS = 80;
 // How long the submenu survives while the pointer is outside both panels.
 const SUBMENU_CLOSE_DELAY_MS = 150;
 
@@ -43,6 +47,7 @@ const subX = ref(0);
 const subY = ref(0);
 let subCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let subSwitchTimer: ReturnType<typeof setTimeout> | null = null;
+let subSwitchDelay = 0;
 let subAnchorRect: { left: number; right: number; top: number; bottom: number } | null = null;
 // The wedge between the trigger row and the submenu panel, rebuilt each time the
 // pointer leaves a trigger. While the pointer stays inside it the submenu is
@@ -63,6 +68,7 @@ function close() {
   hoveredRow = null;
   cancelSubClose();
   cancelSubSwitch();
+  pointerSamples = [];
   activeItems.value = [];
   show.value = false;
   emit("close");
@@ -198,6 +204,8 @@ function onContextMenu(event: MouseEvent, itemsOverride?: ContextMenuItem[]) {
   event.stopPropagation();
   x.value = event.clientX;
   y.value = event.clientY;
+  // The pointer direction is only meaningful from the point the menu opened at.
+  pointerSamples = [{ x: event.clientX, y: event.clientY }];
   contextMenuRegistration?.activate();
   show.value = true;
   emit("open");
@@ -207,8 +215,7 @@ function onContextMenu(event: MouseEvent, itemsOverride?: ContextMenuItem[]) {
 // ---- submenu ----
 
 function onItemMouseEnter(index: number, event: MouseEvent) {
-  lastMouseX = event.clientX;
-  lastMouseY = event.clientY;
+  rememberPointer(event.clientX, event.clientY);
   // A new row restarts the settle delay; moving within one row must not.
   if (hoveredRow?.index !== index) cancelSubSwitch();
   hoveredRow = { index, trigger: event.currentTarget as HTMLElement };
@@ -216,6 +223,7 @@ function onItemMouseEnter(index: number, event: MouseEvent) {
 }
 
 function onItemMouseLeave(event: MouseEvent) {
+  rememberPointer(event.clientX, event.clientY);
   hoveredRow = null;
   // Leaving a trigger opens the wedge that keeps its submenu alive while the
   // pointer crosses the gap towards the panel.
@@ -229,6 +237,20 @@ function onItemMouseLeave(event: MouseEvent) {
 // panels, where nothing fires.
 let lastMouseX = 0;
 let lastMouseY = 0;
+// Recent pointer positions, oldest first. A row hover can then tell which way
+// the pointer is travelling (along the menu or diagonally into the open panel)
+// instead of judging from a single jittery event delta.
+const POINTER_SAMPLE_LIMIT = 3;
+let pointerSamples: { x: number; y: number }[] = [];
+
+function rememberPointer(x: number, y: number) {
+  lastMouseX = x;
+  lastMouseY = y;
+  const previous = pointerSamples[pointerSamples.length - 1];
+  if (previous?.x === x && previous.y === y) return;
+  pointerSamples.push({ x, y });
+  if (pointerSamples.length > POINTER_SAMPLE_LIMIT) pointerSamples.shift();
+}
 
 function buildSubmenuGraceAreaForPointer(x: number, y: number): GraceAreaPoint[] | null {
   const sub = subRef.value?.getBoundingClientRect();
@@ -256,6 +278,26 @@ function pointerIsHeadingToSubmenu(): boolean {
 }
 
 /**
+ * While the pointer sits on a row outside the wedge, tell a diagonal trip into
+ * the open panel apart from a deliberate move along the menu. Movement between
+ * rows is dominated by vertical travel; a sideways component towards the panel
+ * is what a diagonal approach looks like.
+ */
+function pointerTravelsTowardSubmenu(): boolean {
+  const sub = subRef.value?.getBoundingClientRect();
+  const first = pointerSamples[0];
+  const last = pointerSamples[pointerSamples.length - 1];
+  // No measured panel or no movement history: stay with the conservative delay.
+  if (!sub || !first || !last) return true;
+  const dx = last.x - first.x;
+  const dy = last.y - first.y;
+  if (dx === 0 && dy === 0) return false;
+  const panelIsRight = (sub.left + sub.right) / 2 >= last.x;
+  const sidewaysTowardPanel = panelIsRight ? dx : -dx;
+  return sidewaysTowardPanel > 0 && Math.abs(dx) >= Math.abs(dy);
+}
+
+/**
  * The one place that decides which row owns the submenu. Row hover and pointer
  * moves all funnel through it, so the panel is re-evaluated while the pointer
  * travels instead of being settled once, when it crosses a row edge.
@@ -280,14 +322,10 @@ function syncSubmenu(fromTimer = false) {
     }
     // A panel is already open for another row. The pointer may only be crossing
     // this one on its way to that panel, so let it settle before handing over.
+    // Browsing along the menu does not need the long diagonal settle delay.
     if (activeSubIndex.value !== null && !fromTimer) {
       cancelSubClose();
-      if (!subSwitchTimer) {
-        subSwitchTimer = setTimeout(() => {
-          subSwitchTimer = null;
-          syncSubmenu(true);
-        }, SUBMENU_SWITCH_DELAY_MS);
-      }
+      scheduleSubSwitch(pointerTravelsTowardSubmenu() ? SUBMENU_SWITCH_DELAY_MS : SUBMENU_HANDOVER_DELAY_MS);
       return;
     }
     openSubmenu(row.index, row.trigger);
@@ -304,8 +342,7 @@ function syncSubmenu(fromTimer = false) {
 }
 
 function onDocumentPointerMove(event: PointerEvent) {
-  lastMouseX = event.clientX;
-  lastMouseY = event.clientY;
+  rememberPointer(event.clientX, event.clientY);
   syncSubmenu();
 }
 
@@ -323,7 +360,23 @@ function cancelSubClose() {
   subCloseTimer = null;
 }
 
+function scheduleSubSwitch(delay: number) {
+  // The pointer may change course while the hand-over is pending: switching from
+  // diagonal travel to browsing rows (or back) restarts the wait with the delay
+  // that matches the new intent. A repeated call with the same intent keeps the
+  // existing timer so the row still settles on schedule.
+  if (subSwitchTimer && subSwitchDelay === delay) return;
+  cancelSubSwitch();
+  subSwitchDelay = delay;
+  subSwitchTimer = setTimeout(() => {
+    subSwitchTimer = null;
+    subSwitchDelay = 0;
+    syncSubmenu(true);
+  }, delay);
+}
+
 function cancelSubSwitch() {
+  subSwitchDelay = 0;
   if (!subSwitchTimer) return;
   clearTimeout(subSwitchTimer);
   subSwitchTimer = null;
@@ -354,8 +407,7 @@ function onSubMouseEnter() {
 }
 
 function onSubMouseLeave(event: MouseEvent) {
-  lastMouseX = event.clientX;
-  lastMouseY = event.clientY;
+  rememberPointer(event.clientX, event.clientY);
   syncSubmenu();
 }
 

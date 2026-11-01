@@ -1,5 +1,6 @@
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
+import type { SqlFormatterCase } from "@/lib/sql/sqlFormatterConfig";
 import { metricRangeQuery, qualifiedTableName } from "@/lib/table/tableSelectSql";
 import type { ConnectionConfig, DatabaseType, QueryTab, TreeNode } from "@/types/database";
 
@@ -122,6 +123,7 @@ export interface ResolveNewQueryInitialSqlInput extends ResolveNewQueryTableInpu
   identifierQuote?: string;
   includeDatabaseName?: boolean;
   quoteIdentifiers?: boolean;
+  keywordCase?: SqlFormatterCase;
 }
 
 // Database types whose "table" view does not use standard SQL `SELECT * FROM <table>`
@@ -185,16 +187,25 @@ export function resolveNewQueryTable(input: ResolveNewQueryTableInput): NewQuery
  * full-history scan the moment the user hits Run. VictoriaMetrics
  * already has its own metric range template above.
  */
-export function buildSelectAllSql(databaseType: DatabaseType | undefined, table: Pick<NewQueryTable, "schema" | "catalog" | "tableName"> & Partial<Pick<NewQueryTable, "database">>, identifierQuote?: string, driverProfile?: string, includeDatabaseName = false, quoteIdentifiers = true): string {
+export function buildSelectAllSql(
+  databaseType: DatabaseType | undefined,
+  table: Pick<NewQueryTable, "schema" | "catalog" | "tableName"> & Partial<Pick<NewQueryTable, "database">>,
+  identifierQuote?: string,
+  driverProfile?: string,
+  includeDatabaseName = false,
+  quoteIdentifiers = true,
+  keywordCase?: SqlFormatterCase,
+): string {
   if (databaseType === "victoriametrics") return metricRangeQuery(table.tableName);
   const ref = qualifiedTableName({ databaseType, driverProfile, identifierQuote, database: table.database, schema: table.schema, catalog: table.catalog, tableName: table.tableName, includeDatabaseName, quoteIdentifiers });
+  const keywords = (sql: string) => (keywordCase === "lower" ? sql.toLowerCase() : sql);
   if (databaseType === "influxdb") {
-    return `SELECT * FROM ${ref} WHERE time > now() - 5m ORDER BY time DESC LIMIT 100`;
+    return `${keywords("SELECT * FROM")} ${ref} ${keywords("WHERE time > now() - 5m ORDER BY time DESC LIMIT 100")}`;
   }
   if (databaseType === "influxdb3") {
-    return `SELECT * FROM ${ref} WHERE time > now() - INTERVAL '5 minutes' ORDER BY time DESC LIMIT 100`;
+    return `${keywords("SELECT * FROM")} ${ref} ${keywords("WHERE time > now() - INTERVAL '5 minutes' ORDER BY time DESC LIMIT 100")}`;
   }
-  return `SELECT * FROM ${ref}`;
+  return `${keywords("SELECT * FROM")} ${ref}`;
 }
 
 /**
@@ -208,5 +219,5 @@ export function resolveNewQueryInitialSql(input: ResolveNewQueryInitialSqlInput)
   const table = resolveNewQueryTable(input);
   if (!table || table.connectionId !== input.targetConnectionId || table.database !== input.targetDatabase) return undefined;
 
-  return buildSelectAllSql(input.databaseType, table, input.identifierQuote, input.driverProfile, input.includeDatabaseName, input.quoteIdentifiers);
+  return buildSelectAllSql(input.databaseType, table, input.identifierQuote, input.driverProfile, input.includeDatabaseName, input.quoteIdentifiers, input.keywordCase);
 }

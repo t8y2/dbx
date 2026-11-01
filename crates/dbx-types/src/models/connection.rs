@@ -185,9 +185,13 @@ pub struct ConnectionConfig {
     /// Frontend navigation preference: exhaust the paginated Tables group when opened.
     #[serde(default, skip_serializing_if = "is_false")]
     pub sidebar_auto_load_all_tables: bool,
-    /// Oracle sidebar preference. Absent means shown; only an explicit opt-out is stored.
+    /// Sidebar preference. Absent means shown; only an explicit opt-out is stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_database_links: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_native_jobs: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_user_admin: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     /// SQL statements executed right after the connection is established
@@ -493,6 +497,12 @@ pub struct SshTunnelConfig {
     pub connect_timeout_secs: u64,
     #[serde(default)]
     pub expose_lan: bool,
+    /// Fixed local port for the connection's primary tunnel when this is the
+    /// last transport layer. Unset means a random free port. A shared tunnel
+    /// profile (`profile_id`) supplies its own configuration, so a fixed port
+    /// is not applied to a layer that references one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_port: Option<u16>,
     #[serde(default)]
     pub use_ssh_agent: bool,
     /// Custom SSH agent socket path (e.g. `~/.ssh/agent.sock`).
@@ -500,6 +510,10 @@ pub struct SshTunnelConfig {
     /// the `SSH_AUTH_SOCK` environment variable.
     #[serde(default)]
     pub ssh_agent_sock_path: String,
+    /// SHA-256 fingerprint (`SHA256:...`) of the one agent identity to use.
+    /// Empty means every identity the agent reports is tried, in order.
+    #[serde(default)]
+    pub ssh_agent_key_fingerprint: String,
     /// Login method: `"password"`, `"key"`, `"key+password"`, `"agent"`, or `"none"`.
     /// Empty string means an older saved connection predating this field —
     /// the backend falls back to probing key > password > agent based on
@@ -679,6 +693,45 @@ pub enum ProxyType {
 
 include!(concat!(env!("OUT_DIR"), "/database_type.rs"));
 
+/// A dialect fact that is safe to retain on a connection response after its URL is redacted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum JdbcDialectHint {
+    OceanbaseOracle,
+}
+
+/// Connection data returned to a client, with response-only metadata flattened into the JSON.
+/// This type is never used for persistence, runtime configuration, or request deserialization.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ConnectionResponse {
+    #[serde(flatten)]
+    pub config: ConnectionConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jdbc_dialect: Option<JdbcDialectHint>,
+}
+
+impl ConnectionResponse {
+    pub fn from_config(config: ConnectionConfig) -> Self {
+        let jdbc_dialect = jdbc_dialect_hint(&config);
+        Self { config, jdbc_dialect }
+    }
+
+    pub fn with_jdbc_dialect(config: ConnectionConfig, jdbc_dialect: Option<JdbcDialectHint>) -> Self {
+        Self { config, jdbc_dialect }
+    }
+}
+
+/// Derive only the approved non-sensitive mode identity from an explicit JDBC URL.
+pub fn jdbc_dialect_hint(config: &ConnectionConfig) -> Option<JdbcDialectHint> {
+    if config.db_type != DatabaseType::Jdbc {
+        return None;
+    }
+    let url = config.connection_string.as_deref()?.trim();
+    url.get(.."jdbc:oceanbase:oracle://".len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case("jdbc:oceanbase:oracle://"))
+        .map(|_| JdbcDialectHint::OceanbaseOracle)
+}
+
 #[derive(Deserialize)]
 struct ConnectionConfigData {
     pub id: String,
@@ -713,6 +766,10 @@ struct ConnectionConfigData {
     pub sidebar_auto_load_all_tables: bool,
     #[serde(default)]
     pub show_database_links: Option<bool>,
+    #[serde(default)]
+    pub show_native_jobs: Option<bool>,
+    #[serde(default)]
+    pub show_user_admin: Option<bool>,
     #[serde(default)]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     #[serde(default)]
@@ -838,6 +895,8 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             show_system_schemas: data.show_system_schemas,
             sidebar_auto_load_all_tables: data.sidebar_auto_load_all_tables,
             show_database_links: data.show_database_links,
+            show_native_jobs: data.show_native_jobs,
+            show_user_admin: data.show_user_admin,
             attached_databases: data.attached_databases,
             init_script: data.init_script,
             color: data.color,
@@ -3172,9 +3231,36 @@ mod tests {
     use super::{
         database_info_from_protocol_value, default_query_timeout_secs, default_redis_key_separator,
         default_ssh_connect_timeout_secs, sqlserver_legacy_compatibility_param,
-        without_sqlserver_legacy_compatibility_param, ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo,
-        DatabaseType, IdentifierCase, ProductionBadgeScope, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
+        without_sqlserver_legacy_compatibility_param, ConnectionConfig, ConnectionResponse, ConnectionTestResult,
+        DatabaseConnectionInfo, DatabaseType, IdentifierCase, ProductionBadgeScope, ProxyTunnelConfig, ProxyType,
+        TransportLayerConfig,
     };
+
+    #[test]
+    fn connection_response_derives_only_oceanbase_oracle_from_explicit_jdbc_url() {
+        let mut config = mysql_config("root", "", None);
+        config.db_type = DatabaseType::Jdbc;
+        config.connection_string = Some(" JDBC:OCEANBASE:ORACLE://host/service ".into());
+        let response = ConnectionResponse::from_config(config.clone());
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["jdbc_dialect"], "oceanbase-oracle");
+        assert_eq!(value["db_type"], "jdbc");
+        assert_eq!(response.config, config);
+
+        config.connection_string = Some("jdbc:oracle:thin:@host/service".into());
+        assert!(serde_json::to_value(ConnectionResponse::from_config(config.clone()))
+            .unwrap()
+            .get("jdbc_dialect")
+            .is_none());
+        config.connection_string = Some("jdbc:oceanbase:oracle://host/service".into());
+        config.db_type = DatabaseType::Oracle;
+        assert!(serde_json::to_value(ConnectionResponse::from_config(config)).unwrap().get("jdbc_dialect").is_none());
+
+        let mut legacy = serde_json::to_value(&response.config).unwrap();
+        legacy["jdbc_dialect"] = serde_json::json!("oceanbase-oracle");
+        let restored: ConnectionConfig = serde_json::from_value(legacy).unwrap();
+        assert!(serde_json::to_value(restored).unwrap().get("jdbc_dialect").is_none());
+    }
 
     #[test]
     fn default_query_timeout_is_sixty_seconds() {
@@ -3343,6 +3429,24 @@ mod tests {
         assert_eq!(serde_json::to_value(hidden).unwrap()["show_database_links"], serde_json::json!(false));
     }
 
+    #[test]
+    fn sidebar_visibility_preferences_round_trip() {
+        let base = serde_json::json!({
+            "id": "sidebar", "name": "Sidebar", "db_type": "oracle", "host": "localhost",
+            "port": 1521, "username": "test", "password": ""
+        });
+        for field in ["show_database_links", "show_native_jobs", "show_user_admin"] {
+            let legacy: ConnectionConfig = serde_json::from_value(base.clone()).unwrap();
+            assert!(serde_json::to_value(legacy).unwrap().get(field).is_none());
+            for visible in [true, false] {
+                let mut value = base.clone();
+                value[field] = serde_json::json!(visible);
+                let config: ConnectionConfig = serde_json::from_value(value).unwrap();
+                assert_eq!(serde_json::to_value(config).unwrap()[field], serde_json::json!(visible));
+            }
+        }
+    }
+
     fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
             oracle_oci_nls_lang: None,
@@ -3368,6 +3472,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -3885,6 +3991,40 @@ mod tests {
         assert!(saved.get("transport_layers").is_some());
         for key in ["ssh_tunnels", "ssh_host", "ssh_password", "proxy_host", "proxy_password", "proxy_enabled"] {
             assert!(saved.get(key).is_none(), "legacy key {key} should not serialize");
+        }
+    }
+
+    #[test]
+    fn ssh_layer_local_port_is_optional_and_round_trips() {
+        let cases = [(serde_json::json!({}), None), (serde_json::json!({ "local_port": 4059 }), Some(4059_u16))];
+        for (layer_fields, expected) in cases {
+            let mut layer =
+                serde_json::json!({ "type": "ssh", "id": "ssh-1", "host": "bastion", "port": 22, "user": "deploy" });
+            layer.as_object_mut().unwrap().extend(layer_fields.as_object().unwrap().clone());
+            let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+                "id": "id",
+                "name": "name",
+                "db_type": "mysql",
+                "host": "10.1.2.3",
+                "port": 3306,
+                "username": "root",
+                "password": "",
+                "database": null,
+                "transport_layers": [layer]
+            }))
+            .unwrap();
+            let TransportLayerConfig::Ssh(ssh) = &config.transport_layers[0] else {
+                panic!("expected ssh layer");
+            };
+            assert_eq!(ssh.local_port, expected);
+
+            let saved = serde_json::to_value(&config).unwrap();
+            match expected {
+                Some(port) => assert_eq!(saved["transport_layers"][0]["local_port"], port),
+                None => assert!(saved["transport_layers"][0].get("local_port").is_none()),
+            }
+            let restored: ConnectionConfig = serde_json::from_value(saved).unwrap();
+            assert_eq!(restored.transport_layers, config.transport_layers);
         }
     }
 

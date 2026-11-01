@@ -12,12 +12,22 @@ public final class MetadataListConstraints {
     private final Integer limit;
     private final Integer offset;
     private final List<String> objectTypes;
+    private final boolean exactIdentity;
 
     public MetadataListConstraints(String filter, Integer limit, Integer offset, List<String> objectTypes) {
+        this(filter, limit, offset, objectTypes, false);
+    }
+
+    public MetadataListConstraints(String filter, Integer limit, Integer offset, List<String> objectTypes, boolean exactIdentity) {
         this.filter = normalizeFilter(filter);
         this.limit = limit == null || limit <= 0 ? null : limit;
         this.offset = offset == null || offset <= 0 ? null : offset;
         this.objectTypes = normalizeObjectTypes(objectTypes);
+        this.exactIdentity = exactIdentity;
+    }
+
+    public boolean isExactIdentity() {
+        return exactIdentity;
     }
 
     public static MetadataListConstraints orNone(MetadataListConstraints constraints) {
@@ -57,7 +67,7 @@ public final class MetadataListConstraints {
     }
 
     public MetadataListConstraints withoutPaging() {
-        return new MetadataListConstraints(filter, null, null, objectTypes);
+        return new MetadataListConstraints(filter, null, null, objectTypes, exactIdentity);
     }
 
     public String fuzzyLikePattern() {

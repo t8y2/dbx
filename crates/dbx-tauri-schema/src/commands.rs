@@ -4,6 +4,77 @@ use tauri::State;
 
 use dbx_core::connection::AppState;
 use dbx_core::db;
+use dbx_core::native_jobs::{
+    NativeJobContext, NativeJobDetails, NativeJobList, NativeJobListRequest, NativeJobOperationStatus,
+    NativeJobPreparedPlan, NativeJobRef, NativeJobReferenceCatalog, NativeJobReferenceListRequest, NativeJobRequest,
+};
+use dbx_core::schema::native_jobs as jobs;
+
+#[tauri::command]
+pub async fn native_job_open_context(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+) -> Result<NativeJobContext, String> {
+    jobs::native_job_open_context_core(&state, &connection_id, &database).await
+}
+
+#[tauri::command]
+pub async fn native_job_list(
+    state: State<'_, Arc<AppState>>,
+    request: NativeJobListRequest,
+) -> Result<NativeJobList, String> {
+    jobs::native_job_list_core(&state, &request).await
+}
+
+#[tauri::command]
+pub async fn native_job_references(
+    state: State<'_, Arc<AppState>>,
+    request: NativeJobReferenceListRequest,
+) -> Result<NativeJobReferenceCatalog, String> {
+    jobs::native_job_references_core(&state, &request).await
+}
+
+#[tauri::command]
+pub async fn native_job_read(
+    state: State<'_, Arc<AppState>>,
+    target: NativeJobRef,
+) -> Result<NativeJobDetails, String> {
+    jobs::native_job_read_core(&state, &target).await
+}
+
+#[tauri::command]
+pub async fn native_job_prepare(
+    state: State<'_, Arc<AppState>>,
+    mutation: NativeJobRequest,
+) -> Result<NativeJobPreparedPlan, String> {
+    jobs::native_job_prepare_core(&state, mutation).await
+}
+
+#[tauri::command]
+pub async fn native_job_apply(
+    state: State<'_, Arc<AppState>>,
+    plan_id: String,
+) -> Result<NativeJobOperationStatus, String> {
+    jobs::native_job_apply_core(state.inner().clone(), &plan_id)
+}
+
+#[tauri::command]
+pub async fn native_job_status(
+    state: State<'_, Arc<AppState>>,
+    operation_id: String,
+    observe: Option<bool>,
+) -> Result<NativeJobOperationStatus, String> {
+    Ok(jobs::native_job_status_observed_core(&state, &operation_id, observe.unwrap_or(false)).await)
+}
+
+#[tauri::command]
+pub async fn native_job_cancel(
+    state: State<'_, Arc<AppState>>,
+    operation_id: String,
+) -> Result<NativeJobOperationStatus, String> {
+    Ok(jobs::native_job_cancel(&state, &operation_id))
+}
 
 async fn run_cancellable<T, F>(state: &Arc<AppState>, execution_id: Option<String>, future: F) -> Result<T, String>
 where
@@ -176,6 +247,7 @@ pub async fn list_data_types(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn list_tables(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -187,7 +259,22 @@ pub async fn list_tables(
     object_types: Option<Vec<String>>,
     catalog: Option<String>,
     table_name_filter: Option<dbx_core::schema::TableNameFilter>,
+    exact_identity: Option<bool>,
 ) -> Result<Vec<db::TableInfo>, String> {
+    if exact_identity.unwrap_or(false) {
+        return dbx_core::schema::exact_metadata::tables(
+            &state,
+            &connection_id,
+            &database,
+            &schema,
+            filter.as_deref(),
+            limit,
+            offset,
+            object_types.as_deref(),
+            table_name_filter.as_ref(),
+        )
+        .await;
+    }
     if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
         return dbx_core::schema::list_doris_catalog_tables_core(
             &state,
@@ -224,7 +311,11 @@ pub async fn get_table_comment(
     schema: String,
     table: String,
     catalog: Option<String>,
+    exact_identity: Option<bool>,
 ) -> Result<Option<String>, String> {
+    if exact_identity.unwrap_or(false) {
+        return dbx_core::schema::exact_metadata::comment(&state, &connection_id, &database, &schema, &table).await;
+    }
     if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
         return dbx_core::schema::get_doris_catalog_table_comment_core(
             &state,
@@ -262,10 +353,26 @@ pub async fn list_objects(
     catalog: Option<String>,
     table_name_filter: Option<dbx_core::schema::TableNameFilter>,
     execution_id: Option<String>,
+    identity_mode: Option<dbx_core::schema::MetadataIdentityMode>,
+    exact_identity: Option<bool>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
     let app = Arc::clone(state.inner());
     let operation_app = Arc::clone(&app);
     run_cancellable(&app, execution_id, async move {
+        if exact_identity.unwrap_or(false) {
+            return dbx_core::schema::exact_metadata::objects(
+                &operation_app,
+                &connection_id,
+                &database,
+                &schema,
+                filter.as_deref(),
+                limit,
+                offset,
+                object_types.as_deref(),
+                table_name_filter.as_ref(),
+            )
+            .await;
+        }
         if let Some(catalog) = external_doris_catalog(&operation_app, &connection_id, catalog.as_deref()).await {
             let tables = dbx_core::schema::list_doris_catalog_tables_core(
                 &operation_app,
@@ -299,7 +406,7 @@ pub async fn list_objects(
                 })
                 .collect());
         }
-        dbx_core::schema::list_objects_core(
+        dbx_core::schema::list_objects_core_with_options(
             &operation_app,
             &connection_id,
             &database,
@@ -309,6 +416,7 @@ pub async fn list_objects(
             offset,
             object_types.as_deref(),
             table_name_filter.as_ref(),
+            &dbx_core::schema::MetadataReadOptions { identity_mode, catalog },
         )
         .await
     })
@@ -353,8 +461,10 @@ pub async fn get_object_source(
     object_type: db::ObjectSourceKind,
     signature: Option<String>,
     relation_name: Option<String>,
+    identity_mode: Option<dbx_core::schema::MetadataIdentityMode>,
+    catalog: Option<String>,
 ) -> Result<db::ObjectSource, String> {
-    dbx_core::schema::get_object_source_core(
+    dbx_core::schema::get_object_source_core_with_options(
         &state,
         &connection_id,
         &database,
@@ -363,6 +473,7 @@ pub async fn get_object_source(
         object_type,
         signature.as_deref(),
         relation_name.as_deref(),
+        &dbx_core::schema::MetadataReadOptions { identity_mode, catalog },
     )
     .await
 }
@@ -390,6 +501,49 @@ pub async fn get_custom_type_details(
 }
 
 #[tauri::command]
+pub async fn get_oracle_type_management_snapshot(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    owner: String,
+    name: String,
+    known_objects: Option<Vec<db::OracleTypeManagementObjectKey>>,
+) -> Result<db::OracleTypeManagementSnapshot, String> {
+    dbx_core::schema::get_oracle_type_management_snapshot_with_objects_core(
+        &state,
+        &connection_id,
+        &database,
+        &owner,
+        &name,
+        known_objects.as_deref().unwrap_or_default(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub fn build_oracle_type_management_sql(
+    input: db::OracleTypeManagementSqlInput,
+) -> Result<db::OracleTypeManagementSqlResult, String> {
+    dbx_core::schema::build_oracle_type_management_sql(input)
+}
+
+#[tauri::command]
+pub async fn verify_oracle_type_data(
+    state: State<'_, Arc<AppState>>,
+    input: db::OracleTypeDataRequest,
+) -> Result<db::OracleTypeDataResult, String> {
+    dbx_core::schema::verify_oracle_type_data_core(&state, input).await
+}
+
+#[tauri::command]
+pub async fn prepare_oracle_type_evolution(
+    state: State<'_, Arc<AppState>>,
+    input: db::OracleTypeEvolutionRequest,
+) -> Result<db::OracleTypeEvolutionManifest, String> {
+    dbx_core::schema::prepare_oracle_type_evolution_core(&state, input).await
+}
+
+#[tauri::command]
 pub async fn get_columns(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -399,7 +553,19 @@ pub async fn get_columns(
     catalog: Option<String>,
     client_session_id: Option<String>,
     current_schema: Option<String>,
+    exact_identity: Option<bool>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
+    if exact_identity.unwrap_or(false) {
+        return dbx_core::schema::exact_metadata::columns(
+            &state,
+            &connection_id,
+            &database,
+            &schema,
+            &table,
+            client_session_id.as_deref(),
+        )
+        .await;
+    }
     if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
         return dbx_core::schema::get_doris_catalog_columns_core(&state, &connection_id, &catalog, &database, &table)
             .await;
@@ -455,7 +621,11 @@ pub async fn list_indexes(
     schema: String,
     table: String,
     catalog: Option<String>,
+    exact_identity: Option<bool>,
 ) -> Result<Vec<db::IndexInfo>, String> {
+    if exact_identity.unwrap_or(false) {
+        return dbx_core::schema::exact_metadata::indexes(&state, &connection_id, &database, &schema, &table).await;
+    }
     if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
         return dbx_core::schema::list_doris_catalog_indexes_core(&state, &connection_id, &catalog, &database, &table)
             .await;
@@ -507,7 +677,12 @@ pub async fn list_foreign_keys(
     schema: String,
     table: String,
     catalog: Option<String>,
+    exact_identity: Option<bool>,
 ) -> Result<Vec<db::ForeignKeyInfo>, String> {
+    if exact_identity.unwrap_or(false) {
+        return dbx_core::schema::exact_metadata::foreign_keys(&state, &connection_id, &database, &schema, &table)
+            .await;
+    }
     if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
         return dbx_core::schema::list_doris_catalog_foreign_keys_core(
             &state,
@@ -549,12 +724,25 @@ pub async fn list_triggers(
     schema: String,
     table: String,
     catalog: Option<String>,
+    identity_mode: Option<dbx_core::schema::MetadataIdentityMode>,
+    exact_identity: Option<bool>,
 ) -> Result<Vec<db::TriggerInfo>, String> {
+    if exact_identity.unwrap_or(false) {
+        return dbx_core::schema::exact_metadata::triggers(&state, &connection_id, &database, &schema, &table).await;
+    }
     if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
         return dbx_core::schema::list_doris_catalog_triggers_core(&state, &connection_id, &catalog, &database, &table)
             .await;
     }
-    dbx_core::schema::list_triggers_core(&state, &connection_id, &database, &schema, &table).await
+    dbx_core::schema::list_triggers_core_with_options(
+        &state,
+        &connection_id,
+        &database,
+        &schema,
+        &table,
+        &dbx_core::schema::MetadataReadOptions { identity_mode, catalog },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -565,7 +753,11 @@ pub async fn list_constraints(
     schema: String,
     table: String,
     catalog: Option<String>,
+    exact_identity: Option<bool>,
 ) -> Result<Vec<dbx_core::db::ConstraintInfo>, String> {
+    if exact_identity.unwrap_or(false) {
+        return dbx_core::schema::exact_metadata::constraints(&state, &connection_id, &database, &schema, &table).await;
+    }
     let _ = catalog;
     dbx_core::schema::list_constraints_core(&state, &connection_id, &database, &schema, &table).await
 }
@@ -626,6 +818,7 @@ pub async fn list_subpartitions(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn get_table_ddl(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -636,19 +829,46 @@ pub async fn get_table_ddl(
     catalog: Option<String>,
     include_postgres_access: Option<bool>,
     portable: Option<bool>,
+    exact_identity: Option<bool>,
+    separate_indexes: Option<bool>,
+    explicit_owner: Option<String>,
 ) -> Result<String, String> {
-    if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
-        return dbx_core::schema::get_doris_catalog_table_ddl_core(&state, &connection_id, &catalog, &database, &table)
-            .await;
-    }
-    if portable.unwrap_or(false) {
+    let separate_indexes = separate_indexes.unwrap_or(false) && object_type.is_none();
+    let result = if exact_identity.unwrap_or(false) {
+        dbx_core::schema::exact_metadata::ddl(
+            &state,
+            &connection_id,
+            &database,
+            &schema,
+            &table,
+            object_type,
+            portable.unwrap_or(false),
+        )
+        .await?
+    } else if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
+        dbx_core::schema::get_doris_catalog_table_ddl_core(&state, &connection_id, &catalog, &database, &table).await?
+    } else if portable.unwrap_or(false) {
         dbx_core::schema::get_table_export_ddl_core(&state, &connection_id, &database, &schema, &table, object_type)
-            .await
+            .await?
     } else if include_postgres_access.unwrap_or(false) {
         dbx_core::schema::get_table_display_ddl_core(&state, &connection_id, &database, &schema, &table, object_type)
-            .await
+            .await?
     } else {
-        dbx_core::schema::get_table_ddl_core(&state, &connection_id, &database, &schema, &table, object_type).await
+        dbx_core::schema::get_table_ddl_core(&state, &connection_id, &database, &schema, &table, object_type).await?
+    };
+    if separate_indexes {
+        dbx_core::schema::separate_table_ddl_indexes_core(
+            &state,
+            &connection_id,
+            &database,
+            &schema,
+            &table,
+            &result,
+            explicit_owner.as_deref().or_else(|| exact_identity.unwrap_or(false).then_some(schema.as_str())),
+        )
+        .await
+    } else {
+        Ok(result)
     }
 }
 
@@ -660,6 +880,87 @@ pub async fn list_functions(
     schema: String,
 ) -> Result<Vec<db::FunctionInfo>, String> {
     dbx_core::schema::list_functions_core(&state, &connection_id, &database, &schema).await
+}
+
+#[tauri::command]
+pub async fn load_schema_diff_routines(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    selected_routines: Option<Vec<String>>,
+    object_kinds: Option<Vec<db::ObjectSourceKind>>,
+    selected_objects: Option<Vec<dbx_core::schema::oracle_routines::RoutineSelection>>,
+) -> Result<dbx_core::schema::oracle_routines::RoutineSnapshot, String> {
+    dbx_core::schema::oracle_routines::load_schema_diff_routines_with_options_core(
+        &state,
+        &connection_id,
+        &database,
+        &schema,
+        dbx_core::schema::oracle_routines::RoutineReadOptions { object_kinds, selected_objects, selected_routines },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn prepare_oracle_routine_save(
+    state: State<'_, Arc<AppState>>,
+    input: dbx_core::schema::oracle_routines::OracleRoutineSaveInput,
+) -> Result<dbx_core::schema::oracle_routines::RoutineOperationRecord, String> {
+    dbx_core::schema::oracle_routines::prepare_oracle_routine_save_core(&state, input).await
+}
+
+#[tauri::command]
+pub async fn prepare_oracle_routine_plan(
+    state: State<'_, Arc<AppState>>,
+    input: dbx_core::schema::oracle_routines::OracleRoutinePlanInput,
+) -> Result<dbx_core::schema::oracle_routines::OracleRoutinePlan, String> {
+    dbx_core::schema::oracle_routines::prepare_oracle_routine_plan_core(&state, input).await
+}
+
+#[tauri::command]
+pub async fn prepare_oracle_routine_recovery(
+    state: State<'_, Arc<AppState>>,
+    operation_id: String,
+) -> Result<dbx_core::schema::oracle_routines::OracleRoutinePlan, String> {
+    dbx_core::schema::oracle_routines::prepare_oracle_routine_recovery_core(&state, &operation_id).await
+}
+
+#[tauri::command]
+pub async fn execute_oracle_routine_operation(
+    state: State<'_, Arc<AppState>>,
+    operation_id: String,
+    approved_sql: String,
+) -> Result<dbx_core::schema::oracle_routines::RoutineOperationRecord, String> {
+    dbx_core::schema::oracle_routines::execute_oracle_routine_operation_core(
+        state.inner().clone(),
+        operation_id,
+        approved_sql,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn observe_oracle_routine_operation(
+    state: State<'_, Arc<AppState>>,
+    operation_id: String,
+    refresh_readback: Option<bool>,
+) -> Result<dbx_core::schema::oracle_routines::RoutineOperationObservation, String> {
+    Ok(dbx_core::schema::oracle_routines::observe_oracle_routine_operation_core(
+        &state,
+        &operation_id,
+        refresh_readback.unwrap_or(false),
+    )
+    .await)
+}
+
+#[tauri::command]
+pub fn update_oracle_routine_operation_references(
+    state: State<'_, Arc<AppState>>,
+    retain_operation_ids: Vec<String>,
+    release_operation_ids: Vec<String>,
+) -> Result<(), String> {
+    state.routine_operations.update_references(&retain_operation_ids, &release_operation_ids)
 }
 
 #[tauri::command]

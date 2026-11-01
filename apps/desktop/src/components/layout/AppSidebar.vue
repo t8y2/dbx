@@ -27,16 +27,17 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  import: [source: "dbx" | "navicat" | "dbeaver" | "datagrip"];
+  import: [source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis"];
   export: [];
   startResize: [event: PointerEvent];
   collapse: [];
   "open-settings": [initialTab: string];
+  "open-connection-settings": [connectionId: string];
   "add-to-ai": [nodes: TreeNode | TreeNode[]];
   "open-dependency-object": [context: ObjectDependencyTarget, target: SqlObjectNavigationTarget];
 }>();
 
-type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
+type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
@@ -53,6 +54,8 @@ const importSourceItems = computed(() => [
   { value: "navicat", label: t("sidebar.importNavicat") },
   { value: "dbeaver", label: t("sidebar.importDbeaver") },
   { value: "datagrip", label: t("sidebar.importDatagrip") },
+  { value: "rdm", label: t("sidebar.importRdm"), tooltip: "RedisDesktopManager" },
+  { value: "another-redis", label: t("sidebar.importAnotherRedis"), tooltip: "Another Redis Desktop Manager" },
 ]);
 const connectionTransferItems = computed(() => [
   ...importSourceItems.value.map((item) => ({
@@ -334,7 +337,13 @@ defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections, 
         </template>
       </div>
       <div data-sidebar-connection-tree class="flex-1 min-h-0">
-        <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" @add-to-ai="(nodes) => emit('add-to-ai', nodes)" @open-dependency-object="(context, target) => emit('open-dependency-object', context, target)" />
+        <ConnectionTree
+          ref="connectionTreeRef"
+          @open-settings="(initialTab) => emit('open-settings', initialTab)"
+          @open-connection-settings="(connectionId) => emit('open-connection-settings', connectionId)"
+          @add-to-ai="(nodes) => emit('add-to-ai', nodes)"
+          @open-dependency-object="(context, target) => emit('open-dependency-object', context, target)"
+        />
       </div>
       <div v-if="activeConnectionEndpoint" data-sidebar-connection-endpoint class="flex shrink-0 items-center gap-1.5 border-t border-border/60 px-2.5 py-1.5 text-[11px] leading-none text-muted-foreground" :title="activeWindowConnection?.name">
         <Server class="h-3 w-3 shrink-0" />

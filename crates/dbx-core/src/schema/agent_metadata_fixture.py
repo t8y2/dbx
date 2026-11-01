@@ -52,6 +52,17 @@ def handle(request):
             error = rpc_error(category)
         else:
             result = [{'name': sessions[session].get('sessionRole', 'workload')}]
+    elif method == 'list_objects':
+        failure = root / 'objects-error'
+        if failure.exists():
+            error = rpc_error(failure.read_text())
+        else:
+            objects = [{'name': 'Ix%d' % i, 'schema': params['schema'], 'object_type': 'INDEX',
+                        'parent_schema': ' Other Owner ', 'parent_name': ' T(a) '} for i in range(5)]
+            if params.get('filter'):
+                objects = [obj for obj in objects if params['filter'].lower() in obj['name'].lower()]
+            start = params.get('offset') or 0
+            result = objects[start:][:params.get('limit') or len(objects)]
     elif method in ('execute_query', 'get_table_ddl'):
         with session_locks[session]:
             if method == 'get_table_ddl':
@@ -70,7 +81,7 @@ def handle(request):
                     mode = 'connection' if failed.read_text() == session else 'success'
                 if mode in ('sql', 'timeout', 'connection'):
                     error = rpc_error(mode)
-                elif mode == 'fallback' and 'TABLE_USED_PAGES' in params['sql']:
+                elif mode == 'fallback' and ('TABLE_USED_PAGES' in params['sql'] or 'DBA_OB_TABLET_REPLICAS' in params['sql']):
                     error = rpc_error('sql')
                 else:
                     result = {'columns': ['TABLE_NAME', 'OWNER', 'NUM_ROWS', 'TOTAL_BYTES'],

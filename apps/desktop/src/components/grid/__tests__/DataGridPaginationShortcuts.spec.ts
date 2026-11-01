@@ -178,6 +178,29 @@ afterEach(() => {
 });
 
 describe("DataGrid pagination shortcuts", () => {
+  it("warns only when the exported page may omit rows and respects the view option", async () => {
+    const { host, gridState, settingsStore } = mountGrid();
+    await settle();
+    const openExport = async () => {
+      host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.export")}"]`)!.click();
+      await settle();
+    };
+    await openExport();
+    expect(document.querySelector('[role="note"]')?.textContent).toContain(i18n.global.t("grid.incompleteExportWarning", { count: 1 }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settle();
+    gridState.value = { pageOffset: 0, totalRowCount: 1 };
+    await settle();
+    await openExport();
+    expect(document.querySelector('[role="note"]')).toBeNull();
+    gridState.value = { pageOffset: 0, totalRowCount: undefined, result: { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 0, has_more: true } };
+    await settle();
+    expect(document.querySelector('[role="note"]')).not.toBeNull();
+    settingsStore.updateEditorSettings({ warnIncompleteExport: false });
+    await settle();
+    expect(document.querySelector('[role="note"]')).toBeNull();
+  });
+
   it("allows pointer focus and editing in the custom page size input", async () => {
     const { host, paginate } = mountGrid();
     await settle();

@@ -18,7 +18,7 @@ jobs:
     steps:
       # main 的 ruleset 要求改动走 PR，默认 GITHUB_TOKEN 直推会被 GH013 拒掉；
       # 用 owner PAT 后 push 以 admin 身份命中 ruleset 的 bypass（同 mcp-release.yml）。
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           token: ${{ secrets.MCP_RELEASE_TOKEN || secrets.PROJECT_AUTOMATION_TOKEN }}
       - name: Verify push token

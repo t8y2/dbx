@@ -580,7 +580,8 @@ pub struct SubscriptionInfo {
     /// RocketMQ: subscribed topic names for this consumer group (cluster-wide listing).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub topics: Vec<String>,
-    /// RocketMQ: online consumer client count (cluster-wide listing).
+    /// Online consumer client count for RocketMQ groups or Kafka topic subscriptions.
+    /// Absent when member information is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub online_members: Option<u32>,
     /// RocketMQ: NORMAL / FIFO / SYSTEM (aligned with Dashboard).
@@ -857,6 +858,7 @@ pub enum PeekStartPosition {
     Latest,
     Earliest,
     Offset,
+    Timestamp,
 }
 
 /// Optional hints for reading messages. Non-Kafka adapters ignore
@@ -865,6 +867,8 @@ pub enum PeekStartPosition {
 /// earliest available message unless an older caller supplies `offset`.
 /// `start_position: Offset` requires a non-negative offset. When no partition
 /// is supplied, Kafka reads forward from that offset in every topic partition.
+/// `start_position: Timestamp` requires a non-negative epoch-millisecond
+/// `timestamp` and reads from the first record at or after it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeekMessagesOptions {
@@ -876,6 +880,10 @@ pub struct PeekMessagesOptions {
     pub partition: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<i64>,
+    /// Epoch milliseconds; used only with `start_position: Timestamp`, where
+    /// the agent resolves the first offset at or after this time per partition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1265,6 +1273,10 @@ pub struct SendMessageRequest {
     /// Optional message headers.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// RabbitMQ: standard AMQP BasicProperties, separate from custom headers.
+    /// Keys use AMQP snake_case names; values remain strings on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<HashMap<String, String>>,
     /// Optional target partition (Kafka). When `None`, the key-based partitioner
     /// is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1375,6 +1387,27 @@ mod tests {
         assert!(req.exchange.is_none());
         assert!(req.routing_key.is_none());
         assert!(req.namespace.is_none());
+        assert!(serde_json::to_value(req).unwrap().get("properties").is_none());
+    }
+
+    #[test]
+    fn send_message_request_round_trips_rabbitmq_properties_separately_from_headers() {
+        let value = serde_json::json!({
+            "topic": "dbx-queue",
+            "payloadBase64": "aGVsbG8=",
+            "headers": { "content_type": "custom-header" },
+            "properties": {
+                "content_type": "application/json",
+                "delivery_mode": "2",
+                "priority": "0",
+                "expiration": "0",
+                "timestamp": "1735689600"
+            }
+        });
+        let req: super::SendMessageRequest = serde_json::from_value(value.clone()).expect("send request");
+        let round_trip = serde_json::to_value(req).expect("serialize send request");
+        assert_eq!(round_trip.get("properties"), value.get("properties"));
+        assert_eq!(round_trip.get("headers"), value.get("headers"));
     }
 
     #[test]
@@ -1592,6 +1625,32 @@ mod tests {
         assert_eq!(latest.start_position, Some(super::PeekStartPosition::Latest));
         let json = serde_json::to_value(latest).expect("serialize latest peek options");
         assert_eq!(json.get("startPosition").and_then(|value| value.as_str()), Some("latest"));
+    }
+
+    #[test]
+    fn peek_options_round_trip_timestamp_start_position() {
+        let timestamp: super::PeekMessagesOptions =
+            serde_json::from_str(r#"{"startPosition":"timestamp","timestamp":1700000000000}"#)
+                .expect("timestamp peek options");
+        assert_eq!(timestamp.start_position, Some(super::PeekStartPosition::Timestamp));
+        assert_eq!(timestamp.timestamp, Some(1_700_000_000_000));
+        let json = serde_json::to_value(&timestamp).expect("serialize timestamp peek options");
+        assert_eq!(json.get("startPosition").and_then(|value| value.as_str()), Some("timestamp"));
+        assert_eq!(json.get("timestamp").and_then(|value| value.as_i64()), Some(1_700_000_000_000));
+
+        // Every other start position still parses and carries no timestamp.
+        let earliest: super::PeekMessagesOptions =
+            serde_json::from_str(r#"{"startPosition":"earliest"}"#).expect("earliest peek options");
+        assert_eq!(earliest.start_position, Some(super::PeekStartPosition::Earliest));
+        assert_eq!(earliest.timestamp, None);
+
+        // Requests without a timestamp keep omitting the field, and unknown
+        // start positions still fail here instead of reaching the agent.
+        let legacy: super::PeekMessagesOptions =
+            serde_json::from_str(r#"{"partition":1}"#).expect("legacy peek options");
+        let json = serde_json::to_value(&legacy).expect("serialize legacy peek options");
+        assert!(json.get("timestamp").is_none());
+        assert!(serde_json::from_str::<super::PeekMessagesOptions>(r#"{"startPosition":"whenever"}"#).is_err());
     }
 
     #[test]

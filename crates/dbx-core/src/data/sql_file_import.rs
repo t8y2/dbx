@@ -32,6 +32,7 @@ use crate::sql::{
 };
 use crate::types::QueryResult;
 
+mod includes;
 mod table_restore;
 pub use table_restore::SqlFileTable;
 use table_restore::TableRestoreFilter;
@@ -364,10 +365,11 @@ impl MySqlSqlFileExecutor {
             let conn = self.conn.as_mut().ok_or("MySQL SQL file executor is missing a connection".to_string())?;
             let connection_id = conn.id();
             let kill_opts = conn.opts().clone();
+            let kill_timeout = self.budget.checkout_timeout;
             state.running_queries.register_interrupt(execution_id, move || {
                 let kill_opts = kill_opts.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = db::mysql::kill_query_with_opts(kill_opts, connection_id).await {
+                    if let Err(error) = db::mysql::kill_query_with_opts(kill_opts, connection_id, kill_timeout).await {
                         log::warn!("Failed to cancel MySQL SQL file import query {connection_id}: {error}");
                     }
                 });
@@ -733,8 +735,19 @@ pub async fn execute_sql_file_content(
     file_content: &str,
     token: CancellationToken,
     started_at: Instant,
-    emit: impl FnMut(SqlFileProgress),
+    mut emit: impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        &request.connection_id,
+        crate::query::mysql_data_charset_policy::READ_ONLY,
+    )
+    .await?;
+    if request.resolve_includes {
+        let error = "SQL includes require local .sql file execution, not inline content".to_string();
+        emit(sql_file_error_progress(&request.execution_id, started_at, error.clone()));
+        return Err(error);
+    }
     with_sql_file_transaction(
         state,
         request,
@@ -877,9 +890,80 @@ async fn execute_sql_file_paths_with_options(
     token: CancellationToken,
     started_at: Instant,
     zip_package: bool,
-    emit: impl FnMut(SqlFileProgress),
+    mut emit: impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
-    with_sql_file_transaction(
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        &request.connection_id,
+        crate::query::mysql_data_charset_policy::READ_ONLY,
+    )
+    .await?;
+    let prepared;
+    let mut expanded_request;
+    let expanded_paths;
+    let (request, file_paths, sources) = if request.resolve_includes {
+        let mut preparing =
+            sql_file_progress(&request.execution_id, SqlFileStatus::Running, 0, 0, 0, 0, started_at, "", None);
+        preparing.phase = Some(SqlFilePhase::Preparing);
+        emit(preparing);
+        // Erase preparation's future type so external callers keep their default recursion limit.
+        let prepare: futures::future::BoxFuture<'_, Result<includes::PreparedSqlIncludes, String>> = Box::pin(async {
+            if zip_package || request.selected_tables.is_some() {
+                return Err("SQL includes cannot be combined with ZIP packages or selected-table restore".to_string());
+            }
+            let target = sql_file_import_target(state, &request.connection_id, &request.database).await;
+            let options = target
+                .as_ref()
+                .map(|target| {
+                    SqlParsingOptions::for_database_type_and_compatibility(
+                        target.db_type,
+                        target.compatibility_mode.as_mode_str(),
+                    )
+                })
+                .unwrap_or_default();
+            let normalize_mysql_binary_literals = target.as_ref().is_some_and(|target| {
+                crate::sql::is_mysql_compatible_import_target(&target.db_type, target.driver_profile.as_deref())
+            });
+            includes::prepare_sql_file_includes(
+                file_paths,
+                request.encoding,
+                target.as_ref().map(|target| target.db_type),
+                options,
+                normalize_mysql_binary_literals,
+                &token,
+            )
+            .await
+        });
+        prepared = match prepare.await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if token.is_cancelled() {
+                    emit(sql_file_progress(
+                        &request.execution_id,
+                        SqlFileStatus::Cancelled,
+                        0,
+                        0,
+                        0,
+                        0,
+                        started_at,
+                        "",
+                        None,
+                    ));
+                    return Ok(());
+                }
+                emit(sql_file_error_progress(&request.execution_id, started_at, error.clone()));
+                return Err(error);
+            }
+        };
+        expanded_paths = prepared.paths.iter().map(|path| path.as_path()).collect::<Vec<_>>();
+        expanded_request = request.clone();
+        expanded_request.encoding = SqlFileEncoding::Utf8;
+        (&expanded_request, expanded_paths.as_slice(), Some(&prepared))
+    } else {
+        (request, file_paths, None)
+    };
+    let mut last_source = None;
+    let result = with_sql_file_transaction(
         state,
         request,
         &token,
@@ -890,10 +974,26 @@ async fn execute_sql_file_paths_with_options(
             token.clone(),
             started_at,
             zip_package,
-            emit,
+            |mut progress| {
+                if let Some(source) = sources.and_then(|sources| sources.source_for(&progress)) {
+                    let prefix = format!("[{source}] ");
+                    if !progress.statement_summary.is_empty() {
+                        progress.statement_summary.insert_str(0, &prefix);
+                    }
+                    if let Some(error) = progress.error.as_mut() {
+                        error.insert_str(0, &prefix);
+                    }
+                    last_source = Some(source.to_string());
+                }
+                emit(progress);
+            },
         )),
     )
-    .await
+    .await;
+    result.map_err(|error| match last_source {
+        Some(source) => format!("[{source}] {error}"),
+        None => error,
+    })
 }
 
 async fn execute_sql_file_paths_inner(
@@ -926,7 +1026,12 @@ async fn execute_sql_file_paths_inner(
         })
         .unwrap_or_default();
     let database_type = import_target.as_ref().map(|target| target.db_type);
-    let max_insert_batch_statements = sql_file_import_max_insert_batch_statements(zip_package, database_type);
+    // Included statements retain individual source/error boundaries, even across adjacent INSERTs.
+    let max_insert_batch_statements = if request.resolve_includes {
+        Some(1)
+    } else {
+        sql_file_import_max_insert_batch_statements(zip_package, database_type)
+    };
     let mut progress = SqlFileExecutionProgress::new();
     // Validate the entire dump before any SQL reaches the database. This also
     // identifies view placeholders whose final CREATE VIEW appears later.
@@ -1359,6 +1464,8 @@ pub(crate) struct SqlFileStreamDecoder {
 enum SqlFileByteReader {
     Plain(BufReader<tokio::fs::File>, Option<Arc<AtomicU64>>),
     Gzip(Arc<Mutex<flate2::read::GzDecoder<SqlFileCountingReader<std::io::BufReader<std::fs::File>>>>>),
+    /// Navicat `.nb3` archive rendered as a restore script.
+    Nb3(Arc<Mutex<crate::navicat_nb3::Nb3SqlReader>>),
 }
 
 impl SqlFileByteReader {
@@ -1367,6 +1474,13 @@ impl SqlFileByteReader {
     }
 
     async fn open_with_progress(file_path: &Path, bytes_read: Option<Arc<AtomicU64>>) -> Result<Self, String> {
+        if crate::navicat_nb3::is_nb3_path(file_path) {
+            let path = file_path.to_path_buf();
+            let reader = tokio::task::spawn_blocking(move || crate::navicat_nb3::Nb3SqlReader::open(&path, bytes_read))
+                .await
+                .map_err(|error| format!("Failed to open Navicat backup: {error}"))??;
+            return Ok(Self::Nb3(Arc::new(Mutex::new(reader))));
+        }
         if is_gzip_sql_file_path(file_path) {
             let path = file_path.to_path_buf();
             let reader = tokio::task::spawn_blocking(move || {
@@ -1394,24 +1508,29 @@ impl SqlFileByteReader {
                 }
                 Ok(read)
             }
-            Self::Gzip(reader) => {
-                let reader = reader.clone();
-                let capacity = buffer.len();
-                let (chunk, read) = tokio::task::spawn_blocking(move || {
-                    let mut chunk = vec![0; capacity];
-                    let mut reader =
-                        reader.lock().map_err(|_| "Compressed SQL reader lock was poisoned".to_string())?;
-                    let read =
-                        reader.read(&mut chunk).map_err(|error| format!("Failed to decompress SQL file: {error}"))?;
-                    Ok::<_, String>((chunk, read))
-                })
-                .await
-                .map_err(|error| format!("Failed to read compressed SQL file: {error}"))??;
-                buffer[..read].copy_from_slice(&chunk[..read]);
-                Ok(read)
-            }
+            Self::Gzip(reader) => read_blocking_sql_source(reader.clone(), buffer, "compressed SQL file").await,
+            Self::Nb3(reader) => read_blocking_sql_source(reader.clone(), buffer, "Navicat backup").await,
         }
     }
+}
+
+/// Reads a synchronous decoder off the async worker threads.
+async fn read_blocking_sql_source<R: StdRead + Send + 'static>(
+    reader: Arc<Mutex<R>>,
+    buffer: &mut [u8],
+    label: &'static str,
+) -> Result<usize, String> {
+    let capacity = buffer.len();
+    let (chunk, read) = tokio::task::spawn_blocking(move || {
+        let mut chunk = vec![0; capacity];
+        let mut reader = reader.lock().map_err(|_| format!("Reader lock for {label} was poisoned"))?;
+        let read = reader.read(&mut chunk).map_err(|error| format!("Failed to read {label}: {error}"))?;
+        Ok::<_, String>((chunk, read))
+    })
+    .await
+    .map_err(|error| format!("Failed to read {label}: {error}"))??;
+    buffer[..read].copy_from_slice(&chunk[..read]);
+    Ok(read)
 }
 
 /// 嗅探文件开头的字节序标记，存在时返回 BOM 对应的编码与长度。
@@ -1926,6 +2045,24 @@ impl StreamingSqlFileSplitter {
         self.0.push_chunk(chunk)
     }
 
+    fn can_start_file_directive(&self) -> bool {
+        match &self.0 {
+            StreamingSqlFileSplitterKind::Statements(splitter) => splitter.can_start_file_directive(),
+            StreamingSqlFileSplitterKind::SqlServerBatches(splitter) => {
+                matches!(splitter.lexical_state, SqlServerLexicalState::Normal)
+                    && splitter.partial_line.trim().is_empty()
+            }
+        }
+    }
+
+    fn is_at_file_directive_boundary(&self) -> bool {
+        self.can_start_file_directive()
+            && match &self.0 {
+                StreamingSqlFileSplitterKind::Statements(splitter) => splitter.is_at_file_directive_boundary(),
+                StreamingSqlFileSplitterKind::SqlServerBatches(splitter) => !splitter.batch_has_sql,
+            }
+    }
+
     pub(crate) fn finish(self) -> Vec<SqlStatementWithControl> {
         self.0.finish()
     }
@@ -1966,6 +2103,7 @@ struct SqlServerBatchSplitter {
     partial_line: String,
     lexical_state: SqlServerLexicalState,
     flush_semicolons: bool,
+    batch_has_sql: bool,
 }
 
 impl Default for SqlServerBatchSplitter {
@@ -1992,6 +2130,7 @@ impl SqlServerBatchSplitter {
             partial_line: String::new(),
             lexical_state: SqlServerLexicalState::default(),
             flush_semicolons,
+            batch_has_sql: false,
         }
     }
 
@@ -2023,6 +2162,13 @@ impl SqlServerBatchSplitter {
         }
         let mut chars = line.chars().peekable();
         while let Some(ch) = chars.next() {
+            if matches!(self.lexical_state, SqlServerLexicalState::Normal)
+                && !ch.is_whitespace()
+                && !(ch == '-' && chars.peek() == Some(&'-'))
+                && !(ch == '/' && chars.peek() == Some(&'*'))
+            {
+                self.batch_has_sql = true;
+            }
             self.batch.push(ch);
             match self.lexical_state {
                 SqlServerLexicalState::Normal => match ch {
@@ -2082,6 +2228,7 @@ impl SqlServerBatchSplitter {
             batches.push(batch.to_string());
         }
         self.batch.clear();
+        self.batch_has_sql = false;
         self.lexical_state = SqlServerLexicalState::Normal;
     }
 }
@@ -2362,7 +2509,15 @@ async fn sql_file_import_target(state: &AppState, connection_id: &str, database:
     } else {
         SqlCompatibilityMode::NotApplicable
     };
-    Some(SqlFileImportTarget { db_type: config.db_type, driver_profile: config.driver_profile, compatibility_mode })
+    Some(SqlFileImportTarget {
+        // Split with the connection's statement-splitting dialect, not its
+        // routing `db_type`: a JDBC SQL Server connection keeps control-flow
+        // batches whole (#13514), a JDBC Oracle connection keeps PL/SQL units
+        // whole. The rest of the import still routes on the raw `db_type`.
+        db_type: crate::query::statement_split_database_type(&config),
+        driver_profile: config.driver_profile,
+        compatibility_mode,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2725,6 +2880,14 @@ async fn execute_statement_with_progress(
         }
         Err(error) => {
             if statement.source_statement_count > 1 && !token.is_cancelled() {
+                // A merged batch is an optimization, never a contract: replay the
+                // source statements one by one. Log it because the replay is
+                // orders of magnitude slower and would otherwise be invisible.
+                log::warn!(
+                    "[sql_file_import] merged statement ({} source statements, {} bytes) failed, replaying individually: {error}",
+                    statement.source_statement_count,
+                    statement.sql.len()
+                );
                 return execute_merged_statement_fallback_with_progress(
                     state,
                     request,
@@ -3051,6 +3214,7 @@ mod tests {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            resolve_includes: false,
             encoding: Default::default(),
         };
         // Non-MySQL auto-commit files must keep BEGIN/COMMIT on one connection.
@@ -3079,6 +3243,7 @@ mod tests {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            resolve_includes: false,
             encoding: Default::default(),
         };
         let mut events = Vec::new();
@@ -3435,6 +3600,7 @@ mod tests {
                 part_cooldown_ms: 0,
                 skip_relational_constraints: false,
                 failure_log_enabled: true,
+                resolve_includes: false,
                 encoding: Default::default(),
             };
             let token = CancellationToken::new();
@@ -4104,6 +4270,7 @@ mod tests {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            resolve_includes: false,
             encoding: Default::default(),
         };
         let mut progress = Vec::new();
@@ -4140,6 +4307,30 @@ mod tests {
         assert!(planned[0].sql.contains("SET statement_timeout = 0"));
         assert_eq!(planned[1].sql, "SELECT 1");
         assert_eq!(planned[2].kind, SqlFileImportStatementKind::Skip);
+    }
+
+    #[test]
+    fn oceanbase_oracle_insert_file_plans_one_insert_all_batch() {
+        let statements = split_sql_file_import_statements_with_control(
+            "INSERT INTO T (ID) VALUES (1);\nINSERT INTO T (ID) VALUES (2);\n",
+            Some(DatabaseType::OceanbaseOracle),
+            None,
+        );
+
+        let planned = plan_sql_file_statements(&statements, Some(DatabaseType::OceanbaseOracle), None, false, None);
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].statement.source_statement_count, 2);
+        assert_eq!(
+            planned[0].statement.sql,
+            "INSERT ALL\nINTO T (ID) VALUES (1)\nINTO T (ID) VALUES (2)\nSELECT 1 FROM dual"
+        );
+
+        // A manual transaction must keep every source statement on its own error
+        // boundary, so it never merges.
+        let manual = plan_sql_file_statements(&statements, Some(DatabaseType::OceanbaseOracle), None, true, None);
+        assert_eq!(manual.len(), 2);
+        assert_eq!(manual[0].statement.sql, "INSERT INTO T (ID) VALUES (1)");
     }
 
     #[test]

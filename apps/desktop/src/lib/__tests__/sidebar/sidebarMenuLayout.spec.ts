@@ -7,6 +7,17 @@ const item = (id: string, extras: Partial<ContextMenuItem> = {}): ContextMenuIte
 const leaves = (items: readonly ContextMenuItem[]): ContextMenuItem[] => items.flatMap((entry) => (entry.children?.length ? leaves(entry.children) : entry.separator ? [] : [entry]));
 
 describe("sidebar menu layout", () => {
+  it("keeps PL/SQL debugging in the editor execution group with its original callback and guard", () => {
+    const debug = item("plDebug.start.title", { disabled: true });
+    const execute = item("editor.execute");
+    const grouped = buildSidebarMenuLayout([execute, debug], "sql-editor", "grouped", [], t);
+    const execution = grouped.find((entry) => entry.sidebarActionId === "group.data");
+    expect(execution?.label).toBe("sidebarMenu.groups.execution");
+    expect(execution?.children?.[0]).toMatchObject({ sidebarActionId: debug.sidebarActionId, action: debug.action, disabled: true });
+    expect(leaves(grouped).filter((entry) => entry.sidebarActionId === debug.sidebarActionId)).toHaveLength(1);
+    expect(buildSidebarMenuLayout([execute, debug], "sql-editor", "full", [], t)).toEqual([execute, debug]);
+  });
+
   it.each([
     ["connection", "connectionSettings"],
     ["database", "databaseSettings"],
@@ -14,7 +25,7 @@ describe("sidebar menu layout", () => {
     ["table", "tableSettings"],
     ["view", "viewSettings"],
   ] as const)("names settings for the current %s scope", (scope, key) => {
-    const menu = buildSidebarMenuLayout([item("contextMenu.configureVisibleObjects")], scope, "grouped", [], t, { hiddenPrimaryIds: ["contextMenu.configureVisibleObjects"] });
+    const menu = buildSidebarMenuLayout([item("contextMenu.editSchemaComment")], scope, "grouped", [], t);
     expect(menu[0].label).toBe(`sidebarMenu.groups.${key}`);
     expect(menu[0].sidebarActionId).toBe("group.organize");
   });
@@ -24,8 +35,7 @@ describe("sidebar menu layout", () => {
     const raw = [query, pin];
     expect(buildSidebarMenuLayout(raw, scope, "grouped", [], t, { order: [pin.sidebarActionId!, query.sidebarActionId!] }).filter((entry) => !entry.separator)).toEqual([pin, query]);
     const hidden = buildSidebarMenuLayout(raw, scope, "grouped", [], t, { hiddenPrimaryIds: [pin.sidebarActionId!] });
-    expect(hidden).not.toContain(pin);
-    expect(hidden.find((entry) => entry.sidebarActionId === "group.organize")?.children).toContainEqual(pin);
+    expect(leaves(hidden)).not.toContainEqual(pin);
     expect(buildSidebarMenuLayout(raw, scope, "full", [], t, { hiddenPrimaryIds: [pin.sidebarActionId!] })).toEqual(raw);
   });
 
@@ -33,9 +43,11 @@ describe("sidebar menu layout", () => {
     const filters = [item("contextMenu.configureVisibleObjects"), item("visibleSchemas.title")];
     const defaults = buildSidebarMenuLayout(filters, "connection", "grouped", [], t, { order: ["visibleSchemas.title", "contextMenu.configureVisibleObjects"] });
     expect(defaults).toEqual([filters[1], filters[0]]);
+    // #12791: an unchecked action must disappear from the grouped menu too, not
+    // just from the primary area, or the checkbox reads as a no-op.
     const hidden = buildSidebarMenuLayout(filters, "connection", "grouped", [], t, { hiddenPrimaryIds: filters.map((entry) => entry.sidebarActionId!) });
-    expect(hidden[0].sidebarActionId).toBe("group.organize");
-    expect(hidden[0].children).toEqual(filters);
+    expect(leaves(hidden)).toEqual([]);
+    expect(hidden.filter((entry) => entry.sidebarActionId?.startsWith("group."))).toEqual([]);
   });
 
   it("groups database-wide search with data tools without an extra management submenu", () => {
@@ -65,13 +77,29 @@ describe("sidebar menu layout", () => {
     const input = [dashboard, processes, trace, item("contextMenu.newQuery")];
     const defaults = buildSidebarMenuLayout(input, "connection", "grouped", [], t);
     for (const action of [dashboard, processes, trace]) expect(defaults).toContain(action);
+    // #12791: opting out removes the action from the grouped layout entirely.
     const customized = buildSidebarMenuLayout(input, "connection", "grouped", [], t, { hiddenPrimaryIds: ["contextMenu.serverDashboard", "contextMenu.sqlServerTrace"] });
     expect(customized).not.toContain(dashboard);
     expect(customized).not.toContain(trace);
     expect(customized).toContain(processes);
-    expect(customized.find((entry) => entry.sidebarActionId === "group.manage")?.children).toEqual(expect.arrayContaining([dashboard, trace]));
-    expect(leaves(customized)).toHaveLength(input.length);
+    expect(customized.find((entry) => entry.sidebarActionId === "group.manage")).toBeUndefined();
+    expect(leaves(customized)).toHaveLength(input.length - 2);
     expect(buildSidebarMenuLayout(input, "connection", "full", [], t, { hiddenPrimaryIds: [dashboard.sidebarActionId!], order: [processes.sidebarActionId!] })).toEqual(input);
+  });
+
+  it("hides an unchecked grouped action instead of leaving it in its group", () => {
+    // contextMenu.userAdmin is not a recommended primary action: it only ever
+    // renders inside the connection tools group, so unchecking it used to look
+    // like a no-op (#12791).
+    const userAdmin = item("contextMenu.userAdmin");
+    const processes = item("contextMenu.processList");
+    const visible = buildSidebarMenuLayout([userAdmin, processes], "connection", "grouped", [], t);
+    expect(leaves(visible).map((entry) => entry.sidebarActionId)).toContain("contextMenu.userAdmin");
+    expect(visible.find((entry) => entry.sidebarActionId === "group.manage")?.children).toContainEqual(expect.objectContaining({ sidebarActionId: "contextMenu.userAdmin" }));
+
+    const hidden = buildSidebarMenuLayout([userAdmin, processes], "connection", "grouped", [], t, { hiddenPrimaryIds: ["contextMenu.userAdmin"] });
+    expect(leaves(hidden).map((entry) => entry.sidebarActionId)).not.toContain("contextMenu.userAdmin");
+    expect(hidden.find((entry) => entry.sidebarActionId === "group.manage")).toBeUndefined();
   });
 
   it("sorts primary actions and groups independently while leaving dangerous actions last", () => {

@@ -58,6 +58,14 @@ export interface UseDataGridColumnFiltersOptions {
   getConnectionConfig: () => Pick<ConnectionConfig, "driver_profile" | "query_timeout_secs" | "query_timeout_inherit"> | undefined;
   getIdentifierQuote: () => string | undefined;
   getGlobalQueryTimeoutSecs: () => number | undefined;
+  /**
+   * #13237: in-memory value filters for grids that cannot re-query (query
+   * results). They share this local-filter surface so the funnel and the
+   * chip/clear path also cover them.
+   */
+  getClientColumnFilterActive?: (columnIndex: number) => boolean;
+  getClientFilterCount?: () => number;
+  clearClientFilters?: (columnIndex?: number) => void;
   getDistinctWhereInput?: (columnIndex: number) => string | undefined;
   getNewRows: () => readonly (readonly CellValue[])[];
   getRowData: (row: CellValue[], sourceIndex: number) => readonly CellValue[];
@@ -140,8 +148,8 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
     return [...filteredOptions, ...selectedOptions.map((option) => ({ ...option, count: 0 }))].sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: "base" }));
   }
 
-  const localFilterActive = (columnIndex: number) => !!state.localColumnFilters.value[columnIndex]?.size || !!state.serverColumnFilters.value[columnIndex];
-  const localFilterCount = computed(() => Object.values(state.localColumnFilters.value).filter((values) => values.size).length);
+  const localFilterActive = (columnIndex: number) => !!state.localColumnFilters.value[columnIndex]?.size || !!state.serverColumnFilters.value[columnIndex] || !!options.getClientColumnFilterActive?.(columnIndex);
+  const localFilterCount = computed(() => Object.values(state.localColumnFilters.value).filter((values) => values.size).length + (options.getClientFilterCount?.() ?? 0));
   const serverColumnFilterCount = computed(() => Object.keys(state.serverColumnFilters.value).length);
   const hasLocalColumnFilters = computed(() => localFilterCount.value > 0);
   const hasServerColumnFilters = computed(() => serverColumnFilterCount.value > 0);
@@ -415,6 +423,7 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
       }
     }
     closeLocalFilter();
+    options.clearClientFilters?.(columnIndex);
     options.resetGridVerticalScroll();
     if (removedServerFilter && applyServerWhereFilter && options.canUseWhereSearch.value) void options.applyWhereFilter();
   }

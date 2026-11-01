@@ -238,7 +238,7 @@ export interface SubscriptionInfo {
   consumers: ConsumerInfo[];
   /** RocketMQ subscribed topics (cluster-wide listing). */
   topics?: string[];
-  /** RocketMQ online consumer client count. */
+  /** Online clients for RocketMQ groups or Kafka topic subscriptions; absent when unavailable. */
   onlineMembers?: number;
   /** RocketMQ consumer group delivery type: NORMAL / FIFO / SYSTEM. */
   consumerGroupType?: string;
@@ -365,7 +365,9 @@ export interface PeekMessagesResult {
 
 export interface PeekMessagesOptions {
   /** Kafka only. Omitted starts at earliest unless a legacy caller supplies offset. */
-  startPosition?: "latest" | "earliest" | "offset";
+  startPosition?: "latest" | "earliest" | "offset" | "timestamp";
+  /** Epoch milliseconds; Kafka resolves the first record batch at or after this time per partition. */
+  timestamp?: number;
   partition?: number;
   offset?: number;
 }
@@ -579,6 +581,8 @@ export interface SendMessageRequest {
   payloadText?: string;
   headers: Record<string, string>;
   partition?: number;
+  /** RabbitMQ: AMQP BasicProperties, separate from custom headers. */
+  properties?: Record<string, string>;
   /** RabbitMQ: target exchange; empty means the default exchange. */
   exchange?: string;
   /** RabbitMQ: routing key used when publishing to an exchange. */

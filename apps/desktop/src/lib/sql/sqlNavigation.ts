@@ -135,7 +135,7 @@ export interface ExtractedSqlIdentifierPart {
   quoted: boolean;
 }
 
-export type SqlObjectNavigationType = "table" | "view" | "materialized_view" | "procedure" | "function" | "package" | "package_body" | "sequence" | "trigger";
+export type SqlObjectNavigationType = "table" | "view" | "materialized_view" | "procedure" | "function" | "package" | "package_body" | "sequence" | "synonym" | "trigger" | "index";
 
 /**
  * Semantic role of a Ctrl/Cmd+clicked identifier for navigation.
@@ -222,7 +222,7 @@ export function sqlObjectNavigationTarget(table: SqlObjectNavigationTarget): Sql
 }
 
 export function isSqlObjectNavigationRoutineType(type?: SqlObjectNavigationType): boolean {
-  return type === "procedure" || type === "function" || type === "package" || type === "package_body" || type === "sequence" || type === "trigger";
+  return type === "procedure" || type === "function" || type === "package" || type === "package_body" || type === "sequence" || type === "synonym" || type === "trigger";
 }
 
 export function sqlObjectHoverDetail(table: SqlObjectNavigationTarget): string {
@@ -264,6 +264,8 @@ export function sqlObjectNavigationSourceKind(table: SqlObjectNavigationTarget):
       return "PACKAGE_BODY";
     case "sequence":
       return "SEQUENCE";
+    case "synonym":
+      return "SYNONYM";
     case "trigger":
       return "TRIGGER";
     default:

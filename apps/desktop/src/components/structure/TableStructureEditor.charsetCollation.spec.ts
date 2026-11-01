@@ -28,7 +28,7 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", async (original) => ({ ...(await original<typeof import("vue-i18n")>()), useI18n: () => ({ t: (key: string) => key }) }));
 
 vi.mock("@lucide/vue", async () => {
   const { defineComponent, h } = await import("vue");
@@ -186,7 +186,7 @@ vi.mock("@/components/ui/searchable-select", async () => {
             "data-model-value": props.modelValue,
             "data-options": JSON.stringify(props.options),
             "data-allow-custom": String(props.allowCustom),
-            onClick: () => emit("update:modelValue", "custom_domain"),
+            onClick: () => emit("update:modelValue", "data-mysql-table-charset-select" in attrs ? "utf8mb4" : "data-mysql-table-collation-select" in attrs ? "utf8mb4_bin" : "custom_domain"),
           }),
     }),
   };
@@ -316,6 +316,10 @@ function searchableSelectInColumn(root: HTMLElement, header: string): HTMLButton
   return select;
 }
 
+function queryResult(columns: string[], rows: unknown[][]): { columns: string[]; rows: unknown[][]; affected_rows: number; execution_time_ms: number } {
+  return { columns, rows, affected_rows: 0, execution_time_ms: 1 };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.connection.db_type = "mysql";
@@ -364,6 +368,60 @@ describe("TableStructureEditor charset/collation column width", () => {
     const triggerClass = collationSelect.getAttribute("trigger-class") ?? "";
     expect(triggerClass.split(",")).toContain("w-full");
     expect(triggerClass.split(",")).not.toEqual(expect.arrayContaining(["w-28"]));
+  });
+});
+
+describe("TableStructureEditor MySQL table charset and collation", () => {
+  it("loads the table defaults and previews only the selected table-default change", async () => {
+    mocks.executeQuery.mockImplementation(async (_connectionId, _database, sql: string) => {
+      if (sql === "SHOW CHARACTER SET") {
+        return queryResult(
+          ["Charset", "Default collation"],
+          [
+            ["utf8mb4", "utf8mb4_0900_ai_ci"],
+            ["utf8mb3", "utf8mb3_general_ci"],
+          ],
+        );
+      }
+      if (sql === "SHOW COLLATION") {
+        return queryResult(
+          ["Collation", "Charset", "Default"],
+          [
+            ["utf8mb4_0900_ai_ci", "utf8mb4", "Yes"],
+            ["utf8mb4_bin", "utf8mb4", ""],
+            ["utf8mb3_general_ci", "utf8mb3", "Yes"],
+          ],
+        );
+      }
+      if (sql.includes("information_schema.TABLES")) return queryResult(["TABLE_COLLATION"], [["utf8mb3_general_ci"]]);
+      return queryResult([], []);
+    });
+
+    const root = await mountEditor();
+    const charsetSelect = await vi.waitFor(() => {
+      const select = root.querySelector<HTMLButtonElement>("[data-mysql-table-charset-select]");
+      expect(select).not.toBeNull();
+      return select!;
+    });
+    await vi.waitFor(() => expect(charsetSelect.dataset.modelValue).toBe("utf8mb3"));
+    expect(root.querySelector<HTMLButtonElement>("[data-mysql-table-collation-select]")?.dataset.modelValue).toBe("utf8mb3_general_ci");
+    expect(JSON.parse(charsetSelect.dataset.options ?? "[]")).toContain("utf8mb4");
+
+    charsetSelect.click();
+    await vi.waitFor(() =>
+      expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ tableName: "users" }), undefined, {
+        charset: "utf8mb4",
+        collation: "utf8mb4_0900_ai_ci",
+      }),
+    );
+
+    root.querySelector<HTMLButtonElement>("[data-mysql-table-collation-select]")!.click();
+    await vi.waitFor(() =>
+      expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ tableName: "users" }), undefined, {
+        charset: "utf8mb4",
+        collation: "utf8mb4_bin",
+      }),
+    );
   });
 });
 

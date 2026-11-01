@@ -64,6 +64,8 @@ fn live_connection_config(id: &str, database: &str) -> ConnectionConfig {
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,
+        show_native_jobs: None,
+        show_user_admin: None,
         attached_databases: Vec::new(),
         init_script: None,
         color: None,
@@ -150,6 +152,7 @@ fn csv_mappings(columns: &[String]) -> Vec<TableImportColumnMapping> {
             source_column: column.clone(),
             target_column: column.clone(),
             target_data_type: None,
+            generator: None,
         })
         .collect()
 }
@@ -174,6 +177,7 @@ fn base_request(connection_id: &str, database: &str, file_path: &str, table: &st
         retain_source: false,
         conflict_policy: None,
         skip_duplicate_rows: false,
+        continue_on_error: false,
     }
 }
 

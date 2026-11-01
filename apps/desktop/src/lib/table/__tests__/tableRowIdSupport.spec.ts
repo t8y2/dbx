@@ -15,15 +15,18 @@ describe("tableRowIdSupport", () => {
   });
 
   it("retries once for a failed load whose SQL carried the locator", () => {
-    expect(shouldRetryWithoutRowIdLocator(locatorSql, "conn-1", resultOf(true))).toBe(true);
+    expect(shouldRetryWithoutRowIdLocator(locatorSql, resultOf(true))).toBe(true);
   });
 
-  it("does not retry successful loads, plain SQL, or already-disabled connections", () => {
-    expect(shouldRetryWithoutRowIdLocator(locatorSql, "conn-1", resultOf(false))).toBe(false);
-    expect(shouldRetryWithoutRowIdLocator(plainSql, "conn-1", resultOf(true))).toBe(false);
-    expect(shouldRetryWithoutRowIdLocator(locatorSql, "conn-1", undefined)).toBe(false);
+  it("does not retry successful loads, plain SQL, or missing results", () => {
+    expect(shouldRetryWithoutRowIdLocator(locatorSql, resultOf(false))).toBe(false);
+    expect(shouldRetryWithoutRowIdLocator(plainSql, resultOf(true))).toBe(false);
+    expect(shouldRetryWithoutRowIdLocator(locatorSql, undefined)).toBe(false);
+  });
+
+  it("still retries an already-issued locator query after another request disables the connection", () => {
     markRowIdLocatorUnsupported("conn-1");
-    expect(shouldRetryWithoutRowIdLocator(locatorSql, "conn-1", resultOf(true))).toBe(false);
+    expect(shouldRetryWithoutRowIdLocator(locatorSql, resultOf(true))).toBe(true);
   });
 
   it("keeps the flag only after a successful fallback and restores it on a failed one", () => {

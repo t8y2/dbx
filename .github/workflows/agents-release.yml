@@ -26,7 +26,7 @@ jobs:
       build_jre: ${{ steps.bump.outputs.build_jre }}
       reuse_jre: ${{ steps.bump.outputs.reuse_jre }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Detect changes and bump versions
@@ -80,7 +80,7 @@ jobs:
     needs: bump-versions
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.MCP_RELEASE_TOKEN }}
@@ -132,8 +132,8 @@ jobs:
     if: ${{ needs.bump-versions.outputs.java_modules != '[]' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -166,8 +166,8 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'oracle') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.20.14"
       - name: Test Oracle native agent
@@ -197,7 +197,7 @@ jobs:
           ls -lh ../../../release-native
       # Go 1.20 is the last release that supports Windows 7; keep other targets on Go 1.22.
       - name: Set up Go for Windows 7-compatible Oracle agent
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "1.20.14"
           cache-dependency-path: agents/drivers/oracle-go/go.sum
@@ -222,11 +222,11 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'oracle-oci') }}
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           # godror 需要 Go >= 1.21；thin 的 Windows 7 兼容线仍由 build-oracle-native 用 Go 1.20 构建。
-          go-version: "1.25.x"
+          go-version: "1.27.x"
           cache-dependency-path: agents/drivers/oracle-go/go.sum
       - name: Prepare MinGW-w64 and the Oracle Instant Client
         shell: bash
@@ -304,8 +304,8 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'xugu') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.20.14"
       - name: Test Xugu native agent
@@ -344,8 +344,8 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'rabbitmq') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.20.14"
       - name: Test RabbitMQ native agent
@@ -375,7 +375,7 @@ jobs:
           ls -lh ../../../release-native
       # Go 1.20 is the last release that supports Windows 7; keep other targets on Go 1.22.
       - name: Set up Go for Windows 7-compatible RabbitMQ agent
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "1.20.14"
           cache-dependency-path: agents/drivers/rabbitmq/go.sum
@@ -397,10 +397,10 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'rocketmq') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.25.x"
+          go-version: "1.27.x"
       - name: Test RocketMQ native agent
         working-directory: agents/drivers/rocketmq
         run: go test -race ./...
@@ -437,10 +437,10 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'etcd') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
       - name: Test etcd native agent
         working-directory: agents/drivers/etcd-go
         run: go test ./...
@@ -477,10 +477,10 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'etcd2') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.24.x"
+          go-version: "1.27.x"
       - name: Test etcd v2 native agent
         working-directory: agents/drivers/etcd2-go
         run: go test ./...
@@ -517,10 +517,10 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'zookeeper') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.25.x"
+          go-version: "1.27.x"
       - name: Test ZooKeeper native agent
         working-directory: agents/drivers/zookeeper
         run: go test -race ./...
@@ -557,10 +557,10 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'cassandra') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.22.x"
+          go-version: "1.27.x"
       - name: Test Cassandra native agent
         working-directory: agents/drivers/cassandra-go
         run: go test ./...
@@ -597,10 +597,10 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'hive') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.23.x"
+          go-version: "1.27.x"
       - name: Test Hive native agent
         working-directory: agents/drivers/hive-go
         run: go test ./...
@@ -637,10 +637,10 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'argo') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.23.x"
+          go-version: "1.27.x"
       - name: Test Argo native agent
         working-directory: agents/drivers/argo-go
         run: go test ./...
@@ -677,8 +677,8 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'kingbase') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.20.14"
       - name: Test Kingbase native agent
@@ -717,10 +717,10 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'vastbase') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.22.x"
+          go-version: "1.27.x"
       - name: Test Vastbase native agent
         working-directory: agents/drivers/vastbase-go
         run: go test ./...
@@ -757,10 +757,10 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'neo4j') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.24.x"
+          go-version: "1.27.x"
       - name: Test Neo4j native agent
         working-directory: agents/drivers/neo4j-go
         run: go test ./...
@@ -797,10 +797,10 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'nebula') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.24.x"
+          go-version: "1.27.x"
       - name: Test NebulaGraph native agent
         working-directory: agents/drivers/nebula-go
         run: go test ./...
@@ -835,10 +835,10 @@ jobs:
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'iotdb') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.25.x"
+          go-version: "1.27.x"
       - name: Test IoTDB native agent
         working-directory: agents/drivers/iotdb
         run: go test ./...
@@ -911,7 +911,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.97.1
         if: runner.os != 'Linux' && matrix.win7 != true
         with:
@@ -920,15 +920,15 @@ jobs:
         if: matrix.win7 == true
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-22
+          toolchain: nightly-2026-10-25
           components: rust-src
       - uses: actions/setup-python@v5
         if: runner.os == 'Windows'
         with:
-          python-version: "3.13"
-      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+          python-version: "3.15"
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
         shell: bash
@@ -963,7 +963,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
-            export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
+            # An env RUSTFLAGS replaces .cargo/config.toml target rustflags; keep
+            # the 8 MiB main-thread stack of the DBX app for the Win7 driver too.
+            export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static -C link-arg=/STACK:8388608"
           fi
           if [ -n "${{ matrix.manylinux_image }}" ]; then
             docker run --rm \
@@ -1066,7 +1068,7 @@ jobs:
             rustflags: "-C target-feature=+crt-static -C link-arg=-z -C link-arg=max-page-size=65536"
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
@@ -1144,7 +1146,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.97.1
         if: runner.os != 'Linux' && matrix.win7 != true
         with:
@@ -1153,11 +1155,11 @@ jobs:
         if: matrix.win7 == true
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-22
+          toolchain: nightly-2026-10-25
           components: rust-src
-      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
         shell: bash
@@ -1282,15 +1284,15 @@ jobs:
             java-version: "21"
             modules: "java.base,java.sql,java.sql.rowset,java.naming,java.management,java.desktop,java.security.jgss,java.security.sasl,jdk.security.auth,jdk.security.jgss,jdk.charsets,jdk.unsupported,java.scripting,java.compiler,jdk.crypto.ec"
     steps:
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: ${{ matrix.java-version }}
       - name: Build JRE for all platforms
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zstd
+          sudo python3 .github/scripts/ci-install-system-deps.py --group packaging
           MODULES="${{ matrix.modules }}"
           JLINK_OPTS="--strip-debug --no-header-files --no-man-pages --compress=zip-6"
           JRE_KEY="${{ matrix.jre-key }}"
@@ -1353,11 +1355,10 @@ jobs:
     if: ${{ needs.bump-versions.outputs.reuse_modules != '[]' || needs.bump-versions.outputs.reuse_jre == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install artifact tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zstd
+          sudo python3 .github/scripts/ci-install-system-deps.py --group packaging
       - name: Download and verify previous release artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1397,11 +1398,11 @@ jobs:
           # requires the GitHub App's dedicated Workflows permission.
           permission-workflows: write
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           token: ${{ steps.release-token.outputs.token }}
           fetch-depth: 0
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -1412,8 +1413,7 @@ jobs:
 
       - name: Install artifact tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zstd
+          sudo python3 .github/scripts/ci-install-system-deps.py --group packaging
 
       - name: Flatten artifacts
         run: |
@@ -1907,7 +1907,7 @@ jobs:
         tag: ["${{ github.ref_name }}", "agents-latest"]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Download GitHub release assets
         env:

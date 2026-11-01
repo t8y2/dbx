@@ -45,6 +45,53 @@ describe("custom type sidebar tree", () => {
     expect(children.map((child) => child.id)).toEqual(["c:db:app:types:status:type-member:enum-value:draft", "c:db:app:types:status:type-member:enum-value:published"]);
   });
 
+  it("uses Oracle attributes instead of the empty PostgreSQL members field", () => {
+    const children = buildCustomTypeTreeChildren(
+      parent,
+      details({
+        kind: "object",
+        oracleMetadata: {
+          propertiesRead: { state: "available" },
+          bodyRead: { state: "unsupported" },
+          attributesRead: { state: "incomplete", reason: "Some rows were truncated." },
+          methodsRead: { state: "available" },
+          collectionRead: { state: "unsupported" },
+          attributes: [
+            { name: "amount", ordinal: 2, typeName: "NUMBER", precision: 12, scale: 3 },
+            { name: "label", ordinal: 1, typeName: "VARCHAR2", length: 40 },
+          ],
+          methods: [],
+        },
+      }),
+    );
+
+    expect(children.map((child) => child.meta)).toEqual([
+      { kind: "field", displayValue: "NUMBER(12, 3)", ordinal: 2 },
+      { kind: "field", displayValue: "VARCHAR2(40)", ordinal: 1 },
+    ]);
+    expect(children.map((child) => child.label)).toEqual(["amount", "label"]);
+  });
+
+  it.each(["unavailable", "unsupported"] as const)("does not expand Oracle attributes when they are %s", (state) => {
+    expect(
+      buildCustomTypeTreeChildren(
+        parent,
+        details({
+          kind: "object",
+          oracleMetadata: {
+            propertiesRead: { state: "available" },
+            bodyRead: { state: "unsupported" },
+            attributesRead: { state },
+            methodsRead: { state: "available" },
+            collectionRead: { state: "unsupported" },
+            attributes: [{ name: "amount", typeName: "NUMBER" }],
+            methods: [],
+          },
+        }),
+      ),
+    ).toEqual([]);
+  });
+
   it("keeps existing member IDs stable when a new member is inserted", () => {
     const before = buildCustomTypeTreeChildren(
       parent,

@@ -1,3 +1,6 @@
+import type { DatabaseType } from "@/types/database";
+import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
+
 export interface SqlErrorLocation {
   line: number;
   column: number;
@@ -132,7 +135,29 @@ export function sqlErrorMessagePosition(message: string): SqlErrorMessagePositio
   return { kind: "offset", offset };
 }
 
-export function sqlErrorDecorationRange(sql: string, message: string): SqlErrorRange | null {
+function oracleMissingObjectRange(sql: string, offset: number): SqlErrorRange | null {
+  const tokens = tokenizeSqlSemantic(sql, "oracle");
+  const identifier = (index: number) => {
+    const token = tokens[index];
+    return token?.kind === "word" || (token?.kind === "quoted_identifier" && token.quote === '"' && token.closed === true);
+  };
+  let index = tokens.findIndex((token) => token.span.start <= offset && offset < token.span.end);
+  if (index < 0) index = tokens.findIndex((token, candidate) => token.span.end === offset && identifier(candidate));
+  if (tokens[index]?.text === "." && identifier(index - 1) && identifier(index + 1)) index -= 1;
+  if (!identifier(index)) return null;
+  // An Oracle object reference is a single name or `schema.table`; stop there
+  // instead of walking a column access (`hr.emp.empno`) or a longer chain.
+  let first = index;
+  let last = index;
+  if (tokens[first - 1]?.text === "." && identifier(first - 2)) {
+    first -= 2;
+  } else if (tokens[last + 1]?.text === "." && identifier(last + 2)) {
+    last += 2;
+  }
+  return { from: tokens[first].span.start, to: tokens[last].span.end };
+}
+
+export function sqlErrorDecorationRange(sql: string, message: string, databaseType?: DatabaseType): SqlErrorRange | null {
   const position = sqlErrorMessagePosition(message);
   if (!position) return null;
 
@@ -142,7 +167,25 @@ export function sqlErrorDecorationRange(sql: string, message: string): SqlErrorR
     return { from: offset, to: offset + 1 };
   }
 
-  const { offset } = position;
+  let { offset } = position;
+  if (databaseType === "oracle") {
+    let bytes = 0;
+    let utf16 = 0;
+    for (const character of sql) {
+      if (bytes >= offset) break;
+      const point = character.codePointAt(0)!;
+      bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+      utf16 += character.length;
+    }
+    if (bytes !== offset) return null;
+    offset = utf16;
+  }
+  // An Oracle Agent offset is a byte offset only for Oracle itself; other
+  // engines that happen to emit ORA-00942 keep their own position units.
+  if (databaseType === "oracle" && /\bORA-00942\b/i.test(message)) {
+    const object = oracleMissingObjectRange(sql, offset);
+    if (object) return object;
+  }
   if (offset >= sql.length) return null;
   // For qualified invalid identifiers the offset can point later in the
   // selector, so prefer the named token.

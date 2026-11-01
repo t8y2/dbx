@@ -109,6 +109,7 @@ describe("QueryEditor execution shortcuts", () => {
   describe("createQueryEditorExecutionShortcutHandler", () => {
     const shortcuts = {
       executeSql: "Mod+Enter",
+      executeAllSql: "Alt+X",
       executeSqlInNewResultTab: "Mod+\\",
       explainSql: "Mod+E",
     };
@@ -141,6 +142,37 @@ describe("QueryEditor execution shortcuts", () => {
       expect(handler(event)).toBe(true);
       expect(preventDefault).toHaveBeenCalled();
       expect(stopPropagation).toHaveBeenCalled();
+    });
+
+    it("suppresses execute all SQL shortcut when event.repeat is true or executing", () => {
+      const handler = createQueryEditorExecutionShortcutHandler({
+        getShortcuts: () => shortcuts,
+        isExecuting: () => false,
+      });
+
+      const repeatEvent = new KeyboardEvent("keydown", {
+        key: "x",
+        code: "KeyX",
+        altKey: true,
+        repeat: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      expect(handler(repeatEvent)).toBe(true);
+
+      const executingHandler = createQueryEditorExecutionShortcutHandler({
+        getShortcuts: () => shortcuts,
+        isExecuting: () => true,
+      });
+      const executingEvent = new KeyboardEvent("keydown", {
+        key: "x",
+        code: "KeyX",
+        altKey: true,
+        repeat: false,
+        bubbles: true,
+        cancelable: true,
+      });
+      expect(executingHandler(executingEvent)).toBe(true);
     });
 
     it("suppresses execution shortcuts when isExecuting is true", () => {

@@ -1,5 +1,7 @@
 import type { DatabaseType } from "@/types/database";
 import { collectSqlDatabaseLinkStarts } from "@/lib/sql/sqlDatabaseLinks";
+import { isOracleSubstitutionDatabase } from "@/lib/sql/sqlVariableSyntax";
+import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 
 export type SqlParameterValueKind = "string" | "number" | "boolean" | "null" | "raw";
 
@@ -8,7 +10,7 @@ export interface SqlParameterInput {
   value: string;
 }
 
-export type SqlParameterSyntax = "positional" | "named" | "shell" | "mybatis" | "sqlserver";
+export type SqlParameterSyntax = "positional" | "named" | "shell" | "bracketed-shell" | "mybatis" | "sqlserver" | "substitution";
 
 export interface SqlParameterDescriptor {
   key: string;
@@ -69,6 +71,34 @@ const SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS = new Set(["table", "from", "join",
 const MYSQL_ROUTINE_LABEL_STATEMENTS = new Set(["begin", "loop", "while", "repeat"]);
 const MYSQL_ROUTINE_LABEL_CONTEXTS = new Set(["begin", "then", "else", "do", "loop", "repeat"]);
 const MYSQL_ROUTINE_LABEL_RE = /(?:`(?:``|[^`])+`|[\p{L}_][\p{L}\p{N}_]*)$/u;
+const MYSQL_ROUTINE_BODY_STATEMENTS = new Set(["begin", "return", "select", "set", "insert", "update", "delete", "replace", "call", "if", "case", "loop", "while", "repeat", "declare", "do", "leave", "iterate", "signal", "resignal", "get", "fetch"]);
+// These header words cannot be unquoted stored-program labels.
+const MYSQL_ROUTINE_HEADER_KEYWORDS = new Set([
+  "comment",
+  "language",
+  "contains",
+  "no",
+  "reads",
+  "modifies",
+  "not",
+  "deterministic",
+  "sql",
+  "charset",
+  "character",
+  "collate",
+  "binary",
+  "ascii",
+  "unicode",
+  "byte",
+  "signed",
+  "unsigned",
+  "zerofill",
+  "precision",
+  "varying",
+  "char",
+  "varchar",
+  "varbinary",
+]);
 const POSTGRES_QUESTION_PARAMETER_PREFIX_KEYWORDS = new Set([
   "all",
   "and",
@@ -381,7 +411,13 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   const nativeSqlServerParameters = collectNativeSqlServerParameters(sql, databaseType);
   const supportsNamedParameters = databaseType !== "saphana" && databaseType !== "neo4j" && databaseType !== "nebula";
   const enabledSyntaxes = options?.enabledSyntaxes ? new Set(options.enabledSyntaxes) : null;
-  const isSyntaxEnabled = (syntax: SqlParameterSyntax) => !enabledSyntaxes || enabledSyntaxes.has(syntax);
+  const isSyntaxEnabled = (syntax: SqlParameterSyntax) => {
+    if (enabledSyntaxes) return enabledSyntaxes.has(syntax);
+    if (syntax === "substitution") {
+      return isOracleSubstitutionDatabase(databaseType, options?.compatibilityMode);
+    }
+    return true;
+  };
   const databaseLinkStarts = isSyntaxEnabled("sqlserver") ? collectSqlDatabaseLinkStarts(sql, databaseType) : new Set<number>();
   const complexTypeFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") ? collectComplexTypeFieldSeparators(sql, databaseType) : new Set<number>();
   const duckDbStructFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") && databaseType === "duckdb" ? collectDuckDbStructFieldSeparators(sql) : new Set<number>();
@@ -445,6 +481,14 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
         i = quoted.end;
         continue;
       }
+      if (ch === "'" && isSyntaxEnabled("substitution")) {
+        const quotedSubstitution = tryReadQuotedSubstitutionPlaceholder(sql, i, databaseType);
+        if (quotedSubstitution) {
+          occurrences.push(quotedSubstitution);
+          i = quotedSubstitution.end;
+          continue;
+        }
+      }
       const quotedEnd = skipQuoted(sql, i, ch, databaseType);
       // Double quotes can delimit identifiers, so only ordinary single-quoted
       // values opt into embedded interpolation.
@@ -469,6 +513,22 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
       continue;
     }
     if (ch === "[") {
+      if (isSyntaxEnabled("bracketed-shell") && sql.startsWith("${", i + 1)) {
+        const bracketed = tryReadBracketedShellPlaceholder(sql, i);
+        if (bracketed) {
+          occurrences.push(bracketed);
+          i = bracketed.end;
+          continue;
+        }
+        // A failed bracketed-shell candidate must never swallow characters:
+        // treat "[" as a plain character so the inner `${...}` is still picked
+        // up by the shell branch below. Postgres keeps its array-bracket
+        // tracking so `:` slice handling stays intact.
+        if (databaseType !== "postgres") {
+          i += 1;
+          continue;
+        }
+      }
       if (databaseType === "postgres") {
         postgresBracketStack.push({
           constructor: isPostgresArrayConstructorBracket(sql, i, postgresBracketStack[postgresBracketStack.length - 1]?.constructor ?? false),
@@ -556,6 +616,14 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
         continue;
       }
     }
+    if (ch === "&" && isSyntaxEnabled("substitution")) {
+      const occurrence = readSubstitutionParameterOccurrence(sql, i);
+      if (occurrence) {
+        occurrences.push(occurrence);
+        i = occurrence.end;
+        continue;
+      }
+    }
     if (ch === "$") {
       const marker = readDollarQuoteMarker(sql, i);
       if (marker) {
@@ -577,7 +645,37 @@ function isMysqlRoutineLabelSeparator(sql: string, colonIndex: number, following
   if (!label) return false;
   const labelStart = colonIndex - label[0].length;
   const prefix = sql.slice(0, labelStart).trimEnd();
-  return prefix.length === 0 || prefix.endsWith(";") || MYSQL_ROUTINE_LABEL_CONTEXTS.has(previousKeyword(sql, labelStart));
+  if (prefix.length === 0 || prefix.endsWith(";") || MYSQL_ROUTINE_LABEL_CONTEXTS.has(previousKeyword(sql, labelStart))) return true;
+  const labelName = label[0].toLowerCase();
+  return !MYSQL_ROUTINE_BODY_STATEMENTS.has(labelName) && isMysqlRoutineHeader(prefix, labelName);
+}
+
+function isMysqlRoutineHeader(sql: string, labelName: string): boolean {
+  if (MYSQL_ROUTINE_HEADER_KEYWORDS.has(labelName)) return false;
+  const tokens = tokenizeSqlSemantic(sql, "mysql", { mysqlBackslashEscape: true, mysqlDoubleQuoteIsString: true }).filter((token) => token.kind !== "comment");
+  let start = tokens.length - 1;
+  while (start >= 0 && tokens[start].text !== ";" && !(tokens[start].kind === "word" && tokens[start].normalized === "create")) start -= 1;
+  if (start < 0 || tokens[start].normalized !== "create") return false;
+
+  const header = tokens.slice(start + 1);
+  const routineIndex = header.findIndex((token) => token.kind === "word" && token.depth === 0 && (token.normalized === "procedure" || token.normalized === "function"));
+  if (routineIndex < 0 || (routineIndex !== 0 && header[0]?.normalized !== "definer")) return false;
+  const parameterStart = header.findIndex((token, index) => index > routineIndex && token.text === "(");
+  if (parameterStart < 0) return false;
+  const parameterEnd = header.findIndex((token, index) => index > parameterStart && token.text === ")" && token.depth === 0);
+  if (parameterEnd < 0) return false;
+
+  // The outer label follows the signature and optional routine characteristics,
+  // before any body statement. Quoted names/comments must not change that context.
+  // The word after RETURNS is a data type, which can itself be SET.
+  const characteristics = header.slice(parameterEnd + 1);
+  // RETURNS and SECURITY can be labels, except where the header expects their values.
+  if (labelName === "returns" && header[routineIndex].normalized === "function" && !characteristics.some((token) => token.kind === "word" && token.depth === 0 && token.normalized === "returns")) return false;
+  const lastKeyword = characteristics[characteristics.length - 1]?.normalized;
+  const previousKeyword = characteristics[characteristics.length - 2]?.normalized;
+  if (lastKeyword === "returns" || lastKeyword === "charset" || lastKeyword === "collate" || (lastKeyword === "security" && previousKeyword === "sql")) return false;
+  if (lastKeyword === "sql" && !["language", "no", "contains"].includes(previousKeyword ?? "")) return false;
+  return !characteristics.some((token, index) => token.kind === "word" && token.depth === 0 && MYSQL_ROUTINE_BODY_STATEMENTS.has(token.normalized) && characteristics[index - 1]?.normalized !== "returns");
 }
 
 function readMyBatisForeachAt(sql: string, start: number, databaseType?: DatabaseType): { collection: string; render: MyBatisForeach; end: number } | null {
@@ -1605,6 +1703,22 @@ function readParameterName(sql: string, start: number): string {
   return sql.slice(start, i);
 }
 
+/**
+ * Match the bracketed-shell placeholder `[${name}]` (Navicat-style). All five
+ * segments — "[", "${", a valid parameter name, "}", "]" — must match, and the
+ * brackets belong to the token so they disappear on substitution. Any mismatch
+ * returns null so the caller falls back to the default "[" handling without
+ * consuming characters.
+ */
+function tryReadBracketedShellPlaceholder(sql: string, start: number): ParameterOccurrence | null {
+  if (sql[start] !== "[" || sql[start + 1] !== "$" || sql[start + 2] !== "{") return null;
+  const closeBrace = sql.indexOf("}", start + 3);
+  if (closeBrace === -1 || sql[closeBrace + 1] !== "]") return null;
+  const name = sql.slice(start + 3, closeBrace).trim();
+  if (!PARAMETER_NAME_RE.test(name)) return null;
+  return { key: name, name, syntax: "bracketed-shell", token: sql.slice(start, closeBrace + 2), start, end: closeBrace + 2 };
+}
+
 /** Match only unprefixed quote + exact `${name}`/`#{name}` + same quote. Leaves skipQuoted unchanged. */
 function tryReadQuotedBracedPlaceholder(sql: string, start: number, quote: "'" | '"', isSyntaxEnabled: (syntax: SqlParameterSyntax) => boolean): ParameterOccurrence | null {
   if (sql[start] !== quote) return null;
@@ -1636,7 +1750,82 @@ function tryReadQuotedBracedPlaceholder(sql: string, start: number, quote: "'" |
     name,
     syntax,
     token: sql.slice(start, end),
-    ...(quote === "\'" ? { replacement: "quoted-string" as const } : {}),
+    ...(quote === "'" ? { replacement: "quoted-string" as const } : {}),
+    start,
+    end,
+  };
+}
+
+function tryReadQuotedSubstitutionPlaceholder(sql: string, start: number, databaseType?: DatabaseType): ParameterOccurrence | null {
+  if (sql[start] !== "'") return null;
+  if (hasSqlStringLiteralPrefix(sql, start)) return null;
+
+  const contentStart = start + 1;
+  if (sql[contentStart] !== "&") return null;
+
+  const isDouble = sql[contentStart + 1] === "&";
+  const prefixLength = isDouble ? 2 : 1;
+  const nameStart = contentStart + prefixLength;
+  if (sql[nameStart] === "&") return null;
+  if (/^&(?:lt|gt|amp|quot|apos);/i.test(sql.slice(contentStart))) return null;
+
+  let nameEnd = nameStart;
+  if (/[0-9]/.test(sql[nameStart] ?? "")) {
+    while (nameEnd < sql.length && /[0-9]/.test(sql[nameEnd] ?? "")) nameEnd += 1;
+  } else if (PARAMETER_NAME_START_RE.test(sql[nameStart] ?? "")) {
+    while (nameEnd < sql.length && PARAMETER_NAME_CHAR_RE.test(sql[nameEnd] ?? "")) nameEnd += 1;
+  } else {
+    return null;
+  }
+  if (nameEnd === nameStart) return null;
+
+  const name = sql.slice(nameStart, nameEnd);
+  let contentEnd = nameEnd;
+  if (sql[contentEnd] === ".") contentEnd += 1;
+
+  if (sql[contentEnd] !== "'") return null;
+  const quoteEnd = contentEnd + 1;
+  if (skipQuoted(sql, start, "'", databaseType) !== quoteEnd) return null;
+
+  return {
+    key: name,
+    name,
+    syntax: "substitution",
+    token: sql.slice(start, quoteEnd),
+    replacement: "quoted-string",
+    start,
+    end: quoteEnd,
+  };
+}
+
+function readSubstitutionParameterOccurrence(sql: string, start: number): ParameterOccurrence | null {
+  if (start > 0 && (PARAMETER_NAME_CHAR_RE.test(sql[start - 1] ?? "") || sql[start - 1] === "?" || sql[start - 1] === "&")) return null;
+
+  const isDouble = sql[start + 1] === "&";
+  const prefixLength = isDouble ? 2 : 1;
+  const nameStart = start + prefixLength;
+  if (sql[nameStart] === "&") return null;
+  if (/^&(?:lt|gt|amp|quot|apos);/i.test(sql.slice(start))) return null;
+
+  let nameEnd = nameStart;
+  if (/[0-9]/.test(sql[nameStart] ?? "")) {
+    while (nameEnd < sql.length && /[0-9]/.test(sql[nameEnd] ?? "")) nameEnd += 1;
+  } else if (PARAMETER_NAME_START_RE.test(sql[nameStart] ?? "")) {
+    while (nameEnd < sql.length && PARAMETER_NAME_CHAR_RE.test(sql[nameEnd] ?? "")) nameEnd += 1;
+  } else {
+    return null;
+  }
+  if (nameEnd === nameStart) return null;
+
+  const name = sql.slice(nameStart, nameEnd);
+  let end = nameEnd;
+  if (sql[end] === ".") end += 1;
+
+  return {
+    key: name,
+    name,
+    syntax: "substitution",
+    token: sql.slice(start, end),
     start,
     end,
   };

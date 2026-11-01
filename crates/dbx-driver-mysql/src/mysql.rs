@@ -28,11 +28,15 @@ use crate::types::{
     is_opaque_aggregate_state_type, ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate,
     CompletionAssistantCandidateKind, CompletionAssistantMatchMode, CompletionAssistantObjectKind,
     CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo, ForeignKeyInfo, IndexInfo, LargeValueCell,
-    ObjectInfo, ObjectStatistics, QueryMessage, QueryResult, SpatialColumnBuilder, TableInfo, TriggerInfo,
+    ObjectInfo, ObjectStatistics, OriginalKeyCell, QueryMessage, QueryResult, SpatialColumnBuilder, TableInfo,
+    TriggerInfo,
 };
 use dbx_types::metadata_filter::{table_name_filter_matches, TableNameFilter};
 
 use super::file_validator::validate_file_path;
+pub use crate::mysql_data_charset::{
+    data_charset_for_config, data_charset_from_params, data_charset_from_url, MySqlDataCharset,
+};
 use crate::mysql_event_sql::MysqlEventInfo;
 
 /// DBX-owned MySQL pool handle. The driver does not expose its configured
@@ -42,7 +46,14 @@ use crate::mysql_event_sql::MysqlEventInfo;
 pub struct MySqlPool {
     inner: mysql_async::Pool,
     max_connections: usize,
+    data_charset: Option<MySqlDataCharset>,
     checkout_verifications: std::sync::Arc<MySqlCheckoutVerifications>,
+    /// Budget for checking a connection out of this pool.
+    ///
+    /// The connection-level "connect timeout" setting is threaded down to the
+    /// pool at creation time so that metadata, DDL, connection-info, cancel and
+    /// streaming paths do not fall back to a compile-time constant (#12908).
+    checkout_timeout: Duration,
 }
 
 impl MySqlPool {
@@ -51,11 +62,28 @@ impl MySqlPool {
         mysql_async::Opts: TryFrom<O>,
         <mysql_async::Opts as TryFrom<O>>::Error: std::error::Error,
     {
+        Self::new_with_checkout_timeout(opts, max_connections, super::connection_timeout())
+    }
+
+    /// Builds a pool whose checkout budget follows the connection settings
+    /// instead of the `CONNECTION_TIMEOUT_SECS` default.
+    pub fn new_with_checkout_timeout<O>(opts: O, max_connections: usize, checkout_timeout: Duration) -> Self
+    where
+        mysql_async::Opts: TryFrom<O>,
+        <mysql_async::Opts as TryFrom<O>>::Error: std::error::Error,
+    {
         Self {
             inner: mysql_async::Pool::new(opts),
             max_connections: max_connections.max(1),
+            data_charset: None,
             checkout_verifications: Default::default(),
+            checkout_timeout: checkout_timeout.max(Duration::from_secs(1)),
         }
+    }
+
+    /// How long a checkout may wait for a pooled (or newly created) connection.
+    pub fn checkout_timeout(&self) -> Duration {
+        self.checkout_timeout
     }
 
     /// Whether this is a tab-scoped client-session pool. These pools hold a
@@ -64,6 +92,10 @@ impl MySqlPool {
     /// survives across executions in the same tab.
     pub fn is_client_session_pool(&self) -> bool {
         self.max_connections == 1
+    }
+
+    pub fn data_charset(&self) -> Option<MySqlDataCharset> {
+        self.data_charset
     }
 
     pub async fn disconnect(self) -> Result<(), mysql_async::Error> {
@@ -90,11 +122,21 @@ impl Deref for MySqlPool {
 
 #[doc(hidden)]
 pub trait MySqlPoolAccess {
+    fn data_charset(&self) -> Option<MySqlDataCharset> {
+        None
+    }
     fn driver_pool(&self) -> &mysql_async::Pool;
     fn checkout_max_connections(&self) -> Option<usize>;
     /// Liveness evidence for pooled connections; `None` pings every checkout.
     fn checkout_verifications(&self) -> Option<&MySqlCheckoutVerifications> {
         None
+    }
+
+    /// Budget for checking a connection out of this pool. Pools created by dbx
+    /// carry the connection's configured timeout; bare `mysql_async` pools and
+    /// pools built without a configuration keep the legacy constant (#12908).
+    fn checkout_timeout(&self) -> Duration {
+        super::connection_timeout()
     }
 }
 
@@ -185,6 +227,9 @@ pub async fn get_event_info<P: MySqlPoolAccess + ?Sized>(
 }
 
 impl MySqlPoolAccess for MySqlPool {
+    fn data_charset(&self) -> Option<MySqlDataCharset> {
+        self.data_charset
+    }
     fn driver_pool(&self) -> &mysql_async::Pool {
         &self.inner
     }
@@ -195,6 +240,10 @@ impl MySqlPoolAccess for MySqlPool {
 
     fn checkout_verifications(&self) -> Option<&MySqlCheckoutVerifications> {
         Some(&self.checkout_verifications)
+    }
+
+    fn checkout_timeout(&self) -> Duration {
+        self.checkout_timeout
     }
 }
 
@@ -550,15 +599,16 @@ fn mysql_value_to_json_with_effective_type(
     row: &mysql_async::Row,
     index: usize,
     effective_type: Option<&str>,
+    data_charset: Option<MySqlDataCharset>,
 ) -> serde_json::Value {
     if effective_type.is_some_and(is_opaque_aggregate_state_type) {
         return match row.as_ref(index) {
             None | Some(mysql_async::Value::NULL) => serde_json::Value::Null,
             Some(mysql_async::Value::Bytes(bytes)) => super::binary_value_to_json(bytes),
-            _ => mysql_value_to_json(row, index),
+            _ => mysql_value_to_json_with_data_charset(row, index, data_charset),
         };
     }
-    mysql_value_to_json(row, index)
+    mysql_value_to_json_with_data_charset(row, index, data_charset)
 }
 
 fn ensure_doris_opaque_cells_fit_budget(
@@ -955,6 +1005,14 @@ pub fn mysql_column_type_name(column: &mysql_async::Column) -> String {
 }
 
 pub fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value {
+    mysql_value_to_json_with_data_charset(row, idx, None)
+}
+
+pub fn mysql_value_to_json_with_data_charset(
+    row: &mysql_async::Row,
+    idx: usize,
+    data_charset: Option<MySqlDataCharset>,
+) -> serde_json::Value {
     let Some(column) = row.columns_ref().get(idx) else {
         return serde_json::Value::Null;
     };
@@ -970,6 +1028,29 @@ pub fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Va
         return row_get::<Vec<u8>, _>(row, idx)
             .map(|bytes| mysql_bytes_to_json(bytes, column))
             .unwrap_or(serde_json::Value::Null);
+    }
+
+    if let Some(data_charset) = data_charset {
+        if is_mysql_legacy_text_column(column) {
+            if let mysql_async::Value::Bytes(bytes) = value {
+                // Interpret the untouched carrier, before the old UTF8 heuristic.
+                return match std::str::from_utf8(bytes) {
+                    Ok(text) => {
+                        serde_json::Value::String(if mysql_is_server_text_preview_source(row.columns_ref(), idx) {
+                            // Core must inspect the original character count before
+                            // deciding whether this LEFT result is complete. Even
+                            // the old UTF8 repair heuristic would destroy evidence.
+                            text.to_owned()
+                        } else {
+                            data_charset.interpret_text(text)
+                        })
+                    }
+                    // An invalid UTF8 result violates this mode's wire contract.
+                    // Keep its bytes inspectable; never fabricate replacement text.
+                    Err(_) => super::binary_value_to_json(bytes),
+                };
+            }
+        }
     }
 
     match column.column_type() {
@@ -1057,6 +1138,22 @@ pub fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Va
         .unwrap_or(serde_json::Value::Null)
 }
 
+fn is_mysql_legacy_text_column(column: &mysql_async::Column) -> bool {
+    !is_mysql_binary_charset(column)
+        && matches!(
+            column.column_type(),
+            ColumnType::MYSQL_TYPE_STRING
+                | ColumnType::MYSQL_TYPE_VAR_STRING
+                | ColumnType::MYSQL_TYPE_VARCHAR
+                | ColumnType::MYSQL_TYPE_BLOB
+                | ColumnType::MYSQL_TYPE_LONG_BLOB
+                | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
+                | ColumnType::MYSQL_TYPE_TINY_BLOB
+                | ColumnType::MYSQL_TYPE_ENUM
+                | ColumnType::MYSQL_TYPE_SET
+        )
+}
+
 fn bytes_to_upper_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -1089,14 +1186,15 @@ fn mysql_value_to_json_for_export(
     row: &mysql_async::Row,
     idx: usize,
     spatial_as_wkb: bool,
+    data_charset: Option<MySqlDataCharset>,
 ) -> Result<serde_json::Value, String> {
     if !spatial_as_wkb
         || !row.columns_ref().get(idx).is_some_and(|column| column.column_type() == ColumnType::MYSQL_TYPE_GEOMETRY)
     {
-        return Ok(mysql_value_to_json(row, idx));
+        return Ok(mysql_value_to_json_with_data_charset(row, idx, data_charset));
     }
     let Some(bytes) = row_get::<Vec<u8>, _>(row, idx) else {
-        return Ok(mysql_value_to_json(row, idx));
+        return Ok(mysql_value_to_json_with_data_charset(row, idx, data_charset));
     };
     mysql_geometry_to_export_marker(&bytes)
         .map(serde_json::Value::String)
@@ -1165,6 +1263,7 @@ fn mysql_bounded_value_preview(
     index: usize,
     preview_bytes: usize,
     protected_indexes: &HashSet<usize>,
+    data_charset: Option<MySqlDataCharset>,
 ) -> Option<(serde_json::Value, usize)> {
     if protected_indexes.contains(&index) {
         return None;
@@ -1181,6 +1280,24 @@ fn mysql_bounded_value_preview(
     }
 
     let binary = is_mysql_binary_charset(column) || is_mysql_binary_string_column(column);
+    if !binary && is_mysql_legacy_text_column(column) {
+        if let Some(data_charset) = data_charset {
+            let mut text = match std::str::from_utf8(bytes) {
+                Ok(text) => data_charset.interpret(text, preview_bytes),
+                Err(_) => {
+                    // Keep the invalid wire bytes inspectable under the same
+                    // representation as complete-value retrieval.
+                    let hex_bytes = preview_bytes.saturating_sub(2) / 2;
+                    let serde_json::Value::String(text) = super::binary_value_to_json(&bytes[..hex_bytes]) else {
+                        return None;
+                    };
+                    text
+                }
+            };
+            text.push_str("...");
+            return Some((serde_json::Value::String(text), bytes.len()));
+        }
+    }
     let end = if binary {
         preview_bytes.min(bytes.len())
     } else {
@@ -1206,16 +1323,7 @@ fn mysql_result_protected_column_indexes(
     columns: &[mysql_async::Column],
     protected_columns: &[String],
 ) -> HashSet<usize> {
-    let protected: HashSet<String> = protected_columns.iter().map(|column| column.to_ascii_lowercase()).collect();
-    let mut indexes = columns
-        .iter()
-        .enumerate()
-        .filter_map(|(index, column)| {
-            (column.flags().contains(ColumnFlags::PRI_KEY_FLAG)
-                || protected.contains(&column.name_str().to_ascii_lowercase()))
-            .then_some(index)
-        })
-        .collect::<HashSet<_>>();
+    let mut indexes = mysql_result_key_column_indexes(columns, protected_columns);
     for (index, column) in columns.iter().enumerate() {
         if column.name_str().to_ascii_uppercase().starts_with(crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX) {
             indexes.insert(index);
@@ -1227,10 +1335,129 @@ fn mysql_result_protected_column_indexes(
     indexes
 }
 
+fn mysql_result_key_column_indexes(columns: &[mysql_async::Column], protected_columns: &[String]) -> HashSet<usize> {
+    let protected: HashSet<String> = protected_columns.iter().map(|column| column.to_ascii_lowercase()).collect();
+    columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| {
+            (column.flags().contains(ColumnFlags::PRI_KEY_FLAG)
+                || protected.contains(&column.name_str().to_ascii_lowercase()))
+            .then_some(index)
+        })
+        .collect()
+}
+
+fn mysql_is_server_text_preview_source(columns: &[mysql_async::Column], index: usize) -> bool {
+    let Some(marker) = columns.get(index + 1) else { return false };
+    let name = marker.name_str().to_ascii_uppercase();
+    let Some(suffix) = name.strip_prefix(crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX) else {
+        return false;
+    };
+    suffix.strip_prefix("T_").is_some_and(|index| index.parse::<usize>().is_ok())
+}
+
+fn mysql_original_key_cells(
+    row: &mysql_async::Row,
+    row_index: usize,
+    key_indexes: &HashSet<usize>,
+    data_charset: Option<MySqlDataCharset>,
+) -> Vec<OriginalKeyCell> {
+    if data_charset.is_none() {
+        return Vec::new();
+    }
+    (0..row.len())
+        .filter(|index| key_indexes.contains(index))
+        .filter_map(|column_index| {
+            // Never advertise a potentially truncated projection as a complete key.
+            if mysql_is_server_text_preview_source(row.columns_ref(), column_index) {
+                return None;
+            }
+            let column = row.columns_ref().get(column_index)?;
+            let value = if is_mysql_legacy_text_column(column) {
+                match row.as_ref(column_index)? {
+                    mysql_async::Value::Bytes(bytes) => {
+                        serde_json::Value::String(std::str::from_utf8(bytes).ok()?.to_owned())
+                    }
+                    _ => mysql_value_to_json(row, column_index),
+                }
+            } else {
+                mysql_value_to_json(row, column_index)
+            };
+            Some(OriginalKeyCell { row_index, column_index, value })
+        })
+        .collect()
+}
+
+fn mysql_legacy_key_bytes_fit_budget(
+    row: &mysql_async::Row,
+    row_index: usize,
+    key_indexes: &HashSet<usize>,
+    data_charset: Option<MySqlDataCharset>,
+    max_result_bytes: Option<usize>,
+) -> Result<bool, String> {
+    let Some(limit) = max_result_bytes.filter(|_| data_charset.is_some()) else { return Ok(true) };
+    // Before cloning raw keys, bound the extra allocation by the existing
+    // result budget. The complete row is already owned by mysql_async.
+    let bytes = key_indexes.iter().fold(0usize, |total, index| {
+        let len = match row.as_ref(*index) {
+            Some(mysql_async::Value::Bytes(bytes)) => bytes.len(),
+            _ => 0,
+        };
+        total.saturating_add(len)
+    });
+    mysql_legacy_row_fits_limit(bytes <= limit, row_index)
+}
+
+fn mysql_legacy_row_fits_limit(fits: bool, row_index: usize) -> Result<bool, String> {
+    if !fits && row_index == 0 {
+        return Err("MySQL legacy text row and original key metadata exceed the result byte budget; increase the result budget or select fewer columns".into());
+    }
+    Ok(fits)
+}
+
+#[derive(Default)]
+struct MysqlSerializedByteCount(usize);
+
+impl std::io::Write for MysqlSerializedByteCount {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 =
+            self.0.checked_add(bytes.len()).ok_or_else(|| std::io::Error::other("MySQL result byte count overflow"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn mysql_accept_original_key_row_budget(
+    values: &[serde_json::Value],
+    srids: &[Option<u32>],
+    large_values: &[LargeValueCell],
+    raw_keys: &[OriginalKeyCell],
+    row_index: usize,
+    max_result_bytes: Option<usize>,
+    used_bytes: &mut usize,
+) -> Result<bool, String> {
+    let Some(limit) = max_result_bytes.filter(|_| !raw_keys.is_empty()) else { return Ok(true) };
+    // Count, rather than allocate, a second serialized copy of potentially
+    // large keys. Both displayed values and locator metadata share the budget.
+    let mut count = MysqlSerializedByteCount::default();
+    serde_json::to_writer(&mut count, &(values, srids, large_values, raw_keys)).map_err(|error| error.to_string())?;
+    let next = used_bytes.saturating_add(count.0);
+    if !mysql_legacy_row_fits_limit(next <= limit, row_index)? {
+        return Ok(false);
+    }
+    *used_bytes = next;
+    Ok(true)
+}
+
 fn mysql_row_to_json_with_srids(
     row: &mysql_async::Row,
     spatial_columns: &mut SpatialColumnBuilder,
     effective_types: &[String],
+    data_charset: Option<MySqlDataCharset>,
 ) -> (Vec<serde_json::Value>, Vec<Option<u32>>) {
     let mut srids = vec![None; row.len()];
     let values = (0..row.len())
@@ -1240,7 +1467,12 @@ fn mysql_row_to_json_with_srids(
                 .get(idx)
                 .is_some_and(|column| column.column_type() == ColumnType::MYSQL_TYPE_GEOMETRY);
             if !is_geometry {
-                return mysql_value_to_json_with_effective_type(row, idx, effective_types.get(idx).map(String::as_str));
+                return mysql_value_to_json_with_effective_type(
+                    row,
+                    idx,
+                    effective_types.get(idx).map(String::as_str),
+                    data_charset,
+                );
             }
             let Some(bytes) = row_get::<Vec<u8>, _>(row, idx) else {
                 spatial_columns.observe(idx, None);
@@ -1269,6 +1501,7 @@ fn mysql_row_to_json_with_srids_and_previews(
     preview_bytes: Option<usize>,
     protected_indexes: &HashSet<usize>,
     effective_types: &[String],
+    data_charset: Option<MySqlDataCharset>,
 ) -> (Vec<serde_json::Value>, Vec<Option<u32>>, Vec<LargeValueCell>) {
     let mut srids = vec![None; row.len()];
     let mut large_value_cells = Vec::new();
@@ -1301,12 +1534,14 @@ fn mysql_row_to_json_with_srids_and_previews(
                     row,
                     index,
                     effective_types.get(index).map(String::as_str),
+                    data_charset,
                 );
             }
-            if let Some((preview, original_bytes)) =
-                preview_bytes.and_then(|limit| mysql_bounded_value_preview(row, index, limit, protected_indexes))
+            if let Some((preview, original_bytes)) = preview_bytes
+                .and_then(|limit| mysql_bounded_value_preview(row, index, limit, protected_indexes, data_charset))
             {
                 large_value_cells.push(LargeValueCell {
+                    pending_decode: None,
                     row_index,
                     column_index: index,
                     original_bytes,
@@ -1314,7 +1549,12 @@ fn mysql_row_to_json_with_srids_and_previews(
                 });
                 return preview;
             }
-            mysql_value_to_json_with_effective_type(row, index, effective_types.get(index).map(String::as_str))
+            mysql_value_to_json_with_effective_type(
+                row,
+                index,
+                effective_types.get(index).map(String::as_str),
+                data_charset,
+            )
         })
         .collect();
     (values, srids, large_value_cells)
@@ -1479,6 +1719,7 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
     let mut retry_url = url.to_string();
     let mut retry_ca_cert_path = ca_cert_path;
+    let mut tls_error = None;
     let mut result = connect_pool_attempt(
         url,
         ca_cert_path,
@@ -1495,6 +1736,7 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
     if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_without_ssl(error)) {
         if let Some(fallback_url) = ssl_fallback_url(url) {
             log::info!("SSL handshake failed, retrying with ssl-mode=disabled");
+            tls_error = result.as_ref().err().cloned();
             retry_url = fallback_url;
             retry_ca_cert_path = None;
             result = connect_pool_attempt(
@@ -1514,7 +1756,7 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
 
     if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error)) {
         log::info!("MySQL proxy returned legacy EOF packets; retrying with CLIENT_DEPRECATE_EOF disabled");
-        return connect_pool_attempt(
+        result = connect_pool_attempt(
             &retry_url,
             retry_ca_cert_path,
             timeout,
@@ -1528,7 +1770,12 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
         .await;
     }
 
-    result
+    result.map_err(|error| match tls_error {
+        // MySQL also uses 1045 for REQUIRE SSL accounts, so the final error
+        // alone can conceal why a Preferred connection could not use TLS.
+        Some(tls_error) => format!("MySQL TLS attempt failed: {tls_error}\n\nMySQL plaintext fallback failed: {error}"),
+        None => error,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1593,6 +1840,7 @@ async fn connect_pool_attempt_with_keepalive(
         ca_cert_path,
         max_connections,
         idle_timeout_secs,
+        timeout,
         setup_database,
         extra_setup_queries,
         setup_mode,
@@ -1731,6 +1979,7 @@ async fn verify_pool_connection_with_setup_fallback(
             ca_cert_path,
             max_connections,
             idle_timeout_secs,
+            timeout,
             setup_database,
             extra_setup_queries,
             setup_mode,
@@ -1773,6 +2022,7 @@ async fn verify_pool_connection_with_setup_fallback(
             ca_cert_path,
             max_connections,
             idle_timeout_secs,
+            timeout,
             setup_database,
             extra_setup_queries,
             mode,
@@ -2062,6 +2312,7 @@ fn create_pool(
     ca_cert_path: Option<&str>,
     max_connections: usize,
     idle_timeout_secs: Option<u64>,
+    checkout_timeout: Duration,
     setup_database: Option<&str>,
     extra_setup_queries: &[String],
     setup_mode: MySqlSetupMode,
@@ -2069,6 +2320,7 @@ fn create_pool(
     tcp_keepalive_mode: MySqlTcpKeepaliveMode,
 ) -> Result<MySqlPool, String> {
     let tls_url = mysql_tls_url(url)?;
+    let data_charset = data_charset_from_url(url)?;
     let local_infile_paths = mysql_local_infile_paths(&tls_url.url);
     let opts =
         mysql_async::Opts::from_url(&mysql_async_url(&tls_url.url)).map_err(|e| format!("Invalid MySQL URL: {e}"))?;
@@ -2110,7 +2362,9 @@ fn create_pool(
         // to paths explicitly supplied by the user instead of enabling arbitrary reads.
         builder = builder.local_infile_handler(Some(mysql_async::WhiteListFsHandler::new(local_infile_paths)));
     }
-    Ok(MySqlPool::new(builder, max_connections))
+    let mut pool = MySqlPool::new_with_checkout_timeout(builder, max_connections, checkout_timeout);
+    pool.data_charset = data_charset;
+    Ok(pool)
 }
 
 fn mysql_async_tcp_host(host: &str) -> &str {
@@ -2694,6 +2948,7 @@ fn mysql_error_should_retry_without_ssl(error: &str) -> bool {
     error.contains("handshakefailure")
         || error.contains("handshake")
         || error.contains("tls connection")
+        || error.contains("serverdoesnotsupporttls12or13")
         || error.contains("server closed session")
         // Some older MySQL proxies report a failed preferred-TLS probe as a
         // protocol packet error instead of a TLS handshake error.
@@ -2926,6 +3181,7 @@ fn is_dbx_handled_mysql_url_param(key: &str) -> bool {
     matches!(
         key.to_ascii_lowercase().as_str(),
         "charset"
+            | "datacharset"
             | "catalog"
             | "time_zone"
             | "time-zone"
@@ -2973,6 +3229,7 @@ fn mysql_async_url(url: &str) -> Cow<'_, str> {
     };
 
     let original_count = query.split('&').filter(|segment| !segment.trim().is_empty()).count();
+    let data_charset_enabled = data_charset_from_url(url).ok().flatten().is_some();
     let mut filtered: Vec<String> = Vec::new();
     let mut changed = false;
     let mut has_catalog = false;
@@ -3007,7 +3264,12 @@ fn mysql_async_url(url: &str) -> Cow<'_, str> {
             changed = true;
             continue;
         }
-        if is_dbx_handled_mysql_url_param(key) {
+        if is_dbx_handled_mysql_url_param(key)
+            || (data_charset_enabled
+                && is_dbx_handled_mysql_url_param(
+                    percent_decode_str(&key.replace('+', " ")).decode_utf8_lossy().trim(),
+                ))
+        {
             changed = true;
             continue;
         }
@@ -3151,7 +3413,7 @@ const DATABASE_LIST_QUERY_PLAN: [(&str, bool); 2] =
     [(SHOW_DATABASES_SQL, true), (INFORMATION_SCHEMA_DATABASES_SQL, false)];
 
 pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
-    list_databases_with_timeout(pool, super::connection_timeout()).await
+    list_databases_with_timeout(pool, pool.checkout_timeout()).await
 }
 
 pub async fn list_databases_with_timeout(pool: &MySqlPool, timeout: Duration) -> Result<Vec<DatabaseInfo>, String> {
@@ -3166,7 +3428,7 @@ pub async fn list_databases_with_timeout(pool: &MySqlPool, timeout: Duration) ->
 }
 
 pub async fn list_database_metadata(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let result = match conn.query_iter(DATABASE_METADATA_SQL).await {
         Ok(result) => result,
         Err(error) => {
@@ -3212,7 +3474,7 @@ async fn list_databases_with_query(
 }
 
 pub async fn list_databases_show(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
-    list_databases_show_with_timeout(pool, super::connection_timeout()).await
+    list_databases_show_with_timeout(pool, pool.checkout_timeout()).await
 }
 
 pub async fn list_databases_show_with_timeout(
@@ -3267,7 +3529,7 @@ pub async fn list_tables_filtered(
     table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<TableInfo>, String> {
     let sql = list_tables_sql(database, filter, limit, offset, object_types, table_name_filter);
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let result = match conn.query_iter(&sql).await {
         Ok(result) => result,
         Err(err) => {
@@ -3443,7 +3705,7 @@ pub async fn completion_assistant_search(
         request.object_kinds.clone()
     };
     let pattern = mysql_completion_like_pattern(&request.mask, request.match_mode.as_ref());
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let mut candidates = Vec::new();
     let mut compatibility = MysqlCompletionCompatibility::default();
 
@@ -3765,7 +4027,7 @@ fn table_comment_sql(database: &str, table: &str) -> String {
 
 pub async fn get_table_comment(pool: &MySqlPool, database: &str, table: &str) -> Result<Option<String>, String> {
     let sql = table_comment_sql(database, table);
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     Ok(rows
@@ -3828,7 +4090,7 @@ async fn query_table_status_show(
 }
 
 async fn query_table_status_sql(pool: &MySqlPool, sql: &str) -> Result<HashMap<String, TableStatusMeta>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     query_table_status_sql_with_conn(&mut conn, sql).await
 }
 
@@ -3858,7 +4120,7 @@ async fn query_table_status_sql_with_conn(
 }
 
 pub async fn get_table_auto_increment(pool: &MySqlPool, database: &str, table: &str) -> Result<Option<String>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     // MySQL 8 caches SHOW TABLE STATUS statistics by default, including the
     // counter after ALTER TABLE. The version comment is a no-op on MySQL 5.7.
     enable_fresh_table_statistics(&mut conn, "reading AUTO_INCREMENT").await;
@@ -3930,7 +4192,7 @@ async fn list_logical_table_comments(
     let Some(sql) = logical_table_comments_sql(database, table_names) else {
         return Ok(HashMap::new());
     };
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let result = conn.query_iter(&sql).await.map_err(|error| error.to_string())?;
     let rows = result.collect_and_drop::<mysql_async::Row>().await.map_err(|error| error.to_string())?;
     Ok(rows
@@ -3962,7 +4224,7 @@ pub async fn list_logical_tables_show(pool: &MySqlPool, database: &str) -> Resul
     // Proxy logical names are authoritative here. Do not add SHOW TABLE STATUS: this hot
     // path must replace the information_schema lookup with one metadata request.
     let sql = logical_show_full_tables_sql(database);
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let result = conn.query_iter(&sql).await.map_err(|error| error.to_string())?;
     let rows = result.collect_and_drop::<mysql_async::Row>().await.map_err(|error| error.to_string())?;
     Ok(table_infos_from_show_rows(&rows))
@@ -4004,7 +4266,7 @@ async fn list_table_names_show_filtered(
     filter: Option<&str>,
     exact_names: &[String],
 ) -> Result<Vec<TableInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     list_table_names_show_filtered_with_conn(&mut conn, database, filter, exact_names).await
 }
 
@@ -4447,7 +4709,7 @@ pub async fn list_objects(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<PagedObjectList, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let wants_tables = wants_table_objects(object_types);
     let wants_routines = wants_routine_objects(object_types);
     let paging_applied = limit.is_some() && object_query_supports_paging(object_types);
@@ -4489,7 +4751,7 @@ pub async fn list_objects(
             if !wants_routines {
                 return Ok(PagedObjectList { objects, paging_applied });
             }
-            conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+            conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
         }
     }
 
@@ -4583,7 +4845,7 @@ pub async fn list_object_statistics(
          ORDER BY TABLE_NAME",
         quote_value(database),
     );
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     // The session-scoped statistics cache is what makes the tree keep showing
     // a stale row count for tables written after the first read (#9736).
     enable_fresh_table_statistics(&mut conn, "reading object statistics").await;
@@ -4700,13 +4962,13 @@ pub(super) fn table_infos_to_objects(
 }
 
 pub(super) async fn list_routine_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let rows = query_routine_rows(&mut conn, database, None, None, None).await?;
     Ok(rows.iter().map(|row| row_to_object(row, database)).collect())
 }
 
 pub async fn list_completion_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let mut objects = Vec::new();
 
     match query_routine_rows(&mut conn, database, None, None, None).await {
@@ -5248,7 +5510,7 @@ pub async fn get_conn_with_health_check<P>(pool: &P) -> Result<mysql_async::Conn
 where
     P: MySqlPoolAccess + ?Sized,
 {
-    get_conn_with_health_check_with_timeout(pool, super::connection_timeout()).await
+    get_conn_with_health_check_with_timeout(pool, pool.checkout_timeout()).await
 }
 
 pub async fn get_conn_with_health_check_with_timeout<P>(
@@ -5507,7 +5769,6 @@ async fn collect_mysql_server_messages(conn: &mut mysql_async::Conn, warnings: u
 async fn execute_result_set_with_text_protocol_on_conn(
     conn: &mut mysql_async::Conn,
     sql: &str,
-    row_limit: usize,
     max_rows: Option<usize>,
     max_result_bytes: Option<usize>,
     result_key_columns: &[String],
@@ -5515,7 +5776,9 @@ async fn execute_result_set_with_text_protocol_on_conn(
     start: Instant,
     progress_clock: Option<&crate::execution::StreamProgressClock>,
     opaque_types: &DorisOpaqueColumnTypes,
+    data_charset: Option<MySqlDataCharset>,
 ) -> Result<MySqlQueryResult, String> {
+    let row_limit = query_result_row_limit(max_rows);
     let diagnostics_enabled = diagnostic_trace_id.is_some() && log::log_enabled!(log::Level::Info);
     let dispatch_started_at = diagnostics_enabled.then(Instant::now);
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
@@ -5527,8 +5790,10 @@ async fn execute_result_set_with_text_protocol_on_conn(
         drop(result);
         let messages = collect_mysql_server_messages(conn, warnings, &info).await;
         return Ok(MySqlQueryResult::exact(QueryResult {
+            raw_key_cells: Vec::new(),
             columns: vec![],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
             spatial_values: vec![],
@@ -5550,6 +5815,9 @@ async fn execute_result_set_with_text_protocol_on_conn(
     let preview_bytes =
         max_result_bytes.map(|max_bytes| mysql_result_cell_preview_bytes(max_bytes, row_limit, result.columns_ref()));
     let protected_indexes = mysql_result_protected_column_indexes(result.columns_ref(), result_key_columns);
+    let key_indexes = mysql_result_key_column_indexes(result.columns_ref(), result_key_columns);
+    let mut raw_key_cells = Vec::new();
+    let mut used_result_bytes = 0usize;
 
     if max_result_bytes.is_none() && should_collect_text_result_set(sql, row_limit, max_rows) {
         let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
@@ -5563,8 +5831,11 @@ async fn execute_result_set_with_text_protocol_on_conn(
         let result_rows = rows
             .iter()
             .take(row_limit)
-            .map(|row| {
-                let (values, srids) = mysql_row_to_json_with_srids(row, &mut spatial_columns, &column_types);
+            .enumerate()
+            .map(|(row_index, row)| {
+                raw_key_cells.extend(mysql_original_key_cells(row, row_index, &key_indexes, data_charset));
+                let (values, srids) =
+                    mysql_row_to_json_with_srids(row, &mut spatial_columns, &column_types, data_charset);
                 spatial_values.push(srids);
                 values
             })
@@ -5572,8 +5843,10 @@ async fn execute_result_set_with_text_protocol_on_conn(
 
         let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
         return Ok(MySqlQueryResult::exact(QueryResult {
+            raw_key_cells,
             columns,
             column_types,
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns,
             spatial_values,
@@ -5619,6 +5892,11 @@ async fn execute_result_set_with_text_protocol_on_conn(
             break;
         }
         let row_index = result_rows.len();
+        if !mysql_legacy_key_bytes_fit_budget(&row, row_index, &key_indexes, data_charset, max_result_bytes)? {
+            truncated = true;
+            break;
+        }
+        let row_raw_keys = mysql_original_key_cells(&row, row_index, &key_indexes, data_charset);
         let convert_started_at = diagnostics_enabled.then(Instant::now);
         let (values, srids, mut row_large_values) = mysql_row_to_json_with_srids_and_previews(
             &row,
@@ -5627,7 +5905,21 @@ async fn execute_result_set_with_text_protocol_on_conn(
             preview_bytes,
             &protected_indexes,
             &column_types,
+            data_charset,
         );
+        if !mysql_accept_original_key_row_budget(
+            &values,
+            &srids,
+            &row_large_values,
+            &row_raw_keys,
+            row_index,
+            max_result_bytes,
+            &mut used_result_bytes,
+        )? {
+            truncated = true;
+            break;
+        }
+        raw_key_cells.extend(row_raw_keys);
         result_rows.push(values);
         spatial_values.push(srids);
         large_value_cells.append(&mut row_large_values);
@@ -5669,8 +5961,10 @@ async fn execute_result_set_with_text_protocol_on_conn(
     let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
     Ok(MySqlQueryResult {
         result: QueryResult {
+            raw_key_cells,
             columns,
             column_types,
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns,
             spatial_values,
@@ -5699,6 +5993,7 @@ async fn execute_result_sets_with_text_protocol_on_conn(
     diagnostic_trace_id: Option<&str>,
     start: Instant,
     opaque_types: &DorisOpaqueColumnTypes,
+    data_charset: Option<MySqlDataCharset>,
 ) -> Result<Vec<MySqlQueryResult>, String> {
     // Per-set warnings/info read after each `collect()` are only accurate when
     // the connection negotiated CLIENT_DEPRECATE_EOF: with legacy EOF packets
@@ -5730,6 +6025,9 @@ async fn execute_result_sets_with_text_protocol_on_conn(
         let preview_bytes = max_result_bytes
             .map(|max_bytes| mysql_result_cell_preview_bytes(max_bytes, row_limit, result.columns_ref()));
         let protected_indexes = mysql_result_protected_column_indexes(result.columns_ref(), result_key_columns);
+        let key_indexes = mysql_result_key_column_indexes(result.columns_ref(), result_key_columns);
+        let mut raw_key_cells = Vec::new();
+        let mut used_result_bytes = 0usize;
 
         let rows = if max_result_bytes.is_none() && should_collect_text_result_set(sql, row_limit, max_rows) {
             let read_started_at = diagnostics_enabled.then(Instant::now);
@@ -5742,8 +6040,11 @@ async fn execute_result_sets_with_text_protocol_on_conn(
             let converted_rows = rows
                 .iter()
                 .take(row_limit)
-                .map(|row| {
-                    let (values, srids) = mysql_row_to_json_with_srids(row, &mut spatial_columns, &column_types);
+                .enumerate()
+                .map(|(row_index, row)| {
+                    raw_key_cells.extend(mysql_original_key_cells(row, row_index, &key_indexes, data_charset));
+                    let (values, srids) =
+                        mysql_row_to_json_with_srids(row, &mut spatial_columns, &column_types, data_charset);
                     spatial_values.push(srids);
                     values
                 })
@@ -5768,9 +6069,20 @@ async fn execute_result_sets_with_text_protocol_on_conn(
                 }
                 let Some(row) = next_row else { break };
                 let row = row.map_err(|e| e.to_string())?;
-                if rows.len() < row_limit {
+                if rows.len() < row_limit && !truncated {
                     ensure_doris_opaque_cells_fit_budget(&row, &column_types, max_result_bytes)?;
                     let row_index = rows.len();
+                    if !mysql_legacy_key_bytes_fit_budget(
+                        &row,
+                        row_index,
+                        &key_indexes,
+                        data_charset,
+                        max_result_bytes,
+                    )? {
+                        truncated = true;
+                        continue;
+                    }
+                    let row_raw_keys = mysql_original_key_cells(&row, row_index, &key_indexes, data_charset);
                     let convert_started_at = diagnostics_enabled.then(Instant::now);
                     let (values, srids, mut row_large_values) = mysql_row_to_json_with_srids_and_previews(
                         &row,
@@ -5779,7 +6091,21 @@ async fn execute_result_sets_with_text_protocol_on_conn(
                         preview_bytes,
                         &protected_indexes,
                         &column_types,
+                        data_charset,
                     );
+                    if !mysql_accept_original_key_row_budget(
+                        &values,
+                        &srids,
+                        &row_large_values,
+                        &row_raw_keys,
+                        row_index,
+                        max_result_bytes,
+                        &mut used_result_bytes,
+                    )? {
+                        truncated = true;
+                        continue;
+                    }
+                    raw_key_cells.extend(row_raw_keys);
                     rows.push(values);
                     spatial_values.push(srids);
                     large_value_cells.append(&mut row_large_values);
@@ -5803,8 +6129,10 @@ async fn execute_result_sets_with_text_protocol_on_conn(
         let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
         results.push(MySqlQueryResult {
             result: QueryResult {
+                raw_key_cells,
                 columns,
                 column_types,
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns,
                 spatial_values,
@@ -5831,8 +6159,10 @@ async fn execute_result_sets_with_text_protocol_on_conn(
         drop(result);
         let messages = collect_mysql_server_messages(conn, warnings, &info).await;
         results.push(MySqlQueryResult::exact(QueryResult {
+            raw_key_cells: Vec::new(),
             columns: vec![],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
             spatial_values: vec![],
@@ -5927,6 +6257,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
     start: Instant,
     progress_clock: Option<&crate::execution::StreamProgressClock>,
     opaque_types: &DorisOpaqueColumnTypes,
+    data_charset: Option<MySqlDataCharset>,
 ) -> Result<MySqlQueryResult, String> {
     let diagnostics_enabled = diagnostic_trace_id.is_some() && log::log_enabled!(log::Level::Info);
     let dispatch_started_at = diagnostics_enabled.then(Instant::now);
@@ -5938,6 +6269,9 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
     let preview_bytes =
         max_result_bytes.map(|max_bytes| mysql_result_cell_preview_bytes(max_bytes, row_limit, result.columns_ref()));
     let protected_indexes = mysql_result_protected_column_indexes(result.columns_ref(), result_key_columns);
+    let key_indexes = mysql_result_key_column_indexes(result.columns_ref(), result_key_columns);
+    let mut raw_key_cells = Vec::new();
+    let mut used_result_bytes = 0usize;
 
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut spatial_values: Vec<Vec<Option<u32>>> = Vec::new();
@@ -5968,6 +6302,11 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
             break;
         }
         let row_index = result_rows.len();
+        if !mysql_legacy_key_bytes_fit_budget(&row, row_index, &key_indexes, data_charset, max_result_bytes)? {
+            truncated = true;
+            break;
+        }
+        let row_raw_keys = mysql_original_key_cells(&row, row_index, &key_indexes, data_charset);
         let convert_started_at = diagnostics_enabled.then(Instant::now);
         let (values, srids, mut row_large_values) = mysql_row_to_json_with_srids_and_previews(
             &row,
@@ -5976,7 +6315,21 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
             preview_bytes,
             &protected_indexes,
             &column_types,
+            data_charset,
         );
+        if !mysql_accept_original_key_row_budget(
+            &values,
+            &srids,
+            &row_large_values,
+            &row_raw_keys,
+            row_index,
+            max_result_bytes,
+            &mut used_result_bytes,
+        )? {
+            truncated = true;
+            break;
+        }
+        raw_key_cells.extend(row_raw_keys);
         result_rows.push(values);
         spatial_values.push(srids);
         large_value_cells.append(&mut row_large_values);
@@ -6018,8 +6371,10 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
     let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
     Ok(MySqlQueryResult {
         result: QueryResult {
+            raw_key_cells,
             columns,
             column_types,
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns,
             spatial_values,
@@ -6074,7 +6429,19 @@ where
     P: MySqlPoolAccess + ?Sized,
 {
     let mut conn = get_conn_with_health_check(pool).await?;
-    execute_query_on_conn_with_max_rows(&mut conn, sql, bare, max_rows, dialect).await
+    execute_query_on_conn_with_limits_with_data_charset(
+        &mut conn,
+        sql,
+        bare,
+        max_rows,
+        None,
+        &[],
+        dialect,
+        None,
+        pool.data_charset(),
+    )
+    .await
+    .map(|result| result.result)
 }
 
 /// Progress-aware variant of [`execute_query_with_max_rows`] for long transfers.
@@ -6101,9 +6468,10 @@ where
     let mut conn = get_conn_with_health_check(pool).await?;
     let timeout_error = format!("Query timed out after {} seconds", timeout.map_or(0, |timeout| timeout.as_secs()));
     let clock_for_query = progress_clock.clone();
+    let data_charset = pool.data_charset();
     crate::execution::await_stream_with_progress_timeout(
         async move {
-            execute_query_on_conn_with_limits_progress(
+            execute_query_on_conn_with_limits_progress_with_data_charset(
                 &mut conn,
                 sql,
                 bare,
@@ -6113,6 +6481,7 @@ where
                 dialect,
                 None,
                 Some(&clock_for_query),
+                data_charset,
             )
             .await
             .map(|result| result.result)
@@ -6135,12 +6504,22 @@ pub async fn stream_query_rows(
     mut on_row: impl FnMut(&[serde_json::Value]) -> Result<(), String>,
 ) -> Result<u64, String> {
     let mut conn = get_conn_with_health_check(pool).await?;
-    stream_query_result_on_conn(&mut conn, sql, bare, max_rows, dialect, cancelled, false, |item| {
-        if let MySqlQueryStreamItem::Row(row) = item {
-            on_row(&row)?;
-        }
-        Ok(())
-    })
+    stream_query_result_on_conn_with_data_charset(
+        &mut conn,
+        sql,
+        bare,
+        max_rows,
+        dialect,
+        cancelled,
+        false,
+        pool.data_charset(),
+        |item| {
+            if let MySqlQueryStreamItem::Row(row) = item {
+                on_row(&row)?;
+            }
+            Ok(())
+        },
+    )
     .await
 }
 
@@ -6152,21 +6531,74 @@ pub async fn stream_query_result_on_conn(
     dialect: MySqlQueryDialect,
     cancelled: &AtomicBool,
     spatial_as_wkb: bool,
+    on_item: impl FnMut(MySqlQueryStreamItem) -> Result<(), String>,
+) -> Result<u64, String> {
+    stream_query_result_on_conn_with_data_charset(
+        conn,
+        sql,
+        bare,
+        max_rows,
+        dialect,
+        cancelled,
+        spatial_as_wkb,
+        None,
+        on_item,
+    )
+    .await
+}
+
+pub async fn stream_query_result_on_conn_with_data_charset(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    bare: bool,
+    max_rows: Option<usize>,
+    dialect: MySqlQueryDialect,
+    cancelled: &AtomicBool,
+    spatial_as_wkb: bool,
+    data_charset: Option<MySqlDataCharset>,
     mut on_item: impl FnMut(MySqlQueryStreamItem) -> Result<(), String>,
 ) -> Result<u64, String> {
     let row_limit = max_rows.unwrap_or(usize::MAX);
     let opaque_types = resolve_doris_opaque_column_types(conn, sql, dialect).await;
 
     if bare || prefers_text_protocol_query(sql, dialect) {
-        stream_query_result_text(conn, sql, row_limit, cancelled, spatial_as_wkb, &opaque_types, &mut on_item).await
+        stream_query_result_text(
+            conn,
+            sql,
+            row_limit,
+            cancelled,
+            spatial_as_wkb,
+            &opaque_types,
+            &mut on_item,
+            data_charset,
+        )
+        .await
     } else {
-        match stream_query_result_prepared(conn, sql, row_limit, cancelled, spatial_as_wkb, &opaque_types, &mut on_item)
-            .await
+        match stream_query_result_prepared(
+            conn,
+            sql,
+            row_limit,
+            cancelled,
+            spatial_as_wkb,
+            &opaque_types,
+            &mut on_item,
+            data_charset,
+        )
+        .await
         {
             Ok(rows) => Ok(rows),
             Err(err) if mysql_error_should_retry_with_text_protocol(&err) => {
-                stream_query_result_text(conn, sql, row_limit, cancelled, spatial_as_wkb, &opaque_types, &mut on_item)
-                    .await
+                stream_query_result_text(
+                    conn,
+                    sql,
+                    row_limit,
+                    cancelled,
+                    spatial_as_wkb,
+                    &opaque_types,
+                    &mut on_item,
+                    data_charset,
+                )
+                .await
             }
             Err(err) => Err(err),
         }
@@ -6181,6 +6613,7 @@ async fn stream_query_result_text(
     spatial_as_wkb: bool,
     opaque_types: &DorisOpaqueColumnTypes,
     on_item: &mut impl FnMut(MySqlQueryStreamItem) -> Result<(), String>,
+    data_charset: Option<MySqlDataCharset>,
 ) -> Result<u64, String> {
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
     if !advance_to_result_set_with_columns(&mut result).await? {
@@ -6208,9 +6641,14 @@ async fn stream_query_result_text(
         let values: Vec<serde_json::Value> = (0..row.len())
             .map(|i| {
                 if column_types.get(i).is_some_and(|column_type| is_opaque_aggregate_state_type(column_type)) {
-                    Ok(mysql_value_to_json_with_effective_type(&row, i, column_types.get(i).map(String::as_str)))
+                    Ok(mysql_value_to_json_with_effective_type(
+                        &row,
+                        i,
+                        column_types.get(i).map(String::as_str),
+                        data_charset,
+                    ))
                 } else {
-                    mysql_value_to_json_for_export(&row, i, spatial_as_wkb)
+                    mysql_value_to_json_for_export(&row, i, spatial_as_wkb, data_charset)
                 }
             })
             .collect::<Result<_, _>>()?;
@@ -6229,6 +6667,7 @@ async fn stream_query_result_prepared(
     spatial_as_wkb: bool,
     opaque_types: &DorisOpaqueColumnTypes,
     on_item: &mut impl FnMut(MySqlQueryStreamItem) -> Result<(), String>,
+    data_charset: Option<MySqlDataCharset>,
 ) -> Result<u64, String> {
     let mut result = conn.exec_iter(sql, ()).await.map_err(|e| e.to_string())?;
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
@@ -6256,9 +6695,14 @@ async fn stream_query_result_prepared(
         let values: Vec<serde_json::Value> = (0..row.len())
             .map(|i| {
                 if column_types.get(i).is_some_and(|column_type| is_opaque_aggregate_state_type(column_type)) {
-                    Ok(mysql_value_to_json_with_effective_type(&row, i, column_types.get(i).map(String::as_str)))
+                    Ok(mysql_value_to_json_with_effective_type(
+                        &row,
+                        i,
+                        column_types.get(i).map(String::as_str),
+                        data_charset,
+                    ))
                 } else {
-                    mysql_value_to_json_for_export(&row, i, spatial_as_wkb)
+                    mysql_value_to_json_for_export(&row, i, spatial_as_wkb, data_charset)
                 }
             })
             .collect::<Result<_, _>>()?;
@@ -6271,7 +6715,7 @@ async fn stream_query_result_prepared(
 
 pub async fn kill_query(pool: &MySqlPool, connection_id: u32) -> Result<(), String> {
     let start = Instant::now();
-    let timeout = super::connection_timeout();
+    let timeout = pool.checkout_timeout();
     let mut conn = tokio::time::timeout(timeout, pool.get_conn())
         .await
         .map_err(|_| {
@@ -6298,9 +6742,18 @@ pub async fn kill_query(pool: &MySqlPool, connection_id: u32) -> Result<(), Stri
     Ok(())
 }
 
-pub async fn kill_query_with_opts(opts: mysql_async::Opts, connection_id: u32) -> Result<(), String> {
+/// Kills a query through a dedicated connection rebuilt from its `Opts`.
+///
+/// Cancel paths run while the original pool may be busy, so this opens a new
+/// physical connection. `timeout` is the caller's infrastructure budget (the
+/// connection's configured connect/checkout timeout), not the old compile-time
+/// 5 s: on a slow link a hardcoded budget turns cancellation into a failure.
+pub async fn kill_query_with_opts(
+    opts: mysql_async::Opts,
+    connection_id: u32,
+    timeout: Duration,
+) -> Result<(), String> {
     let start = Instant::now();
-    let timeout = super::connection_timeout();
     let mut conn = tokio::time::timeout(timeout, mysql_async::Conn::new(opts))
         .await
         .map_err(|_| {
@@ -6347,6 +6800,17 @@ pub async fn execute_transaction_statement_on_conn(
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<MySqlTransactionExecution, MySqlTransactionError> {
+    execute_transaction_statement_on_conn_with_data_charset(conn, sql, max_rows, None).await
+}
+
+/// Context-aware fixed-session read conversion; preserves the same no-replay
+/// protocol and final server-status contract as the default wrapper.
+pub async fn execute_transaction_statement_on_conn_with_data_charset(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    max_rows: Option<usize>,
+    data_charset: Option<MySqlDataCharset>,
+) -> Result<MySqlTransactionExecution, MySqlTransactionError> {
     let started_at = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
     let mut query = conn.query_iter(sql).await.map_err(transaction_error_from_mysql_error)?;
@@ -6360,8 +6824,10 @@ pub async fn execute_transaction_statement_on_conn(
         query.drop_result().await.map_err(transaction_error_from_mysql_error)?;
         let messages = collect_mysql_server_messages(conn, warnings, &info).await;
         QueryResult {
+            raw_key_cells: Vec::new(),
             columns,
             column_types,
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: Vec::new(),
             spatial_values: Vec::new(),
@@ -6378,12 +6844,16 @@ pub async fn execute_transaction_statement_on_conn(
         }
     } else {
         let mut spatial_columns = mysql_spatial_column_builder(query.columns_ref());
+        let key_indexes = mysql_result_key_column_indexes(query.columns_ref(), &[]);
+        let mut raw_key_cells = Vec::new();
         let mut rows = Vec::with_capacity(row_limit.min(128));
         let mut spatial_values = Vec::new();
         let mut truncated = false;
         while let Some(row) = query.next().await.map_err(transaction_error_from_mysql_error)? {
             if rows.len() < row_limit {
-                let (values, srids) = mysql_row_to_json_with_srids(&row, &mut spatial_columns, &column_types);
+                raw_key_cells.extend(mysql_original_key_cells(&row, rows.len(), &key_indexes, data_charset));
+                let (values, srids) =
+                    mysql_row_to_json_with_srids(&row, &mut spatial_columns, &column_types, data_charset);
                 spatial_values.push(srids);
                 rows.push(values);
             } else {
@@ -6396,8 +6866,10 @@ pub async fn execute_transaction_statement_on_conn(
         query.drop_result().await.map_err(transaction_error_from_mysql_error)?;
         let (spatial_columns, spatial_values) = spatial_columns.finish_with_values(spatial_values);
         QueryResult {
+            raw_key_cells,
             columns,
             column_types,
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns,
             spatial_values,
@@ -6427,7 +6899,7 @@ pub async fn execute_query_on_conn_with_limits(
     dialect: MySqlQueryDialect,
     diagnostic_trace_id: Option<&str>,
 ) -> Result<MySqlQueryResult, String> {
-    execute_query_on_conn_with_limits_progress(
+    execute_query_on_conn_with_limits_with_data_charset(
         conn,
         sql,
         bare,
@@ -6437,6 +6909,32 @@ pub async fn execute_query_on_conn_with_limits(
         dialect,
         diagnostic_trace_id,
         None,
+    )
+    .await
+}
+
+pub async fn execute_query_on_conn_with_limits_with_data_charset(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    bare: bool,
+    max_rows: Option<usize>,
+    max_result_bytes: Option<usize>,
+    result_key_columns: &[String],
+    dialect: MySqlQueryDialect,
+    diagnostic_trace_id: Option<&str>,
+    data_charset: Option<MySqlDataCharset>,
+) -> Result<MySqlQueryResult, String> {
+    execute_query_on_conn_with_limits_progress_with_data_charset(
+        conn,
+        sql,
+        bare,
+        max_rows,
+        max_result_bytes,
+        result_key_columns,
+        dialect,
+        diagnostic_trace_id,
+        None,
+        data_charset,
     )
     .await
 }
@@ -6458,7 +6956,33 @@ pub async fn execute_query_on_conn_with_limits_progress(
     diagnostic_trace_id: Option<&str>,
     progress_clock: Option<&crate::execution::StreamProgressClock>,
 ) -> Result<MySqlQueryResult, String> {
-    let opaque_types = resolve_doris_opaque_column_types(conn, sql, dialect).await;
+    execute_query_on_conn_with_limits_progress_with_data_charset(
+        conn,
+        sql,
+        bare,
+        max_rows,
+        max_result_bytes,
+        result_key_columns,
+        dialect,
+        diagnostic_trace_id,
+        progress_clock,
+        None,
+    )
+    .await
+}
+
+pub async fn execute_query_on_conn_with_limits_progress_with_data_charset(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    bare: bool,
+    max_rows: Option<usize>,
+    max_result_bytes: Option<usize>,
+    result_key_columns: &[String],
+    dialect: MySqlQueryDialect,
+    diagnostic_trace_id: Option<&str>,
+    progress_clock: Option<&crate::execution::StreamProgressClock>,
+    data_charset: Option<MySqlDataCharset>,
+) -> Result<MySqlQueryResult, String> {
     execute_query_on_conn_with_limits_progress_resolved(
         conn,
         sql,
@@ -6469,7 +6993,7 @@ pub async fn execute_query_on_conn_with_limits_progress(
         dialect,
         diagnostic_trace_id,
         progress_clock,
-        &opaque_types,
+        data_charset,
     )
     .await
 }
@@ -6484,8 +7008,9 @@ async fn execute_query_on_conn_with_limits_progress_resolved(
     dialect: MySqlQueryDialect,
     diagnostic_trace_id: Option<&str>,
     progress_clock: Option<&crate::execution::StreamProgressClock>,
-    opaque_types: &DorisOpaqueColumnTypes,
+    data_charset: Option<MySqlDataCharset>,
 ) -> Result<MySqlQueryResult, String> {
+    let opaque_types = resolve_doris_opaque_column_types(conn, sql, dialect).await;
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
@@ -6494,14 +7019,14 @@ async fn execute_query_on_conn_with_limits_progress_resolved(
             execute_result_set_with_text_protocol_on_conn(
                 conn,
                 sql,
-                row_limit,
                 max_rows,
                 max_result_bytes,
                 result_key_columns,
                 diagnostic_trace_id,
                 start,
                 progress_clock,
-                opaque_types,
+                &opaque_types,
+                data_charset,
             )
             .await
         } else {
@@ -6514,7 +7039,8 @@ async fn execute_query_on_conn_with_limits_progress_resolved(
                 diagnostic_trace_id,
                 start,
                 progress_clock,
-                opaque_types,
+                &opaque_types,
+                data_charset,
             )
             .await
             {
@@ -6523,14 +7049,14 @@ async fn execute_query_on_conn_with_limits_progress_resolved(
                     execute_result_set_with_text_protocol_on_conn(
                         conn,
                         sql,
-                        row_limit,
                         max_rows,
                         max_result_bytes,
                         result_key_columns,
                         diagnostic_trace_id,
                         start,
                         progress_clock,
-                        opaque_types,
+                        &opaque_types,
+                        data_charset,
                     )
                     .await
                 }
@@ -6549,8 +7075,10 @@ async fn execute_query_on_conn_with_limits_progress_resolved(
                     match mysql_add_column_if_not_exists_fallback(conn, &query_sql, &err).await {
                         Some(MySqlAddColumnFallback::AlreadyExists) => {
                             return Ok(MySqlQueryResult::exact(QueryResult {
+                                raw_key_cells: Vec::new(),
                                 columns: vec![],
                                 column_types: Vec::new(),
+                                deferred_large_value_cells: Vec::new(),
                                 column_sortables: vec![],
                                 spatial_columns: vec![],
                                 spatial_values: vec![],
@@ -6588,8 +7116,10 @@ async fn execute_query_on_conn_with_limits_progress_resolved(
         drop_result.map_err(|e| e.to_string())?;
 
         Ok(MySqlQueryResult::exact(QueryResult {
+            raw_key_cells: Vec::new(),
             columns: vec![],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
             spatial_values: vec![],
@@ -6629,8 +7159,33 @@ pub async fn execute_query_results_on_conn_with_limits(
     dialect: MySqlQueryDialect,
     diagnostic_trace_id: Option<&str>,
 ) -> Result<Vec<MySqlQueryResult>, String> {
-    let opaque_types = resolve_doris_opaque_column_types(conn, sql, dialect).await;
+    execute_query_results_on_conn_with_limits_with_data_charset(
+        conn,
+        sql,
+        bare,
+        max_rows,
+        max_result_bytes,
+        result_key_columns,
+        dialect,
+        diagnostic_trace_id,
+        None,
+    )
+    .await
+}
+
+pub async fn execute_query_results_on_conn_with_limits_with_data_charset(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    bare: bool,
+    max_rows: Option<usize>,
+    max_result_bytes: Option<usize>,
+    result_key_columns: &[String],
+    dialect: MySqlQueryDialect,
+    diagnostic_trace_id: Option<&str>,
+    data_charset: Option<MySqlDataCharset>,
+) -> Result<Vec<MySqlQueryResult>, String> {
     if is_result_set_query(sql, dialect) && (bare || prefers_text_protocol_query(sql, dialect)) {
+        let opaque_types = resolve_doris_opaque_column_types(conn, sql, dialect).await;
         let start = Instant::now();
         execute_result_sets_with_text_protocol_on_conn(
             conn,
@@ -6642,6 +7197,7 @@ pub async fn execute_query_results_on_conn_with_limits(
             diagnostic_trace_id,
             start,
             &opaque_types,
+            data_charset,
         )
         .await
     } else {
@@ -6655,7 +7211,7 @@ pub async fn execute_query_results_on_conn_with_limits(
             dialect,
             diagnostic_trace_id,
             None,
-            &opaque_types,
+            data_charset,
         )
         .await
         .map(|result| vec![result])
@@ -6722,8 +7278,10 @@ pub async fn execute_non_result_batch_on_conn(
             if capture_per_set_messages { mysql_info_message(&info).into_iter().collect() } else { Vec::new() };
         let elapsed_ms = start.elapsed().as_millis();
         let current_result = QueryResult {
+            raw_key_cells: Vec::new(),
             columns: vec![],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
             spatial_values: vec![],
@@ -7084,7 +7642,7 @@ fn mysql_statistics_expression_is_unsupported(error: &mysql_async::Error) -> boo
 }
 
 pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let expression_sql = mysql_list_indexes_sql(database, table, true);
     let legacy_sql = mysql_list_indexes_sql(database, table, false);
     let (result, include_expression) = match conn.query_iter(&expression_sql).await {
@@ -7108,6 +7666,7 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
                 let index_position = indexes.len();
                 index_positions.insert(name.clone(), index_position);
                 indexes.push(IndexInfo {
+                    owner: None,
                     key_directions: Vec::new(),
                     visibility: None,
                     key_metadata_complete: false,
@@ -7168,7 +7727,7 @@ pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) ->
         quote_value(database),
         quote_value(table),
     );
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let column_result = conn.query_iter(&column_sql).await.map_err(|e| e.to_string())?;
     let column_rows: Vec<mysql_async::Row> = column_result.collect_and_drop().await.map_err(|e| e.to_string())?;
     if column_rows.is_empty() {
@@ -7229,7 +7788,7 @@ pub async fn list_foreign_keys_for_database(
          ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION",
         quote_value(database),
     );
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let column_result = conn.query_iter(&column_sql).await.map_err(|e| e.to_string())?;
     let column_rows: Vec<mysql_async::Row> = column_result.collect_and_drop().await.map_err(|e| e.to_string())?;
     if column_rows.is_empty() {
@@ -7281,7 +7840,7 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
         quote_value(database),
         quote_value(table),
     );
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
 
@@ -7298,6 +7857,7 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
             valid: None,
             comment: None,
             created_at: None,
+            oracle_metadata: None,
             statement: Some(get_str_by_name(row, "ACTION_STATEMENT")).filter(|value| !value.is_empty()),
         })
         .collect())
@@ -7351,6 +7911,239 @@ mod tests {
 
     fn mysql_test_row_with_columns(values: Vec<Value>, columns: Vec<Column>) -> mysql_async::Row {
         new_row(values, columns.into())
+    }
+
+    #[test]
+    fn data_charset_converters_share_original_carrier_and_preserve_nontext() {
+        let carrier = "çÍ·×²Êºç";
+        let codec = Some(MySqlDataCharset::Gbk);
+        for kind in [
+            ColumnType::MYSQL_TYPE_VAR_STRING,
+            ColumnType::MYSQL_TYPE_STRING,
+            ColumnType::MYSQL_TYPE_BLOB,
+            ColumnType::MYSQL_TYPE_LONG_BLOB,
+            ColumnType::MYSQL_TYPE_MEDIUM_BLOB,
+            ColumnType::MYSQL_TYPE_TINY_BLOB,
+        ] {
+            let column = mysql_test_column(kind, 45, ColumnFlags::empty(), u32::MAX);
+            let row = mysql_test_row_with_columns(vec![Value::Bytes(carrier.as_bytes().to_vec())], vec![column]);
+            assert_eq!(mysql_value_to_json_with_data_charset(&row, 0, codec), serde_json::json!("缤纷彩虹"));
+            assert_eq!(mysql_value_to_json_for_export(&row, 0, false, codec).unwrap(), serde_json::json!("缤纷彩虹"));
+            assert_eq!(mysql_value_to_json_with_data_charset(&row, 0, None), mysql_value_to_json(&row, 0));
+            let mut spatial = mysql_spatial_column_builder(row.columns_ref());
+            assert_eq!(
+                mysql_row_to_json_with_srids(&row, &mut spatial, &[], codec).0[0],
+                serde_json::json!("缤纷彩虹")
+            );
+        }
+        let row = mysql_test_row_with_columns(
+            vec![
+                Value::Bytes(carrier.as_bytes().to_vec()),
+                Value::NULL,
+                Value::Bytes("正常中文".as_bytes().to_vec()),
+                Value::Int(42),
+            ],
+            vec![
+                mysql_test_column(ColumnType::MYSQL_TYPE_BLOB, 63, ColumnFlags::BINARY_FLAG, 100),
+                mysql_test_column(ColumnType::MYSQL_TYPE_VAR_STRING, 45, ColumnFlags::empty(), 100),
+                mysql_test_column(ColumnType::MYSQL_TYPE_VAR_STRING, 45, ColumnFlags::empty(), 100),
+                mysql_test_column(ColumnType::MYSQL_TYPE_LONG, 63, ColumnFlags::empty(), 100),
+            ],
+        );
+        for index in 0..row.len() {
+            assert_eq!(mysql_value_to_json_with_data_charset(&row, index, codec), mysql_value_to_json(&row, index));
+        }
+        // Existing UTF8 repair must not run before explicit GBK decoding.
+        let row = mysql_test_row_with_columns(
+            vec![Value::Bytes("ä¸\u{AD}".as_bytes().to_vec())],
+            vec![mysql_test_column(ColumnType::MYSQL_TYPE_VAR_STRING, 45, ColumnFlags::empty(), 100)],
+        );
+        assert_eq!(mysql_value_to_json(&row, 0), serde_json::json!("中"));
+        assert_eq!(mysql_value_to_json_with_data_charset(&row, 0, codec), serde_json::json!("ä¸\u{AD}"));
+    }
+
+    #[test]
+    fn data_charset_preview_is_bounded_and_preserves_wire_size() {
+        let carrier = "çÍ·×²Êºç".repeat(10_000);
+        let column = mysql_test_column(ColumnType::MYSQL_TYPE_LONG_BLOB, 45, ColumnFlags::empty(), u32::MAX);
+        let row = mysql_test_row_with_columns(vec![Value::Bytes(carrier.as_bytes().to_vec())], vec![column]);
+        let mut spatial = mysql_spatial_column_builder(row.columns_ref());
+        let (values, _, cells) = mysql_row_to_json_with_srids_and_previews(
+            &row,
+            &mut spatial,
+            3,
+            Some(5),
+            &HashSet::new(),
+            &[],
+            Some(MySqlDataCharset::Gbk),
+        );
+        assert_eq!(values[0], serde_json::json!("缤..."));
+        assert_eq!(
+            cells,
+            vec![LargeValueCell {
+                row_index: 3,
+                column_index: 0,
+                original_bytes: carrier.len(),
+                value_ref: None,
+                pending_decode: None
+            }]
+        );
+    }
+
+    #[test]
+    fn data_charset_option_is_removed_before_mysql_async_parsing() {
+        let url = "mysql://root@localhost/test?dataCharset=GBK&charset=utf8mb4";
+        assert_eq!(mysql_async_url(url), "mysql://root@localhost/test");
+        assert_eq!(data_charset_from_url(url).unwrap(), Some(MySqlDataCharset::Gbk));
+        let encoded = "mysql://root@localhost/test?%64ataCharset=%47BK&%63harset=utf8mb4";
+        assert_eq!(mysql_async_url(encoded), "mysql://root@localhost/test");
+        assert_eq!(data_charset_from_url(encoded).unwrap(), Some(MySqlDataCharset::Gbk));
+    }
+
+    #[test]
+    fn data_charset_original_keys_preserve_carriers_and_decoded_collisions() {
+        let columns = vec![
+            mysql_test_column(ColumnType::MYSQL_TYPE_VAR_STRING, 45, ColumnFlags::PRI_KEY_FLAG, 100).with_name(b"key"),
+            mysql_test_column(ColumnType::MYSQL_TYPE_LONG, 63, ColumnFlags::PRI_KEY_FLAG, 10).with_name(b"part"),
+        ];
+        let indexes = mysql_result_key_column_indexes(&columns, &[]);
+        let codec = Some(MySqlDataCharset::Gbk);
+        let row = |key: &str| {
+            mysql_test_row_with_columns(vec![Value::Bytes(key.as_bytes().to_vec()), Value::Int(7)], columns.clone())
+        };
+        let carrier = row("ÖÐÎÄ");
+        let unicode = row("中文");
+        assert_eq!(
+            mysql_value_to_json_with_data_charset(&carrier, 0, codec),
+            mysql_value_to_json_with_data_charset(&unicode, 0, codec)
+        );
+        let original = mysql_original_key_cells(&carrier, 0, &indexes, codec);
+        assert_eq!(
+            original,
+            vec![
+                OriginalKeyCell { row_index: 0, column_index: 0, value: serde_json::json!("ÖÐÎÄ") },
+                OriginalKeyCell { row_index: 0, column_index: 1, value: mysql_value_to_json(&carrier, 1) },
+            ]
+        );
+        assert_ne!(original[0].value, mysql_original_key_cells(&unicode, 1, &indexes, codec)[0].value);
+        let heuristic = row("ä¸\u{AD}");
+        assert_eq!(mysql_value_to_json(&heuristic, 0), serde_json::json!("中"));
+        assert_eq!(mysql_original_key_cells(&heuristic, 2, &indexes, codec)[0].value, serde_json::json!("ä¸\u{AD}"));
+        assert!(mysql_original_key_cells(&carrier, 0, &indexes, None).is_empty());
+        let alias =
+            mysql_test_column(ColumnType::MYSQL_TYPE_VAR_STRING, 45, ColumnFlags::empty(), 100).with_name(b"alias_key");
+        assert_eq!(mysql_result_key_column_indexes(&[alias], &["alias_key".into()]), HashSet::from([0]));
+    }
+
+    #[test]
+    fn data_charset_original_decimal_keys_remain_lossless_on_the_wire() {
+        for (column_type, values) in [
+            (ColumnType::MYSQL_TYPE_DECIMAL, ["12345678901234567890.12345678", "12345678901234567890.12345679"]),
+            (
+                ColumnType::MYSQL_TYPE_NEWDECIMAL,
+                [
+                    "123456789012345678901234567890.123456789012345678901234567890",
+                    "123456789012345678901234567890.123456789012345678901234567891",
+                ],
+            ),
+        ] {
+            let column = mysql_test_column(column_type, 63, ColumnFlags::PRI_KEY_FLAG, 65).with_name(b"key");
+            let indexes = mysql_result_key_column_indexes(std::slice::from_ref(&column), &[]);
+            let mut wire_values = Vec::new();
+            for value in values {
+                let row =
+                    mysql_test_row_with_columns(vec![Value::Bytes(value.as_bytes().to_vec())], vec![column.clone()]);
+                let keys = mysql_original_key_cells(&row, 0, &indexes, Some(MySqlDataCharset::Gbk));
+                assert_eq!(keys[0].value, serde_json::json!(value));
+                let wire = serde_json::to_string(&keys).unwrap();
+                let restored: Vec<OriginalKeyCell> = serde_json::from_str(&wire).unwrap();
+                assert_eq!(restored[0].value.as_str(), Some(value));
+                assert_eq!(
+                    mysql_value_to_json_with_data_charset(&row, 0, Some(MySqlDataCharset::Gbk)),
+                    restored[0].value
+                );
+                wire_values.push(restored[0].value.clone());
+            }
+            assert_ne!(wire_values[0], wire_values[1], "adjacent exact decimal keys must not collapse");
+        }
+    }
+
+    #[test]
+    fn data_charset_server_marker_source_stays_uninterpreted_until_core_validation() {
+        let row = mysql_test_row_with_columns(
+            vec![Value::Bytes("ÖÐ".as_bytes().to_vec()), Value::Bytes(b"T:1:1000".to_vec())],
+            vec![
+                mysql_test_column(ColumnType::MYSQL_TYPE_VAR_STRING, 45, ColumnFlags::PRI_KEY_FLAG, 100)
+                    .with_name(b"payload"),
+                mysql_test_column(ColumnType::MYSQL_TYPE_VAR_STRING, 45, ColumnFlags::empty(), 100)
+                    .with_name(b"__DBX_LARGE_VALUE_BYTES_T_0"),
+            ],
+        );
+        let codec = Some(MySqlDataCharset::Gbk);
+        assert_eq!(mysql_value_to_json_with_data_charset(&row, 0, codec), serde_json::json!("ÖÐ"));
+        assert_eq!(MySqlDataCharset::Gbk.interpret_text("ÖÐ"), "中");
+        let protected = mysql_result_protected_column_indexes(row.columns_ref(), &[]);
+        let mut spatial = mysql_spatial_column_builder(row.columns_ref());
+        let (values, _, cells) =
+            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial, 0, Some(1), &protected, &[], codec);
+        assert_eq!(values[0], serde_json::json!("ÖÐ"));
+        assert!(cells.is_empty(), "core owns server-marker pending metadata");
+        assert!(
+            mysql_original_key_cells(&row, 0, &HashSet::from([0]), codec).is_empty(),
+            "a truncated expression is not an authoritative key"
+        );
+    }
+
+    #[test]
+    fn data_charset_original_key_sidecar_shares_row_budget_atomically() {
+        let values = vec![serde_json::json!("中")];
+        let keys = vec![OriginalKeyCell { row_index: 0, column_index: 0, value: serde_json::json!("ÖÐ") }];
+        let mut used = 0;
+        assert!(mysql_accept_original_key_row_budget(&values, &[], &[], &keys, 0, Some(200), &mut used).unwrap());
+        let one_row = used;
+        assert!(one_row > serde_json::to_vec(&values).unwrap().len());
+        assert!(!mysql_accept_original_key_row_budget(&values, &[], &[], &keys, 1, Some(one_row), &mut used).unwrap());
+        assert_eq!(used, one_row, "reject the row and its metadata atomically");
+        assert!(mysql_accept_original_key_row_budget(&values, &[], &[], &keys, 0, Some(1), &mut 0)
+            .unwrap_err()
+            .contains("byte budget"));
+        assert!(mysql_accept_original_key_row_budget(&values, &[], &[], &keys, 0, None, &mut 0).unwrap());
+        assert!(mysql_accept_original_key_row_budget(&values, &[], &[], &[], 0, Some(1), &mut 0).unwrap());
+        let row = mysql_test_row_with_columns(
+            vec![Value::Bytes(vec![b'x'; 1000])],
+            vec![mysql_test_column(ColumnType::MYSQL_TYPE_VAR_STRING, 45, ColumnFlags::PRI_KEY_FLAG, 1000)],
+        );
+        assert!(mysql_legacy_key_bytes_fit_budget(
+            &row,
+            0,
+            &HashSet::from([0]),
+            Some(MySqlDataCharset::Gbk),
+            Some(100)
+        )
+        .is_err());
+        assert!(!mysql_legacy_key_bytes_fit_budget(
+            &row,
+            1,
+            &HashSet::from([0]),
+            Some(MySqlDataCharset::Gbk),
+            Some(100)
+        )
+        .unwrap());
+        assert!(mysql_legacy_key_bytes_fit_budget(&row, 0, &HashSet::from([0]), None, Some(100)).unwrap());
+    }
+
+    #[test]
+    fn data_charset_invalid_wire_utf8_never_becomes_replacement_text() {
+        let bytes = vec![0xff; 100];
+        let row = mysql_test_row_with_columns(
+            vec![Value::Bytes(bytes.clone())],
+            vec![mysql_test_column(ColumnType::MYSQL_TYPE_LONG_BLOB, 45, ColumnFlags::empty(), u32::MAX)],
+        );
+        let codec = Some(MySqlDataCharset::Gbk);
+        assert_eq!(mysql_value_to_json_with_data_charset(&row, 0, codec), crate::binary_value_to_json(&bytes));
+        let (preview, size) = mysql_bounded_value_preview(&row, 0, 5, &HashSet::new(), codec).unwrap();
+        assert_eq!(preview, serde_json::json!("0xff..."));
+        assert_eq!(size, 100);
     }
 
     #[tokio::test]
@@ -9054,7 +9847,7 @@ mod tests {
         let column = Column::new(ColumnType::MYSQL_TYPE_STRING).with_name(b"v2").with_character_set(33);
         let row = mysql_test_row_with_columns(vec![Value::Bytes(vec![0x00, 0xff, 0x01])], vec![column.clone()]);
         assert_eq!(
-            mysql_value_to_json_with_effective_type(&row, 0, Some("agg_state<sum(int)>")),
+            mysql_value_to_json_with_effective_type(&row, 0, Some("agg_state<sum(int)>"), None),
             serde_json::json!("0x00ff01")
         );
         assert!(ensure_doris_opaque_cells_fit_budget(&row, &["agg_state<sum(int)>".to_string()], Some(7))
@@ -9069,14 +9862,14 @@ mod tests {
 
         let null_row = mysql_test_row_with_columns(vec![Value::NULL], vec![column]);
         assert_eq!(
-            mysql_value_to_json_with_effective_type(&null_row, 0, Some("agg_state<sum(int)>")),
+            mysql_value_to_json_with_effective_type(&null_row, 0, Some("agg_state<sum(int)>"), None),
             serde_json::Value::Null
         );
 
         let unexpected =
             mysql_test_row_with_columns(vec![Value::Int(42)], vec![Column::new(ColumnType::MYSQL_TYPE_LONG)]);
         assert_eq!(
-            mysql_value_to_json_with_effective_type(&unexpected, 0, Some("agg_state<sum(int)>")),
+            mysql_value_to_json_with_effective_type(&unexpected, 0, Some("agg_state<sum(int)>"), None),
             serde_json::json!(42)
         );
     }
@@ -9147,6 +9940,17 @@ mod tests {
     }
 
     #[test]
+    fn mysql_binary_string_preserves_canonical_hex_for_ascii_uuid() {
+        let binary_column = mysql_test_column(ColumnType::MYSQL_TYPE_STRING, 63, ColumnFlags::BINARY_FLAG, 36);
+        let uuid_bytes = b"01a057bf-2bbd-70a6-b3c3-56eb409a0f95".to_vec();
+
+        assert_eq!(
+            mysql_bytes_to_json(uuid_bytes, &binary_column),
+            serde_json::json!("0x30316130353762662d326262642d373061362d623363332d353665623430396130663935")
+        );
+    }
+
+    #[test]
     fn mysql_binary_values_preserve_all_bytes_as_hex() {
         let binary_column = mysql_test_column(ColumnType::MYSQL_TYPE_STRING, 63, ColumnFlags::BINARY_FLAG, 8);
         let varbinary_column = mysql_test_column(ColumnType::MYSQL_TYPE_VAR_STRING, 63, ColumnFlags::BINARY_FLAG, 8);
@@ -9192,14 +9996,20 @@ mod tests {
         let mut spatial_columns = mysql_spatial_column_builder(row.columns_ref());
 
         let (values, _srids, cells) =
-            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 7, Some(1024), &protected, &[]);
+            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 7, Some(1024), &protected, &[], None);
 
         assert_eq!(values[0], serde_json::json!("k".repeat(2048)));
         assert_eq!(values[1].as_str().map(str::len), Some(1027));
         assert!(values[1].as_str().is_some_and(|value| value.ends_with("...")));
         assert_eq!(
             cells,
-            vec![LargeValueCell { row_index: 7, column_index: 1, original_bytes: 32 * 1024, value_ref: None }]
+            vec![LargeValueCell {
+                row_index: 7,
+                column_index: 1,
+                original_bytes: 32 * 1024,
+                value_ref: None,
+                pending_decode: None
+            }]
         );
     }
 
@@ -9222,12 +10032,18 @@ mod tests {
         let mut spatial_columns = mysql_spatial_column_builder(row.columns_ref());
 
         let (values, _srids, cells) =
-            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 0, Some(512), &protected, &[]);
+            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 0, Some(512), &protected, &[], None);
 
         assert_eq!(values[0], serde_json::json!("k".repeat(2048)));
         assert_eq!(
             cells,
-            vec![LargeValueCell { row_index: 0, column_index: 1, original_bytes: 4096, value_ref: None }]
+            vec![LargeValueCell {
+                row_index: 0,
+                column_index: 1,
+                original_bytes: 4096,
+                value_ref: None,
+                pending_decode: None
+            }]
         );
     }
 
@@ -9262,7 +10078,7 @@ mod tests {
         let mut spatial_columns = mysql_spatial_column_builder(row.columns_ref());
 
         let (values, _srids, cells) =
-            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 0, Some(256), &protected, &[]);
+            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 0, Some(256), &protected, &[], None);
 
         assert_eq!(values[0].as_str().map(str::len), Some(500));
         assert!(values[1].as_str().is_some_and(|value| value.ends_with("...")));
@@ -9270,7 +10086,13 @@ mod tests {
         assert_eq!(values[3], serde_json::json!("B:419:25143"));
         assert_eq!(
             cells,
-            vec![LargeValueCell { row_index: 0, column_index: 1, original_bytes: 10_000, value_ref: None }]
+            vec![LargeValueCell {
+                row_index: 0,
+                column_index: 1,
+                original_bytes: 10_000,
+                value_ref: None,
+                pending_decode: None
+            }]
         );
     }
 
@@ -9284,8 +10106,15 @@ mod tests {
         let row = mysql_test_row_with_columns(vec![Value::Bytes(vec![0xAB; 4096])], vec![payload_column]);
         let mut spatial_columns = mysql_spatial_column_builder(row.columns_ref());
 
-        let (values, _srids, cells) =
-            mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 0, Some(512), &HashSet::new(), &[]);
+        let (values, _srids, cells) = mysql_row_to_json_with_srids_and_previews(
+            &row,
+            &mut spatial_columns,
+            0,
+            Some(512),
+            &HashSet::new(),
+            &[],
+            None,
+        );
 
         let preview = values[0].as_str().unwrap();
         assert!(preview.starts_with("0xabab"));
@@ -9403,6 +10232,179 @@ mod tests {
             server closed session with no notification";
 
         assert!(mysql_error_should_retry_without_ssl(error));
+    }
+
+    #[test]
+    fn mysql_tls_legacy_version_error_retries_only_when_tls_is_optional() {
+        let error = "MySQL connection failed: Input/output error: Input/output error: \
+                     peer is incompatible: ServerDoesNotSupportTls12Or13";
+        assert!(mysql_error_should_retry_without_ssl(error));
+        for mode in ["required", "verify_ca", "verify_identity"] {
+            assert_eq!(ssl_fallback_url(&format!("mysql://host/db?ssl-mode={mode}")), None);
+        }
+        assert_eq!(ssl_fallback_url("mysql://host/db?ssl-mode=disabled"), None);
+        assert_eq!(ssl_fallback_url("mysql://host/db?ssl-cert=client.pem&ssl-key=client.key"), None);
+    }
+
+    #[derive(Clone, Copy)]
+    enum MysqlTlsTestReply {
+        LegacyTls,
+        AccessDenied,
+        LegacyEof,
+        Accept,
+    }
+
+    async fn mysql_tls_test_packet(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
+        use tokio::io::AsyncReadExt;
+        let mut header = [0; 4];
+        socket.read_exact(&mut header).await.unwrap();
+        let length = u32::from_le_bytes([header[0], header[1], header[2], 0]) as usize;
+        assert!(length < 65536);
+        let mut payload = vec![0; length];
+        socket.read_exact(&mut payload).await.unwrap();
+        payload
+    }
+
+    async fn mysql_tls_test_write(socket: &mut tokio::net::TcpStream, seq: u8, payload: &[u8]) {
+        use tokio::io::AsyncWriteExt;
+        let length = (payload.len() as u32).to_le_bytes();
+        socket.write_all(&[length[0], length[1], length[2], seq]).await.unwrap();
+        socket.write_all(payload).await.unwrap();
+    }
+
+    async fn mysql_tls_test_server(
+        listener: tokio::net::TcpListener,
+        replies: Vec<MysqlTlsTestReply>,
+    ) -> Vec<mysql_async::consts::CapabilityFlags> {
+        use mysql_async::consts::CapabilityFlags as Caps;
+        use mysql_common::proto::MySerialize;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut attempts = Vec::new();
+        for reply in replies {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let greeting = mysql_common::packets::HandshakePacket::new(
+                10,
+                &b"5.6.24-test"[..],
+                1,
+                *b"12345678",
+                Some(&b"abcdefghijkl\0"[..]),
+                Caps::CLIENT_PROTOCOL_41
+                    | Caps::CLIENT_SECURE_CONNECTION
+                    | Caps::CLIENT_PLUGIN_AUTH
+                    | Caps::CLIENT_SSL
+                    | Caps::CLIENT_DEPRECATE_EOF,
+                33,
+                StatusFlags::SERVER_STATUS_AUTOCOMMIT,
+                Some(&b"mysql_native_password"[..]),
+            );
+            let mut payload = Vec::new();
+            greeting.serialize(&mut payload);
+            mysql_tls_test_write(&mut socket, 0, &payload).await;
+            let request = mysql_tls_test_packet(&mut socket).await;
+            let capabilities = Caps::from_bits_truncate(u32::from_le_bytes(request[..4].try_into().unwrap()));
+            attempts.push(capabilities);
+
+            match reply {
+                MysqlTlsTestReply::LegacyTls => {
+                    assert!(capabilities.contains(Caps::CLIENT_SSL));
+                    assert_eq!(request.len(), 32);
+                    let mut header = [0; 5];
+                    socket.read_exact(&mut header).await.unwrap();
+                    let mut client_hello = vec![0; u16::from_be_bytes([header[3], header[4]]) as usize];
+                    socket.read_exact(&mut client_hello).await.unwrap();
+                    // A complete TLS 1.0 ServerHello makes the real rustls connector
+                    // report ServerDoesNotSupportTls12Or13 before authentication.
+                    let mut hello = vec![0x16, 3, 1, 0, 44, 2, 0, 0, 40, 3, 1];
+                    hello.extend_from_slice(&[0; 32]);
+                    hello.extend_from_slice(&[0, 0xc0, 0x2f, 0, 0, 0]);
+                    socket.write_all(&hello).await.unwrap();
+                }
+                MysqlTlsTestReply::AccessDenied => {
+                    assert!(!capabilities.contains(Caps::CLIENT_SSL));
+                    let mut error = vec![0xff, 0x15, 0x04];
+                    error.extend_from_slice(b"#28000Access denied for user 'test'@'localhost' (using password: YES)");
+                    mysql_tls_test_write(&mut socket, 2, &error).await;
+                }
+                MysqlTlsTestReply::LegacyEof => {
+                    assert!(!capabilities.contains(Caps::CLIENT_SSL));
+                    assert!(capabilities.contains(Caps::CLIENT_DEPRECATE_EOF));
+                    mysql_tls_test_write(&mut socket, 3, &[0, 0, 0, 2, 0, 0, 0]).await;
+                }
+                MysqlTlsTestReply::Accept => {
+                    assert!(!capabilities.contains(Caps::CLIENT_SSL));
+                    mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    loop {
+                        let command = mysql_tls_test_packet(&mut socket).await;
+                        if command[0] == 1 {
+                            break;
+                        }
+                        mysql_tls_test_write(&mut socket, 1, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    }
+                }
+            }
+        }
+        attempts
+    }
+
+    async fn mysql_tls_test_connect(
+        replies: Vec<MysqlTlsTestReply>,
+        mode: &str,
+    ) -> (Result<MySqlPool, String>, tokio::task::JoinSet<Vec<mysql_async::consts::CapabilityFlags>>) {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut servers = tokio::task::JoinSet::new();
+        servers.spawn(mysql_tls_test_server(listener, replies));
+        let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode={mode}&max_allowed_packet=65536&wait_timeout=60&sessionVariables=group_concat_max_len%3D1024");
+        let result = connect_with_ca_cert_and_pool_limit(&url, None, Duration::from_secs(2), 1).await;
+        (result, servers)
+    }
+
+    #[tokio::test]
+    async fn mysql_tls_preferred_retains_legacy_tls_and_plaintext_errors() {
+        let (result, mut servers) =
+            mysql_tls_test_connect(vec![MysqlTlsTestReply::LegacyTls, MysqlTlsTestReply::AccessDenied], "preferred")
+                .await;
+        let error = result.unwrap_err();
+        assert!(error.contains("ServerDoesNotSupportTls12Or13"), "{error}");
+        assert!(error.contains("1045 (28000)"), "{error}");
+        assert_eq!(servers.join_next().await.unwrap().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn mysql_tls_preferred_returns_a_working_plaintext_pool() {
+        let (result, mut servers) =
+            mysql_tls_test_connect(vec![MysqlTlsTestReply::LegacyTls, MysqlTlsTestReply::Accept], "preferred").await;
+        let pool = result.unwrap();
+        verify_pool_connection(&pool, Duration::from_secs(2)).await.unwrap();
+        pool.disconnect().await.unwrap();
+        assert_eq!(servers.join_next().await.unwrap().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn mysql_tls_preferred_retains_original_error_after_legacy_eof_retry() {
+        let (result, mut servers) = mysql_tls_test_connect(
+            vec![MysqlTlsTestReply::LegacyTls, MysqlTlsTestReply::LegacyEof, MysqlTlsTestReply::AccessDenied],
+            "preferred",
+        )
+        .await;
+        let error = result.unwrap_err();
+        assert!(error.contains("ServerDoesNotSupportTls12Or13"), "{error}");
+        assert!(error.contains("1045 (28000)"), "{error}");
+        let attempts = servers.join_next().await.unwrap().unwrap();
+        assert_eq!(attempts.len(), 3);
+        assert!(!attempts[2].contains(mysql_async::consts::CapabilityFlags::CLIENT_DEPRECATE_EOF));
+    }
+
+    #[tokio::test]
+    async fn mysql_tls_strict_modes_never_retry_in_plaintext() {
+        for mode in ["required", "verify_ca", "verify_identity"] {
+            let (result, mut servers) = mysql_tls_test_connect(vec![MysqlTlsTestReply::LegacyTls], mode).await;
+            let error = result.unwrap_err();
+            assert!(error.contains("ServerDoesNotSupportTls12Or13"), "{mode}: {error}");
+            assert_eq!(servers.join_next().await.unwrap().unwrap().len(), 1);
+        }
     }
 
     #[test]
@@ -10421,6 +11423,65 @@ mod tests {
         let default = connection_timeout();
         let url = "mysql://host:3306/db";
         assert_eq!(crate::db::parse_connect_timeout(url), default);
+    }
+
+    /// #12908: metadata, DDL, connection-info, cancel and streaming paths used to
+    /// check connections out with the compile-time `CONNECTION_TIMEOUT_SECS`
+    /// (5 s) even when the connection was configured with a larger budget. The
+    /// pool now carries the configured value, so the timeout reported by a
+    /// checkout failure follows the connection settings.
+    #[test]
+    fn create_pool_carries_the_configured_checkout_timeout() {
+        let pool = create_pool(
+            "mysql://root@127.0.0.1:3306/app",
+            None,
+            2,
+            None,
+            Duration::from_secs(300),
+            None,
+            &[],
+            MySqlSetupMode::Standard,
+            MySqlEofMode::Legacy,
+            MySqlTcpKeepaliveMode::Enabled,
+        )
+        .expect("pool");
+
+        assert_eq!(pool.checkout_timeout(), Duration::from_secs(300));
+        assert_ne!(pool.checkout_timeout(), connection_timeout());
+        assert_eq!(
+            super::super::PoolCheckoutError::Timeout {
+                database: "MySQL",
+                stage: MysqlCheckoutStage::Wait,
+                timeout: pool.checkout_timeout(),
+            }
+            .to_string(),
+            "MySQL connection pool checkout timed out [stage=wait, timeout_ms=300000]"
+        );
+    }
+
+    #[test]
+    fn create_pool_keeps_the_legacy_default_when_the_caller_does_not_override_it() {
+        let pool = MySqlPool::new(mysql_async::OptsBuilder::default(), 2);
+        assert_eq!(pool.checkout_timeout(), connection_timeout());
+    }
+
+    #[test]
+    fn create_pool_clamps_a_zero_checkout_timeout_to_one_second() {
+        let pool = create_pool(
+            "mysql://root@127.0.0.1:3306/app",
+            None,
+            2,
+            None,
+            Duration::from_secs(0),
+            None,
+            &[],
+            MySqlSetupMode::Standard,
+            MySqlEofMode::Legacy,
+            MySqlTcpKeepaliveMode::Enabled,
+        )
+        .expect("pool");
+
+        assert_eq!(pool.checkout_timeout(), Duration::from_secs(1));
     }
 
     #[test]

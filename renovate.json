@@ -78,7 +78,6 @@
         "@tauri-apps/plugin-clipboard-manager",
         "@tauri-apps/plugin-dialog",
         "@tauri-apps/plugin-fs",
-        "@tauri-apps/plugin-process",
         "@tauri-apps/plugin-shell",
         "@tauri-apps/plugin-updater"
       ],
@@ -94,6 +93,70 @@
       ],
       "enabled": false,
       "description": "Docs deps are pinned deliberately (fumadocs/lucide 2026-10-14 regression) and renovate's pnpm rewrites docs/pnpm-lock.yaml in a pre-10.34 patchedDependencies format that fails the frozen CI install; bump docs deps manually with pnpm 10.34.7 and a verified local build"
+    },
+    {
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchFileNames": [
+        "agents/drivers/oracle-go/go.mod",
+        "agents/drivers/xugu/go.mod",
+        "agents/drivers/rabbitmq/go.mod",
+        "agents/drivers/kingbase-go/go.mod"
+      ],
+      "enabled": false,
+      "description": "Windows 7 agents build on Go 1.20.14 (Go 1.21+ requires Windows 10); their go.mod bumps stay manual (#11926 rounds 1-3)"
+    },
+    {
+      "matchPackageNames": [
+        "golang.org/x/net",
+        "golang.org/x/crypto",
+        "golang.org/x/sys",
+        "golang.org/x/text",
+        "github.com/apache/thrift",
+        "go"
+      ],
+      "enabled": false,
+      "description": "golang.org/x/* and thrift releases now declare go 1.26 while agent-go CI and several release jobs stay on 1.23-1.25, and the go directive / setup-go go-version inputs must move only with a deliberate toolchain bump; re-enable per package once CI is on Go 1.26 (#11926, #11932)"
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchPackageNames": [
+        "pnpm"
+      ],
+      "enabled": false,
+      "description": "pnpm comes from packageManager in package.json; the action-setup version input must not drift from it (#11932 rounds 1-6)"
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchPackageNames": [
+        "go",
+        "rust",
+        "sccache"
+      ],
+      "enabled": false,
+      "description": "uses-with tool inputs move only with deliberate toolchain bumps: Go 1.20.14 is the last Windows 7 release (#11926), sccache 0.19.0 breaks the win7 build-std rustc invocation with os error 206, and the nightly pin is keyed by WIN7_NIGHTLY_TOOLCHAIN for the prebuilt win7 artifacts (#13436)"
+    },
+    {
+      "matchManagers": [
+        "npm"
+      ],
+      "matchPackageNames": [
+        "pnpm"
+      ],
+      "enabled": false,
+      "description": "pnpm packageManager stays on the version the ci.yml action-setup steps pin (10.34.7); bump it manually together with those pins (#12479)"
+    },
+    {
+      "paths": [
+        "flake.nix"
+      ],
+      "enabled": false,
+      "description": "Nix hashes must be updated manually with the CI-computed value; renovate's local pnpm environment computes a different dbx-desktop-pnpm-deps hash"
     }
   ]
 }

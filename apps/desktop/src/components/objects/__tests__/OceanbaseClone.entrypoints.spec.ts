@@ -6,14 +6,16 @@ import i18n, { loadLocaleMessages } from "@/i18n";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import ObjectBrowser from "@/components/objects/ObjectBrowser.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
+import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { OraclePackageSaveAsFailure, type OraclePackageSaveAsPlan } from "@/lib/table/oraclePackageSaveAs";
 
-const backend = vi.hoisted(() => ({ executeQuery: vi.fn(), buildCreateTableSql: vi.fn(), buildCopyTableDataSql: vi.fn() }));
-const packageSaveAs = vi.hoisted(() => ({ prepare: vi.fn(), execute: vi.fn() }));
+const backend = vi.hoisted(() => ({ executeQuery: vi.fn(), executeConditionalUpdate: vi.fn(), buildDuplicateTableStructureSql: vi.fn(), buildCreateTableSql: vi.fn(), buildCopyTableDataSql: vi.fn() }));
+const packageSaveAs = vi.hoisted(() => ({ prepare: vi.fn(), prepareExecution: vi.fn(), execute: vi.fn(), dispose: vi.fn() }));
 vi.mock("@/lib/backend/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/backend/api")>()),
   ...backend,
@@ -23,6 +25,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   loadSchemaCache: vi.fn().mockResolvedValue(null),
   deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
   checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+  saveConnectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),
   listSchemas: vi.fn().mockResolvedValue(["APP"]),
   listDatabases: vi.fn().mockResolvedValue(["APP"]),
   listObjects: vi.fn().mockResolvedValue([{ name: "SOURCE", object_type: "TABLE", schema: "APP" }]),
@@ -34,7 +37,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
 }));
 vi.mock("@/lib/table/oraclePackageSaveAs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/table/oraclePackageSaveAs")>();
-  return { ...actual, prepareOraclePackageSaveAs: (...args: unknown[]) => packageSaveAs.prepare(...args), executeOraclePackageSaveAs: (...args: unknown[]) => packageSaveAs.execute(...args) };
+  return { ...actual, prepareOraclePackageSaveAs: (...args: unknown[]) => packageSaveAs.prepare(...args), prepareOraclePackageSaveAsExecution: (...args: unknown[]) => packageSaveAs.prepareExecution(...args) };
 });
 
 const result = (rows: unknown[][] = []) => ({ columns: [], rows, affected_rows: 0, execution_time_ms: 0 });
@@ -63,6 +66,8 @@ beforeEach(() => {
   backend.buildCopyTableDataSql.mockResolvedValue('INSERT INTO "APP"."MixedCopy" SELECT * FROM "APP"."SOURCE"');
   packageSaveAs.prepare.mockReset();
   packageSaveAs.execute.mockReset();
+  packageSaveAs.dispose.mockReset().mockResolvedValue(undefined);
+  packageSaveAs.prepareExecution.mockReset().mockImplementation(async (...args: unknown[]) => Object.assign(() => packageSaveAs.execute(...args), { dispose: packageSaveAs.dispose }));
   backend.executeQuery.mockImplementation(async (_id, _db, sql: string) => {
     if (sql.includes("ALL_TAB_COMMENTS")) return result([["source comment"]]);
     if (sql.includes("ALL_TABLES")) return result([["NO", "N"]]);
@@ -533,6 +538,21 @@ async function beginPackageSaveAs(surface: "sidebar" | "objects") {
 }
 
 describe.each(["sidebar", "objects"] as const)("%s Oracle package Save As failure refresh", (surface) => {
+  it("binds the execution before production confirmation and releases the unused approval on cancel", async () => {
+    connection.is_production = true;
+    const { controller, plan } = await beginPackageSaveAs(surface);
+    const pending = controller.confirmPackageSaveAs();
+    const safety = useProductionSafetyStore();
+    await vi.waitFor(() => expect(safety.pending).toMatchObject({ sql: plan.statements.join("\n\n") }));
+    expect(packageSaveAs.prepareExecution).toHaveBeenCalledExactlyOnceWith(plan, expect.any(Function));
+    expect(packageSaveAs.execute).not.toHaveBeenCalled();
+    safety.cancel();
+    await pending;
+    expect(packageSaveAs.execute).not.toHaveBeenCalled();
+    expect(packageSaveAs.dispose).toHaveBeenCalledOnce();
+    expect(controller.packageSaveAsOpen).toBe(true);
+  });
+
   it("refreshes the target tree and keeps the failed plan editable for recovery", async () => {
     const { controller, refresh, plan } = await beginPackageSaveAs(surface);
     packageSaveAs.execute.mockRejectedValue(new OraclePackageSaveAsFailure(plan, ["PACKAGE P_NEW"], "PACKAGE BODY P_NEW", new Error("body failed"), true));
@@ -605,5 +625,41 @@ describe.each(["sidebar", "objects"] as const)("%s Oracle package Save As failur
     expect(refresh).toHaveBeenCalledWith(connection.id, "APP", "APP");
     expect(controller.packageSaveAsDrafts).toEqual({ body: "P_OTHER draft" });
     expect(controller.packageSaveAsError).toBe("");
+  });
+});
+
+describe.each(["sidebar", "objects"] as const)("%s MySQL copy task entry point", (surface) => {
+  it("uses the owned copy task for clone and paste, blocks reentry, and refreshes the target data tab", async () => {
+    const { controller, context } = await mountEntry(surface);
+    const mysql = { ...connection, db_type: "mysql", driver_profile: "mysql" } as ConnectionConfig;
+    useConnectionStore().connections = [mysql];
+    context.value = { connection: mysql, database: "APP", schema: "APP" };
+    controller.pasteTableEntries = [{ sourceName: "SOURCE", targetName: "mysql_copy", connectionId: connection.id, database: "APP", schema: "APP" }];
+    backend.buildDuplicateTableStructureSql.mockResolvedValue("CREATE TABLE `mysql_copy` LIKE `SOURCE`;");
+    backend.buildCopyTableDataSql.mockResolvedValue("INSERT INTO `mysql_copy` (`ID`) SELECT `ID` FROM `SOURCE`;");
+    let finish!: () => void;
+    const copying = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    backend.executeConditionalUpdate.mockImplementation(async (_id, _db, sql: string) => {
+      if (sql.startsWith("INSERT")) await copying;
+      return { ...result(), affected_rows: sql.startsWith("INSERT") ? 7000001 : 0 };
+    });
+    const refreshData = vi.spyOn(useQueryStore(), "refreshDataTabsForTable").mockResolvedValue(1);
+    await nextTick();
+    const pending = controller.confirmPasteTable();
+    await vi.waitFor(() => expect(backend.executeConditionalUpdate).toHaveBeenCalledTimes(2));
+    const task = useTableCopyTaskStore();
+    expect(task.open).toBe(false);
+    expect(task.task?.phase).toBe("data");
+    expect(controller.showPasteDialog).toBe(false);
+    expect(refreshData).not.toHaveBeenCalled();
+    await controller.confirmPasteTable();
+    expect(backend.executeConditionalUpdate).toHaveBeenCalledTimes(2);
+    finish();
+    await pending;
+    expect(task.task?.status).toBe("succeeded");
+    expect(task.task?.targets[0]?.copiedRows).toBe(7000001);
+    expect(refreshData).toHaveBeenCalledWith(expect.objectContaining({ connectionId: connection.id, database: "APP", name: "mysql_copy" }));
   });
 });

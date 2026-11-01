@@ -2,10 +2,13 @@
 
 import { createApp, defineComponent, h, ref, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createPinia, getActivePinia, setActivePinia } from "pinia";
 import ObjectBrowser from "@/components/objects/ObjectBrowser.vue";
 import { getCachedObjectBrowserRows, invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import { freezeSourceIdentities } from "@/lib/table/objectSourceIdentity";
 import type { ConnectionConfig } from "@/types/database";
+import type { OracleRoutineOperation } from "@/types/schemaDiff";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 
 const mocks = vi.hoisted(() => ({
   listObjects: vi.fn(),
@@ -14,6 +17,9 @@ const mocks = vi.hoisted(() => ({
   buildEditableObjectSource: vi.fn(),
   buildExecutableObjectSourceStatements: vi.fn(),
   executeQuery: vi.fn(),
+  prepareOracleRoutineSave: vi.fn(),
+  updateOracleRoutineOperationReferences: vi.fn(),
+  executeOracleRoutineOperation: vi.fn(),
   ensureConnected: vi.fn(),
   toast: vi.fn(),
   sourceTabs: [] as Array<{ id: string; sourceLoad?: { error?: string }; objectSource?: unknown }>,
@@ -36,16 +42,17 @@ vi.mock("@/lib/backend/api", () => ({
   buildEditableObjectSource: (...args: unknown[]) => mocks.buildEditableObjectSource(...args),
   buildExecutableObjectSourceStatements: (...args: unknown[]) => mocks.buildExecutableObjectSourceStatements(...args),
   executeQuery: (...args: unknown[]) => mocks.executeQuery(...args),
+  prepareOracleRoutineSave: (...args: unknown[]) => mocks.prepareOracleRoutineSave(...args),
+  updateOracleRoutineOperationReferences: (...args: unknown[]) => mocks.updateOracleRoutineOperationReferences(...args),
+  executeOracleRoutineOperation: (...args: unknown[]) => mocks.executeOracleRoutineOperation(...args),
   deleteSchemaCachePrefix: (...args: unknown[]) => mocks.deleteSchemaCachePrefix(...args),
-}));
-vi.mock("@/lib/database/productionExecutionGuard", () => ({
-  executeWithProductionSqlGuard: async ({ execute }: { execute: () => Promise<unknown> }) => execute(),
 }));
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     treeClipboard: null,
     ensureConnected: mocks.ensureConnected,
     getConfig: () => connection,
+    tableNameFilterForScope: () => undefined,
     orderByPinnedTreeNodes: (rows: unknown[]) => rows,
     refreshObjectListTreeNode: mocks.refreshObjectListTreeNode,
   }),
@@ -81,7 +88,7 @@ vi.mock("@/components/objects/OracleInvalidObjectsDialog.vue", async () => {
   return {
     default: defineComponent({
       props: { open: Boolean },
-      emits: ["update:open", "open-source", "compile-finished"],
+      emits: ["update:open", "open-source", "compile-finished", "trigger-result"],
       setup(props, { emit }) {
         return () =>
           props.open
@@ -167,6 +174,7 @@ const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
 beforeEach(() => {
   vi.clearAllMocks();
+  setActivePinia(createPinia());
   mocks.sourceTabs.splice(0);
   mocks.sourceLoadFailure = "";
   mocks.deferSourceTabLoad = false;
@@ -198,6 +206,7 @@ async function mountBrowser(browserConnection = connection, database = "app") {
   const host = document.createElement("div");
   document.body.append(host);
   const app = createApp({ setup: () => () => h(ObjectBrowser, { connection: browserConnection, database }) });
+  app.use(getActivePinia()!);
   mountedApps.push({ app, host });
   app.mount(host);
   await vi.waitFor(() => expect(host.textContent).toContain(VIEW_NAME));
@@ -209,6 +218,7 @@ async function mountOracleBrowserWithSchema() {
   const host = document.createElement("div");
   document.body.append(host);
   const app = createApp({ setup: () => () => h(ObjectBrowser, { connection: oracleConnection, database: "ORCL", schema: schema.value }) });
+  app.use(getActivePinia()!);
   mountedApps.push({ app, host });
   app.mount(host);
   await vi.waitFor(() => expect(host.textContent).toContain(VIEW_NAME));
@@ -245,6 +255,85 @@ async function clickRow(host: HTMLElement, name: string) {
 }
 
 describe("ObjectBrowser view source save", () => {
+  it.each(["confirm", "cancel"] as const)("uses the real production guard before a routine source save (%s)", async (decision) => {
+    const target = { ...oracleConnection, id: `browser-production-${decision}`, is_production: true };
+    const source = 'CREATE OR REPLACE FUNCTION "APP"."v_demo" RETURN NUMBER AS BEGIN RETURN 1; END;';
+    const identity = { owner: "APP", name: VIEW_NAME, kind: "FUNCTION" as const };
+    const operation: OracleRoutineOperation = {
+      operationId: `browser-production-${decision}`,
+      target: { connectionId: target.id, database: "ORCL", schema: "APP", databaseType: "oracle", generation: 0 },
+      identity,
+      lifecycle: "terminal",
+      dispatched: true,
+      acknowledged: true,
+      readback: { identity, state: "verified", exists: true, source, version: null, definitionMatches: true, compilerMessages: [], issues: [] },
+      error: null,
+    };
+    mocks.listObjects.mockResolvedValue([{ name: VIEW_NAME, schema: "APP", object_type: "FUNCTION" }]);
+    mocks.getObjectSource.mockResolvedValue({ name: VIEW_NAME, schema: "APP", object_type: "FUNCTION", source, editable: true });
+    mocks.buildExecutableObjectSourceStatements.mockResolvedValue([source]);
+    mocks.prepareOracleRoutineSave.mockResolvedValue({ ...operation, lifecycle: "prepared", dispatched: false, acknowledged: false, readback: null });
+    mocks.executeOracleRoutineOperation.mockResolvedValue(operation);
+    const host = await mountBrowser(target, "ORCL");
+    vi.useFakeTimers();
+    await clickRow(host, VIEW_NAME);
+    click(saveButton(host)!);
+    await settle();
+    const safety = useProductionSafetyStore();
+    expect(safety.pending).toMatchObject({ connectionName: target.name, database: "ORCL", sql: source, source: "production.sourceObjectSource" });
+    expect(mocks.prepareOracleRoutineSave).toHaveBeenCalledExactlyOnceWith({ connectionId: target.id, database: "ORCL", identity, sql: source });
+    expect(mocks.executeOracleRoutineOperation).not.toHaveBeenCalled();
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    if (decision === "confirm") safety.confirm();
+    else safety.cancel();
+    await settle();
+    if (decision === "confirm") {
+      expect(mocks.executeOracleRoutineOperation).toHaveBeenCalledExactlyOnceWith(operation.operationId, source);
+      expect(mocks.toast).toHaveBeenCalledWith("objects.sourceSaved", 2000);
+    } else {
+      expect(mocks.executeOracleRoutineOperation).not.toHaveBeenCalled();
+      expect(mocks.toast).not.toHaveBeenCalled();
+      expect(mocks.getObjectSource).toHaveBeenCalledTimes(1);
+      expect(saveButton(host)).toBeDefined();
+    }
+  });
+
+  it.each([false, true])("counts a routine save only after complete verification (valid=%s)", async (valid) => {
+    const source = 'CREATE OR REPLACE FUNCTION "APP"."v_demo" RETURN NUMBER AS BEGIN RETURN 1; END;';
+    const identity = { owner: "APP", name: VIEW_NAME, kind: "FUNCTION" as const };
+    const operation: OracleRoutineOperation = {
+      operationId: `browser-routine-${valid}`,
+      target: { connectionId: oracleConnection.id, database: "ORCL", schema: "APP", databaseType: "oracle", generation: 0 },
+      identity,
+      lifecycle: "terminal",
+      dispatched: true,
+      acknowledged: true,
+      readback: { identity, state: valid ? "verified" : "invalid", exists: true, source, version: null, definitionMatches: true, compilerMessages: valid ? [] : [{ attribute: "ERROR", line: 1, position: 72, text: "missing identifier" }], issues: [] },
+      error: null,
+    };
+    mocks.listObjects.mockResolvedValue([{ name: VIEW_NAME, schema: "APP", object_type: "FUNCTION" }]);
+    mocks.getObjectSource.mockResolvedValue({ name: VIEW_NAME, schema: "APP", object_type: "FUNCTION", source, editable: true });
+    mocks.buildExecutableObjectSourceStatements.mockResolvedValue([source]);
+    mocks.prepareOracleRoutineSave.mockResolvedValue({ ...operation, lifecycle: "prepared", dispatched: false, acknowledged: false, readback: null });
+    mocks.executeOracleRoutineOperation.mockResolvedValue(operation);
+    const host = await mountBrowser(oracleConnection, "ORCL");
+    vi.useFakeTimers();
+    await clickRow(host, VIEW_NAME);
+    click(saveButton(host)!);
+    await settle();
+    expect(mocks.prepareOracleRoutineSave).toHaveBeenCalledWith({ connectionId: oracleConnection.id, database: "ORCL", identity, sql: source });
+    expect(mocks.executeOracleRoutineOperation).toHaveBeenCalledExactlyOnceWith(operation.operationId, source);
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    if (valid) {
+      expect(mocks.toast).toHaveBeenCalledWith("objects.sourceSaved", 2000);
+      expect(saveButton(host)).toBeUndefined();
+    } else {
+      expect(host.textContent).toContain("ERROR 1:72 missing identifier");
+      expect(mocks.toast).not.toHaveBeenCalledWith("objects.sourceSaved", 2000);
+      expect(mocks.getObjectSource).toHaveBeenCalledTimes(1);
+      expect(saveButton(host)).toBeDefined();
+    }
+  });
   it("invalidates completed compile caches but does not refresh an unmounted browser", async () => {
     let release!: () => void;
     mocks.listSchemas.mockResolvedValue(["APP_A", "APP_B"]);
@@ -253,8 +342,11 @@ describe("ObjectBrowser view source save", () => {
       if (prefix === ddlPrefix) await new Promise<void>((resolve) => (release = resolve));
     });
     const { host } = await mountOracleBrowserWithSchema();
-    const scope = { connectionId: oracleConnection.id, database: "ORCL", schema: "APP_A" };
+    const scope = { connectionId: oracleConnection.id, database: "ORCL", schema: "APP_A", oracleTriggerContract: 1 as const, exactIdentity: true };
     expect(getCachedObjectBrowserRows(scope)).toBeDefined();
+    expect(getCachedObjectBrowserRows({ connectionId: oracleConnection.id, database: "ORCL", schema: "APP_A" })).toBeUndefined();
+    expect(getCachedObjectBrowserRows({ ...scope, exactIdentity: false })).toBeUndefined();
+    expect(getCachedObjectBrowserRows({ ...scope, oracleTriggerContract: undefined })).toBeUndefined();
     const listCalls = mocks.listObjects.mock.calls.length;
     [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("processList.oracleInvalidObjects.title"))?.click();
     await nextTick();
@@ -296,21 +388,20 @@ describe("ObjectBrowser view source save", () => {
   it.each([
     ["PACKAGE BODY", "PACKAGE_BODY"],
     ["MATERIALIZED VIEW", "MATERIALIZED_VIEW"],
+    ["TYPE", "TYPE"],
+    ["TYPE BODY", "TYPE_BODY"],
   ])("opens supported %s through the normalized source-tab request", async (type, kind) => {
     mocks.invalidObjectType = type;
     const host = await mountBrowser(oracleConnection, "ORCL");
     [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("processList.oracleInvalidObjects.title"))?.click();
     await nextTick();
     host.querySelector<HTMLButtonElement>("[data-invalid-object-dialog] button")?.click();
-    expect(mocks.openObjectSourceTabPending).toHaveBeenCalledWith(expect.objectContaining({ request: { name: "P_BAD", objectType: kind } }));
+    expect(mocks.openObjectSourceTabPending).toHaveBeenCalledWith(expect.objectContaining({ schema: "APP", initialEditing: true, request: { name: "P_BAD", objectType: kind } }));
+    expect(mocks.createTab).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(host.querySelector("[data-invalid-object-dialog]")).toBeNull());
   });
 
-  it.each([
-    ["TYPE", "TYPE"],
-    ["TYPE BODY", "TYPE_BODY"],
-    ["TRIGGER", "TRIGGER"],
-  ])("keeps the supported %s repair path usable", async (type, kind) => {
+  it.each([["TRIGGER", "TRIGGER"]])("keeps the supported %s repair path usable", async (type, kind) => {
     mocks.invalidObjectType = type;
     const source = `CREATE OR REPLACE ${type} P_BAD`;
     mocks.getObjectSource.mockResolvedValueOnce({ source, editable: true });
@@ -381,25 +472,47 @@ describe("ObjectBrowser view source save", () => {
     expect(mocks.toast).not.toHaveBeenCalled();
   });
 
-  it("does not create a repair tab or toast when an Oracle TYPE source request returns after unmount", async () => {
+  it("does not create a repair tab or toast when a TRIGGER source request returns after unmount", async () => {
     let release!: (value: { source: string; editable: boolean }) => void;
-    mocks.invalidObjectType = "TYPE";
+    mocks.invalidObjectType = "TRIGGER";
     mocks.getObjectSource.mockReturnValueOnce(new Promise((resolve) => (release = resolve)));
     const host = await mountBrowser(oracleConnection, "ORCL");
     const opener = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("processList.oracleInvalidObjects.title"));
     opener?.click();
     await nextTick();
     host.querySelector<HTMLButtonElement>("[data-invalid-object-dialog] button")?.click();
-    await vi.waitFor(() => expect(mocks.getObjectSource).toHaveBeenCalledWith(oracleConnection.id, "ORCL", "APP", "P_BAD", "TYPE"));
+    await vi.waitFor(() => expect(mocks.getObjectSource).toHaveBeenCalledWith(oracleConnection.id, "ORCL", "APP", "P_BAD", "TRIGGER"));
     const mounted = mountedApps.splice(
       mountedApps.findIndex((item) => item.host === host),
       1,
     )[0]!;
     mounted.app.unmount();
-    release({ source: "CREATE TYPE P_BAD AS OBJECT (...)", editable: true });
+    release({ source: "CREATE TRIGGER P_BAD BEFORE INSERT ON T BEGIN NULL; END;", editable: true });
     await Promise.resolve();
     await nextTick();
     expect(mocks.openObjectSourceTabPending).not.toHaveBeenCalled();
+    expect(mocks.toast).not.toHaveBeenCalled();
+    host.remove();
+  });
+
+  it("does not create another TYPE tab or toast when its pending source finishes after unmount", async () => {
+    mocks.invalidObjectType = "TYPE";
+    mocks.deferSourceTabLoad = true;
+    const host = await mountBrowser(oracleConnection, "ORCL");
+    [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("processList.oracleInvalidObjects.title"))?.click();
+    await nextTick();
+    host.querySelector<HTMLButtonElement>("[data-invalid-object-dialog] button")?.click();
+    await vi.waitFor(() => expect(mocks.finishSourceTabLoad).toBeTypeOf("function"));
+    expect(mocks.openObjectSourceTabPending).toHaveBeenCalledOnce();
+    const mounted = mountedApps.splice(
+      mountedApps.findIndex((item) => item.host === host),
+      1,
+    )[0]!;
+    mounted.app.unmount();
+    mocks.finishSourceTabLoad?.();
+    await nextTick();
+    expect(mocks.openObjectSourceTabPending).toHaveBeenCalledOnce();
+    expect(mocks.createTab).not.toHaveBeenCalled();
     expect(mocks.toast).not.toHaveBeenCalled();
     host.remove();
   });
@@ -440,7 +553,7 @@ describe("ObjectBrowser view source save", () => {
     click(save!);
     await settle();
     expect(mocks.executeQuery).toHaveBeenCalledWith("mysql-views", "app", ALTER_SQL, "app");
-    expect(mocks.toast).toHaveBeenCalledWith("objects.sourceSaved");
+    expect(mocks.toast).toHaveBeenCalledWith("objects.sourceSaved", 2000);
     // The success path closes the panel (same row + source mode).
     expect(saveButton(host)).toBeUndefined();
 

@@ -113,8 +113,13 @@ public final class DdlBuilder {
             if (!index.getIs_primary() || index.getColumns().isEmpty()) {
                 continue;
             }
-            for (String column : index.getColumns()) {
-                primaryKeys.add(quoteIdent(column, useBacktick));
+            List<String> directions = index.getKey_directions();
+            for (int columnIndex = 0; columnIndex < index.getColumns().size(); columnIndex++) {
+                String renderedColumn = quoteIdent(index.getColumns().get(columnIndex), useBacktick);
+                if (isDescendingKey(directions, columnIndex)) {
+                    renderedColumn += " DESC";
+                }
+                primaryKeys.add(renderedColumn);
             }
             break;
         }
@@ -185,9 +190,16 @@ public final class DdlBuilder {
             if (index.getIs_primary()) {
                 continue;
             }
-            String unique = index.getIs_unique() ? "UNIQUE " : "";
-            String using = notBlank(index.getIndex_type()) ? " USING " + index.getIndex_type() : "";
+            // Spanner renders full-text indexes as `CREATE SEARCH INDEX name ON table (cols)`.
+            // Its grammar has neither `CREATE UNIQUE SEARCH INDEX` nor `CREATE INDEX ... USING`,
+            // so both the uniqueness prefix and the USING clause must stay out of the
+            // statement (#13881); the keyword sits where UNIQUE would.
+            boolean searchIndex = "SEARCH".equalsIgnoreCase(index.getIndex_type());
+            String search = searchIndex ? "SEARCH " : "";
+            String unique = !searchIndex && index.getIs_unique() ? "UNIQUE " : "";
+            String using = !searchIndex && notBlank(index.getIndex_type()) ? " USING " + index.getIndex_type() : "";
             List<String> quotedColumns = new ArrayList<>();
+            List<String> directions = index.getKey_directions();
             for (int columnIndex = 0; columnIndex < index.getColumns().size(); columnIndex++) {
                 String column = index.getColumns().get(columnIndex);
                 String renderedColumn = quoteIdent(column, useBacktick);
@@ -199,11 +211,19 @@ public final class DdlBuilder {
                     int options = keyOptions.get(columnIndex);
                     renderedColumn += (options & 1) != 0 ? " DESC" : " ASC";
                     renderedColumn += (options & 2) != 0 ? " NULLS FIRST" : " NULLS LAST";
+                } else if (isDescendingKey(directions, columnIndex)) {
+                    // Explicit key directions (e.g. Spanner's ASC_OR_DESC) must
+                    // survive into the DDL: DESC key parts change query plans
+                    // and their absence misrepresents the schema (#13484).
+                    // ASC is the default and stays implicit, matching the
+                    // engine's own DDL output and the index panels.
+                    renderedColumn += " DESC";
                 }
                 quotedColumns.add(renderedColumn);
             }
             String filter = notBlank(index.getFilter()) ? " WHERE " + index.getFilter() : "";
             ddl.append("\nCREATE ");
+            ddl.append(search);
             ddl.append(unique);
             ddl.append("INDEX ");
             ddl.append(quoteIdent(index.getName(), useBacktick));
@@ -458,6 +478,14 @@ public final class DdlBuilder {
         }
         String truncated = defaultValue.substring(0, nullIdx).trim();
         return truncated.isEmpty() ? null : truncated;
+    }
+
+    private static boolean isDescendingKey(List<String> directions, int columnIndex) {
+        if (directions == null || columnIndex >= directions.size()) {
+            return false;
+        }
+        String direction = directions.get(columnIndex);
+        return direction != null && "DESC".equalsIgnoreCase(direction.trim());
     }
 
     private static boolean notBlank(String value) {

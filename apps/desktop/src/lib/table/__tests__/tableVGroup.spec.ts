@@ -12,6 +12,7 @@ import {
   hasTableTreeLoadMore,
   isTableVGroupContainerNode,
   isTableVGroupGroupableRowType,
+  missingTableVGroupMemberNames,
   moveTableToVGroup,
   normalizeTableVGroupLayout,
   pruneTableVGroupMembers,
@@ -41,6 +42,43 @@ function otherNode(id: string): TreeNode {
 function groupIds(nodes: TreeNode[]): string[] {
   return nodes.filter((node) => node.type === "table-vgroup").map((node) => node.id);
 }
+
+describe("off-page table group members", () => {
+  const names = ["orders_2026", "ordersX2026", "orders%2026", "orders\\2026", "订单😀", "archived_orders"];
+  const layout: TableVGroupLayout = {
+    groups: [
+      { id: "parent", name: "Business", collapsed: true },
+      { id: "nested", name: "Nested", collapsed: false },
+    ],
+    order: [
+      { type: "table", name: "ungrouped" },
+      {
+        type: "group",
+        id: "parent",
+        children: [
+          { type: "table", name: "already_loaded" },
+          { type: "table", name: "a_view", rowType: "view" },
+          { type: "group", id: "nested", children: names.map((name) => ({ type: "table", name })) },
+        ],
+      },
+    ],
+  };
+
+  it("includes collapsed and nested members while skipping loaded tables and ungrouped entries", () => {
+    expect(missingTableVGroupMemberNames(layout, new Set(["already_loaded"]))).toEqual(names);
+    expect(missingTableVGroupMemberNames({ ...layout, enabled: false }, new Set())).toEqual([]);
+  });
+
+  it.each([
+    { includePatterns: [" ORDERS\\_2026 "], excludePatterns: [], expected: ["orders_2026"] },
+    { includePatterns: ["orders_2026"], excludePatterns: ["orders\\%2026", "orders\\\\2026"], expected: ["orders_2026", "ordersX2026"] },
+    { includePatterns: ["订单_"], excludePatterns: [], expected: ["订单😀"] },
+    { includePatterns: ["orders%"], excludePatterns: ["%X2026"], expected: ["orders_2026", "orders%2026", "orders\\2026"] },
+    { includePatterns: [" "], excludePatterns: ["archived%", "ORDERS%"], expected: ["订单😀"] },
+  ])("respects LIKE include $includePatterns and exclude $excludePatterns", ({ includePatterns, excludePatterns, expected }) => {
+    expect(missingTableVGroupMemberNames(layout, new Set(["already_loaded"]), { includePatterns, excludePatterns })).toEqual(expected);
+  });
+});
 
 describe("tableVGroup layout ops", () => {
   it("moves a table into a group and back to the ungrouped root", () => {
@@ -326,6 +364,18 @@ describe("resolveTableVGroupScopeFromNode", () => {
     tablesGroup.children = [row, groupRow];
     expect(resolveTableVGroupScopeFromNode([databaseNode], groupRow)).toEqual(resolveTableVGroupScopeFromNode([databaseNode], databaseNode));
   });
+
+  it("refuses scopes for non-groupable metadata and table structural children", () => {
+    const columnsGroup: TreeNode = { id: "conn-1:main:t_order:__columns", label: "Columns", type: "group-columns", connectionId: "conn-1", database: "main", tableName: "t_order" };
+    const columnNode: TreeNode = { id: "conn-1:main:t_order:col:id", label: "id", type: "column", connectionId: "conn-1", database: "main", tableName: "t_order" };
+    const indexesGroup: TreeNode = { id: "conn-1:main:t_order:__indexes", label: "Indexes", type: "group-indexes", connectionId: "conn-1", database: "main", tableName: "t_order" };
+    const tableTriggersGroup: TreeNode = { id: "conn-1:main:t_order:__triggers", label: "Triggers", type: "group-triggers", connectionId: "conn-1", database: "main", tableName: "t_order" };
+
+    expect(resolveTableVGroupScopeFromNode([databaseNode], columnsGroup)).toEqual({});
+    expect(resolveTableVGroupScopeFromNode([databaseNode], columnNode)).toEqual({});
+    expect(resolveTableVGroupScopeFromNode([databaseNode], indexesGroup)).toEqual({});
+    expect(resolveTableVGroupScopeFromNode([databaseNode], tableTriggersGroup)).toEqual({});
+  });
 });
 
 describe("table tree helpers", () => {
@@ -445,6 +495,12 @@ describe("container-kind scoped groups (views/procedures/triggers)", () => {
     expect(tableVGroupKindOfContainerNode({ type: "group-types" })).toBe("types");
     expect(tableVGroupKindOfContainerNode({ type: "group-tablespaces" })).toBeNull();
     expect(tableVGroupKindOfContainerNode({ type: "group-dolt-system-tables" })).toBeNull();
+    expect(tableVGroupKindOfContainerNode({ type: "table" })).toBeNull();
+    expect(tableVGroupKindOfContainerNode({ type: "group-columns" })).toBeNull();
+    expect(tableVGroupKindOfContainerNode({ type: "group-indexes" })).toBeNull();
+    expect(tableVGroupKindOfContainerNode({ type: "group-fkeys" })).toBeNull();
+    expect(tableVGroupKindOfContainerNode({ type: "group-constraints" })).toBeNull();
+    expect(tableVGroupKindOfContainerNode({ type: "column" })).toBeNull();
   });
 
   it("projects view rows under the views scope and passes non-member rows through", () => {
@@ -488,12 +544,12 @@ describe("container-kind scoped groups (views/procedures/triggers)", () => {
     expect(resolveTableVGroupScopeFromNode(tree, member)).toMatchObject({ connectionId: "conn-1", database: "db1", objectType: "views" });
   });
 
-  it("narrows reprojection candidates to the scope kind even without a member label", () => {
+  it("narrows reprojection candidates to the scope kind and prefers group-tables over database (issue #13030)", () => {
     const database: TreeNode = { id: "db:conn-1:db1", label: "db1", type: "database", connectionId: "conn-1", database: "db1" };
     const groupTables: TreeNode = { id: "gt:1", label: "Tables", type: "group-tables", connectionId: "conn-1", database: "db1" };
     const groupFunctions: TreeNode = { id: "gf:1", label: "Functions", type: "group-functions", connectionId: "conn-1", database: "db1", children: [{ id: "fn:1", label: "vg_count", type: "function", connectionId: "conn-1", database: "db1" }] };
     const tree: TreeNode[] = [{ ...database, children: [groupTables, groupFunctions] }];
-    expect(findTableVGroupContainerNode(tree, { connectionId: "conn-1", database: "db1", objectType: "tables" })).toBe(tree[0]);
+    expect(findTableVGroupContainerNode(tree, { connectionId: "conn-1", database: "db1", objectType: "tables" })).toBe(groupTables);
   });
 
   it("collects member names per container kind", () => {

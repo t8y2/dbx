@@ -1,6 +1,9 @@
 import type { DatabaseType, ObjectSourceKind } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { beginSourceSave, type SourceIdentitySnapshot } from "@/lib/table/objectSourceIdentity";
+import { prepareOracleRoutineSourceSave } from "@/lib/table/oracleRoutineWrite";
+import i18n from "@/i18n";
+import type { OracleRoutineOperation } from "@/types/schemaDiff";
 
 export type BuildEditableObjectSourceSqlInput = {
   databaseType: DatabaseType;
@@ -11,12 +14,10 @@ export type BuildEditableObjectSourceSqlInput = {
 };
 
 export type ValidateOracleExecutableObjectSourceInput = {
-  databaseType: Extract<DatabaseType, "oracle" | "oceanbase-oracle">;
-  objectType: Extract<ObjectSourceKind, "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE_BODY">;
   schema?: string | null;
   name: string;
   source: string;
-};
+} & ({ databaseType: Extract<DatabaseType, "oracle" | "oceanbase-oracle">; objectType: Extract<ObjectSourceKind, "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE_BODY" | "TRIGGER"> } | { databaseType: "dameng"; objectType: "TRIGGER" });
 
 export type FingerprintOracleRoutineObjectSourceInput = {
   databaseType: Extract<DatabaseType, "oracle" | "oceanbase-oracle">;
@@ -106,6 +107,30 @@ export function buildEditableObjectSource(input: BuildEditableObjectSourceSqlInp
 
 export function objectSourceSaveExecutionMode(_databaseType: DatabaseType): ObjectSourceSaveExecutionMode {
   return "single";
+}
+
+export type PreparedObjectSourceSave = (() => Promise<OracleRoutineOperation | undefined>) & { dispose?: () => Promise<void> };
+
+export async function prepareObjectSourceSave(connectionId: string, database: string, databaseType: DatabaseType, statements: string[], schema: string, identity: { objectType: ObjectSourceKind; name: string }): Promise<PreparedObjectSourceSave> {
+  if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && (identity.objectType === "PROCEDURE" || identity.objectType === "FUNCTION" || identity.objectType === "PACKAGE" || identity.objectType === "PACKAGE_BODY")) {
+    const nonEmpty = statements.filter((sql) => sql.trim());
+    if (nonEmpty.length !== 1) throw new Error(i18n.global.t("objects.routineSaveSingleDefinition"));
+    return prepareOracleRoutineSourceSave({ connectionId, database, identity: { owner: schema, name: identity.name, kind: identity.objectType }, sql: nonEmpty[0] });
+  }
+  return async () => {
+    await executeObjectSourceSave(connectionId, database, databaseType, statements, schema);
+    return undefined;
+  };
+}
+
+export function objectSourceSaveSuccessMessage(message: string, operation?: OracleRoutineOperation): string {
+  const warnings = operation?.readback?.compilerMessages.filter((message) => message.attribute === "WARNING") ?? [];
+  const companion = operation?.readback?.packageCompanion;
+  const companionIssues =
+    companion && companion.exists !== false && companion.state !== "present" && companion.state !== "verified"
+      ? [`${companion.identity.kind.replaceAll("_", " ")}: ${companion.version?.status ?? companion.state}`, ...companion.issues.map((issue) => issue.message), ...companion.compilerMessages.map((message) => `${message.attribute} ${message.line}:${message.position} ${message.text}`)]
+      : [];
+  return [message, ...warnings.map((warning) => `WARNING ${warning.line}:${warning.position} ${warning.text}`), ...companionIssues].join("\n");
 }
 
 export async function executeObjectSourceSave(connectionId: string, database: string, databaseType: DatabaseType, statements: string[], schema?: string, timeoutSecs?: number): Promise<void> {

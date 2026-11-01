@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::error::AppError;
 use crate::state::WebState;
 use axum::extract::{Query, State};
+use axum::http::HeaderMap;
 use axum::Json;
 use dbx_core::connection::AppState;
 use serde::de::DeserializeOwned;
@@ -31,6 +32,10 @@ pub struct SchemaQuery {
     pub include_postgres_access: Option<bool>,
     pub portable: Option<bool>,
     pub execution_id: Option<String>,
+    pub identity_mode: Option<dbx_core::schema::MetadataIdentityMode>,
+    pub exact_identity: Option<bool>,
+    pub separate_indexes: Option<bool>,
+    pub explicit_owner: Option<String>,
 }
 
 async fn run_cancellable<T, F>(state: &Arc<WebState>, execution_id: Option<String>, future: F) -> Result<T, AppError>
@@ -243,6 +248,22 @@ pub async fn list_tables(
         .table_name_filter
         .as_deref()
         .and_then(|value| serde_json::from_str::<dbx_core::schema::TableNameFilter>(value).ok());
+    if q.exact_identity.unwrap_or(false) {
+        let result = dbx_core::schema::exact_metadata::tables(
+            &state.app,
+            &q.connection_id,
+            database,
+            schema,
+            q.filter.as_deref(),
+            q.limit,
+            q.offset,
+            object_types.as_deref(),
+            table_name_filter.as_ref(),
+        )
+        .await
+        .map_err(AppError::from)?;
+        return Ok(Json(serde_json::to_value(result).map_err(|error| AppError::from(error.to_string()))?));
+    }
     let result = if let Some(catalog) = external_doris_catalog(&state, &q.connection_id, q.catalog.as_deref()).await {
         dbx_core::schema::list_doris_catalog_tables_core(
             &state.app,
@@ -293,6 +314,20 @@ pub async fn list_objects(
         .as_deref()
         .and_then(|value| serde_json::from_str::<dbx_core::schema::TableNameFilter>(value).ok());
     let result = run_cancellable(&state, execution_id, async {
+        if q.exact_identity.unwrap_or(false) {
+            return dbx_core::schema::exact_metadata::objects(
+                &state.app,
+                &connection_id,
+                &database,
+                &schema,
+                filter.as_deref(),
+                q.limit,
+                q.offset,
+                object_types.as_deref(),
+                table_name_filter.as_ref(),
+            )
+            .await;
+        }
         if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
             let tables = dbx_core::schema::list_doris_catalog_tables_core(
                 &state.app,
@@ -326,7 +361,7 @@ pub async fn list_objects(
                 })
                 .collect::<Vec<_>>())
         } else {
-            dbx_core::schema::list_objects_core(
+            dbx_core::schema::list_objects_core_with_options(
                 &state.app,
                 &connection_id,
                 &database,
@@ -336,6 +371,7 @@ pub async fn list_objects(
                 q.offset,
                 object_types.as_deref(),
                 table_name_filter.as_ref(),
+                &dbx_core::schema::MetadataReadOptions { identity_mode: q.identity_mode, catalog },
             )
             .await
         }
@@ -385,7 +421,7 @@ pub async fn get_object_source(
     let schema = q.schema.as_deref().unwrap_or("");
     let name = q.table.as_deref().unwrap_or("");
     let object_type = q.object_type.ok_or_else(|| AppError::from("Missing object_type".to_string()))?;
-    let result = dbx_core::schema::get_object_source_core(
+    let result = dbx_core::schema::get_object_source_core_with_options(
         &state.app,
         &q.connection_id,
         database,
@@ -394,6 +430,7 @@ pub async fn get_object_source(
         object_type,
         q.signature.as_deref(),
         q.relation_name.as_deref(),
+        &dbx_core::schema::MetadataReadOptions { identity_mode: q.identity_mode, catalog: q.catalog },
     )
     .await
     .map_err(AppError::from)?;
@@ -426,6 +463,54 @@ pub async fn get_custom_type_details(
     let result = dbx_core::schema::get_custom_type_details_core(&state.app, &q.connection_id, database, schema, name)
         .await
         .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn verify_oracle_type_data(
+    State(state): State<Arc<WebState>>,
+    Json(input): Json<dbx_core::db::OracleTypeDataRequest>,
+) -> Result<Json<dbx_core::db::OracleTypeDataResult>, AppError> {
+    Ok(Json(dbx_core::schema::verify_oracle_type_data_core(&state.app, input).await?))
+}
+
+pub async fn prepare_oracle_type_evolution(
+    State(state): State<Arc<WebState>>,
+    Json(input): Json<dbx_core::db::OracleTypeEvolutionRequest>,
+) -> Result<Json<dbx_core::db::OracleTypeEvolutionManifest>, AppError> {
+    Ok(Json(dbx_core::schema::prepare_oracle_type_evolution_core(&state.app, input).await?))
+}
+
+pub async fn get_oracle_type_management_snapshot(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<dbx_core::db::OracleTypeManagementSnapshot>, AppError> {
+    let result = dbx_core::schema::get_oracle_type_management_snapshot_core(
+        &state.app,
+        &q.connection_id,
+        q.database.as_deref().unwrap_or(""),
+        q.schema.as_deref().unwrap_or(""),
+        q.table.as_deref().unwrap_or(""),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn read_oracle_type_management_snapshot(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<dbx_core::db::OracleTypeManagementSnapshotRequest>,
+) -> Result<Json<dbx_core::db::OracleTypeManagementSnapshot>, AppError> {
+    let target = request.target;
+    let result = dbx_core::schema::get_oracle_type_management_snapshot_with_objects_core(
+        &state.app,
+        &target.connection_id,
+        &target.database,
+        &target.owner,
+        &target.name,
+        &request.known_objects,
+    )
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -505,6 +590,21 @@ pub async fn list_columns(
     let database = q.database.as_deref().unwrap_or("");
     let schema = q.schema.as_deref().unwrap_or("");
     let table = q.table.as_deref().unwrap_or("");
+    // Exact reads revalidate the current process contract and never reuse a
+    // persisted ordinary/synonym-resolved snapshot as an editing baseline.
+    if q.exact_identity.unwrap_or(false) {
+        let result = dbx_core::schema::exact_metadata::columns(
+            &state.app,
+            &q.connection_id,
+            database,
+            schema,
+            table,
+            q.client_session_id.as_deref(),
+        )
+        .await
+        .map_err(AppError::from)?;
+        return Ok(Json(serde_json::to_value(result).map_err(|error| AppError::from(error.to_string()))?));
+    }
     let catalog = external_doris_catalog(&state, &q.connection_id, q.catalog.as_deref()).await;
     let load_columns = || async {
         if let Some(catalog) = catalog.as_deref() {
@@ -572,6 +672,12 @@ pub async fn list_indexes(
     let database = q.database.as_deref().unwrap_or("");
     let schema = q.schema.as_deref().unwrap_or("");
     let table = q.table.as_deref().unwrap_or("");
+    if q.exact_identity.unwrap_or(false) {
+        let result = dbx_core::schema::exact_metadata::indexes(&state.app, &q.connection_id, database, schema, table)
+            .await
+            .map_err(AppError::from)?;
+        return Ok(Json(serde_json::to_value(result).map_err(|error| AppError::from(error.to_string()))?));
+    }
     let catalog = external_doris_catalog(&state, &q.connection_id, q.catalog.as_deref()).await;
     let result = cached_metadata(
         &state.app,
@@ -650,6 +756,13 @@ pub async fn list_foreign_keys(
     let database = q.database.as_deref().unwrap_or("");
     let schema = q.schema.as_deref().unwrap_or("");
     let table = q.table.as_deref().unwrap_or("");
+    if q.exact_identity.unwrap_or(false) {
+        let result =
+            dbx_core::schema::exact_metadata::foreign_keys(&state.app, &q.connection_id, database, schema, table)
+                .await
+                .map_err(AppError::from)?;
+        return Ok(Json(serde_json::to_value(result).map_err(|error| AppError::from(error.to_string()))?));
+    }
     let catalog = external_doris_catalog(&state, &q.connection_id, q.catalog.as_deref()).await;
     let result = cached_metadata(
         &state.app,
@@ -696,6 +809,25 @@ pub async fn list_foreign_keys_for_database(
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 
+pub async fn get_table_comment(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<Option<String>>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let table = q.table.as_deref().unwrap_or("");
+    let result = if q.exact_identity.unwrap_or(false) {
+        dbx_core::schema::exact_metadata::comment(&state.app, &q.connection_id, database, schema, table).await
+    } else if let Some(catalog) = external_doris_catalog(&state, &q.connection_id, q.catalog.as_deref()).await {
+        dbx_core::schema::get_doris_catalog_table_comment_core(&state.app, &q.connection_id, &catalog, database, table)
+            .await
+    } else {
+        dbx_core::schema::get_table_comment_core(&state.app, &q.connection_id, database, schema, table).await
+    }
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn list_triggers(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,
@@ -703,14 +835,25 @@ pub async fn list_triggers(
     let database = q.database.as_deref().unwrap_or("");
     let schema = q.schema.as_deref().unwrap_or("");
     let table = q.table.as_deref().unwrap_or("");
-    let result = if let Some(catalog) = external_doris_catalog(&state, &q.connection_id, q.catalog.as_deref()).await {
+    let result = if q.exact_identity.unwrap_or(false) {
+        dbx_core::schema::exact_metadata::triggers(&state.app, &q.connection_id, database, schema, table)
+            .await
+            .map_err(AppError::from)?
+    } else if let Some(catalog) = external_doris_catalog(&state, &q.connection_id, q.catalog.as_deref()).await {
         dbx_core::schema::list_doris_catalog_triggers_core(&state.app, &q.connection_id, &catalog, database, table)
             .await
             .map_err(AppError::from)?
     } else {
-        dbx_core::schema::list_triggers_core(&state.app, &q.connection_id, database, schema, table)
-            .await
-            .map_err(AppError::from)?
+        dbx_core::schema::list_triggers_core_with_options(
+            &state.app,
+            &q.connection_id,
+            database,
+            schema,
+            table,
+            &dbx_core::schema::MetadataReadOptions { identity_mode: q.identity_mode, catalog: q.catalog },
+        )
+        .await
+        .map_err(AppError::from)?
     };
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
@@ -723,9 +866,12 @@ pub async fn list_constraints(
     let schema = q.schema.as_deref().unwrap_or("");
     let table = q.table.as_deref().unwrap_or("");
     let _ = q.catalog.as_deref();
-    let result = dbx_core::schema::list_constraints_core(&state.app, &q.connection_id, database, schema, table)
-        .await
-        .map_err(AppError::from)?;
+    let result = if q.exact_identity.unwrap_or(false) {
+        dbx_core::schema::exact_metadata::constraints(&state.app, &q.connection_id, database, schema, table).await
+    } else {
+        dbx_core::schema::list_constraints_core(&state.app, &q.connection_id, database, schema, table).await
+    }
+    .map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 
@@ -798,10 +944,23 @@ pub async fn get_ddl(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,
 ) -> Result<Json<String>, AppError> {
+    let separate_indexes = q.separate_indexes.unwrap_or(false) && q.object_type.is_none();
     let database = q.database.as_deref().unwrap_or("");
     let schema = q.schema.as_deref().unwrap_or("");
     let table = q.table.as_deref().unwrap_or("");
-    let result = if let Some(catalog) = external_doris_catalog(&state, &q.connection_id, q.catalog.as_deref()).await {
+    let result = if q.exact_identity.unwrap_or(false) {
+        dbx_core::schema::exact_metadata::ddl(
+            &state.app,
+            &q.connection_id,
+            database,
+            schema,
+            table,
+            q.object_type,
+            q.portable.unwrap_or(false),
+        )
+        .await
+        .map_err(AppError::from)?
+    } else if let Some(catalog) = external_doris_catalog(&state, &q.connection_id, q.catalog.as_deref()).await {
         dbx_core::schema::get_doris_catalog_table_ddl_core(&state.app, &q.connection_id, &catalog, database, table)
             .await
             .map_err(AppError::from)?
@@ -832,6 +991,21 @@ pub async fn get_ddl(
             .await
             .map_err(AppError::from)?
     };
+    let result = if separate_indexes {
+        dbx_core::schema::separate_table_ddl_indexes_core(
+            &state.app,
+            &q.connection_id,
+            database,
+            schema,
+            table,
+            &result,
+            q.explicit_owner.as_deref().or_else(|| q.exact_identity.unwrap_or(false).then_some(schema)),
+        )
+        .await
+        .map_err(AppError::from)?
+    } else {
+        result
+    };
     Ok(Json(result))
 }
 
@@ -845,6 +1019,166 @@ pub async fn list_functions(
         .await
         .map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
+#[derive(Deserialize)]
+pub struct RoutineSnapshotQuery {
+    #[serde(flatten)]
+    scope: SchemaQuery,
+    selected_routines: Option<String>,
+    object_kinds: Option<String>,
+    selected_objects: Option<String>,
+}
+
+pub async fn load_schema_diff_routines(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<RoutineSnapshotQuery>,
+) -> Result<Json<dbx_core::schema::oracle_routines::RoutineSnapshot>, AppError> {
+    let selected_routines = query
+        .selected_routines
+        .as_deref()
+        .map(serde_json::from_str::<Vec<String>>)
+        .transpose()
+        .map_err(|error| AppError::from(format!("Invalid selected routine names: {error}")))?;
+    let q = query.scope;
+    let object_kinds = query
+        .object_kinds
+        .as_deref()
+        .map(serde_json::from_str::<Vec<dbx_core::db::ObjectSourceKind>>)
+        .transpose()
+        .map_err(|error| AppError::from(format!("Invalid program object kinds: {error}")))?;
+    let selected_objects = query
+        .selected_objects
+        .as_deref()
+        .map(serde_json::from_str::<Vec<dbx_core::schema::oracle_routines::RoutineSelection>>)
+        .transpose()
+        .map_err(|error| AppError::from(format!("Invalid selected program identities: {error}")))?;
+    let snapshot = dbx_core::schema::oracle_routines::load_schema_diff_routines_with_options_core(
+        &state.app,
+        &q.connection_id,
+        q.database.as_deref().unwrap_or(""),
+        q.schema.as_deref().unwrap_or(""),
+        dbx_core::schema::oracle_routines::RoutineReadOptions { object_kinds, selected_objects, selected_routines },
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(snapshot))
+}
+
+pub async fn prepare_oracle_routine_save(
+    State(state): State<Arc<WebState>>,
+    Json(input): Json<dbx_core::schema::oracle_routines::OracleRoutineSaveInput>,
+) -> Result<Json<dbx_core::schema::oracle_routines::RoutineOperationRecord>, AppError> {
+    dbx_core::schema::oracle_routines::prepare_oracle_routine_save_core(&state.app, input)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
+pub async fn prepare_oracle_routine_plan(
+    State(state): State<Arc<WebState>>,
+    Json(input): Json<dbx_core::schema::oracle_routines::OracleRoutinePlanInput>,
+) -> Result<Json<dbx_core::schema::oracle_routines::OracleRoutinePlan>, AppError> {
+    dbx_core::schema::oracle_routines::prepare_oracle_routine_plan_core(&state.app, input)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineRecoveryRequest {
+    operation_id: String,
+}
+
+pub async fn prepare_oracle_routine_recovery(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<RoutineRecoveryRequest>,
+) -> Result<Json<dbx_core::schema::oracle_routines::OracleRoutinePlan>, AppError> {
+    dbx_core::schema::oracle_routines::prepare_oracle_routine_recovery_core(&state.app, &request.operation_id)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecuteRoutineOperationRequest {
+    operation_id: String,
+    approved_sql: String,
+}
+
+pub async fn execute_oracle_routine_operation(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(request): Json<ExecuteRoutineOperationRequest>,
+) -> Result<Json<dbx_core::schema::oracle_routines::RoutineOperationRecord>, AppError> {
+    let original = state
+        .app
+        .routine_operations
+        .observe(&request.operation_id)
+        .operation
+        .ok_or_else(|| AppError::from("Original routine operation is unavailable; do not replay"))?;
+    let database = super::mcp_policy::ensure_sql(
+        &state,
+        &headers,
+        &original.target.connection_id,
+        &original.target.database,
+        &request.approved_sql,
+        false,
+    )
+    .await?;
+    if database != original.target.database {
+        return Err(AppError::from("Routine operation cannot switch its approved target database"));
+    }
+    dbx_core::schema::oracle_routines::execute_oracle_routine_operation_core(
+        state.app.clone(),
+        request.operation_id,
+        request.approved_sql,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+#[derive(Deserialize)]
+pub struct RoutineOperationQuery {
+    operation_id: String,
+    #[serde(default)]
+    refresh_readback: bool,
+}
+
+pub async fn observe_oracle_routine_operation(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<RoutineOperationQuery>,
+) -> Json<dbx_core::schema::oracle_routines::RoutineOperationObservation> {
+    Json(
+        dbx_core::schema::oracle_routines::observe_oracle_routine_operation_core(
+            &state.app,
+            &query.operation_id,
+            query.refresh_readback,
+        )
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineOperationReferences {
+    retain_operation_ids: Vec<String>,
+    release_operation_ids: Vec<String>,
+}
+
+pub async fn update_oracle_routine_operation_references(
+    State(state): State<Arc<WebState>>,
+    Json(input): Json<RoutineOperationReferences>,
+) -> Result<Json<()>, AppError> {
+    state
+        .app
+        .routine_operations
+        .update_references(&input.retain_operation_ids, &input.release_operation_ids)
+        .map_err(AppError::from)?;
+    Ok(Json(()))
 }
 
 #[derive(Deserialize)]

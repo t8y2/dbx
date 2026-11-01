@@ -41,11 +41,30 @@ pub struct SqlServerClient {
     inner: SqlServerTdsClient,
     query_transport: SqlServerQueryTransport,
     server_major_version: Option<u32>,
+    /// Set when a result stream was abandoned mid-flight because the caller's
+    /// row limit was reached. The connection still has unread TDS tokens on
+    /// the wire, so it must be discarded instead of returned to the pool.
+    abandoned_after_row_limit: bool,
 }
 
 impl SqlServerClient {
     fn new(inner: SqlServerTdsClient) -> Self {
-        Self { inner, query_transport: SqlServerQueryTransport::Unknown, server_major_version: None }
+        Self {
+            inner,
+            query_transport: SqlServerQueryTransport::Unknown,
+            server_major_version: None,
+            abandoned_after_row_limit: false,
+        }
+    }
+
+    fn mark_abandoned_after_row_limit(&mut self) {
+        self.abandoned_after_row_limit = true;
+    }
+
+    /// Returns whether the last result stream was abandoned after the row limit
+    /// and resets the flag. Callers must discard (never reuse) such a client.
+    pub fn take_abandoned_after_row_limit(&mut self) -> bool {
+        std::mem::take(&mut self.abandoned_after_row_limit)
     }
 
     async fn ensure_query_transport(&mut self) -> SqlServerQueryTransport {
@@ -868,8 +887,10 @@ fn server_messages_query_result(messages: Vec<String>, start: Instant) -> Option
         QueryResult {
             columns: vec![],
             column_types: vec![],
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![],
             affected_rows: 0,
@@ -894,7 +915,8 @@ async fn collect_first_result_limited(
     sql: &str,
     query: &SqlServerUnsafeTypeQuery,
     progress_clock: Option<&crate::execution::StreamProgressClock>,
-) -> Result<QueryResult, String> {
+    stop_at_row_limit: bool,
+) -> Result<(QueryResult, bool), String> {
     let row_limit = query_result_row_limit(max_rows);
     let mut remaining_offset = result_offset;
     let mut columns: Vec<String> = vec![];
@@ -930,33 +952,84 @@ async fn collect_first_result_limited(
                     spatial_values.push(srids);
                 } else {
                     truncated = true;
+                    if stop_at_row_limit {
+                        // The caller only asked for `row_limit` rows. Reading the
+                        // rest of a large result set costs ~10-15us per row on
+                        // the TDS side (a 1M-row query then keeps the UI busy
+                        // for 10s+ while the grid shows 100 rows), so abandon
+                        // the stream and let the caller reset the connection.
+                        return collect_first_result_finish(
+                            columns,
+                            column_types,
+                            rows,
+                            spatial_values,
+                            spatial_values_builder,
+                            query,
+                            sql,
+                            start,
+                            true,
+                            true,
+                        );
+                    }
                 }
             }
             QueryItem::Row(_) => {}
         }
     }
 
+    collect_first_result_finish(
+        columns,
+        column_types,
+        rows,
+        spatial_values,
+        spatial_values_builder,
+        query,
+        sql,
+        start,
+        truncated,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_first_result_finish(
+    mut columns: Vec<String>,
+    mut column_types: Vec<String>,
+    rows: Vec<Vec<serde_json::Value>>,
+    spatial_values: Vec<Vec<Option<u32>>>,
+    spatial_values_builder: SpatialColumnBuilder,
+    query: &SqlServerUnsafeTypeQuery,
+    sql: &str,
+    start: Instant,
+    truncated: bool,
+    stopped_early: bool,
+) -> Result<(QueryResult, bool), String> {
     restore_sqlserver_blank_column_names(&mut columns, sql);
     restore_sqlserver_unsafe_column_types(&mut column_types, query);
 
     let (spatial_columns, spatial_values) = spatial_values_builder.finish_with_values(spatial_values);
-    Ok(QueryResult {
-        columns,
-        column_types,
-        column_sortables: vec![],
-        spatial_columns,
-        spatial_values,
-        rows,
-        affected_rows: 0,
-        execution_time_ms: start.elapsed().as_millis(),
-        server_execute_time_us: None,
-        query_timings_ms: None,
-        truncated,
-        session_id: None,
-        has_more: false,
-        elasticsearch_raw_body: None,
-        messages: Vec::new(),
-    })
+    Ok((
+        QueryResult {
+            columns,
+            column_types,
+            deferred_large_value_cells: Vec::new(),
+            column_sortables: vec![],
+            spatial_columns,
+            raw_key_cells: Vec::new(),
+            spatial_values,
+            rows,
+            affected_rows: 0,
+            execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
+            query_timings_ms: None,
+            truncated,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        },
+        stopped_early,
+    ))
 }
 
 struct SqlServerResultSet {
@@ -1688,6 +1761,14 @@ fn is_single_sqlserver_select(sql: &str) -> bool {
     normalized_sqlserver_select_statement(&statements[0]).is_some()
 }
 
+/// Abandoning a stream also cancels the server's remaining work. Require a
+/// parsed query so EXEC, DML OUTPUT and scripts (including statements separated
+/// without semicolons) cannot lose side effects after their first result set.
+fn sqlserver_can_stop_at_row_limit(sql: &str) -> bool {
+    is_single_sqlserver_select(sql)
+        && matches!(Parser::parse_sql(&MsSqlDialect {}, sql).as_deref(), Ok([Statement::Query(_)]))
+}
+
 fn sqlserver_source_column_name(index: usize) -> String {
     format!("dbx_col_{}", index + 1)
 }
@@ -1869,8 +1950,10 @@ fn push_sqlserver_result_set(results: &mut Vec<QueryResult>, result: Option<SqlS
         results.push(QueryResult {
             columns: result.columns,
             column_types: result.column_types,
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: result.rows,
             affected_rows: 0,
@@ -1929,8 +2012,10 @@ fn push_sqlserver_ordered_events(
                     result: QueryResult {
                         columns: vec![],
                         column_types: vec![],
+                        deferred_large_value_cells: Vec::new(),
                         column_sortables: vec![],
                         spatial_columns: vec![],
+                        raw_key_cells: Vec::new(),
                         spatial_values: vec![],
                         rows: vec![],
                         affected_rows,
@@ -3295,6 +3380,7 @@ pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &st
             let cols_str = row.get::<&str, _>(1).unwrap_or("");
             let inc_str = row.get::<&str, _>(5).unwrap_or("");
             IndexInfo {
+                owner: None,
                 key_directions: Vec::new(),
                 visibility: None,
                 key_metadata_complete: false,
@@ -3501,6 +3587,7 @@ pub async fn list_triggers(
             valid: None,
             comment: None,
             created_at: None,
+            oracle_metadata: None,
             statement: row.get::<&str, _>(3).map(str::to_string),
         })
         .collect())
@@ -3698,7 +3785,35 @@ pub async fn execute_query_with_max_rows(
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<QueryResult, String> {
-    execute_query_with_max_rows_inner(client, sql, max_rows, None).await
+    execute_query_with_max_rows_inner(client, sql, max_rows, None, false).await
+}
+
+/// Like [`execute_query_with_max_rows`], but stops reading the TDS stream as
+/// soon as the row limit is reached instead of draining the whole result set.
+///
+/// Draining costs roughly 10-15us per discarded row on the client side, so a
+/// query that returns a few hundred thousand rows keeps DBX busy for seconds
+/// while the grid only ever shows `max_rows` rows. When this stops early the
+/// connection is left with unread tokens: the driver sends a best-effort TDS
+/// ATTENTION and marks the client as abandoned, and the caller must discard
+/// that pooled connection ([`SqlServerClient::take_abandoned_after_row_limit`]).
+/// Stored procedures, writes and scripts always drain to completion so their
+/// side effects are not canceled by a display row limit.
+pub async fn execute_query_with_max_rows_stopping(
+    client: &mut SqlServerClient,
+    sql: &str,
+    max_rows: Option<usize>,
+) -> Result<QueryResult, String> {
+    execute_query_with_max_rows_inner(client, sql, max_rows, None, sqlserver_can_stop_at_row_limit(sql)).await
+}
+
+async fn abandon_sqlserver_result_stream(client: &mut SqlServerClient) {
+    // ATTENTION is best effort: the connection is discarded either way, so a
+    // missing feature flag or a write error must never fail the query.
+    if let Err(error) = client.send_attention().await {
+        log::debug!("SQL Server ATTENTION after row-limit stop failed: {error}");
+    }
+    client.mark_abandoned_after_row_limit();
 }
 
 /// Progress-aware variant of [`execute_query_with_max_rows`] for long transfers.
@@ -3722,14 +3837,14 @@ pub async fn execute_query_with_max_rows_progress(
         return crate::execution::wait_for_query_opt(
             None,
             timeout,
-            execute_query_with_max_rows_inner(client, sql, max_rows, None),
+            execute_query_with_max_rows_inner(client, sql, max_rows, None, false),
         )
         .await;
     }
     let timeout_error = format!("Query timed out after {} seconds", timeout.map_or(0, |timeout| timeout.as_secs()));
     let clock_for_query = progress_clock.clone();
     crate::execution::await_stream_with_progress_timeout(
-        execute_query_with_max_rows_inner(client, sql, max_rows, Some(&clock_for_query)),
+        execute_query_with_max_rows_inner(client, sql, max_rows, Some(&clock_for_query), false),
         timeout,
         progress_clock,
         None,
@@ -3743,6 +3858,7 @@ async fn execute_query_with_max_rows_inner(
     sql: &str,
     max_rows: Option<usize>,
     progress_clock: Option<&crate::execution::StreamProgressClock>,
+    stop_at_row_limit: bool,
 ) -> Result<QueryResult, String> {
     let start = Instant::now();
     let result_offset = crate::query_result_sql::sqlserver_result_offset(sql);
@@ -3758,7 +3874,7 @@ async fn execute_query_with_max_rows_inner(
         };
         let (result, messages) = capture_sqlserver_messages(async {
             let stream = sqlserver_driver_result(client.query(query.sql.as_str(), &[])).await?;
-            sqlserver_driver_result(collect_first_result_limited(
+            let (result, stopped_early) = sqlserver_driver_result(collect_first_result_limited(
                 stream,
                 start,
                 max_rows,
@@ -3766,11 +3882,17 @@ async fn execute_query_with_max_rows_inner(
                 sql,
                 &query,
                 progress_clock,
+                stop_at_row_limit,
             ))
-            .await
+            .await?;
+            Ok::<_, String>((result, stopped_early))
         })
         .await;
-        let mut result = query_result_with_server_messages(result?, messages);
+        let (result, stopped_early) = result?;
+        if stopped_early {
+            abandon_sqlserver_result_stream(client).await;
+        }
+        let mut result = query_result_with_server_messages(result, messages);
         strip_dbx_sqlserver_row_number_column(&mut result, sql);
         Ok(result)
     } else if !sqlserver_batch_can_use_execute(sql) {
@@ -3782,8 +3904,10 @@ async fn execute_query_with_max_rows_inner(
             QueryResult {
                 columns: vec![],
                 column_types: Vec::new(),
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![],
                 affected_rows: result.rows_affected().iter().sum::<u64>(),
@@ -3820,6 +3944,26 @@ pub async fn execute_batch_with_max_rows_metadata(
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<Vec<SqlServerBatchResult>, String> {
+    execute_batch_with_max_rows_metadata_inner(client, sql, max_rows, false).await
+}
+
+/// Row-limited batch execution that abandons the result stream once the limit
+/// is reached. Only single-result sets can stop early: a real multi-statement
+/// batch keeps draining so later statements still produce their results.
+pub async fn execute_batch_with_max_rows_metadata_stopping(
+    client: &mut SqlServerClient,
+    sql: &str,
+    max_rows: Option<usize>,
+) -> Result<Vec<SqlServerBatchResult>, String> {
+    execute_batch_with_max_rows_metadata_inner(client, sql, max_rows, sqlserver_can_stop_at_row_limit(sql)).await
+}
+
+async fn execute_batch_with_max_rows_metadata_inner(
+    client: &mut SqlServerClient,
+    sql: &str,
+    max_rows: Option<usize>,
+    stop_at_row_limit: bool,
+) -> Result<Vec<SqlServerBatchResult>, String> {
     let start = Instant::now();
     let result_offset = crate::query_result_sql::sqlserver_result_offset(sql);
     if sqlserver_batch_can_use_execute(sql) {
@@ -3829,8 +3973,10 @@ pub async fn execute_batch_with_max_rows_metadata(
             QueryResult {
                 columns: vec![],
                 column_types: Vec::new(),
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![],
                 affected_rows: result.rows_affected().iter().sum::<u64>(),
@@ -3852,7 +3998,7 @@ pub async fn execute_batch_with_max_rows_metadata(
             Ok(Some(query)) => {
                 let (result, messages) = capture_sqlserver_messages(async {
                     let stream = sqlserver_driver_result(client.query(query.sql.as_str(), &[])).await?;
-                    sqlserver_driver_result(collect_first_result_limited(
+                    let (result, stopped_early) = sqlserver_driver_result(collect_first_result_limited(
                         stream,
                         start,
                         max_rows,
@@ -3860,15 +4006,19 @@ pub async fn execute_batch_with_max_rows_metadata(
                         sql,
                         &query,
                         None,
+                        stop_at_row_limit,
                     ))
-                    .await
+                    .await?;
+                    Ok::<_, String>((result, stopped_early))
                 })
                 .await;
-                return result.map(|result| {
-                    let mut result = query_result_with_server_messages_metadata(result, messages);
-                    strip_dbx_sqlserver_row_number_column(&mut result.result, sql);
-                    vec![result]
-                });
+                let (result, stopped_early) = result?;
+                if stopped_early {
+                    abandon_sqlserver_result_stream(client).await;
+                }
+                let mut result = query_result_with_server_messages_metadata(result, messages);
+                strip_dbx_sqlserver_row_number_column(&mut result.result, sql);
+                return Ok(vec![result]);
             }
             Err(error) if is_blocking_sqlserver_unsafe_probe_error(&error) => return Err(error),
             Ok(None) | Err(_) => {}
@@ -3925,8 +4075,10 @@ pub async fn execute_simple_batch_with_max_rows_metadata(
             result: QueryResult {
                 columns: vec![],
                 column_types: Vec::new(),
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![],
                 affected_rows: 0,
@@ -3956,8 +4108,18 @@ async fn execute_simple_batch_first_result_with_max_rows(
     let (result, messages) = capture_sqlserver_messages(async {
         let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
         let query = SqlServerUnsafeTypeQuery::plain(sql);
-        sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows, result_offset, sql, &query, None))
-            .await
+        sqlserver_driver_result(collect_first_result_limited(
+            stream,
+            start,
+            max_rows,
+            result_offset,
+            sql,
+            &query,
+            None,
+            false,
+        ))
+        .await
+        .map(|(result, _)| result)
     })
     .await;
     let mut result = query_result_with_server_messages(result?, messages);
@@ -4296,6 +4458,29 @@ fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn row_limit_stopping_only_accepts_single_read_queries() {
+        for sql in [
+            "SELECT * FROM dbo.items",
+            "SELECT DISTINCT id FROM dbo.items ORDER BY id;",
+            "WITH items AS (SELECT 1 AS id) SELECT id FROM items;",
+        ] {
+            assert!(super::sqlserver_can_stop_at_row_limit(sql), "{sql}");
+        }
+        for sql in [
+            "EXEC dbo.read_then_update;",
+            "EXECUTE dbo.read_then_update;",
+            "UPDATE dbo.items SET value = 1 OUTPUT inserted.id;",
+            "SELECT * INTO dbo.copy FROM dbo.items;",
+            "SELECT * FROM dbo.items; UPDATE dbo.items SET value = 1;",
+            "SELECT * FROM dbo.items\nUPDATE dbo.items SET value = 1",
+            "SELECT * FROM dbo.items\nSELECT 2",
+            "WITH items AS (SELECT 1 AS id) DELETE FROM dbo.items OUTPUT deleted.id;",
+        ] {
+            assert!(!super::sqlserver_can_stop_at_row_limit(sql), "{sql}");
+        }
+    }
+
+    #[test]
     fn manual_transaction_status_keeps_legacy_and_modern_safety_explicit() {
         use super::{uses_legacy_transaction_status as legacy, ManualTransactionStatus as Status};
         assert!(legacy(Some(8)));
@@ -4516,8 +4701,10 @@ mod tests {
         let empty = QueryResult {
             columns: vec![],
             column_types: vec![],
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![],
             affected_rows: 0,
@@ -4542,8 +4729,10 @@ mod tests {
             QueryResult {
                 columns: vec![],
                 column_types: vec![],
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![],
                 affected_rows: 0,
@@ -4563,8 +4752,10 @@ mod tests {
         let select = QueryResult {
             columns: vec!["id".to_string()],
             column_types: vec!["int".to_string()],
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!(1)]],
             affected_rows: 0,
@@ -5490,8 +5681,7 @@ mod tests {
 
         let first_result = source.split("async fn execute_simple_batch_first_result_with_max_rows").nth(1).unwrap();
         let first_result = first_result.split("fn strip_dbx_sqlserver_row_number_column").next().unwrap();
-        assert!(first_result
-            .contains("collect_first_result_limited(stream, start, max_rows, result_offset, sql, &query, None)"));
+        assert!(first_result.contains("collect_first_result_limited("));
         assert!(!first_result.contains("collect_result_sets_limited"));
     }
 
@@ -5823,8 +6013,10 @@ mod tests {
         let context = completion_context_from_query_result(QueryResult {
             columns: vec!["default_schema".to_string(), "engine_edition".to_string()],
             column_types: vec![],
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!("app_user"), serde_json::json!("8")]],
             affected_rows: 0,
@@ -6386,8 +6578,10 @@ mod tests {
         let mut result = QueryResult {
             columns: vec!["id".to_string(), "__dbx_row_num".to_string()],
             column_types: vec!["int".to_string(), "bigint".to_string()],
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!(42), serde_json::json!(101)]],
             affected_rows: 0,

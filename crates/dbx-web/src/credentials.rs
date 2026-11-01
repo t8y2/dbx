@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use dbx_core::models::connection::{ConnectionConfig, TransportLayerConfig};
+use dbx_core::models::connection::{jdbc_dialect_hint, ConnectionConfig, ConnectionResponse, TransportLayerConfig};
 use serde_json::Value;
 
 use crate::{error::AppError, state::WebState};
@@ -292,13 +292,19 @@ pub fn redact_tunnel(profile: TransportLayerConfig) -> TransportLayerConfig {
     redact(&tunnel_connection(profile)).transport_layers.remove(0)
 }
 
+pub(crate) fn restore_tunnel_from_profiles(
+    profile: TransportLayerConfig,
+    saved: &[TransportLayerConfig],
+) -> Result<TransportLayerConfig, AppError> {
+    let saved = saved.iter().cloned().map(tunnel_connection).map(|config| (config.id.clone(), config)).collect();
+    Ok(restore(tunnel_connection(profile), &saved)?.transport_layers.remove(0))
+}
+
 impl WebState {
-    pub fn connection_response(&self, config: ConnectionConfig) -> ConnectionConfig {
-        if self.password_viewer_enabled {
-            config
-        } else {
-            redact(&config)
-        }
+    pub fn connection_response(&self, config: ConnectionConfig) -> ConnectionResponse {
+        let jdbc_dialect = jdbc_dialect_hint(&config);
+        let response_config = if self.password_viewer_enabled { config } else { redact(&config) };
+        ConnectionResponse::with_jdbc_dialect(response_config, jdbc_dialect)
     }
 
     pub async fn resolve_connection_credentials(&self, config: ConnectionConfig) -> Result<ConnectionConfig, AppError> {
@@ -363,7 +369,9 @@ impl WebState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::connection::{self, ConnectRequest, SaveConnectionsRequest};
+    use crate::routes::connection::{
+        self, ConnectRequest, McpAddConnectionRequest, McpDuplicateConnectionRequest, SaveConnectionsRequest,
+    };
     use axum::{extract::State, http::HeaderMap, Json};
     use std::sync::Arc;
 
@@ -471,39 +479,201 @@ mod tests {
         let (state, _dir) = web_state().await;
         let original = config();
         state.app.storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
-        let Json(mut listed) = connection::load_connections(State(state.clone()), HeaderMap::new()).await.unwrap();
-        assert!(listed[0].password.starts_with(REFERENCE_PREFIX));
+        let Json(mut listed) = connection::load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
+        assert!(listed[0].config.password.starts_with(REFERENCE_PREFIX));
         assert_eq!(state.app.configs.read().await[&original.id].password, original.password);
-        listed[0].name = "Renamed".into();
+        listed[0].config.name = "Renamed".into();
         let _ = connection::save_connections(
             State(state.clone()),
             HeaderMap::new(),
-            Json(SaveConnectionsRequest { configs: listed.clone(), removed_ids: Vec::new() }),
+            Json(SaveConnectionsRequest {
+                configs: listed.iter().map(|response| response.config.clone()).collect(),
+                removed_ids: Vec::new(),
+            }),
         )
         .await
         .unwrap();
         assert_eq!(state.app.storage.load_connections().await.unwrap()[0].password, original.password);
-        listed[0].password = "replacement".into();
+        listed[0].config.password = "replacement".into();
         let _ = connection::save_connections(
             State(state.clone()),
             HeaderMap::new(),
-            Json(SaveConnectionsRequest { configs: listed.clone(), removed_ids: Vec::new() }),
+            Json(SaveConnectionsRequest {
+                configs: listed.iter().map(|response| response.config.clone()).collect(),
+                removed_ids: Vec::new(),
+            }),
         )
         .await
         .unwrap();
         assert_eq!(state.app.storage.load_connections().await.unwrap()[0].password, "replacement");
-        let Json(mut listed) = connection::load_connections(State(state.clone()), HeaderMap::new()).await.unwrap();
-        listed[0].save_password = false;
+        let Json(mut listed) = connection::load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
+        listed[0].config.save_password = false;
         let _ = connection::save_connections(
             State(state.clone()),
             HeaderMap::new(),
-            Json(SaveConnectionsRequest { configs: listed, removed_ids: Vec::new() }),
+            Json(SaveConnectionsRequest {
+                configs: listed.into_iter().map(|response| response.config).collect(),
+                removed_ids: Vec::new(),
+            }),
         )
         .await
         .unwrap();
         assert_eq!(state.app.storage.get_secret(&original.id, "password").await.unwrap(), None);
         assert!(state.ensure_secret_export_allowed(true).is_err());
         assert!(state.ensure_secret_export_allowed(false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn jdbc_dialect_response_hint_survives_redaction_but_never_persists_or_trusts_input() {
+        let (mut state, _dir) = web_state().await;
+        let original: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "saved-jdbc", "name": "JDBC connection", "db_type": "jdbc", "driver_profile": "jdbc",
+            "host": "host", "port": 2881, "username": "user", "password": "database-secret",
+            "connection_string": "jdbc:oceanbase:oracle://host/service"
+        }))
+        .unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
+
+        let Json(mut listed) = connection::load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
+        let response_json = serde_json::to_value(&listed[0]).unwrap();
+        assert_eq!(response_json["jdbc_dialect"], "oceanbase-oracle");
+        assert!(listed[0].config.connection_string.as_deref().unwrap().starts_with(REFERENCE_PREFIX));
+        assert!(!serde_json::to_string(&response_json).unwrap().contains("jdbc:oceanbase:oracle://host/service"));
+        assert!(!serde_json::to_string(&response_json).unwrap().contains("database-secret"));
+
+        let mut rename = listed.remove(0).config;
+        rename.name = "Renamed JDBC connection".into();
+        let _ = connection::save_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SaveConnectionsRequest { configs: vec![rename], removed_ids: Vec::new() }),
+        )
+        .await
+        .unwrap();
+        let persisted = state.app.storage.load_connections().await.unwrap();
+        assert_eq!(persisted[0].name, "Renamed JDBC connection");
+        assert_eq!(persisted[0].connection_string.as_deref(), Some("jdbc:oceanbase:oracle://host/service"));
+        assert!(serde_json::to_value(&persisted[0]).unwrap().get("jdbc_dialect").is_none());
+
+        Arc::get_mut(&mut state).unwrap().password_viewer_enabled = true;
+        let Json(viewed) = connection::load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(viewed[0].jdbc_dialect, Some(dbx_core::models::connection::JdbcDialectHint::OceanbaseOracle));
+        assert_eq!(viewed[0].config.connection_string.as_deref(), original.connection_string.as_deref());
+        assert_eq!(viewed[0].config.password, original.password);
+        Arc::get_mut(&mut state).unwrap().password_viewer_enabled = false;
+
+        let Json(mut listed) = connection::load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(listed[0].jdbc_dialect, Some(dbx_core::models::connection::JdbcDialectHint::OceanbaseOracle));
+        let mut changed_url = serde_json::to_value(listed.remove(0).config).unwrap();
+        changed_url["connection_string"] = serde_json::json!("jdbc:oracle:thin:@host/service");
+        changed_url["jdbc_dialect"] = serde_json::json!("oceanbase-oracle");
+        changed_url["password"] = serde_json::json!("replacement-secret");
+        let changed_url: ConnectionConfig = serde_json::from_value(changed_url).unwrap();
+        let _ = connection::save_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SaveConnectionsRequest { configs: vec![changed_url], removed_ids: Vec::new() }),
+        )
+        .await
+        .unwrap();
+        let Json(listed) = connection::load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
+        assert!(listed[0].jdbc_dialect.is_none());
+        assert_eq!(
+            state.app.storage.load_connections().await.unwrap()[0].connection_string.as_deref(),
+            Some("jdbc:oracle:thin:@host/service")
+        );
+
+        let mut cleared_url = serde_json::to_value(&listed[0].config).unwrap();
+        cleared_url["connection_string"] = Value::Null;
+        cleared_url["jdbc_dialect"] = serde_json::json!("oceanbase-oracle");
+        cleared_url["password"] = serde_json::json!("replacement-secret-2");
+        let cleared_url: ConnectionConfig = serde_json::from_value(cleared_url).unwrap();
+        let _ = connection::save_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SaveConnectionsRequest { configs: vec![cleared_url], removed_ids: Vec::new() }),
+        )
+        .await
+        .unwrap();
+        let Json(listed) = connection::load_connections(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
+        assert!(listed[0].jdbc_dialect.is_none());
+        assert!(state.app.storage.load_connections().await.unwrap()[0].connection_string.is_none());
+    }
+
+    #[tokio::test]
+    async fn mcp_added_and_duplicated_connections_use_the_same_flat_dialect_response() {
+        let (state, _dir) = web_state().await;
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "mcp-jdbc", "name": "MCP JDBC", "db_type": "jdbc", "driver_profile": "jdbc",
+            "host": "host", "port": 2881, "username": "user", "password": "",
+            "connection_string": "jdbc:oceanbase:oracle://host/service"
+        }))
+        .unwrap();
+        let Json(added) = connection::mcp_add_connection(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(McpAddConnectionRequest { config }),
+        )
+        .await
+        .unwrap();
+        let value = serde_json::to_value(&added).unwrap();
+        assert_eq!(value["jdbc_dialect"], "oceanbase-oracle");
+        assert!(value.get("config").is_none());
+        let Json(duplicated) = connection::mcp_duplicate_connection(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(McpDuplicateConnectionRequest {
+                source_id: "mcp-jdbc".into(),
+                copy_id: "mcp-copy".into(),
+                copy_name: "Copy".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(serde_json::to_value(&duplicated).unwrap()["jdbc_dialect"], "oceanbase-oracle");
+        assert_eq!(duplicated.config.id, "mcp-copy");
     }
 
     #[cfg(feature = "sqlite-sqlcipher")]
@@ -584,6 +754,7 @@ mod tests {
         assert!(!serde_json::to_string(&profiles).unwrap().contains("ssh-secret"));
         let _ = crate::routes::tunnel_profiles::save_tunnel_profiles(
             State(state.clone()),
+            axum::http::HeaderMap::new(),
             Json(crate::routes::tunnel_profiles::SaveTunnelProfilesRequest { profiles }),
         )
         .await

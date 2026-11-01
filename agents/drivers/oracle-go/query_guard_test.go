@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -255,4 +256,48 @@ func TestOracleQueryPanicAllowsManualTransactionCleanup(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOracleQueryDecodeErrorRetiresConnectionButServerErrorDoesNot(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		retired bool
+	}{
+		{"ttc", errors.New("TTC error: received code 112 during response reading"), true},
+		{"number", errors.New("invalid NUMBER"), true},
+		{"int64", errors.New("invalid size for GetInt64: 9"), true},
+		{"server", errors.New("ORA-00942: table or view does not exist"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &oracleQueryConnection{oracleThinConnection: oracleGuardErrorConn{err: tc.err}}
+			_, err := conn.QueryContext(context.Background(), "SELECT * FROM T_GEOM", nil)
+			if err == nil || err.Error() != tc.err.Error() {
+				t.Fatalf("expected the driver message %q, got %v", tc.err, err)
+			}
+			var decodeErr oracleProtocolDecodeError
+			if errors.As(err, &decodeErr) != tc.retired || conn.IsValid() == tc.retired {
+				t.Fatalf("retired=%v, want %v (err %T)", !conn.IsValid(), tc.retired, err)
+			}
+			if !tc.retired {
+				return
+			}
+			_, next := conn.QueryContext(context.Background(), "SELECT 1 FROM DUAL", nil)
+			if next == nil || !strings.Contains(next.Error(), "unusable after a response decode error") {
+				t.Fatalf("a retired session must not run the next statement, got %v", next)
+			}
+		})
+	}
+}
+
+// oracleGuardErrorConn returns err from every query, like go-ora does after it
+// misreads a response.
+type oracleGuardErrorConn struct {
+	oracleThinConnection
+	err error
+}
+
+func (c oracleGuardErrorConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+	return nil, c.err
 }

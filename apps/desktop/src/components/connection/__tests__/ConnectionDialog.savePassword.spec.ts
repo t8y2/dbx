@@ -100,10 +100,11 @@ vi.mock("@/components/ui/PasswordInput.vue", async () => {
   return {
     default: defineComponent({
       props: ["modelValue"],
+      emits: ["update:modelValue"],
       setup:
-        (props, { attrs }) =>
+        (props, { attrs, emit }) =>
         () =>
-          h("input", { ...attrs, type: "password", value: props.modelValue }),
+          h("input", { ...attrs, type: "password", value: props.modelValue, onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value) }),
     }),
   };
 });
@@ -274,5 +275,48 @@ describe("ConnectionDialog save-password checkbox", () => {
     } as ConnectionConfig);
 
     expect(savePasswordCheckbox()).toBeNull();
+  });
+});
+
+function elasticsearchConnection(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
+  return { id: "es-1", name: "Elasticsearch", db_type: "elasticsearch", host: "search.example.com", port: 9243, username: "elastic", password: "basic-password", ssl: true, save_password: true, ...overrides } as ConnectionConfig;
+}
+
+function buttonNamed(name: string): HTMLButtonElement {
+  const button = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === name);
+  expect(button, `Expected button ${name}`).toBeTruthy();
+  return button!;
+}
+
+describe("Elasticsearch API key authentication", () => {
+  it("clears the previous credential on switch, hides username and submits the key in the secret slot", async () => {
+    await mountDialog(elasticsearchConnection());
+    expect(buttonNamed("Basic").getAttribute("aria-pressed")).toBe("true");
+    buttonNamed("API Key").click();
+    await settle();
+    const input = document.querySelector<HTMLInputElement>('input[placeholder="Base64(id:api_key)"]')!;
+    expect(input.type).toBe("password");
+    expect(input.value).toBe("");
+    expect(Array.from(document.querySelectorAll("label")).some((label) => label.textContent?.trim() === "User")).toBe(false);
+    input.value = "  c3ludGhldGljOmtleQ==  ";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    buttonNamed("Test").click();
+    await settle();
+    expect(backend.testConnectionWithInfo).toHaveBeenCalledWith(expect.objectContaining({ username: "", password: "c3ludGhldGljOmtleQ==", external_config: { authType: "apiKey" } }));
+    buttonNamed("Save").click();
+    await settle();
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ username: "", password: "c3ludGhldGljOmtleQ==", external_config: { authType: "apiKey" }, save_password: true }));
+  });
+
+  it("restores the API key mode when editing and clears the key when switching back to Basic", async () => {
+    await mountDialog(elasticsearchConnection({ username: "", password: "encoded-key", external_config: { authType: "apiKey" }, save_password: false }));
+    expect(buttonNamed("API Key").getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector<HTMLInputElement>('input[placeholder="Base64(id:api_key)"]')!.value).toBe("encoded-key");
+    expect(savePasswordCheckbox()!.checked).toBe(false);
+    buttonNamed("Basic").click();
+    await settle();
+    expect(document.querySelector<HTMLInputElement>('input[type="password"]')!.value).toBe("");
+    expect(document.querySelector('input[placeholder="Base64(id:api_key)"]')).toBeNull();
   });
 });

@@ -246,7 +246,7 @@ fn maps_table_pagination_strategy_by_database_type() {
     assert_eq!(table_pagination_strategy(Some(DatabaseType::OceanbaseOracle)), TablePaginationStrategy::Rownum);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Questdb)), TablePaginationStrategy::QuestDbLimit);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Oracle)), TablePaginationStrategy::Rownum);
-    assert_eq!(table_pagination_strategy(Some(DatabaseType::Oscar)), TablePaginationStrategy::Rownum);
+    assert_eq!(table_pagination_strategy(Some(DatabaseType::Oscar)), TablePaginationStrategy::LimitOffset);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Cassandra)), TablePaginationStrategy::AgentMaxRows);
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Cassandra), PaginationContext::BoundedRead),
@@ -270,12 +270,44 @@ fn maps_table_pagination_strategy_by_database_type() {
     );
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oracle), PaginationContext::UserQuery),
-        TablePaginationStrategy::Unbounded
+        TablePaginationStrategy::Rownum
     );
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Jdbc)), TablePaginationStrategy::AgentMaxRows);
     // Both Spanner dialects support `LIMIT n OFFSET m`; pin the fallback.
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Spanner)), TablePaginationStrategy::LimitOffset);
     assert_eq!(table_pagination_strategy(None), TablePaginationStrategy::LimitOffset);
+}
+
+#[test]
+fn oscar_table_data_pages_use_one_limit_pagination_form_without_rownum() {
+    let options = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Oscar),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "USERS".to_string(),
+        table_type: Some("TABLE".to_string()),
+        primary_keys: vec!["ID".to_string()],
+        columns: vec!["ID".to_string(), "NAME".to_string()],
+        order_by: Some("\"ID\" ASC".to_string()),
+        limit: Some(100),
+        offset: Some(0),
+        ..Default::default()
+    };
+
+    // OSCAR rejects a statement that combines ROWNUM with a LIMIT. The JDBC
+    // agent always caps table-data statements with setMaxRows(), so table
+    // previews must not also wrap the statement in ROWNUM: a later page's
+    // ROWNUM bound (offset + limit) exceeds the driver cap and the server
+    // reports "rownum and limit cannot be mixed" (#13515).
+    let first_page = build_table_data_select_sql(options.clone());
+    assert_eq!(first_page, "SELECT \"ID\", \"NAME\" FROM \"SYSDBA\".\"USERS\" ORDER BY \"ID\" ASC LIMIT 100;");
+    assert!(!first_page.to_ascii_uppercase().contains("ROWNUM"), "{first_page}");
+
+    let second_page = build_table_data_select_sql(TableDataSelectSqlOptions { offset: Some(100), ..options });
+    assert_eq!(
+        second_page,
+        "SELECT \"ID\", \"NAME\" FROM \"SYSDBA\".\"USERS\" ORDER BY \"ID\" ASC LIMIT 100 OFFSET 100;"
+    );
+    assert!(!second_page.to_ascii_uppercase().contains("ROWNUM"), "{second_page}");
 }
 
 #[test]
@@ -577,6 +609,32 @@ fn jdbc_table_data_qualifies_schema_without_forcing_identifier_quotes() {
             ..Default::default()
         }),
         "SELECT * FROM STUDENT;"
+    );
+}
+
+#[test]
+fn opengauss_table_data_uses_compatibility_identifier_quote() {
+    // openGauss keeps the PostgreSQL catalog but switches identifier quoting with
+    // the database compatibility mode: B/MySQL databases reject the double quotes
+    // that A/PG databases require (#13596).
+    let base = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::OpenGauss),
+        schema: Some("dbx-demo".to_string()),
+        table_name: "order".to_string(),
+        limit: Some(25),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            identifier_quote: Some("`".to_string()),
+            ..base.clone()
+        }),
+        "SELECT * FROM `dbx-demo`.`order` LIMIT 25;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions { identifier_quote: Some("\"".to_string()), ..base }),
+        "SELECT * FROM \"dbx-demo\".\"order\" LIMIT 25;"
     );
 }
 
@@ -1119,6 +1177,143 @@ fn builds_db2_table_data_large_value_previews_with_bounded_substr() {
 }
 
 #[test]
+fn builds_oracle_table_data_large_value_previews_with_bounded_substr() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("MESPRD".to_string()),
+        table_name: "API_REQUEST_RESPONSE".to_string(),
+        primary_keys: vec!["ID".to_string()],
+        columns: vec!["ID".to_string(), "REQ_PAYLOAD".to_string(), "RESP_PAYLOAD".to_string(), "RAW_DATA".to_string()],
+        column_types: vec!["NUMBER".to_string(), "CLOB".to_string(), "NCLOB".to_string(), "BLOB".to_string()],
+        large_value_preview_size: Some(8192),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    // Oracle SQL 结果上限：VARCHAR2 4000 字节（4 字节/字符 → 999+1 字符）、RAW 2000 字节
+    // （RAWTOHEX 翻倍 + "0x" → 1998+1 字节）。外层 ROWNUM 分页按别名重选内层视图的列，
+    // marker 列必须透传到最外层，客户端才能剥离并登记大值单元格。
+    assert!(
+        sql.starts_with(
+            "SELECT \"ID\", \"REQ_PAYLOAD\", \"__DBX_LARGE_VALUE_BYTES_T_1\", \"RESP_PAYLOAD\", \"__DBX_LARGE_VALUE_BYTES_T_2\", \"RAW_DATA\", \"__DBX_LARGE_VALUE_BYTES_B_3\" FROM"
+        ),
+        "outer page projection: {sql}"
+    );
+    assert!(sql.contains("DBMS_LOB.SUBSTR(\"REQ_PAYLOAD\", 1000, 1) AS \"REQ_PAYLOAD\""), "clob preview sql: {sql}");
+    assert!(
+        sql.contains("'T:999:' || DBMS_LOB.GETLENGTH(\"REQ_PAYLOAD\") AS \"__DBX_LARGE_VALUE_BYTES_T_1\""),
+        "clob marker sql: {sql}"
+    );
+    assert!(sql.contains("DBMS_LOB.SUBSTR(\"RESP_PAYLOAD\", 1000, 1) AS \"RESP_PAYLOAD\""), "nclob preview sql: {sql}");
+    assert!(
+        sql.contains("'T:999:' || DBMS_LOB.GETLENGTH(\"RESP_PAYLOAD\") AS \"__DBX_LARGE_VALUE_BYTES_T_2\""),
+        "nclob marker sql: {sql}"
+    );
+    assert!(
+        sql.contains("'0x' || RAWTOHEX(DBMS_LOB.SUBSTR(\"RAW_DATA\", 1999, 1)) AS \"RAW_DATA\""),
+        "blob preview sql: {sql}"
+    );
+    assert!(
+        sql.contains("'B:1998:' || DBMS_LOB.GETLENGTH(\"RAW_DATA\") AS \"__DBX_LARGE_VALUE_BYTES_B_3\""),
+        "blob marker sql: {sql}"
+    );
+    assert!(sql.contains("ROWNUM <= 100"), "rownum page: {sql}");
+    assert!(!sql.contains("SUBSTR(\"ID\""), "pk should not be previewed: {sql}");
+}
+
+#[test]
+fn builds_oracle_table_data_previews_for_small_budgets() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        table_name: "documents".to_string(),
+        primary_keys: vec!["ID".to_string()],
+        columns: vec!["ID".to_string(), "BODY".to_string()],
+        column_types: vec!["NUMBER".to_string(), "CLOB".to_string()],
+        large_value_preview_size: Some(200),
+        limit: Some(50),
+        ..Default::default()
+    });
+
+    assert!(sql.contains("DBMS_LOB.SUBSTR(\"BODY\", 201, 1) AS \"BODY\""), "preview sql: {sql}");
+    assert!(
+        sql.contains("'T:200:' || DBMS_LOB.GETLENGTH(\"BODY\") AS \"__DBX_LARGE_VALUE_BYTES_T_1\""),
+        "marker sql: {sql}"
+    );
+}
+
+#[test]
+fn builds_oracle_table_data_previews_for_rowid_keyed_tables() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        table_name: "keyless_logs".to_string(),
+        table_type: Some("TABLE".to_string()),
+        primary_keys: vec!["__DBX_ROWID".to_string()],
+        include_row_id: true,
+        columns: vec!["PAYLOAD".to_string(), "CREATED_AT".to_string()],
+        column_types: vec!["CLOB".to_string(), "DATE".to_string()],
+        large_value_preview_size: Some(200),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    // 无主键基表：内层投影以合成键 ROWIDTOCHAR 开头、FROM 带别名 t，外层按别名重选
+    // __DBX_ROWID 与 marker 列，取全值时按同一合成键回查。marker 下标是结果集位置：
+    // __DBX_ROWID 占第 0 位，PAYLOAD 的 marker 因此是 _T_1（客户端剥离按此校验）。
+    assert!(
+        sql.contains(
+            "SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", DBMS_LOB.SUBSTR(\"PAYLOAD\", 201, 1) AS \"PAYLOAD\", 'T:200:' || DBMS_LOB.GETLENGTH(\"PAYLOAD\") AS \"__DBX_LARGE_VALUE_BYTES_T_1\", \"CREATED_AT\" FROM \"keyless_logs\" t"
+        ),
+        "inner projection: {sql}"
+    );
+    assert!(
+        sql.starts_with("SELECT \"__DBX_ROWID\", \"PAYLOAD\", \"__DBX_LARGE_VALUE_BYTES_T_1\", \"CREATED_AT\" FROM"),
+        "outer projection: {sql}"
+    );
+}
+
+#[test]
+fn keeps_oracle_table_data_previews_on_later_pages() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        table_name: "documents".to_string(),
+        primary_keys: vec!["ID".to_string()],
+        columns: vec!["ID".to_string(), "BODY".to_string()],
+        column_types: vec!["NUMBER".to_string(), "CLOB".to_string()],
+        large_value_preview_size: Some(200),
+        limit: Some(100),
+        offset: Some(200),
+        ..Default::default()
+    });
+
+    // 第二页起是三层嵌套；中间层 dbx_inner.* 必须把 marker 带到最外层投影。
+    assert!(sql.contains("\"__dbx_row_num\""), "row-number page: {sql}");
+    assert!(
+        sql.starts_with("SELECT \"ID\", \"BODY\", \"__DBX_LARGE_VALUE_BYTES_T_1\" FROM"),
+        "outer projection: {sql}"
+    );
+    assert!(sql.contains("DBMS_LOB.SUBSTR(\"BODY\", 201, 1)"), "inner preview survives: {sql}");
+}
+
+#[test]
+fn skips_oracle_previews_for_columns_without_substr_support() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        table_name: "mixed_objects".to_string(),
+        primary_keys: vec!["ID".to_string()],
+        columns: vec!["ID".to_string(), "DOC".to_string(), "LEGACY".to_string()],
+        column_types: vec!["NUMBER".to_string(), "XMLTYPE".to_string(), "LONG".to_string()],
+        large_value_preview_size: Some(200),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    // XMLTYPE / LONG 没有 DBMS_LOB.SUBSTR 重载，保持原样投影（与旧行为一致）。
+    assert!(!sql.contains("DBMS_LOB"), "no substr for xmltype/long: {sql}");
+    assert!(!sql.contains("__DBX_LARGE_VALUE_BYTES_"), "no markers: {sql}");
+    assert!(sql.contains("\"DOC\""), "xmltype column stays projected: {sql}");
+}
+
+#[test]
 fn preserves_postgres_array_types_in_large_value_previews() {
     let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
         database_type: Some(DatabaseType::Postgres),
@@ -1317,6 +1512,43 @@ fn explicit_table_data_order_is_preserved() {
         }),
         "SELECT * FROM \"public\".\"country_gdp\" ORDER BY \"iso3\" ASC LIMIT 100;"
     );
+}
+
+#[test]
+fn greenplum_servers_do_not_receive_the_system_column_locator() {
+    let base = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "ao_table".to_string(),
+        table_type: Some("TABLE".to_string()),
+        columns: vec!["id".to_string()],
+        limit: Some(20),
+        include_row_id: true,
+        ..Default::default()
+    };
+
+    // Greenplum reports itself through version(); its segments reject
+    // tableoid/ctid/xmin with "cannot retrieve a system column" (#13227).
+    let greenplum = build_table_data_select_sql(TableDataSelectSqlOptions {
+        server_version: Some("PostgreSQL 9.4.24 (Greenplum Database 6.18.2 build commit:4b1c8322)".to_string()),
+        ..base.clone()
+    });
+    assert_eq!(greenplum, "SELECT * FROM \"public\".\"ao_table\" LIMIT 20;");
+
+    // Real Cloudberry `version()` never contains the "greenplum" word.
+    let cloudberry = build_table_data_select_sql(TableDataSelectSqlOptions {
+        server_version: Some("PostgreSQL 14.4 (Cloudberry Database 1.6.0 build 6f2c4a1)".to_string()),
+        ..base.clone()
+    });
+    assert_eq!(cloudberry, "SELECT * FROM \"public\".\"ao_table\" LIMIT 20;");
+
+    // Plain PostgreSQL and unknown versions keep the locator.
+    assert!(build_table_data_select_sql(base.clone()).contains("\"__DBX_ROWID\""));
+    assert!(build_table_data_select_sql(TableDataSelectSqlOptions {
+        server_version: Some("PostgreSQL 16.3".to_string()),
+        ..base
+    })
+    .contains("\"__DBX_ROWID\""));
 }
 
 #[test]

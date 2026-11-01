@@ -86,6 +86,19 @@ fn exact_backup_scope_preserves_literal_names_and_rejects_empty_or_foreign_scope
     assert!(config.validate().is_err());
 }
 
+#[test]
+fn scheduled_backup_system_databases_filter_templates_for_postgres_and_opengauss() {
+    assert!(super::engine::system_database("template0", true));
+    assert!(super::engine::system_database("template1", true));
+    assert!(super::engine::system_database("TEMPLATE0", true));
+    assert!(!super::engine::system_database("my_db", true));
+    assert!(super::engine::system_database("information_schema", false));
+    assert!(super::engine::system_database("mysql", false));
+    assert!(super::engine::system_database("performance_schema", false));
+    assert!(super::engine::system_database("sys", false));
+    assert!(!super::engine::system_database("my_db", false));
+}
+
 #[tokio::test]
 async fn schedule_survives_reopen_and_rejects_stale_edit() {
     let dir = tempfile::tempdir().unwrap();
@@ -207,6 +220,76 @@ async fn deletion_only_removes_recorded_files_within_the_backup_root() {
     assert!(!inside.exists());
     assert!(outside.exists());
     assert!(service.store.snapshot().await.unwrap().runs.is_empty());
+}
+
+#[tokio::test]
+async fn imported_backups_restore_from_their_folder_and_are_never_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = service(dir.path(), None).await;
+    let downloads = dir.path().join("downloads");
+    std::fs::create_dir(&downloads).unwrap();
+    let dump = downloads.join("before-upgrade.sql.gz");
+    std::fs::write(&dump, "not inspected").unwrap();
+    let import = |path: &std::path::Path| BackupCommand::Import { files: vec![path.to_string_lossy().into_owned()] };
+
+    let imported = service.command(import(&dump)).await.unwrap();
+    let run: BackupRun = serde_json::from_value(imported[0].clone()).unwrap();
+    assert_eq!((run.source.as_str(), run.status.as_str()), (IMPORTED_SOURCE, "success"));
+    assert_eq!(run.files[0].display_name, "before-upgrade.sql.gz");
+    assert!(!run.files[0].owned);
+    assert_eq!(service.file(&run.id, 0).await.unwrap(), dump.canonicalize().unwrap());
+
+    assert!(service.command(import(&dump)).await.unwrap_err().contains("already in the history"));
+    let notes = downloads.join("notes.txt");
+    std::fs::write(&notes, "x").unwrap();
+    assert!(service.command(import(&notes)).await.unwrap_err().contains("Unsupported"));
+    assert!(service.command(import(&downloads)).await.is_err());
+
+    service.delete_runs(vec![run.id]).await.unwrap();
+    assert!(dump.exists());
+    assert!(service.store.snapshot().await.unwrap().runs.is_empty());
+}
+
+#[tokio::test]
+async fn imported_navicat_archives_record_their_source_and_web_imports_stay_in_the_root() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("backups");
+    std::fs::create_dir(&root).unwrap();
+    let service = service(dir.path(), Some(root.clone())).await;
+    let write_archive = |path: &std::path::Path| {
+        let mut writer = crate::navicat_nb3::Nb3ExportWriter::new(
+            std::fs::File::create(path).unwrap(),
+            None,
+            crate::models::connection::DatabaseType::Postgres,
+            "shop",
+            "sales",
+        )
+        .unwrap();
+        writer.write_all(b"CREATE TABLE \"sales\".\"orders\" (\"id\" int);\n").unwrap();
+        writer.finish().unwrap();
+    };
+
+    let outside = dir.path().join("outside.nb3");
+    write_archive(&outside);
+    let files = vec![outside.to_string_lossy().into_owned()];
+    assert!(service
+        .command(BackupCommand::Import { files })
+        .await
+        .unwrap_err()
+        .contains("outside the server backup root"));
+
+    let archive = root.join("navicat.nb3");
+    write_archive(&archive);
+    let files = vec![archive.to_string_lossy().into_owned()];
+    let imported = service.command(BackupCommand::Import { files }).await.unwrap();
+    let run: BackupRun = serde_json::from_value(imported[0].clone()).unwrap();
+    let file = &run.files[0];
+    assert_eq!(
+        (file.database.as_str(), file.schema.as_str(), file.display_name.as_str()),
+        ("shop", "sales", "shop.sales")
+    );
+    assert_eq!(service.file(&run.id, 0).await.unwrap(), archive.canonicalize().unwrap());
 }
 
 #[tokio::test]

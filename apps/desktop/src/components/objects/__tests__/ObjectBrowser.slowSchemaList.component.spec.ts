@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, ref, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ObjectBrowser from "@/components/objects/ObjectBrowser.vue";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
@@ -21,6 +21,7 @@ vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     getConfig: () => connection,
     ensureConnected: mocks.ensureConnected,
+    tableNameFilterForScope: () => undefined,
     orderByPinnedTreeNodes: (rows: unknown[]) => rows,
   }),
 }));
@@ -81,7 +82,7 @@ const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.listObjects.mockResolvedValue([{ name: "TEST2026", object_type: "TABLE" }]);
+  mocks.listObjects.mockImplementation(async (...args: unknown[]) => (args[10] === true ? [] : [{ name: "TEST2026", object_type: "TABLE" }]));
   mocks.ensureConnected.mockResolvedValue(undefined);
   invalidateObjectBrowserRowsCache({});
 });
@@ -111,7 +112,10 @@ describe("ObjectBrowser with a slow schema list", () => {
     const host = await mountBrowser();
 
     await vi.waitFor(() => expect(host.textContent).toContain("TEST2026"));
-    expect(mocks.listObjects).toHaveBeenCalledWith("dameng-slow-schemas", "TEST", "TEST", undefined, undefined, undefined, undefined, undefined);
+    // Schema index metadata is read only in the dedicated paged filter.
+    expect(mocks.listObjects).toHaveBeenCalledWith("dameng-slow-schemas", "TEST", "TEST", expect.arrayContaining(["TABLE", "VIEW", "TRIGGER"]), undefined, undefined, undefined, undefined, undefined, undefined, { identityMode: "exact" });
+    expect(mocks.listObjects.mock.calls[0][3]).not.toContain("INDEX");
+    expect(mocks.listObjects).toHaveBeenCalledTimes(1);
     expect(mocks.listSchemas).toHaveBeenCalledWith("dameng-slow-schemas", "TEST");
     expect(host.textContent).not.toContain("objects.empty");
   });
@@ -124,6 +128,8 @@ describe("ObjectBrowser with a slow schema list", () => {
     await vi.waitFor(() => expect(host.textContent).toContain("TEST2026"));
 
     resolveSchemas(["TEST", "OTHER"]);
-    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(1));
+    await Promise.resolve();
+    await nextTick();
+    expect(mocks.listObjects).toHaveBeenCalledTimes(1);
   });
 });

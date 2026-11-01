@@ -1,3 +1,4 @@
+use super::duckdb_export::DuckDbExportSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::borrow::Cow;
@@ -725,12 +726,19 @@ async fn fetch_table_export_batch(
     cursor_session: &mut Option<TableExportCursorSession>,
     table_read_attempted: &mut bool,
     table_read_completed: &mut bool,
+    duckdb_snapshot: Option<&DuckDbExportSnapshot>,
     cancel_token: CancellationToken,
+    cleanup_error: &std::sync::Mutex<Option<String>>,
 ) -> Result<QueryResult, String> {
+    if let Some(snapshot) = duckdb_snapshot {
+        return snapshot.page(state, offset, active_batch_size, Some(cancel_token)).await;
+    }
     if *table_read_completed {
         return Ok(QueryResult {
+            raw_key_cells: Vec::new(),
             columns: col_names.to_vec(),
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
             spatial_values: vec![],
@@ -911,7 +919,8 @@ async fn fetch_table_export_batch(
                         if cancel_token.is_cancelled() {
                             cursor_session.take();
                         } else {
-                            close_table_export_cursor_if_open(state, pool_key, request, cursor_session).await;
+                            close_table_export_cursor_if_open(state, pool_key, request, cursor_session, cleanup_error)
+                                .await;
                         }
                         Err(error)
                     }
@@ -969,23 +978,28 @@ async fn close_table_export_cursor_if_open(
     pool_key: &str,
     request: &TableExportRequest,
     cursor_session: &mut Option<TableExportCursorSession>,
+    cleanup_error: &std::sync::Mutex<Option<String>>,
 ) {
     let Some(session) = cursor_session.take() else {
         return;
     };
-    match session {
+    let result = match session {
         TableExportCursorSession::Agent(session_id) => {
             let pool_handle = state.pool_handle(pool_key).await;
             let Some(PoolKind::Agent(client)) = pool_handle.as_ref() else {
+                cleanup_error
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get_or_insert_with(|| "Export cursor close completion was not confirmed".to_string());
                 return;
             };
             let client = client.clone();
             let mut client = client.lock().await;
-            let _ = client.close_table_read_session::<bool>(&session_id).await;
+            client.close_table_read_session::<bool>(&session_id).await.map(|_| ())
         }
         TableExportCursorSession::ExternalDriver(session_id) => {
             let client_session_id = table_export_client_session_id(&request.export_id);
-            let _ = close_query_session(
+            close_query_session(
                 state,
                 &request.connection_id,
                 &request.database,
@@ -993,8 +1007,12 @@ async fn close_table_export_cursor_if_open(
                 Some(&client_session_id),
                 None,
             )
-            .await;
+            .await
+            .map(|_| ())
         }
+    };
+    if let Err(error) = result {
+        cleanup_error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get_or_insert(error);
     }
 }
 
@@ -1569,6 +1587,33 @@ pub async fn export_table_data_core(
     request: &TableExportRequest,
     on_progress: impl Fn(TableExportProgress),
 ) -> Result<(), String> {
+    export_table_data_with_cleanup(state, request, on_progress, false).await.result
+}
+
+pub struct ExportCompletion {
+    pub result: Result<(), String>,
+    pub cleanup: Result<(), String>,
+}
+
+pub async fn export_table_data_core_with_completion(
+    state: &AppState,
+    request: &TableExportRequest,
+    on_progress: impl Fn(TableExportProgress),
+) -> ExportCompletion {
+    export_table_data_with_cleanup(state, request, on_progress, true).await
+}
+
+async fn export_table_data_with_cleanup(
+    state: &AppState,
+    request: &TableExportRequest,
+    on_progress: impl Fn(TableExportProgress),
+    report_completion: bool,
+) -> ExportCompletion {
+    if let Err(error) =
+        crate::query::mysql_data_charset_policy::check_export(state, &request.connection_id, &request.format).await
+    {
+        return ExportCompletion { result: Err(error), cleanup: Ok(()) };
+    }
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel_token = CancellationToken::new();
     let cancel_watcher =
@@ -1578,12 +1623,51 @@ pub async fn export_table_data_core(
         last_rows_exported.store(progress.rows_exported, Ordering::SeqCst);
         on_progress(progress);
     };
-    let result =
-        export_table_data_core_inner(state, request, &tracked_progress, cancelled.clone(), cancel_token.clone()).await;
+    let cleanup_error = std::sync::Mutex::new(None);
+    let mut duckdb_snapshot = None;
+    let result = export_table_data_core_inner(
+        state,
+        request,
+        &tracked_progress,
+        cancelled.clone(),
+        cancel_token.clone(),
+        &cleanup_error,
+        &mut duckdb_snapshot,
+    )
+    .await;
     cancel_watcher.abort();
+    let snapshot_cleanup = if let Some(snapshot) = duckdb_snapshot {
+        if report_completion {
+            snapshot.close_with_completion(state).await
+        } else {
+            snapshot.close(state).await;
+            Ok(())
+        }
+    } else {
+        Ok(())
+    };
     let client_session_id = table_export_client_session_id(&request.export_id);
-    let _ = state.close_client_session_pool(&request.connection_id, Some(&request.database), &client_session_id).await;
-    match result {
+    let pool_cleanup = if report_completion {
+        state
+            .close_client_session_pool_with_completion(
+                &request.connection_id,
+                Some(&request.database),
+                &client_session_id,
+            )
+            .await
+            .map(|_| ())
+    } else {
+        let _ =
+            state.close_client_session_pool(&request.connection_id, Some(&request.database), &client_session_id).await;
+        Ok(())
+    };
+    let mut cleanup = snapshot_cleanup.and(pool_cleanup);
+    if report_completion {
+        if let Some(error) = cleanup_error.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner()) {
+            cleanup = Err(error);
+        }
+    }
+    let result = match result {
         Err(error) if cancelled.load(Ordering::SeqCst) || error == crate::query::canceled_error() => {
             on_progress(TableExportProgress {
                 export_id: request.export_id.clone(),
@@ -1596,7 +1680,8 @@ pub async fn export_table_data_core(
             Ok(())
         }
         result => result,
-    }
+    };
+    ExportCompletion { result, cleanup }
 }
 
 async fn export_table_data_core_inner(
@@ -1605,6 +1690,8 @@ async fn export_table_data_core_inner(
     on_progress: &impl Fn(TableExportProgress),
     cancelled: Arc<AtomicBool>,
     cancel_token: CancellationToken,
+    cleanup_error: &std::sync::Mutex<Option<String>>,
+    duckdb_snapshot: &mut Option<DuckDbExportSnapshot>,
 ) -> Result<(), String> {
     // 1. Get database type
     let db_type = {
@@ -1797,6 +1884,32 @@ async fn export_table_data_core_inner(
         return Ok(());
     }
 
+    if db_type == DatabaseType::DuckDb {
+        on_progress(TableExportProgress {
+            export_id: request.export_id.clone(),
+            table_name: request.table_name.clone(),
+            rows_exported: 0,
+            total_rows,
+            status: ExportStatus::PreparingSnapshot,
+            error_message: None,
+        });
+        let snapshot = duckdb_snapshot.insert(DuckDbExportSnapshot::new(
+            &request.connection_id,
+            &request.database,
+            request.schema.as_deref(),
+            QueryExecutionOptions {
+                client_session_id: Some(client_session_id),
+                // Bounds the small paged reads only: materialization runs as a
+                // full source scan and deliberately ignores the interactive
+                // query timeout so it cannot SIGKILL the worker mid-export.
+                timeout_secs: Some(table_export_query_timeout_secs(state, &pool_key).await),
+                ..Default::default()
+            },
+        ));
+        let sql = table_cursor_sql(request, &sql_context, query_col_names.as_ref(), &column_types, &primary_keys);
+        snapshot.materialize(state, &sql, row_limit, Some(cancel_token.clone())).await?;
+    }
+
     // 8. Create output file
     let mut file = if request.format.eq_ignore_ascii_case("sql") {
         create_table_export_sql_writer(request)?
@@ -1835,7 +1948,8 @@ async fn export_table_data_core_inner(
                         status: ExportStatus::Cancelled,
                         error_message: Some("Export cancelled".to_string()),
                     });
-                    close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session).await;
+                    close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session, cleanup_error)
+                        .await;
                     return Ok(());
                 }
 
@@ -1859,7 +1973,9 @@ async fn export_table_data_core_inner(
                     &mut cursor_session,
                     &mut table_read_attempted,
                     &mut table_read_completed,
+                    duckdb_snapshot.as_ref(),
                     cancel_token.clone(),
+                    cleanup_error,
                 )
                 .await?;
                 let row_count = result.rows.len();
@@ -1935,7 +2051,8 @@ async fn export_table_data_core_inner(
                         status: ExportStatus::Cancelled,
                         error_message: Some("Export cancelled".to_string()),
                     });
-                    close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session).await;
+                    close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session, cleanup_error)
+                        .await;
                     return Ok(());
                 }
 
@@ -1959,7 +2076,9 @@ async fn export_table_data_core_inner(
                     &mut cursor_session,
                     &mut table_read_attempted,
                     &mut table_read_completed,
+                    duckdb_snapshot.as_ref(),
                     cancel_token.clone(),
+                    cleanup_error,
                 )
                 .await?;
                 let row_count = result.rows.len();
@@ -2049,7 +2168,8 @@ async fn export_table_data_core_inner(
                         status: ExportStatus::Cancelled,
                         error_message: Some("Export cancelled".to_string()),
                     });
-                    close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session).await;
+                    close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session, cleanup_error)
+                        .await;
                     return Ok(());
                 }
 
@@ -2073,7 +2193,9 @@ async fn export_table_data_core_inner(
                     &mut cursor_session,
                     &mut table_read_attempted,
                     &mut table_read_completed,
+                    duckdb_snapshot.as_ref(),
                     cancel_token.clone(),
+                    cleanup_error,
                 )
                 .await?;
                 let row_count = result.rows.len();
@@ -2145,7 +2267,8 @@ async fn export_table_data_core_inner(
                         status: ExportStatus::Cancelled,
                         error_message: Some("Export cancelled".to_string()),
                     });
-                    close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session).await;
+                    close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session, cleanup_error)
+                        .await;
                     return Ok(());
                 }
 
@@ -2169,7 +2292,9 @@ async fn export_table_data_core_inner(
                     &mut cursor_session,
                     &mut table_read_attempted,
                     &mut table_read_completed,
+                    duckdb_snapshot.as_ref(),
                     cancel_token.clone(),
+                    cleanup_error,
                 )
                 .await?;
                 let row_count = result.rows.len();
@@ -2230,7 +2355,8 @@ async fn export_table_data_core_inner(
                         status: ExportStatus::Cancelled,
                         error_message: Some("Export cancelled".to_string()),
                     });
-                    close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session).await;
+                    close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session, cleanup_error)
+                        .await;
                     return Ok(());
                 }
 
@@ -2254,7 +2380,9 @@ async fn export_table_data_core_inner(
                     &mut cursor_session,
                     &mut table_read_attempted,
                     &mut table_read_completed,
+                    duckdb_snapshot.as_ref(),
                     cancel_token.clone(),
+                    cleanup_error,
                 )
                 .await?;
                 let row_count = result.rows.len();
@@ -2315,7 +2443,8 @@ async fn export_table_data_core_inner(
                         status: ExportStatus::Cancelled,
                         error_message: Some("Export cancelled".to_string()),
                     });
-                    close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session).await;
+                    close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session, cleanup_error)
+                        .await;
                     return Ok(());
                 }
 
@@ -2339,7 +2468,9 @@ async fn export_table_data_core_inner(
                     &mut cursor_session,
                     &mut table_read_attempted,
                     &mut table_read_completed,
+                    duckdb_snapshot.as_ref(),
                     cancel_token.clone(),
+                    cleanup_error,
                 )
                 .await?;
                 let row_count = result.rows.len();
@@ -2409,7 +2540,7 @@ async fn export_table_data_core_inner(
         }
     }
 
-    close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session).await;
+    close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session, cleanup_error).await;
     file.finish(&format!("{}.sql", request.table_name))?;
 
     // 8. Emit Done progress

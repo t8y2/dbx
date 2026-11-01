@@ -132,7 +132,7 @@ const groupOrder: MenuGroup[] = ["structure", "copy", "data", "sql", "selection"
 export function sidebarMenuActionGroup(item: ContextMenuItem): MenuGroup {
   const id = item.sidebarActionId;
   if (id?.startsWith("editor.object.") || id === "editor.contextMenu.expandSelectStar") return "structure";
-  if (id === "settings.shortcutExecuteSqlInNewResultTab" || id === "toolbar.explainPlan" || id === "editor.previewChanges" || id === "editor.contextMenu.export") return "data";
+  if (id === "plDebug.start.title" || id === "settings.shortcutExecuteSqlInNewResultTab" || id === "toolbar.explainPlan" || id === "editor.previewChanges" || id === "editor.contextMenu.export") return "data";
   if (id === "editor.contextMenu.copySelectionAsRichText" || id === "editor.contextMenu.screenshotSelection" || id === "editor.contextMenu.pasteRestoringSourceSql") return "copy";
   if (id === "editor.contextMenu.folding" || id === "editor.contextMenu.addNextSelectionOccurrence" || id === "editor.contextMenu.selectAllSelectionOccurrences" || id === "editor.contextMenu.selectCurrentStatement" || id === "editor.contextMenu.selectAll") return "selection";
   if (id?.startsWith("editor.contextMenu.")) return "sql";
@@ -189,6 +189,9 @@ export function buildSidebarMenuLayout(items: readonly ContextMenuItem[], scope:
     }
     const actionGroup = sidebarMenuActionGroup(item);
     const group: MenuGroup = scope === "connection" && ["data", "sql", "structure"].includes(actionGroup) ? "manage" : (scope === "table" || scope === "view") && actionGroup === "manage" ? "structure" : actionGroup;
+    // Unchecking an action in the customize dialog has to hide it, not just drop
+    // it back into its group (#12791). Built-in actions cannot be unchecked.
+    if (group !== "danger" && !builtInIds.has(item.sidebarActionId) && hiddenIds.has(item.sidebarActionId)) continue;
     if (group !== "danger" && (builtInIds.has(item.sidebarActionId) || pinned.has(item.sidebarActionId) || (recommendedIds.has(item.sidebarActionId) && !hiddenIds.has(item.sidebarActionId)))) {
       primary.push(item);
       continue;

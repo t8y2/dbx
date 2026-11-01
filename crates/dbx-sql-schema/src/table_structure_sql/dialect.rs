@@ -278,6 +278,7 @@ pub(super) fn capabilities_for(
             // from the index metadata (issue #10758).
             add_primary_key: true,
             alter_primary_key: true,
+            foreign_key: true,
             ..base
         },
         Some(DatabaseType::SapHana) => TableStructureCapabilities {

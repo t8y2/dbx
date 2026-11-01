@@ -105,6 +105,9 @@ const TRANSPOSE_RECORD_MIN_WIDTH = 96;
 const TRANSPOSE_RECORD_DEFAULT_WIDTH = 168;
 const TRANSPOSE_FIELD_MIN_WIDTH = 104;
 const TRANSPOSE_FIELD_MAX_WIDTH = 220;
+export const TRANSPOSE_INFO_DEFAULT_WIDTH = 360;
+export const TRANSPOSE_INFO_MIN_WIDTH = 120;
+export const TRANSPOSE_INFO_MAX_WIDTH = 800;
 
 // 转置视图每种密度对应的缩放因子（不再依赖 charWidth）
 const TRANSPOSE_DENSITY_SCALE: Record<ColumnWidthDensity, number> = {
@@ -132,6 +135,26 @@ export function minTransposeRecordWidth(density: ColumnWidthDensity): number {
 
 export function minTransposeFieldWidth(density: ColumnWidthDensity): number {
   return densityScaledWidth(TRANSPOSE_FIELD_MIN_WIDTH, density);
+}
+
+export function defaultTransposeInfoWidth(density: ColumnWidthDensity): number {
+  return densityScaledWidth(TRANSPOSE_INFO_DEFAULT_WIDTH, density);
+}
+
+export function minTransposeInfoWidth(density: ColumnWidthDensity): number {
+  return densityScaledWidth(TRANSPOSE_INFO_MIN_WIDTH, density);
+}
+
+export function calculateTransposeInfoWidth(texts: readonly string[], options: TransposeFieldWidthOptions = {}): number {
+  const density = options.density ?? "standard";
+  const preset = COLUMN_WIDTH_DENSITY_PRESETS[density];
+  const minWidth = options.minWidth ?? minTransposeInfoWidth(density);
+  const maxWidth = options.maxWidth ?? densityScaledWidth(TRANSPOSE_INFO_MAX_WIDTH, density);
+  const charWidth = options.charWidth ?? preset.charWidth;
+  const padding = options.padding ?? preset.cellPadding + 16;
+  const longest = texts.reduce((max, text) => Math.max(max, text.length), 0);
+  if (longest === 0) return defaultTransposeInfoWidth(density);
+  return Math.min(maxWidth, Math.max(minWidth, Math.ceil(longest * charWidth + padding)));
 }
 
 export function calculateTransposeRecordWidth(values: readonly unknown[], density: ColumnWidthDensity): number {

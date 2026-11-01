@@ -15,6 +15,27 @@ describe("buildTableSelectTemplate", () => {
     ).toBe("SELECT *\nFROM public.dbx_smoke;");
   });
 
+  it("honors lower keywordCase for a new-query table reference (#12933)", () => {
+    expect(
+      buildTableSelectTemplate({
+        databaseType: "postgres",
+        schema: "public",
+        tableName: "dbx_smoke",
+        quoteIdentifiers: false,
+        keywordCase: "lower",
+      }),
+    ).toBe("select *\nfrom public.dbx_smoke;");
+    expect(
+      buildTableSelectTemplate({
+        databaseType: "postgres",
+        schema: "public",
+        tableName: "dbx_smoke",
+        quoteIdentifiers: false,
+        keywordCase: "upper",
+      }),
+    ).toBe("SELECT *\nFROM public.dbx_smoke;");
+  });
+
   it("keeps required quotes for columns when identifier quoting is disabled", () => {
     expect(
       buildTableSelectTemplate({

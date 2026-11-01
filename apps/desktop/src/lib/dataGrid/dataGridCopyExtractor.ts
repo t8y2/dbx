@@ -117,7 +117,7 @@ export interface DataGridDsvOptions {
   includeColumnHeader: boolean;
   includeRowHeader: boolean;
   headerPosition: "legacy" | "none" | "top" | "bottom";
-  headerFormat: "name" | "description" | "both";
+  headerFormat: "name" | "description" | "both" | "name-and-description-two-rows";
   headerCase: "preserve" | "upper" | "lower";
   escapeFormulas: boolean;
   lineFeedEscapeString: string;
@@ -248,7 +248,7 @@ export function normalizeDataGridExtractorOptions(value: unknown): DataGridExtra
       includeColumnHeader: dsv.includeColumnHeader === true,
       includeRowHeader: dsv.includeRowHeader === true,
       headerPosition: dsv.headerPosition === "none" || dsv.headerPosition === "top" || dsv.headerPosition === "bottom" ? dsv.headerPosition : "legacy",
-      headerFormat: dsv.headerFormat === "description" || dsv.headerFormat === "both" ? dsv.headerFormat : "name",
+      headerFormat: dsv.headerFormat === "description" || dsv.headerFormat === "both" || dsv.headerFormat === "name-and-description-two-rows" ? dsv.headerFormat : "name",
       headerCase: dsv.headerCase === "upper" || dsv.headerCase === "lower" ? dsv.headerCase : "preserve",
       escapeFormulas: dsv.escapeFormulas === true,
       lineFeedEscapeString: typeof dsv.lineFeedEscapeString === "string" && dsv.lineFeedEscapeString.length <= 32 ? dsv.lineFeedEscapeString : "",

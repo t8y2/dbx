@@ -457,7 +457,46 @@
         "id": { "$ref": "#/$defs/identifier" },
         "description": { "type": "string" },
         "ai_tools": { "type": "boolean", "default": true, "description": "Set false to keep the tools off the built-in AI agent." },
-        "external_tools": { "type": "boolean", "default": false, "description": "Set true to expose the tools on the external dbx MCP server." }
+        "external_tools": { "type": "boolean", "default": false, "description": "Set true to expose the tools on the external dbx MCP server." },
+        "toolsets": {
+          "type": "array",
+          "description": "Optional grouping of the plugin's tools for the MCP settings UI. Without toolsets the plugin shows as one group.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "title"],
+            "properties": {
+              "id": { "type": "string", "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+              "title": { "type": "string", "minLength": 1 },
+              "description": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "title", "argument"],
+          "description": "Optional sub-scope below a connection (e.g. a Kubernetes namespace) that users can allow or restrict per connection.",
+          "properties": {
+            "kind": { "type": "string", "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9._-]*$", "not": { "const": "database" } },
+            "title": { "type": "string", "minLength": 1 },
+            "argument": { "type": "string", "minLength": 1, "maxLength": 64, "description": "Tool argument carrying the scope value; the host enforces the policy on it." },
+            "list_method": { "type": "string", "minLength": 1, "description": "Sidecar method returning { values: [string] } for a connectionId." }
+          }
+        },
+        "tools": {
+          "type": "object",
+          "description": "Per-tool declarations keyed by the tool name mcp/tools returns. Required with external_tools: only tools declared here with an access level can be exposed on the external dbx MCP server.",
+          "maxProperties": 64,
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "toolset": { "type": "string", "description": "Toolset id from toolsets." },
+              "access": { "enum": ["read", "write", "full"], "description": "Highest access the tool can reach." }
+            }
+          }
+        }
       }
     },
     "menuItem": {

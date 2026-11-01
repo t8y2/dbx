@@ -388,6 +388,31 @@ mod tests {
     }
 
     #[test]
+    fn system_java_fallback_rejects_an_older_java_home() {
+        let manager = test_manager("old-system-java");
+        let home = manager.base_dir().join("jdk8");
+        touch(&home.join("bin").join(java_executable_name()));
+        fs::write(home.join("release"), "JAVA_VERSION=\"1.8.0_504\"\n").unwrap();
+
+        let err = ensure_system_java_fallback_supported(Some(home.as_os_str()), None).unwrap_err();
+
+        assert!(err.starts_with(AGENT_JAVA_TOO_OLD_MESSAGE), "unexpected error: {err}");
+        assert!(err.contains("Detected Java 8"));
+    }
+
+    #[test]
+    fn system_java_fallback_accepts_java_21_and_a_missing_runtime() {
+        let manager = test_manager("new-system-java");
+        let home = manager.base_dir().join("jdk21");
+        touch(&home.join("bin").join(java_executable_name()));
+        fs::write(home.join("release"), "JAVA_VERSION=\"21.0.10\"\n").unwrap();
+        let empty_path = std::env::join_paths([manager.base_dir().join("empty")]).unwrap();
+
+        assert_eq!(ensure_system_java_fallback_supported(Some(home.as_os_str()), None), Ok(()));
+        assert_eq!(ensure_system_java_fallback_supported(None, Some(empty_path.as_os_str())), Ok(()));
+    }
+
+    #[test]
     fn accepts_java_runtime_matching_the_agent_bytecode() {
         let manager = test_manager("new-custom-java");
         let java = manager.base_dir().join("jre21").join("bin").join(java_executable_name());
@@ -851,13 +876,13 @@ pub struct DriverStoreUsage {
     pub agent_drivers: Vec<DriverStoreUsageItem>,
 }
 
+type ConnectionRuntimeSlots = std::collections::HashMap<String, Arc<tokio::sync::OnceCell<Arc<AgentRuntimeClient>>>>;
+
 pub struct AgentManager {
     base_dir: PathBuf,
     app_version: String,
     pub daemons: Mutex<std::collections::HashMap<String, AgentDriverClient>>,
-    pub connection_runtimes: Mutex<
-        std::collections::HashMap<String, std::sync::Arc<tokio::sync::OnceCell<std::sync::Arc<AgentRuntimeClient>>>>,
-    >,
+    pub connection_runtimes: Arc<Mutex<ConnectionRuntimeSlots>>,
     /// Serializes `load_state` → modify → `save_state` to prevent lost updates
     /// when multiple driver installs run concurrently.
     pub state_lock: StdMutex<()>,
@@ -898,7 +923,7 @@ impl AgentManager {
             base_dir,
             app_version: app_version.into(),
             daemons: Mutex::new(std::collections::HashMap::new()),
-            connection_runtimes: Mutex::new(std::collections::HashMap::new()),
+            connection_runtimes: Arc::new(Mutex::new(std::collections::HashMap::new())),
             state_lock: StdMutex::new(()),
             jre_install_locks: StdMutex::new(std::collections::HashMap::new()),
             driver_operation_locks: StdMutex::new(std::collections::HashMap::new()),
@@ -1392,6 +1417,17 @@ impl AgentManager {
         Ok(java)
     }
 
+    /// The JDBC plugin wrapper falls back to JAVA_HOME / PATH when the managed
+    /// JRE is not installed. Checks that runtime before the wrapper starts it,
+    /// so an older system Java (e.g. Java 8) fails with the Java 21 guidance
+    /// instead of an opaque plugin exit. A missing system Java is left to the
+    /// wrapper, which reports it itself.
+    pub fn ensure_system_java_fallback_supported(&self) -> Result<(), String> {
+        let java_home = std::env::var_os(JAVA_HOME_ENV);
+        let path_var = std::env::var_os(PATH_ENV);
+        ensure_system_java_fallback_supported(java_home.as_deref(), path_var.as_deref())
+    }
+
     pub async fn stop_daemons(&self) {
         crate::agent_runtime::stop_daemons(self).await;
     }
@@ -1644,6 +1680,13 @@ fn ensure_supported_java_runtime(java_path: &Path) -> Result<(), String> {
         return Ok(());
     }
     Err(format!("{AGENT_JAVA_TOO_OLD_MESSAGE} Detected Java {major} at {}.", java_path.display()))
+}
+
+fn ensure_system_java_fallback_supported(java_home: Option<&OsStr>, path_var: Option<&OsStr>) -> Result<(), String> {
+    match resolve_system_java_path(java_home, path_var) {
+        Some(java) => ensure_supported_java_runtime(&java),
+        None => Ok(()),
+    }
 }
 
 fn java_version_cache() -> &'static StdMutex<std::collections::HashMap<PathBuf, Option<u32>>> {

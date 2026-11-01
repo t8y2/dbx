@@ -37,20 +37,20 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       npm-tag: ${{ steps.release.outputs.npm-tag }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           registry-url: https://registry.npmjs.org
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.22.x"
+          go-version: "1.27.x"
           cache: false
 
       - name: Validate release branch and versions
@@ -130,7 +130,7 @@ jobs:
           fi
 
       - name: Install nextest
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
 
@@ -177,7 +177,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: main
 
@@ -290,7 +290,7 @@ jobs:
             package-name: "@dbx-app/plugin-cli-win32-x64"
             binary: dbx-plugin.exe
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -329,7 +329,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           registry-url: https://registry.npmjs.org
 
       - name: Publish platform package
@@ -351,13 +351,13 @@ jobs:
     needs: [prepare, publish-platforms]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           registry-url: https://registry.npmjs.org
 
       - name: Prepare development runtime build dependencies
@@ -412,14 +412,14 @@ jobs:
     steps:
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           registry-url: https://registry.npmjs.org
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.22.x"
+          go-version: "1.27.x"
           cache: false
 
       - name: Install from npm and package every template

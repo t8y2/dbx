@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Check, ChevronDown, ChevronRight, DatabaseBackup, Download, FolderOpen, Loader2, Pencil, Play, Plus, RotateCcw, Search, Square, Trash2 } from "@lucide/vue";
+import { Check, ChevronDown, ChevronRight, DatabaseBackup, Download, FileInput, FolderOpen, Loader2, Pencil, Play, Plus, RotateCcw, Search, Square, Trash2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { useScheduledDatabaseBackups } from "@/composables/useScheduledDatabaseBackups";
 import DatabaseBackupConfigFields from "@/components/backup/DatabaseBackupConfigFields.vue";
@@ -28,6 +28,7 @@ import {
   nextDatabaseBackupRunAt,
   normalizeDatabaseBackupRetention,
   normalizeDatabaseBackupTablePatterns,
+  supportsNavicatBackupFormat,
   supportsScheduledDatabaseBackup,
   type DatabaseBackupExecutionConfig,
   type DatabaseBackupFile,
@@ -44,7 +45,27 @@ const { t, locale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
-const { schedules, runs, activeScheduleIds, activeRunIds, cancellingRunIds, activeRuns, heartbeat, destinationRoot, error: backupError, saveSchedule, setScheduleEnabled, deleteSchedule, deleteRuns, renameRun, runSchedule, runOneShot, runOneShotBatch, cancelRun } = useScheduledDatabaseBackups();
+const {
+  schedules,
+  runs,
+  activeScheduleIds,
+  activeRunIds,
+  cancellingRunIds,
+  activeRuns,
+  heartbeat,
+  destinationRoot,
+  error: backupError,
+  saveSchedule,
+  setScheduleEnabled,
+  deleteSchedule,
+  deleteRuns,
+  importBackupFiles,
+  renameRun,
+  runSchedule,
+  runOneShot,
+  runOneShotBatch,
+  cancelRun,
+} = useScheduledDatabaseBackups();
 const desktop = isTauriRuntime();
 const backgroundEnabled = ref(false);
 const backgroundBusy = ref(false);
@@ -117,7 +138,7 @@ const selectedRunIds = reactive(new Set<string>());
 const historyConnectionId = ref("");
 const historyConnectionPickerOpen = ref(false);
 const historyConnectionSearch = ref("");
-const historyBackupMethod = ref<"all" | "manual" | "scheduled" | "one-shot">("all");
+const historyBackupMethod = ref<"all" | ReturnType<typeof runBackupMethod>>("all");
 const historyStatus = ref<"all" | DatabaseBackupRun["status"]>("all");
 
 const sqlConnections = computed(() => connectionStore.connections.filter((connection) => supportsScheduledDatabaseBackup(connection.db_type)));
@@ -126,7 +147,8 @@ const sortedRuns = computed(() => [...runs.value].sort((left, right) => Date.par
 const historyConnections = computed(() => {
   const connectionById = new Map<string, string>();
   for (const run of sortedRuns.value) {
-    if (!connectionById.has(run.connectionId)) connectionById.set(run.connectionId, run.connectionName || connectionName(run.connectionId));
+    // Imported backup files are not tied to a saved connection.
+    if (run.connectionId && !connectionById.has(run.connectionId)) connectionById.set(run.connectionId, run.connectionName || connectionName(run.connectionId));
   }
   return [...connectionById].map(([id, name]) => ({ id, name })).sort((left, right) => left.name.localeCompare(right.name, locale.value));
 });
@@ -276,6 +298,10 @@ function databaseLoadIsCurrent(generation: number, dialog: BackupDialogKind, tar
   return scheduleDialogOpen.value && draft.value === targetDraft && targetDraft.connectionId === connectionId;
 }
 
+// `.nb3` is a MySQL/PostgreSQL-only format; keep a saved or newly selected value from being submitted for other connections.
+const scheduleNavicatFormatSupported = computed(() => supportsNavicatBackupFormat([connectionStore.getConfig(draft.value.connectionId)?.db_type]));
+const oneShotNavicatFormatSupported = computed(() => supportsNavicatBackupFormat(oneShotConnectionIds.value.map((connectionId) => connectionStore.getConfig(connectionId)?.db_type)));
+
 const canSave = computed(() => {
   const hasContent = draft.value.includeStructure || draft.value.includeData || draft.value.includeObjects;
   const hasDatabaseScope = allDatabases.value || selectedDatabases.value.length > 0;
@@ -286,6 +312,7 @@ const canSave = computed(() => {
     !!draft.value.destinationDirectory.trim() &&
     databaseBackupRunDirectoryPatternIsValid(draft.value.runDirectoryPattern || "") &&
     databaseBackupFileNamePatternIsValid(draft.value.fileNamePattern || "") &&
+    (draft.value.outputCompression !== "nb3" || scheduleNavicatFormatSupported.value) &&
     hasContent &&
     hasDatabaseScope &&
     hasTableScope &&
@@ -333,8 +360,18 @@ const canStartOneShot = computed(() => {
   const hasTableScope = tableScopeReady(oneShotDraft.value, oneShotTableSelectionState.value);
   // Runs started together share a timestamp, so only {runId} keeps their files apart.
   const hasUniqueFileNames = !multiple || databaseBackupFileNamePatternHasRunId(oneShotDraft.value.fileNamePattern);
+  const hasSupportedFormat = oneShotDraft.value.outputCompression !== "nb3" || oneShotNavicatFormatSupported.value;
   return (
-    !!oneShotDraft.value.connectionId && !!oneShotDraft.value.destinationDirectory.trim() && databaseBackupFileNamePatternIsValid(oneShotDraft.value.fileNamePattern || "") && hasContent && hasDatabaseScope && hasTableScope && hasUniqueFileNames && !oneShotStarting.value && !loadingDatabases.value
+    !!oneShotDraft.value.connectionId &&
+    !!oneShotDraft.value.destinationDirectory.trim() &&
+    databaseBackupFileNamePatternIsValid(oneShotDraft.value.fileNamePattern || "") &&
+    hasContent &&
+    hasDatabaseScope &&
+    hasTableScope &&
+    hasUniqueFileNames &&
+    hasSupportedFormat &&
+    !oneShotStarting.value &&
+    !loadingDatabases.value
   );
 });
 
@@ -348,9 +385,16 @@ function selectHistoryConnection(connectionId: string) {
   historyConnectionSearch.value = "";
 }
 
-function runBackupMethod(run: DatabaseBackupRun): "manual" | "scheduled" | "one-shot" {
-  if (run.source === "one-shot") return "one-shot";
+function runBackupMethod(run: DatabaseBackupRun): "manual" | "scheduled" | "one-shot" | "imported" {
+  if (run.source === "one-shot" || run.source === "imported") return run.source;
   return run.trigger;
+}
+
+function runBackupMethodLabel(run: DatabaseBackupRun): string {
+  const method = runBackupMethod(run);
+  if (method === "one-shot") return t("databaseBackup.oneShotTrigger");
+  if (method === "imported") return t("databaseBackup.importedTrigger");
+  return method === "scheduled" ? t("databaseBackup.scheduledTrigger") : t("databaseBackup.manualTrigger");
 }
 
 function formatDate(value?: string): string {
@@ -554,6 +598,11 @@ function toggleDatabase(database: string) {
   const selected = new Set(selectedDatabases.value);
   if (selected.has(database)) selected.delete(database);
   else selected.add(database);
+  selectedDatabases.value = databaseOptions.value.filter((item) => selected.has(item));
+}
+
+function updateSelectedDatabases(databases: string[]) {
+  const selected = new Set(databases);
   selectedDatabases.value = databaseOptions.value.filter((item) => selected.has(item));
 }
 
@@ -802,6 +851,46 @@ async function revealBackup(file: DatabaseBackupFile) {
   }
 }
 
+const BACKUP_FILE_FILTERS = [{ name: "Database backup", extensions: ["sql", "gz", "nb3"] }];
+
+async function pickBackupFiles(multiple: boolean): Promise<string[]> {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({ multiple, filters: BACKUP_FILE_FILTERS });
+  return Array.isArray(selected) ? selected : selected ? [selected] : [];
+}
+
+/** Restores a backup file created anywhere, without adding it to the history. */
+async function restoreFromFile() {
+  try {
+    // The web SQL file dialog uploads the file itself; the desktop picks a local path first.
+    const [filePath] = desktop ? await pickBackupFiles(false) : [undefined];
+    if (desktop && !filePath) return;
+    connectionStore.sqlFileSource = { connectionId: "", database: "", ...(filePath ? { filePath } : {}) };
+  } catch (error) {
+    toast(translateBackendError(t, error), 5000);
+  }
+}
+
+async function importBackups() {
+  try {
+    const files = await pickBackupFiles(true);
+    if (files.length === 0) return;
+    const imported = await importBackupFiles(files);
+    toast(t("databaseBackup.backupsImported", { count: imported.length }), 2500);
+  } catch (error) {
+    toast(translateBackendError(t, error), 5000);
+  }
+}
+
+const pendingDeleteMessage = computed(() => {
+  const pending = pendingDeleteRunIds.value.map((runId) => runs.value.find((run) => run.id === runId)).filter((run): run is DatabaseBackupRun => !!run);
+  const owned = pending.filter((run) => run.source !== "imported");
+  if (owned.length === 0) return t("databaseBackup.deleteImportedConfirm", { count: pending.length });
+  const files = owned.reduce((total, run) => total + run.files.length, 0);
+  const message = pending.length === 1 ? t("databaseBackup.deleteBackupConfirm", { count: files }) : t("databaseBackup.deleteBackupsConfirm", { count: pending.length, files });
+  return owned.length === pending.length ? message : `${message} ${t("databaseBackup.importedFilesKept")}`;
+});
+
 async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
   try {
     const prepared = desktop ? file.filePath : await api.prepareDatabaseBackupRestore(run.id, run.files.indexOf(file));
@@ -825,6 +914,14 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
         <p v-if="!canCreateSchedule" class="mt-1 text-xs text-muted-foreground">{{ t("databaseBackup.noSupportedConnections") }}</p>
       </div>
       <div class="flex flex-wrap items-center justify-end gap-2">
+        <Button data-backup-restore-from-file variant="outline" size="sm" :title="t('databaseBackup.restoreFromFileHint')" @click="restoreFromFile">
+          <RotateCcw class="mr-2 h-4 w-4" />
+          {{ t("databaseBackup.restoreFromFile") }}
+        </Button>
+        <Button v-if="desktop" data-backup-import variant="outline" size="sm" :title="t('databaseBackup.importBackupHint')" @click="importBackups">
+          <FileInput class="mr-2 h-4 w-4" />
+          {{ t("databaseBackup.importBackup") }}
+        </Button>
         <Button variant="outline" size="sm" :disabled="!canCreateSchedule" :title="canCreateSchedule ? t('databaseBackup.oneShotBackup') : t('databaseBackup.noSupportedConnections')" @click="openOneShotBackup">
           <Play class="mr-2 h-4 w-4" />
           {{ t("databaseBackup.oneShotBackup") }}
@@ -941,6 +1038,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
               <SelectItem value="manual">{{ t("databaseBackup.manualTrigger") }}</SelectItem>
               <SelectItem value="scheduled">{{ t("databaseBackup.scheduledTrigger") }}</SelectItem>
               <SelectItem value="one-shot">{{ t("databaseBackup.oneShotTrigger") }}</SelectItem>
+              <SelectItem value="imported">{{ t("databaseBackup.importedTrigger") }}</SelectItem>
             </SelectContent>
           </Select>
           <Select v-model="historyStatus">
@@ -987,10 +1085,10 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
               <div class="flex min-w-0 flex-wrap items-center gap-2">
                 <span class="truncate text-sm font-medium">{{ run.displayName || run.scheduleName }}</span>
                 <Badge :variant="runStatusVariant(run.status)" class="font-normal">{{ displayedRunStatusLabel(run) }}</Badge>
-                <Badge variant="outline" class="font-normal">{{ run.source === "one-shot" ? t("databaseBackup.oneShotTrigger") : run.trigger === "scheduled" ? t("databaseBackup.scheduledTrigger") : t("databaseBackup.manualTrigger") }}</Badge>
+                <Badge variant="outline" class="font-normal">{{ runBackupMethodLabel(run) }}</Badge>
               </div>
               <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                <span>{{ run.connectionName || connectionName(run.connectionId) }}</span>
+                <span>{{ run.source === "imported" ? t("databaseBackup.externalFile") : run.connectionName || connectionName(run.connectionId) }}</span>
                 <span>{{ formatDate(run.startedAt) }}</span>
                 <span>{{ t("databaseBackup.fileCount", { count: run.files.length }) }}</span>
                 <span v-if="run.error" class="break-all text-destructive">{{ translateBackendError(t, run.error) }}</span>
@@ -1076,6 +1174,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
           @change-connection="changeConnection"
           @choose-destination="chooseDestination"
           @toggle-database="toggleDatabase"
+          @update:selected-databases="updateSelectedDatabases"
           @update:all-databases="setAllDatabases"
           @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
           @table-selection-state="(state) => (scheduleTableSelectionState = state)"
@@ -1171,6 +1270,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
         @toggle-connection="toggleOneShotConnection"
         @choose-destination="chooseDestination"
         @toggle-database="toggleDatabase"
+        @update:selected-databases="updateSelectedDatabases"
         @update:all-databases="setAllDatabases"
         @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
         @table-selection-state="(state) => (oneShotTableSelectionState = state)"
@@ -1208,13 +1308,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
       <DialogHeader
         ><DialogTitle>{{ t("databaseBackup.deleteBackup") }}</DialogTitle></DialogHeader
       >
-      <p class="text-sm text-muted-foreground">
-        {{
-          pendingDeleteRunIds.length === 1
-            ? t("databaseBackup.deleteBackupConfirm", { count: runs.find((run) => run.id === pendingDeleteRunIds[0])?.files.length || 0 })
-            : t("databaseBackup.deleteBackupsConfirm", { count: pendingDeleteRunIds.length, files: pendingDeleteRunIds.reduce((total, runId) => total + (runs.find((run) => run.id === runId)?.files.length || 0), 0) })
-        }}
-      </p>
+      <p data-backup-delete-message class="text-sm text-muted-foreground">{{ pendingDeleteMessage }}</p>
       <DialogFooter>
         <Button variant="outline" @click="deleteRunDialogOpen = false">{{ t("common.cancel") }}</Button>
         <Button variant="destructive" @click="confirmDeleteRuns">{{ t("databaseBackup.delete") }}</Button>

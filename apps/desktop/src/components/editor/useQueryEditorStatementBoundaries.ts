@@ -1,12 +1,13 @@
 import type { ShallowRef } from "vue";
 import { RangeSet, RangeValue, type EditorState } from "@codemirror/state";
 import type { EditorView as EditorViewType, ViewPlugin as ViewPluginType } from "@codemirror/view";
+import { queryEditorStatementDatabaseType } from "@/lib/mongo/mongoSql";
 import { executableStatementRangeCacheForDoc, statementGutterStartIndexForCache, mapStatementGutterStartIndex, type ExecutableStatementRangeCache, type StatementGutterStartIndex } from "@/lib/sql/executableStatementRangeCache";
 import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import type { QueryEditorProps } from "./queryEditorTypes";
 import type { QueryEditorCodeMirrorRuntime } from "./queryEditorCodeMirrorRuntime";
 import { createSqlStatementAnalysisWorker } from "@/lib/sql/sqlStatementAnalysisWorker";
-import { shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
+import { shouldParseQueryEditorSyntax, shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
 import type { FoldRange } from "@/lib/editor/codemirrorSqlBlockFolding";
 
 class FoldRangeMarker extends RangeValue {
@@ -87,7 +88,15 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
     if (pendingAnalysis?.doc === state.doc && pendingAnalysis.generation === statementBoundariesGeneration) return pendingAnalysis.result;
     const generation = statementBoundariesGeneration;
     const result = analysisWorker
-      .analyze({ sql: state.doc.toString(), databaseType: props.databaseType, parameterOptions: sqlStatementParameterOptions(), includeFolds: true, syntaxDialect: options.syntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, driverProfile: options.driverProfile?.() })
+      .analyze({
+        sql: state.doc.toString(),
+        databaseType: queryEditorStatementDatabaseType(props.databaseType, props.mongoQueryLanguage),
+        parameterOptions: sqlStatementParameterOptions(),
+        // Fold ranges need a full Lezer parse in the worker; past the grammar budget that costs ~100 bytes per character.
+        includeFolds: shouldParseQueryEditorSyntax(state.doc.length),
+        syntaxDialect: options.syntaxDialect?.() ?? props.syntaxDialect ?? props.dialect,
+        driverProfile: options.driverProfile?.(),
+      })
       .then((analysis) => {
         const currentView = view.value ?? trackedView;
         if (!analysis || generation !== statementBoundariesGeneration || currentView?.state.doc !== state.doc) return null;
@@ -105,7 +114,7 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
     if (shouldUseQueryEditorLargeDocumentModeForSize(state.doc.length, state.doc.lines)) {
       void ensureStatementCache(state);
     } else {
-      installStatementBoundaries(state, executableStatementRangeCacheForDoc(cache.value, state.doc, props.databaseType, sqlStatementParameterOptions()));
+      installStatementBoundaries(state, executableStatementRangeCacheForDoc(cache.value, state.doc, queryEditorStatementDatabaseType(props.databaseType, props.mongoQueryLanguage), sqlStatementParameterOptions()));
     }
   }
 

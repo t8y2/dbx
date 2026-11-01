@@ -18,7 +18,7 @@ jobs:
   checks:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -33,19 +33,19 @@ jobs:
         os: [ubuntu-24.04, macos-15, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
-          go-version: '1.22'
+          go-version: '1.27'
           cache: false
       - run: npm ci --prefix plugins/sdk/dev-host
       - run: npm test --prefix plugins/sdk/dev-host
         timeout-minutes: 5
-      - uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
       - run: cargo nextest run --locked --manifest-path plugins/sdk/cli/Cargo.toml --no-fail-fast

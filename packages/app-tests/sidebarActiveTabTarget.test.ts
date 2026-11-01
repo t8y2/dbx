@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { activeTabSidebarTarget, findNodePathForTarget, findSidebarConnectionNode, findSidebarNodeForActiveTab, findSidebarNodeForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebar/sidebarActiveTabTarget.ts";
+import { activeTabSidebarTarget, expandSidebarLocatePath, findNodePathForTarget, findSidebarConnectionNode, findSidebarNodeForActiveTab, findSidebarNodeForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebar/sidebarActiveTabTarget.ts";
 import { buildTreeNodesFromLayout, expandGroups } from "../../apps/desktop/src/lib/sidebar/sidebarLayout.ts";
 import { flattenTree } from "../../apps/desktop/src/composables/useFlatTree.ts";
 import type { FlatTreeNode } from "../../apps/desktop/src/composables/useFlatTree.ts";
@@ -635,4 +635,109 @@ test("locate under collapsed connection groups resolves the path, expands the gr
 
   const rebuiltTree = buildTreeNodesFromLayout(expandedLayout, connections, new Set());
   assert.equal(findSidebarNodeForTarget(target, flattenTree(rebuiltTree))?.id, "conn-grouped");
+});
+
+test("auto-select reveals target from collapsed loaded ancestors when tab switches", () => {
+  const tree: TreeNode[] = [
+    {
+      id: "conn-1",
+      label: "MySQL Local",
+      type: "connection",
+      connectionId: "conn-1",
+      isExpanded: false,
+      children: [
+        {
+          id: "conn-1:app",
+          label: "app",
+          type: "database",
+          connectionId: "conn-1",
+          database: "app",
+          isExpanded: false,
+          children: [
+            {
+              id: "conn-1:app:__tables",
+              label: "Tables",
+              type: "group-tables",
+              connectionId: "conn-1",
+              database: "app",
+              isExpanded: false,
+              children: [
+                {
+                  id: "conn-1:app:__tables:users",
+                  label: "users",
+                  type: "table",
+                  connectionId: "conn-1",
+                  database: "app",
+                  isExpanded: false,
+                  children: [],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const tab: QueryTab = {
+    id: "tab-users",
+    title: "users",
+    mode: "data",
+    connectionId: "conn-1",
+    database: "app",
+    sql: "SELECT * FROM users",
+  };
+
+  // Initially, because ancestors are collapsed, flatNodes doesn't contain the table.
+  assert.equal(findSidebarNodeForActiveTab(tab, flattenTree(tree)), null);
+
+  // Resolving path and expanding loaded ancestors reveals it in the flat tree.
+  const target = activeTabSidebarTarget(tab);
+  assert.ok(target);
+  const nodePath = findNodePathForTarget(target, tree);
+  assert.ok(nodePath);
+  assert.deepEqual(
+    nodePath.map((n) => n.id),
+    ["conn-1", "conn-1:app", "conn-1:app:__tables", "conn-1:app:__tables:users"],
+  );
+
+  expandSidebarLocatePath(nodePath, () => true);
+
+  // Now flattened tree reveals the table node
+  const match = findSidebarNodeForActiveTab(tab, flattenTree(tree));
+  assert.ok(match);
+  assert.equal(match.id, "conn-1:app:__tables:users");
+});
+
+test("sidebar selection synchronization replaces previous selection set and multiSelect flag", () => {
+  // Simulates TreeItem rowSelected computation:
+  // rowSelected = selectedTreeNodeIds.length > 0 ? multiSelected : selected
+  const store = {
+    selectedTreeNodeId: "previous-db-id" as string | null,
+    selectedTreeNodeIds: ["previous-db-id"],
+    treeSelectionAnchorId: "previous-db-id" as string | null,
+    connectionMultiSelectActive: true,
+  };
+
+  const isRowSelected = (nodeId: string) => {
+    const selected = store.selectedTreeNodeId === nodeId;
+    const multiSelected = store.selectedTreeNodeIds.includes(nodeId);
+    return store.selectedTreeNodeIds.length > 0 ? multiSelected : selected;
+  };
+
+  // Before fix: only selectedTreeNodeId was set, selectedTreeNodeIds stayed ["previous-db-id"].
+  // As a result, isRowSelected("table-users") was FALSE, and "previous-db-id" was TRUE!
+  assert.equal(isRowSelected("previous-db-id"), true);
+  assert.equal(isRowSelected("conn-1:app:__tables:users"), false);
+
+  // With the fix: auto-select synchronizes selectedTreeNodeIds, treeSelectionAnchorId, and clears multiSelect.
+  const matchId = "conn-1:app:__tables:users";
+  store.selectedTreeNodeId = matchId;
+  store.selectedTreeNodeIds = [matchId];
+  store.treeSelectionAnchorId = matchId;
+  store.connectionMultiSelectActive = false;
+
+  assert.equal(isRowSelected("previous-db-id"), false);
+  assert.equal(isRowSelected("conn-1:app:__tables:users"), true);
+  assert.equal(store.connectionMultiSelectActive, false);
 });

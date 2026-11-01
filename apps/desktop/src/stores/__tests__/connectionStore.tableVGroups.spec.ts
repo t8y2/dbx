@@ -21,6 +21,7 @@ describe("connectionStore table virtual groups during disk reload", () => {
       getColumns: vi.fn().mockResolvedValue([]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
       loadTableVGroups: vi.fn().mockResolvedValue({}),
       saveTableVGroups: vi.fn().mockResolvedValue(undefined),
       loadTunnelProfiles: vi.fn().mockResolvedValue([]),

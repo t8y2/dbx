@@ -726,6 +726,10 @@ export const useConnectionStore = defineStore("connection", () => {
     return connectionGroupIdForSelection(sidebarLayout.value, selectedNodeId, selectedNode?.connectionId);
   });
   let layoutPersistTimer: ReturnType<typeof setTimeout> | null = null;
+  // In-flight saveSidebarLayout promise (set by the debounce timer callback and
+  // by flushSidebarLayoutPersist). flushSidebarLayoutPersist awaits it so a
+  // reload that races a save already in flight reads back the new value.
+  let layoutPersistInFlight: Promise<void> | null = null;
   const staleTreeRefreshIds = new Set<string>();
   const activeTreeRefreshGenerations = new Map<string, number>();
   let nextTreeRefreshGeneration = 0;
@@ -10668,9 +10672,43 @@ export const useConnectionStore = defineStore("connection", () => {
   function persistSidebarLayoutDebounced() {
     if (layoutPersistTimer) clearTimeout(layoutPersistTimer);
     layoutPersistTimer = setTimeout(() => {
-      api.saveSidebarLayout(sidebarLayout.value).catch(() => {});
       layoutPersistTimer = null;
+      layoutPersistInFlight = api
+        .saveSidebarLayout(sidebarLayout.value)
+        .catch(() => {})
+        .finally(() => {
+          layoutPersistInFlight = null;
+        });
     }, 300);
+  }
+
+  /** 立即落盘当前侧边栏布局（清防抖计时器）：initFromDisk 等整体覆盖内存布局的路径
+   *  必须先调用，否则防抖窗口内 ≤300ms 的分组编辑（移连接入组、新建/重命名分组等）
+   *  会被随后的 loadSidebarLayout 取回的旧快照静默回滚——表现为「分组设好了过段时间
+   *  又变回原样」（#13976）。与 flushTableVGroupPersist 对称。
+   *
+   *  仅在有 pending 防抖编辑（计时器存在）或 save 已在飞行中时落盘：无 pending 编辑
+   *  说明内存与磁盘一致（上次 save 已落盘），不应把内存写回覆盖磁盘——避免空内存
+   *  重载时覆盖测试预设/真实磁盘已有的布局。计时器存在时主动 save 当前内存值并
+   *  await，覆盖「计时器在 initFromDisk 的 await 链期间已触发但 fire-and-forget save
+   *  未落盘」的竞态。 */
+  async function flushSidebarLayoutPersist(): Promise<void> {
+    const inflight = layoutPersistInFlight;
+    if (layoutPersistTimer) {
+      clearTimeout(layoutPersistTimer);
+      layoutPersistTimer = null;
+      // 主动落盘当前内存布局（含 pending 编辑），并追踪为 in-flight 供并发 reload await。
+      layoutPersistInFlight = api
+        .saveSidebarLayout(sidebarLayout.value)
+        .catch(() => {})
+        .finally(() => {
+          layoutPersistInFlight = null;
+        });
+      await layoutPersistInFlight;
+    } else if (inflight) {
+      // 计时器已在 initFromDisk await 链期间触发，save 在飞行中：等它落盘。
+      await inflight;
+    }
   }
 
   /** 表分组的 scope 一律从「解析到的容器」派生：simple 显示模式下表行带 schema
@@ -11366,6 +11404,9 @@ export const useConnectionStore = defineStore("connection", () => {
         // 整体覆盖内存布局前，先落盘窗口内未写盘的分组编辑（防止 300ms 防抖窗口
         // 内的编辑被备份轮询/重载带回的旧快照静默回滚）。
         await flushTableVGroupPersist();
+        // 同理：侧边栏连接分组布局也是防抖持久化的，重载前必须先落盘，否则
+        // loadSidebarLayout 取回的旧快照会回滚用户刚做的分组编辑（#13976）。
+        await flushSidebarLayoutPersist();
         const [pinnedOrder, saved, , loadedTableVGroups] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(settingsStore.editorSettings.sidebarShowUserAdmin !== false), tunnelProfileStore.init(), api.loadTableVGroups()]);
         setPinnedTreeNodeOrder(pinnedOrder);
         await migrateTimeoutInheritance(saved);

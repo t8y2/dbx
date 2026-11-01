@@ -3,7 +3,7 @@
 import { createApp, h, nextTick, ref, shallowRef, type App } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
-import { StreamLanguage, ensureSyntaxTree, foldedRanges, language, syntaxTree } from "@codemirror/language";
+import { StreamLanguage, ensureSyntaxTree, foldable, foldedRanges, language, syntaxTree } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QUERY_EDITOR_FULL_FEATURE_MAX_DOCUMENT_LENGTH, QUERY_EDITOR_FULL_FEATURE_MAX_LINE_COUNT } from "@/lib/editor/queryEditorLargeDocument";
@@ -318,5 +318,25 @@ describe("QueryEditor large document mode", () => {
     expect(view.state.facet(language)).not.toBeNull();
     await vi.waitFor(() => expect(analysisProbe.foldRequests.length).toBeGreaterThan(0));
     expect(analysisProbe.foldRequests).not.toContain(false);
+  });
+
+  it("still folds multi-line blocks past the grammar budget, computed per statement on demand", async () => {
+    const statement = "SELECT * FROM t WHERE id IN (\n  1,\n  2\n);\n";
+    const source = statement.repeat(Math.ceil((SYNTAX_PARSE_TEST_BUDGET + 1) / statement.length));
+    expect(source.length).toBeGreaterThan(SYNTAX_PARSE_TEST_BUDGET);
+    const { view } = await mountEditor(source, { databaseType: "mysql", dialect: "mysql" });
+    expect(view.state.facet(language)).toBeInstanceOf(StreamLanguage);
+    const lastOpener = view.state.doc.line(view.state.doc.lines - 4);
+    expect(lastOpener.text).toBe("SELECT * FROM t WHERE id IN (");
+
+    // The analysis worker no longer returns folds for this document, so every range below comes from the on-demand path.
+    await vi.waitFor(() => expect(foldable(view.state, lastOpener.from, lastOpener.to)).not.toBeNull());
+    const range = foldable(view.state, lastOpener.from, lastOpener.to)!;
+    expect(range.from).toBe(lastOpener.to);
+    expect(view.state.sliceDoc(range.from, range.to)).toBe("\n  1,\n  2\n");
+    expect(analysisProbe.foldRequests).not.toContain(true);
+
+    const untouched = view.state.doc.line(3);
+    expect(foldable(view.state, untouched.from, untouched.to)).toBeNull();
   });
 });

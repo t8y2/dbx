@@ -882,14 +882,36 @@ export async function readPluginUiAsset(pluginId: string, path: string): Promise
   return pluginAssetPayload(`/api/plugins/${encodeURIComponent(pluginId)}/ui/${encodedPath}`);
 }
 
+type PluginEventSubscriber = { onEvent: (event: PluginEvent) => void; onBinary?: (event: PluginBinaryEvent) => void };
+
+const pluginEventSubscribers = new Set<PluginEventSubscriber>();
+let pluginEventSource: EventSource | undefined;
+
+/**
+ * Every plugin host shares one `/api/plugins/events` stream (#14027). A stream per
+ * workbench held one of the browser's six HTTP/1.1 connections per origin each, so
+ * a few open workbenches starved every later `fetch` (plugin invoke, reconnect),
+ * which then queued forever without an error.
+ */
 export async function subscribePluginEvents(onEvent: (event: PluginEvent) => void, onBinary?: (event: PluginBinaryEvent) => void): Promise<() => void> {
-  const source = new EventSource(apiUrl("/api/plugins/events"));
-  source.onmessage = (message) => {
-    const payload = JSON.parse(message.data) as ({ kind: "event" } & PluginEvent) | ({ kind: "binary" } & PluginBinaryEvent) | { kind: "lagged" };
-    if (payload.kind === "event") onEvent(payload);
-    if (payload.kind === "binary") onBinary?.(payload);
+  const subscriber: PluginEventSubscriber = { onEvent, onBinary };
+  pluginEventSubscribers.add(subscriber);
+  if (!pluginEventSource) {
+    const source = new EventSource(apiUrl("/api/plugins/events"));
+    source.onmessage = (message) => {
+      const payload = JSON.parse(message.data) as ({ kind: "event" } & PluginEvent) | ({ kind: "binary" } & PluginBinaryEvent) | { kind: "lagged" };
+      for (const current of [...pluginEventSubscribers]) {
+        if (payload.kind === "event") current.onEvent(payload);
+        if (payload.kind === "binary") current.onBinary?.(payload);
+      }
+    };
+    pluginEventSource = source;
+  }
+  return () => {
+    if (!pluginEventSubscribers.delete(subscriber) || pluginEventSubscribers.size > 0) return;
+    pluginEventSource?.close();
+    pluginEventSource = undefined;
   };
-  return () => source.close();
 }
 
 /**

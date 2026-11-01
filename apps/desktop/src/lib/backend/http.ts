@@ -900,7 +900,7 @@ export async function subscribePluginEvents(onEvent: (event: PluginEvent) => voi
     const source = new EventSource(apiUrl("/api/plugins/events"));
     source.onmessage = (message) => {
       const payload = JSON.parse(message.data) as ({ kind: "event" } & PluginEvent) | ({ kind: "binary" } & PluginBinaryEvent) | { kind: "lagged" };
-      for (const current of [...pluginEventSubscribers]) {
+      for (const current of pluginEventSubscribers) {
         if (payload.kind === "event") current.onEvent(payload);
         if (payload.kind === "binary") current.onBinary?.(payload);
       }

@@ -16,6 +16,7 @@ import { createSqlAliasHighlights } from "@/lib/editor/codemirrorSqlAliasHighlig
 import { elasticsearchLanguage } from "@/lib/elasticsearch/elasticsearchLanguage";
 import { createDbxCodeMirrorSqlDialect, supportsQueryEditorSqlLanguage } from "@/lib/editor/codemirrorSqlDialect";
 import { createLargeDocumentSqlLanguage } from "@/lib/editor/codemirrorLargeDocumentSqlLanguage";
+import { createSqlWindowTreeParser } from "@/lib/editor/codemirrorSqlWindowTree";
 import { graphQueryLanguage, isGraphQueryDatabase } from "@/lib/graph/graphQueryLanguage";
 import { getGraphFunctionSignatureHelp } from "@/lib/graph/graphSignatureHelp";
 import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorSqlSemanticHighlight";
@@ -357,6 +358,11 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   };
 
   const shellLineCommentHighlightPlugin = createShellLineCommentHighlight({ ViewPlugin, Decoration, highlightingFor, syntaxTree });
+
+  codeMirrorRuntime.parseSqlWindowTree = createSqlWindowTreeParser(langSql, {
+    key: () => `${options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect}|${props.databaseType}|${sqlDriverProfile.value}`,
+    dialect: () => createDbxCodeMirrorSqlDialect(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
+  });
 
   codeMirrorRuntime.buildSqlLanguageExtension = () => {
     const commentDatabaseType = queryEditorStatementDatabaseType(props.databaseType, props.mongoQueryLanguage);

@@ -61,6 +61,10 @@ const aiAssistantMountApi = vi.hoisted(() => ({
   // existing test's behavior changes.
   pluginToolPluginIds: [] as string[],
   installedPlugins: [] as Array<Record<string, unknown>>,
+  // #13978 review: defer the next conversation save so a test can toggle plugin
+  // attachments while the first snapshot of a new chat is still in flight.
+  deferNextConversationSave: false,
+  deferredSaveResolvers: [] as Array<() => void>,
 }));
 
 // `onMounted` imports the syntax highlighter lazily; this module-level delay stands in for the
@@ -171,6 +175,10 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     loadAiRuns: empty,
     saveAiConversation: (conversation: Record<string, unknown>) => {
       aiAssistantMountApi.savedConversations.push(conversation);
+      if (aiAssistantMountApi.deferNextConversationSave) {
+        aiAssistantMountApi.deferNextConversationSave = false;
+        return new Promise<void>((resolve) => aiAssistantMountApi.deferredSaveResolvers.push(resolve));
+      }
       return Promise.resolve();
     },
     // The send path consults the skill catalog (metadata only — bodies are read
@@ -236,6 +244,8 @@ afterEach(() => {
   aiAssistantMountApi.tauriRuntime = false;
   aiAssistantMountApi.pluginToolPluginIds = [];
   aiAssistantMountApi.installedPlugins = [];
+  aiAssistantMountApi.deferNextConversationSave = false;
+  aiAssistantMountApi.deferredSaveResolvers = [];
   // Reset the shared catalog mock, then re-arm the default implementation that
   // reads `skillCatalog`: `mockReset()` alone leaves it returning undefined, so
   // every test would start from a broken catalog.
@@ -1060,6 +1070,106 @@ describe("AiAssistant mount", () => {
     aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
     useConnectionStore(pinia).connectedIds.add(SSH_PLUGIN.id);
     await vi.waitFor(() => expect(container.querySelector(".ai-plugin-tools-trigger")).not.toBeNull());
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("keeps a toggle made while the first save of a new chat is in flight", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    aiAssistantMountApi.installedPlugins = [{ manifest: { id: "sample.plugin", name: "Sample", drivers: [] }, compatibility: { compatible: true } }];
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    useConnectionStore(pinia).connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+
+    const trigger = () => container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    const popoverOpen = () => !!container.querySelector('[data-slot="popover-content"]');
+    const openPopover = async () => {
+      if (!popoverOpen()) trigger()!.click();
+      await settle();
+    };
+    const row = () => Array.from(container.querySelectorAll<HTMLButtonElement>('[data-slot="popover-content"] button[aria-pressed]')).find((button) => button.textContent?.includes(SSH_PLUGIN.name));
+
+    // Attach in the draft, then send: the first snapshot carries the attachment.
+    await openPopover();
+    await vi.waitFor(() => expect(row()).toBeDefined());
+    row()!.click();
+    await settle();
+    aiAssistantMountApi.deferNextConversationSave = true;
+    await sendPrompt(container, "check memory");
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedConversations.at(-1) as unknown as { pluginConnectionIds?: string[] }).toMatchObject({ pluginConnectionIds: [SSH_PLUGIN.id] }));
+    expect(aiAssistantMountApi.deferredSaveResolvers).toHaveLength(1);
+
+    // Detach while that first save is still pending.
+    await openPopover();
+    await vi.waitFor(() => expect(row()).toBeDefined());
+    row()!.click();
+    await settle();
+
+    // The stale snapshot resolves last; neither the record nor the next request
+    // may bring the attachment back.
+    const savesBeforeResolve = aiAssistantMountApi.savedConversations.length;
+    aiAssistantMountApi.deferredSaveResolvers.shift()!();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedConversations.length).toBeGreaterThan(savesBeforeResolve));
+    expect((aiAssistantMountApi.savedConversations.at(-1) as { pluginConnectionIds?: string[] }).pluginConnectionIds ?? []).toEqual([]);
+    expect(trigger()!.querySelector(".ai-plugin-tools-count")).toBeNull();
+    expect(trigger()!.getAttribute("aria-label")).toBe(i18n.global.t("ai.pluginToolsNoneTitle"));
+
+    await settle();
+    await sendPrompt(container, "check memory again");
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("keeps an attachment added while the first save of a new chat is in flight", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    aiAssistantMountApi.installedPlugins = [{ manifest: { id: "sample.plugin", name: "Sample", drivers: [] }, compatibility: { compatible: true } }];
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    useConnectionStore(pinia).connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+
+    const trigger = () => container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    const row = () => Array.from(container.querySelectorAll<HTMLButtonElement>('[data-slot="popover-content"] button[aria-pressed]')).find((button) => button.textContent?.includes(SSH_PLUGIN.name));
+
+    // Send first: the first snapshot carries no attachments and is deferred.
+    aiAssistantMountApi.deferNextConversationSave = true;
+    await sendPrompt(container, "check memory");
+    await vi.waitFor(() => expect(aiAssistantMountApi.deferredSaveResolvers).toHaveLength(1));
+
+    // Attach while that save is pending.
+    trigger()!.click();
+    await settle();
+    await vi.waitFor(() => expect(row()).toBeDefined());
+    row()!.click();
+    await settle();
+
+    // The stale empty snapshot resolves last; the attachment must survive in the
+    // record, the UI and the next request.
+    const savesBeforeResolve = aiAssistantMountApi.savedConversations.length;
+    aiAssistantMountApi.deferredSaveResolvers.shift()!();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedConversations.length).toBeGreaterThan(savesBeforeResolve));
+    expect((aiAssistantMountApi.savedConversations.at(-1) as { pluginConnectionIds?: string[] }).pluginConnectionIds).toEqual([SSH_PLUGIN.id]);
+    expect(trigger()!.querySelector(".ai-plugin-tools-count")?.textContent?.trim()).toBe("1");
+
+    await settle();
+    await sendPrompt(container, "check memory again");
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([SSH_PLUGIN.id]);
     expect(errors.map(String)).toEqual([]);
   });
 

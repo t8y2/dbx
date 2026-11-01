@@ -554,6 +554,15 @@ const activeAction = picker.action;
  * the next send.
  */
 const draftPluginConnectionIds = ref<string[]>([]);
+/**
+ * Live attachment lists per conversation id, in memory.
+ *
+ * A new chat's draft list moves here when its id is minted, and every toggle
+ * writes here too. A snapshot can be built before a click and resolve after it,
+ * so reading this map first keeps the UI, the saved record and the next request
+ * on the user's latest choice instead of the pre-click snapshot.
+ */
+const conversationPluginConnectionIds = createReactiveMap(new Map<string, string[]>());
 /** Plugins whose "built-in AI tools" switch is on; others cannot contribute tools. */
 const pluginToolPluginIds = ref<Set<string>>(new Set());
 /** Plugin display names for the attachment list, by plugin id. */
@@ -569,8 +578,20 @@ void loadPluginToolCatalog();
 
 /** Attachment list owned by `targetConversationId` (or the unsaved draft). */
 function pluginAttachmentIdsFor(targetConversationId: string): string[] {
-  const record = targetConversationId ? conversations.value.find((conversation) => conversation.id === targetConversationId) : undefined;
-  return record ? (record.pluginConnectionIds ?? []) : draftPluginConnectionIds.value;
+  if (!targetConversationId) return draftPluginConnectionIds.value;
+  // The live map wins over a record: a first snapshot can be in flight while the
+  // user toggles, and the record only catches up after that save resolves.
+  const live = conversationPluginConnectionIds.get(targetConversationId);
+  if (live !== undefined) return live;
+  const record = conversations.value.find((conversation) => conversation.id === targetConversationId);
+  return record ? (record.pluginConnectionIds ?? []) : [];
+}
+
+/** Hands the unsaved draft's attachments to the conversation id minted for them. */
+function migrateUnsavedPluginAttachments(id: string) {
+  if (!id || !draftPluginConnectionIds.value.length) return;
+  conversationPluginConnectionIds.set(id, [...draftPluginConnectionIds.value]);
+  draftPluginConnectionIds.value = [];
 }
 
 const attachedPluginConnectionIds = computed(() => pluginAttachmentIdsFor(conversationId.value));
@@ -674,9 +695,19 @@ function togglePluginConnection(connectionId: string) {
   if (isPluginConnectionTarget.value) return;
   const current = attachedPluginConnectionIds.value;
   const next = current.includes(connectionId) ? current.filter((id) => id !== connectionId) : [...current, connectionId];
-  const record = conversations.value.find((conversation) => conversation.id === conversationId.value);
-  if (!record) {
+  const targetConversationId = conversationId.value;
+  if (!targetConversationId) {
     draftPluginConnectionIds.value = next;
+    return;
+  }
+  // Record the click before anything async: a first snapshot built earlier (or
+  // still in flight) must not resurrect the pre-click list.
+  conversationPluginConnectionIds.set(targetConversationId, next);
+  const record = conversations.value.find((conversation) => conversation.id === targetConversationId);
+  if (!record) {
+    // The id is minted but its first save has not returned yet; persist the
+    // change now so the record is not left with the pre-toggle list.
+    void persistConversation().catch(() => {});
     return;
   }
   const updated: AiConversation = { ...record, pluginConnectionIds: next, updatedAt: new Date().toISOString() };
@@ -4378,6 +4409,9 @@ async function send() {
     // later). Without this the first snapshot of a picker-touched new chat would
     // persist no selection at all (#12075 R4).
     migrateUnsavedPickerSelection(conversationId.value);
+    // The minted id owns the draft's plugin attachments from this tick on, so a
+    // toggle during the first save cannot land in the draft slot and be lost.
+    migrateUnsavedPluginAttachments(conversationId.value);
   }
   const runConversationId = auto ? auto.conversationId : conversationId.value;
   const runMessages = auto ? auto.messages : messages.value;
@@ -5794,6 +5828,9 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
     }
   }
   const loadedSkillIdsForSnapshot = conversationLoadedSkillIds.get(targetConversationId) ?? [];
+  // The live map wins over the record: a toggle can land after this snapshot's
+  // arguments were read but before it is saved.
+  const pluginConnectionIdsForSnapshot = conversationPluginConnectionIds.get(targetConversationId) ?? existingConversation?.pluginConnectionIds ?? [];
   return {
     id: targetConversationId,
     title: first?.pluginContext?.title || renamedConversationTitles.get(targetConversationId) || existingConversation?.title || (first ? messageTitle(first).slice(0, 50) : "Untitled"),
@@ -5837,8 +5874,8 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
     // combination written back over the user's own choice (R9).
     ...pickerSnapshotFor(targetConversationId),
     // Plugin attachments are user-scoped, not run-scoped: a streaming snapshot
-    // must never overwrite them. New conversations take the draft selection.
-    ...(existingConversation ? (existingConversation.pluginConnectionIds?.length ? { pluginConnectionIds: [...existingConversation.pluginConnectionIds] } : {}) : draftPluginConnectionIds.value.length ? { pluginConnectionIds: [...draftPluginConnectionIds.value] } : {}),
+    // must never overwrite them.
+    ...(pluginConnectionIdsForSnapshot.length ? { pluginConnectionIds: [...pluginConnectionIdsForSnapshot] } : {}),
     createdAt,
     updatedAt: new Date().toISOString(),
   };
@@ -5888,11 +5925,21 @@ const runSnapshotScheduler = createDesktopAiRunSnapshotScheduler<ChatMessage>({
   intervalMs: RUN_SNAPSHOT_PERSIST_INTERVAL_MS,
 });
 
+function sameIdList(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
 function syncPersistedConversation(conversation: AiConversation) {
-  const index = conversations.value.findIndex((item) => item.id === conversation.id);
-  if (index >= 0) conversations.value.splice(index, 1, conversation);
-  else conversations.value.unshift(conversation);
+  // A snapshot can be built before the latest attachment toggle and resolve
+  // after it. Keep the live list in the record and write it back, so neither the
+  // next load nor the disk copy resurrects the pre-toggle selection.
+  const livePluginConnectionIds = conversationPluginConnectionIds.get(conversation.id);
+  const merged = livePluginConnectionIds === undefined || sameIdList(livePluginConnectionIds, conversation.pluginConnectionIds ?? []) ? conversation : { ...conversation, pluginConnectionIds: [...livePluginConnectionIds] };
+  const index = conversations.value.findIndex((item) => item.id === merged.id);
+  if (index >= 0) conversations.value.splice(index, 1, merged);
+  else conversations.value.unshift(merged);
   conversations.value.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  if (merged !== conversation) void saveAiConversation(merged).catch(() => {});
 }
 
 /** Re-registers a persisted run at startup. `extra` overrides the transcript
@@ -6277,6 +6324,7 @@ function queueInput() {
     // reason as `send()`, #12075 R4). Only on a mint: moving it for an id that
     // already has a record is exactly what must not happen.
     migrateUnsavedPickerSelection(conversationId.value);
+    migrateUnsavedPluginAttachments(conversationId.value);
   }
   queuedInputs.set(conversationId.value, { text, mode: assistantMode.value, action: activeAction.value });
   prompt.value = "";

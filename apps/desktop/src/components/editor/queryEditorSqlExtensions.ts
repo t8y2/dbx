@@ -349,7 +349,7 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
           ? graphQueryLanguage(props.databaseType)
           : supportsQueryEditorSqlLanguage(props.databaseType)
             ? langSql.sql({
-                dialect: createDbxCodeMirrorSqlDialect(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
+                dialect: createDbxCodeMirrorSqlDialect(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value, sqlStatementParameterOptions()),
               })
             : [],
       // Non-SQL editors (MongoDB shell) keep the SQL grammar for highlighting, so override the

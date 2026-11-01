@@ -159,6 +159,7 @@
   "pnpm": {
     "overrides": {
       "happy-dom": "~20.10.6",
+      "@lezer/common": "1.5.3",
       "@codemirror/view": "6.43.0"
     }
   }

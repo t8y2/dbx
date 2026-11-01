@@ -69,3 +69,12 @@ test("rejects a lockfile missing one of the application packages", async () => {
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /dbx-web package version was not found/);
 });
+
+test("updates a CRLF Cargo.lock as checked out on Windows runners", async () => {
+  const root = await fixture();
+  const lock = '[[package]]\r\nname = "dbx"\r\nversion = "0.6.59"\r\n\r\n[[package]]\r\nname = "dbx-web"\r\nversion = "0.6.59"\r\n';
+  await writeFile(join(root, "Cargo.lock"), lock);
+  const result = await run("v0.6.60-beta.20261029.1", root);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(await readFile(join(root, "Cargo.lock"), "utf8"), lock.replaceAll("0.6.59", "0.6.60-beta.20261029.1"));
+});

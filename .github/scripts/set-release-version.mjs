@@ -33,10 +33,11 @@ for (const relativePath of cargoFiles) {
 }
 
 const lockPath = resolve(root, "Cargo.lock");
+// Windows runners check Cargo.lock out with CRLF line endings.
 const lockSource = readFileSync(lockPath, "utf8");
 let lockUpdated = lockSource;
 for (const packageName of ["dbx", "dbx-web"]) {
-  const pattern = new RegExp(`(\\[\\[package\\]\\]\\nname = "${packageName}"\\nversion = ")[^\\n"]+(")`);
+  const pattern = new RegExp(`(\\[\\[package\\]\\]\\r?\\nname = "${packageName}"\\r?\\nversion = ")[^\\r\\n"]+(")`);
   if (!pattern.test(lockUpdated)) throw new Error(`${packageName} package version was not found in Cargo.lock.`);
   lockUpdated = lockUpdated.replace(pattern, `$1${version}$2`);
 }

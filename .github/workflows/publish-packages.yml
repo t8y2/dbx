@@ -618,20 +618,22 @@ jobs:
           set -euo pipefail
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
           source="s3://${R2_BUCKET_NAME}/releases/stable/${TAG}/"
-          # Bucket-to-bucket copies: R2 does not implement GetObjectTagging, which
-          # the CLI's default --copy-props calls for multipart copies. Copy only the
-          # metadata (content-type, ...) that CopyObject can carry over.
+          # R2 rejects the tagging headers the CLI sends on bucket-to-bucket copies
+          # (GetObjectTagging, x-amz-tagging-directive), so download the immutable
+          # directory once and upload it to each alias, like a first publish does.
+          assets="$RUNNER_TEMP/stable-aliases"
+          mkdir -p "${assets}"
+          aws s3 sync "${source}" "${assets}/" --endpoint-url "${endpoint}"
           for alias in stable/latest latest; do
-            aws s3 sync "${source}" "s3://${R2_BUCKET_NAME}/releases/${alias}/" \
+            aws s3 sync "${assets}/" "s3://${R2_BUCKET_NAME}/releases/${alias}/" \
               --endpoint-url "${endpoint}" \
-              --copy-props metadata-directive \
               --cache-control "no-cache" \
               --delete
           done
-          aws s3 cp "${source}latest.json" "s3://${R2_BUCKET_NAME}/releases/stable/latest.json" \
-            --endpoint-url "${endpoint}" --copy-props metadata-directive --cache-control "no-cache"
-          aws s3 cp "${source}latest.json" "s3://${R2_BUCKET_NAME}/releases/latest/latest.json" \
-            --endpoint-url "${endpoint}" --copy-props metadata-directive --cache-control "no-cache"
+          aws s3 cp "${assets}/latest.json" "s3://${R2_BUCKET_NAME}/releases/stable/latest.json" \
+            --endpoint-url "${endpoint}" --cache-control "no-cache"
+          aws s3 cp "${assets}/latest.json" "s3://${R2_BUCKET_NAME}/releases/latest/latest.json" \
+            --endpoint-url "${endpoint}" --cache-control "no-cache"
 
       - name: Keep latest five versioned releases in R2
         continue-on-error: true

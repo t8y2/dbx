@@ -76,6 +76,7 @@ import {
   MessageSquarePlus,
   Minimize2,
   Pencil,
+  Plug,
   Plus,
   RefreshCw,
   Server,
@@ -214,10 +215,29 @@ import { buildAiAgentStepItems, formatAgentToolName, formatToolDurationMs, toolC
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
-import { aiStream, aiCancelStream, resolveAiToolApproval, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, listUserSkills, readUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
+import {
+  aiStream,
+  aiCancelStream,
+  resolveAiToolApproval,
+  saveAiConversation,
+  saveAiRun,
+  saveAiRunState,
+  loadAiConversations,
+  loadAiRuns,
+  deleteAiConversation,
+  listSchemas,
+  listTables,
+  listUserSkills,
+  readUserSkills,
+  getAiPluginToolPlugins,
+  listPlugins,
+  type AiConversation,
+  type AiRun,
+  type AiRunStatus,
+} from "@/lib/backend/api";
 import type { AiMessage } from "@/lib/backend/api";
 import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
-import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
+import type { ConnectionConfig, InstalledPlugin, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
 import { fetchNamespaceOptionsForConnection, useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
@@ -522,6 +542,173 @@ const picker = createAiConversationPickerController({
 const assistantMode = picker.mode;
 /** The shown action entry (`auto` included); the next send resolves it (#9118). */
 const activeAction = picker.action;
+
+/*
+ * Plugin tools attached to the shown conversation (#13978).
+ *
+ * Opening a plugin connection (an SSH terminal, for example) is not consent for
+ * the assistant: the backend exposes plugin tools only for connections listed
+ * here, plus the target when the target itself is a plugin connection. The list
+ * is conversation-scoped (persisted on the record, held on a draft until the
+ * first send) and frozen with the run target, so a mid-run change only affects
+ * the next send.
+ */
+const draftPluginConnectionIds = ref<string[]>([]);
+/** Plugins whose "built-in AI tools" switch is on; others cannot contribute tools. */
+const pluginToolPluginIds = ref<Set<string>>(new Set());
+/** Plugin display names for the attachment list, by plugin id. */
+const pluginToolPluginNames = ref<Map<string, string>>(new Map());
+const pluginToolsOpen = ref(false);
+
+async function loadPluginToolCatalog() {
+  const [enabled, plugins] = await Promise.all([getAiPluginToolPlugins().catch(() => [] as string[]), listPlugins().catch(() => [] as InstalledPlugin[])]);
+  pluginToolPluginIds.value = new Set(enabled);
+  pluginToolPluginNames.value = new Map(plugins.filter((plugin) => plugin.compatibility?.compatible !== false).map((plugin) => [plugin.manifest.id, plugin.manifest.name || plugin.manifest.id]));
+}
+void loadPluginToolCatalog();
+
+/** Attachment list owned by `targetConversationId` (or the unsaved draft). */
+function pluginAttachmentIdsFor(targetConversationId: string): string[] {
+  const record = targetConversationId ? conversations.value.find((conversation) => conversation.id === targetConversationId) : undefined;
+  return record ? (record.pluginConnectionIds ?? []) : draftPluginConnectionIds.value;
+}
+
+const attachedPluginConnectionIds = computed(() => pluginAttachmentIdsFor(conversationId.value));
+
+/** The target is a plugin connection: it is always attached and follows the target. */
+const isPluginConnectionTarget = computed(() => boundConnection.value?.db_type === "plugin");
+
+/** Plugin connections the user currently has open, AI tools enabled or not. */
+const openPluginConnections = computed(() => connectionStore.connections.filter((connection) => connection.db_type === "plugin" && connectionStore.connectedIds.has(connection.id)));
+
+/** Open plugin connections whose plugin has built-in AI tools enabled. */
+const eligiblePluginConnections = computed(() => openPluginConnections.value.filter((connection) => !!connection.plugin_id && pluginToolPluginIds.value.has(connection.plugin_id)));
+
+// The control is reachable as soon as any plugin connection is open, because the
+// catalog can be stale: a plugin enabled in Plugin Center while the panel stayed
+// mounted, or a connection opened after mount. Reloading on every open/close (and
+// when the popover opens) makes both orders work without a remount.
+watch(
+  () =>
+    openPluginConnections.value
+      .map((connection) => connection.id)
+      .sort()
+      .join(","),
+  () => void loadPluginToolCatalog(),
+);
+
+const eligiblePluginConnectionIds = computed(() => new Set(eligiblePluginConnections.value.map((connection) => connection.id)));
+
+/** Attached connections that can actually contribute tools right now. */
+const activePluginConnectionIds = computed(() => {
+  if (isPluginConnectionTarget.value) return boundConnection.value ? [boundConnection.value.id] : [];
+  return attachedPluginConnectionIds.value.filter((id) => eligiblePluginConnectionIds.value.has(id));
+});
+
+/** Attached connections that are closed (or had their AI tools switched off). */
+const inactivePluginConnectionCount = computed(() => {
+  if (isPluginConnectionTarget.value) return 0;
+  return attachedPluginConnectionIds.value.length - activePluginConnectionIds.value.length;
+});
+
+interface PluginToolRow {
+  id: string;
+  name: string;
+  pluginId: string;
+  /** Absent when the saved connection no longer exists at all. */
+  connection?: ConnectionConfig;
+  /** Open and AI-enabled: the only rows that can actually contribute tools. */
+  connected: boolean;
+}
+
+const pluginToolGroups = computed(() => {
+  const groups = new Map<string, { pluginId: string; pluginName: string; rows: PluginToolRow[] }>();
+  const add = (row: PluginToolRow) => {
+    const group = groups.get(row.pluginId) ?? {
+      pluginId: row.pluginId,
+      pluginName: row.pluginId ? (pluginToolPluginNames.value.get(row.pluginId) ?? row.pluginId) : "",
+      rows: [],
+    };
+    group.rows.push(row);
+    groups.set(row.pluginId, group);
+  };
+  for (const connection of eligiblePluginConnections.value) {
+    add({ id: connection.id, name: connection.name, pluginId: connection.plugin_id ?? "", connection, connected: true });
+  }
+  // An attached connection that is closed (or had its AI tools switched off)
+  // contributes nothing, but it must stay listed so the user can detach it —
+  // otherwise a selection made while it was open could never be removed.
+  for (const id of attachedPluginConnectionIds.value) {
+    if (eligiblePluginConnectionIds.value.has(id)) continue;
+    const connection = connectionStore.getConfig(id);
+    add({ id, name: connection?.name ?? id, pluginId: connection?.plugin_id ?? "", connection, connected: false });
+  }
+  return [...groups.values()].sort((left, right) => left.pluginName.localeCompare(right.pluginName));
+});
+
+const activePluginConnectionNames = computed(() => eligiblePluginConnections.value.filter((connection) => activePluginConnectionIds.value.includes(connection.id)).map((connection) => connection.name));
+
+const showPluginToolsSelector = computed(() => assistantMode.value === "agent" && !!boundConnection.value && (isPluginConnectionTarget.value || openPluginConnections.value.length > 0 || attachedPluginConnectionIds.value.length > 0));
+
+const pluginToolsTriggerText = computed(() => {
+  if (isPluginConnectionTarget.value) return boundConnection.value?.name ?? "";
+  const names = activePluginConnectionNames.value;
+  if (!names.length) return t("ai.pluginToolsEntry");
+  // Show the extra target(s) in the target row itself: the database stays the SQL
+  // target, while attached plugin connections are additional targets for tool calls.
+  return `${t("ai.pluginToolsEntry")} · ${names[0]}${names.length > 1 ? ` +${names.length - 1}` : ""}`;
+});
+
+const pluginToolsTriggerLabel = computed(() => {
+  if (isPluginConnectionTarget.value) return t("ai.pluginToolsFollowsTarget");
+  if (activePluginConnectionNames.value.length) return t("ai.pluginToolsSelectedTitle", { names: activePluginConnectionNames.value.join(", ") });
+  return t("ai.pluginToolsNoneTitle");
+});
+
+function isPluginConnectionAttached(connectionId: string): boolean {
+  return isPluginConnectionTarget.value ? connectionId === boundConnection.value?.id : attachedPluginConnectionIds.value.includes(connectionId);
+}
+
+/** Persists one attachment change on the shown conversation (or its draft). */
+function togglePluginConnection(connectionId: string) {
+  if (isPluginConnectionTarget.value) return;
+  const current = attachedPluginConnectionIds.value;
+  const next = current.includes(connectionId) ? current.filter((id) => id !== connectionId) : [...current, connectionId];
+  const record = conversations.value.find((conversation) => conversation.id === conversationId.value);
+  if (!record) {
+    draftPluginConnectionIds.value = next;
+    return;
+  }
+  const updated: AiConversation = { ...record, pluginConnectionIds: next, updatedAt: new Date().toISOString() };
+  const index = conversations.value.findIndex((conversation) => conversation.id === updated.id);
+  if (index >= 0) conversations.value.splice(index, 1, updated);
+  // Same persistence path as the mode picker: a chip click must reach disk even
+  // if the panel never sends another message.
+  if (conversationId.value === updated.id && messages.value.length) {
+    void persistConversation().catch(() => {});
+  } else {
+    void saveAiConversation(updated).catch(() => {});
+  }
+}
+
+/**
+ * The plugin connections one run may use. A plugin target always wins (its own
+ * tools only); otherwise the conversation's stored attachments are sent as-is.
+ * The backend resolves them against open + AI-enabled connections, so a closed
+ * or stale id is dropped there rather than racing the catalog load here.
+ */
+function effectivePluginConnectionIds(targetConnectionId: string, targetConversationId: string): string[] {
+  const target = targetConnectionId ? connectionStore.getConfig(targetConnectionId) : undefined;
+  if (target?.db_type === "plugin") return [target.id];
+  return [...pluginAttachmentIdsFor(targetConversationId)];
+}
+
+function onPluginToolsOpenChange(open: boolean) {
+  pluginToolsOpen.value = open;
+  // The eligible set depends on what is open and on Plugin Center switches, both
+  // of which can change while the panel stays mounted.
+  if (open) void loadPluginToolCatalog();
+}
 
 /**
  * Which picker selection each conversation recorded, `raw` only — a capability
@@ -977,6 +1164,10 @@ function discardUnsavedDraftState() {
   conversationLoadedSkillIds.delete(unsavedKey);
   conversationLoadedSkillBodies.delete(unsavedKey);
   conversationPickerSelections.delete(unsavedKey);
+  // Plugin attachments are conversation state too (#13978). The draft can never
+  // be reopened, so a new chat must not inherit the tool surface the abandoned
+  // one had — an attachment is exactly the kind of consent that must not travel.
+  draftPluginConnectionIds.value = [];
   unsavedConversationKey.value = `unsaved:${uuid()}`;
 }
 
@@ -4124,6 +4315,10 @@ async function send() {
   const connection = runBinding.connectionId ? connectionStore.getConfig(runBinding.connectionId) : undefined;
   const tab = runPluginContext ? undefined : aiContextTargetFor(runBinding, props.tab);
   const runSourceName = connection?.name ?? runPluginContext?.pluginName ?? "";
+  // Plugin attachments freeze with the run target (#13978): changing the chip
+  // while this request is in flight must not widen the tool surface it was sent
+  // with, exactly like a mid-run rebind cannot move its SQL target.
+  const runPluginConnectionIds = effectivePluginConnectionIds(runBinding.connectionId, auto ? auto.conversationId : conversationId.value);
   if (!runPluginContext && (!connection || !tab)) {
     clearPendingWriteGrant();
     return;
@@ -4735,6 +4930,7 @@ async function send() {
           context,
           inlineImages: imageAttachments.map(({ mediaType, data }) => ({ mediaType, data })),
           allowSkills,
+          pluginConnectionIds: runPluginConnectionIds,
         },
         history,
         onEvent,
@@ -4804,6 +5000,7 @@ async function send() {
           confirmedDatabase: confirmedTargetDb,
           confirmedSchema: confirmedTargetSchema,
           allowSkills,
+          pluginConnectionIds: runPluginConnectionIds,
         },
         history,
         onEvent,
@@ -5639,6 +5836,9 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
     // so a vector-DB or disconnected-plugin chat cannot have its degraded
     // combination written back over the user's own choice (R9).
     ...pickerSnapshotFor(targetConversationId),
+    // Plugin attachments are user-scoped, not run-scoped: a streaming snapshot
+    // must never overwrite them. New conversations take the draft selection.
+    ...(existingConversation ? (existingConversation.pluginConnectionIds?.length ? { pluginConnectionIds: [...existingConversation.pluginConnectionIds] } : {}) : draftPluginConnectionIds.value.length ? { pluginConnectionIds: [...draftPluginConnectionIds.value] } : {}),
     createdAt,
     updatedAt: new Date().toISOString(),
   };
@@ -7401,6 +7601,47 @@ async function openExternalUrl(url: string) {
                 </template>
               </template>
             </template>
+            <!-- Plugin tools this conversation may use (#13978). Opening a plugin
+                 connection is not consent for the assistant; only checked
+                 connections reach the model. -->
+            <Popover v-if="showPluginToolsSelector" :open="pluginToolsOpen" @update:open="onPluginToolsOpenChange">
+              <PopoverTrigger as-child>
+                <button
+                  type="button"
+                  class="ai-plugin-tools-trigger flex min-w-0 items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:bg-transparent"
+                  :disabled="isPluginConnectionTarget"
+                  :aria-label="pluginToolsTriggerLabel"
+                  :title="pluginToolsTriggerLabel"
+                >
+                  <Plug class="h-3 w-3" />
+                  <span class="ai-plugin-tools-label max-w-40 truncate">{{ pluginToolsTriggerText }}</span>
+                  <span v-if="!isPluginConnectionTarget && activePluginConnectionIds.length" class="ai-plugin-tools-count rounded-sm bg-primary px-1 text-[10px] font-medium text-primary-foreground">{{ activePluginConnectionIds.length }}</span>
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="start" class="w-72 gap-0 p-1.5">
+                <div class="px-2 py-1 text-xs font-medium">{{ t("ai.pluginToolsTitle") }}</div>
+                <p class="px-2 pb-1 text-[11px] leading-4 text-muted-foreground">{{ t("ai.pluginToolsDescription") }}</p>
+                <div class="max-h-64 overflow-auto">
+                  <template v-for="group in pluginToolGroups" :key="group.pluginId">
+                    <div v-if="group.pluginName" class="px-2 pb-1 pt-2 text-[11px] font-medium text-muted-foreground">{{ group.pluginName }}</div>
+                    <button v-for="row in group.rows" :key="row.id" type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted" :aria-pressed="isPluginConnectionAttached(row.id)" @click="togglePluginConnection(row.id)">
+                      <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="isPluginConnectionAttached(row.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
+                        <Check v-if="isPluginConnectionAttached(row.id)" class="h-3 w-3" />
+                      </span>
+                      <ConnectionIcon v-if="row.connection" :connection="row.connection" class="h-3.5 w-3.5 shrink-0" />
+                      <Plug v-else class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span class="min-w-0 flex-1 truncate">{{ row.name }}</span>
+                      <!-- A stored attachment whose connection is closed stays
+                           listed (so it can be detached) but says it is inactive. -->
+                      <span class="shrink-0 text-[10px]" :class="row.connected ? 'text-muted-foreground' : 'text-amber-600'">{{ row.connected ? t("connection.connected") : t("connection.disconnected") }}</span>
+                    </button>
+                  </template>
+                  <div v-if="!pluginToolGroups.length" class="px-2 py-3 text-xs text-muted-foreground">{{ t("ai.pluginToolsEmpty") }}</div>
+                </div>
+                <p v-if="inactivePluginConnectionCount" class="border-t px-2 pt-1.5 text-[10px] leading-4 text-amber-600">{{ t("ai.pluginToolsClosedHint", { count: inactivePluginConnectionCount }) }}</p>
+                <p class="border-t px-2 pt-1.5 text-[10px] leading-4 text-muted-foreground">{{ t("ai.pluginToolsHowTo") }}</p>
+              </PopoverContent>
+            </Popover>
             <span class="ai-prompt-context-spacer min-w-0 flex-1" />
             <!-- Template selector -->
             <Popover v-if="!pluginContext" v-model:open="showTemplateSelector">

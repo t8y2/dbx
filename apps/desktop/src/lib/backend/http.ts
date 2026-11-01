@@ -2442,6 +2442,7 @@ export async function aiAgentStream(
   signal?: AbortSignal,
   selectedDatabases?: string[],
   allowSkills = false,
+  pluginConnectionIds: string[] = [],
 ): Promise<string> {
   const res = await fetch(apiUrl("/api/ai/agent-stream"), {
     method: "POST",
@@ -2463,6 +2464,7 @@ export async function aiAgentStream(
       // The web server ignores this by design: local skill files are never
       // exposed to it (there is no request field on that route either).
       allowSkills,
+      pluginConnectionIds,
     }),
     signal,
   });

@@ -152,6 +152,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     keys: ["pluginPlatform.dataAccessConsent", "pluginPlatform.dataAccessConsentTitle", "pluginPlatform.aiTools.*", "pluginPlatform.dataAccess.*", "ai.toolApproval.*"],
     translated: true,
   },
+  { feature: "plugin tool attachments (#13978)", keys: under("ai", ["pluginToolsEntry", "pluginToolsTitle", "pluginToolsDescription", "pluginToolsEmpty", "pluginToolsHowTo", "pluginToolsClosedHint", "pluginToolsFollowsTarget", "pluginToolsNoneTitle", "pluginToolsSelectedTitle"]), translated: true },
   { feature: "schema diff deploy ignores foreign key checks", keys: under("diff", ["ignoreForeignKeyChecks", "ignoreForeignKeyChecksHint"]), translated: true },
   { feature: "shortcut recorder", keys: under("settings", ["shortcutRecordKeys", "shortcutRecordKeysRecordingHint", "shortcutRecordKeysWindowInactive"]), locales: ALL_LOCALES.filter((locale) => locale !== "th") },
   { feature: "select current statement", keys: ["settings.shortcutSelectCurrentStatement", "editor.contextMenu.selectCurrentStatement"] },

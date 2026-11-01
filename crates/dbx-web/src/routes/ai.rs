@@ -94,6 +94,10 @@ pub struct AiAgentStreamRequest {
     pub database: String,
     #[serde(default)]
     pub selected_databases: Vec<String>,
+    /// Plugin connections the user attached to this conversation. Absent means
+    /// "nothing attached": opening a connection is not consent for the agent.
+    #[serde(default)]
+    pub plugin_connection_ids: Vec<String>,
     #[serde(default)]
     pub schema: Option<String>,
     pub db_type: String,
@@ -510,6 +514,7 @@ pub async fn ai_agent_stream(
         connection_id: body.connection_id,
         database: body.database,
         selected_databases: body.selected_databases,
+        plugin_connection_ids: body.plugin_connection_ids,
         schema: body.schema,
         db_type: parsed_db_type,
         cli_mcp_server_command: None,

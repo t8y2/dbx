@@ -381,6 +381,10 @@ pub async fn ai_agent_stream(
     // Set by the frontend exactly when this send carries a skill listing; the
     // agent loop appends the skill tools only then (ADR Decision 10).
     allow_skills: Option<bool>,
+    // Plugin connections the user attached to this conversation. Absent means
+    // "nothing attached": opening a plugin connection is not consent, so the
+    // agent gets no plugin tools.
+    plugin_connection_ids: Option<Vec<String>>,
 ) -> Result<String, String> {
     let mut request = resolve_cli_provider_request(request);
     merge_global_max_retries(
@@ -436,6 +440,7 @@ pub async fn ai_agent_stream(
         connection_id,
         database,
         selected_databases: selected_databases.unwrap_or_default(),
+        plugin_connection_ids: plugin_connection_ids.unwrap_or_default(),
         schema,
         db_type: parsed_db_type,
         cli_mcp_server_command,

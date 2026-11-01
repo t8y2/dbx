@@ -1311,6 +1311,7 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         plugin_context_json TEXT,
         assistant_mode TEXT,
         assistant_action TEXT,
+        plugin_connection_ids TEXT,
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
     )",
@@ -3439,6 +3440,10 @@ fn ensure_ai_conversations_columns_sync(conn: &Connection) -> Result<(), String>
         // default.
         ("assistant_mode", "TEXT"),
         ("assistant_action", "TEXT"),
+        // Plugin connections attached to the conversation's AI runs. Legacy
+        // rows keep NULL, read as "nothing attached" — the safe default that
+        // never exposes tools the user did not opt into.
+        ("plugin_connection_ids", "TEXT"),
     ];
 
     ensure_table_columns(conn, "ai_conversations", COLUMNS)
@@ -6669,12 +6674,13 @@ impl Storage {
     pub async fn save_ai_conversation(&self, conv: &AiConversation) -> Result<(), String> {
         let conv = conv.clone();
         let messages_json = serde_json::to_string(&conv.messages).map_err(|e| e.to_string())?;
+        let plugin_connection_ids = serde_json::to_string(&conv.plugin_connection_ids).map_err(|e| e.to_string())?;
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
                 "INSERT INTO ai_conversations \
-                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json, assistant_mode, assistant_action) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json, assistant_mode, assistant_action, plugin_connection_ids) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                    title = excluded.title, \
                    connection_name = excluded.connection_name, \
@@ -6685,7 +6691,8 @@ impl Storage {
                    queued_input = excluded.queued_input, \
                    created_at = excluded.created_at, \
                    updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json, \
-                   assistant_mode = excluded.assistant_mode, assistant_action = excluded.assistant_action",
+                   assistant_mode = excluded.assistant_mode, assistant_action = excluded.assistant_action, \
+                   plugin_connection_ids = excluded.plugin_connection_ids",
                 params![
                     conv.id,
                     conv.title,
@@ -6699,7 +6706,8 @@ impl Storage {
                     conv.updated_at,
                     conv.plugin_context.map(|value| value.to_string()),
                     conv.assistant_mode,
-                    conv.assistant_action
+                    conv.assistant_action,
+                    plugin_connection_ids
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -6714,7 +6722,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json, connection_id, schema_name, assistant_mode, assistant_action \
+                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json, connection_id, schema_name, assistant_mode, assistant_action, plugin_connection_ids \
                      FROM ai_conversations ORDER BY updated_at DESC",
                 )
                 .map_err(|e| e.to_string())?;
@@ -6737,6 +6745,10 @@ impl Storage {
                         schema: row.get(10)?,
                         assistant_mode: row.get(11)?,
                         assistant_action: row.get(12)?,
+                        plugin_connection_ids: row
+                            .get::<_, Option<String>>(13)?
+                            .and_then(|json| serde_json::from_str(&json).ok())
+                            .unwrap_or_default(),
                     })
                 })
                 .map_err(|e| e.to_string())?;
@@ -6796,6 +6808,7 @@ impl Storage {
         let conv = conv.clone();
         let run = run.clone();
         let messages_json = serde_json::to_string(&conv.messages).map_err(|e| e.to_string())?;
+        let plugin_connection_ids = serde_json::to_string(&conv.plugin_connection_ids).map_err(|e| e.to_string())?;
         let session_ids_json = serde_json::to_string(&run.session_ids).map_err(|e| e.to_string())?;
         let pending_confirmation_json = run.pending_confirmation.map(|value| value.to_string());
         let fifo_category = run.fifo_category.map(|c| c.as_str().to_string());
@@ -6803,8 +6816,8 @@ impl Storage {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
                 "INSERT INTO ai_conversations
-                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json, assistant_mode, assistant_action)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json, assistant_mode, assistant_action, plugin_connection_ids)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                    title = excluded.title,
                    connection_name = excluded.connection_name,
@@ -6815,7 +6828,8 @@ impl Storage {
                    queued_input = excluded.queued_input,
                    created_at = excluded.created_at,
                    updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json,
-                   assistant_mode = excluded.assistant_mode, assistant_action = excluded.assistant_action",
+                   assistant_mode = excluded.assistant_mode, assistant_action = excluded.assistant_action,
+                   plugin_connection_ids = excluded.plugin_connection_ids",
                 params![
                     conv.id,
                     conv.title,
@@ -6829,7 +6843,8 @@ impl Storage {
                     conv.updated_at,
                     conv.plugin_context.map(|value| value.to_string()),
                     conv.assistant_mode,
-                    conv.assistant_action
+                    conv.assistant_action,
+                    plugin_connection_ids
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -11495,6 +11510,7 @@ mod tests {
             queued_input: None,
             assistant_mode: None,
             assistant_action: None,
+            plugin_connection_ids: Vec::new(),
             created_at: updated_at.to_string(),
             updated_at: updated_at.to_string(),
         }
@@ -11883,10 +11899,63 @@ mod tests {
         let legacy_json: AiConversation = serde_json::from_str(r#"{"id":"old","title":"Old","connectionName":"","connectionId":"","database":"","messages":[],"createdAt":"0000","updatedAt":"0000"}"#).unwrap();
         assert!(legacy_json.assistant_mode.is_none());
         assert!(legacy_json.assistant_action.is_none());
+        // #13978: nothing attached, so the agent gets no plugin tools.
+        assert!(legacy_json.plugin_connection_ids.is_empty());
         // `None` is skipped entirely, so an old reader sees the record it always saw.
         let serialized = serde_json::to_value(&legacy_json).unwrap();
         assert!(serialized.get("assistantMode").is_none());
         assert!(serialized.get("assistantAction").is_none());
+        assert!(serialized.get("pluginConnectionIds").is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    // #13978: the conversation's plugin attachment list has to survive a restart
+    // (and a web round-trip), and a pre-migration row must read as "nothing
+    // attached" rather than failing or exposing every open plugin connection.
+    #[tokio::test]
+    async fn ai_conversation_roundtrips_plugin_connection_attachments() {
+        let path = temp_db_path("ai-conversation-plugin-attachments");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ai_conversations (
+            id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', connection_name TEXT NOT NULL DEFAULT '',
+            database TEXT NOT NULL DEFAULT '', messages_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT ''
+        ); INSERT INTO ai_conversations (id, title) VALUES ('legacy', 'SQL conversation');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        // The migrated legacy row has no attachments: the safe default, since an
+        // attachment is the user's explicit consent to expose plugin tools.
+        let legacy = storage.load_ai_conversations().await.unwrap();
+        assert!(legacy[0].plugin_connection_ids.is_empty());
+
+        // Both upserts carry the list: the plain conversation write and the
+        // conversation+run write used by background runs.
+        let mut conversation = ai_conversation("attached-conv", "0001");
+        conversation.plugin_connection_ids = vec!["ssh-1".to_string(), "kafka-1".to_string()];
+        storage.save_ai_conversation(&conversation).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "attached-conv").unwrap();
+        assert_eq!(saved.plugin_connection_ids, ["ssh-1", "kafka-1"]);
+
+        let mut run_conversation = ai_conversation("run-attached", "0002");
+        run_conversation.plugin_connection_ids = vec!["openobserve-1".to_string()];
+        let run = ai_run("run-2", "run-attached", AiRunStatus::Running, "0002");
+        storage.save_ai_run_state(&run_conversation, &run).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "run-attached").unwrap();
+        assert_eq!(saved.plugin_connection_ids, ["openobserve-1"]);
+
+        // Detaching everything writes an empty list, not a stale one.
+        conversation.plugin_connection_ids = Vec::new();
+        storage.save_ai_conversation(&conversation).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "attached-conv").unwrap();
+        assert!(saved.plugin_connection_ids.is_empty());
 
         let _ = std::fs::remove_file(path);
     }

@@ -56,6 +56,11 @@ const aiAssistantMountApi = vi.hoisted(() => ({
   // (false), where a CLI config is ineligible and its disabled selector never
   // renders — the skill-capability test flips this for its own duration.
   tauriRuntime: false,
+  // Plugin ids whose "built-in AI tools" switch is on, and the installed plugins
+  // that name them (#13978). Empty by default: no connection is eligible, so no
+  // existing test's behavior changes.
+  pluginToolPluginIds: [] as string[],
+  installedPlugins: [] as Array<Record<string, unknown>>,
 }));
 
 // `onMounted` imports the syntax highlighter lazily; this module-level delay stands in for the
@@ -187,7 +192,8 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     },
     loadAiConfigs: empty,
     saveAiConfigItem: () => Promise.resolve(),
-    listPlugins: empty,
+    listPlugins: () => Promise.resolve(aiAssistantMountApi.installedPlugins as never),
+    getAiPluginToolPlugins: () => Promise.resolve(aiAssistantMountApi.pluginToolPluginIds),
     loadPromptTemplates: empty,
     getAiGlobalCustomInstructions: () => Promise.resolve(""),
     saveAiChatSelection: () => Promise.resolve(),
@@ -228,6 +234,8 @@ afterEach(() => {
   aiAssistantMountApi.skillReadCalls = [];
   aiAssistantMountApi.skillListCalls = 0;
   aiAssistantMountApi.tauriRuntime = false;
+  aiAssistantMountApi.pluginToolPluginIds = [];
+  aiAssistantMountApi.installedPlugins = [];
   // Reset the shared catalog mock, then re-arm the default implementation that
   // reads `skillCatalog`: `mockReset()` alone leaves it returning undefined, so
   // every test would start from a broken catalog.
@@ -884,6 +892,8 @@ describe("AiAssistant mount", () => {
   // selection chip that renders is worthless if the send drops it.
   const POSTGRES: ConnectionConfig = { id: "postgres", name: "PostgreSQL", db_type: "postgres", host: "localhost", port: 5432, username: "", password: "", database: "app" };
   const CONN_A: ConnectionConfig = { id: "conn-a", name: "ConnA", db_type: "mysql", host: "localhost", port: 3306, username: "", password: "", database: "db_a" };
+  /** A plugin connection the user opened for their own terminal work (#13978). */
+  const SSH_PLUGIN: ConnectionConfig = { id: "ssh-1", name: "middleware", db_type: "plugin", plugin_id: "sample.plugin", host: "localhost", port: 22, username: "", password: "" };
 
   function configureAiPanel(settings: ReturnType<typeof useSettingsStore>) {
     settings.aiConfigs = [
@@ -994,6 +1004,174 @@ describe("AiAssistant mount", () => {
 
     // The connection arrived: the recorded Agent mode comes back on its own.
     expect(modeTrigger().textContent).toContain(i18n.global.t("ai.modes.agent"));
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #13978: opening a plugin connection is not consent. The run's plugin tools are
+  // limited to the connections the conversation attached, so the control is the
+  // only way an SSH terminal's tools can reach the model.
+  it("hides the plugin tools control when no plugin connection is eligible", async () => {
+    const { container, errors } = await mountPanel(true, POSTGRES, (settings) => {
+      configureAiPanel(settings);
+      settings.defaultAiMode = "agent";
+    });
+    await settle();
+    expect(container.querySelector(".ai-mode-action-trigger")?.textContent).toContain(i18n.global.t("ai.modes.agent"));
+    expect(container.querySelector(".ai-plugin-tools-trigger")).toBeNull();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("hides the plugin tools control in ask mode", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "ask";
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    useConnectionStore(pinia).connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+    // Ask mode never receives plugin tools, so the control would only mislead.
+    expect(container.querySelector(".ai-plugin-tools-trigger")).toBeNull();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("reveals the plugin tools control after the plugin is enabled and its connection opens", async () => {
+    // Mounted with an empty catalog and no attachments: the control is hidden.
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    await settle();
+    expect(container.querySelector(".ai-plugin-tools-trigger")).toBeNull();
+
+    // The user enables the plugin's built-in AI tools, then opens its connection.
+    // Opening reloads the catalog, so the control appears without a remount.
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    useConnectionStore(pinia).connectedIds.add(SSH_PLUGIN.id);
+    await vi.waitFor(() => expect(container.querySelector(".ai-plugin-tools-trigger")).not.toBeNull());
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("attaches an open plugin connection, persists it, and freezes it into the send", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    aiAssistantMountApi.installedPlugins = [{ manifest: { id: "sample.plugin", name: "Sample", drivers: [] }, compatibility: { compatible: true } }];
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-ssh", connectionId: "postgres", connectionName: "PostgreSQL", database: "app" })];
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+        settings.restoreLastConversation = true;
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    const connectionStore = useConnectionStore(pinia);
+    connectionStore.connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+
+    // Nothing is attached yet, so the run carries an empty allow-list.
+    await sendPrompt(container, "check memory");
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([]);
+
+    const trigger = () => container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    expect(trigger()).not.toBeNull();
+    expect(trigger()!.getAttribute("aria-label")).toBe(i18n.global.t("ai.pluginToolsNoneTitle"));
+    trigger()!.click();
+    await settle();
+
+    const row = () => Array.from(container.querySelectorAll<HTMLButtonElement>('[data-slot="popover-content"] button[aria-pressed]')).find((button) => button.textContent?.includes(SSH_PLUGIN.name));
+    await vi.waitFor(() => expect(row()).toBeDefined());
+    expect(row()!.getAttribute("aria-pressed")).toBe("false");
+    row()!.click();
+    await settle();
+
+    expect(row()!.getAttribute("aria-pressed")).toBe("true");
+    expect(trigger()!.querySelector(".ai-plugin-tools-count")?.textContent?.trim()).toBe("1");
+    expect(trigger()!.getAttribute("aria-label")).toBe(i18n.global.t("ai.pluginToolsSelectedTitle", { names: SSH_PLUGIN.name }));
+    // The attached connection is visible as an extra target in the target row,
+    // not hidden behind the generic entry label.
+    expect(trigger()!.textContent).toContain(SSH_PLUGIN.name);
+    // A toggle reaches disk immediately, on the conversation's own record.
+    await vi.waitFor(() => expect((aiAssistantMountApi.savedConversations.at(-1) as { pluginConnectionIds?: string[] }).pluginConnectionIds).toEqual([SSH_PLUGIN.id]));
+
+    await sendPrompt(container, "check memory again");
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([SSH_PLUGIN.id]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("keeps a closed stored attachment visible but inactive", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-ssh", connectionId: "postgres", connectionName: "PostgreSQL", database: "app", pluginConnectionIds: [SSH_PLUGIN.id] })];
+    const { container, errors } = await mountPanel(
+      true,
+      POSTGRES,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+        settings.restoreLastConversation = true;
+      },
+      undefined,
+      [SSH_PLUGIN],
+    );
+    await settle();
+
+    // The selection stays visible (so it can be removed) but contributes nothing.
+    const trigger = container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    expect(trigger?.querySelector(".ai-plugin-tools-count")).toBeNull();
+    expect(trigger?.getAttribute("aria-label")).toBe(i18n.global.t("ai.pluginToolsNoneTitle"));
+
+    // …and the row is reachable, marked inactive, so the stale selection can be
+    // detached instead of becoming an unreachable stored value.
+    trigger!.click();
+    await settle();
+    const row = () => Array.from(container.querySelectorAll<HTMLButtonElement>('[data-slot="popover-content"] button[aria-pressed]')).find((button) => button.textContent?.includes(SSH_PLUGIN.name));
+    await vi.waitFor(() => expect(row()).toBeDefined());
+    expect(row()!.getAttribute("aria-pressed")).toBe("true");
+    expect(row()!.textContent).toContain(i18n.global.t("connection.disconnected"));
+    expect(container.querySelector('[data-slot="popover-content"]')?.textContent).toContain(i18n.global.t("ai.pluginToolsClosedHint", { count: 1 }));
+
+    await sendPrompt(container, "check memory");
+    // The request carries the stored attachment; the backend drops it because the
+    // connection is not open, so the run still gets no plugin tools.
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([SSH_PLUGIN.id]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("locks the plugin tools control to a plugin-connection target", async () => {
+    aiAssistantMountApi.pluginToolPluginIds = ["sample.plugin"];
+    const { container, errors, pinia } = await mountPanel(
+      true,
+      SSH_PLUGIN,
+      (settings) => {
+        configureAiPanel(settings);
+        settings.defaultAiMode = "agent";
+      },
+      undefined,
+      [POSTGRES],
+    );
+    useConnectionStore(pinia).connectedIds.add(SSH_PLUGIN.id);
+    await settle();
+
+    const trigger = container.querySelector<HTMLButtonElement>(".ai-plugin-tools-trigger");
+    expect(trigger).not.toBeNull();
+    expect(trigger!.disabled).toBe(true);
+    expect(trigger!.getAttribute("aria-label")).toBe(i18n.global.t("ai.pluginToolsFollowsTarget"));
+    // The target follows itself into the run without any attachment.
+    await sendPrompt(container, "check memory");
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput).pluginConnectionIds).toEqual([SSH_PLUGIN.id]);
     expect(errors.map(String)).toEqual([]);
   });
 

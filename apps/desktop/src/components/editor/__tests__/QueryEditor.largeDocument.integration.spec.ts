@@ -3,7 +3,7 @@
 import { createApp, h, nextTick, ref, shallowRef, type App } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
-import { foldedRanges, language } from "@codemirror/language";
+import { StreamLanguage, foldedRanges, language } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QUERY_EDITOR_FULL_FEATURE_MAX_DOCUMENT_LENGTH, QUERY_EDITOR_FULL_FEATURE_MAX_LINE_COUNT } from "@/lib/editor/queryEditorLargeDocument";
@@ -17,6 +17,15 @@ const analysisProbe = vi.hoisted(() => ({
   failAtLength: Number.POSITIVE_INFINITY,
   failAtLineCount: Number.POSITIVE_INFINITY,
 }));
+
+// The real grammar budget is 2 MB; parsing a document that large in happy-dom exhausts the test worker,
+// so this file runs the same swap logic against a small budget. The real constants are covered in
+// queryEditorLargeDocument.spec.ts.
+const { SYNTAX_PARSE_TEST_BUDGET } = vi.hoisted(() => ({ SYNTAX_PARSE_TEST_BUDGET: 100_000 }));
+vi.mock("@/lib/editor/queryEditorLargeDocument", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/editor/queryEditorLargeDocument")>();
+  return { ...actual, QUERY_EDITOR_SYNTAX_PARSE_MAX_DOCUMENT_LENGTH: SYNTAX_PARSE_TEST_BUDGET, shouldParseQueryEditorSyntax: (length: number) => length <= SYNTAX_PARSE_TEST_BUDGET };
+});
 
 vi.mock("@/lib/sql/executableStatementRangeCache", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/sql/executableStatementRangeCache")>();
@@ -251,5 +260,32 @@ describe("QueryEditor large document mode", () => {
     await nextTick();
     expect(view.state.doc.toString()).toBe(source);
     expect(host.firstElementChild?.getAttribute("data-large-document-mode")).toBe("true");
+  });
+
+  it("swaps the full grammar for a stream tokenizer above the syntax budget and back below it", async () => {
+    const line = "SELECT 1 FROM t WHERE c = 'x';\n";
+    const oversized = line.repeat(Math.ceil((SYNTAX_PARSE_TEST_BUDGET + 1) / line.length));
+    expect(oversized.length).toBeGreaterThan(SYNTAX_PARSE_TEST_BUDGET);
+    const { host, view } = await mountEditor(oversized, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(host.firstElementChild?.getAttribute("data-large-document-mode")).toBe("true");
+    expect(view.state.facet(language)).toBeInstanceOf(StreamLanguage);
+
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "SELECT 1;" }, userEvent: "input" });
+    await nextTick();
+    await vi.waitFor(() => expect(view.state.facet(language)).not.toBeInstanceOf(StreamLanguage));
+    expect(view.state.facet(language)).not.toBeNull();
+
+    const { undo } = await import("@codemirror/commands");
+    expect(undo(view)).toBe(true);
+    await vi.waitFor(() => expect(view.state.facet(language)).toBeInstanceOf(StreamLanguage));
+  });
+
+  it("keeps the full grammar for documents at or below the syntax budget", async () => {
+    const source = Array.from({ length: 2_001 }, (_, index) => `SELECT ${index};`).join("\n");
+    expect(source.length).toBeLessThanOrEqual(SYNTAX_PARSE_TEST_BUDGET);
+    const { view } = await mountEditor(source, { databaseType: "mysql", dialect: "mysql" });
+    expect(view.state.facet(language)).not.toBeInstanceOf(StreamLanguage);
+    expect(view.state.facet(language)).not.toBeNull();
   });
 });

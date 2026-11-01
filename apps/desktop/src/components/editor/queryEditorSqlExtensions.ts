@@ -15,6 +15,7 @@ import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatem
 import { createSqlAliasHighlights } from "@/lib/editor/codemirrorSqlAliasHighlights";
 import { elasticsearchLanguage } from "@/lib/elasticsearch/elasticsearchLanguage";
 import { createDbxCodeMirrorSqlDialect, supportsQueryEditorSqlLanguage } from "@/lib/editor/codemirrorSqlDialect";
+import { createLargeDocumentSqlLanguage } from "@/lib/editor/codemirrorLargeDocumentSqlLanguage";
 import { graphQueryLanguage, isGraphQueryDatabase } from "@/lib/graph/graphQueryLanguage";
 import { getGraphFunctionSignatureHelp } from "@/lib/graph/graphSignatureHelp";
 import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorSqlSemanticHighlight";
@@ -58,10 +59,27 @@ interface QueryEditorSqlExtensionsOptions {
   executeSqlStatementFromGutter: (view: EditorViewType, line: { from: number; to: number }, event: Event) => boolean;
   signatureHelpWindowChars: number;
   boundedAnalysisEnabled: () => boolean;
+  /** False once the document is too large for the full Lezer grammar; a lighter stream tokenizer takes over. */
+  syntaxParsingEnabled: () => boolean;
 }
 
 export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensionsOptions) {
-  const { props, runtime: codeMirrorRuntime, settingsStore, t, sqlBehaviorDialect, sqlDriverProfile, sqlStatementParameterOptions, queryEditorSelectionLanguage, cache, batchSelection, currentExecutableStatementRange, executeSqlStatementFromGutter, boundedAnalysisEnabled } = options;
+  const {
+    props,
+    runtime: codeMirrorRuntime,
+    settingsStore,
+    t,
+    sqlBehaviorDialect,
+    sqlDriverProfile,
+    sqlStatementParameterOptions,
+    queryEditorSelectionLanguage,
+    cache,
+    batchSelection,
+    currentExecutableStatementRange,
+    executeSqlStatementFromGutter,
+    boundedAnalysisEnabled,
+    syntaxParsingEnabled,
+  } = options;
   const { EditorView, Decoration, StateField, StateEffect, GutterMarker, RangeSet, lineNumberMarkers, gutter, showTooltip, autocompletion, ViewPlugin, highlightingFor, syntaxTree, langSql, Prec, EditorState, ensureSyntaxTree, layer, RectangleMarker } = options.modules;
   const { provideSqlCompletions } = options.completion;
   const { renderBatchColumnSelectionActionMarker, renderBatchColumnSelectionCheckbox } = batchSelection;
@@ -348,9 +366,11 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
         : isGraphQueryDatabase(props.databaseType)
           ? graphQueryLanguage(props.databaseType)
           : supportsQueryEditorSqlLanguage(props.databaseType)
-            ? langSql.sql({
-                dialect: createDbxCodeMirrorSqlDialect(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
-              })
+            ? syntaxParsingEnabled()
+              ? langSql.sql({
+                  dialect: createDbxCodeMirrorSqlDialect(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
+                })
+              : createLargeDocumentSqlLanguage(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType)
             : [],
       // Non-SQL editors (MongoDB shell) keep the SQL grammar for highlighting, so override the
       // comment marker that toggleLineComment reads from language data.

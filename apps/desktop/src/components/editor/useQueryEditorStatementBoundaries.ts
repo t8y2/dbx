@@ -7,7 +7,7 @@ import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import type { QueryEditorProps } from "./queryEditorTypes";
 import type { QueryEditorCodeMirrorRuntime } from "./queryEditorCodeMirrorRuntime";
 import { createSqlStatementAnalysisWorker } from "@/lib/sql/sqlStatementAnalysisWorker";
-import { shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
+import { shouldParseQueryEditorSyntax, shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
 import type { FoldRange } from "@/lib/editor/codemirrorSqlBlockFolding";
 
 class FoldRangeMarker extends RangeValue {
@@ -92,7 +92,8 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
         sql: state.doc.toString(),
         databaseType: queryEditorStatementDatabaseType(props.databaseType, props.mongoQueryLanguage),
         parameterOptions: sqlStatementParameterOptions(),
-        includeFolds: true,
+        // Fold ranges need a full Lezer parse in the worker; past the grammar budget that costs ~100 bytes per character.
+        includeFolds: shouldParseQueryEditorSyntax(state.doc.length),
         syntaxDialect: options.syntaxDialect?.() ?? props.syntaxDialect ?? props.dialect,
         driverProfile: options.driverProfile?.(),
       })

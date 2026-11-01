@@ -1,4 +1,4 @@
-import { syntaxTree, syntaxTreeAvailable } from "@codemirror/language";
+import { StreamLanguage, language, syntaxTree, syntaxTreeAvailable } from "@codemirror/language";
 import type { EditorState, Text } from "@codemirror/state";
 import { matchDollarQuoteTag } from "@/lib/sql/semantic/tokens";
 import type { TextRange } from "@/lib/sql/insertValueHints";
@@ -43,6 +43,13 @@ type SyntaxNode = ReturnType<ReturnType<typeof syntaxTree>["resolve"]>;
 // Matches insertValueHints.ts's STATEMENT_LOOKBACK -- same budget, same tradeoff, used here only
 // as a safety check rather than as the primary boundary-finding mechanism.
 const DOLLAR_QUOTE_DISTRUST_LOOKBACK = 32 * 1024;
+
+/** The node names these helpers read belong to the Lezer SQL grammar. Documents past the grammar
+ * budget are highlighted by a stream tokenizer whose tree has different (or no) node names, so every
+ * lookup here must report "unknown" for them and let the caller use the bounded scanner. */
+function hasLezerSqlGrammar(state: EditorState): boolean {
+  return !(state.facet(language) instanceof StreamLanguage);
+}
 
 function hasUnresolvedDollarQuoteBefore(doc: Text, from: number, lookback: number): boolean {
   const scanStart = Math.max(0, from - lookback);
@@ -89,7 +96,7 @@ function statementNodeAt(state: EditorState, cursor: number): SyntaxNode | null 
  * resolved node looks like an error-recovery node, or when a dollar-quoted body might be hiding
  * the true boundary (see module doc comment) -- the caller should fall back to the scanner. */
 export function resolveStatementWindowFromSyntaxTree(state: EditorState, cursor: number): TextRange | null {
-  if (!syntaxTreeAvailable(state, cursor)) return null;
+  if (!hasLezerSqlGrammar(state) || !syntaxTreeAvailable(state, cursor)) return null;
 
   const statementNode = statementNodeAt(state, cursor);
   if (!statementNode) return null;
@@ -116,7 +123,7 @@ export function resolveStatementWindowFromSyntaxTree(state: EditorState, cursor:
  * `QuotedIdentifier` (double-quote/backtick/bracket) and everything else is neither, matching
  * getSqlLexicalContext's existing "only single/dollar-quoted text is a value literal" semantics. */
 export function resolveLexicalLeafFromSyntaxTree(state: EditorState, cursor: number): { inLineComment: boolean; inBlockComment: boolean; inStringLiteral: boolean } | null {
-  if (!syntaxTreeAvailable(state, cursor)) return null;
+  if (!hasLezerSqlGrammar(state) || !syntaxTreeAvailable(state, cursor)) return null;
 
   const tree = syntaxTree(state);
   const node = tree.resolve(cursor, -1);

@@ -1808,6 +1808,7 @@ export default withEnglishFallback({
     mqttSearchPayloadPlaceholder: "Поиск по полезной нагрузке сообщений...",
     mqttNoMatchingMessages: "Нет загруженных сообщений, соответствующих этому фильтру полезной нагрузки",
     mqttNoSavedSubscriptions: "Нет сохранённых подписок. Нажмите «Новая подписка», чтобы добавить.",
+    mqttTopicAlias: "Псевдоним (необязательно)",
     mqttTopicFilter: "Фильтр топика",
     mqttTopicFilterPlaceholder: "например, device/+/status",
     mqttTopicFilterHint: "Поддерживаются одноуровневый знак + и многоуровневый знак #.",

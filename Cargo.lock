@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.62"
+version = "0.6.63"
 dependencies = [
  "anyhow",
  "axum",
@@ -2780,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.62"
+version = "0.6.63"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

@@ -1,7 +1,7 @@
 import { StandardSQL } from "@codemirror/lang-sql";
 import { ensureSyntaxTree, foldable, matchBrackets, syntaxTree } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createSqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
 import { elasticsearchJsonDiagnostics, elasticsearchLanguage } from "@/lib/elasticsearch/elasticsearchLanguage";
 
@@ -26,10 +26,15 @@ GET /orders/_count
   }
 }`;
 
+function fullyParsedState(state: EditorState) {
+  expect(ensureSyntaxTree(state, state.doc.length, 5_000)).not.toBeNull();
+  // ensureSyntaxTree completes the parse context; a transaction publishes its
+  // tree to the immutable state that syntaxTree and foldable actually read.
+  return state.update({}).state;
+}
+
 function stateFor(text: string, databaseType: "elasticsearch" | "easysearch" = "elasticsearch") {
-  const state = EditorState.create({ doc: text, extensions: [elasticsearchLanguage(StandardSQL.language.parser), createSqlBlockFoldService(databaseType)] });
-  ensureSyntaxTree(state, text.length, 5_000);
-  return state;
+  return fullyParsedState(EditorState.create({ doc: text, extensions: [elasticsearchLanguage(StandardSQL.language.parser), createSqlBlockFoldService(databaseType)] }));
 }
 
 function foldedText(state: EditorState, lineNumber: number) {
@@ -39,6 +44,18 @@ function foldedText(state: EditorState, lineNumber: number) {
 }
 
 describe("Elasticsearch REST JSON language", () => {
+  it("folds the complete JSON tree after the initial parse exhausts its time budget", () => {
+    let now = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => (now += 25));
+    try {
+      const state = stateFor(doc);
+      expect(foldedText(state, 3)).toContain('"bool"');
+      expect(foldedText(state, 5)).toBe('\n        { "term": { "status": "paid" } }\n      ');
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it.each(["elasticsearch", "easysearch"] as const)("folds nested objects and arrays while retaining %s request folds", (databaseType) => {
     const state = stateFor(doc, databaseType);
     expect(foldedText(state, 1)).toBe(doc.slice(doc.indexOf("\n"), doc.indexOf("\n\n")));
@@ -83,8 +100,7 @@ describe("Elasticsearch REST JSON language", () => {
     expect(diagnostics[0].severity).toBe("error");
     expect(diagnostics[0].from).toBeGreaterThan(text.indexOf("POST"));
     const comma = text.lastIndexOf(",");
-    const updated = state.update({ changes: { from: comma, to: comma + 1, insert: "" } }).state;
-    ensureSyntaxTree(updated, updated.doc.length, 5_000);
+    const updated = fullyParsedState(state.update({ changes: { from: comma, to: comma + 1, insert: "" } }).state);
     expect(elasticsearchJsonDiagnostics(updated)).toEqual([]);
     expect(syntaxTree(updated).resolveInner(text.indexOf('"query"') + 1).name).toBe("PropertyName");
   });
@@ -114,8 +130,7 @@ describe("Elasticsearch REST JSON language", () => {
   it("keeps body offsets correct after inserting a request and supports tab-separated headers", () => {
     const state = stateFor(doc);
     const prefix = "GET\t/_cluster/health\n\n";
-    const updated = state.update({ changes: { from: 0, insert: prefix } }).state;
-    ensureSyntaxTree(updated, updated.doc.length, 5000);
+    const updated = fullyParsedState(state.update({ changes: { from: 0, insert: prefix } }).state);
     expect(syntaxTree(updated).resolveInner(1).name).toBe("RequestMethod");
     expect(syntaxTree(updated).resolveInner(prefix.length + doc.indexOf('"filter"') + 1).name).toBe("PropertyName");
     expect(elasticsearchJsonDiagnostics(updated)).toEqual([]);

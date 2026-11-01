@@ -113,6 +113,7 @@ import {
   type TabSortMode,
   type WelcomePageMode,
   type UpdateDownloadSource,
+  type UpdateChannel,
   type CsvQuoteMode,
   type CsvNullMode,
   type QueryResultExportFileNameSource,
@@ -1082,6 +1083,7 @@ const editExportRowLimitEnabled = ref(settingsStore.editorSettings.exportRowLimi
 const editExportRowLimit = ref(settingsStore.editorSettings.exportRowLimit);
 const editQueryExportKeysetOptimizationEnabled = ref(settingsStore.editorSettings.queryExportKeysetOptimizationEnabled);
 const editUpdateDownloadSource = ref<UpdateDownloadSource>(settingsStore.editorSettings.updateDownloadSource);
+const editUpdateChannel = ref<UpdateChannel>(settingsStore.editorSettings.updateChannel);
 const editToolbarItems = ref({ ...settingsStore.editorSettings.toolbarItems });
 // Desktop-only toolbar buttons (always-on-top) can never render in the Web build, so their switches stay out of the Web settings dialog.
 const toolbarVisibilityItems = computed(() => visibleToolbarVisibilityItems(TOOLBAR_VISIBILITY_ITEMS, isWeb));
@@ -1392,6 +1394,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     exportRowLimit: editExportRowLimit.value,
     queryExportKeysetOptimizationEnabled: editQueryExportKeysetOptimizationEnabled.value,
     updateDownloadSource: editUpdateDownloadSource.value,
+    updateChannel: editUpdateChannel.value,
     toolbarItems: { ...editToolbarItems.value },
     snippets: editSnippets.value,
     snippetTriggerKey: editSnippetTriggerKey.value,
@@ -2098,6 +2101,7 @@ function syncEditorSettingsDraftFromStore() {
   editExportRowLimit.value = settingsStore.editorSettings.exportRowLimit;
   editQueryExportKeysetOptimizationEnabled.value = settingsStore.editorSettings.queryExportKeysetOptimizationEnabled;
   editUpdateDownloadSource.value = settingsStore.editorSettings.updateDownloadSource;
+  editUpdateChannel.value = settingsStore.editorSettings.updateChannel;
   editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
   editSnippets.value = settingsStore.editorSettings.snippets.map(editableSnippet);
   editSnippetTriggerKey.value = settingsStore.editorSettings.snippetTriggerKey;
@@ -2274,6 +2278,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   globalDateTimeExportFormat: editGlobalDateTimeExportFormat,
   globalDateTimeImportFormat: editGlobalDateTimeImportFormat,
   updateDownloadSource: editUpdateDownloadSource,
+  updateChannel: editUpdateChannel,
   toolbarItems: editToolbarItems,
   snippets: editSnippets,
   snippetTriggerKey: editSnippetTriggerKey,
@@ -2931,6 +2936,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editAutoUpdateMcp.value = DEFAULT_EDITOR_SETTINGS.autoUpdateMcp;
     editAutoUpdatePlugins.value = DEFAULT_EDITOR_SETTINGS.autoUpdatePlugins;
     editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
+    editUpdateChannel.value = DEFAULT_EDITOR_SETTINGS.updateChannel;
   }
 }
 
@@ -3101,6 +3107,7 @@ function resetAllDefaults() {
   editExportRowLimit.value = DEFAULT_EDITOR_SETTINGS.exportRowLimit;
   editQueryExportKeysetOptimizationEnabled.value = DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled;
   editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
+  editUpdateChannel.value = DEFAULT_EDITOR_SETTINGS.updateChannel;
   editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
   editSnippets.value = DEFAULT_SQL_SNIPPETS.map((s) => ({ ...s }));
   editSnippetTriggerKey.value = DEFAULT_EDITOR_SETTINGS.snippetTriggerKey;
@@ -3415,6 +3422,10 @@ function onUiScaleChange(value: unknown) {
 
 function onUpdateDownloadSourceChange(v: any) {
   if (v === "official" || v === "cnb") editUpdateDownloadSource.value = v;
+}
+
+function onUpdateChannelChange(v: any) {
+  if (v === "stable" || v === "beta") editUpdateChannel.value = v;
 }
 
 function setSidebarObjectDisplay(value: "grouped" | "simple") {
@@ -13619,6 +13630,20 @@ LIMIT 100;</pre>
                   </div>
                 </div>
                 <p class="border-t pt-3 text-xs text-muted-foreground">{{ t("settings.updateRestartHint") }}</p>
+              </div>
+
+              <div class="flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div class="min-w-0 space-y-1">
+                  <Label>{{ t("settings.updateChannel") }}</Label>
+                  <p class="text-sm text-muted-foreground">{{ t("settings.updateChannelDescription") }}</p>
+                </div>
+                <Select :model-value="editUpdateChannel" @update:model-value="onUpdateChannelChange">
+                  <SelectTrigger class="h-9 w-full sm:w-[180px]"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="stable">{{ t("settings.updateChannelStable") }}</SelectItem>
+                    <SelectItem value="beta">{{ t("settings.updateChannelBeta") }}</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
 
               <div class="flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between">

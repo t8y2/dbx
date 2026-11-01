@@ -21,10 +21,10 @@ log = "0.4"
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "macros"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "socks"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-tls", "socks"] }
 futures = "0.3"
-base64 = "0.22"
-sha2 = "0.10"
+base64 = "0.23"
+sha2 = "0.11"
 bytes = "1"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 tempfile = "3"

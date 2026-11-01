@@ -8,8 +8,8 @@ publish = false
 
 [dependencies]
 dbx-ai-provider = { path = "../../crates/dbx-ai-provider" }
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "system-proxy"] }
-hyper-util = "=0.1.20"
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-tls", "system-proxy"] }
+hyper-util = "=0.1.21"
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
 

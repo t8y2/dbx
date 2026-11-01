@@ -33,15 +33,15 @@ mysql_async = { version = "0.37", default-features = false, features = ["default
 axum = "0.8"
 chrono = "0.4"
 rmcp = { version = "3.5.1", features = ["client", "transport-io", "transport-streamable-http-server"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls", "socks"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlparser = { version = "0.62", features = ["visitor"] }
+sqlparser = { version = "0.63", features = ["visitor"] }
 tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal"] }
 tokio-util = "0.7"
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.7", features = ["cors"] }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
 

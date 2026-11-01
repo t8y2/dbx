@@ -37,9 +37,11 @@ type nativeIoTDBSession struct {
 
 func (s *nativeIoTDBSession) ExecuteQueryStatement(ctx context.Context, sql string, timeoutMs *int64) (*client.SessionDataSet, error) {
 	return executeIoTDBStatement(ctx, func() (*client.SessionDataSet, error) {
-		// #13935: the timeout must ride inside the RPC — 0 explicitly disables
-		// the server's query_timeout_threshold, an omitted value falls back to
-		// the 60 s server default. The old adapter dropped it here.
+		// #13935: the timeout must ride inside the RPC — an omitted value
+		// falls back to the server's query_timeout_threshold (60 s default),
+		// so whatever timeoutMilliseconds produced (the 100-year no-limit
+		// budget, or a positive bound) reaches the request. The old adapter
+		// dropped it here.
 		return s.session.ExecuteQueryStatementWithContext(ctx, sql, timeoutMs)
 	})
 }

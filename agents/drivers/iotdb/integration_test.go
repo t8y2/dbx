@@ -411,11 +411,11 @@ func (b *synchronizedBuffer) String() string {
 
 // #13935: with the server's query_timeout_threshold tightened (the live
 // environment sets it to 1 ms — see the issue's rclone/export scenario for the
-// 60 s default pain point), a "no limit" (timeoutSecs=0) query must still
-// complete because the adapter forwards an explicit 0, which disables the
-// server timeout. Before the fix the adapter omitted the timeout and every
-// query died with error 720 (Current query is time out).
-func TestLiveIoTDBNoLimitQueryDisablesServerTimeout(t *testing.T) {
+// 60 s default pain point), a "no limit" (timeoutSecs=0) query maps to a
+// 100-year budget that the adapter forwards on every request, including each
+// paged fetch. Before the fix the first query omitted the timeout entirely and
+// the server aborted the task with "Current query is time out".
+func TestLiveIoTDBNoLimitQueryCarriesBudgetThroughFetchPages(t *testing.T) {
 	if os.Getenv("DBX_IOTDB_LIVE") != "1" {
 		t.Skip("set DBX_IOTDB_LIVE=1 to run against a real IoTDB server")
 	}

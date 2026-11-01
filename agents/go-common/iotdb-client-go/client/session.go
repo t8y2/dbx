@@ -524,9 +524,11 @@ func (s *Session) ExecuteStatementWithContext(ctx context.Context, sql string) (
 // ExecuteQueryStatementWithContext combines the cancellable context of
 // ExecuteStatementWithContext with the per-query timeout of
 // ExecuteQueryStatement: timeoutMs travels in TSExecuteStatementReq.Timeout so
-// the server applies it (0 disables query_timeout_threshold; absent falls back
-// to the server default), while ctx cancels the underlying RPC. Reconnect-once
-// and status verification keep the legacy error handling.
+// the server applies it against the query task, while ctx cancels the
+// underlying RPC. Positive budgets bound the task; 0 and absent values fall
+// back to the server's query_timeout_threshold (60 s default — there is no
+// wire-level "disable"). Reconnect-once and status verification keep the
+// legacy error handling.
 func (s *Session) ExecuteQueryStatementWithContext(ctx context.Context, sql string, timeoutMs *int64) (*SessionDataSet, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

@@ -117,7 +117,11 @@ test("duplicating a grouped connection keeps the copy in the same group", async 
     }
     if (url === "/api/layout/sidebar") {
       if (init?.method === "POST") {
-        savedLayout = JSON.parse(String(init.body ?? "null"));
+        // saveSidebarLayout posts { layout } — match the real api contract so a
+        // disk-reload flush (initFromDisk now flushes pending layout persist)
+        // writes the layout itself, not the { layout } wrapper.
+        const body = JSON.parse(String(init.body ?? "null"));
+        savedLayout = body?.layout ?? body;
         return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
       }
       return new Response(JSON.stringify(savedLayout), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -175,7 +179,11 @@ test("reloading connections preserves the current grouped layout when the saved 
     }
     if (url === "/api/layout/sidebar") {
       if (init?.method === "POST") {
-        savedLayout = JSON.parse(String(init.body ?? "null"));
+        // saveSidebarLayout posts { layout } — match the real api contract so a
+        // disk-reload flush (initFromDisk now flushes pending layout persist)
+        // writes the layout itself, not the { layout } wrapper.
+        const body = JSON.parse(String(init.body ?? "null"));
+        savedLayout = body?.layout ?? body;
         return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
       }
       return new Response(JSON.stringify(savedLayout), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -219,7 +227,11 @@ test("importing grouped dbx connections remaps exported layout to new connection
     }
     if (url === "/api/layout/sidebar") {
       if (init?.method === "POST") {
-        savedLayout = JSON.parse(String(init.body ?? "null"));
+        // saveSidebarLayout posts { layout } — match the real api contract so a
+        // disk-reload flush (initFromDisk now flushes pending layout persist)
+        // writes the layout itself, not the { layout } wrapper.
+        const body = JSON.parse(String(init.body ?? "null"));
+        savedLayout = body?.layout ?? body;
         return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
       }
       return new Response(JSON.stringify(savedLayout), { status: 200, headers: { "Content-Type": "application/json" } });

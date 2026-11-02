@@ -109,3 +109,11 @@ describe("createQueryEditorBookmarks", () => {
     expect(view.state.selection.main.head).toBe(cursor);
   });
 });
+
+it("does not toggle a bookmark when the gutter receives a context click", () => {
+  const { view, host } = createEditor("one\ntwo");
+  const gutterLine = host.querySelector<HTMLElement>(".cm-bookmark-gutter .cm-gutterElement:not(.cm-gutterElement-spacer)")!;
+  expect(gutterLine).not.toBeNull();
+  gutterLine.dispatchEvent(new MouseEvent("mousedown", { button: 2, bubbles: true, cancelable: true }));
+  expect(visibleBookmarkMarkerCount(host)).toBe(0);
+});

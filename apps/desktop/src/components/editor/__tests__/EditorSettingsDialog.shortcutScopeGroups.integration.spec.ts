@@ -425,7 +425,7 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     const conflictBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-destructive/25"]');
 
     // Debugger/quickOpen and bookmark navigation add informational cross-scope overlaps.
-    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=7");
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=8");
     expect(conflictBadge()).toBeNull();
 
     const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
@@ -448,7 +448,7 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     search.value = "";
     search.dispatchEvent(new Event("input", { bubbles: true }));
     await flushAsyncUpdates();
-    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=7");
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=8");
   });
 
   it("scopes the red same-scope badge to the search results while the footer gate stays global", async () => {

@@ -102,6 +102,7 @@ export function createQueryEditorBookmarks(options: QueryEditorBookmarkOptions):
     },
     domEventHandlers: {
       mousedown(view, line, event) {
+        if (event.button !== 0) return false;
         event.preventDefault();
         view.dispatch({ effects: toggleBookmarkEffect.of(line.from) });
         view.focus();

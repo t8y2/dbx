@@ -3296,6 +3296,29 @@ pub fn starts_with_executable_sql_keyword(sql: &str, keywords: &[&str]) -> bool 
     starts_with_executable_sql_keyword_with_options(sql, keywords, SqlParsingOptions::default())
 }
 
+/// Like [`starts_with_executable_sql_keyword`], but requires the leading
+/// executable words to match a whole sequence. Needed for statements such as
+/// GaussDB's `EXECUTE DIRECT`, where the first word alone does not decide
+/// whether the statement returns rows. Comments and whitespace between the
+/// words are skipped.
+pub fn starts_with_executable_sql_keyword_sequence(sql: &str, keywords: &[&str]) -> bool {
+    if keywords.is_empty() {
+        return false;
+    }
+    let options = SqlParsingOptions::default();
+    let mut offset = 0;
+    for keyword in keywords {
+        let Some((token, next)) = next_executable_sql_token_with_options(sql, offset, options) else {
+            return false;
+        };
+        if !executable_sql_keyword_matches(token, keyword) {
+            return false;
+        }
+        offset = next;
+    }
+    true
+}
+
 pub fn starts_with_executable_sql_keyword_for_database(sql: &str, keywords: &[&str], db_type: DatabaseType) -> bool {
     starts_with_executable_sql_keyword_with_options(sql, keywords, SqlParsingOptions::for_database_type(db_type))
 }
@@ -3533,9 +3556,12 @@ fn leading_executable_sql_with_options(sql: &str, options: SqlParsingOptions) ->
     &sql[i..]
 }
 
-fn first_executable_sql_token_with_options(sql: &str, options: SqlParsingOptions) -> Option<&str> {
+fn next_executable_sql_token_with_options(
+    sql: &str,
+    mut i: usize,
+    options: SqlParsingOptions,
+) -> Option<(&str, usize)> {
     let bytes = sql.as_bytes();
-    let mut i = 0;
 
     while i < bytes.len() {
         while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'(') {
@@ -3587,7 +3613,11 @@ fn first_executable_sql_token_with_options(sql: &str, options: SqlParsingOptions
         i += 1;
     }
 
-    (i > start).then_some(&sql[start..i])
+    (i > start).then_some((&sql[start..i], i))
+}
+
+fn first_executable_sql_token_with_options(sql: &str, options: SqlParsingOptions) -> Option<&str> {
+    next_executable_sql_token_with_options(sql, 0, options).map(|(token, _)| token)
 }
 
 fn starts_with_oracle_plsql_block(sql: &str) -> bool {
@@ -4714,8 +4744,9 @@ mod tests {
         find_statement_at_cursor_for_database, fuzzy_filter_enabled, fuzzy_like_pattern_with_escape,
         fuzzy_subsequence_match, optimize_sql_file_import_statements, prepare_sql_file_statement, split_sql_script,
         split_sql_statement_ranges_with_options, split_sql_statements_for_database, starts_with_executable_sql_keyword,
-        starts_with_executable_sql_keyword_for_database, starts_with_oracle_style_routine_body, SqlDialectProfile,
-        SqlFileRequest, SqlFileStatementAction, SqlParsingOptions, SqlStatementSplitter,
+        starts_with_executable_sql_keyword_for_database, starts_with_executable_sql_keyword_sequence,
+        starts_with_oracle_style_routine_body, SqlDialectProfile, SqlFileRequest, SqlFileStatementAction,
+        SqlParsingOptions, SqlStatementSplitter,
     };
 
     #[test]
@@ -5497,6 +5528,22 @@ mod tests {
             &["WITH"]
         ));
         assert!(!starts_with_executable_sql_keyword("-- comment only\n", &["SELECT"]));
+    }
+
+    #[test]
+    fn detects_multi_word_result_set_keyword_sequences() {
+        assert!(starts_with_executable_sql_keyword_sequence(
+            "-- distribute\nexecute direct on (dn_6001_6002) $$ SELECT 1 $$",
+            &["EXECUTE", "DIRECT"]
+        ));
+        assert!(starts_with_executable_sql_keyword_sequence(
+            "EXECUTE /* route to datanode */ DIRECT ON (dn_1) 'select 1'",
+            &["EXECUTE", "DIRECT"]
+        ));
+        assert!(!starts_with_executable_sql_keyword_sequence("EXECUTE prepared_statement", &["EXECUTE", "DIRECT"]));
+        assert!(!starts_with_executable_sql_keyword_sequence("EXECUTED DIRECT", &["EXECUTE", "DIRECT"]));
+        assert!(!starts_with_executable_sql_keyword_sequence("SELECT 1", &["EXECUTE", "DIRECT"]));
+        assert!(!starts_with_executable_sql_keyword_sequence("EXECUTE DIRECT", &[]));
     }
 
     #[test]

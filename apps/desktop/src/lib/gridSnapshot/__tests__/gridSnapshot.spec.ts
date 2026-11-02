@@ -126,4 +126,20 @@ describe("grid snapshot rendering", () => {
     const unstripedHtml = renderGridSnapshotHtml(source, { appearance: "light", stripedRows: false });
     expect(unstripedHtml).not.toContain("background:rgb(240, 240, 240)");
   });
+
+  it("defines explicit line-height and safe bottom padding on the last row to prevent clipping", () => {
+    const source = {
+      columns: ["id", "val"],
+      rows: [
+        [1, "first"],
+        [2, "second"],
+      ],
+    };
+    const standardHtml = renderGridSnapshotHtml(source, { appearance: "light" });
+    expect(standardHtml).toContain("line-height: 1.4");
+    expect(standardHtml).toContain("padding:4px 12px 6px");
+
+    const compactHtml = renderGridSnapshotHtml(source, { appearance: "light", compact: true });
+    expect(compactHtml).toContain("padding:3px 8px 5px");
+  });
 });

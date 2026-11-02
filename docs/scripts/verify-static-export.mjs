@@ -64,13 +64,7 @@ for (const requirement of requiredContent) {
 
 console.log("Static export metadata verified for language, software schema, and llms.txt accuracy.");
 
-const localizedHtmlFiles = files.filter(
-  (file) =>
-    extname(file) === ".html" &&
-    LANGUAGES.some(
-      (lang) => file === join(outputDirectory, `${lang}.html`) || file.startsWith(`${join(outputDirectory, lang)}${sep}`),
-    ),
-);
+const localizedHtmlFiles = files.filter((file) => extname(file) === ".html" && LANGUAGES.some((lang) => file === join(outputDirectory, `${lang}.html`) || file.startsWith(`${join(outputDirectory, lang)}${sep}`)));
 
 for (const file of localizedHtmlFiles) {
   const content = await readFile(file, "utf8");

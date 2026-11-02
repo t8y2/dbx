@@ -4,6 +4,19 @@ import { buildMongoObjectBrowserRows, buildObjectBrowserRows, canonicalizeObject
 import type { TreeNode } from "@/types/database";
 
 describe("buildObjectBrowserRows", () => {
+  it("keeps a schema index distinct from a table and preserves its exact parent identity", () => {
+    const rows = buildObjectBrowserRows({
+      objects: [{ name: " Ix (a) ", object_type: "INDEX", schema: "Index Owner", parent_schema: "Table Owner", parent_name: " T(a) " }],
+      database: "database",
+      fallbackSchema: "Index Owner",
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ name: " Ix (a) ", displayName: " Ix (a) ", type: "INDEX", schema: "Index Owner", parentSchema: "Table Owner", parentName: " T(a) " });
+    expect(rows[0]?.partitionParentSchema).toBeUndefined();
+    expect(rows[0]?.partitionParentName).toBeUndefined();
+  });
+
   it("preserves a resolved SQLite attached-database alias on every row", () => {
     const rows = buildObjectBrowserRows({
       objects: [{ name: "events", object_type: "TABLE" }],

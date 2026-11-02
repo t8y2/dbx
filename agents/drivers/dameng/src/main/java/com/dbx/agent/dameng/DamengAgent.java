@@ -12,8 +12,10 @@ import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.MetadataReadOptions;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
+import com.dbx.agent.OracleTriggerReader;
 import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
@@ -145,6 +147,11 @@ public final class DamengAgent extends AbstractJdbcAgent {
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
         return buildUrl(params);
+    }
+
+    @Override
+    protected java.sql.Driver connectionMetadataDriver(String jdbcUrl) throws Exception {
+        return externalDriver == null ? super.connectionMetadataDriver(jdbcUrl) : externalDriver;
     }
 
     @Override
@@ -412,7 +419,17 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     String sqlState = candidate.getSQLState();
                     if ("0A000".equalsIgnoreCase(sqlState)
                         || "42000".equalsIgnoreCase(sqlState)
-                        || "42501".equalsIgnoreCase(sqlState)) {
+                        || "42501".equalsIgnoreCase(sqlState)
+                        // DM 在无 DBMS_OUTPUT 权限时用 28000（invalid authorization
+                        // specification），与 Oracle 的 42000/42501 对应。
+                        || "28000".equalsIgnoreCase(sqlState)) {
+                        return true;
+                    }
+                    // 达梦中文环境只回「权限不足」（vendorCode -5669，SQLState 28000），消息里
+                    // 不含 `dbms_output` 字样，无法走 isDbmsOutputUnavailableMessage 的匹配。
+                    // DBMS_OUTPUT.ENABLE 是可选步骤，这里执行的也只可能是这一句，因此权限类失败
+                    // 一律只让该功能降级，不能阻断用户自己的 SQL（#11875）。
+                    if (isDamengPermissionError(candidate)) {
                         return true;
                     }
                     String message = candidate.getMessage();
@@ -565,6 +582,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
+    public boolean supportsExactMetadataIdentity() { return !legacyJdbcMetadata; }
+
+    @Override
     public List<TableInfo> listTables(String schema, List<String> objectTypes) {
         return queryConstrainedTables(schema, new MetadataListConstraints(null, null, null, objectTypes));
     }
@@ -576,6 +596,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     private List<TableInfo> queryConstrainedTables(String rawSchema, MetadataListConstraints constraints) {
         final String schema = normalizeSchema(rawSchema);
+        if (constraints.isExactIdentity()) {
+            if (legacyJdbcMetadata) throw new UnsupportedOperationException("Legacy DM metadata does not support exact_metadata_identity_v1");
+            return withViewValidity(executeConstrainedTables(buildAccessibleConstrainedTablesQuery(schema, constraints), constraints), schema);
+        }
         if (legacyJdbcMetadata) {
             return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
         }
@@ -965,9 +989,11 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     return current;
                 }
             }
-        } catch (SQLException error) {
-            // A server without SYS_CONTEXT support still resolves an unqualified name to the
-            // connected user, which is what the caller falls back to.
+        } catch (Exception error) {
+            // Current schema resolution is best-effort: any failure (including environments without
+            // SYS_CONTEXT support, query execution errors, or pathological drivers returning a null
+            // Statement) falls back to an empty string, allowing the caller to fall back to the
+            // connected username.
         }
         return "";
     }
@@ -978,7 +1004,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
             || constraints.objectTypeAllowed("FUNCTION")
             || constraints.objectTypeAllowed("SEQUENCE")
             || constraints.objectTypeAllowed("PACKAGE")
-            || constraints.objectTypeAllowed("PACKAGE_BODY");
+            || constraints.objectTypeAllowed("PACKAGE_BODY")
+            || constraints.hasObjectTypes() && constraints.objectTypeAllowed("TRIGGER")
+            || constraints.objectTypeAllowed("TYPE")
+            || constraints.objectTypeAllowed("TYPE_BODY");
     }
 
     private static void appendDamengObjectTypePredicate(
@@ -1029,6 +1058,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (constraints.objectTypeAllowed("PACKAGE_BODY")) {
             result.add("PACKAGE BODY");
         }
+        if (constraints.hasObjectTypes() && constraints.objectTypeAllowed("TRIGGER")) result.add("TRIGGER");
+        if (constraints.objectTypeAllowed("TYPE")) {
+            result.add("TYPE");
+        }
+        if (constraints.objectTypeAllowed("TYPE_BODY")) {
+            result.add("TYPE BODY");
+        }
         return result;
     }
 
@@ -1062,6 +1098,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
         }
         if (constraints.objectTypeAllowed("PACKAGE_BODY")) {
             result.add("PACKAGE BODY");
+        }
+        if (constraints.hasObjectTypes() && constraints.objectTypeAllowed("TRIGGER")) result.add("TRIGGER");
+        if (constraints.objectTypeAllowed("TYPE")) {
+            result.add("TYPE");
+        }
+        if (constraints.objectTypeAllowed("TYPE_BODY")) {
+            result.add("TYPE BODY");
         }
         return result;
     }
@@ -1162,14 +1205,77 @@ public final class DamengAgent extends AbstractJdbcAgent {
         return queryConstrainedObjects(schema, MetadataListConstraints.orNone(constraints));
     }
 
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints, MetadataReadOptions options) {
+        if (options == null || !options.exact() || legacyJdbcMetadata) return listObjects(schema, constraints);
+        if (schema == null || schema.isEmpty()) throw new IllegalArgumentException("Exact metadata requires an owner");
+        MetadataListConstraints requested = MetadataListConstraints.orNone(constraints);
+        if (!requested.hasObjectTypes()) {
+            List<String> kinds = damengObjectTypes(MetadataListConstraints.NONE);
+            kinds.add("TRIGGER");
+            requested = new MetadataListConstraints(requested.getFilter(), requested.getLimit(), requested.getOffset(), kinds);
+        }
+        List<ObjectInfo> objects = queryConstrainedObjectsWithoutValidity(schema, requested, true);
+        applyViewValidity(objects, schema);
+        if (objects.stream().anyMatch(object -> "TRIGGER".equals(object.getObject_type()))) {
+            uncheckedVoid(() -> new OracleTriggerReader(requireConnected(), "dm").enrichObjects(objects, schema));
+        }
+        return objects;
+    }
+
     private List<ObjectInfo> queryConstrainedObjects(String rawSchema, MetadataListConstraints constraints) {
         final String schema = normalizeSchema(rawSchema);
-        List<ObjectInfo> objects = queryConstrainedObjectsWithoutValidity(schema, constraints);
+        List<ObjectInfo> objects;
+        if (constraints.objectTypeAllowed("INDEX") && (constraints.hasObjectTypes() || constraints.isExactIdentity())) {
+            // Merge before paging: separate dictionary sources must not each consume the offset.
+            objects = new ArrayList<>();
+            List<String> otherTypes = damengObjectTypes(constraints);
+            if (!otherTypes.isEmpty()) {
+                objects.addAll(queryConstrainedObjectsWithoutValidity(schema,
+                    new MetadataListConstraints(constraints.getFilter(), null, null, otherTypes, constraints.isExactIdentity())));
+            }
+            objects.addAll(querySchemaIndexes(schema, constraints.withoutPaging()));
+            objects.sort(java.util.Comparator.comparing(ObjectInfo::getName).thenComparing(ObjectInfo::getObject_type));
+            objects = constraints.filterObjects(objects);
+        } else {
+            objects = queryConstrainedObjectsWithoutValidity(schema, constraints);
+        }
         applyViewValidity(objects, schema);
         return objects;
     }
 
+    private List<ObjectInfo> querySchemaIndexes(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            List<Object> args = new ArrayList<>();
+            args.add(schema);
+            StringBuilder sql = new StringBuilder("SELECT OWNER, INDEX_NAME, TABLE_OWNER, TABLE_NAME FROM ALL_INDEXES i WHERE i.OWNER = ?");
+            appendNameFilter(sql, args, "i.INDEX_NAME", constraints);
+            sql.append(" ORDER BY i.INDEX_NAME");
+            List<ObjectInfo> objects = new ArrayList<>();
+            try (PreparedStatement statement = requireConnected().prepareStatement(sql.toString())) {
+                bind(statement, args);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        ObjectInfo index = new ObjectInfo(rows.getString(2), "INDEX", rows.getString(1), null);
+                        index.setParent_schema(rows.getString(3));
+                        index.setParent_name(rows.getString(4));
+                        objects.add(index);
+                    }
+                }
+            }
+            return constraints.filterObjects(objects);
+        });
+    }
+
     private List<ObjectInfo> queryConstrainedObjectsWithoutValidity(String schema, MetadataListConstraints constraints) {
+        return queryConstrainedObjectsWithoutValidity(schema, constraints, false);
+    }
+
+    private List<ObjectInfo> queryConstrainedObjectsWithoutValidity(String schema, MetadataListConstraints constraints, boolean requireDictionary) {
+        if (constraints.isExactIdentity()) {
+            if (legacyJdbcMetadata) throw new UnsupportedOperationException("Legacy DM metadata does not support exact_metadata_identity_v1");
+            return executeConstrainedObjects(schema, buildAccessibleConstrainedObjectsQuery(schema, constraints), constraints);
+        }
         if (legacyJdbcMetadata) {
             return executeJdbcMetadataObjects(schema, constraints);
         }
@@ -1221,6 +1327,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
             permissionError.addSuppressed(e);
         }
+        if (requireDictionary) throw permissionError;
         try {
             return executeJdbcMetadataObjects(schema, constraints);
         } catch (RuntimeException e) {
@@ -1424,7 +1531,11 @@ public final class DamengAgent extends AbstractJdbcAgent {
             RuntimeException dbmsError;
             try {
                 String source = readDbmsMetadataObjectSource(dbmsType, name, schema);
-                return new ObjectSource(name, objectType, schema, source);
+                if (isOracleFamilyType(objectType) && !notBlank(source)) {
+                    dbmsError = new IllegalStateException("DM8 returned empty type source for " + schema + "." + name);
+                } else {
+                    return new ObjectSource(name, objectType, schema, source, !isOracleFamilyType(objectType));
+                }
             } catch (Exception error) {
                 // 检查型异常（SQLException 等）由 unchecked 透传后在此处统一处理。
                 RuntimeException runtimeError = error instanceof RuntimeException runtime ? runtime : new RuntimeException(error);
@@ -1434,12 +1545,32 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 dbmsError = runtimeError;
             }
             try {
-                return buildCatalogObjectSource(schema, name, objectType, dbmsError);
+                ObjectSource source = buildCatalogObjectSource(schema, name, objectType, dbmsError);
+                if (isOracleFamilyType(objectType)) {
+                    if (source == null || !notBlank(source.getSource()) || source.getSource().startsWith(CATALOG_BODY_HINT)) {
+                        throw new IllegalStateException("DM8 could not read complete type source for " + schema + "." + name, dbmsError);
+                    }
+                    return new ObjectSource(name, objectType, schema, source.getSource(), false);
+                }
+                return source;
             } catch (RuntimeException fallbackError) {
                 fallbackError.addSuppressed(dbmsError);
                 throw fallbackError;
             }
         });
+    }
+
+    @Override
+    public ObjectSource getObjectSource(String schema, String name, String objectType, MetadataReadOptions options) {
+        if (options == null || !options.exact() || legacyJdbcMetadata || !"TRIGGER".equalsIgnoreCase(objectType)) {
+            return getObjectSource(schema, name, objectType);
+        }
+        return unchecked(() -> new OracleTriggerReader(requireConnected(), "dm").getObjectSource(schema, name));
+    }
+
+    private static boolean isOracleFamilyType(String objectType) {
+        String normalized = normalizeObjectSourceType(objectType);
+        return "TYPE".equals(normalized) || "TYPE_BODY".equals(normalized);
     }
 
     private String readDbmsMetadataObjectSource(String dbmsType, String name, String schema) throws Exception {
@@ -1517,6 +1648,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 }
             }
             default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
+        }
+        if (isOracleFamilyType(objectType)) {
+            throw new IllegalStateException("DM8 could not read complete type source for " + schema + "." + name + " (" + objectType + ")", dbmsError);
         }
         return unavailableObjectSource(schema, name, objectType, dbmsError);
     }
@@ -1655,6 +1789,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
         String sourceType,
         String source
     ) {
+        if (isOracleFamilyType(objectType)) {
+            return oracleFamilyTypeSourceMatches(source, objectType);
+        }
         if (!("FUNCTION".equals(objectType) || "PROCEDURE".equals(objectType))
             || !"PROC".equalsIgnoreCase(sourceType)) {
             return true;
@@ -1663,6 +1800,30 @@ public final class DamengAgent extends AbstractJdbcAgent {
         return catalogType != null
             ? objectType.equals(catalogType)
             : routineSourceStartsWithType(source, objectType);
+    }
+
+    private static boolean oracleFamilyTypeSourceMatches(String source, String objectType) {
+        String expected = "TYPE_BODY".equals(normalizeObjectSourceType(objectType)) ? "TYPE BODY" : "TYPE";
+        String firstDeclaration = oracleFamilyTypeDeclaration(source.stripLeading());
+        return expected.equals(firstDeclaration);
+    }
+
+    private static String oracleFamilyTypeDeclaration(String source) {
+        String candidate = stripTypeDdlPrefix(source);
+        if (startsWithRoutineDeclaration(candidate, "TYPE BODY")) {
+            return "TYPE BODY";
+        }
+        return startsWithRoutineDeclaration(candidate, "TYPE") ? "TYPE" : "";
+    }
+
+    private static String stripTypeDdlPrefix(String source) {
+        String upper = source.toUpperCase(Locale.ROOT);
+        for (String prefix : List.of("CREATE OR REPLACE ", "CREATE ", "ALTER ")) {
+            if (upper.startsWith(prefix)) {
+                return source.substring(prefix.length()).stripLeading();
+            }
+        }
+        return source;
     }
 
     private String readDamengRoutineObjectType(String schema, String name) {
@@ -1748,12 +1909,20 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 JOIN SYS.SYSOBJECTS o ON o.ID = t.ID
                 JOIN SYS.SYSOBJECTS s ON s.ID = o.SCHID AND s.TYPE$ = 'SCH' AND s.NAME = ?
                 WHERE o.NAME = ?
-                ORDER BY t.SEQNO
                 """.stripIndent().trim();
+            boolean typedType = isOracleFamilyType(objectType);
+            if (typedType) {
+                sql += " AND EXISTS (SELECT 1 FROM ALL_OBJECTS a WHERE a.OBJECT_ID = o.ID"
+                    + " AND a.OWNER = s.NAME AND a.OBJECT_NAME = o.NAME AND a.OBJECT_TYPE = ?)";
+            }
+            sql += " ORDER BY t.SEQNO";
             StringBuilder source = new StringBuilder();
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
                 stmt.setString(1, schema);
                 stmt.setString(2, name);
+                if (typedType) {
+                    stmt.setString(3, "TYPE_BODY".equals(normalizeObjectSourceType(objectType)) ? "TYPE BODY" : "TYPE");
+                }
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String line = coalesce(readTextColumn(rs, 1));
@@ -1844,9 +2013,33 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
+    protected boolean includeColumnCommentsInTableDdl() {
+        return true;
+    }
+
+    @Override
+    public String getTableComment(String rawSchema, String table) {
+        final String schema = normalizeSchema(rawSchema);
+        try {
+            String comment = tableComment(schema, table);
+            if (notBlank(comment)) {
+                return comment;
+            }
+        } catch (Exception ignored) {
+        }
+        return super.getTableComment(schema, table);
+    }
+
+    @Override
     public String getTableDdl(String rawSchema, String table) {
+        return getTableDdl(rawSchema, table, false);
+    }
+
+    @Override
+    public String getTableDdl(String rawSchema, String table, boolean exactIdentity) {
         final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
+            if (exactIdentity) throw new UnsupportedOperationException("Legacy DM metadata does not support exact_metadata_identity_v1");
             return super.getTableDdl(schema, table);
         }
         try {
@@ -1870,6 +2063,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 throw new IllegalArgumentException("Table not found: " + schema + "." + table);
             });
         } catch (RuntimeException error) {
+            if (exactIdentity) throw error;
             if (!isDamengMetadataUnavailableError(error)) {
                 throw error;
             }
@@ -2301,12 +2495,14 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 MAX(CASE WHEN constraint_metadata.TYPE$ = 'P' THEN 1 ELSE 0 END) AS IS_PK,
                 index_metadata.TYPE$,
                 MAX(CASE WHEN constraint_metadata.TYPE$ IN ('P', 'U') THEN 1 ELSE 0 END) AS CONSTRAINT_BACKED,
-                index_metadata.FLAG
+                index_metadata.FLAG, index_schema_object.NAME AS INDEX_OWNER
             FROM SYS.SYSOBJECTS schema_object
             JOIN SYS.SYSOBJECTS table_object ON table_object.SCHID = schema_object.ID
                 AND table_object.TYPE$ = 'SCHOBJ' AND table_object.SUBTYPE$ = 'UTAB'
             JOIN SYS.SYSOBJECTS index_object ON index_object.PID = table_object.ID
                 AND index_object.SUBTYPE$ = 'INDEX'
+            JOIN SYS.SYSOBJECTS index_schema_object ON index_schema_object.ID = index_object.SCHID
+                AND index_schema_object.TYPE$ = 'SCH'
             JOIN SYS.SYSINDEXES index_metadata ON index_metadata.ID = index_object.ID
             JOIN SYS.SYSCOLUMNS column_object ON column_object.ID = table_object.ID
                 AND SF_COL_IS_IDX_KEY(
@@ -2318,8 +2514,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 AND constraint_metadata.INDEXID = index_metadata.ID
                 AND constraint_metadata.TYPE$ IN ('P', 'U')
             WHERE schema_object.TYPE$ = 'SCH' AND schema_object.NAME = ? AND table_object.NAME = ?
-            GROUP BY index_object.NAME, index_metadata.ISUNIQUE, index_metadata.TYPE$, index_metadata.FLAG
-            ORDER BY index_object.NAME
+            GROUP BY index_schema_object.NAME, index_object.NAME, index_metadata.ISUNIQUE, index_metadata.TYPE$, index_metadata.FLAG
+            ORDER BY index_schema_object.NAME, index_object.NAME
             """.stripIndent().trim();
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
             stmt.setString(1, schema);
@@ -2339,6 +2535,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                         null
                     );
                     index.setConstraint_backed(constraintBacked);
+                    index.setOwner(rs.getString(8));
                     result.add(index);
                 }
             }
@@ -2356,14 +2553,14 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 i.UNIQUENESS,
                 CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK,
                 i.INDEX_TYPE,
-                CASE WHEN c.CONSTRAINT_TYPE IN ('P', 'U') THEN 1 ELSE 0 END AS CONSTRAINT_BACKED
+                CASE WHEN c.CONSTRAINT_TYPE IN ('P', 'U') THEN 1 ELSE 0 END AS CONSTRAINT_BACKED, i.OWNER AS INDEX_OWNER
             FROM ALL_INDEXES i
             JOIN ALL_IND_COLUMNS ic ON i.INDEX_NAME = ic.INDEX_NAME AND i.OWNER = ic.INDEX_OWNER AND i.TABLE_OWNER = ic.TABLE_OWNER
             LEFT JOIN ALL_CONSTRAINTS c ON i.INDEX_NAME = c.INDEX_NAME AND i.TABLE_OWNER = c.OWNER
                 AND c.CONSTRAINT_TYPE IN ('P', 'U')
             WHERE i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
-            GROUP BY i.INDEX_NAME, i.UNIQUENESS, c.CONSTRAINT_TYPE, i.INDEX_TYPE
-            ORDER BY i.INDEX_NAME
+            GROUP BY i.OWNER, i.INDEX_NAME, i.UNIQUENESS, c.CONSTRAINT_TYPE, i.INDEX_TYPE
+            ORDER BY i.OWNER, i.INDEX_NAME
             """.stripIndent().trim();
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
             stmt.setString(1, schema);
@@ -2381,6 +2578,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                         null
                     );
                     index.setConstraint_backed("1".equals(rs.getString(6)));
+                    index.setOwner(rs.getString(7));
                     result.add(index);
                 }
             }
@@ -2505,24 +2703,104 @@ public final class DamengAgent extends AbstractJdbcAgent {
             return StandardJdbcMetadata.INSTANCE.listTriggers(schema, table);
         }
         return unchecked(() -> {
-            List<TriggerInfo> result = new ArrayList<>();
-            String sql = """
-                SELECT TRIGGER_NAME, TRIGGERING_EVENT, '' AS TRIGGER_TYPE
-                FROM ALL_TRIGGERS
-                WHERE OWNER = ? AND TABLE_NAME = ?
-                ORDER BY TRIGGER_NAME
-                """.stripIndent().trim();
-            try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-                stmt.setString(1, schema);
-                stmt.setString(2, table);
-                try (ResultSet rs = stmt.executeQuery()) {
-                    while (rs.next()) {
-                        result.add(new TriggerInfo(rs.getString(1), rs.getString(2), rs.getString(3)));
+            try {
+                return readTriggerDetails(schema, table);
+            } catch (Exception error) {
+                // 字典视图不可读（权限/旧版本视图缺失）时退回只取名字与事件的实现，
+                // 保证表结构编辑器的触发器列表不会因为新增列整体失败。
+                if (isDamengConnectionError(error)) {
+                    throw error;
+                }
+                return readTriggerNames(schema, table);
+            }
+        });
+    }
+
+    @Override
+    public List<TriggerInfo> listTriggers(String schema, String table, MetadataReadOptions options) {
+        if (options == null || !options.exact() || legacyJdbcMetadata) return listTriggers(schema, table);
+        return unchecked(() -> new OracleTriggerReader(requireConnected(), "dm").listTriggers(schema, table));
+    }
+
+    /**
+     * 读取表上触发器的完整字典信息，供表结构编辑器的触发器页签展示与编辑。
+     *
+     * <p>达梦不同版本的 ALL_TRIGGERS 列并不完全一致（部分版本没有 Oracle 的 TRIGGER_TYPE、
+     * WHEN_CLAUSE、TRIGGER_BODY 等列），所以这里用 SELECT * 后再按列名容错读取：
+     * 有列就带回正文/类型/状态，缺列只影响对应字段，不会让整个触发器列表失败。</p>
+     */
+    private List<TriggerInfo> readTriggerDetails(String schema, String table) throws Exception {
+        List<TriggerInfo> result = new ArrayList<>();
+        String sql = """
+            SELECT * FROM ALL_TRIGGERS
+            WHERE OWNER = ? AND TABLE_NAME = ?
+            ORDER BY TRIGGER_NAME
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String name = triggerColumnText(rs, "TRIGGER_NAME").trim();
+                    if (name.isEmpty()) {
+                        continue;
                     }
+                    TriggerInfo trigger = new TriggerInfo(name, triggerColumnText(rs, "TRIGGERING_EVENT"), "");
+                    trigger.setTiming(normalizeTriggerTiming(triggerColumnText(rs, "TRIGGER_TYPE")));
+                    trigger.setStatement(triggerColumnText(rs, "TRIGGER_BODY"));
+                    trigger.setCondition(triggerColumnText(rs, "WHEN_CLAUSE"));
+                    trigger.setEnabled(triggerEnabledState(triggerColumnText(rs, "STATUS")));
+                    result.add(trigger);
                 }
             }
-            return result;
-        });
+        }
+        return result;
+    }
+
+    /** 修复前的降级实现：字典视图缺列时只返回触发器名字与事件。 */
+    private List<TriggerInfo> readTriggerNames(String schema, String table) throws Exception {
+        List<TriggerInfo> result = new ArrayList<>();
+        String sql = """
+            SELECT TRIGGER_NAME, TRIGGERING_EVENT, '' AS TRIGGER_TYPE
+            FROM ALL_TRIGGERS
+            WHERE OWNER = ? AND TABLE_NAME = ?
+            ORDER BY TRIGGER_NAME
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    result.add(new TriggerInfo(rs.getString(1), rs.getString(2), rs.getString(3)));
+                }
+            }
+        }
+        return result;
+    }
+
+    /** 按列名读取字典文本；当前达梦版本的视图没有该列时返回空串而不是抛错。 */
+    private static String triggerColumnText(ResultSet rs, String column) {
+        try {
+            return coalesce(readTextColumn(rs, rs.findColumn(column)));
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    /** TRIGGER_TYPE 与 Oracle 一致（BEFORE/AFTER + STATEMENT/EACH ROW），只做空白与大小写归一化。 */
+    private static String normalizeTriggerTiming(String value) {
+        return coalesce(value).trim().replaceAll("\\s+", " ").toUpperCase(Locale.ROOT);
+    }
+
+    private static Boolean triggerEnabledState(String status) {
+        String normalized = coalesce(status).trim().toUpperCase(Locale.ROOT);
+        if ("ENABLED".equals(normalized) || "ENABLE".equals(normalized) || "Y".equals(normalized)) {
+            return Boolean.TRUE;
+        }
+        if ("DISABLED".equals(normalized) || "DISABLE".equals(normalized) || "N".equals(normalized)) {
+            return Boolean.FALSE;
+        }
+        return null;
     }
 
     @Override
@@ -2958,16 +3236,30 @@ public final class DamengAgent extends AbstractJdbcAgent {
         return value == null ? "" : value;
     }
 
+    private boolean schemaMatchesConnectedUserOrCurrent(String schema) {
+        if (schema == null || schema.isBlank()) {
+            return true;
+        }
+        if (schemaMatchesConnectedUser(schema)) {
+            return true;
+        }
+        // Short-circuit before the SYS_CONTEXT probe: when we don't know the connected username
+        // there is nothing to compare the probe result against, so skip the extra DB round-trip.
+        if (connectedUsername == null || connectedUsername.isBlank()) {
+            return true;
+        }
+        String currentSchema = currentSchemaOrBlank();
+        if (!currentSchema.isBlank()) {
+            return schema.equalsIgnoreCase(currentSchema);
+        }
+        return false;
+    }
+
     private void fillMissingColumnComments(String schema, String table, List<ColumnInfo> columns) {
         if (columns.stream().noneMatch(column -> !notBlank(column.getComment()))) {
             return;
         }
         Map<String, String> comments = new HashMap<>();
-        queryColumnComments(
-            comments,
-            "SELECT /*+ PARALLEL(1) */ COLUMN_NAME, COMMENTS FROM USER_COL_COMMENTS WHERE TABLE_NAME = ?",
-            table
-        );
         queryColumnComments(
             comments,
             "SELECT /*+ PARALLEL(1) */ COLNAME, COMMENT$ FROM SYS.SYSCOLUMNCOMMENTS WHERE SCHNAME = ? AND TVNAME = ?",
@@ -2980,6 +3272,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
             schema,
             table
         );
+        if (schemaMatchesConnectedUserOrCurrent(schema)) {
+            queryColumnComments(
+                comments,
+                "SELECT /*+ PARALLEL(1) */ COLUMN_NAME, COMMENTS FROM USER_COL_COMMENTS WHERE TABLE_NAME = ?",
+                table
+            );
+        }
         for (ColumnInfo column : columns) {
             if (notBlank(column.getComment())) {
                 continue;
@@ -3046,8 +3345,61 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     }
                 }
             }
+        } catch (Exception ignored) {
+        }
+        if (result.isEmpty()) {
+            queryTableColumnComments(
+                result,
+                "SELECT /*+ PARALLEL(1) */ COLNAME, COMMENT$ FROM SYS.SYSCOLUMNCOMMENTS WHERE SCHNAME = ? AND TVNAME = ?",
+                schema,
+                table
+            );
+        }
+        if (result.isEmpty()) {
+            queryTableColumnComments(
+                result,
+                "SELECT /*+ PARALLEL(1) */ COLUMN_NAME, COMMENTS FROM ALL_COL_COMMENTS WHERE UPPER(OWNER) = UPPER(?) AND UPPER(TABLE_NAME) = UPPER(?)",
+                schema,
+                table
+            );
+        }
+        if (result.isEmpty() && schemaMatchesConnectedUserOrCurrent(schema)) {
+            queryTableColumnComments(
+                result,
+                "SELECT /*+ PARALLEL(1) */ COLUMN_NAME, COMMENTS FROM USER_COL_COMMENTS WHERE TABLE_NAME = ?",
+                table
+            );
+        }
+        if (result.isEmpty()) {
+            try {
+                for (ColumnInfo column : getColumns(schema, table)) {
+                    if (notBlank(column.getName()) && notBlank(column.getComment())) {
+                        result.put(column.getName(), column.getComment());
+                    }
+                }
+            } catch (Exception ignored) {
+            }
         }
         return result;
+    }
+
+    private void queryTableColumnComments(Map<String, String> comments, String sql, String... params) {
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            for (int i = 0; i < params.length; i++) {
+                stmt.setString(i + 1, params[i]);
+            }
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String column = rs.getString(1);
+                    String comment = rs.getString(2);
+                    if (notBlank(column) && notBlank(comment)) {
+                        comments.putIfAbsent(column, comment);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // Some Dameng versions or users do not expose every comment view.
+        }
     }
 
     private String appendIndependentIndexDdl(String ddl, String schema, String table) throws Exception {
@@ -3262,7 +3614,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
         });
     }
 
+    @Override
+    public boolean supportsNativeJobSessions() { return true; }
+
     public static void main(String[] args) {
-        new MultiSessionJsonRpcServer(DamengAgent::new).run();
+        MultiSessionJsonRpcServer.withNativeJobSessions(DamengAgent::new).withExactMetadataIdentity().run();
     }
 }

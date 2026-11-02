@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   openPluginConnection: vi.fn(),
   openPluginWorkbench: vi.fn(),
   listPlugins: vi.fn(),
+  getAiPluginToolPlugins: vi.fn(async () => []),
   listPluginTrustedKeys: vi.fn(),
   listPluginRepositories: vi.fn(),
   fetchPluginMarketplaceCatalogs: vi.fn(),
@@ -19,6 +20,8 @@ const mocks = vi.hoisted(() => ({
   installPluginPackage: vi.fn(),
   installPluginPackageFromUrl: vi.fn(),
   uninstallPlugin: vi.fn(),
+  removeConnections: vi.fn(),
+  disconnect: vi.fn(),
   rollbackPlugin: vi.fn(),
   savePluginRepository: vi.fn(),
   removePluginRepository: vi.fn(),
@@ -32,7 +35,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/backend/api", () => mocks);
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
-vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: mocks.connections }) }));
+vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: mocks.connections, removeConnections: mocks.removeConnections, disconnect: mocks.disconnect }) }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ openPluginWorkbench: mocks.openPluginWorkbench, openPluginConnection: mocks.openPluginConnection }) }));
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({ editorSettings: { pluginGraphicsEngineIds: [] }, updateEditorSettings: vi.fn() }),
@@ -89,6 +92,7 @@ type PanelState = {
   launchDetailEntry: (entry: string) => Promise<void>;
   openDetailPlugin: () => void;
   batchRunning: boolean;
+  mutationRunning: boolean;
   batchMode: boolean;
   marketplaceViewMode: "grid" | "list";
   marketplaceSortMode: string;
@@ -124,6 +128,9 @@ type PanelState = {
   installPlugin: (source: string | File) => Promise<void>;
   installPluginFromUrl: () => Promise<void>;
   uninstallSelectedPlugin: () => Promise<void>;
+  uninstallDependents: { pluginId: string; pluginName: string; connections: import("@/types/database").ConnectionConfig[] } | null;
+  confirmUninstallWithDependents: () => Promise<void>;
+  cancelUninstallDependents: () => void;
   rollbackSelectedPlugin: () => Promise<void>;
   saveRepository: () => Promise<void>;
   toggleRepository: (repository: PluginRepositoryCatalogResult["repository"]) => Promise<void>;
@@ -239,6 +246,8 @@ beforeEach(async () => {
   mocks.fetchPluginMarketplaceCatalogs.mockResolvedValue([catalog("first", ["a", "b", "c"])]);
   for (const mock of mutationApis) mock.mockResolvedValue({ plugin: installed("a", "3.0.0") });
   mocks.uninstallPlugin.mockResolvedValue([]);
+  mocks.removeConnections.mockResolvedValue(undefined);
+  mocks.disconnect.mockResolvedValue(undefined);
   mocks.savePluginRepository.mockResolvedValue([]);
   mocks.removePluginRepository.mockResolvedValue([]);
   mocks.savePluginTrustedKey.mockResolvedValue([]);
@@ -271,6 +280,26 @@ afterEach(() => {
 });
 
 describe("PluginContributionsPanel batch source validation", () => {
+  it("keeps the MCP filter available after the last matching plugin is removed", async () => {
+    const marked = installed("mcp");
+    marked.manifest.entrypoints = { backend: { executable: "sidecar" } };
+    marked.manifest.contributions = [{ type: "mcp", id: "mcp.tools" }];
+    state.installedPlugins = [marked, installed("ordinary")];
+    state.activeSection = "installed";
+    await flushUi();
+    host.querySelector<HTMLInputElement>("[data-plugin-mcp-filter] input")!.click();
+    await nextTick();
+    state.installedPlugins = [installed("ordinary")];
+    await flushUi();
+    const filter = host.querySelector<HTMLInputElement>("[data-plugin-mcp-filter] input");
+    expect(filter).not.toBeNull();
+    expect(filter!.checked).toBe(true);
+    filter!.click();
+    await nextTick();
+    expect(host.textContent).toContain("ordinary");
+    expect(host.querySelector("[data-plugin-mcp-filter]")).toBeNull();
+  });
+
   it.each(["first", "second"])("does not silently resolve selected source conflicts by filtering to %s", async (repositoryId) => {
     state.catalogResults = [catalog("first", ["a"]), catalog("second", ["a"], "2.0.0")];
     state.selectAllUpdatable();
@@ -1631,6 +1660,86 @@ describe("marketplace detail launch", () => {
   });
 });
 
+describe("marketplace detail update history", () => {
+  function multiVersionCatalog(): PluginRepositoryCatalogResult {
+    const result = catalog("repo", ["a"]);
+    const plugin = result.catalog!.plugins[0];
+    plugin.latestVersion = "3.0.0";
+    plugin.source = "https://github.com/jinpy/dbx-ssh-plugin";
+    const artifact = { target: "darwin-arm64", url: "https://example.invalid/plugin.dbxp", sha256: "a".repeat(64), signingKeyId: "test.key" };
+    plugin.versions = [
+      { version: "3.0.0", releasedAt: "2026-10-14T00:00:00.000Z", releaseNotes: "Third release notes", artifacts: [artifact] },
+      { version: "2.0.0", releasedAt: "2026-10-13T00:00:00.000Z", releaseNotes: "Second release notes", artifacts: [] },
+      { version: "1.0.0", releasedAt: "", releaseNotes: "", artifacts: [] },
+    ];
+    return result;
+  }
+
+  it("starts with only the newest release expanded and toggles notes per version", async () => {
+    state.catalogResults = [multiVersionCatalog()];
+    await flushUi();
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    await flushUi();
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const headers = [...dialog.querySelectorAll("button[aria-expanded]")];
+    expect(headers.length).toBe(3);
+    // Newest release starts expanded; older versions stay collapsed so a long
+    // history remains scannable.
+    expect(headers.map((header) => header.getAttribute("aria-expanded"))).toEqual(["true", "false", "false"]);
+    expect(dialog.textContent).toContain("Third release notes");
+    expect(dialog.textContent).not.toContain("Second release notes");
+
+    // Expanding an older version reveals its notes; collapsing hides them again.
+    headers[1].click();
+    await flushUi();
+    expect(headers[1].getAttribute("aria-expanded")).toBe("true");
+    expect(dialog.textContent).toContain("Second release notes");
+
+    headers[1].click();
+    await flushUi();
+    expect(headers[1].getAttribute("aria-expanded")).toBe("false");
+    expect(dialog.textContent).not.toContain("Second release notes");
+
+    // The auto-expanded newest release can be collapsed too.
+    headers[0].click();
+    await flushUi();
+    expect(headers[0].getAttribute("aria-expanded")).toBe("false");
+    expect(dialog.textContent).not.toContain("Third release notes");
+  });
+
+  it("links each expanded version to its GitHub release page", async () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    state.catalogResults = [multiVersionCatalog()];
+    await flushUi();
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    await flushUi();
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const releaseButton = [...dialog.querySelectorAll("button")].find((element) => element.textContent?.includes("pluginPlatform.pluginDetailsOpenRelease"))!;
+    expect(releaseButton).toBeDefined();
+    releaseButton.click();
+    await flushUi();
+    expect(openSpy).toHaveBeenCalledWith("https://github.com/jinpy/dbx-ssh-plugin/releases/tag/v3.0.0", "_blank", "noopener,noreferrer");
+    openSpy.mockRestore();
+  });
+
+  it("links expanded version to GitHub release page when source has a branch tree URL", async () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    const cat = multiVersionCatalog();
+    cat.catalog!.plugins[0].source = "https://github.com/Ezreal-byte/dbx-plugin-xxl-job-console/tree/v0.3.3";
+    state.catalogResults = [cat];
+    await flushUi();
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    await flushUi();
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const releaseButton = [...dialog.querySelectorAll("button")].find((element) => element.textContent?.includes("pluginPlatform.pluginDetailsOpenRelease"))!;
+    expect(releaseButton).toBeDefined();
+    releaseButton.click();
+    await flushUi();
+    expect(openSpy).toHaveBeenCalledWith("https://github.com/Ezreal-byte/dbx-plugin-xxl-job-console/releases/tag/v3.0.0", "_blank", "noopener,noreferrer");
+    openSpy.mockRestore();
+  });
+});
+
 describe("marketplace author filtering", () => {
   it("shows exact author matches across repositories and clears prior filters", async () => {
     const first = catalog("first", ["a", "b", "c"]);
@@ -1714,5 +1823,127 @@ describe("marketplace detail focus", () => {
     state.openDetailPlugin();
     await settleDialog();
     expect(document.activeElement).toBe(destination);
+  });
+});
+
+describe("PluginContributionsPanel uninstall with dependent connections", () => {
+  function pluginConnection(id: string, pluginId: string): import("@/types/database").ConnectionConfig {
+    return { id, name: `待办 ${id}`, db_type: "plugin", plugin_id: pluginId } as import("@/types/database").ConnectionConfig;
+  }
+
+  it("opens the cascade dialog instead of uninstalling while saved plugin connections exist", async () => {
+    mocks.connections.push(pluginConnection("conn-1", "a"));
+
+    await state.uninstallSelectedPlugin();
+
+    expect(state.uninstallDependents).toMatchObject({ pluginId: "a", pluginName: "a" });
+    expect(state.uninstallDependents?.connections.map((connection) => connection.id)).toEqual(["conn-1"]);
+    expect(mocks.uninstallPlugin).not.toHaveBeenCalled();
+    expect(mocks.removeConnections).not.toHaveBeenCalled();
+  });
+
+  it("deletes the dependent connections first and then uninstalls on confirm", async () => {
+    mocks.connections.push(pluginConnection("conn-1", "a"));
+    await state.uninstallSelectedPlugin();
+
+    await state.confirmUninstallWithDependents();
+
+    expect(mocks.removeConnections).toHaveBeenCalledWith(["conn-1"]);
+    expect(mocks.disconnect).toHaveBeenCalledWith("conn-1", { skipTabHandling: true, markClosedByUser: false });
+    expect(mocks.uninstallPlugin).toHaveBeenCalledWith("a");
+    expect(mocks.toast).toHaveBeenCalledWith('pluginPlatform.uninstallSuccess:{"name":"a"}');
+    expect(state.uninstallDependents).toBeNull();
+  });
+
+  it("deletes nothing and keeps the dialog contract when removal fails", async () => {
+    mocks.connections.push(pluginConnection("conn-1", "a"));
+    await state.uninstallSelectedPlugin();
+    mocks.removeConnections.mockRejectedValueOnce(new Error("storage offline"));
+
+    await state.confirmUninstallWithDependents();
+
+    expect(mocks.uninstallPlugin).not.toHaveBeenCalled();
+    expect(state.uninstallDependents).toBeNull();
+    expect(mocks.toast).toHaveBeenLastCalledWith("storage offline", 5000);
+  });
+
+  it("keeps the plugin and its connections when the cascade dialog is cancelled", async () => {
+    mocks.connections.push(pluginConnection("conn-1", "a"));
+    await state.uninstallSelectedPlugin();
+
+    state.cancelUninstallDependents();
+    await flushUi();
+
+    expect(state.uninstallDependents).toBeNull();
+    expect(mocks.removeConnections).not.toHaveBeenCalled();
+    expect(mocks.uninstallPlugin).not.toHaveBeenCalled();
+  });
+
+  it("keeps the plain confirm flow when no dependent connections exist", async () => {
+    await state.uninstallSelectedPlugin();
+
+    expect(state.uninstallDependents).toBeNull();
+    expect(window.confirm).toHaveBeenCalledWith('pluginPlatform.uninstallConfirm:{"name":"a"}');
+    expect(mocks.uninstallPlugin).toHaveBeenCalledWith("a");
+    expect(mocks.removeConnections).not.toHaveBeenCalled();
+  });
+
+  it("translates a known uninstall-blocked backend error on the single uninstall path", async () => {
+    mocks.uninstallPlugin.mockRejectedValueOnce(new Error("Cannot uninstall plugin 'a' while these connections still use it: 待办 Todo"));
+
+    await state.uninstallSelectedPlugin();
+
+    // 该消息命中 backend-errors 的 pattern，走 t(key, params) 而不是原始消息直传。
+    expect(mocks.toast).toHaveBeenLastCalledWith('pluginPlatform.uninstallBlockedByConnections:{"plugin":"a","labels":"待办 Todo"}', 5000);
+  });
+});
+
+describe("PluginContributionsPanel uninstall cascade locking and batch skip", () => {
+  function pluginConnection(id: string, pluginId: string): import("@/types/database").ConnectionConfig {
+    return { id, name: `待办 ${id}`, db_type: "plugin", plugin_id: pluginId } as import("@/types/database").ConnectionConfig;
+  }
+
+  it("holds the mutation lock so concurrent uninstall actions cannot race the removal", async () => {
+    mocks.connections.push(pluginConnection("conn-1", "a"));
+    await state.uninstallSelectedPlugin();
+    const pendingRemoval = deferred<void>();
+    mocks.removeConnections.mockReturnValueOnce(pendingRemoval.promise);
+
+    const cascade = state.confirmUninstallWithDependents();
+    await flushUi();
+    expect(state.mutationRunning).toBe(true);
+
+    // 连接删除在途时，单个卸载必须被 mutationRunning 挡住，不能开第二个对话框或重复删除。
+    await state.uninstallSelectedPlugin();
+    expect(state.uninstallDependents).toBeNull();
+    expect(mocks.removeConnections).toHaveBeenCalledTimes(1);
+    expect(mocks.uninstallPlugin).not.toHaveBeenCalled();
+
+    pendingRemoval.resolve();
+    await cascade;
+
+    expect(state.mutationRunning).toBe(false);
+    expect(mocks.uninstallPlugin).toHaveBeenCalledWith("a");
+  });
+
+  it("skips plugins with dependent connections from a batch uninstall and explains why", async () => {
+    mocks.connections.push(pluginConnection("conn-1", "a"));
+    state.selectedInstalledIds = new Set(["a", "b"]);
+
+    await state.runBatchUninstall();
+
+    expect(mocks.uninstallPlugin).toHaveBeenCalledTimes(1);
+    expect(mocks.uninstallPlugin).toHaveBeenCalledWith("b");
+    expect(mocks.toast).toHaveBeenCalledWith('pluginPlatform.batchUninstallDependentsSkipped:{"names":"a"}', 8000);
+  });
+
+  it("runs no batch uninstall when every selection still has dependent connections", async () => {
+    mocks.connections.push(pluginConnection("conn-1", "a"));
+    state.selectedInstalledIds = new Set(["a"]);
+
+    await state.runBatchUninstall();
+
+    expect(mocks.toast).toHaveBeenCalledWith('pluginPlatform.batchUninstallDependentsSkipped:{"names":"a"}', 8000);
+    expect(mocks.uninstallPlugin).not.toHaveBeenCalled();
   });
 });

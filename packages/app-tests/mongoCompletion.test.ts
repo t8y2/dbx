@@ -343,6 +343,7 @@ test("offers the newly supported count and database commands", () => {
   assert.ok(dbLevel.includes("serverStatus"));
   assert.ok(dbLevel.includes("createCollection"));
   assert.ok(dbLevel.includes("dropDatabase"));
+  for (const method of ["createView", "getUsers", "getUser", "getRoles", "getRole"]) assert.ok(dbLevel.includes(method), method);
   assert.ok(labels("").includes("db.stats"));
 });
 
@@ -793,6 +794,9 @@ test("withholds illegal stages in sub-pipelines and view definitions", () => {
 
   // View definition pipeline rejects $out and $merge, but permits $documents.
   const viewStages = labels('db.createCollection("v", { viewOn: "users", pipeline: [{ $');
+  const createViewStages = labels('db.createView("v", "users", [{ $');
+  assert.ok(createViewStages.includes("$match"));
+  assert.equal(createViewStages.includes("$out"), false, "views cannot write");
   assert.equal(viewStages.includes("$out"), false, "view pipeline must not offer $out");
   assert.equal(viewStages.includes("$merge"), false, "view pipeline must not offer $merge");
   assert.ok(viewStages.includes("$match"));
@@ -1701,9 +1705,9 @@ test("suggests show dbs and show subcommands", () => {
   assert.ok(buildMongoCompletionItems("show", 4).some((item) => item.label === "show dbs"));
   assert.ok(parseMongoCommand("show dbs"), "show dbs snippet must parse");
 
-  // show followed by space offers dbs and databases, and NOT db.* snippets
+  // show followed by space offers its subcommands, and NOT db.* snippets
   const showSpaceItems = labels("show ");
-  assert.deepEqual(showSpaceItems, ["dbs", "databases"]);
+  assert.deepEqual(showSpaceItems, ["dbs", "databases", "users", "roles"]);
   assert.equal(showSpaceItems.includes("db.collection.find"), false);
   assert.equal(showSpaceItems.includes("db.version"), false);
   assert.equal(showSpaceItems.includes("collections"), false, "show collections is not supported");
@@ -1712,6 +1716,9 @@ test("suggests show dbs and show subcommands", () => {
   assert.deepEqual(labels("show d"), ["dbs", "databases"]);
   assert.deepEqual(labels("show db"), ["dbs"]);
   assert.deepEqual(labels("show dat"), ["databases"]);
+  assert.deepEqual(labels("show us"), ["users"]);
+  assert.deepEqual(labels("show ro"), ["roles"]);
+  for (const source of ["show users", "show roles"]) assert.ok(parseMongoCommand(source), `${source} must parse`);
   assert.deepEqual(labels("show col"), []);
 
   // Context and auto-trigger
@@ -2125,7 +2132,7 @@ test("replaces typed new keyword when completing new Date", () => {
   // keeps the other `…d…` constructors alongside `new Date`.
   assert.deepEqual(
     items1.map((candidate) => candidate.label),
-    ["ISODate", "ObjectId", "BinData", "new Date", "NumberDecimal", "UUID"],
+    ["Decimal128", "Double", "ISODate", "ObjectId", "BinData", "new Date", "NumberDecimal", "UUID"],
   );
 
   // Bad case 2: cursor after `new ` (trailing space)

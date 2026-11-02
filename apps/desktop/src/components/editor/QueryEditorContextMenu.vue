@@ -14,6 +14,7 @@ import {
   Columns3,
   Download,
   Eye,
+  FastForward,
   FileCode,
   FoldVertical,
   GitBranch,
@@ -56,10 +57,13 @@ export interface QueryEditorContextMenuState {
   expandSelectStar: (() => void) | undefined;
   canExplain?: boolean;
   hasContent?: boolean;
+  canDebugPlSql?: boolean;
 }
 
 export interface QueryEditorContextMenuActions {
+  debugPlSqlFromContextMenu?: () => void;
   executeFromContextMenu: () => void;
+  executeAllFromContextMenu?: () => void;
   executeInNewResultTabFromContextMenu: () => void;
   explainFromContextMenu?: () => void;
   requestPreviewChanges: (sql?: string) => void;
@@ -81,6 +85,7 @@ export interface QueryEditorContextMenuActions {
   openFindReplaceFromContextMenu: () => void;
   deleteEmptyLines: () => void;
   selectCurrentStatementFromContextMenu: () => void;
+  copyCurrentStatementFromContextMenu: () => void;
   selectAllSqlFromContextMenu: () => void;
   emitContextObjectAction: (action: QueryContextObjectAction) => void;
   openCodeSnapshot: () => void;
@@ -172,6 +177,19 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
             icon: Play,
             shortcut: shortcuts.executeSql,
           },
+          ...(actions.executeAllFromContextMenu
+            ? [
+                {
+                  sidebarActionId: "toolbar.executeAllSql",
+                  label: t("toolbar.executeAllSql"),
+                  action: actions.executeAllFromContextMenu,
+                  disabled: !canExecuteContextSql,
+                  icon: FastForward,
+                  shortcut: shortcuts.executeAllSql,
+                },
+              ]
+            : []),
+          ...(state.canDebugPlSql && actions.debugPlSqlFromContextMenu ? [{ sidebarActionId: "plDebug.start.title", label: t("plDebug.start.title"), action: actions.debugPlSqlFromContextMenu, icon: Play }] : []),
           {
             sidebarActionId: "settings.shortcutExecuteSqlInNewResultTab",
             label: t("settings.shortcutExecuteSqlInNewResultTab"),
@@ -391,6 +409,12 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       action: actions.selectCurrentStatementFromContextMenu,
       icon: TextSelect,
       shortcut: shortcuts.selectCurrentStatement,
+    },
+    {
+      sidebarActionId: "editor.contextMenu.copyCurrentStatement",
+      label: t("editor.contextMenu.copyCurrentStatement"),
+      action: actions.copyCurrentStatementFromContextMenu,
+      icon: Copy,
     },
     { label: "", separator: true },
     {

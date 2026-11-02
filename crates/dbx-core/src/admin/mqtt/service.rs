@@ -69,3 +69,8 @@ pub async fn clear_messages(client: &Arc<MqttClient>) -> Result<(), String> {
     client.clear_messages().await;
     Ok(())
 }
+
+/// Remove one message from the live MQTT console buffer.
+pub async fn delete_message(client: &Arc<MqttClient>, message: &MqttMessage) {
+    client.delete_message(message).await;
+}

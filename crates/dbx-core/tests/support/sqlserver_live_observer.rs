@@ -22,12 +22,22 @@ pub async fn connect_with_port_explicit(
     user: &str,
     password: &str,
     database: Option<&str>,
+    url_params: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
     if !sql_server_2000() {
-        return native::connect_with_port_explicit(host, port, port_explicit, user, password, database, timeout)
-            .await
-            .map(|client| SqlServerClient::Native(Box::new(client)));
+        return native::connect_with_port_explicit(
+            host,
+            port,
+            port_explicit,
+            user,
+            password,
+            database,
+            url_params,
+            timeout,
+        )
+        .await
+        .map(|client| SqlServerClient::Native(Box::new(client)));
     }
     let mut client = AgentDriverClient::spawn(AgentLaunchSpec::java_jar(
         std::env::var("DBX_TEST_SQLSERVER_JAVA").expect("Java 21 executable"),

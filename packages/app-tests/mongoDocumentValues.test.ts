@@ -169,6 +169,48 @@ test("preserves existing Mongo strings that resemble typed literals", () => {
   });
 });
 
+test("keeps the BSON number type of edited Mongo fields", () => {
+  const original = {
+    _id: { $oid: "65f000000000000000000001" },
+    count: { $numberInt: "1" },
+    total: { $numberLong: "2" },
+    ratio: { $numberDouble: "1.5" },
+    price: { $numberDecimal: "9.99" },
+  };
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, "200"],
+    [2, 7],
+    [3, "3"],
+    [4, "10.50"],
+  ]);
+
+  assert.deepEqual(buildMongoUpdateDocument(changes, ["_id", "count", "total", "ratio", "price"], original), {
+    $set: {
+      count: { $numberInt: "200" },
+      total: { $numberLong: "7" },
+      ratio: { $numberDouble: "3" },
+      price: { $numberDecimal: "10.50" },
+    },
+  });
+});
+
+test("falls back to inferred types when an edit no longer fits the Mongo number type", () => {
+  const original = { _id: "1", count: { $numberInt: "1" }, other: { $numberInt: "1" }, label: { $numberInt: "1" } };
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, "2147483648"],
+    [2, "1.5"],
+    [3, "abc"],
+  ]);
+
+  assert.deepEqual(buildMongoUpdateDocument(changes, ["_id", "count", "other", "label"], original), {
+    $set: {
+      count: 2147483648,
+      other: 1.5,
+      label: "abc",
+    },
+  });
+});
+
 test("keeps JSON inference for fields without an existing Mongo type", () => {
   const changes = new Map<number, string | number | boolean | null>([
     [1, '{"enabled":true}'],
@@ -490,8 +532,8 @@ test("counts typed BSON scalars as numbers so a column total keeps its negative 
   const summary = summarizeSelection({ columns: ["charactersUsed"], rows }, { numericValue: mongoDocumentGridNumericValue });
 
   assert.equal(summary.numericCount, 5);
-  assert.equal(summary.sum, 2528.125 - 12.5 - 100.5 - 5 + 9);
-  assert.equal(summary.average, (2528.125 - 12.5 - 100.5 - 5 + 9) / 5);
+  assert.equal(summary.sum, "2419.125");
+  assert.equal(summary.average, "483.825");
 });
 
 test("keeps non-numeric Mongo cells out of a column total", () => {

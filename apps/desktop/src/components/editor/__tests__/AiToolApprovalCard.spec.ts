@@ -53,3 +53,29 @@ describe("AiToolApprovalCard", () => {
     expect(container.textContent).toContain(i18n.global.t("ai.toolApproval.status.denied"));
   });
 });
+
+describe("command previews (#13855)", () => {
+  it("shows the exact command first and keeps the full arguments available", async () => {
+    const { container, approval } = mountCard();
+    approval.args = { command: "printf '<hello>\\n'", cwd: "/tmp", timeout: 30 };
+    await nextTick();
+    const preview = container.querySelector("[data-ai-tool-approval-command]");
+    expect(preview?.textContent).toBe(approval.args.command);
+    expect(preview?.querySelector("hello")).toBeNull();
+    const details = container.querySelector("details");
+    expect(details).not.toBeNull();
+    expect(details?.open).toBe(false);
+    expect(details?.textContent).toContain('"cwd": "/tmp"');
+    expect(details?.textContent).toContain('"timeout": 30');
+  });
+  it("keeps JSON visible for tools without a non-empty string command", async () => {
+    const { container, approval } = mountCard();
+    for (const command of [undefined, "", "   ", ["echo", "hello"]]) {
+      approval.args = { command, target: "orders" };
+      await nextTick();
+      expect(container.querySelector("[data-ai-tool-approval-command]")).toBeNull();
+      expect(container.querySelector("details")).toBeNull();
+      expect(container.querySelector("pre")?.textContent).toContain('"target": "orders"');
+    }
+  });
+});

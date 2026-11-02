@@ -1,0 +1,17 @@
+[package]
+name = "dbx-ai-proxy-12277-proof"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+dbx-ai-provider = { path = "../../crates/dbx-ai-provider" }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "system-proxy"] }
+hyper-util = "=0.1.20"
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_System_Registry", "Win32_Foundation", "Win32_Security"] }

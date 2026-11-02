@@ -123,7 +123,26 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     let Some(strategy) = estimated_plan_strategy(options.database_type) else {
         return explain_err("unsupported");
     };
+    build_explain_sql_with_strategy(options, strategy)
+}
 
+/// Builds the only validated GaussDB(DWS) Estimated Plan form. This does not
+/// make `DatabaseType::Gaussdb` generally supported: callers must first verify
+/// the explicit DWS connection profile and supported server version.
+pub fn build_gaussdb_dws_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
+    if options.database_type != Some(DatabaseType::Gaussdb) {
+        return explain_err("unsupported");
+    }
+    if options.analyze == Some(true) {
+        return explain_err("unsafe");
+    }
+    build_explain_sql_with_strategy(options, gaussdb_dws_estimated_plan_strategy())
+}
+
+fn build_explain_sql_with_strategy(
+    options: ExplainSqlOptions,
+    strategy: EstimatedPlanStrategy,
+) -> ExplainSqlBuildResult {
     let source = strip_trailing_semicolons(options.sql.trim());
     if source.is_empty() {
         return explain_err("empty");
@@ -215,6 +234,13 @@ pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<Es
         DatabaseType::Postgres => {
             EstimatedPlanStrategy { sql_generation: Postgres, acquisition: GeneratedSql, format: Json }
         }
+        // openGauss documents EXPLAIN (FORMAT TEXT|XML|JSON|YAML) but JSON output
+        // additionally depends on the session's explain_perf_mode; plain text avoids
+        // assuming that GUC, so the plan is generated as plain `EXPLAIN <statement>`
+        // text (#13055).
+        DatabaseType::OpenGauss => {
+            EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text }
+        }
         DatabaseType::Questdb => {
             EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text }
         }
@@ -237,6 +263,16 @@ pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<Es
         _ => return None,
     };
     Some(strategy)
+}
+
+/// The version-gated strategy used only for an explicitly identified and
+/// validated Huawei DWS connection. Generic GaussDB remains unsupported.
+pub const fn gaussdb_dws_estimated_plan_strategy() -> EstimatedPlanStrategy {
+    EstimatedPlanStrategy {
+        sql_generation: EstimatedPlanSqlGeneration::Postgres,
+        acquisition: EstimatedPlanAcquisition::GeneratedSql,
+        format: EstimatedPlanFormat::Json,
+    }
 }
 
 /// Payload encoding defined by the estimated-plan strategy for this dialect.
@@ -834,6 +870,7 @@ fn is_postgresql_family_database(database_type: DatabaseType) -> bool {
             | DatabaseType::Highgo
             | DatabaseType::Uxdb
             | DatabaseType::Vastbase
+            | DatabaseType::Gbase8c
             | DatabaseType::Kwdb
     )
 }
@@ -847,7 +884,7 @@ pub fn has_dialect_specific_write(sql: &str, database_type: DatabaseType) -> boo
 
 fn has_dialect_specific_write_statement(sql: &str, database_type: DatabaseType) -> bool {
     if is_mysql_compatible_database(database_type) {
-        let (cleaned, has_executable_comment) = strip_sql_comments_and_literals_with_metadata(sql, true);
+        let (cleaned, has_executable_comment) = strip_sql_comments_and_literals_with_metadata(sql, true, true);
         return has_executable_comment
             || contains_keyword_sequence(&cleaned, "INTO", "OUTFILE")
             || contains_keyword_sequence(&cleaned, "INTO", "DUMPFILE");
@@ -892,7 +929,7 @@ fn is_write_sql_statement(
 ) -> bool {
     // 1. Strip comments and string literals
     let (cleaned, has_mysql_executable_comment) =
-        strip_sql_comments_and_literals_with_metadata(sql, detect_mysql_executable_comments);
+        strip_sql_comments_and_literals_with_metadata(sql, detect_mysql_executable_comments, true);
     // MySQL/MariaDB executable comments may contain arbitrary SQL, including
     // writes that are not represented by the outer statement (for example,
     // INTO OUTFILE inside a SELECT). Treat them as writes rather than
@@ -1008,7 +1045,10 @@ fn is_safe_read_pragma(upper_stripped: &str) -> bool {
     false
 }
 
-fn starts_with_keyword(upper: &str, keyword: &str) -> bool {
+/// True when `upper` starts with `keyword` followed by a non-alphanumeric byte
+/// (or nothing). `upper` must already be ASCII-uppercased. Shared with the
+/// Oracle manual-transaction proof in [`crate::sql_risk`].
+pub(crate) fn starts_with_keyword(upper: &str, keyword: &str) -> bool {
     upper.starts_with(keyword)
         && (upper.len() == keyword.len() || !upper.as_bytes()[keyword.len()].is_ascii_alphanumeric())
 }
@@ -1054,94 +1094,31 @@ pub fn check_read_only(sql: &str, connection_name: &str, database_type: Database
     Ok(())
 }
 
-/// Oracle-only, fail-closed classifier for manual-transaction UX. Returns true
-/// only for an ordinary top-level read that DBX can prove harmless: a single
-/// top-level `SELECT` (not `WITH`) that after Oracle-aware comment/literal
-/// stripping contains no row-locking, transaction-control, DDL/DCL, `CALL`/
-/// `EXEC`, PL/SQL block, `EXECUTE IMMEDIATE`, database-link, sequence
-/// pseudocolumn (`NEXTVAL`/`CURRVAL`), function-invocation, or subquery
-/// syntax. Any lexical ambiguity is **not** proven read-only; the classifier
-/// deliberately whitelists no functions because user/package function side
-/// effects cannot be proven and would create an unbounded compatibility
-/// surface.
+/// Oracle-only, fail-closed classifier for manual-transaction UX: true only for
+/// a top-level read DBX can prove harmless.
+///
+/// This is the public Oracle entry point; the rule set lives in
+/// [`crate::sql_risk::prove_read_only_for_database`] (see
+/// `prove_oracle_read_only_statement` there) and combines the Oracle lexical
+/// guard rails — no `WITH`, no row locking, no transaction control, no DDL/DCL,
+/// no `CALL`/`EXEC`, no PL/SQL block, no `EXECUTE IMMEDIATE`, no database link
+/// (`@`), no sequence pseudocolumn (`NEXTVAL`/`CURRVAL`), no `SELECT ... INTO` —
+/// with an `OracleDialect` AST proof that every function call is on the reviewed
+/// built-in whitelist.
+///
+/// Before #11788 the guard rails included "reject any `(`", which rejected every
+/// ordinary query that used a built-in function (`SELECT LENGTH(1) FROM dual`)
+/// and could not tell a call from a datatype argument
+/// (`CAST(a AS VARCHAR2(10))`) or an `IN (1, 2)` list.
 pub fn is_oracle_proven_read_only_statement(sql: &str) -> bool {
-    let cleaned = strip_sql_comments_and_literals(sql);
-    let trimmed = cleaned.trim_start();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let upper = trimmed.to_uppercase();
-    // Single top-level SELECT only (WITH is excluded because data-modifying
-    // CTEs can hide writes in a row-returning path).
-    if !starts_with_keyword(&upper, "SELECT") {
-        return false;
-    }
-
-    let lower = cleaned.to_lowercase();
-
-    // Function invocation or subquery syntax: any '(' after literal stripping.
-    // This deliberately excludes SELECT upper(name), COUNT(*), package
-    // functions, and subqueries DBX cannot prove harmless.
-    if lower.contains('(') {
-        return false;
-    }
-
-    // Database link: '@' cannot appear in an unquoted Oracle identifier, so any
-    // remaining '@' after literal stripping is a remote-object reference.
-    if lower.contains('@') {
-        return false;
-    }
-
-    // Word-boundary forbidden keywords. These are Oracle keywords/reserved
-    // words, so they cannot be legitimate unquoted identifiers inside a simple
-    // read; a quoted occurrence is already stripped to spaces above.
-    const FORBIDDEN_WORDS: &[&str] = &[
-        // row locking
-        "for",
-        "update",
-        "lock",
-        // transaction control
-        "begin",
-        "commit",
-        "rollback",
-        "savepoint",
-        // DDL/DCL
-        "create",
-        "alter",
-        "drop",
-        "truncate",
-        "rename",
-        "grant",
-        "revoke",
-        "comment",
-        "purge",
-        "audit",
-        "noaudit",
-        "analyze",
-        "flashback",
-        "merge",
-        "insert",
-        "delete",
-        // set operators (a UNION is not a single top-level SELECT)
-        "union",
-        "minus",
-        "intersect",
-        // stored procedures / dynamic SQL / PL/SQL blocks
-        "call",
-        "exec",
-        "execute",
-        "declare",
-        // sequence pseudocolumns
-        "nextval",
-        "currval",
-        // SELECT ... INTO is PL/SQL-only in Oracle
-        "into",
-    ];
-
-    !FORBIDDEN_WORDS.iter().any(|word| contains_word(&lower, word))
+    crate::sql_risk::prove_read_only_for_database(sql, DatabaseType::Oracle)
+        == crate::sql_risk::ReadProof::ProvenReadOnly
 }
 
-fn contains_word(source: &str, word: &str) -> bool {
+/// Match a whole word (`word` bounded by non-identifier bytes) in a
+/// pre-lowercased, comment/literal-stripped source. Shared with the Oracle
+/// manual-transaction proof in [`crate::sql_risk`].
+pub(crate) fn contains_word(source: &str, word: &str) -> bool {
     let bytes = source.as_bytes();
     let word_bytes = word.as_bytes();
     if word_bytes.is_empty() || bytes.len() < word_bytes.len() {
@@ -1222,10 +1199,28 @@ pub fn strip_sql_comments(sql: &str) -> String {
 }
 
 pub fn strip_sql_comments_and_literals(sql: &str) -> String {
-    strip_sql_comments_and_literals_with_metadata(sql, false).0
+    strip_sql_comments_and_literals_with_metadata(sql, false, true).0
 }
 
-fn strip_sql_comments_and_literals_with_metadata(sql: &str, detect_mysql_executable_comments: bool) -> (String, bool) {
+/// [`strip_sql_comments_and_literals`] with `#` handled as a **code character**
+/// instead of a line-comment start.
+///
+/// `#` only starts a comment in the MySQL family; Oracle (and OceanBase-Oracle)
+/// allow `#` inside unquoted identifiers, so stripping from `#` to end of line
+/// hides real code from the safety scanners. `sql::SqlDialectProfile::
+/// supports_hash_line_comments` models the same distinction for statement
+/// splitting. Only the Oracle manual-transaction proof opts in here; every other
+/// caller keeps the MySQL-conservative default, so no other dialect's
+/// classification changes.
+pub(crate) fn strip_sql_comments_and_literals_keeping_hash(sql: &str) -> String {
+    strip_sql_comments_and_literals_with_metadata(sql, false, false).0
+}
+
+fn strip_sql_comments_and_literals_with_metadata(
+    sql: &str,
+    detect_mysql_executable_comments: bool,
+    hash_line_comments: bool,
+) -> (String, bool) {
     let mut output = String::with_capacity(sql.len());
     let mut chars = sql.chars().peekable();
     let mut in_line_comment = false;
@@ -1323,7 +1318,10 @@ fn strip_sql_comments_and_literals_with_metadata(sql: &str, detect_mysql_executa
             in_line_comment = true;
             continue;
         }
-        if ch == '#' {
+        // `#` starts a line comment only in the MySQL family; elsewhere it is a
+        // code character (Oracle allows it inside identifiers), so callers that
+        // pass `hash_line_comments = false` must keep the text visible.
+        if hash_line_comments && ch == '#' {
             in_line_comment = true;
             continue;
         }
@@ -1535,19 +1533,24 @@ mod tests {
 
     #[test]
     fn oracle_proven_read_only_accepts_simple_top_level_selects() {
-        assert!(is_oracle_proven_read_only_statement("SELECT * FROM table"));
-        assert!(is_oracle_proven_read_only_statement("select id, name from users"));
-        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users WHERE id = 1"));
-        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users ORDER BY id"));
-        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users FETCH FIRST 10 ROWS ONLY"));
-        assert!(is_oracle_proven_read_only_statement("SELECT 1"));
-        assert!(is_oracle_proven_read_only_statement("SELECT ROWNUM FROM dual"));
-        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users"));
-        // Comment/literal stripping hides keywords that are not part of the SQL.
-        assert!(is_oracle_proven_read_only_statement("-- comment\nSELECT * FROM users"));
-        assert!(is_oracle_proven_read_only_statement("SELECT 'update' FROM dual"));
-        assert!(is_oracle_proven_read_only_statement("SELECT \"select\" FROM t"));
-        assert!(is_oracle_proven_read_only_statement("SELECT * FROM user_update"));
+        for sql in [
+            "SELECT * FROM users",
+            "select id, name from users",
+            "SELECT * FROM users WHERE id = 1",
+            "SELECT * FROM users ORDER BY id",
+            "SELECT * FROM users FETCH FIRST 10 ROWS ONLY",
+            "SELECT * FROM users ORDER BY id OFFSET 5 ROWS FETCH NEXT 10 ROWS ONLY",
+            "SELECT 1",
+            "SELECT ROWNUM FROM dual",
+            "SELECT * FROM users;",
+            // Comment/literal stripping hides keywords that are not part of the SQL.
+            "-- comment\nSELECT * FROM users",
+            "SELECT 'update' FROM dual",
+            "SELECT \"select\" FROM t",
+            "SELECT * FROM user_update",
+        ] {
+            assert!(is_oracle_proven_read_only_statement(sql), "expected proven: {sql}");
+        }
     }
 
     #[test]
@@ -1596,28 +1599,89 @@ mod tests {
         }
     }
 
+    /// #11788: the old blanket "reject any `(`" rule rejected every ordinary
+    /// read that used a built-in function. Whitelisted calls, non-call
+    /// parentheses (`IN` lists, grouping, datatype arguments) and subqueries are
+    /// proven now; the AST walk is what tells a call from a datatype argument.
     #[test]
-    fn oracle_proven_read_only_rejects_functions_and_subqueries() {
+    fn oracle_proven_read_only_accepts_whitelisted_functions_and_parenthesised_reads() {
         for sql in [
-            "SELECT upper(name) FROM users",
-            "SELECT count(*) FROM users",
-            "SELECT pkg.fn() FROM dual",
-            "SELECT * FROM users WHERE id IN (SELECT id FROM orders)",
-            "SELECT * FROM (SELECT * FROM users)",
+            "SELECT LENGTH(1) FROM dual",
+            "SELECT COUNT(*) FROM users",
+            "SELECT UPPER(name) FROM users",
             "SELECT NVL(name, 'x') FROM users",
+            "SELECT TO_CHAR(SYSDATE, 'YYYY-MM-DD') FROM dual",
+            "SELECT SUBSTR(name, 1, 3) || DECODE(a, 1, 'x', 'y') FROM users",
+            "SELECT MIN(a), MAX(a), AVG(a), SUM(a) FROM t",
+            "SELECT COUNT(*) FROM t GROUP BY a HAVING COUNT(*) > 1",
+            "SELECT * FROM t WHERE id IN (1, 2, 3)",
+            "SELECT (a + b) * c FROM t",
+            "SELECT * FROM t WHERE (a = 1 OR b = 2)",
+            "SELECT CAST(a AS VARCHAR2(10)) FROM t",
+            "SELECT CAST(a AS NUMBER(10,2)) FROM t",
+            "SELECT * FROM (SELECT * FROM users)",
+            "SELECT * FROM users WHERE id IN (SELECT id FROM orders)",
+            // Read-only keyword forms sqlparser models as function calls must
+            // stay proven, or the fix would regress them.
+            "SELECT CURRENT_DATE FROM dual",
+            "SELECT CURRENT_TIME FROM dual",
+            "SELECT CURRENT_TIMESTAMP FROM dual",
+            "SELECT SYSTIMESTAMP, USER, LEVEL FROM dual",
+            "SELECT LEVEL, a FROM t START WITH id = 1 CONNECT BY PRIOR id = pid",
+            "SELECT /*+ FULL(t) */ COUNT(*) FROM t WHERE a = :1",
+        ] {
+            assert!(is_oracle_proven_read_only_statement(sql), "expected proven: {sql}");
+        }
+    }
+
+    #[test]
+    fn oracle_proven_read_only_rejects_unknown_functions_and_qualified_calls() {
+        for sql in [
+            // Not on the reviewed built-in whitelist.
+            "SELECT my_udf(a) FROM t",
+            "SELECT my_pkg.fn(a) FROM t",
+            "SELECT DBMS_LOCK.SLEEP(1) FROM dual",
+            "SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') FROM dual",
+            "SELECT SYS_GUID() FROM dual",
+            "SELECT XMLAGG(x) FROM t",
+            "SELECT LISTAGG(a, ',') WITHIN GROUP (ORDER BY a) FROM t",
+            // Window and table functions stay Unproven by the visitor.
+            "SELECT ROW_NUMBER() OVER (ORDER BY a) FROM t",
+            "SELECT * FROM TABLE(my_func())",
         ] {
             assert!(!is_oracle_proven_read_only_statement(sql), "expected rejected: {sql}");
         }
     }
 
     #[test]
-    fn oracle_proven_read_only_rejects_empty_and_ambiguous_input() {
-        assert!(!is_oracle_proven_read_only_statement(""));
-        assert!(!is_oracle_proven_read_only_statement("   "));
-        assert!(!is_oracle_proven_read_only_statement("-- only a comment"));
-        assert!(!is_oracle_proven_read_only_statement("SELECT * FROM t WHERE a IN (1, 2)"));
-        assert!(!is_oracle_proven_read_only_statement("SELECT * FROM t WHERE b = 'x' AND c IN (3)"));
-        assert!(!is_oracle_proven_read_only_statement("SELECT 1 UNION SELECT 2"));
+    fn oracle_proven_read_only_rejects_empty_and_multi_statement_input() {
+        for sql in [
+            "",
+            "   ",
+            "-- only a comment",
+            "SELECT 1 UNION SELECT 2",
+            "SELECT 1; SELECT 2",
+            "SELECT a FROM t; SELECT b FROM u",
+            // Parse failure is judged by the lexical guard rails alone. Call-shaped
+            // syntax stays Unproven because no AST can vouch for the call.
+            "SELECT * FROM t AS OF TIMESTAMP TO_TIMESTAMP('2020-01-01', 'YYYY-MM-DD')",
+        ] {
+            assert!(!is_oracle_proven_read_only_statement(sql), "expected rejected: {sql}");
+        }
+    }
+
+    /// Oracle-only syntax sqlparser cannot parse keeps the verdict it had before
+    /// #11788 (no `(`, no `@`, no forbidden word) instead of losing the bit: the
+    /// pre-change classifier never parsed the statement either.
+    #[test]
+    fn oracle_proven_read_only_keeps_pre_change_verdict_for_unparseable_oracle_syntax() {
+        for sql in [
+            "SELECT * FROM t AS OF TIMESTAMP SYSTIMESTAMP - INTERVAL '1' HOUR",
+            "SELECT * FROM t AS OF SCN 12345",
+            "SELECT * FROM t VERSIONS BETWEEN TIMESTAMP SYSTIMESTAMP - INTERVAL '1' HOUR AND SYSTIMESTAMP",
+        ] {
+            assert!(is_oracle_proven_read_only_statement(sql), "expected proven: {sql}");
+        }
     }
 
     #[test]
@@ -2110,6 +2174,56 @@ mod tests {
     }
 
     #[test]
+    fn gaussdb_dws_strategy_is_explicit_and_keeps_the_generic_dialect_closed() {
+        use EstimatedPlanAcquisition::GeneratedSql;
+        use EstimatedPlanFormat::Json;
+
+        let strategy = gaussdb_dws_estimated_plan_strategy();
+        assert_eq!(strategy.acquisition(), GeneratedSql);
+        assert_eq!(strategy.format(), Json);
+        assert!(estimated_plan_strategy(Some(DatabaseType::Gaussdb)).is_none());
+        assert!(!supports_explain_plan(Some(DatabaseType::Gaussdb)));
+
+        let result = build_gaussdb_dws_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::Gaussdb),
+            format: None,
+            analyze: None,
+            sql: "SELECT 1".to_string(),
+        });
+        assert_eq!(result.sql.as_deref(), Some("EXPLAIN (FORMAT JSON) SELECT 1"));
+        assert!(result.ok);
+
+        for options in [
+            ExplainSqlOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                format: None,
+                analyze: Some(true),
+                sql: "SELECT 1".to_string(),
+            },
+            ExplainSqlOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                format: None,
+                analyze: None,
+                sql: "DELETE FROM users".to_string(),
+            },
+        ] {
+            assert!(!build_gaussdb_dws_explain_sql(options).ok);
+        }
+
+        assert_eq!(
+            build_gaussdb_dws_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                format: None,
+                analyze: None,
+                sql: "SELECT 1".to_string(),
+            })
+            .reason
+            .as_deref(),
+            Some("unsupported")
+        );
+    }
+
+    #[test]
     fn estimated_plan_strategy_matches_capability_sql_format_and_acquisition() {
         use EstimatedPlanAcquisition::{DriverNative, GeneratedSql, SqlServerShowPlanSession};
         use EstimatedPlanFormat::{Json, Text, Xml};
@@ -2119,6 +2233,7 @@ mod tests {
             (DatabaseType::Doris, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Xugu, "EXPLAIN VERBOSE SELECT 1", Text, GeneratedSql),
             (DatabaseType::Postgres, "EXPLAIN (FORMAT JSON) SELECT 1", Json, GeneratedSql),
+            (DatabaseType::OpenGauss, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Questdb, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Dameng, "EXPLAIN SELECT 1", Text, DriverNative),
             (DatabaseType::Oracle, "EXPLAIN PLAN FOR SELECT 1", Text, DriverNative),
@@ -2908,6 +3023,23 @@ mod tests {
                 &format!("DBX DYNAMODB {operation}\ntable: \"orders\""),
                 DatabaseType::DynamoDb
             ));
+        }
+    }
+
+    #[test]
+    fn classifies_dynamodb_partiql_reads_and_writes_for_read_only_protection() {
+        assert!(!is_write_sql_for_database(
+            "SELECT * FROM \"items\" WHERE \"status\"='PENDING'",
+            DatabaseType::DynamoDb
+        ));
+        assert!(!is_write_sql_for_database("-- comment\nSELECT 'UPDATE' FROM \"items\"", DatabaseType::DynamoDb));
+        for statement in [
+            "INSERT INTO \"items\" VALUE {'pk':'x'}",
+            "UPDATE \"items\" SET flag=true WHERE pk='x'",
+            "DELETE FROM \"items\" WHERE pk='x'",
+            "SELECT * FROM \"items\"; DELETE FROM \"items\" WHERE pk='x'",
+        ] {
+            assert!(is_write_sql_for_database(statement, DatabaseType::DynamoDb), "{statement}");
         }
     }
 

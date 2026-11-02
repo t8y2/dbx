@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::error::AppError;
 use crate::state::WebState;
-use dbx_core::db::redis_driver::RedisKeysExpiryResult;
+use dbx_core::db::redis_driver::{RedisKeyMetadata, RedisKeysExpiryResult};
 
 /// Check if a connection is read-only and return an error if so.
 async fn ensure_writable(
@@ -75,6 +75,15 @@ pub struct RedisKeyRequest {
     pub connection_id: String,
     pub db: u32,
     pub key_raw: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisValueRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raw: String,
+    pub preview_limit_bytes: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -275,6 +284,14 @@ pub struct RedisKeysTtlRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RedisKeyMetadataBatchRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raws: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RedisKeysExpireAtRequest {
     pub connection_id: String,
     pub db: u32,
@@ -404,11 +421,17 @@ pub async fn scan_values(
 
 pub async fn get_value(
     State(state): State<Arc<WebState>>,
-    Json(req): Json<RedisKeyRequest>,
+    Json(req): Json<RedisValueRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let result = dbx_core::redis_ops::redis_get_value_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw)
-        .await
-        .map_err(AppError::from)?;
+    let result = dbx_core::redis_ops::redis_get_value_in_db_with_preview_limit_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        &req.key_raw,
+        req.preview_limit_bytes,
+    )
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 
@@ -832,6 +855,17 @@ pub async fn set_expire_at(
     Ok(Json(()))
 }
 
+pub async fn key_metadata_batch(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisKeyMetadataBatchRequest>,
+) -> Result<Json<Vec<RedisKeyMetadata>>, AppError> {
+    let result =
+        dbx_core::redis_ops::redis_key_metadata_batch_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raws)
+            .await
+            .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn set_keys_ttl(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisKeysTtlRequest>,
@@ -911,7 +945,7 @@ pub async fn execute_command(
     super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
     let argv = dbx_core::db::redis_driver::parse_command_argv(&req.command)
         .map_err(|error| AppError::from(format!("Invalid Redis command: {error}")))?;
-    let cmd_name = argv[0].to_ascii_uppercase();
+    let cmd_name = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
     let safety = dbx_core::db::redis_driver::classify_command(&cmd_name);
     let is_mcp_request = super::mcp_policy::is_mcp_request(&headers);
     let centrally_approved_high_risk =

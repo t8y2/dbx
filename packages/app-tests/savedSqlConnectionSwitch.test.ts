@@ -59,9 +59,11 @@ async function setupSwitch(databaseType = "mysql") {
     ensureConnected,
     activeConnectionId: "conn-1",
   };
+  const connectionRequiredTabId = { value: null as string | null };
   const changeActiveConnection = new Function(
     "resolveToolbarTab",
     "connectionStore",
+    "connectionRequiredTabId",
     "resolveDefaultDatabase",
     "queryStore",
     "getDatabaseOptions",
@@ -75,6 +77,7 @@ async function setupSwitch(databaseType = "mysql") {
   )(
     (id: string) => queryStore.tabs.find((candidate) => candidate.id === id),
     connectionStore,
+    connectionRequiredTabId,
     (_connection: unknown, options: string[]) => options[0] ?? "",
     queryStore,
     getDatabaseOptions,
@@ -85,7 +88,7 @@ async function setupSwitch(databaseType = "mysql") {
     (key: string) => key,
     (_translate: unknown, error: Error) => error.message,
   ) as (id: string, connectionId: string) => Promise<void>;
-  return { savedSqlStore, original, queryStore, tab, tabId, ensureConnected, getDatabaseOptions, changeActiveConnection, rememberExternalSqlFileTarget };
+  return { savedSqlStore, original, queryStore, tab, tabId, ensureConnected, getDatabaseOptions, changeActiveConnection, rememberExternalSqlFileTarget, connectionRequiredTabId };
 }
 
 test.each(["connect", "databases"])("a target-save rollback invalidates the pending %s continuation", async (stage) => {
@@ -206,4 +209,18 @@ test("an external SQL switch still remembers the initialized database and schema
   await context.changeActiveConnection(context.tabId, "conn-2");
   assert.deepEqual(context.rememberExternalSqlFileTarget.mock.calls.at(-1), ["/tmp/report.sql", { connectionId: "conn-2", database: "db-2", catalog: undefined, schema: "new_schema" }]);
   assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 1);
+});
+
+test("clears the connection-required prompt marker for the switching tab", async () => {
+  const context = await setupSwitch();
+  context.connectionRequiredTabId.value = context.tabId;
+  await context.changeActiveConnection(context.tabId, "conn-2");
+  assert.equal(context.connectionRequiredTabId.value, null);
+});
+
+test("leaves connection-required prompt marker untouched when switching a different tab", async () => {
+  const context = await setupSwitch();
+  context.connectionRequiredTabId.value = "different-tab-id";
+  await context.changeActiveConnection(context.tabId, "conn-2");
+  assert.equal(context.connectionRequiredTabId.value, "different-tab-id");
 });

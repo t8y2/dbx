@@ -18,10 +18,7 @@ test("rejects very large SQL before importing formatter", async () => {
 });
 
 test("formats SQL with uppercase keywords and readable line breaks by default", async () => {
-  const formatted = await formatSqlText(
-    "select id, name, email, created_at, updated_at, deleted_at, tenant_id from users where active = 1 and verified = 1 order by name, created_at desc",
-    "postgres",
-  );
+  const formatted = await formatSqlText("select id, name, email, created_at, updated_at, deleted_at, tenant_id from users where active = 1 and verified = 1 order by name, created_at desc", "postgres");
 
   assert.match(formatted, /^SELECT\b/);
   assert.match(formatted, /\nFROM\b/);
@@ -29,20 +26,17 @@ test("formats SQL with uppercase keywords and readable line breaks by default", 
   assert.match(formatted, /\nORDER BY\b/);
 });
 
-test("puts each SELECT field on its own line even when the statement fits on one line", async () => {
+test("aligns SELECT field continuations under the first field", async () => {
   const formatted = await formatSqlText("select id, name from users where active = 1 order by name", "postgres");
 
   assert.equal(formatted, "SELECT id,\n       name\nFROM users\nWHERE active = 1\nORDER BY name");
   assert.equal(await formatSqlText(formatted, "postgres"), formatted);
 });
 
-test("aligns explicit SELECT aliases to the widest expression", async () => {
+test("aligns explicit SELECT aliases in the default layout", async () => {
   const formatted = await formatSqlText("select bh.id as unique_value, bh.title as title, bh.house_type as type from biz_house bh", "mysql");
 
-  assert.equal(
-    formatted,
-    "SELECT bh.id         AS unique_value,\n       bh.title      AS title,\n       bh.house_type AS type\nFROM biz_house bh",
-  );
+  assert.equal(formatted, "SELECT bh.id         AS unique_value,\n       bh.title      AS title,\n       bh.house_type AS type\nFROM biz_house bh");
   assert.equal(await formatSqlText(formatted, "mysql"), formatted);
 });
 
@@ -53,22 +47,18 @@ test("collapses a single-field statement that fits on one line", async () => {
 });
 
 test("formats SQL with custom keyword case and indentation settings", async () => {
-  const formatted = await formatSqlText(
-    "select id, name, email, created_at, updated_at, deleted_at, tenant_id from users where active = 1 and verified = 1 order by name, created_at desc",
-    "postgres",
-    {
-      keywordCase: "lower",
-      dataTypeCase: "preserve",
-      functionCase: "preserve",
-      useTabs: true,
-      tabWidth: 2,
-      logicalOperatorNewline: "before",
-      expressionWidth: 50,
-      linesBetweenQueries: 1,
-      denseOperators: false,
-      newlineBeforeSemicolon: false,
-    },
-  );
+  const formatted = await formatSqlText("select id, name, email, created_at, updated_at, deleted_at, tenant_id from users where active = 1 and verified = 1 order by name, created_at desc", "postgres", {
+    keywordCase: "lower",
+    dataTypeCase: "preserve",
+    functionCase: "preserve",
+    useTabs: true,
+    tabWidth: 2,
+    logicalOperatorNewline: "before",
+    expressionWidth: 50,
+    linesBetweenQueries: 1,
+    denseOperators: false,
+    newlineBeforeSemicolon: false,
+  });
 
   assert.match(formatted, /^select\b/);
   assert.match(formatted, /\nfrom\b/);
@@ -86,21 +76,13 @@ test("rejects very large SQL before loading formatter work", async () => {
   await assert.rejects(() => formatSqlText("x".repeat(MAX_SQL_FORMAT_CHARS + 1), "generic"), /too large/i);
 });
 
-test("keeps a trailing line comment from swallowing the column after it", async () => {
-  // Oracle stores a view's text as written, so a comment at the end of a column
-  // line is followed by the next column on its own line. A `--` comment consumes
-  // the rest of its line, so the next column has to start a new line instead of
-  // being appended to that comment.
-  const formatted = await formatSqlText(
-    'CREATE VIEW "TEMP_TEST_VIEW" AS SELECT trunc(sysdate) AS dates, -- 测试\n(SELECT sysdate FROM dual t) AS nows\nFROM dual;',
-    "oracle",
-    { keywordCase: "upper" },
-  );
+test("keeps a trailing line comment on its field line without swallowing the next column", async () => {
+  // A `--` comment consumes the rest of its source line. When the comment was
+  // written after the field's comma, keep it there and put the next column on
+  // a new line so it is still valid SQL (#12615).
+  const formatted = await formatSqlText('CREATE VIEW "TEMP_TEST_VIEW" AS SELECT trunc(sysdate) AS dates, -- 测试\n(SELECT sysdate FROM dual t) AS nows\nFROM dual;', "oracle", { keywordCase: "upper" });
 
-  assert.equal(
-    formatted,
-    'CREATE VIEW "TEMP_TEST_VIEW" AS\nSELECT trunc(sysdate) AS dates,\n       -- 测试\n       (SELECT sysdate FROM dual t) AS nows\nFROM dual;',
-  );
+  assert.equal(formatted, 'CREATE VIEW "TEMP_TEST_VIEW" AS\nSELECT trunc(sysdate) AS dates, -- 测试\n       (SELECT sysdate FROM dual t) AS nows\nFROM dual;');
 });
 
 test("keeps a line comment from swallowing the separator after it", async () => {
@@ -115,10 +97,10 @@ test("keeps a line comment from swallowing the statement terminator", async () =
   assert.equal(formatted, "SELECT a -- c\n;");
 });
 
-test("formats a comment on its own line without extra breaks", async () => {
+test("keeps a source trailing comment on the field line", async () => {
   const formatted = await formatSqlText("select a, -- c\nb from t", "postgres", { keywordCase: "upper" });
 
-  assert.equal(formatted, "SELECT a,\n       -- c\n       b\nFROM t");
+  assert.equal(formatted, "SELECT a, -- c\n       b\nFROM t");
 });
 
 test("compressSqlText collapses whitespace into single spaces", () => {
@@ -337,3 +319,56 @@ test("formats SQL preserving original keyword case when keywordCase is preserve 
   assert.doesNotMatch(formatted, /\bWHERE\b/);
 });
 
+test("formats SQL placing semicolons on their own line when newlineBeforeSemicolon is true (#12440)", async () => {
+  const selectSql = "SELECT id, name FROM users WHERE id = 1;";
+  const formattedSelect = await formatSqlText(selectSql, "mysql", {
+    layoutStyle: "dbx",
+    newlineBeforeSemicolon: true,
+  });
+  assert.match(formattedSelect, /\n;$/);
+
+  const updateSql = "UPDATE users SET name = 'Alice' WHERE id = 1;";
+  const formattedUpdate = await formatSqlText(updateSql, "mysql", {
+    layoutStyle: "dbx",
+    newlineBeforeSemicolon: true,
+  });
+  assert.match(formattedUpdate, /\n;$/);
+
+  const collapsedSql = "SELECT 1;";
+  const formattedCollapsed = await formatSqlText(collapsedSql, "mysql", {
+    layoutStyle: "dbx",
+    newlineBeforeSemicolon: true,
+  });
+  assert.equal(formattedCollapsed, "SELECT 1\n;");
+
+  const ddlSql = "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(50));";
+  const formattedDdl = await formatSqlText(ddlSql, "mysql", {
+    layoutStyle: "dbx",
+    newlineBeforeSemicolon: true,
+  });
+  assert.match(formattedDdl, /\n;$/);
+
+  const multiSql = "SELECT 1; SELECT 2;";
+  const formattedMulti = await formatSqlText(multiSql, "mysql", {
+    layoutStyle: "dbx",
+    newlineBeforeSemicolon: true,
+  });
+  assert.match(formattedMulti, /SELECT 1\n;\n\nSELECT 2\n;/);
+});
+
+test("formats SQL with semicolons on same line by default when newlineBeforeSemicolon is false (#12440)", async () => {
+  const selectSql = "SELECT id, name FROM users WHERE id = 1;";
+  const formattedSelect = await formatSqlText(selectSql, "mysql", {
+    layoutStyle: "dbx",
+    newlineBeforeSemicolon: false,
+  });
+  assert.match(formattedSelect, /1;$/);
+  assert.doesNotMatch(formattedSelect, /\n;$/);
+
+  const collapsedSql = "SELECT 1;";
+  const formattedCollapsed = await formatSqlText(collapsedSql, "mysql", {
+    layoutStyle: "dbx",
+    newlineBeforeSemicolon: false,
+  });
+  assert.equal(formattedCollapsed, "SELECT 1;");
+});

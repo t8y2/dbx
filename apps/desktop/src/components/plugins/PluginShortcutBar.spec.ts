@@ -109,6 +109,19 @@ describe("plugin shortcut bar", () => {
     expect(document.querySelectorAll("[data-dbx-context-menu] button")).toHaveLength(3);
   });
 
+  it("keeps the remaining sidebar shortcuts when one plugin visibility changes", async () => {
+    mount("sidebar-bottom");
+    mocks.state.editorSettings.pluginShortcuts.hiddenPluginIds = ["a"];
+    mocks.entries.value = mocks.entries.value.filter((entry: any) => entry.pluginId !== "a");
+    await flush();
+    expect([...container.querySelectorAll("[data-shortcut-label]")].map((label) => label.textContent)).toEqual(["Function b", "Function c"]);
+
+    mocks.state.editorSettings.pluginShortcuts.hiddenPluginIds = [];
+    mocks.entries.value = [...mocks.allEntries.value];
+    await flush();
+    expect([...container.querySelectorAll("[data-shortcut-label]")].map((label) => label.textContent)).toEqual(["Function a", "Function b", "Function c"]);
+  });
+
   it.each(["left-top", "right-top", "sidebar-bottom"] as const)("keeps the measured preview inside both edges at %s", async (position) => {
     const original = HTMLElement.prototype.getBoundingClientRect;
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {

@@ -142,11 +142,15 @@ type server struct {
 	usePgViewDefinition             bool
 	usePgFunctionDefinition         bool
 	useLegacyRoutineDefinition      bool
+	routineKindUnsupported          bool
+	routineIdentityFallback         int
 	catalogIdentityUnsupported      bool
+	catalogGeneratedUnsupported     bool
 	catalogOIDUnsupported           bool
 	infoColumnTypeUnsupported       bool
 	infoUdtNameUnsupported          bool
 	indexOrdinalityUnsupported      bool
+	indexKeyCountUnsupported        bool
 	triggerPrettyUnsupported        bool
 	triggerInternalUnsupported      bool
 	constraintDefinitionUnsupported bool
@@ -422,7 +426,13 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		result, err := s.listTriggers(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
 	case "get_object_source":
-		result, err := s.getObjectSourceForRelation(stringParam(params, "schema"), stringParam(params, "name"), stringParam(params, "object_type"), stringParam(params, "relation_name"))
+		var signature *string
+		if raw, ok := params["signature"]; ok {
+			if err := json.Unmarshal(raw, &signature); err != nil {
+				return nil, false, fmt.Errorf("invalid routine signature: %w", err)
+			}
+		}
+		result, err := s.getObjectSourceWithSignature(stringParam(params, "schema"), stringParam(params, "name"), stringParam(params, "object_type"), stringParam(params, "relation_name"), signature)
 		return result, false, err
 	case "get_type_details":
 		result, err := s.getTypeDetails(stringParam(params, "schema"), stringParam(params, "name"))
@@ -487,11 +497,15 @@ func (s *server) connect(cp connectParams) error {
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
 	s.useLegacyRoutineDefinition = false
+	s.routineKindUnsupported = false
+	s.routineIdentityFallback = 0
 	s.catalogIdentityUnsupported = false
+	s.catalogGeneratedUnsupported = false
 	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
 	s.indexOrdinalityUnsupported = false
+	s.indexKeyCountUnsupported = false
 	s.triggerPrettyUnsupported = false
 	s.triggerInternalUnsupported = false
 	s.constraintDefinitionUnsupported = false
@@ -687,11 +701,15 @@ func (s *server) disconnect() error {
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
 	s.useLegacyRoutineDefinition = false
+	s.routineKindUnsupported = false
+	s.routineIdentityFallback = 0
 	s.catalogIdentityUnsupported = false
+	s.catalogGeneratedUnsupported = false
 	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
 	s.indexOrdinalityUnsupported = false
+	s.indexKeyCountUnsupported = false
 	s.triggerPrettyUnsupported = false
 	s.triggerInternalUnsupported = false
 	s.constraintDefinitionUnsupported = false
@@ -1394,7 +1412,13 @@ func isNativeDSNSpace(value byte) bool {
 }
 
 func isKingbaseJDBCURL(value string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "jdbc:kingbase8://")
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, prefix := range []string{"jdbc:kingbase://", "jdbc:kingbase8://", "jdbc:kingbase83://", "jdbc:kingbase86://"} {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func quoteDSNValue(value string) string {
@@ -1688,6 +1712,12 @@ func normalizeValue(value any, columnTypeName string) any {
 		}
 		return map[string]string{"$binary": base64.StdEncoding.EncodeToString(typed)}
 	case time.Time:
+		// A "time" column holds a time of day and no date. gokb decodes one into a
+		// time.Time on Go's zero date, so formatting a date part shows every time of
+		// day as 0000-01-01T<time> (issue #12188).
+		if isKingbaseTimeOnlyType(columnTypeName) {
+			return typed.Format("15:04:05.999999999")
+		}
 		// KingBase "timestamp"/"date" columns are wall-clock values with no timezone
 		// meaning; the gokb driver decodes them into a time.Time labeled with the
 		// process-local zone, which is not a real UTC instant. Formatting those with
@@ -1710,13 +1740,27 @@ func normalizeValue(value any, columnTypeName string) any {
 }
 
 func isKingbaseTimezoneLessDateTime(columnTypeName string) bool {
-	normalized := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(columnTypeName), " ", ""))
-	switch normalized {
-	case "DATE", "TIMESTAMP", "TIME":
+	switch normalizedKingbaseColumnType(columnTypeName) {
+	case "DATE", "TIMESTAMP":
 		return true
 	default:
 		return false
 	}
+}
+
+// isKingbaseTimeOnlyType matches the type names a "time" column can carry: the
+// driver's own name (`DatabaseTypeName`) and the information_schema spelling.
+func isKingbaseTimeOnlyType(columnTypeName string) bool {
+	switch normalizedKingbaseColumnType(columnTypeName) {
+	case "TIME", "TIMEWITHOUTTIMEZONE":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizedKingbaseColumnType(columnTypeName string) string {
+	return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(columnTypeName), " ", ""))
 }
 
 func isTextBytes(value []byte) bool {

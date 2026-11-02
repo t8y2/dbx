@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick, type App } from "vue";
+import { createApp, h, nextTick, reactive, ref, unref, type App, type Ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -22,14 +22,12 @@ function sampleFile(sql: string): SavedSqlFile {
   };
 }
 
-function mountSnippet(file: SavedSqlFile, query: string, onSelectMatch?: (match: any) => void) {
+function mountSnippet(file: SavedSqlFile, query: string | Ref<string>, onSelectMatch?: (match: any) => void) {
   setActivePinia(createPinia());
   const host = document.createElement("div");
   document.body.appendChild(host);
-  const app = createApp(SqlLibrarySearchSnippet, {
-    file,
-    query,
-    onSelectMatch,
+  const app = createApp({
+    render: () => h(SqlLibrarySearchSnippet, { file, query: unref(query), onSelectMatch }),
   });
   app.use(i18n);
   app.mount(host);
@@ -127,5 +125,30 @@ describe("SqlLibrarySearchSnippet", () => {
 
     snippetRows = host.querySelectorAll(".group\\/snippet");
     expect(snippetRows).toHaveLength(3);
+  });
+  it("keeps expanded results across refreshes but resets for a different query", async () => {
+    const file = reactive(sampleFile(Array.from({ length: 5 }, () => "SELECT needle").join("\n")));
+    const query = ref("needle");
+    const host = mountSnippet(file, query);
+    await nextTick();
+    host.querySelector<HTMLButtonElement>("button")!.click();
+    await nextTick();
+    expect(host.querySelectorAll("mark")).toHaveLength(5);
+    file.sql += "\nSELECT needle";
+    await nextTick();
+    expect(host.querySelectorAll("mark")).toHaveLength(6);
+    query.value = "SELECT";
+    await nextTick();
+    expect(host.querySelectorAll("mark")).toHaveLength(3);
+  });
+
+  it("reports the preview cap without understating matching line counts", async () => {
+    const host = mountSnippet(sampleFile(Array.from({ length: 150 }, () => "SELECT needle").join("\n")), "needle");
+    await nextTick();
+    expect(host.querySelector<HTMLButtonElement>("button")?.textContent).toContain("147");
+    expect(host.textContent).toContain(i18n.global.t("sqlLibrary.matchPreviewLimit", { limit: 100, total: 150 }));
+    host.querySelector<HTMLButtonElement>("button")!.click();
+    await nextTick();
+    expect(host.querySelectorAll("mark")).toHaveLength(100);
   });
 });

@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
-import { mqttGetBrokerInfo, mqttListTopics, mqttListSavedTopicConfigs, mqttGetMessages, mqttSubscribe, mqttUnsubscribe, mqttSaveTopicConfig, mqttDeleteTopicConfig, mqttClearMessages } from "@/lib/backend/api";
+import { mqttGetBrokerInfo, mqttListTopics, mqttListSavedTopicConfigs, mqttGetMessages, mqttSubscribe, mqttUnsubscribe, mqttSaveTopicConfig, mqttDeleteTopicConfig, mqttClearMessages, mqttDeleteMessage } from "@/lib/backend/api";
 import type { MqttBrokerInfo, MqttSavedTopic, MqttTopicNode, MqttMessage, MqttMessageDirection, MqttQoS } from "@/types/mqtt";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import TopicTreeNode from "./TopicTreeNode.vue";
 import MqttPublishPanel from "./MqttPublishDialog.vue";
 import { decodePayload, PAYLOAD_ENCODINGS, PAYLOAD_ENCODING_LABELS, type PayloadEncoding } from "@/lib/mqtt/mqttPayloadCodec";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
-import { ChevronDown, ChevronUp, Pause, Play } from "@lucide/vue";
+import { ChevronDown, ChevronUp, Copy, Pause, Play, Trash2 } from "@lucide/vue";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 interface Props {
@@ -28,11 +30,13 @@ interface MqttTabUiState {
   messageDirectionFilter?: MqttMessageDirectionFilter;
   showSubscriptionDialog?: boolean;
   formTopic?: string;
+  formAlias?: string;
   formQos?: MqttQoS;
   formNoLocal?: boolean;
   formEnabled?: boolean;
   editingTopic?: string | null;
   publishPanelCollapsed?: boolean;
+  pollingIntervalMs?: number;
 }
 
 interface MqttMessagePreview extends MqttMessage {
@@ -41,6 +45,14 @@ interface MqttMessagePreview extends MqttMessage {
 }
 
 type MqttMessageDirectionFilter = "all" | MqttMessageDirection;
+
+const DEFAULT_MQTT_POLLING_INTERVAL_MS = 1000;
+const MQTT_POLLING_INTERVAL_OPTIONS = [
+  { value: 1000, label: "1s" },
+  { value: 2000, label: "2s" },
+  { value: 3000, label: "3s" },
+  { value: 5000, label: "5s" },
+] as const;
 
 const { initialState: restoredUiState, track: trackUiState } = useTabUiState<MqttTabUiState>({}, "MqttAdminConsole");
 
@@ -51,10 +63,14 @@ const messages = ref<MqttMessage[]>([]);
 const collapsedMessageKeys = ref<Set<string>>(new Set());
 const noLocalSubscribe = ref(false);
 const selectedTopic = ref<string>(restoredUiState.selectedTopic ?? props.initialTopic ?? "");
+const publishInitialTopic = ref(selectedTopic.value);
+const publishTopic = ref(selectedTopic.value);
 const loading = ref(true);
 const error = ref<string | null>(null);
+const pollingIntervalMs = ref<number>(MQTT_POLLING_INTERVAL_OPTIONS.some((opt) => opt.value === restoredUiState.pollingIntervalMs) ? restoredUiState.pollingIntervalMs! : DEFAULT_MQTT_POLLING_INTERVAL_MS);
 const pollingTimer = ref<ReturnType<typeof setInterval> | null>(null);
 const messageListRef = ref<HTMLElement | null>(null);
+const contextMenuMessage = ref<MqttMessagePreview | null>(null);
 const messagesPaused = ref(restoredUiState.messagesPaused ?? false);
 const displayEncoding = ref<PayloadEncoding>(restoredUiState.displayEncoding ?? "plaintext");
 const topicSearch = ref(restoredUiState.topicSearch ?? "");
@@ -63,6 +79,7 @@ const messageDirectionFilter = ref<MqttMessageDirectionFilter>(restoredUiState.m
 const showSubscriptionDialog = ref(restoredUiState.showSubscriptionDialog ?? false);
 const savingSubscription = ref(false);
 const formTopic = ref(restoredUiState.formTopic ?? "");
+const formAlias = ref(restoredUiState.formAlias ?? "");
 const formQos = ref<MqttQoS>(restoredUiState.formQos ?? "atmostonce");
 const formNoLocal = ref(restoredUiState.formNoLocal ?? false);
 const formEnabled = ref(restoredUiState.formEnabled ?? true);
@@ -70,6 +87,23 @@ const editingTopic = ref<string | null>(restoredUiState.editingTopic ?? null);
 const MQTT_PUBLISH_PANEL_COLLAPSED_STORAGE_KEY = "dbx-mqtt-publish-panel-collapsed";
 const MQTT_MESSAGE_HISTORY_LIMIT = 400;
 const publishPanelCollapsed = ref(restoredUiState.publishPanelCollapsed ?? safeLocalStorageGet(MQTT_PUBLISH_PANEL_COLLAPSED_STORAGE_KEY) === "true");
+
+const subscriptionDialogDragOffset = ref({ x: 0, y: 0 });
+const isDraggingSubscriptionDialog = ref(false);
+const subscriptionDialogDragStart = ref({ x: 0, y: 0 });
+const subscriptionDialogDragStartOffset = ref({ x: 0, y: 0 });
+const subscriptionDialogDragStartRect = ref<DOMRect | null>(null);
+const activeSubscriptionDialogPointerId = ref<number | null>(null);
+const subscriptionDialogContentStyle = computed(() => {
+  const { x, y } = subscriptionDialogDragOffset.value;
+  if (isDraggingSubscriptionDialog.value || x !== 0 || y !== 0) {
+    return {
+      transform: `translate(${x}px, ${y}px)`,
+      transition: isDraggingSubscriptionDialog.value ? "none" : "transform 0.15s ease-out",
+    };
+  }
+  return {};
+});
 
 trackUiState(() => ({
   selectedTopic: selectedTopic.value,
@@ -80,12 +114,20 @@ trackUiState(() => ({
   messageDirectionFilter: messageDirectionFilter.value,
   showSubscriptionDialog: showSubscriptionDialog.value,
   formTopic: formTopic.value,
+  formAlias: formAlias.value,
   formQos: formQos.value,
   formNoLocal: formNoLocal.value,
   formEnabled: formEnabled.value,
   editingTopic: editingTopic.value,
   publishPanelCollapsed: publishPanelCollapsed.value,
+  pollingIntervalMs: pollingIntervalMs.value,
 }));
+
+function suggestPublishTopic(topic: string, force = false) {
+  if (!force && publishTopic.value.length > 0) return;
+  publishTopic.value = topic;
+  publishInitialTopic.value = topic;
+}
 
 const connected = computed(() => brokerInfo.value?.connected ?? false);
 const mqtt5 = computed(() => brokerInfo.value?.protocolVersion?.includes("5") ?? false);
@@ -182,6 +224,7 @@ async function handleSubscribe(topic: string, qos: MqttQoS = "atmostonce", noLoc
   try {
     await mqttSubscribe(props.connectionId, topic, qos, noLocal);
     selectedTopic.value = topic;
+    suggestPublishTopic(topic);
     await refreshData();
   } catch (e) {
     error.value = String(e);
@@ -207,7 +250,10 @@ async function handleDelete(config: MqttSavedTopic) {
   try {
     if (subscribedTopics.value.some(([topic]) => topic === config.topic)) await mqttUnsubscribe(props.connectionId, config.topic);
     await mqttDeleteTopicConfig(props.connectionId, config.topic);
-    if (selectedTopic.value === config.topic) selectedTopic.value = "";
+    if (selectedTopic.value === config.topic) {
+      selectedTopic.value = "";
+      suggestPublishTopic("");
+    }
     await refreshData();
   } catch (e) {
     error.value = String(e);
@@ -215,8 +261,10 @@ async function handleDelete(config: MqttSavedTopic) {
 }
 
 function openSubscriptionDialog() {
+  resetSubscriptionDialogDrag();
   editingTopic.value = null;
   formTopic.value = "";
+  formAlias.value = "";
   formQos.value = "atmostonce";
   formNoLocal.value = false;
   formEnabled.value = true;
@@ -225,13 +273,67 @@ function openSubscriptionDialog() {
 }
 
 function editSubscription(config: MqttSavedTopic) {
+  resetSubscriptionDialogDrag();
   editingTopic.value = config.topic;
   formTopic.value = config.topic;
+  formAlias.value = config.alias ?? "";
   formQos.value = config.qos;
   formNoLocal.value = config.noLocal === true;
   formEnabled.value = config.enabled !== false;
   error.value = null;
   showSubscriptionDialog.value = true;
+}
+
+function resetSubscriptionDialogDrag() {
+  subscriptionDialogDragOffset.value = { x: 0, y: 0 };
+  isDraggingSubscriptionDialog.value = false;
+  activeSubscriptionDialogPointerId.value = null;
+  subscriptionDialogDragStartRect.value = null;
+}
+
+function startSubscriptionDialogDrag(event: PointerEvent) {
+  if (event.button !== 0) return;
+  const dialogContent = (event.currentTarget as HTMLElement).closest<HTMLElement>('[data-slot="dialog-content"]');
+  if (!dialogContent) return;
+
+  subscriptionDialogDragStartRect.value = dialogContent.getBoundingClientRect();
+  subscriptionDialogDragStart.value = { x: event.clientX, y: event.clientY };
+  subscriptionDialogDragStartOffset.value = { ...subscriptionDialogDragOffset.value };
+  activeSubscriptionDialogPointerId.value = event.pointerId;
+  isDraggingSubscriptionDialog.value = true;
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+
+function moveSubscriptionDialog(event: PointerEvent) {
+  const rect = subscriptionDialogDragStartRect.value;
+  if (!isDraggingSubscriptionDialog.value || event.pointerId !== activeSubscriptionDialogPointerId.value || !rect) return;
+
+  const startOffset = subscriptionDialogDragStartOffset.value;
+  const deltaX = event.clientX - subscriptionDialogDragStart.value.x;
+  const deltaY = event.clientY - subscriptionDialogDragStart.value.y;
+  const margin = 8;
+  const minX = startOffset.x + margin - rect.left;
+  const maxX = startOffset.x + window.innerWidth - margin - rect.right;
+  const minY = startOffset.y + margin - rect.top;
+  const maxY = startOffset.y + window.innerHeight - margin - rect.bottom;
+  const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), Math.max(min, max));
+
+  subscriptionDialogDragOffset.value = {
+    x: clamp(startOffset.x + deltaX, minX, maxX),
+    y: clamp(startOffset.y + deltaY, minY, maxY),
+  };
+}
+
+function endSubscriptionDialogDrag(event: PointerEvent) {
+  if (!isDraggingSubscriptionDialog.value || event.pointerId !== activeSubscriptionDialogPointerId.value) return;
+  isDraggingSubscriptionDialog.value = false;
+  activeSubscriptionDialogPointerId.value = null;
+  subscriptionDialogDragStartRect.value = null;
+  try {
+    (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+  } catch {
+    // Pointer capture may already be released when the pointer is cancelled.
+  }
 }
 
 function validTopicFilter(topic: string): boolean {
@@ -266,12 +368,13 @@ async function saveSubscription() {
   try {
     // Save the new configuration first so a broker failure cannot remove the
     // previous configuration or leave the edited topic without a retry path.
-    await mqttSaveTopicConfig(props.connectionId, topic, formQos.value, formNoLocal.value, formEnabled.value);
+    await mqttSaveTopicConfig(props.connectionId, topic, formQos.value, formNoLocal.value, formEnabled.value, formAlias.value.trim());
     if (formEnabled.value) await mqttSubscribe(props.connectionId, topic, formQos.value, formNoLocal.value);
     else if (!topicChanged && previousWasActive) await mqttUnsubscribe(props.connectionId, topic);
     if (topicChanged && previousWasActive && previousTopic) await mqttUnsubscribe(props.connectionId, previousTopic);
     if (topicChanged && previousTopic) await mqttDeleteTopicConfig(props.connectionId, previousTopic);
     selectedTopic.value = topic;
+    suggestPublishTopic(topic);
     showSubscriptionDialog.value = false;
     await refreshData();
   } catch (e) {
@@ -284,6 +387,7 @@ async function saveSubscription() {
 
 function handleTopicClick(topic: string) {
   selectedTopic.value = topic;
+  suggestPublishTopic(topic, true);
   void refreshData();
 }
 
@@ -311,6 +415,42 @@ async function handleClearMessages() {
   }
 }
 
+async function copyMessageValue(value: string) {
+  try {
+    await copyToClipboard(value);
+  } catch (e) {
+    error.value = t("grid.copyFailed", { message: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+async function deleteMessage(msg: MqttMessagePreview) {
+  try {
+    await mqttDeleteMessage(props.connectionId, msg);
+    const index = messagePreviews.value.findIndex((candidate) => candidate.previewKey === msg.previewKey);
+    if (index !== -1) messages.value.splice(index, 1);
+    const nextCollapsedMessageKeys = new Set(collapsedMessageKeys.value);
+    nextCollapsedMessageKeys.delete(msg.previewKey);
+    collapsedMessageKeys.value = nextCollapsedMessageKeys;
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+function messageContextMenuItems(): ContextMenuItem[] {
+  const msg = contextMenuMessage.value;
+  if (!msg) return [];
+  return [
+    { label: t("connection.mqttCopyPayload"), icon: Copy, action: () => void copyMessageValue(formatMessagePayload(msg)) },
+    { label: t("connection.mqttCopyTopic"), icon: Copy, action: () => void copyMessageValue(msg.topic) },
+    { label: t("connection.mqttDeleteMessage"), icon: Trash2, variant: "destructive", action: () => void deleteMessage(msg) },
+  ];
+}
+
+function openMessageContextMenu(event: MouseEvent, msg: MqttMessagePreview, openMenu: (event: MouseEvent) => void) {
+  contextMenuMessage.value = msg;
+  openMenu(event);
+}
+
 function startPolling() {
   stopPolling();
   pollingTimer.value = setInterval(async () => {
@@ -321,7 +461,11 @@ function startPolling() {
     } catch {
       /* ignore polling errors */
     }
-  }, 3000);
+  }, pollingIntervalMs.value);
+}
+
+function handlePollingIntervalChange() {
+  startPolling();
 }
 
 function stopPolling() {
@@ -346,9 +490,32 @@ function toggleMessagePayload(messageKey: string) {
   collapsedMessageKeys.value = nextCollapsedMessageKeys;
 }
 
+function collapseAllMessagePayloads() {
+  const nextCollapsedMessageKeys = new Set(collapsedMessageKeys.value);
+  for (const msg of filteredMessages.value) nextCollapsedMessageKeys.add(msg.previewKey);
+  collapsedMessageKeys.value = nextCollapsedMessageKeys;
+}
+
+function expandAllMessagePayloads() {
+  if (filteredMessages.value.length === 0) {
+    collapsedMessageKeys.value = new Set();
+    return;
+  }
+  const keysToExpand = new Set(filteredMessages.value.map((msg) => msg.previewKey));
+  const nextCollapsedMessageKeys = new Set([...collapsedMessageKeys.value].filter((key) => !keysToExpand.has(key)));
+  collapsedMessageKeys.value = nextCollapsedMessageKeys;
+}
+
 function formatMessagePayload(msg: MqttMessage): string {
   if (displayEncoding.value === "plaintext") return messagePayloadText(msg);
   return decodePayload(msg.payloadBase64, displayEncoding.value);
+}
+
+function formatMessageTimestamp(timestamp: number): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "-";
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 watch(
@@ -356,6 +523,7 @@ watch(
   (topic) => {
     if (topic !== undefined && topic !== selectedTopic.value) {
       selectedTopic.value = topic;
+      suggestPublishTopic(topic, true);
       void refreshData();
     }
   },
@@ -481,10 +649,30 @@ onUnmounted(stopPolling);
               <select v-model="displayEncoding" class="h-6 rounded border bg-transparent px-1.5 text-[11px] text-muted-foreground outline-none">
                 <option v-for="enc in PAYLOAD_ENCODINGS" :key="enc" :value="enc">{{ PAYLOAD_ENCODING_LABELS[enc] }}</option>
               </select>
+              <select
+                v-model.number="pollingIntervalMs"
+                data-testid="mqtt-refresh-interval"
+                class="h-6 rounded border bg-transparent px-1.5 text-[11px] text-muted-foreground outline-none"
+                :aria-label="t('connection.mqttRefreshInterval')"
+                :title="t('connection.mqttRefreshInterval')"
+                @change="handlePollingIntervalChange"
+              >
+                <option v-for="option in MQTT_POLLING_INTERVAL_OPTIONS" :key="option.value" :value="option.value">
+                  {{ option.label }}
+                </option>
+              </select>
               <Button size="sm" variant="ghost" class="h-6 gap-1 px-2 text-[11px] font-normal normal-case" :title="messagesPaused ? t('connection.mqttResumeMessages') : t('connection.mqttPauseMessages')" @click="toggleMessagesPaused">
                 <Play v-if="messagesPaused" class="h-3.5 w-3.5" />
                 <Pause v-else class="h-3.5 w-3.5" />
                 <span>{{ messagesPaused ? t("connection.mqttResumeMessages") : t("connection.mqttPauseMessages") }}</span>
+              </Button>
+              <Button type="button" size="sm" variant="ghost" data-testid="mqtt-message-payload-collapse-all" class="h-6 gap-1 px-2 text-[11px] font-normal normal-case" :disabled="filteredMessages.length === 0" :title="t('connection.mqttCollapseAllPayloads')" @click="collapseAllMessagePayloads">
+                <ChevronUp class="h-3.5 w-3.5" />
+                <span>{{ t("connection.mqttCollapseAllPayloads") }}</span>
+              </Button>
+              <Button type="button" size="sm" variant="ghost" data-testid="mqtt-message-payload-expand-all" class="h-6 gap-1 px-2 text-[11px] font-normal normal-case" :disabled="filteredMessages.length === 0" :title="t('connection.mqttExpandAllPayloads')" @click="expandAllMessagePayloads">
+                <ChevronDown class="h-3.5 w-3.5" />
+                <span>{{ t("connection.mqttExpandAllPayloads") }}</span>
               </Button>
               <Button
                 size="sm"
@@ -501,58 +689,61 @@ onUnmounted(stopPolling);
               </Button>
             </div>
           </div>
-          <div ref="messageListRef" data-testid="mqtt-message-list" class="flex min-h-0 flex-1 flex-col overflow-auto">
-            <div v-if="messages.length === 0" class="p-4 text-center text-xs text-muted-foreground">{{ t("connection.mqttNoMessages") }}</div>
-            <div v-else-if="filteredMessages.length === 0" data-testid="mqtt-no-matching-messages" class="p-4 text-center text-xs text-muted-foreground">{{ t("connection.mqttNoMatchingMessages") }}</div>
-            <div
-              v-for="msg in filteredMessages"
-              :key="msg.previewKey"
-              data-testid="mqtt-message"
-              class="w-full cursor-pointer border-b px-3 py-2 text-xs"
-              :class="
-                msg.direction === 'sent'
-                  ? 'ml-auto max-w-[85%] rounded-l-md border-r-2 border-emerald-400 bg-emerald-50/70 hover:bg-emerald-100/70 dark:border-emerald-500 dark:bg-emerald-950/30 dark:hover:bg-emerald-950/50'
-                  : 'mr-auto max-w-[85%] rounded-r-md border-l-2 border-blue-400 bg-blue-50/70 hover:bg-blue-100/70 dark:border-blue-500 dark:bg-blue-950/30 dark:hover:bg-blue-950/50'
-              "
-              @click="handleMessageClick(msg.topic)"
-            >
-              <div class="mb-0.5 flex items-center gap-2">
-                <span v-if="msg.direction === 'sent'" class="shrink-0 text-[10px] font-bold text-emerald-600 dark:text-emerald-400">{{ t("connection.mqttSent") }}</span>
-                <span v-else class="shrink-0 text-[10px] font-bold text-blue-600 dark:text-blue-400">{{ t("connection.mqttReceived") }}</span>
-                <span class="truncate font-mono font-medium text-blue-700 dark:text-blue-300">{{ msg.topic }}</span>
-                <span class="shrink-0 text-muted-foreground">QoS{{ msg.qos }}</span>
-                <span v-if="msg.retain" class="shrink-0 text-[10px] font-medium text-amber-600 dark:text-amber-400">{{ t("connection.mqttRetained") }}</span>
-                <Button
-                  type="button"
-                  size="xs"
-                  variant="ghost"
-                  data-testid="mqtt-message-payload-toggle"
-                  class="ml-auto h-5 gap-0.5 px-1.5 text-[10px] font-normal"
-                  :title="isMessagePayloadCollapsed(msg.previewKey) ? t('connection.mqttExpandPayload') : t('connection.mqttCollapsePayload')"
-                  :aria-expanded="!isMessagePayloadCollapsed(msg.previewKey)"
-                  :aria-controls="msg.payloadElementId"
-                  @click.stop="toggleMessagePayload(msg.previewKey)"
-                >
-                  <ChevronDown v-if="isMessagePayloadCollapsed(msg.previewKey)" class="h-3 w-3" />
-                  <ChevronUp v-else class="h-3 w-3" />
-                  <span>{{ isMessagePayloadCollapsed(msg.previewKey) ? t("connection.mqttExpandPayload") : t("connection.mqttCollapsePayload") }}</span>
-                  <span class="sr-only">: {{ msg.topic }}</span>
-                </Button>
+          <CustomContextMenu :items="messageContextMenuItems" v-slot="{ onContextMenu }">
+            <div ref="messageListRef" data-testid="mqtt-message-list" class="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-3">
+              <div v-if="messages.length === 0" class="p-4 text-center text-xs text-muted-foreground">{{ t("connection.mqttNoMessages") }}</div>
+              <div v-else-if="filteredMessages.length === 0" data-testid="mqtt-no-matching-messages" class="p-4 text-center text-xs text-muted-foreground">{{ t("connection.mqttNoMatchingMessages") }}</div>
+              <div
+                v-for="msg in filteredMessages"
+                :key="msg.previewKey"
+                data-testid="mqtt-message"
+                class="w-full cursor-pointer border px-3 py-2 text-xs"
+                :class="
+                  msg.direction === 'sent'
+                    ? 'ml-auto max-w-[85%] rounded-l-md border-r-2 border-emerald-400 bg-emerald-50/70 hover:bg-emerald-100/70 dark:border-emerald-500 dark:bg-emerald-950/30 dark:hover:bg-emerald-950/50'
+                    : 'mr-auto max-w-[85%] rounded-r-md border-l-2 border-blue-400 bg-blue-50/70 hover:bg-blue-100/70 dark:border-blue-500 dark:bg-blue-950/30 dark:hover:bg-blue-950/50'
+                "
+                @click="handleMessageClick(msg.topic)"
+                @contextmenu="openMessageContextMenu($event, msg, onContextMenu)"
+              >
+                <div class="mb-0.5 flex items-center gap-2">
+                  <span v-if="msg.direction === 'sent'" class="shrink-0 text-[10px] font-bold text-emerald-600 dark:text-emerald-400">{{ t("connection.mqttSent") }}</span>
+                  <span v-else class="shrink-0 text-[10px] font-bold text-blue-600 dark:text-blue-400">{{ t("connection.mqttReceived") }}</span>
+                  <span class="truncate font-mono font-medium text-blue-700 dark:text-blue-300">{{ msg.topic }}</span>
+                  <span class="shrink-0 text-muted-foreground">QoS{{ msg.qos }}</span>
+                  <span v-if="msg.retain" class="shrink-0 text-[10px] font-medium text-amber-600 dark:text-amber-400">{{ t("connection.mqttRetained") }}</span>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    data-testid="mqtt-message-payload-toggle"
+                    class="ml-auto h-5 gap-0.5 px-1.5 text-[10px] font-normal"
+                    :title="isMessagePayloadCollapsed(msg.previewKey) ? t('connection.mqttExpandPayload') : t('connection.mqttCollapsePayload')"
+                    :aria-expanded="!isMessagePayloadCollapsed(msg.previewKey)"
+                    :aria-controls="msg.payloadElementId"
+                    @click.stop="toggleMessagePayload(msg.previewKey)"
+                  >
+                    <ChevronDown v-if="isMessagePayloadCollapsed(msg.previewKey)" class="h-3 w-3" />
+                    <ChevronUp v-else class="h-3 w-3" />
+                    <span>{{ isMessagePayloadCollapsed(msg.previewKey) ? t("connection.mqttExpandPayload") : t("connection.mqttCollapsePayload") }}</span>
+                    <span class="sr-only">: {{ msg.topic }}</span>
+                  </Button>
+                </div>
+                <div :id="msg.payloadElementId" data-testid="mqtt-message-payload" class="break-all whitespace-pre-wrap font-mono text-muted-foreground" :hidden="isMessagePayloadCollapsed(msg.previewKey)">
+                  <template v-if="!isMessagePayloadCollapsed(msg.previewKey)">{{ formatMessagePayload(msg) }}</template>
+                </div>
+                <time class="mt-1 block text-[10px] tabular-nums text-muted-foreground/70">{{ formatMessageTimestamp(msg.receivedAtMs) }}</time>
               </div>
-              <div :id="msg.payloadElementId" data-testid="mqtt-message-payload" class="break-all whitespace-pre-wrap font-mono text-muted-foreground" :hidden="isMessagePayloadCollapsed(msg.previewKey)">
-                <template v-if="!isMessagePayloadCollapsed(msg.previewKey)">{{ formatMessagePayload(msg) }}</template>
-              </div>
-              <div class="mt-0.5 text-[10px] text-muted-foreground/60">{{ new Date(msg.receivedAtMs).toLocaleTimeString() }}</div>
             </div>
-          </div>
+          </CustomContextMenu>
         </div>
-        <MqttPublishPanel v-if="connected" v-show="!publishPanelCollapsed" :connection-id="connectionId" :initial-topic="selectedTopic" @published="handleMessagePublished" />
+        <MqttPublishPanel v-if="connected" v-show="!publishPanelCollapsed" :connection-id="connectionId" :initial-topic="publishInitialTopic" @topic-changed="publishTopic = $event" @published="handleMessagePublished" />
       </div>
     </div>
 
     <Dialog v-model:open="showSubscriptionDialog">
-      <DialogContent class="sm:max-w-md">
-        <DialogHeader>
+      <DialogContent :style="subscriptionDialogContentStyle" class="sm:max-w-md">
+        <DialogHeader class="cursor-move select-none touch-none" @pointerdown="startSubscriptionDialogDrag" @pointermove="moveSubscriptionDialog" @pointerup="endSubscriptionDialogDrag" @pointercancel="endSubscriptionDialogDrag">
           <DialogTitle>{{ editingTopic ? t("connection.mqttEditSubscription") : t("connection.mqttNewSubscription") }}</DialogTitle>
         </DialogHeader>
         <div class="grid gap-3">
@@ -560,6 +751,10 @@ onUnmounted(stopPolling);
             <span>{{ t("connection.mqttTopicFilter") }}</span>
             <input v-model="formTopic" class="h-8 rounded border bg-transparent px-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring" :placeholder="t('connection.mqttTopicFilterPlaceholder')" :disabled="savingSubscription" @keydown.enter.prevent="saveSubscription" />
             <span class="text-[11px] font-normal text-muted-foreground">{{ t("connection.mqttTopicFilterHint") }}</span>
+          </label>
+          <label class="grid gap-1.5 text-xs font-medium">
+            <span>{{ t("connection.mqttTopicAlias") }}</span>
+            <input v-model="formAlias" data-mqtt-topic-alias class="h-8 rounded border bg-transparent px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring" :disabled="savingSubscription" @keydown.enter.prevent="saveSubscription" />
           </label>
           <label class="grid gap-1.5 text-xs font-medium">
             <span>QoS</span>

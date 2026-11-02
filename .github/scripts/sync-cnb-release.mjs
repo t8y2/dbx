@@ -40,9 +40,7 @@ async function main() {
   });
 
   console.log(`Uploading ${assets.length} CNB asset(s) with concurrency ${args.concurrency}.`);
-  await mapWithConcurrency(assets, args.concurrency, (assetPath) =>
-    uploadWithRetry(client, release.id, assetPath, args.overwriteExisting),
-  );
+  await mapWithConcurrency(assets, args.concurrency, (assetPath) => uploadWithRetry(client, release.id, assetPath, args.overwriteExisting));
 }
 
 function parseArgs(argv) {
@@ -70,9 +68,7 @@ function parseArgs(argv) {
   }
   if (!args.token) throw new Error("CNB_TOKEN is required.");
   if (!args.githubReleasePath || (!args.metadataOnly && !args.assetsDir)) {
-    throw new Error(
-      "Usage: sync-cnb-release.mjs --github-release <release.json> (--assets-dir <dir> | --metadata-only) [--prune-assets] [--make-latest]",
-    );
+    throw new Error("Usage: sync-cnb-release.mjs --github-release <release.json> (--assets-dir <dir> | --metadata-only) [--prune-assets] [--make-latest]");
   }
   if (!Number.isInteger(args.concurrency) || args.concurrency < 1) {
     throw new Error("CNB_UPLOAD_CONCURRENCY must be a positive integer.");
@@ -162,19 +158,13 @@ export class CnbClient {
   }
 
   async deleteAsset(releaseId, assetId) {
-    await this.request(
-      "DELETE",
-      `/${this.repository}/-/releases/${encodeURIComponent(releaseId)}/assets/${encodeURIComponent(assetId)}`,
-    );
+    await this.request("DELETE", `/${this.repository}/-/releases/${encodeURIComponent(releaseId)}/assets/${encodeURIComponent(assetId)}`);
   }
 
   async listReleases(pageSize = 100) {
     const releases = [];
     for (let page = 1; ; page++) {
-      const batch = await this.request(
-        "GET",
-        `/${this.repository}/-/releases?page=${page}&page_size=${pageSize}`,
-      );
+      const batch = await this.request("GET", `/${this.repository}/-/releases?page=${page}&page_size=${pageSize}`);
       if (!Array.isArray(batch)) throw new Error("CNB release list response must be an array.");
       releases.push(...batch);
       if (batch.length < pageSize) return releases;

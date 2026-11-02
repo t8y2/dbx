@@ -1,6 +1,8 @@
 // MQTT HTTP backend stubs (MQTT is not yet supported in web/Docker mode).
 // Throw descriptive errors so the user knows this isn't available.
 
+import type { MqttMessage } from "@/types/mqtt";
+
 function mqttWebNotAvailable(name: string): never {
   throw new Error(`MQTT ${name}: MQTT 功能暂不支持 Web/Docker 模式。请使用桌面版。`);
 }
@@ -13,7 +15,7 @@ export async function mqttSubscribe(_connectionId: string, _topic: string, _qos?
   mqttWebNotAvailable("mqttSubscribe");
 }
 
-export async function mqttSaveTopicConfig(_connectionId: string, _topic: string, _qos: string, _noLocal: boolean, _enabled = false) {
+export async function mqttSaveTopicConfig(_connectionId: string, _topic: string, _qos: string, _noLocal: boolean, _enabled = false, _alias = "") {
   mqttWebNotAvailable("mqttSaveTopicConfig");
 }
 
@@ -47,4 +49,8 @@ export async function mqttGetMessages(_connectionId: string, _topicFilter?: stri
 
 export async function mqttClearMessages(_connectionId: string) {
   mqttWebNotAvailable("mqttClearMessages");
+}
+
+export async function mqttDeleteMessage(_connectionId: string, _message: MqttMessage) {
+  mqttWebNotAvailable("mqttDeleteMessage");
 }

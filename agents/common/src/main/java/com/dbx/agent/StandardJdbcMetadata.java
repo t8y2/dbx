@@ -216,13 +216,42 @@ public final class StandardJdbcMetadata {
             Set<String> primaryKeys = primaryKeys(meta, null, schema, table);
             List<ColumnInfo> result = new ArrayList<>();
             appendColumns(result, meta, null, schema, table, primaryKeys);
+
+            // Some drivers resolve table names case-insensitively in SQL but use the exact
+            // table pattern for DatabaseMetaData. Retry only when the driver opts in and
+            // getTables() identifies one unambiguous table name.
+            if (profile.getCaseInsensitiveTableMetadata() && (result.isEmpty() || primaryKeys.isEmpty())) {
+                String resolvedTable = resolveCaseInsensitiveTableName(meta, profile, null, schema, table);
+                if (resolvedTable != null && !resolvedTable.equals(table)) {
+                    Set<String> resolvedPrimaryKeys = primaryKeys(meta, null, schema, resolvedTable);
+                    if (result.isEmpty()) {
+                        appendColumns(result, meta, null, schema, resolvedTable, resolvedPrimaryKeys);
+                    } else {
+                        markPrimaryKeys(result, resolvedPrimaryKeys);
+                    }
+                }
+            }
+
             if (!result.isEmpty() && primaryKeys.isEmpty() && profile.getCatalogFallbackEnabled() && hasConfiguredDatabase(configuredDatabase)) {
                 Set<String> fallbackPrimaryKeys = primaryKeys(meta, configuredDatabase, schema, table);
+                if (profile.getCaseInsensitiveTableMetadata() && fallbackPrimaryKeys.isEmpty()) {
+                    String resolvedTable = resolveCaseInsensitiveTableName(meta, profile, configuredDatabase, schema, table);
+                    if (resolvedTable != null && !resolvedTable.equals(table)) {
+                        fallbackPrimaryKeys = primaryKeys(meta, configuredDatabase, schema, resolvedTable);
+                    }
+                }
                 markPrimaryKeys(result, fallbackPrimaryKeys);
             }
             if (result.isEmpty() && profile.getCatalogFallbackEnabled() && hasConfiguredDatabase(configuredDatabase)) {
                 Set<String> fallbackPrimaryKeys = primaryKeys(meta, configuredDatabase, schema, table);
                 appendColumns(result, meta, configuredDatabase, schema, table, fallbackPrimaryKeys);
+                if (result.isEmpty() && profile.getCaseInsensitiveTableMetadata()) {
+                    String resolvedTable = resolveCaseInsensitiveTableName(meta, profile, configuredDatabase, schema, table);
+                    if (resolvedTable != null && !resolvedTable.equals(table)) {
+                        Set<String> resolvedPrimaryKeys = primaryKeys(meta, configuredDatabase, schema, resolvedTable);
+                        appendColumns(result, meta, configuredDatabase, schema, resolvedTable, resolvedPrimaryKeys);
+                    }
+                }
             }
             return result;
         });
@@ -237,8 +266,20 @@ public final class StandardJdbcMetadata {
     ) {
         return unchecked(() -> {
             List<IndexInfo> result = listIndexesInternal(conn, null, schema, table);
+            if (result.isEmpty() && profile.getCaseInsensitiveTableMetadata()) {
+                String resolvedTable = resolveCaseInsensitiveTableName(conn.getMetaData(), profile, null, schema, table);
+                if (resolvedTable != null && !resolvedTable.equals(table)) {
+                    result = listIndexesInternal(conn, null, schema, resolvedTable);
+                }
+            }
             if (result.isEmpty() && profile.getCatalogFallbackEnabled() && hasConfiguredDatabase(configuredDatabase)) {
                 result = listIndexesInternal(conn, configuredDatabase, schema, table);
+                if (result.isEmpty() && profile.getCaseInsensitiveTableMetadata()) {
+                    String resolvedTable = resolveCaseInsensitiveTableName(conn.getMetaData(), profile, configuredDatabase, schema, table);
+                    if (resolvedTable != null && !resolvedTable.equals(table)) {
+                        result = listIndexesInternal(conn, configuredDatabase, schema, resolvedTable);
+                    }
+                }
             }
             return result;
         });
@@ -453,11 +494,14 @@ public final class StandardJdbcMetadata {
                 if (!completionTableKindAllowed(kind, kinds) || !completionNameMatches(name, request)) {
                     continue;
                 }
+                // An unscoped lookup must keep the owner returned by JDBC so
+                // alias completion can load columns from that physical table.
+                String tableSchema = blankToNull(rs.getString("TABLE_SCHEM"));
                 result.add(new CompletionAssistantCandidate(
                     name,
                     kind,
                     request.getDatabase(),
-                    schema,
+                    tableSchema != null ? tableSchema : schema,
                     null,
                     null,
                     rs.getString("REMARKS"),
@@ -480,7 +524,7 @@ public final class StandardJdbcMetadata {
         if (table == null || table.trim().isEmpty()) {
             return;
         }
-        try (ResultSet rs = meta.getColumns(catalog, blankToNull(schema), table, completionPattern(meta, request))) {
+        try (ResultSet rs = meta.getColumns(catalog, blankToNull(schema), escapeSchemaPattern(meta, table, true), completionPattern(meta, request))) {
             while (rs.next() && result.size() < limit) {
                 String name = rs.getString("COLUMN_NAME");
                 if (!completionNameMatches(name, request)) {
@@ -592,6 +636,36 @@ public final class StandardJdbcMetadata {
         return keys;
     }
 
+    private String resolveCaseInsensitiveTableName(
+        DatabaseMetaData meta,
+        JdbcAgentProfile profile,
+        String catalog,
+        String schema,
+        String requestedTable
+    ) {
+        if (requestedTable == null || requestedTable.trim().isEmpty()) {
+            return null;
+        }
+        Set<String> matches = new LinkedHashSet<>();
+        String[] tableTypes;
+        try {
+            tableTypes = getDriverTableTypes(meta, profile);
+        } catch (Exception ignored) {
+            tableTypes = profile.getTableTypes().toArray(new String[0]);
+        }
+        try (ResultSet rs = meta.getTables(blankToNull(catalog), blankToNull(schema), "%", tableTypes)) {
+            while (rs.next()) {
+                String name = rs.getString("TABLE_NAME");
+                if (name != null && name.equalsIgnoreCase(requestedTable)) {
+                    matches.add(name);
+                }
+            }
+        } catch (Exception ignored) {
+            return null;
+        }
+        return matches.size() == 1 ? matches.iterator().next() : null;
+    }
+
     private static boolean hasConfiguredDatabase(String configuredDatabase) {
         return configuredDatabase != null && !configuredDatabase.trim().isEmpty();
     }
@@ -657,6 +731,31 @@ public final class StandardJdbcMetadata {
         return type;
     }
 
+    private static boolean isSqlServer(DatabaseMetaData meta) {
+        try {
+            String productName = meta.getDatabaseProductName();
+            return productName != null && productName.toLowerCase(Locale.ROOT).contains("sql server");
+        } catch (Exception | AbstractMethodError ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * SQL Server's JDBC driver appends the procedure group number to routine
+     * names ("proc;1"). Use the real object name so the tree, source lookup and
+     * double-click all address the same routine.
+     */
+    private static String stripSqlServerRoutineGroup(String name, boolean sqlServer) {
+        if (!sqlServer || name == null) return name;
+        int semicolon = name.lastIndexOf(';');
+        if (semicolon <= 0 || semicolon == name.length() - 1) return name;
+        for (int i = semicolon + 1; i < name.length(); i++) {
+            char ch = name.charAt(i);
+            if (ch < '0' || ch > '9') return name;
+        }
+        return name.substring(0, semicolon);
+    }
+
     private static void appendRoutines(
         List<ObjectInfo> result,
         DatabaseMetaData meta,
@@ -668,10 +767,11 @@ public final class StandardJdbcMetadata {
         // schema 作为 getProcedures/getFunctions 的 schemaPattern，同样需要转义 _ 和 % 通配符
         // （databend 等驱动除外，见 escapeSchemaPattern）。
         String schemaPattern = escapeSchemaPattern(meta, schema, escapeSchemaWildcards);
+        boolean sqlServer = isSqlServer(meta);
         Set<String> procedureNames = new LinkedHashSet<>();
         try (ResultSet rs = meta.getProcedures(catalog, schemaPattern, "%")) {
             while (rs.next()) {
-                String name = rs.getString("PROCEDURE_NAME");
+                String name = stripSqlServerRoutineGroup(rs.getString("PROCEDURE_NAME"), sqlServer);
                 if (name != null && !name.trim().isEmpty()) {
                     procedureNames.add(name);
                     result.add(new ObjectInfo(name, "PROCEDURE", schemaLabel, rs.getString("REMARKS")));
@@ -682,7 +782,7 @@ public final class StandardJdbcMetadata {
         }
         try (ResultSet rs = meta.getFunctions(catalog, schemaPattern, "%")) {
             while (rs.next()) {
-                String name = rs.getString("FUNCTION_NAME");
+                String name = stripSqlServerRoutineGroup(rs.getString("FUNCTION_NAME"), sqlServer);
                 if (name != null && !name.trim().isEmpty() && !procedureNames.contains(name)) {
                     result.add(new ObjectInfo(name, "FUNCTION", schemaLabel, rs.getString("REMARKS")));
                 }

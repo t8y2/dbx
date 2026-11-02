@@ -8,6 +8,7 @@ import {
   dataGridToolbarIntervalOptions,
   isDataGridToolbarActionCompact,
   isDataGridToolbarCompact,
+  shouldCompactDataGridConditionInput,
   selectDataGridToolbarAddRowItem,
   selectDataGridToolbarAutoRefreshInterval,
   selectDataGridToolbarCopyItem,
@@ -67,6 +68,19 @@ describe("data grid toolbar capabilities", () => {
     expect(isDataGridToolbarCompact(1000, 1100)).toBe(false);
   });
 
+  it("reserves usable condition input width even when the flex row does not overflow", () => {
+    expect(shouldCompactDataGridConditionInput(159)).toBe(true);
+    expect(shouldCompactDataGridConditionInput(160)).toBe(false);
+    expect(shouldCompactDataGridConditionInput(250)).toBe(false);
+  });
+
+  it("accounts for the hidden prefix before restoring condition labels", () => {
+    expect(shouldCompactDataGridConditionInput(210, 60, true)).toBe(true);
+    expect(shouldCompactDataGridConditionInput(235, 60, true)).toBe(true);
+    expect(shouldCompactDataGridConditionInput(236, 60, true)).toBe(false);
+    expect(shouldCompactDataGridConditionInput(Number.NaN)).toBe(false);
+  });
+
   it("progressively compacts toolbar actions as the available width shrinks", () => {
     expect(dataGridToolbarActionCollapseCount(1050, 1440, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)).toBe(0);
     expect(dataGridToolbarActionCollapseCount(1049, 1440, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)).toBe(1);
@@ -80,6 +94,7 @@ describe("data grid toolbar capabilities", () => {
     const visibleActions = ["refresh", "navigation", "addRow", "preview", "save", "rollback"] as const;
 
     expect(DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER.slice(-3)).toEqual(["preview", "save", "rollback"]);
+    expect(DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER.indexOf("deleteColumn")).toBe(DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER.indexOf("deleteRow") + 1);
     expect(isDataGridToolbarActionCompact("refresh", visibleActions, 3)).toBe(true);
     expect(isDataGridToolbarActionCompact("navigation", visibleActions, 3)).toBe(true);
     expect(isDataGridToolbarActionCompact("addRow", visibleActions, 3)).toBe(true);

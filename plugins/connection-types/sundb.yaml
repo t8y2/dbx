@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 630
 dbType: sundb
+compareModes: [schema, data]
 rustVariant: Sundb
 label: 科蓝 SUNDB
 dialect: SunDB

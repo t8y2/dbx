@@ -48,7 +48,7 @@ describe("DataGrid rerun total row count action", () => {
     expect(showDataGridRerunTotalCountAction({ canCalculateTotalRowCount: true, displayedTotalRowCount: NaN, totalRowCountIsExact: true })).toBe(false);
   });
 
-  it("places the rerun icon before the numeric total and keeps the other actions ordered", () => {
+  it("places the text action before the numeric total and keeps the other actions ordered", () => {
     const numericTotal = statusRenderSource.indexOf('typeof $setup.displayedTotalRowCount === "number" && $setup.displayedTotalRowCount >= 0');
     const rerunAction = statusRenderSource.indexOf("$setup.showRerunTotalCountAction && !($setup.totalRowCountBusy && !$setup.manualTotalRowCountLoading)");
     const busyBranch = statusRenderSource.indexOf("if ($setup.totalRowCountBusy && !($setup.showRerunTotalCountAction && $setup.manualTotalRowCountLoading)) {");
@@ -60,9 +60,11 @@ describe("DataGrid rerun total row count action", () => {
     expect(inlineLink).toBeGreaterThan(busyBranch);
   });
 
-  it("renders a spaced rerun icon labelled for the total-count action and disabled while counting", () => {
-    expect(statusRenderSource).toContain('keypath: "grid.totalRowCountWithAction"');
-    expect(rerunBranch).toContain('<button type="button" class="mr-1 inline-flex h-3.5 w-3.5');
+  it("renders an underlined total-count action and disables it while counting", () => {
+    expect(statusRenderSource).not.toContain('keypath: "grid.totalRowCountWithAction"');
+    expect(rerunBranch).toContain('<button type="button" class="text-muted-foreground/70 underline underline-offset-2');
+    expect(rerunBranch).toContain("$setup.totalRowCountLabelKey");
+    expect(rerunBranch).toContain("$setup.displayedTotalRowCount");
     expect(rerunBranch).toContain("disabled:pointer-events-none");
     expect(rerunBranch).toContain("disabled:opacity-50");
     // title/aria-label toggle between idle and busy copy
@@ -72,12 +74,9 @@ describe("DataGrid rerun total row count action", () => {
     expect(rerunBranch).toContain("aria-busy");
   });
 
-  it("swaps the rerun icon for a spinner only while the manual count is in flight and hides decorative icons", () => {
-    expect(rerunBranch).toContain("if ($setup.manualTotalRowCountLoading) {");
-    expect(rerunBranch).toContain("Loader2");
-    expect(rerunBranch).toContain("RefreshCcw");
-    expect(rerunBranch).toContain("h-3 w-3 animate-spin");
-    expect(rerunBranch).toContain("h-3 w-3");
-    expect(rerunBranch).toContain("aria-hidden");
+  it("does not render a decorative refresh icon", () => {
+    expect(rerunBranch).not.toContain("Loader2");
+    expect(rerunBranch).not.toContain("RefreshCcw");
+    expect(rerunBranch).not.toContain("Rows3");
   });
 });

@@ -1,5 +1,6 @@
 import type { Extension } from "@codemirror/state";
 import type { EditorTheme, CustomThemeColors } from "@/stores/settingsStore";
+import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/app/appFonts";
 import { customUiAppearance, type AppCustomUiColors, type AppThemeAppearance, type AppThemePalette } from "@/lib/app/appTheme";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
@@ -10,11 +11,18 @@ import { tags } from "@lezer/highlight";
 // sync with what the SQL tokenizer actually emits.
 export const SQL_BUILTIN_HIGHLIGHT_TAG = tags.standard(tags.name);
 
+// @codemirror/lang-sql tags quoted identifiers (e.g. `col`, "col", [col]) as
+// special(string) by default. In SQL, quoted identifiers represent columns, tables,
+// and database objects — not string literals (#12122). Both the SQL dialect parser
+// configuration and DBX theme highlight styles map this token to identifier/variable
+// color instead of string literal color.
+export const SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG = tags.special(tags.string);
+
 type CodeMirrorStyleSpec = Parameters<typeof import("@codemirror/view").EditorView.theme>[0];
 type LucideIconNode = Array<[string, Record<string, string>]>;
 
 export const EDITOR_FONT_SIZE_CSS_VAR = "--dbx-editor-font-size";
-export const EDITOR_FONT_FAMILY_CSS_VAR = "--dbx-editor-font-family";
+export { EDITOR_FONT_FAMILY_CSS_VAR };
 export const SQL_TABLE_COLOR_CSS_VAR = "--dbx-sql-table-color";
 const EDITOR_SELECTION_BACKGROUND_CSS_VAR = "--dbx-editor-selection-background";
 
@@ -160,7 +168,7 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
     { tag: tags.moduleKeyword, color: c.keyword },
     { tag: tags.operatorKeyword, color: c.keyword },
     { tag: tags.string, color: c.string },
-    { tag: tags.special(tags.string), color: c.string },
+    { tag: SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG, color: c.variable },
     { tag: tags.number, color: c.number },
     { tag: tags.integer, color: c.number },
     { tag: tags.float, color: c.number },
@@ -204,7 +212,6 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
     { tag: tags.namespace, color: c.className },
     { tag: tags.macroName, color: c.function },
     { tag: tags.literal, color: c.string },
-    { tag: tags.special(tags.string), color: c.string },
     { tag: tags.regexp, color: c.string },
     { tag: tags.escape, color: c.string },
     { tag: tags.processingInstruction, color: c.keyword },
@@ -569,11 +576,11 @@ function createIdeEditorTheme(EditorView: typeof import("@codemirror/view").Edit
 
   const highlightStyle = HighlightStyle.define([
     { tag: [tags.keyword, tags.controlKeyword, tags.definitionKeyword, tags.moduleKeyword, tags.operatorKeyword, tags.modifier, tags.bool, tags.null], color: c.keyword, ...(c.keywordBold ? { fontWeight: "bold" } : {}) },
-    { tag: [tags.string, tags.special(tags.string), tags.regexp, tags.escape, tags.inserted], color: c.string, ...(c.stringBold ? { fontWeight: "bold" } : {}) },
+    { tag: [tags.string, tags.regexp, tags.escape, tags.inserted], color: c.string, ...(c.stringBold ? { fontWeight: "bold" } : {}) },
     { tag: [tags.number, tags.integer, tags.float], color: c.number, ...(c.numberBold ? { fontWeight: "bold" } : {}) },
     { tag: [tags.comment, tags.lineComment, tags.blockComment, tags.quote], color: c.comment, fontStyle: "italic" },
     { tag: [tags.typeName, tags.typeOperator, tags.unit], color: c.type },
-    { tag: [tags.name, tags.variableName, tags.definition(tags.variableName)], color: c.variable },
+    { tag: [tags.name, tags.variableName, tags.definition(tags.variableName), SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG], color: c.variable },
     { tag: [tags.function(tags.variableName), tags.function(tags.propertyName), tags.function(tags.name), tags.macroName], color: c.function },
     { tag: [SQL_BUILTIN_HIGHLIGHT_TAG, tags.special(tags.name)], color: c.builtin },
     { tag: [tags.propertyName, tags.labelName, tags.annotation], color: c.property },
@@ -642,6 +649,21 @@ const DATABASE_LINK_ICON: LucideIconNode = [
 ];
 
 const SCHEMA_ICON: LucideIconNode = [["path", { d: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z" }]];
+
+const SEQUENCE_ICON: LucideIconNode = [
+  ["path", { d: "M8 5h13" }],
+  ["path", { d: "M13 12h8" }],
+  ["path", { d: "M13 19h8" }],
+  ["path", { d: "M3 10a2 2 0 0 0 2 2h3" }],
+  ["path", { d: "M3 5v12a2 2 0 0 0 2 2h3" }],
+];
+
+const VARIABLE_ICON: LucideIconNode = [
+  ["path", { d: "M8 21s-4-3-4-9 4-9 4-9" }],
+  ["path", { d: "M16 3s4 3 4 9-4 9-4 9" }],
+  ["line", { x1: "15", x2: "9", y1: "9", y2: "15" }],
+  ["line", { x1: "9", x2: "15", y1: "9", y2: "15" }],
+];
 
 function encodeSvgIcon(iconNode: LucideIconNode): string {
   const body = iconNode
@@ -871,6 +893,36 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       paddingRight: "8px",
       userSelect: "none",
     },
+    ".cm-foldGutter": {
+      width: "16px",
+    },
+    ".cm-foldGutter .cm-gutterElement": {
+      alignItems: "center",
+      cursor: "pointer",
+      display: "flex",
+      justifyContent: "center",
+      padding: "0",
+      userSelect: "none",
+    },
+    ".cm-foldMarker-svg": {
+      alignItems: "center",
+      color: "var(--muted-foreground)",
+      display: "inline-flex",
+      height: "16px",
+      justifyContent: "center",
+      opacity: "0.65",
+      transition: "opacity 0.15s",
+      verticalAlign: "middle",
+      width: "16px",
+    },
+    ".cm-foldMarker-svg:hover": {
+      opacity: "0.95",
+    },
+    ".cm-foldMarker-svg svg": {
+      display: "block",
+      height: "16px",
+      width: "16px",
+    },
     ".cm-run-statement-gutter": {
       minWidth: "28px",
     },
@@ -1098,6 +1150,16 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
     ".cm-completionIcon-schema": {
       color: colorMixValue("var(--amber-500, #f59e0b)", "color-mix(in oklch, var(--amber-500, #f59e0b) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(SCHEMA_ICON),
+    },
+    // Sequences previously reused "variable" without any icon mask, which
+    // rendered a blank slot (#12099). Match the sidebar's emerald ListTree.
+    ".cm-completionIcon-sequence": {
+      color: colorMixValue("var(--emerald-500, #10b981)", "color-mix(in oklch, var(--emerald-500, #10b981) 92%, var(--popover-foreground))"),
+      ...lucideCompletionIconMask(SEQUENCE_ICON),
+    },
+    ".cm-completionIcon-variable": {
+      color: colorMixValue("var(--rose-500, #f43f5e)", "color-mix(in oklch, var(--rose-500, #f43f5e) 92%, var(--popover-foreground))"),
+      ...lucideCompletionIconMask(VARIABLE_ICON),
     },
     // Reuse the table glyph for aliases instead of CodeMirror's default text
     // icon, which is rendered as a solid black square in some themes.

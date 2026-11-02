@@ -25,9 +25,15 @@ assertIncludes("apps/desktop/src/stores/queryStore.ts", "openMqAdmin", "Query st
 
 const manifest = JSON.parse(read("crates/dbx-core/assets/database-drivers.manifest.json"));
 const drivers = Array.isArray(manifest) ? manifest : manifest.drivers;
-assert.ok(drivers?.some((driver) => driver.dbType === "mq"), "Driver manifest must include dbType=mq.");
+assert.ok(
+  drivers?.some((driver) => driver.dbType === "mq"),
+  "Driver manifest must include dbType=mq.",
+);
 const mqDriver = drivers.find((driver) => driver.dbType === "mq");
-assert.ok(mqDriver.driverProfiles?.some((profile) => profile.profile === "rabbitmq"), "MQ driver manifest entry must include a rabbitmq driver profile.");
+assert.ok(
+  mqDriver.driverProfiles?.some((profile) => profile.profile === "rabbitmq"),
+  "MQ driver manifest entry must include a rabbitmq driver profile.",
+);
 
 const mqHttp = read("apps/desktop/src/lib/backend/mq-http.ts");
 assert.ok(!mqHttp.includes('post("/mq/'), "MQ HTTP client must not call unprefixed /mq paths.");
@@ -80,16 +86,8 @@ for (const panel of ["PoliciesPanel.vue", "PermissionsPanel.vue", "RawApiPanel.v
 for (const panel of ["TenantsPanel.vue", "NamespacesPanel.vue", "TopicsPanel.vue", "SubscriptionsPanel.vue"]) {
   assertIncludes(`apps/desktop/src/components/mq/${panel}`, "readOnly", `${panel} must disable mutating actions in read-only mode.`);
 }
-assertIncludes(
-  "apps/desktop/src/components/mq/TopicsPanel.vue",
-  "topics-table-hscroll",
-  "TopicsPanel must keep a shared horizontal scroller so wide RocketMQ action columns stay reachable.",
-);
-assertIncludes(
-  "apps/desktop/src/components/mq/TopicsPanel.vue",
-  "overflow-x: auto",
-  "TopicsPanel horizontal scroller must allow overflow-x.",
-);
+assertIncludes("apps/desktop/src/components/mq/TopicsPanel.vue", "topics-table-hscroll", "TopicsPanel must keep a shared horizontal scroller so wide RocketMQ action columns stay reachable.");
+assertIncludes("apps/desktop/src/components/mq/TopicsPanel.vue", "overflow-x: auto", "TopicsPanel horizontal scroller must allow overflow-x.");
 for (const panel of ["ExchangesPanel.vue", "SendMessagePanel.vue", "rabbitmq/RabbitMqClientsPanel.vue", "ProducerConsumerPanel.vue"]) {
   assertIncludes(`apps/desktop/src/components/mq/${panel}`, "readOnly", `${panel} must disable mutating actions in read-only mode.`);
 }

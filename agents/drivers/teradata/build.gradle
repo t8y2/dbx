@@ -1,6 +1,6 @@
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
-    implementation 'com.teradata.jdbc:terajdbc:20.00.00.60'
+    implementation 'com.teradata.jdbc:terajdbc:20.00.00.62'
 }
 
 tasks.named('shadowJar') {

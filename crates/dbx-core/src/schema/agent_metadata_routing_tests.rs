@@ -1,6 +1,6 @@
 use super::{
-    get_table_comment_core, get_table_ddl_core, list_databases_core, list_object_statistics_core, AppState,
-    ConnectionConfig, DatabaseType, PoolKind,
+    get_table_comment_core, get_table_ddl_core, list_databases_core, list_object_statistics_core, list_objects_core,
+    AppState, ConnectionConfig, DatabaseType, PoolKind,
 };
 use crate::db::agent_driver::{AgentDriverClient, PooledAgentClient};
 use serde_json::{json, Value};
@@ -101,6 +101,45 @@ impl AgentFixture {
         self.state.shutdown(Duration::from_secs(2)).await;
         drop(self.directory);
     }
+}
+
+#[tokio::test]
+async fn oracle_public_object_entry_applies_index_filter_and_offset_once() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    let types = vec!["INDEX".to_string()];
+    let page =
+        list_objects_core(&fixture.state, "conn", "configured", " Mixed ", None, Some(2), Some(2), Some(&types), None)
+            .await
+            .unwrap();
+    assert_eq!(page.iter().map(|object| object.name.as_str()).collect::<Vec<_>>(), ["Ix2", "Ix3"]);
+    assert_eq!(page[0].parent_schema.as_deref(), Some(" Other Owner "));
+    assert_eq!(page[0].parent_name.as_deref(), Some(" T(a) "));
+    let filtered = list_objects_core(
+        &fixture.state,
+        "conn",
+        "configured",
+        " Mixed ",
+        Some("Ix4"),
+        Some(2),
+        Some(0),
+        Some(&types),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(filtered.iter().map(|object| object.name.as_str()).collect::<Vec<_>>(), ["Ix4"]);
+    let calls = fixture.requests("list_objects");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["params"]["offset"], 2);
+    assert_eq!(calls[1]["params"]["filter"], "Ix4");
+    assert_eq!(calls[1]["params"]["limit"], 2);
+    std::fs::write(fixture.control_path("objects-error"), "sql").unwrap();
+    let error =
+        list_objects_core(&fixture.state, "conn", "configured", " Mixed ", None, Some(2), Some(0), Some(&types), None)
+            .await
+            .unwrap_err();
+    assert!(error.contains("fixture sql"));
+    fixture.shutdown().await;
 }
 
 #[tokio::test]
@@ -337,6 +376,30 @@ async fn statistics_fallback_reuses_ephemeral_session_and_closes_it() {
     fixture.wait_for_requests("close_session", 1).await;
     fixture.assert_only_foreground_remains(&foreground).await;
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oceanbase_statistics_routes_through_agent_and_preserves_foreground() {
+    for mode in ["success", "fallback", "sql"] {
+        let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+        let foreground = fixture.foreground().await;
+        std::fs::write(fixture.control_path("statistics"), mode).unwrap();
+        let result = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await;
+        let queries = fixture.requests("execute_query");
+        assert!(queries[0]["params"]["sql"].as_str().unwrap().contains("DBA_OB_TABLET_REPLICAS"));
+        if mode == "sql" {
+            assert!(result.is_err());
+            assert_eq!(queries.len(), 2);
+        } else {
+            let rows = result.unwrap();
+            assert_eq!(rows[0].estimated_rows, Some(12));
+            assert_eq!(rows[0].total_bytes, if mode == "success" { Some(4096) } else { None });
+            assert_eq!(queries.len(), if mode == "success" { 1 } else { 2 });
+        }
+        fixture.wait_for_requests("close_session", 1).await;
+        fixture.assert_only_foreground_remains(&foreground).await;
+        fixture.shutdown().await;
+    }
 }
 
 #[tokio::test]

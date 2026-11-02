@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 520
 dbType: kyuubi
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Kyuubi
 label: Apache Kyuubi
 runtimeMode: agent

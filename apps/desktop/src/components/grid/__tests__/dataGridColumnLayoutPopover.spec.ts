@@ -52,11 +52,12 @@ function columnLayoutOptions(itemCount: number): DataGridColumnLayoutOption[] {
   }));
 }
 
-function createGrid(itemCount: number) {
+function createGrid(itemCount: number, optionsOverride: Partial<DataGridColumnLayoutHandle> = {}) {
   const options = columnLayoutOptions(itemCount);
   const toggleColumnVisibility = vi.fn();
   const moveDisplayableColumn = vi.fn();
   const autoFitAllColumns = vi.fn();
+  const resetColumnWidths = vi.fn();
   const grid: DataGridColumnLayoutHandle = {
     visibleColumnCount: itemCount,
     displayableColumnCount: itemCount,
@@ -74,8 +75,11 @@ function createGrid(itemCount: number) {
     moveDisplayableColumn,
     resetColumnOrder: vi.fn(),
     autoFitAllColumns,
+    resetColumnWidths,
+    hasUserSizedColumns: true,
+    ...optionsOverride,
   };
-  return { grid, moveDisplayableColumn, toggleColumnVisibility, autoFitAllColumns };
+  return { grid, moveDisplayableColumn, toggleColumnVisibility, autoFitAllColumns, resetColumnWidths };
 }
 
 // https://github.com/t8y2/dbx/issues/9813
@@ -105,6 +109,34 @@ describe("column layout popover auto fit", () => {
     await nextTick();
 
     expect(host.querySelector("[data-column-auto-fit-all]")).toBeNull();
+  });
+
+  it("offers a clear remembered column widths action that clears user-sized columns", async () => {
+    const { host, resetColumnWidths } = await mountPopover(3);
+
+    const resetButton = host.querySelector<HTMLButtonElement>("[data-column-reset-widths]")!;
+    expect(resetButton).not.toBeNull();
+    expect(resetButton.textContent?.trim()).toBe("Clear remembered column widths");
+    expect(resetButton.disabled).toBe(false);
+
+    resetButton.click();
+    expect(resetColumnWidths).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables clear remembered column widths button when hasUserSizedColumns is false", async () => {
+    const gridState = createGrid(3, { hasUserSizedColumns: false });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const app = createApp(DataGridColumnLayoutPopover, { grid: gridState.grid });
+    app.use(i18n);
+    app.mount(host);
+    mountedApps.push({ app, host });
+    await nextTick();
+    await nextTick();
+
+    const resetButton = host.querySelector<HTMLButtonElement>("[data-column-reset-widths]")!;
+    expect(resetButton).not.toBeNull();
+    expect(resetButton.disabled).toBe(true);
   });
 });
 

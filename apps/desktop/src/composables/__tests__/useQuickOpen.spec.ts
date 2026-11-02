@@ -1,8 +1,9 @@
-import { nextTick } from "vue";
+import { effectScope, nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { matchQuickOpenText, useQuickOpen } from "@/composables/useQuickOpen";
 import * as api from "@/lib/backend/api";
 import { getSqlFileFilter, getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
+import { setQuickOpenScopeIds } from "@/lib/quickOpen/quickOpenScope";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 
@@ -58,6 +59,13 @@ describe("useQuickOpen", () => {
     vi.mocked(getSqlFileFolderPaths).mockReturnValue([]);
   });
 
+  afterEach(() => {
+    // The scope is module-level state and every useQuickOpen() instance leaves live
+    // watchers behind, so a leaked scope or mock would make later tests order-dependent.
+    setQuickOpenScopeIds([]);
+    vi.clearAllMocks();
+  });
+
   describe("external SQL files", () => {
     it("reloads when folders change during an in-flight scan", async () => {
       vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [] } as any);
@@ -82,6 +90,122 @@ describe("useQuickOpen", () => {
       setQuery(".sql");
       expect(filteredItems.value.map((item) => item.label)).toContain("new.sql");
       expect(filteredItems.value.map((item) => item.label)).not.toContain("old.sql");
+    });
+  });
+
+  describe("metadata matching through indexed sources", () => {
+    it.each(["/work/order-reports", "C:\\work\\order-reports"])("filters scanned external files under %s and preserves navigation", async (root) => {
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [] } as any);
+      vi.mocked(getSqlFileFolderPaths).mockReturnValue([root]);
+      const separator = root.includes("\\") ? "\\" : "/";
+      const label = "report-v2024-07-customer-order-detail-export.sql";
+      const path = `${root}${separator}export${separator}${label}`;
+      vi.mocked(api.listSqlFilesInFolder).mockResolvedValue([{ name: "export", path: `${root}${separator}export`, is_dir: true, children: [{ name: label, path, is_dir: false, children: [] }] }]);
+      const scope = effectScope();
+      try {
+        const quickOpen = scope.run(() => useQuickOpen())!;
+        await quickOpen.loadExternalSqlFiles();
+        quickOpen.setQuery("cordetxprep");
+        expect(quickOpen.filteredItems.value).toEqual([]);
+        expect(quickOpen.selectedItem.value).toBeNull();
+        quickOpen.selectNext();
+        expect(quickOpen.selectedItem.value).toBeNull();
+        for (const query of ["ORDER-REPORTS", "export", "cordetxp"]) {
+          quickOpen.setQuery(query);
+          expect(quickOpen.filteredItems.value).toHaveLength(1);
+          expect(quickOpen.selectedItem.value).toMatchObject({ type: "sql_file", filePath: path, description: "order-reports / export" });
+        }
+        expect(quickOpen.selectedItem.value!.matchIndices.map((index) => label[index]).join("")).toBe("cordetxp");
+        quickOpen.setQuery("ORDER-REPORTS");
+        expect(quickOpen.selectedItem.value!.matchIndices).toEqual([]);
+        quickOpen.setQuery("   ");
+        expect(quickOpen.filteredItems.value).toHaveLength(1);
+      } finally {
+        scope.stop();
+      }
+    });
+
+    it("does not combine connection and database characters when finding a table", () => {
+      vi.mocked(useConnectionStore).mockReturnValue({
+        connections: [{ id: "conn1", name: "Production", db_type: "postgres" }],
+        treeNodes: [{ connectionId: "conn1", type: "table", database: "Analytics", schema: "public", label: "用户明细" }],
+      } as any);
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("proana");
+      expect(filteredItems.value).toEqual([]);
+      for (const query of ["PRODUCTION", "Analytics", "PUBLIC"]) {
+        setQuery(query);
+        const table = filteredItems.value.find((item) => item.type === "table");
+        expect(table).toMatchObject({ label: "用户明细", matchIndices: [] });
+      }
+      setQuery("yhmx");
+      expect(filteredItems.value).toHaveLength(1);
+      expect(filteredItems.value[0].matchIndices).toEqual([0, 1, 2, 3]);
+    });
+
+    it("preserves SQL-library connection search without cross-field fuzzy matches", () => {
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [{ id: "conn1", name: "Production", db_type: "postgres" }], treeNodes: [] } as any);
+      vi.mocked(useSavedSqlStore).mockReturnValue({ ...emptySavedSqlStore(), allFiles: [{ id: "saved1", name: "report.sql", connectionId: "conn1" }] } as any);
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("rptprod");
+      expect(filteredItems.value).toEqual([]);
+      setQuery("Production");
+      expect(filteredItems.value.map((item) => item.type)).toEqual(["connection", "sql_library_file"]);
+      expect(filteredItems.value[1]).toMatchObject({ sqlFileId: "saved1", matchIndices: [] });
+      setQuery("rpt");
+      expect(filteredItems.value[0]).toMatchObject({ type: "sql_library_file", sqlFileId: "saved1", matchIndices: [0, 2, 5] });
+    });
+
+    it("keeps plugin commands searchable by literal description and fuzzy visible label", () => {
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [] } as any);
+      const { filteredItems, setQuery } = useQuickOpen({ extraItems: ref([{ id: "command", type: "plugin_command", label: "Open console", description: "Manage servers", searchText: "Open console Manage servers AdminTools", connectionId: "", pluginId: "admin", commandId: "open" }]) });
+      setQuery("ocms");
+      expect(filteredItems.value).toEqual([]);
+      for (const query of ["manage servers", "ADMINTOOLS"]) {
+        setQuery(query);
+        expect(filteredItems.value).toHaveLength(1);
+        expect(filteredItems.value[0]).toMatchObject({ commandId: "open", matchIndices: [] });
+      }
+      setQuery("oc");
+      expect(filteredItems.value[0].matchIndices).toEqual([0, 5]);
+    });
+  });
+
+  describe("metadata matching", () => {
+    it.each([
+      ["cordetxprep", "report-v2024-07-customer-order-detail-export.sql", "report-v2024-07-customer-order-detail-export.sql export order-reports"],
+      ["sper", "report.sql", "report.sql sales production export reports"],
+      ["salesprod", "report.sql", "report.sql sales production"],
+      ["zzj", "report.sql", "report.sql 总租金"],
+    ])("rejects non-literal metadata matches for %s", (query, label, searchText) => {
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [] } as any);
+      const { filteredItems, setQuery } = useQuickOpen({ extraItems: ref([{ id: "file", type: "sql_file", label, searchText, connectionId: "" }]) });
+      setQuery(query);
+      expect(filteredItems.value).toEqual([]);
+    });
+
+    it.each(["PRODUCTION", "duction", "  production  "])("preserves literal metadata search for %s below label matches", (query) => {
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [] } as any);
+      const { filteredItems, setQuery } = useQuickOpen({
+        extraItems: ref([
+          { id: "metadata", type: "sql_file", label: "report.sql", searchText: "Production reports", connectionId: "" },
+          { id: "label", type: "sql_file", label: "production.sql", searchText: "production.sql", connectionId: "" },
+        ]),
+      });
+      setQuery(query);
+      expect(filteredItems.value.map((item) => item.id)).toEqual(["label", "metadata"]);
+      expect(filteredItems.value[0].matchIndices.length).toBeGreaterThan(0);
+      expect(filteredItems.value[1].matchIndices).toEqual([]);
+      expect(filteredItems.value[1].matchScore).toBeGreaterThan(1000);
+    });
+
+    it("preserves fuzzy file-name matches and their highlights", () => {
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [] } as any);
+      const label = "report-v2024-07-customer-order-detail-export.sql";
+      const { filteredItems, setQuery } = useQuickOpen({ extraItems: ref([{ id: "file", type: "sql_file", label, searchText: `${label} export order-reports`, connectionId: "" }]) });
+      setQuery("cordetxp");
+      expect(filteredItems.value).toHaveLength(1);
+      expect(filteredItems.value[0].matchIndices.map((index) => label[index]).join("")).toBe("cordetxp");
     });
   });
 
@@ -876,6 +1000,142 @@ describe("useQuickOpen", () => {
       const funcItem = filteredItems.value.find((item) => item.type === "function");
       expect(funcItem).toBeDefined();
       expect(funcItem?.label).toBe("ComputeAge");
+    });
+  });
+
+  describe("connection scope", () => {
+    // Scope: no selection searches every connection, picking some narrows both
+    // the local tree entries and the remote search pool to those connections.
+    function scopeStore() {
+      return {
+        connections: [
+          { id: "conn1", name: "Alpha", db_type: "mysql", database: "shop" },
+          { id: "conn2", name: "Beta", db_type: "postgres", database: "public_db" },
+          { id: "conn3", name: "Gamma", db_type: "mysql", database: "crm" },
+        ],
+        activeConnectionId: "conn1",
+        connectedIds: new Set(["conn1", "conn2", "conn3"]),
+        treeNodes: [
+          { connectionId: "conn1", type: "database", database: "shop", label: "shop" },
+          { connectionId: "conn2", type: "database", database: "public_db", label: "public_db" },
+          { connectionId: "conn3", type: "database", database: "crm", label: "crm" },
+        ],
+        listCompletionTables: vi.fn().mockResolvedValue([]),
+      };
+    }
+
+    it("searches every connection by default", () => {
+      vi.mocked(useConnectionStore).mockReturnValue(scopeStore() as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("");
+
+      const databases = filteredItems.value.filter((item) => item.type === "database").map((item) => item.label);
+      expect(databases).toEqual(["shop", "public_db", "crm"]);
+    });
+
+    it("hides unselected connections and their objects from the local pool", () => {
+      vi.mocked(useConnectionStore).mockReturnValue(scopeStore() as any);
+
+      const { filteredItems, setQuery, setScopeConnectionIds } = useQuickOpen();
+      setScopeConnectionIds(["conn2"]);
+      setQuery("");
+
+      const labels = filteredItems.value.map((item) => item.label);
+      expect(labels).toContain("Beta");
+      expect(labels).not.toContain("Alpha");
+      expect(labels).not.toContain("Gamma");
+      expect(labels.filter((label) => ["shop", "public_db", "crm"].includes(label))).toEqual(["public_db"]);
+    });
+
+    it("only queries the selected connections remotely", async () => {
+      vi.useFakeTimers();
+      try {
+        const store = scopeStore();
+        vi.mocked(useConnectionStore).mockReturnValue(store as any);
+
+        const { setQuery, setScopeConnectionIds } = useQuickOpen();
+        setScopeConnectionIds(["conn3"]);
+        setQuery("customer");
+
+        await vi.advanceTimersByTimeAsync(400);
+        await flushAsyncWork();
+
+        expect(store.listCompletionTables).toHaveBeenCalledTimes(1);
+        expect(store.listCompletionTables.mock.calls[0][0]).toBe("conn3");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("treats an empty selection as all connections", () => {
+      vi.mocked(useConnectionStore).mockReturnValue(scopeStore() as any);
+
+      const { scopeActive, setScopeConnectionIds } = useQuickOpen();
+      setScopeConnectionIds(["conn1"]);
+      expect(scopeActive.value).toBe(true);
+      setScopeConnectionIds([]);
+      expect(scopeActive.value).toBe(false);
+    });
+
+    // Switching the scope must re-issue the query without retyping: the user picks a
+    // connection and expects the list to change on the spot.
+    it("re-runs the current query against the new connection when the scope changes", async () => {
+      vi.useFakeTimers();
+      try {
+        const store = scopeStore();
+        vi.mocked(useConnectionStore).mockReturnValue(store as any);
+
+        const { setQuery, setScopeConnectionIds } = useQuickOpen();
+        setScopeConnectionIds(["conn1"]);
+        setQuery("customer");
+        await vi.advanceTimersByTimeAsync(400);
+        await flushAsyncWork();
+        expect(store.listCompletionTables).toHaveBeenCalledTimes(1);
+        expect(store.listCompletionTables.mock.calls[0][0]).toBe("conn1");
+
+        // Switching to conn2 re-queries that connection without touching the query text.
+        setScopeConnectionIds(["conn2"]);
+        await vi.advanceTimersByTimeAsync(400);
+        await flushAsyncWork();
+
+        expect(store.listCompletionTables).toHaveBeenCalledTimes(2);
+        expect(store.listCompletionTables.mock.calls[1][0]).toBe("conn2");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("drops results from the previous scope instead of merging them", async () => {
+      vi.useFakeTimers();
+      try {
+        let resolveAlpha!: (value: any[]) => void;
+        const store = scopeStore();
+        store.listCompletionTables = vi.fn().mockImplementation((connectionId: string) => {
+          if (connectionId === "conn1") return new Promise((resolve) => (resolveAlpha = resolve));
+          return Promise.resolve([{ name: "beta_orders", schema: "", type: "table" }]);
+        });
+        vi.mocked(useConnectionStore).mockReturnValue(store as any);
+
+        const { filteredItems, setQuery, setScopeConnectionIds } = useQuickOpen();
+        setScopeConnectionIds(["conn1"]);
+        setQuery("orders");
+        await vi.advanceTimersByTimeAsync(400);
+
+        // The scope changes while conn1's request is still in flight.
+        setScopeConnectionIds(["conn2"]);
+        await vi.advanceTimersByTimeAsync(400);
+        await flushAsyncWork();
+        expect(filteredItems.value.map((item) => item.label)).toContain("beta_orders");
+
+        // The stale conn1 response lands late and must not surface under the new scope.
+        resolveAlpha([{ name: "alpha_orders", schema: "", type: "table" }]);
+        await flushAsyncWork();
+        expect(filteredItems.value.map((item) => item.label)).toContain("beta_orders");
+        expect(filteredItems.value.map((item) => item.label)).not.toContain("alpha_orders");
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

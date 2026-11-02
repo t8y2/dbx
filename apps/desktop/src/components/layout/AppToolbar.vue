@@ -2,7 +2,34 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, LogOut, CloudDownload, Package, PlugZap, FileDown, FolderTree, Pin, PinOff, CalendarClock, Waypoints, RefreshCw } from "@lucide/vue";
+import {
+  ChevronsRight,
+  DatabaseZap,
+  FilePlus2,
+  FolderOpen,
+  Moon,
+  Sun,
+  SunMoon,
+  History,
+  Bot,
+  ArrowLeftRight,
+  FileCode,
+  BookMarked,
+  GitCompareArrows,
+  TableProperties,
+  Settings,
+  LogOut,
+  CloudDownload,
+  Package,
+  PlugZap,
+  FileDown,
+  FolderTree,
+  Pin,
+  PinOff,
+  CalendarClock,
+  Waypoints,
+  RefreshCw,
+} from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown, { type LightDropdownItem } from "@/components/ui/LightDropdown.vue";
@@ -63,6 +90,7 @@ const emit = defineEmits<{
   "expand-sidebar": [];
   "new-connection": [];
   "new-query": [];
+  "open-sql-editor-file": [];
   "set-theme-mode": [mode: AppThemeMode];
   "toggle-ai": [];
   "toggle-history": [];
@@ -461,6 +489,13 @@ type ToolbarMenuItem = LightDropdownItem & { action: () => void };
 function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenuItem[] {
   const items: ToolbarMenuItem[] = [];
 
+  items.push({
+    value: "open-sql-editor-file",
+    label: t("toolbar.openSql"),
+    icon: FolderOpen,
+    action: () => emit("open-sql-editor-file"),
+    disabled: false,
+  });
   if (includeVisiblePrimaryItems || !toolbarItems.value.dataTransfer) {
     items.push({
       value: "transfer",

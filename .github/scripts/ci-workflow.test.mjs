@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-const workflow = readFileSync(new URL("../workflows/ci.yml", import.meta.url), "utf8");
+const workflow = readFileSync(new URL("../workflows/ci.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
 function job(name, content = workflow) {
   const jobs = content.slice(content.indexOf("\njobs:\n") + 7);
   const pattern = /^  ([\w-]+):\s*$/gm;
@@ -20,26 +20,27 @@ function concurrencySettings(github) {
   assert.ok(block, "missing workflow concurrency");
   const format = (template, ...values) => template.replace(/\{(\d+)\}/g, (_, index) => String(values[Number(index)]));
   const endsWith = (search, value) => String(search).toLowerCase().endsWith(String(value).toLowerCase());
-  return Object.fromEntries(block.trim().split("\n").map((line) => {
-    const [, setting, value] = line.match(/^\s*([\w-]+):\s*(.+)$/);
-    const evaluate = (expression) =>
-      new Function("github", "format", "endsWith", `return (${expression});`)(github, format, endsWith);
-    const expressions = [...value.matchAll(/\$\{\{\s*(.*?)\s*\}\}/g)];
-    return [setting, expressions.length === 1 && expressions[0][0] === value
-      ? evaluate(expressions[0][1]) : value.replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, expression) => evaluate(expression))];
-  }));
+  return Object.fromEntries(
+    block
+      .trim()
+      .split("\n")
+      .map((line) => {
+        const [, setting, value] = line.match(/^\s*([\w-]+):\s*(.+)$/);
+        const evaluate = (expression) => new Function("github", "format", "endsWith", `return (${expression});`)(github, format, endsWith);
+        const expressions = [...value.matchAll(/\$\{\{\s*(.*?)\s*\}\}/g)];
+        return [setting, expressions.length === 1 && expressions[0][0] === value ? evaluate(expressions[0][1]) : value.replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, expression) => evaluate(expression))];
+      }),
+  );
 }
 
 function concurrencyContext({ authorId = 101, author = "contributor", actor = author, number = 100, ref = `refs/pull/${number}/merge`, eventName = "pull_request" } = {}) {
-  return { workflow: "CI", repository_owner: "t8y2", actor, ref, event_name: eventName,
-    event: eventName === "pull_request" ? { pull_request: { number, user: { id: authorId, login: author } } } : {} };
+  return { workflow: "CI", repository_owner: "t8y2", actor, ref, event_name: eventName, event: eventName === "pull_request" ? { pull_request: { number, user: { id: authorId, login: author } } } : {} };
 }
 
 test("a contributor's PRs share two main CI queues split by PR number parity, regardless of trigger actor", () => {
   const even = concurrencySettings(concurrencyContext());
   assert.deepEqual(even, { group: "CI-pr-author-101-even", "cancel-in-progress": false, queue: "max" });
-  for (const context of [concurrencyContext({ number: 202 }), concurrencyContext({ actor: "t8y2" }),
-    concurrencyContext({ actor: "github-actions[bot]" }), concurrencyContext({ author: "renamed-contributor" })]) {
+  for (const context of [concurrencyContext({ number: 202 }), concurrencyContext({ actor: "t8y2" }), concurrencyContext({ actor: "github-actions[bot]" }), concurrencyContext({ author: "renamed-contributor" })]) {
     assert.deepEqual(concurrencySettings(context), even);
   }
   for (const number of [101, 11849, 11853, 7]) {
@@ -64,8 +65,7 @@ test("main pushes retain their independent cancellation group without PR context
 });
 
 test("expanded author queues never combine max queuing with in-progress cancellation", () => {
-  for (const context of [concurrencyContext(), concurrencyContext({ author: "t8y2" }),
-    concurrencyContext({ eventName: "push", ref: "refs/heads/main" })]) {
+  for (const context of [concurrencyContext(), concurrencyContext({ author: "t8y2" }), concurrencyContext({ eventName: "push", ref: "refs/heads/main" })]) {
     const settings = concurrencySettings(context);
     assert.ok(settings.queue === "single" || settings.queue === "max");
     assert.equal(settings.queue === "max" && settings["cancel-in-progress"], false);
@@ -147,6 +147,21 @@ test("frontend tests use two shards on separate runners", () => {
   assert.doesNotMatch(job("frontend-typecheck"), /vitest|oxfmt|oxlint/);
 });
 
+test("frontend type checking retains its configured heap budget", () => {
+  const content = job("frontend-typecheck");
+  assert.match(content, /NODE_OPTIONS: --max-old-space-size=8192/);
+  assert.match(content, /name: Type-check frontend\s+run: pnpm exec vue-tsc --noEmit --project apps\/desktop\/tsconfig\.json/);
+});
+
+test("Windows 7 bundling uses the tested retry script and still audits the installer", () => {
+  const content = job("windows-win7-bundle");
+  assert.ok(content.includes("run: ./.github/scripts/bundle-win7-installer.ps1"));
+  assert.doesNotMatch(content, /bundle-win7-installer\.test\.ps1/);
+  assert.ok(content.includes("assert-win7-installer-content.ps1"));
+  assert.ok(content.indexOf("bundle-win7-installer.ps1") < content.indexOf("assert-win7-installer-content.ps1"));
+  assert.ok(job("github-scripts").includes("run: ./.github/scripts/bundle-win7-installer.test.ps1"));
+});
+
 test("every old Agent stage has an independent owner and Java packaging remains strict", () => {
   assert.ok(job("agent-checks").includes("python3 -m unittest discover"));
   assert.ok(job("agent-checks").includes("python3 scripts/validate_agents.py"));
@@ -202,7 +217,11 @@ test("S3 and secretless Rust jobs export identical compiler wrappers", (context)
     const setup = job(name).match(/- name: Configure sccache\n([\s\S]*?)(?=\n      - name: Rust cache)/)?.[1];
     assert.ok(setup, name);
     assert.doesNotMatch(setup, /^\s+if:/m);
-    const script = setup.match(/        run: \|\n([\s\S]*)/)[1].split("\n").map((line) => line.slice(10)).join("\n");
+    const script = setup
+      .match(/        run: \|\n([\s\S]*)/)[1]
+      .split("\n")
+      .map((line) => line.slice(10))
+      .join("\n");
     for (const remote of [true, false]) {
       const output = path.join(directory, `${name}-${remote}.env`);
       const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", script], {
@@ -221,16 +240,25 @@ test("S3 and secretless Rust jobs export identical compiler wrappers", (context)
       });
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stdout, "");
-      const exported = Object.fromEntries(readFileSync(output, "utf8").trim().split("\n").map((line) => {
-        const separator = line.indexOf("=");
-        return [line.slice(0, separator), line.slice(separator + 1)];
-      }));
-      assert.deepEqual(exported, {
-        ...(remote ? backend : {}),
-        SCCACHE_IDLE_TIMEOUT: "0",
-        CC: `${compiler} cc`,
-        CXX: `${compiler} c++`,
-      }, `${name}: ${remote ? "S3" : "local"}`);
+      const exported = Object.fromEntries(
+        readFileSync(output, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => {
+            const separator = line.indexOf("=");
+            return [line.slice(0, separator), line.slice(separator + 1)];
+          }),
+      );
+      assert.deepEqual(
+        exported,
+        {
+          ...(remote ? backend : {}),
+          SCCACHE_IDLE_TIMEOUT: "0",
+          CC: `${compiler} cc`,
+          CXX: `${compiler} c++`,
+        },
+        `${name}: ${remote ? "S3" : "local"}`,
+      );
     }
   }
 });
@@ -251,22 +279,98 @@ test("Rust build timings remain available after failures without waiting for can
   assert.ok(job("agent-rust").includes('--manifest-path "drivers/$DRIVER/Cargo.toml" --locked --no-fail-fast --timings'));
 });
 
-test("Linux Rust dependency installs bound apt mirror stalls", () => {
-  for (const name of ["packages", "rust-fmt-clippy", "rust-test", "agent-rust"]) {
-    const content = job(name);
-    assert.equal((content.match(/sudo timeout --kill-after=30s 10m apt-get/g) ?? []).length, 2);
-    for (const option of ["Acquire::Retries=3", "Acquire::http::Timeout=30", "Acquire::https::Timeout=30"]) {
-      assert.ok(content.includes(option));
-    }
+test("Linux dependency installs share bounded acquisition before offline installation", () => {
+  for (const name of ["packages", "rust-fmt-clippy", "rust-test"]) {
+    assert.ok(job(name).includes("sudo python3 .github/scripts/ci-install-system-deps.py"));
+    assert.ok(!job(name).includes("apt-get"));
   }
+  for (const name of ["agent-checks", "agent-java"]) {
+    assert.ok(job(name).includes("sudo python3 ../.github/scripts/ci-install-system-deps.py --group packaging"));
+  }
+  assert.ok(job("agent-rust").includes("sudo python3 ../.github/scripts/ci-install-system-deps.py --group duckdb"));
+  assert.ok(job("github-scripts").includes("python3 .github/scripts/ci-install-system-deps.test.py"));
 });
+
+test("Java CI acquires before original commands without retrying packaging or tests", () => {
+  assert.ok(job("agent-java").includes("python3 ../.github/scripts/ci-gradle.py agents -- ./gradlew test shadowJar --continue"));
+  for (const name of ["jdbc", "offline-jdbc-release"]) {
+    assert.ok(job(name).includes("python3 .github/scripts/ci-gradle.py jdbc -- ./package.sh"));
+  }
+  assert.ok(job("github-scripts").includes("python3 .github/scripts/ci-gradle.test.py"));
+});
+
+test("mold downloads are isolated from extraction in CI and keepalive", () => {
+  for (const name of ["packages", "rust-test"]) {
+    assert.ok(job(name).includes("run: bash .github/scripts/ci-install-mold.sh"));
+  }
+  assert.ok(job("agent-rust").includes("run: bash ../.github/scripts/ci-install-mold.sh"));
+  const keepalive = readFileSync(new URL("../workflows/cache-keepalive.yml", import.meta.url), "utf8");
+  assert.ok(keepalive.includes("run: bash .github/scripts/ci-install-mold.sh"));
+  assert.ok(keepalive.includes("sudo python3 .github/scripts/ci-install-system-deps.py"));
+  assert.ok(job("github-scripts").includes("python3 .github/scripts/ci-install-mold.test.py"));
+  assert.ok(job("github-scripts").includes("./.github/scripts/prepare-webview2-win7-runtime.test.ps1"));
+});
+
+for (const name of ["rust-test", "agent-integration"]) {
+  for (const scenario of ["ready", "delayed", "unavailable", "missing-mirror"]) {
+    test(`${name} Docker readiness: ${scenario}`, () => {
+      const step = job(name).match(/      - name: Configure public Docker Hub cache\n([\s\S]*?)(?=\n      - )/)[1];
+      const block = step.slice(step.indexOf("          timeout 30s")).replace(/^          /gm, "");
+      const directory = mkdtempSync(path.join(tmpdir(), "dbx-docker-ready-"));
+      try {
+        const result = spawnSync(
+          "bash",
+          [
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            `
+          sudo() { "$@"; }
+          systemctl() { printf 'restart\\n' >> "$STATE/restarts"; }
+          timeout() { shift; "$@"; }
+          sleep() { :; }
+          ${process.platform === "win32" ? 'python3() { python "$@"; }' : ""}
+          docker() {
+            local count=0
+            [[ ! -f "$STATE/count" ]] || read -r count < "$STATE/count"
+            count=$((count + 1)); printf '%s\\n' "$count" > "$STATE/count"
+            if [[ "$SCENARIO" == unavailable ]] || { [[ "$SCENARIO" == delayed ]] && ((count < 3)); }; then
+              printf 'daemon not ready\\n' >&2; return 124
+            fi
+            if [[ "$SCENARIO" == missing-mirror ]]; then printf '[]\\n'; else printf '["https://mirror.gcr.io/"]\\n'; fi
+          }
+          ${block}
+          printf 'verified\\n'
+        `,
+          ],
+          { env: { ...process.env, STATE: directory.replaceAll("\\", "/"), SCENARIO: scenario }, encoding: "utf8", timeout: 15000 },
+        );
+        assert.ifError(result.error);
+        assert.equal(readFileSync(path.join(directory, "restarts"), "utf8"), "restart\n");
+        const count = Number(readFileSync(path.join(directory, "count"), "utf8"));
+        if (scenario === "ready" || scenario === "delayed") {
+          assert.equal(result.status, 0, result.stderr);
+          assert.match(result.stdout, /verified/);
+          assert.equal(count, scenario === "ready" ? 1 : 3);
+        } else {
+          assert.notEqual(result.status, 0);
+          assert.doesNotMatch(result.stdout, /verified/);
+          assert.equal(count, scenario === "unavailable" ? 12 : 1);
+        }
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  }
+}
 
 test("Rust test jobs install pinned nextest and retain separate doctests", () => {
   const pluginDevHost = readFileSync(new URL("../workflows/plugin-dev-host.yml", import.meta.url), "utf8");
   const pluginRelease = readFileSync(new URL("../workflows/plugin-cli-release.yml", import.meta.url), "utf8");
   const consumers = [job("packages"), job("rust-test"), job("agent-rust"), job("agent-integration"), job("test", pluginDevHost), job("prepare", pluginRelease)];
   for (const content of consumers) {
-    assert.ok(content.includes("uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b"));
+    assert.ok(content.includes("uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91"));
     assert.ok(content.includes("tool: cargo-nextest@0.9.137"));
     assert.doesNotMatch(content, /cargo test (?!.*--doc)/);
     const testCommand = content.indexOf("cargo nextest run") >= 0 ? "cargo nextest run" : content.includes("pnpm test:packages") ? "pnpm test:packages" : content.includes("ci-rust.mjs test") ? "ci-rust.mjs test" : "ci-agent-integration.sh";
@@ -293,7 +397,8 @@ test("local Rust entrypoints and live TDengine tests use nextest", () => {
 
 test("DuckDB Windows builds persist Rust and C++ compiler results", () => {
   const content = job("duckdb-windows-driver");
-  assert.ok(content.includes('SCCACHE_GHA_ENABLED: "true"'));
+  // S3 is preferred over the quota-limited GHA backend; GHA remains the fallback.
+  assert.ok(content.includes("SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}"));
   assert.ok(content.includes('CC: "sccache cl.exe"'));
   assert.ok(content.includes('CXX: "sccache cl.exe"'));
   assert.ok(content.includes("0b201ec74fa43914dc39ae48a89fd1d8cb592756"));
@@ -305,7 +410,7 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   const standard = job("windows-standard-check");
   assert.ok(standard.includes("needs.changes.outputs.windows_standard == 'true'"));
   assert.ok(standard.includes("RUSTC_WRAPPER: sccache"));
-  assert.ok(standard.includes('SCCACHE_GHA_ENABLED: "true"'));
+  assert.ok(standard.includes("SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}"));
   assert.ok(standard.includes("SCCACHE_GHA_VERSION: windows-standard-v1"));
   assert.ok(standard.includes("fc920bf0ec8de6ee65d409111f7ec508035751ba"));
   assert.ok(standard.includes('version: "v0.16.0"'));
@@ -315,7 +420,8 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   const win7 = job("windows-win7-bundle");
   assert.ok(win7.includes("needs.changes.outputs.windows_win7_bundle == 'true'"));
   assert.doesNotMatch(win7, /x86_64-pc-windows-msvc|Setup Rust for standard Windows/);
-  for (const setting of ["RUSTC_WRAPPER: sccache", 'SCCACHE_GHA_ENABLED: "true"', "SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1", 'SCCACHE_IDLE_TIMEOUT: "0"', 'CARGO_PROFILE_RELEASE_LTO: "off"', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"']) assert.ok(win7.includes(setting));
+  for (const setting of ["RUSTC_WRAPPER: sccache", "SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}", "SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1", 'SCCACHE_IDLE_TIMEOUT: "0"', 'CARGO_PROFILE_RELEASE_LTO: "off"', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"'])
+    assert.ok(win7.includes(setting));
   assert.ok(win7.includes("fc920bf0ec8de6ee65d409111f7ec508035751ba"));
   assert.ok(win7.includes('version: "v0.16.0"'));
   assert.ok(win7.includes("sccache --show-stats"));
@@ -323,7 +429,7 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   assert.ok(win7.includes("--config .github/fixtures/win7-host-repro-config.toml"));
   const hostConfig = readFileSync(new URL("../fixtures/win7-host-repro-config.toml", import.meta.url), "utf8");
   assert.ok(hostConfig.includes("target-applies-to-host = false"));
-  assert.ok(hostConfig.includes('[host.x86_64-pc-windows-msvc]'));
+  assert.ok(hostConfig.includes("[host.x86_64-pc-windows-msvc]"));
   assert.ok(hostConfig.includes('rustflags = ["-Clink-arg=/Brepro"]'));
   assert.ok(win7.includes("--timings"));
   assert.ok(win7.includes("name: DBX-win7-cargo-timings"));
@@ -347,11 +453,30 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   assert.doesNotMatch(win7, /^\s+(?:CC|CXX):/m);
 });
 
-test("Win7 TLS cache keys ignore the workspace lockfile", () => {
+test("Win7 TLS artifact names ignore the workspace lockfile", () => {
   const win7 = job("windows-win7-bundle");
   assert.ok(win7.includes("hashFiles('.github/fixtures/win7-aws-lc-cache/Cargo.toml', '.github/fixtures/win7-aws-lc-cache/Cargo.lock')"));
   assert.ok(win7.includes("hashFiles('.github/fixtures/win7-openssl-cache/Cargo.toml', '.github/fixtures/win7-openssl-cache/Cargo.lock')"));
-  assert.doesNotMatch(win7, /key: win7-(?:aws-lc|openssl).*hashFiles\('Cargo\.lock'/);
+  assert.doesNotMatch(win7, /WIN7_PREBUILT_ARTIFACT_NAME: win7-(?:aws-lc|openssl).*hashFiles\('Cargo\.lock'/);
+});
+
+test("Win7 TLS artifacts come from main and retain a build fallback", () => {
+  const win7 = job("windows-win7-bundle");
+  assert.ok(win7.includes("actions: read"));
+  assert.doesNotMatch(win7, /uses: actions\/cache(?:\/restore|\/save)?@v4/);
+  for (const [name, id] of [
+    ["AWS-LC", "aws-lc-artifact"],
+    ["OpenSSL", "openssl-artifact"],
+  ]) {
+    assert.ok(win7.includes(`if: steps.${id}.outputs.run_id != ''`));
+    assert.ok(win7.includes(`if: steps.${id}.outputs.run_id == ''`));
+    assert.ok(win7.includes(`if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.${id}.outputs.run_id == ''`));
+    assert.ok(win7.includes(`name: \${{ steps.${id}.outputs.name }}`));
+    assert.ok(win7.indexOf(`name: Find prebuilt Win7 ${name} artifact`) < win7.indexOf(`name: Download prebuilt Win7 ${name} artifact`));
+    assert.ok(win7.indexOf(`name: Download prebuilt Win7 ${name} artifact`) < win7.indexOf(`name: Build prebuilt Win7 ${name}`));
+    assert.ok(win7.indexOf(`name: Build prebuilt Win7 ${name}`) < win7.indexOf(`name: Upload prebuilt Win7 ${name} on main`));
+    assert.ok(win7.indexOf(`name: Configure prebuilt Win7 ${name}`) < win7.indexOf(`name: Upload prebuilt Win7 ${name} on main`));
+  }
 });
 
 test("path filtering and the planner use the exact test merge first parent", () => {
@@ -366,9 +491,25 @@ test("path filtering and the planner use the exact test merge first parent", () 
   assert.ok(changes.includes("node .github/scripts/ci-plan.mjs"));
   assert.doesNotMatch(changes, /fetch-depth:\s*0/);
   assert.doesNotMatch(changes, /dtolnay\/rust-toolchain/);
-  for (const flag of ["rust", "rust_full", "rust_matrix", "agents", "agent_go", "agent_rust", "agent_integration",
-    "windows_standard", "windows_win7_bundle", "windows_win7_candidate", "windows_win7_affected_packages", "windows_win7_reasons", "plan"]) {
+  for (const flag of ["rust", "rust_full", "rust_matrix", "agents", "agent_go", "agent_rust", "agent_integration", "windows_standard", "windows_win7_bundle", "windows_win7_candidate", "windows_win7_affected_packages", "windows_win7_reasons", "plan"]) {
     assert.ok(changes.includes(`steps.plan.outputs.${flag}`));
   }
   assert.doesNotMatch(changes, /steps\.filter\.outputs\.windows_win7_bundle|github\.event\.pull_request\.base\.sha|WIN7_CURRENT/);
+});
+
+test("legacy Windows builds keep the 8 MiB main-thread stack", () => {
+  const release = readFileSync(new URL("../workflows/release.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const sqlServerUserTest = readFileSync(new URL("../workflows/sqlserver2000-windows-user-test.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const stackFlag = /RUSTFLAGS:.*link-arg=\/STACK:8388608/;
+  // An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so every job
+  // that links a Windows PE has to repeat the /STACK link argument; otherwise
+  // the 1 MiB linker default returns and deep DB call stacks abort with
+  // 0xC00000FD ("DBX 已停止工作").
+  for (const name of ["windows-standard-check", "windows-win7-bundle", "duckdb-windows-driver"]) {
+    assert.match(job(name), stackFlag, `${name} must keep the 8 MiB main-thread stack in RUSTFLAGS`);
+  }
+  for (const name of ["build-windows-7-offline", "build-windows-7-static-browser"]) {
+    assert.match(job(name, release), stackFlag, `release job ${name} must keep the 8 MiB main-thread stack in RUSTFLAGS`);
+  }
+  assert.match(job("build-windows-7-x64", sqlServerUserTest), stackFlag, "the SQL Server 2000 Win7 test build must keep the 8 MiB main-thread stack");
 });

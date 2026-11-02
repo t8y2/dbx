@@ -1,5 +1,5 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
-import { filterDatabaseNamesForVisiblePicker, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
+import { filterDatabaseNamesForVisiblePicker, filterVisibleDatabaseNames, visibleDatabasePatternsAreEnabled } from "@/lib/database/visibleDatabases";
 
 const DRAFT_VISIBLE_DATABASES_PREFIX = "__visible_draft_";
 
@@ -22,9 +22,12 @@ export function connectionCanChooseVisibleDatabases(connection: Pick<ConnectionC
   return !!connection?.db_type && !UNSUPPORTED_VISIBLE_DATABASE_TYPES.has(connection.db_type);
 }
 
-export function initialVisibleDatabaseSelection(databaseNames: string[], visibleDatabases: string[] | undefined, connection?: Pick<ConnectionConfig, "db_type" | "driver_profile" | "visible_databases">): string[] {
-  if (Array.isArray(visibleDatabases)) {
-    return normalizeVisibleDatabaseSelection(visibleDatabases, databaseNames);
+export function initialVisibleDatabaseSelection(databaseNames: string[], visibleDatabases: string[] | undefined, connection?: Pick<ConnectionConfig, "db_type" | "driver_profile" | "visible_databases" | "visible_database_patterns">): string[] {
+  const patterns = connection?.visible_database_patterns;
+  // 通配符与显式名单取并集，和侧栏筛选保持一致；全匹配通配符会让"显示全部"的选择器
+  // 重新打开时仍勾选所有库（含系统库），而不是看起来又退回默认视图。
+  if (Array.isArray(visibleDatabases) || visibleDatabasePatternsAreEnabled(patterns)) {
+    return filterVisibleDatabaseNames(databaseNames, visibleDatabases, patterns);
   }
   return filterDatabaseNamesForVisiblePicker(databaseNames, connection);
 }

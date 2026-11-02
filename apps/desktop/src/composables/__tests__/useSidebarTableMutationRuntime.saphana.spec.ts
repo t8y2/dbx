@@ -124,7 +124,7 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
   });
 
   it("omits the GBase 8s metadata owner from generated table SQL", async () => {
-    const { feature } = runtime("tenant", { db_type: "gbase", driver_profile: "gbase8s" }, "informix");
+    const { feature } = runtime("tenant", { db_type: "gbase8s", driver_profile: "gbase8s" }, "informix");
 
     await feature.confirmDropTable();
 

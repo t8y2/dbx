@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 740
 dbType: iris
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Iris
 label: InterSystems IRIS
 dialect: Iris

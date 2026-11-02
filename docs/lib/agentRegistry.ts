@@ -121,6 +121,7 @@ const driverLabels: Record<string, string> = {
   exasol: "Exasol",
   firebird: "Firebird",
   gbase8a: "GBase 8a",
+  gbase8c: "GBase 8c",
   gbase8s: "GBase 8s",
   goldendb: "GoldenDB",
   h2: "H2",

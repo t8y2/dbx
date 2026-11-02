@@ -109,6 +109,10 @@ export function mongoDropCollectionPreview(database: string, collection: string)
   return `db.getSiblingDB(${JSON.stringify(database)}).getCollection(${JSON.stringify(collection)}).drop()`;
 }
 
+export function mongoClearCollectionPreview(database: string, collection: string): string {
+  return `db.getSiblingDB(${JSON.stringify(database)}).getCollection(${JSON.stringify(collection)}).deleteMany({})`;
+}
+
 export function mongoDropDatabasePreview(database: string): string {
   return `db.getSiblingDB(${JSON.stringify(database)}).dropDatabase()`;
 }

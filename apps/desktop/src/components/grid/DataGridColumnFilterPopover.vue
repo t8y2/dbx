@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowDown, ArrowUp, ArrowUpDown, Check, Database, Filter, Loader2, Search } from "@lucide/vue";
+import { ArrowDown, ArrowUp, ArrowUpDown, Check, Database, Filter, Loader2, Search, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
@@ -75,8 +75,38 @@ const { t } = useI18n();
           spellcheck="false"
           class="h-7 min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
           :placeholder="t('grid.searchValues')"
+          :title="props.draftMode === 'local' ? t('grid.searchValuesOrCountTooltip') : undefined"
           @input="emit('update:search', ($event.target as HTMLInputElement).value)"
         />
+        <template v-if="props.draftMode === 'local'">
+          <div class="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              class="h-5 px-1.5 rounded text-[10px] font-mono border transition-colors"
+              :class="props.search === '>1' ? 'border-primary bg-primary text-primary-foreground font-semibold shadow-xs' : 'border-border/60 bg-muted/40 hover:bg-muted text-muted-foreground hover:text-foreground'"
+              :title="t('grid.filterDuplicates')"
+              :aria-label="t('grid.filterDuplicates')"
+              :aria-pressed="props.search === '>1'"
+              @click="emit('update:search', props.search === '>1' ? '' : '>1')"
+            >
+              &gt;1
+            </button>
+            <button
+              type="button"
+              class="h-5 px-1.5 rounded text-[10px] font-mono border transition-colors"
+              :class="props.search === '=1' ? 'border-primary bg-primary text-primary-foreground font-semibold shadow-xs' : 'border-border/60 bg-muted/40 hover:bg-muted text-muted-foreground hover:text-foreground'"
+              :title="t('grid.filterUniques')"
+              :aria-label="t('grid.filterUniques')"
+              :aria-pressed="props.search === '=1'"
+              @click="emit('update:search', props.search === '=1' ? '' : '=1')"
+            >
+              =1
+            </button>
+          </div>
+        </template>
+        <button v-if="props.search" type="button" class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted/60" :aria-label="t('grid.clearFilter')" @click="emit('update:search', '')">
+          <X class="h-3 w-3" />
+        </button>
       </div>
       <div class="grid grid-cols-[1.75rem_minmax(0,1fr)_3.5rem] border-b bg-muted/40 px-2 py-1 text-xs font-medium text-muted-foreground">
         <button

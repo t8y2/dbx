@@ -68,7 +68,7 @@ function mountWithProvider(render: () => ReturnType<typeof h>) {
   return mounted;
 }
 
-function mountToolbar() {
+function mountToolbar(autoRefreshEnabled = false) {
   return mountWithProvider(() =>
     h(DataGridToolbar, {
       compact: true,
@@ -78,7 +78,7 @@ function mountToolbar() {
         shortLabel: "Auto",
         startLabel: "Start auto-refresh",
         stopLabel: "Stop auto-refresh",
-        enabled: false,
+        enabled: autoRefreshEnabled,
         intervalSeconds: 30,
         sweepKey: 0,
         intervalOptions: [10, 30, 60],
@@ -198,6 +198,16 @@ describe("data grid icon-only toolbar tooltips", () => {
     await hover(button);
 
     expect(showsTooltip("Auto-refresh results")).toBe(true);
+  });
+
+  it.each([false, true])("marks the interval as selected only when auto refresh is enabled (%s)", async (enabled) => {
+    const { host } = mountToolbar(enabled);
+    await settle();
+    await click(toolbarButton(host, "autoRefresh"));
+
+    const intervalItem = [...document.querySelectorAll<HTMLElement>('[data-slot="dropdown-menu-item"]')].find((item) => item.textContent?.trim() === "Refresh every 30s");
+    expect(intervalItem).toBeDefined();
+    expect(!!intervalItem!.querySelector("svg")).toBe(enabled);
   });
 
   it("opens the column lookup side panel through its toolbar capability", async () => {

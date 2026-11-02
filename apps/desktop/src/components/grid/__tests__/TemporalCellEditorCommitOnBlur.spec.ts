@@ -1,15 +1,10 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import TemporalCellEditor from "../TemporalCellEditor.vue";
-
-const dataGridSource = readFileSync(resolve(import.meta.dirname, "../DataGrid.vue"), "utf8");
-const cellDetailPanelSource = readFileSync(resolve(import.meta.dirname, "../DataGridCellDetailPanel.vue"), "utf8");
 
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
@@ -98,17 +93,5 @@ describe("TemporalCellEditor blur commit (value editor, #10667)", () => {
     typeValue(input, "2027-07-08 09:10:11");
     blurInput(input);
     expect(onCommit).toHaveBeenCalledTimes(2);
-  });
-
-  it("keeps the cell details panel temporal editor explicit-commit by design (#10667)", () => {
-    // 值编辑器 tab 的 temporal 编辑器与同 tab 的 CodeMirror 编辑器（onBlur →
-    // commitValueEditorEdit）对齐：不再传 commit-on-close="false"。
-    const valueEditorTemporal = dataGridSource.match(/<TemporalCellEditor[^>]*v-if="detailTemporalEditorConfig"[\s\S]*?\/>/)?.[0] ?? "";
-    expect(valueEditorTemporal).toContain('@commit="commitValueEditorEdit"');
-    expect(valueEditorTemporal).not.toContain("commit-on-close");
-
-    // 单元格详情 tab 维持显式 确认/取消 交互：其 CodeMirror 同样不失焦提交，
-    // 且失焦提交会让点「取消」先于 click 触发一次误提交。
-    expect(cellDetailPanelSource).toContain(':commit-on-close="false"');
   });
 });

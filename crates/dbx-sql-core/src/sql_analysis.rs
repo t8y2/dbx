@@ -53,6 +53,11 @@ pub struct SqlReferenceAnalysis {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SqlTableReference {
     pub name: String,
+    /// Database part of a three-part name such as SQL Server's `db.dbo.orders`.
+    /// Without it the editor looked the table up in the current database and
+    /// flagged cross-database references as unknown (#13947).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     pub schema: Option<String>,
     pub alias: Option<String>,
     pub span: SqlTextSpan,
@@ -80,6 +85,10 @@ pub struct SqlReferenceScope {
     pub parent_id: Option<usize>,
 }
 
+/// 1-based line and column range in SQL text.
+/// Both `start_column` and `end_column` are 1-based and inclusive.
+/// For example, a 1-character token at line 1, column 5 has
+/// `start_line: 1, start_column: 5, end_line: 1, end_column: 5`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SqlTextSpan {
     pub start_line: usize,
@@ -90,12 +99,23 @@ pub struct SqlTextSpan {
 
 impl From<Span> for SqlTextSpan {
     fn from(span: Span) -> Self {
-        Self {
-            start_line: span.start.line as usize,
-            start_column: span.start.column as usize,
-            end_line: span.end.line as usize,
-            end_column: span.end.column as usize,
-        }
+        let start_line = span.start.line as usize;
+        let start_column = span.start.column as usize;
+        let end_line = span.end.line as usize;
+        // sqlparser's `Span.end.column` is 1-based exclusive. Convert to 1-based
+        // inclusive so that downstream consumers (both in Rust and TypeScript)
+        // receive precise token bounds that do not overshoot into trailing
+        // delimiters (e.g. commas or semicolons).
+        let end_column = if span.end.column > 0 {
+            if end_line == start_line && start_column > 0 {
+                (span.end.column as usize).saturating_sub(1).max(start_column)
+            } else {
+                (span.end.column as usize).saturating_sub(1)
+            }
+        } else {
+            0
+        };
+        Self { start_line, start_column, end_line, end_column }
     }
 }
 
@@ -171,7 +191,7 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
 
     let parsed_statements = match normalized_dialect.as_str() {
         "postgres" => Parser::parse_sql(&PostgreSqlDialect {}, &parser_sql),
-        "mysql" => Parser::parse_sql(&MySqlDialect {}, &parser_sql),
+        "mysql" => parse_mysql(&parser_sql),
         "sqlite" => Parser::parse_sql(&SQLiteDialect {}, &parser_sql),
         "sqlserver" => parse_sqlserver(&parser_sql),
         "clickhouse" => Parser::parse_sql(&ClickHouseDialect {}, &parser_sql),
@@ -226,6 +246,231 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
         analysis.group_by_violations.clear();
     }
     Ok(analysis)
+}
+
+/// sqlparser 0.62 does not implement MySQL's ALTER TABLE COMMENT table option.
+/// Validate only that complete statement form, then leave all other statements
+/// to the normal parser. Original token spans (including later statements) survive.
+fn parse_mysql(sql: &str) -> Result<Vec<Statement>, ParserError> {
+    let dialect = MySqlDialect {};
+    match Parser::parse_sql(&dialect, sql) {
+        Ok(statements) => Ok(statements),
+        Err(original_error) => {
+            let tokens = Tokenizer::new(&dialect, sql).tokenize_with_location()?;
+            let mut remaining = Vec::with_capacity(tokens.len());
+            let mut start = 0;
+            let mut changed = false;
+            for end in 0..=tokens.len() {
+                if end < tokens.len() && !matches!(tokens[end].token, Token::SemiColon | Token::EOF) {
+                    continue;
+                }
+                let statement = &tokens[start..end];
+                if let Some(stripped) = strip_mysql_table_comment_if_parseable(statement) {
+                    remaining.extend(stripped);
+                    changed = true;
+                } else if is_mysql_table_comment(statement) {
+                    changed = true;
+                } else {
+                    remaining.extend_from_slice(statement);
+                }
+                if end < tokens.len() {
+                    remaining.push(tokens[end].clone());
+                }
+                start = end + 1;
+            }
+            if !changed {
+                return Err(original_error);
+            }
+            Parser::new(&dialect).with_tokens_with_locations(remaining).parse_statements()
+        }
+    }
+}
+
+fn strip_mysql_table_comment_if_parseable(tokens: &[TokenWithSpan]) -> Option<Vec<TokenWithSpan>> {
+    let dialect = MySqlDialect {};
+    let alter_index = next_significant_token_index(tokens, 0)?;
+    if unquoted_token_keyword(&tokens[alter_index]) != Some(Keyword::ALTER) {
+        return None;
+    }
+    let table_index = next_significant_token_index(tokens, alter_index + 1)?;
+    if unquoted_token_keyword(&tokens[table_index]) != Some(Keyword::TABLE) {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for index in table_index + 1..tokens.len() {
+        match tokens[index].token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            _ if depth == 0 && unquoted_token_keyword(&tokens[index]) == Some(Keyword::COMMENT) => {
+                let mut value_index = next_significant_token_index(tokens, index + 1)?;
+                if matches!(tokens[value_index].token, Token::Eq) {
+                    value_index = next_significant_token_index(tokens, value_index + 1)?;
+                }
+                if !matches!(tokens[value_index].token, Token::SingleQuotedString(_) | Token::DoubleQuotedString(_)) {
+                    continue;
+                }
+
+                if mysql_alter_table_options_are_valid(tokens) {
+                    return Some(Vec::new());
+                }
+
+                let next_index = next_significant_token_index(tokens, value_index + 1);
+                if next_index.is_some_and(|index| !matches!(tokens[index].token, Token::Comma)) {
+                    continue;
+                }
+
+                let previous_index =
+                    (0..index).rev().find(|index| !matches!(tokens[*index].token, Token::Whitespace(_)));
+                let (range_start, range_end) =
+                    if previous_index.is_some_and(|index| matches!(tokens[index].token, Token::Comma)) {
+                        (previous_index.expect("checked above"), value_index)
+                    } else if next_index.is_some() {
+                        (index, next_index.expect("checked above"))
+                    } else {
+                        (index, value_index)
+                    };
+
+                let mut stripped = tokens.to_vec();
+                stripped.drain(range_start..=range_end);
+                if Parser::new(&dialect).with_tokens_with_locations(stripped.clone()).parse_statements().is_ok() {
+                    return Some(stripped);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn mysql_alter_table_options_are_valid(tokens: &[TokenWithSpan]) -> bool {
+    let dialect = MySqlDialect {};
+    let mut parser = Parser::new(&dialect).with_tokens_with_locations(tokens.to_vec());
+    if !parser.parse_keywords(&[Keyword::ALTER, Keyword::TABLE]) {
+        return false;
+    }
+    if parser.parse_object_name(false).is_err() {
+        return false;
+    }
+    let option_start = parser.peek_token_ref().span;
+    let Some(mut index) = tokens.iter().position(|token| token.span == option_start) else {
+        return false;
+    };
+    let mut saw_comment = false;
+    let mut saw_option = false;
+
+    while let Some(current) = next_significant_token_index(tokens, index) {
+        let keyword = unquoted_token_keyword(&tokens[current]);
+        if keyword == Some(Keyword::COMMENT) {
+            if saw_comment {
+                return false;
+            }
+            saw_comment = true;
+        }
+        if matches!(tokens[current].token, Token::Comma) {
+            if !saw_option {
+                return false;
+            }
+            let Some(next) = next_significant_token_index(tokens, current + 1) else {
+                return false;
+            };
+            if matches!(tokens[next].token, Token::Comma) {
+                return false;
+            }
+            index = next;
+            continue;
+        }
+
+        let Some(next_index) = mysql_table_option_value_start(tokens, current, keyword) else {
+            return false;
+        };
+        saw_option = true;
+        index = next_index + 1;
+    }
+
+    saw_option && saw_comment
+}
+
+fn mysql_table_option_value_start(
+    tokens: &[TokenWithSpan],
+    key_index: usize,
+    keyword: Option<Keyword>,
+) -> Option<usize> {
+    let mut value_index = key_index + 1;
+    match keyword {
+        Some(Keyword::DEFAULT) => {
+            let modifier = next_significant_token_index(tokens, value_index)?;
+            if !matches!(unquoted_token_keyword(&tokens[modifier]), Some(Keyword::CHARSET | Keyword::CHARACTER)) {
+                return None;
+            }
+            value_index = modifier + 1;
+            if unquoted_token_keyword(&tokens[modifier]) == Some(Keyword::CHARACTER) {
+                let set_index = next_significant_token_index(tokens, value_index)?;
+                if unquoted_token_keyword(&tokens[set_index]) != Some(Keyword::SET) {
+                    return None;
+                }
+                value_index = set_index + 1;
+            }
+        }
+        Some(Keyword::CHARACTER) => {
+            let set_index = next_significant_token_index(tokens, value_index)?;
+            if unquoted_token_keyword(&tokens[set_index]) != Some(Keyword::SET) {
+                return None;
+            }
+            value_index = set_index + 1;
+        }
+        Some(
+            Keyword::AUTO_INCREMENT
+            | Keyword::CHARSET
+            | Keyword::COLLATE
+            | Keyword::COMMENT
+            | Keyword::COMPRESSION
+            | Keyword::CONNECTION
+            | Keyword::ENGINE
+            | Keyword::ENCRYPTION
+            | Keyword::INSERT_METHOD
+            | Keyword::KEY_BLOCK_SIZE
+            | Keyword::MAX_ROWS
+            | Keyword::MIN_ROWS
+            | Keyword::PACK_KEYS
+            | Keyword::PASSWORD
+            | Keyword::ROW_FORMAT
+            | Keyword::STATS_AUTO_RECALC
+            | Keyword::STATS_PERSISTENT
+            | Keyword::STATS_SAMPLE_PAGES
+            | Keyword::TABLESPACE,
+        ) => {}
+        _ => return None,
+    }
+
+    let separator = next_significant_token_index(tokens, value_index)?;
+    let value_index = if matches!(tokens[separator].token, Token::Eq) {
+        next_significant_token_index(tokens, separator + 1)?
+    } else {
+        separator
+    };
+    matches!(
+        tokens[value_index].token,
+        Token::Word(_) | Token::Number(_, _) | Token::SingleQuotedString(_) | Token::DoubleQuotedString(_)
+    )
+    .then_some(value_index)
+}
+
+fn is_mysql_table_comment(tokens: &[TokenWithSpan]) -> bool {
+    let dialect = MySqlDialect {};
+    let mut parser = Parser::new(&dialect).with_tokens_with_locations(tokens.to_vec());
+    if !parser.parse_keywords(&[Keyword::ALTER, Keyword::TABLE]) {
+        return false;
+    }
+    let Ok(name) = parser.parse_object_name(false) else { return false };
+    if name.0.len() > 2 || !parser.parse_keyword(Keyword::COMMENT) {
+        return false;
+    }
+    let _ = parser.consume_token(&Token::Eq);
+    if !matches!(parser.next_token().token, Token::SingleQuotedString(_) | Token::DoubleQuotedString(_)) {
+        return false;
+    }
+    matches!(parser.next_token().token, Token::EOF)
 }
 
 fn parse_sqlserver(sql: &str) -> Result<Vec<Statement>, ParserError> {
@@ -1743,8 +1988,16 @@ fn table_reference_from_name(
     let parts: Vec<&Ident> = name.0.iter().filter_map(ObjectNamePart::as_ident).collect();
     let table = parts.last()?;
     let schema = if parts.len() >= 2 { parts.get(parts.len() - 2).map(|ident| ident.value.clone()) } else { None };
+    let database = if parts.len() >= 3 { parts.get(parts.len() - 3).map(|ident| ident.value.clone()) } else { None };
 
-    Some(SqlTableReference { name: table.value.clone(), schema, alias, span: table.span.into(), scope_id: scope_id? })
+    Some(SqlTableReference {
+        name: table.value.clone(),
+        database,
+        schema,
+        alias,
+        span: table.span.into(),
+        scope_id: scope_id?,
+    })
 }
 
 fn object_name_last_ident(name: &ObjectName) -> Option<&Ident> {
@@ -1920,5 +2173,137 @@ mod group_by_violation_tests {
                 "dialect {dialect}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod sql_text_span_tests {
+    use super::*;
+    use sqlparser::tokenizer::Location;
+
+    #[test]
+    fn span_conversion_produces_inclusive_end_column() {
+        // sqlparser's exclusive column 15 for 7-char token starting at 8 maps to inclusive 14.
+        let span = Span { start: Location { line: 1, column: 8 }, end: Location { line: 1, column: 15 } };
+        let text_span: SqlTextSpan = span.into();
+        assert_eq!(text_span, SqlTextSpan { start_line: 1, start_column: 8, end_line: 1, end_column: 14 });
+
+        // 1-character token at column 5: start 5, exclusive end 6 maps to inclusive 5.
+        let single_char = Span { start: Location { line: 1, column: 5 }, end: Location { line: 1, column: 6 } };
+        let single_span: SqlTextSpan = single_char.into();
+        assert_eq!(single_span, SqlTextSpan { start_line: 1, start_column: 5, end_line: 1, end_column: 5 });
+
+        // Multi-line span: end column 10 maps to inclusive 9 on line 2.
+        let multiline = Span { start: Location { line: 1, column: 1 }, end: Location { line: 2, column: 10 } };
+        let multiline_span: SqlTextSpan = multiline.into();
+        assert_eq!(multiline_span, SqlTextSpan { start_line: 1, start_column: 1, end_line: 2, end_column: 9 });
+
+        // Empty span stays zeroed.
+        let empty_span: SqlTextSpan = Span::empty().into();
+        assert_eq!(empty_span, SqlTextSpan { start_line: 0, start_column: 0, end_line: 0, end_column: 0 });
+    }
+
+    #[test]
+    fn reference_analysis_emits_inclusive_spans_before_semicolon() {
+        let sql = "SELECT id, name AS user_name FROM users GROUP BY user_name;";
+        let analysis = analyze_sql_references(sql, Some("generic")).expect("query should analyze");
+
+        // "users" starts at 1-based column 35, length 5 ("users" -> 35..=39).
+        assert_eq!(analysis.tables[0].name, "users");
+        assert_eq!(analysis.tables[0].span.start_line, 1);
+        assert_eq!(analysis.tables[0].span.start_column, 35);
+        assert_eq!(analysis.tables[0].span.end_line, 1);
+        assert_eq!(analysis.tables[0].span.end_column, 39);
+
+        // "id" at col 8..=9 (length 2).
+        let id_col = analysis.columns.iter().find(|col| col.name == "id").unwrap();
+        assert_eq!(id_col.span.start_column, 8);
+        assert_eq!(id_col.span.end_column, 9);
+
+        // "name" at col 12..=15 (length 4).
+        let name_col = analysis.columns.iter().find(|col| col.name == "name").unwrap();
+        assert_eq!(name_col.span.start_column, 12);
+        assert_eq!(name_col.span.end_column, 15);
+
+        // The GROUP BY column reference "user_name" directly before ';' at column 60:
+        // "user_name" starts at column 50, length 9 (50..=58).
+        // It must NOT overshoot to column 59 (which is ';').
+        let group_col = analysis.columns.iter().rfind(|col| col.name == "user_name").unwrap();
+        assert_eq!(group_col.span.start_column, 50);
+        assert_eq!(group_col.span.end_column, 58);
+    }
+
+    #[test]
+    fn group_by_violations_emit_inclusive_spans() {
+        let sql = "SELECT USER_ID, SUM(MONEY) FROM users GROUP BY USER_NAME;";
+        let analysis = analyze_sql_references(sql, Some("postgres")).expect("query should analyze");
+        assert_eq!(analysis.group_by_violations.len(), 1);
+        let violation = &analysis.group_by_violations[0];
+        assert_eq!(violation.column, "USER_ID");
+        // "USER_ID" starts at column 8, length 7 (8..=14).
+        // Must NOT overshoot to column 15 (which is the comma ',').
+        assert_eq!(violation.span.start_line, 1);
+        assert_eq!(violation.span.start_column, 8);
+        assert_eq!(violation.span.end_line, 1);
+        assert_eq!(violation.span.end_column, 14);
+    }
+}
+
+#[cfg(test)]
+mod mysql_table_comment_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_mysql_table_comment_options() {
+        for sql in [
+            "ALTER TABLE yrisk_source COMMENT '风险源定义';",
+            "ALTER TABLE t COMMENT = \"double quoted\";",
+            "ALTER TABLE t COMMENT 'it\\'s escaped';",
+            "CREATE TABLE t (id INT COMMENT 'column') COMMENT='table';",
+            "SELECT 'ALTER TABLE t COMMENT' AS text;",
+            "ALTER TABLE `db`.`table` COMMENT = 'it''s a table';",
+            "/* before */ alter table t comment /* between */ = ''; -- after",
+            "ALTER TABLE t COMMENT 'semi;colon'; SELECT u.id FROM users u;",
+            "ALTER TABLE t COMMENT='x', ADD COLUMN c INT; SELECT * FROM users",
+            "ALTER TABLE t ADD COLUMN c INT, COMMENT='x'; SELECT * FROM users",
+            "ALTER TABLE t ENGINE=InnoDB COMMENT='x'; SELECT * FROM users",
+            "ALTER TABLE t COMMENT='x' ROW_FORMAT=DYNAMIC; SELECT * FROM users",
+            "ALTER TABLE t DEFAULT CHARACTER SET=utf8mb4 COMMENT='x'; SELECT * FROM users",
+        ] {
+            assert!(analyze_sql_references(sql, Some("mysql")).is_ok(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn keeps_mysql_comment_errors_and_other_statements_visible() {
+        for sql in [
+            "ALTER TABLE t COMMENT;",
+            "ALTER TABLE t COMMENT =;",
+            "ALTER TABLE t COMMENT 123;",
+            "ALTER TABLE t COMMENT NULL;",
+            "ALTER TABLE t COMMENT 'x' COMMENT 'y';",
+            "ALTER TABLE t COMMENT 'x'; SELECT * FROM;",
+            "SELECT FROM; ALTER TABLE t COMMENT 'x';",
+            "ALTER TABLE t COMMENT 'x' garbage;",
+            "ALTER TABLE t COMMENT 'unterminated",
+            "ALTER TABLE t COMMENT 'x'; SELECT FROM;",
+            "ALTER TABLE t COMMENT 'x', ADD COLUMN;",
+            "ALTER TABLE t COMMENT='x' ADD COLUMN c INT;",
+            "ALTER TABLE t COMMENT='x' COMMENT='y';",
+            "ALTER TABLE t COMMENT='x',",
+        ] {
+            assert!(analyze_sql_references(sql, Some("mysql")).is_err(), "{sql}");
+        }
+        assert!(analyze_sql_references("ALTER TABLE t COMMENT 'x'", Some("postgres")).is_err());
+    }
+
+    #[test]
+    fn preserves_reference_spans_after_mysql_comment() {
+        let sql = "ALTER TABLE t COMMENT '注释';\nSELECT u.id FROM users u";
+        let analysis = analyze_sql_references(sql, Some("mysql")).unwrap();
+        assert_eq!(analysis.tables[0].name, "users");
+        assert_eq!(analysis.tables[0].span.start_line, 2);
+        assert_eq!(analysis.columns[0].name, "id");
+        assert_eq!(analysis.columns[0].span.start_line, 2);
     }
 }

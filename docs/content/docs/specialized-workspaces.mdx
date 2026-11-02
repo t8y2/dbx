@@ -34,6 +34,25 @@ Redis and MongoDB have dedicated guides:
 
 When a connection is read-only, DBX disables or rejects mutations in Redis, MongoDB, and GridFS. Dangerous Redis commands also pass through a separate command-safety classifier.
 
+## DynamoDB PartiQL
+
+DynamoDB connections support native PartiQL in the query editor:
+
+```sql
+SELECT "pk", "status" FROM "orders" WHERE "pk" = 'order-1001';
+INSERT INTO "orders" VALUE {'pk': 'order-1002', 'status': 'NEW'};
+UPDATE "orders" SET "status" = 'PAID' WHERE "pk" = 'order-1002';
+DELETE FROM "orders" WHERE "pk" = 'order-1002';
+```
+
+DBX calls the AWS SDK's [ExecuteStatement](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_ExecuteStatement.html) rather than translating PartiQL into another SQL dialect. DynamoDB determines supported syntax, IAM permissions, and errors. This is not full relational SQL: JOIN, SQL-file execution, DDL, and cross-statement transactions are not enabled. Existing `DBX DYNAMODB SCAN` / Item commands remain supported.
+
+SELECT follows service `NextToken` values, including intermediate pages with no filter matches. Results respect the editor's row cap and a 1,000-page safety bound. A reached limit or a service response without a usable continuation token marks the result truncated and emits a warning instead of presenting partial data as complete. Use the editor row cap or narrower conditions, not SQL `LIMIT`. SELECT without a partition-key condition may scan substantial data and incur charges.
+
+Query results paginate the returned data locally, without injecting SQL `LIMIT` / `OFFSET` or derived-table `COUNT` queries. Document-browser cursor pagination is unchanged.
+
+Projections preserve DynamoDB representations for large numbers, binary, and nested values without adding synthetic document-editing `_id` fields. Singleton writes never enter the client pagination loop; their affected count acknowledges one successful operation, not an exact changed-row count supplied by the service. Existing read-only, production-confirmation, timeout, and cancellation paths remain in effect.
+
 ## Search and Document Indexes
 
 Elasticsearch, Easysearch, Meilisearch, and Manticore Search use index- and document-oriented browsing. DBX displays indexes or collections from driver metadata and provides entry points for browsing, querying, and inspecting documents.

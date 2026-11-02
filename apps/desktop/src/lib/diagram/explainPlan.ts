@@ -24,7 +24,7 @@ export interface ExplainPlanNode {
   children: ExplainPlanNode[];
 }
 
-export type ExplainPlanDatabaseType = "mysql" | "postgres" | "dameng" | "questdb" | "doris" | "oracle" | "oceanbase-oracle" | "sqlserver" | "xugu" | "db2";
+export type ExplainPlanDatabaseType = "mysql" | "postgres" | "opengauss" | "dameng" | "questdb" | "doris" | "oracle" | "oceanbase-oracle" | "sqlserver" | "xugu" | "db2";
 
 export interface ParsedExplainPlan {
   databaseType: ExplainPlanDatabaseType;
@@ -39,7 +39,7 @@ export function formatExplainPlanDetails(node: ExplainPlanNode | undefined, esti
   return node.estimatedTimeUs === undefined ? node.details : [`${estimatedTimeLabel}: ${node.estimatedTimeUs} µs`, ...node.details];
 }
 
-const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb", "doris", "oracle", "oceanbase-oracle", "sqlserver", "xugu", "db2"]);
+const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "opengauss", "dameng", "questdb", "doris", "oracle", "oceanbase-oracle", "sqlserver", "xugu", "db2"]);
 export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is ExplainPlanDatabaseType {
   return !!databaseType && supportsDatabaseFeature(databaseType, "sqlExplain") && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
 }
@@ -57,6 +57,8 @@ export function parseExplainResult(databaseType: ExplainPlanDatabaseType, result
     return parseXuguExplainResult(result);
   } else if (databaseType === "dameng") {
     return parseDamengExplain(result);
+  } else if (databaseType === "opengauss") {
+    return parseOpenGaussExplain(result);
   } else if (databaseType === "questdb") {
     return parseQuestdbExplain(result);
   } else if (databaseType === "doris") {
@@ -414,23 +416,21 @@ function parseSqlServerExplain(result: QueryResult): ParsedExplainPlan {
   if (!raw) throw new Error("SQL Server did not return ShowPlan XML");
   if (typeof DOMParser === "undefined") throw new Error("XML parser is unavailable");
 
+  if (!hasBalancedXmlTags(raw)) throw new Error("Invalid SQL Server ShowPlan XML");
   const parserIssues: string[] = [];
-  type XmlParserConstructor = new (options?: {
-    errorHandler?: {
-      warning: (message: string) => void;
-      error: (message: string) => void;
-      fatalError: (message: string) => void;
-    };
-  }) => DOMParser;
+  type XmlParserConstructor = new (options?: { onError?: (level: string, message: string) => void }) => DOMParser;
   const Parser = DOMParser as unknown as XmlParserConstructor;
-  const recordParserIssue = (message: string) => parserIssues.push(message);
-  const document = new Parser({
-    errorHandler: {
-      warning: recordParserIssue,
-      error: recordParserIssue,
-      fatalError: recordParserIssue,
-    },
-  }).parseFromString(raw, "application/xml");
+  const recordParserIssue = (_level: string, message: string) => parserIssues.push(message);
+  let document: Document;
+  try {
+    document = new Parser({
+      onError: recordParserIssue,
+    }).parseFromString(raw, "application/xml");
+  } catch {
+    // xmldom 0.9 throws ParseError on fatal issues even with onError set; the
+    // recorded issues are non-fatal warnings at this point.
+    throw new Error("Invalid SQL Server ShowPlan XML");
+  }
   if (parserIssues.length > 0 || xmlElements(document, "parsererror").length > 0 || !document.documentElement) {
     throw new Error("Invalid SQL Server ShowPlan XML");
   }
@@ -447,6 +447,23 @@ function parseSqlServerExplain(result: QueryResult): ParsedExplainPlan {
     raw,
     nodes: roots.map(parseSqlServerRelOp),
   };
+}
+
+function hasBalancedXmlTags(xml: string): boolean {
+  const stack: string[] = [];
+  const tokens = xml.match(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[^>]*\?>|<!DOCTYPE[^>]*>|<\/?[A-Za-z_][\w:.-]*(?:\s[^<>]*?)?\/?>/gi);
+  if (!tokens || xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[^>]*\?>|<!DOCTYPE[^>]*>|<\/?[A-Za-z_][\w:.-]*(?:\s[^<>]*?)?\/?>/gi, "").includes("<")) return false;
+  for (const token of tokens) {
+    if (token.startsWith("<!--") || token.startsWith("<![CDATA[") || token.startsWith("<?") || /^<!DOCTYPE/i.test(token)) continue;
+    const closing = /^<\//.test(token);
+    const selfClosing = /\/\s*>$/.test(token);
+    const name = token.match(/^<\/?([A-Za-z_][\w:.-]*)/)?.[1];
+    if (!name) return false;
+    if (closing) {
+      if (stack.pop() !== name) return false;
+    } else if (!selfClosing) stack.push(name);
+  }
+  return stack.length === 0;
 }
 
 function firstSqlServerShowplanXml(result: QueryResult): string | undefined {
@@ -914,6 +931,43 @@ function parseMysqlTable(table: Record<string, unknown>, id: string): ExplainPla
 }
 
 // ── QuestDB explain parser ─────────────────────────────────────────
+// ── openGauss explain parser ────────────────────────────────────────
+// openGauss (PostgreSQL 9.2 lineage) returns the plan as indented text rows
+// with no FORMAT JSON output, so the tree comes from the leading-space depth.
+function parseOpenGaussExplain(result: QueryResult): ParsedExplainPlan {
+  const rows = (result.rows ?? []).map((row: unknown[]) => String(row[0] ?? ""));
+  const nodes: ExplainPlanNode[] = [];
+  // Stack of (depth, node); each row nests under the shallowest deeper predecessor.
+  const stack: { depth: number; node: ExplainPlanNode }[] = [];
+  rows.forEach((text, index) => {
+    if (!text.trim()) return;
+    const leading = text.length - text.trimStart().length;
+    const depth = Math.floor(leading / 2);
+    const node: ExplainPlanNode = {
+      id: `plan_${index}`,
+      title: text.trim(),
+      nodeType: "Plan",
+      relation: "",
+      index: String(index),
+      cost: undefined,
+      rows: undefined,
+      details: [text.trim()],
+      children: [],
+    };
+    // Compare stored depths, not stack length: a row may jump more than one
+    // level past its parent (detail lines under a `->` node), which desyncs
+    // length from depth and chains same-indent siblings as parent-child.
+    while (stack.length > 0 && stack[stack.length - 1]!.depth >= depth) stack.pop();
+    if (stack.length === 0) {
+      nodes.push(node);
+    } else {
+      stack[stack.length - 1]!.node.children.push(node);
+    }
+    stack.push({ depth, node });
+  });
+  return { databaseType: "opengauss", raw: result, nodes };
+}
+
 function parseQuestdbExplain(result: QueryResult): ParsedExplainPlan {
   let nodes: ExplainPlanNode[] = result.rows.map((row: unknown[], index: number) => {
     const text = String(row[0] ?? "");

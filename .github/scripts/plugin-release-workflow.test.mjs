@@ -108,7 +108,7 @@ test("pnpm setup precedes setup-node cache restoration and respects nested packa
 });
 
 test("Go cache includes backend go.sum and is disabled when no checksum file exists", () => {
-  const goStep = workflowStep("actions/setup-go@v5");
+  const goStep = workflowStep("actions/setup-go@v7");
   assert.ok(goStep.includes("cache-dependency-path: ${{ inputs.working-directory }}/**/go.sum"));
   assert.ok(goStep.includes("cache: ${{ hashFiles(format('{0}/**/go.sum', inputs.working-directory)) != '' }}"));
   assert.ok(goStep.includes("if: inputs.go-version != ''"));

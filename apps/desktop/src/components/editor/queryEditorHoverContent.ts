@@ -85,6 +85,7 @@ export function createQueryEditorHoverContent(options: QueryEditorHoverContentOp
         originalHtml: sqlContainer.innerHTML,
         placeholder: t("grid.hoverSearchPlaceholder"),
         noResultLabel: t("grid.hoverSearchNoResult"),
+        debounceMs: 120,
       });
       dom.appendChild(searchController.element);
 
@@ -126,6 +127,7 @@ export function createQueryEditorHoverContent(options: QueryEditorHoverContentOp
         layoutController || handleCopy || searchController
           ? () => {
               layoutController?.mount();
+              searchController?.pinTooltip(dom.closest<HTMLElement>(".cm-tooltip") ?? dom);
               if (handleCopy) document.addEventListener("copy", handleCopy);
             }
           : undefined,

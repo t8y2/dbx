@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Bot, Database, Loader2, ShieldCheck, TriangleAlert, X } from "@lucide/vue";
+import { Bot, Database, Loader2, Plug, ShieldCheck, TriangleAlert, X } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/composables/useToast";
 import type { InstalledPlugin } from "@/types/database";
+import { installedPluginOffersExternalMcp, installedPluginProvidesMcpTools } from "@/lib/plugins/pluginMcpMark";
 import type { PluginDataGrant } from "@/types/pluginData";
 import { PLUGIN_DATA_READ_PERMISSION } from "@/types/pluginData";
 import type { PluginToolPreview } from "@/types/pluginAiTools";
@@ -26,6 +27,10 @@ const { toast } = useToast();
 
 const pluginId = computed(() => props.plugin.manifest.id);
 const hasBackend = computed(() => !!props.plugin.manifest.entrypoints?.backend);
+// External MCP is governed in Settings → MCP → Capabilities; this card only
+// mirrors the author opt-in so users know where the switch lives.
+const providesMcpTools = computed(() => installedPluginProvidesMcpTools(props.plugin));
+const externalMcpOffered = computed(() => installedPluginOffersExternalMcp(props.plugin));
 const declaresDataRead = computed(() => (props.plugin.manifest.permissions || []).includes(PLUGIN_DATA_READ_PERMISSION));
 
 const aiEnabled = ref(false);
@@ -135,6 +140,14 @@ watch(pluginId, () => void load(), { immediate: true });
             <Badge v-else variant="outline" class="h-5 shrink-0 border-amber-500/40 px-1.5 text-[10px] text-amber-700 dark:text-amber-300">{{ t("pluginPlatform.aiTools.needsApproval") }}</Badge>
           </li>
         </ul>
+      </div>
+    </section>
+
+    <section v-if="providesMcpTools" class="flex items-start gap-2 rounded-lg border p-4" data-plugin-external-mcp>
+      <Plug class="mt-0.5 size-4 shrink-0 text-primary" />
+      <div class="min-w-0">
+        <div class="text-sm font-medium">{{ t("pluginPlatform.externalMcp.title") }}</div>
+        <p class="mt-1 text-xs leading-5 text-muted-foreground">{{ externalMcpOffered ? t("pluginPlatform.externalMcp.offered") : t("pluginPlatform.externalMcp.notOffered") }}</p>
       </div>
     </section>
 

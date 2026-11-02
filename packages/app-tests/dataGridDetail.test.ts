@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { buildDataGridCellDetail, buildDataGridColumnDetail, dataGridColumnDetailJson, dataGridColumnDetailTsv, buildDataGridRowDetail, dataGridRowDetailJson, dataGridRowDetailTsv, filterDataGridDetailFields, jsonDetailDisplayValue, type DataGridCellDetail } from "../../apps/desktop/src/lib/dataGrid/dataGridDetail.ts";
+import {
+  buildDataGridCellDetail,
+  buildDataGridColumnDetail,
+  dataGridColumnDetailJson,
+  dataGridColumnDetailTsv,
+  buildDataGridRowDetail,
+  dataGridRowDetailJson,
+  dataGridRowDetailTsv,
+  filterDataGridDetailFields,
+  jsonDetailDisplayValue,
+  type DataGridCellDetail,
+} from "../../apps/desktop/src/lib/dataGrid/dataGridDetail.ts";
 import type { CellValue } from "../../apps/desktop/src/lib/dataGrid/cellValue.ts";
 
 test("buildDataGridCellDetail returns null for an invalid column", () => {
@@ -144,7 +155,7 @@ test("aggregate details defer binary image preview generation", () => {
 });
 
 test("buildDataGridCellDetail limits rendered previews for huge text values", () => {
-  const hugeJson = `{"body":"${"x".repeat(120_000)}"}`;
+  const hugeJson = `{"body":"${"x".repeat(600_000)}"}`;
   const detail = buildDataGridCellDetail({
     rowIndex: 0,
     rowId: 1,
@@ -162,6 +173,24 @@ test("buildDataGridCellDetail limits rendered previews for huge text values", ()
   assert.equal(detail.displayValuePreview.length, 12_000);
   assert.equal(detail.isValuePreviewTruncated, true);
   assert.equal(detail.formattedJson, "");
+});
+
+test("buildDataGridCellDetail formats large JSON values within the format limit", () => {
+  const largeJson = `{"body":"${"x".repeat(120_000)}"}`;
+  const detail = buildDataGridCellDetail({
+    rowIndex: 0,
+    rowId: 1,
+    row: [largeJson],
+    columns: ["payload"],
+    columnIndex: 0,
+    typeByColumn: new Map([["payload", "nvarchar(max)"]]),
+    displayValue: (value) => String(value),
+    isEditable: false,
+  });
+
+  assert.ok(detail);
+  assert.notEqual(detail.formattedJson, "");
+  assert.ok(detail.formattedJson.startsWith('{\n  "body":'));
 });
 
 test("buildDataGridRowDetail maps requested column indexes in order", () => {
@@ -273,10 +302,7 @@ test("dataGridRowDetailJson uses the original MongoDB document for nested values
 });
 
 test("jsonDetailDisplayValue expands JSON stored in MongoDB string fields", () => {
-  assert.deepEqual(
-    jsonDetailDisplayValue({ imparts: '{"insImpart":[{"impartId":"40-936","impartAnswer":"N,,"}]}' }),
-    { imparts: { insImpart: [{ impartId: "40-936", impartAnswer: "N,," }] } },
-  );
+  assert.deepEqual(jsonDetailDisplayValue({ imparts: '{"insImpart":[{"impartId":"40-936","impartAnswer":"N,,"}]}' }), { imparts: { insImpart: [{ impartId: "40-936", impartAnswer: "N,," }] } });
 });
 test("buildDataGridColumnDetail maps a whole column across rows", () => {
   const typeByColumn = new Map([["name", "varchar"]]);

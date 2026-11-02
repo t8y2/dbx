@@ -33,7 +33,8 @@ function fixture(tree: TreeNode[], grouped: boolean, rowHeight: number) {
     }),
   );
   const stickyScrollTop = ref(0);
-  const bindings = { computed, flatNodes, flatTreeIndex, stickyScrollTop, sidebarTreeRowHeight: ref(rowHeight), isTreeSearchFiltering: ref(false), isSidebarTableSearchControlNode, SCHEMA_LEVEL_TYPES: new Set(["schema"]) };
+  const plainStickyContainerIndex = ref(-1);
+  const bindings = { computed, flatNodes, flatTreeIndex, stickyScrollTop, plainStickyContainerIndex, sidebarTreeRowHeight: ref(rowHeight), useVirtualTree: ref(true), isTreeSearchFiltering: ref(false), isSidebarTableSearchControlNode, SCHEMA_LEVEL_TYPES: new Set(["schema"]) };
   const state = new Function(...Object.keys(bindings), `${compiled}; return {stickyNode, stickyTableSearchNode, stickyHeaderStyle, stickyHeaderHeight};`)(...Object.values(bindings));
   return {
     state,
@@ -48,7 +49,9 @@ describe("sticky table search scope boundaries", () => {
     it.each(["grouped", "schemas"])(`keeps the database title pinned across %s (row height=${rowHeight})`, (mode) => {
       const grouped = mode === "grouped";
       const first = node("first", grouped ? "group-tables" : "schema", tables());
-      const second = node("second", grouped ? "group-views" : "schema", [node("view", "view")]);
+      // group-procedures has no in-group search control, so this keeps exercising
+      // the boundary where only the first scope carries one (#12901 gave views one).
+      const second = node("second", grouped ? "group-procedures" : "schema", [node("view", "view")]);
       const { state, scrollBefore } = fixture([node("conn", "connection", [node("db", "database", [first, second])])], grouped, rowHeight);
       scrollBefore("second", 3 * rowHeight);
       expect(state.stickyTableSearchNode.value.node.tableSearchParentId).toBe("first");

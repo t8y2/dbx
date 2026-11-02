@@ -1,9 +1,10 @@
 import type { ConnectionConfig, DatabaseType, QueryResult } from "@/types/database";
 import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
 import { effectiveDatabaseTypeForConnection, gaussdbConnectionMode } from "@/lib/database/jdbcDialect";
+import { supportsOracleSecurity } from "@/lib/database/oracleSecurity";
 
 export type UserAdminDialect = "mysql" | "postgres";
-export type PrivilegeScope = "mysql" | "database" | "schema" | "table" | "role";
+export type PrivilegeScope = "mysql" | "database" | "schema" | "table" | "role" | "system";
 export type AuthorizationModel = "mysql" | "postgres" | "starrocks";
 
 export interface DatabaseUserIdentity {
@@ -1000,5 +1001,5 @@ export function resolveDatabaseUserAdminProviderForConnection(connection: Connec
 }
 
 export function connectionSupportsDatabaseUserAdmin(connection: ConnectionConfig | undefined): boolean {
-  return resolveDatabaseUserAdminProviderForConnection(connection) !== null;
+  return supportsOracleSecurity(connection) || resolveDatabaseUserAdminProviderForConnection(connection) !== null;
 }

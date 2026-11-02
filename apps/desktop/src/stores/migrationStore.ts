@@ -11,14 +11,14 @@ export function useMigrationStore(backend: MigrationApi = api) {
     report: MigrationReport | null;
     loading: boolean;
     busy: boolean;
-    error: "statusFailed" | "migrationFailed" | "cleanupFailed" | null;
+    error: "statusFailed" | "migrationFailed" | "keyRecoveryRequired" | "cleanupFailed" | null;
     errorCode: string | null;
     errorMessage: string | null;
     entered: boolean;
     step: 1 | 2 | 3;
   }>({ status: null, report: null, loading: true, busy: false, error: null, errorCode: null, errorMessage: null, entered: false, step: 1 });
   const migrationAttempted = ref(false);
-  const completed = computed(() => state.status !== null && !state.status.needsMigration && ["succeeded", "not_required"].includes(state.status.state));
+  const completed = computed(() => state.status !== null && !state.status.needsMigration && !state.status.keyRecoveryRequired && ["succeeded", "not_required"].includes(state.status.state));
   // A managed data-directory key is intentionally created when migration
   // starts. Its absence during the read-only preflight is actionable, not a
   // migration failure, as long as the backend explicitly allows creation.
@@ -50,7 +50,8 @@ export function useMigrationStore(backend: MigrationApi = api) {
       // not a reason to block the normal application startup. `entered` is
       // therefore only changed by the explicit success-page action below.
       state.entered = false;
-      if (state.status?.state === "failed" || hasBlockingError()) state.error = "migrationFailed";
+      if (state.status?.keyRecoveryRequired) state.error = "keyRecoveryRequired";
+      else if (state.status?.state === "failed" || hasBlockingError()) state.error = "migrationFailed";
     } catch {
       state.error = "statusFailed";
     } finally {
@@ -72,11 +73,15 @@ export function useMigrationStore(backend: MigrationApi = api) {
     }
     try {
       await refreshStatus();
-      if (completed.value) {
+      if (state.status?.keyRecoveryRequired) {
+        state.step = 1;
+        state.error = "keyRecoveryRequired";
+      } else if (completed.value) {
         state.step = 3;
         state.error = null;
+      } else if (hasBlockingError()) {
+        state.error = "migrationFailed";
       }
-      if (!completed.value || hasBlockingError()) state.error = "migrationFailed";
     } catch {
       state.error = "statusFailed";
     } finally {
@@ -104,6 +109,7 @@ export function useMigrationStore(backend: MigrationApi = api) {
       actionError: state.error,
       step: state.step,
       needsMigration: s?.needsMigration,
+      keyRecoveryRequired: s?.keyRecoveryRequired,
       legacyJsonFiles: s?.legacyJsonFiles,
       state: s?.state,
       counts: s ? { connections: s.connectionCount, databasePlaintext: s.databasePlaintextCount, plugin: s.pluginSecretCount, ai: s.aiSecretCount, tunnel: s.tunnelSecretCount, sync: s.syncCredentialCount } : {},

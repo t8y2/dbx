@@ -114,6 +114,10 @@ function buildExportHarness(
     sql?: string;
     exportSql?: string;
     pageSql?: string;
+    displayValue?: (value: any, columnIndex: number) => string;
+    hasColumnFormatter?: (columnIndex: number) => boolean;
+    applyColumnFormattersOnExport?: any;
+    contextCell?: any;
   } = {},
 ) {
   const exportColumns = options.columns ?? ["id", "name"];
@@ -122,6 +126,7 @@ function buildExportHarness(
     [2, "Lin"],
   ];
   const rowItems = exportRows.map((data, index) => ({ id: index + 1, data, isNew: false, isDeleted: false, isDirtyCol: data.map(() => false), status: "" }));
+  const contextCell = options.contextCell ?? ref(null);
   const exportProgressDialog = ref(false);
   const exportProgressState = ref({
     title: "",
@@ -182,7 +187,7 @@ function buildExportHarness(
     hasCellSelection: computed(() => false),
     selectedCells: computed(() => ({ columns: [], rows: [] })),
     selectedRange: computed(() => null),
-    contextCell: ref(null),
+    contextCell,
     getRowItem: (rowId: number) => rowItems.find((item) => item.id === rowId),
     selectedRowIds: ref(new Set<number>()),
     hasRowSelection: computed(() => false),
@@ -193,6 +198,9 @@ function buildExportHarness(
     allExportResults: computed(() => options.allExportResults),
     currentResultLabel: computed(() => options.currentResultLabel),
     exportFileBaseName: computed(() => options.exportFileBaseName),
+    displayValue: options.displayValue,
+    hasColumnFormatter: options.hasColumnFormatter,
+    applyColumnFormattersOnExport: options.applyColumnFormattersOnExport,
     exportProgressDialog,
     exportProgressState,
     exportCancelHandler,
@@ -205,10 +213,18 @@ function buildExportHarness(
     exportProgressDialog,
     exportProgressState,
     exportCancelHandler,
+    contextCell,
   };
 }
 
-function buildTableDataExportHarness() {
+function buildTableDataExportHarness(
+  options: {
+    displayValue?: (value: any, columnIndex: number) => string;
+    hasColumnFormatter?: (columnIndex: number) => boolean;
+    applyColumnFormattersOnExport?: any;
+    fullExportResult?: any;
+  } = {},
+) {
   const exportProgressDialog = ref(false);
   const exportProgressState = ref({
     title: "",
@@ -254,6 +270,10 @@ function buildTableDataExportHarness() {
     getRowItem: () => undefined,
     selectedRowIds: ref(new Set<number>()),
     hasRowSelection: computed(() => false),
+    fullExportResult: options.fullExportResult,
+    displayValue: options.displayValue,
+    hasColumnFormatter: options.hasColumnFormatter,
+    applyColumnFormattersOnExport: options.applyColumnFormattersOnExport,
     exportProgressDialog,
     exportProgressState,
     exportCancelHandler,
@@ -567,6 +587,40 @@ test("local SQL export maps the selected mode to the shared formatter", async ()
     await composable.exportSql();
 
     assert.equal(apiMock.buildExportSqlInsert.mock.calls[0][0].batchSize, 1);
+  } finally {
+    download.restore();
+  }
+});
+
+test.each([
+  ["oracle", "all"],
+  ["oracle", "page"],
+  ["oceanbase-oracle", "all"],
+  ["oceanbase-oracle", "page"],
+] as const)("local %s %s SQL export preserves temporal precision and timezone", async (databaseType, scope) => {
+  const download = installTextDownloadCapture();
+  apiMock.buildExportSqlInsert.mockResolvedValueOnce("INSERT INTO fixture VALUES (1);");
+  const timestamp = "2026-10-13T12:34:56.123456789+08:00";
+  try {
+    const completeLocalResult: QueryResult = {
+      columns: ["id", "created_at"],
+      column_types: ["NUMBER", "TIMESTAMP WITH TIME ZONE"],
+      rows: [[1, timestamp]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      truncated: false,
+      has_more: false,
+    };
+    const { composable } = buildExportHarness({
+      databaseType,
+      columns: completeLocalResult.columns,
+      columnTypes: completeLocalResult.column_types,
+      rows: completeLocalResult.rows,
+      completeLocalResult,
+      displayValue: () => "2026-10-13 12:34:56",
+    });
+    await (scope === "all" ? composable.exportSql() : composable.exportCurrentPageSql());
+    assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].rows, [[1, timestamp]]);
   } finally {
     download.restore();
   }
@@ -1204,6 +1258,126 @@ test("table data export passes row limit when enabled", async () => {
 
     assert.equal(apiMock.startTableExport.mock.calls.length, 1);
     assert.equal(apiMock.startTableExport.mock.calls[0][0].rowLimit, 12_345);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("selected query result CSV export formats column values when column formatter is active", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    const { composable } = buildExportHarness({
+      columns: ["id", "amount", "name"],
+      columnTypes: ["integer", "numeric", "text"],
+      rows: [
+        [1, 100, "Ada"],
+        [2, null, "Lin"],
+      ],
+      hasColumnFormatter: (idx) => idx === 1,
+      displayValue: (val, idx) => (idx === 1 ? `$${val}.00` : String(val)),
+    });
+
+    await composable.exportCsv([1, 2]);
+
+    assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 1);
+    assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][1], ["id", "amount", "name"]);
+    assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [
+      [1, "$100.00", "Ada"],
+      [2, null, "Lin"],
+    ]);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("selected query result CSV export preserves raw values when applyColumnFormattersOnExport is false", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    useSettingsStore().updateEditorSettings({ applyColumnFormattersOnExport: false });
+    const { composable } = buildExportHarness({
+      columns: ["id", "amount"],
+      columnTypes: ["integer", "numeric"],
+      rows: [[1, 100]],
+      hasColumnFormatter: (idx) => idx === 1,
+      displayValue: (val, idx) => (idx === 1 ? `$${val}.00` : String(val)),
+    });
+
+    await composable.exportCsv([1]);
+
+    assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 1);
+    assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [[1, 100]]);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("table data CSV export bypasses backend streaming when column formatters are active", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    const fullExportResult = vi.fn(async () => ({
+      columns: ["id", "name"],
+      rows: [
+        [1, "Alice"],
+        [2, "Bob"],
+      ],
+      column_types: ["integer", "text"],
+    }));
+    const { composable } = buildTableDataExportHarness({
+      hasColumnFormatter: (idx) => idx === 1,
+      displayValue: (val, idx) => (idx === 1 ? String(val).toUpperCase() : String(val)),
+      fullExportResult,
+    });
+
+    await composable.exportCsv();
+
+    assert.equal(apiMock.startTableExport.mock.calls.length, 0);
+    assert.equal(fullExportResult.mock.calls.length, 1);
+    assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 1);
+    assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [
+      [1, "ALICE"],
+      [2, "BOB"],
+    ]);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("table data SQL export does not bypass backend streaming even when column formatters are active", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    const { composable } = buildTableDataExportHarness({
+      hasColumnFormatter: (idx) => idx === 1,
+      displayValue: (val, idx) => (idx === 1 ? String(val).toUpperCase() : String(val)),
+    });
+
+    await composable.exportSql();
+
+    assert.equal(apiMock.startTableExport.mock.calls.length, 1);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("copyCell applies column formatter when active and preserves raw values when disabled", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    const { composable, contextCell } = buildExportHarness({
+      columns: ["id", "price"],
+      rows: [[1, 42]],
+      hasColumnFormatter: (idx) => idx === 1,
+      displayValue: (val, idx) => (idx === 1 ? `$${val}` : String(val)),
+    });
+    contextCell.value = { rowId: 1, rowIndex: 0, col: 1 };
+
+    await composable.copyCell();
+    assert.equal(clipboardMock.copyToClipboard.mock.calls.length, 1);
+    assert.equal(clipboardMock.copyToClipboard.mock.calls[0][0], "$42");
+
+    clipboardMock.copyToClipboard.mockClear();
+    useSettingsStore().updateEditorSettings({ applyColumnFormattersOnExport: false });
+    await composable.copyCell();
+    assert.equal(clipboardMock.copyToClipboard.mock.calls.length, 1);
+    assert.equal(clipboardMock.copyToClipboard.mock.calls[0][0], "42");
   } finally {
     restoreStorage();
   }

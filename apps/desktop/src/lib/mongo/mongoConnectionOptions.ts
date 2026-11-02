@@ -54,6 +54,34 @@ export function normalizeMongoTlsFormState(ssl: boolean, urlParams: string | und
   return { urlParams: next, caCertPath: "" };
 }
 
+/**
+ * MongoDB Atlas cluster names (`cluster0.abcde.mongodb.net`) exist only as SRV
+ * records, so a plain `host:port` connection to them fails DNS lookup. Atlas's
+ * per-member hostnames (`…-shard-00-00.abcde.mongodb.net`) resolve normally.
+ */
+export function looksLikeMongoSrvHost(host: string | undefined): boolean {
+  const normalized = host?.trim().toLowerCase() ?? "";
+  return /^[a-z0-9-]+\.[a-z0-9-]+\.mongodb\.net\.?$/.test(normalized) && !normalized.includes("-shard-");
+}
+
+/** The form-mode fields as a `mongodb+srv://` URL; SRV carries no port and turns TLS on by default. */
+export function mongoSrvConnectionString(form: { host: string; username?: string; password?: string; database?: string; url_params?: string; ca_cert_path?: string }): string {
+  const params = parseMongoUrlParams(form.url_params);
+  // SRV discovers the members itself, and DBX's TLS defaults already come from the SRV scheme.
+  const droppedKeys = Array.from(params.keys()).filter((key) => ["directconnection", "tls", "ssl"].includes(key.toLowerCase()));
+  for (const key of droppedKeys) params.delete(key);
+  const caCertPath = form.ca_cert_path?.trim();
+  if (caCertPath && !params.has("tlsCAFile")) params.set("tlsCAFile", caCertPath);
+
+  const username = form.username?.trim() ?? "";
+  const usesOidc = mongoUrlParamCaseInsensitive(params.toString(), "authMechanism").toUpperCase() === "MONGODB-OIDC";
+  const userInfo = username ? `${encodeURIComponent(username)}${usesOidc ? "" : `:${encodeURIComponent(form.password ?? "")}`}@` : "";
+  const host = form.host.trim().replace(/:\d+$/, "");
+  const database = form.database?.trim();
+  const query = params.toString();
+  return `mongodb+srv://${userInfo}${host}/${database ? encodeURIComponent(database) : ""}${query ? `?${query}` : ""}`;
+}
+
 export function mongodbAuthFailureHint(message: string): string {
   const normalizedMessage = message.toLowerCase();
   if (normalizedMessage.includes("tlsallowinvalidhostnames is an invalid option")) {
@@ -70,6 +98,11 @@ export function mongodbAuthFailureHint(message: string): string {
 
   if (message.includes("no records found") && message.includes("_mongodb._tcp.")) {
     return `${message}\n\nMongoDB SRV URLs require a DNS hostname with SRV records. For an IP address or normal host:port endpoint, use mongodb://host:port instead of mongodb+srv://host.`;
+  }
+
+  const unresolvedHost = mongoUnresolvedHost(message);
+  if (unresolvedHost && looksLikeMongoSrvHost(unresolvedHost)) {
+    return `${message}\n\n${unresolvedHost} looks like a MongoDB Atlas cluster name, which only has SRV DNS records. Switch to URL mode and connect with mongodb+srv://${unresolvedHost} instead of host:port.`;
   }
 
   if (message.includes("ReplicaSetNoPrimary") && message.includes("127.0.0.1:27017")) {
@@ -93,6 +126,13 @@ export function mongodbAuthFailureHint(message: string): string {
   if (source.toLowerCase() === "admin") return `${message}\n\n${verificationHint}`;
 
   return `${message}\n\n${verificationHint} If the user was created in admin, set Authentication database to admin or add authSource=admin to URL params.`;
+}
+
+/** The host of a server-selection failure whose DNS lookup failed, as the driver reports it on each OS. */
+function mongoUnresolvedHost(message: string): string | null {
+  const lookupFailed = /os error 11001|no such host is known|failed to lookup address|nodename nor servname|name or service not known|不知道这样的主机/i.test(message);
+  if (!lookupFailed) return null;
+  return /Address:\s*([^\s,:]+):\d+/.exec(message)?.[1] ?? null;
 }
 
 function parseMongoUrlParams(urlParams: string | undefined): URLSearchParams {

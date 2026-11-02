@@ -1647,8 +1647,8 @@ function resetMqttFields(config?: Partial<MqttConnectionConfig>) {
     mqttClientKeyPath.value = "";
   } else if (auth && auth.kind === "certificate") {
     mqttAuthKind.value = "certificate";
-    mqttUsername.value = "";
-    mqttPassword.value = "";
+    mqttUsername.value = auth.username || "";
+    mqttPassword.value = auth.password || "";
     mqttCaCertPath.value = auth.caCertPath || "";
     mqttClientCertPath.value = auth.clientCertPath || "";
     mqttClientKeyPath.value = auth.clientKeyPath || "";
@@ -1675,7 +1675,7 @@ function buildMqttExternalConfig(): MqttConnectionConfig {
     mqttAuthKind.value === "password"
       ? { kind: "password", username: mqttUsername.value, password: mqttPassword.value }
       : mqttAuthKind.value === "certificate"
-        ? { kind: "certificate", caCertPath: mqttCaCertPath.value || undefined, clientCertPath: mqttClientCertPath.value || undefined, clientKeyPath: mqttClientKeyPath.value || undefined }
+        ? { kind: "certificate", username: mqttUsername.value || undefined, password: mqttUsername.value ? mqttPassword.value : undefined, caCertPath: mqttCaCertPath.value || undefined, clientCertPath: mqttClientCertPath.value || undefined, clientKeyPath: mqttClientKeyPath.value || undefined }
         : { kind: "none" };
 
   return {
@@ -8967,7 +8967,7 @@ function openExternalUrl(url: string) {
                         <Button size="sm" :variant="mqttAuthKind === 'certificate' ? 'default' : 'outline'" @click="mqttAuthKind = 'certificate'">{{ t("connection.mqttAuthCertificate") }}</Button>
                       </div>
                     </div>
-                    <template v-if="mqttAuthKind === 'password'">
+                    <template v-if="mqttAuthKind === 'password' || mqttAuthKind === 'certificate'">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.mqttUsername") }}</Label>
                         <Input v-model="mqttUsername" class="col-span-3" :placeholder="t('connection.mqttUsernamePlaceholder')" />
@@ -8977,7 +8977,7 @@ function openExternalUrl(url: string) {
                         <Input v-model="mqttPassword" type="password" class="col-span-3" :placeholder="t('connection.mqttPasswordPlaceholder')" />
                       </div>
                     </template>
-                    <template v-else-if="mqttAuthKind === 'certificate'">
+                    <template v-if="mqttAuthKind === 'certificate'">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.mqttCaCertPath") }}</Label>
                         <Input v-model="mqttCaCertPath" class="col-span-3" placeholder="/path/to/ca.pem" />

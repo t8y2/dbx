@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   cancelQuery: vi.fn(),
   disconnectDb: vi.fn(),
   releaseLargeValue: vi.fn(),
+  executeInManualTransaction: vi.fn(),
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -39,6 +40,81 @@ describe("query Store LOB session release through public close and disconnect", 
     api.cancelQuery.mockResolvedValue(true);
     api.disconnectDb.mockResolvedValue(undefined);
     api.releaseLargeValue.mockResolvedValue(true);
+  });
+
+  it("opts JDBC grid queries into deferred values and binds their original client session", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().editorSettings.autoCalculateTotalRows = false;
+    const connections = useConnectionStore();
+    connections.connections = [{ id: "jdbc-lob", name: "JDBC", db_type: "jdbc", database: "APP", read_only: false, connection_string: "jdbc:oracle:thin:@fixture", jdbc_driver_class: "oracle.jdbc.OracleDriver" } as ConnectionConfig];
+    connections.connectedIds.add("jdbc-lob");
+    const store = useQueryStore();
+    const id = store.createTab("jdbc-lob", "APP", "LOB", "query", "APP");
+    store.tabs.find((tab) => tab.id === id)!.autoCommit = true;
+    api.executeMulti.mockResolvedValueOnce([{ ...result("jdbc-page"), large_value_cells: [{ row_index: 0, column_index: 0, original_bytes: 67108864, value_ref: "jdbc-original" }] }]);
+    await store.executeTabSql(id, "SELECT PAYLOAD FROM FIXTURE");
+    const options = api.executeMulti.mock.calls[0][5];
+    expect(options.deferLobs).toBe(true);
+    expect(options.tableDataPreview).not.toBe(true);
+    expect(store.tabs.find((tab) => tab.id === id)?.result?.large_value_context).toEqual(expect.objectContaining({ connectionId: "jdbc-lob", database: "APP", clientSessionId: options.clientSessionId }));
+    await store.flushPendingPersist();
+  });
+
+  it("keeps SQL marker parsing enabled for JDBC manual table data with mixed LOB types", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().editorSettings.autoCalculateTotalRows = false;
+    const connections = useConnectionStore();
+    connections.connections = [{ id: "jdbc-mixed", name: "JDBC", db_type: "jdbc", database: "APP", read_only: false, connection_string: "jdbc:oracle:thin:@fixture", jdbc_driver_class: "oracle.jdbc.OracleDriver" } as ConnectionConfig];
+    connections.connectedIds.add("jdbc-mixed");
+    const store = useQueryStore();
+    const id = store.createTab("jdbc-mixed", "APP", "FIXTURE", "data", "APP");
+    const tab = store.tabs.find((entry) => entry.id === id)!;
+    store.setTableMeta(id, { tableName: "FIXTURE", schema: "APP", primaryKeys: ["ID"], columns: ["NUMBER", "NCLOB", "CLOB"].map((data_type, index) => ({ name: ["ID", "N", "C"][index]!, data_type, is_nullable: false, column_default: null, is_primary_key: index === 0, extra: null })) });
+    tab.autoCommit = false;
+    tab.txnSessionId = "mixed-transaction";
+    api.executeInManualTransaction.mockResolvedValueOnce([{ columns: ["ID", "N", "C"], rows: [[1, "national preview", "clob preview"]], affected_rows: 0, execution_time_ms: 1 }]);
+    await store.executeTabSql(id, "SELECT ID,N,marker,C FROM FIXTURE");
+    const args = api.executeInManualTransaction.mock.calls[0];
+    expect(args[0]).toBe("mixed-transaction");
+    expect(args[5]).toBe(true);
+    expect(args[12]).toBe(true);
+    await store.flushPendingPersist();
+  });
+
+  it("releases a late manual result using its executed transaction, not the tab's replacement", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().editorSettings.autoCalculateTotalRows = false;
+    const connections = useConnectionStore();
+    connections.connections = [{ id: "txn-lob", name: "OB", db_type: "oceanbase-oracle", database: "SYS", read_only: false } as ConnectionConfig];
+    connections.connectedIds.add("txn-lob");
+    const store = useQueryStore();
+    const id = store.createTab("txn-lob", "SYS", "LOB", "query", "APP");
+    const tab = store.tabs.find((tab) => tab.id === id)!;
+    tab.autoCommit = false;
+    tab.txnSessionId = "executed-transaction";
+    let finish!: (results: QueryResult[]) => void;
+    api.executeInManualTransaction.mockImplementationOnce(
+      () =>
+        new Promise<QueryResult[]>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const executing = store.executeTabSql(id, "SELECT PAYLOAD FROM FIXTURE");
+    await vi.waitFor(() => expect(api.executeInManualTransaction).toHaveBeenCalledTimes(1));
+    expect(api.executeInManualTransaction.mock.calls[0][0]).toBe("executed-transaction");
+    tab.txnSessionId = "replacement-transaction";
+    tab.executionId = "replacement-execution";
+    finish([{ ...result("late-cursor"), large_value_cells: [{ row_index: 0, column_index: 0, original_bytes: 67108864, value_ref: "old-reference" }] }]);
+    await executing;
+    await vi.waitFor(() => expect(api.releaseLargeValue).toHaveBeenCalledWith(expect.objectContaining({ valueRef: "old-reference", txnSessionId: "executed-transaction" })));
+    expect(api.releaseLargeValue.mock.calls.every(([request]) => request.txnSessionId !== "replacement-transaction")).toBe(true);
+    await store.flushPendingPersist();
   });
 
   it("preserves locator ownership from hydrated earlier pages when appending", async () => {

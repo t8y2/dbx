@@ -16,8 +16,10 @@ const PAGE_SIZE: usize = 256;
 mod execution;
 mod transfer;
 pub(crate) use transfer::{
-    capture_routine_transfer_context, transfer_oracle_routine_core, RoutineTransferContext, RoutineTransferInput,
+    capture_routine_transfer_context, claim_transfer_packages, prepare_transfer_packages, transfer_oracle_routine_core,
+    PackageTransferPreflightError, RoutineTransferContext, RoutineTransferInput,
 };
+pub use transfer::{OraclePackageTransferPreview, OraclePackageTransferRequest};
 mod operations;
 mod plan;
 mod readback;
@@ -31,7 +33,8 @@ pub use operations::{
 };
 pub use plan::{
     prepare_oracle_routine_plan_core, prepare_oracle_routine_recovery_core, OracleRoutinePlan, OracleRoutinePlanInput,
-    OracleRoutinePlanStep, RoutinePlanAction, RoutinePlanDraft,
+    OracleRoutinePlanStep, PackageBodySource, PackageContractChoice, PackageGrant, PackageGrantSnapshot,
+    PackagePlanImpact, RoutinePlanAction, RoutinePlanDraft,
 };
 pub use readback::{
     read_oracle_routine_core, RoutineCompilerMessage, RoutineReadback, RoutineReadbackGoal, RoutineReadbackState,
@@ -53,6 +56,75 @@ pub struct RoutineIdentity {
     pub owner: String,
     pub name: String,
     pub kind: db::ObjectSourceKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineSelection {
+    pub name: String,
+    pub kind: db::ObjectSourceKind,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineReadOptions {
+    pub object_kinds: Option<Vec<db::ObjectSourceKind>>,
+    pub selected_objects: Option<Vec<RoutineSelection>>,
+    pub selected_routines: Option<Vec<String>>,
+}
+
+impl RoutineReadOptions {
+    fn kinds(&self) -> &[db::ObjectSourceKind] {
+        self.object_kinds.as_deref().unwrap_or(&[db::ObjectSourceKind::Procedure, db::ObjectSourceKind::Function])
+    }
+
+    fn inventory_kinds(&self) -> Vec<db::ObjectSourceKind> {
+        let mut kinds = self.kinds().to_vec();
+        if kinds.iter().any(|kind| matches!(kind, db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody)) {
+            for kind in [db::ObjectSourceKind::Package, db::ObjectSourceKind::PackageBody] {
+                if !kinds.contains(&kind) {
+                    kinds.push(kind);
+                }
+            }
+        }
+        kinds
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.kinds().iter().any(|kind| {
+            !matches!(
+                kind,
+                db::ObjectSourceKind::Procedure
+                    | db::ObjectSourceKind::Function
+                    | db::ObjectSourceKind::Package
+                    | db::ObjectSourceKind::PackageBody
+            )
+        }) {
+            return Err("Strict program inventory supports only procedures, functions and packages".into());
+        }
+        if self.selected_routines.is_some()
+            && (self.selected_objects.is_some()
+                || self
+                    .kinds()
+                    .iter()
+                    .any(|kind| matches!(kind, db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody)))
+        {
+            return Err("Package selection requires exact selected objects instead of legacy routine names".into());
+        }
+        if self.selected_objects.as_ref().is_some_and(|objects| {
+            objects.iter().any(|object| object.name.is_empty() || !self.kinds().contains(&object.kind))
+        }) {
+            return Err("Selected program identities must belong to the requested object kinds".into());
+        }
+        Ok(())
+    }
+
+    fn reads(&self, identity: &RoutineIdentity) -> bool {
+        if let Some(objects) = &self.selected_objects {
+            return objects.iter().any(|object| object.name == identity.name);
+        }
+        self.selected_routines.as_ref().is_none_or(|names| names.contains(&identity.name))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +169,8 @@ pub enum RoutineReadState {
 pub struct RoutineObjectSnapshot {
     pub version: RoutineVersion,
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_origin: Option<SourceOrigin>,
     pub source_complete: bool,
     pub dependencies: Vec<RoutineDependency>,
     pub dependencies_complete: bool,
@@ -176,11 +250,15 @@ struct SourceReply {
     object: db::ObjectSource,
     #[serde(flatten)]
     flags: ReadFlags,
+    #[serde(default, alias = "sourceOrigin")]
+    source_origin: Option<SourceOrigin>,
 }
 
-#[derive(Clone, Copy)]
-enum SourceOrigin {
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceOrigin {
     OracleDictionary,
+    #[serde(rename = "oceanbase-dictionary")]
     OceanBaseDictionary,
     OracleMetadata,
 }
@@ -256,6 +334,8 @@ impl RoutineCatalog for LiveCatalog<'_> {
             &identity.kind,
             None,
             None,
+            &dbx_types::oracle_trigger::MetadataReadOptions::default(),
+            true,
             agent_metadata_timeout(Some(self.config)),
         )
         .await
@@ -278,6 +358,24 @@ pub async fn load_selected_schema_diff_routines_core(
     schema: &str,
     selected_routines: Option<&[String]>,
 ) -> Result<RoutineSnapshot, String> {
+    load_schema_diff_routines_with_options_core(
+        state,
+        connection_id,
+        database,
+        schema,
+        RoutineReadOptions { selected_routines: selected_routines.map(<[String]>::to_vec), ..Default::default() },
+    )
+    .await
+}
+
+pub async fn load_schema_diff_routines_with_options_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    options: RoutineReadOptions,
+) -> Result<RoutineSnapshot, String> {
+    options.validate()?;
     if schema.is_empty() {
         return Err("Select an exact Oracle routine owner".into());
     }
@@ -292,7 +390,7 @@ pub async fn load_selected_schema_diff_routines_core(
         generation: lifecycle.generation(),
     };
     let catalog = LiveCatalog { state, endpoint: &endpoint, config: &config };
-    let mut snapshot = collect_selected_snapshot(&catalog, endpoint.clone(), origin, selected_routines).await;
+    let mut snapshot = collect_snapshot_with_options(&catalog, endpoint.clone(), origin, &options).await;
     if !state.connection_lifecycle_is_current(connection_id, &lifecycle) {
         invalidate_snapshot_endpoint(&mut snapshot);
     }
@@ -328,6 +426,8 @@ fn kind_name(kind: &db::ObjectSourceKind) -> &'static str {
     match kind {
         db::ObjectSourceKind::Procedure => "PROCEDURE",
         db::ObjectSourceKind::Function => "FUNCTION",
+        db::ObjectSourceKind::Package => "PACKAGE",
+        db::ObjectSourceKind::PackageBody => "PACKAGE BODY",
         _ => unreachable!("routine identities are validated on collection"),
     }
 }
@@ -346,12 +446,13 @@ fn issue(stage: &str, message: impl Into<String>) -> RoutineReadIssue {
     RoutineReadIssue { stage: stage.into(), code: code.into(), message }
 }
 
-fn inventory_sql(owner: &str, dba: bool, after_id: u64) -> String {
+fn inventory_sql(owner: &str, dba: bool, after_id: u64, kinds: &[db::ObjectSourceKind]) -> String {
     let view = if dba { "SYS.DBA_OBJECTS" } else { "ALL_OBJECTS" };
+    let kinds = kinds.iter().map(|kind| literal(kind_name(kind))).collect::<Vec<_>>().join(", ");
     format!(
         "SELECT * FROM (SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, OBJECT_ID, STATUS, \
          TO_CHAR(LAST_DDL_TIME, 'YYYY-MM-DD\"T\"HH24:MI:SS') LAST_DDL_TIME \
-         FROM {view} WHERE OWNER = {} AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION') \
+         FROM {view} WHERE OWNER = {} AND OBJECT_TYPE IN ({kinds}) \
          AND OBJECT_ID > {after_id} ORDER BY OBJECT_ID) WHERE ROWNUM <= {PAGE_SIZE}",
         literal(owner),
     )
@@ -362,13 +463,21 @@ struct InventoryRead {
     error: Option<String>,
 }
 
-async fn inventory(catalog: &impl RoutineCatalog, owner: &str, dba: bool) -> InventoryRead {
+async fn inventory(
+    catalog: &impl RoutineCatalog,
+    owner: &str,
+    dba: bool,
+    kinds: &[db::ObjectSourceKind],
+) -> InventoryRead {
+    if kinds.is_empty() {
+        return InventoryRead { objects: Vec::new(), error: None };
+    }
     let mut objects = Vec::new();
     let mut after_id = 0;
     let mut names = std::collections::BTreeSet::new();
     let read: Result<(), String> = async {
         loop {
-            let reply = catalog.query(&inventory_sql(owner, dba, after_id)).await?;
+            let reply = catalog.query(&inventory_sql(owner, dba, after_id, kinds)).await?;
             if reply.rows.len() > PAGE_SIZE {
                 return Err("Routine inventory exceeded its page size".into());
             }
@@ -377,11 +486,17 @@ async fn inventory(catalog: &impl RoutineCatalog, owner: &str, dba: bool) -> Inv
                 let kind = match reply.text(row, "OBJECT_TYPE")?.as_str() {
                     "PROCEDURE" => db::ObjectSourceKind::Procedure,
                     "FUNCTION" => db::ObjectSourceKind::Function,
+                    "PACKAGE" => db::ObjectSourceKind::Package,
+                    "PACKAGE BODY" => db::ObjectSourceKind::PackageBody,
                     _ => return Err("Routine inventory returned a different object kind".into()),
                 };
                 let identity =
                     RoutineIdentity { owner: reply.text(row, "OWNER")?, name: reply.text(row, "OBJECT_NAME")?, kind };
-                if identity.owner != owner || object_id <= after_id || !names.insert(object_key(&identity)) {
+                if !kinds.contains(&identity.kind)
+                    || identity.owner != owner
+                    || object_id <= after_id
+                    || !names.insert(object_key(&identity))
+                {
                     return Err("Routine inventory has duplicate, unordered or mismatched identities".into());
                 }
                 after_id = object_id;
@@ -413,9 +528,13 @@ fn identity_filter(identity: &RoutineIdentity) -> String {
 
 fn source_integrity_sql(identity: &RoutineIdentity, origin: SourceOrigin) -> String {
     if matches!(origin, SourceOrigin::OracleMetadata) {
+        let metadata_kind = match identity.kind {
+            db::ObjectSourceKind::Package => "PACKAGE_SPEC".into(),
+            _ => kind_name(&identity.kind).replace(' ', "_"),
+        };
         return format!(
             "SELECT LENGTH(DBMS_METADATA.GET_DDL({}, {}, {})) SOURCE_CHARS FROM DUAL",
-            literal(kind_name(&identity.kind)),
+            literal(&metadata_kind),
             literal(&identity.name),
             literal(&identity.owner)
         );
@@ -444,6 +563,19 @@ async fn check_source(
     origin: SourceOrigin,
 ) -> Result<(), String> {
     reply.flags.check()?;
+    let origin = match reply.source_origin {
+        Some(SourceOrigin::OracleDictionary) if endpoint.database_type != DatabaseType::Oracle => {
+            return Err("Routine source origin does not match the database product".into());
+        }
+        Some(SourceOrigin::OceanBaseDictionary) if endpoint.database_type != DatabaseType::OceanbaseOracle => {
+            return Err("Routine source origin does not match the database product".into());
+        }
+        Some(actual) => actual,
+        None if matches!(identity.kind, db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody) => {
+            return Err("Strict package source requires the getter's actual source origin".into());
+        }
+        None => origin,
+    };
     if reply.object.name != identity.name
         || reply.object.schema.as_deref() != Some(&identity.owner)
         || reply.object.object_type != identity.kind
@@ -465,6 +597,9 @@ async fn check_source(
     let row = &lengths.rows[0];
     let mut expected = lengths.integer(row, "SOURCE_CHARS")?;
     let actual = match origin {
+        SourceOrigin::OracleMetadata if endpoint.database_type == DatabaseType::OceanbaseOracle => {
+            reply.object.source.chars().count() as u64
+        }
         SourceOrigin::OracleMetadata => reply.object.source.encode_utf16().count() as u64,
         SourceOrigin::OracleDictionary => reply.object.source.chars().count() as u64,
         SourceOrigin::OceanBaseDictionary => {
@@ -542,6 +677,7 @@ async fn dependencies(
 }
 
 #[cfg(test)]
+#[cfg(test)]
 async fn collect_snapshot(
     catalog: &impl RoutineCatalog,
     endpoint: RoutineEndpoint,
@@ -550,12 +686,29 @@ async fn collect_snapshot(
     collect_selected_snapshot(catalog, endpoint, origin, None).await
 }
 
+#[cfg(test)]
 async fn collect_selected_snapshot(
     catalog: &impl RoutineCatalog,
     endpoint: RoutineEndpoint,
     origin: SourceOrigin,
     selected_routines: Option<&[String]>,
 ) -> RoutineSnapshot {
+    collect_snapshot_with_options(
+        catalog,
+        endpoint,
+        origin,
+        &RoutineReadOptions { selected_routines: selected_routines.map(<[String]>::to_vec), ..Default::default() },
+    )
+    .await
+}
+
+async fn collect_snapshot_with_options(
+    catalog: &impl RoutineCatalog,
+    endpoint: RoutineEndpoint,
+    origin: SourceOrigin,
+    options: &RoutineReadOptions,
+) -> RoutineSnapshot {
+    let kinds = options.inventory_kinds();
     let mut snapshot = RoutineSnapshot {
         endpoint,
         state: RoutineReadState::Failed,
@@ -577,13 +730,13 @@ async fn collect_selected_snapshot(
         }
     };
     let mut dba = login != snapshot.endpoint.schema;
-    let mut initial_read = inventory(catalog, &snapshot.endpoint.schema, dba).await;
+    let mut initial_read = inventory(catalog, &snapshot.endpoint.schema, dba, &kinds).await;
     snapshot.enumeration_complete = initial_read.error.is_none();
     if let Some(error) = initial_read.error {
         snapshot.issues.push(issue(if dba { "visibility" } else { "inventory" }, error));
         if dba {
             dba = false;
-            let visible = inventory(catalog, &snapshot.endpoint.schema, false).await;
+            let visible = inventory(catalog, &snapshot.endpoint.schema, false, &kinds).await;
             for object in visible.objects {
                 if !initial_read.objects.iter().any(|known| object_key(&known.identity) == object_key(&object.identity))
                 {
@@ -600,19 +753,34 @@ async fn collect_selected_snapshot(
         let mut object = RoutineObjectSnapshot {
             version,
             source: None,
+            source_origin: None,
             source_complete: false,
             dependencies: Vec::new(),
             dependencies_complete: false,
             issues: Vec::new(),
         };
-        if selected_routines.is_some_and(|names| !names.contains(&object.version.identity.name)) {
+        if !options.reads(&object.version.identity) {
             snapshot.objects.push(object);
             continue;
         }
         match catalog.source(&object.version.identity).await {
             Ok(reply) => {
                 object.source = Some(reply.object.source.clone());
+                if matches!(
+                    object.version.identity.kind,
+                    db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody
+                ) {
+                    object.source_origin = reply.source_origin;
+                }
                 match check_source(catalog, &snapshot.endpoint, &object.version.identity, &reply, origin).await {
+                    Ok(())
+                        if matches!(
+                            object.version.identity.kind,
+                            db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody
+                        ) =>
+                    {
+                        object.source_complete = true;
+                    }
                     Ok(()) => {
                         // A second full read also detects replacement within LAST_DDL_TIME's second.
                         match catalog.source(&object.version.identity).await {
@@ -621,6 +789,7 @@ async fn collect_selected_snapshot(
                                     && second.object.name == reply.object.name
                                     && second.object.schema == reply.object.schema
                                     && second.object.object_type == reply.object.object_type
+                                    && second.source_origin == reply.source_origin
                                     && second.object.source == reply.object.source =>
                             {
                                 object.source_complete = true
@@ -645,7 +814,36 @@ async fn collect_selected_snapshot(
         }
         snapshot.objects.push(object);
     }
-    let after_read = inventory(catalog, &snapshot.endpoint.schema, dba).await;
+    for object in &mut snapshot.objects {
+        if !object.source_complete
+            || !matches!(
+                object.version.identity.kind,
+                db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody
+            )
+        {
+            continue;
+        }
+        match catalog.source(&object.version.identity).await {
+            Ok(second)
+                if second.flags.check().is_ok()
+                    && second.object.name == object.version.identity.name
+                    && second.object.schema.as_deref() == Some(object.version.identity.owner.as_str())
+                    && second.object.object_type == object.version.identity.kind
+                    && second.source_origin == object.source_origin
+                    && object.source.as_deref() == Some(second.object.source.as_str()) => {}
+            Ok(_) => {
+                object.source_complete = false;
+                object
+                    .issues
+                    .push(issue("source", "Package source changed or became incomplete while collecting its pair"));
+            }
+            Err(error) => {
+                object.source_complete = false;
+                object.issues.push(issue("source", error));
+            }
+        }
+    }
+    let after_read = inventory(catalog, &snapshot.endpoint.schema, dba, &kinds).await;
     if let Some(error) = after_read.error {
         snapshot.enumeration_complete = false;
         snapshot.issues.push(issue("inventory", error));
@@ -673,6 +871,7 @@ async fn collect_selected_snapshot(
                     snapshot.objects.push(RoutineObjectSnapshot {
                         version,
                         source: None,
+                        source_origin: None,
                         source_complete: false,
                         dependencies: Vec::new(),
                         dependencies_complete: false,

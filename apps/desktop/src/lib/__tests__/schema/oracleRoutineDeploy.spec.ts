@@ -1,15 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createOracleRoutineDeployment,
+  acceptOracleRoutineDeploymentOperation,
   disposeOracleRoutineDeployment,
   editOracleRoutineDraft,
+  editOraclePackageOptions,
+  includeOraclePackageCompanion,
   executeOracleRoutineDeployment,
   observeOracleRoutineDeployment,
+  oracleRoutineActiveStep,
+  oracleRoutineDeploymentEntries,
   prepareOracleRoutineRecovery,
   refreshOracleRoutineDeployment,
+  reviewOraclePackageTargetDraft,
   selectOracleRoutineDraft,
   synchronizeOracleRoutineSelection,
   validateOracleRoutineDeployment,
+  canRegenerateOracleRoutineDeployment,
 } from "@/lib/schema/oracleRoutineDeploy";
 import type { SchemaDiffObject } from "@/lib/schema/schemaDiff";
 import type { OracleRoutineOperation, OracleRoutinePlan, OracleRoutineSnapshot } from "@/types/schemaDiff";
@@ -77,6 +84,377 @@ beforeEach(() => {
 });
 
 describe("Oracle routine deployment in the existing comparison session", () => {
+  it("adopts original background operation results without enabling replay or overwriting a newer approval", async () => {
+    const session = state("F");
+    calls.prepare.mockResolvedValue(plan("F"));
+    await validateOracleRoutineDeployment(session);
+    const invalid = finished("F", "invalid");
+    expect(acceptOracleRoutineDeploymentOperation(session, invalid)).toBe(true);
+    expect(session.drafts[0].operation).toBe(invalid);
+    expect(session.plan?.steps[0].operation).toBe(invalid);
+    expect(session.plan?.ready).toBe(false);
+    expect(session.attemptedOperationIds).toEqual([invalid.operationId]);
+    expect(acceptOracleRoutineDeploymentOperation(session, operation("F"))).toBe(false);
+    expect(session.drafts[0].operation).toBe(invalid);
+    session.drafts[0].operation = operation("F", "newer-body-approval");
+    expect(acceptOracleRoutineDeploymentOperation(session, finished("F"))).toBe(true);
+    expect(session.drafts[0].operation.operationId).toBe("newer-body-approval");
+  });
+
+  it("rejects background records from another target, generation, identity or unknown operation ID", async () => {
+    const session = state("F");
+    calls.prepare.mockResolvedValue(plan("F"));
+    await validateOracleRoutineDeployment(session);
+    const original = session.drafts[0].operation;
+    for (const record of [
+      { ...finished("F"), target: { ...endpoint, connectionId: "another-target" } },
+      { ...finished("F"), target: { ...endpoint, generation: endpoint.generation + 1 } },
+      { ...finished("F"), identity: { ...operation("F").identity, kind: "PACKAGE_BODY" as const } },
+      { ...finished("F"), operationId: "unknown-original-id" },
+    ])
+      expect(acceptOracleRoutineDeploymentOperation(session, record)).toBe(false);
+    expect(session.drafts[0].operation).toBe(original);
+    expect(session.plan?.ready).toBe(true);
+  });
+
+  it("uses a transfer-bound preparation callback without bypassing the existing target and selection checks", async () => {
+    const session = state("F");
+    const prepare = vi.fn().mockResolvedValue(plan("F"));
+    await validateOracleRoutineDeployment(session, prepare, { compactSql: true });
+    expect(calls.prepare).not.toHaveBeenCalled();
+    expect(prepare.mock.calls[0][0].source).toBe(session.source);
+    expect(prepare.mock.calls[0][0].target).toBe(session.target);
+    expect(prepare.mock.calls[0][0].compactSql).toBe(true);
+    expect(session.plan?.ready).toBe(true);
+    const wrong = plan("G");
+    prepare.mockResolvedValue(wrong);
+    await validateOracleRoutineDeployment(session, prepare);
+    expect(session.error).toContain("unselected object");
+    expect(session.plan?.steps[0].identity.name).toBe("F");
+  });
+
+  it("does not call a transfer-bound preparer while an original package write is unproven", async () => {
+    const session = state();
+    synchronizeOracleRoutineSelection(session, [{ ...object("P"), id: "body", routineType: "PACKAGE_BODY" }]);
+    const original = { ...operation("P", "original-body"), identity: session.drafts[0].identity, lifecycle: "unproven" as const, dispatched: true };
+    session.drafts[0].operation = original;
+    calls.observe.mockResolvedValue({ operation: original, lifecycle: "unproven", error: null });
+    const prepare = vi.fn();
+    await validateOracleRoutineDeployment(session, prepare);
+    expect(prepare).not.toHaveBeenCalled();
+    expect(calls.prepare).not.toHaveBeenCalled();
+    expect(session.error).toContain("termination is not proven");
+    expect(session.drafts[0].operation?.operationId).toBe("original-body");
+  });
+
+  it("does not turn generated cross-product previews into final target drafts merely by revalidating", async () => {
+    const session = state();
+    session.source = { ...session.source, endpoint: { ...session.source.endpoint, databaseType: "oracle" } };
+    synchronizeOracleRoutineSelection(session, [
+      { ...object("Pkg.With.Dot"), id: "spec", routineType: "PACKAGE" },
+      { ...object("Pkg.With.Dot"), id: "body", routineType: "PACKAGE_BODY" },
+    ]);
+    const response = plan("Pkg.With.Dot", "Pkg.With.Dot");
+    response.ready = false;
+    response.steps.forEach((step, index) => {
+      step.identity = session.drafts[index].identity;
+      step.operation = null;
+      step.sql = `generated target ${step.identity.kind}`;
+    });
+    calls.prepare.mockResolvedValue(response);
+    await validateOracleRoutineDeployment(session);
+    await validateOracleRoutineDeployment(session);
+    expect(calls.prepare.mock.calls[1][0].drafts.map((draft: { sql?: string }) => draft.sql)).toEqual([undefined, undefined]);
+    reviewOraclePackageTargetDraft(session, "spec");
+    expect(session.plan).toBeNull();
+    await validateOracleRoutineDeployment(session);
+    expect(calls.prepare.mock.calls[2][0].drafts.map((draft: { sql?: string }) => draft.sql)).toEqual(["generated target PACKAGE", undefined]);
+    editOracleRoutineDraft(session, "body", "manually edited target body");
+    await validateOracleRoutineDeployment(session);
+    expect(calls.prepare.mock.calls[3][0].drafts[1].sql).toBe("manually edited target body");
+    await executeOracleRoutineDeployment(session, authorize);
+    expect(calls.execute).not.toHaveBeenCalled();
+  });
+
+  it("regenerates only untouched generated SQL from snapshots with one replacement prepare", async () => {
+    const session = state("F");
+    const originalSource = structuredClone(session.source);
+    const originalTarget = structuredClone(session.target);
+    calls.prepare.mockResolvedValueOnce(plan("F"));
+    await validateOracleRoutineDeployment(session, undefined, { compactSql: true });
+    expect(canRegenerateOracleRoutineDeployment(session)).toBe(true);
+    const replacement = plan("F");
+    replacement.steps[0].sql = replacement.steps[0].sql.replace("CREATE FUNCTION", "CREATE   FUNCTION");
+    replacement.steps[0].operation = operation("F", "replacement");
+    calls.prepare.mockResolvedValueOnce(replacement);
+    await validateOracleRoutineDeployment(session, undefined, { compactSql: false, regenerateGenerated: true });
+    expect(calls.prepare).toHaveBeenCalledTimes(2);
+    expect(calls.prepare.mock.calls[1][0]).toMatchObject({ compactSql: false, drafts: [{ sql: undefined, supersedesOperationId: "F-approved" }] });
+    expect(session.drafts[0].sql).toContain("CREATE   FUNCTION");
+    expect(session.drafts[0].generatedSql).toBe(session.drafts[0].sql);
+    expect(session.source).toEqual(originalSource);
+    expect(session.target).toEqual(originalTarget);
+  });
+
+  it("publishes a regenerated cross-product review-only preview without approving or regenerating its reviewed text", async () => {
+    const session = state();
+    session.source.endpoint.databaseType = "oracle";
+    synchronizeOracleRoutineSelection(session, [{ ...object("PKG"), id: "spec", routineType: "PACKAGE" }]);
+    const preview = (sql: string): OracleRoutinePlan => ({
+      target: endpoint,
+      ready: false,
+      steps: [{ ...plan("PKG").steps[0], identity: session.drafts[0].identity, sql, operation: null, issues: [{ code: "target-draft-review", message: "Review target draft", line: 1, column: 1 }] }],
+    });
+    calls.prepare.mockResolvedValueOnce(preview("generated compact spec"));
+    await validateOracleRoutineDeployment(session, undefined, { compactSql: true });
+    calls.prepare.mockResolvedValueOnce(preview("generated expanded spec"));
+    await validateOracleRoutineDeployment(session, undefined, { compactSql: false, regenerateGenerated: true });
+    expect(session.drafts[0].sql).toBe("generated expanded spec");
+    expect(session.drafts[0].reviewedTargetDraft).not.toBe(true);
+    expect(session.plan?.ready).toBe(false);
+    expect(calls.prepare).toHaveBeenCalledTimes(2);
+    reviewOraclePackageTargetDraft(session, "spec");
+    expect(canRegenerateOracleRoutineDeployment(session)).toBe(false);
+    calls.prepare.mockResolvedValueOnce(preview("generated expanded spec"));
+    await validateOracleRoutineDeployment(session);
+    expect(calls.prepare.mock.calls[2][0].drafts[0].sql).toBe("generated expanded spec");
+  });
+
+  it.each(["missing", "duplicate", "action", "empty", "other-issue", "operation"])("preserves generated drafts when a review-only replacement has %s evidence", async (failure) => {
+    const session = state();
+    session.source.endpoint.databaseType = "oracle";
+    synchronizeOracleRoutineSelection(
+      session,
+      ["P", "Q"].map((name) => ({ ...object(name), routineType: "PACKAGE" as const })),
+    );
+    const response = (): OracleRoutinePlan => ({
+      target: endpoint,
+      ready: false,
+      steps: session.drafts.map((draft) => ({ ...plan(draft.identity.name).steps[0], identity: draft.identity, sql: `preview ${draft.identity.name}`, operation: null, issues: [{ code: "target-draft-review", message: "Review", line: 1, column: 1 }] })),
+    });
+    calls.prepare.mockResolvedValueOnce(response());
+    await validateOracleRoutineDeployment(session);
+    const before = session.drafts.map((draft) => draft.sql);
+    const replacement = response();
+    replacement.steps.forEach((step) => {
+      step.sql += " changed";
+    });
+    if (failure === "missing") replacement.steps.pop();
+    if (failure === "duplicate") replacement.steps[1] = replacement.steps[0];
+    if (failure === "action") replacement.steps[0].action = "replace";
+    if (failure === "empty") replacement.steps[0].sql = "";
+    if (failure === "other-issue") replacement.steps[0].issues[0].code = "plan-preflight";
+    if (failure === "operation") replacement.steps[0].operation = { ...operation("P"), identity: session.drafts[0].identity };
+    calls.prepare.mockResolvedValueOnce(replacement);
+    await validateOracleRoutineDeployment(session, undefined, { regenerateGenerated: true });
+    expect(session.drafts.map((draft) => draft.sql)).toEqual(before);
+    expect(session.plan?.ready).toBe(false);
+  });
+
+  it.each(["manual", "attempted"])("does not regenerate a %s routine document", async (reason) => {
+    const session = state("F");
+    calls.prepare.mockResolvedValueOnce(plan("F"));
+    await validateOracleRoutineDeployment(session, undefined, { compactSql: true });
+    if (reason === "manual") editOracleRoutineDraft(session, "func-F", "manual source");
+    else session.attemptedOperationIds.push("F-approved");
+    const original = session.drafts[0].sql;
+    expect(canRegenerateOracleRoutineDeployment(session)).toBe(false);
+    await validateOracleRoutineDeployment(session, undefined, { compactSql: false, regenerateGenerated: true });
+    expect(calls.prepare).toHaveBeenCalledOnce();
+    expect(session.drafts[0].sql).toBe(original);
+  });
+
+  it("preserves visible generated SQL but invalidates old approval after regeneration fails", async () => {
+    const session = state("F");
+    calls.prepare.mockResolvedValueOnce(plan("F"));
+    await validateOracleRoutineDeployment(session, undefined, { compactSql: true });
+    const original = session.drafts[0].sql;
+    calls.prepare.mockRejectedValueOnce(new Error("replacement unavailable"));
+    await validateOracleRoutineDeployment(session, undefined, { compactSql: false, regenerateGenerated: true });
+    expect(session.drafts[0].sql).toBe(original);
+    expect(session.error).toBe("replacement unavailable");
+    expect(session.plan?.ready).toBe(false);
+    await executeOracleRoutineDeployment(session, authorize);
+    expect(calls.execute).not.toHaveBeenCalled();
+    expect(canRegenerateOracleRoutineDeployment(session)).toBe(true);
+  });
+
+  it("keeps the prior generated document when regeneration returns an incomplete plan", async () => {
+    const session = state("F");
+    calls.prepare.mockResolvedValueOnce(plan("F"));
+    await validateOracleRoutineDeployment(session, undefined, { compactSql: true });
+    const original = session.drafts[0].sql;
+    const incomplete = plan("F");
+    incomplete.ready = false;
+    incomplete.steps[0].sql = "";
+    incomplete.steps[0].operation = undefined;
+    calls.prepare.mockResolvedValueOnce(incomplete);
+    await validateOracleRoutineDeployment(session, undefined, { compactSql: false, regenerateGenerated: true });
+    expect(session.plan).toBe(incomplete);
+    expect(session.plan?.ready).toBe(false);
+    expect(session.drafts[0].sql).toBe(original);
+    expect(session.retainedOperationIds).toContain("F-approved");
+    await executeOracleRoutineDeployment(session, authorize);
+    expect(calls.execute).not.toHaveBeenCalled();
+  });
+
+  it("requires a new target-draft review after changing the selected body source", () => {
+    const session = state();
+    synchronizeOracleRoutineSelection(session, [{ ...object("Pkg.With.Dot"), id: "body", routineType: "PACKAGE_BODY" }]);
+    editOracleRoutineDraft(session, "body", "reviewed source body");
+    expect(session.drafts[0].reviewedTargetDraft).toBe(true);
+    editOraclePackageOptions(session, "body", { packageBodySource: "target" });
+    expect(session.drafts[0].reviewedTargetDraft).toBe(false);
+    reviewOraclePackageTargetDraft(session, "body");
+    expect(session.drafts[0].reviewedTargetDraft).toBe(false);
+    editOraclePackageOptions(session, "body", { packageBodySource: "source" });
+    expect(session.drafts[0].sql).toBe("reviewed source body");
+    reviewOraclePackageTargetDraft(session, "body");
+    expect(session.drafts[0].reviewedTargetDraft).toBe(true);
+  });
+
+  it("adds a whole-package deletion only explicitly from a body deletion, using target material", () => {
+    const session = state();
+    const selected = { ...object("Pkg.With.Dot"), id: "body", routineType: "PACKAGE_BODY" as const, operationType: "delete" as const };
+    session.target = {
+      ...session.target,
+      objects: [{ version: { identity: { owner: endpoint.schema, name: selected.name, kind: "PACKAGE" }, objectId: "1", status: "VALID", lastDdlTime: "1" }, source: "complete target specification", sourceComplete: true, dependencies: [], dependenciesComplete: true, issues: [] }],
+    };
+    synchronizeOracleRoutineSelection(session, [selected]);
+    expect(session.drafts).toHaveLength(1);
+    const spec = includeOraclePackageCompanion(session, "body");
+    expect(spec).toMatchObject({ identity: { kind: "PACKAGE" }, action: "delete", confirmPackagePair: false });
+    expect(includeOraclePackageCompanion(session, spec!.objectId)).toBeUndefined();
+    expect(session.drafts).toHaveLength(2);
+  });
+
+  it("projects normalized Core steps in execution order rather than sorting deletes last", async () => {
+    const session = state();
+    synchronizeOracleRoutineSelection(session, [
+      { ...object("Pkg.With.Dot"), id: "spec", routineType: "PACKAGE", operationType: "modify" },
+      { ...object("Pkg.With.Dot"), id: "body", routineType: "PACKAGE_BODY", operationType: "delete" },
+    ]);
+    const response = plan("Pkg.With.Dot", "Pkg.With.Dot");
+    response.steps[0].identity = { ...session.drafts[1].identity };
+    response.steps[0].action = "delete";
+    response.steps[1].identity = { ...session.drafts[0].identity };
+    response.steps[1].action = "replace";
+    calls.prepare.mockResolvedValue(response);
+    await validateOracleRoutineDeployment(session);
+    expect(oracleRoutineDeploymentEntries(session).map((entry) => entry.objectId)).toEqual(["body", "spec"]);
+    const normalized = { ...response, steps: [response.steps[1]] };
+    calls.prepare.mockResolvedValue(normalized);
+    session.selectedObjectId = "body";
+    await validateOracleRoutineDeployment(session);
+    expect(oracleRoutineDeploymentEntries(session).map((entry) => entry.objectId)).toEqual(["spec"]);
+    expect(session.selectedObjectId).toBe("spec");
+  });
+
+  it("allows inspecting recovery-only companion definitions without adding them to the write selection", async () => {
+    const session = state();
+    synchronizeOracleRoutineSelection(session, [{ ...object("Pkg.With.Dot"), id: "spec", routineType: "PACKAGE", operationType: "modify" }]);
+    const response = plan("Pkg.With.Dot", "Pkg.With.Dot");
+    response.ready = false;
+    response.steps[0].identity = { ...session.drafts[0].identity };
+    response.steps[1].identity = { ...session.drafts[0].identity, kind: "PACKAGE_BODY" };
+    response.steps[1].sourceOriginal = "original orphan body";
+    response.steps.forEach((step) => {
+      step.operation = null;
+      step.recoveryComplete = false;
+    });
+    calls.recovery.mockResolvedValue(response);
+    await prepareOracleRoutineRecovery(session, "original-spec");
+    const entries = oracleRoutineDeploymentEntries(session);
+    expect(entries).toHaveLength(2);
+    selectOracleRoutineDraft(session, entries[1].objectId);
+    expect(session.recoveryPlan).toBe(response);
+    expect(oracleRoutineActiveStep(session)?.sourceOriginal).toBe("original orphan body");
+    expect(session.drafts).toHaveLength(1);
+    session.executing = true;
+    selectOracleRoutineDraft(session, entries[0].objectId);
+    expect(session.selectedObjectId).toBe(entries[1].objectId);
+  });
+
+  it("adds a completely read companion only after explicit selection and retains it with its parent", () => {
+    const session = state();
+    const selected = { ...object("Pkg.With.Dot"), id: "body", routineType: "PACKAGE_BODY" as const };
+    session.source.objects = [{ version: { identity: { owner: "Source", name: selected.name, kind: "PACKAGE" }, objectId: "1", status: "VALID", lastDdlTime: "1" }, source: "complete source specification", sourceComplete: true, dependencies: [], dependenciesComplete: true, issues: [] }];
+    synchronizeOracleRoutineSelection(session, [selected]);
+    expect(session.drafts).toHaveLength(1);
+    const specification = includeOraclePackageCompanion(session, "body");
+    expect(specification).toMatchObject({ identity: { owner: endpoint.schema, name: selected.name, kind: "PACKAGE" }, action: "create", companionFor: "body", included: true });
+    synchronizeOracleRoutineSelection(session, [selected]);
+    expect(session.drafts.filter((draft) => draft.included)).toHaveLength(2);
+    expect(includeOraclePackageCompanion(session, "body")).toBe(specification);
+    expect(session.drafts).toHaveLength(2);
+    synchronizeOracleRoutineSelection(session, [{ ...selected, selected: false }]);
+    expect(session.drafts.some((draft) => draft.included)).toBe(false);
+  });
+
+  it("keeps the edited body when a companion is incomplete instead of inventing a write", () => {
+    const session = state();
+    synchronizeOracleRoutineSelection(session, [{ ...object("Pkg.With.Dot"), id: "body", routineType: "PACKAGE_BODY" }]);
+    editOracleRoutineDraft(session, "body", "retained body draft");
+    expect(includeOraclePackageCompanion(session, "body")).toBeUndefined();
+    expect(session.drafts).toHaveLength(1);
+    expect(session.drafts[0].sql).toBe("retained body draft");
+    expect(session.error).toContain("Completely read");
+  });
+
+  it("keeps same-name specification and body drafts separate and preserves edited source variants when package choices change", () => {
+    const session = state();
+    synchronizeOracleRoutineSelection(session, [
+      { ...object("Pkg.With.Dot"), id: "spec", routineType: "PACKAGE" },
+      { ...object("Pkg.With.Dot"), id: "body", routineType: "PACKAGE_BODY" },
+    ]);
+    expect(session.drafts.map((draft) => draft.identity.kind)).toEqual(["PACKAGE", "PACKAGE_BODY"]);
+    editOracleRoutineDraft(session, "body", "manually edited source body");
+    editOraclePackageOptions(session, "spec", { confirmPackagePair: true });
+    editOraclePackageOptions(session, "body", { packageBodySource: "target", packageContract: "target" });
+    expect(session.drafts[0].confirmPackagePair).toBe(false);
+    expect(session.drafts[1].sql).toBeUndefined();
+    editOracleRoutineDraft(session, "body", "manually edited target body");
+    editOraclePackageOptions(session, "body", { packageBodySource: "source" });
+    expect(session.drafts[1].sql).toBe("manually edited source body");
+    editOraclePackageOptions(session, "body", { packageBodySource: "target" });
+    expect(session.drafts[1].sql).toBe("manually edited target body");
+    editOraclePackageOptions(session, "spec", { confirmPackagePair: true });
+    editOracleRoutineDraft(session, "body", "changed final body");
+    expect(session.drafts[0].confirmPackagePair).toBe(false);
+  });
+
+  it("forwards reviewed package body source, target contract and pair confirmation without adding a specification write", async () => {
+    const session = state();
+    synchronizeOracleRoutineSelection(session, [{ ...object("Pkg.With.Dot"), id: "body", routineType: "PACKAGE_BODY" }]);
+    editOraclePackageOptions(session, "body", { packageBodySource: "target", packageContract: "target", confirmPackagePair: true });
+    const response = plan("Pkg.With.Dot");
+    response.steps[0].identity.kind = "PACKAGE_BODY";
+    response.steps[0].operation!.identity.kind = "PACKAGE_BODY";
+    calls.prepare.mockResolvedValue(response);
+    await validateOracleRoutineDeployment(session);
+    expect(session.error).toBeNull();
+    expect(calls.prepare.mock.calls[0][0].drafts).toHaveLength(1);
+    expect(calls.prepare.mock.calls[0][0].drafts[0]).toMatchObject({ identity: { kind: "PACKAGE_BODY", name: "Pkg.With.Dot" }, packageBodySource: "target", packageContract: "target", confirmPackagePair: true });
+  });
+
+  it("refreshes packages with typed selection and does not treat a same-name specification as an existing body", async () => {
+    const session = state();
+    synchronizeOracleRoutineSelection(session, [{ ...object("Pkg.With.Dot"), id: "body", routineType: "PACKAGE_BODY", operationType: "modify" }]);
+    calls.load.mockImplementation(async (id: string) =>
+      id === "source"
+        ? session.source
+        : { ...snapshot, objects: [{ version: { identity: { owner: endpoint.schema, name: "Pkg.With.Dot", kind: "PACKAGE" }, objectId: "11", status: "VALID", lastDdlTime: "1" }, source: "complete specification", sourceComplete: true, dependencies: [], dependenciesComplete: true, issues: [] }] },
+    );
+    await refreshOracleRoutineDeployment(session);
+    expect(session.error).toBeNull();
+    expect(session.drafts[0].action).toBe("create");
+    for (const call of calls.load.mock.calls) {
+      expect(call[3]).toBeUndefined();
+      expect(call[4]).toEqual({ objectKinds: ["PACKAGE_BODY"], selectedObjects: [{ name: "Pkg.With.Dot", kind: "PACKAGE_BODY" }] });
+    }
+    expect(session.target.objects[0].version.identity.kind).toBe("PACKAGE");
+  });
+
   it("preserves the existing approved plan when revalidation is rejected by capacity admission", async () => {
     const session = state("F");
     calls.prepare.mockResolvedValueOnce(plan("F"));

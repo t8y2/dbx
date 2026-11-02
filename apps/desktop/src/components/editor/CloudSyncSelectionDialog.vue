@@ -68,7 +68,7 @@ const backupSettingsCategoryLabelKeys: Record<BackupSettingsCategoryId, string> 
   shortcuts: "settings.shortcutsTab",
   snippets: "settings.snippetsTab",
 };
-const nonSyncableEditorSettingIds = new Set(["updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins", "updateDownloadSource", "ignoredUpdateVersion"]);
+const nonSyncableEditorSettingIds = new Set(["updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins", "updateDownloadSource", "updateChannel", "ignoredUpdateVersion"]);
 const desktopSettingCategories: Record<string, BackupSettingsCategoryId> = {
   show_tray_icon: "appearance",
   linux_floating_frame_enabled: "appearance",
@@ -102,6 +102,9 @@ const editorSettingCategoryOverrides: Partial<Record<string, BackupSettingsCateg
   tableDdlWordWrap: "editor",
   refreshDdlOnOpen: "editor",
   excludeDdlStorage: "editor",
+  includeDdlStorage: "editor",
+  compactDdlSql: "editor",
+  separateDdlIndexes: "editor",
   sqlSemanticDiagnosticsEnabled: "editor",
   infiniteScrollMaxRows: "data",
   tableFontSize: "data",

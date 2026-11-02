@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { ConnectionConfig, DatabaseType, ObjectSourceKind } from "@/types/database";
@@ -19,6 +19,15 @@ const mocks = vi.hoisted(() => ({
   buildEditableObjectSource: vi.fn(),
   buildExecutableObjectSourceStatements: vi.fn(),
   executeQuery: vi.fn(),
+  checkConnectionHealth: vi.fn(),
+  subscribeConnectionLiveness: vi.fn(),
+  subscribeConnectionIdleClosed: vi.fn(),
+  prewarmConnection: vi.fn(),
+  loadConnections: vi.fn(),
+  loadTunnelProfiles: vi.fn(),
+  loadTableVGroups: vi.fn(),
+  loadSidebarLayout: vi.fn(),
+  listInstalledAgents: vi.fn(),
   prepareOracleRoutineSave: vi.fn(),
   updateOracleRoutineOperationReferences: vi.fn(async () => {}),
   executeOracleRoutineOperation: vi.fn(),
@@ -28,10 +37,20 @@ const mocks = vi.hoisted(() => ({
 // save/production-guard pipeline remain real. Rust builder tests cover the SQL.
 vi.mock("@/lib/backend/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/backend/api")>()), ...mocks }));
 const cleanups: Array<() => void> = [];
-afterEach(() => {
+const unexpectedHttp: string[] = [];
+beforeEach(() => {
+  unexpectedHttp.length = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    unexpectedHttp.push(String(input));
+    throw new Error(`Unexpected HTTP boundary: ${String(input)}`);
+  });
+});
+afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) cleanup();
+  await vi.dynamicImportSettled();
   vi.restoreAllMocks();
   for (const mock of Object.values(mocks)) mock.mockReset();
+  expect(unexpectedHttp).toEqual([]);
 });
 function button(text: string) {
   return [...document.querySelectorAll<HTMLButtonElement>("button")].find((element) => element.textContent?.trim() === text);
@@ -47,8 +66,17 @@ async function mount(options: { databaseType?: DatabaseType; initialEditing?: bo
   const pinia = createPinia();
   setActivePinia(pinia);
   const store = useConnectionStore();
-  vi.spyOn(store, "ensureConnected").mockResolvedValue(undefined);
-  vi.spyOn(store, "getConfig").mockReturnValue({ id: "ob", name: "test", db_type: databaseType, is_production: options.production } as ConnectionConfig);
+  store.connections.push({ id: "ob", name: "test", db_type: databaseType, is_production: options.production } as ConnectionConfig);
+  store.connectedIds.add("ob");
+  mocks.checkConnectionHealth.mockResolvedValue(undefined);
+  mocks.subscribeConnectionLiveness.mockResolvedValue(() => {});
+  mocks.subscribeConnectionIdleClosed.mockResolvedValue(() => {});
+  mocks.prewarmConnection.mockResolvedValue(undefined);
+  mocks.loadConnections.mockResolvedValue([]);
+  mocks.loadTunnelProfiles.mockResolvedValue([]);
+  mocks.loadTableVGroups.mockResolvedValue({});
+  mocks.loadSidebarLayout.mockResolvedValue(null);
+  mocks.listInstalledAgents.mockResolvedValue([]);
   mocks.getObjectSource.mockResolvedValue({ name: "SEQ", schema: "APP", object_type: objectType, source, editable: options.editable !== false });
   mocks.buildEditableObjectSource.mockResolvedValue(objectType === "SEQUENCE" && databaseType === "oceanbase-oracle" ? alter : source);
   mocks.buildExecutableObjectSourceStatements.mockResolvedValue([objectType === "SEQUENCE" ? alter : source]);
@@ -70,6 +98,27 @@ async function mount(options: { databaseType?: DatabaseType; initialEditing?: bo
 }
 
 describe("OceanBase sequence source through the shared Oracle object dialog", () => {
+  it.each(["TYPE", "TYPE_BODY"] as const)("labels %s editing and save preview for the controlled TYPE flow", async (type) => {
+    const source = type === "TYPE" ? 'CREATE OR REPLACE TYPE "APP"."SEQ" AS OBJECT (ID NUMBER);' : 'CREATE OR REPLACE TYPE BODY "APP"."SEQ" AS MEMBER FUNCTION F RETURN NUMBER IS BEGIN RETURN 1; END; END;';
+    await mount({ type, source });
+    expect(editor()!.state.readOnly).toBe(true);
+    expect(button("contextMenu.editView")).toBeUndefined();
+    button("contextMenu.editObject")!.click();
+    await vi.waitFor(() => expect(editor()!.state.readOnly).toBe(false));
+    expect(document.querySelector('[role="dialog"] h2')?.textContent).toBe("contextMenu.editObject - SEQ");
+    expect(button("objects.saveSource")).toBeUndefined();
+    const requests = await import("@/lib/table/oracleTypeManagementRequest");
+    try {
+      button("objects.typeManagementPreviewSave")!.click();
+      await vi.waitFor(() => expect(requests.oracleTypeManagementRequest.value?.operation).toBe(type === "TYPE_BODY" ? "save-body" : "save-spec"));
+      expect(mocks.buildExecutableObjectSourceStatements).not.toHaveBeenCalled();
+      expect(mocks.executeQuery).not.toHaveBeenCalled();
+    } finally {
+      const pending = requests.oracleTypeManagementRequest.value;
+      if (pending) requests.finishOracleTypeManagementRequest(pending.id, { complete: false, target: pending.target, operation: pending.operation });
+    }
+  });
+
   function routineOperation(source: string, valid: boolean): OracleRoutineOperation {
     const identity = { owner: "APP", name: "SEQ", kind: "FUNCTION" as const };
     return {

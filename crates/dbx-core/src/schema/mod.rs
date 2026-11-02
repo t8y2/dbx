@@ -1,3 +1,5 @@
+pub mod exact_metadata;
+pub mod native_jobs;
 pub mod table_structure_sql;
 
 pub use dbx_drivers::metadata::sqlite_ddl;
@@ -24,12 +26,24 @@ mod agent_pg_sequences;
 mod external_table_filter_tests;
 mod kingbase;
 mod mongodb_columns;
+mod oracle_ddl_indexes;
 pub mod oracle_routines;
+mod oracle_table_triggers;
+mod oracle_triggers;
+pub use oracle_ddl_indexes::{prepare_schema_sync_oracle_ddl_core, separate_table_ddl_indexes_core};
+mod oracle_type_data;
+mod oracle_type_details;
+mod oracle_type_evolution;
+mod oracle_type_management;
+#[cfg(test)]
+mod oracle_type_transport_tests;
 pub mod plugin_metadata;
 #[cfg(test)]
 mod plugin_metadata_tests;
 #[cfg(test)]
 mod sqlserver_temporal_ddl_tests;
+#[cfg(all(test, unix))]
+mod trigger_metadata_routing_tests;
 
 macro_rules! extract_pool {
     ($pool:expr, $variant:ident) => {
@@ -115,6 +129,7 @@ const TDENGINE_LIKE_PATTERN_MAX_BYTES: usize = 100;
 pub use dbx_types::metadata_filter::{
     sql_like_pattern_matches_case_insensitive, table_name_filter_matches, TableNameFilter,
 };
+pub use dbx_types::oracle_trigger::{MetadataIdentityMode, MetadataReadOptions};
 
 fn clickhouse_metadata_database<'a>(database: &'a str, schema: &'a str) -> &'a str {
     if schema.trim().is_empty() {
@@ -1013,6 +1028,64 @@ pub async fn list_tables_core(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::TableInfo>, String> {
+    list_tables_core_impl(
+        state,
+        connection_id,
+        database,
+        schema,
+        filter,
+        limit,
+        offset,
+        object_types,
+        table_name_filter,
+        false,
+    )
+    .await
+}
+
+/// Sidebar table-tree variant of [`list_tables_core`]: for PostgreSQL-family
+/// connections `limit`/`offset` count top-level relations, and every partition
+/// below a returned root is included in the same page. Other drivers ignore
+/// the flag and keep row-based pagination.
+pub async fn list_table_roots_page_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
+) -> Result<Vec<db::TableInfo>, String> {
+    list_tables_core_impl(
+        state,
+        connection_id,
+        database,
+        schema,
+        filter,
+        limit,
+        offset,
+        object_types,
+        table_name_filter,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn list_tables_core_impl(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
+    page_table_roots: bool,
+) -> Result<Vec<db::TableInfo>, String> {
     let db_config = connection_config(state, connection_id).await;
     if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
         validate_oceanbase_metadata_page(limit, offset)?;
@@ -1038,6 +1111,7 @@ pub async fn list_tables_core(
                 object_types,
                 table_name_filter,
                 metadata_session.client_session_id(),
+                page_table_roots,
             )
         },
     )
@@ -1452,24 +1526,54 @@ fn table_comments_from_query_result(result: db::QueryResult) -> HashMap<String, 
 
 // Oracle 11g can spend about a minute evaluating SYS_CONTEXT inside the ALL_SYNONYMS START WITH clause.
 const ORACLE_CURRENT_SCHEMA_SQL: &str = "SELECT SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS CURRENT_SCHEMA FROM DUAL";
+// Private database links resolve in the session's current schema, and the metadata session
+// may have switched to the requested owner. Reads through a link run as the login user, who
+// owns the private links the session can use.
+const ORACLE_SESSION_USER_SQL: &str = "SELECT SYS_CONTEXT('USERENV','SESSION_USER') AS SESSION_USER FROM DUAL";
 const ORACLE_SYNONYM_MAX_DEPTH: usize = 16;
 
+/// An object owner left empty on a database link stands for the link user's default schema,
+/// which is only known after asking the remote database.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct OracleObjectRef {
     owner: String,
     name: String,
+    db_link: Option<String>,
 }
 
 struct OracleSynonymResolver {
     current: OracleObjectRef,
     visited: HashSet<OracleObjectRef>,
     depth: usize,
+    /// Candidates tried after the current chain finds nothing, last entry first.
+    retries: Vec<OracleObjectRef>,
+    database_link_name: bool,
 }
 
 impl OracleSynonymResolver {
+    /// The SQL editor sends `TABLE@LINK` as a single table name. The literal name is read
+    /// first, so a quoted local name that contains `@` keeps resolving even when no such link
+    /// exists. Then it is read as a remote object owned by the requested schema, and last under
+    /// the link user's default schema because a one-part reference still arrives with the query
+    /// tab's schema.
     fn new(owner: String, name: String) -> Self {
-        let current = OracleObjectRef { owner, name };
-        Self { current: current.clone(), visited: HashSet::from([current]), depth: 0 }
+        let current = OracleObjectRef { owner, name, db_link: None };
+        let retries = match split_oracle_database_link(&current.name) {
+            Some((name, db_link)) => {
+                let remote = OracleObjectRef { owner: current.owner.clone(), name, db_link: Some(db_link) };
+                let link_user = OracleObjectRef { owner: String::new(), ..remote.clone() };
+                vec![link_user, remote]
+            }
+            None => Vec::new(),
+        };
+        let database_link_name = !retries.is_empty();
+        Self { current: current.clone(), visited: HashSet::from([current]), depth: 0, retries, database_link_name }
+    }
+
+    /// Reads through a link, and every candidate of a name that may be a link, keep the login
+    /// user as the session schema: the requested owner may only exist on the remote side.
+    fn uses_login_schema(&self) -> bool {
+        self.database_link_name || self.current.db_link.is_some()
     }
 
     fn current(&self) -> &OracleObjectRef {
@@ -1492,6 +1596,71 @@ impl OracleSynonymResolver {
         self.depth += 1;
         true
     }
+
+    fn retry_next_candidate(&mut self) -> bool {
+        while let Some(target) = self.retries.pop() {
+            if self.visited.insert(target.clone()) {
+                self.current = target;
+                self.depth = 0;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn pending_database_link_user(&self) -> Option<String> {
+        self.current.owner.is_empty().then(|| self.current.db_link.clone()).flatten()
+    }
+
+    fn resolve_database_link_user(&mut self, owner: String) -> bool {
+        let resolved = OracleObjectRef { owner, ..self.current.clone() };
+        if !self.visited.insert(resolved.clone()) {
+            return false;
+        }
+        self.current = resolved;
+        true
+    }
+}
+
+/// Database link names are spliced into dictionary view names, so only the plain
+/// `NAME[.DOMAIN]` spelling is accepted.
+fn oracle_database_link_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    let identifier_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '#');
+    let valid = value.len() <= 128
+        && value.split('.').enumerate().all(|(index, part)| {
+            part.chars().next().is_some_and(|first| index > 0 || first.is_ascii_alphabetic())
+                && part.chars().all(identifier_char)
+        });
+    valid.then(|| value.to_ascii_uppercase())
+}
+
+fn split_oracle_database_link(name: &str) -> Option<(String, String)> {
+    let (object, db_link) = name.split_once('@')?;
+    if object.is_empty() {
+        return None;
+    }
+    Some((object.to_string(), oracle_database_link_name(db_link)?))
+}
+
+fn oracle_dictionary_link_suffix(db_link: Option<&str>) -> Result<String, String> {
+    match db_link {
+        None => Ok(String::new()),
+        Some(link) => oracle_database_link_name(link)
+            .map(|link| format!("@{link}"))
+            .ok_or_else(|| "Invalid Oracle database link name".to_string()),
+    }
+}
+
+fn oracle_database_link_user_sql(db_link: &str) -> Result<String, String> {
+    Ok(format!("SELECT USERNAME FROM USER_USERS{}", oracle_dictionary_link_suffix(Some(db_link))?))
+}
+
+fn oracle_identifier_from_query_result(result: db::QueryResult, column: &str) -> Option<String> {
+    let index = result.columns.iter().position(|name| name.trim().eq_ignore_ascii_case(column))?;
+    let value = query_result_cell_string(result.rows.first()?, index)?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn oracle_current_schema_from_query_result(result: db::QueryResult) -> Result<String, String> {
@@ -1519,21 +1688,22 @@ fn oracle_columns_sql(schema: &str, table: &str) -> Result<String, String> {
     if schema.is_empty() {
         return Err("Oracle columns query requires a resolved schema".to_string());
     }
-    oracle_columns_sql_for_resolved_owner(&schema.to_uppercase(), table)
+    oracle_columns_sql_for_resolved_owner(&schema.to_uppercase(), table, None)
 }
 
-fn oracle_columns_sql_for_resolved_owner(owner: &str, table: &str) -> Result<String, String> {
+fn oracle_columns_sql_for_resolved_owner(owner: &str, table: &str, db_link: Option<&str>) -> Result<String, String> {
     if owner.trim().is_empty() {
         return Err("Oracle columns query requires a resolved schema".to_string());
     }
     let owner = sql_string(owner);
+    let at = oracle_dictionary_link_suffix(db_link)?;
     Ok(format!(
         "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.NULLABLE, c.DATA_DEFAULT, \
          c.DATA_LENGTH, c.DATA_PRECISION, c.DATA_SCALE, c.COLUMN_ID, \
          CASE WHEN EXISTS ( \
            SELECT 1 \
-           FROM ALL_CONS_COLUMNS cols \
-           JOIN ALL_CONSTRAINTS con \
+           FROM ALL_CONS_COLUMNS{at} cols \
+           JOIN ALL_CONSTRAINTS{at} con \
              ON con.OWNER = cols.OWNER \
             AND con.CONSTRAINT_NAME = cols.CONSTRAINT_NAME \
             AND con.CONSTRAINT_TYPE = 'P' \
@@ -1543,12 +1713,12 @@ fn oracle_columns_sql_for_resolved_owner(owner: &str, table: &str) -> Result<Str
          ) THEN 1 ELSE 0 END AS IS_PK, \
          ( \
            SELECT cm.COMMENTS \
-           FROM ALL_COL_COMMENTS cm \
+           FROM ALL_COL_COMMENTS{at} cm \
            WHERE cm.OWNER = c.OWNER \
              AND cm.TABLE_NAME = c.TABLE_NAME \
              AND cm.COLUMN_NAME = c.COLUMN_NAME \
          ) AS COMMENTS \
-         FROM ALL_TAB_COLUMNS c \
+         FROM ALL_TAB_COLUMNS{at} c \
          WHERE c.OWNER = {owner} \
            AND c.TABLE_NAME = {table} \
          ORDER BY c.COLUMN_ID",
@@ -1556,32 +1726,52 @@ fn oracle_columns_sql_for_resolved_owner(owner: &str, table: &str) -> Result<Str
     ))
 }
 
-fn oracle_synonym_target_sql(owner: &str, table: &str, include_public: bool) -> Result<String, String> {
+fn oracle_synonym_target_sql(
+    owner: &str,
+    table: &str,
+    db_link: Option<&str>,
+    include_public: bool,
+) -> Result<String, String> {
     if owner.trim().is_empty() {
         return Err("Oracle synonym query requires a resolved schema".to_string());
     }
     let owner = sql_string(owner);
     let owner_filter =
         if include_public { format!("s.OWNER IN ({owner}, 'PUBLIC')") } else { format!("s.OWNER = {owner}") };
+    let at = oracle_dictionary_link_suffix(db_link)?;
+    // A link name in a remote dictionary is relative to the remote database, so the
+    // resolver does not chain links.
+    let remote_filter = if db_link.is_some() { " AND s.DB_LINK IS NULL" } else { "" };
     Ok(format!(
-        "SELECT s.TABLE_OWNER, s.TABLE_NAME \
-         FROM ALL_SYNONYMS s \
+        "SELECT s.TABLE_OWNER, s.TABLE_NAME, s.DB_LINK \
+         FROM ALL_SYNONYMS{at} s \
          WHERE s.SYNONYM_NAME = {} \
-           AND {owner_filter} \
-           AND s.DB_LINK IS NULL \
+           AND {owner_filter}{remote_filter} \
          ORDER BY CASE WHEN s.OWNER = {owner} THEN 0 ELSE 1 END",
         sql_string(table),
     ))
 }
 
-fn oracle_synonym_target_from_query_result(result: db::QueryResult) -> Option<OracleObjectRef> {
+fn oracle_synonym_target_from_query_result(
+    result: db::QueryResult,
+    source: &OracleObjectRef,
+) -> Option<OracleObjectRef> {
     let owner_index = result.columns.iter().position(|column| column.eq_ignore_ascii_case("TABLE_OWNER"))?;
     let table_index = result.columns.iter().position(|column| column.eq_ignore_ascii_case("TABLE_NAME"))?;
+    let link_index = result.columns.iter().position(|column| column.eq_ignore_ascii_case("DB_LINK"));
     let row = result.rows.first()?;
-    Some(OracleObjectRef {
-        owner: query_result_cell_string(row, owner_index)?,
-        name: query_result_cell_string(row, table_index)?,
-    })
+    let db_link =
+        match link_index.and_then(|index| query_result_cell_string(row, index)).filter(|link| !link.is_empty()) {
+            Some(link) => Some(oracle_database_link_name(&link)?),
+            None => source.db_link.clone(),
+        };
+    // `CREATE SYNONYM s FOR t@link` stores no owner; the remote object belongs to the link user.
+    let owner = match query_result_cell_string(row, owner_index) {
+        Some(owner) => owner,
+        None if db_link.is_some() => String::new(),
+        None => return None,
+    };
+    Some(OracleObjectRef { owner, name: query_result_cell_string(row, table_index)?, db_link })
 }
 
 fn oracle_column_type(data_type: &str, precision: Option<i32>, scale: Option<i32>, length: Option<i32>) -> String {
@@ -1633,6 +1823,68 @@ fn oracle_columns_from_query_result(result: db::QueryResult) -> Vec<db::ColumnIn
         .collect()
 }
 
+/// Runs the Oracle column resolver's dictionary queries over either the native agent or an
+/// external JDBC driver session.
+enum OracleMetadataQuery<'a> {
+    Agent { client: &'a mut db::agent_driver::AgentDriverClient, database: &'a str, timeout_duration: Option<Duration> },
+    ExternalDriver { session: &'a crate::plugins::PluginDriverSession, config: &'a ConnectionConfig, database: &'a str },
+}
+
+impl OracleMetadataQuery<'_> {
+    async fn run(&mut self, sql: &str, schema: Option<&str>, max_rows: usize) -> Result<db::QueryResult, String> {
+        match self {
+            Self::Agent { client, database, timeout_duration } => {
+                client
+                    .execute_query_with_timeout::<db::QueryResult>(
+                        agent_execute_query_params(
+                            sql,
+                            if database.is_empty() { None } else { Some(*database) },
+                            schema,
+                            QueryExecutionOptions { max_rows: Some(max_rows), ..Default::default() },
+                        ),
+                        *timeout_duration,
+                    )
+                    .await
+            }
+            Self::ExternalDriver { session, config, database } => {
+                session
+                    .invoke_with_timeout(
+                        "executeQuery",
+                        serde_json::json!({
+                            "connection": config,
+                            "database": database,
+                            "schema": schema.unwrap_or(""),
+                            "sql": sql,
+                            "maxRows": max_rows
+                        }),
+                        agent_metadata_timeout(Some(config)),
+                    )
+                    .await
+            }
+        }
+    }
+
+    /// A query through a link that Oracle cannot resolve (`ORA-02019`) means the name was not
+    /// a usable database link. That candidate yields no rows; other remote errors still fail.
+    async fn run_candidate(
+        &mut self,
+        sql: &str,
+        schema: Option<&str>,
+        max_rows: usize,
+        through_link: bool,
+    ) -> Result<Option<db::QueryResult>, String> {
+        match self.run(sql, schema, max_rows).await {
+            Ok(result) => Ok(Some(result)),
+            Err(error) if through_link && is_oracle_missing_database_link_error(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn is_oracle_missing_database_link_error(error: &str) -> bool {
+    error.contains("ORA-02019")
+}
+
 async fn oracle_columns_via_sql(
     database: &str,
     schema: &str,
@@ -1640,67 +1892,8 @@ async fn oracle_columns_via_sql(
     client: &mut db::agent_driver::AgentDriverClient,
     timeout_duration: Option<Duration>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
-    let request_schema = (!schema.trim().is_empty()).then_some(schema);
-    let owner = if let Some(schema) = request_schema {
-        schema.trim().to_uppercase()
-    } else {
-        let result = client
-            .execute_query_with_timeout::<db::QueryResult>(
-                agent_execute_query_params(
-                    ORACLE_CURRENT_SCHEMA_SQL,
-                    if database.is_empty() { None } else { Some(database) },
-                    None,
-                    QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
-                ),
-                timeout_duration,
-            )
-            .await?;
-        oracle_current_schema_from_query_result(result)?
-    };
-    let mut resolver = OracleSynonymResolver::new(owner, table.to_string());
-
-    loop {
-        let object = resolver.current();
-        let sql = oracle_columns_sql_for_resolved_owner(&object.owner, &object.name)?;
-        let result = client
-            .execute_query_with_timeout::<db::QueryResult>(
-                agent_execute_query_params(
-                    &sql,
-                    if database.is_empty() { None } else { Some(database) },
-                    request_schema,
-                    QueryExecutionOptions { max_rows: Some(10_000), ..Default::default() },
-                ),
-                timeout_duration,
-            )
-            .await?;
-        let columns = oracle_columns_from_query_result(result);
-        if !columns.is_empty() {
-            return Ok(deduplicate_column_infos(columns));
-        }
-        if !resolver.can_follow() {
-            return Ok(Vec::new());
-        }
-
-        let object = resolver.current();
-        let sql = oracle_synonym_target_sql(&object.owner, &object.name, resolver.include_public_synonym())?;
-        let result = client
-            .execute_query_with_timeout::<db::QueryResult>(
-                agent_execute_query_params(
-                    &sql,
-                    if database.is_empty() { None } else { Some(database) },
-                    request_schema,
-                    QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
-                ),
-                timeout_duration,
-            )
-            .await?;
-        let Some(target) = oracle_synonym_target_from_query_result(result) else {
-            return Ok(Vec::new());
-        };
-        if !resolver.follow(target) {
-            return Ok(Vec::new());
-        }
-    }
+    let mut query = OracleMetadataQuery::Agent { client, database, timeout_duration };
+    oracle_columns_via_metadata_query(&mut query, schema, table).await
 }
 
 async fn external_driver_oracle_columns_via_sql(
@@ -1710,72 +1903,78 @@ async fn external_driver_oracle_columns_via_sql(
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::ColumnInfo>, String> {
-    let request_schema = if schema.trim().is_empty() { "" } else { schema };
-    let owner = if request_schema.is_empty() {
-        let result: db::QueryResult = session
-            .invoke_with_timeout(
-                "executeQuery",
-                serde_json::json!({
-                    "connection": config,
-                    "database": database,
-                    "schema": request_schema,
-                    "sql": ORACLE_CURRENT_SCHEMA_SQL,
-                    "maxRows": 1
-                }),
-                agent_metadata_timeout(Some(config)),
-            )
-            .await?;
-        oracle_current_schema_from_query_result(result)?
-    } else {
-        schema.trim().to_uppercase()
+    let mut query = OracleMetadataQuery::ExternalDriver { session: &session, config, database };
+    oracle_columns_via_metadata_query(&mut query, schema, table).await
+}
+
+async fn oracle_columns_via_metadata_query(
+    query: &mut OracleMetadataQuery<'_>,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<db::ColumnInfo>, String> {
+    let request_schema = (!schema.trim().is_empty()).then_some(schema);
+    let owner = match request_schema {
+        Some(schema) => schema.trim().to_uppercase(),
+        None => oracle_current_schema_from_query_result(query.run(ORACLE_CURRENT_SCHEMA_SQL, None, 1).await?)?,
     };
     let mut resolver = OracleSynonymResolver::new(owner, table.to_string());
+    let mut session_user = None;
 
     loop {
+        if resolver.uses_login_schema() && session_user.is_none() {
+            let result = query.run(ORACLE_SESSION_USER_SQL, None, 1).await?;
+            session_user = oracle_identifier_from_query_result(result, "SESSION_USER");
+            if session_user.is_none() {
+                return Ok(Vec::new());
+            }
+        }
+        let session_schema = if resolver.uses_login_schema() { session_user.as_deref() } else { request_schema };
+        let through_link = resolver.current().db_link.is_some();
+
+        if let Some(db_link) = resolver.pending_database_link_user() {
+            let sql = oracle_database_link_user_sql(&db_link)?;
+            let owner = query
+                .run_candidate(&sql, session_schema, 1, through_link)
+                .await?
+                .and_then(|result| oracle_identifier_from_query_result(result, "USERNAME"));
+            if !owner.is_some_and(|owner| resolver.resolve_database_link_user(owner)) {
+                if resolver.retry_next_candidate() {
+                    continue;
+                }
+                return Ok(Vec::new());
+            }
+        }
+
         let object = resolver.current();
-        let sql = oracle_columns_sql_for_resolved_owner(&object.owner, &object.name)?;
-        let result: db::QueryResult = session
-            .invoke_with_timeout(
-                "executeQuery",
-                serde_json::json!({
-                    "connection": config,
-                    "database": database,
-                    "schema": request_schema,
-                    "sql": sql,
-                    "maxRows": 10_000
-                }),
-                agent_metadata_timeout(Some(config)),
-            )
-            .await?;
-        let columns = oracle_columns_from_query_result(result);
+        let sql = oracle_columns_sql_for_resolved_owner(&object.owner, &object.name, object.db_link.as_deref())?;
+        let columns = query
+            .run_candidate(&sql, session_schema, 10_000, through_link)
+            .await?
+            .map(oracle_columns_from_query_result)
+            .unwrap_or_default();
         if !columns.is_empty() {
             return Ok(deduplicate_column_infos(columns));
         }
-        if !resolver.can_follow() {
-            return Ok(Vec::new());
-        }
 
-        let object = resolver.current();
-        let sql = oracle_synonym_target_sql(&object.owner, &object.name, resolver.include_public_synonym())?;
-        let result: db::QueryResult = session
-            .invoke_with_timeout(
-                "executeQuery",
-                serde_json::json!({
-                    "connection": config,
-                    "database": database,
-                    "schema": request_schema,
-                    "sql": sql,
-                    "maxRows": 1
-                }),
-                agent_metadata_timeout(Some(config)),
-            )
-            .await?;
-        let Some(target) = oracle_synonym_target_from_query_result(result) else {
-            return Ok(Vec::new());
+        let target = if resolver.can_follow() {
+            let object = resolver.current();
+            let sql = oracle_synonym_target_sql(
+                &object.owner,
+                &object.name,
+                object.db_link.as_deref(),
+                resolver.include_public_synonym(),
+            )?;
+            query
+                .run_candidate(&sql, session_schema, 1, through_link)
+                .await?
+                .and_then(|result| oracle_synonym_target_from_query_result(result, resolver.current()))
+        } else {
+            None
         };
-        if !resolver.follow(target) {
-            return Ok(Vec::new());
+        if target.is_some_and(|target| resolver.follow(target)) || resolver.retry_next_candidate() {
+            continue;
         }
+        return Ok(Vec::new());
     }
 }
 
@@ -1899,6 +2098,57 @@ fn oracle_object_statistics_query_plan(schema: &str) -> Vec<ObjectStatisticsAtte
         ("all-segments", oracle_object_statistics_sql(schema), true),
         ("dba-segments", oracle_object_statistics_dba_segments_sql(schema), true),
         ("user-segments", oracle_object_statistics_user_segments_sql(schema), false),
+        ("rows-only", oracle_object_statistics_rows_only_sql(schema), true),
+    ]
+}
+
+fn oceanbase_oracle_object_statistics_sql(schema: &str) -> String {
+    format!(
+        r#"WITH locations AS (
+  SELECT DISTINCT DATABASE_NAME, TABLE_NAME, TABLE_ID, TABLE_TYPE,
+         DATA_TABLE_ID, TABLET_ID, LS_ID, SVR_IP, SVR_PORT, ROLE
+  FROM SYS.DBA_OB_TABLE_LOCATIONS WHERE DATABASE_NAME = {owner}
+), base_tables AS (
+  SELECT DISTINCT DATABASE_NAME, TABLE_NAME, TABLE_ID FROM locations
+  WHERE TABLE_TYPE = 'USER TABLE'
+), owned_tablets AS (
+  SELECT b.DATABASE_NAME, b.TABLE_NAME, l.TABLET_ID,
+         MAX(CASE WHEN l.ROLE = 'LEADER' THEN l.LS_ID END) AS LS_ID,
+         MAX(CASE WHEN l.ROLE = 'LEADER' THEN l.SVR_IP END) AS SVR_IP,
+         MAX(CASE WHEN l.ROLE = 'LEADER' THEN l.SVR_PORT END) AS SVR_PORT,
+         SUM(CASE WHEN l.ROLE = 'LEADER' THEN 1 ELSE 0 END) AS LEADER_COUNT
+  FROM base_tables b JOIN locations l
+    ON l.DATABASE_NAME = b.DATABASE_NAME
+   AND (l.TABLE_ID = b.TABLE_ID OR (l.DATA_TABLE_ID = b.TABLE_ID
+        AND l.TABLE_TYPE IN ('INDEX', 'LOB AUX TABLE')))
+  GROUP BY b.DATABASE_NAME, b.TABLE_NAME, l.TABLET_ID
+), tablet_sizes AS (
+  SELECT o.DATABASE_NAME, o.TABLE_NAME, o.TABLET_ID,
+         CASE WHEN o.LEADER_COUNT = 1 AND COUNT(r.TABLET_ID) = 1
+                   AND COUNT(r.REQUIRED_SIZE) = 1
+              THEN MAX(r.REQUIRED_SIZE) ELSE NULL END AS TABLET_BYTES
+  FROM owned_tablets o LEFT JOIN SYS.DBA_OB_TABLET_REPLICAS r
+    ON r.TABLET_ID = o.TABLET_ID AND r.LS_ID = o.LS_ID
+   AND r.SVR_IP = o.SVR_IP AND r.SVR_PORT = o.SVR_PORT
+  GROUP BY o.DATABASE_NAME, o.TABLE_NAME, o.TABLET_ID, o.LEADER_COUNT
+), sizes AS (
+  SELECT DATABASE_NAME, TABLE_NAME,
+         CASE WHEN COUNT(*) = COUNT(TABLET_BYTES)
+              THEN SUM(TABLET_BYTES) ELSE NULL END AS TOTAL_BYTES
+  FROM tablet_sizes GROUP BY DATABASE_NAME, TABLE_NAME
+)
+SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, s.TOTAL_BYTES
+FROM ALL_TABLES t
+LEFT JOIN sizes s ON s.DATABASE_NAME = t.OWNER AND s.TABLE_NAME = t.TABLE_NAME
+WHERE t.OWNER = {owner} AND t.NESTED = 'NO'
+ORDER BY t.TABLE_NAME"#,
+        owner = oracle_owner_filter(schema),
+    )
+}
+
+fn oceanbase_oracle_object_statistics_query_plan(schema: &str) -> Vec<ObjectStatisticsAttempt> {
+    vec![
+        ("tablet-replicas", oceanbase_oracle_object_statistics_sql(schema), true),
         ("rows-only", oracle_object_statistics_rows_only_sql(schema), true),
     ]
 }
@@ -2206,11 +2456,18 @@ async fn agent_list_object_statistics(
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ExternalDriverStatisticsDialect {
     Oracle,
+    OceanbaseOracle,
     Dameng,
     Kingbase,
 }
 
 fn external_driver_statistics_dialect(config: &ConnectionConfig) -> Option<ExternalDriverStatisticsDialect> {
+    if config.db_type == DatabaseType::OceanbaseOracle
+        || crate::models::connection::jdbc_dialect_hint(config)
+            == Some(crate::models::connection::JdbcDialectHint::OceanbaseOracle)
+    {
+        return Some(ExternalDriverStatisticsDialect::OceanbaseOracle);
+    }
     // `is_oracle_external_driver_config` (added alongside the JDBC Oracle DDL
     // fix) checks both the `jdbc:oracle:` URL prefix and the driver class, so
     // it recognises more real-world configs than a URL-only sniff would.
@@ -2240,6 +2497,7 @@ fn external_driver_statistics_query_plan(
 ) -> Vec<ObjectStatisticsAttempt> {
     match dialect {
         ExternalDriverStatisticsDialect::Oracle => oracle_object_statistics_query_plan(schema),
+        ExternalDriverStatisticsDialect::OceanbaseOracle => oceanbase_oracle_object_statistics_query_plan(schema),
         ExternalDriverStatisticsDialect::Dameng => dameng_object_statistics_query_plan(schema),
         ExternalDriverStatisticsDialect::Kingbase => kingbase::object_statistics_query_plan(schema),
     }
@@ -2248,6 +2506,7 @@ fn external_driver_statistics_query_plan(
 fn external_driver_statistics_vendor(dialect: ExternalDriverStatisticsDialect) -> &'static str {
     match dialect {
         ExternalDriverStatisticsDialect::Oracle => "Oracle",
+        ExternalDriverStatisticsDialect::OceanbaseOracle => "OceanBase Oracle",
         ExternalDriverStatisticsDialect::Dameng => "Dameng",
         ExternalDriverStatisticsDialect::Kingbase => "Kingbase",
     }
@@ -2323,6 +2582,7 @@ fn message_queue_topic_tables(topics: Vec<crate::mq::TopicInfo>) -> Vec<db::Tabl
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn list_tables_once(
     state: &AppState,
     connection_id: &str,
@@ -2334,6 +2594,7 @@ async fn list_tables_once(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
     client_session_id: Option<&str>,
+    page_table_roots: bool,
 ) -> Result<Vec<db::TableInfo>, String> {
     let pool_key =
         state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
@@ -2722,17 +2983,25 @@ async fn list_tables_once(
                 db::cloudberry::list_tables_filtered(p, schema, filter, None, None)
                     .await
                     .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
+            } else if page_table_roots {
+                db::cloudberry::list_table_roots_page_filtered(p, schema, filter, limit, offset).await
             } else {
                 db::cloudberry::list_tables_filtered(p, schema, filter, limit, offset).await
             }
         }
         PoolKind::Postgres(p) => {
             if requests_table_objects_only(object_types) && table_name_filter.is_none_or(TableNameFilter::is_empty) {
-                db::postgres::list_table_objects_filtered(p, schema, filter, limit, offset).await
+                if page_table_roots {
+                    db::postgres::list_table_roots_page_filtered(p, schema, filter, limit, offset, true).await
+                } else {
+                    db::postgres::list_table_objects_filtered(p, schema, filter, limit, offset).await
+                }
             } else if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
                 db::postgres::list_tables_filtered(p, schema, filter, None, None)
                     .await
                     .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
+            } else if page_table_roots {
+                db::postgres::list_table_roots_page_filtered(p, schema, filter, limit, offset, false).await
             } else {
                 db::postgres::list_tables_filtered(p, schema, filter, limit, offset).await
             }
@@ -3217,25 +3486,27 @@ mod tests {
         filter_table_infos, filter_visible_schema_names, finalize_object_source, gaussdb_m_indexes_sql,
         gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config,
         is_mysql_external_driver_config, is_oracle_external_driver_config, is_retryable_metadata_error,
-        metadata_error_action, metadata_name_or_comment_matches, mysql_auto_increment_from_query_result,
-        mysql_auto_increment_metadata_sql, mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result,
-        mysql_external_driver_ddl_sql, mysql_object_source_ddl_column_index, mysql_object_source_sql,
-        mysql_table_list_source_for_config, mysql_table_metadata_catalog, normalize_information_schema_table_type,
-        oracle_columns_from_query_result, oracle_columns_sql, oracle_columns_sql_for_resolved_owner,
-        oracle_completion_synonyms_sql, oracle_current_schema_from_query_result,
-        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
-        oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
-        oracle_object_statistics_user_segments_sql, oracle_synonym_target_from_query_result, oracle_synonym_target_sql,
-        oracle_table_comment_sql, oracle_table_comments_sql, presto_like_columns_from_query_result,
-        presto_like_information_schema_columns_sql, presto_like_information_schema_tables_sql,
-        presto_like_tables_from_query_result, reference_key_columns_from_indexes, reference_keys_from_indexes,
-        replace_metadata_runtime, should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
-        single_table_comment_from_query_result, table_comments_from_query_result, table_name_filter_matches,
-        tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
-        uses_mongodb_agent_collection_listing, visible_schema_filter, ExternalDriverStatisticsDialect,
-        MetadataErrorAction, MysqlTableListSource, OracleObjectRef, OracleSynonymResolver, ReferenceKeyInfo,
-        TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL, ORACLE_SYNONYM_MAX_DEPTH, TDENGINE_COMMENT_SEARCH_TIMEOUT,
-        TDENGINE_LIKE_PATTERN_MAX_BYTES,
+        is_sqlserver_external_driver_config, metadata_error_action, metadata_name_or_comment_matches,
+        mysql_auto_increment_from_query_result, mysql_auto_increment_metadata_sql, mysql_database_list_timeout,
+        mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
+        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
+        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
+        oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_completion_synonyms_sql,
+        oracle_current_schema_from_query_result, oracle_database_link_name, oracle_database_link_user_sql,
+        oracle_identifier_from_query_result, oracle_object_statistics_dba_segments_sql,
+        oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
+        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
+        oracle_synonym_target_from_query_result, oracle_synonym_target_sql, oracle_table_comment_sql,
+        oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
+        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
+        reference_key_columns_from_indexes, reference_keys_from_indexes, replace_metadata_runtime,
+        should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
+        single_table_comment_from_query_result, split_oracle_database_link, table_comments_from_query_result,
+        table_name_filter_matches, tdengine_table_comment_like_pattern, tdengine_table_comment_sql,
+        tdengine_table_comments_sql, uses_mongodb_agent_collection_listing, visible_schema_filter,
+        ExternalDriverStatisticsDialect, MetadataErrorAction, MysqlTableListSource, OracleObjectRef,
+        OracleSynonymResolver, ReferenceKeyInfo, TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL, ORACLE_SYNONYM_MAX_DEPTH,
+        TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     use super::{list_databases_core, list_tables_core};
     use super::{
@@ -3256,6 +3527,7 @@ mod tests {
     #[test]
     fn reference_keys_require_effective_unfiltered_plain_unique_columns() {
         let index = |name: &str, columns: &[&str], is_unique: bool, is_primary: bool| db::IndexInfo {
+            owner: None,
             key_directions: Vec::new(),
             visibility: None,
             key_metadata_complete: false,
@@ -3306,8 +3578,10 @@ mod tests {
         db::QueryResult {
             columns: columns.iter().map(|column| (*column).to_string()).collect(),
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: Vec::new(),
+            raw_key_cells: Vec::new(),
             spatial_values: Vec::new(),
             rows,
             affected_rows: 0,
@@ -3440,6 +3714,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -3544,13 +3820,16 @@ mod tests {
     }
 
     #[test]
-    fn supports_custom_type_details_covers_five_verified_families() {
+    fn supports_custom_type_details_preserves_pg_and_adds_oracle_families() {
         for db_type in [
             DatabaseType::Postgres,
             DatabaseType::OpenGauss,
             DatabaseType::Gaussdb,
             DatabaseType::Kingbase,
             DatabaseType::Vastbase,
+            DatabaseType::Oracle,
+            DatabaseType::OceanbaseOracle,
+            DatabaseType::Dameng,
         ] {
             assert!(supports_custom_type_details(&test_connection_config(db_type)), "{db_type:?}");
         }
@@ -3797,6 +4076,35 @@ done
 
         config.db_type = DatabaseType::Oracle;
         assert!(!is_oracle_external_driver_config(&config));
+    }
+
+    #[test]
+    fn sqlserver_external_driver_detection_only_accepts_standard_jdbc_signals() {
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.connection_string = Some(" jdbc:sqlserver://127.0.0.1:1433;databaseName=demo ".to_string());
+        assert!(is_sqlserver_external_driver_config(&config));
+
+        config.connection_string = Some("jdbc:jtds:sqlserver://127.0.0.1:1433/demo".to_string());
+        assert!(is_sqlserver_external_driver_config(&config));
+
+        config.connection_string = Some("jdbc:jtds:sqlserver://127.0.0.1:1433/demo".to_string());
+        config.jdbc_driver_class = Some("com.mysql.cj.jdbc.Driver".to_string());
+        assert!(!is_sqlserver_external_driver_config(&config));
+
+        config.connection_string = None;
+        config.jdbc_driver_class = Some(" com.microsoft.sqlserver.jdbc.SQLServerDriver ".to_string());
+        assert!(is_sqlserver_external_driver_config(&config));
+
+        config.jdbc_driver_class = Some("net.sourceforge.jtds.jdbc.Driver".to_string());
+        assert!(is_sqlserver_external_driver_config(&config));
+
+        config.connection_string = Some("jdbc:postgresql://127.0.0.1:5432/demo".to_string());
+        config.jdbc_driver_class = Some("com.microsoft.sqlserver.jdbc.SQLServerDriver".to_string());
+        assert!(!is_sqlserver_external_driver_config(&config));
+
+        config.db_type = DatabaseType::SqlServer;
+        config.connection_string = None;
+        assert!(!is_sqlserver_external_driver_config(&config));
     }
 
     #[test]
@@ -4285,6 +4593,12 @@ done
     #[test]
     fn external_driver_statistics_dialect_matches_jdbc_url_vendor() {
         let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.connection_string = Some(" JDBC:OceanBase:Oracle://localhost:2881/test ".to_string());
+        assert_eq!(external_driver_statistics_dialect(&config), Some(ExternalDriverStatisticsDialect::OceanbaseOracle));
+        config.connection_string = Some("jdbc:oceanbase:mysql://localhost:2881/test".to_string());
+        assert_eq!(external_driver_statistics_dialect(&config), None);
+        config.connection_string = Some("jdbc:oceanbase://localhost:2881/test".to_string());
+        assert_eq!(external_driver_statistics_dialect(&config), None);
         config.connection_string = Some(" JDBC:Oracle:thin:@127.0.0.1:1521:XE ".to_string());
         assert_eq!(external_driver_statistics_dialect(&config), Some(ExternalDriverStatisticsDialect::Oracle));
 
@@ -4422,8 +4736,10 @@ done
         let result = db::QueryResult {
             columns: vec!["Table".to_string(), "Extra".to_string(), "CREATE TABLE".to_string()],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![
                 serde_json::json!("users"),
@@ -4452,8 +4768,10 @@ done
         let result = db::QueryResult {
             columns: vec!["Table".to_string(), "Create Table".to_string()],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![
                 serde_json::json!("orders"),
@@ -4481,8 +4799,10 @@ done
         let result = db::QueryResult {
             columns: vec!["name".to_string(), "definition".to_string()],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!("users"), serde_json::json!("CREATE TABLE `users` (`id` bigint);\n")]],
             affected_rows: 0,
@@ -4507,8 +4827,10 @@ done
         let result = db::QueryResult {
             columns: vec!["View".to_string(), "Extra".to_string(), "CREATE VIEW".to_string()],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![
                 serde_json::json!("active_users"),
@@ -4537,8 +4859,10 @@ done
         let result = db::QueryResult {
             columns: vec!["name".to_string(), "definition".to_string()],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![
                 serde_json::json!("active_users"),
@@ -4599,16 +4923,70 @@ done
 
     #[test]
     fn mysql_event_object_source_is_read_only() {
-        let source = finalize_object_source(db::ObjectSource {
-            name: "event_daily_sync".to_string(),
-            object_type: db::ObjectSourceKind::Event,
-            schema: None,
-            source: "CREATE EVENT event_daily_sync ON SCHEDULE EVERY 1 DAY DO SELECT 1".to_string(),
-            editable: None,
-            routine_parameters: None,
-        });
+        let source = finalize_object_source(
+            db::ObjectSource {
+                name: "event_daily_sync".to_string(),
+                object_type: db::ObjectSourceKind::Event,
+                schema: None,
+                source: "CREATE EVENT event_daily_sync ON SCHEDULE EVERY 1 DAY DO SELECT 1".to_string(),
+                editable: None,
+                routine_parameters: None,
+                trigger: None,
+            },
+            None,
+        );
 
         assert_eq!(source.editable, Some(false));
+    }
+
+    #[test]
+    fn oracle_family_type_sources_are_editable_without_changing_xugu_or_routines() {
+        for db_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng, DatabaseType::Xugu] {
+            let config = test_connection_config(db_type);
+            for kind in [db::ObjectSourceKind::Type, db::ObjectSourceKind::TypeBody, db::ObjectSourceKind::Function] {
+                let source = finalize_object_source(
+                    db::ObjectSource {
+                        name: "Mixed Type".to_string(),
+                        object_type: kind.clone(),
+                        schema: Some("Exact Owner".to_string()),
+                        source: "CREATE TYPE ...".to_string(),
+                        editable: Some(true),
+                        routine_parameters: None,
+                        trigger: None,
+                    },
+                    Some(&config),
+                );
+                let newly_editable = db_type != DatabaseType::Xugu
+                    && matches!(kind, db::ObjectSourceKind::Type | db::ObjectSourceKind::TypeBody);
+                assert_eq!(
+                    source.editable,
+                    Some(
+                        db_type == DatabaseType::Xugu
+                            || newly_editable
+                            || !matches!(kind, db::ObjectSourceKind::Type | db::ObjectSourceKind::TypeBody)
+                    ),
+                    "{db_type:?} {kind:?}"
+                );
+            }
+        }
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.connection_string = Some("jdbc:oceanbase:oracle://localhost:2881/APP".into());
+        config.jdbc_driver_class = Some("com.oceanbase.jdbc.Driver".into());
+        for kind in [db::ObjectSourceKind::Type, db::ObjectSourceKind::TypeBody] {
+            let source = finalize_object_source(
+                db::ObjectSource {
+                    name: "Mixed Type".into(),
+                    object_type: kind,
+                    schema: Some("Exact Owner".into()),
+                    source: "CREATE TYPE ...".into(),
+                    editable: Some(true),
+                    routine_parameters: None,
+                    trigger: None,
+                },
+                Some(&config),
+            );
+            assert_eq!(source.editable, Some(true));
+        }
     }
 
     #[test]
@@ -5577,8 +5955,10 @@ for line in sys.stdin:
         let result = super::db::QueryResult {
             columns: vec!["table_name".to_string(), "table_type".to_string()],
             column_types: vec![],
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![
                 vec![serde_json::json!("daily_revenue"), serde_json::json!("BASE TABLE")],
@@ -5615,8 +5995,10 @@ for line in sys.stdin:
                 "comment".to_string(),
             ],
             column_types: vec![],
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![
                 vec![
@@ -5869,8 +6251,10 @@ for line in sys.stdin:
         let result = db::QueryResult {
             columns: vec!["COMMENTS".to_string()],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!("Customer table")]],
             affected_rows: 0,
@@ -5889,8 +6273,10 @@ for line in sys.stdin:
         let empty = db::QueryResult {
             columns: vec!["COMMENTS".to_string()],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!("  ")]],
             affected_rows: 0,
@@ -5917,8 +6303,10 @@ for line in sys.stdin:
         let result = db::QueryResult {
             columns: vec!["AUTO_INCREMENT".to_string()],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!("18446744073709551615")]],
             affected_rows: 0,
@@ -5962,8 +6350,10 @@ for line in sys.stdin:
         let result = db::QueryResult {
             columns: vec!["TABLE_NAME".to_string(), "COMMENTS".to_string()],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![
                 vec![serde_json::json!("ORDERS"), serde_json::json!("Orders table")],
@@ -6003,16 +6393,15 @@ for line in sys.stdin:
 
     #[test]
     fn oracle_synonym_sql_resolves_private_before_public_without_hierarchical_queries() {
-        let sql = oracle_synonym_target_sql("Dbx'Owner", "ORDERS_ALIAS", true).unwrap();
+        let sql = oracle_synonym_target_sql("Dbx'Owner", "ORDERS_ALIAS", None, true).unwrap();
 
         assert!(!sql.contains("SYS_CONTEXT"));
         assert!(sql.contains("FROM ALL_SYNONYMS s"));
         assert!(sql.contains("s.OWNER IN ('Dbx''Owner', 'PUBLIC')"));
         assert!(sql.contains("CASE WHEN s.OWNER = 'Dbx''Owner' THEN 0 ELSE 1 END"));
-        assert!(sql.contains("s.DB_LINK IS NULL"));
         assert!(!sql.contains("CONNECT BY"));
 
-        let nested_sql = oracle_synonym_target_sql("OTHER_OWNER", "ORDERS_ALIAS_2", false).unwrap();
+        let nested_sql = oracle_synonym_target_sql("OTHER_OWNER", "ORDERS_ALIAS_2", None, false).unwrap();
         assert!(nested_sql.contains("s.OWNER = 'OTHER_OWNER'"));
         assert!(!nested_sql.contains("s.OWNER IN"));
     }
@@ -6031,8 +6420,8 @@ for line in sys.stdin:
         ))
         .unwrap();
         assert_eq!(current_schema, "Mixed'Case");
-        let sql = oracle_columns_sql_for_resolved_owner(&current_schema, "ORDERS_ALIAS").unwrap();
-        let synonym_sql = oracle_synonym_target_sql(&current_schema, "ORDERS_ALIAS", true).unwrap();
+        let sql = oracle_columns_sql_for_resolved_owner(&current_schema, "ORDERS_ALIAS", None).unwrap();
+        let synonym_sql = oracle_synonym_target_sql(&current_schema, "ORDERS_ALIAS", None, true).unwrap();
 
         assert!(sql.contains("c.OWNER = 'Mixed''Case'"));
         assert!(synonym_sql.contains("s.OWNER IN ('Mixed''Case', 'PUBLIC')"));
@@ -6062,34 +6451,185 @@ for line in sys.stdin:
 
     #[test]
     fn oracle_synonym_resolver_follows_two_levels_and_rejects_cycles() {
-        let initial = OracleObjectRef { owner: "DBX_TEST".to_string(), name: "ORDERS_ALIAS".to_string() };
+        let initial =
+            OracleObjectRef { owner: "DBX_TEST".to_string(), name: "ORDERS_ALIAS".to_string(), db_link: None };
         let mut resolver = OracleSynonymResolver::new(initial.owner.clone(), initial.name.clone());
 
         assert_eq!(resolver.current(), &initial);
         assert!(resolver.include_public_synonym());
-        assert!(resolver.follow(OracleObjectRef { owner: "APP".to_string(), name: "ORDERS_ALIAS_2".to_string() }));
+        assert!(resolver.follow(OracleObjectRef {
+            owner: "APP".to_string(),
+            name: "ORDERS_ALIAS_2".to_string(),
+            db_link: None
+        }));
         assert!(!resolver.include_public_synonym());
-        assert!(resolver.follow(OracleObjectRef { owner: "DATA".to_string(), name: "ORDERS".to_string() }));
+        assert!(resolver.follow(OracleObjectRef {
+            owner: "DATA".to_string(),
+            name: "ORDERS".to_string(),
+            db_link: None
+        }));
         assert_eq!(resolver.current().owner, "DATA");
         assert_eq!(resolver.current().name, "ORDERS");
         assert!(!resolver.follow(initial));
     }
 
     #[test]
-    fn oracle_columns_sql_preserves_quoted_case_synonym_names_and_excludes_database_links() {
-        let sql = oracle_synonym_target_sql("DBX_TEST", "Order Alias", true).unwrap();
+    fn oracle_columns_sql_preserves_quoted_case_synonym_names() {
+        let sql = oracle_synonym_target_sql("DBX_TEST", "Order Alias", None, true).unwrap();
 
         assert!(sql.contains("s.SYNONYM_NAME = 'Order Alias'"));
         assert!(!sql.contains("ORDER ALIAS"));
-        assert_eq!(sql.matches("s.DB_LINK IS NULL").count(), 1);
+    }
+
+    #[test]
+    fn oracle_metadata_sql_reads_remote_dictionary_through_database_link() {
+        let columns_sql = oracle_columns_sql_for_resolved_owner("APP", "ORDERS", Some("sales.example")).unwrap();
+        for view in ["ALL_TAB_COLUMNS", "ALL_CONS_COLUMNS", "ALL_CONSTRAINTS", "ALL_COL_COMMENTS"] {
+            assert!(columns_sql.contains(&format!("{view}@SALES.EXAMPLE ")), "{view}: {columns_sql}");
+        }
+        assert!(columns_sql.contains("c.OWNER = 'APP'"));
+
+        let local_synonym_sql = oracle_synonym_target_sql("APP", "ORDERS", None, true).unwrap();
+        assert!(local_synonym_sql.contains("s.DB_LINK"));
+        assert!(local_synonym_sql.contains("FROM ALL_SYNONYMS s"));
+        assert!(!local_synonym_sql.contains("DB_LINK IS NULL"));
+
+        let remote_synonym_sql = oracle_synonym_target_sql("APP", "ORDERS", Some("SALES"), true).unwrap();
+        assert!(remote_synonym_sql.contains("FROM ALL_SYNONYMS@SALES s"));
+        assert!(remote_synonym_sql.contains("s.DB_LINK IS NULL"));
+
+        assert_eq!(oracle_database_link_user_sql("sales").unwrap(), "SELECT USERNAME FROM USER_USERS@SALES");
+    }
+
+    #[test]
+    fn oracle_database_link_names_reject_sql_outside_the_link_identifier() {
+        assert_eq!(oracle_database_link_name(" sales.example.com "), Some("SALES.EXAMPLE.COM".to_string()));
+        assert_eq!(oracle_database_link_name("LINK_1$#"), Some("LINK_1$#".to_string()));
+        for invalid in ["", "1LINK", "LINK X", "LINK;DROP", "LINK--", "\"LINK\"", "LINK.", ".LINK", "LINK@OTHER"] {
+            assert_eq!(oracle_database_link_name(invalid), None, "{invalid}");
+            assert!(oracle_columns_sql_for_resolved_owner("APP", "ORDERS", Some(invalid)).is_err(), "{invalid}");
+        }
+        assert_eq!(split_oracle_database_link("ORDERS@SALES"), Some(("ORDERS".to_string(), "SALES".to_string())));
+        assert_eq!(split_oracle_database_link("ORDERS"), None);
+        assert_eq!(split_oracle_database_link("@SALES"), None);
+        assert_eq!(split_oracle_database_link("ORDERS@SALES X"), None);
+    }
+
+    #[test]
+    fn oracle_resolver_reads_editor_database_link_names_after_the_literal_name() {
+        let literal =
+            OracleObjectRef { owner: "LOCAL_TAB".to_string(), name: "ORDERS@SALES".to_string(), db_link: None };
+        let mut resolver = OracleSynonymResolver::new(literal.owner.clone(), literal.name.clone());
+        assert_eq!(resolver.current(), &literal);
+        assert!(resolver.uses_login_schema());
+
+        assert!(resolver.retry_next_candidate());
+        assert_eq!(
+            resolver.current(),
+            &OracleObjectRef {
+                owner: "LOCAL_TAB".to_string(),
+                name: "ORDERS".to_string(),
+                db_link: Some("SALES".to_string())
+            }
+        );
+        assert!(resolver.include_public_synonym());
+        assert_eq!(resolver.pending_database_link_user(), None);
+
+        assert!(resolver.retry_next_candidate());
+        assert_eq!(resolver.pending_database_link_user().as_deref(), Some("SALES"));
+        assert!(resolver.resolve_database_link_user("REMOTE_APP".to_string()));
+        assert_eq!(resolver.current().owner, "REMOTE_APP");
+        assert_eq!(resolver.pending_database_link_user(), None);
+        assert!(!resolver.retry_next_candidate());
+
+        // A link user that equals the schema already tried has nothing new to read.
+        let mut same_owner = OracleSynonymResolver::new("APP".to_string(), "ORDERS@SALES".to_string());
+        assert!(same_owner.retry_next_candidate());
+        assert!(same_owner.retry_next_candidate());
+        assert!(!same_owner.resolve_database_link_user("APP".to_string()));
+        assert!(!same_owner.retry_next_candidate());
+
+        let mut local = OracleSynonymResolver::new("APP".to_string(), "ORDERS".to_string());
+        assert!(!local.uses_login_schema());
+        assert!(!local.retry_next_candidate());
+        assert!(local.follow(OracleObjectRef {
+            owner: "APP".to_string(),
+            name: "ORDERS".to_string(),
+            db_link: Some("SALES".to_string())
+        }));
+        assert!(local.uses_login_schema());
+    }
+
+    #[test]
+    fn oracle_synonym_target_follows_database_links() {
+        let local = OracleObjectRef { owner: "APP".to_string(), name: "ORDERS_ALIAS".to_string(), db_link: None };
+        let result = |owner: serde_json::Value, link: serde_json::Value| {
+            oracle_current_schema_result(
+                &["TABLE_OWNER", "TABLE_NAME", "DB_LINK"],
+                vec![vec![owner, serde_json::json!("ORDERS"), link]],
+            )
+        };
+
+        let remote = oracle_synonym_target_from_query_result(
+            result(serde_json::json!("REMOTE_APP"), serde_json::json!("sales.example")),
+            &local,
+        )
+        .unwrap();
+        assert_eq!(remote.owner, "REMOTE_APP");
+        assert_eq!(remote.db_link.as_deref(), Some("SALES.EXAMPLE"));
+
+        // `CREATE SYNONYM s FOR t@link` leaves TABLE_OWNER empty: the link user owns the target.
+        let unqualified = oracle_synonym_target_from_query_result(
+            result(serde_json::Value::Null, serde_json::json!("SALES")),
+            &local,
+        )
+        .unwrap();
+        assert_eq!(unqualified.owner, "");
+        assert_eq!(unqualified.db_link.as_deref(), Some("SALES"));
+
+        assert!(oracle_synonym_target_from_query_result(
+            result(serde_json::Value::Null, serde_json::Value::Null),
+            &local
+        )
+        .is_none());
+        assert!(oracle_synonym_target_from_query_result(
+            result(serde_json::json!("APP"), serde_json::json!("BAD LINK")),
+            &local
+        )
+        .is_none());
+
+        // Synonyms read through a link stay on that link.
+        let on_link = OracleObjectRef { db_link: Some("SALES".to_string()), ..local };
+        let nested = oracle_synonym_target_from_query_result(
+            result(serde_json::json!("DATA"), serde_json::Value::Null),
+            &on_link,
+        )
+        .unwrap();
+        assert_eq!(nested.db_link.as_deref(), Some("SALES"));
+
+        assert_eq!(
+            oracle_identifier_from_query_result(
+                oracle_current_schema_result(&["username"], vec![vec![serde_json::json!(" REMOTE_APP ")]]),
+                "USERNAME"
+            ),
+            Some("REMOTE_APP".to_string())
+        );
+        assert_eq!(
+            oracle_identifier_from_query_result(oracle_current_schema_result(&["USERNAME"], Vec::new()), "USERNAME"),
+            None
+        );
     }
 
     #[test]
     fn oracle_synonym_target_preserves_dictionary_identifier_values() {
-        let target = oracle_synonym_target_from_query_result(oracle_current_schema_result(
-            &["table_name", "table_owner"],
-            vec![vec![serde_json::json!("Order Detail"), serde_json::json!("Mixed Owner")]],
-        ))
+        let source = OracleObjectRef { owner: "DBX_TEST".to_string(), name: "ORDER_ALIAS".to_string(), db_link: None };
+        let target = oracle_synonym_target_from_query_result(
+            oracle_current_schema_result(
+                &["table_name", "table_owner"],
+                vec![vec![serde_json::json!("Order Detail"), serde_json::json!("Mixed Owner")]],
+            ),
+            &source,
+        )
         .unwrap();
 
         assert_eq!(target.owner, "Mixed Owner");
@@ -6100,11 +6640,19 @@ for line in sys.stdin:
     fn oracle_synonym_resolver_enforces_maximum_depth() {
         let mut resolver = OracleSynonymResolver::new("DBX_TEST".to_string(), "ALIAS_0".to_string());
         for depth in 1..=ORACLE_SYNONYM_MAX_DEPTH {
-            assert!(resolver.follow(OracleObjectRef { owner: "DBX_TEST".to_string(), name: format!("ALIAS_{depth}") }));
+            assert!(resolver.follow(OracleObjectRef {
+                owner: "DBX_TEST".to_string(),
+                name: format!("ALIAS_{depth}"),
+                db_link: None
+            }));
         }
 
         assert!(!resolver.can_follow());
-        assert!(!resolver.follow(OracleObjectRef { owner: "DBX_TEST".to_string(), name: "ALIAS_TOO_DEEP".to_string() }));
+        assert!(!resolver.follow(OracleObjectRef {
+            owner: "DBX_TEST".to_string(),
+            name: "ALIAS_TOO_DEEP".to_string(),
+            db_link: None
+        }));
     }
 
     #[test]
@@ -6136,8 +6684,10 @@ for line in sys.stdin:
                 "COMMENTS".to_string(),
             ],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![
                 vec![
@@ -6187,6 +6737,216 @@ for line in sys.stdin:
         assert_eq!(columns[1].name, "data");
         assert_eq!(columns[1].data_type, "TIMESTAMP");
         assert!(columns[1].is_nullable);
+    }
+
+    /// Dictionary answers shared by the native agent and JDBC mocks below. The login user
+    /// `APP` owns a quoted local table `"ORDERS@NOLINK"` and a private link `SALES`, whose user
+    /// `REMOTE_APP` owns `ORDERS`. `BROKEN` fails like an unreachable listener, any other link
+    /// is unknown, and a private link only resolves while `APP` is the session schema.
+    #[cfg(unix)]
+    const ORACLE_DATABASE_LINK_DICTIONARY_PY: &str = r#"
+import json, re, sys
+
+COLUMNS = ['COLUMN_NAME', 'DATA_TYPE', 'NULLABLE', 'DATA_DEFAULT', 'DATA_LENGTH',
+           'DATA_PRECISION', 'DATA_SCALE', 'COLUMN_ID', 'IS_PK', 'COMMENTS']
+TABLES = {
+    (None, 'APP', 'ORDERS@NOLINK'): [['LOCAL_ID', 'NUMBER', 'N', None, '22', '10', '0', '1', '0', 'quoted local']],
+    ('SALES', 'REMOTE_APP', 'ORDERS'): [['REMOTE_ID', 'NUMBER', 'N', None, '22', '10', '0', '1', '1', 'remote']],
+}
+
+def handle(sql, schema):
+    if 'SESSION_USER' in sql:
+        return {'columns': ['SESSION_USER'], 'rows': [['APP']]}
+    if 'CURRENT_SCHEMA' in sql:
+        return {'columns': ['CURRENT_SCHEMA'], 'rows': [['APP']]}
+    view, link = re.search(r'(ALL_TAB_COLUMNS|USER_USERS|ALL_SYNONYMS)(?:@([A-Z0-9_$#.]+))?', sql).groups()
+    if link == 'BROKEN':
+        raise RuntimeError('ORA-12541: Cannot connect. No listener at host 10.0.0.9 port 1521.')
+    if link is not None and (link != 'SALES' or schema not in (None, '', 'APP')):
+        raise RuntimeError('ORA-02019: connection description for remote database not found')
+    if view == 'USER_USERS':
+        return {'columns': ['USERNAME'], 'rows': [['REMOTE_APP']]}
+    if view == 'ALL_SYNONYMS':
+        return {'columns': ['TABLE_OWNER', 'TABLE_NAME', 'DB_LINK'], 'rows': []}
+    owner, table = re.search(r"c\.OWNER = '([^']*)' AND c\.TABLE_NAME = '([^']*)'", sql).groups()
+    return {'columns': COLUMNS, 'rows': TABLES.get((link, owner, table), [])}
+
+def answer(calls_path, params):
+    with open(calls_path, 'a') as calls:
+        calls.write(json.dumps({'sql': params.get('sql'), 'schema': params.get('schema')}) + '\n')
+    result = handle(params['sql'], params.get('schema'))
+    result.update({'affected_rows': 0, 'execution_time_ms': 1})
+    return result
+"#;
+
+    #[cfg(unix)]
+    fn take_oracle_mock_calls(path: &std::path::Path) -> String {
+        let calls = std::fs::read_to_string(path).unwrap_or_default();
+        std::fs::write(path, "").unwrap();
+        calls
+    }
+
+    /// Runs the database link candidates against one metadata transport and checks them
+    /// call by call, so a remote failure cannot hide the local candidate.
+    #[cfg(unix)]
+    async fn assert_oracle_database_link_candidates<F, Fut>(calls: &std::path::Path, mut columns: F)
+    where
+        F: FnMut(&'static str, &'static str) -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<db::ColumnInfo>, String>>,
+    {
+        // A quoted local name that contains `@` is read locally before any link lookup.
+        let local = columns("APP", "ORDERS@NOLINK").await.unwrap();
+        assert_eq!(local.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), ["LOCAL_ID"]);
+        let log = take_oracle_mock_calls(calls);
+        assert!(!log.contains("@NOLINK "), "{log}");
+
+        // An unknown link is not an error: the name just has no columns.
+        assert!(columns("APP", "INVOICES@NOLINK").await.unwrap().is_empty());
+        let log = take_oracle_mock_calls(calls);
+        assert!(log.contains("ALL_TAB_COLUMNS@NOLINK "), "{log}");
+
+        // `APP` has no remote `ORDERS`, so the link user's schema is read next. `REMOTE_APP`
+        // names the remote owner directly; it does not exist locally, so every read in this
+        // resolution keeps the login schema.
+        for schema in ["APP", "REMOTE_APP"] {
+            let remote = columns(schema, "ORDERS@SALES").await.unwrap();
+            assert_eq!(remote.len(), 1, "{schema}");
+            assert_eq!(remote[0].name, "REMOTE_ID");
+            assert!(remote[0].is_primary_key);
+            assert_eq!(remote[0].comment.as_deref(), Some("remote"));
+            let log = take_oracle_mock_calls(calls);
+            assert_eq!(log.contains("USER_USERS@SALES"), schema == "APP", "{log}");
+            assert!(!log.contains(r#""schema": "REMOTE_APP""#), "{log}");
+        }
+
+        // Any other remote failure still reaches the caller.
+        let error = columns("APP", "ORDERS@BROKEN").await.unwrap_err();
+        assert!(error.contains("ORA-12541"), "{error}");
+        take_oracle_mock_calls(calls);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn oracle_agent_columns_resolve_database_link_candidates() {
+        let dir = std::env::temp_dir().join(format!("dbx-oracle-link-agent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let calls = dir.join("calls.log");
+        let script_path = dir.join("oracle-link-agent.py");
+        std::fs::write(
+            &script_path,
+            format!(
+                r#"{ORACLE_DATABASE_LINK_DICTIONARY_PY}
+calls_path = {calls_path}
+print(json.dumps({{'ready': True}}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'handshake':
+        result = {{'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']}}
+    elif req['method'] != 'execute_query':
+        result = {{}}
+    else:
+        try:
+            result = answer(calls_path, req.get('params') or {{}})
+        except RuntimeError as error:
+            print(json.dumps({{'jsonrpc': '2.0', 'id': req['id'], 'error': {{'code': -1, 'message': str(error)}}}}), flush=True)
+            continue
+    print(json.dumps({{'jsonrpc': '2.0', 'id': req['id'], 'result': result}}), flush=True)
+"#,
+                calls_path = serde_json::to_string(&calls.to_string_lossy()).unwrap(),
+            ),
+        )
+        .unwrap();
+        let runtime = crate::db::agent_driver::AgentRuntimeClient::spawn(
+            crate::db::agent_driver::AgentLaunchSpec::new("python3")
+                .with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+        runtime.increment_session_count();
+        let client = tokio::sync::Mutex::new(crate::db::agent_driver::AgentDriverClient::shared_session(
+            runtime.clone(),
+            "metadata-session".to_string(),
+        ));
+
+        assert_oracle_database_link_candidates(&calls, |schema, table| {
+            let client = &client;
+            async move {
+                let mut client = client.lock().await;
+                super::oracle_columns_via_sql("FREEPDB1", schema, table, &mut client, None).await
+            }
+        })
+        .await;
+
+        runtime.kill();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn jdbc_oracle_columns_resolve_database_link_candidates() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-oracle-link-jdbc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let calls = dir.join("calls.log");
+        let executable = dir.join("plugin.py");
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/usr/bin/env python3
+{ORACLE_DATABASE_LINK_DICTIONARY_PY}
+calls_path = {calls_path}
+for line in sys.stdin:
+    req = json.loads(line)
+    if req.get('method') != 'executeQuery':
+        continue
+    try:
+        response = {{'id': req['id'], 'result': answer(calls_path, req.get('params') or {{}})}}
+    except RuntimeError as error:
+        response = {{'id': req['id'], 'error': {{'message': str(error)}}}}
+    print(json.dumps(response), flush=True)
+"#,
+                calls_path = serde_json::to_string(&calls.to_string_lossy()).unwrap(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.py".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+                ..PluginManifest::default()
+            },
+            path: dir.clone(),
+            compatibility: crate::plugins::PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(executable.clone()),
+                ..Default::default()
+            },
+            provenance: None,
+        };
+        let session = std::sync::Arc::new(
+            PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
+        );
+        let config = test_connection_config(DatabaseType::Jdbc);
+
+        assert_oracle_database_link_candidates(&calls, |schema, table| {
+            super::external_driver_oracle_columns_via_sql(session.clone(), &config, "FREEPDB1", schema, table)
+        })
+        .await;
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A `jdbc:oracle:` connection answers `getColumns` from the object it was asked for,
@@ -6433,6 +7193,65 @@ done
     }
 
     #[test]
+    fn oceanbase_statistics_sql_requires_complete_unique_tablet_sizes() {
+        for (case, mutation, expected) in [
+            ("normal", "", Some(10_i64)),
+            ("zero", "UPDATE SYS.DBA_OB_TABLET_REPLICAS SET REQUIRED_SIZE=0", Some(0)),
+            ("missing-leader", "INSERT INTO SYS.DBA_OB_TABLE_LOCATIONS VALUES ('APP','T',1,'USER TABLE',0,2,1,'host',2882,'FOLLOWER')", None),
+            ("multiple-leaders", "INSERT INTO SYS.DBA_OB_TABLE_LOCATIONS VALUES ('APP','T',1,'USER TABLE',0,1,2,'host2',2882,'LEADER')", None),
+            ("duplicate-location", "INSERT INTO SYS.DBA_OB_TABLE_LOCATIONS SELECT * FROM SYS.DBA_OB_TABLE_LOCATIONS", Some(10)),
+            ("missing-replica", "DELETE FROM SYS.DBA_OB_TABLET_REPLICAS", None),
+            ("duplicate-replica", "INSERT INTO SYS.DBA_OB_TABLET_REPLICAS SELECT * FROM SYS.DBA_OB_TABLET_REPLICAS", None),
+            ("null-size", "UPDATE SYS.DBA_OB_TABLET_REPLICAS SET REQUIRED_SIZE=NULL", None),
+            ("index-and-lob", "INSERT INTO SYS.DBA_OB_TABLE_LOCATIONS VALUES ('APP','I',2,'INDEX',1,2,1,'host',2882,'LEADER'),('APP','L',3,'LOB AUX TABLE',1,3,1,'host',2882,'LEADER'); INSERT INTO SYS.DBA_OB_TABLET_REPLICAS VALUES (2,1,'host',2882,20),(3,1,'host',2882,30)", Some(60)),
+        ] {
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            conn.execute_batch(
+                "ATTACH DATABASE ':memory:' AS SYS;
+                 CREATE TABLE ALL_TABLES(TABLE_NAME TEXT,OWNER TEXT,NUM_ROWS INTEGER,NESTED TEXT);
+                 INSERT INTO ALL_TABLES VALUES ('T','APP',31,'NO');
+                 CREATE TABLE SYS.DBA_OB_TABLE_LOCATIONS(DATABASE_NAME TEXT,TABLE_NAME TEXT,TABLE_ID INTEGER,TABLE_TYPE TEXT,DATA_TABLE_ID INTEGER,TABLET_ID INTEGER,LS_ID INTEGER,SVR_IP TEXT,SVR_PORT INTEGER,ROLE TEXT);
+                 INSERT INTO SYS.DBA_OB_TABLE_LOCATIONS VALUES ('APP','T',1,'USER TABLE',0,1,1,'host',2882,'LEADER');
+                 CREATE TABLE SYS.DBA_OB_TABLET_REPLICAS(TABLET_ID INTEGER,LS_ID INTEGER,SVR_IP TEXT,SVR_PORT INTEGER,REQUIRED_SIZE INTEGER);
+                 INSERT INTO SYS.DBA_OB_TABLET_REPLICAS VALUES (1,1,'host',2882,10);",
+            ).unwrap();
+            conn.execute_batch(mutation).unwrap();
+            let actual: (i64, Option<i64>) = conn.query_row(
+                &super::oceanbase_oracle_object_statistics_sql("APP"),
+                [],
+                |row| Ok((row.get(2)?, row.get(3)?)),
+            ).unwrap();
+            assert_eq!(actual, (31, expected), "{case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn oceanbase_statistics_preserves_rows_when_capacity_is_unavailable() {
+        let stats = super::object_statistics_from_query_plan(
+            "OceanBase Oracle",
+            "APP",
+            super::oceanbase_oracle_object_statistics_query_plan("APP"),
+            |sql| async move {
+                if sql.contains("DBA_OB_TABLET_REPLICAS") {
+                    Err("insufficient privilege".to_string())
+                } else {
+                    Ok(statistics_query_result(vec![vec![
+                        serde_json::json!("T"),
+                        serde_json::json!("APP"),
+                        serde_json::json!(31),
+                        serde_json::Value::Null,
+                    ]]))
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].estimated_rows, Some(31));
+        assert_eq!(stats[0].total_bytes, None);
+    }
+
+    #[test]
     fn dameng_object_statistics_sql_uses_bounded_table_size_function() {
         let sql = dameng_object_statistics_sql("app's");
         assert!(sql.contains("TABLE_USED_PAGES(t.OWNER, t.TABLE_NAME) * PAGE"));
@@ -6455,8 +7274,10 @@ done
                 "TOTAL_BYTES".to_string(),
             ],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows,
             affected_rows: 0,
@@ -6633,8 +7454,10 @@ done
                 "TOTAL_BYTES".to_string(),
             ],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![
                 vec![
@@ -6807,6 +7630,33 @@ pub async fn list_objects_core(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
+    list_objects_core_with_options(
+        state,
+        connection_id,
+        database,
+        schema,
+        filter,
+        limit,
+        offset,
+        object_types,
+        table_name_filter,
+        &Default::default(),
+    )
+    .await
+}
+
+pub async fn list_objects_core_with_options(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
+    options: &MetadataReadOptions,
+) -> Result<Vec<db::ObjectInfo>, String> {
     let db_config = connection_config(state, connection_id).await;
     if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
         validate_oceanbase_metadata_page(limit, offset)?;
@@ -6814,13 +7664,6 @@ pub async fn list_objects_core(
             return Ok(vec![]);
         }
     }
-    let filter_locally_after_oracle_comments = db_config.as_ref().is_some_and(|config| {
-        config.db_type == DatabaseType::Oracle && filter.is_some_and(|filter| !filter.trim().is_empty())
-    });
-    let force_local_table_name_filter = table_name_filter.is_some_and(|filter| !filter.is_empty());
-    let use_oracle_agent_paging = db_config.as_ref().is_some_and(is_default_oracle_agent_config)
-        && !filter_locally_after_oracle_comments
-        && !force_local_table_name_filter;
     let metadata_session = EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "objects").await;
     let result = retry_metadata_connection_for_session(
         state,
@@ -6839,16 +7682,11 @@ pub async fn list_objects_core(
                 object_types,
                 table_name_filter,
                 metadata_session.client_session_id(),
+                options,
             )
             .await
             .map(|outcome| {
-                let final_offset = if outcome.paging_applied
-                    || agent_paging_likely_applied(use_oracle_agent_paging, limit, outcome.objects.len())
-                {
-                    Some(0)
-                } else {
-                    offset
-                };
+                let final_offset = if outcome.paging_applied { Some(0) } else { offset };
                 filter_object_infos(outcome.objects, filter, limit, final_offset, object_types, table_name_filter)
             })?;
             Ok(objects)
@@ -7357,6 +8195,22 @@ async fn list_object_statistics_once(
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::MongoDb) {
             return crate::mongo_ops::mongo_agent_list_object_statistics(&client, database).await;
         }
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
+            let timeout_duration = agent_metadata_timeout(db_config.as_ref());
+            return object_statistics_from_query_plan(
+                "OceanBase Oracle",
+                schema,
+                oceanbase_oracle_object_statistics_query_plan(schema),
+                |sql| {
+                    let client = client.clone();
+                    async move {
+                        let mut client = client.lock().await;
+                        agent_object_statistics_query(&mut client, database, schema, &sql, timeout_duration).await
+                    }
+                },
+            )
+            .await;
+        }
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle) {
             return oracle_agent_list_object_statistics(
                 client,
@@ -7409,7 +8263,15 @@ async fn list_object_statistics_once(
     let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
     match &pool {
         PoolKind::Mysql(p, mode) => {
-            if *mode == MysqlMode::OceanBaseOracle || db_config.as_ref().is_some_and(db::manticoresearch::is_config) {
+            if *mode == MysqlMode::OceanBaseOracle {
+                object_statistics_from_query_plan(
+                    "OceanBase Oracle",
+                    schema,
+                    oceanbase_oracle_object_statistics_query_plan(schema),
+                    |sql| async move { db::mysql::execute_query(p, &sql, true).await },
+                )
+                .await
+            } else if db_config.as_ref().is_some_and(db::manticoresearch::is_config) {
                 Ok(vec![])
             } else {
                 let include_mysql_details = db_config.as_ref().is_some_and(|config| {
@@ -7449,6 +8311,7 @@ fn unpaged_object_list(objects: Vec<db::ObjectInfo>) -> ObjectListOutcome {
     ObjectListOutcome { objects, paging_applied: false }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn list_objects_once(
     state: &AppState,
     connection_id: &str,
@@ -7460,10 +8323,30 @@ async fn list_objects_once(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
     client_session_id: Option<&str>,
+    options: &MetadataReadOptions,
 ) -> Result<ObjectListOutcome, String> {
     let pool_key =
         state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
     let db_config = connection_config(state, connection_id).await;
+    if options.is_exact() {
+        if let Some(result) = oracle_triggers::list_objects(
+            state,
+            &pool_key,
+            db_config.as_ref(),
+            database,
+            schema,
+            filter,
+            limit,
+            offset,
+            object_types,
+            table_name_filter,
+            options,
+        )
+        .await?
+        {
+            return Ok(result);
+        }
+    }
     let force_local_table_name_filter = table_name_filter.is_some_and(|filter| !filter.is_empty());
     let (mysql_limit, mysql_offset) = if filter.is_none_or(|value| value.trim().is_empty())
         && table_name_filter.is_none_or(|filter| filter.is_empty())
@@ -7514,16 +8397,34 @@ async fn list_objects_once(
         if let Some(agent_client) = extract_pool!(pool_handle.as_ref(), Agent) {
             let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
             let is_oceanbase = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle);
-            let use_oracle_agent_paging = db_config.as_ref().is_some_and(is_default_oracle_agent_config);
+            // Type requests can use the shared Go handler's ROWNUM paging on
+            // legacy/OCI profiles too; retain the old fallback for other kinds.
+            let use_oracle_agent_paging = db_config.as_ref().is_some_and(is_default_oracle_agent_config)
+                || (is_oracle && object_types_only_custom_types(object_types));
             let use_agent_paging = use_oracle_agent_paging || is_oceanbase;
-            let filter_locally_after_oracle_comments =
-                is_oracle && filter.is_some_and(|filter| !filter.trim().is_empty());
+            let filter_locally_after_oracle_comments = is_oracle
+                && !object_types_only_custom_types(object_types)
+                && !object_types.is_some_and(|types| types.len() == 1 && types[0].eq_ignore_ascii_case("INDEX"))
+                && filter.is_some_and(|filter| !filter.trim().is_empty());
             let timeout_duration = agent_metadata_timeout(db_config.as_ref());
             let fallback_config = db_config.clone();
             if is_oracle && !use_oracle_agent_paging {
-                return oracle_agent_list_objects(agent_client, database, schema, timeout_duration)
-                    .await
-                    .map(unpaged_object_list);
+                return oracle_agent_list_objects(
+                    agent_client,
+                    database,
+                    schema,
+                    filter,
+                    if force_local_table_name_filter { None } else { limit },
+                    if force_local_table_name_filter { None } else { offset },
+                    object_types,
+                    false,
+                    timeout_duration,
+                )
+                .await
+                .map(|mut outcome| {
+                    outcome.paging_applied &= !force_local_table_name_filter;
+                    outcome
+                });
             }
             // KingbaseES/Vastbase agents list relations, routines and types but
             // never sequences, so their pg_class-backed sequence list is merged
@@ -7577,7 +8478,12 @@ async fn list_objects_once(
                         )
                         .await?;
                     }
-                    return Ok(unpaged_object_list(with_agent_pg_sequence_objects(objects, &sequence_objects)));
+                    return Ok(ObjectListOutcome {
+                        objects: with_agent_pg_sequence_objects(objects, &sequence_objects),
+                        paging_applied: use_agent_paging
+                            && !filter_locally_after_oracle_comments
+                            && !force_local_table_name_filter,
+                    });
                 }
                 Ok(objects) => {
                     if object_types_only_custom_types(object_types) {
@@ -7650,7 +8556,18 @@ async fn list_objects_once(
             } else if db_config.as_ref().is_some_and(db::starrocks::is_config) {
                 db::starrocks::list_table_objects(p, database).await.map(unpaged_object_list)
             } else if db_config.as_ref().is_some_and(db::oceanbase_mysql::is_config) {
-                db::oceanbase_mysql::list_objects(p, database).await.map(unpaged_object_list)
+                let mut objects = db::oceanbase_mysql::list_objects(p, database).await?;
+                // The OceanBase MySQL branch only lists tables/materialized views and
+                // routines; reuse the generic MySQL trigger/event queries so the object
+                // browser counts match SHOW TRIGGERS / information_schema.EVENTS.
+                let supplemental_types = vec!["TRIGGER".to_string(), "EVENT".to_string()];
+                match db::mysql::list_objects(p, database, Some(&supplemental_types), None, None).await {
+                    Ok(supplemental) => objects.extend(supplemental.objects),
+                    Err(error) => log::warn!(
+                        "Skipping triggers/events for OceanBase database `{database}` in object browser: {error}"
+                    ),
+                }
+                Ok(unpaged_object_list(objects))
             } else if db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) {
                 db::mysql::list_table_objects_show(p, database).await.map(unpaged_object_list)
             } else if mysql_table_list_source_for_config(db_config.as_ref()) == MysqlTableListSource::ShowFullTables {
@@ -7758,7 +8675,22 @@ async fn list_completion_objects_once(
         let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
         let fallback_config = db_config.clone();
         let objects = if is_oracle {
-            oracle_agent_list_objects(client, database, schema, agent_metadata_timeout(db_config.as_ref())).await?
+            oracle_agent_list_objects(
+                client,
+                database,
+                schema,
+                None,
+                None,
+                None,
+                None,
+                false,
+                agent_metadata_timeout(db_config.as_ref()),
+            )
+            .await?
+            .objects
+            .into_iter()
+            .filter(|object| object.object_type != "INDEX")
+            .collect()
         } else {
             let mut client = client.lock().await;
             match client
@@ -7839,8 +8771,20 @@ async fn list_completion_objects_once(
             db::postgres::list_objects(p, schema, true, true, false).await.map(filter_completion_objects)
         }
         PoolKind::SqlServer(_) => {
-            let outcome =
-                list_objects_once(state, connection_id, database, schema, None, None, None, None, None, None).await?;
+            let outcome = list_objects_once(
+                state,
+                connection_id,
+                database,
+                schema,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &Default::default(),
+            )
+            .await?;
             Ok(filter_completion_objects(outcome.objects))
         }
         _ => Ok(Vec::new()),
@@ -7908,7 +8852,7 @@ where
     retry_metadata_connection_for_session(state, connection_id, database, None, operation).await
 }
 
-async fn retry_metadata_connection_for_session<T, F, Fut>(
+pub(crate) async fn retry_metadata_connection_for_session<T, F, Fut>(
     state: &AppState,
     connection_id: &str,
     database: Option<&str>,
@@ -7923,7 +8867,7 @@ where
         .await
 }
 
-async fn run_metadata_connection_for_session<T, F, Fut>(
+pub(crate) async fn run_metadata_connection_for_session<T, F, Fut>(
     state: &AppState,
     connection_id: &str,
     database: Option<&str>,
@@ -8974,6 +9918,17 @@ pub async fn list_triggers_core(
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::TriggerInfo>, String> {
+    list_triggers_core_with_options(state, connection_id, database, schema, table, &Default::default()).await
+}
+
+pub async fn list_triggers_core_with_options(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    options: &MetadataReadOptions,
+) -> Result<Vec<db::TriggerInfo>, String> {
     if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
         return Ok(vec![]);
     }
@@ -8983,10 +9938,36 @@ pub async fn list_triggers_core(
 
         {
             let pool_handle = state.pool_handle(&pool_key).await;
+            if let Some(PoolKind::ExternalDriver { config, session, .. }) = pool_handle.as_ref() {
+                let mut params = serde_json::json!({ "connection": config.as_ref(), "database": database, "schema": schema, "table": table });
+                options.apply_to(&mut params);
+                return match session.invoke_with_timeout("listTriggers", params, agent_metadata_timeout(Some(config.as_ref()))).await {
+                    Err(error) if !options.is_exact() && crate::query::is_external_driver_method_unsupported(&error, "listTriggers") => Ok(Vec::new()),
+                    result => result,
+                };
+            }
             try_sqlserver!(pool_handle, list_triggers, schema, table);
             if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
+                if options.is_exact() && db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle && !is_default_oracle_agent_config(config)) {
+                    let mut reader = oracle_triggers::agent_reader(client, database, schema, agent_metadata_timeout(db_config.as_ref())).await;
+                    return reader.list_triggers(schema, table).await;
+                }
                 let mut client = client.lock().await;
-                return client.list_triggers(database, schema, table, agent_metadata_timeout(db_config.as_ref())).await;
+                let triggers = client
+                    .list_triggers_with_options(
+                        database,
+                        schema,
+                        table,
+                        options,
+                        agent_metadata_timeout(db_config.as_ref()),
+                    )
+                    .await?;
+                drop(client);
+                drop(pool_handle);
+                if options.is_exact() {
+                    return Ok(triggers);
+                }
+                return oracle_table_triggers::enrich(state, connection_id, database, schema, table, triggers).await;
             }
         }
 
@@ -8995,6 +9976,9 @@ pub async fn list_triggers_core(
         match &pool {
             PoolKind::Mysql(p, mode) => {
                 if *mode == MysqlMode::OceanBaseOracle {
+                    if options.is_exact() {
+                        return oracle_triggers::pool_reader(p.clone()).await.list_triggers(schema, table).await;
+                    }
                     db::ob_oracle::list_triggers(p, schema, table).await
                 } else {
                     db::mysql::list_triggers(p, mysql_table_metadata_catalog(database, schema), table).await
@@ -10409,6 +11393,37 @@ pub(crate) fn is_oracle_external_driver_config(config: &ConnectionConfig) -> boo
     }
 }
 
+/// SQL Server over a generic JDBC connection runs T-SQL through the JDBC
+/// plugin, so its scripts split with the SQL Server statement rules (#13514).
+/// The plain `Jdbc` profile would cut a `BEGIN TRY ... END CATCH` batch at
+/// every inner semicolon. The `jdbc:jtds:sqlserver:` prefix and the jTDS driver
+/// cover the legacy open-source TDS driver alongside the Microsoft one.
+pub(crate) fn is_sqlserver_external_driver_config(config: &ConnectionConfig) -> bool {
+    if config.db_type != DatabaseType::Jdbc {
+        return false;
+    }
+
+    let connection_string = config.connection_string.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let driver_class = config.jdbc_driver_class.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let sqlserver_url = connection_string.map(|value| {
+        value.to_ascii_lowercase().starts_with("jdbc:sqlserver:")
+            || value.to_ascii_lowercase().starts_with("jdbc:jtds:sqlserver:")
+    });
+    let sqlserver_driver = driver_class.map(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "com.microsoft.sqlserver.jdbc.sqlserverdriver" | "net.sourceforge.jtds.jdbc.driver"
+        )
+    });
+
+    match (sqlserver_url, sqlserver_driver) {
+        (Some(url_matches), Some(driver_matches)) => url_matches && driver_matches,
+        (Some(url_matches), None) => url_matches,
+        (None, Some(driver_matches)) => driver_matches,
+        (None, None) => false,
+    }
+}
+
 fn external_driver_uses_mysql_ddl(config: &ConnectionConfig) -> bool {
     is_mysql_external_driver_config(config) || gaussdb_uses_m_jdbc_driver(config)
 }
@@ -10475,6 +11490,7 @@ async fn external_driver_gaussdb_m_indexes(
                 let is_primary =
                     current_name.to_lowercase().ends_with("_pkey") || current_name.eq_ignore_ascii_case("primary");
                 indexes.push(db::IndexInfo {
+                    owner: None,
                     key_directions: Vec::new(),
                     visibility: None,
                     key_metadata_complete: false,
@@ -10550,6 +11566,7 @@ async fn external_driver_gaussdb_m_indexes(
     if !current_name.is_empty() {
         let is_primary = current_name.to_lowercase().ends_with("_pkey") || current_name.eq_ignore_ascii_case("primary");
         indexes.push(db::IndexInfo {
+            owner: None,
             key_directions: Vec::new(),
             visibility: None,
             key_metadata_complete: false,
@@ -11284,14 +12301,15 @@ async fn read_mysql_object_source_row(
 /// separate from listing support so a future per-kind DDL capability can be
 /// toggled independently.
 fn supports_custom_type_details(config: &ConnectionConfig) -> bool {
-    matches!(
-        config.db_type,
-        DatabaseType::Postgres
-            | DatabaseType::OpenGauss
-            | DatabaseType::Gaussdb
-            | DatabaseType::Kingbase
-            | DatabaseType::Vastbase
-    )
+    oracle_type_details::dialect(config).is_some()
+        || matches!(
+            config.db_type,
+            DatabaseType::Postgres
+                | DatabaseType::OpenGauss
+                | DatabaseType::Gaussdb
+                | DatabaseType::Kingbase
+                | DatabaseType::Vastbase
+        )
 }
 
 pub async fn get_custom_type_details_core(
@@ -11305,6 +12323,401 @@ pub async fn get_custom_type_details_core(
         get_custom_type_details_once(state, connection_id, database, schema, name)
     })
     .await
+}
+
+/// Read a type-management snapshot through the same Agent/JDBC query boundary
+/// as custom-type details. This is intentionally a narrow dictionary adapter;
+/// execution remains a separate, explicit user-confirmed operation.
+pub async fn get_oracle_type_management_snapshot_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    owner: &str,
+    name: &str,
+) -> Result<db::OracleTypeManagementSnapshot, String> {
+    get_oracle_type_management_snapshot_with_objects_core(state, connection_id, database, owner, name, &[]).await
+}
+
+/// Known identities let recovery inspect objects whose dependency edges vanished
+/// after an earlier confirmed DROP. Definitions still come from the live database.
+pub async fn get_oracle_type_management_snapshot_with_objects_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    owner: &str,
+    name: &str,
+    known_objects: &[db::OracleTypeManagementObjectKey],
+) -> Result<db::OracleTypeManagementSnapshot, String> {
+    if known_objects.len() > 500 {
+        return Err("TYPE recovery can inspect at most 500 known object identities.".into());
+    }
+    let config = connection_config(state, connection_id).await;
+    let config = config.as_ref().ok_or_else(|| "connection not found".to_string())?;
+    let dialect = oracle_type_details::dialect(config)
+        .ok_or_else(|| "TYPE management is supported only for Oracle-family connections".to_string())?;
+    let run = |sql: String| run_oracle_type_management_query(state, connection_id, database, sql, 10_000);
+    let (acting_user, acting_user_read) = oracle_type_management::acting_user(&run).await;
+    let (dependencies, dependencies_read) = oracle_type_management::dependencies(dialect, owner, name, &run).await;
+    let (direct_privileges, privileges_read) =
+        oracle_type_management::direct_privileges(dialect, owner, name, &run).await;
+
+    let mut objects = Vec::new();
+    let mut identities = vec![
+        (owner.to_string(), name.to_string(), "TYPE".to_string()),
+        (owner.to_string(), name.to_string(), "TYPE BODY".to_string()),
+    ];
+    identities.extend(known_objects.iter().map(|key| (key.owner.clone(), key.name.clone(), key.object_type.clone())));
+    for dependency in &dependencies {
+        identities.push((dependency.owner.clone(), dependency.name.clone(), dependency.object_type.clone()));
+        if dependency.object_type == "TYPE" {
+            identities.push((dependency.owner.clone(), dependency.name.clone(), "TYPE BODY".to_string()));
+        }
+    }
+    let mut object_keys = HashSet::new();
+    let mut persistent_references = Vec::new();
+    let mut persistent_references_read = oracle_type_management::available();
+    for (object_owner, object_name, object_type) in identities {
+        if !object_keys.insert((object_owner.clone(), object_name.clone(), object_type.clone())) {
+            continue;
+        }
+        let mut object =
+            oracle_type_management::object_metadata(dialect, &object_owner, &object_name, &object_type, &run).await;
+        let source_kind = match object_type.as_str() {
+            "TYPE" => Some(db::ObjectSourceKind::Type),
+            "TYPE BODY" | "CLASS_BODY" => Some(db::ObjectSourceKind::TypeBody),
+            "CLASS" | "CLLT" => Some(db::ObjectSourceKind::Type),
+            "FUNCTION" => Some(db::ObjectSourceKind::Function),
+            "PROCEDURE" => Some(db::ObjectSourceKind::Procedure),
+            "PACKAGE" => Some(db::ObjectSourceKind::Package),
+            "PACKAGE BODY" => Some(db::ObjectSourceKind::PackageBody),
+            "VIEW" => Some(db::ObjectSourceKind::View),
+            "MATERIALIZED VIEW" => Some(db::ObjectSourceKind::MaterializedView),
+            "TRIGGER" => Some(db::ObjectSourceKind::Trigger),
+            _ => None,
+        };
+        let (source, source_read) = if object.exists == Some(false) {
+            (None, oracle_type_management::available())
+        } else if let Some(source_kind) = source_kind.clone() {
+            match get_object_source_core(
+                state,
+                connection_id,
+                database,
+                &object_owner,
+                &object_name,
+                source_kind,
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(source) => (
+                    Some(source.source),
+                    db::TypeMetadataRead { state: db::TypeMetadataState::Available, reason: None },
+                ),
+                Err(error) => {
+                    (None, db::TypeMetadataRead { state: db::TypeMetadataState::Unavailable, reason: Some(error) })
+                }
+            }
+        } else {
+            (
+                None,
+                db::TypeMetadataRead {
+                    state: db::TypeMetadataState::Unsupported,
+                    reason: Some(format!("Source for {object_type} is not available through the type manager")),
+                },
+            )
+        };
+        object.source = source;
+        object.source_read = source_read;
+        object.source_fingerprint = source_kind.and_then(|kind| {
+            object.source.as_ref().and_then(|source| {
+                dbx_sql::object_source_sql::build_oracle_type_management_source(
+                    dbx_sql::object_source_sql::EditableObjectSourceSqlInput {
+                        database_type: match dialect {
+                            oracle_type_details::Dialect::Oracle => DatabaseType::Oracle,
+                            oracle_type_details::Dialect::OceanBase => DatabaseType::OceanbaseOracle,
+                            oracle_type_details::Dialect::Dameng => DatabaseType::Dameng,
+                        },
+                        object_type: kind,
+                        schema: Some(object_owner.clone()),
+                        name: object_name.clone(),
+                        source: source.clone(),
+                    },
+                )
+                .ok()
+                .map(|(_, fingerprint)| fingerprint)
+            })
+        });
+        let is_type = object_type == "TYPE";
+        let (object_privileges, object_privileges_read) = if is_type {
+            if object_owner == owner && object_name == name {
+                (direct_privileges.clone(), privileges_read.clone())
+            } else {
+                oracle_type_management::direct_privileges(dialect, &object_owner, &object_name, &run).await
+            }
+        } else {
+            (
+                Vec::new(),
+                db::TypeMetadataRead {
+                    state: db::TypeMetadataState::Unsupported,
+                    reason: Some(
+                        "Direct grants are read only for objects that the type manager may replace".to_string(),
+                    ),
+                },
+            )
+        };
+        object.direct_privileges = object_privileges;
+        object.privileges_read = object_privileges_read;
+        if is_type {
+            let (references, read) =
+                oracle_type_management::persistent_references(dialect, &object_owner, &object_name, &run).await;
+            persistent_references.extend(references);
+            if read.state != db::TypeMetadataState::Available {
+                persistent_references_read.state = db::TypeMetadataState::Incomplete;
+                let reason = format!(
+                    "{object_owner}.{object_name}: {}",
+                    read.reason.unwrap_or_else(|| "Persistent references are unknown".into())
+                );
+                persistent_references_read.reason.get_or_insert_with(String::new).push_str(&format!("{reason}\n"));
+            }
+        }
+        objects.push(object);
+    }
+    let root = objects
+        .iter()
+        .find(|object| object.owner == owner && object.name == name && object.object_type == "TYPE")
+        .unwrap();
+    let body = objects
+        .iter()
+        .find(|object| object.owner == owner && object.name == name && object.object_type == "TYPE BODY")
+        .unwrap();
+    let (type_source, type_source_read) = (root.source.clone(), root.source_read.clone());
+    let (body_source, body_source_read) = (body.source.clone(), body.source_read.clone());
+    let (details, details_read) = if root.exists == Some(false) {
+        (None, oracle_type_management::available())
+    } else {
+        match get_custom_type_details_core(state, connection_id, database, owner, name).await {
+            Ok(details) => (Some(details), oracle_type_management::available()),
+            Err(error) => (None, oracle_type_management::unavailable(error)),
+        }
+    };
+    Ok(db::OracleTypeManagementSnapshot {
+        target: db::OracleTypeManagementTarget {
+            connection_id: connection_id.to_string(),
+            database: database.to_string(),
+            owner: owner.to_string(),
+            name: name.to_string(),
+        },
+        acting_user,
+        acting_user_read,
+        visibility_scope: "current-user-visible-dictionaries".to_string(),
+        details,
+        details_read,
+        type_source,
+        type_source_read,
+        body_source,
+        body_source_read,
+        objects,
+        dependencies,
+        dependencies_read,
+        persistent_references,
+        persistent_references_read,
+        direct_privileges,
+        privileges_read,
+    })
+}
+
+/// Shared query transport for TYPE metadata and bounded scalar verification.
+/// These are ordinary reads on the existing Agent/ExternalDriver RPC contract.
+async fn run_oracle_type_management_query(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: String,
+    max_rows: usize,
+) -> Result<db::QueryResult, String> {
+    let config = connection_config(state, connection_id).await.ok_or("connection not found")?;
+    if oracle_type_details::dialect(&config).is_none() {
+        return Err("TYPE management requires an Oracle-family connection".into());
+    }
+    let timeout = agent_metadata_timeout(Some(&config));
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+    let response: oracle_type_management::QueryResponse = match clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")? {
+        PoolKind::Agent(client) => client.lock().await.execute_query_with_timeout(agent_execute_query_params(&sql, if database.is_empty() { None } else { Some(database) }, None, QueryExecutionOptions { max_rows: Some(max_rows), ..Default::default() }), timeout).await,
+        PoolKind::ExternalDriver { config, session, .. } => session.invoke_with_timeout("executeQuery", serde_json::json!({ "connection": config.as_ref(), "database": database, "sql": sql, "maxRows": max_rows, "fetchSize": 1000 }), timeout).await,
+        _ => Err("Oracle-family TYPE management requires an Agent or JDBC query transport".into()),
+    }?;
+    response.into_result()
+}
+
+pub async fn verify_oracle_type_data_core(
+    state: &AppState,
+    input: db::OracleTypeDataRequest,
+) -> Result<db::OracleTypeDataResult, String> {
+    let target = input.target.clone();
+    let config = connection_config(state, &target.connection_id).await.ok_or("connection not found")?;
+    let dialect =
+        oracle_type_details::dialect(&config).ok_or("TYPE data verification requires an Oracle-family connection")?;
+    if input.action == "register" {
+        let mapping = input.mapping.as_ref().ok_or("A permanent data mapping is required")?;
+        let snapshot = get_oracle_type_management_snapshot_core(
+            state,
+            &target.connection_id,
+            &target.database,
+            &target.owner,
+            &target.name,
+        )
+        .await?;
+        // Registration is a read-only, full-table proof, not permission to run
+        // TYPE DDL. DM can identify the table while its UDT column code remains
+        // unknown; the execution planner still requires complete live references.
+        if !snapshot
+            .persistent_references
+            .iter()
+            .any(|r| r.owner == mapping.source.owner && r.table_name == mapping.source.name)
+        {
+            return Err(
+                "Register the original complete data projection before changing or removing its live TYPE reference"
+                    .into(),
+            );
+        }
+    }
+    oracle_type_data::read(dialect, input, |sql| {
+        run_oracle_type_management_query(state, &target.connection_id, &target.database, sql, 10_002)
+    })
+    .await
+}
+
+pub async fn prepare_oracle_type_evolution_core(
+    state: &AppState,
+    input: db::OracleTypeEvolutionRequest,
+) -> Result<db::OracleTypeEvolutionManifest, String> {
+    let target = input.target.clone();
+    let config = connection_config(state, &target.connection_id).await.ok_or("connection not found")?;
+    if oracle_type_details::dialect(&config) != Some(oracle_type_details::Dialect::Oracle) {
+        return Err("Native ALTER TYPE evolution is not enabled for this database dialect; retain the source or use the verified manual mapping route".into());
+    }
+    let snapshot = get_oracle_type_management_snapshot_core(
+        state,
+        &target.connection_id,
+        &target.database,
+        &target.owner,
+        &target.name,
+    )
+    .await?;
+    oracle_type_evolution::read(input, snapshot, |sql| {
+        run_oracle_type_management_query(state, &target.connection_id, &target.database, sql, 10_000)
+    })
+    .await
+}
+
+/// Build one strictly-targeted TYPE-management statement group. This endpoint
+/// validates and previews only; the caller must obtain explicit confirmation
+/// and execute statements through the normal guarded query path.
+pub fn build_oracle_type_management_sql(
+    input: db::OracleTypeManagementSqlInput,
+) -> Result<db::OracleTypeManagementSqlResult, String> {
+    if !matches!(input.database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng) {
+        return Err("TYPE management SQL is supported only for Oracle-family databases.".into());
+    }
+    use db::OracleTypeManagementSqlOperation as Operation;
+    use dbx_sql::db_admin_sql::{
+        build_drop_object_sql, build_oracle_type_grant_sql, DatabaseObjectType, DropObjectSqlOptions,
+        OracleTypeGrantSqlOptions,
+    };
+    use dbx_sql::object_source_sql::{build_oracle_type_management_source, EditableObjectSourceSqlInput};
+
+    let database_type = input.database_type;
+    let owner = input.owner.clone();
+    let name = input.name.clone();
+    let object_source = move |object_type: db::ObjectSourceKind, source: Option<String>| {
+        let source = source.ok_or_else(|| "TYPE source text is required for a save operation.".to_string())?;
+        let source_input = EditableObjectSourceSqlInput {
+            database_type,
+            object_type: object_type.clone(),
+            schema: Some(owner.clone()),
+            name: name.clone(),
+            source,
+        };
+        let (sql, fingerprint) = if object_type == db::ObjectSourceKind::Trigger {
+            dbx_sql::object_source_sql::build_oracle_type_management_trigger_source(
+                source_input,
+                input.trigger_enabled.ok_or("The verified trigger firing state is required")?,
+            )?
+        } else {
+            build_oracle_type_management_source(source_input)?
+        };
+        Ok(db::OracleTypeManagementSqlResult { statements: vec![sql], source_fingerprint: Some(fingerprint) })
+    };
+    let statements = match input.operation {
+        Operation::SaveSpec => return object_source(db::ObjectSourceKind::Type, input.source),
+        Operation::SaveBody => return object_source(db::ObjectSourceKind::TypeBody, input.source),
+        Operation::RebuildSource => {
+            return object_source(input.object_type.ok_or("Dependency object type is required")?, input.source)
+        }
+        Operation::CompileSpec => {
+            if database_type != DatabaseType::Oracle {
+                return Err("Native TYPE specification compilation is only enabled for Oracle".into());
+            }
+            let validated = object_source(db::ObjectSourceKind::Type, input.source)?;
+            let quoted = |value: &str| format!("\"{}\"", value.replace('"', "\"\""));
+            return Ok(db::OracleTypeManagementSqlResult {
+                statements: vec![format!(
+                    "ALTER TYPE {}.{} COMPILE SPECIFICATION;",
+                    quoted(&input.owner),
+                    quoted(&input.name)
+                )],
+                source_fingerprint: validated.source_fingerprint,
+            });
+        }
+        Operation::CompileTrigger => {
+            let source = input.source.ok_or("The unchanged trigger definition is required")?;
+            input.trigger_enabled.ok_or("The verified trigger firing state is required")?;
+            let (_, fingerprint) = build_oracle_type_management_source(EditableObjectSourceSqlInput {
+                database_type,
+                object_type: db::ObjectSourceKind::Trigger,
+                schema: Some(input.owner.clone()),
+                name: input.name.clone(),
+                source,
+            })?;
+            let quoted = |value: &str| format!("\"{}\"", value.replace('"', "\"\""));
+            return Ok(db::OracleTypeManagementSqlResult {
+                statements: vec![format!("ALTER TRIGGER {}.{} COMPILE;", quoted(&input.owner), quoted(&input.name))],
+                source_fingerprint: Some(fingerprint),
+            });
+        }
+        Operation::DropSpec => vec![build_drop_object_sql(DropObjectSqlOptions {
+            database_type: Some(input.database_type),
+            object_type: DatabaseObjectType::Type,
+            schema: Some(input.owner),
+            name: input.name,
+            signature: None,
+            identifier_quote: None,
+        })],
+        Operation::DropBody => vec![build_drop_object_sql(DropObjectSqlOptions {
+            database_type: Some(input.database_type),
+            object_type: DatabaseObjectType::TypeBody,
+            schema: Some(input.owner),
+            name: input.name,
+            signature: None,
+            identifier_quote: None,
+        })],
+        Operation::GrantExecute | Operation::GrantPrivilege => {
+            vec![build_oracle_type_grant_sql(OracleTypeGrantSqlOptions {
+                database_type: input.database_type,
+                owner: input.owner,
+                type_name: input.name,
+                grantee: input.grantee.ok_or_else(|| "TYPE grant grantee is required.".to_string())?,
+                grantable: input.grantable,
+                privilege: if input.operation == Operation::GrantExecute {
+                    "EXECUTE".into()
+                } else {
+                    input.privilege.ok_or("TYPE privilege is required")?
+                },
+            })?]
+        }
+    };
+    Ok(db::OracleTypeManagementSqlResult { statements, source_fingerprint: None })
 }
 
 async fn get_custom_type_details_once(
@@ -11321,6 +12734,54 @@ async fn get_custom_type_details_once(
     };
     if !supports_custom_type_details(config) {
         return Err(format!("custom type details are not supported for {:?} connections", config.db_type));
+    }
+    if let Some(dialect) = oracle_type_details::dialect(config) {
+        let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
+        let timeout = agent_metadata_timeout(Some(config));
+        return match pool {
+            PoolKind::Agent(client) => {
+                oracle_type_details::read(dialect, schema, name, |sql| {
+                    let client = client.clone();
+                    async move {
+                        let mut client = client.lock().await;
+                        client
+                            .execute_query_with_timeout(
+                                agent_execute_query_params(
+                                    &sql,
+                                    if database.is_empty() { None } else { Some(database) },
+                                    // Dictionaries use an explicit OWNER predicate;
+                                    // do not switch the borrowed session's schema.
+                                    None,
+                                    QueryExecutionOptions { max_rows: Some(10_000), ..Default::default() },
+                                ),
+                                timeout,
+                            )
+                            .await
+                    }
+                })
+                .await
+            }
+            PoolKind::ExternalDriver { config, session, .. } => {
+                oracle_type_details::read(dialect, schema, name, |sql| {
+                    let session = session.clone();
+                    let config = config.clone();
+                    async move {
+                        session
+                            .invoke_with_timeout(
+                                "executeQuery",
+                                serde_json::json!({
+                                    "connection": config.as_ref(), "database": database,
+                                    "sql": sql, "maxRows": 10_000, "fetchSize": 1000,
+                                }),
+                                timeout,
+                            )
+                            .await
+                    }
+                })
+                .await
+            }
+            _ => Err("Oracle-family type details require an Agent or JDBC query transport".to_string()),
+        };
     }
     {
         let pool_handle = state.pool_handle(&pool_key).await;
@@ -11349,7 +12810,33 @@ pub async fn get_object_source_core(
     signature: Option<&str>,
     relation_name: Option<&str>,
 ) -> Result<db::ObjectSource, String> {
-    let source = retry_metadata_connection(state, connection_id, Some(database), || {
+    get_object_source_core_with_options(
+        state,
+        connection_id,
+        database,
+        schema,
+        name,
+        object_type,
+        signature,
+        relation_name,
+        &Default::default(),
+    )
+    .await
+}
+
+pub async fn get_object_source_core_with_options(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    name: &str,
+    object_type: db::ObjectSourceKind,
+    signature: Option<&str>,
+    relation_name: Option<&str>,
+    options: &MetadataReadOptions,
+) -> Result<db::ObjectSource, String> {
+    let config = connection_config(state, connection_id).await;
+    let mut source = retry_metadata_connection(state, connection_id, Some(database), || {
         get_object_source_once(
             state,
             connection_id,
@@ -11359,10 +12846,14 @@ pub async fn get_object_source_core(
             object_type.clone(),
             signature,
             relation_name,
+            options,
         )
     })
     .await?;
-    Ok(finalize_object_source(source))
+    if options.is_exact() {
+        oracle_triggers::validate_source_definition(&mut source, schema, name);
+    }
+    Ok(finalize_object_source(source, config.as_ref()))
 }
 
 pub async fn get_event_info_core(
@@ -11418,12 +12909,16 @@ pub async fn get_event_info_core(
     }
 }
 
-fn finalize_object_source(mut source: db::ObjectSource) -> db::ObjectSource {
+fn finalize_object_source(mut source: db::ObjectSource, config: Option<&ConnectionConfig>) -> db::ObjectSource {
     if matches!(source.object_type, db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function) {
         source.source = normalize_routine_object_source(source.source);
     }
     if matches!(source.object_type, db::ObjectSourceKind::Event) {
         source.editable = Some(false);
+    } else if matches!(source.object_type, db::ObjectSourceKind::Type | db::ObjectSourceKind::TypeBody)
+        && config.and_then(oracle_type_details::dialect).is_some()
+    {
+        source.editable = Some(true);
     }
     source
 }
@@ -11436,14 +12931,25 @@ async fn managed_object_source<T: serde::de::DeserializeOwned + Send + 'static>(
     object_type: &db::ObjectSourceKind,
     signature: Option<&str>,
     relation_name: Option<&str>,
+    options: &MetadataReadOptions,
+    include_source_origin: bool,
     timeout: Option<Duration>,
 ) -> Result<T, String> {
     match pool {
         PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
             client
-                .lock()
-                .await
-                .get_object_source_with_identity(database, schema, name, object_type, signature, relation_name, timeout)
+                .get_object_source_with_options(
+                    database,
+                    schema,
+                    name,
+                    object_type,
+                    signature,
+                    relation_name,
+                    options,
+                    include_source_origin,
+                    timeout,
+                )
                 .await
         }
         PoolKind::ExternalDriver { config, session, .. } => {
@@ -11454,9 +12960,13 @@ async fn managed_object_source<T: serde::de::DeserializeOwned + Send + 'static>(
                 "name": name,
                 "object_type": object_type,
             });
+            options.apply_to(&mut params);
             // An empty signature identifies the zero-argument overload; absence means unknown.
             if let Some(signature) = signature {
                 params["signature"] = serde_json::Value::String(signature.to_string());
+            }
+            if include_source_origin {
+                params["include_source_origin"] = serde_json::json!(true);
             }
             session.invoke_with_timeout("getObjectSource", params, timeout).await
         }
@@ -11473,6 +12983,7 @@ async fn get_object_source_once(
     object_type: db::ObjectSourceKind,
     signature: Option<&str>,
     relation_name: Option<&str>,
+    options: &MetadataReadOptions,
 ) -> Result<db::ObjectSource, String> {
     let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
     let db_config = connection_config(state, connection_id).await;
@@ -11503,6 +13014,7 @@ async fn get_object_source_once(
                     source,
                     editable: None,
                     routine_parameters: None,
+                    trigger: None,
                 });
             }
             let result: db::ObjectSource = managed_object_source(
@@ -11513,6 +13025,8 @@ async fn get_object_source_once(
                 &object_type,
                 signature,
                 None,
+                options,
+                false,
                 agent_metadata_timeout(Some(config.as_ref())),
             )
             .await?;
@@ -11530,6 +13044,17 @@ async fn get_object_source_once(
             }
             first_string_cell(result?)?
         } else if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
+            if options.is_exact()
+                && matches!(object_type, db::ObjectSourceKind::Trigger)
+                && db_config.as_ref().is_some_and(|config| {
+                    config.db_type == DatabaseType::Oracle && !is_default_oracle_agent_config(config)
+                })
+            {
+                let mut reader =
+                    oracle_triggers::agent_reader(client, database, schema, agent_metadata_timeout(db_config.as_ref()))
+                        .await;
+                return reader.source(schema, name).await;
+            }
             if uses_oracle_metadata_object_source(db_config.as_ref(), &object_type) {
                 oracle_agent_object_source(
                     client,
@@ -11560,6 +13085,7 @@ async fn get_object_source_once(
                             source,
                             editable: None,
                             routine_parameters: None,
+                            trigger: None,
                         });
                     }
                     None => String::new(),
@@ -11573,6 +13099,8 @@ async fn get_object_source_once(
                     &object_type,
                     signature,
                     relation_name,
+                    options,
+                    false,
                     agent_metadata_timeout(db_config.as_ref()),
                 )
                 .await?;
@@ -11580,6 +13108,12 @@ async fn get_object_source_once(
             }
         } else {
             match pool_handle.as_ref().ok_or("Pool not found")? {
+                PoolKind::Mysql(pool, MysqlMode::OceanBaseOracle) => {
+                    if options.is_exact() && matches!(object_type, db::ObjectSourceKind::Trigger) {
+                        return oracle_triggers::pool_reader(pool.clone()).await.source(schema, name).await;
+                    }
+                    db::ob_oracle::get_object_source(pool, schema, name, &object_type).await?
+                }
                 PoolKind::Mysql(pool, _) => {
                     mysql_object_source(pool, mysql_table_metadata_catalog(database, schema), name, &object_type)
                         .await?
@@ -11599,6 +13133,21 @@ async fn get_object_source_once(
                 PoolKind::Postgres(pool) if db_config.as_ref().is_some_and(is_questdb_config) => {
                     // only view
                     db::questdb::questdb_object_source(pool, name).await?
+                }
+                PoolKind::Postgres(pool)
+                    if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Redshift)
+                        && matches!(object_type, db::ObjectSourceKind::Procedure) =>
+                {
+                    // Redshift has no pg_proc.prokind / pg_get_functiondef
+                    // (PostgreSQL 8.0 catalog); read the full CREATE PROCEDURE
+                    // text from prosrc and use pg_proc_info for the routine
+                    // kind (issue #13293).
+                    db::postgres::execute_query(
+                        pool,
+                        &db::postgres::redshift_procedure_source_sql(schema, name, signature),
+                    )
+                    .await
+                    .and_then(first_string_cell)?
                 }
                 PoolKind::Postgres(pool) => {
                     let unwrap_opengauss_record = db_config.as_ref().is_some_and(is_opengauss_family_config);
@@ -11686,6 +13235,7 @@ async fn get_object_source_once(
         source,
         editable,
         routine_parameters: None,
+        trigger: None,
     })
 }
 
@@ -11699,12 +13249,18 @@ fn oracle_owner_filter(schema: &str) -> String {
 }
 
 pub fn oracle_list_objects_sql(schema: &str) -> String {
+    let type_owner = if schema.is_empty() { "USER".to_string() } else { sql_string(schema) };
+    oracle_list_objects_sql_for_owner(&oracle_owner_filter(schema), &type_owner)
+}
+
+fn oracle_list_objects_sql_for_owner(owner: &str, type_owner: &str) -> String {
     format!(
-        "SELECT object_name, CASE object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' ELSE object_type END AS object_type, owner \
-         FROM all_objects \
-         WHERE owner = {} AND object_type IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY') \
-         ORDER BY CASE object_type WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 WHEN 'SEQUENCE' THEN 4 WHEN 'PACKAGE' THEN 5 ELSE 6 END, object_name",
-        oracle_owner_filter(schema)
+        "SELECT o.object_name, CASE o.object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' WHEN 'TYPE BODY' THEN 'TYPE_BODY' ELSE o.object_type END AS object_type, o.owner, \
+         i.table_owner AS parent_schema, i.table_name AS parent_name \
+         FROM all_objects o LEFT JOIN all_indexes i ON o.object_type = 'INDEX' AND i.owner = o.owner AND i.index_name = o.object_name \
+         WHERE ((o.owner = {owner} AND o.object_type IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY', 'INDEX')) \
+            OR (o.owner = {type_owner} AND o.object_type IN ('TYPE', 'TYPE BODY'))) \
+         ORDER BY CASE o.object_type WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 WHEN 'SEQUENCE' THEN 4 WHEN 'PACKAGE' THEN 5 WHEN 'PACKAGE BODY' THEN 6 ELSE 7 END, o.object_name, o.object_type"
     )
 }
 
@@ -11758,25 +13314,55 @@ fn oracle_completion_like_pattern(mask: &str, match_mode: Option<&db::Completion
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn oracle_agent_list_objects(
     client: Arc<db::agent_driver::PooledAgentClient>,
     database: &str,
     schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+    exact_identity: bool,
     timeout_duration: Option<Duration>,
-) -> Result<Vec<db::ObjectInfo>, String> {
-    let sql = oracle_list_objects_sql(schema);
-    let params = agent_execute_query_params(
-        &sql,
-        if database.is_empty() { None } else { Some(database) },
-        if schema.is_empty() { None } else { Some(schema) },
-        QueryExecutionOptions { max_rows: Some(10_000), ..Default::default() },
-    );
+) -> Result<ObjectListOutcome, String> {
+    let index_only = object_types.is_some_and(|types| types.len() == 1 && types[0].eq_ignore_ascii_case("INDEX"));
+    let mut sql = if exact_identity {
+        oracle_list_objects_sql_for_owner(&sql_string(schema), &sql_string(schema))
+    } else {
+        oracle_list_objects_sql(schema)
+    };
+    if index_only {
+        sql = format!("SELECT object_name, object_type, owner, parent_schema, parent_name FROM ({sql}) WHERE object_type = 'INDEX'");
+        if let Some(filter) = filter.map(str::trim).filter(|value| !value.is_empty()) {
+            let pattern = crate::sql::fuzzy_like_pattern_with_escape(&filter.to_lowercase(), |value| {
+                value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+            });
+            sql.push_str(&format!(" AND LOWER(object_name) LIKE {} ESCAPE '\\'", sql_string(&pattern)));
+        }
+        sql.push_str(" ORDER BY object_name, owner");
+    }
+    const PAGE_SIZE: usize = 1_000;
+    let mut start = if index_only { offset.unwrap_or(0) } else { 0 };
+    let requested = if index_only { limit.unwrap_or(usize::MAX) } else { usize::MAX };
+    let mut objects = Vec::new();
     let mut client = client.lock().await;
-    let result: db::QueryResult = client.execute_query_with_timeout(params, timeout_duration).await?;
-    let mut objects: Vec<db::ObjectInfo> = result
-        .rows
-        .into_iter()
-        .filter_map(|row| {
+    while objects.len() < requested {
+        let page_size = PAGE_SIZE.min(requested - objects.len());
+        let end = start.checked_add(page_size).ok_or("Oracle metadata page overflow")?;
+        let page_sql = format!("SELECT object_name, object_type, owner, parent_schema, parent_name FROM (SELECT dbx_objects.*, ROWNUM dbx_row_number FROM ({sql}) dbx_objects WHERE ROWNUM <= {end}) WHERE dbx_row_number > {start}");
+        let params = agent_execute_query_params(
+            &page_sql,
+            (!database.is_empty()).then_some(database),
+            None,
+            QueryExecutionOptions { max_rows: Some(page_size), ..Default::default() },
+        );
+        let result: db::QueryResult = client.execute_query_with_timeout(params, timeout_duration).await?;
+        if (result.truncated || result.has_more) && result.rows.is_empty() {
+            return Err("Oracle object list was truncated without returning a page".to_string());
+        }
+        let row_count = result.rows.len();
+        objects.extend(result.rows.into_iter().filter_map(|row| {
             let name = row.first()?.as_str()?.to_string();
             let object_type = row.get(1)?.as_str()?.to_string();
             let schema = row.get(2).and_then(|value| value.as_str()).map(str::to_string);
@@ -11791,15 +13377,19 @@ async fn oracle_agent_list_objects(
                 comment: None,
                 created_at: None,
                 updated_at: None,
-                parent_schema: None,
-                parent_name: None,
+                parent_schema: row.get(3).and_then(|value| value.as_str()).map(str::to_owned),
+                parent_name: row.get(4).and_then(|value| value.as_str()).map(str::to_owned),
                 trigger: None,
                 xugu_type_members_expandable: None,
             })
-        })
-        .collect();
+        }));
+        if row_count < page_size {
+            break;
+        }
+        start = end;
+    }
     load_oracle_table_comments_for_objects(&mut client, database, schema, &mut objects, timeout_duration).await?;
-    Ok(objects)
+    Ok(ObjectListOutcome { objects, paging_applied: index_only })
 }
 
 async fn oracle_agent_object_source(
@@ -12181,19 +13771,33 @@ impl Default for PostgresCatalogCaps {
     }
 }
 
-/// Probe the catalog features once per object-source fetch. A failed probe
-/// (permissions, proxies) stays on the modern queries and lets the existing
-/// error-triggered fallbacks handle legacy servers.
-async fn postgres_object_source_catalog_caps(pool: &deadpool_postgres::Pool) -> PostgresCatalogCaps {
-    const PROBE_SQL: &str = "SELECT EXISTS ( \
+/// Catalog-feature probe for object-source queries.
+///
+/// `to_regclass` is PostgreSQL 9.4+, so it errors on legacy forks such as
+/// Redshift (8.0.2) and the failed probe would leave the modern capabilities
+/// (including `pg_proc.prokind`, PostgreSQL 11+) enabled. Probe `pg_sequence`
+/// through the PostgreSQL 8.0 catalogs instead so those servers actually take
+/// the legacy paths (issue #13293).
+const POSTGRES_OBJECT_SOURCE_CATALOG_CAPS_SQL: &str = "SELECT EXISTS ( \
        SELECT 1 \
        FROM pg_catalog.pg_attribute \
        WHERE attrelid = 'pg_catalog.pg_proc'::regclass \
          AND attname = 'prokind' \
          AND NOT attisdropped \
      ), \
-     to_regclass('pg_catalog.pg_sequence') IS NOT NULL";
-    match db::postgres::execute_query(pool, PROBE_SQL).await {
+     EXISTS ( \
+       SELECT 1 \
+       FROM pg_catalog.pg_class c \
+       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+       WHERE n.nspname = 'pg_catalog' \
+         AND c.relname = 'pg_sequence' \
+     )";
+
+/// Probe the catalog features once per object-source fetch. A failed probe
+/// (permissions, proxies) stays on the modern queries and lets the existing
+/// error-triggered fallbacks handle legacy servers.
+async fn postgres_object_source_catalog_caps(pool: &deadpool_postgres::Pool) -> PostgresCatalogCaps {
+    match db::postgres::execute_query(pool, POSTGRES_OBJECT_SOURCE_CATALOG_CAPS_SQL).await {
         Ok(result) => {
             let values = result.rows.first().cloned().unwrap_or_default();
             PostgresCatalogCaps {
@@ -12281,7 +13885,7 @@ async fn postgres_object_source(
         }
         Err(primary_err)
             if postgres_missing_prokind_error(&primary_err)
-                && matches!(object_type, db::ObjectSourceKind::Function) =>
+                && matches!(object_type, db::ObjectSourceKind::Function | db::ObjectSourceKind::Procedure) =>
         {
             let fallback_sql = postgres_function_object_source_sql_without_prokind(schema, name, false);
             db::postgres::execute_query(pool, &fallback_sql)
@@ -12640,6 +14244,19 @@ mod object_source_tests {
     }
 
     #[test]
+    fn object_source_capability_probe_avoids_post_pg8_catalog_helpers() {
+        // Redshift is based on PostgreSQL 8.0.2: to_regclass (9.4+) errors,
+        // and the failed probe would keep the modern prokind / pg_sequence
+        // queries enabled (#13293).
+        let sql = super::POSTGRES_OBJECT_SOURCE_CATALOG_CAPS_SQL;
+        assert!(sql.contains("attname = 'prokind'"));
+        assert!(sql.contains("FROM pg_catalog.pg_class c"));
+        assert!(sql.contains("JOIN pg_catalog.pg_namespace n"));
+        assert!(sql.contains("c.relname = 'pg_sequence'"));
+        assert!(!sql.contains("to_regclass"));
+    }
+
+    #[test]
     fn missing_prokind_gate_matches_localized_undefined_column_errors() {
         // The exact strings from #11161: PostgreSQL reports undefined-column
         // errors in the server's language, so the gate cannot rely on the
@@ -12875,8 +14492,41 @@ mod object_source_tests {
         assert!(sql.contains("'PACKAGE'"));
         assert!(sql.contains("'PACKAGE BODY'"));
         assert!(sql.contains("'SEQUENCE'"));
-        assert!(sql.contains("CASE object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY'"));
+        assert!(sql.contains("CASE o.object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY'"));
         assert!(sql.contains("owner = 'HR'"));
+        assert!(sql.contains("'INDEX'"));
+        assert!(sql.contains("i.table_owner AS parent_schema, i.table_name AS parent_name"));
+    }
+
+    #[test]
+    fn oracle_object_list_returns_triggers_only_from_the_selected_owner() {
+        // Execute the dictionary query against fixture rows so a missing object
+        // kind or a widened owner predicate cannot silently empty the transfer list.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE all_objects (owner TEXT, object_name TEXT, object_type TEXT);
+             CREATE TABLE all_indexes (owner TEXT, index_name TEXT, table_owner TEXT, table_name TEXT, generated TEXT);
+             INSERT INTO all_objects VALUES
+               ('APP', 'QR_CODE_MAIL_TEMPLATE', 'TABLE'),
+               ('APP', 'SEQ_QR_CODE_MAIL_TEMPLATE', 'SEQUENCE'),
+               ('APP', 'TRIGGER_QR_CODE_MAIL_TEMPLATE', 'TRIGGER'),
+               ('OTHER', 'TRIGGER_QR_CODE_MAIL_TEMPLATE', 'TRIGGER');",
+        )
+        .unwrap();
+
+        for owner in ["APP", "OTHER"] {
+            let sql = format!(
+                "SELECT object_name, owner FROM ({}) WHERE object_type = 'TRIGGER'",
+                oracle_list_objects_sql(owner)
+            );
+            let mut statement = conn.prepare(&sql).unwrap();
+            let triggers = statement
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(triggers, vec![("TRIGGER_QR_CODE_MAIL_TEMPLATE".to_string(), owner.to_string())]);
+        }
     }
 
     #[test]
@@ -13283,6 +14933,7 @@ mod ddl_tests {
         id.is_primary_key = true;
         let indexes = vec![
             db::IndexInfo {
+                owner: None,
                 key_directions: Vec::new(),
                 visibility: None,
                 key_metadata_complete: false,
@@ -13300,6 +14951,7 @@ mod ddl_tests {
                 constraint_backed: true,
             },
             db::IndexInfo {
+                owner: None,
                 key_directions: Vec::new(),
                 visibility: None,
                 key_metadata_complete: false,
@@ -13317,6 +14969,7 @@ mod ddl_tests {
                 constraint_backed: true,
             },
             db::IndexInfo {
+                owner: None,
                 key_directions: Vec::new(),
                 visibility: None,
                 key_metadata_complete: false,
@@ -13544,6 +15197,7 @@ mod ddl_tests {
         // expression key just like a real column.
         let id = column("id", "integer");
         let indexes = vec![db::IndexInfo {
+            owner: None,
             key_directions: Vec::new(),
             visibility: None,
             key_metadata_complete: false,
@@ -13573,6 +15227,7 @@ mod ddl_tests {
     fn postgres_table_ddl_preserves_btree_key_order_and_nulls_position() {
         let id = column("id", "bigint");
         let indexes = vec![db::IndexInfo {
+            owner: None,
             key_directions: Vec::new(),
             visibility: None,
             key_metadata_complete: false,
@@ -13600,6 +15255,7 @@ mod ddl_tests {
 
     fn postgres_primary_index(keys: &[&str]) -> db::IndexInfo {
         db::IndexInfo {
+            owner: None,
             key_directions: Vec::new(),
             visibility: None,
             key_metadata_complete: false,
@@ -13844,6 +15500,7 @@ mod ddl_tests {
         let mut id = column("id", "integer");
         id.is_primary_key = true;
         let indexes = vec![db::IndexInfo {
+            owner: None,
             key_directions: Vec::new(),
             visibility: None,
             key_metadata_complete: false,
@@ -13898,6 +15555,7 @@ mod ddl_tests {
     #[test]
     fn postgres_partition_ddl_preserves_local_unique_without_local_primary_key() {
         let indexes = vec![db::IndexInfo {
+            owner: None,
             key_directions: Vec::new(),
             visibility: None,
             key_metadata_complete: false,
@@ -13966,6 +15624,7 @@ mod ddl_tests {
         let mut id = column("id", "integer");
         id.is_primary_key = true;
         let indexes = vec![db::IndexInfo {
+            owner: None,
             key_directions: Vec::new(),
             visibility: None,
             key_metadata_complete: false,
@@ -14330,6 +15989,24 @@ mod ddl_tests {
             "CONSTRAINT \"aaa_1\" FOREIGN KEY (\"a\", \"b\", \"c\") REFERENCES \"public\".\"aaa_2\"(\"a\", \"b\", \"c\")"
         ));
         assert_eq!(ddl.matches("CONSTRAINT \"aaa_1\" FOREIGN KEY").count(), 1);
+    }
+
+    #[test]
+    fn postgres_table_ddl_preserves_foreign_key_actions_without_native_definition() {
+        let foreign_key = db::ForeignKeyInfo {
+            name: "fk_parent".to_string(),
+            column: "parent_id".to_string(),
+            ref_schema: Some("other".to_string()),
+            ref_table: "parent".to_string(),
+            ref_column: "id".to_string(),
+            on_update: Some("RESTRICT".to_string()),
+            on_delete: Some("CASCADE".to_string()),
+        };
+        let ddl = render_postgres_table_ddl("public", "child", &[], &[], &[foreign_key], None);
+        assert!(
+            ddl.contains("REFERENCES \"other\".\"parent\"(\"id\") ON UPDATE RESTRICT ON DELETE CASCADE"),
+            "ddl: {ddl}"
+        );
     }
 
     #[test]
@@ -16183,6 +17860,7 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
         }
         definition_lines.push(format!("  CONSTRAINT {} {}", pg_ident(&constraint.name), constraint.definition.trim()));
     }
+    let mut not_valid_foreign_keys = Vec::new();
     for fk_group in group_foreign_keys_by_name(fkeys) {
         let Some(first_fk) = fk_group.first() else {
             continue;
@@ -16195,13 +17873,36 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
         let referenced_schema =
             first_fk.ref_schema.as_deref().filter(|value| !value.trim().is_empty()).unwrap_or(schema);
         let referenced_table = format!("{}.{}", pg_ident(referenced_schema), pg_ident(&first_fk.ref_table));
-        definition_lines.push(format!(
-            "  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({})",
-            pg_ident(&first_fk.name),
-            columns,
-            referenced_table,
-            ref_columns
-        ));
+        let native_definition = constraints
+            .iter()
+            .find(|constraint| constraint.constraint_type == "FOREIGN KEY" && constraint.name == first_fk.name)
+            .map(|constraint| constraint.definition.as_str())
+            .or_else(|| partition_local_objects.foreign_key_definitions.get(&first_fk.name).map(String::as_str));
+        // Keep our schema-qualified relation and ordered column pairs, but
+        // preserve every native option after REFERENCES (...). The scanner
+        // also handles parentheses inside quoted identifiers.
+        let suffix = native_definition
+            .and_then(|definition| {
+                let columns_end = db::ddl_scan::find_top_level_paren_close(definition, 0)?;
+                let references_end = db::ddl_scan::find_top_level_paren_close(definition, columns_end)?;
+                Some(definition[references_end..].trim_end().to_string())
+            })
+            .unwrap_or_else(|| {
+                let mut suffix = String::new();
+                if let Some(action) = first_fk.on_update.as_deref() {
+                    suffix.push_str(&format!(" ON UPDATE {action}"));
+                }
+                if let Some(action) = first_fk.on_delete.as_deref() {
+                    suffix.push_str(&format!(" ON DELETE {action}"));
+                }
+                suffix
+            });
+        let definition = format!("FOREIGN KEY ({columns}) REFERENCES {referenced_table}({ref_columns}){suffix}");
+        if is_not_valid_constraintdef(&definition) {
+            not_valid_foreign_keys.push((first_fk.name.as_str(), definition));
+        } else {
+            definition_lines.push(format!("  CONSTRAINT {} {definition}", pg_ident(&first_fk.name)));
+        }
     }
     // `pg_get_constraintdef` appends ` NOT VALID` for an unvalidated CHECK
     // constraint, but that suffix is only legal after `ALTER TABLE ADD
@@ -16282,6 +17983,9 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
     }
     ddl.push_str(";\n");
 
+    for (name, definition) in &not_valid_foreign_keys {
+        ddl.push_str(&format!("\nALTER TABLE {table_name} ADD CONSTRAINT {} {};", pg_ident(name), definition));
+    }
     for (name, definition) in &not_valid_check_constraints {
         ddl.push_str(&format!("\nALTER TABLE {table_name} ADD CONSTRAINT {} {};", pg_ident(name), definition));
     }

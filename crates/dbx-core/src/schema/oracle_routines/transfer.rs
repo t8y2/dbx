@@ -2,6 +2,10 @@ use super::*;
 use crate::data::transfer::{oracle_object_source_query, rewrite_oracle_schema_qualifier, TransferObjectKind};
 use dbx_sql::object_source_sql::{prepare_oracle_routine_definition, OracleRoutineDefinitionInput};
 
+mod packages;
+pub(crate) use packages::{claim_transfer_packages, prepare_transfer_packages, PackageTransferPreflightError};
+pub use packages::{OraclePackageTransferPreview, OraclePackageTransferRequest};
+
 pub(crate) struct RoutineTransferInput {
     pub source_connection_id: String,
     pub source_database: String,
@@ -126,6 +130,8 @@ pub(crate) async fn transfer_oracle_routine_core(
             database: input.target_database,
             identity: RoutineIdentity { owner: input.target_owner, ..input.identity },
             sql: sql.clone(),
+            require_absent: false,
+            prerequisite_operation_id: None,
             supersedes_operation_id: None,
         },
         context.target_config.clone(),

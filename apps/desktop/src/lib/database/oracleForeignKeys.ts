@@ -1,5 +1,5 @@
 import * as api from "@/lib/backend/api";
-import type { BuildTableStructureChangeSqlOptions, OracleForeignKeyChange, OracleForeignKeyDefinition, OracleForeignKeyState, TablePartitionDefinition } from "@/lib/table/tableStructureEditorSql";
+import type { BuildTableStructureChangeSqlOptions, OracleForeignKeyChange, OracleForeignKeyDefinition, OracleForeignKeyState, OracleTriggerStructureOperation, TablePartitionDefinition } from "@/lib/table/tableStructureEditorSql";
 import { foldCreatedTableName } from "@/lib/table/tableStructureEditorState";
 
 export interface OracleForeignKeyTarget {
@@ -501,6 +501,7 @@ export interface OracleForeignKeyCreatePlan {
   references: OracleForeignKeyReferenceSnapshot[];
   session: { user: string; currentSchema: string };
   snapshot: string;
+  triggerOperations?: OracleTriggerStructureOperation[];
 }
 
 export interface OracleForeignKeyCreateExecutionResult {
@@ -556,17 +557,22 @@ export async function prepareOracleForeignKeyCreatePlan(target: OracleForeignKey
     validateOracleForeignKeyReference(snapshot, source, definition, false, target.databaseType);
     references.push(snapshot);
   }
-  return { target, options, partitioning, changes, statements: [...generated.statements], references, session, snapshot: JSON.stringify({ session, references }) };
+  return { target, options, partitioning, changes, statements: [...generated.statements], references, session, snapshot: JSON.stringify({ session, references }), ...(generated.triggerOperations?.length ? { triggerOperations: generated.triggerOperations } : {}) };
+}
+
+export async function preflightOracleForeignKeyCreatePlan(plan: OracleForeignKeyCreatePlan, canStart: () => boolean, connectionCurrent: () => boolean): Promise<boolean> {
+  if (!canStart() || !connectionCurrent()) return false;
+  const fresh = await prepareOracleForeignKeyCreatePlan(plan.target, plan.options, plan.changes, plan.partitioning, connectionCurrent);
+  if (!connectionCurrent() || !canStart()) return false;
+  if (fresh.snapshot !== plan.snapshot || JSON.stringify(fresh.statements) !== JSON.stringify(plan.statements)) invalid();
+  return true;
 }
 
 /** Rechecks parent/session state, then executes CREATE and ordered FKs once each. */
 export async function executeOracleForeignKeyCreatePlan(plan: OracleForeignKeyCreatePlan, timeoutSecs: number, guards: (() => boolean) | { canStart?: () => boolean; connectionCurrent?: () => boolean }): Promise<OracleForeignKeyCreateExecutionResult | undefined> {
   const canStart = typeof guards === "function" ? guards : (guards.canStart ?? (() => true));
   const connectionCurrent = typeof guards === "function" ? guards : (guards.connectionCurrent ?? (() => true));
-  if (!canStart() || !connectionCurrent()) return undefined;
-  const fresh = await prepareOracleForeignKeyCreatePlan(plan.target, plan.options, plan.changes, plan.partitioning, connectionCurrent);
-  if (!connectionCurrent() || !canStart()) return undefined;
-  if (fresh.snapshot !== plan.snapshot || JSON.stringify(fresh.statements) !== JSON.stringify(plan.statements)) invalid();
+  if (!(await preflightOracleForeignKeyCreatePlan(plan, canStart, connectionCurrent))) return undefined;
   const steps: OracleForeignKeyCreateExecutionResult["steps"] = plan.statements.map((sql) => ({ sql, state: "notExecuted" }));
   for (const step of steps) {
     if (!canStart() || !connectionCurrent()) break;
@@ -592,6 +598,10 @@ export async function executeOracleForeignKeyCreatePlan(plan: OracleForeignKeyCr
       break;
     }
   }
+  return readOracleForeignKeyCreateResult(plan, steps, connectionCurrent);
+}
+
+export async function readOracleForeignKeyCreateResult(plan: OracleForeignKeyCreatePlan, steps: OracleForeignKeyCreateExecutionResult["steps"], connectionCurrent: () => boolean): Promise<OracleForeignKeyCreateExecutionResult> {
   const outcome: OracleForeignKeyCreateExecutionResult = { steps };
   const createUnknown = steps[0]?.state === "unknown";
   if (!steps.some((step) => step.state === "committed") && !createUnknown) return outcome;

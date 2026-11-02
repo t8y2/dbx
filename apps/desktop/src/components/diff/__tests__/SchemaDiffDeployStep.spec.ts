@@ -3,10 +3,11 @@
 import { createApp, defineComponent, h, nextTick, reactive, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import SchemaDiffDeployStep from "@/components/diff/SchemaDiffDeployStep.vue";
-import { createOracleRoutineDeployment, synchronizeOracleRoutineSelection } from "@/lib/schema/oracleRoutineDeploy";
-import type { OracleRoutineOperation } from "@/types/schemaDiff";
+import { createOracleRoutineDeployment, editOraclePackageOptions, includeOraclePackageCompanion, reviewOraclePackageTargetDraft, selectOracleRoutineDraft, synchronizeOracleRoutineSelection } from "@/lib/schema/oracleRoutineDeploy";
+import type { OracleRoutineOperation, OracleRoutineKind } from "@/types/schemaDiff";
 
-const editor = vi.hoisted(() => ({ focus: vi.fn(), dispatch: vi.fn(), readOnly: vi.fn((_value: boolean) => []), dialect: vi.fn((_language: unknown, _dialect: string) => undefined) }));
+const editor = vi.hoisted(() => ({ focus: vi.fn(), dispatch: vi.fn(), readOnly: vi.fn((_value: boolean) => []), dialect: vi.fn((_language: unknown, _dialect: string) => undefined), copy: vi.fn() }));
+vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: editor.copy }));
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/i18n", () => ({ default: { global: { t: (key: string) => key } } }));
@@ -143,14 +144,14 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-function routineFixture() {
+function routineFixture(kind: OracleRoutineKind = "FUNCTION") {
   const endpoint = { connectionId: "target", database: "tenant", schema: "Owner.With.Dot", databaseType: "oceanbase-oracle" as const, generation: 1 };
   const snapshot = { endpoint, state: "complete" as const, enumerationComplete: true, objects: [], issues: [] };
   const state = reactive(createOracleRoutineDeployment(snapshot, snapshot));
-  const object = { id: "func-F", name: "F", routineType: "FUNCTION", objectKind: "function" as const, operationType: "create" as const, selected: true };
+  const object = { id: "func-F", name: "F", routineType: kind, objectKind: "function" as const, operationType: "create" as const, selected: true };
   synchronizeOracleRoutineSelection(state, [object]);
   const identity = state.drafts[0].identity;
-  const sql = 'CREATE FUNCTION "Owner.With.Dot"."F" RETURN NUMBER AS BEGIN RETURN 1; END;';
+  const sql = kind === "FUNCTION" ? 'CREATE FUNCTION "Owner.With.Dot"."F" RETURN NUMBER AS BEGIN RETURN 1; END;' : `CREATE ${kind.replaceAll("_", " ")} "Owner.With.Dot"."F" AS END;`;
   state.drafts[0].sql = sql;
   state.plan = {
     target: endpoint,
@@ -161,6 +162,229 @@ function routineFixture() {
 }
 
 describe("SchemaDiffDeployStep Oracle routine review", () => {
+  it("reuses package editing and validation for transfer without offering a second execution or replacement of skipped kinds", async () => {
+    const { state, object, sql, identity } = routineFixture("PACKAGE_BODY");
+    const spec = { ...identity, kind: "PACKAGE" as const };
+    const material = { version: { identity: spec, objectId: "spec", status: "VALID", lastDdlTime: "1" }, source: "complete specification", sourceComplete: true, dependencies: [], dependenciesComplete: true, issues: [] };
+    state.source = { ...state.source, objects: [material] };
+    state.target = { ...state.target, objects: [material] };
+    const validate = vi.fn();
+    const { container } = await mountDeployStep({ deploySql: sql, selectedObjects: [object], databaseType: "oracle", routineDeployment: state, packageTransfer: true, onValidateRoutines: validate });
+    expect(container.textContent).not.toContain("diff.deployToServer");
+    expect(container.textContent).not.toContain("diff.backToResult");
+    expect(container.textContent).not.toContain("diff.packageAddSpecification");
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>("button")];
+    buttons.find((button) => button.textContent?.trim() === "diff.routineValidate")!.click();
+    expect(validate).toHaveBeenCalledOnce();
+    expect(container.querySelector('input[type="radio"][value="target"]')).not.toBeNull();
+    state.target = { ...state.target, objects: [] };
+    await nextTick();
+    expect(container.textContent).toContain("diff.packageAddSpecification");
+  });
+
+  it("offers an explicit manual target-draft review for cross-product packages without enabling deployment", async () => {
+    const { state, object, sql } = routineFixture("PACKAGE");
+    state.source = { ...state.source, endpoint: { ...state.source.endpoint, databaseType: "oracle" } };
+    const { container } = await mountDeployStep({ deploySql: sql, selectedObjects: [object], databaseType: "oceanbase-oracle", routineDeployment: state, canExecute: false, onReviewPackageTarget: (id: string) => reviewOraclePackageTargetDraft(state, id) });
+    expect(container.textContent).toContain("oracle → oceanbase-oracle");
+    expect(container.textContent).toContain("diff.packageCrossProduct");
+    const review = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("diff.packageReviewTarget"))!;
+    expect(state.drafts[0].reviewedTargetDraft).not.toBe(true);
+    review.click();
+    await nextTick();
+    expect(state.drafts[0].reviewedTargetDraft).toBe(true);
+    expect(state.plan).toBeNull();
+    const deploy = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("diff.deployToServer"))!;
+    expect(deploy.disabled).toBe(true);
+  });
+
+  it("requires an explicit body choice, retains target body as a draft, and invalidates confirmation when its contract changes", async () => {
+    const { state, object, sql, identity } = routineFixture("PACKAGE");
+    const bodyIdentity = { ...identity, kind: "PACKAGE_BODY" as const };
+    state.drafts[0].action = "replace";
+    state.target = { ...state.target, objects: [{ version: { identity: bodyIdentity, objectId: "2", status: "VALID", lastDdlTime: "1" }, source: "complete target body", sourceComplete: true, dependencies: [], dependenciesComplete: true, issues: [] }] };
+    const { container } = await mountDeployStep({
+      deploySql: sql,
+      selectedObjects: [object],
+      databaseType: "oceanbase-oracle",
+      routineDeployment: state,
+      onIncludePackageCompanion: (id: string, source: "source" | "target") => includeOraclePackageCompanion(state, id, source),
+      onUpdatePackageOptions: (id: string, options: Parameters<typeof editOraclePackageOptions>[2]) => editOraclePackageOptions(state, id, options),
+    });
+    expect(state.drafts).toHaveLength(1);
+    const confirm = [...container.querySelectorAll<HTMLLabelElement>("label")].find((label) => label.textContent?.includes("diff.packageConfirmImpact"))!.querySelector<HTMLInputElement>("input")!;
+    expect(confirm.checked).toBe(false);
+    confirm.checked = true;
+    confirm.dispatchEvent(new Event("change"));
+    await nextTick();
+    expect(state.drafts[0].confirmPackagePair).toBe(true);
+    const retain = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("diff.packageRebuildTargetBody"))!;
+    retain.click();
+    await nextTick();
+    expect(state.drafts).toHaveLength(2);
+    expect(state.drafts[1]).toMatchObject({ identity: bodyIdentity, packageBodySource: "target", action: "replace" });
+    expect(state.drafts[0].confirmPackagePair).toBe(false);
+    expect(state.plan).toBeNull();
+    const original = [...container.querySelectorAll("details")].find((detail) => detail.querySelector("summary")?.textContent === "diff.targetDdl")!;
+    expect(original.querySelector("pre")?.textContent).toBe("complete target body");
+    original.querySelector("button")!.click();
+    expect(editor.copy).toHaveBeenCalledWith("complete target body");
+    const targetContract = container.querySelector<HTMLInputElement>('input[type="radio"][value="target"]')!;
+    targetContract.checked = true;
+    targetContract.dispatchEvent(new Event("change"));
+    await nextTick();
+    expect(state.drafts[1].packageContract).toBe("target");
+  });
+
+  it("renders the Core package order and exposes recovery-only body source in the same review", async () => {
+    const { state, object, sql, identity } = routineFixture("PACKAGE");
+    const bodyIdentity = { ...identity, kind: "PACKAGE_BODY" as const };
+    const specification = state.plan!.steps[0];
+    const body = { ...specification, identity: bodyIdentity, action: "delete" as const, sql: 'DROP PACKAGE BODY "Owner.With.Dot"."F"', sourceOriginal: "complete original body" };
+    state.recoveryPlan = { ...state.plan!, steps: [body, specification] };
+    const { container } = await mountDeployStep({ deploySql: sql, selectedObjects: [object], databaseType: "oceanbase-oracle", routineDeployment: state, onSelectRoutine: (id: string) => selectOracleRoutineDraft(state, id) });
+    const rows = [...container.querySelectorAll<HTMLElement>('[role="button"]')];
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("PACKAGE BODY");
+    expect(rows[1].textContent).not.toContain("PACKAGE BODY");
+    rows[0].click();
+    await nextTick();
+    expect(state.recoveryPlan).not.toBeNull();
+    expect(state.drafts).toHaveLength(1);
+    expect(container.textContent).toContain("Owner.With.Dot.F · PACKAGE_BODY");
+    const source = [...container.querySelectorAll("details")].find((detail) => detail.querySelector("summary")?.textContent === "diff.sourceDdl")!;
+    expect(source.querySelector("pre")?.textContent).toBe("complete original body");
+    source.querySelector("button")!.click();
+    expect(editor.copy).toHaveBeenCalledWith("complete original body");
+  });
+
+  it("shows specification success separately from an invalid body, preserves its full readback, and does not locate body errors in the specification editor", async () => {
+    const { state, object, sql, endpoint, identity } = routineFixture("PACKAGE");
+    const bodyIdentity = { ...identity, kind: "PACKAGE_BODY" as const };
+    const body = 'CREATE OR REPLACE PACKAGE BODY "Owner.With.Dot"."F" AS -- 中文😀\nEND;';
+    const record: OracleRoutineOperation = {
+      operationId: "spec-success",
+      target: endpoint,
+      identity,
+      lifecycle: "terminal",
+      dispatched: true,
+      acknowledged: true,
+      error: null,
+      readback: {
+        identity,
+        state: "verified",
+        exists: true,
+        version: null,
+        source: sql,
+        definitionMatches: true,
+        issues: [],
+        compilerMessages: [],
+        packageCompanion: {
+          identity: bodyIdentity,
+          state: "invalid",
+          exists: true,
+          version: { identity: bodyIdentity, objectId: "12", status: "INVALID", lastDdlTime: "1" },
+          source: body,
+          definitionMatches: null,
+          issues: [],
+          compilerMessages: [
+            { attribute: "ERROR", line: 3, position: 12, text: "PLS-00323" },
+            { attribute: "WARNING", line: 4, position: 2, text: "unused package state" },
+          ],
+        },
+      },
+    };
+    state.drafts[0].operation = record;
+    state.plan!.steps[0].operation = record;
+    state.plan!.steps[0].issues = [];
+    const { container } = await mountDeployStep({ deploySql: sql, selectedObjects: [object], databaseType: "oceanbase-oracle", routineDeployment: state, canExecute: false });
+    expect(container.textContent).toContain("diff.routineVerified");
+    expect(container.textContent).toContain("PACKAGE BODY F · objects.invalid");
+    expect(container.textContent).toContain("ERROR 3:12 — PLS-00323");
+    expect(container.textContent).toContain("WARNING 4:2 — unused package state");
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent?.includes("PLS-00323"))).toBe(false);
+    const details = [...container.querySelectorAll("details")].find((detail) => detail.querySelector("summary")?.textContent === "diff.targetDdl · PACKAGE BODY")!;
+    expect(details.querySelector("pre")?.textContent).toBe(body);
+    details.querySelector("button")!.click();
+    expect(editor.copy).toHaveBeenCalledWith(body);
+    state.drafts[0].operation!.readback!.packageCompanion = { ...record.readback!.packageCompanion!, state: "missing", exists: false, version: null, source: null, compilerMessages: [] };
+    await nextTick();
+    expect(container.textContent).toContain("PACKAGE BODY F · objects.routineReadbackMissing");
+  });
+
+  it("does not present a VALID catalog status as complete companion verification when its source readback failed", async () => {
+    const { state, object, sql, endpoint, identity } = routineFixture("PACKAGE");
+    const companion = { ...identity, kind: "PACKAGE_BODY" as const };
+    state.drafts[0].operation = {
+      operationId: "pair-read-failed",
+      target: endpoint,
+      identity,
+      lifecycle: "terminal",
+      dispatched: true,
+      acknowledged: true,
+      error: null,
+      readback: {
+        identity,
+        state: "readback-failed",
+        exists: true,
+        source: sql,
+        version: null,
+        definitionMatches: true,
+        compilerMessages: [],
+        issues: [],
+        packageCompanion: {
+          identity: companion,
+          state: "readback-failed",
+          exists: true,
+          version: { identity: companion, objectId: "12", status: "VALID", lastDdlTime: "1" },
+          source: null,
+          definitionMatches: null,
+          compilerMessages: [],
+          issues: [{ stage: "source", code: "incomplete", message: "companion source incomplete" }],
+        },
+      },
+    };
+    const { container } = await mountDeployStep({ deploySql: sql, selectedObjects: [object], routineDeployment: state });
+    expect(container.textContent).toContain("PACKAGE BODY F · diff.routineUnverified");
+    expect(container.textContent).toContain("companion source incomplete");
+    expect(container.textContent).not.toContain("PACKAGE BODY F · VALID");
+  });
+
+  it("locates a package-body compiler position after Unicode and an omitted stored owner in the body editor", async () => {
+    const { state, object, endpoint, identity } = routineFixture("PACKAGE_BODY");
+    const stored = "PACKAGE BODY \"F\" AS FUNCTION f RETURN NUMBER IS BEGIN RETURN '😀' + missing_identifier; END f; END;";
+    const sql = `CREATE OR REPLACE ${stored.replace('"F"', '"Owner.With.Dot"."F"')}`;
+    state.drafts[0].sql = sql;
+    state.plan!.steps[0].sql = sql;
+    state.plan!.steps[0].issues = [];
+    state.drafts[0].operation = {
+      operationId: "invalid-body",
+      target: endpoint,
+      identity,
+      lifecycle: "terminal",
+      dispatched: true,
+      acknowledged: true,
+      error: null,
+      readback: {
+        identity,
+        state: "invalid",
+        exists: true,
+        source: `CREATE OR REPLACE ${stored}`,
+        version: null,
+        definitionMatches: true,
+        issues: [],
+        compilerMessages: [{ attribute: "ERROR", line: 1, position: Array.from(stored.slice(0, stored.indexOf("missing_identifier"))).length + 1, text: "package member missing" }],
+      },
+    };
+    const { container } = await mountDeployStep({ deploySql: sql, selectedObjects: [object], routineDeployment: state, databaseType: "oceanbase-oracle" });
+    const message = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("package member missing"))!;
+    expect(message.disabled).toBe(false);
+    message.click();
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(editor.dispatch).toHaveBeenCalledWith(expect.objectContaining({ selection: { anchor: sql.indexOf("missing_identifier") } }));
+  });
+
   it("keeps the editable draft and positioned issues in the existing editor, with explicit revalidation", async () => {
     const { state, object, sql } = routineFixture();
     const validate = vi.fn();

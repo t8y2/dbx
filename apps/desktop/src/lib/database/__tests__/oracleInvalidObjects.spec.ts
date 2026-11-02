@@ -141,6 +141,17 @@ describe("Oracle invalid-object SQL and mapping", () => {
     expect(() => buildOracleCompileSql("oceanbase-oracle", "APP", { name: "V", type: "VIEW" })).toThrow();
   });
 
+  it("adds only the verified OB trigger profile without changing default or unrelated compile capabilities", () => {
+    const trigger = { name: ' Tr"ig ', type: "TRIGGER" };
+    const triggerProfile = { contractVersion: 1, identityMode: "exact", engine: "oceanbase-oracle", engineVersion: "4.2.5.7_107" } as const;
+    expect(buildOracleCompileSql("oceanbase-oracle", " Owner ", trigger, { triggerProfile })).toBe('ALTER TRIGGER " Owner "." Tr""ig " COMPILE');
+    expect(() => buildOracleCompileSql("oceanbase-oracle", " Owner ", trigger)).toThrow();
+    expect(() => buildOracleCompileSql("oceanbase-oracle", " Owner ", trigger, { triggerProfile: { ...triggerProfile, engineVersion: "4.3.0" } })).toThrow();
+    expect(() => buildOracleCompileSql("oceanbase-oracle", " Owner ", trigger, { triggerProfile: { ...triggerProfile, engineVersion: undefined } })).toThrow();
+    expect(() => buildOracleCompileSql("oceanbase-oracle", " Owner ", { name: "V", type: "VIEW" }, { triggerProfile })).toThrow();
+    expect(() => buildOracleCompileSql("oceanbase-oracle", " Owner ", { name: "T", type: "TYPE" }, { triggerProfile })).toThrow();
+  });
+
   it("maps numeric error locations and keeps the database sequence", () => {
     expect(
       mapOracleObjectErrors([

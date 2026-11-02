@@ -135,7 +135,7 @@ export function serializeSettingsTransfer(settings: EditorSettings, meta: Settin
 const SETTINGS_TRANSFER_CATEGORY_ORDER: readonly SettingsTransferCategoryId[] = ["appearance", "editor", "formatter", "navigation", "data", "shortcuts", "snippets", "other"];
 
 const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readonly EditorSettingsDraftKey[]> = {
-  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "welcomePageMode", "webLogoPosition"],
+  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "fontSmoothing", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "welcomePageMode", "webLogoPosition"],
   editor: [
     "executeMode",
     "defaultTransactionMode",
@@ -147,7 +147,9 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "showLineNumbers",
     "showCurrentStatementFrame",
     "showInsertValueHints",
+    "showConnectionGroupPath",
     "autoAliasTables",
+    "batchColumnSelectionIncludeComments",
     "tableCompletionSchemaQualification",
     "insertSpaceAfterCompletion",
     "sqlServerSpaceConfirmsCompletion",
@@ -192,6 +194,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "colorizeConnectionTabsScope",
     "tabSortMode",
     "tabMaxWidth",
+    "tabDoubleClickAction",
     "tabGroupRows",
     "sidebarActivation",
     "sidebarObjectDisplay",
@@ -206,14 +209,15 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "disconnectTabHandlingMode",
     "deleteConnectionTabHandlingMode",
     "rememberConnectionDatabaseOnDelete",
+    "deepLinkConnectionConfirmMode",
     "dataTabReuseMode",
     "openDataTabsNextToActive",
+    "openTablesInDetachedWindow",
     "clickTableNavigationTarget",
     "objectBrowserAutoOpenDetailPanel",
     "sidebarObjectInfoMode",
     "sidebarAllowHorizontalScroll",
     "sidebarShowTooltips",
-    "sidebarShowUserAdmin",
     "sidebarIndent",
     "sidebarFontSize",
     "sidebarDensity",
@@ -284,10 +288,12 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "globalDateTimeDisplayFormat",
     "globalDateTimeExportFormat",
     "globalDateTimeImportFormat",
+    "globalConnectTimeoutSecs",
+    "globalQueryTimeoutSecs",
   ],
   shortcuts: ["shortcuts", "sqlShortcuts"],
   snippets: ["snippets", "snippetTriggerKey"],
-  other: ["updateDownloadSource", "updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins"],
+  other: ["updateDownloadSource", "updateChannel", "updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins"],
 };
 
 const KEY_TO_CATEGORY = new Map<string, SettingsTransferCategoryId>();
@@ -370,6 +376,7 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
   "autoAliasTables",
   "functionCompletionIncludeParams",
   "sequenceCompletionEnabled",
+  "fontSmoothing",
   "confirmDangerousSqlExecution",
   "confirmUnsavedSqlClose",
   "showColumnCommentsInHeader",
@@ -392,7 +399,6 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
   "sidebarPinDefaultDatabase",
   "sidebarAllowHorizontalScroll",
   "sidebarShowTooltips",
-  "sidebarShowUserAdmin",
   "updateNotificationsEnabled",
   "autoDownloadUpdates",
   "autoUpdateApp",

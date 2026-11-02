@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
 	"strconv"
@@ -2192,7 +2193,7 @@ func (s *server) cacheMissingIndexMetadataCapability(err error) bool {
 	switch {
 	case !s.indexKeyCountUnsupported && isUndefinedColumn(err, "indnkeyatts"):
 		s.indexKeyCountUnsupported = true
-	case !s.usePgDefaultExpression && isUndefinedFunction(err, "sys_get_expr"):
+	case !s.usePgDefaultExpression && (isUndefinedFunction(err, "sys_get_expr") || isUndefinedFunction(err, "sys_get_indexdef")):
 		s.usePgDefaultExpression = true
 	default:
 		return false
@@ -2217,7 +2218,7 @@ ix.indexrelid, %s, %s(ix.indpred, ix.indrelid), ix.indoption
 FROM %s.%s_index ix JOIN %s.%s_class t ON t.oid = ix.indrelid
 JOIN %s.%s_class i ON i.oid = ix.indexrelid JOIN %s.%s_namespace n ON n.oid = t.relnamespace
 JOIN %s.%s_am am ON am.oid = i.relam
-WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname`, keyCount, expression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+WHERE (n.nspname = %s OR lower(n.nspname) = lower(%s)) AND (t.relname = %s OR lower(t.relname) = lower(%s)) ORDER BY i.relname`, keyCount, expression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(schema), quoteLiteral(table), quoteLiteral(table))
 	rows, err := s.metadataQuery(query)
 	if err != nil && s.cacheMissingIndexMetadataCapability(err) {
 		return s.listIndexesWithoutOrdinality(catalog, prefix, schema, table)
@@ -2272,6 +2273,9 @@ WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname`, keyCount, expressio
 			name := attributes[number]
 			if number == 0 {
 				definitionFunction := kingbaseCatalogFunction(catalog, "sys_get_indexdef", "pg_get_indexdef")
+				if catalog != "pg_catalog" && s.usePgDefaultExpression {
+					definitionFunction = "pg_catalog.pg_get_indexdef"
+				}
 				query := fmt.Sprintf("SELECT %s(%d, %d, true)", definitionFunction, raw.oid, ordinal+1)
 				if err := s.requireDBQueryRow(query, &name); err != nil {
 					return nil, fmt.Errorf("failed to read index %q key %d: %w", raw.name, ordinal+1, err)
@@ -2325,7 +2329,7 @@ func (s *server) relationAttributesByNumber(catalog, prefix, schema, table strin
 	query := fmt.Sprintf(`SELECT a.attnum, a.attname
 FROM %s.%s_attribute a JOIN %s.%s_class c ON c.oid = a.attrelid
 JOIN %s.%s_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped`, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+WHERE (n.nspname = %s OR lower(n.nspname) = lower(%s)) AND (c.relname = %s OR lower(c.relname) = lower(%s)) AND a.attnum > 0 AND NOT a.attisdropped`, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(schema), quoteLiteral(table), quoteLiteral(table))
 	rows, err := s.metadataQuery(query)
 	if err != nil {
 		return nil, err
@@ -2345,6 +2349,9 @@ WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped`
 
 func kingbaseListIndexesQuery(catalog, prefix, schema, table, keyCount, expression string) string {
 	definitionFunction := kingbaseCatalogFunction(catalog, "sys_get_indexdef", "pg_get_indexdef")
+	if catalog != "pg_catalog" && strings.Contains(expression, "pg_get_expr") {
+		definitionFunction = "pg_catalog.pg_get_indexdef"
+	}
 	return fmt.Sprintf(`SELECT i.relname, am.amname, ix.indisunique, ix.indisprimary,
 CASE WHEN pos.attnum = 0 THEN %s(ix.indexrelid, CAST(pos.n AS integer), true) ELSE CAST(a.attname AS text) END, pos.n,
 pos.attnum = 0, pos.n > %s, %s(ix.indpred, ix.indrelid), ix.indoption
@@ -2353,7 +2360,7 @@ JOIN %s.%s_class i ON i.oid = ix.indexrelid JOIN %s.%s_namespace n ON n.oid = t.
 JOIN %s.%s_am am ON am.oid = i.relam
 JOIN unnest(ix.indkey) WITH ORDINALITY AS pos(attnum,n) ON true
 LEFT JOIN %s.%s_attribute a ON a.attrelid = t.oid AND a.attnum = pos.attnum
-WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname, pos.n`, definitionFunction, keyCount, expression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+WHERE (n.nspname = %s OR lower(n.nspname) = lower(%s)) AND (t.relname = %s OR lower(t.relname) = lower(%s)) ORDER BY i.relname, pos.n`, definitionFunction, keyCount, expression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(schema), quoteLiteral(table), quoteLiteral(table))
 }
 
 func kingbaseCatalogFunction(catalog, sysFunction, postgresFunction string) string {
@@ -3204,21 +3211,100 @@ func (s *server) effectiveSchema(schema string) (string, error) {
 func (s *server) primaryKeys(schema, table string) (map[string]bool, error) {
 	query := `SELECT kcu.column_name FROM information_schema.table_constraints tc
 JOIN information_schema.key_column_usage kcu ON kcu.constraint_schema=tc.constraint_schema AND kcu.constraint_name=tc.constraint_name AND kcu.table_schema=tc.table_schema AND kcu.table_name=tc.table_name
-WHERE tc.table_schema=` + quoteLiteral(schema) + ` AND tc.table_name=` + quoteLiteral(table) + ` AND tc.constraint_type='PRIMARY KEY' ORDER BY kcu.ordinal_position`
+WHERE (tc.table_schema=` + quoteLiteral(schema) + ` OR lower(tc.table_schema)=lower(` + quoteLiteral(schema) + `))
+  AND (tc.table_name=` + quoteLiteral(table) + ` OR lower(tc.table_name)=lower(` + quoteLiteral(table) + `))
+  AND tc.constraint_type='PRIMARY KEY' ORDER BY kcu.ordinal_position`
 	rows, err := s.metadataQuery(query)
+	result := map[string]bool{}
 	if err != nil {
-		return nil, err
+		log.Printf("[kingbase-go][primaryKeys] information_schema query failed: schema=%q table=%q err=%v", schema, table, err)
+	} else {
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return nil, err
+			}
+			result[strings.ToLower(name)] = true
+		}
+		if err := rows.Err(); err != nil {
+			log.Printf("[kingbase-go][primaryKeys] information_schema query failed: schema=%q table=%q err=%v", schema, table, err)
+		}
+	}
+	if len(result) > 0 {
+		return result, nil
+	}
+	s.appendCatalogPrimaryKeys(result, schema, table)
+	return result, nil
+}
+
+// appendCatalogPrimaryKeys recovers primary keys from the system catalog when
+// information_schema reports none, e.g. in MySQL-compatibility modes. indkey
+// spans key and INCLUDE columns, so only positions up to indnkeyatts count and
+// keep declaration order; older servers fall back to indnatts (they predate
+// INCLUDE columns) or to a plain ANY membership without WITH ORDINALITY.
+func (s *server) appendCatalogPrimaryKeys(result map[string]bool, schema, table string) {
+	catalog, prefix := "sys_catalog", "sys"
+	if s.mode.postgresCatalog {
+		catalog, prefix = "pg_catalog", "pg"
+	}
+	rows, err := s.metadataQuery(s.primaryKeysCatalogQuery(catalog, prefix, schema, table))
+	if err != nil {
+		retry := false
+		if !s.indexOrdinalityUnsupported && isUnsupportedWithOrdinality(err) {
+			s.indexOrdinalityUnsupported = true
+			retry = true
+		} else if s.cacheMissingIndexMetadataCapability(err) {
+			retry = true
+		}
+		if !retry {
+			log.Printf("[kingbase-go][primaryKeys] catalog fallback query failed: schema=%q table=%q err=%v", schema, table, err)
+			return
+		}
+		rows, err = s.metadataQuery(s.primaryKeysCatalogQuery(catalog, prefix, schema, table))
+		if err != nil {
+			log.Printf("[kingbase-go][primaryKeys] catalog fallback query failed: schema=%q table=%q err=%v", schema, table, err)
+			return
+		}
 	}
 	defer rows.Close()
-	result := map[string]bool{}
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			return nil, err
+			log.Printf("[kingbase-go][primaryKeys] catalog fallback row scan failed: schema=%q table=%q err=%v", schema, table, err)
+			return
 		}
 		result[strings.ToLower(name)] = true
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		log.Printf("[kingbase-go][primaryKeys] catalog fallback query failed: schema=%q table=%q err=%v", schema, table, err)
+	}
+}
+
+func (s *server) primaryKeysCatalogQuery(catalog, prefix, schema, table string) string {
+	predicate := fmt.Sprintf(`(n.nspname = %s OR lower(n.nspname) = lower(%s))
+  AND (t.relname = %s OR lower(t.relname) = lower(%s))`, quoteLiteral(schema), quoteLiteral(schema), quoteLiteral(table), quoteLiteral(table))
+	if s.indexOrdinalityUnsupported {
+		return fmt.Sprintf(`SELECT a.attname
+FROM %s.%s_index ix
+JOIN %s.%s_class t ON t.oid = ix.indrelid
+JOIN %s.%s_namespace n ON n.oid = t.relnamespace
+JOIN %s.%s_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+WHERE %s
+  AND ix.indisprimary
+ORDER BY a.attnum`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, predicate)
+	}
+	keyCount, _ := s.indexMetadataExpressions(catalog)
+	return fmt.Sprintf(`SELECT a.attname
+FROM %s.%s_index ix
+JOIN %s.%s_class t ON t.oid = ix.indrelid
+JOIN %s.%s_namespace n ON n.oid = t.relnamespace
+JOIN unnest(ix.indkey) WITH ORDINALITY AS k(attnum, pos) ON true
+JOIN %s.%s_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+WHERE %s
+  AND ix.indisprimary
+  AND k.pos <= %s
+ORDER BY k.pos`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, predicate, keyCount)
 }
 
 func (s *server) applyIdentityMetadata(schema, table string, columns []columnInfo) {

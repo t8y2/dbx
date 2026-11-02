@@ -90,10 +90,60 @@ describe.each(["http", "tauri"] as const)("FunctionInfo %s transport", (transpor
     if (transport === "tauri") expect(mocks.invoke).toHaveBeenLastCalledWith("prepare_oracle_routine_save", { input });
   });
 
+  it("transports package kinds and typed selection without turning BODY-only into a legacy name selection", async () => {
+    const options = { objectKinds: ["PACKAGE", "PACKAGE_BODY"] as Array<"PACKAGE" | "PACKAGE_BODY">, selectedObjects: [{ name: 'Pkg.With.Dot,"中文😀', kind: "PACKAGE_BODY" as const }] };
+    response = {
+      endpoint: { connectionId: "connection", database: "database", schema: "Owner.With.Dot", databaseType: "oceanbase-oracle", generation: 3 },
+      state: "partial",
+      enumerationComplete: true,
+      issues: [],
+      objects: [
+        {
+          version: { identity: { owner: "Owner.With.Dot", ...options.selectedObjects[0] }, objectId: "9007199254740993", status: "INVALID", lastDdlTime: "2026-10-23T01:00:00" },
+          source: null,
+          sourceComplete: false,
+          dependencies: [],
+          dependenciesComplete: true,
+          issues: [{ stage: "source", code: "permission-denied", message: "ORA-01031" }],
+        },
+      ],
+    };
+    await expect(backend.loadSchemaDiffRoutines("connection", "database", "Owner.With.Dot", undefined, options)).resolves.toEqual(response);
+    if (transport === "tauri") {
+      expect(mocks.invoke).toHaveBeenLastCalledWith("load_schema_diff_routines", { connectionId: "connection", database: "database", schema: "Owner.With.Dot", ...options });
+    } else {
+      const params = new URL(String(fetchMock.mock.calls.at(-1)![0]), "http://localhost").searchParams;
+      expect(JSON.parse(params.get("object_kinds")!)).toEqual(options.objectKinds);
+      expect(JSON.parse(params.get("selected_objects")!)).toEqual(options.selectedObjects);
+      expect(params.has("selected_routines")).toBe(false);
+    }
+  });
+
   it("uses the original operation ID and approved SQL for execution", async () => {
     response = { operationId: "bound-operation", lifecycle: "running", dispatched: true };
     await expect(backend.executeOracleRoutineOperation("bound-operation", wireProcedure.definition)).resolves.toEqual(response);
     expect(sent()).toEqual({ operationId: "bound-operation", approvedSql: wireProcedure.definition });
+  });
+
+  it("preserves explicit new-package absence protection in controlled save requests", async () => {
+    const input = { connectionId: "target", database: "tenant", identity: { owner: "Owner.With.Dot", name: "Pkg.With.Dot", kind: "PACKAGE" as const }, sql: 'CREATE PACKAGE "Owner.With.Dot"."Pkg.With.Dot" AS g NUMBER; END;', requireAbsent: true };
+    response = { operationId: "package-save", identity: input.identity, lifecycle: "prepared" };
+    await expect(backend.prepareOracleRoutineSave(input)).resolves.toEqual(response);
+    expect(transport === "tauri" ? sent().input : sent()).toEqual(input);
+  });
+
+  it("binds a Save As body request to its original verified specification operation", async () => {
+    const input = {
+      connectionId: "target",
+      database: "tenant",
+      identity: { owner: "Owner.With.Dot", name: "Pkg.With.Dot", kind: "PACKAGE_BODY" as const },
+      sql: 'CREATE PACKAGE BODY "Owner.With.Dot"."Pkg.With.Dot" AS END;',
+      requireAbsent: true,
+      prerequisiteOperationId: "verified-new-specification",
+    };
+    response = { operationId: "package-body-save", identity: input.identity, lifecycle: "prepared" };
+    await expect(backend.prepareOracleRoutineSave(input)).resolves.toEqual(response);
+    expect(transport === "tauri" ? sent().input : sent()).toEqual(input);
   });
 
   it("retains complete snapshots and final per-object drafts in both controlled-plan transports", async () => {
@@ -112,6 +162,28 @@ describe.each(["http", "tauri"] as const)("FunctionInfo %s transport", (transpor
     if (transport === "tauri") expect(mocks.invoke).toHaveBeenLastCalledWith("prepare_oracle_routine_recovery", { operationId: "original-operation" });
   });
 
+  it("preserves explicit retained-body and target-contract choices instead of broadening package selection", async () => {
+    const snapshot = { endpoint: { connectionId: "target", database: "db", schema: "Owner.With.Dot", databaseType: "oceanbase-oracle" as const, generation: 7 }, state: "complete" as const, enumerationComplete: true, objects: [], issues: [] };
+    const identity = { owner: "Owner.With.Dot", name: "Pkg.With.Dot", kind: "PACKAGE_BODY" as const };
+    const input = { source: snapshot, target: snapshot, drafts: [{ identity, action: "replace" as const, packageBodySource: "target" as const, packageContract: "target" as const, confirmPackagePair: true, sql: "retained body draft" }] };
+    response = {
+      target: snapshot.endpoint,
+      ready: false,
+      steps: [
+        {
+          identity,
+          sql: input.drafts[0].sql,
+          packageImpact: { companion: { ...identity, kind: "PACKAGE" }, companionAction: null, implicitCompanionDelete: false, retainsTargetBody: true, bodyPending: false, mayInitialize: true, grants: null },
+          issues: [{ code: "plan-preflight", message: "Refresh the complete target pair", line: 1, column: 1 }],
+        },
+      ],
+    };
+    const result = await backend.prepareOracleRoutinePlan(input);
+    expect(result).toEqual(response);
+    expect(transport === "tauri" ? sent().input : sent()).toEqual(input);
+    expect(result.steps[0]?.packageImpact?.retainsTargetBody).toBe(true);
+  });
+
   it("transports atomic operation retain and release through the same ownership boundary", async () => {
     await backend.updateOracleRoutineOperationReferences(["current"], ["abandoned"]);
     expect(sent()).toEqual({ retainOperationIds: ["current"], releaseOperationIds: ["abandoned"] });
@@ -123,6 +195,38 @@ describe.each(["http", "tauri"] as const)("FunctionInfo %s transport", (transpor
     await expect(backend.observeOracleRoutineOperation("old-operation", true)).resolves.toEqual(response);
     if (transport === "tauri") expect(mocks.invoke).toHaveBeenLastCalledWith("observe_oracle_routine_operation", { operationId: "old-operation", refreshReadback: true });
     else expect(String(fetchMock.mock.calls.at(-1)![0])).toContain("/api/schema/routine-operation?operation_id=old-operation&refresh_readback=true");
+  });
+
+  it("retains the independently identified package companion and exact source origins in operation readback", async () => {
+    const identity = { owner: "Owner.With.Dot", name: "Pkg.With.Dot", kind: "PACKAGE" as const };
+    const companion = {
+      identity: { ...identity, kind: "PACKAGE_BODY" as const },
+      state: "invalid" as const,
+      exists: true,
+      version: null,
+      source: "CREATE PACKAGE BODY ...",
+      sourceOrigin: "oceanbase-dictionary" as const,
+      definitionMatches: null,
+      compilerMessages: [{ attribute: "ERROR", line: 1, position: 0, text: "PLS-00323" }],
+      issues: [],
+    };
+    response = {
+      operation: {
+        operationId: "package-spec",
+        identity,
+        lifecycle: "terminal",
+        dispatched: true,
+        acknowledged: true,
+        error: null,
+        readback: { identity, state: "verified", exists: true, version: null, source: "CREATE PACKAGE ...", sourceOrigin: "oracle-metadata", packageCompanion: companion, definitionMatches: true, compilerMessages: [], issues: [] },
+      },
+      lifecycle: "terminal",
+      error: null,
+    };
+    const observed = await backend.observeOracleRoutineOperation("package-spec", true);
+    expect(observed).toEqual(response);
+    expect(observed.operation?.readback?.packageCompanion).toEqual(companion);
+    expect(observed.operation?.readback?.sourceOrigin).toBe("oracle-metadata");
   });
 
   it("does not guess a kind when snake_case and camelCase disagree", async () => {
@@ -151,6 +255,34 @@ describe.each(["http", "tauri"] as const)("FunctionInfo %s transport", (transpor
     await backend.generateSchemaSyncPlan({ diffs: [], functionDiffs: [diff], sequenceDiffs: [], ruleDiffs: [], ownerDiffs: [] }, { databaseType: "oracle", targetSchema: "APP" });
     expect(sent()).toMatchObject({ functionDiffs: [{ source: wireProcedure, target: { ...wireProcedure, definition: "old" } }] });
     expect((sent().functionDiffs as FunctionDiff[])[0].source).not.toHaveProperty("function_type");
+  });
+
+  it("retains explicit package diff identity and kind-scoped read issues through preparation and selected SQL requests", async () => {
+    const body = { ...procedure, name: "Pkg.With.Dot", function_type: "PACKAGE_BODY", definition: 'CREATE OR REPLACE PACKAGE BODY "S"."Pkg.With.Dot" AS END;' };
+    const targetBody = { ...body, definition: body.definition.replace('"S".', '"T".') };
+    const wireBody = { ...wireProcedure, name: body.name, functionType: "PACKAGE_BODY", definition: body.definition };
+    const wireTarget = { ...wireBody, definition: targetBody.definition };
+    const packageDiff: FunctionDiff = { type: "unreadable", name: body.name, programKind: "PACKAGE_BODY", source: body, target: targetBody };
+    const oracleRoutines = {
+      sourceDatabaseType: "oceanbase-oracle",
+      targetDatabaseType: "oceanbase-oracle",
+      sourceSchema: "S",
+      targetSchema: "T",
+      sourceEnumerationComplete: true,
+      targetEnumerationComplete: true,
+      sourceIncompleteNames: [body.name],
+      targetIncompleteNames: [],
+      objectKinds: ["PACKAGE", "PACKAGE_BODY"] as Array<"PACKAGE" | "PACKAGE_BODY">,
+      sourceIncompleteObjects: [{ name: body.name, kind: "PACKAGE_BODY" as const }],
+      targetIncompleteObjects: [],
+    };
+    response = { diffs: [], syncSql: "", functionDiffs: [{ ...packageDiff, source: wireBody, target: wireTarget }] };
+    const result = await backend.prepareSchemaDiff({ sourceTables: [], targetTables: [], sourceDetails: [], targetDetails: [], sourceFunctions: [body], targetFunctions: [targetBody], databaseType: "oceanbase-oracle", oracleRoutines });
+    expect(result.functionDiffs).toEqual([packageDiff]);
+    expect(transport === "tauri" ? sent().options : sent()).toMatchObject({ oracleRoutines });
+    response = { syncSql: "", rollbackCompleteness: "complete", missingRollbackObjects: [] };
+    await backend.generateSchemaSyncPlan({ diffs: [], functionDiffs: result.functionDiffs!, sequenceDiffs: [], ruleDiffs: [], ownerDiffs: [] }, { databaseType: "oceanbase-oracle", targetSchema: "T" });
+    expect(sent()).toMatchObject({ functionDiffs: [{ programKind: "PACKAGE_BODY", source: wireBody, target: wireTarget }] });
   });
 
   it("uses the same routine wire fields for the legacy SQL plan entry", async () => {

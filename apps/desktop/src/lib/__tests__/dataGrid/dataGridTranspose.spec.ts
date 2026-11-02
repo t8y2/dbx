@@ -3,8 +3,11 @@ import {
   averageTransposeRecordWidth,
   buildVisibleTransposeRows,
   calculateTransposeRecordWidth,
+  calculateTransposeInfoWidth,
+  defaultTransposeInfoWidth,
   defaultTransposeRecordWidth,
   minTransposeFieldWidth,
+  minTransposeInfoWidth,
   shouldAutoTransposeSingleRow,
   transposeAnchorRowIndex,
   transposeEndAlignmentSpacerWidth,
@@ -57,6 +60,23 @@ describe("dataGridTranspose density widths", () => {
     expect(compactField).toBeLessThan(standardField);
     expect(standardField).toBeLessThan(comfortableField);
     expect(transposeFieldWidth([], { density: "compact" })).toBe(minTransposeFieldWidth("compact"));
+  });
+
+  it("scales default and min transpose info width with density", () => {
+    expect(defaultTransposeInfoWidth("compact")).toBeLessThan(defaultTransposeInfoWidth("standard"));
+    expect(defaultTransposeInfoWidth("standard")).toBe(360);
+    expect(defaultTransposeInfoWidth("standard")).toBeLessThan(defaultTransposeInfoWidth("comfortable"));
+
+    expect(minTransposeInfoWidth("compact")).toBeLessThan(minTransposeInfoWidth("standard"));
+    expect(minTransposeInfoWidth("standard")).toBe(120);
+    expect(minTransposeInfoWidth("standard")).toBeLessThan(minTransposeInfoWidth("comfortable"));
+
+    const longMetadata = ["varchar(255) · Nullable: Yes · " + "a".repeat(120)];
+    const compactWidth = calculateTransposeInfoWidth(longMetadata, { density: "compact" });
+    const standardWidth = calculateTransposeInfoWidth(longMetadata, { density: "standard" });
+    expect(compactWidth).toBeLessThan(standardWidth);
+    expect(standardWidth).toBeGreaterThan(defaultTransposeInfoWidth("standard"));
+    expect(calculateTransposeInfoWidth([])).toBe(defaultTransposeInfoWidth("standard"));
   });
 
   it("keeps compact record width independent of field order", () => {

@@ -11,7 +11,7 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use crate::{
     diagnostics::health,
     http_auth::{authorize_request, HttpAuth},
-    runtime::HttpRuntimeConfig,
+    runtime::{HttpRuntimeConfig, McpTransport},
     server::{PendingSalesforceWrites, PluginToolsMode, SALESFORCE_WRITE_CONFIRM_TTL},
     DbxBackend, DbxMcpServer, McpScope, McpSessionStore,
 };
@@ -88,7 +88,8 @@ fn build_streamable_http_router(
                 plugin_tools_mode,
                 sessions.clone(),
                 pending_salesforce_writes.clone(),
-            ))
+            )
+            .with_transport(McpTransport::StreamableHttp))
         },
         session_manager,
         rmcp_config,
@@ -242,8 +243,10 @@ mod tests {
                 result: dbx_core::db::QueryResult {
                     columns: Vec::new(),
                     column_types: Vec::new(),
+                    deferred_large_value_cells: Vec::new(),
                     column_sortables: Vec::new(),
                     spatial_columns: Vec::new(),
+                    raw_key_cells: Vec::new(),
                     spatial_values: Vec::new(),
                     rows: Vec::new(),
                     affected_rows: 0,

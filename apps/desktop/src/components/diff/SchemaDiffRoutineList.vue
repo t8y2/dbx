@@ -38,6 +38,7 @@ const rows = computed(() =>
 
 function displayName(object: SchemaDiffObject, side: "source" | "target"): string {
   const name = side === "source" ? (object.sourceName ?? object.name) : (object.targetName ?? object.name);
+  if (object.routineType === "PACKAGE" || object.routineType === "PACKAGE_BODY") return `${object.routineType.replaceAll("_", " ")} ${name}`;
   return schemaDiffRoutineKey(name, object.arguments ?? "");
 }
 

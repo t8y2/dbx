@@ -75,6 +75,8 @@ fn fallback_readback(identity: &RoutineIdentity) -> RoutineReadback {
         exists: None,
         version: None,
         source: None,
+        source_origin: None,
+        package_companion: None,
         definition_matches: None,
         compiler_messages: Vec::new(),
         issues: vec![super::super::issue("capacity", RESULT_CAPACITY_ERROR)],
@@ -85,6 +87,7 @@ fn charge(
     operation: &StoredOperation,
     record: &RoutineOperationRecord,
     verified: &Option<RoutineReadback>,
+    acknowledged: &Option<RoutineReadback>,
     limit: usize,
 ) -> Result<usize, String> {
     let parts = [
@@ -94,6 +97,7 @@ fn charge(
         json_bytes(&operation.binding, limit)?,
         json_bytes(record, limit)?.max(operation.receipt_floor),
         json_bytes(verified, limit)?,
+        json_bytes(acknowledged, limit)?,
     ];
     parts.into_iter().try_fold(0usize, |total, value| {
         total.checked_add(value).filter(|total| *total <= limit).ok_or_else(|| CAPACITY_ERROR.into())
@@ -119,7 +123,12 @@ fn sweep(operations: &mut HashMap<String, StoredOperation>, additional_roots: &H
     pending.extend(keep.iter().cloned());
     while let Some(id) = pending.pop() {
         if let Some(operation) = operations.get(&id) {
-            for prerequisite in &operation.binding.prerequisite_operation_ids {
+            for prerequisite in operation
+                .binding
+                .prerequisite_operation_ids
+                .iter()
+                .chain(&operation.binding.package_effect_operation_ids)
+            {
                 if keep.insert(prerequisite.clone()) {
                     pending.push(prerequisite.clone());
                 }
@@ -216,6 +225,7 @@ impl RoutineOperationRegistry {
                 binding: request.binding,
                 record,
                 verified_post_state: None,
+                acknowledged_post_state: None,
                 owner_scope: owner_scope.clone(),
                 client_retained: false,
                 unclaimed_until: (pins == 0).then(|| Instant::now() + Duration::from_secs(60)),
@@ -223,7 +233,7 @@ impl RoutineOperationRegistry {
                 charge: 0,
                 receipt_floor: floor,
             };
-            operation.charge = charge(&operation, &operation.record, &None, self.limits.single)?;
+            operation.charge = charge(&operation, &operation.record, &None, &None, self.limits.single)?;
             candidates.push((operation, request.supersedes));
         }
         let mut operations = self.operations.lock().unwrap_or_else(|error| error.into_inner());
@@ -250,7 +260,13 @@ impl RoutineOperationRegistry {
                     let mut record = original.record.clone();
                     record.lifecycle = RoutineOperationLifecycle::Terminal;
                     record.error = Some("Approval was superseded before dispatch".into());
-                    let bytes = charge(original, &record, &original.verified_post_state, self.limits.single)?;
+                    let bytes = charge(
+                        original,
+                        &record,
+                        &original.verified_post_state,
+                        &original.acknowledged_post_state,
+                        self.limits.single,
+                    )?;
                     replacements.insert(id.clone(), (record, bytes));
                 }
             }
@@ -261,12 +277,21 @@ impl RoutineOperationRegistry {
                     return Err("Routine prerequisite approval is unavailable".into());
                 }
             }
+            if operation
+                .binding
+                .package_effect_operation_ids
+                .iter()
+                .any(|id| !new_ids.contains(id) || id == &operation.record.operation_id)
+            {
+                return Err("Package effects must refer to other approvals in the same atomic preparation batch".into());
+            }
         }
         // Preserve old inputs until admission succeeds; capacity failure must not
         // invalidate approvals which the caller can still use.
         let mut inputs = supersedes_ids;
         for (operation, _) in &candidates {
             inputs.extend(operation.binding.prerequisite_operation_ids.iter().cloned());
+            inputs.extend(operation.binding.package_effect_operation_ids.iter().cloned());
         }
         sweep(&mut operations, &inputs);
         let total = operations
@@ -307,6 +332,16 @@ impl RoutineOperationRegistry {
         id: &str,
         update: impl FnOnce(&mut RoutineOperationRecord),
     ) {
+        self.update_record_locked_with_receipt(operations, id, false, update);
+    }
+
+    pub(super) fn update_record_locked_with_receipt(
+        &self,
+        operations: &mut HashMap<String, StoredOperation>,
+        id: &str,
+        capture_receipt: bool,
+        update: impl FnOnce(&mut RoutineOperationRecord),
+    ) {
         sweep(operations, &HashSet::from([id.to_owned()]));
         let other_bytes = operations
             .iter()
@@ -323,11 +358,22 @@ impl RoutineOperationRegistry {
         } else {
             operation.verified_post_state.clone()
         };
+        let acknowledged = if capture_receipt
+            && operation.acknowledged_post_state.is_none()
+            && record.lifecycle == RoutineOperationLifecycle::Terminal
+            && record.dispatched
+            && record.acknowledged
+        {
+            record.readback.clone()
+        } else {
+            operation.acknowledged_post_state.clone()
+        };
         let limit = self.limits.single.min(self.limits.total.saturating_sub(other_bytes));
-        match charge(operation, &record, &verified, limit) {
+        match charge(operation, &record, &verified, &acknowledged, limit) {
             Ok(bytes) => {
                 operation.record = record;
                 operation.verified_post_state = verified;
+                operation.acknowledged_post_state = acknowledged;
                 operation.charge = bytes;
             }
             Err(_) => {
@@ -335,8 +381,14 @@ impl RoutineOperationRegistry {
                 record.error = Some(RESULT_CAPACITY_ERROR.into());
                 // The prepared floor reserves this bounded result, including
                 // immutable identity copies and the original verified snapshot.
-                operation.charge = charge(operation, &record, &operation.verified_post_state, self.limits.single)
-                    .expect("bounded receipt fits the approval's reserved floor");
+                operation.charge = charge(
+                    operation,
+                    &record,
+                    &operation.verified_post_state,
+                    &operation.acknowledged_post_state,
+                    self.limits.single,
+                )
+                .expect("bounded receipt fits the approval's reserved floor");
                 operation.record = record;
             }
         }
@@ -350,6 +402,32 @@ mod tests {
 
     fn request(id: &str, supersedes: Option<&str>) -> PreparedRoutineWrite {
         PreparedRoutineWrite { operation_id: id.into(), binding: binding(), supersedes: supersedes.map(str::to_owned) }
+    }
+
+    #[tokio::test]
+    async fn related_package_cycles_are_retained_from_live_roots_and_reclaimed_together() {
+        let registry = RoutineOperationRegistry::default();
+        let mut spec = request("spec", None);
+        spec.binding.identity.kind = crate::db::ObjectSourceKind::Package;
+        spec.binding.package_effect_operation_ids = vec!["body".into()];
+        let mut body = request("body", None);
+        body.binding.identity.kind = crate::db::ObjectSourceKind::PackageBody;
+        body.binding.package_effect_operation_ids = vec!["spec".into()];
+        registry.prepare_batch(vec![spec, body], 0).unwrap();
+        registry.update_references(&["body".into()], &["spec".into()]).unwrap();
+        assert!(registry.observe("spec").operation.is_some());
+        registry.update_references(&[], &["body".into()]).unwrap();
+        assert!(registry.operations.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn package_effect_ids_cannot_borrow_an_unrelated_preparation_batch() {
+        let registry = RoutineOperationRegistry::default();
+        registry.prepare_batch(vec![request("original", None)], 0).unwrap();
+        let mut body = request("body", None);
+        body.binding.package_effect_operation_ids = vec!["original".into()];
+        assert!(registry.prepare_batch(vec![body], 0).is_err());
+        assert!(registry.observe("original").operation.is_some());
     }
 
     #[tokio::test]
@@ -530,6 +608,44 @@ mod tests {
         assert!(!operation.record.verified());
         assert_eq!(operation.verified_post_state.as_ref().unwrap().source.as_deref(), Some("expected source"));
         assert!(operation.charge <= before);
+    }
+
+    #[test]
+    fn recovery_keeps_acknowledged_invalid_post_state_instead_of_later_observations() {
+        let registry = RoutineOperationRegistry::default();
+        let record = registry.prepare(binding());
+        registry.begin(&record.operation_id, "approved SQL").unwrap();
+        registry.mark_dispatched(&record.operation_id).unwrap();
+        registry.terminal(&record.operation_id, true, None, None);
+        assert!(registry.recovery_post_state(&record.operation_id).is_err());
+        let mut original = verified_readback();
+        original.state = RoutineReadbackState::Invalid;
+        registry.terminal(&record.operation_id, true, Some(original.clone()), None);
+        let mut later = verified_readback();
+        later.source = Some("third-party definition".into());
+        registry.update_readback(&record.operation_id, later);
+        assert_eq!(registry.recovery_post_state(&record.operation_id).unwrap(), original);
+        assert_eq!(
+            registry.observe(&record.operation_id).operation.unwrap().readback.unwrap().source.as_deref(),
+            Some("third-party definition")
+        );
+    }
+
+    #[test]
+    fn observation_cannot_create_recovery_receipt_for_unknown_or_rejected_write() {
+        for rejected in [false, true] {
+            let registry = RoutineOperationRegistry::default();
+            let record = registry.prepare(binding());
+            registry.begin(&record.operation_id, "approved SQL").unwrap();
+            registry.mark_dispatched(&record.operation_id).unwrap();
+            if rejected {
+                registry.terminal(&record.operation_id, false, Some(verified_readback()), None);
+            } else {
+                registry.waiting_lost(&record.operation_id, "unknown".into());
+            }
+            registry.update_readback(&record.operation_id, verified_readback());
+            assert!(registry.recovery_post_state(&record.operation_id).is_err());
+        }
     }
 
     #[test]

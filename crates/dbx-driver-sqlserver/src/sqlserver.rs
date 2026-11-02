@@ -887,8 +887,10 @@ fn server_messages_query_result(messages: Vec<String>, start: Instant) -> Option
         QueryResult {
             columns: vec![],
             column_types: vec![],
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![],
             affected_rows: 0,
@@ -1010,8 +1012,10 @@ fn collect_first_result_finish(
         QueryResult {
             columns,
             column_types,
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns,
+            raw_key_cells: Vec::new(),
             spatial_values,
             rows,
             affected_rows: 0,
@@ -1946,8 +1950,10 @@ fn push_sqlserver_result_set(results: &mut Vec<QueryResult>, result: Option<SqlS
         results.push(QueryResult {
             columns: result.columns,
             column_types: result.column_types,
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: result.rows,
             affected_rows: 0,
@@ -2006,8 +2012,10 @@ fn push_sqlserver_ordered_events(
                     result: QueryResult {
                         columns: vec![],
                         column_types: vec![],
+                        deferred_large_value_cells: Vec::new(),
                         column_sortables: vec![],
                         spatial_columns: vec![],
+                        raw_key_cells: Vec::new(),
                         spatial_values: vec![],
                         rows: vec![],
                         affected_rows,
@@ -3372,6 +3380,7 @@ pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &st
             let cols_str = row.get::<&str, _>(1).unwrap_or("");
             let inc_str = row.get::<&str, _>(5).unwrap_or("");
             IndexInfo {
+                owner: None,
                 key_directions: Vec::new(),
                 visibility: None,
                 key_metadata_complete: false,
@@ -3578,6 +3587,7 @@ pub async fn list_triggers(
             valid: None,
             comment: None,
             created_at: None,
+            oracle_metadata: None,
             statement: row.get::<&str, _>(3).map(str::to_string),
         })
         .collect())
@@ -3894,8 +3904,10 @@ async fn execute_query_with_max_rows_inner(
             QueryResult {
                 columns: vec![],
                 column_types: Vec::new(),
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![],
                 affected_rows: result.rows_affected().iter().sum::<u64>(),
@@ -3961,8 +3973,10 @@ async fn execute_batch_with_max_rows_metadata_inner(
             QueryResult {
                 columns: vec![],
                 column_types: Vec::new(),
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![],
                 affected_rows: result.rows_affected().iter().sum::<u64>(),
@@ -4061,8 +4075,10 @@ pub async fn execute_simple_batch_with_max_rows_metadata(
             result: QueryResult {
                 columns: vec![],
                 column_types: Vec::new(),
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![],
                 affected_rows: 0,
@@ -4193,7 +4209,112 @@ fn sqlserver_balanced_transaction_batch_can_use_execute(sql: &str) -> bool {
     saw_begin && saw_commit && transaction_depth == 0
 }
 
+/// Leading keywords of T-SQL statements that are not procedure calls. A name missing
+/// here only costs the simple-query path, so the list does not need to be exhaustive.
+const SQLSERVER_NON_PROCEDURE_LEADING_KEYWORDS: &[&str] = &[
+    "ADD",
+    "ALTER",
+    "BACKUP",
+    "BEGIN",
+    "BREAK",
+    "BULK",
+    "CHECKPOINT",
+    "CLOSE",
+    "COMMIT",
+    "CONTINUE",
+    "CREATE",
+    "DBCC",
+    "DEALLOCATE",
+    "DECLARE",
+    "DELETE",
+    "DENY",
+    "DISABLE",
+    "DROP",
+    "ELSE",
+    "ENABLE",
+    "END",
+    "EXEC",
+    "EXECUTE",
+    "FETCH",
+    "GOTO",
+    "GRANT",
+    "IF",
+    "INSERT",
+    "KILL",
+    "MERGE",
+    "OPEN",
+    "PRINT",
+    "RAISERROR",
+    "RECONFIGURE",
+    "RESTORE",
+    "RETURN",
+    "REVERT",
+    "REVOKE",
+    "ROLLBACK",
+    "SAVE",
+    "SELECT",
+    "SET",
+    "SHUTDOWN",
+    "TABLE",
+    "THROW",
+    "TRUNCATE",
+    "UPDATE",
+    "USE",
+    "WAITFOR",
+    "WHILE",
+    "WITH",
+];
+
+fn skip_sqlserver_leading_trivia(sql: &str) -> &str {
+    let mut rest = sql.trim_start();
+    loop {
+        if rest.starts_with("--") {
+            rest = rest.split_once('\n').map_or("", |(_, tail)| tail).trim_start();
+        } else if rest.starts_with("/*") {
+            let mut comment_depth = 0usize;
+            let mut index = 0;
+            while index < rest.len() {
+                if rest[index..].starts_with("/*") {
+                    comment_depth += 1;
+                    index += 2;
+                } else if rest[index..].starts_with("*/") {
+                    comment_depth -= 1;
+                    index += 2;
+                    if comment_depth == 0 {
+                        break;
+                    }
+                } else {
+                    index += next_char(rest, index).len_utf8();
+                }
+            }
+            rest = rest[index..].trim_start();
+        } else {
+            return rest;
+        }
+    }
+}
+
+/// SQL Server runs a batch's first statement as a procedure call when it starts with a
+/// name instead of a keyword, so `dbo.list_users` behaves like `EXEC dbo.list_users`.
+fn sqlserver_batch_starts_with_implicit_procedure_call(sql: &str) -> bool {
+    let statements = crate::sql::split_sql_statements(sql);
+    let Some(first_statement) = statements.first() else {
+        return false;
+    };
+    let statement = skip_sqlserver_leading_trivia(first_statement);
+    // The token scan skips delimited identifiers, so `[dbo].[update]` must be recognized here.
+    if statement.starts_with(['[', '"']) {
+        return true;
+    }
+    top_level_sqlserver_tokens(statement).first().is_some_and(|token| {
+        token.start == 0 && !SQLSERVER_NON_PROCEDURE_LEADING_KEYWORDS.contains(&token.text.as_str())
+    })
+}
+
 fn sqlserver_batch_may_return_result_set(sql: &str) -> bool {
+    if sqlserver_batch_starts_with_implicit_procedure_call(sql) {
+        return true;
+    }
     crate::sql::split_sql_statements(sql).iter().any(|statement| {
         let tokens = top_level_sqlserver_tokens(statement);
         let starts_with_dml = starts_with_executable_sql_keyword(statement, &["INSERT", "UPDATE", "DELETE", "MERGE"]);
@@ -4685,8 +4806,10 @@ mod tests {
         let empty = QueryResult {
             columns: vec![],
             column_types: vec![],
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![],
             affected_rows: 0,
@@ -4711,8 +4834,10 @@ mod tests {
             QueryResult {
                 columns: vec![],
                 column_types: vec![],
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![],
                 affected_rows: 0,
@@ -4732,8 +4857,10 @@ mod tests {
         let select = QueryResult {
             columns: vec!["id".to_string()],
             column_types: vec!["int".to_string()],
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!(1)]],
             affected_rows: 0,
@@ -5591,6 +5718,35 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_implicit_procedure_calls_keep_simple_query_path() {
+        for sql in [
+            "list_users",
+            "dbo.list_users;",
+            "[dbo].[list_users]",
+            "[dbo].[update] 1",
+            "\"dbo\".\"list_users\"",
+            "dbo.list_users @id = 1",
+            "-- run it\ndbo.list_users",
+            "/* outer /* inner */ UPDATE */ dbo.list_users",
+        ] {
+            assert!(!sqlserver_batch_can_use_execute(sql), "{sql}");
+        }
+
+        for sql in [
+            "-- comment only",
+            "/* [dbo].[list_users] */ UPDATE dbo.users SET active = 0;",
+            "-- dbo.list_users\nDELETE FROM dbo.users;",
+            "TRUNCATE TABLE dbo.users;",
+            "DROP TABLE dbo.users;",
+            "SET ANSI_NULLS ON;",
+            "USE [app];",
+            "GRANT INSERT ON dbo.users TO writer;",
+        ] {
+            assert!(sqlserver_batch_can_use_execute(sql), "{sql}");
+        }
+    }
+
+    #[test]
     fn sqlserver_result_returning_batches_keep_simple_query_path() {
         assert!(!sqlserver_batch_can_use_execute("SELECT * FROM dbo.users;"));
         assert!(!sqlserver_batch_can_use_execute("EXEC dbo.list_users;"));
@@ -5991,8 +6147,10 @@ mod tests {
         let context = completion_context_from_query_result(QueryResult {
             columns: vec!["default_schema".to_string(), "engine_edition".to_string()],
             column_types: vec![],
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!("app_user"), serde_json::json!("8")]],
             affected_rows: 0,
@@ -6554,8 +6712,10 @@ mod tests {
         let mut result = QueryResult {
             columns: vec!["id".to_string(), "__dbx_row_num".to_string()],
             column_types: vec!["int".to_string(), "bigint".to_string()],
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!(42), serde_json::json!(101)]],
             affected_rows: 0,

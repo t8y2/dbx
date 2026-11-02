@@ -9,6 +9,8 @@ use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Location, TokenWithSpan};
 use std::collections::BTreeMap;
 
+mod package;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OracleDraftName {
@@ -23,6 +25,42 @@ pub struct OracleDraftParameter {
     pub mode: String,
     pub data_type: String,
     pub has_default: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_expression: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OracleDraftPackageMemberKind {
+    Variable,
+    Constant,
+    Exception,
+    Procedure,
+    Function,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleDraftPackageMember {
+    pub name: OracleDraftName,
+    pub kind: OracleDraftPackageMemberKind,
+    pub parameters: Vec<OracleDraftParameter>,
+    pub return_type: Option<String>,
+    pub data_type: Option<String>,
+    pub default_expression: Option<String>,
+    pub public: bool,
+    pub defined: bool,
+    pub line: u64,
+    pub column: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleDraftPackageCall {
+    pub caller: Option<OracleDraftName>,
+    pub callee: OracleDraftName,
+    pub line: u64,
+    pub column: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -32,6 +70,7 @@ pub enum OracleDraftReferenceRole {
     Value,
     Function,
     Procedure,
+    Exception,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +81,10 @@ pub struct OracleDraftReference {
     pub argument_writable: Vec<bool>,
     pub query: Option<usize>,
     pub local_binding: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_binding: Option<OracleDraftPackageMemberKind>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub out_of_scope_binding: bool,
     pub line: u64,
     pub column: u64,
 }
@@ -70,6 +113,12 @@ pub struct OracleRoutineDraftAnalysis {
     pub references: Vec<OracleDraftReference>,
     pub queries: Vec<OracleDraftQuery>,
     pub issues: Vec<OracleDraftIssue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_members: Vec<OracleDraftPackageMember>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_calls: Vec<OracleDraftPackageCall>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_package_initialization: bool,
 }
 
 fn canonical(ident: &Ident) -> String {
@@ -97,6 +146,7 @@ struct Analysis<'a> {
     bindings: BTreeMap<String, bool>,
     output: OracleRoutineDraftAnalysis,
     issue_position: Option<Location>,
+    package_context: Option<package::PackageContext>,
 }
 
 impl Analysis<'_> {
@@ -256,12 +306,25 @@ impl Analysis<'_> {
         if parts.is_empty() || parts.len() > 3 {
             return Err("Reference does not have an exact supported identity".into());
         }
-        let local = self.bindings.get(&canonical(&parts[0])).copied();
+        self.check_package_lexical_reference(parts, &role, query)?;
+        let mut local = self.bindings.get(&canonical(&parts[0])).copied();
+        let mut package_binding = None;
+        if query.is_some() && role == OracleDraftReferenceRole::Value && self.package_local_exception(parts) {
+            package_binding = Some(OracleDraftPackageMemberKind::Exception);
+            local = None;
+        }
         if query.is_none() && local.is_some() {
             if parts.len() == 1 && role == OracleDraftReferenceRole::Value {
                 return Ok(());
             }
             return Err("A local scalar shadows this call or qualifier; use an unambiguous static target name".into());
+        }
+        if local.is_none() && package_binding.is_none() {
+            match self.package_reference(parts, &role, &arguments, query)? {
+                package::PackageReference::Closed => return Ok(()),
+                package::PackageReference::SqlValue(kind) => package_binding = Some(kind),
+                package::PackageReference::External => {}
+            }
         }
         self.output.references.push(OracleDraftReference {
             parts: parts.iter().map(name).collect(),
@@ -269,13 +332,23 @@ impl Analysis<'_> {
             argument_writable: arguments,
             query,
             local_binding: local,
+            package_binding,
+            out_of_scope_binding: query.is_some()
+                && local.is_none()
+                && package_binding.is_none()
+                && self.package_exited_binding(parts),
             line: parts[0].span.start.line,
             column: parts[0].span.start.column,
         });
         Ok(())
     }
     fn writable(&self, expr: &Expr) -> bool {
-        matches!(expr, Expr::Identifier(ident) if self.bindings.get(&canonical(ident)) == Some(&true))
+        if let Expr::Identifier(ident) = expr {
+            if let Some(writable) = self.bindings.get(&canonical(ident)) {
+                return *writable;
+            }
+        }
+        self.package_writable(expr)
     }
     fn call(
         &mut self,
@@ -329,6 +402,7 @@ impl Analysis<'_> {
     fn visit_expr(&mut self, expr: &Expr, query: Option<usize>) -> Result<(), String> {
         match expr {
             Expr::Value(value) if matches!(value.value, sqlparser::ast::Value::Number(_, _) | sqlparser::ast::Value::SingleQuotedString(_) | sqlparser::ast::Value::NationalStringLiteral(_) | sqlparser::ast::Value::QuoteDelimitedStringLiteral(_) | sqlparser::ast::Value::NationalQuoteDelimitedStringLiteral(_) | sqlparser::ast::Value::Boolean(_) | sqlparser::ast::Value::Null) => Ok(()),
+            Expr::Identifier(ident) if self.package_context.is_some() && ident.quote_style.is_none() && matches!(canonical(ident).as_str(), "TRUE" | "FALSE") => Ok(()),
             Expr::Identifier(ident) => self.reference(std::slice::from_ref(ident), OracleDraftReferenceRole::Value, Vec::new(), query),
             Expr::CompoundIdentifier(parts) => self.reference(parts, OracleDraftReferenceRole::Value, Vec::new(), query),
             Expr::Nested(expr) | Expr::IsNull(expr) | Expr::IsNotNull(expr) => self.visit_expr(expr, query),
@@ -345,6 +419,12 @@ impl Analysis<'_> {
         Ok(())
     }
     fn parse(&mut self) -> Result<(), String> {
+        if self.input.object_type == ObjectSourceKind::Package {
+            return package::parse_specification(self);
+        }
+        if self.input.object_type == ObjectSourceKind::PackageBody {
+            return Err("Package body analysis requires its complete final specification".into());
+        }
         self.expect_word("CREATE")?;
         if self.consume_word("OR") {
             self.expect_word("REPLACE")?;
@@ -381,6 +461,7 @@ impl Analysis<'_> {
                     mode: mode.into(),
                     data_type,
                     has_default,
+                    default_expression: None,
                 });
                 if self.consume(Token::RParen) {
                     break;
@@ -467,14 +548,20 @@ impl Analysis<'_> {
             return Ok(());
         }
         if is_word(0, "RETURN") {
-            if tokens.len() == 1 {
-                return if self.input.object_type == ObjectSourceKind::Procedure {
-                    Ok(())
-                } else {
-                    Err("A scalar function RETURN needs an expression".into())
-                };
+            if self.package_context.as_ref().is_some_and(|context| context.current_kind().is_none()) {
+                return Err("Package initialization cannot RETURN a member result".into());
             }
-            if self.input.object_type != ObjectSourceKind::Function {
+            let procedure = self
+                .package_context
+                .as_ref()
+                .and_then(|context| context.current_kind())
+                .map_or(self.input.object_type == ObjectSourceKind::Procedure, |kind| {
+                    kind == OracleDraftPackageMemberKind::Procedure
+                });
+            if tokens.len() == 1 {
+                return if procedure { Ok(()) } else { Err("A scalar function RETURN needs an expression".into()) };
+            }
+            if procedure || (self.package_context.is_none() && self.input.object_type != ObjectSourceKind::Function) {
                 return Err("A procedure RETURN cannot return a value".into());
             }
             self.expression(tokens[1..].to_vec(), None)?;
@@ -511,11 +598,23 @@ impl Analysis<'_> {
                 return Err("Assignment needs a local scalar target".into());
             };
             let ident = Ident { value: word.value.clone(), quote_style: word.quote_style, span: tokens[0].span };
-            if self.bindings.get(&canonical(&ident)) != Some(&true) {
+            if !self.writable(&Expr::Identifier(ident)) {
                 return Err("Assignment target is not a writable local scalar".into());
             }
             self.expression(tokens[2..].to_vec(), None)?;
             return Ok(());
+        }
+        if self.package_context.is_some() {
+            if let Some(assignment) = tokens.iter().position(|token| token.token == Token::Assignment) {
+                let mut parser =
+                    Parser::new(&OracleDialect {}).with_tokens_with_locations(tokens[..assignment].to_vec());
+                let target = parser.parse_expr().map_err(|error| error.to_string())?;
+                if parser.peek_token_ref().token != Token::EOF || !self.writable(&target) {
+                    return Err("Assignment target is not a writable scalar in this package scope".into());
+                }
+                self.expression(tokens[assignment + 1..].to_vec(), None)?;
+                return Ok(());
+            }
         }
         let mut parser = Parser::new(&OracleDialect {}).with_tokens_with_locations(tokens);
         let expr = parser.parse_expr().map_err(|error| error.to_string())?;
@@ -568,7 +667,7 @@ impl Analysis<'_> {
                 return Err("INTO targets must be local scalar identifiers".into());
             };
             let ident = Ident { value: word.value.clone(), quote_style: word.quote_style, span: token.span };
-            if self.bindings.get(&canonical(&ident)) != Some(&true) {
+            if !self.writable(&Expr::Identifier(ident)) {
                 return Err("INTO target is not a writable local scalar".into());
             }
             count += 1;
@@ -676,6 +775,43 @@ impl Analysis<'_> {
 }
 
 pub fn analyze_oracle_routine_draft(input: EditableObjectSourceSqlInput) -> OracleRoutineDraftAnalysis {
+    analyze_draft(input, None)
+}
+
+pub fn analyze_oracle_package_body_draft(
+    input: EditableObjectSourceSqlInput,
+    specification: EditableObjectSourceSqlInput,
+) -> OracleRoutineDraftAnalysis {
+    if input.object_type != ObjectSourceKind::PackageBody
+        || specification.object_type != ObjectSourceKind::Package
+        || input.database_type != specification.database_type
+        || input.schema != specification.schema
+        || input.name != specification.name
+    {
+        return OracleRoutineDraftAnalysis {
+            issues: vec![OracleDraftIssue {
+                code: "manual-static-correction".into(),
+                message: "The body requires its exact final specification identity and product".into(),
+                line: 1,
+                column: 1,
+            }],
+            ..Default::default()
+        };
+    }
+    let contract = analyze_oracle_routine_draft(specification);
+    if !contract.complete {
+        return contract;
+    }
+    let has_package_initialization = contract.has_package_initialization;
+    let mut analysis = analyze_draft(input, Some(contract.package_members));
+    analysis.has_package_initialization |= has_package_initialization;
+    analysis
+}
+
+fn analyze_draft(
+    input: EditableObjectSourceSqlInput,
+    contract: Option<Vec<OracleDraftPackageMember>>,
+) -> OracleRoutineDraftAnalysis {
     let mut analysis = Analysis {
         input: &input,
         tokens: Vec::new(),
@@ -683,6 +819,7 @@ pub fn analyze_oracle_routine_draft(input: EditableObjectSourceSqlInput) -> Orac
         bindings: BTreeMap::new(),
         output: OracleRoutineDraftAnalysis::default(),
         issue_position: None,
+        package_context: None,
     };
     let parsed: Result<(), String> = (|| {
         validate_oracle_routine_target_definition(input.clone(), None)?;
@@ -692,7 +829,11 @@ pub fn analyze_oracle_routine_draft(input: EditableObjectSourceSqlInput) -> Orac
             .into_iter()
             .filter(|token| !matches!(token.token, Token::Whitespace(_) | Token::EOF))
             .collect();
-        analysis.parse()
+        if let Some(contract) = contract {
+            package::parse_body(&mut analysis, contract)
+        } else {
+            analysis.parse()
+        }
     })();
     match parsed {
         Ok(()) => analysis.output.complete = true,

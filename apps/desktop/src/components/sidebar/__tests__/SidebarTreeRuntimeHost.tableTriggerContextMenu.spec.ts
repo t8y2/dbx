@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
 import { createPinia, setActivePinia } from "pinia";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import type { DatabaseType, TreeNode } from "@/types/database";
@@ -12,12 +12,20 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     ...actual,
     listPlugins: vi.fn().mockResolvedValue([]),
     executeQuery: vi.fn().mockResolvedValue({ success: true, columns: [], rows: [] }),
+    checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+    subscribeConnectionLiveness: vi.fn().mockResolvedValue(() => {}),
+    subscribeConnectionIdleClosed: vi.fn().mockResolvedValue(() => {}),
+    deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+    loadSchemaCache: vi.fn().mockResolvedValue(null),
   };
 });
 vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: vi.fn().mockResolvedValue(true) }));
 
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { finishOracleTypeManagementRequest, oracleTypeManagementRequest } from "@/lib/table/oracleTypeManagementRequest";
 
 const node = (type: TreeNode["type"], label: string, tableName?: string): TreeNode => ({
   id: `test-conn:db:${type}:${label}`,
@@ -29,8 +37,10 @@ const node = (type: TreeNode["type"], label: string, tableName?: string): TreeNo
   database: "testdb",
 });
 const mountedApps: App<Element>[] = [];
+const sourceEvents: Array<{ node: TreeNode; initialEditing: boolean }> = [];
 const labels = (items: ContextMenuItem[]): string[] => items.flatMap((item) => [...(item.label ? [item.label] : []), ...(item.children ? labels(item.children) : [])]);
 const tr = (key: string) => i18n.global.t(key);
+const unexpectedHttp: string[] = [];
 
 async function mountHost(dbType: DatabaseType = "firebird", treeNodes: TreeNode[] = []) {
   const pinia = createPinia();
@@ -38,10 +48,9 @@ async function mountHost(dbType: DatabaseType = "firebird", treeNodes: TreeNode[
   const store = useConnectionStore();
   store.treeNodes = treeNodes;
   store.connections = [{ id: "test-conn", name: "TestDB", db_type: dbType, driver_profile: dbType, host: "localhost", port: 3050, username: "sysdba", password: "masterkey" }];
-  vi.spyOn(store, "ensureConnected").mockResolvedValue(undefined as any);
-  vi.spyOn(store, "refreshTreeNode").mockResolvedValue(undefined as any);
+  store.connectedIds.add("test-conn");
   const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
-  const root = defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: node("connection", "TestDB"), depth: 0 }) });
+  const root = defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: node("connection", "TestDB"), depth: 0, "onOpen-object-source": (sourceNode: TreeNode, initialEditing: boolean) => sourceEvents.push({ node: sourceNode, initialEditing }) }) });
   const container = document.createElement("div");
   document.body.appendChild(container);
   const app = createApp(root);
@@ -52,14 +61,100 @@ async function mountHost(dbType: DatabaseType = "firebird", treeNodes: TreeNode[
   await nextTick();
   await new Promise((resolve) => setTimeout(resolve, 0));
   await nextTick();
-  return host.value as { buildContextMenu(node: TreeNode): ContextMenuItem[] };
+  return host.value as { buildContextMenu(node: TreeNode): ContextMenuItem[]; handleRowKeydown(node: TreeNode, event: KeyboardEvent): void };
 }
 
 describe("Table trigger context menu", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    unexpectedHttp.length = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      unexpectedHttp.push(String(input));
+      throw new Error(`Unexpected HTTP boundary: ${String(input)}`);
+    });
+  });
   afterEach(() => {
+    const pending = oracleTypeManagementRequest.value;
+    if (pending) finishOracleTypeManagementRequest(pending.id, { complete: false, target: pending.target, operation: pending.operation });
     vi.clearAllMocks();
     for (const app of mountedApps.splice(0)) app.unmount();
     document.body.innerHTML = "";
+    sourceEvents.length = 0;
+    vi.restoreAllMocks();
+    expect(unexpectedHttp).toEqual([]);
+  });
+
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("routes %s TYPE deletion keys to the exact managed preview without executing SQL", async (databaseType) => {
+    const host = await mountHost(databaseType);
+    const store = useConnectionStore();
+    const api = await import("@/lib/backend/api");
+    for (const type of ["type", "type-body"] as const) {
+      const selected = { ...node(type, "Type' Name"), schema: "App" };
+      store.treeNodes = [selected];
+      store.selectedTreeNodeId = selected.id;
+      store.selectedTreeNodeIds = [selected.id];
+      const event = new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true });
+      host.handleRowKeydown(selected, event);
+      await vi.waitFor(() => expect(oracleTypeManagementRequest.value?.operation).toBe(type === "type-body" ? "delete-body" : "delete-spec"));
+      const pending = oracleTypeManagementRequest.value!;
+      expect(pending.target).toEqual({ connectionId: "test-conn", database: "testdb", owner: "App", name: "Type' Name", databaseType });
+      expect(event.defaultPrevented).toBe(true);
+      expect(api.executeQuery).not.toHaveBeenCalled();
+      finishOracleTypeManagementRequest(pending.id, { complete: false, target: pending.target, operation: pending.operation });
+      await nextTick();
+      expect(store.treeNodes[0].id).toBe(selected.id);
+    }
+  });
+
+  it.each(["postgres", "xugu", "mysql"] as const)("does not route TYPE deletion for unsupported %s connections", async (databaseType) => {
+    const host = await mountHost(databaseType);
+    const store = useConnectionStore();
+    for (const type of ["type", "type-body"] as const) {
+      const selected = node(type, "T");
+      store.treeNodes = [selected];
+      store.selectedTreeNodeId = selected.id;
+      store.selectedTreeNodeIds = [selected.id];
+      const event = new KeyboardEvent("keydown", { key: "Delete", cancelable: true });
+      host.handleRowKeydown(selected, event);
+      expect(oracleTypeManagementRequest.value).toBeNull();
+      expect(event.defaultPrevented).toBe(false);
+    }
+  });
+
+  it("opens Oracle-family TYPE and TYPE_BODY query tabs in viewing mode before explicit editing", async () => {
+    for (const dbType of ["oracle", "oceanbase-oracle", "dameng"] as const) {
+      const host = await mountHost(dbType);
+      useSettingsStore().updateEditorSettings({ routineSourceOpenMode: "query-tab" });
+      const pendingSourceTab = vi.spyOn(useQueryStore(), "openObjectSourceTabPending").mockImplementation(() => undefined);
+
+      for (const type of ["type", "type-body"] as const) {
+        const typeNode = node(type, type === "type" ? "TYPE_OBJ" : "TYPE_OBJ_BODY");
+        const menu = host.buildContextMenu(typeNode);
+        expect(labels(menu)).not.toContain(tr("contextMenu.changeOpenMode"));
+        const sourceAction = menu.find((item) => item.label === tr("contextMenu.viewSource"));
+        await sourceAction?.action?.();
+        expect(pendingSourceTab).toHaveBeenLastCalledWith(expect.objectContaining({ connectionId: "test-conn", database: "testdb", request: expect.objectContaining({ name: typeNode.label, objectType: type === "type" ? "TYPE" : "TYPE_BODY" }), initialEditing: false }));
+      }
+      expect(pendingSourceTab).toHaveBeenCalledTimes(2);
+    }
+    expect(sourceEvents).toEqual([]);
+  });
+
+  it("preserves query-tab source routing for Xugu types and routines", async () => {
+    const host = await mountHost("xugu");
+    useSettingsStore().updateEditorSettings({ routineSourceOpenMode: "query-tab" });
+    const queryStore = useQueryStore();
+    const pendingSourceTab = vi.spyOn(queryStore, "openObjectSourceTabPending").mockImplementation(() => undefined);
+
+    const xuguTypeMenu = host.buildContextMenu(node("type", "T_XUGU"));
+    expect(labels(xuguTypeMenu)).toContain(tr("contextMenu.changeOpenMode"));
+    for (const sourceNode of [node("type", "T_XUGU"), node("procedure", "P_XUGU")]) {
+      const sourceAction = host.buildContextMenu(sourceNode).find((item) => item.label === tr("contextMenu.viewSource"));
+      await sourceAction?.action?.();
+    }
+
+    expect(pendingSourceTab).toHaveBeenCalledTimes(2);
+    expect(sourceEvents).toHaveLength(0);
   });
 
   it("exposes view source and change open mode for table triggers", async () => {

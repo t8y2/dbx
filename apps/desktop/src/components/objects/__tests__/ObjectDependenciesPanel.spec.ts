@@ -5,13 +5,13 @@ import { createI18n } from "vue-i18n";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ObjectDependenciesPanel from "../ObjectDependenciesPanel.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
-import type { ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
+import type { ObjectDetailsSection, ObjectDependencyTarget } from "@/lib/database/objectDependencyDetails";
 
 const backend = vi.hoisted(() => ({ executeQuery: vi.fn(), cancelQuery: vi.fn(async () => true), checkConnectionHealth: vi.fn(async () => undefined) }));
 vi.mock("@/lib/backend/api", async (original) => ({ ...(await original<typeof import("@/lib/backend/api")>()), ...backend }));
 const target = { connectionId: "source-connection", database: "ORCL", schema: "Original.Owner", name: "P", objectType: "PROCEDURE" as const };
 const mounted: Array<{ app: App; host: HTMLElement; pinia: Pinia }> = [];
-function mountPanel(initial: ObjectDetailsSection = "source") {
+function mountPanel(initial: ObjectDetailsSection = "source", identity: ObjectDependencyTarget = target, includeSource?: boolean, withOpen = true) {
   const pinia = createPinia();
   const connections = useConnectionStore(pinia);
   connections.connectedIds.add(target.connectionId);
@@ -24,9 +24,10 @@ function mountPanel(initial: ObjectDetailsSection = "source") {
       h(
         ObjectDependenciesPanel,
         {
-          target,
+          target: identity,
+          includeSource,
           section: section.value,
-          open: open.value,
+          ...(withOpen ? { open: open.value } : {}),
           "onUpdate:section": (value: ObjectDetailsSection) => {
             section.value = value;
           },
@@ -70,6 +71,46 @@ afterEach(() => {
 });
 
 describe("object details shared sections", () => {
+  it("opens dependency sections when optional open is omitted, while an explicit close still suppresses reads", async () => {
+    const omitted = mountPanel("dependencies", target, undefined, false);
+    await vi.waitFor(() => expect(omitted.host.textContent).toContain("Mixed.Table"));
+    expect(omitted.host.querySelector('[data-object-section="dependencies"]')).not.toBeNull();
+    const closed = mountPanel();
+    closed.open.value = false;
+    closed.section.value = "dependencies";
+    await nextTick();
+    expect(closed.host.querySelector("[data-object-details]")).toBeNull();
+    expect(backend.executeQuery).toHaveBeenCalledOnce();
+  });
+
+  it("shows foreign keys and owning objects separately in table properties without mounting a source editor", async () => {
+    const identity: ObjectDependencyTarget = { ...target, name: "Child.Table", objectType: "TABLE" };
+    const { host, onOpenObject } = mountPanel("dependencies", identity, false);
+    await vi.waitFor(() => expect(backend.executeQuery).toHaveBeenCalledTimes(1));
+    expect(host.querySelector("textarea")).toBeNull();
+    expect(button(host, "objects.source")).toBeUndefined();
+    backend.executeQuery.mockResolvedValueOnce({
+      columns: ["DIRECTION", "CONSTRAINT_OWNER", "CONSTRAINT_NAME", "CHILD_OWNER", "CHILD_NAME", "CHILD_COLUMN", "POSITION", "PARENT_OWNER", "PARENT_NAME", "PARENT_COLUMN", "COLUMN_COUNT"],
+      rows: [["REFERENCES", identity.schema, "FK", identity.schema, identity.name, "Child Column", 1, "Other.Owner", "Parent.Table", "Parent Column", 1]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+    });
+    button(host, "objectRelations.foreignKeys").click();
+    await vi.waitFor(() => expect(host.textContent).toContain("Child Column"));
+    expect(backend.executeQuery.mock.calls[1]![2]).toContain("ALL_CONSTRAINTS");
+    button(host, "Other.Owner.Parent.Table").click();
+    expect(onOpenObject).toHaveBeenLastCalledWith(identity, { name: "Parent.Table", schema: "Other.Owner", type: "table", nameQuoted: true, schemaQuoted: true });
+    backend.executeQuery.mockResolvedValueOnce({ columns: ["CHILD_OWNER", "CHILD_NAME", "CHILD_TYPE", "PARENT_OWNER", "PARENT_NAME", "PARENT_TYPE"], rows: [["Index.Owner", "Index.Name", "INDEX", identity.schema, identity.name, "TABLE"]], affected_rows: 0, execution_time_ms: 1 });
+    button(host, "objectRelations.ownership").click();
+    await vi.waitFor(() => expect(host.textContent).toContain("Index.Owner.Index.Name"));
+    button(host, "Index.Owner.Index.Name").click();
+    expect(onOpenObject).toHaveBeenLastCalledWith(identity, { name: "Index.Name", schema: "Index.Owner", type: "index", parentName: identity.name, parentSchema: identity.schema, nameQuoted: true, schemaQuoted: true, parentNameQuoted: true, parentSchemaQuoted: true });
+    button(host, "objectDependencies.dependencies").click();
+    await nextTick();
+    expect(backend.executeQuery).toHaveBeenCalledTimes(3);
+    expect(host.querySelector("textarea")).toBeNull();
+  });
+
   it("preserves the source element, draft and selection while switching and refreshing dependencies", async () => {
     const { host, section } = mountPanel();
     expect(backend.executeQuery).not.toHaveBeenCalled();

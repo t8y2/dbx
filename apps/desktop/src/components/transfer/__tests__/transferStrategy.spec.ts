@@ -1,9 +1,9 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { TransferOwnershipPreview, TransferRequest } from "@/lib/backend/api";
+import type { TransferOwnershipPreview, TransferRequest, OraclePackageTransferRequest } from "@/lib/backend/api";
 import type { ConnectionConfig } from "@/types/database";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
-import { confirmTransferWithProductionSafety, createTransferSubmission, rebuildUnavailableReason, resolveTransferStrategy, supportsTransferUpsert, transferStrategyOptions } from "../transferStrategy";
+import { confirmTransferWithProductionSafety, createTransferSubmission, rebuildUnavailableReason, resolveTransferStrategy, supportsTransferUpsert, transferStrategyOptions, type TransferPackageConfirmation } from "../transferStrategy";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -92,6 +92,79 @@ describe("transfer strategies", () => {
 });
 
 describe("transfer submission", () => {
+  function packageOptions(): OraclePackageTransferRequest {
+    const endpoint = { connectionId: "source", database: "tenant", schema: "Source", databaseType: "oracle" as const, generation: 1 };
+    return {
+      input: {
+        source: { endpoint, state: "complete", enumerationComplete: true, objects: [], issues: [] },
+        target: { endpoint: { ...endpoint, connectionId: "target", schema: "Target" }, state: "complete", enumerationComplete: true, objects: [], issues: [] },
+        drafts: [{ identity: { owner: "Target", name: "Pkg.With.Dot😀", kind: "PACKAGE_BODY" }, action: "create", sql: "original target draft" }],
+      },
+      operationIds: ["original-id"],
+    };
+  }
+
+  it("freezes nested package drafts and original IDs before asynchronous preview", async () => {
+    const gate = deferred<TransferOwnershipPreview>();
+    let captured: TransferRequest | undefined;
+    const execute = vi.fn();
+    const submission = createTransferSubmission({
+      preview: async (value) => {
+        captured = value;
+        return gate.promise;
+      },
+      confirmOwnership: async () => "preserve",
+      confirm: async () => false,
+      execute,
+    });
+    const input = request({ oraclePackages: packageOptions() });
+    const pending = submission.start(input);
+    input.oraclePackages!.input!.drafts[0].sql = "late unreviewed text";
+    input.oraclePackages!.operationIds!.push("late-id");
+    expect(captured!.oraclePackages!.input!.drafts[0].sql).toBe("original target draft");
+    expect(captured!.oraclePackages!.operationIds).toEqual(["original-id"]);
+    expect(() => {
+      captured!.oraclePackages!.input!.drafts[0].sql = "mutation";
+    }).toThrow();
+    gate.resolve(preview());
+    await expect(pending).resolves.toBe(false);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("accepts only explicit same-package companion selection and freezes the final reviewed approval", async () => {
+    const decision = deferred<TransferPackageConfirmation>();
+    const execute = vi.fn();
+    const initial = request({ objects: [{ objectType: "PACKAGE_BODY", names: ["Pkg.With.Dot😀"] }], oraclePackages: packageOptions() });
+    const confirm = vi.fn(() => decision.promise);
+    const submission = createTransferSubmission({ preview: async () => preview(), confirmOwnership: async () => "preserve", confirm, execute });
+    const pending = submission.start(initial);
+    await vi.waitFor(() => expect(confirm).toHaveBeenCalledOnce());
+    const reviewed = { objects: [...initial.objects, { objectType: "PACKAGE" as const, names: ["Pkg.With.Dot😀"] }], oraclePackages: { ...packageOptions(), operationIds: ["reviewed-body", "reviewed-spec"] } };
+    decision.resolve(reviewed);
+    await expect(pending).resolves.toBe(true);
+    reviewed.oraclePackages.operationIds.push("late-unapproved-id");
+    expect(execute).toHaveBeenCalledOnce();
+    const final = execute.mock.calls[0][0] as TransferRequest;
+    expect(final.targetConnectionId).toBe(initial.targetConnectionId);
+    expect(final.tables).toEqual(initial.tables);
+    expect(final.objects).toEqual(reviewed.objects);
+    expect(final.oraclePackages?.operationIds).toEqual(["reviewed-body", "reviewed-spec"]);
+  });
+
+  it.each([
+    [{ objectType: "PACKAGE_BODY" as const, names: ["Different"] }],
+    [{ objectType: "PACKAGE" as const, names: ["Pkg.With.Dot😀"] }],
+    [
+      { objectType: "PACKAGE_BODY" as const, names: ["Pkg.With.Dot😀"] },
+      { objectType: "VIEW" as const, names: ["unreviewed"] },
+    ],
+  ])("rejects package review that changes or omits the original scope: %j", async (...objects) => {
+    const execute = vi.fn();
+    const submission = createTransferSubmission({ preview: async () => preview(), confirmOwnership: async () => "preserve", confirm: async () => ({ objects, oraclePackages: packageOptions() }), execute });
+    await expect(submission.start(request({ objects: [{ objectType: "PACKAGE_BODY", names: ["Pkg.With.Dot😀"] }] }))).rejects.toThrow("TRANSFER_PACKAGE_REVIEW_SCOPE_CHANGED");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it("reviews backend SQL and executes the frozen request only after confirmation", async () => {
     const decision = deferred<boolean>();
     const reviewed: Array<{ request: TransferRequest; preview: TransferOwnershipPreview }> = [];

@@ -88,6 +88,6 @@ describe("DataGrid status bar layout", () => {
   });
 
   it("constrains the middle status SQL column with min-w-0 and overflow-hidden", () => {
-    expect(statusRenderSource).toContain('class="flex min-w-0 max-w-full items-center gap-1 justify-self-center overflow-hidden"');
+    expect(statusRenderSource).toContain('class="flex min-w-0 max-w-full items-center gap-1 overflow-hidden"');
   });
 });

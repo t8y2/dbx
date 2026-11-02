@@ -1,3 +1,10 @@
+import type { QueryTab } from "@/types/database";
+
+/** File identity comes from the query tab, never its editable display title. */
+export function queryTabExternalFilePath(tab: QueryTab | undefined | null): string | undefined {
+  return tab?.mode === "query" && tab.externalSqlPath?.trim() ? tab.externalSqlPath : undefined;
+}
+
 export function isSqlFilePath(path: string): boolean {
   return /\.sql$/i.test(path.trim());
 }

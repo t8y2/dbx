@@ -642,6 +642,53 @@ describe("extractSqlParameters", () => {
     ]);
   });
 
+  describe("bracketed-shell placeholders", () => {
+    it("recognizes [${name}] as a bracketed-shell parameter covering the brackets", () => {
+      const sql = "select * from t where id = [${userId}]";
+      expect(extractSqlParameterDescriptors(sql)).toEqual([{ key: "userId", name: "userId", syntax: "bracketed-shell", token: "[${userId}]" }]);
+      // Postgres must prefer bracketed-shell over its array-bracket handling too.
+      expect(extractSqlParameterDescriptors(sql, { databaseType: "postgres" })).toEqual([{ key: "userId", name: "userId", syntax: "bracketed-shell", token: "[${userId}]" }]);
+    });
+
+    it("replaces the whole [${name}] token so the brackets disappear", () => {
+      const sql = "select * from t where id = [${userId}]";
+      expect(substituteSqlParameters(sql, { userId: { kind: "number", value: "5" } })).toBe("select * from t where id = 5");
+      expect(substituteSqlParameters(sql, { userId: { kind: "string", value: "abc" } })).toBe("select * from t where id = 'abc'");
+    });
+
+    it("still recognizes bare ${name} as a shell parameter", () => {
+      expect(extractSqlParameterDescriptors("select ${name}")).toEqual([{ key: "name", name: "name", syntax: "shell", token: "${name}" }]);
+    });
+
+    it("falls back to shell recognition when the closing bracket is missing", () => {
+      const sql = "select [${name}";
+      expect(extractSqlParameterDescriptors(sql)).toEqual([{ key: "name", name: "name", syntax: "shell", token: "${name}" }]);
+      expect(substituteSqlParameters(sql, { name: { kind: "number", value: "7" } })).toBe("select [7");
+    });
+
+    it("falls back without swallowing characters when the inner name is invalid", () => {
+      const sql = "select [${bad-name}]";
+      expect(extractSqlParameterDescriptors(sql)).toEqual([]);
+      expect(substituteSqlParameters(sql, {})).toBe(sql);
+    });
+
+    it("does not recognize the syntax when bracketed-shell is disabled", () => {
+      const sql = "select * from t where id = [${userId}]";
+      expect(extractSqlParameterDescriptors(sql, { enabledSyntaxes: ["shell"] })).toEqual([]);
+      expect(substituteSqlParameters(sql, { userId: { kind: "number", value: "5" } }, { enabledSyntaxes: ["shell"] })).toBe(sql);
+      // Postgres never swallows brackets: the inner ${...} stays recognized as shell.
+      expect(extractSqlParameterDescriptors(sql, { databaseType: "postgres", enabledSyntaxes: ["shell"] })).toEqual([{ key: "userId", name: "userId", syntax: "shell", token: "${userId}" }]);
+    });
+
+    it("leaves bracketed-shell candidates inside string literals to embedded shell handling", () => {
+      const sql = "select '[${x}]' as c";
+      expect(extractSqlParameterDescriptors(sql)).toEqual([{ key: "x", name: "x", syntax: "shell", token: "${x}" }]);
+      // Existing behavior: the embedded ${x} inside the string is replaced as a
+      // string fragment while the brackets stay part of the literal.
+      expect(substituteSqlParameters(sql, { x: { kind: "string", value: "hi" } })).toBe("select '[hi]' as c");
+    });
+  });
+
   it("ignores declared SQL Server variables and system variables", () => {
     const sql = `
       declare @id int = 1, @name nvarchar(50);
@@ -1037,6 +1084,94 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters("SELECT * FROM jobs WHERE state = :LOOP", { databaseType: "mysql" })).toEqual(["LOOP"]);
     expect(extractSqlParameters("BEGIN SELECT :LOOP; END", { databaseType: "mysql" })).toEqual(["LOOP"]);
     expect(extractSqlParameters("read_loop:LOOP")).toEqual(["LOOP"]);
+  });
+
+  it.each([
+    "CREATE PROCEDURE p() run:BEGIN SELECT 1; END;",
+    "DROP PROCEDURE IF EXISTS p; CREATE DEFINER=`root`@`127.0.0.1` PROCEDURE `p`(IN in_username VARCHAR(200))\nrun:BEGIN IF in_username = '' THEN LEAVE run; END IF; END;",
+    "CREATE PROCEDURE `app`.`p`(IN amount DECIMAL(10, 2)) SQL SECURITY INVOKER COMMENT 'begin; :hidden' run:BEGIN SELECT amount; END;",
+    "CREATE /* procedure header */ PROCEDURE p() /* body label */ `run`:BEGIN SELECT 1; END;",
+    "CREATE FUNCTION f() RETURNS INT DETERMINISTIC run:BEGIN RETURN 1; END;",
+    "CREATE FUNCTION f() RETURNS SET('a', 'b') DETERMINISTIC run:BEGIN RETURN 'a'; END;",
+    "CREATE PROCEDURE p() open:BEGIN SELECT 1; END;",
+    "CREATE PROCEDURE p() close:BEGIN SELECT 1; END;",
+    "CREATE PROCEDURE p() lbl:LOOP LEAVE lbl; END LOOP lbl;",
+    "CREATE PROCEDURE p() lbl:WHILE FALSE DO SELECT 1; END WHILE lbl;",
+    "CREATE PROCEDURE p() lbl:REPEAT LEAVE lbl; UNTIL TRUE END REPEAT lbl;",
+    "DROP PROCEDURE IF EXISTS p; CREATE DEFINER=`root`@`127.0.0.1` PROCEDURE p() SQL SECURITY INVOKER COMMENT 'loop; :hidden' lbl:LOOP LEAVE lbl; END LOOP lbl;",
+    "CREATE /* routine */ PROCEDURE `app`.`p`() /* label */ `select`:WHILE FALSE DO SELECT 1; END WHILE `select`;",
+    "CREATE FUNCTION f() RETURNS SET('a', 'b') DETERMINISTIC lbl:LOOP RETURN 'a'; END LOOP lbl;",
+    "CREATE PROCEDURE p() LANGUAGE SQL security:LOOP LEAVE security; END LOOP security;",
+    "CREATE PROCEDURE p() NO SQL security:LOOP LEAVE security; END LOOP security;",
+    "CREATE PROCEDURE p() CONTAINS SQL security:LOOP LEAVE security; END LOOP security;",
+    "CREATE PROCEDURE p() SQL SECURITY INVOKER invoker:LOOP LEAVE invoker; END LOOP invoker;",
+    "CREATE PROCEDURE p() SQL SECURITY DEFINER definer:WHILE FALSE DO SELECT 1; END WHILE definer;",
+    "CREATE PROCEDURE p() READS SQL DATA data:REPEAT LEAVE data; UNTIL TRUE END REPEAT data;",
+    "CREATE PROCEDURE p() returns:LOOP LEAVE returns; END LOOP returns;",
+    "CREATE FUNCTION f() RETURNS INT DETERMINISTIC returns:LOOP RETURN 1; END LOOP returns;",
+    "CREATE PROCEDURE p() `comment`:WHILE FALSE DO SELECT 1; END WHILE `comment`;",
+    "CREATE PROCEDURE p() `language`:REPEAT LEAVE `language`; UNTIL TRUE END REPEAT `language`;",
+    "DELIMITER //\nCREATE PROCEDURE p() run:BEGIN SELECT 1; END//\nDELIMITER ;",
+  ])("preserves compact outer MySQL routine labels (#13242): %s", (sql) => {
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([]);
+    expect(substituteSqlParameters(sql, {}, { databaseType: "mysql" })).toBe(sql);
+  });
+
+  it.each([
+    ["SELECT :BEGIN, :LOOP;", "SELECT 'x', 'y';"],
+    ["CREATE PROCEDURE p() run:BEGIN SELECT :BEGIN, :LOOP; END;", "CREATE PROCEDURE p() run:BEGIN SELECT 'x', 'y'; END;"],
+    ["CREATE PROCEDURE p() SELECT :BEGIN, :LOOP;", "CREATE PROCEDURE p() SELECT 'x', 'y';"],
+    ["CREATE PROCEDURE p() SELECT:BEGIN, :LOOP;", "CREATE PROCEDURE p() SELECT'x', 'y';"],
+    ["CREATE FUNCTION f() RETURNS VARCHAR(20) RETURN CONCAT(:BEGIN, :LOOP);", "CREATE FUNCTION f() RETURNS VARCHAR(20) RETURN CONCAT('x', 'y');"],
+    ["CREATE PROCEDURE p() BEGIN SELECT 1; END; SELECT :BEGIN, :LOOP;", "CREATE PROCEDURE p() BEGIN SELECT 1; END; SELECT 'x', 'y';"],
+    ["SELECT 'CREATE PROCEDURE p()' AS label, :BEGIN, :LOOP;", "SELECT 'CREATE PROCEDURE p()' AS label, 'x', 'y';"],
+    ["/* CREATE PROCEDURE p() */ SELECT :BEGIN, :LOOP;", "/* CREATE PROCEDURE p() */ SELECT 'x', 'y';"],
+  ])("keeps real MySQL parameters named after block keywords: %s", (sql, expected) => {
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual(["BEGIN", "LOOP"]);
+    expect(substituteSqlParameters(sql, { BEGIN: { kind: "string", value: "x" }, LOOP: { kind: "string", value: "y" } }, { databaseType: "mysql" })).toBe(expected);
+  });
+
+  it.each(["LOOP", "WHILE", "REPEAT"])("keeps compact SELECT:%s as a MySQL parameter", (name) => {
+    const sql = `CREATE PROCEDURE p() SELECT:${name};`;
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([name]);
+    expect(substituteSqlParameters(sql, { [name]: { kind: "string", value: "x" } }, { databaseType: "mysql" })).toBe("CREATE PROCEDURE p() SELECT'x';");
+  });
+
+  it.each([
+    ["CREATE PROCEDURE p() COMMENT:WHILE SELECT 1;", "WHILE", { kind: "string", value: "routine comment" }, "CREATE PROCEDURE p() COMMENT'routine comment' SELECT 1;"],
+    ["CREATE PROCEDURE p() LANGUAGE:LOOP SELECT 1;", "LOOP", { kind: "raw", value: "/**/SQL" }, "CREATE PROCEDURE p() LANGUAGE/**/SQL SELECT 1;"],
+    ["CREATE PROCEDURE p() SQL SECURITY:LOOP SELECT 1;", "LOOP", { kind: "raw", value: "/**/INVOKER" }, "CREATE PROCEDURE p() SQL SECURITY/**/INVOKER SELECT 1;"],
+    ["CREATE FUNCTION f() RETURNS:REPEAT DETERMINISTIC RETURN 1;", "REPEAT", { kind: "raw", value: "/**/INT" }, "CREATE FUNCTION f() RETURNS/**/INT DETERMINISTIC RETURN 1;"],
+    ["CREATE PROCEDURE p() CONTAINS:BEGIN SELECT 1;", "BEGIN", { kind: "raw", value: "/**/SQL" }, "CREATE PROCEDURE p() CONTAINS/**/SQL SELECT 1;"],
+    ["CREATE PROCEDURE p() NO:REPEAT SELECT 1;", "REPEAT", { kind: "raw", value: "/**/SQL" }, "CREATE PROCEDURE p() NO/**/SQL SELECT 1;"],
+    ["CREATE PROCEDURE p() READS:WHILE SELECT 1;", "WHILE", { kind: "raw", value: "/**/SQL DATA" }, "CREATE PROCEDURE p() READS/**/SQL DATA SELECT 1;"],
+    ["CREATE PROCEDURE p() MODIFIES:LOOP SELECT 1;", "LOOP", { kind: "raw", value: "/**/SQL DATA" }, "CREATE PROCEDURE p() MODIFIES/**/SQL DATA SELECT 1;"],
+    ["CREATE PROCEDURE p() NOT:REPEAT SELECT 1;", "REPEAT", { kind: "raw", value: "/**/DETERMINISTIC" }, "CREATE PROCEDURE p() NOT/**/DETERMINISTIC SELECT 1;"],
+    ["CREATE PROCEDURE p() DETERMINISTIC:BEGIN;", "BEGIN", { kind: "raw", value: "/**/SELECT 1" }, "CREATE PROCEDURE p() DETERMINISTIC/**/SELECT 1;"],
+    ["CREATE PROCEDURE p() SQL:WHILE SELECT 1;", "WHILE", { kind: "raw", value: "/**/SECURITY INVOKER" }, "CREATE PROCEDURE p() SQL/**/SECURITY INVOKER SELECT 1;"],
+    ["CREATE PROCEDURE p() SQL SECURITY INVOKER:LOOP;", "LOOP", { kind: "raw", value: "/**/SELECT 1" }, "CREATE PROCEDURE p() SQL SECURITY INVOKER/**/SELECT 1;"],
+    ["CREATE PROCEDURE p() SQL SECURITY DEFINER:LOOP;", "LOOP", { kind: "raw", value: "/**/SELECT 1" }, "CREATE PROCEDURE p() SQL SECURITY DEFINER/**/SELECT 1;"],
+    ["CREATE PROCEDURE p() READS SQL DATA:WHILE;", "WHILE", { kind: "raw", value: "/**/SELECT 1" }, "CREATE PROCEDURE p() READS SQL DATA/**/SELECT 1;"],
+    ["CREATE PROCEDURE p() MODIFIES SQL DATA:REPEAT;", "REPEAT", { kind: "raw", value: "/**/SELECT 1" }, "CREATE PROCEDURE p() MODIFIES SQL DATA/**/SELECT 1;"],
+    ["CREATE FUNCTION f() RETURNS INT:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS INT/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET:LOOP DETERMINISTIC RETURN 1;", "LOOP", { kind: "raw", value: "/**/utf8mb4" }, "CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET/**/utf8mb4 DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET utf8mb4 COLLATE:WHILE DETERMINISTIC RETURN 1;", "WHILE", { kind: "raw", value: "/**/utf8mb4_general_ci" }, "CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET utf8mb4 COLLATE/**/utf8mb4_general_ci DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS VARCHAR(20) CHARACTER:REPEAT DETERMINISTIC RETURN 1;", "REPEAT", { kind: "raw", value: "/**/SET utf8mb4" }, "CREATE FUNCTION f() RETURNS VARCHAR(20) CHARACTER/**/SET utf8mb4 DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET utf8mb4:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET utf8mb4/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET utf8mb4 COLLATE utf8mb4_general_ci:REPEAT;", "REPEAT", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET utf8mb4 COLLATE utf8mb4_general_ci/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS INT SIGNED:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS INT SIGNED/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS INT UNSIGNED:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS INT UNSIGNED/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS INT ZEROFILL:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS INT ZEROFILL/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS DOUBLE PRECISION:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS DOUBLE PRECISION/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS CHAR(20) ASCII:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS CHAR(20) ASCII/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS CHAR(20) UNICODE:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS CHAR(20) UNICODE/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS CHAR(20) BYTE:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS CHAR(20) BYTE/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS CHAR VARYING:LOOP;", "LOOP", { kind: "raw", value: "(20) DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS CHAR VARYING(20) DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS NATIONAL CHAR:LOOP;", "LOOP", { kind: "raw", value: "(20) DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS NATIONAL CHAR(20) DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS NATIONAL VARCHAR:LOOP;", "LOOP", { kind: "raw", value: "(20) DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS NATIONAL VARCHAR(20) DETERMINISTIC RETURN 1;"],
+  ] as const)("keeps compact MySQL routine header parameters: %s", (sql, name, value, expected) => {
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([name]);
+    expect(substituteSqlParameters(sql, { [name]: value }, { databaseType: "mysql" })).toBe(expected);
   });
 
   it("ignores HANA SQLScript variable references", () => {

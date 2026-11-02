@@ -1025,6 +1025,13 @@ function scanSqlServerControlFlow(sql: string, from: number, to: number, databas
     if (word === "END") {
       if (next !== undefined && SQLSERVER_NON_BLOCK_END_KEYWORDS.has(next)) continue;
       openBlocks -= 1;
+      // `END TRY` must be followed by `BEGIN CATCH` within the same batch
+      // (#13051): when the carried TRY block closes right where a CATCH block
+      // opens, the batch continues instead of ending at the pair — the
+      // following `BEGIN` re-opens the depth in its own branch below.
+      if (initialOpenBlocks > 0 && openBlocks === 0 && next === "TRY" && words[index + 2] === "BEGIN" && words[index + 3] === "CATCH") {
+        continue;
+      }
       // Only the closure of the *carried* block is a statement boundary: a
       // block opened and closed inside this fragment (`IF ... BEGIN ... END`
       // in one piece) belongs to the statement that contains it. A closure
@@ -1033,8 +1040,11 @@ function scanSqlServerControlFlow(sql: string, from: number, to: number, databas
       // branch tail carries no semicolon) must still be able to replace it;
       // a closure followed by anything else is final.
       if (initialOpenBlocks > 0 && openBlocks === 0 && (closedAt === null || wordAfterClose === "ELSE")) {
-        closedAt = ends[index];
-        wordAfterClose = next ?? "";
+        // `END TRY`/`END CATCH` are two-token closers; the statement boundary
+        // sits after the pair, not between `END` and its keyword.
+        const closesPairedKeyword = next === "TRY" || next === "CATCH";
+        closedAt = closesPairedKeyword ? (ends[index + 1] ?? ends[index]) : ends[index];
+        wordAfterClose = (closesPairedKeyword ? words[index + 2] : next) ?? "";
       }
       continue;
     }
@@ -1047,26 +1057,51 @@ function scanSqlServerControlFlow(sql: string, from: number, to: number, databas
 }
 
 /**
+ * True when the first word is `BEGIN` followed by a keyword that opens a real
+ * block — a plain `BEGIN ... END`, `BEGIN TRY`, `BEGIN CATCH` — rather than a
+ * transaction or conversation, which has no matching `END` (#13051).
+ */
+function opensSqlServerTopLevelBlock(sql: string, from: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
+  const firstToken = nextSqlWordToken(sql, from, databaseType, parameterOptions);
+  if (firstToken?.word !== "BEGIN") return false;
+  const secondToken = nextSqlWordToken(sql, firstToken.end, databaseType, parameterOptions);
+  return secondToken != null && !SQLSERVER_NON_BLOCK_BEGIN_KEYWORDS.has(secondToken.word);
+}
+
+/**
  * True when `statement` is a whole T-SQL control-flow batch: an `IF`/`WHILE`
  * whose body is a `BEGIN ... END` block or whose branches are plain statements
- * with an `ELSE`. Such a batch contains no independent statements, so it must
- * stay one execution range instead of being split at the line-oriented
- * `BEGIN`/`EXEC`/`END` tokens.
+ * with an `ELSE`, or a top-level block statement (`BEGIN ... END`, `BEGIN TRY
+ * ... END TRY BEGIN CATCH ... END CATCH`). Such a batch contains no
+ * independent statements, so it must stay one execution range instead of
+ * being split at the line-oriented `BEGIN`/`EXEC`/`END` tokens.
  */
 function isSqlServerControlFlowBatch(sql: string, statement: RawStatement, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
   if (databaseType !== "sqlserver") return false;
   const firstWord = nextSqlWordToken(sql, statement.from, databaseType, parameterOptions)?.word;
-  if (firstWord !== "IF" && firstWord !== "WHILE") return false;
+  const opensTopLevelBlock = opensSqlServerTopLevelBlock(sql, statement.from, databaseType, parameterOptions);
+  if (firstWord !== "IF" && firstWord !== "WHILE" && !opensTopLevelBlock) return false;
 
   const scan = scanSqlServerControlFlow(sql, statement.from, statement.to, databaseType, parameterOptions);
-  return scan.hasControlFlowElse || (scan.sawBlockBegin && scan.openBlocks === 0);
+  if (firstWord === "IF" || firstWord === "WHILE") {
+    return scan.hasControlFlowElse || (scan.sawBlockBegin && scan.openBlocks === 0);
+  }
+  // A top-level `BEGIN` block is one batch by itself: keep it whole whether
+  // the block is balanced or still open mid-typing. `BEGIN TRAN[SACTION]` and
+  // friends never reach this branch.
+  return true;
 }
 
 /**
  * T-SQL does not end a `BEGIN ... END` block at a semicolon, so splitting on
  * every top-level `;` cuts `IF ... BEGIN ... ; ... END` batches into fragments
  * whose `BEGIN`/`EXEC`/`END` lines then look like independent statements
- * (#9336). Re-join the fragments of such a batch so it stays one range.
+ * (#9336). Top-level block statements — a plain `BEGIN ... END`, `BEGIN TRY
+ * ... END TRY` plus its mandatory `BEGIN CATCH ... END CATCH` — hit the same
+ * split and are re-joined here too (#13051); only `BEGIN` keywords that start
+ * a transaction or conversation (`BEGIN TRAN[SACTION]`, `BEGIN DISTRIBUTED
+ * TRANSACTION`, `BEGIN DIALOG CONVERSATION`) have no matching `END` and stay
+ * split.
  */
 function mergeSqlServerControlFlowBatches(sql: string, statements: RawStatement[], databaseType: DatabaseType, parameterOptions?: SqlParameterOptions): RawStatement[] {
   const merged: RawStatement[] = [];
@@ -1074,8 +1109,11 @@ function mergeSqlServerControlFlowBatches(sql: string, statements: RawStatement[
 
   while (pending.length > 0) {
     const first = pending.shift()!;
-    const firstWord = nextSqlWordToken(sql, first.from, databaseType, parameterOptions)?.word;
-    if (firstWord !== "IF" && firstWord !== "WHILE") {
+    const firstToken = nextSqlWordToken(sql, first.from, databaseType, parameterOptions);
+    const secondToken = firstToken ? nextSqlWordToken(sql, firstToken.end, databaseType, parameterOptions) : null;
+    const firstWord = firstToken?.word;
+    const opensTopLevelBlock = firstWord === "BEGIN" && secondToken != null && !SQLSERVER_NON_BLOCK_BEGIN_KEYWORDS.has(secondToken.word);
+    if (firstWord !== "IF" && firstWord !== "WHILE" && !opensTopLevelBlock) {
       merged.push(first);
       continue;
     }

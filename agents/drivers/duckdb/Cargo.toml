@@ -32,7 +32,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
-dbx-core = { path = "../../../crates/dbx-core", default-features = false, features = ["duckdb-sidecar"] }
+dbx-core = { path = "../../../crates/dbx-core", default-features = false, features = ["duckdb-sidecar", "sqlite-bundled", "test-support"] }
 sysinfo = "0.32"
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }

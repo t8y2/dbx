@@ -322,6 +322,66 @@ afterEach(() => {
   root = undefined;
 });
 
+describe("SqlFileExecutionDialog includes", () => {
+  it("shows included source paths in live statement progress and retained failure details", async () => {
+    await mountReadyDialog();
+    const gate = deferred();
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "running", { statementIndex: 1, statementSummary: "[shared/seed.sql] INSERT INTO missing VALUES(1)" }));
+      await gate.promise;
+      mocks.progressHandler?.(progress(request.executionId, "statementFailed", { statementIndex: 1, failureCount: 1, statementSummary: "[shared/seed.sql] INSERT INTO missing VALUES(1)", error: "[shared/seed.sql] no such table: missing" }));
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 1, failureCount: 1 }));
+    });
+    findButton("sqlFile.execute").click();
+    try {
+      await vi.waitFor(() => expect(root!.textContent).toContain("[shared/seed.sql] INSERT INTO missing"));
+    } finally {
+      gate.resolve();
+    }
+    await vi.waitFor(() => expect(root!.textContent).toContain("[shared/seed.sql] no such table: missing"));
+    expect(mocks.trackerTask.sqlFileFailures[0].statementSummary).toContain("[shared/seed.sql]");
+  });
+
+  it("keeps includes opt-in and submits the checked option with the entry paths", async () => {
+    await mountReadyDialog();
+    const label = Array.from(root!.querySelectorAll("label")).find((item) => item.textContent?.includes("sqlFile.resolveIncludes"))!;
+    const input = label.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(input.checked).toBe(false);
+    expect(input.disabled).toBe(false);
+    input.click();
+    await nextTick();
+    expect(root!.textContent).toContain("sqlFile.resolveIncludesHint");
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalledWith(expect.objectContaining({ resolveIncludes: true }), ["/tmp/first.sql", "/tmp/second.sql"]));
+    expect(input.disabled).toBe(true);
+  });
+
+  it("does not offer server-local includes for prepared Web uploads", async () => {
+    mocks.desktop = false;
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true, prefillPreview: { fileName: "main.sql", filePath: "/server/tmp/main.sql", sizeBytes: 9, preview: "SELECT 1;", canExecuteWithoutSelectedDatabase: true } });
+    app.mount(root);
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+    expect(root.textContent).not.toContain("sqlFile.resolveIncludes");
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalledWith(expect.objectContaining({ resolveIncludes: false }), ["/server/tmp/main.sql"]));
+  });
+
+  it("disables includes for compressed SQL files", async () => {
+    mocks.openFileDialog.mockResolvedValue(["/tmp/backup.sql.gz"]);
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(mocks.previewSqlFile).toHaveBeenCalled());
+    const label = Array.from(root.querySelectorAll("label")).find((item) => item.textContent?.includes("sqlFile.resolveIncludes"))!;
+    expect(label.querySelector<HTMLInputElement>("input")!.disabled).toBe(true);
+  });
+});
+
 describe("SqlFileExecutionDialog retries", () => {
   async function mountRestoredPreview() {
     mocks.desktop = false;
@@ -1270,5 +1330,79 @@ describe("SqlFileExecutionDialog closeOnSuccess option (#12891)", () => {
     findButton("toolbar.commit").click();
     await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("sqlFile.executeSuccess", 3000));
     expect(onOpenChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("SqlFileExecutionDialog progress visibility", () => {
+  // The scrollable body has no layout in happy-dom, so its metrics are
+  // stubbed to observe the scroll position the dialog keeps the progress
+  // area at.
+  function stubScrollBody() {
+    const element = root!.querySelector<HTMLElement>('[data-testid="sql-file-scroll-body"]');
+    expect(element).not.toBeNull();
+    const scrollTopValues: number[] = [];
+    let currentScrollTop = 0;
+    Object.defineProperty(element!, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(element!, "clientHeight", { configurable: true, value: 400 });
+    Object.defineProperty(element!, "scrollTop", {
+      configurable: true,
+      get: () => currentScrollTop,
+      set: (value: number) => {
+        currentScrollTop = value;
+        scrollTopValues.push(value);
+      },
+    });
+    return { element: element!, scrollTopValues };
+  }
+
+  it("scrolls the progress area into view when an execution starts", async () => {
+    await mountReadyDialog();
+    const { scrollTopValues } = stubScrollBody();
+
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "running"));
+    });
+    findButton("sqlFile.execute").click();
+
+    await vi.waitFor(() => expect(scrollTopValues.length).toBeGreaterThan(0));
+    expect(scrollTopValues[scrollTopValues.length - 1]).toBe(1000);
+  });
+
+  it("keeps the progress area in view while the execution reports progress", async () => {
+    await mountReadyDialog();
+    const { scrollTopValues } = stubScrollBody();
+
+    const gate = deferred();
+    mocks.executeSqlFiles.mockImplementationOnce(() => gate.promise);
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(scrollTopValues.length).toBeGreaterThan(0));
+    const afterStart = scrollTopValues.length;
+
+    mocks.progressHandler?.(progress("run-1", "statementDone", { statementIndex: 1, successCount: 1 }));
+    await vi.waitFor(() => expect(scrollTopValues.length).toBeGreaterThan(afterStart));
+
+    expect(scrollTopValues[scrollTopValues.length - 1]).toBe(1000);
+    gate.resolve();
+  });
+
+  it("leaves the scroll position to the user once they scroll up", async () => {
+    await mountReadyDialog();
+    const { element, scrollTopValues } = stubScrollBody();
+
+    const gate = deferred();
+    mocks.executeSqlFiles.mockImplementationOnce(() => gate.promise);
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(scrollTopValues.length).toBeGreaterThan(0));
+
+    element.scrollTop = 120;
+    element.dispatchEvent(new Event("scroll"));
+    const afterUserScroll = scrollTopValues.length;
+
+    mocks.progressHandler?.(progress("run-1", "statementDone", { statementIndex: 1, successCount: 1 }));
+    await nextTick();
+    await nextTick();
+
+    expect(scrollTopValues.length).toBe(afterUserScroll);
+    gate.resolve();
   });
 });

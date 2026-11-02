@@ -16,6 +16,9 @@ pub struct OracleRoutineSaveInput {
     pub identity: RoutineIdentity,
     pub sql: String,
     #[serde(default)]
+    pub require_absent: bool,
+    pub prerequisite_operation_id: Option<String>,
+    #[serde(default)]
     pub supersedes_operation_id: Option<String>,
 }
 
@@ -47,7 +50,99 @@ pub(super) async fn prepare_definition(
 ) -> Result<RoutineOperationRecord, String> {
     let config = connection_config(state, &input.connection_id).await.ok_or("Connection not found")?;
     let generation = state.connection_lifecycle_snapshot(&input.connection_id).generation();
+    let require_absent = require_absent || input.require_absent;
+    if matches!(input.identity.kind, db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody) {
+        let (database_type, _) = routine_source_origin(&config)?;
+        let target = RoutineEndpoint {
+            connection_id: input.connection_id.clone(),
+            database: input.database.clone(),
+            schema: input.identity.owner.clone(),
+            database_type,
+            generation,
+        };
+        let catalog = LiveCatalog { state, endpoint: &target, config: &config };
+        return prepare_package_definition(
+            &state.routine_operations,
+            &catalog,
+            input,
+            &target,
+            &config,
+            require_absent,
+        )
+        .await;
+    }
     prepare_bound_definition(state, input, config, generation, require_absent)
+}
+
+async fn prepare_package_definition(
+    registry: &RoutineOperationRegistry,
+    catalog: &impl RoutineCatalog,
+    input: OracleRoutineSaveInput,
+    target: &RoutineEndpoint,
+    config: &ConnectionConfig,
+    require_absent: bool,
+) -> Result<RoutineOperationRecord, String> {
+    let (database_type, origin) = routine_source_origin(config)?;
+    if input.identity.owner.is_empty()
+        || input.identity.name.is_empty()
+        || target.schema != input.identity.owner
+        || target.connection_id != input.connection_id
+        || target.database != input.database
+    {
+        return Err("A package save requires its exact original target, owner and name".into());
+    }
+    validate_oracle_routine_target_definition(
+        EditableObjectSourceSqlInput {
+            database_type,
+            object_type: input.identity.kind.clone(),
+            schema: Some(input.identity.owner.clone()),
+            name: input.identity.name.clone(),
+            source: input.sql.clone(),
+        },
+        require_absent.then_some(false),
+    )?;
+    if let Some(id) = &input.prerequisite_operation_id {
+        let specification = registry.binding_for_readback(id)?;
+        if input.identity.kind != db::ObjectSourceKind::PackageBody
+            || specification.identity.kind != db::ObjectSourceKind::Package
+            || specification.identity.owner != input.identity.owner
+            || specification.identity.name != input.identity.name
+            || specification.target != *target
+            || specification.expected_config != *config
+            || !registry.observe(id).operation.is_some_and(|record| record.verified())
+        {
+            return Err(
+                "The new package body requires its original verified specification operation on the same target".into(),
+            );
+        }
+    }
+    let compare = plan::package_save_preflight(catalog, target, &input.identity, origin).await?;
+    if require_absent {
+        if !matches!(&compare.target, plan::ExpectedRoutine::Absent(_)) {
+            return Err("The new package save target already exists; refresh without overwriting it".into());
+        }
+        if input.identity.kind == db::ObjectSourceKind::Package
+            && !matches!(&compare.package.as_ref().unwrap().pair.body, plan::ExpectedRoutine::Absent(_))
+        {
+            return Err(
+                "The new package name has a residual body; refresh without overwriting that package pair".into()
+            );
+        }
+    }
+    registry.prepare_replacing(
+        RoutineWriteBinding {
+            target: target.clone(),
+            identity: input.identity,
+            goal: RoutineReadbackGoal::Definition { sql: input.sql.clone() },
+            sql: input.sql,
+            expected_config: config.clone(),
+            require_absent,
+            compare: Some(compare),
+            prerequisite_operation_ids: input.prerequisite_operation_id.into_iter().collect(),
+            package_effect_operation_ids: Vec::new(),
+        },
+        input.supersedes_operation_id.as_deref(),
+    )
 }
 
 pub(super) fn prepare_bound_definition(
@@ -68,7 +163,14 @@ fn prepare_bound_definition_with_pins(
     require_absent: bool,
     pins: usize,
 ) -> Result<RoutineOperationRecord, String> {
+    let require_absent = require_absent || input.require_absent;
+    if input.prerequisite_operation_id.is_some() {
+        return Err("A package specification prerequisite applies only to controlled package-body saves".into());
+    }
     let (database_type, _) = routine_source_origin(&config)?;
+    if !matches!(input.identity.kind, db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function) {
+        return Err("Standalone routine saves require an exact procedure/function identity".into());
+    }
     if input.identity.owner.is_empty() || input.identity.name.is_empty() {
         return Err("A routine write requires its exact original owner and name".into());
     }
@@ -101,6 +203,7 @@ fn prepare_bound_definition_with_pins(
                 require_absent,
                 compare: None,
                 prerequisite_operation_ids: Vec::new(),
+                package_effect_operation_ids: Vec::new(),
             },
             supersedes: input.supersedes_operation_id,
         }],
@@ -157,22 +260,12 @@ async fn perform_write(state: &AppState, id: &str, binding: RoutineWriteBinding)
     };
     let (_, origin) =
         routine_source_origin(&binding.expected_config).expect("preparation accepted this routine engine");
-    if let Some(compare) = &binding.compare {
-        let mut guard = WriteGuard { registry: &state.routine_operations, id, complete: false };
-        let source = compare.source.as_ref().map(|before| LiveCatalog {
-            state,
-            endpoint: &before.endpoint,
-            config: &before.config,
-        });
-        let check = plan::verify_compare_preflight(source.as_ref(), &io, &binding.target, compare, origin).await;
-        if let Err(error) = check {
-            state.routine_operations.not_started(id, error);
-            guard.complete = true;
-            return;
-        }
-        guard.complete = true;
-    }
-    run_write(&state.routine_operations, id, &binding, &io, origin).await;
+    let source = binding.compare.as_ref().and_then(|compare| compare.source.as_ref()).map(|before| LiveCatalog {
+        state,
+        endpoint: &before.endpoint,
+        config: &before.config,
+    });
+    run_write(&state.routine_operations, id, &binding, &io, source.as_ref(), origin).await;
     drop(registered);
 }
 
@@ -208,14 +301,37 @@ pub async fn observe_oracle_routine_operation_core(
             let catalog = LiveCatalog { state, endpoint: &binding.target, config: &binding.expected_config };
             if let Ok((_, origin)) = routine_source_origin(&binding.expected_config) {
                 let current =
-                    readback::readback(&catalog, &binding.target, binding.identity.clone(), &binding.goal, origin)
-                        .await;
+                    current_readback(&state.routine_operations, operation_id, &binding, &catalog, origin).await;
                 // Updating current contents deliberately does not change lifecycle.
                 state.routine_operations.update_readback(operation_id, current);
             }
         }
     }
     state.routine_operations.observe(operation_id)
+}
+
+async fn current_readback(
+    registry: &RoutineOperationRegistry,
+    id: &str,
+    binding: &RoutineWriteBinding,
+    catalog: &impl RoutineCatalog,
+    origin: SourceOrigin,
+) -> RoutineReadback {
+    let mut current =
+        readback::readback(catalog, &binding.target, binding.identity.clone(), &binding.goal, origin).await;
+    if binding.identity.kind == db::ObjectSourceKind::PackageBody {
+        match registry
+            .package_effects_for_write(id)
+            .and_then(|effects| plan::observed_body_preflight(binding, &effects))
+        {
+            Ok(compare) => plan::validate_post_state(binding, compare.as_ref(), &mut current),
+            Err(error) => {
+                current.state = RoutineReadbackState::ReadbackFailed;
+                current.issues.push(issue("package-contract", error));
+            }
+        }
+    }
+    current
 }
 
 #[async_trait::async_trait]
@@ -313,11 +429,19 @@ async fn run_write(
     id: &str,
     binding: &RoutineWriteBinding,
     io: &impl RoutineWriteIo,
+    source: Option<&impl RoutineCatalog>,
     origin: SourceOrigin,
 ) {
     let mut guard = WriteGuard { registry, id, complete: false };
+    let mut effective_compare = None;
     let preflight: Result<(), String> = async {
         io.check_write(&binding.sql).await?;
+        let effects=registry.package_effects_for_write(id)?;
+        effective_compare=plan::effective_preflight(binding,&effects)?;
+        if matches!(binding.identity.kind,db::ObjectSourceKind::Package|db::ObjectSourceKind::PackageBody) && !effective_compare.as_ref().is_some_and(|compare|compare.package.is_some()) {
+            return Err("Package dispatch requires its frozen pair approval".into());
+        }
+        if let Some(compare)=&effective_compare {plan::verify_compare_preflight(source,io,&binding.target,compare,origin).await?;}
         if binding.require_absent {
             let before = readback::readback(
                 io,
@@ -332,6 +456,7 @@ async fn run_write(
             }
         }
         for (prerequisite, before) in registry.prerequisites_for_write(id)? {
+            let before=plan::effective_prerequisite(&prerequisite,&before,&effects)?;
             let current = readback::readback(
                 io,
                 &prerequisite.target,
@@ -341,10 +466,7 @@ async fn run_write(
             ).await;
             if current.state != RoutineReadbackState::Verified
                 || !current.issues.is_empty()
-                || current.exists != before.exists
-                || current.version != before.version
-                || current.source != before.source
-                || current.compiler_messages != before.compiler_messages
+                || !plan::same_observation(&current,&before)
             {
                 return Err(format!(
                     "Prerequisite routine {}.{} changed since its verified deployment; refresh and validate the remaining draft without replaying completed steps",
@@ -385,13 +507,16 @@ async fn run_write(
             // Receipt/terminal evidence belongs to the write itself. A later
             // metadata timeout or dropped readback must not erase that fact.
             registry.terminal(id, acknowledged, None, error.clone());
-            let current =
+            let mut current =
                 readback::readback(io, &binding.target, binding.identity.clone(), &binding.goal, origin).await;
+            plan::validate_post_state(binding, effective_compare.as_ref(), &mut current);
             registry.terminal(id, acknowledged, Some(current), error);
         }
     }
     guard.complete = true;
 }
 
+#[cfg(test)]
+mod package_tests;
 #[cfg(test)]
 mod tests;

@@ -127,7 +127,7 @@ describe("DataGrid status bar SQL and total row count layout", () => {
     expect(sqlButton?.textContent).toContain("SELECT TOP (200)");
 
     // Locate the first column containing row counts
-    const statusCol1 = host.querySelector(".grid.grid-cols-\\[max-content_minmax\\(0\\,1fr\\)_max-content\\] > div:first-child");
+    const statusCol1 = host.querySelector(".grid.grid-cols-\\[max-content_minmax\\(0\\,1fr\\)_minmax\\(0\\,max-content\\)\\] > div:first-child");
     expect(statusCol1).not.toBeNull();
     expect(statusCol1?.className).toContain("min-w-max");
     expect(statusCol1?.className).toContain("shrink-0");
@@ -141,7 +141,7 @@ describe("DataGrid status bar SQL and total row count layout", () => {
     expect(countBtn).toBeDefined();
 
     // The status SQL middle container must have overflow-hidden to prevent spilling
-    const sqlContainer = sqlButton?.closest(".justify-self-center");
+    const sqlContainer = sqlButton?.parentElement?.closest(".flex");
     expect(sqlContainer).not.toBeNull();
     expect(sqlContainer?.className).toContain("overflow-hidden");
   });
@@ -150,7 +150,7 @@ describe("DataGrid status bar SQL and total row count layout", () => {
     const { host } = mountGrid({ showStatusSql: true });
     await settle();
 
-    const statusCol1 = host.querySelector(".grid.grid-cols-\\[max-content_minmax\\(0\\,1fr\\)_max-content\\] > div:first-child");
+    const statusCol1 = host.querySelector(".grid.grid-cols-\\[max-content_minmax\\(0\\,1fr\\)_minmax\\(0\\,max-content\\)\\] > div:first-child");
     const countLabel = String(i18n.global.t("grid.calculateTotalRowsInline"));
     const countBtn = Array.from(statusCol1?.querySelectorAll("button") ?? []).find((btn) => btn.textContent?.trim() === countLabel);
     expect(countBtn).toBeDefined();
@@ -174,7 +174,7 @@ describe("DataGrid status bar SQL and total row count layout", () => {
     expect(sqlButton).toBeNull();
 
     // Row count in Col 1 is intact
-    const statusCol1 = host.querySelector(".grid.grid-cols-\\[max-content_minmax\\(0\\,1fr\\)_max-content\\] > div:first-child");
+    const statusCol1 = host.querySelector(".grid.grid-cols-\\[max-content_minmax\\(0\\,1fr\\)_minmax\\(0\\,max-content\\)\\] > div:first-child");
     expect(statusCol1?.textContent).toContain("100");
   });
 });

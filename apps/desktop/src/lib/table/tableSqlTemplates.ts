@@ -10,6 +10,8 @@ export interface TableSqlTemplateOptions {
   catalog?: string;
   database?: string;
   includeDatabaseName?: boolean;
+  /** Connection default schema; the PostgreSQL family qualifies tables outside it (#13235). */
+  defaultSchema?: string;
   /** Omit optional identifier quotes while retaining quotes required by the dialect. */
   quoteIdentifiers?: boolean;
   keywordCase?: SqlFormatterCase;
@@ -158,6 +160,7 @@ function templateTableName(options: TableSqlTemplateOptions): string {
     catalog: options.catalog,
     database: options.database,
     includeDatabaseName: options.includeDatabaseName,
+    defaultSchema: options.defaultSchema,
     quoteIdentifiers: options.quoteIdentifiers,
     schema: options.schema,
     tableName: options.tableName,

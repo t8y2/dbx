@@ -130,7 +130,7 @@ export interface AiInlineImageContext {
  * model-facing data block name the origin without inventing a second channel —
  * adding a member here must not require touching the request pipeline.
  */
-export type AiSelectionSource = "editor" | "terminal";
+export type AiSelectionSource = "editor" | "terminal" | "query-error";
 
 /**
  * A user selection attached as *context*, never as an instruction (#10058 R8).
@@ -1073,7 +1073,7 @@ export async function buildAiContext(
     databaseType,
     database,
     schema,
-    currentSql: currentCollectionName ?? tab.sql ?? "",
+    currentSql: currentCollectionName ?? options.selections?.find((selection) => selection.source === "query-error")?.content ?? tab.sql ?? "",
     lastError: extractLastError(tab.result),
     lastResultPreview: (options.includeQueryResult !== undefined ? options.includeQueryResult : options.excludeQueryResult !== undefined ? !options.excludeQueryResult : false) ? formatResultPreview(tab.result) : undefined,
     tables,

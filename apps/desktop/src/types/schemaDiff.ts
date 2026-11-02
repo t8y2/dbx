@@ -8,10 +8,17 @@ export interface OracleRoutineEndpoint {
   generation: number;
 }
 
+export type OracleRoutineKind = "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE_BODY";
+
 export interface OracleRoutineIdentity {
   owner: string;
   name: string;
-  kind: "PROCEDURE" | "FUNCTION";
+  kind: OracleRoutineKind;
+}
+
+export interface OracleRoutineReadOptions {
+  objectKinds?: OracleRoutineKind[];
+  selectedObjects?: Pick<OracleRoutineIdentity, "name" | "kind">[];
 }
 
 export interface OracleRoutineVersion {
@@ -38,6 +45,7 @@ export interface OracleRoutineDependency {
 export interface OracleRoutineObjectSnapshot {
   version: OracleRoutineVersion;
   source: string | null;
+  sourceOrigin?: "oracle-dictionary" | "oceanbase-dictionary" | "oracle-metadata";
   sourceComplete: boolean;
   dependencies: OracleRoutineDependency[];
   dependenciesComplete: boolean;
@@ -61,6 +69,9 @@ export interface OracleRoutineCompareContext {
   targetEnumerationComplete: boolean;
   sourceIncompleteNames: string[];
   targetIncompleteNames: string[];
+  objectKinds?: OracleRoutineKind[];
+  sourceIncompleteObjects?: Pick<OracleRoutineIdentity, "name" | "kind">[];
+  targetIncompleteObjects?: Pick<OracleRoutineIdentity, "name" | "kind">[];
 }
 
 export interface OracleRoutineReadback {
@@ -70,6 +81,8 @@ export interface OracleRoutineReadback {
   version: OracleRoutineVersion | null;
   source: string | null;
   definitionMatches: boolean | null;
+  sourceOrigin?: "oracle-dictionary" | "oceanbase-dictionary" | "oracle-metadata";
+  packageCompanion?: OracleRoutineReadback;
   compilerMessages: { attribute: string; line: number; position: number; text: string }[];
   issues: OracleRoutineReadIssue[];
 }
@@ -96,6 +109,8 @@ export interface OracleRoutineSaveInput {
   database: string;
   identity: OracleRoutineIdentity;
   sql: string;
+  requireAbsent?: boolean;
+  prerequisiteOperationId?: string;
   supersedesOperationId?: string;
 }
 
@@ -108,12 +123,16 @@ export interface OracleRoutinePlanDraft {
   sql?: string;
   baselineOperationId?: string;
   supersedesOperationId?: string;
+  packageBodySource?: "source" | "target";
+  packageContract?: "source" | "target";
+  confirmPackagePair?: boolean;
 }
 
 export interface OracleRoutinePlanInput {
   source: OracleRoutineSnapshot;
   target: OracleRoutineSnapshot;
   drafts: OracleRoutinePlanDraft[];
+  compactSql?: boolean;
 }
 
 export interface OracleRoutinePlanStep {
@@ -128,6 +147,17 @@ export interface OracleRoutinePlanStep {
   incomingCallers: OracleRoutineDependency[];
   issues: { code: string; message: string; line: number; column: number }[];
   operation: OracleRoutineOperation | null;
+  packageImpact?: OraclePackagePlanImpact;
+}
+
+export interface OraclePackagePlanImpact {
+  companion: OracleRoutineIdentity;
+  companionAction: OracleRoutinePlanAction | null;
+  implicitCompanionDelete: boolean;
+  retainsTargetBody: boolean;
+  bodyPending: boolean;
+  mayInitialize: boolean;
+  grants: { grants: { grantor: string; grantee: string; privilege: string; grantable: boolean }[]; complete: boolean; issue: string | null } | null;
 }
 
 export interface OracleRoutinePlan {
@@ -166,6 +196,12 @@ export interface SchemaDiffCompareOptions {
   compareCharset: boolean;
   ignoreTableNameCase: boolean;
   ignoreColumnNameCase: boolean;
+  /**
+   * Drop the persisted object metadata cache for both endpoints before loading
+   * table details, so the compare reads the live structure. Turn off to reuse
+   * cached metadata (faster, but may hide changes made outside DBX).
+   */
+  refreshMetadata: boolean;
   tableIncludePattern: string;
   tableExcludePattern: string;
   tableFilterPriority: SchemaDiffTableFilterPriority;
@@ -186,6 +222,8 @@ export interface SchemaDiffCompareOptions {
    * `[]` means restriction enabled with nothing selected.
    */
   selectedRoutines: string[] | undefined;
+  routineObjectKinds?: OracleRoutineKind[];
+  selectedRoutineObjects?: Pick<OracleRoutineIdentity, "name" | "kind">[];
   routineMappings?: SchemaDiffRoutineMapping[];
   detectRenames: boolean;
   renameThreshold: number;
@@ -254,6 +292,7 @@ export const DEFAULT_POSTGRES_OPTIONS: SchemaDiffCompareOptions = {
   compareCharset: true,
   ignoreTableNameCase: false,
   ignoreColumnNameCase: false,
+  refreshMetadata: true,
   tableIncludePattern: "",
   tableExcludePattern: "",
   tableFilterPriority: "exclude",
@@ -292,6 +331,7 @@ export const DEFAULT_MYSQL_OPTIONS: SchemaDiffCompareOptions = {
   compareCharset: true,
   ignoreTableNameCase: false,
   ignoreColumnNameCase: false,
+  refreshMetadata: true,
   tableIncludePattern: "",
   tableExcludePattern: "",
   tableFilterPriority: "exclude",
@@ -325,6 +365,8 @@ export function normalizeSchemaDiffCompareOptions(options: Partial<SchemaDiffCom
     tableMappings: Array.isArray(options?.tableMappings) ? options.tableMappings.map((mapping) => ({ ...mapping })) : defaults.tableMappings,
     routineMappings: Array.isArray(options?.routineMappings) ? options.routineMappings.map((mapping) => ({ ...mapping })) : defaults.routineMappings,
     selectedRoutines: options?.selectedRoutines === undefined ? defaults.selectedRoutines : options.selectedRoutines ? [...options.selectedRoutines] : options.selectedRoutines,
+    ...(options?.routineObjectKinds === undefined ? {} : { routineObjectKinds: [...options.routineObjectKinds] }),
+    ...(options?.selectedRoutineObjects === undefined ? {} : { selectedRoutineObjects: options.selectedRoutineObjects.map((object) => ({ ...object })) }),
   };
   // Table compare owns views; turning tables off must not leave views loading metadata alone.
   if (!normalized.tables) normalized.views = false;

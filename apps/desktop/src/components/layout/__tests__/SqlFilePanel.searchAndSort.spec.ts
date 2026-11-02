@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   savedSortOrder: "asc",
   saveSqlFileSortOrder: vi.fn((order: string) => {
     mocks.savedSortOrder = order;
+    return true;
   }),
 }));
 
@@ -108,26 +109,39 @@ describe("SqlFilePanel search and sort", () => {
     expect(renderedNames).toEqual(["migrations", "queries", "alpha.sql", "zebra.sql"]);
   });
 
-  it("toggles sort order between asc and desc, updating rendered order and persisting", async () => {
+  it("selects asc and desc from the sort menu, updating rendered order and persisting", async () => {
     const { host } = await mountPanel();
     const sortBtn = host.querySelector<HTMLButtonElement>("button[data-sql-file-sort-btn]")!;
 
-    // Toggle to descending
-    sortBtn.click();
-    await nextTick();
+    async function selectSortOrder(order: "asc" | "desc") {
+      sortBtn.click();
+      const label = i18n.global.t(order === "asc" ? "sqlLibrary.sortNameAsc" : "sqlLibrary.sortNameDesc");
+      // Dropdown content is teleported outside the mounted panel.
+      const item = await vi.waitFor(() => {
+        const menuId = sortBtn.getAttribute("aria-controls");
+        const menu = menuId ? document.getElementById(menuId) : null;
+        const option = Array.from(menu?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []).find((entry) => entry.textContent?.trim() === label);
+        expect(option).toBeDefined();
+        return option!;
+      });
+      item.click();
+      await vi.waitFor(() => expect(sortBtn.getAttribute("aria-expanded")).toBe("false"));
+    }
 
-    expect(mocks.saveSqlFileSortOrder).toHaveBeenCalledWith("desc");
+    await selectSortOrder("desc");
+
+    expect(mocks.saveSqlFileSortOrder).toHaveBeenLastCalledWith("desc");
+    expect(mocks.savedSortOrder).toBe("desc");
 
     // Order should now be: queries, migrations, zebra.sql, alpha.sql
     let rows = Array.from(host.querySelectorAll<HTMLElement>("[data-sql-file-path]"));
     let renderedNames = rows.map((r) => r.querySelector(".truncate")?.textContent?.trim());
     expect(renderedNames).toEqual(["queries", "migrations", "zebra.sql", "alpha.sql"]);
 
-    // Toggle back to ascending
-    sortBtn.click();
-    await nextTick();
+    await selectSortOrder("asc");
 
-    expect(mocks.saveSqlFileSortOrder).toHaveBeenCalledWith("asc");
+    expect(mocks.saveSqlFileSortOrder).toHaveBeenLastCalledWith("asc");
+    expect(mocks.savedSortOrder).toBe("asc");
     rows = Array.from(host.querySelectorAll<HTMLElement>("[data-sql-file-path]"));
     renderedNames = rows.map((r) => r.querySelector(".truncate")?.textContent?.trim());
     expect(renderedNames).toEqual(["migrations", "queries", "alpha.sql", "zebra.sql"]);
@@ -195,6 +209,6 @@ describe("SqlFilePanel search and sort", () => {
     expect(host.textContent).toContain("zebra.sql");
     const zebraRow = host.querySelector<HTMLElement>('[data-sql-file-path="/sql/zebra.sql"]');
     expect(zebraRow).not.toBeNull();
-    expect(zebraRow!.classList.contains("bg-accent")).toBe(true);
+    await vi.waitFor(() => expect(zebraRow!.classList.contains("bg-accent")).toBe(true));
   });
 });

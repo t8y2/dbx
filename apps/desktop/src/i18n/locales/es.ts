@@ -3473,6 +3473,7 @@ export default withEnglishFallback({
     transposeSingleRow: "Solo selección",
     transposeMultiRow: "Resaltar selección",
     transposeMultiRowHint: "Solo selección: transpone las filas seleccionadas, o todas las filas cargadas si no hay selección. Resaltar selección: transpone todas las filas cargadas y resalta la selección.",
+    totalPages: "{count} páginas",
     rowsPerPageShort: " filas",
     columnDetails: "Detalles de columna",
     tableInfoSearch: "Buscar...",

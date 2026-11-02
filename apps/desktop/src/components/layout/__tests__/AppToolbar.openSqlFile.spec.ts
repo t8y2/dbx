@@ -136,7 +136,10 @@ describe("AppToolbar opens SQL files in the editor", () => {
     await flushLayout();
 
     expect(buttonWithText(host, "New query")).toBeUndefined();
-    const openButton = buttonWithText(host, "Open SQL file");
+    expect(buttonWithText(host, "Open SQL file")).toBeUndefined();
+    buttonWithText(host, "More")!.click();
+    await nextTick();
+    const openButton = buttonWithText(document.body, "Open SQL file");
     expect(openButton).toBeDefined();
     expect(openButton?.disabled).toBe(false);
     openButton!.click();
@@ -149,7 +152,7 @@ describe("AppToolbar opens SQL files in the editor", () => {
     const openEditor = vi.fn();
     const host = mount({ onOpenSqlEditorFile: openEditor });
     await flushLayout();
-    expect(buttonWithText(host, "Open SQL file")).toBeDefined();
+    expect(buttonWithText(host, "Open SQL file")).toBeUndefined();
 
     toolbarWidth = 400;
     window.dispatchEvent(new Event("resize"));
@@ -165,7 +168,7 @@ describe("AppToolbar opens SQL files in the editor", () => {
     expect(openEditor).toHaveBeenCalledOnce();
   });
 
-  it("moves only the file action into More in a narrow window and restores it when widened", async () => {
+  it("keeps one file action in More across narrow and wide windows", async () => {
     useSettingsStore().editorSettings.toolbarItems.dataTransfer = true;
     vi.stubGlobal("visualViewport", { width: 760 });
     toolbarWidth = 722;
@@ -186,14 +189,14 @@ describe("AppToolbar opens SQL files in the editor", () => {
     toolbarWidth = 1200;
     window.dispatchEvent(new Event("resize"));
     await flushLayout();
-    expect(buttonWithText(host, "Open SQL file")).toBeDefined();
+    expect(buttonWithText(host, "Open SQL file")).toBeUndefined();
     buttonWithText(host, "More")!.click();
     await nextTick();
     const menuItems = document.body.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]');
-    expect(Array.from(menuItems).some((item) => item.textContent?.trim() === "Open SQL file")).toBe(false);
+    expect(Array.from(menuItems).filter((item) => item.textContent?.trim() === "Open SQL file")).toHaveLength(1);
   });
 
-  it("collapses primary controls in a very narrow window while keeping file opening in More", async () => {
+  it("preserves existing primary controls in a narrow window while keeping file opening in More", async () => {
     useSettingsStore().editorSettings.toolbarItems.dataTransfer = true;
     vi.stubGlobal("visualViewport", { width: 520 });
     toolbarWidth = 482;
@@ -202,7 +205,7 @@ describe("AppToolbar opens SQL files in the editor", () => {
     await flushLayout();
 
     expect(buttonWithText(host, "Open SQL file")).toBeUndefined();
-    expect(buttonWithText(host, "Data transfer")).toBeUndefined();
+    expect(buttonWithText(host, "Data transfer")).toBeDefined();
     const moreButton = buttonWithText(host, "More");
     expect(moreButton).toBeDefined();
     moreButton!.click();

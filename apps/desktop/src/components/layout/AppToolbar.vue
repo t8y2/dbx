@@ -204,7 +204,6 @@ function onToolbarDblClick(e: MouseEvent) {
 const toolbarEl = ref<HTMLElement>();
 const newConnectionLabelEl = ref<HTMLElement>();
 const toolbarCollapsed = ref(false);
-const openSqlFileInMore = ref(false);
 const pluginCenterGroup = ref<HTMLElement | null>(null);
 const showPluginCenterShortcuts = computed(() => settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position === "plugin-center");
 const shouldReserveTrafficLightInset = computed(() => shouldReserveMacTrafficLightInset(isMac, isFullscreen.value, isDesktop));
@@ -213,12 +212,8 @@ function checkToolbarWidth() {
   const el = toolbarEl.value;
   if (!el) return;
   const screenWidth = window.visualViewport?.width ?? window.innerWidth;
-  // Full-width narrow windows also need to collapse so More stays reachable.
-  const threshold = Math.max(screenWidth / 2, 640);
+  const threshold = screenWidth / 2;
   toolbarCollapsed.value = el.clientWidth < threshold;
-  // Keep the new file action from squeezing the existing primary controls in
-  // a narrow window, where the threshold above may not collapse them.
-  openSqlFileInMore.value = el.clientWidth < 960;
 }
 
 // ──────────── Right-side overflow detection ────────────
@@ -494,15 +489,13 @@ type ToolbarMenuItem = LightDropdownItem & { action: () => void };
 function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenuItem[] {
   const items: ToolbarMenuItem[] = [];
 
-  if (includeVisiblePrimaryItems || openSqlFileInMore.value) {
-    items.push({
-      value: "open-sql-editor-file",
-      label: t("toolbar.openSql"),
-      icon: FolderOpen,
-      action: () => emit("open-sql-editor-file"),
-      disabled: false,
-    });
-  }
+  items.push({
+    value: "open-sql-editor-file",
+    label: t("toolbar.openSql"),
+    icon: FolderOpen,
+    action: () => emit("open-sql-editor-file"),
+    disabled: false,
+  });
   if (includeVisiblePrimaryItems || !toolbarItems.value.dataTransfer) {
     items.push({
       value: "transfer",
@@ -651,11 +644,6 @@ const toolbarStyle = computed(() => {
     </Tooltip>
 
     <template v-if="!toolbarCollapsed">
-      <Button v-if="!openSqlFileInMore" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('open-sql-editor-file')">
-        <FolderOpen class="h-3.5 w-3.5" />
-        <span :class="toolbarTextLabelClass">{{ t("toolbar.openSql") }}</span>
-      </Button>
-
       <Button v-if="toolbarItems.dataTransfer" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('open-transfer')" :disabled="!hasConnections">
         <ArrowLeftRight class="h-3.5 w-3.5" />
         <span :class="toolbarTextLabelClass">{{ t("transfer.dataTransfer") }}</span>

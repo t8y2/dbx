@@ -610,6 +610,8 @@ export default withEnglishFallback({
   docs,
   dataDictionary,
   pluginPlatform: {
+    openUrlTitle: "Abrir URL externa",
+    openUrlPrompt: "El complemento {name} quiere abrir esta URL en tu navegador.",
     dataAccessConsent: '"{name}" quiere leer datos de la conexión "{connection}". Mientras esa conexión esté abierta, el plugin podrá ejecutar consultas de solo lectura en ella hasta que revoques el acceso en el Centro de plugins. ¿Permitir?',
     dataAccessConsentTitle: "Solicitud de acceso a datos",
     mcpToolsBadge: "Herramientas MCP",

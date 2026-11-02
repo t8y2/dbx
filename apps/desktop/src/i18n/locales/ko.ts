@@ -606,6 +606,8 @@ export default withEnglishFallback({
   docs,
   dataDictionary,
   pluginPlatform: {
+    openUrlTitle: "외부 URL 열기",
+    openUrlPrompt: "플러그인 {name}이 다음 URL을 브라우저에서 열려고 합니다.",
     dataAccessConsent: '"{name}" 플러그인이 "{connection}" 연결의 데이터 읽기를 요청합니다. 허용하면 플러그인 센터에서 취소할 때까지 이 연결이 열려 있는 동안 플러그인이 읽기 전용 쿼리를 실행할 수 있습니다. 허용하시겠습니까?',
     dataAccessConsentTitle: "데이터 액세스 요청",
     mcpToolsBadge: "MCP 도구",

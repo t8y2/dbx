@@ -82,6 +82,8 @@ export default withEnglishFallback({
   sidebarMenu,
   oracleIndex: { mixedDraft: "Oracle indeks değişikliklerini diğer tablo yapısı değişikliklerinden ayrı uygulayın." },
   pluginPlatform: {
+    openUrlTitle: "Harici URL aç",
+    openUrlPrompt: "{name} eklentisi bu URL'yi tarayıcınızda açmak istiyor.",
     dataAccessConsent: '"{name}", "{connection}" bağlantısındaki verileri okumak istiyor. Bu bağlantı açık olduğu sürece eklenti, Eklenti Merkezi\'nden erişimi iptal edene kadar bağlantıda salt okunur sorgular çalıştırabilir. İzin verilsin mi?',
     dataAccessConsentTitle: "Veri Erişim İsteği",
     mcpToolsBadge: "MCP araçları",

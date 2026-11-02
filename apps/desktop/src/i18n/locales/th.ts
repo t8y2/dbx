@@ -664,6 +664,8 @@ export default withEnglishFallback({
     previewFailed: "ดูตัวอย่างไม่สำเร็จ: {error}",
   },
   pluginPlatform: {
+    openUrlTitle: "เปิด URL ภายนอก",
+    openUrlPrompt: "ปลั๊กอิน {name} ต้องการเปิด URL นี้ในเบราว์เซอร์ของคุณ",
     dataAccessConsent: '"{name}" ต้องการอ่านข้อมูลจากการเชื่อมต่อ "{connection}" ขณะที่การเชื่อมต่อนี้เปิดอยู่ Plugin จะเรียกใช้ Query แบบอ่านอย่างเดียวกับการเชื่อมต่อนี้ได้จนกว่าคุณจะเพิกถอนสิทธิ์ใน Plugin Center อนุญาตหรือไม่?',
     dataAccessConsentTitle: "คำขอเข้าถึงข้อมูล",
     mcpToolsBadge: "เครื่องมือ MCP",

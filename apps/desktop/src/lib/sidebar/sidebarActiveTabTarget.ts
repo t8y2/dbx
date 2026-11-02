@@ -426,13 +426,20 @@ export function shouldScrollActiveSidebarSelection(options: { activeTabId: strin
  * user had just collapsed, making connection/database nodes impossible to fold (#13839, #13849).
  */
 export class ActiveTabSidebarRevealTracker {
+  private initialized = false;
   private pending = false;
   private pendingScroll = false;
   private pendingTabId: string | null | undefined;
 
   /** Feed the watcher's previous/current values; returns whether the reveal should run now and with which scroll intent. */
   onWatchTrigger(options: { activeTabId: string | null | undefined; previousActiveTabId: string | null | undefined; autoSelectEnabled: boolean; previousAutoSelectEnabled: boolean | undefined }): { run: boolean; scroll: boolean } {
-    if (options.activeTabId !== options.previousActiveTabId || options.autoSelectEnabled !== options.previousAutoSelectEnabled) {
+    const changed = !this.initialized || options.activeTabId !== options.previousActiveTabId || options.autoSelectEnabled !== options.previousAutoSelectEnabled;
+    this.initialized = true;
+    if (!options.autoSelectEnabled || !options.activeTabId) {
+      this.pending = false;
+      return { run: false, scroll: false };
+    }
+    if (changed) {
       this.pending = true;
       this.pendingTabId = options.activeTabId;
       this.pendingScroll = shouldScrollActiveSidebarSelection(options);

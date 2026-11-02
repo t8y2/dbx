@@ -801,3 +801,16 @@ test("an older tab reveal cannot settle the new tab's pending reveal", () => {
   tracker.onSettled(true, "tab-b");
   assert.deepEqual(tracker.onWatchTrigger({ activeTabId: "tab-b", previousActiveTabId: "tab-b", autoSelectEnabled: true, previousAutoSelectEnabled: true }), { run: false, scroll: false });
 });
+
+test("the first tree update can reveal an already active tab", () => {
+  const tracker = new ActiveTabSidebarRevealTracker();
+  const input = { activeTabId: "restored", previousActiveTabId: "restored", autoSelectEnabled: true, previousAutoSelectEnabled: true };
+  assert.deepEqual(tracker.onWatchTrigger(input), { run: true, scroll: false });
+  tracker.onSettled(true, "restored");
+  assert.deepEqual(tracker.onWatchTrigger(input), { run: false, scroll: false });
+});
+
+test("a disabled preference does not start a reveal", () => {
+  const tracker = new ActiveTabSidebarRevealTracker();
+  assert.deepEqual(tracker.onWatchTrigger({ activeTabId: "tab-1", previousActiveTabId: null, autoSelectEnabled: false, previousAutoSelectEnabled: false }), { run: false, scroll: false });
+});

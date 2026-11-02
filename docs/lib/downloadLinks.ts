@@ -105,7 +105,8 @@ const downloadArtifacts: DownloadArtifact[] = [
 const RELEASE_TAG_PATTERN = /^v\d+\.\d+\.\d+(-beta\.\d{8}\.\d+)?$/;
 
 // Stable packages are published once under releases/stable/<release_tag>/. A
-// promoted beta keeps its beta tag there while its files are named by the plain
+// promoted beta is republished under its plain vX.Y.Z tag; releases promoted
+// earlier keep their beta tag there. Package files are always named by the plain
 // version. Releases from before channels have no release_tag and live in
 // releases/v<version>/.
 function releaseDirectory(version: string, releaseTag?: string) {

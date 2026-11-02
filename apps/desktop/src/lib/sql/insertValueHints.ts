@@ -292,7 +292,24 @@ function selectProjectionAlias(tokens: readonly SqlSemanticToken[], to: number, 
   return introducesAlias ? unquoteSqlSemanticIdentifier(last) : undefined;
 }
 
-function parseInsertClause(tokens: readonly SqlSemanticToken[], span: SqlSemanticSpan): InsertValuesClause | null {
+/** Retokenize only the INSERT's value expressions, never its relation/column names. */
+function insertHintExpressionTokens(sql: string, tokens: readonly SqlSemanticToken[], sourceIndex: number, selectSource: boolean, dialectId: string): SqlSemanticToken[] {
+  const first = tokens[sourceIndex]!;
+  let endIndex = sourceIndex + 1;
+  for (; endIndex < tokens.length; endIndex += 1) {
+    const item = tokens[endIndex]!;
+    if (item.depth < first.depth) break;
+    if (selectSource ? isSelectClauseBoundary(item, first.depth) : item.depth === first.depth && item.kind === "word" && ["returning", "on", "select"].includes(item.normalized)) break;
+  }
+  const last = tokens[endIndex - 1]!;
+  return significantTokens(tokenizeSqlSemantic(sql.slice(first.span.start, last.span.end), dialectId, { fullwidthParenthesesAsDelimiters: true })).map((item) => ({
+    ...item,
+    span: { start: item.span.start + first.span.start, end: item.span.end + first.span.start },
+    depth: item.depth + first.depth,
+  }));
+}
+
+function parseInsertClause(sql: string, tokens: readonly SqlSemanticToken[], span: SqlSemanticSpan, dialectId: string): InsertValuesClause | null {
   const insertIndex = findWordIndex(tokens, "insert");
   if (insertIndex < 0) return null;
   const intoIndex = findWordIndex(tokens, "into", insertIndex + 1);
@@ -333,7 +350,16 @@ function parseInsertClause(tokens: readonly SqlSemanticToken[], span: SqlSemanti
   const selectIndex = findInsertSourceSelectIndex(tokens, index, sourceDepth);
   if (valuesIndex < 0 && selectIndex < 0) return null;
 
-  const rows = selectIndex >= 0 && (valuesIndex < 0 || selectIndex < valuesIndex) ? [selectProjectionStarts(tokens, selectIndex)] : parseValuesRows(tokens, valuesIndex);
+  const selectSource = selectIndex >= 0 && (valuesIndex < 0 || selectIndex < valuesIndex);
+  let rows = selectSource ? [selectProjectionStarts(tokens, selectIndex)] : parseValuesRows(tokens, valuesIndex);
+  // Preserve #10104's IME tolerance without changing MySQL identifier parsing.
+  // A valid INSERT already has matching counts, so its names remain untouched.
+  // Only adopt the local retry when it restores every explicit target column.
+  if (dialectId === "mysql" && columns?.length && rows.some((row) => row.length !== columns.length) && /[（）]/u.test(sql.slice(span.start, span.end))) {
+    const hintTokens = insertHintExpressionTokens(sql, tokens, selectSource ? selectIndex : valuesIndex, selectSource, dialectId);
+    const hintRows = selectSource ? [selectProjectionStarts(hintTokens, 0)] : parseValuesRows(hintTokens, 0);
+    if (hintRows.length === rows.length && hintRows.every((row) => row.length === columns.length)) rows = hintRows;
+  }
   if (rows.length === 0) return null;
   if (rows[0]?.length === 0) return null;
 
@@ -398,8 +424,8 @@ function shiftClause(clause: InsertValuesClause, offset: number): InsertValuesCl
  * live `EditorState` is available (i.e. for every real user keystroke in the editor).
  *
  * `dialectId` defaults to "mysql" (matching semantic/tokens.ts's tokenizeSqlSemantic default) and
- * only affects how `#` is treated -- see stepLexState. Callers that know the active SQL dialect
- * should pass it through so window boundaries agree with tokenizeSqlSemantic's own tokenization.
+ * controls comments and fullwidth identifier characters -- see stepLexState. Callers that know
+ * the active SQL dialect should pass it through so window boundaries agree with the tokenizer.
  */
 const STATEMENT_LOOKBACK = 32 * 1024;
 const STATEMENT_LOOKAHEAD = 32 * 1024;
@@ -419,7 +445,7 @@ function isLexStateClean(state: LexState): boolean {
 
 /**
  * Advances `state` past the token starting at `sql[index]` and returns the next index.
- * `dialectId` only affects `#`: MySQL-family dialects treat it as a line-comment starter, but
+ * `dialectId` controls `#`: MySQL-family dialects treat it as a line-comment starter, but
  * PostgreSQL (and dialects that don't special-case it) use `#`/`#>`/`#>>`/`#-` as operators --
  * see the matching dialect check in semantic/tokens.ts's tokenizeSqlSemantic.
  */
@@ -486,12 +512,13 @@ function stepLexState(sql: string, index: number, state: LexState, dialectId: st
     }
     return index + 1;
   }
-  // Match tokenizeSqlSemantic: fullwidth （） update nesting the same as ASCII ().
-  if (ch === "(" || ch === "\uFF08") {
+  // MySQL's （） are identifier characters, including when unpaired (#14111).
+  // Match the semantic tokenizer; INSERT expression hint tolerance stays local.
+  if (ch === "(" || (dialectId !== "mysql" && ch === "\uFF08")) {
     state.depth += 1;
     return index + ch.length;
   }
-  if (ch === ")" || ch === "\uFF09") {
+  if (ch === ")" || (dialectId !== "mysql" && ch === "\uFF09")) {
     state.depth = Math.max(0, state.depth - 1);
     return index + ch.length;
   }
@@ -767,7 +794,7 @@ export function parseInsertValuesClauses(sql: string, dialectId = "mysql"): Inse
   const clauses: InsertValuesClause[] = [];
   for (const { tokens } of statementTokenGroups(sql, allTokens)) {
     for (const statement of splitInsertStatements(tokens)) {
-      const clause = parseInsertClause(statement.tokens, statement.span);
+      const clause = parseInsertClause(sql, statement.tokens, statement.span, dialectId);
       if (clause) clauses.push(clause);
     }
   }
@@ -820,7 +847,7 @@ export function parseInsertValueHintsAtCursor(sql: string, cursor: number, optio
   const tokens = tokenizeSqlSemantic(sql);
   const span = findActiveSqlStatementSpan(sql, tokens, cursor);
   const statementTokens = significantTokens(tokensInSpan(tokens, span));
-  const clause = parseInsertClause(statementTokens, span);
+  const clause = parseInsertClause(sql, statementTokens, span, "mysql");
   if (!clause) return [];
   return buildInsertValueHints([clause], options);
 }

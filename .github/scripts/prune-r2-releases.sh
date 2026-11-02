@@ -3,10 +3,13 @@
 #
 # Usage: prune-r2-releases.sh <stable|beta> <current_tag>
 #
-# stable: published non-prerelease releases (a promoted beta tag lives under
-#         releases/stable/ too) and also removes legacy releases/<tag>/ dirs.
+# stable: published non-prerelease releases and also removes legacy
+#         releases/<tag>/ dirs. A promoted beta is republished under its plain
+#         vX.Y.Z tag; releases promoted before that keep their beta-tag directory
+#         and are kept while they are still listed as non-prerelease releases.
 # beta:   published releases whose tag is a beta tag, whatever their prerelease
-#         flag, because a promoted beta keeps its releases/beta/<tag>/ directory.
+#         flag. A promoted beta's Release moves to the plain tag, so its
+#         releases/beta/<tag>/ directory ages out with the other beta builds.
 #
 # Nothing is deleted unless five releases are listed and <current_tag> is one
 # of them, so incomplete release metadata can never remove the wrong versions.

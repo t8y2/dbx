@@ -4,6 +4,7 @@ use super::{
     MetadataReadOptions, PoolKind,
 };
 use crate::db::agent_driver::{AgentDriverClient, PooledAgentClient};
+use crate::db::ObjectSourceKind;
 use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
@@ -629,4 +630,46 @@ async fn statistics_native_sqlite_preserves_default_pool() {
     assert!(state.with_connection_pools(|pools| pools.len() == 1 && pools.contains_key(&key)).await);
     assert!(state.agent_manager.connection_runtimes.lock().await.is_empty());
     state.shutdown(Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn kingbase_view_ddl_appends_view_and_column_comments() {
+    let fixture = AgentFixture::new(DatabaseType::Kingbase).await;
+    let ddl = get_table_ddl_core(&fixture.state, "conn", "configured", "app", "orders_v", Some(ObjectSourceKind::View))
+        .await
+        .unwrap();
+    assert_eq!(
+        ddl,
+        "CREATE OR REPLACE VIEW \"app\".\"orders_v\" AS\nSELECT 1 AS id;\n\
+         COMMENT ON VIEW \"app\".\"orders_v\" IS 'View''s comment';\n\
+         COMMENT ON COLUMN \"app\".\"orders_v\".\"id\" IS 'Column''s comment';"
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn kingbase_view_ddl_survives_comment_lookup_failure() {
+    let fixture = AgentFixture::new(DatabaseType::Kingbase).await;
+    std::fs::write(fixture.control_path("comment-error"), "sql").unwrap();
+    let ddl = get_table_ddl_core(&fixture.state, "conn", "configured", "app", "orders_v", Some(ObjectSourceKind::View))
+        .await
+        .unwrap();
+    assert!(ddl.starts_with("CREATE OR REPLACE VIEW \"app\".\"orders_v\" AS"), "{ddl}");
+    assert!(!ddl.contains("COMMENT ON VIEW"), "{ddl}");
+    assert!(ddl.contains("COMMENT ON COLUMN"), "{ddl}");
+    fixture.shutdown().await;
+}
+
+#[test]
+fn kingbase_view_comments_follow_the_reported_identifier_quote() {
+    let column = crate::db::ColumnInfo { name: "id".into(), comment: Some("c".into()), ..Default::default() };
+    let ddl = super::append_kingbase_view_comments_to_ddl(
+        "CREATE VIEW `app`.`v` AS\nSELECT 1;",
+        "app",
+        "v",
+        Some("`"),
+        Some("v"),
+        &[column],
+    );
+    assert!(ddl.ends_with("\nCOMMENT ON VIEW `app`.`v` IS 'v';\nCOMMENT ON COLUMN `app`.`v`.`id` IS 'c';"), "{ddl}");
 }

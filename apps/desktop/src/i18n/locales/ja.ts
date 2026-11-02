@@ -4484,6 +4484,8 @@ export default withEnglishFallback({
     pluginToolsFollowsTarget: "ターゲット接続に従います",
     pluginToolsNoneTitle: "AI はプラグイン接続を使用しません",
     pluginToolsSelectedTitle: "この会話で利用可能: {names}",
+    pluginToolsSaveFailed: "プラグインツールの添付を保存できませんでした: {message}",
+    pluginToolsOverflowHint: "同時に有効になるプラグイン接続は最大 8 個です。今回使用されない接続: {names}",
     skillsUnsupportedForCliProvider: "Skills は DBX 内蔵 AI でのみ利用できます。",
     skillsSelectAll: "すべて選択",
     skillsDeselectAll: "選択をすべて解除",

@@ -4840,6 +4840,8 @@ export default withEnglishFallback({
     pluginToolsFollowsTarget: "ตามการเชื่อมต่อเป้าหมาย",
     pluginToolsNoneTitle: "ผู้ช่วยจะไม่ใช้การเชื่อมต่อปลั๊กอินใด ๆ",
     pluginToolsSelectedTitle: "ใช้ได้ในบทสนทนานี้: {names}",
+    pluginToolsSaveFailed: "บันทึกไฟล์แนบเครื่องมือปลั๊กอินไม่สำเร็จ: {message}",
+    pluginToolsOverflowHint: "การเชื่อมต่อปลั๊กอินมีผลพร้อมกันได้ไม่เกิน 8 รายการ ครั้งนี้ไม่ได้ใช้: {names}",
     skillsUnsupportedForCliProvider: "Skills ใช้ได้เฉพาะกับ AI ในตัวของ DBX",
     skillsSelectAll: "เลือกทั้งหมด",
     skillsDeselectAll: "ยกเลิกการเลือกทั้งหมด",

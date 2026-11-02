@@ -4958,6 +4958,8 @@ export default withEnglishFallback({
     pluginToolsFollowsTarget: "跟随目标连接",
     pluginToolsNoneTitle: "AI 不会使用任何插件连接",
     pluginToolsSelectedTitle: "本会话可用：{names}",
+    pluginToolsSaveFailed: "插件工具附件保存失败：{message}",
+    pluginToolsOverflowHint: "同时最多生效 8 个插件连接；本次未生效：{names}。",
     skillsUnsupportedForCliProvider: "Skill 仅对 DBX 内置 AI 可用。",
     skillsSelectAll: "全选",
     skillsDeselectAll: "取消全选",

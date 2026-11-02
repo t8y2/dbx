@@ -3975,6 +3975,8 @@ export default withEnglishFallback({
     pluginToolsFollowsTarget: "Mengikuti koneksi target",
     pluginToolsNoneTitle: "Asisten tidak akan menggunakan koneksi plugin mana pun",
     pluginToolsSelectedTitle: "Tersedia dalam percakapan ini: {names}",
+    pluginToolsSaveFailed: "Gagal menyimpan lampiran alat plugin: {message}",
+    pluginToolsOverflowHint: "Paling banyak 8 koneksi plugin berlaku sekaligus. Tidak digunakan kali ini: {names}.",
     skillsLoading: "Memuat skill…",
     skillsEmpty: "Belum ada skill yang ditemukan",
     skillsRefresh: "Segarkan",

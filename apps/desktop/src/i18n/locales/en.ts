@@ -5032,6 +5032,8 @@ export default {
     pluginToolsFollowsTarget: "Follows the target connection",
     pluginToolsNoneTitle: "The assistant will not use any plugin connection",
     pluginToolsSelectedTitle: "Available in this conversation: {names}",
+    pluginToolsSaveFailed: "Failed to save plugin tool attachments: {message}",
+    pluginToolsOverflowHint: "At most 8 plugin connections take effect at a time. Not used this time: {names}.",
     skillsUnsupportedForCliProvider: "Skills are available to DBX's built-in AI only.",
     skillsSelectAll: "Select all",
     skillsDeselectAll: "Deselect all",

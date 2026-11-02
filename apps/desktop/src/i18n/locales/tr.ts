@@ -3624,6 +3624,8 @@ export default withEnglishFallback({
     pluginToolsFollowsTarget: "Hedef bağlantıyı izler",
     pluginToolsNoneTitle: "Asistan hiçbir eklenti bağlantısını kullanmaz",
     pluginToolsSelectedTitle: "Bu sohbette kullanılabilir: {names}",
+    pluginToolsSaveFailed: "Eklenti aracı ekleri kaydedilemedi: {message}",
+    pluginToolsOverflowHint: "Aynı anda en fazla 8 eklenti bağlantısı geçerli olur. Bu kez kullanılmayanlar: {names}.",
     skillsUnsupportedForCliProvider: "Skills yalnızca DBX'in yerleşik yapay zekası için kullanılabilir.",
     skillsSelectAll: "Tümünü seç",
     skillsDeselectAll: "Tümünün seçimini kaldır",

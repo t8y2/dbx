@@ -4341,6 +4341,8 @@ export default withEnglishFallback({
     pluginToolsFollowsTarget: "跟隨目標連線",
     pluginToolsNoneTitle: "AI 不會使用任何外掛連線",
     pluginToolsSelectedTitle: "此工作階段可用：{names}",
+    pluginToolsSaveFailed: "外掛工具附件儲存失敗：{message}",
+    pluginToolsOverflowHint: "同時最多生效 8 個外掛連線；本次未生效：{names}。",
     skillsUnsupportedForCliProvider: "Skill 僅對 DBX 內建 AI 可用。",
     skillsSelectAll: "全選",
     skillsDeselectAll: "取消全選",

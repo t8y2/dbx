@@ -3654,6 +3654,8 @@ export default withEnglishFallback({
     pluginToolsFollowsTarget: "Hədəf bağlantısını izləyir",
     pluginToolsNoneTitle: "Köməkçi heç bir plugin bağlantısından istifadə etməyəcək",
     pluginToolsSelectedTitle: "Bu söhbətdə mövcuddur: {names}",
+    pluginToolsSaveFailed: "Plugin alət əlavələri yadda saxlanılmadı: {message}",
+    pluginToolsOverflowHint: "Eyni anda ən çox 8 plugin bağlantısı qüvvədə olur. Bu dəfə istifadə olunmayanlar: {names}.",
     skillsUnsupportedForCliProvider: "Skills yalnızca DBX-in daxili süni intellekti üçün əlçatandır.",
     skillsSelectAll: "Hamısını seç",
     skillsDeselectAll: "Bütün seçimləri ləğv et",

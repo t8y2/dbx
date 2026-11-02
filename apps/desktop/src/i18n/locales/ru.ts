@@ -4690,6 +4690,8 @@ export default withEnglishFallback({
     pluginToolsFollowsTarget: "Следует за целевым подключением",
     pluginToolsNoneTitle: "Ассистент не будет использовать подключения плагинов",
     pluginToolsSelectedTitle: "Доступно в этом диалоге: {names}",
+    pluginToolsSaveFailed: "Не удалось сохранить вложения инструментов плагинов: {message}",
+    pluginToolsOverflowHint: "Одновременно действуют не более 8 подключений плагинов. Не используются сейчас: {names}.",
     skillsUnsupportedForCliProvider: "Навыки доступны только встроенному ИИ DBX.",
     skillsSelectAll: "Выбрать все",
     skillsDeselectAll: "Снять выделение",

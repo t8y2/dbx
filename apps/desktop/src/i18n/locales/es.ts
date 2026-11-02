@@ -4607,6 +4607,8 @@ export default withEnglishFallback({
     pluginToolsFollowsTarget: "Sigue a la conexión de destino",
     pluginToolsNoneTitle: "El asistente no usará ninguna conexión de plugin",
     pluginToolsSelectedTitle: "Disponibles en esta conversación: {names}",
+    pluginToolsSaveFailed: "No se pudieron guardar los adjuntos de herramientas de plugins: {message}",
+    pluginToolsOverflowHint: "Como máximo 8 conexiones de plugin surten efecto a la vez. No usadas esta vez: {names}.",
     skillsUnsupportedForCliProvider: "Las skills solo están disponibles para la IA integrada de DBX.",
     skillsSelectAll: "Seleccionar todo",
     skillsDeselectAll: "Deseleccionar todo",

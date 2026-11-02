@@ -221,6 +221,7 @@ import { databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 
 import type { AgentEvent } from "@/lib/backend/tauri";
 import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
+import { comparePluginConnectionOrder } from "@/lib/ai/pluginConnectionOrder";
 import { extractFirstSqlCodeBlock, extractSingleSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
 import type { AiSqlActionReport } from "@/lib/ai/aiSqlActionFeedback";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
@@ -626,17 +627,39 @@ watch(
 
 const eligiblePluginConnectionIds = computed(() => new Set(eligiblePluginConnections.value.map((connection) => connection.id)));
 
+/**
+ * Mirrors `MAX_OPEN_CONNECTIONS` in `crates/dbx-core/src/ai/plugin_tools.rs`: the
+ * backend filters to the attached connections, sorts them and keeps at most this
+ * many. The UI must compute the same set, or a ninth attachment would look
+ * active and silently do nothing.
+ */
+const MAX_PLUGIN_TOOL_CONNECTIONS = 8;
+
+/** Attached + open + AI-enabled connections, in the order the backend keeps. */
+const effectivePluginConnections = computed(() => {
+  const attached = new Set(attachedPluginConnectionIds.value);
+  return eligiblePluginConnections.value
+    .filter((connection) => attached.has(connection.id))
+    .sort(comparePluginConnectionOrder)
+    .slice(0, MAX_PLUGIN_TOOL_CONNECTIONS);
+});
+
+const effectivePluginConnectionIdSet = computed(() => new Set(effectivePluginConnections.value.map((connection) => connection.id)));
+
 /** Attached connections that can actually contribute tools right now. */
 const activePluginConnectionIds = computed(() => {
   if (isPluginConnectionTarget.value) return boundConnection.value ? [boundConnection.value.id] : [];
-  return attachedPluginConnectionIds.value.filter((id) => eligiblePluginConnectionIds.value.has(id));
+  return effectivePluginConnections.value.map((connection) => connection.id);
 });
 
 /** Attached connections that are closed (or had their AI tools switched off). */
 const inactivePluginConnectionCount = computed(() => {
   if (isPluginConnectionTarget.value) return 0;
-  return attachedPluginConnectionIds.value.length - activePluginConnectionIds.value.length;
+  return attachedPluginConnectionIds.value.filter((id) => !eligiblePluginConnectionIds.value.has(id)).length;
 });
+
+/** Attached + eligible connections pushed out by the backend's cap. */
+const overflowPluginConnections = computed(() => eligiblePluginConnections.value.filter((connection) => attachedPluginConnectionIds.value.includes(connection.id) && !effectivePluginConnectionIdSet.value.has(connection.id)).sort(comparePluginConnectionOrder));
 
 interface PluginToolRow {
   id: string;
@@ -698,16 +721,34 @@ function isPluginConnectionAttached(connectionId: string): boolean {
 
 /** Patches the attachment column in click order; the last click always wins.
  *  The chain is module-scoped so a reopened panel serializes against the writes
- *  an older panel instance still has in flight. */
-function persistPluginAttachmentIds(targetConversationId: string, ids: string[]) {
+ *  an older panel instance still has in flight. The returned promise rejects when
+ *  this write fails, so the caller can tell the user; the chain itself is left
+ *  usable so a later toggle (or repair) can still converge on the latest list. */
+function persistPluginAttachmentIds(targetConversationId: string, ids: string[]): Promise<void> {
   const previous = pluginAttachmentWriteChains.get(targetConversationId) ?? Promise.resolve();
-  const write = previous
-    .catch(() => {})
-    .then(() => updateAiConversationPluginConnections(targetConversationId, ids))
-    .catch(() => {});
-  pluginAttachmentWriteChains.set(targetConversationId, write);
-  void write.finally(() => {
-    if (pluginAttachmentWriteChains.get(targetConversationId) === write) pluginAttachmentWriteChains.delete(targetConversationId);
+  const write = previous.catch(() => {}).then(() => updateAiConversationPluginConnections(targetConversationId, ids));
+  const settled = write.catch(() => {});
+  pluginAttachmentWriteChains.set(targetConversationId, settled);
+  void settled.finally(() => {
+    if (pluginAttachmentWriteChains.get(targetConversationId) === settled) pluginAttachmentWriteChains.delete(targetConversationId);
+  });
+  return write;
+}
+
+function notifyPluginAttachmentSaveFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  toast(t("ai.pluginToolsSaveFailed", { message }), 5000);
+}
+
+/** Shared failure handling for attachment patches (clicks and stale-snapshot
+ *  repairs): tell the user, then retry once with the conversation's current live
+ *  list so a transient failure cannot leave the record on an older selection. */
+function persistPluginAttachmentIdsWithFeedback(targetConversationId: string, ids: string[]): void {
+  void persistPluginAttachmentIds(targetConversationId, ids).catch((error: unknown) => {
+    notifyPluginAttachmentSaveFailure(error);
+    const latest = conversationPluginConnectionIds.get(targetConversationId);
+    if (latest === undefined) return;
+    void persistPluginAttachmentIds(targetConversationId, latest).catch(notifyPluginAttachmentSaveFailure);
   });
 }
 
@@ -727,7 +768,7 @@ function togglePluginConnection(connectionId: string) {
   // Patch only this column. A full snapshot save here could race a streaming
   // transcript save and write older messages over newer ones. A missing row is a
   // no-op; the landing snapshot's repair below re-applies the live list.
-  persistPluginAttachmentIds(targetConversationId, next);
+  persistPluginAttachmentIdsWithFeedback(targetConversationId, next);
   const record = conversations.value.find((conversation) => conversation.id === targetConversationId);
   if (!record) return;
   const updated: AiConversation = { ...record, pluginConnectionIds: next, updatedAt: new Date().toISOString() };
@@ -5954,8 +5995,9 @@ function syncPersistedConversation(conversation: AiConversation) {
   conversations.value.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   if (merged !== conversation) {
     // Patch only the attachment column: re-saving this older snapshot would
-    // write its stale transcript and title over whatever landed since.
-    persistPluginAttachmentIds(merged.id, livePluginConnectionIds ?? []);
+    // write its stale transcript and title over whatever landed since. The same
+    // failure handling (and one retry) as a user click applies here.
+    persistPluginAttachmentIdsWithFeedback(merged.id, livePluginConnectionIds ?? []);
   }
 }
 
@@ -7709,6 +7751,9 @@ async function openExternalUrl(url: string) {
                   <div v-if="!pluginToolGroups.length" class="px-2 py-3 text-xs text-muted-foreground">{{ t("ai.pluginToolsEmpty") }}</div>
                 </div>
                 <p v-if="inactivePluginConnectionCount" class="border-t px-2 pt-1.5 text-[10px] leading-4 text-amber-600">{{ t("ai.pluginToolsClosedHint", { count: inactivePluginConnectionCount }) }}</p>
+                <p v-if="overflowPluginConnections.length" data-ai-plugin-tools-overflow class="border-t px-2 pt-1.5 text-[10px] leading-4 text-amber-600">
+                  {{ t("ai.pluginToolsOverflowHint", { count: overflowPluginConnections.length, names: overflowPluginConnections.map((connection) => connection.name).join(", ") }) }}
+                </p>
                 <p class="border-t px-2 pt-1.5 text-[10px] leading-4 text-muted-foreground">{{ t("ai.pluginToolsHowTo") }}</p>
               </PopoverContent>
             </Popover>

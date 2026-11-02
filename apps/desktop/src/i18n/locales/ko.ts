@@ -4529,6 +4529,8 @@ export default withEnglishFallback({
     pluginToolsFollowsTarget: "대상 연결을 따릅니다",
     pluginToolsNoneTitle: "AI가 플러그인 연결을 사용하지 않습니다",
     pluginToolsSelectedTitle: "이 대화에서 사용 가능: {names}",
+    pluginToolsSaveFailed: "플러그인 도구 첨부를 저장하지 못했습니다: {message}",
+    pluginToolsOverflowHint: "한 번에 최대 8개의 플러그인 연결만 적용됩니다. 이번에 사용되지 않음: {names}",
     skillsUnsupportedForCliProvider: "Skills 는 DBX 내장 AI 에서만 사용할 수 있습니다.",
     skillsSelectAll: "모두 선택",
     skillsDeselectAll: "모두 선택 해제",

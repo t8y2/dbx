@@ -4018,6 +4018,8 @@ export default withEnglishFallback({
     pluginToolsFollowsTarget: "Podąża za połączeniem docelowym",
     pluginToolsNoneTitle: "Asystent nie będzie używać żadnego połączenia wtyczki",
     pluginToolsSelectedTitle: "Dostępne w tej rozmowie: {names}",
+    pluginToolsSaveFailed: "Nie udało się zapisać załączników narzędzi wtyczek: {message}",
+    pluginToolsOverflowHint: "Jednocześnie działa maksymalnie 8 połączeń wtyczek. Nieużywane tym razem: {names}.",
     skillsUnsupportedForCliProvider: "Umiejętności są dostępne tylko dla wbudowanej AI w DBX.",
     skillsSelectAll: "Zaznacz wszystko",
     skillsDeselectAll: "Odznacz wszystko",

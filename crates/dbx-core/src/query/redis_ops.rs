@@ -1,7 +1,7 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::redis_driver::{
-    self, RedisBlob, RedisCollectionPage, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisKeysExpiry,
-    RedisKeysExpiryResult, RedisScanResult, RedisStreamConsumer, RedisStreamGroup, RedisStreamPage,
+    self, RedisBlob, RedisCollectionPage, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisKeyMetadata,
+    RedisKeysExpiry, RedisKeysExpiryResult, RedisScanResult, RedisStreamConsumer, RedisStreamGroup, RedisStreamPage,
     RedisStreamPendingPage, RedisValue,
 };
 
@@ -82,6 +82,47 @@ pub async fn redis_scan_keys_batch_core(
                     include_types,
                 )
                 .await
+            }
+        },
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
+/// Reads TYPE and TTL for an explicit list of keys.
+///
+/// The key browser lists key names without metadata when it loads a whole
+/// database in one sweep. This endpoint fills the missing badges for the rows
+/// that are actually shown, so the cost is proportional to the visible rows
+/// instead of the keyspace.
+pub async fn redis_key_metadata_batch_in_db_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    key_raws: &[String],
+) -> Result<Vec<RedisKeyMetadata>, String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    let mut keys = Vec::with_capacity(key_raws.len());
+    for key_raw in key_raws {
+        keys.push(redis_driver::redis_key_raw_to_bytes(key_raw)?);
+    }
+    match &pool {
+        PoolKind::Redis(redis) => match redis.as_ref() {
+            RedisConnection::Direct(con) => {
+                let mut con = con.lock().await;
+                redis_driver::select_db(&mut *con, db).await?;
+                redis_driver::key_metadata_batch(&mut *con, &keys).await
+            }
+            RedisConnection::Cluster(cluster) => {
+                redis_driver::ensure_cluster_database(cluster, db).await?;
+                // A cluster pipeline cannot span slots, so every key keeps its
+                // own slot-routed connection, like `apply_redis_keys_expiry`.
+                let mut result = Vec::with_capacity(keys.len());
+                for key in &keys {
+                    let mut con = redis_driver::cluster_key_connection_in_db(cluster, key, db).await?;
+                    result.extend(redis_driver::key_metadata_batch(&mut con, std::slice::from_ref(key)).await?);
+                }
+                Ok(result)
             }
         },
         _ => Err("Not a Redis connection".to_string()),
@@ -1242,7 +1283,7 @@ pub async fn redis_execute_command_core(
                 let argv = cluster_console_argv(command)?;
                 redis_driver::ensure_cluster_database(cluster, db).await?;
                 let mut con = if command_may_target_first_key(&argv) {
-                    redis_driver::cluster_key_connection_in_db(cluster, argv[1].as_bytes(), db).await?
+                    redis_driver::cluster_key_connection_in_db(cluster, &argv[1], db).await?
                 } else {
                     redis_driver::cluster_any_connection_in_db(cluster, db).await?
                 };
@@ -1253,9 +1294,9 @@ pub async fn redis_execute_command_core(
     }
 }
 
-fn cluster_console_argv(command: &str) -> Result<Vec<String>, String> {
+fn cluster_console_argv(command: &str) -> Result<Vec<Vec<u8>>, String> {
     let argv = redis_driver::parse_command_argv(command)?;
-    if argv.first().is_some_and(|name| name.eq_ignore_ascii_case("SELECT")) {
+    if argv.first().is_some_and(|name| name.eq_ignore_ascii_case(b"SELECT")) {
         return Err(
             "SELECT is not available on a shared cluster connection; switch databases using the database picker"
                 .to_string(),
@@ -1264,12 +1305,13 @@ fn cluster_console_argv(command: &str) -> Result<Vec<String>, String> {
     Ok(argv)
 }
 
-fn command_may_target_first_key(argv: &[String]) -> bool {
+fn command_may_target_first_key(argv: &[Vec<u8>]) -> bool {
     if argv.len() < 2 {
         return false;
     }
+    let cmd = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
     !matches!(
-        argv[0].to_ascii_uppercase().as_str(),
+        cmd.as_str(),
         "PING" | "INFO" | "DBSIZE" | "TIME" | "ROLE" | "CLUSTER" | "CLIENT" | "COMMAND" | "HELLO" | "AUTH" | "QUIT"
     )
 }
@@ -1445,7 +1487,7 @@ mod cluster_database_tests {
             assert!(error.contains("database picker"), "{command}: {error}");
             assert!(!error.contains("only supports db0"));
         }
-        assert_eq!(super::cluster_console_argv("GET key").unwrap(), ["GET", "key"]);
+        assert_eq!(super::cluster_console_argv("GET key").unwrap(), [b"GET".to_vec(), b"key".to_vec()]);
         assert!(super::cluster_console_argv("\"").is_err());
     }
 }

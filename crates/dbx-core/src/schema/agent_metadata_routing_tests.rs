@@ -1,8 +1,9 @@
 use super::{
-    get_table_comment_core, get_table_ddl_core, list_databases_core, list_object_statistics_core, AppState,
-    ConnectionConfig, DatabaseType, PoolKind,
+    get_table_comment_core, get_table_ddl_core, list_databases_core, list_object_statistics_core, list_objects_core,
+    AppState, ConnectionConfig, DatabaseType, PoolKind,
 };
 use crate::db::agent_driver::{AgentDriverClient, PooledAgentClient};
+use crate::db::ObjectSourceKind;
 use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
@@ -101,6 +102,45 @@ impl AgentFixture {
         self.state.shutdown(Duration::from_secs(2)).await;
         drop(self.directory);
     }
+}
+
+#[tokio::test]
+async fn oracle_public_object_entry_applies_index_filter_and_offset_once() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    let types = vec!["INDEX".to_string()];
+    let page =
+        list_objects_core(&fixture.state, "conn", "configured", " Mixed ", None, Some(2), Some(2), Some(&types), None)
+            .await
+            .unwrap();
+    assert_eq!(page.iter().map(|object| object.name.as_str()).collect::<Vec<_>>(), ["Ix2", "Ix3"]);
+    assert_eq!(page[0].parent_schema.as_deref(), Some(" Other Owner "));
+    assert_eq!(page[0].parent_name.as_deref(), Some(" T(a) "));
+    let filtered = list_objects_core(
+        &fixture.state,
+        "conn",
+        "configured",
+        " Mixed ",
+        Some("Ix4"),
+        Some(2),
+        Some(0),
+        Some(&types),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(filtered.iter().map(|object| object.name.as_str()).collect::<Vec<_>>(), ["Ix4"]);
+    let calls = fixture.requests("list_objects");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["params"]["offset"], 2);
+    assert_eq!(calls[1]["params"]["filter"], "Ix4");
+    assert_eq!(calls[1]["params"]["limit"], 2);
+    std::fs::write(fixture.control_path("objects-error"), "sql").unwrap();
+    let error =
+        list_objects_core(&fixture.state, "conn", "configured", " Mixed ", None, Some(2), Some(0), Some(&types), None)
+            .await
+            .unwrap_err();
+    assert!(error.contains("fixture sql"));
+    fixture.shutdown().await;
 }
 
 #[tokio::test]
@@ -340,6 +380,30 @@ async fn statistics_fallback_reuses_ephemeral_session_and_closes_it() {
 }
 
 #[tokio::test]
+async fn oceanbase_statistics_routes_through_agent_and_preserves_foreground() {
+    for mode in ["success", "fallback", "sql"] {
+        let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+        let foreground = fixture.foreground().await;
+        std::fs::write(fixture.control_path("statistics"), mode).unwrap();
+        let result = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await;
+        let queries = fixture.requests("execute_query");
+        assert!(queries[0]["params"]["sql"].as_str().unwrap().contains("DBA_OB_TABLET_REPLICAS"));
+        if mode == "sql" {
+            assert!(result.is_err());
+            assert_eq!(queries.len(), 2);
+        } else {
+            let rows = result.unwrap();
+            assert_eq!(rows[0].estimated_rows, Some(12));
+            assert_eq!(rows[0].total_bytes, if mode == "success" { Some(4096) } else { None });
+            assert_eq!(queries.len(), if mode == "success" { 1 } else { 2 });
+        }
+        fixture.wait_for_requests("close_session", 1).await;
+        fixture.assert_only_foreground_remains(&foreground).await;
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn statistics_sql_error_and_timeout_clean_up_without_replaying() {
     for failure in ["sql", "timeout"] {
         let fixture = AgentFixture::new(DatabaseType::Dameng).await;
@@ -484,4 +548,46 @@ async fn statistics_native_sqlite_preserves_default_pool() {
     assert!(state.with_connection_pools(|pools| pools.len() == 1 && pools.contains_key(&key)).await);
     assert!(state.agent_manager.connection_runtimes.lock().await.is_empty());
     state.shutdown(Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn kingbase_view_ddl_appends_view_and_column_comments() {
+    let fixture = AgentFixture::new(DatabaseType::Kingbase).await;
+    let ddl = get_table_ddl_core(&fixture.state, "conn", "configured", "app", "orders_v", Some(ObjectSourceKind::View))
+        .await
+        .unwrap();
+    assert_eq!(
+        ddl,
+        "CREATE OR REPLACE VIEW \"app\".\"orders_v\" AS\nSELECT 1 AS id;\n\
+         COMMENT ON VIEW \"app\".\"orders_v\" IS 'View''s comment';\n\
+         COMMENT ON COLUMN \"app\".\"orders_v\".\"id\" IS 'Column''s comment';"
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn kingbase_view_ddl_survives_comment_lookup_failure() {
+    let fixture = AgentFixture::new(DatabaseType::Kingbase).await;
+    std::fs::write(fixture.control_path("comment-error"), "sql").unwrap();
+    let ddl = get_table_ddl_core(&fixture.state, "conn", "configured", "app", "orders_v", Some(ObjectSourceKind::View))
+        .await
+        .unwrap();
+    assert!(ddl.starts_with("CREATE OR REPLACE VIEW \"app\".\"orders_v\" AS"), "{ddl}");
+    assert!(!ddl.contains("COMMENT ON VIEW"), "{ddl}");
+    assert!(ddl.contains("COMMENT ON COLUMN"), "{ddl}");
+    fixture.shutdown().await;
+}
+
+#[test]
+fn kingbase_view_comments_follow_the_reported_identifier_quote() {
+    let column = crate::db::ColumnInfo { name: "id".into(), comment: Some("c".into()), ..Default::default() };
+    let ddl = super::append_kingbase_view_comments_to_ddl(
+        "CREATE VIEW `app`.`v` AS\nSELECT 1;",
+        "app",
+        "v",
+        Some("`"),
+        Some("v"),
+        &[column],
+    );
+    assert!(ddl.ends_with("\nCOMMENT ON VIEW `app`.`v` IS 'v';\nCOMMENT ON COLUMN `app`.`v`.`id` IS 'c';"), "{ddl}");
 }

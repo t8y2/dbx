@@ -24,6 +24,37 @@ set clipboard=unnamedplus
 
 配置 `set clipboard=unnamedplus` 后，Vim 的复制和删除会写入系统剪贴板，普通模式下的 `p` 和 `P` 会从系统剪贴板读取。不支持的命令不会阻止编辑器启动。
 
+### 在 Vim 中执行 DBX 操作
+
+在 Vim 命令行中输入 `:dbx <action>` 即可执行 DBX 操作。操作名与快捷键的 action ID 一致，且不区分大小写，例如 `:dbx formatsql` 同样有效。输入未知的操作名时只会显示提示，不会执行任何操作。
+
+| 范围 | 操作 |
+| --- | --- |
+| 编辑器 | `executeSql`、`executeSqlInNewResultTab`、`explainSql`、`formatSql`、`saveSql`、`expandSelectStar`、`toggleLineComment`、`toggleBlockComment`、`selectCurrentStatement`、`previousStatement`、`nextStatement`、`statementStart`、`uppercaseSelection`、`lowercaseSelection`、`sendSelectionToAi`、`sqlIntentionActions` |
+| 应用 | `newQuery`、`closeTab`、`closeOtherTabs`、`closeAllTabs`、`reopenClosedTab`、`openSettings` |
+
+编辑器操作的行为与对应的快捷键相同。例如 `executeSql` 有选区时执行选中内容，否则执行当前语句。在可视模式下执行（命令行会变成 `:'<,'>dbx executeSql`）时，会先恢复可视选区，只使用选中的 SQL；行可视和块可视选区会扩展为整行。
+
+撤销、缩进、删除行、合并行等 Vim 本身已提供的编辑操作不会通过 `:dbx` 提供，请直接使用 Vim 原生命令。
+
+每个操作还有一个不含空格的命令：`:Dbx` 加上首字母大写的操作名，例如 `:DbxExecuteSql`、`:DbxFormatSql`。在 `vimrc` 的映射中请使用这些命令，因为 CodeMirror Vim 的映射遇到第一个空格就会截断，无法直接映射 `:dbx executeSql`：
+
+```vim
+nnoremap Qr :DbxExecuteSql<CR>
+vnoremap Qr :DbxExecuteSql<CR>
+nnoremap Qf :DbxFormatSql<CR>
+nnoremap Qj :DbxNextStatement<CR>
+nnoremap Qk :DbxPreviousStatement<CR>
+```
+
+CodeMirror Vim 在已输入的按键完整匹配某个内置命令时会立即执行，不会像 Vim 那样按 `timeoutlen` 等待后续按键。因此映射前缀请选择本身不是单键命令的键，例如 `Q`。常用的 leader 键 `<Space>`（光标右移）和 `,`（反向重复上一次 `f`/`t` 查找）会被内置命令直接吃掉，`<Space>r`、`,x` 这类映射不会被触发。如果想用它们作为前缀，请先取消其内置命令（该键原本的功能也会随之失效）：
+
+```vim
+unmap <Space>
+nnoremap <Space>r :DbxExecuteSql<CR>
+vnoremap <Space>r :DbxExecuteSql<CR>
+```
+
 ## 基本工作流
 
 <Steps>
@@ -169,6 +200,10 @@ set clipboard=unnamedplus
 
 格式化和压缩只修改编辑器文本，不会执行 SQL。
 
+## PL/SQL 调试
+
+Oracle 与 OceanBase Oracle 模式的过程、函数、包成员和匿名块可从调试入口执行逐步检查。启动、显式调试编译、会话恢复及事务边界见 [PL/SQL 调试](/cn/docs/plsql-debug)。
+
 ## 执行计划
 
 执行计划入口只接受可安全分析的查询类 SQL，例如 `SELECT`、`WITH`、`TABLE` 或 `VALUES`。支持的数据库会返回：
@@ -179,6 +214,14 @@ set clipboard=unnamedplus
 - 数据库返回的原始详情
 
 不同数据库的 `EXPLAIN` 语义不同，部分引擎只提供表格或文本结果。执行计划反映优化器估算，不等于真实生产性能；需要结合数据量、统计信息、索引和实际耗时判断。
+
+### 查看会话已有的诊断证据
+
+Oracle 和 OceanBase Oracle 连接可从连接右键菜单打开**进程列表**，点击会话行的**诊断**，查看 SQL、已有计划、统计与等待、长操作。此入口只读取数据库已经保留的证据，不执行目标 SQL，也不生成新的执行计划。
+
+诊断会固定打开时的会话与 SQL 身份；刷新继续读取同一目标。会话切换 SQL 后，页面会标明目标已变化，不会把新 SQL 的数据接到原结果。多个审计请求或缓存计划需要手动选择。SQL 文本会标明完整性；缓存计划中的行数是估算值，Oracle 游标累计统计、OB 请求统计和缓存累计统计分别标明口径。
+
+**停止读取**结束本地等待，并尝试取消诊断查询，不会终止目标会话。权限不足、视图不可用、缓存淘汰或数据未采集会分别显示；刷新失败时保留此前读到的数据及其采样时间。长操作没有记录不代表 SQL 已完成；OB 长操作只显示已有时间信息，不推算工作量百分比。
 
 ## 查询历史
 

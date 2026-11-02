@@ -44,10 +44,10 @@
     "apps/desktop/vite.docs-export.config.ts": "833bc2cbd99f9c0740cbc1584640458492bad75c9518db4d1ce0edd6958881ec"
   },
   "deps": {
-    "@vue/reactivity": "3.5.35",
-    "@vue/runtime-core": "3.5.35",
-    "@vue/runtime-dom": "3.5.35",
-    "@vue/shared": "3.5.35",
-    "marked": "18.0.4"
+    "@vue/reactivity": "3.5.44",
+    "@vue/runtime-core": "3.5.44",
+    "@vue/runtime-dom": "3.5.44",
+    "@vue/shared": "3.5.44",
+    "marked": "18.1.1"
   }
 }

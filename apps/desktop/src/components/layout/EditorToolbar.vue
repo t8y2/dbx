@@ -3,6 +3,7 @@ import { computed, nextTick, onUnmounted, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   Play,
+  FastForward,
   SquarePlay,
   CirclePlay,
   Loader2,
@@ -31,15 +32,19 @@ import {
   WrapText,
   RefreshCw,
   UserRound,
+  Copy,
 } from "@lucide/vue";
-import { supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
+import { supportsInsertValueHints } from "@/lib/sql/insertValueHints";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
+import ConnectionDetailContent from "@/components/connection/ConnectionDetailContent.vue";
+import ConnectionGroupPath from "@/components/connection/ConnectionGroupPath.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -56,20 +61,29 @@ import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { formatShortcutDisplay, formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 import { resolveNextEditorToolbarTier, type EditorToolbarTier } from "@/lib/tabs/editorToolbarLayout";
 import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
-import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { useToast } from "@/composables/useToast";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
+import type { MongoQueryLanguage } from "@/lib/mongo/mongoSql";
+import { isObjectDependencySection } from "@/lib/database/objectDependencyDetails";
+import { connectionDetailRows } from "@/lib/connection/connectionDetailRows";
+import { findConnectionGroupPath } from "@/lib/sidebar/sidebarLayout";
 
 const props = defineProps<{
   activeTab: QueryTab;
   activeConnection?: ConnectionConfig;
-  executableSql: string;
+  hasExecutableSql: boolean;
+  /** The executable SQL contains a DML statement; fallback for the preview button when `canPreviewChanges` is not provided. */
+  executableSqlMayContainDml: boolean;
   /** 来自 QueryEditor 的实时“当前语句是否为可预览 DML”信号；未提供时退回可编辑文档启发式。 */
   canPreviewChanges?: boolean;
   explainMode?: string;
   blockDangerousRedisCommands?: boolean;
   sqlKeywordCase: "preserve" | "upper" | "lower";
   databaseRequiredSignal?: number;
+  /** When non-zero, highlights and opens the connection picker so the user selects a connection. */
+  connectionRequiredSignal?: number;
   autoCommit?: boolean;
   txnSessionId?: string;
   txnAutoRolledBack?: boolean;
@@ -93,6 +107,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   toolbarExecute: [source: "pointer" | "keyboard"];
+  toolbarExecuteAll: [source: "pointer" | "keyboard"];
   toolbarExecuteInNewResultTab: [source: "pointer" | "keyboard"];
   executePointerDown: [];
   cancel: [];
@@ -126,9 +141,23 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const showMongoSqlToggle = computed(() => props.activeConnection?.db_type === "mongodb" && props.activeTab.mode === "query");
+const mongoQueryLanguage = computed(() => props.activeTab.mongoQueryLanguage ?? "shell");
+
+function setMongoQueryLanguage(language: MongoQueryLanguage) {
+  queryStore.setMongoQueryLanguage(props.activeTab.id, language);
+}
+
+async function copyGeneratedMongoShell() {
+  const shell = props.activeTab.mongoGeneratedShell;
+  if (!shell) return;
+  await copyToClipboard(shell);
+  toast(t("toolbar.mongoShellCopied"));
+}
 const { databaseOptions, loadingDatabaseOptions, loadDatabaseOptions, catalogOptions, loadingCatalogOptions, loadCatalogOptions, catalogDatabaseOptions, loadingCatalogDatabaseOptions, loadCatalogDatabaseOptions } = useDatabaseOptions();
 const { loadSchemaOptions, getSchemaOptionsForDb, isLoadingSchemas, isSchemaAware } = useSchemaOptions();
 
@@ -248,6 +277,13 @@ const activeProductionContext = computed(() => productionContextForDatabase(prop
 const showConnectionProductionBadge = computed(() => activeProductionContext.value.reason === "connection");
 const showDatabaseProductionBadge = computed(() => activeProductionContext.value.reason === "database");
 const activeConnectionValue = computed(() => props.activeConnection?.id || "");
+const activeConnectionDetailRows = computed(() => (props.activeConnection ? connectionDetailRows(props.activeConnection, t) : []));
+const activeConnectionGroupPath = computed(() => {
+  const connection = props.activeConnection;
+  if (!connection) return [];
+  return findConnectionGroupPath(connectionStore.sidebarLayout, connection.id) ?? [];
+});
+const visibleConnectionGroupPath = computed(() => (settingsStore.editorSettings.showConnectionGroupPath ? activeConnectionGroupPath.value.join("/") : ""));
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
 // Salesforce identity badge. A Salesforce tab talks to one live org and every grid
 // save is a real REST write, so the signed-in user stays visible next to the
@@ -328,12 +364,9 @@ function refreshObjectSource() {
 }
 const executeShortcutDisplay = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.executeSql));
 const executeShortcutTooltip = computed(() => t("toolbar.executeShortcut", { shortcut: executeShortcutDisplay.value }));
+const executeAllShortcutTooltip = computed(() => formatShortcutTooltip(t("toolbar.executeAllSql"), settingsStore.editorSettings.shortcuts.executeAllSql));
 const executeInNewResultTabTooltip = computed(() => formatShortcutTooltip(t("settings.shortcutExecuteSqlInNewResultTab"), settingsStore.editorSettings.shortcuts.executeSqlInNewResultTab));
-// executableSql 在无选区时可能是整篇文档；只要有 DML 语句出现就显示预览按钮，
-// 具体"当前语句"由编辑器（QueryEditor）按执行模式解析。
-const DML_KEYWORD_RE = /(^|\s)(update|insert|delete)\s/i;
-const canPreviewDml = computed(() => looksLikeDmlStatement(props.executableSql) || DML_KEYWORD_RE.test(props.executableSql));
-const previewButtonVisible = computed(() => props.canPreviewChanges ?? canPreviewDml.value);
+const previewButtonVisible = computed(() => props.canPreviewChanges ?? props.executableSqlMayContainDml);
 // DM calls it autotrace, Postgres EXPLAIN ANALYZE, SQL Server the actual execution
 // plan (SET STATISTICS XML); all three execute the statement.
 const supportsExplainAnalyze = computed(() => {
@@ -403,12 +436,15 @@ const executeButtonClass = computed(() => {
   if (props.activeTab.isExecuting) return "";
   return activeProductionContext.value.active ? "bg-red-500/10 text-red-700 hover:bg-red-500/20 hover:text-red-800 dark:text-red-300 dark:hover:text-red-200" : "bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/20 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200";
 });
+const executeAllButtonClass = computed(() => {
+  return activeProductionContext.value.active ? "text-red-700 hover:bg-red-500/10 hover:text-red-800 dark:text-red-300 dark:hover:text-red-200" : "text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-300 dark:hover:text-emerald-200";
+});
 
 const canMultiExecute = computed(() => {
   if (!supportsQueryExecution(props.activeConnection?.db_type)) return false;
   if (props.activeTab.isExecuting || props.activeTab.isExplaining || props.activeTab.isCancelling) return false;
   if (isTransactionActive.value) return false;
-  return !!props.executableSql.trim();
+  return props.hasExecutableSql;
 });
 
 const schemaSelectorAvailable = computed(() => {
@@ -435,8 +471,26 @@ watch(
   },
 );
 
+const connectionRequiredVisible = ref(false);
+
+watch(
+  () => props.connectionRequiredSignal,
+  (signal) => {
+    if (!signal) return;
+    connectionRequiredVisible.value = false;
+    requestAnimationFrame(() => {
+      connectionRequiredVisible.value = true;
+      connectionPickerRef.value?.openDropdown();
+    });
+  },
+);
+
 watch(activeDatabaseValue, (database) => {
   if (database) databaseRequiredVisible.value = false;
+});
+
+watch(activeConnectionValue, (connectionId) => {
+  if (connectionId) connectionRequiredVisible.value = false;
 });
 
 /**
@@ -473,6 +527,9 @@ const isActiveDatabaseDefault = computed(() => isDefaultDatabase(props.activeCon
 // tier contract.
 
 const showOverflowMenu = computed(() => toolbarTier.value >= 1);
+// A boolean computed keeps keystrokes from re-rendering the toolbar: it only
+// notifies when the editor flips between empty and non-empty.
+const hasSqlText = computed(() => /\S/.test(props.activeTab.sql));
 const canFormatSql = computed(() => canFormatSqlForDatabaseType(props.activeConnection?.db_type));
 const showFormatButton = computed(() => canFormatSql.value && toolbarTier.value < 2);
 const showExplainAnalyzeToggle = computed(() => toolbarTier.value < 3);
@@ -530,6 +587,10 @@ function onExecuteClick(event: MouseEvent) {
   emit("toolbarExecute", event.detail > 0 ? "pointer" : "keyboard");
 }
 
+function onExecuteAllClick(event: MouseEvent) {
+  emit("toolbarExecuteAll", event.detail > 0 ? "pointer" : "keyboard");
+}
+
 function onExecuteInNewResultTabClick(event: MouseEvent) {
   emit("toolbarExecuteInNewResultTab", event.detail > 0 ? "pointer" : "keyboard");
 }
@@ -556,6 +617,7 @@ async function changeCatalog(selectedCatalog: string) {
 }
 
 const connectionPickerRef = ref<InstanceType<typeof ConnectionTreeSelect> | null>(null);
+const connectionPickerOpen = ref(false);
 const databasePickerRef = ref<InstanceType<typeof SearchableSelect> | null>(null);
 const schemaPickerRef = ref<InstanceType<typeof SearchableSelect> | null>(null);
 
@@ -567,7 +629,7 @@ defineExpose({
 </script>
 
 <template>
-  <div ref="toolbarRootRef" class="app-editor-toolbar h-9 min-w-0 shrink-0 border-b bg-background/80 px-3 flex items-center gap-1 text-xs text-muted-foreground relative z-10 overflow-hidden" :style="toolbarStyle">
+  <div v-show="!isObjectDependencySection(activeTab)" ref="toolbarRootRef" class="app-editor-toolbar h-9 min-w-0 shrink-0 border-b bg-background/80 px-3 flex items-center gap-1 text-xs text-muted-foreground relative z-10 overflow-hidden" :style="toolbarStyle">
     <div ref="toolbarActionsRef" class="min-w-0 flex flex-1 items-center gap-0.5 overflow-hidden">
       <Tooltip>
         <TooltipTrigger as-child>
@@ -576,7 +638,7 @@ defineExpose({
             size="icon"
             class="h-6 w-6"
             :class="executeButtonClass"
-            :disabled="activeTab.isCancelling || activeTab.isExplaining || (!activeTab.isExecuting && !executableSql.trim())"
+            :disabled="activeTab.isCancelling || activeTab.isExplaining || (!activeTab.isExecuting && !hasExecutableSql)"
             @mousedown.prevent="onExecutePointerDown"
             @click="onExecuteClick"
           >
@@ -587,13 +649,37 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ activeTab.isExecuting ? t("toolbar.stopQuery") : executeShortcutTooltip }}</TooltipContent>
       </Tooltip>
+      <div v-if="showMongoSqlToggle" class="ml-1 flex h-6 shrink-0 items-center rounded-md border bg-muted/40 p-0.5" role="group" :aria-label="t('toolbar.mongoQueryLanguage')">
+        <button type="button" class="h-5 rounded px-1.5 text-[11px] font-medium" :class="mongoQueryLanguage !== 'sql' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" :aria-pressed="mongoQueryLanguage !== 'sql'" @click="setMongoQueryLanguage('shell')">
+          {{ t("toolbar.mongoShellMode") }}
+        </button>
+        <button type="button" class="h-5 rounded px-1.5 text-[11px] font-medium" :class="mongoQueryLanguage === 'sql' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" :aria-pressed="mongoQueryLanguage === 'sql'" @click="setMongoQueryLanguage('sql')">
+          {{ t("toolbar.mongoSqlMode") }}
+        </button>
+      </div>
+      <Tooltip v-if="showMongoSqlToggle && mongoQueryLanguage === 'sql' && activeTab.mongoGeneratedShell">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:text-foreground" :aria-label="t('toolbar.copyMongoShell')" @click="copyGeneratedMongoShell">
+            <Copy class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("toolbar.copyMongoShell") }}</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6" :class="executeAllButtonClass" :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining || !hasSqlText" :aria-label="t('toolbar.executeAllSql')" @click="onExecuteAllClick">
+            <FastForward class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ executeAllShortcutTooltip }}</TooltipContent>
+      </Tooltip>
       <Tooltip>
         <TooltipTrigger as-child>
           <Button
             variant="ghost"
             size="icon"
             class="h-6 w-6 text-violet-600 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-300 dark:hover:text-violet-200"
-            :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining || !executableSql.trim()"
+            :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining || !hasExecutableSql"
             :aria-label="t('settings.shortcutExecuteSqlInNewResultTab')"
             @mousedown.prevent="onExecutePointerDown"
             @click="onExecuteInNewResultTabClick"
@@ -618,7 +704,7 @@ defineExpose({
             size="icon"
             class="h-6 w-6"
             :class="activeTab.isExplaining ? '' : 'text-violet-600 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-300 dark:hover:text-violet-200'"
-            :disabled="activeTab.isExecuting || (!activeTab.isExplaining && !executableSql.trim())"
+            :disabled="activeTab.isExecuting || (!activeTab.isExplaining && !hasExecutableSql)"
             @click="activeTab.isExplaining ? emit('cancel') : emit('explain')"
           >
             <Square v-if="activeTab.isExplaining" class="h-3.5 w-3.5 fill-current" />
@@ -647,7 +733,7 @@ defineExpose({
       </Tooltip>
       <Tooltip v-if="showFormatButton">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @click="emit('formatSql')">
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @click="emit('formatSql')">
             <AlignLeft class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -655,7 +741,7 @@ defineExpose({
       </Tooltip>
       <Tooltip v-if="showCompressButton">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @click="emit('compressSql')">
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @click="emit('compressSql')">
             <Minimize2 class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -663,7 +749,7 @@ defineExpose({
       </Tooltip>
       <Tooltip v-if="showFoldButtons">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" :aria-label="t('toolbar.foldAll')" @click="emit('foldAll')">
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" :aria-label="t('toolbar.foldAll')" @click="emit('foldAll')">
             <FoldVertical class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -671,7 +757,7 @@ defineExpose({
       </Tooltip>
       <Tooltip v-if="showFoldButtons">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" :aria-label="t('toolbar.unfoldAll')" @click="emit('unfoldAll')">
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" :aria-label="t('toolbar.unfoldAll')" @click="emit('unfoldAll')">
             <UnfoldVertical class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -819,15 +905,15 @@ defineExpose({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" class="w-max min-w-56 max-w-[calc(100vw-1rem)]">
-          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('compressSql')">
+          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('compressSql')">
             <Minimize2 class="h-3.5 w-3.5" />
             {{ t("toolbar.compressSql") }}
           </DropdownMenuItem>
-          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('foldAll')">
+          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('foldAll')">
             <FoldVertical class="h-3.5 w-3.5" />
             {{ t("toolbar.foldAll") }}
           </DropdownMenuItem>
-          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('unfoldAll')">
+          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('unfoldAll')">
             <UnfoldVertical class="h-3.5 w-3.5" />
             {{ t("toolbar.unfoldAll") }}
           </DropdownMenuItem>
@@ -870,7 +956,7 @@ defineExpose({
             {{ t("settings.showInsertValueHints") }}
           </DropdownMenuCheckboxItem>
           <template v-if="toolbarTier >= 2">
-            <DropdownMenuItem v-if="canFormatSql" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('formatSql')">
+            <DropdownMenuItem v-if="canFormatSql" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('formatSql')">
               <AlignLeft class="h-3.5 w-3.5" />
               {{ t("toolbar.formatSql") }}
             </DropdownMenuItem>
@@ -950,30 +1036,45 @@ defineExpose({
       </div>
     </div>
     <div class="flex shrink-0 items-center gap-2">
-      <div class="flex shrink-0 items-center gap-1">
+      <div class="flex shrink-0 items-center gap-1" :class="{ 'connection-required-prompt': connectionRequiredVisible }">
         <span v-if="activeConnection?.color" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: activeConnection.color }" />
-        <ConnectionTreeSelect
-          ref="connectionPickerRef"
-          :model-value="activeConnectionValue"
-          :connections="connectionStore.connections"
-          :layout="connectionStore.sidebarLayout"
-          :placeholder="t('editor.selectConnection')"
-          :search-placeholder="t('editor.searchConnection')"
-          :empty-text="t('grid.noSearchResults')"
-          trigger-class="font-medium text-foreground"
-          trigger-icon-class="h-3 w-3"
-          list-class="w-96 max-w-[calc(100vw-2rem)]"
-          @update:model-value="(connectionId) => emit('changeConnection', connectionId)"
-        >
-          <template #trigger-label="{ label }">
-            <div v-if="activeConnection" class="flex min-w-0 items-center gap-1.5">
-              <DatabaseIcon :db-type="connectionIconType(activeConnection)" class="h-3.5 w-3.5 shrink-0" />
-              <span class="truncate">{{ label }}</span>
-              <ProductionContextBadge v-if="showConnectionProductionBadge" compact />
-            </div>
-            <span v-else class="truncate text-muted-foreground">{{ t("editor.selectConnection") }}</span>
+        <LightTooltip text="" :disabled="connectionPickerOpen || !activeConnectionDetailRows.length" side="bottom" :side-offset="6" :delay="250" :close-delay="80" surface="popover">
+          <ConnectionTreeSelect
+            ref="connectionPickerRef"
+            :model-value="activeConnectionValue"
+            :connections="connectionStore.connections"
+            :layout="connectionStore.sidebarLayout"
+            :placeholder="t('editor.selectConnection')"
+            :search-placeholder="t('editor.searchConnection')"
+            :empty-text="t('grid.noSearchResults')"
+            :hide-title="activeConnectionDetailRows.length > 0"
+            trigger-class="max-w-[min(28rem,36vw)] font-medium text-foreground"
+            trigger-icon-class="h-3 w-3"
+            list-class="w-96 max-w-[calc(100vw-2rem)]"
+            @update:model-value="(connectionId) => emit('changeConnection', connectionId)"
+            @update:open="(open: boolean) => (connectionPickerOpen = open)"
+          >
+            <template #trigger-label="{ label }">
+              <div v-if="activeConnection" class="flex min-w-0 items-center gap-0.5">
+                <DatabaseIcon :db-type="connectionIconType(activeConnection)" class="h-3.5 w-3.5 shrink-0" />
+                <ConnectionGroupPath v-if="visibleConnectionGroupPath" :segments="activeConnectionGroupPath" :connection-name="label" />
+                <span v-else class="min-w-0 flex-1 truncate">{{ label }}</span>
+                <ProductionContextBadge v-if="showConnectionProductionBadge" compact />
+              </div>
+              <span v-else class="truncate text-muted-foreground">{{ t("editor.selectConnection") }}</span>
+            </template>
+          </ConnectionTreeSelect>
+          <template #content>
+            <ConnectionDetailContent :rows="activeConnectionDetailRows" :class="['max-w-[min(22rem,calc(100vw-24px))]', visibleConnectionGroupPath ? 'max-h-[min(32rem,calc(100vh-24px))] overflow-y-auto overscroll-contain' : undefined]">
+              <template v-if="visibleConnectionGroupPath" #header>
+                <div class="mb-1 grid grid-cols-[max-content_minmax(0,1fr)] gap-2 text-xs leading-5">
+                  <div class="text-muted-foreground">{{ t("connection.groupPath") }}</div>
+                  <div data-connection-detail-group-path class="whitespace-pre-wrap font-mono text-foreground/90 [overflow-wrap:anywhere]">{{ visibleConnectionGroupPath }}</div>
+                </div>
+              </template>
+            </ConnectionDetailContent>
           </template>
-        </ConnectionTreeSelect>
+        </LightTooltip>
       </div>
       <div v-if="showCatalogSelector" class="flex shrink-0 items-center gap-1">
         <SearchableSelect
@@ -1168,5 +1269,16 @@ defineExpose({
   72% {
     transform: translateX(3px);
   }
+}
+
+.connection-required-prompt {
+  color: var(--destructive);
+  animation: database-required-shake 420ms ease;
+}
+
+.connection-required-prompt :deep(button) {
+  color: var(--destructive);
+  border-color: color-mix(in oklch, var(--destructive) 55%, transparent);
+  background: color-mix(in oklch, var(--destructive) 10%, transparent);
 }
 </style>

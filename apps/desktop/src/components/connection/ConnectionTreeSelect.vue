@@ -22,9 +22,11 @@ const props = withDefaults(
     triggerClass?: HTMLAttributes["class"];
     triggerIconClass?: HTMLAttributes["class"];
     listClass?: HTMLAttributes["class"];
+    hideTitle?: boolean;
   }>(),
   {
     disabled: false,
+    hideTitle: false,
     triggerIconClass: "size-4 text-muted-foreground",
   },
 );
@@ -154,7 +156,7 @@ defineExpose({
 <template>
   <Popover v-model:open="open">
     <PopoverTrigger as-child>
-      <Button type="button" variant="ghost" :disabled="disabled" :title="selectedLabel" :class="cn('h-6 w-auto max-w-56 min-w-0 justify-between gap-1 border-0 bg-transparent px-1 text-xs font-normal shadow-none hover:bg-muted/50 focus-visible:ring-0', triggerClass)">
+      <Button type="button" variant="ghost" :disabled="disabled" :title="hideTitle ? undefined : selectedLabel" :class="cn('h-6 w-auto max-w-56 min-w-0 justify-between gap-1 border-0 bg-transparent px-1 text-xs font-normal shadow-none hover:bg-muted/50 focus-visible:ring-0', triggerClass)">
         <slot name="trigger-label" :value="modelValue" :label="selectedLabel">
           <span class="truncate">{{ selectedLabel }}</span>
         </slot>

@@ -16,6 +16,24 @@ describe("data grid filter candidate value serialization", () => {
     expect(parseFilterValues(raw)).toEqual(["north,east", "line 1\nline 2", "O'Brien", "null"]);
   });
 
+  it("keeps exact decimal filter literals as text for lossless SQL generation", () => {
+    const value = "9007199254740993.123456789012";
+    expect(parseFilterValue(value, { data_type: "NUMBER(38,12)" }, "oceanbase-oracle")).toBe(value);
+    expect(parseFilterValues(`'${value}', '${value}1'`, { data_type: "NUMBER(38,12)" }, "oceanbase-oracle")).toEqual([value, `${value}1`]);
+  });
+
+  it("keeps leading-zero text values when the column type is unknown", () => {
+    // #13059: Number("0000000") is 0, so a text filter value lost its leading
+    // zeros and was compared as an integer when the column type was missing.
+    expect(parseFilterValue("0000000")).toBe("0000000");
+    expect(parseFilterValue("00123")).toBe("00123");
+    expect(parseFilterValue("-0007")).toBe("-0007");
+    // Plain numeric literals keep their existing numeric coercion.
+    expect(parseFilterValue("0")).toBe(0);
+    expect(parseFilterValue("123")).toBe(123);
+    expect(parseFilterValue("0.5")).toBe(0.5);
+  });
+
   it("maps a selected NULL candidate to a null-aware single-value operator", () => {
     expect(dataGridNullSuggestionFilterMode("equals")).toBe("is-null");
     expect(dataGridNullSuggestionFilterMode("like")).toBe("is-null");

@@ -57,6 +57,8 @@ function mountNavigation(placement: "top" | "bottom" | "left" | "right", empty =
   const pages = reactive({ settingsOpen: true, driverOpen: true, driverActive: false, draft: "initial" });
   const navigation = reactive({ width: 260, collapsed: false });
   const workspace = ref<{ toggleResultsPane: () => boolean } | null>(null);
+  const saveTab = vi.fn();
+  const saveAll = vi.fn();
   const active = computed(() => settings.settingsPageActive || pages.driverActive);
   const portal = createGroupTabBarPortal(active);
   const actions = {
@@ -90,15 +92,15 @@ function mountNavigation(placement: "top" | "bottom" | "left" | "right", empty =
   document.body.appendChild(host);
   const root = defineComponent({
     components: { AppTabBar, SqlEditorWorkspace, TooltipProvider },
-    setup: () => ({ store, settings, pages, active, navigation, workspace }),
+    setup: () => ({ store, settings, pages, active, navigation, workspace, saveTab, saveAll }),
     template: `
       <TooltipProvider>
-        <AppTabBar :settings-page-open="pages.settingsOpen" :settings-page-active="settings.settingsPageActive" :driver-store-open="pages.driverOpen" :driver-store-active="pages.driverActive" :tab-bar-width="navigation.width" :tab-bar-collapsed="navigation.collapsed">
+        <AppTabBar :settings-page-open="pages.settingsOpen" :settings-page-active="settings.settingsPageActive" :driver-store-open="pages.driverOpen" :driver-store-active="pages.driverActive" :tab-bar-width="navigation.width" :tab-bar-collapsed="navigation.collapsed" @save-tab="saveTab" @save-all-tab-close="saveAll">
           <div v-show="settings.settingsPageActive" data-test="settings-page"><input v-model="pages.draft" data-test="settings-input" /></div>
           <div v-show="pages.driverActive" data-test="driver-page">Drivers</div>
         </AppTabBar>
         <div v-show="!active" data-test="editor-workspace-wrapper">
-          <SqlEditorWorkspace ref="workspace" :active-tab="store.tabs.find(tab => tab.id === store.activeTabId)" :show-tab-navigation="store.tabs.length > 0 || pages.settingsOpen || pages.driverOpen" active-output-view="result" executable-sql="SELECT 1" :format-sql-request="null" :compress-sql-request="null" :keyword-case-request="null" selected-sql="" :cursor-pos="0" :block-dangerous-redis-commands="false" :tab-bar-width="navigation.width" :tab-bar-collapsed="navigation.collapsed">
+          <SqlEditorWorkspace ref="workspace" :active-tab="store.tabs.find(tab => tab.id === store.activeTabId)" :show-tab-navigation="store.tabs.length > 0 || pages.settingsOpen || pages.driverOpen" active-output-view="result" :has-executable-sql="true" :format-sql-request="null" :compress-sql-request="null" :keyword-case-request="null" :block-dangerous-redis-commands="false" :tab-bar-width="navigation.width" :tab-bar-collapsed="navigation.collapsed">
             <template #empty><div data-test="welcome"><button @click="store.createTab('mysql-local', 'app', 'New query', 'query')">New query</button></div></template>
           </SqlEditorWorkspace>
         </div>
@@ -117,7 +119,7 @@ function mountNavigation(placement: "top" | "bottom" | "left" | "right", empty =
     host.remove();
     window.removeEventListener("dbx:activate-query-surface", onQuerySurface);
   });
-  return { host, store, settings, pages, portal, actions, warnings, navigation, workspace };
+  return { host, store, settings, pages, portal, actions, warnings, navigation, workspace, saveTab, saveAll };
 }
 
 function element(host: HTMLElement, selector: string): HTMLElement {
@@ -132,6 +134,78 @@ describe("AppTabBar group navigation portal", () => {
   });
   afterEach(() => {
     for (const cleanup of cleanups.splice(0)) cleanup();
+  });
+
+  function mixedClose(recoveryFirst = false) {
+    const mounted = mountNavigation("top");
+    mounted.settings.editorSettings.confirmUnsavedSqlClose = true;
+    const [sql, recovery] = mounted.store.tabs;
+    sql!.originalSql = "SELECT 0";
+    recovery!.originalSql = recovery!.sql;
+    recovery!.typeManagementDraft = { state: "stopped" } as NonNullable<QueryTab["typeManagementDraft"]>;
+    mounted.store.closeTabsByIds(recoveryFirst ? [recovery!.id, sql!.id] : [sql!.id, recovery!.id]);
+    return { ...mounted, sql: sql!, recovery: recovery! };
+  }
+
+  function closeButton(label: string) {
+    return [...document.querySelectorAll<HTMLButtonElement>("[role='dialog'] button")].find((button) => button.textContent?.trim() === label);
+  }
+
+  it("keeps the current SQL save action in a mixed TYPE recovery batch", async () => {
+    const { store, sql, recovery, saveTab, saveAll } = mixedClose();
+    await settle();
+    expect(store.pendingCloseTabId).toBe(sql.id);
+    expect(closeButton("editor.discardChanges")).toBeDefined();
+    expect(closeButton("objects.typeManagementDiscardClose")).toBeUndefined();
+    expect(closeButton("editor.saveAllChanges")).toBeUndefined();
+    expect(document.querySelector("[role='alert']")?.textContent).toBe("objects.typeManagementCloseWarning");
+    expect(closeButton("savedSql.save")).toBeDefined();
+    closeButton("savedSql.save")!.click();
+    await settle();
+    expect(saveTab).toHaveBeenCalledExactlyOnceWith(sql.id);
+    expect(saveAll).not.toHaveBeenCalled();
+    expect(store.tabs.find((tab) => tab.id === recovery.id)?.typeManagementDraft).toEqual({ state: "stopped" });
+    expect(sql.sql).toBe("SELECT 1");
+  });
+
+  it.each([false, true])("scopes discard controls to the pending tab (TYPE first: %s)", async (recoveryFirst) => {
+    const { store, sql, recovery } = mixedClose(recoveryFirst);
+    await settle();
+    expect(store.pendingCloseTabId).toBe(recoveryFirst ? recovery.id : sql.id);
+    expect(closeButton(recoveryFirst ? "objects.typeManagementDiscardClose" : "editor.discardChanges")).toBeDefined();
+    expect(!!closeButton("savedSql.save")).toBe(!recoveryFirst);
+    closeButton(recoveryFirst ? "objects.typeManagementDiscardClose" : "editor.discardChanges")!.click();
+    await settle();
+    expect(store.pendingCloseTabId).toBe(recoveryFirst ? sql.id : recovery.id);
+    expect(closeButton(recoveryFirst ? "editor.discardChanges" : "objects.typeManagementDiscardClose")).toBeDefined();
+    expect(!!closeButton("savedSql.save")).toBe(recoveryFirst);
+    expect(store.tabs.map((tab) => tab.id)).toEqual([recoveryFirst ? sql.id : recovery.id]);
+    if (recoveryFirst) expect(store.tabs[0]?.sql).toBe("SELECT 1");
+    else expect(store.tabs[0]?.typeManagementDraft).toEqual({ state: "stopped" });
+  });
+
+  it("cancels a mixed close without discarding SQL or the TYPE recovery draft", async () => {
+    const { store, sql, recovery } = mixedClose();
+    await settle();
+    closeButton("common.cancel")!.click();
+    await settle();
+    expect(store.showCloseConfirm).toBe(false);
+    expect(store.tabs.map((tab) => tab.id)).toEqual([sql.id, recovery.id]);
+    expect(sql.sql).toBe("SELECT 1");
+    expect(recovery.typeManagementDraft).toEqual({ state: "stopped" });
+  });
+
+  it("retains Save All for a batch without unfinished TYPE recovery", async () => {
+    const { store, settings, saveAll } = mountNavigation("top");
+    settings.editorSettings.confirmUnsavedSqlClose = true;
+    for (const tab of store.tabs) tab.originalSql = "SELECT 0";
+    store.tabs[1]!.typeManagementDraft = { state: "complete" } as NonNullable<QueryTab["typeManagementDraft"]>;
+    store.closeTabsByIds(store.tabs.map((tab) => tab.id));
+    await settle();
+    expect(closeButton("savedSql.save")).toBeDefined();
+    expect(closeButton("editor.saveAllChanges")).toBeDefined();
+    closeButton("editor.saveAllChanges")!.click();
+    expect(saveAll).toHaveBeenCalledOnce();
   });
 
   it.each(["top", "bottom", "left", "right"] as const)("moves the same %s bar between query, settings and driver surfaces", async (placement) => {

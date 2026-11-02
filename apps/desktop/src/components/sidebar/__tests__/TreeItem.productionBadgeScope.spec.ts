@@ -179,6 +179,26 @@ describe("TreeItem production badge scope", () => {
     expect(container.querySelector<HTMLElement>('[data-node-id="scope-inline"]')?.style.paddingRight).toBe("");
   });
 
+  it("marks object rows with one aligned marker in table scope", async () => {
+    connection = { ...productionConnection, production_badge_scope: "table" };
+
+    const container = mountTreeItem({ id: "table-1", label: "orders", type: "table", connectionId: productionConnection.id, database: "analytics" });
+    await nextTick();
+
+    expect(container.querySelector('[data-node-id="table-1"] [data-production-marker]')).not.toBeNull();
+    expect(rowText(container, "table-1")).not.toContain("PROD");
+  });
+
+  it("keeps the text badge on container rows in table scope", async () => {
+    connection = { ...productionConnection, production_badge_scope: "table" };
+
+    const container = mountTreeItem({ id: "schema-1", label: "analytics", type: "schema", connectionId: productionConnection.id, database: "analytics" });
+    await nextTick();
+
+    expect(container.querySelector('[data-node-id="schema-1"] [data-production-marker]')).toBeNull();
+    expect(rowText(container, "schema-1")).toContain("PROD");
+  });
+
   it("leaves ordinary object rows unmarked inside a production connection", async () => {
     const container = mountTreeItem({ id: "table-1", label: "orders", type: "table", connectionId: productionConnection.id, database: "shop" });
     await nextTick();

@@ -1,7 +1,7 @@
 use dbx_core::connection::{AppState, PoolKind, TransactionSession, TxnConnection};
 use dbx_core::db::agent_driver::{AgentDriverClient, AgentLaunchSpec, AgentRuntimeClient};
 use dbx_core::models::connection::ConnectionConfig;
-use dbx_core::query::{request_large_value, LargeValueRequest};
+use dbx_core::query::{request_large_value, request_large_value_reported, LargeValueCompletion, LargeValueRequest};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -101,6 +101,7 @@ async fn public_lob_request_cancels_while_waiting_for_transaction_connection() {
         fixture.state.transaction_sessions.write().await.insert(
             "txn".into(),
             TransactionSession {
+                mysql_data_charset: None,
                 sqlserver: None,
                 connection: connection.clone(),
                 pool_key: "lob".into(),
@@ -128,6 +129,59 @@ async fn public_lob_request_cancels_while_waiting_for_agent_client() {
         let _held = client.lock().await;
         assert_local_cancel(&fixture, false, release).await;
     }
+}
+
+#[tokio::test]
+async fn reported_lob_cancel_during_lock_wait_is_confirmed_without_rpc() {
+    let fixture = Fixture::new().await;
+    let Some(PoolKind::Agent(client)) = fixture.state.pool_handle("lob").await else { panic!("Agent fixture missing") };
+    let _held = client.lock().await;
+    let mut pending = Box::pin(request_large_value_reported(&fixture.state, request(false)));
+    assert!(tokio::time::timeout(Duration::from_millis(20), &mut pending).await.is_err());
+    assert!(fixture.state.running_queries.cancel("lob-wait"));
+    let error = tokio::time::timeout(Duration::from_secs(1), pending).await.unwrap().unwrap_err();
+    assert_eq!(error.status, LargeValueCompletion::Cancelled);
+    fixture.assert_no_lob_rpc();
+}
+
+#[tokio::test]
+async fn reported_lob_cancel_waits_for_original_response_and_preserves_transport_unknown() {
+    for transport in [false, true] {
+        let fixture = Fixture::new().await;
+        let mut req = request(false);
+        req.value_ref = if transport { "delayed-transport" } else { "delayed" }.into();
+        let mut pending = Box::pin(request_large_value_reported(&fixture.state, req));
+        tokio::select! {
+            result = &mut pending => panic!("Read returned before original response: {result:?}"),
+            _ = async {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        let methods = std::fs::read_to_string(fixture.directory.path().join("methods.log")).unwrap_or_default();
+                        if methods.lines().any(|method| method == "read_large_value_chunk") { break; }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                }).await.unwrap();
+            } => {}
+        }
+        assert!(fixture.state.running_queries.cancel("lob-wait"));
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut pending).await.is_err());
+        std::fs::write(fixture.directory.path().join("methods.release"), "release").unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), pending).await.unwrap().unwrap_err();
+        assert_eq!(
+            error.status,
+            if transport { LargeValueCompletion::Unknown } else { LargeValueCompletion::Cancelled }
+        );
+    }
+}
+
+#[tokio::test]
+async fn reported_lob_original_error_is_a_confirmed_failure() {
+    let fixture = Fixture::new().await;
+    let mut req = request(false);
+    req.value_ref = "original-error".into();
+    let error = request_large_value_reported(&fixture.state, req).await.unwrap_err();
+    assert_eq!(error.status, LargeValueCompletion::Failed);
+    assert!(error.message.contains("fixture read failed"));
 }
 
 #[tokio::test]

@@ -100,6 +100,7 @@ async fn live_oracle_database_export_replays_trigger_sequences() {
             include_create_database: false,
             drop_table_if_exists: false,
             omit_auto_increment: false,
+        omit_database_qualifier: false,
             preserve_original_language: false,
             fail_on_error: true,
             prevent_overwrite: false,
@@ -140,6 +141,7 @@ async fn live_oracle_database_export_replays_trigger_sequences() {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            resolve_includes: false,
             encoding: Default::default(),
         };
         execute_sql_file_path(

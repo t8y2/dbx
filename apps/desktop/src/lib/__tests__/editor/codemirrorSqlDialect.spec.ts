@@ -14,6 +14,15 @@ function nodeNameAt(dialect: langSql.SQLDialect, statement: string, word: string
 }
 
 describe("codemirrorSqlDialect", () => {
+  it.each([
+    ["oracle", "SELECT NVL(\"name\", 'n/a') FROM t", '"name"', "QuotedIdentifier"],
+    ["mysql", "SELECT IFNULL(`name`, 'n/a') FROM t", "`name`", "QuotedIdentifier"],
+    ["postgres", "SELECT now(), data #>> '{name}' FROM t", "now", "Builtin"],
+    ["sqlserver", "SELECT GETDATE() FROM #temp", "#temp", "SpecialVar"],
+  ] as const)("uses the %s lexer for Kingbase without replacing its physical type", (mode, sql, token, expected) => {
+    expect(nodeNameAt(createDbxCodeMirrorSqlDialect(langSql, mode, "kingbase"), sql, token)).toBe(expected);
+  });
+
   it("keeps common PostgreSQL identifier names out of keyword highlighting", () => {
     const keywords = new Set(postgresKeywordSyntaxTerms(langSql.PostgreSQL.spec.keywords || "").split(/\s+/));
 

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use dbx_core::connection::{AppState, PoolKind};
 use dbx_core::db::postgres;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
@@ -81,6 +83,8 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,
+        show_native_jobs: None,
+        show_user_admin: None,
         database_info: None,
     }
 }
@@ -262,6 +266,7 @@ async fn live_postgres_transfer_upserts_generated_always_identity_values() {
         create_table: false,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        oracle_packages: None,
         content: dbx_core::transfer::TransferContent::default(),
         objects: Some(Vec::new()),
         mode: TransferMode::Upsert,
@@ -441,6 +446,7 @@ async fn live_postgres_structure_only_preserves_table_indexes() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        oracle_packages: None,
         content: dbx_core::transfer::TransferContent::default(),
         objects: Some(Vec::new()),
         mode: TransferMode::Append,
@@ -727,6 +733,7 @@ async fn live_postgres_transfer_preserves_data_and_schema_objects() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        oracle_packages: None,
         content: dbx_core::transfer::TransferContent::default(),
         objects: None,
         mode: TransferMode::Append,
@@ -1031,6 +1038,7 @@ async fn live_postgres_transfer_skips_create_ddl_for_existing_target_table() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        oracle_packages: None,
         content: dbx_core::transfer::TransferContent::default(),
         objects: Some(Vec::new()),
         mode: TransferMode::Append,
@@ -1157,6 +1165,7 @@ async fn live_postgres_transfer_creates_selected_sequence_before_referencing_tab
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        oracle_packages: None,
         content: dbx_core::transfer::TransferContent::default(),
         objects: Some(vec![
             TransferObjectSelection { object_type: TransferObjectKind::Table, names: vec!["biz_banner".to_string()] },
@@ -1350,6 +1359,7 @@ async fn live_postgres_transfer_drop_target_rebuilds_structure_and_indexes() {
         create_table: true,
         drop_target_before_create: true,
         drop_target_confirmed: true,
+        oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
         mode: TransferMode::Append,
@@ -1553,6 +1563,7 @@ impl PostgresRebuildFixture {
                 create_table: true,
                 drop_target_before_create: true,
                 drop_target_confirmed: true,
+                oracle_packages: None,
                 content: TransferContent::default(),
                 objects: Some(Vec::new()),
                 mode: TransferMode::Append,
@@ -1878,6 +1889,7 @@ async fn live_postgres_keyset_pagination_copies_every_row() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
         mode: TransferMode::Append,
@@ -1992,6 +2004,7 @@ async fn live_postgres_progress_read_survives_total_duration_beyond_timeout() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
         mode: TransferMode::Append,
@@ -2100,6 +2113,7 @@ async fn live_postgres_keyset_large_batch_copies_every_row() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        oracle_packages: None,
         content: TransferContent::default(),
         objects: Some(Vec::new()),
         mode: TransferMode::Append,
@@ -2214,6 +2228,7 @@ async fn live_postgres_structure_only_preview_renders_ddl_without_touching_the_t
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        oracle_packages: None,
         content: TransferContent::StructureOnly,
         // A selected non-table object must be disclosed as not expanded, never silently dropped.
         objects: Some(vec![TransferObjectSelection {

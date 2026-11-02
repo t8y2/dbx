@@ -32,7 +32,7 @@
 //! statement or a JSON document would corrupt it.
 
 use dbx_formats::csv_export::needs_formula_guard;
-use dbx_sql::data_grid_extractors::{DataGridExtractRequest, DataGridExtractorId};
+use dbx_sql::data_grid_extractors::{DataGridExtractRequest, DataGridExtractorId, DataGridHeaderFormat};
 use serde_json::Value;
 
 /// Extractors whose output is pasted straight into a spreadsheet cell grid.
@@ -71,7 +71,9 @@ fn is_spreadsheet_extractor(extractor: DataGridExtractorId) -> bool {
         | DataGridExtractorId::Markdown
         | DataGridExtractorId::Html
         | DataGridExtractorId::Xml
-        | DataGridExtractorId::Pretty => false,
+        | DataGridExtractorId::Pretty
+        | DataGridExtractorId::Dbunit
+        | DataGridExtractorId::Php => false,
     }
 }
 
@@ -98,6 +100,15 @@ pub fn neutralize_spreadsheet_formulas(mut request: DataGridExtractRequest) -> D
     for column in &mut request.columns {
         if needs_formula_guard(&column.display_name) {
             column.display_name.insert(0, '\'');
+        }
+        if request.options.dsv.header_format == DataGridHeaderFormat::Description
+            || request.options.dsv.header_format == DataGridHeaderFormat::NameAndDescriptionTwoRows
+        {
+            if let Some(description) = &mut column.description {
+                if needs_formula_guard(description) {
+                    description.insert(0, '\'');
+                }
+            }
         }
     }
 
@@ -136,11 +147,13 @@ mod tests {
             database_type: None,
             identifier_quote: None,
             table_meta: None,
+            source_table_name: None,
             columns: vec![DataGridExtractColumn {
                 display_name: "value".to_string(),
                 source_name: Some("value".to_string()),
                 source_index: 0,
                 data_type: None,
+                description: None,
             }],
             selected_column_indexes: vec![0],
             rows,
@@ -316,6 +329,21 @@ mod tests {
     }
 
     #[test]
+    fn description_headers_are_guarded_only_when_they_are_the_effective_header() {
+        let mut request = request(DataGridExtractorId::CsvWithHeaders, vec![vec![json!(1)]]);
+        request.columns[0].display_name = "value".into();
+        request.columns[0].description = Some("=SUM(A1)".into());
+        request.options.dsv.header_format = DataGridHeaderFormat::Description;
+        let guarded = neutralize_spreadsheet_formulas(request.clone());
+        assert_eq!(guarded.columns[0].description.as_deref(), Some("'=SUM(A1)"));
+        assert_eq!(dbx_sql::data_grid_extractors::extract_data_grid_selection(guarded).unwrap().text, "'=SUM(A1)\n1");
+
+        request.options.dsv.header_format = DataGridHeaderFormat::Both;
+        let guarded = neutralize_spreadsheet_formulas(request);
+        assert_eq!(guarded.columns[0].description.as_deref(), Some("=SUM(A1)"));
+    }
+
+    #[test]
     fn non_spreadsheet_headers_are_untouched() {
         let mut request = request(DataGridExtractorId::SqlInserts, vec![vec![json!(1)]]);
         request.columns[0].display_name = "-total".to_string();
@@ -338,6 +366,7 @@ mod tests {
                 source_name: Some("formula".to_string()),
                 source_index: 1,
                 data_type: None,
+                description: None,
             });
             let guarded = neutralize_spreadsheet_formulas(request);
             let result = dbx_sql::data_grid_extractors::extract_data_grid_selection(guarded)

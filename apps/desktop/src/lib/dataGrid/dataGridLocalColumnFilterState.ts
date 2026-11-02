@@ -14,6 +14,62 @@ export type DataGridLocalFilterSort = {
   direction: "asc" | "desc";
 };
 
+export type DataGridLocalFilterCountPredicate = (count: number | null) => boolean;
+
+function createCountPredicate(operator: string, target: number): DataGridLocalFilterCountPredicate {
+  switch (operator) {
+    case ">":
+      return (count) => (count ?? 0) > target;
+    case ">=":
+      return (count) => (count ?? 0) >= target;
+    case "<":
+      return (count) => (count ?? 0) < target;
+    case "<=":
+      return (count) => (count ?? 0) <= target;
+    case "!=":
+    case "<>":
+      return (count) => (count ?? 0) !== target;
+    case "=":
+    case "==":
+    default:
+      return (count) => (count ?? 0) === target;
+  }
+}
+
+export function parseDataGridLocalFilterCountQuery(query: string): DataGridLocalFilterCountPredicate | null {
+  const trimmed = query.trim();
+  if (!trimmed) return null;
+
+  const prefixMatch = /^(?:count|数量)\s*(?::\s*|\s*=\s*|\s*)?(>=|<=|>|<|==|=|!=|<>)?\s*(\d+)$/i.exec(trimmed);
+  if (prefixMatch) {
+    const op = prefixMatch[1] ?? "=";
+    const target = Number(prefixMatch[2]);
+    return createCountPredicate(op, target);
+  }
+
+  const opMatch = /^(>=|<=|>|<|==|=|!=|<>)\s*(\d+)$/.exec(trimmed);
+  if (opMatch) {
+    const op = opMatch[1];
+    const target = Number(opMatch[2]);
+    return createCountPredicate(op, target);
+  }
+
+  return null;
+}
+
+export function filterDataGridLocalFilterOptions(options: readonly DataGridLocalFilterOption[], query: string): DataGridLocalFilterOption[] {
+  const trimmed = query.trim();
+  if (!trimmed) return [...options];
+
+  const countPredicate = parseDataGridLocalFilterCountQuery(trimmed);
+  const normalizedQuery = trimmed.toLowerCase();
+
+  return options.filter((option) => {
+    if (countPredicate && countPredicate(option.count)) return true;
+    return option.label.toLowerCase().includes(normalizedQuery);
+  });
+}
+
 function compareLocalFilterValues(a: DataGridLocalFilterOption, b: DataGridLocalFilterOption): number {
   if (a.value === null && b.value !== null) return -1;
   if (a.value !== null && b.value === null) return 1;

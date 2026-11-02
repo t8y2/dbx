@@ -61,6 +61,149 @@ pub async fn load_mcp_global_policy(
     state.app.storage.load_mcp_global_policy().await.map(Json).map_err(AppError::from)
 }
 
+pub async fn load_mcp_tool_catalog() -> Json<dbx_core::mcp_catalog::McpToolCatalog> {
+    Json(dbx_mcp::DbxMcpServer::tool_catalog())
+}
+
+pub async fn list_plugin_mcp_views(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<Vec<dbx_core::plugin_mcp::PluginMcpView>>, AppError> {
+    dbx_core::plugin_mcp::list_plugin_views(&state.app).await.map(Json).map_err(AppError::from)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMcpViewRequest {
+    pub plugin_id: String,
+}
+
+pub async fn load_plugin_mcp_view(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<PluginMcpViewRequest>,
+) -> Result<Json<dbx_core::plugin_mcp::PluginMcpView>, AppError> {
+    dbx_core::plugin_mcp::plugin_view_for(&state.app, &body.plugin_id).await.map(Json).map_err(AppError::bad_request)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListPluginMcpScopesRequest {
+    pub plugin_id: String,
+    pub connection_id: String,
+}
+
+pub async fn list_plugin_mcp_scopes(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<ListPluginMcpScopesRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let manifest = state
+        .app
+        .plugins
+        .list_installed()
+        .map_err(AppError::from)?
+        .into_iter()
+        .find(|plugin| plugin.manifest.id == body.plugin_id)
+        .ok_or_else(|| AppError::bad_request("Plugin is not installed."))?
+        .manifest;
+    let method = manifest
+        .mcp_contribution()
+        .and_then(|mcp| mcp.scope.as_ref())
+        .and_then(|scope| scope.list_method.as_deref())
+        .ok_or_else(|| AppError::bad_request("This plugin does not declare a scope list method."))?;
+    let (policy, group_paths) = crate::routes::mcp_policy::load_policy_context(&state).await?;
+    let connection = state
+        .app
+        .storage
+        .load_connections()
+        .await
+        .map_err(AppError::from)?
+        .into_iter()
+        .find(|connection| connection.id == body.connection_id)
+        .ok_or_else(|| AppError::bad_request("CONNECTION_NOT_FOUND: connection is not available."))?;
+    if connection.plugin_id.as_deref() != Some(body.plugin_id.as_str()) {
+        return Err(AppError::bad_request("CONNECTION_OUT_OF_SCOPE: connection is not owned by this plugin."));
+    }
+    crate::routes::mcp_policy::ensure_allowed(&policy, group_paths.get(&connection.id), &connection.id)?;
+    let value = state
+        .app
+        .plugin_host
+        .invoke::<serde_json::Value>(
+            &body.plugin_id,
+            method,
+            serde_json::json!({ "connectionId": connection.id }),
+            None,
+            Some(std::time::Duration::from_secs(8)),
+        )
+        .await
+        .map_err(AppError::bad_request)?;
+    let values: Vec<String> = serde_json::from_value(
+        value
+            .get("values")
+            .cloned()
+            .ok_or_else(|| AppError::bad_request("Plugin scope list must return { values: string[] }."))?,
+    )
+    .map_err(|_| AppError::bad_request("Plugin scope list must return { values: string[] }."))?;
+    Ok(Json(serde_json::json!({ "values": values })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavePluginMcpGrantRequest {
+    pub plugin_id: String,
+    pub grant: dbx_core::storage::PluginMcpGrant,
+    #[serde(default)]
+    pub approve_current: bool,
+}
+
+pub async fn save_plugin_mcp_grant(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SavePluginMcpGrantRequest>,
+) -> Result<Json<dbx_core::plugin_mcp::PluginMcpView>, AppError> {
+    dbx_core::plugin_mcp::save_plugin_grant(&state.app, &body.plugin_id, body.grant, body.approve_current)
+        .await
+        .map(Json)
+        .map_err(AppError::bad_request)
+}
+
+pub async fn load_mcp_access_policy(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<dbx_core::mcp_access::McpAccessPolicy>, AppError> {
+    state.app.storage.load_mcp_access_policy().await.map(Json).map_err(AppError::from)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMcpPluginScopeRuleRequest {
+    pub connection_id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub rule: Option<dbx_core::mcp_access::McpAccessRule>,
+    #[serde(default)]
+    pub sub_scope: Option<dbx_core::mcp_access::McpSubScopeMode>,
+}
+
+pub async fn set_mcp_plugin_scope_rule(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SetMcpPluginScopeRuleRequest>,
+) -> Result<Json<dbx_core::mcp_access::McpAccessPolicy>, AppError> {
+    dbx_core::plugin_mcp::set_scope_rule(
+        &state.app,
+        &body.connection_id,
+        &body.kind,
+        body.value.as_deref(),
+        body.rule,
+        body.sub_scope,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::bad_request)
+}
+
+pub async fn reset_invalid_mcp_access_policy(State(state): State<Arc<WebState>>) -> Result<Json<()>, AppError> {
+    state.app.storage.reset_invalid_mcp_access_policy().await.map(Json).map_err(AppError::bad_request)
+}
+
 pub async fn save_mcp_global_policy(
     State(state): State<Arc<WebState>>,
     Json(policy): Json<McpGlobalPolicy>,

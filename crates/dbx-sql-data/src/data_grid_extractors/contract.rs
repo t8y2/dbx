@@ -38,6 +38,8 @@ pub enum DataGridExtractorId {
     Html,
     Xml,
     Pretty,
+    Dbunit,
+    Php,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +60,78 @@ pub enum DataGridQuotePolicy {
     #[default]
     Minimal,
     Never,
+    Strings,
+    AllButNumbers,
+    AllIncludingNulls,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum DataGridHeaderPosition {
+    #[default]
+    Legacy,
+    None,
+    Top,
+    Bottom,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum DataGridHeaderFormat {
+    #[default]
+    Name,
+    Description,
+    Both,
+    /// `Both` on two stacked header rows: the description row first, then the
+    /// name row, so a two-line header pastes into documents with one row per
+    /// line (#13305). Columns without a description leave their description
+    /// cell empty.
+    NameAndDescriptionTwoRows,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum DataGridHeaderCase {
+    #[default]
+    Preserve,
+    Upper,
+    Lower,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum DataGridArrayFormat {
+    #[default]
+    Preserve,
+    Braces,
+    Brackets,
+    Parentheses,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum DataGridValueFormat {
+    #[default]
+    Default,
+    Legacy,
+    Display,
+    Edit,
+    Native,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum DataGridNumberFormat {
+    #[default]
+    Inherit,
+    Native,
+    Display,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,8 +143,16 @@ pub struct DataGridDsvOptions {
     pub null_text: String,
     pub quote: char,
     pub quote_policy: DataGridQuotePolicy,
+    pub quote_numeric_strings: bool,
     pub include_column_header: bool,
     pub include_row_header: bool,
+    pub header_position: DataGridHeaderPosition,
+    pub header_format: DataGridHeaderFormat,
+    pub header_case: DataGridHeaderCase,
+    pub escape_formulas: bool,
+    pub line_feed_escape_string: String,
+    pub array_format: DataGridArrayFormat,
+    pub format_numbers: DataGridNumberFormat,
 }
 
 impl Default for DataGridDsvOptions {
@@ -81,8 +163,16 @@ impl Default for DataGridDsvOptions {
             null_text: DEFAULT_DSV_NULL_TEXT.to_owned(),
             quote: DEFAULT_DSV_QUOTE,
             quote_policy: DataGridQuotePolicy::Minimal,
+            quote_numeric_strings: false,
             include_column_header: false,
             include_row_header: false,
+            header_position: DataGridHeaderPosition::Legacy,
+            header_format: DataGridHeaderFormat::Name,
+            header_case: DataGridHeaderCase::Preserve,
+            escape_formulas: false,
+            line_feed_escape_string: String::new(),
+            array_format: DataGridArrayFormat::Preserve,
+            format_numbers: DataGridNumberFormat::Inherit,
         }
     }
 }
@@ -134,6 +224,61 @@ pub struct DataGridJsonExtractorOptions {
     pub values_only: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct DataGridDbUnitOptions {
+    pub table_name: String,
+    pub upper_case_table_name: bool,
+    pub upper_case_column_names: bool,
+    pub include_null_values: bool,
+    pub null_value_string: String,
+}
+
+impl Default for DataGridDbUnitOptions {
+    fn default() -> Self {
+        Self {
+            table_name: String::new(),
+            upper_case_table_name: true,
+            upper_case_column_names: true,
+            include_null_values: true,
+            null_value_string: "[NULL]".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum DataGridPhpArraySyntax {
+    Legacy,
+    #[default]
+    Short,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct DataGridPhpOptions {
+    pub array_syntax: DataGridPhpArraySyntax,
+    pub quote_char: char,
+    pub format_date_iso: bool,
+    pub row_delimiter: String,
+    pub variable_name: String,
+}
+
+impl Default for DataGridPhpOptions {
+    fn default() -> Self {
+        Self {
+            array_syntax: DataGridPhpArraySyntax::Short,
+            quote_char: '"',
+            format_date_iso: true,
+            row_delimiter: "\n".into(),
+            variable_name: String::new(),
+        }
+    }
+}
+
 impl Default for DataGridJsonExtractorOptions {
     fn default() -> Self {
         Self { pretty: DEFAULT_JSON_PRETTY, camel_case_field_names: false, values_only: false }
@@ -147,6 +292,9 @@ pub struct DataGridExtractorOptions {
     pub dsv: DataGridDsvOptions,
     pub sql: DataGridSqlExtractorOptions,
     pub json: DataGridJsonExtractorOptions,
+    pub dbunit: DataGridDbUnitOptions,
+    pub php: DataGridPhpOptions,
+    pub value_format: DataGridValueFormat,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +307,8 @@ pub struct DataGridExtractColumn {
     pub source_index: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +323,8 @@ pub struct DataGridExtractRequest {
     pub identifier_quote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table_meta: Option<DataGridTableMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_table_name: Option<String>,
     #[serde(default)]
     pub columns: Vec<DataGridExtractColumn>,
     #[serde(default)]
@@ -191,6 +343,7 @@ pub struct DataGridExtractRequest {
 pub enum DataGridExtractWarningCode {
     OmittedColumns,
     DuplicateJsonColumnNames,
+    PhpDateNotIso,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,6 +385,7 @@ pub enum DataGridExtractErrorCode {
     NoWritableColumns,
     UnsupportedDatabase,
     InvalidDsvConfiguration,
+    InvalidFormatConfiguration,
     InputTooLarge,
     OutputTooLarge,
     EncodingFailed,

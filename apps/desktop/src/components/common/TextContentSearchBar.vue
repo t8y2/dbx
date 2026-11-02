@@ -167,7 +167,12 @@ defineExpose({ focusInput, inputEl: inputRef });
       <button v-if="allowReplace" type="button" class="flex h-7 w-5 shrink-0 items-center justify-center rounded hover:bg-accent" :title="t('editor.search.replace')" :aria-label="t('editor.search.replace')" :aria-expanded="showReplace" @pointerdown.stop @click="showReplace = !showReplace">
         <ChevronDown class="h-4 w-4" :class="{ '-rotate-90': !showReplace }" />
       </button>
-      <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-1 focus-within:ring-ring" :class="{ 'border-destructive focus-within:border-destructive focus-within:ring-destructive': error }" data-no-drag @pointerdown.stop>
+      <div
+        class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:bg-background-solid focus-within:border-ring focus-within:ring-1 focus-within:ring-ring"
+        :class="{ 'border-destructive focus-within:border-destructive focus-within:ring-destructive': error }"
+        data-no-drag
+        @pointerdown.stop
+      >
         <input
           ref="inputRef"
           data-text-content-search-input

@@ -4,6 +4,7 @@ dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
     // DmJdbcDriver8 supports JDK 8+ (compatible with JRE 21 used by DAMENG agent).
     implementation 'com.dameng:DmJdbcDriver8:8.1.5.45'
+    testImplementation 'com.google.code.gson:gson:2.15.0'
 }
 
 tasks.named('shadowJar') {

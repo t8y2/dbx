@@ -171,33 +171,64 @@ function* readBracketedGroup(lexer: Lexer): Generator<DataGridRowPreparationProg
   return null;
 }
 
-function readValueToken(lexer: Lexer): string | null {
+function readTableReferenceToken(lexer: Lexer): string | null {
   skipWhitespace(lexer);
   if (lexer.pos >= lexer.source.length) return null;
   const start = lexer.pos;
-  const char = lexer.source[lexer.pos]!;
-  if (char === "'" || char === '"' || char === "`") {
-    const closing = char;
-    lexer.pos++;
-    while (lexer.pos < lexer.source.length) {
-      const inner = lexer.source[lexer.pos++]!;
-      if (inner === closing) {
-        if (lexer.source[lexer.pos] === closing) lexer.pos++;
-        else break;
-      } else if (inner === "\\" && closing !== "`") {
-        if (lexer.pos < lexer.source.length) lexer.pos++;
+
+  while (lexer.pos < lexer.source.length) {
+    skipWhitespace(lexer);
+    if (lexer.pos >= lexer.source.length) break;
+    const char = lexer.source[lexer.pos]!;
+
+    if (char === "'" || char === '"' || char === "`") {
+      const closing = char;
+      lexer.pos++;
+      while (lexer.pos < lexer.source.length) {
+        const inner = lexer.source[lexer.pos++]!;
+        if (inner === closing) {
+          if (lexer.source[lexer.pos] === closing) lexer.pos++;
+          else break;
+        } else if (inner === "\\" && closing !== "`") {
+          if (lexer.pos < lexer.source.length) lexer.pos++;
+        }
+      }
+    } else if (char === "[") {
+      lexer.pos++;
+      while (lexer.pos < lexer.source.length) {
+        const inner = lexer.source[lexer.pos++]!;
+        if (inner === "]") {
+          if (lexer.source[lexer.pos] === "]") lexer.pos++;
+          else break;
+        }
+      }
+    } else {
+      let readAny = false;
+      while (lexer.pos < lexer.source.length) {
+        const inner = lexer.source[lexer.pos]!;
+        if (inner === "." || inner === "," || inner === "(" || inner === ")" || inner === ";" || /\s/.test(inner)) {
+          break;
+        }
+        readAny = true;
+        lexer.pos++;
+      }
+      if (!readAny) {
+        break;
       }
     }
-    return lexer.source.slice(start, lexer.pos);
+
+    const savePos = lexer.pos;
+    skipWhitespace(lexer);
+    if (lexer.pos < lexer.source.length && lexer.source[lexer.pos] === ".") {
+      lexer.pos++;
+    } else {
+      lexer.pos = savePos;
+      break;
+    }
   }
-  while (lexer.pos < lexer.source.length) {
-    const inner = lexer.source[lexer.pos]!;
-    // A table reference never contains commas, brackets, or whitespace, so the
-    // first one of those ends the token (and leaves "(" for the column list).
-    if (inner === "," || inner === "(" || inner === ")" || /\s/.test(inner)) break;
-    lexer.pos++;
-  }
-  return lexer.source.slice(start, lexer.pos).trim() || null;
+
+  const token = lexer.source.slice(start, lexer.pos).trim();
+  return token || null;
 }
 
 function unescapeSqlString(text: string): string {
@@ -241,7 +272,7 @@ function* parseSingleInsertStatement(statement: string, rows: ParsedInsertStatem
   if (!matchKeyword(lexer, "INSERT")) return null;
   if (!matchKeyword(lexer, "INTO")) return null;
   // Skip the table reference (possibly db.schema."table" or `db`.`table`).
-  if (!readValueToken(lexer)) return null;
+  if (!readTableReferenceToken(lexer)) return null;
   // Optional column-name list: the next bracketed group before VALUES/VALUE.
   const save = lexer.pos;
   let columnNames: string[] | null = null;

@@ -110,6 +110,11 @@ pub(crate) fn model_is_assistant_compatible(provider: &AiProvider, model_id: &st
 
 pub(crate) fn retain_known_assistant_models(provider: &AiProvider, models: &mut Vec<AiModelInfo>) {
     models.retain(|model| model_is_assistant_compatible(provider, &model.id));
+    if matches!(provider, AiProvider::MiniMax) {
+        // Only constrain discovery; saved and manually entered model IDs remain valid.
+        models.retain(|model| matches!(model.id.as_str(), "MiniMax-M3.1-Flash" | "MiniMax-M3"));
+        models.sort_by_key(|model| if model.id == "MiniMax-M3.1-Flash" { 0 } else { 1 });
+    }
 }
 
 pub(crate) fn gemini_item_is_assistant_compatible(item: &Value) -> bool {

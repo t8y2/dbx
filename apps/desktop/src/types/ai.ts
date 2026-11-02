@@ -132,6 +132,10 @@ export interface AiChatSelectionState {
   defaultAutoRouting?: boolean;
   /** Whether opening the AI panel restores the most recently updated conversation. */
   restoreLastConversation?: boolean;
+  /** Whether to include query result previews in AI context (#12757). Defaults to false to prevent leaking sensitive row data. */
+  includeQueryResult?: boolean;
+  /** Inverted alias for includeQueryResult (#12757). */
+  excludeQueryResult?: boolean;
   /** Prompt template ids auto-applied when the AI panel opens, keyed by connection db_type. */
   defaultTemplatesByDbType?: Record<string, string[]>;
   /** Prompt template ids from the most recent send, keyed by connection db_type. */

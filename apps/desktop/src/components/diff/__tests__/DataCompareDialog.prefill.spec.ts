@@ -2,12 +2,33 @@
 
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDataCompareSelection, isCompareRowSelected } from "@/lib/dataGrid/dataCompareSelection";
 import i18n from "@/i18n";
 import DataCompareDialog from "@/components/diff/DataCompareDialog.vue";
 import type { DataCompareSession } from "@/composables/useDataCompareSession";
 
+vi.mock("vue-virtual-scroller", () => ({
+  DynamicScroller: defineComponent({
+    props: ["items"],
+    setup:
+      (props, { slots }) =>
+      () =>
+        h(
+          "div",
+          props.items.map((item: unknown, index: number) => slots.default?.({ item, index, active: true })),
+        ),
+  }),
+  DynamicScrollerItem: defineComponent({
+    setup:
+      (_, { slots }) =>
+      () =>
+        h("div", slots.default?.()),
+  }),
+}));
+
 const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
+  copyToClipboard: vi.fn().mockResolvedValue(undefined),
   ensureConnected: vi.fn().mockResolvedValue(undefined),
   listDatabases: vi.fn().mockResolvedValue([]),
   listSchemas: vi.fn().mockResolvedValue(["DBX_TEST", "REPORTING", "SYS"]),
@@ -20,6 +41,8 @@ const mocks = vi.hoisted(() => ({
   commitManualTransaction: vi.fn().mockResolvedValue({}),
   rollbackManualTransaction: vi.fn().mockResolvedValue({}),
 }));
+
+vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: mocks.copyToClipboard }));
 
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 
@@ -132,10 +155,11 @@ function completedSession(): DataCompareSession {
         rowBudget: 100_000,
         syncEligible: true,
         databaseType: "oracle",
+        selection: { added: createDataCompareSelection(true), removed: createDataCompareSelection(true), modified: createDataCompareSelection(true) },
         diff: {
           added: [
-            { key: "1", keyValues: { ID: 1 }, values: { ID: 1, NAME: "first" }, selected: true },
-            { key: "2", keyValues: { ID: 2 }, values: { ID: 2, NAME: "second" }, selected: true },
+            { key: "1", keyValues: { ID: 1 }, values: { ID: 1, NAME: "first" } },
+            { key: "2", keyValues: { ID: 2 }, values: { ID: 2, NAME: "second" } },
           ],
           removed: [],
           modified: [],
@@ -483,7 +507,7 @@ describe("DataCompareDialog session restore", () => {
     });
     await flushAsyncSetup();
 
-    expect(session.batchResults[0]?.diff.added[0]?.selected).toBe(false);
+    expect(isCompareRowSelected(session.batchResults[0]!.selection.added, 0)).toBe(false);
     expect(session.syncPlan.syncStatements).toEqual(["INSERT 2"]);
     expect(session.syncPlan.syncSql).toBe("INSERT 2;");
   });
@@ -535,4 +559,21 @@ describe("DataCompareDialog truncation warning", () => {
 
     expect(document.body.textContent ?? "").not.toContain(i18n.global.t("dataCompare.truncatedTitle"));
   });
+});
+
+it("bounds the SQL preview while executing the complete plan", async () => {
+  const session = completedSession();
+  const statements = Array.from({ length: 1000 }, (_, index) => `UPDATE orders SET name = '${"x".repeat(32)}' WHERE id = ${index};`);
+  session.syncPlan = { insertCount: 0, updateCount: 1000, deleteCount: 0, statementCount: statements.length, syncStatements: statements, syncSql: statements.join("\n") };
+  mountSessionDialog(session);
+  await flushAsyncSetup();
+  const preview = document.querySelector<HTMLTextAreaElement>("textarea[readonly]")!.value;
+  expect(preview.length).toBeLessThan(9000);
+  expect(preview).toContain("WHERE id = 999;");
+  buttonFor("diff.copySql").click();
+  await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith(session.syncPlan.syncSql));
+  mocks.executeBatch.mockResolvedValue(undefined);
+  buttonFor("diff.executeSync").click();
+  await vi.waitFor(() => expect(mocks.executeBatch).toHaveBeenCalledTimes(2));
+  expect(mocks.executeBatch.mock.calls.flatMap((call) => call[2])).toEqual(statements);
 });

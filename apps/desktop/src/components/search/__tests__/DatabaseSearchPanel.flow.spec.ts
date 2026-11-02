@@ -258,4 +258,27 @@ describe("DatabaseSearchPanel scan flow", () => {
     expect(api.buildDatabaseSearchSql).not.toHaveBeenCalled();
     expect(states.at(-1)?.results).toHaveLength(0);
   });
+
+  it("first search scans past the 200-table batch boundary without user action", async () => {
+    connectionConfig.db_type = "sqlite";
+    const tables = Array.from({ length: 205 }, (_, index) => ({ name: `T${index}`, table_type: "TABLE" }));
+    vi.mocked(api.getColumns).mockResolvedValue([] as any);
+    vi.mocked(api.buildDatabaseSearchSql).mockResolvedValue(null as any);
+
+    const { panelRef, states } = await mountPanel();
+    vi.mocked(api.listTables).mockResolvedValue(tables as any);
+    await panelRef.value.startSearch();
+    await vi.waitFor(
+      () => {
+        expect(states.at(-1)?.progressDone).toBe(205);
+      },
+      { timeout: 5000 },
+    );
+
+    // 首轮自动跨过 200 张的批边界,无需点击“继续扫描/扫描剩余”
+    expect(Math.max(...states.map((state) => state.progressDone ?? 0))).toBe(205);
+    expect(api.getColumns).toHaveBeenCalledTimes(205);
+    expect(states.at(-1)?.nextTableIndex).toBe(205);
+    expect(states.at(-1)?.progressTotal).toBe(205);
+  });
 });

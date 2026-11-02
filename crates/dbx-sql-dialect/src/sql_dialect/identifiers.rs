@@ -48,7 +48,8 @@ pub fn qualified_table_name(database_type: Option<DatabaseType>, schema: Option<
         }
         return table_name;
     }
-    let supports_qualifier = database_type.is_some_and(is_schema_aware)
+    let supports_qualifier = (database_type.is_some_and(is_schema_aware)
+        && database_type != Some(DatabaseType::Gbase8s))
         || matches!(
             database_type,
             Some(DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::StarRocks | DatabaseType::Doris)

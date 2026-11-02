@@ -3,6 +3,7 @@ import type { CSSProperties } from "vue";
 import { computed } from "vue";
 import type { DataGridConditionSuggestionPosition } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
 import type { MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
+import KeyCap from "@/components/ui/KeyCap.vue";
 
 defineOptions({ name: "DocumentQueryCompletionMenu" });
 
@@ -75,6 +76,10 @@ function isSelected(index: number): boolean {
         <span class="w-3 shrink-0 text-center font-mono text-[10px] text-muted-foreground">{{ glyph(item) }}</span>
         <span class="min-w-0 flex-1 truncate font-mono">{{ item.label }}</span>
         <span v-if="item.detail" class="max-w-[55%] shrink-0 truncate text-[11px] text-muted-foreground">{{ item.detail }}</span>
+        <!-- The slot keeps its width on every row so the hint never shifts the text. -->
+        <span class="flex w-7 shrink-0 justify-end">
+          <KeyCap v-if="isSelected(index)" label="Tab" />
+        </span>
       </button>
     </div>
   </Teleport>

@@ -1,18 +1,22 @@
-import type { MongoCollectionKind, ObjectBrowserFilter, ObjectInfo, TreeNode, TreeNodeType } from "@/types/database";
+import type { MongoCollectionKind, ObjectBrowserFilter, ObjectInfo, TreeNode, TreeNodeType, TriggerInfo } from "@/types/database";
 export type { ObjectBrowserFilter } from "@/types/database";
 import { pinnedTreeNodeIdentityMatches, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { toMongoCollectionKind } from "@/lib/sidebar/mongoCollectionMutation";
 import { buildGroupedObjectTreeNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, compareDatabaseObjectNames, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
 import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
+import { exactOracleTriggerMetadata, exactOracleTriggerObjectMetadata, oracleTriggerIdentityKey } from "@/lib/database/oracleTriggerIdentity";
 
 export type ObjectBrowserRow = {
   id: string;
   name: string;
   displayName: string;
   schema?: string;
-  type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+  type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "INDEX" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+  parentSchema?: string;
+  parentName?: string;
   collectionKind?: MongoCollectionKind;
   valid?: boolean | null;
+  trigger?: TriggerInfo | null;
   signature?: string | null;
   comment?: string | null;
   created_at?: string | null;
@@ -46,6 +50,7 @@ export function objectBrowserRowTreeNodeType(type: ObjectBrowserRow["type"]): Tr
   if (type === "TRIGGER") return "trigger";
   if (type === "EVENT") return "event";
   if (type === "SEQUENCE") return "sequence";
+  if (type === "INDEX") return "index";
   if (type === "PACKAGE_BODY") return "package-body";
   if (type === "PACKAGE") return "package";
   if (type === "TYPE_BODY") return "type-body";
@@ -77,7 +82,7 @@ export function objectBrowserRowPinnedTreeNodeIdentity(row: ObjectBrowserRow, co
 }
 
 export function objectBrowserRowMatchesPinnedTreeNode(row: ObjectBrowserRow, identity: PinnedTreeNodeIdentity, context: ObjectBrowserPinnedTreeNodeContext): boolean {
-  return pinnedTreeNodeIdentityMatches(identity, objectBrowserRowPinnedTreeNodeIdentity(row, context), canonicalizeObjectBrowserPinnedTreeNodeIdentity(context));
+  return pinnedTreeNodeIdentityMatches(identity, objectBrowserRowPinnedTreeNodeIdentity(row, context), exactOracleTriggerMetadata(row.trigger) ? undefined : canonicalizeObjectBrowserPinnedTreeNodeIdentity(context));
 }
 
 function flattenTreeNodeIds(nodes: readonly TreeNode[]): string[] {
@@ -91,12 +96,15 @@ function objectBrowserRowObjectInfo(row: ObjectBrowserRow, schema?: string): Obj
     schema,
     valid: row.valid,
     signature: row.signature || undefined,
-    parent_schema: row.partitionParentSchema,
-    parent_name: row.partitionParentName,
+    trigger: row.trigger,
+    parent_schema: row.type === "INDEX" ? row.parentSchema : row.partitionParentSchema,
+    parent_name: row.type === "INDEX" ? row.parentName : row.partitionParentName,
   };
 }
 
 function legacySchemaCandidates(row: ObjectBrowserRow, context: ObjectBrowserPinnedTreeNodeContext): Array<string | undefined> {
+  const trigger = exactOracleTriggerMetadata(row.trigger);
+  if (trigger) return [trigger.owner];
   const identity = objectBrowserRowPinnedTreeNodeIdentity(row, context);
   const canonicalIdentity = canonicalizeObjectBrowserPinnedTreeNodeIdentity(context)(identity);
   return [...new Set([row.schema, context.schema, canonicalIdentity.schema, undefined].map((schema) => schema?.trim() || undefined))];
@@ -143,6 +151,7 @@ export function objectBrowserRowLegacyPinnedTreeNodeIds(row: ObjectBrowserRow, c
 export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type"] {
   const value = type.toUpperCase();
   const normalized = value.replace(/[\s-]+/g, "_");
+  if (normalized === "INDEX") return "INDEX";
   if (normalized.includes("PACKAGE_BODY")) return "PACKAGE_BODY";
   if (normalized.includes("TYPE_BODY")) return "TYPE_BODY";
   if (normalized.includes("PACKAGE")) return "PACKAGE";
@@ -159,12 +168,32 @@ export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type
 
 export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; database: string; fallbackSchema: string; rowSchema?: string }): ObjectBrowserRow[] {
   const seen = new Map<string, number>();
-  const rows = options.objects.flatMap((object) => {
-    const name = normalizeDatabaseObjectName(object.name);
-    if (!name) return [];
-    const objectSchema = object.schema ? normalizeDatabaseObjectName(object.schema) : undefined;
-    const schema = objectSchema || options.rowSchema;
+  const rows = options.objects.flatMap<ObjectBrowserRow>((object) => {
+    const exactTrigger = exactOracleTriggerObjectMetadata(object);
+    if (exactTrigger) {
+      const baseId = oracleTriggerIdentityKey(exactTrigger);
+      const index = seen.get(baseId) ?? 0;
+      seen.set(baseId, index + 1);
+      return [
+        {
+          id: `${baseId}:${index}`,
+          name: exactTrigger.name,
+          displayName: exactTrigger.name,
+          schema: exactTrigger.owner,
+          type: "TRIGGER" as const,
+          valid: object.trigger?.valid ?? object.valid,
+          trigger: object.trigger,
+          comment: object.comment,
+          created_at: object.created_at,
+          updated_at: object.updated_at,
+        },
+      ];
+    }
     const type = normalizeObjectBrowserType(object.object_type);
+    const name = type === "INDEX" ? object.name : normalizeDatabaseObjectName(object.name);
+    if (!name) return [];
+    const objectSchema = type === "INDEX" ? object.schema : object.schema ? normalizeDatabaseObjectName(object.schema) : undefined;
+    const schema = objectSchema || options.rowSchema;
     const signature = routineSignatureForDisplay(type, object.signature);
     const displayName = signature === undefined ? name : `${name}(${signature})`;
     const signatureIdPart = signature === undefined ? "" : `:${signature}`;
@@ -183,8 +212,11 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
         comment: object.comment,
         created_at: object.created_at,
         updated_at: object.updated_at,
-        partitionParentSchema: object.parent_schema ? normalizeDatabaseObjectName(object.parent_schema) : undefined,
-        partitionParentName: object.parent_name ? normalizeDatabaseObjectName(object.parent_name) : undefined,
+        trigger: object.trigger,
+        parentSchema: type === "INDEX" ? (object.parent_schema ?? undefined) : undefined,
+        parentName: type === "INDEX" ? (object.parent_name ?? undefined) : undefined,
+        partitionParentSchema: type !== "INDEX" && object.parent_schema ? normalizeDatabaseObjectName(object.parent_schema) : undefined,
+        partitionParentName: type !== "INDEX" && object.parent_name ? normalizeDatabaseObjectName(object.parent_name) : undefined,
       },
     ];
   });
@@ -359,6 +391,7 @@ export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): Object
     triggers: 0,
     events: 0,
     sequences: 0,
+    indexes: 0,
     packages: 0,
     types: 0,
   };
@@ -372,6 +405,7 @@ export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): Object
     else if (row.type === "TRIGGER") counts.triggers++;
     else if (row.type === "EVENT") counts.events++;
     else if (row.type === "SEQUENCE") counts.sequences++;
+    else if (row.type === "INDEX") counts.indexes++;
     else if (row.type === "PACKAGE" || row.type === "PACKAGE_BODY") counts.packages++;
     else if (row.type === "TYPE" || row.type === "TYPE_BODY") counts.types++;
   }

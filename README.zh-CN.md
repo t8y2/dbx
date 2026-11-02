@@ -587,6 +587,8 @@ make package
 
 安装包输出在 `src-tauri/target/release/bundle/` 目录。
 
+`pnpm build` 会在运行 Vite 前显式清理根目录的 `dist/`，确保桌面打包使用重新生成的前端资源。
+
 ## 技术栈
 
 | 层级   | 技术                                                                                                                                                                                                             |

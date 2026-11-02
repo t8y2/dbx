@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
+import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import PluginShortcutBar from "@/components/plugins/PluginShortcutBar.vue";
 import { useSettingsStore } from "@/stores/settingsStore";
 import ConnectionTree from "@/components/sidebar/ConnectionTree.vue";
@@ -17,6 +18,8 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import type { QueryTab, TreeNode } from "@/types/database";
+import type { ObjectDependencyTarget } from "@/lib/database/objectDependencyDetails";
+import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 
 defineProps<{
   sidebarWidth: number;
@@ -24,15 +27,17 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  import: [source: "dbx" | "navicat" | "dbeaver" | "datagrip"];
+  import: [source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis"];
   export: [];
   startResize: [event: PointerEvent];
   collapse: [];
   "open-settings": [initialTab: string];
+  "open-connection-settings": [connectionId: string];
   "add-to-ai": [nodes: TreeNode | TreeNode[]];
+  "open-dependency-object": [context: ObjectDependencyTarget, target: SqlObjectNavigationTarget];
 }>();
 
-type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
+type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
@@ -49,6 +54,8 @@ const importSourceItems = computed(() => [
   { value: "navicat", label: t("sidebar.importNavicat") },
   { value: "dbeaver", label: t("sidebar.importDbeaver") },
   { value: "datagrip", label: t("sidebar.importDatagrip") },
+  { value: "rdm", label: t("sidebar.importRdm"), tooltip: "RedisDesktopManager" },
+  { value: "another-redis", label: t("sidebar.importAnotherRedis"), tooltip: "Another Redis Desktop Manager" },
 ]);
 const connectionTransferItems = computed(() => [
   ...importSourceItems.value.map((item) => ({
@@ -220,11 +227,17 @@ function openTableStructureForSelection(): boolean {
   return connectionTreeRef.value?.openTableStructureForSelection?.() ?? false;
 }
 
+const refreshShortcutLabel = computed(() => formatShortcut(settingsStore.editorSettings.shortcuts.refreshData));
+
+function refreshSidebar(): boolean {
+  return connectionTreeRef.value?.refreshSidebar?.() ?? false;
+}
+
 async function focusSelectedNode() {
   await connectionTreeRef.value?.focusSelectedNode?.();
 }
 
-defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections, focusSelectedNode, openTableStructureForSelection });
+defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections, focusSelectedNode, openTableStructureForSelection, refreshSidebar, refreshTree });
 </script>
 
 <template>
@@ -311,7 +324,7 @@ defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections, 
               </Button>
             </LightTooltip>
             <LightTooltip :text="t('contextMenu.refreshChildren')" side="bottom" :delay="0" :close-delay="0" nowrap>
-              <Button variant="ghost" size="icon" class="h-5 w-5" @click="refreshTree">
+              <Button variant="ghost" size="icon" class="h-5 w-5" :aria-keyshortcuts="refreshShortcutLabel || undefined" @click="refreshTree">
                 <RefreshCw class="h-3 w-3" />
               </Button>
             </LightTooltip>
@@ -324,7 +337,13 @@ defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections, 
         </template>
       </div>
       <div data-sidebar-connection-tree class="flex-1 min-h-0">
-        <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" @add-to-ai="(nodes) => emit('add-to-ai', nodes)" />
+        <ConnectionTree
+          ref="connectionTreeRef"
+          @open-settings="(initialTab) => emit('open-settings', initialTab)"
+          @open-connection-settings="(connectionId) => emit('open-connection-settings', connectionId)"
+          @add-to-ai="(nodes) => emit('add-to-ai', nodes)"
+          @open-dependency-object="(context, target) => emit('open-dependency-object', context, target)"
+        />
       </div>
       <div v-if="activeConnectionEndpoint" data-sidebar-connection-endpoint class="flex shrink-0 items-center gap-1.5 border-t border-border/60 px-2.5 py-1.5 text-[11px] leading-none text-muted-foreground" :title="activeWindowConnection?.name">
         <Server class="h-3 w-3 shrink-0" />

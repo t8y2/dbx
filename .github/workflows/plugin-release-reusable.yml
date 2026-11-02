@@ -77,7 +77,7 @@ jobs:
       matrix: ${{ fromJSON(inputs.build-matrix) }}
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve Node dependency cache
         id: node-cache
@@ -123,7 +123,7 @@ jobs:
           cache: ${{ steps.node-cache.outputs.cache }}
           cache-dependency-path: ${{ steps.node-cache.outputs.dependency-path }}
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         if: inputs.go-version != ''
         with:
           go-version: ${{ inputs.go-version }}
@@ -137,7 +137,7 @@ jobs:
 
       - name: Checkout DBX plugin SDK
         if: inputs.install-plugin-cli && inputs.install-plugin-cli-from-source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: t8y2/dbx
           ref: ${{ inputs.sdk-ref }}

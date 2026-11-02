@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
 import { ArrowDown, ArrowUp, Check, Copy, Database, GripVertical, Grid3X3, LayoutGrid, List, Loader2, RefreshCw, Search, Settings2, TerminalSquare, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
@@ -9,12 +10,13 @@ import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { openSidebarDangerDialog } from "@/lib/sidebar/sidebarDangerDialog";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
+import { connectionUsesConnectionRootSchemaMode } from "@/lib/database/jdbcDialect";
 import { objectBrowserTargetForNamespaceRow } from "@/lib/database/objectBrowserTarget";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "@/components/sidebar/SidebarTreeItemDialogs.vue";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import * as api from "@/lib/backend/api";
-import { filterDatabaseNamesForConnection } from "@/lib/database/visibleDatabases";
+import { filterDatabaseNamesForConnection, filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import { formatObjectBrowserBytes, formatObjectBrowserTimestamp } from "@/lib/table/objectBrowserRows";
 import { requestObjectBrowserSearchFocus } from "@/lib/tabs/objectBrowserSearchFocus";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
@@ -117,11 +119,17 @@ const viewMode = computed(() => settingsStore.editorSettings.objectBrowserViewMo
 const isListView = computed(() => viewMode.value === "list");
 const isGridView = computed(() => viewMode.value === "grid");
 const isCompactView = computed(() => viewMode.value === "compact");
+const compactCardWidth = computed(() => normalizeObjectBrowserCompactWidth(settingsStore.editorSettings.objectBrowserCompactWidth));
+
+function setCompactCardWidth(width: ObjectBrowserCompactWidth) {
+  settingsStore.updateEditorSettings({ objectBrowserCompactWidth: width });
+}
+
 // Measured condensation for the header row: tier 1 moves the sort/view
 // controls into the overflow menu, tier 2 drops the connection chip (the tab
 // title already carries it). See useToolbarOverflow for the tier contract.
 const toolbarRef = ref<HTMLElement | null>(null);
-const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.connection.id]);
+const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.connection.id, () => settingsStore.editorSettings.objectBrowserViewMode]);
 const showToolbarOverflow = computed(() => toolbarTier.value >= 1);
 const showConnectionChip = computed(() => toolbarTier.value < 2);
 const showInlineSortAndView = computed(() => toolbarTier.value < 1);
@@ -189,11 +197,11 @@ function databaseContextMenuItems(row: DatabaseRow): ContextMenuItem[] {
         action: () => {
           const dbType = props.connection.db_type;
           const sql = dbType === "mysql" ? `SHOW CREATE DATABASE \`${row.name.replaceAll("`", "``")}\`;` : `-- ${row.name}\n-- Database DDL is not available for this driver.`;
-          queryStore.createTab(props.connection.id, row.name, `${row.name} - ${t("contextMenu.viewDdl")}`, "query", undefined, sql, undefined, { forceNew: true });
+          queryStore.createTab(props.connection.id, target.database, `${row.name} - ${t("contextMenu.viewDdl")}`, "query", target.schema, sql, undefined, { forceNew: true });
         },
         icon: Copy,
       },
-      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => queryStore.createTab(props.connection.id, row.name, `${row.name} - ${t("contextMenu.newQuery")}`, "query", undefined, undefined, undefined, { forceNew: true }), icon: TerminalSquare },
+      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => queryStore.createTab(props.connection.id, target.database, `${row.name} - ${t("contextMenu.newQuery")}`, "query", target.schema, undefined, undefined, { forceNew: true }), icon: TerminalSquare },
       { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: () => copyToClipboard(row.name), icon: Copy },
       { label: "", separator: true },
       {
@@ -396,7 +404,46 @@ async function refresh(): Promise<boolean> {
   loading.value = true;
   error.value = "";
   try {
+    if (connectionUsesConnectionRootSchemaMode(props.connection)) {
+      const database = props.connection.database || "";
+      let schemas: Array<{ name: string; comment?: string | null }> = [];
+      try {
+        schemas = await api.listSchemaInfos(props.connection.id, database);
+      } catch {
+        const names = await api.listSchemas(props.connection.id, database, true).catch(() => []);
+        schemas = names.map((name) => ({ name, comment: null }));
+      }
+      if (generation !== refreshGeneration) return true;
+      if (schemas.length === 0) {
+        const databases = await api.listDatabases(props.connection.id).catch(() => []);
+        if (generation !== refreshGeneration) return true;
+        schemas = databases.map((database) => ({ name: database.name, comment: database.comment ?? null }));
+      }
+      const visibleNames = new Set(
+        filterSchemaNamesForConnection(
+          schemas.map((schema) => schema.name),
+          props.connection,
+          database,
+        ),
+      );
+      rows.value = schemas
+        .filter((schema) => schema.name.trim() && visibleNames.has(schema.name))
+        .map((schema) => ({
+          name: schema.name,
+          sizeBytes: null,
+          createdAt: null,
+          updatedAt: null,
+          comment: schema.comment ?? null,
+          defaultCharset: null,
+          defaultCollation: null,
+        }));
+      loading.value = false;
+      restoreScrollPosition();
+      return true;
+    }
+
     const databases = await api.listDatabases(props.connection.id);
+    if (generation !== refreshGeneration) return true;
     const visibleNames = new Set(
       filterDatabaseNamesForConnection(
         databases.map((database) => database.name),
@@ -554,6 +601,17 @@ defineExpose({ focusSearch, refresh });
         <button type="button" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground" :class="{ 'bg-background text-foreground shadow-sm': isCompactView }" :title="t('objects.viewCompact')" @click="setViewMode('compact')">
           <Grid3X3 class="h-3.5 w-3.5" />
         </button>
+        <select
+          v-if="isCompactView"
+          data-compact-width-select
+          class="ml-1 h-6 shrink-0 cursor-pointer rounded-sm border-l bg-transparent px-1 text-xs text-muted-foreground outline-none hover:text-foreground focus:text-foreground focus-visible:ring-1 focus-visible:ring-ring"
+          :value="compactCardWidth"
+          :aria-label="t('objects.compactCardWidth')"
+          :title="t('objects.compactCardWidth')"
+          @change="setCompactCardWidth(normalizeObjectBrowserCompactWidth(Number(($event.target as HTMLSelectElement).value)))"
+        >
+          <option v-for="width in OBJECT_BROWSER_COMPACT_WIDTHS" :key="width" :value="width" class="bg-background text-foreground">{{ width }}px</option>
+        </select>
       </div>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('contextMenu.refreshTab')" :disabled="loading" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }" />
@@ -589,6 +647,15 @@ defineExpose({ focusSearch, refresh });
           <Grid3X3 class="h-3.5 w-3.5" />
           {{ t("objects.viewCompact") }}
         </DropdownMenuItem>
+        <DropdownMenuSub v-if="isCompactView">
+          <DropdownMenuSubTrigger>{{ t("objects.compactCardWidth") }}</DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            <DropdownMenuItem v-for="width in OBJECT_BROWSER_COMPACT_WIDTHS" :key="width" @select="setCompactCardWidth(width)">
+              <Check v-if="compactCardWidth === width" class="h-3.5 w-3.5" />
+              {{ width }}px
+            </DropdownMenuItem>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
       </ToolbarOverflowMenu>
     </div>
 
@@ -655,7 +722,14 @@ defineExpose({ focusSearch, refresh });
           </div>
         </div>
       </div>
-      <div v-else ref="gridScrollerRef" class="grid min-h-0 flex-1 content-start overflow-auto" :class="isCompactView ? 'grid-cols-[repeat(auto-fill,minmax(128px,1fr))] gap-1 p-1' : 'grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-3 p-3'" @scroll.passive="onGridScroll">
+      <div
+        v-else
+        ref="gridScrollerRef"
+        class="grid min-h-0 flex-1 content-start overflow-auto"
+        :class="isCompactView ? 'gap-1 p-1' : 'grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-3 p-3'"
+        :style="isCompactView ? { gridTemplateColumns: `repeat(auto-fill, minmax(min(${compactCardWidth}px, 100%), 1fr))` } : undefined"
+        @scroll.passive="onGridScroll"
+      >
         <div
           v-for="row in visibleRows"
           :key="row.name"

@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, extractorUnavailableForDatabase, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions, resolveDataGridCopyPreference, validateDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
+import {
+  DATA_GRID_COPY_EXTRACTOR_IDS,
+  DATA_GRID_DEFAULT_COPY_PREFERENCES,
+  DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+  extractorUnavailableForDatabase,
+  normalizeDataGridCopyPreference,
+  normalizeDataGridExtractorOptions,
+  normalizeVisibleDataGridCopyExtractors,
+  resolveDataGridCopyPreference,
+  validateDataGridExtractorOptions,
+} from "@/lib/dataGrid/dataGridCopyExtractor";
 
 describe("data-grid extractor options", () => {
   it("preserves native SQL defaults and normalizes portable INSERT options", () => {
@@ -18,18 +28,28 @@ describe("data-grid extractor options", () => {
     expect(normalizeDataGridExtractorOptions({ sql: { primaryKeyMode: "exclude-all" } }).sql.primaryKeyMode).toBe("exclude-all");
   });
 
-  it("defaults to dropping database qualification and keeps an explicit opt-in", () => {
-    expect(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql.includeDatabaseName).toBe(false);
-    expect(normalizeDataGridExtractorOptions({ sql: {} }).sql.includeDatabaseName).toBe(false);
-    const configured = normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: true } });
-    expect(configured.sql.includeDatabaseName).toBe(true);
-    expect(normalizeDataGridExtractorOptions(JSON.parse(JSON.stringify(configured))).sql.includeDatabaseName).toBe(true);
-    expect(normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: "true" } }).sql.includeDatabaseName).toBe(false);
+  it("defaults to including database qualification and keeps an explicit opt-out", () => {
+    expect(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql.includeDatabaseName).toBe(true);
+    expect(normalizeDataGridExtractorOptions({ sql: {} }).sql.includeDatabaseName).toBe(true);
+    const configured = normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: false } });
+    expect(configured.sql.includeDatabaseName).toBe(false);
+    expect(normalizeDataGridExtractorOptions(JSON.parse(JSON.stringify(configured))).sql.includeDatabaseName).toBe(false);
+    expect(normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: "false" } }).sql.includeDatabaseName).toBe(true);
   });
 
   it("defaults DSV NULL output to an empty spreadsheet field", () => {
     expect(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.dsv.nullText).toBe("");
     expect(normalizeDataGridExtractorOptions({}).dsv.nullText).toBe("");
+  });
+
+  it("normalizes the additive CSV copy controls without changing legacy defaults", () => {
+    expect(normalizeDataGridExtractorOptions({}).dsv).toMatchObject({ headerPosition: "legacy", headerFormat: "name", headerCase: "preserve", quotePolicy: "minimal", escapeFormulas: false, arrayFormat: "preserve", formatNumbers: "inherit" });
+    expect(
+      normalizeDataGridExtractorOptions({
+        valueFormat: "edit",
+        dsv: { headerPosition: "bottom", headerFormat: "both", headerCase: "upper", quotePolicy: "all-including-nulls", quoteNumericStrings: true, escapeFormulas: true, lineFeedEscapeString: "\\n", arrayFormat: "brackets", formatNumbers: "display" },
+      }),
+    ).toMatchObject({ valueFormat: "edit", dsv: { headerPosition: "bottom", headerFormat: "both", headerCase: "upper", quotePolicy: "all-including-nulls", quoteNumericStrings: true, escapeFormulas: true, lineFeedEscapeString: "\\n", arrayFormat: "brackets", formatNumbers: "display" } });
   });
 
   it("resolves smart copy to raw for one cell and TSV otherwise", () => {
@@ -112,6 +132,16 @@ describe("data-grid extractor options", () => {
     expect(validateDataGridExtractorOptions("dsv", options)).toBe("null-text-too-long");
   });
 
+  it("requires PHP row delimiters to be whitespace only", () => {
+    const options = normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS);
+    options.php.rowDelimiter = ";";
+    expect(validateDataGridExtractorOptions("php", options)).toBe("invalid-php-row-delimiter");
+    options.php.rowDelimiter = "\n\t";
+    expect(validateDataGridExtractorOptions("php", options)).toBeNull();
+    options.php.rowDelimiter = "\u00a0";
+    expect(validateDataGridExtractorOptions("php", options)).toBe("invalid-php-row-delimiter");
+  });
+
   it("handles sql-deletes-inserts copy preference and database availability", () => {
     expect(normalizeDataGridCopyPreference("sql-deletes-inserts")).toBe("sql-deletes-inserts");
     expect(resolveDataGridCopyPreference("sql-deletes-inserts", 1)).toBe("sql-deletes-inserts");
@@ -121,5 +151,27 @@ describe("data-grid extractor options", () => {
     expect(extractorUnavailableForDatabase("sql-deletes-inserts", "mongodb")).toBe(true);
     expect(extractorUnavailableForDatabase("sql-deletes-inserts", "neo4j")).toBe(true);
     expect(extractorUnavailableForDatabase("sql-deletes-inserts", "tdengine")).toBe(true);
+  });
+
+  it("adds DbUnit and PHP without changing the extractor contract version", () => {
+    expect(DATA_GRID_COPY_EXTRACTOR_IDS).toContain("dbunit");
+    expect(DATA_GRID_COPY_EXTRACTOR_IDS).toContain("php");
+    expect(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.dbunit).toMatchObject({ upperCaseTableName: true, upperCaseColumnNames: true, includeNullValues: true, nullValueString: "[NULL]" });
+    expect(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.php).toMatchObject({ arraySyntax: "short", formatDateIso: true, rowDelimiter: "\n", variableName: "" });
+    expect(normalizeDataGridExtractorOptions({ php: { formatDateISO: false } }).php.formatDateIso).toBe(false);
+  });
+
+  it("normalizes visible copy formats deterministically and preserves an empty selection", () => {
+    expect(normalizeVisibleDataGridCopyExtractors(undefined)).toEqual(DATA_GRID_COPY_EXTRACTOR_IDS);
+    expect(normalizeVisibleDataGridCopyExtractors(undefined)).toContain("sql-select");
+    expect(DATA_GRID_DEFAULT_COPY_PREFERENCES).not.toContain("sql-select");
+    expect(normalizeVisibleDataGridCopyExtractors(["php", "php", "unknown", "csv"])).toEqual(["csv", "php"]);
+    expect(normalizeVisibleDataGridCopyExtractors([])).toEqual([]);
+  });
+  it("keeps the two-row header format through normalization (#13305)", () => {
+    const normalized = normalizeDataGridExtractorOptions({ extractor: "tsv-with-headers", dsv: { headerFormat: "name-and-description-two-rows" } });
+    expect(normalized.dsv.headerFormat).toBe("name-and-description-two-rows");
+    const rejected = normalizeDataGridExtractorOptions({ extractor: "tsv", dsv: { headerFormat: "made-up" } });
+    expect(rejected.dsv.headerFormat).toBe("name");
   });
 });

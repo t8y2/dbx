@@ -142,11 +142,15 @@ type server struct {
 	usePgViewDefinition             bool
 	usePgFunctionDefinition         bool
 	useLegacyRoutineDefinition      bool
+	routineKindUnsupported          bool
+	routineIdentityFallback         int
 	catalogIdentityUnsupported      bool
+	catalogGeneratedUnsupported     bool
 	catalogOIDUnsupported           bool
 	infoColumnTypeUnsupported       bool
 	infoUdtNameUnsupported          bool
 	indexOrdinalityUnsupported      bool
+	indexKeyCountUnsupported        bool
 	triggerPrettyUnsupported        bool
 	triggerInternalUnsupported      bool
 	constraintDefinitionUnsupported bool
@@ -422,7 +426,13 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		result, err := s.listTriggers(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
 	case "get_object_source":
-		result, err := s.getObjectSourceForRelation(stringParam(params, "schema"), stringParam(params, "name"), stringParam(params, "object_type"), stringParam(params, "relation_name"))
+		var signature *string
+		if raw, ok := params["signature"]; ok {
+			if err := json.Unmarshal(raw, &signature); err != nil {
+				return nil, false, fmt.Errorf("invalid routine signature: %w", err)
+			}
+		}
+		result, err := s.getObjectSourceWithSignature(stringParam(params, "schema"), stringParam(params, "name"), stringParam(params, "object_type"), stringParam(params, "relation_name"), signature)
 		return result, false, err
 	case "get_type_details":
 		result, err := s.getTypeDetails(stringParam(params, "schema"), stringParam(params, "name"))
@@ -487,11 +497,15 @@ func (s *server) connect(cp connectParams) error {
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
 	s.useLegacyRoutineDefinition = false
+	s.routineKindUnsupported = false
+	s.routineIdentityFallback = 0
 	s.catalogIdentityUnsupported = false
+	s.catalogGeneratedUnsupported = false
 	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
 	s.indexOrdinalityUnsupported = false
+	s.indexKeyCountUnsupported = false
 	s.triggerPrettyUnsupported = false
 	s.triggerInternalUnsupported = false
 	s.constraintDefinitionUnsupported = false
@@ -687,11 +701,15 @@ func (s *server) disconnect() error {
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
 	s.useLegacyRoutineDefinition = false
+	s.routineKindUnsupported = false
+	s.routineIdentityFallback = 0
 	s.catalogIdentityUnsupported = false
+	s.catalogGeneratedUnsupported = false
 	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
 	s.indexOrdinalityUnsupported = false
+	s.indexKeyCountUnsupported = false
 	s.triggerPrettyUnsupported = false
 	s.triggerInternalUnsupported = false
 	s.constraintDefinitionUnsupported = false
@@ -1394,7 +1412,13 @@ func isNativeDSNSpace(value byte) bool {
 }
 
 func isKingbaseJDBCURL(value string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "jdbc:kingbase8://")
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, prefix := range []string{"jdbc:kingbase://", "jdbc:kingbase8://", "jdbc:kingbase83://", "jdbc:kingbase86://"} {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func quoteDSNValue(value string) string {

@@ -43,6 +43,7 @@ pub(super) fn column_definition(
     database_type: Option<DatabaseType>,
 ) -> String {
     let data_type = column_data_type(dialect, column, database_type);
+    let firebird = database_type == Some(DatabaseType::Firebird);
     let mut parts = vec![quote_ident(dialect, &column.name), data_type];
     // QuestDB SQL Syntax: ```ALTER TABLE tableName ADD COLUMN [IF NOT EXISTS] columnName typeDef```
     if dialect == StructureDialect::Questdb {
@@ -62,7 +63,7 @@ pub(super) fn column_definition(
     if let Some(generated_clause) = mysql_generated_clause.as_ref() {
         parts.push(generated_clause.clone());
     }
-    if !column.is_nullable && !is_oracle_like(dialect) && dialect != StructureDialect::ClickHouse {
+    if !column.is_nullable && !is_oracle_like(dialect) && dialect != StructureDialect::ClickHouse && !firebird {
         parts.push("NOT NULL".to_string());
     } else if column.is_nullable
         && dialect == StructureDialect::Mysql
@@ -85,6 +86,11 @@ pub(super) fn column_definition(
     // Without it `ADD (...)` silently created a nullable column (t8y2/dbx#11234). A primary key
     // column stays without it because the follow-up `ADD PRIMARY KEY` already enforces NOT NULL.
     if dialect == StructureDialect::Oracle && !column.is_nullable && !column.is_primary_key {
+        parts.push("NOT NULL".to_string());
+    }
+    // Firebird's column grammar is `col type [DEFAULT expr] [NOT NULL]`; emitting
+    // NOT NULL first produced `NOT NULL DEFAULT ...` and failed to recreate the table.
+    if firebird && !column.is_nullable {
         parts.push("NOT NULL".to_string());
     }
     if mysql_generated_clause.is_none() {

@@ -33,8 +33,26 @@ const DEFAULT_WORKER_KILL_WAIT: Duration = Duration::from_secs(3);
 /// `connection.rs` so pool close cancellation cannot cut the checkpoint short.
 const WORKER_SHUTDOWN_EXIT_WAIT: Duration = Duration::from_millis(2500);
 const DEFAULT_WORKER_START_WAIT: Duration = Duration::from_secs(5);
+/// Upper bound for the worker to acknowledge an interrupt-only cancel. The
+/// caller already reports its own timeout error, so waiting longer than this
+/// adds latency without improving the outcome.
+const WORKER_INTERRUPT_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 pub const DUCKDB_DRIVER_PATH_ENV: &str = "DBX_DUCKDB_DRIVER_PATH";
 type PendingRequests = Arc<Mutex<HashMap<String, PendingRequest>>>;
+
+#[path = "duckdb_query_sessions.rs"]
+mod query_sessions;
+use query_sessions::QuerySession;
+
+/// How a request reacts to cancellation or a timeout. Interactive queries
+/// restart the worker because a DuckDB connection stuck inside a statement
+/// cannot be reused. Statements whose caller shares the session (`:memory:`
+/// contents, temp tables, views) must not: they only interrupt.
+#[derive(Clone, Copy)]
+enum AbortPolicy {
+    KillWorker,
+    InterruptOnly,
+}
 
 struct PendingRequest {
     generation: u64,
@@ -51,6 +69,7 @@ struct DuckDbWorkerClientInner {
     pending: PendingRequests,
     connect_lock: Mutex<()>,
     query_lock: Mutex<()>,
+    query_sessions: Mutex<HashMap<String, QuerySession>>,
     process_limiter: Arc<Semaphore>,
     process_limit: usize,
     executable: PathBuf,
@@ -179,6 +198,7 @@ impl DuckDbWorkerClient {
                 pending: Arc::new(Mutex::new(HashMap::new())),
                 connect_lock: Mutex::new(()),
                 query_lock: Mutex::new(()),
+                query_sessions: Mutex::new(HashMap::new()),
                 process_limiter,
                 process_limit,
                 executable,
@@ -210,7 +230,16 @@ impl DuckDbWorkerClient {
         cancel_token: Option<CancellationToken>,
         query_timeout: Option<Duration>,
     ) -> Result<db::QueryResult, DuckDbWorkerError> {
-        self.execute_typed_with_options(database, sql, max_rows, cancel_token, query_timeout, false).await
+        self.execute_typed_with_options(
+            database,
+            sql,
+            max_rows,
+            cancel_token,
+            query_timeout,
+            false,
+            AbortPolicy::KillWorker,
+        )
+        .await
     }
 
     /// Executes a query with DuckDB insertion-order preservation enabled for
@@ -225,7 +254,32 @@ impl DuckDbWorkerClient {
         cancel_token: Option<CancellationToken>,
         query_timeout: Option<Duration>,
     ) -> Result<db::QueryResult, String> {
-        self.execute_typed_with_options(database, sql, max_rows, cancel_token, query_timeout, true)
+        self.execute_typed_with_options(
+            database,
+            sql,
+            max_rows,
+            cancel_token,
+            query_timeout,
+            true,
+            AbortPolicy::KillWorker,
+        )
+        .await
+        .map_err(|error| error.message)
+    }
+
+    /// Executes a best-effort statement with a bounded wait that never restarts
+    /// the worker. On timeout the running statement is interrupted and a
+    /// timeout error is returned; the worker and its session stay alive. Used
+    /// where a SIGKILL would discard session state that outlives the statement
+    /// (e.g. dropping an export's temporary table on a shared connection).
+    pub async fn execute_interrupt_only(
+        &self,
+        database: Option<String>,
+        sql: String,
+        max_rows: Option<usize>,
+        timeout: Duration,
+    ) -> Result<db::QueryResult, String> {
+        self.execute_typed_with_options(database, sql, max_rows, None, Some(timeout), false, AbortPolicy::InterruptOnly)
             .await
             .map_err(|error| error.message)
     }
@@ -238,10 +292,32 @@ impl DuckDbWorkerClient {
         cancel_token: Option<CancellationToken>,
         query_timeout: Option<Duration>,
         preserve_insertion_order: bool,
+        abort_policy: AbortPolicy,
     ) -> Result<db::QueryResult, DuckDbWorkerError> {
-        let _query_guard = self.inner.query_lock.lock().await;
+        // A queued request must remain cancellable. In particular, cancelling
+        // a grid read waiting behind an export must not kill that export.
+        let lock = self.inner.query_lock.lock();
+        tokio::pin!(lock);
+        let _query_guard = match (cancel_token.as_ref(), query_timeout) {
+            (Some(token), Some(duration)) => tokio::select! {
+                biased;
+                _ = token.cancelled() => return Err(crate::execution::canceled_error().into()),
+                guard = &mut lock => guard,
+                _ = tokio::time::sleep(duration) => return Err(crate::execution::timeout_error_for(duration).into()),
+            },
+            (Some(token), None) => tokio::select! {
+                biased;
+                _ = token.cancelled() => return Err(crate::execution::canceled_error().into()),
+                guard = &mut lock => guard,
+            },
+            (None, Some(duration)) => tokio::select! {
+                guard = &mut lock => guard,
+                _ = tokio::time::sleep(duration) => return Err(crate::execution::timeout_error_for(duration).into()),
+            },
+            (None, None) => lock.await,
+        };
         let client = self.clone();
-        // Cancellation and timeout restart the worker via cancel_or_kill below. An ordinary
+        // Cancellation and timeout apply `abort_policy` below. An ordinary
         // query error (parser/binder/catalog/runtime) leaves the worker healthy, so we keep it
         // alive to preserve session-local state (:memory: contents, temp tables, SET, raw ATTACH).
         // The one exception is a poisoned connection: duckdb-rs can leave the connection unusable
@@ -277,31 +353,60 @@ impl DuckDbWorkerClient {
             (Some(token), Some(duration)) => {
                 tokio::select! {
                     biased;
-                    _ = token.cancelled() => self.cancel_or_kill(crate::execution::canceled_error()).await,
+                    _ = token.cancelled() => self.abort(crate::execution::canceled_error(), abort_policy).await,
                     result = &mut future => result,
-                    _ = tokio::time::sleep(duration) => self.cancel_or_kill(crate::execution::timeout_error()).await,
+                    _ = tokio::time::sleep(duration) => {
+                        self.abort(crate::execution::timeout_error_for(duration), abort_policy).await
+                    },
                 }
             }
             (Some(token), None) => {
                 tokio::select! {
                     biased;
-                    _ = token.cancelled() => self.cancel_or_kill(crate::execution::canceled_error()).await,
+                    _ = token.cancelled() => self.abort(crate::execution::canceled_error(), abort_policy).await,
                     result = &mut future => result,
                 }
             }
             (None, Some(duration)) => {
                 tokio::select! {
                     result = &mut future => result,
-                    _ = tokio::time::sleep(duration) => self.cancel_or_kill(crate::execution::timeout_error()).await,
+                    _ = tokio::time::sleep(duration) => {
+                        self.abort(crate::execution::timeout_error_for(duration), abort_policy).await
+                    },
                 }
             }
             (None, None) => future.await,
         }
     }
 
-    async fn cancel_or_kill(&self, final_error: String) -> Result<db::QueryResult, DuckDbWorkerError> {
-        let _ = self.cancel().await;
+    /// Applies the request's abort policy and reports the cancellation/timeout
+    /// as the operation's final error. Interactive queries restart the worker,
+    /// because an unresponsive DuckDB session cannot be reused; best-effort
+    /// statements only interrupt so a shared session survives.
+    async fn abort(&self, final_error: String, policy: AbortPolicy) -> Result<db::QueryResult, DuckDbWorkerError> {
+        match policy {
+            AbortPolicy::KillWorker => {
+                let _ = self.cancel().await;
+            }
+            AbortPolicy::InterruptOnly => {
+                let _ = self.interrupt().await;
+            }
+        }
         Err(DuckDbWorkerError::from(final_error))
+    }
+
+    /// Asks the worker to interrupt the statement it is running without
+    /// restarting it. Best effort: a worker that cannot acknowledge in time is
+    /// left running rather than escalated to SIGKILL.
+    async fn interrupt(&self) -> Result<(), String> {
+        self.send_request_structured::<serde_json::Value>(
+            DuckDbWorkerMethod::Cancel,
+            serde_json::json!({}),
+            Some(WORKER_INTERRUPT_ACK_TIMEOUT),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| error.message)
     }
 
     pub async fn list_databases(&self) -> Result<Vec<db::DatabaseInfo>, String> {

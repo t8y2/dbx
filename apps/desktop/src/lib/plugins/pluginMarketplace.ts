@@ -3,7 +3,34 @@ import { uuid } from "@/lib/common/utils";
 
 export type MarketplacePluginStatus = "install" | "installed" | "update" | "unsupported";
 
-export type MarketplacePluginSortMode = "name" | "recently-updated" | "recently-listed" | "updates-first";
+export type MarketplacePluginSortMode = "name" | "installs" | "recently-updated" | "recently-listed" | "updates-first";
+
+const PLUGIN_STATS_URL = "https://dbxio.com/api/plugins/stats";
+const PLUGIN_STATS_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
+export type PluginInstallCounts = Record<string, number>;
+
+// Public install counters from the marketplace stats worker (install beacons,
+// not raw artifact downloads). Failure is decorative: the store still renders.
+export async function fetchPluginInstallCounts(init?: RequestInit): Promise<PluginInstallCounts | null> {
+  try {
+    const response = await fetch(PLUGIN_STATS_URL, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8000),
+      ...init,
+    });
+    if (!response.ok) return null;
+    const payload = (await response.json()) as { installs?: unknown };
+    if (typeof payload !== "object" || payload === null || typeof payload.installs !== "object" || payload.installs === null) return null;
+    const installs: PluginInstallCounts = {};
+    for (const [id, value] of Object.entries(payload.installs as Record<string, unknown>)) {
+      if (PLUGIN_STATS_ID_PATTERN.test(id) && typeof value === "number" && Number.isFinite(value) && value > 0) installs[id] = value;
+    }
+    return installs;
+  } catch {
+    return null;
+  }
+}
 
 export const UNIVERSAL_PLUGIN_TARGET = "universal";
 
@@ -288,11 +315,20 @@ function firstReleaseTime(listing: MarketplacePluginListing): number {
   return times.length ? Math.min(...times) : Number.NEGATIVE_INFINITY;
 }
 
+function listingInstallCount(listing: MarketplacePluginListing, installs: Readonly<Record<string, number>> | undefined): number {
+  const value = installs?.[listing.plugin.id];
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 // Copies before sorting: the builder output is also consumed elsewhere (batch selection,
 // the installed-tab update index) and must keep its name order there.
-export function sortMarketplacePluginListings(listings: readonly MarketplacePluginListing[], mode: MarketplacePluginSortMode): MarketplacePluginListing[] {
+// `installs` is the public stats map keyed by plugin id; missing counts sort last.
+export function sortMarketplacePluginListings(listings: readonly MarketplacePluginListing[], mode: MarketplacePluginSortMode, installs?: Readonly<Record<string, number>>): MarketplacePluginListing[] {
   const byName = (left: MarketplacePluginListing, right: MarketplacePluginListing) => left.name.localeCompare(right.name);
   if (mode === "name") return [...listings].sort(byName);
+  if (mode === "installs") {
+    return [...listings].sort((left, right) => listingInstallCount(right, installs) - listingInstallCount(left, installs) || byName(left, right));
+  }
   const releaseTimeFor = mode === "recently-listed" ? firstReleaseTime : latestVersionReleaseTime;
   if (mode === "updates-first") {
     return [...listings].sort((left, right) => {

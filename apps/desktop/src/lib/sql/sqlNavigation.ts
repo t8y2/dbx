@@ -2,7 +2,8 @@
  * Utilities for SQL identifier navigation (Ctrl/Cmd + click on table/column names).
  */
 
-import type { ObjectSourceKind } from "@/types/database";
+import type { ObjectSourceKind, QueryTab } from "@/types/database";
+import { isSqlIdentifierPart, isSqlIdentifierStart } from "@/lib/sql/sqlIdentifierCharacters";
 
 const SQL_KEYWORDS_SET = new Set([
   "select",
@@ -135,7 +136,7 @@ export interface ExtractedSqlIdentifierPart {
   quoted: boolean;
 }
 
-export type SqlObjectNavigationType = "table" | "view" | "materialized_view" | "procedure" | "function" | "package" | "trigger";
+export type SqlObjectNavigationType = "table" | "view" | "materialized_view" | "procedure" | "function" | "package" | "package_body" | "sequence" | "synonym" | "trigger" | "index";
 
 /**
  * Semantic role of a Ctrl/Cmd+clicked identifier for navigation.
@@ -161,6 +162,20 @@ export interface SqlObjectNavigationTarget {
   schemaQuoted?: boolean;
   parentNameQuoted?: boolean;
   parentSchemaQuoted?: boolean;
+}
+
+export type SqlObjectNavigationContext = Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog" | "tableMeta">;
+
+/** Resolve a structured object against its captured origin, without reparsing quoted dots. */
+export function sqlObjectNavigationContextTarget(table: SqlObjectNavigationTarget, context: SqlObjectNavigationContext) {
+  return {
+    connectionId: context.connectionId,
+    database: table.database || context.database,
+    catalog: context.tableMeta?.catalog || context.catalog,
+    schema: table.schema || context.schema,
+    tableName: table.name,
+    tableType: table.type ? sqlObjectNavigationTableType(table) : undefined,
+  };
 }
 
 /**
@@ -208,11 +223,11 @@ export function sqlObjectNavigationTarget(table: SqlObjectNavigationTarget): Sql
 }
 
 export function isSqlObjectNavigationRoutineType(type?: SqlObjectNavigationType): boolean {
-  return type === "procedure" || type === "function" || type === "package" || type === "trigger";
+  return type === "procedure" || type === "function" || type === "package" || type === "package_body" || type === "sequence" || type === "synonym" || type === "trigger";
 }
 
 export function sqlObjectHoverDetail(table: SqlObjectNavigationTarget): string {
-  const objectType = table.type === "materialized_view" ? "materialized view" : table.type === "view" ? "view" : table.type === "procedure" ? "procedure" : table.type === "function" ? "function" : table.type === "package" ? "package" : table.type === "trigger" ? "trigger" : "table";
+  const objectType = table.type === "materialized_view" ? "materialized view" : table.type === "package_body" ? "package body" : (table.type ?? "table");
   if (table.parentName) {
     const owner = table.parentSchema ? `${table.parentSchema}.${table.parentName}` : table.parentName;
     return `${objectType} in ${owner}`;
@@ -246,6 +261,12 @@ export function sqlObjectNavigationSourceKind(table: SqlObjectNavigationTarget):
       return "FUNCTION";
     case "package":
       return "PACKAGE";
+    case "package_body":
+      return "PACKAGE_BODY";
+    case "sequence":
+      return "SEQUENCE";
+    case "synonym":
+      return "SYNONYM";
     case "trigger":
       return "TRIGGER";
     default:
@@ -306,15 +327,6 @@ export function mergeSqlObjectNavigationType(left?: SqlObjectNavigationType, rig
   return left ?? right;
 }
 
-// Aligned with the semantic tokenizer (tokens.ts WORD_START/WORD_PART) so Ctrl/Cmd+click,
-// hover range extraction and Unicode identifiers (e.g. CJK names) agree on identifier chars.
-const IDENTIFIER_START_CHAR = /^[A-Za-z_@$#\p{ID_Start}]$/u;
-const IDENTIFIER_PART_CHAR = /^[A-Za-z0-9_@$#\p{ID_Continue}]$/u;
-
-function isIdentifierStartChar(char: string | undefined): boolean {
-  return !!char && IDENTIFIER_START_CHAR.test(char);
-}
-
 /**
  * MySQL/MariaDB allow an unquoted identifier to begin with a digit as long as it is not a pure
  * number, so `01_tablename` is a table name while `123` / `1e3` / `0x1f` stay numeric literals
@@ -328,10 +340,6 @@ function isNumberShapedToken(value: string): boolean {
   if (rest.startsWith("x")) return /^x[0-9a-f]+$/.test(rest);
   if (rest.startsWith("b")) return /^b[01]+$/.test(rest);
   return /^[0-9e]+$/.test(rest);
-}
-
-function isIdentifierChar(char: string | undefined): boolean {
-  return !!char && IDENTIFIER_PART_CHAR.test(char);
 }
 
 function readQuotedPart(text: string, start: number): IdentifierPart | null {
@@ -355,29 +363,29 @@ function readQuotedPart(text: string, start: number): IdentifierPart | null {
   return null;
 }
 
-function readUnquotedPart(text: string, start: number): IdentifierPart | null {
+function readUnquotedPart(text: string, start: number, dialectId: string): IdentifierPart | null {
   const first = text[start];
   const startsWithDigit = !!first && /^[0-9]$/.test(first);
-  if (!isIdentifierStartChar(first) && !startsWithDigit) return null;
+  if (!isSqlIdentifierStart(first, dialectId) && !startsWithDigit) return null;
   let end = start + 1;
-  while (end < text.length && isIdentifierChar(text[end])) end += 1;
+  while (end < text.length && isSqlIdentifierPart(text[end], dialectId)) end += 1;
   const value = text.slice(start, end);
   if (startsWithDigit && isNumberShapedToken(value)) return null;
   return { value, start, end, quoted: false };
 }
 
-function readIdentifierPart(text: string, start: number): IdentifierPart | null {
-  return readQuotedPart(text, start) ?? readUnquotedPart(text, start);
+function readIdentifierPart(text: string, start: number, dialectId: string): IdentifierPart | null {
+  return readQuotedPart(text, start) ?? readUnquotedPart(text, start, dialectId);
 }
 
-function parseQualifiedIdentifier(text: string, start: number): { parts: IdentifierPart[]; start: number; end: number } | null {
-  const first = readIdentifierPart(text, start);
+function parseQualifiedIdentifier(text: string, start: number, dialectId = "generic"): { parts: IdentifierPart[]; start: number; end: number } | null {
+  const first = readIdentifierPart(text, start, dialectId);
   if (!first) return null;
 
   const parts = [first];
   let end = first.end;
   while (text[end] === ".") {
-    const next = readIdentifierPart(text, end + 1);
+    const next = readIdentifierPart(text, end + 1, dialectId);
     if (!next) break;
     parts.push(next);
     end = next.end;
@@ -397,7 +405,7 @@ function identifierSearchBounds(doc: string, pos: number): { start: number; end:
 }
 
 /** Locate the qualified identifier covering `pos`, including quote flags and document range. */
-export function extractQualifiedIdentifierAt(doc: string, pos: number): { parts: ExtractedSqlIdentifierPart[]; start: number; end: number } | null {
+export function extractQualifiedIdentifierAt(doc: string, pos: number, dialectId = "generic"): { parts: ExtractedSqlIdentifierPart[]; start: number; end: number } | null {
   if (pos < 0 || pos > doc.length) return null;
 
   const clickPos = pos === doc.length ? pos - 1 : pos;
@@ -406,7 +414,7 @@ export function extractQualifiedIdentifierAt(doc: string, pos: number): { parts:
   const bounds = identifierSearchBounds(doc, clickPos);
   let index = bounds.start;
   while (index < bounds.end) {
-    const parsed = parseQualifiedIdentifier(doc, index);
+    const parsed = parseQualifiedIdentifier(doc, index, dialectId);
     if (parsed) {
       if (clickPos >= parsed.start && clickPos < parsed.end) {
         return {
@@ -425,13 +433,13 @@ export function extractQualifiedIdentifierAt(doc: string, pos: number): { parts:
 }
 
 /** Extract qualified identifier parts and per-part quote metadata at position `pos`. */
-export function extractIdentifierPartsAt(doc: string, pos: number): ExtractedSqlIdentifierPart[] {
-  return extractQualifiedIdentifierAt(doc, pos)?.parts ?? [];
+export function extractIdentifierPartsAt(doc: string, pos: number, dialectId = "generic"): ExtractedSqlIdentifierPart[] {
+  return extractQualifiedIdentifierAt(doc, pos, dialectId)?.parts ?? [];
 }
 
 /** Extract identifier and quote metadata at position `pos` in the document. */
-export function extractIdentifierDetailsAt(doc: string, pos: number): ExtractedSqlIdentifier | null {
-  const parts = extractIdentifierPartsAt(doc, pos);
+export function extractIdentifierDetailsAt(doc: string, pos: number, dialectId = "generic"): ExtractedSqlIdentifier | null {
+  const parts = extractIdentifierPartsAt(doc, pos, dialectId);
   if (parts.length === 0) return null;
   return {
     identifier: parts.map((part) => part.value).join("."),
@@ -440,16 +448,16 @@ export function extractIdentifierDetailsAt(doc: string, pos: number): ExtractedS
 }
 
 /** Extract identifier at position `pos` in the document. */
-export function extractIdentifierAt(doc: string, pos: number): string | null {
-  return extractIdentifierDetailsAt(doc, pos)?.identifier ?? null;
+export function extractIdentifierAt(doc: string, pos: number, dialectId = "generic"): string | null {
+  return extractIdentifierDetailsAt(doc, pos, dialectId)?.identifier ?? null;
 }
 
 /**
  * True when the identifier at `pos` is immediately followed by `(` (after optional whitespace).
  * Not sufficient alone for routine navigation — also see {@link isSqlRelationColumnListContext}.
  */
-export function isSqlCallSiteIdentifierAt(doc: string, pos: number): boolean {
-  const located = extractQualifiedIdentifierAt(doc, pos);
+export function isSqlCallSiteIdentifierAt(doc: string, pos: number, dialectId = "generic"): boolean {
+  const located = extractQualifiedIdentifierAt(doc, pos, dialectId);
   if (!located) return false;
   let cursor = located.end;
   while (cursor < doc.length && /\s/.test(doc[cursor] ?? "")) cursor += 1;
@@ -478,8 +486,8 @@ export function isSqlRelationColumnListContext(beforeIdentifier: string): boolea
  * True when the identifier is a routine-call navigation candidate (not a relation column list).
  * `INSERT INTO ORDERS(ID)` → false; `BEGIN PROC_NAME()` → true.
  */
-export function isSqlRoutineCallNavigationCandidate(doc: string, pos: number): boolean {
-  const located = extractQualifiedIdentifierAt(doc, pos);
+export function isSqlRoutineCallNavigationCandidate(doc: string, pos: number, dialectId = "generic"): boolean {
+  const located = extractQualifiedIdentifierAt(doc, pos, dialectId);
   if (!located) return false;
   let cursor = located.end;
   while (cursor < doc.length && /\s/.test(doc[cursor] ?? "")) cursor += 1;
@@ -490,8 +498,8 @@ export function isSqlRoutineCallNavigationCandidate(doc: string, pos: number): b
 /**
  * Resolve the full navigation identity at a click position (role + quote-aware parts).
  */
-export function resolveSqlObjectNavigationIdentity(doc: string, pos: number): SqlObjectNavigationIdentity | null {
-  const located = extractQualifiedIdentifierAt(doc, pos);
+export function resolveSqlObjectNavigationIdentity(doc: string, pos: number, dialectId = "generic"): SqlObjectNavigationIdentity | null {
+  const located = extractQualifiedIdentifierAt(doc, pos, dialectId);
   if (!located || located.parts.length === 0) return null;
 
   const parts = located.parts;
@@ -661,11 +669,11 @@ export function isSqlKeyword(identifier: string): boolean {
   return SQL_KEYWORDS_SET.has(identifier.toLowerCase());
 }
 
-export function splitQualifiedIdentifier(identifier: string): string[] {
+export function splitQualifiedIdentifier(identifier: string, dialectId = "generic"): string[] {
   const trimmed = identifier.trim();
   if (!trimmed) return [];
 
-  const parsed = parseQualifiedIdentifier(trimmed, 0);
+  const parsed = parseQualifiedIdentifier(trimmed, 0, dialectId);
   if (!parsed || parsed.end !== trimmed.length) return [trimmed];
   return parsed.parts.map((part) => part.value);
 }

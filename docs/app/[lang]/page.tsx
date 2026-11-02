@@ -640,7 +640,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
             </h1>
             <p className="landing-hero-subtitle min-w-0 mt-5 mx-auto text-[17px] font-[460] leading-[1.8] whitespace-nowrap max-[900px]:max-w-[680px] max-[900px]:whitespace-normal max-[760px]:max-w-[320px] max-[760px]:text-[15px] max-[760px]:leading-[1.68]">{t.heroSubtitle}</p>
             <div className="w-full max-w-[520px] mt-10 max-[760px]:mt-7">
-              <InstallTabs lang={l} version={initialDownloadVersion} />
+              <InstallTabs lang={l} version={initialDownloadVersion} releaseTag={initialLatestRelease?.release_tag} />
             </div>
           </div>
           <HeroProductStage />

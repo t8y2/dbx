@@ -41,7 +41,7 @@ export const damengDumpEn = {
     toolNotFound: "Dameng client tools (dexp/dimp) were not found in the configured bin directory.",
     connectionRequired: "Native dexp/dimp dump is only available for Dameng connections.",
     passwordMissing: "The connection has no stored password; reconnect and enter the password first.",
-    useridInvalid: "The connection's username or password contains / or {'@'}, which the dexp/dimp USERID argument cannot encode; the task was not started.",
+    useridInvalid: "The connection's username or password contains /, {'@'} or a space, which the dexp/dimp USERID argument cannot encode; the task was not started.",
   },
 };
 
@@ -88,7 +88,7 @@ export const damengDumpZhCN = {
     toolNotFound: "在配置的 bin 目录中未找到达梦客户端工具（dexp/dimp）。",
     connectionRequired: "原生 dexp/dimp 导出仅支持达梦连接。",
     passwordMissing: "该连接没有保存密码，请先重新连接并输入密码。",
-    useridInvalid: "连接的用户名或密码包含 / 或 {'@'}，无法编码进 dexp/dimp 的 USERID 参数；任务未启动。",
+    useridInvalid: "连接的用户名或密码包含 /、{'@'} 或空格，无法编码进 dexp/dimp 的 USERID 参数；任务未启动。",
   },
 };
 
@@ -135,7 +135,7 @@ export const damengDumpEs = {
     toolNotFound: "No se encontraron las herramientas del cliente de Dameng (dexp/dimp) en el directorio bin configurado.",
     connectionRequired: "La exportación nativa dexp/dimp solo está disponible para conexiones de Dameng.",
     passwordMissing: "La conexión no tiene contraseña guardada; reconéctese e introduzca la contraseña primero.",
-    useridInvalid: "El nombre de usuario o la contraseña de la conexión contiene / o {'@'}, que el argumento USERID de dexp/dimp no puede codificar; la tarea no se inició.",
+    useridInvalid: "El nombre de usuario o la contraseña de la conexión contiene /, {'@'} o un espacio, que el argumento USERID de dexp/dimp no puede codificar; la tarea no se inició.",
   },
 };
 
@@ -182,7 +182,7 @@ export const damengDumpIt = {
     toolNotFound: "Strumenti del client Dameng (dexp/dimp) non trovati nella directory bin configurata.",
     connectionRequired: "L'esportazione nativa dexp/dimp è disponibile solo per le connessioni Dameng.",
     passwordMissing: "La connessione non ha una password salvata; riconnettiti e inserisci prima la password.",
-    useridInvalid: "Il nome utente o la password della connessione contiene / o {'@'}, che l'argomento USERID di dexp/dimp non può codificare; l'attività non è stata avviata.",
+    useridInvalid: "Il nome utente o la password della connessione contiene /, {'@'} o uno spazio, che l'argomento USERID di dexp/dimp non può codificare; l'attività non è stata avviata.",
   },
 };
 
@@ -229,7 +229,7 @@ export const damengDumpJa = {
     toolNotFound: "設定された bin ディレクトリに Dameng クライアントツール（dexp/dimp）が見つかりません。",
     connectionRequired: "ネイティブ dexp/dimp エクスポートは Dameng 接続でのみ利用できます。",
     passwordMissing: "接続に保存されたパスワードがありません。先に再接続してパスワードを入力してください。",
-    useridInvalid: "接続のユーザー名またはパスワードに / または {'@'} が含まれており、dexp/dimp の USERID 引数としてエンコードできません。タスクは開始されませんでした。",
+    useridInvalid: "接続のユーザー名またはパスワードに /、{'@'} またはスペースが含まれており、dexp/dimp の USERID 引数としてエンコードできません。タスクは開始されませんでした。",
   },
 };
 
@@ -276,7 +276,7 @@ export const damengDumpKo = {
     toolNotFound: "구성된 bin 디렉터리에서 Dameng 클라이언트 도구(dexp/dimp)를 찾을 수 없습니다.",
     connectionRequired: "네이티브 dexp/dimp 내보내기는 Dameng 연결에서만 사용할 수 있습니다.",
     passwordMissing: "연결에 저장된 비밀번호가 없습니다. 먼저 다시 연결하여 비밀번호를 입력하세요.",
-    useridInvalid: "연결의 사용자 이름 또는 비밀번호에 / 또는 {'@'}가 포함되어 있어 dexp/dimp의 USERID 인수로 인코딩할 수 없습니다. 작업이 시작되지 않았습니다.",
+    useridInvalid: "연결의 사용자 이름 또는 비밀번호에 /, {'@'} 또는 공백이 포함되어 있어 dexp/dimp의 USERID 인수로 인코딩할 수 없습니다. 작업이 시작되지 않았습니다.",
   },
 };
 
@@ -323,7 +323,7 @@ export const damengDumpPtBR = {
     toolNotFound: "Ferramentas do cliente Dameng (dexp/dimp) não foram encontradas no diretório bin configurado.",
     connectionRequired: "A exportação nativa dexp/dimp está disponível apenas para conexões Dameng.",
     passwordMissing: "A conexão não tem senha salva; reconecte-se e insira a senha primeiro.",
-    useridInvalid: "O nome de usuário ou a senha da conexão contém / ou {'@'}, que o argumento USERID do dexp/dimp não consegue codificar; a tarefa não foi iniciada.",
+    useridInvalid: "O nome de usuário ou a senha da conexão contém /, {'@'} ou um espaço, que o argumento USERID do dexp/dimp não consegue codificar; a tarefa não foi iniciada.",
   },
 };
 
@@ -370,6 +370,6 @@ export const damengDumpZhTW = {
     toolNotFound: "在設定的 bin 目錄中未找到達夢用戶端工具（dexp/dimp）。",
     connectionRequired: "原生 dexp/dimp 匯出僅支援達夢連線。",
     passwordMissing: "該連線沒有儲存密碼，請先重新連線並輸入密碼。",
-    useridInvalid: "連線的使用者名稱或密碼包含 / 或 {'@'}，無法編碼進 dexp/dimp 的 USERID 參數；任務未啟動。",
+    useridInvalid: "連線的使用者名稱或密碼包含 /、{'@'} 或空格，無法編碼進 dexp/dimp 的 USERID 參數；任務未啟動。",
   },
 };

@@ -154,6 +154,52 @@ final class StatementCancelTest {
         }
     }
 
+    @Test
+    void cancellingAnActiveLobChunkPreservesOtherRefsAndIgnoresStaleTokens() throws Exception {
+        var block = new java.util.concurrent.atomic.AtomicBoolean();
+        var entered = new CountDownLatch(1);
+        var cancelled = new CountDownLatch(1);
+        var connection = DeferredLobValuesTest.connection(() -> {
+            if (!block.get()) return;
+            entered.countDown();
+            try { assertTrue(cancelled.await(5, TimeUnit.SECONDS)); }
+            catch (InterruptedException error) { throw new AssertionError(error); }
+        }, cancelled::countDown);
+        var stateField = DbxJdbcPlugin.class.getDeclaredField("DEFAULT_CONNECTION_STATE");
+        stateField.setAccessible(true);
+        Object state = stateField.get(null);
+        var connectionField = state.getClass().getDeclaredField("sharedConnection");
+        connectionField.setAccessible(true);
+        var valuesField = state.getClass().getDeclaredField("largeValues");
+        valuesField.setAccessible(true);
+        var values = (DeferredLobValues) valuesField.get(state);
+        values.clear();
+        connectionField.set(state, connection);
+        var first = values.capture(connection, new javax.sql.rowset.serial.SerialBlob(new byte[300]), false);
+        var survivor = values.capture(connection, new javax.sql.rowset.serial.SerialBlob(new byte[300]), false);
+        try {
+            startServer();
+            block.set(true);
+            write(1, "read_large_value_chunk", params().put("valueRef", first.ref()).put("offset", 0).put("limit", 10).put(DbxJdbcPlugin.CANCEL_TOKEN_PARAM, "lob-token"));
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            assertFalse(send(2, DbxJdbcPlugin.CANCEL_STATEMENT_METHOD, MAPPER.createObjectNode().put(DbxJdbcPlugin.CANCEL_TOKEN_PARAM, "stale-token")).path("result").path("cancelled").asBoolean());
+            assertEquals(1, cancelled.getCount());
+            assertTrue(send(3, DbxJdbcPlugin.CANCEL_STATEMENT_METHOD, MAPPER.createObjectNode().put(DbxJdbcPlugin.CANCEL_TOKEN_PARAM, "lob-token")).path("result").path("cancelled").asBoolean());
+            assertTrue(await(1).has("error"));
+            block.set(false);
+            assertEquals("expired", send(4, "read_large_value_chunk", params().put("valueRef", first.ref()).put("offset", 0).put("limit", 1)).path("result").path("status").asText());
+            assertEquals("ok", send(5, "read_large_value_chunk", params().put("valueRef", survivor.ref()).put("offset", 0).put("limit", 1)).path("result").path("status").asText());
+            assertFalse(send(6, DbxJdbcPlugin.CANCEL_STATEMENT_METHOD, MAPPER.createObjectNode().put(DbxJdbcPlugin.CANCEL_TOKEN_PARAM, "lob-token")).path("result").path("cancelled").asBoolean());
+        } finally {
+            block.set(false);
+            cancelled.countDown();
+            stopServer();
+            server = null;
+            values.clear();
+            connectionField.set(state, null);
+        }
+    }
+
     private void startServer() throws Exception {
         startServer(Executors.newSingleThreadExecutor());
     }

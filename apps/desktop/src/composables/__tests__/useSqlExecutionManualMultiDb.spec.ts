@@ -54,6 +54,20 @@ describe("manual multi-database submission", () => {
     vi.mocked(api.rollbackManualTransaction).mockResolvedValue({ columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 });
   });
 
+  it.each([
+    ["oracle", "BEGIN\n NULL;\n NULL;\nEND;\n/\nSELECT 3;"],
+    ["mysql", "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END$$\nDELIMITER ;\nSELECT 3;"],
+  ])("does not bypass the existing manual-transaction capability gate for Kingbase %s", async (mode, sql) => {
+    const { execution, input, ordinary } = setup();
+    input.connection.db_type = "kingbase";
+    input.connection.database_info = { compatibilityMode: mode };
+    input.sql = sql;
+    const result = await execution.executeTargetSql(input);
+    expect(result).toMatchObject({ status: "failed", errorMessage: "multiDbExecute.manualUnsupported" });
+    expect(api.executeInManualTransaction).not.toHaveBeenCalled();
+    expect(ordinary).not.toHaveBeenCalled();
+  });
+
   it("uses the captured target and records success only after an explicit commit", async () => {
     const { execution, input, ordinary, cleanup, capture, history } = setup();
     input.tab.resultCountSql = "SELECT COUNT(*) FROM unrelated_source";

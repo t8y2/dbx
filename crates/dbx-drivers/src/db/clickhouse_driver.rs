@@ -1,3 +1,4 @@
+use dbx_sql_core::sql_risk::{classify_sql_risk_for_database, SqlRisk};
 use futures::StreamExt;
 use reqwest::{Certificate, Client as HttpClient};
 use serde::Deserialize;
@@ -7,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{http_client_builder, with_connection_timeout};
 use crate::execution::{canceled_error, MAX_ROWS};
+use crate::models::connection::DatabaseType;
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{ColumnInfo, DatabaseInfo, IndexInfo, ObjectStatistics, QueryResult, TableInfo};
 
@@ -544,6 +546,7 @@ fn clickhouse_index_from_skipping_row(row: &[serde_json::Value]) -> IndexInfo {
     let index_type = row.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let granularity = json_value_as_u64(row.get(3));
     IndexInfo {
+        owner: None,
         name: row.first().and_then(|v| v.as_str()).unwrap_or("").to_string(),
         columns: split_clickhouse_expression_list(row.get(1).and_then(|v| v.as_str()).unwrap_or("")),
         is_unique: false,
@@ -601,8 +604,10 @@ fn limited_query_result(result: ChJsonResult, execution_time_ms: u128, max_rows:
     QueryResult {
         columns,
         column_types,
+        deferred_large_value_cells: Vec::new(),
         column_sortables: vec![],
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows,
         affected_rows: 0,
@@ -808,6 +813,7 @@ pub async fn list_indexes(client: &ChClient, database: &str, table: &str) -> Res
         .filter(|value| !value.trim().is_empty())
     {
         indexes.push(IndexInfo {
+            owner: None,
             key_directions: Vec::new(),
             visibility: None,
             key_metadata_complete: false,
@@ -844,7 +850,10 @@ pub async fn execute_query_with_max_rows(
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH"]) {
+    // WITH can prefix INSERT as well as SELECT; successful writes return no JSON result set.
+    let is_cte_write = starts_with_executable_sql_keyword(sql, &["WITH"])
+        && classify_sql_risk_for_database(sql, DatabaseType::ClickHouse).is_ok_and(|risk| risk != SqlRisk::ReadOnly);
+    if !is_cte_write && starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH"]) {
         let result = ch_query_with_limit(client, sql, Some(database), QueryResultLimit::Limited(row_limit + 1)).await?;
         Ok(limited_query_result(result, start.elapsed().as_millis(), Some(row_limit)))
     } else {
@@ -863,8 +872,10 @@ pub async fn execute_query_with_max_rows(
         Ok(QueryResult {
             columns: vec![],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![],
             affected_rows: 0,
@@ -1135,6 +1146,70 @@ mod tests {
         });
 
         (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn cte_insert_accepts_empty_command_response_without_result_limits() {
+        let sql = "WITH a AS (SELECT 1 AS eid), b AS (SELECT 1 AS eid) \
+                   INSERT INTO test123(eid) SELECT b.eid FROM a LEFT JOIN b ON a.eid = b.eid";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            write_http_response(&mut socket, "200 OK", "").await;
+            request
+        });
+        let client = ChClient::new(&format!("http://{address}"), None, None, Duration::from_secs(5));
+        let result = execute_query_with_max_rows(&client, "default", sql, Some(2)).await;
+        let request = server.await.unwrap();
+
+        let result = result.expect("successful CTE INSERT returns an empty command response, not JSON");
+        assert!(result.columns.is_empty());
+        assert!(result.rows.is_empty());
+        assert!(!result.truncated);
+        let target = request.lines().next().unwrap();
+        assert!(!target.contains("max_result_rows"), "writes must not inherit query result limits");
+        assert!(!target.contains("result_overflow_mode"));
+        assert!(request.ends_with(sql));
+    }
+
+    #[tokio::test]
+    async fn cte_select_preserves_result_decoding_and_limits() {
+        for sql in [
+            "WITH a AS (SELECT 1 AS eid) SELECT eid FROM a",
+            "/* INSERT INTO t */ WITH 'INSERT INTO t' AS label SELECT 1 AS eid",
+            "WITH a AS (SELECT 1 AS `insert`) SELECT `insert` AS eid FROM a",
+            "WITH a AS (SELECT 1 AS insert) SELECT insert AS eid FROM a",
+            "WITH replace('a', 'a', 'b') AS label SELECT 1 AS eid",
+            "EXPLAIN WITH a AS (SELECT 1) INSERT INTO t SELECT * FROM a",
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                write_http_response(
+                    &mut socket,
+                    "200 OK",
+                    r#"{"meta":[{"name":"eid","type":"UInt64"}],"data":[[1],[2],[3]],"rows":3}"#,
+                )
+                .await;
+                request
+            });
+            let client = ChClient::new(&format!("http://{address}"), None, None, Duration::from_secs(5));
+            let result = execute_query_with_max_rows(&client, "default", sql, Some(2)).await.unwrap();
+            let request = server.await.unwrap();
+
+            assert_eq!(result.columns, vec!["eid"], "{sql}");
+            assert_eq!(result.column_types, vec!["UInt64"], "{sql}");
+            assert_eq!(result.rows, vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]], "{sql}");
+            assert!(result.truncated, "{sql}");
+            let target = request.lines().next().unwrap();
+            assert!(target.contains("max_result_rows=3"), "{sql}");
+            assert!(target.contains("result_overflow_mode=break"), "{sql}");
+            assert!(request.ends_with(sql));
+        }
     }
 
     #[test]

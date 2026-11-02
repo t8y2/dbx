@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod ai;
 pub mod ai_multi_config;
+pub mod app_relaunch;
 pub mod app_settings;
 pub mod background_image;
 pub mod cc_switch;
@@ -40,6 +41,7 @@ pub mod mq_cmd;
 #[cfg(feature = "mq-admin")]
 pub mod mqtt_cmd;
 pub mod nacos_cmd;
+pub mod pl_debug;
 pub mod plugin_download;
 pub mod plugin_download_file;
 pub mod plugin_file;

@@ -18,6 +18,8 @@ const props = defineProps<{
   columnComment?: string;
   tooltipColumnType?: string;
   tooltipColumnComment?: string;
+  /** `schema.table.column` of the column this result column came from, when known. */
+  tooltipColumnSource?: string;
   columnNullability?: "nullable" | "required";
   showTypeLine?: boolean;
   showCommentLine?: boolean;
@@ -30,6 +32,7 @@ const props = defineProps<{
   columnNameLabel: string;
   columnTypeLabel: string;
   columnCommentLabel: string;
+  columnSourceLabel: string;
   nullableLabel?: string;
   yesLabel?: string;
   noLabel?: string;
@@ -104,6 +107,10 @@ const emit = defineEmits<{
             <template v-if="tooltipColumnType ?? columnType">
               <span class="text-muted-foreground">{{ columnTypeLabel }}</span>
               <span :class="typeClass">{{ tooltipColumnType ?? columnType }}</span>
+            </template>
+            <template v-if="tooltipColumnSource">
+              <span class="text-muted-foreground">{{ columnSourceLabel }}</span>
+              <span class="min-w-0 break-all font-mono">{{ tooltipColumnSource }}</span>
             </template>
             <template v-if="tooltipColumnComment ?? columnComment">
               <span class="text-muted-foreground">{{ columnCommentLabel }}</span>

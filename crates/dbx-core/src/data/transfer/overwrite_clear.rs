@@ -15,7 +15,8 @@ use super::*;
 /// Tables referenced by another selected table are cleared with `DELETE`, the rest with the
 /// usual per-database clear statement. Returns the source names of the tables that were
 /// cleared; the caller passes `target_cleared = true` to `transfer_table_with_result` for
-/// those so they are not cleared a second time.
+/// those so they are not cleared a second time. Returns `Err("Cancelled")` when the transfer
+/// is cancelled while the metadata is still being read; once clearing starts it runs through.
 ///
 /// Returns an empty set, leaving every table to the per-table clear, when the request is not
 /// an overwrite, when no selected target references another, when the foreign key metadata
@@ -35,6 +36,9 @@ pub async fn clear_foreign_key_linked_overwrite_targets(
 
     let mut targets: Vec<(String, String)> = Vec::new();
     for table in tables {
+        if is_cancelled(&request.transfer_id).await {
+            return Err("Cancelled".to_string());
+        }
         let ResolvedTransferTargetTable { name, preexisting } = resolve_transfer_target_table_name(
             state,
             request,
@@ -52,6 +56,9 @@ pub async fn clear_foreign_key_linked_overwrite_targets(
 
     let mut edges: Vec<(String, String)> = Vec::new();
     for (_, target_table) in &targets {
+        if is_cancelled(&request.transfer_id).await {
+            return Err("Cancelled".to_string());
+        }
         let foreign_keys = match crate::schema::list_foreign_keys_core(
             state,
             &request.target_connection_id,

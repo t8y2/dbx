@@ -1680,7 +1680,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     // The cursor handed back with the matching page is preserved: the manual
     // continuation resumes from cursor 801 and scans its own keyspace-aware
     // page (200 iterations = 25 backend calls) past the end of the mock.
-    clickButtonWithText("redis.loadMoreKeys");
+    clickButtonWithText("redis.fetchMoreKeys");
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(33));
     await settle();
     expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(33);
@@ -1713,12 +1713,12 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(125);
     expect(mocks.redisScanKeysBatch.mock.calls[124]?.[2]).toBe(124);
     expect(document.body.textContent).toContain("redis.noKeysInScanHint");
-    expect(Array.from(document.querySelectorAll("button")).some((button) => button.textContent?.includes("redis.loadMoreKeys"))).toBe(true);
+    expect(Array.from(document.querySelectorAll("button")).some((button) => button.textContent?.includes("redis.fetchMoreKeys"))).toBe(true);
 
     // The manual continuation resumes from the saved cursor with the same
     // keyspace-aware per-page budget (another 1000 iterations) instead of
     // falling back to the old 50k COUNT floor.
-    clickButtonWithText("redis.loadMoreKeys");
+    clickButtonWithText("redis.fetchMoreKeys");
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(250));
 
     expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(250);
@@ -1756,7 +1756,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     // 200 iterations) and reaches the next sparse match while keeping the
     // already found key; previously the same click was cut off at the old
     // 50-iteration slice just short of the match and needed a second click (#12412).
-    clickButtonWithText("redis.loadMoreKeys");
+    clickButtonWithText("redis.fetchMoreKeys");
     await vi.waitFor(() => expect(document.body.textContent).toContain("next"));
 
     expect(continuationBatch).toBe(8);
@@ -1837,13 +1837,13 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
 
     await submitKeySearch("old");
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 0 && call[3] === "*old*")).toHaveLength(1));
-    clickButtonWithText("redis.loadMoreKeys");
+    clickButtonWithText("redis.fetchMoreKeys");
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.some((call) => call[2] === 11)).toBe(true));
 
     await submitKeySearch("new");
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 0 && call[3] === "*new*")).toHaveLength(1));
     const firstCurrentLoadMore = await vi.waitFor(() => {
-      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((candidate) => candidate.textContent?.includes("redis.loadMoreKeys"));
+      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((candidate) => candidate.textContent?.includes("redis.fetchMoreKeys"));
       const button = buttons.find((candidate) => !candidate.disabled);
       expect(button).toBeDefined();
       return button!;
@@ -1851,7 +1851,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     firstCurrentLoadMore.click();
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 21)).toHaveLength(1));
     const secondCurrentLoadMore = await vi.waitFor(() => {
-      const button = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((candidate) => candidate.textContent?.includes("redis.loadMoreKeys") && !candidate.disabled);
+      const button = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((candidate) => candidate.textContent?.includes("redis.fetchMoreKeys") && !candidate.disabled);
       expect(button).toBeDefined();
       return button!;
     });
@@ -1861,7 +1861,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     oldContinuation.resolve({ cursor: 12, keys: [], total_keys: 0 });
     await settle();
 
-    const loadMoreButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((button) => button.textContent?.includes("redis.loadMoreKeys"));
+    const loadMoreButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((button) => button.textContent?.includes("redis.fetchMoreKeys"));
     expect(loadMoreButtons.length).toBeGreaterThan(0);
     expect(loadMoreButtons.every((button) => button.disabled)).toBe(true);
     loadMoreButtons[0]!.click();
@@ -1869,7 +1869,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 22)).toHaveLength(1);
 
     currentContinuation.resolve({ cursor: 0, keys: [currentLastPage], total_keys: 0 });
-    await vi.waitFor(() => expect(Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((button) => button.textContent?.includes("redis.loadMoreKeys"))).toHaveLength(0));
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((button) => button.textContent?.includes("redis.fetchMoreKeys"))).toHaveLength(0));
     const labels = Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).map((element) => element.textContent);
     expect(labels).toContain("new");
     expect(labels).not.toContain("old");
@@ -2040,7 +2040,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     await settle();
 
     await selectGroup("user");
-    clickButtonWithText("redis.loadMoreKeys");
+    clickButtonWithText("redis.fetchMoreKeys");
     await settle();
 
     const updatedUserCheckbox = groupCheckbox("user");
@@ -2657,7 +2657,7 @@ describe("RedisKeyBrowser interrupted Fetch All", () => {
     mountBrowser();
     await settle();
 
-    expect(document.body.textContent).toContain("redis.loadMoreKeys");
+    expect(document.body.textContent).toContain("redis.fetchMoreKeys");
     const keyPane = requiredElement<HTMLElement>(".redis-key-pane");
     keyPane.focus();
     keyPane.dispatchEvent(new KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true, cancelable: true }));
@@ -2893,7 +2893,7 @@ describe("RedisKeyBrowser connection default key scope", () => {
     await submitKeySearch("*pending*");
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(7));
     await vi.waitFor(() => expect(requiredElement<HTMLElement>(".redis-key-count").textContent).toBe("0+ keys"));
-    clickButtonWithText("redis.loadMoreKeys");
+    clickButtonWithText("redis.fetchMoreKeys");
     await vi.waitFor(() => expect(requiredElement<HTMLElement>(".redis-key-count").textContent).toBe("1 keys"));
     expect(mocks.redisScanKeysBatch.mock.calls[7]?.[2]).toBe(7);
     expect(document.querySelector(`[data-redis-leaf="${outside.key_raw}"]`)).toBeNull();

@@ -194,6 +194,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     keywordKeys: ["settings.tableCompletionSchemaQualificationNever", "settings.tableCompletionSchemaQualificationCollision", "settings.tableCompletionSchemaQualificationAlways"],
   },
   { id: "editor-auto-alias", category: "editor", titleKey: "settings.autoAliasTables", descriptionKey: "settings.autoAliasTablesDescription", targetId: "editor" },
+  { id: "editor-batch-column-comments", category: "editor", titleKey: "settings.batchColumnSelectionIncludeComments", descriptionKey: "settings.batchColumnSelectionIncludeCommentsDescription", targetId: "editor" },
   { id: "editor-unsaved-close", category: "editor", titleKey: "settings.confirmUnsavedSqlClose", descriptionKey: "settings.confirmUnsavedSqlCloseDescription", targetId: "editor" },
   {
     id: "editor-app-close-unsaved-tabs",
@@ -322,6 +323,14 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   },
   { id: "appearance-layout", category: "appearance", titleKey: "settings.appLayout", targetId: "appearance", keywordKeys: ["settings.appLayoutSeparated", "settings.appLayoutClassic", "settings.appLayoutSeparatedDescription", "settings.appLayoutClassicDescription"] },
   { id: "appearance-tab-layout", category: "appearance", titleKey: "settings.tabLayout", targetId: "appearance", keywordKeys: ["settings.tabLayoutScroll", "settings.tabLayoutWrap", "settings.tabLayoutScrollDescription", "settings.tabLayoutWrapDescription"] },
+  {
+    id: "appearance-tab-double-click-action",
+    category: "appearance",
+    titleKey: "settings.tabDoubleClickAction",
+    descriptionKey: "settings.tabDoubleClickActionDescription",
+    targetId: "appearance",
+    keywordKeys: ["settings.tabDoubleClickActionDefault", "settings.tabDoubleClickActionClose", "contextMenu.renameTab"],
+  },
   {
     id: "appearance-tab-max-width",
     category: "appearance",
@@ -728,6 +737,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "updates-jdbc", category: "updates", titleKey: "settings.autoUpdateJdbc", descriptionKey: "settings.autoUpdateJdbcDescription", targetId: "updates" },
   { id: "updates-mcp", category: "updates", titleKey: "settings.autoUpdateMcp", descriptionKey: "settings.autoUpdateMcpDescription", targetId: "updates" },
   { id: "updates-plugins", category: "updates", titleKey: "settings.autoUpdatePlugins", descriptionKey: "settings.autoUpdatePluginsDescription", targetId: "updates" },
+  { id: "updates-channel", category: "updates", titleKey: "settings.updateChannel", descriptionKey: "settings.updateChannelDescription", targetId: "updates", keywordKeys: ["settings.updateChannelStable", "settings.updateChannelBeta"] },
   { id: "updates-source", category: "updates", titleKey: "settings.updateDownloadSource", descriptionKey: "settings.updateDownloadSourceDescription", targetId: "updates", keywordKeys: ["settings.updateDownloadSourceOfficial", "settings.updateDownloadSourceCnb"] },
   // Fixed controls added alongside the full template coverage audit.
   { id: "editor-keep-explicit-transaction-in-auto-commit", category: "editor", titleKey: "settings.keepExplicitTransactionInAutoCommit", descriptionKey: "settings.keepExplicitTransactionInAutoCommitDescription", targetId: "editor" },

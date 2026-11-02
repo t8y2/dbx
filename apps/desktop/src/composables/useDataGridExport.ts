@@ -43,7 +43,7 @@ import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import i18n from "@/i18n";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, xlsxHeaderUsesCommentRows, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { isPartiallyLoadedCopy, partialLoadCopyHintKey, type PartialLoadCopyInfo } from "@/lib/dataGrid/copyPartialLoadHint";
-import { showExportExecutionModeDialog } from "@/lib/export/exportExecutionMode";
+import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 import type { CapturedLegacyLargeValueExport } from "@/lib/dataGrid/legacyLargeValueExport";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -451,6 +451,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       const app = createApp(XlsxHeaderDialog, {
         open: true,
         showExecutionMode,
+        initialExecutionMode: showExecutionMode ? getDefaultExportExecutionMode() : "immediate",
         showHeaderOptions: hasXlsxHeaderComments(allXlsxColumnComments.value) || hasXlsxHeaderComments(visibleXlsxColumnComments.value),
         onConfirm: (exportOptions: XlsxExportOptions) => {
           resolve(exportOptions);
@@ -1237,8 +1238,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     };
     const fileFormat = FORMAT_META[format]!;
     let outputPath = full && (format === "txt" || format === "sql") ? exportFileName(tableMeta.value?.tableName || "export", fileFormat.ext, { preferFallback: true }) : exportFileName(full ? "export" : "export-page", fileFormat.ext, { page: !full });
-    const mode = exportOptions.openAfterExport ? "immediate" : (exportOptions.xlsx?.executionMode ?? exportOptions.sql?.executionMode ?? (await showExportExecutionModeDialog()));
-    if (mode === null) return true;
+    const mode = exportOptions.openAfterExport ? "immediate" : (exportOptions.xlsx?.executionMode ?? exportOptions.sql?.executionMode ?? getDefaultExportExecutionMode());
     if (native) {
       const path = exportOptions.openAfterExport ? await api.createQueryResultTempFile(fileFormat.ext) : await promptExportSavePath({ defaultFileName: outputPath, filters: [{ name: fileFormat.label, extensions: [fileFormat.ext] }], preferredPath: editorSettings.preferredExportPath });
       if (!path) return true;
@@ -1431,8 +1431,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         : undefined;
     const isCurrent = () => !scopeDisposed && (completeLocalResult?.value ?? options.snapshotResult?.value) === original && connectionId.value === originalConnection && database.value === originalDatabase;
     if (!isCurrent()) throw new Error("Export result context changed");
-    const mode = exportOptions.openAfterExport ? "immediate" : (xlsxOptions?.executionMode ?? sqlOptions?.executionMode ?? (await showExportExecutionModeDialog()));
-    if (mode === null) return true;
+    const mode = exportOptions.openAfterExport ? "immediate" : (xlsxOptions?.executionMode ?? sqlOptions?.executionMode ?? getDefaultExportExecutionMode());
     const outputPath = exportOptions.openAfterExport ? await api.createQueryResultTempFile(meta.ext) : await promptExportSavePath({ defaultFileName: fileName, filters: [{ name: meta.label, extensions: [meta.ext] }], preferredPath: settings.preferredExportPath });
     if (!outputPath) return true;
     if (!isCurrent()) throw new Error("Export result context changed");
@@ -2017,8 +2016,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const exportOptions = await showXlsxHeaderDialog(true);
     if (exportOptions === null) return true;
     if (!isCurrent()) throw new Error("Export result context changed");
-    const mode = exportOptions.executionMode ?? (await showExportExecutionModeDialog());
-    if (mode === null) return true;
+    const mode = exportOptions.executionMode ?? getDefaultExportExecutionMode();
     const outputPath = await promptExportSavePath({ defaultFileName: fileName, filters: [{ name: "Excel", extensions: ["xlsx"] }], preferredPath: settings.preferredExportPath });
     if (!outputPath) return true;
     if (!isCurrent()) throw new Error("Export result context changed");
@@ -2365,8 +2363,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const preparingStore = isTauriRuntime() && getActivePinia() ? useConnectionStore() : undefined;
     const originalConfig = preparingStore?.getConfig(request.connectionId);
     const fingerprint = originalConfig ? connectionConfigFingerprint(originalConfig) : undefined;
-    const mode = openAfterExport ? "immediate" : (selectedMode ?? sqlExportOptions?.executionMode ?? (await showExportExecutionModeDialog()));
-    if (mode === null) return true;
+    const mode = openAfterExport ? "immediate" : (selectedMode ?? sqlExportOptions?.executionMode ?? getDefaultExportExecutionMode());
     const connStore = mode === "queued" ? useConnectionStore() : undefined;
     const fmt = FORMAT_META[format];
     const splitSqlOutput = format === "sql" && request.splitMaxMb !== undefined;
@@ -2606,8 +2603,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const extension = fmt?.ext ?? format;
     const filterName = fmt?.label ?? format.toUpperCase();
     let outputPath = exportFileName("query-result", extension);
-    const mode = openAfterExport ? "immediate" : (selectedMode ?? sqlExportOptions?.executionMode ?? (await showExportExecutionModeDialog()));
-    if (mode === null) return true;
+    const mode = openAfterExport ? "immediate" : (selectedMode ?? sqlExportOptions?.executionMode ?? getDefaultExportExecutionMode());
     if (isTauriRuntime()) {
       if (openAfterExport) outputPath = await api.createQueryResultTempFile(extension);
       else {

@@ -9,6 +9,9 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import SavePasswordCheckbox from "@/components/connection/SavePasswordCheckbox.vue";
+import ConnectionParametersDialog from "@/components/connection/ConnectionParametersDialog.vue";
+import { parseConnectionParameters, patchConnectionParameter } from "@/lib/connection/connectionParameterDocument";
+import { connectionParameterSyntax, type ConnectionParameterDefinition } from "@/lib/connection/connectionParameterCatalog";
 import { Label } from "@/components/ui/label";
 import { sidebarProductionBadgeScope } from "@/lib/sidebar/sidebarProductionBadge";
 import type { ProductionBadgeScope } from "@/types/database";
@@ -97,7 +100,6 @@ import {
   supportsIdleTimeout,
 } from "@/lib/connection/timeoutLimits";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
-import { ORACLE_LEGACY_CHARSETS, oracleLegacyCharset, withOracleLegacyCharset } from "@/lib/connection/oracleLegacyCharset";
 import { applyConnectionDeepLinkUpdate, resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
 import {
   connectionDeepLinkServiceHydrationValue,
@@ -704,6 +706,19 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 }
 
 const form = ref(defaultForm());
+const parameterEditorOpen = ref(false);
+watch(open, (value) => {
+  if (!value) parameterEditorOpen.value = false;
+});
+const parameterDriverDefinitions = ref<ConnectionParameterDefinition[]>([]);
+const parameterMetadataLoading = ref(false);
+const parameterMetadataError = ref("");
+let parameterMetadataRequest = 0;
+const configuredParameterCount = computed(() => parseConnectionParameters(form.value.url_params || "", connectionParameterSyntax(form.value)).entries.length);
+function applyConnectionParameters(value: string) {
+  form.value.url_params = value;
+  resetTestState();
+}
 const sidebarVisibilitySettings = computed(() => {
   const config = { ...form.value, database_info: visibleTestDatabaseInfo.value ?? visibleSavedDatabaseInfo.value ?? undefined } as ConnectionConfig;
   return [
@@ -1305,6 +1320,29 @@ function parsedJdbcDriverPaths(): string[] {
     .filter(Boolean);
 }
 
+watch([parameterEditorOpen, () => form.value.db_type, () => form.value.driver_profile, () => form.value.connection_string, () => form.value.url_params, () => form.value.jdbc_driver_class, jdbcDriverPathsInput], async ([isOpen]) => {
+  const request = ++parameterMetadataRequest;
+  parameterDriverDefinitions.value = [];
+  parameterMetadataError.value = "";
+  parameterMetadataLoading.value = false;
+  if (!isOpen) return;
+  const runtime = databaseManifestEntry(form.value.db_type)?.runtimeMode;
+  if ((runtime === "native" || runtime === "file") && !form.value.driver_profile?.includes("legacy")) return;
+  if (form.value.db_type === "oracle") return;
+  parameterMetadataLoading.value = true;
+  try {
+    const config = { ...form.value, id: editingId.value || "parameter-metadata-draft", jdbc_driver_paths: parsedJdbcDriverPaths() } as ConnectionConfig;
+    const metadata = await api.connectionParameters(config);
+    if (request !== parameterMetadataRequest) return;
+    parameterDriverDefinitions.value = metadata.parameters;
+    if (!metadata.available) parameterMetadataError.value = "unavailable";
+  } catch {
+    if (request === parameterMetadataRequest) parameterMetadataError.value = "unavailable";
+  } finally {
+    if (request === parameterMetadataRequest) parameterMetadataLoading.value = false;
+  }
+});
+
 function applyCustomColor(value: string) {
   form.value.color = value;
   customColorInput.value = value;
@@ -1609,8 +1647,8 @@ function resetMqttFields(config?: Partial<MqttConnectionConfig>) {
     mqttClientKeyPath.value = "";
   } else if (auth && auth.kind === "certificate") {
     mqttAuthKind.value = "certificate";
-    mqttUsername.value = "";
-    mqttPassword.value = "";
+    mqttUsername.value = auth.username || "";
+    mqttPassword.value = auth.password || "";
     mqttCaCertPath.value = auth.caCertPath || "";
     mqttClientCertPath.value = auth.clientCertPath || "";
     mqttClientKeyPath.value = auth.clientKeyPath || "";
@@ -1637,7 +1675,7 @@ function buildMqttExternalConfig(): MqttConnectionConfig {
     mqttAuthKind.value === "password"
       ? { kind: "password", username: mqttUsername.value, password: mqttPassword.value }
       : mqttAuthKind.value === "certificate"
-        ? { kind: "certificate", caCertPath: mqttCaCertPath.value || undefined, clientCertPath: mqttClientCertPath.value || undefined, clientKeyPath: mqttClientKeyPath.value || undefined }
+        ? { kind: "certificate", username: mqttUsername.value || undefined, password: mqttUsername.value ? mqttPassword.value : undefined, caCertPath: mqttCaCertPath.value || undefined, clientCertPath: mqttClientCertPath.value || undefined, clientKeyPath: mqttClientKeyPath.value || undefined }
         : { kind: "none" };
 
   return {
@@ -3652,13 +3690,6 @@ function persistOracleOciClientPath() {
  * global default for reuse.
  */
 const OCI_NLS_LANG_FOLLOW_GLOBAL = "__follow_global__";
-const ORACLE_LEGACY_CHARSET_DISABLED = "__disabled__";
-const oracleLegacyCharsetSelection = computed(() => oracleLegacyCharset(form.value.url_params) || ORACLE_LEGACY_CHARSET_DISABLED);
-function onOracleLegacyCharsetSelected(value: unknown) {
-  const charset = typeof value === "string" && value !== ORACLE_LEGACY_CHARSET_DISABLED ? value : "";
-  form.value.url_params = withOracleLegacyCharset(form.value.url_params, charset);
-  resetTestState();
-}
 const ORACLE_NLS_LANG_OPTIONS = [
   "AMERICAN_AMERICA.AL32UTF8",
   "AMERICAN_AMERICA.UTF8",
@@ -3996,12 +4027,6 @@ const tlsCapableDatabaseTypes = new Set<DatabaseType>([
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type) || supportsMysqlTlsTab(form.value.db_type, selectedType.value));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse" || form.value.db_type === "victoriametrics");
 const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase" && form.value.db_type !== "nebula");
-const genericUrlParamsHints = computed(() => {
-  const hints: string[] = [];
-  if (["mysql", "doris", "starrocks"].includes(form.value.db_type)) hints.push(t("connection.localInfilePathHint"));
-  if (form.value.db_type === "mysql") hints.push(t("connection.sessionVariablesHint"));
-  return hints;
-});
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => mysqlTlsOptionsSupported(form.value.db_type, selectedType.value));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
@@ -5074,10 +5099,12 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
   // be significant, and file-path hosts (SQLite/DuckDB/H2 file mode) keep
   // their exact value for the same reason.
   const usesLocalFilePathHost = isLocalFileTypeDb(config.db_type) && (config.db_type !== "h2" || h2ConnectionModeForConfig(config) === "file");
-  if (!usesLocalFilePathHost) {
+  if (!usesLocalFilePathHost && typeof config.host === "string") {
     config.host = config.host.trim();
   }
-  config.username = config.username.trim();
+  if (typeof config.username === "string") {
+    config.username = config.username.trim();
+  }
   config.database = config.database?.trim() || undefined;
   if (isCloudflareD1Connection(config)) {
     normalizeCloudflareD1Connection(config);
@@ -5307,8 +5334,6 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     if (parsed.portExplicit && parsed.port !== undefined) {
       config.port = parsed.port;
       setSqlServerPortExplicit(config, true);
-      form.value.host = parsed.host;
-      form.value.port = parsed.port;
     }
     if (!connectionUpdateExternalConfigPreserved(config)) config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
@@ -5427,12 +5452,10 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
       // pasted into the field) are stored as the index the backend connects with.
       const database = normalizeRedisDatabaseValue(config.database);
       config.database = database;
-      form.value.database = database || "";
     }
     {
       const templates = normalizeRedisKeyTemplates(redisKeyTemplatesText.value);
       config.redis_key_templates = templates.length > 0 ? templates : undefined;
-      form.value.redis_key_templates = templates;
     }
   }
   if (config.db_type === "zookeeper") {
@@ -5682,22 +5705,11 @@ function setSqliteExtensionPaths(params: string | undefined, paths: string): str
 }
 
 function setUrlParam(params: string | undefined, key: string, value: string): string {
-  const parsed = new URLSearchParams((params || "").trim().replace(/^\?/, ""));
-  const normalized = value.trim();
-  if (normalized) {
-    parsed.set(key, normalized);
-  } else {
-    parsed.delete(key);
-  }
-  return parsed.toString();
+  return patchConnectionParameter(params, key, value.trim() || null);
 }
 
 function deleteUrlParams(params: string | undefined, keys: string[]): string {
-  const parsed = new URLSearchParams((params || "").trim().replace(/^\?/, ""));
-  for (const key of keys) {
-    parsed.delete(key);
-  }
-  return parsed.toString();
+  return keys.reduce((value, key) => patchConnectionParameter(value, key, null), params || "");
 }
 
 function mysqlTlsModeFromParams(params: string | undefined, ssl: boolean | undefined): string {
@@ -5845,7 +5857,7 @@ function parseEtcdEndpoint(value: string): { scheme?: string; host: string; port
 }
 
 function isOracleSysUser(config: Pick<ConnectionConfig, "db_type" | "username">): boolean {
-  return config.db_type === "oracle" && config.username.trim().toLowerCase() === "sys";
+  return config.db_type === "oracle" && typeof config.username === "string" && config.username.trim().toLowerCase() === "sys";
 }
 
 function resetTestState() {
@@ -7513,7 +7525,7 @@ function openExternalUrl(url: string) {
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <Dialog :open="open && !parameterEditorOpen" @update:open="open = $event">
     <DialogContent
       :style="dialogContentStyle"
       class="connection-dialog-content"
@@ -7986,6 +7998,13 @@ function openExternalUrl(url: string) {
                           </Button>
                         </div>
                       </div>
+                    </div>
+                    <div v-if="supportsGenericUrlParams" class="connection-parameters-row grid grid-cols-4 items-center gap-4">
+                      <Label for="connection-parameters-open" :class="connectionLabelClass">{{ t("connection.parameterEditor.title") }}</Label>
+                      <Button id="connection-parameters-open" type="button" variant="outline" class="col-span-3 justify-between" @click="parameterEditorOpen = true">
+                        <span class="font-normal text-muted-foreground">{{ configuredParameterCount ? t("connection.parameterEditor.configuredCount", { count: configuredParameterCount }) : t("connection.parameterEditor.default") }}</span>
+                        <span>{{ t("connection.parameterEditor.configure") }}</span>
+                      </Button>
                     </div>
                   </template>
 
@@ -8948,7 +8967,7 @@ function openExternalUrl(url: string) {
                         <Button size="sm" :variant="mqttAuthKind === 'certificate' ? 'default' : 'outline'" @click="mqttAuthKind = 'certificate'">{{ t("connection.mqttAuthCertificate") }}</Button>
                       </div>
                     </div>
-                    <template v-if="mqttAuthKind === 'password'">
+                    <template v-if="mqttAuthKind === 'password' || mqttAuthKind === 'certificate'">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.mqttUsername") }}</Label>
                         <Input v-model="mqttUsername" class="col-span-3" :placeholder="t('connection.mqttUsernamePlaceholder')" />
@@ -8958,7 +8977,7 @@ function openExternalUrl(url: string) {
                         <Input v-model="mqttPassword" type="password" class="col-span-3" :placeholder="t('connection.mqttPasswordPlaceholder')" />
                       </div>
                     </template>
-                    <template v-else-if="mqttAuthKind === 'certificate'">
+                    <template v-if="mqttAuthKind === 'certificate'">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.mqttCaCertPath") }}</Label>
                         <Input v-model="mqttCaCertPath" class="col-span-3" placeholder="/path/to/ca.pem" />
@@ -9877,44 +9896,12 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
 
-                    <div v-if="supportsGenericUrlParams" class="connection-url-params-row grid grid-cols-4 items-start gap-4">
-                      <div :class="[connectionLabelClass, 'connection-url-params-label inline-flex min-h-8 items-center gap-1']">
-                        <Label for="connection-url-params">{{ t("connection.urlParams") }}</Label>
-                        <HelpTooltip v-if="genericUrlParamsHints.length" :label="genericUrlParamsHints.join('\n\n')" side="right" content-class="w-[min(400px,calc(100vw-32px))] max-w-none space-y-3 break-words">
-                          <p v-for="hint in genericUrlParamsHints" :key="hint">{{ hint }}</p>
-                        </HelpTooltip>
-                      </div>
-                      <div class="col-span-3 space-y-1.5">
-                        <Input
-                          id="connection-url-params"
-                          v-model="form.url_params"
-                          :placeholder="
-                            form.db_type === 'mysql'
-                              ? 'charset=utf8mb4'
-                              : form.db_type === 'doris' || form.db_type === 'starrocks'
-                                ? 'sessionVariables=query_timeout=60'
-                                : form.db_type === 'saphana'
-                                  ? 'databaseName=TENANT_DB'
-                                  : form.db_type === 'clickhouse'
-                                    ? 'secure=true'
-                                    : form.db_type === 'bigquery'
-                                      ? 'OAuthType=0;OAuthServiceAcctEmail=svc@project.iam.gserviceaccount.com;OAuthPvtKeyPath=/path/key.json'
-                                      : form.db_type === 'spanner'
-                                        ? 'credentials=/path/key.json;autocommit=true'
-                                        : form.db_type === 'informix'
-                                          ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
-                                          : form.db_type === 'spark'
-                                            ? 'catalog=paimon_catalog'
-                                            : form.db_type === 'cassandra'
-                                              ? 'localdatacenter=dc1'
-                                              : form.db_type === 'transwarp'
-                                                ? 'fetchSize=500;auth=noSasl'
-                                                : form.db_type === 'firebird'
-                                                  ? 'charSet=GBK'
-                                                  : 'sslmode=prefer'
-                          "
-                        />
-                      </div>
+                    <div v-if="supportsGenericUrlParams" class="connection-parameters-row grid grid-cols-4 items-center gap-4">
+                      <Label for="connection-parameters-open" :class="connectionLabelClass">{{ t("connection.parameterEditor.title") }}</Label>
+                      <Button id="connection-parameters-open" type="button" variant="outline" class="col-span-3 justify-between" @click="parameterEditorOpen = true">
+                        <span class="font-normal text-muted-foreground">{{ configuredParameterCount ? t("connection.parameterEditor.configuredCount", { count: configuredParameterCount }) : t("connection.parameterEditor.default") }}</span>
+                        <span>{{ t("connection.parameterEditor.configure") }}</span>
+                      </Button>
                     </div>
 
                     <div v-if="form.db_type === 'dameng'" class="grid grid-cols-4 items-start gap-4">
@@ -10944,7 +10931,7 @@ function openExternalUrl(url: string) {
                       </p>
                     </div>
                   </div>
-                  <div v-show="form.db_type === 'redis'" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type === 'redis'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("settings.redisScanPageSize") }}</Label>
                     <div class="col-span-3 flex flex-col gap-1">
                       <Select :model-value="String(form.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT)" @update:model-value="form.redis_scan_page_size = Number($event)">
@@ -10968,26 +10955,6 @@ function openExternalUrl(url: string) {
                         <span class="text-sm text-muted-foreground">KiB</span>
                       </div>
                       <p class="text-xs text-muted-foreground">{{ t("settings.redisValuePreviewLimitDescription") }}</p>
-                    </div>
-                  </div>
-                </section>
-                <section v-if="form.db_type === 'oracle'" class="connection-advanced-section grid content-start gap-4 rounded-lg border p-4">
-                  <h3 class="text-base font-bold">{{ t("connection.advancedCompatibility") }}</h3>
-                  <div class="grid grid-cols-4 items-start gap-4">
-                    <Label :class="connectionLabelSmallPaddedClass">
-                      <span class="inline-flex items-center gap-1">{{ t("connection.oracleLegacyCharset") }} <HelpTooltip :label="t('connection.oracleLegacyCharsetHint')" /></span>
-                    </Label>
-                    <div class="col-span-3 space-y-1">
-                      <Select :model-value="oracleLegacyCharsetSelection" @update:model-value="onOracleLegacyCharsetSelected">
-                        <SelectTrigger class="w-full" :aria-label="t('connection.oracleLegacyCharset')">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem :value="ORACLE_LEGACY_CHARSET_DISABLED">{{ t("connection.oracleLegacyCharsetDisabled") }}</SelectItem>
-                          <SelectItem v-for="charset in ORACLE_LEGACY_CHARSETS" :key="charset" :value="charset">{{ charset }}</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <p v-if="oracleLegacyCharsetSelection !== ORACLE_LEGACY_CHARSET_DISABLED" class="text-xs text-muted-foreground">{{ t("connection.oracleLegacyCharsetHint") }}</p>
                     </div>
                   </div>
                 </section>
@@ -11421,6 +11388,8 @@ function openExternalUrl(url: string) {
     </DialogContent>
   </Dialog>
 
+  <ConnectionParametersDialog v-if="open" v-model:open="parameterEditorOpen" :model-value="form.url_params" :context="form" :definitions="parameterDriverDefinitions" :loading="parameterMetadataLoading" :metadata-error="parameterMetadataError" @apply="applyConnectionParameters" />
+
   <Dialog v-model:open="showConnectionErrorDialog">
     <DialogContent class="min-w-0 sm:max-w-[680px]">
       <DialogHeader>
@@ -11735,6 +11704,9 @@ function openExternalUrl(url: string) {
   /* Preserve every form section's natural height; the form viewport owns
    * scrolling and must never shrink cards into collapsed grid rows. */
   align-content: start;
+  /* Overlay scrollbars need padding too; older WebViews ignore gutter. */
+  padding-right: 1rem;
+  scrollbar-gutter: stable;
 }
 
 .connection-form-body--nacos {

@@ -355,12 +355,11 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(connectionDialogLegacyCss).toContain("flex-wrap: nowrap !important;");
     expect(connectionDialogLegacyCss).toContain('[data-slot="dialog-content"].connection-dialog-content--config .connection-dialog-test-status');
     expect(connectionDialogLegacyCss).toContain("min-width: 12rem !important;");
-    expect(connectionDialogSource).toContain("connection-url-params-row");
-    expect(connectionDialogSource).toContain("connection-url-params-label");
-    // URL details now live in a tooltip, so every driver uses the same single-line row.
-    expect(connectionDialogLegacyCss).toMatch(/\.connection-url-params-row\s*\{\s*align-items: center !important;\s*\}/);
-    expect(connectionDialogLegacyCss).not.toContain("connection-url-params-row--compact");
-    expect(connectionDialogLegacyCss).not.toContain("connection-url-params-row--with-hint");
+    expect(connectionDialogSource).toContain("connection-parameters-row");
+    expect(connectionDialogSource).toContain('for="connection-parameters-open"');
+    // Keep the parameter-editor entry aligned in both native and JDBC forms.
+    expect(connectionDialogLegacyCss).toMatch(/\.connection-parameters-row\s*\{\s*align-items: center !important;\s*\}/);
+    expect(connectionDialogLegacyCss).not.toContain("connection-url-params-row");
     expect(connectionDialogLegacyCss).not.toContain("minmax(8rem, 1fr)");
     expect(connectionDialogLegacyCss).toContain(".connection-db-picker-option");
     expect(connectionDialogLegacyCss).not.toContain("width >=");

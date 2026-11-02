@@ -45,6 +45,7 @@ const under = (namespace: string, keys: string[]) => keys.map((key) => `${namesp
 // leaks the raw key path, and a key missing from a locale silently shows
 // English.
 const FEATURE_MESSAGES: FeatureMessages[] = [
+  { feature: "query connection group path preview", keys: ["connection.groupPath"], translated: true },
   { feature: "SQL file includes", keys: under("sqlFile", ["resolveIncludes", "resolveIncludesHint"]), translated: true },
   { feature: "AstraFlow provider", keys: ["ai.astraflowDescription"], translated: true },
   { feature: "AI HTML preview (#6467)", keys: under("ai", ["htmlPreviewLabel", "htmlExpandPreview", "htmlExpandPreviewHint", "htmlSaveSafe", "htmlSaveFailed", "htmlCopySource", "htmlCopyRiskBody", "htmlCopyRiskAccept", "htmlCopyRiskRemember", "htmlCopyRiskToast"]) },

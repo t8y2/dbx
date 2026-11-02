@@ -1,6 +1,18 @@
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 
-export function sidebarUserAdminVisibility(nodes: TreeNode[], getConfig?: (connectionId: string) => ConnectionConfig | undefined): { nodes: TreeNode[]; hiddenNodeIds: ReadonlySet<string> } {
+const noHiddenNodeIds: ReadonlySet<string> = new Set();
+
+function configHidesSidebarEntry(config: ConnectionConfig): boolean {
+  return config.show_user_admin === false || config.show_database_links === false || config.show_native_jobs === false;
+}
+
+/**
+ * `configs`, when given, lists every connection `getConfig` can resolve. If none of them hides an
+ * entry the tree is returned as-is, so a sidebar with tens of thousands of table rows is not walked
+ * (and every row is not tracked as a reactive dependency) on each page load.
+ */
+export function sidebarUserAdminVisibility(nodes: TreeNode[], getConfig?: (connectionId: string) => ConnectionConfig | undefined, configs?: readonly ConnectionConfig[]): { nodes: TreeNode[]; hiddenNodeIds: ReadonlySet<string> } {
+  if (configs && !configs.some(configHidesSidebarEntry)) return { nodes, hiddenNodeIds: noHiddenNodeIds };
   const hiddenNodeIds = new Set<string>();
 
   function hideNode(node: TreeNode) {

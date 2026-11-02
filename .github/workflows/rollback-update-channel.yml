@@ -1,0 +1,89 @@
+name: Rollback Stable Update Channel
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Previously promoted release tag to point the stable channel at"
+        required: true
+        type: string
+      purge_cache:
+        description: "Purge Cloudflare cache after switching aliases"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    name: Roll back stable update manifest
+    runs-on: ubuntu-latest
+    environment: release-promotion
+    steps:
+      - name: Validate stable release and manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]{8}\.[0-9]+)?$ ]]; then
+            echo "::error::Rollback requires a promoted vX.Y.Z or vX.Y.Z-beta.YYYYMMDD.N tag: $TAG"
+            exit 1
+          fi
+          RELEASE_JSON="$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json isDraft,isPrerelease)"
+          if [ "$(jq -r '.isDraft' <<<"$RELEASE_JSON")" = "true" ] || [ "$(jq -r '.isPrerelease' <<<"$RELEASE_JSON")" = "true" ]; then
+            echo "::error::$TAG is not a promoted stable release."
+            exit 1
+          fi
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          mkdir -p rollback-assets
+          aws s3 cp "s3://${R2_BUCKET_NAME}/releases/stable/${TAG}/latest.json" rollback-assets/latest.json \
+            --endpoint-url "$endpoint"
+          jq -e --arg tag "$TAG" '
+            .channel == "stable" and .release_tag == $tag and .is_promoted == true and
+            (.platforms | type == "object") and
+            (. as $manifest |
+              all(["darwin-aarch64", "darwin-x86_64", "windows-x86_64", "windows-aarch64", "linux-x86_64", "linux-aarch64"][];
+                $manifest.platforms[.] | type == "object" and (.url | type == "string" and length > 0) and (.signature | type == "string" and length > 0)))
+          ' rollback-assets/latest.json >/dev/null
+
+      - name: Point stable aliases at the selected immutable manifest
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          source="s3://${R2_BUCKET_NAME}/releases/stable/${TAG}/"
+          for alias in stable/latest latest; do
+            aws s3 sync "$source" "s3://${R2_BUCKET_NAME}/releases/${alias}/" \
+              --endpoint-url "$endpoint" --cache-control "no-cache" --delete
+          done
+          aws s3 cp "$source/latest.json" "s3://${R2_BUCKET_NAME}/releases/stable/latest.json" \
+            --endpoint-url "$endpoint" --cache-control "no-cache"
+
+      - name: Purge Cloudflare cache
+        if: ${{ inputs.purge_cache }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+        run: |
+          set -euo pipefail
+          zone_id="${CLOUDFLARE_ZONE_ID:-}"
+          if [ -z "$zone_id" ]; then
+            zone_id="$(curl -fsSL -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" \
+              "https://api.cloudflare.com/client/v4/zones?name=dbxio.com" | jq -r '.result[0].id // empty')"
+          fi
+          test -n "$zone_id"
+          curl -fsSL -X POST -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" \
+            --data '{"purge_everything":true}' "https://api.cloudflare.com/client/v4/zones/${zone_id}/purge_cache" \
+            | jq -e '.success == true'

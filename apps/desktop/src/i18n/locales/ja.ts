@@ -4496,6 +4496,8 @@ export default withEnglishFallback({
     skillsGroupDefault: "既定ディレクトリ",
     skillsGroupCustom: "カスタムディレクトリ",
     outputTruncated: "出力がモデルの上限に達したため、内容は不完全です。続きを生成してください。",
+    continueGeneration: "生成を続ける",
+    continueGenerationPrompt: "途中で切れた前の回答を、停止した箇所から続けてください。既存の内容を繰り返したり、SQLを実行したりしないでください。",
     skillsDuplicateName: "名前が重複",
     skillsDuplicateNameNote: "このディレクトリ内の別のスキルが同じ名前を使用しているため、AI が区別できません。どちらかの SKILL.md の name フィールドを変更してください。",
     skillsReasonNotFound: "Skill フォルダーまたは SKILL.md が存在しません",

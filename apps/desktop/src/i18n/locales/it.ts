@@ -4377,6 +4377,8 @@ export default withEnglishFallback({
     skillsGroupDefault: "Directory predefinita",
     skillsGroupCustom: "Directory personalizzata",
     outputTruncated: "L'output ha raggiunto il limite del modello ed è incompleto. Continua per generare il resto.",
+    continueGeneration: "Continua a generare",
+    continueGenerationPrompt: "Continua la risposta precedente troncata dal punto in cui si è interrotta. Non ripetere il contenuto precedente e non eseguire SQL.",
     skillsDuplicateName: "Nome duplicato",
     skillsDuplicateNameNote: "Un altro skill in questa directory usa lo stesso nome, quindi l'IA non può distinguerli. Cambia il campo name in uno dei loro file SKILL.md.",
     skillsReasonNotFound: "La cartella della skill o SKILL.md non esiste più",

@@ -4541,6 +4541,8 @@ export default withEnglishFallback({
     skillsGroupDefault: "기본 디렉터리",
     skillsGroupCustom: "사용자 지정 디렉터리",
     outputTruncated: "출력이 모델 한도에 도달해 내용이 불완전합니다. 계속 생성하세요.",
+    continueGeneration: "계속 생성",
+    continueGenerationPrompt: "이전의 잘린 답변을 중단된 지점부터 이어서 작성하세요. 앞의 내용을 반복하거나 SQL을 실행하지 마세요.",
     skillsDuplicateName: "이름 중복",
     skillsDuplicateNameNote: "이 디렉터리의 다른 스킬이 같은 이름을 사용하고 있어 AI가 구분할 수 없습니다. 둘 중 하나의 SKILL.md에서 name 필드를 변경하세요.",
     skillsReasonNotFound: "Skill 폴더 또는 SKILL.md 이(가) 더 이상 존재하지 않습니다",

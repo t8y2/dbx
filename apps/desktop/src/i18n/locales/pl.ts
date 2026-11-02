@@ -4028,6 +4028,8 @@ export default withEnglishFallback({
     skillsGroupDefault: "Katalog domyślny",
     skillsGroupCustom: "Katalog niestandardowy",
     outputTruncated: "Odpowiedź osiągnęła limit modelu i jest niekompletna. Kontynuuj, aby wygenerować resztę.",
+    continueGeneration: "Kontynuuj generowanie",
+    continueGenerationPrompt: "Kontynuuj poprzednią, uciętą odpowiedź od miejsca przerwania. Nie powtarzaj wcześniejszej treści ani nie wykonuj SQL.",
     skillsDuplicateName: "Powielona nazwa",
     skillsDuplicateNameNote: "Inna umiejętność w tym katalogu ma taką samą nazwę, przez co AI nie może ich rozróżnić. Zmień pole name w jednym z plików SKILL.md.",
     skillsReasonNotFound: "Folder umiejętności lub plik SKILL.md już nie istnieje",

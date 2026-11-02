@@ -4852,6 +4852,8 @@ export default withEnglishFallback({
     skillsGroupDefault: "Directory เริ่มต้น",
     skillsGroupCustom: "Directory กำหนดเอง",
     outputTruncated: "Output ถึงขีดจำกัดของโมเดลและไม่สมบูรณ์ ดำเนินการสร้างส่วนที่เหลือต่อ",
+    continueGeneration: "สร้างต่อ",
+    continueGenerationPrompt: "เขียนคำตอบก่อนหน้าที่ถูกตัดต่อจากจุดที่หยุดไว้ อย่าซ้ำเนื้อหาก่อนหน้าหรือเรียกใช้ SQL",
     skillsDuplicateName: "ชื่อซ้ำ",
     skillsDuplicateNameNote: "Skill อื่นใน Directory นี้ใช้ชื่อเดียวกัน ทำให้ AI แยกไม่ออก เปลี่ยน Field name ในไฟล์ SKILL.md ไฟล์ใดไฟล์หนึ่ง",
     skillsReasonNotFound: "ไม่พบโฟลเดอร์ Skill หรือ SKILL.md อีกต่อไป",

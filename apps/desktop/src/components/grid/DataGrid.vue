@@ -286,7 +286,7 @@ import {
 import { resolveDataGridWheelScroll } from "@/lib/dataGrid/dataGridWheel";
 import {
   CANVAS_DATA_GRID_ROW_HEIGHT,
-  MAX_CANVAS_DATA_GRID_PIXEL_RATIO,
+  clearFitCanvasTextCache,
   canvasDataGridActionOverlayWidth,
   canvasDataGridActionReservedWidth,
   canvasDataGridContentHeight,
@@ -295,6 +295,7 @@ import {
   dataGridSearchMatchKey,
   drawCanvasDataGrid,
   resolveCanvasBackingStoreMetrics,
+  resolveCanvasDataGridPixelRatio,
   resolveCanvasCellTextLayout,
   type CanvasDevicePixelSize,
 } from "@/lib/dataGrid/canvasDataGridRenderer";
@@ -463,7 +464,7 @@ import { mongoCollectionSupportsIndexes, supportsMongoIndexMutations } from "@/l
 import { isProtectedMongoIndex, mongoDropAllIndexesPreview, mongoDropIndexFailureCount, mongoDropIndexPreview } from "@/lib/sidebar/mongoCollectionMutation";
 import { runMongoMutation } from "@/lib/sidebar/runMongoSidebarMutation";
 import { dataGridConditionColumnOptions, dataGridConditionIdentifierQuote, dataGridFilterColumns } from "@/lib/dataGrid/dataGridConditionCompletion";
-import { isMacOS } from "@/lib/backend/platform";
+import { getPlatform, isMacOS } from "@/lib/backend/platform";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
@@ -2877,6 +2878,8 @@ const columnHeaderMeasurementKey = computed(() => [tableFontSize.value, tableFon
 let columnHeaderMeasureContext: CanvasRenderingContext2D | null | undefined;
 let triggerGrowColumnWidths: (() => void) | undefined;
 
+// Invalidate cached canvas font metrics after the configured fonts finish loading.
+const dataGridFontReadyTick = ref(0);
 if (typeof document !== "undefined" && document.fonts) {
   let fontLoadRequestId = 0;
   watch(
@@ -2884,11 +2887,13 @@ if (typeof document !== "undefined" && document.fonts) {
     async ([fontSize, fontFamily]) => {
       const requestId = ++fontLoadRequestId;
       try {
-        await document.fonts.load(`600 ${fontSize}px ${fontFamily}`);
+        await Promise.all([document.fonts.load(`400 ${fontSize}px ${fontFamily}`), document.fonts.load(`600 ${fontSize}px ${fontFamily}`), document.fonts.load(`italic 400 ${fontSize}px ${fontFamily}`)]);
       } catch {
         return;
       }
       if (requestId === fontLoadRequestId) {
+        clearFitCanvasTextCache();
+        dataGridFontReadyTick.value++;
         triggerGrowColumnWidths?.();
       }
     },
@@ -8622,11 +8627,8 @@ const canvasScrollTop = ref(0);
 const canvasHoverCell = ref<{ rowIndex: number; visibleColIdx: number } | null>(null);
 const canvasDevicePixelRatio = ref(typeof window === "undefined" ? 1 : window.devicePixelRatio || 1);
 const canvasMeasuredDevicePixelSize = ref<CanvasDevicePixelSize | null>(null);
-// window.devicePixelRatio 已包含系统 DPI 与 Webview 缩放（uiScale / setZoom）。
-// 若在此处再次乘以 uiScale，会导致非 Chromium 环境（如 WebKitGTK / Safari）在未支持
-// devicePixelContentBoxSize 走 fallback 时，画布尺寸被二次放大（如 1.25^2=1.5625），
-// 与实际屏幕视口像素尺寸不符而触发合成器重采样，导致表格数据模糊（issue #12475）。
-const canvasBackingPixelRatio = computed(() => Math.min(MAX_CANVAS_DATA_GRID_PIXEL_RATIO, Math.max(1, canvasDevicePixelRatio.value)));
+// devicePixelRatio already includes WebView zoom on all supported platforms.
+const canvasBackingPixelRatio = computed(() => resolveCanvasDataGridPixelRatio({ devicePixelRatio: canvasDevicePixelRatio.value, uiScale: settingsStore.editorSettings.uiScale, platform: getPlatform() }));
 const useCanvasGridRows = computed(() => dataGridRenderMode.value === "canvas");
 const canvasContentHeight = computed(() => canvasDataGridContentHeight(displayRowCount.value));
 
@@ -8666,7 +8668,7 @@ const dataGridTypeColorKey = computed(() => {
 });
 const canvasRenderStyleKey = computed(
   () =>
-    `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}:${themePalette.value}:${tableFontFamily.value}:${tableFontSize.value}:${!!saveError.value}:${dataGridTypeColorKey.value}:${dataGridStripedRows.value}:${settingsStore.editorSettings.dataGridZebraRowBg}:${settingsStore.editorSettings.dataGridCrosshairRowBg}:${settingsStore.editorSettings.dataGridCrosshairColBg}`,
+    `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}:${themePalette.value}:${tableFontFamily.value}:${tableFontSize.value}:${dataGridFontReadyTick.value}:${!!saveError.value}:${dataGridTypeColorKey.value}:${dataGridStripedRows.value}:${settingsStore.editorSettings.dataGridZebraRowBg}:${settingsStore.editorSettings.dataGridCrosshairRowBg}:${settingsStore.editorSettings.dataGridCrosshairColBg}`,
 );
 const CANVAS_MOUSE_WHEEL_SCROLL_MULTIPLIER = 1.5;
 const CANVAS_TRACKPAD_DELTA_THRESHOLD = 40;

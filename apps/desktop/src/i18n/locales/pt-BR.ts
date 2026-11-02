@@ -3272,6 +3272,7 @@ export default withEnglishFallback({
     fitImage: "Ajustar à Visualização",
     openImage: "Abrir Imagem",
     columnName: "Coluna",
+    columnSource: "Origem",
     columnType: "Tipo",
     columnComment: "Comentário",
     columnInfo: "Informações da coluna",

@@ -3275,6 +3275,7 @@ export default withEnglishFallback({
     fitImage: "表示領域に合わせる",
     openImage: "画像を開く",
     columnName: "列",
+    columnSource: "ソース",
     columnType: "データ型",
     columnComment: "コメント",
     columnInfo: "列情報",

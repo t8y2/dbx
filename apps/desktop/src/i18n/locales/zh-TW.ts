@@ -3245,6 +3245,7 @@ export default withEnglishFallback({
     fitImage: "適合顯示區域",
     openImage: "開啟圖片",
     columnName: "欄位名稱",
+    columnSource: "來源",
     columnType: "類型",
     columnComment: "註解",
     columnInfo: "欄位資訊",

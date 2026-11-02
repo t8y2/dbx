@@ -3824,6 +3824,7 @@ export default {
     fitImage: "Fit to View",
     openImage: "Open Image",
     columnName: "Column",
+    columnSource: "Source",
     columnType: "Type",
     columnComment: "Comment",
     columnInfo: "Column information",

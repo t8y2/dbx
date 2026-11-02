@@ -3654,6 +3654,7 @@ export default withEnglishFallback({
     fitImage: "ปรับให้พอดีมุมมอง",
     openImage: "เปิดรูปภาพ",
     columnName: "คอลัมน์",
+    columnSource: "ต้นทาง",
     columnType: "ชนิด",
     columnComment: "คอมเมนต์",
     rowNumber: "แถว",

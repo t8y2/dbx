@@ -17,9 +17,10 @@ describe("query surface focus shortcuts", () => {
 
   it("matches configured bindings across platforms, including cleared bindings and IME input", () => {
     const shortcuts = normalizeShortcutSettings({ focusResultGrid: "Mod+Shift+G", focusSqlEditor: "F6" });
-    expect(isFocusResultGridShortcut({ key: "G", ctrlKey: true, shiftKey: true }, shortcuts)).toBe(true);
-    expect(isFocusResultGridShortcut({ key: "G", metaKey: true, shiftKey: true }, shortcuts)).toBe(true);
-    expect(isFocusResultGridShortcut({ key: "G", ctrlKey: true }, shortcuts)).toBe(false);
+    expect(isFocusResultGridShortcut({ key: "G", ctrlKey: true, shiftKey: true }, shortcuts, "Win32")).toBe(true);
+    expect(isFocusResultGridShortcut({ key: "G", metaKey: true, shiftKey: true }, shortcuts, "MacIntel")).toBe(true);
+    expect(isFocusResultGridShortcut({ key: "G", ctrlKey: true, shiftKey: true }, shortcuts, "MacIntel")).toBe(false);
+    expect(isFocusResultGridShortcut({ key: "G", ctrlKey: true }, shortcuts, "Win32")).toBe(false);
     expect(isFocusSqlEditorShortcut({ key: "F6" }, shortcuts)).toBe(true);
     expect(isFocusSqlEditorShortcut({ key: "F6", isComposing: true }, shortcuts)).toBe(false);
     expect(isFocusSqlEditorShortcut({ key: "F6" }, { focusSqlEditor: "" })).toBe(false);

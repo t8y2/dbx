@@ -94,6 +94,8 @@ export type ShortcutActionId =
   | "replace"
   | "refreshData"
   | "toggleResultsPane"
+  | "focusResultGrid"
+  | "focusSqlEditor"
   | "toggleTranspose"
   | "cancelSearch"
   | "toggleSidebar"
@@ -731,6 +733,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   {
     id: "toggleResultsPane",
     labelKey: "settings.shortcutToggleResultsPane",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "focusResultGrid",
+    labelKey: "settings.shortcutFocusResultGrid",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "focusSqlEditor",
+    labelKey: "settings.shortcutFocusSqlEditor",
     scope: "global",
     defaultShortcut: "",
   },

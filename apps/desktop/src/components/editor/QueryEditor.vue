@@ -1000,6 +1000,7 @@ function syncContextMenuStateAtEvent(currentView: EditorViewType, event: MouseEv
 function focusEditor() {
   view.value?.focus();
   rememberFocusedQueryEditorView(view.value);
+  return !!view.value;
 }
 
 function executeFromContextMenu() {
@@ -3193,6 +3194,7 @@ function shouldBlockExecutionShortcut(event?: KeyboardEvent, currentView: Editor
 }
 
 defineExpose({
+  focusEditor,
   openSearch,
   openReplace,
   scrollCursorIntoView,

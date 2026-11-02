@@ -8452,6 +8452,8 @@ export default withEnglishFallback({
     shortcutResetUiZoom: "Arayüz yakınlaştırmasını sıfırla",
     shortcutRefreshData: "Verileri yenile",
     shortcutToggleResultsPane: "Sonuç bölmesini aç/kapat",
+    shortcutFocusResultGrid: "Sonuç tablosuna odaklan",
+    shortcutFocusSqlEditor: "SQL düzenleyicisine odaklan",
     shortcutToggleTranspose: "Devrik görünümü aç/kapat",
     shortcutCancelSearch: "Aramayı iptal et",
     shortcutToggleSidebar: "Kenar çubuğunu aç/kapat",

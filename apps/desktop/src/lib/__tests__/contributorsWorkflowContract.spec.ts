@@ -25,6 +25,11 @@ function updateJobLines(source: string): string[] {
   return block;
 }
 
+/** Index of the step declared with the given name or action, or -1 when absent. */
+function stepIndex(block: string[], step: string): number {
+  return block.findIndex((line) => line.trim() === `- name: ${step}` || line.trim() === `- uses: ${step}`);
+}
+
 describe("contributors workflow contract", () => {
   it("guards the update job to the upstream repository", () => {
     const block = updateJobLines(workflow);
@@ -33,6 +38,17 @@ describe("contributors workflow contract", () => {
     expect(guardLine?.trim()).toBe(`if: github.repository == '${UPSTREAM_REPOSITORY}'`);
     // Job-level condition: the `if:` sits directly on the job, not inside a step.
     expect(guardLine, "job update guard is job-level").toMatch(/^ {4}if:/);
+  });
+
+  it("verifies the push token before checkout", () => {
+    const block = updateJobLines(workflow);
+    const verifyIndex = stepIndex(block, "Verify push token");
+    const checkoutIndex = stepIndex(block, "actions/checkout@v7");
+    expect(verifyIndex, "the push token check is a step").toBeGreaterThanOrEqual(0);
+    expect(checkoutIndex, "the checkout step is a step").toBeGreaterThanOrEqual(0);
+    // Checkout consumes the same token, so a missing token must be reported by
+    // the cheap check first instead of failing inside actions/checkout.
+    expect(verifyIndex, "the push token check runs before checkout").toBeLessThan(checkoutIndex);
   });
 
   it("preserves the triggers, permissions, and serialization", () => {

@@ -39,7 +39,7 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "opengauss", patterns: [/jdbc:opengauss:/i, /org\.opengauss/i, /opengauss/i] },
   { type: "postgres", patterns: [/jdbc:postgresql:/i, /postgres/i] },
   { type: "sqlserver", patterns: [/jdbc:sqlserver:/i, /sqlserver/i, /mssql/i] },
-  { type: "oracle", patterns: [/jdbc:oracle:/i, /oracle/i] },
+  { type: "oracle", patterns: [/jdbc:oracle:/i, /oracle/i, /ojdbc/i] },
   { type: "clickhouse", patterns: [/jdbc:clickhouse:/i, /clickhouse/i] },
   { type: "tdengine", patterns: [/jdbc:taos(?:-rs|-ws)?:/i, /taosdata/i, /tdengine/i] },
   { type: "h2", patterns: [/jdbc:h2:/i, /\bh2\b/i] },
@@ -61,8 +61,12 @@ export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseTy
   if (!connection || connection.db_type !== "jdbc") return undefined;
   if (isGbase8sProfile(connection.driver_profile)) return undefined;
   const connectionString = connection.connection_string?.trim() ?? "";
-  if (isSavedCredential(connectionString) && connection.jdbc_dialect === "oceanbase-oracle") return "oceanbase-oracle";
+  if (isSavedCredential(connectionString)) {
+    if (connection.jdbc_dialect === "oceanbase-oracle") return "oceanbase-oracle";
+    if (connection.jdbc_dialect === "oracle") return "oracle";
+  }
   if (/^jdbc:oceanbase:oracle:\/\//i.test(connectionString)) return "oceanbase-oracle";
+  if (/^jdbc:oracle:/i.test(connectionString)) return "oracle";
   const haystack = [connection.driver_profile, connection.driver_label, connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? []), connection.database_info?.productName, connection.database_info?.serverComment, connection.database_info?.driverName]
     .filter(Boolean)
     .join("\n");
@@ -154,6 +158,11 @@ export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConne
   if (connection.db_type === "spanner") return true;
   if (gaussdbIdentifierQuoteStyle(connection) !== "auto") return false;
   if (connection.db_type === "gaussdb") return true;
+  // openGauss inherits the database compatibility mode for identifier quoting:
+  // MySQL-compatible (B) databases only accept backticks, while A/PG modes use
+  // double quotes. The backend probes `pg_database.datcompatibility`, so fetch
+  // the reported quote instead of assuming the PostgreSQL default.
+  if (connection.db_type === "opengauss") return true;
   if (connection.db_type !== "jdbc") return false;
   const dialect = inferJdbcDialect(connection);
   return dialect === "jdbc" || ["gaussdb", "opengauss", "postgres"].includes(dialect ?? "");

@@ -1,23 +1,22 @@
-﻿// @vitest-environment happy-dom
+// @vitest-environment happy-dom
 
 import { createApp, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   connection: {
-    id: "structure-charset-test",
-    name: "MySQL",
-    db_type: "mysql",
-    driver_profile: "mysql",
-    driver_label: "MySQL",
+    id: "structure-row-height-test",
+    name: "Dameng",
+    db_type: "dameng",
+    driver_profile: "dameng",
+    driver_label: "Dameng",
   },
   ensureConnected: vi.fn(),
   executeQuery: vi.fn(),
   listDataTypes: vi.fn(),
   buildTableStructureChangeSql: vi.fn(),
-  buildMysqlAutoIncrementSql: vi.fn(),
-  getMysqlTableAutoIncrement: vi.fn(),
   executeBatch: vi.fn(),
+  getTableOwner: vi.fn(),
   updateEditorSettings: vi.fn(),
   loadObjectDdl: vi.fn(),
   invalidateObjectDdl: vi.fn(),
@@ -36,6 +35,8 @@ vi.mock("@lucide/vue", async () => {
     AlertTriangle: Icon,
     Check: Icon,
     ChevronDown: Icon,
+    ChevronLeft: Icon,
+    ChevronRight: Icon,
     ChevronUp: Icon,
     ClipboardList: Icon,
     Copy: Icon,
@@ -183,9 +184,7 @@ vi.mock("@/components/ui/searchable-select", async () => {
             type: "button",
             "data-searchable-select": "true",
             "data-model-value": props.modelValue,
-            "data-options": JSON.stringify(props.options),
-            "data-allow-custom": String(props.allowCustom),
-            onClick: () => emit("update:modelValue", "custom_domain"),
+            onClick: () => emit("update:modelValue", "custom"),
           }),
     }),
   };
@@ -199,7 +198,18 @@ vi.mock("@/components/ui/select", async () => {
       () =>
         h("div", attrs, slots.default?.()),
   });
-  return { Select: Div, SelectContent: Div, SelectItem: Div, SelectTrigger: Div, SelectValue: Div };
+  const SelectTrigger = defineComponent({
+    name: "SelectTrigger",
+    inheritAttrs: false,
+    props: {
+      size: { type: String, default: "default" },
+    },
+    setup:
+      (props, { attrs, slots }) =>
+      () =>
+        h("button", { ...attrs, "data-size": props.size, "data-slot": "select-trigger" }, slots.default?.()),
+  });
+  return { Select: Div, SelectContent: Div, SelectItem: Div, SelectTrigger, SelectValue: Div };
 });
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -213,9 +223,11 @@ vi.mock("@/stores/connectionStore", () => ({
 vi.mock("@/stores/productionSafetyStore", () => ({ useProductionSafetyStore: () => ({ requestConfirmation: vi.fn() }) }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ tableStructureRefreshVersion: () => 0 }) }));
 vi.mock("@/stores/historyStore", () => ({ useHistoryStore: () => ({ add: vi.fn() }) }));
+
+let mockDensity = "compact";
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
-    editorSettings: { structureEditorDensity: "compact", sqlFormatter: {}, tableColumnTemplateFields: [], generateSqlQuoteIdentifiers: true },
+    editorSettings: { structureEditorDensity: mockDensity, sqlFormatter: {}, tableColumnTemplateFields: [], generateSqlQuoteIdentifiers: true },
     updateEditorSettings: mocks.updateEditorSettings,
   }),
 }));
@@ -232,32 +244,25 @@ vi.mock("@/lib/backend/api", () => ({
   executeQuery: mocks.executeQuery,
   listDataTypes: mocks.listDataTypes,
   buildTableStructureChangeSql: mocks.buildTableStructureChangeSql,
-  buildMysqlAutoIncrementSql: mocks.buildMysqlAutoIncrementSql,
-  getMysqlTableAutoIncrement: mocks.getMysqlTableAutoIncrement,
   executeBatch: mocks.executeBatch,
+  getTableOwner: mocks.getTableOwner,
 }));
 
 import TableStructureEditor from "@/components/structure/TableStructureEditor.vue";
 
 const mountedApps: App[] = [];
 
-type ColumnSeed = { name: string; originalName: string };
-
-/**
- * Mount the editor in edit mode over `columns`. The column name the user typed
- * is `name`; `originalName` is the metadata name the draft was hydrated from.
- */
-function draftWithColumns(columns: ColumnSeed[]) {
+function draftWithColumns(columns: Array<{ name: string; dataType: string }>) {
   return {
     initialized: true,
     activeTab: "columns" as const,
     newTableName: "",
     tableComment: "",
     originalTableComment: "",
-    columns: columns.map((column, index) => ({
-      id: `existing:${column.originalName}`,
-      name: column.name,
-      dataType: "int",
+    columns: columns.map((col, index) => ({
+      id: `existing:${col.name}`,
+      name: col.name,
+      dataType: col.dataType,
       isNullable: true,
       defaultValue: "",
       comment: "",
@@ -266,8 +271,8 @@ function draftWithColumns(columns: ColumnSeed[]) {
       collation: "",
       extra: {},
       original: {
-        name: column.originalName,
-        data_type: "int",
+        name: col.name,
+        data_type: col.dataType,
         is_nullable: true,
         column_default: null,
         is_primary_key: false,
@@ -285,7 +290,11 @@ function draftWithColumns(columns: ColumnSeed[]) {
 
 async function mountEditor(draft: ReturnType<typeof draftWithColumns>) {
   mocks.ensureConnected.mockResolvedValue(undefined);
-  mocks.listDataTypes.mockResolvedValue([]);
+  mocks.listDataTypes.mockResolvedValue([
+    { name: "VARCHAR", full_type: "VARCHAR(255)" },
+    { name: "TIMESTAMP", full_type: "TIMESTAMP" },
+    { name: "TEXT", full_type: "TEXT" },
+  ]);
   mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
 
   const root = document.createElement("div");
@@ -294,7 +303,7 @@ async function mountEditor(draft: ReturnType<typeof draftWithColumns>) {
     connectionId: mocks.connection.id,
     database: "test",
     schema: "test",
-    tableName: "user",
+    tableName: "mixed_types_table",
     draft,
   });
   mountedApps.push(app);
@@ -305,21 +314,17 @@ async function mountEditor(draft: ReturnType<typeof draftWithColumns>) {
   return root;
 }
 
-/** Column names exactly as they reached the DDL builder. */
-async function previewColumnNames(): Promise<string[]> {
-  await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled(), { timeout: 3000 });
-  const options = mocks.buildTableStructureChangeSql.mock.calls.at(-1)![0] as { columns: Array<{ name: string }> };
-  return options.columns.map((column) => column.name);
-}
-
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.connection.db_type = "mysql";
-  mocks.connection.driver_profile = "mysql";
-  mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE user (id int)", cacheStatus: "remote" });
-  mocks.loadObjectMetadataFacet.mockResolvedValue({ value: [], cacheStatus: "remote" });
-  mocks.getMysqlTableAutoIncrement.mockResolvedValue(null);
-  mocks.buildMysqlAutoIncrementSql.mockResolvedValue("");
+  mockDensity = "compact";
+  mocks.connection.db_type = "dameng";
+  mocks.connection.driver_profile = "dameng";
+  mocks.getTableOwner.mockResolvedValue("dameng");
+  mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE mixed_types_table (del_flag VARCHAR(1) BYTE, create_time TIMESTAMP)", cacheStatus: "remote" });
+  mocks.loadObjectMetadataFacet.mockImplementation(async (_options: unknown, facet: string) => {
+    if (facet === "owner") return { value: "app_user", cacheStatus: "remote" };
+    return { value: [], cacheStatus: "remote" };
+  });
   mocks.executeBatch.mockResolvedValue({ affected_rows: 0 });
 });
 
@@ -328,45 +333,86 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
-describe("TableStructureEditor column name whitespace", () => {
-  // MySQL rejects identifiers that end with a space (ERROR 1166 "Incorrect column
-  // name"), so a pasted name carrying a trailing space produced an unexecutable
-  // `ALTER TABLE ... CHANGE COLUMN ...` statement reported as "可执行".
-  it("trims a user-entered trailing space before the name reaches the DDL builder", async () => {
-    await mountEditor(draftWithColumns([{ name: "device_app_face_status ", originalName: "app_auth_status" }]));
+describe("TableStructureEditor row height consistency (#13659)", () => {
+  it("applies --structure-column-row-height CSS variable and uniform row heights across mixed data types", async () => {
+    const root = await mountEditor(
+      draftWithColumns([
+        { name: "del_flag", dataType: "VARCHAR(1) BYTE" },
+        { name: "create_by", dataType: "VARCHAR(64) BYTE" },
+        { name: "create_time", dataType: "TIMESTAMP" },
+        { name: "remark", dataType: "TEXT" },
+      ]),
+    );
 
-    expect(await previewColumnNames()).toEqual(["device_app_face_status"]);
+    // Root element should define --structure-column-row-height: 33px (24 control + 4*2 cellPaddingY + 1 border)
+    const rootEl = root.querySelector("[data-structure-density='compact']") as HTMLElement;
+    expect(rootEl).not.toBeNull();
+    expect(rootEl.style.getPropertyValue("--structure-column-row-height")).toBe("33px");
+
+    // RecycleScroller should carry --structure-column-row-height style
+    const scroller = root.querySelector(".structure-column-virtual-scroller") as HTMLElement;
+    expect(scroller).not.toBeNull();
+    expect(scroller.style.getPropertyValue("--structure-column-row-height")).toBe("33px");
+
+    // All row tables and tr elements must have uniform height matching the 33px slot
+    const rowTables = root.querySelectorAll(".structure-column-virtual-row-table") as NodeListOf<HTMLElement>;
+    expect(rowTables.length).toBeGreaterThan(0);
+    for (const table of Array.from(rowTables)) {
+      expect(table.style.height).toBe("33px");
+    }
+
+    const rowTrs = root.querySelectorAll(".structure-column-virtual-row-table tr[data-column-id]") as NodeListOf<HTMLElement>;
+    expect(rowTrs.length).toBeGreaterThan(0);
+    for (const tr of Array.from(rowTrs)) {
+      expect(tr.style.height).toBe("33px");
+    }
+
+    // Length unit SelectTrigger in VARCHAR rows should have size="sm"
+    const triggers = root.querySelectorAll("[data-slot='select-trigger']");
+    expect(triggers.length).toBeGreaterThan(0);
+    for (const trigger of Array.from(triggers)) {
+      expect(trigger.getAttribute("data-size")).toBe("sm");
+    }
   });
 
-  it("drops trailing whitespace a user pasted around a renamed column", async () => {
-    await mountEditor(draftWithColumns([{ name: "display_name\t ", originalName: "name" }]));
+  it("updates --structure-column-row-height and row heights when density changes to standard", async () => {
+    mockDensity = "standard";
+    const root = await mountEditor(
+      draftWithColumns([
+        { name: "id", dataType: "BIGINT" },
+        { name: "name", dataType: "VARCHAR(50)" },
+      ]),
+    );
 
-    expect(await previewColumnNames()).toEqual(["display_name"]);
+    // Standard density: controlHeight 28 + cellPaddingY 5 * 2 + 1 border = 39px
+    const rootEl = root.querySelector("[data-structure-density='standard']") as HTMLElement;
+    expect(rootEl).not.toBeNull();
+    expect(rootEl.style.getPropertyValue("--structure-column-row-height")).toBe("39px");
+
+    const rowTables = root.querySelectorAll(".structure-column-virtual-row-table") as NodeListOf<HTMLElement>;
+    for (const table of Array.from(rowTables)) {
+      expect(table.style.height).toBe("39px");
+    }
   });
 
-  it("trims the visible field on blur so the input matches the generated SQL", async () => {
-    const root = await mountEditor(draftWithColumns([{ name: "app_auth_status", originalName: "app_auth_status" }]));
-    const input = root.querySelector<HTMLInputElement>("[data-column-name-input]");
-    expect(input).not.toBeNull();
+  it("allocates extra height for Postgres geometry columns with variable geometry hint", async () => {
+    mockDensity = "compact";
+    mocks.connection.db_type = "postgres";
+    mocks.connection.driver_profile = "postgres";
+    mocks.getTableOwner.mockResolvedValue("postgres");
+    const root = await mountEditor(
+      draftWithColumns([
+        { name: "id", dataType: "BIGINT" },
+        { name: "geom", dataType: "geometry(,4326)" },
+      ]),
+    );
 
-    input!.value = "device_app_face_status ";
-    input!.dispatchEvent(new Event("input", { bubbles: true }));
-    await nextTick();
-    input!.dispatchEvent(new Event("blur"));
-    await nextTick();
-
-    expect(input!.value).toBe("device_app_face_status");
-  });
-
-  // Metadata-backed names must stay byte-exact: MySQL keeps leading spaces in a
-  // backtick-quoted identifier, so rewriting a name the user never touched would
-  // turn every unrelated edit into a bogus rename
-  // (see crates/dbx-core/tests/live_mysql_column_name_whitespace.rs, #9654).
-  it("leaves an untouched metadata column name byte-exact", async () => {
-    const draft = draftWithColumns([{ name: "  content1", originalName: "  content1" }]);
-    draft.columns[0]!.comment = "leading space kept";
-    await mountEditor(draft);
-
-    expect(await previewColumnNames()).toEqual(["  content1"]);
+    const idRow = root.querySelector("tr[data-column-id='existing:id']") as HTMLElement;
+    const geomRow = root.querySelector("tr[data-column-id='existing:geom']") as HTMLElement;
+    expect(idRow).not.toBeNull();
+    expect(geomRow).not.toBeNull();
+    expect(idRow.style.height).toBe("33px");
+    const geomHeight = parseInt(geomRow.style.height, 10);
+    expect(geomHeight).toBeGreaterThan(33);
   });
 });

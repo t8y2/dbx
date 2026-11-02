@@ -146,6 +146,7 @@ fn live_sqlserver_import_request(
         retain_source: false,
         conflict_policy: None,
         skip_duplicate_rows: false,
+        continue_on_error: false,
     }
 }
 

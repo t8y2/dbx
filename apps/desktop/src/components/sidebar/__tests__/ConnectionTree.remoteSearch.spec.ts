@@ -7,9 +7,10 @@ import { findNodePathByIdentity } from "@/lib/sidebar/sidebarSearchTree";
 import { sidebarIndexedObjectGroupTypes } from "@/lib/sidebar/sidebarGlobalSearchIndex";
 import { resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 import type { TreeNode } from "@/types/database";
+import { runSidebarSearchTasks } from "../sidebarSearchTaskRunner";
 import { compileConnectionTreeTestScript } from "./connectionTreeTestScript";
 
-const compiled = compileConnectionTreeTestScript(["loadGlobalRemoteSearchResults", "isGlobalTableIndexParent", "discoverGlobalSearchChildren", "globalSearchContext", "remoteSearchResults"]);
+const compiled = compileConnectionTreeTestScript(["globalSearchConnectionRoots", "loadGlobalRemoteSearchResults", "isGlobalTableIndexParent", "discoverGlobalSearchChildren", "globalSearchContext", "remoteSearchResults"]);
 const cleanups: Array<() => void> = [];
 
 beforeEach(() => vi.useFakeTimers());
@@ -49,6 +50,7 @@ function mountSearch() {
     selectedSearchScopes: ref([]),
     searchableNodeTypes: ref(undefined),
     useSidebarRemoteSearch,
+    runSidebarSearchTasks,
     collectSidebarRemoteSearchResults,
     findNodePathByIdentity,
     sidebarIndexedObjectGroupTypes,

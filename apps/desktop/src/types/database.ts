@@ -141,7 +141,7 @@ export interface ConnectionConfig {
   id: string;
   name: string;
   /** Read-only response identity retained when a saved JDBC URL is protected. */
-  readonly jdbc_dialect?: "oceanbase-oracle";
+  readonly jdbc_dialect?: "oceanbase-oracle" | "oracle";
   note?: string;
   db_type: DatabaseType;
   driver_profile?: string;
@@ -2408,6 +2408,7 @@ export interface TableStructureEditorDraft {
   starrocksLayoutDraft?: import("@/lib/table/starrocksAlterOptions").StarRocksLayoutDraft;
   starrocksSortColumns?: string[];
   starrocksPhysicalOptions?: import("@/lib/table/starrocksPhysicalOptions").StarRocksPhysicalOptionsDraft;
+  postgresForeignTable?: import("@/lib/table/postgresForeignTable").PostgresForeignTableDraft;
   tableOwner?: string;
   originalTableOwner?: string;
   columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];

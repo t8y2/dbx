@@ -1439,7 +1439,7 @@ function removeTabDragGhost() {
 }
 
 function isDirtyTab(tab: QueryTab) {
-  return queryStore.isTabDirty(tab);
+  return queryStore.dirtyTabIds.has(tab.id);
 }
 
 function tabTitleStyle(tab: QueryTab): CSSProperties | undefined {
@@ -1822,6 +1822,10 @@ function handleTabDoubleClick(tab: QueryTab, event: MouseEvent) {
   if (event.target instanceof Element && event.target.closest("button, input, [role='button']")) {
     return;
   }
+  if (settingsStore.editorSettings.tabDoubleClickAction === "close") {
+    closeTab(tab);
+    return;
+  }
   if (tab.mode === "data") {
     if (tab.id !== props.activeTabId) {
       activateTab(tab.id);
@@ -1973,10 +1977,12 @@ const tabScrollBehavior = ref<ScrollBehavior>("smooth");
 
 watch(
   () => props.activeTabId,
-  (tabId) => {
+  (tabId, previousTabId) => {
     lastDispatchedSwitchTabId = null;
-    // A tab that just became active must be visible: reveal its group if collapsed.
-    expandTabGroupForTab(tabId);
+    // Closing the active tab selects a fallback without changing other groups.
+    if (!previousTabId || queryStore.tabs.some((tab) => tab.id === previousTabId)) {
+      expandTabGroupForTab(tabId);
+    }
     if (isTwoRowLayout.value && tabId) {
       const tab = queryStore.tabs.find((item) => item.id === tabId);
       if (tab) {

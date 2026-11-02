@@ -13,10 +13,29 @@ import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import * as api from "@/lib/backend/api";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 
 const { t } = useI18n();
 const { toast } = useToast();
-const { tasks, activeCount, hasActive, clearFinished, cancelTask, removeTask } = useExportTracker();
+const { tasks, activeCount, hasActive, clearFinished, cancelTask, removeTask, recoverCancelledTask } = useExportTracker();
+const recoveryOpen = ref(false);
+const pendingRemoval = ref<ExportTask>();
+
+function requestRemoval(task: ExportTask) {
+  if (task.canRemove === false) return;
+  if (task.status === "Unknown" || task.canRecoverCancellation) {
+    pendingRemoval.value = task;
+    recoveryOpen.value = true;
+  } else if (isFinished(task.status)) removeTask(task.exportId);
+}
+
+function confirmRemoval() {
+  const task = pendingRemoval.value;
+  pendingRemoval.value = undefined;
+  if (!task || !tasks.value.includes(task) || task.canRemove === false) return;
+  if (task.status === "Cancelling" && task.canRecoverCancellation) recoverCancelledTask(task.exportId);
+  else if (task.status === "Unknown" || isFinished(task.status)) removeTask(task.exportId);
+}
 const open = ref(false);
 const showAll = ref(false);
 const expandedFailureTaskIds = ref<string[]>([]);
@@ -468,7 +487,7 @@ function openTask(task: ExportTask): void {
               <FolderOpen class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
             </button>
             <button
-              v-if="(isActive(task.status) || task.status === 'Queued') && task.canCancel !== false"
+              v-if="!task.canRecoverCancellation && (isActive(task.status) || task.status === 'Queued') && task.canCancel !== false"
               class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted disabled:cursor-not-allowed"
               :disabled="task.status === 'Cancelling'"
               :title="task.status === 'Cancelling' ? t('databaseBackup.cancelling') : t('exportProgress.cancel')"
@@ -477,7 +496,7 @@ function openTask(task: ExportTask): void {
               <Loader2 v-if="task.status === 'Cancelling'" class="h-3.5 w-3.5 animate-spin text-primary" />
               <X v-else class="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
             </button>
-            <button v-else-if="task.canRemove !== false && (isFinished(task.status) || task.status === 'Unknown')" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.delete')" @click="removeTask(task.exportId)">
+            <button v-else-if="task.canRemove !== false && (isFinished(task.status) || task.status === 'Unknown' || task.canRecoverCancellation)" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.delete')" @click="requestRemoval(task)">
               <X class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
             </button>
           </div>
@@ -497,6 +516,7 @@ function openTask(task: ExportTask): void {
       </div>
     </PopoverContent>
   </Popover>
+  <DangerConfirmDialog v-model:open="recoveryOpen" :title="t('exportProgress.recoveryTitle')" :message="t('exportProgress.recoveryMessage')" :confirm-label="t('exportProgress.recoveryConfirm')" initial-focus="cancel" @confirm="confirmRemoval" />
 </template>
 
 <style scoped>

@@ -107,7 +107,8 @@ const mountedApps: App[] = [];
 const compiledSearchHandlers = compileConnectionTreeTestScript(["onSearchToggle", "onNodeToggled"]);
 
 function searchHandlers(searchCollapsedIds: { value: Set<string> }) {
-  const bindings = { searchCollapsedIds, isTreeSearchFiltering: ref(true), store: connectionStore, syncSidebarTreeNodeExpansion, sidebarLayoutMonitor: { recordEvent: vi.fn() } };
+  const searchExpandedIds = ref(new Set<string>());
+  const bindings = { searchCollapsedIds, searchExpandedIds, isTreeSearchFiltering: ref(true), store: connectionStore, syncSidebarTreeNodeExpansion, sidebarLayoutMonitor: { recordEvent: vi.fn() } };
   return new Function(...Object.keys(bindings), `${compiledSearchHandlers}; return { onSearchToggle, onNodeToggled };`)(...Object.values(bindings)) as {
     onSearchToggle: (node: TreeNode) => void;
     onNodeToggled: (node: TreeNode, expanded: boolean) => void;
@@ -843,6 +844,17 @@ describe("SidebarTreeRuntimeHost expansion", () => {
 
     expect(group.isExpanded).toBe(false);
     expect(connectionStore.releaseCollapsedTreeNodeChildren).not.toHaveBeenCalled();
+  });
+
+  it("clears the collapsed marker of a search table whose children are not loaded (#13856)", () => {
+    // Search results list the table before its column/index groups exist, and
+    // collapse-all seeds every expandable id; expanding must clear the table's
+    // own id even without children, or the groups stay hidden.
+    const table: TreeNode = { id: "sqlserver:app:dbo:orders", label: "orders", type: "table", connectionId: "sqlserver", database: "app", schema: "dbo", isExpanded: false };
+    const collapsedIds = ref(new Set([table.id]));
+    const handlers = searchHandlers(collapsedIds);
+    handlers.onSearchToggle(table);
+    expect(collapsedIds.value.has(table.id)).toBe(false);
   });
 
   it("expands a collapsed search projection without reloading its live subtree", async () => {

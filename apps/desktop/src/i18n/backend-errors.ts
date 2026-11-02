@@ -152,7 +152,14 @@ const patterns: [RegExp, string][] = [
   [/^(?:SSH layer \d+ failed:\s*)?Failed to bind requested local port (\d+): ([\s\S]+)$/, "connection.sshLocalPortBindFailed"],
 
   // Query result export limits (crates/dbx-core/src/data/query_result_export.rs)
+  [/^Streaming export cannot page through this query\. Export a single SELECT statement, or load the full result first and export the loaded rows\.$/, "exportProgress.streamingUnsupported"],
+  [/^A manual transaction cannot use a result cursor, and this query cannot be split into pages\. Commit or roll back the transaction, then export again\.$/, "exportProgress.transactionUnsupported"],
+  // Still raised by the frontend for MongoDB exports (apps/desktop/src/stores/queryStore.ts).
   [/^Streaming export is unsupported for this query\. Simplify it or use a supported driver\.$/, "exportProgress.streamingUnsupported"],
+  // Paging a cursor-only query while a manual transaction is open: raised by the pagination planner
+  // (crates/dbx-sql-data/src/query_result_sql.rs) and by the store's OceanBase Oracle guard.
+  [/^This query requires an Agent result session for offset pagination$/, "editor.resultSessionRequiredForPaging"],
+  [/^This query requires an existing result session for offset pagination in a manual transaction$/, "editor.resultSessionRequiredForPaging"],
   // MongoDB Legacy agent failures: messages raised by the agent arrive wrapped in "Agent RPC
   // error (<code>): ", and the import path prefixes the row a batch-level failure belongs to.
   [/^(?:Agent RPC error \(-?\d+\): )?MongoDB Legacy Agent does not support insertMany; upgrade or reinstall the MongoDB Legacy driver$/, "mongo.import.legacyInsertUnsupported"],

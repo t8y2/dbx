@@ -177,6 +177,7 @@ fn base_request(connection_id: &str, database: &str, file_path: &str, table: &st
         retain_source: false,
         conflict_policy: None,
         skip_duplicate_rows: false,
+        continue_on_error: false,
     }
 }
 

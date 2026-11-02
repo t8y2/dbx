@@ -91,6 +91,88 @@ class InstallerTests(unittest.TestCase):
                 self.assertIn("URIs: https://security.ubuntu.com/ubuntu/", rewritten)
                 self.assertIn("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", rewritten)
 
+    def test_jammy_list_preserves_options_suites_comments_and_security(self):
+        source = (
+            "# runner sources\n"
+            "deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] "
+            "http://azure.archive.ubuntu.com/ubuntu/ jammy main universe\n"
+            "deb-src http://archive.ubuntu.com/ubuntu jammy-updates main\n"
+            "deb http://security.ubuntu.com/ubuntu jammy-security main\n"
+            "# deb http://archive.ubuntu.com/ubuntu jammy-backports main\n"
+            "deb https://example.test/apt stable main\n"
+        )
+        expected = source.replace("http://azure.archive.ubuntu.com/ubuntu/", deps.BACKUP)
+        expected = expected.replace("deb-src http://archive.ubuntu.com/ubuntu ", "deb-src " + deps.BACKUP + " ")
+        self.assertEqual(deps.rewrite_ubuntu_uris(source, deps.BACKUP), expected)
+
+    def test_release_package_groups_preserve_existing_dependencies(self):
+        expected = {
+            "release": ["fcitx5-frontend-gtk3", "ibus-gtk3", "libwebkit2gtk-4.1-dev",
+                        "libgtk-3-dev", "libappindicator3-dev", "librsvg2-dev", "patchelf",
+                        "libssl-dev", "xdg-utils", "lld"],
+            "node-release": ["libfontconfig1-dev", "libsecret-1-dev"],
+            "fontconfig": ["libfontconfig1-dev"],
+            "preview": ["ffmpeg", "fonts-noto-cjk", "fonts-noto-color-emoji"],
+        }
+        for group, packages in expected.items():
+            with self.subTest(group=group):
+                self.calls.clear()
+                self.execute([OK, OK, OK], group)
+                self.assertEqual(self.calls[1][0], ["--download-only", "install", "-y", *packages])
+                self.assertEqual(self.calls[2][0], ["--no-download", "install", "-y", *packages])
+
+    def test_arm_sources_never_switch_to_amd64_archive(self):
+        for source in [
+            "deb http://ports.ubuntu.com/ubuntu-ports jammy main universe\n",
+            "Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports/\nSuites: noble noble-security\nComponents: main\nSigned-By: /keyring\n",
+        ]:
+            with self.subTest(source=source):
+                self.source.write_text(source)
+                calls = []
+                responses = iter([TIMEOUT, OK, OK, OK])
+                def run(arguments, budget):
+                    calls.append((arguments, self.source.read_text()))
+                    return next(responses)
+                with patch.object(deps, "run_apt", side_effect=run):
+                    deps.install(self.source, "release")
+                self.assertEqual(self.source.read_text(), source)
+                self.assertIn(deps.PORT_MIRRORS[0][1], calls[0][1])
+                self.assertIn(deps.PORT_MIRRORS[1][1], calls[1][1])
+                self.assertTrue(all("archive.ubuntu.com" not in text for _args, text in calls))
+
+    def test_default_source_selects_existing_runner_format(self):
+        legacy = Path(self.directory.name) / "sources.list"
+        legacy.write_text("deb http://archive.ubuntu.com/ubuntu jammy main\n")
+        with patch.object(deps, "SOURCES", Path(self.directory.name) / "missing.sources"), \
+             patch.object(deps, "LEGACY_SOURCES", legacy), \
+             patch.object(deps, "run_apt", return_value=OK):
+            deps.install(group="packaging")
+        self.assertEqual(legacy.read_text(), "deb http://archive.ubuntu.com/ubuntu jammy main\n")
+
+    def test_release_workflows_use_bounded_installer_from_their_checkout(self):
+        workflows = SCRIPT.parent.parent / "workflows"
+        expected = {
+            "release.yml": {"release": 1},
+            "agents-release.yml": {"packaging": 3},
+            "mcp-release.yml": {"node-release": 1, "fontconfig": 2},
+            "ui-preview.yml": {"preview": 1},
+        }
+        for filename, groups in expected.items():
+            content = (workflows / filename).read_text(encoding="utf-8")
+            with self.subTest(workflow=filename):
+                self.assertNotIn("sudo apt-get", content)
+                for group, count in groups.items():
+                    self.assertEqual(content.count("ci-install-system-deps.py --group " + group + "\n"), count)
+        agents = (workflows / "agents-release.yml").read_text(encoding="utf-8")
+        jre = agents.split("\n  build-jre:", 1)[1].split("\n  reuse-previous-assets:", 1)[0]
+        self.assertLess(jre.index("uses: actions/checkout@"), jre.index("ci-install-system-deps.py"))
+        preview = (workflows / "ui-preview.yml").read_text(encoding="utf-8")
+        trusted_checkout = preview.split("path: ci", 1)[1].split("persist-credentials:", 1)[0]
+        self.assertIn(".github/scripts", trusted_checkout)
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", preview)
+        self.assertIn("working-directory: ci/.github/ui-preview", preview)
+        self.assertIn("sudo python3 ../scripts/ci-install-system-deps.py --group preview", preview)
+
     def test_timeout_or_network_failure_switches_once_and_reuses_cache(self):
         for failure in [TIMEOUT, NETWORK]:
             with self.subTest(failure=failure):

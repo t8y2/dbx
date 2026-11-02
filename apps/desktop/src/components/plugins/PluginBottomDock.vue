@@ -640,12 +640,11 @@ onScopeDispose(() => window.removeEventListener("blur", onPlusMenuWindowBlur));
         <X class="h-3.5 w-3.5" />
       </Button>
     </div>
-    <div class="relative min-h-0 flex-1 overflow-hidden">
-      <div v-for="entry in entries" :key="entry.id" class="size-full min-h-0" :class="entry.id === activeEntryId && !collapsed ? 'relative flex size-full' : 'pointer-events-none absolute inset-0 -z-10 invisible'">
+    <div class="min-h-0 flex-1 overflow-hidden">
+      <div v-for="entry in entries" v-show="entry.id === activeEntryId && !collapsed" :key="entry.id" class="h-full w-full">
         <PluginWorkbenchHost
           v-if="workbenchContributionFor(entry)"
           :ref="setWorkbenchHostRef(entry.id)"
-          :active="entry.id === activeEntryId && !collapsed"
           :plugin="definitionFor(entry.pluginId)!"
           :contribution="workbenchContributionFor(entry)!"
           :context="entry.context"

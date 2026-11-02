@@ -1550,6 +1550,14 @@ pub async fn test_ssh_tunnel(state: State<'_, Arc<AppState>>, config: Connection
     state.test_connection_ssh_tunnel(&config.canonicalized()).await
 }
 
+#[tauri::command]
+pub async fn connection_parameters(
+    state: State<'_, Arc<AppState>>,
+    config: ConnectionConfig,
+) -> Result<dbx_core::connection::parameters::ConnectionParameterMetadata, String> {
+    state.connection_parameter_metadata(&config).await
+}
+
 async fn test_connection_with_info_inner(
     state: &Arc<AppState>,
     config: ConnectionConfig,

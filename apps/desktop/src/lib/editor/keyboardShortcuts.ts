@@ -1,5 +1,5 @@
 import { isMacShortcutPlatform, parseShortcutParts } from "@/lib/editor/shortcutDisplay";
-import { normalizeShortcutSettings, type ShortcutActionId, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
+import { readNormalizedShortcutSettings, type ShortcutActionId, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 
 export interface ShortcutLikeEvent {
   key: string;
@@ -249,7 +249,7 @@ export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string, plat
 }
 
 function actionShortcut(actionId: ShortcutActionId, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): string {
-  return normalizeShortcutSettings(shortcuts, platform)[actionId];
+  return readNormalizedShortcutSettings(shortcuts, platform)[actionId];
 }
 
 const SWITCH_TO_TAB_ACTIONS: ShortcutActionId[] = ["switchToTab1", "switchToTab2", "switchToTab3", "switchToTab4", "switchToTab5", "switchToTab6", "switchToTab7", "switchToTab8", "switchToTab9"];
@@ -349,6 +349,14 @@ export function isRefreshDataShortcut(event: ShortcutLikeEvent, shortcuts?: Part
 
 export function isToggleResultsPaneShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("toggleResultsPane", shortcuts));
+}
+
+export function isFocusResultGridShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform?: string): boolean {
+  return matchesShortcut(event, actionShortcut("focusResultGrid", shortcuts), platform);
+}
+
+export function isFocusSqlEditorShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform?: string): boolean {
+  return matchesShortcut(event, actionShortcut("focusSqlEditor", shortcuts), platform);
 }
 
 export function isModRShortcut(event: ShortcutLikeEvent): boolean {
@@ -555,7 +563,7 @@ export function tabSwitcherDirectionFromShortcut(event: ShortcutLikeEvent, short
 }
 
 export function switchToTabIndexFromShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): number | null {
-  const normalized = normalizeShortcutSettings(shortcuts);
+  const normalized = readNormalizedShortcutSettings(shortcuts);
   const index = SWITCH_TO_TAB_ACTIONS.findIndex((actionId) => matchesShortcut(event, normalized[actionId]));
   return index >= 0 ? index : null;
 }
@@ -580,7 +588,7 @@ export function isCaretBrowsingShortcut(event: ShortcutLikeEvent): boolean {
 
 export function isConfiguredShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
   if (!shortcuts) return false;
-  const normalized = normalizeShortcutSettings(shortcuts, platform);
+  const normalized = readNormalizedShortcutSettings(shortcuts, platform);
   return Object.values(normalized).some((shortcut) => matchesShortcut(event, shortcut, platform));
 }
 

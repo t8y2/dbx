@@ -601,6 +601,11 @@ function toggleDatabase(database: string) {
   selectedDatabases.value = databaseOptions.value.filter((item) => selected.has(item));
 }
 
+function updateSelectedDatabases(databases: string[]) {
+  const selected = new Set(databases);
+  selectedDatabases.value = databaseOptions.value.filter((item) => selected.has(item));
+}
+
 async function chooseDestination() {
   const { open } = await import("@tauri-apps/plugin-dialog");
   // 传入当前目录，让系统选择框直接定位到上次使用的位置（issue #11317）
@@ -1169,6 +1174,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
           @change-connection="changeConnection"
           @choose-destination="chooseDestination"
           @toggle-database="toggleDatabase"
+          @update:selected-databases="updateSelectedDatabases"
           @update:all-databases="setAllDatabases"
           @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
           @table-selection-state="(state) => (scheduleTableSelectionState = state)"
@@ -1264,6 +1270,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
         @toggle-connection="toggleOneShotConnection"
         @choose-destination="chooseDestination"
         @toggle-database="toggleDatabase"
+        @update:selected-databases="updateSelectedDatabases"
         @update:all-databases="setAllDatabases"
         @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
         @table-selection-state="(state) => (oneShotTableSelectionState = state)"

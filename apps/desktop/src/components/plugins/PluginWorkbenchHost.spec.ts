@@ -449,37 +449,4 @@ describe("PluginWorkbenchHost initialization", () => {
       ),
     );
   });
-
-  it("posts a layout message to the iframe when active becomes true", async () => {
-    const activeRef = ref(false);
-    app = createApp({
-      components: { PluginWorkbenchHost },
-      setup() {
-        return { activeRef, plugin, contribution };
-      },
-      template: '<PluginWorkbenchHost :plugin="plugin" :contribution="contribution" :active="activeRef" />',
-    });
-    app.mount(root);
-    await flushWorkbenchLoad();
-
-    const frame = root.querySelector("iframe")!;
-    const target = frame.contentWindow!;
-    const postMessage = vi.spyOn(target, "postMessage").mockImplementation(() => {});
-
-    // Initially inactive: no layout message
-    expect(postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "layout" }), "*");
-
-    // Transition to active
-    activeRef.value = true;
-    await nextTick();
-    await vi.waitFor(() =>
-      expect(postMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          source: "dbx-host",
-          type: "layout",
-        }),
-        "*",
-      ),
-    );
-  });
 });

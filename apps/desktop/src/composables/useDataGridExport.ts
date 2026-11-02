@@ -43,7 +43,7 @@ import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import i18n from "@/i18n";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, xlsxHeaderUsesCommentRows, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { isPartiallyLoadedCopy, partialLoadCopyHintKey, type PartialLoadCopyInfo } from "@/lib/dataGrid/copyPartialLoadHint";
-import { showExportExecutionModeDialog } from "@/lib/export/exportExecutionMode";
+import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 import type { CapturedLegacyLargeValueExport } from "@/lib/dataGrid/legacyLargeValueExport";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -451,6 +451,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       const app = createApp(XlsxHeaderDialog, {
         open: true,
         showExecutionMode,
+        initialExecutionMode: showExecutionMode ? getDefaultExportExecutionMode() : "immediate",
         showHeaderOptions: hasXlsxHeaderComments(allXlsxColumnComments.value) || hasXlsxHeaderComments(visibleXlsxColumnComments.value),
         onConfirm: (exportOptions: XlsxExportOptions) => {
           resolve(exportOptions);
@@ -1237,8 +1238,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     };
     const fileFormat = FORMAT_META[format]!;
     let outputPath = full && (format === "txt" || format === "sql") ? exportFileName(tableMeta.value?.tableName || "export", fileFormat.ext, { preferFallback: true }) : exportFileName(full ? "export" : "export-page", fileFormat.ext, { page: !full });
-    const mode = exportOptions.openAfterExport ? "immediate" : (exportOptions.xlsx?.executionMode ?? exportOptions.sql?.executionMode ?? (await showExportExecutionModeDialog()));
-    if (mode === null) return true;
+    const mode = exportOptions.openAfterExport ? "immediate" : (exportOptions.xlsx?.executionMode ?? exportOptions.sql?.executionMode ?? getDefaultExportExecutionMode());
     if (native) {
       const path = exportOptions.openAfterExport ? await api.createQueryResultTempFile(fileFormat.ext) : await promptExportSavePath({ defaultFileName: outputPath, filters: [{ name: fileFormat.label, extensions: [fileFormat.ext] }], preferredPath: editorSettings.preferredExportPath });
       if (!path) return true;
@@ -1431,8 +1431,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         : undefined;
     const isCurrent = () => !scopeDisposed && (completeLocalResult?.value ?? options.snapshotResult?.value) === original && connectionId.value === originalConnection && database.value === originalDatabase;
     if (!isCurrent()) throw new Error("Export result context changed");
-    const mode = exportOptions.openAfterExport ? "immediate" : (xlsxOptions?.executionMode ?? sqlOptions?.executionMode ?? (await showExportExecutionModeDialog()));
-    if (mode === null) return true;
+    const mode = exportOptions.openAfterExport ? "immediate" : (xlsxOptions?.executionMode ?? sqlOptions?.executionMode ?? getDefaultExportExecutionMode());
     const outputPath = exportOptions.openAfterExport ? await api.createQueryResultTempFile(meta.ext) : await promptExportSavePath({ defaultFileName: fileName, filters: [{ name: meta.label, extensions: [meta.ext] }], preferredPath: settings.preferredExportPath });
     if (!outputPath) return true;
     if (!isCurrent()) throw new Error("Export result context changed");
@@ -1946,11 +1945,34 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   async function exportMemoryResultSheetsXlsx(sheetsToExport: DataGridExportSheet[] | undefined, includeSqlSheet: boolean): Promise<boolean> {
     if (!isTauriRuntime()) return false;
-    const sheets = (sheetsToExport ?? allExportResults?.value ?? []).filter((sheet) => sheet.result.columns.length > 0);
+    let sheets = (sheetsToExport ?? allExportResults?.value ?? []).filter((sheet) => sheet.result.columns.length > 0);
     if (!sheets.length) return true;
+    // 导出全部结果集（sheetsToExport === undefined）时，当前激活结果集可能只持
+    // 有当前页：SQL 分页会把 tab.result 替换为当前页，而 allExportResults 直接
+    // 引用它（snapshotResult === props.result === 激活结果集）。此时重跑一次查询
+    // 拉全量，避免"导出所有数据"实际只导出当前页（#13726）。
+    const completedResultResults = new Set<QueryResult>();
+    if (sheetsToExport === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
+      const activeIndex = sheets.findIndex((sheet) => sheet.result === options.snapshotResult?.value);
+      if (activeIndex >= 0) {
+        // 用户要求全部数据：补全查询失败（含取消）时中止导出而不是静默回退到
+        // 当前页快照，否则会产出残缺文件；错误向上传播，与单结果导出路径
+        // （resultToExport 中的 fullExportResult 调用）一致，由统一 toast 提示。
+        const fullResult = await fullExportResult();
+        if (fullResult?.columns.length) {
+          sheets = sheets.map((sheet, index) => (index === activeIndex ? { ...sheet, result: fullResult } : sheet));
+          completedResultResults.add(fullResult);
+        }
+      }
+    }
+    // 补全后的激活 sheet 是重建对象（result 替换为全量结果），不再与
+    // allExportResults 中任一原对象共享引用，但其"仍是当前激活结果集"已由
+    // sourceCurrent() 通过 snapshotResult 引用一致性保证，故在此豁免，避免
+    // 补全后误报 "Export result context changed"。
+    const isSheetInAllExportResults = (sheet: DataGridExportSheet) => completedResultResults.has(sheet.result) || !!allExportResults?.value?.some((origin) => origin === sheet || origin.result === sheet.result);
     const sourceCurrent = captureExportConfirmationSource();
     const sources = sheets.map((sheet) => ({ sheet, result: sheet.result, rows: sheet.result.rows }));
-    const isCurrent = () => sourceCurrent() && sources.every(({ sheet, result, rows }) => sheet.result === result && sheet.result.rows === rows && (sheetsToExport !== undefined || !!allExportResults?.value?.includes(sheet)));
+    const isCurrent = () => sourceCurrent() && sources.every(({ sheet, result, rows }) => sheet.result === result && sheet.result.rows === rows && (sheetsToExport !== undefined || isSheetInAllExportResults(sheet)));
     const settings = { ...useSettingsStore().editorSettings };
     const title = currentExportTitle();
     const fileName = exportFileName("query-results", "xlsx", { allResults: true });
@@ -1985,7 +2007,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const resourcesCurrent = () =>
       !scopeDisposed &&
       sourceCurrent() &&
-      lobSources.every(({ sheet, result, rows }) => sheet.result === result && result.rows === rows && (sheetsToExport !== undefined || !!allExportResults?.value?.includes(sheet))) &&
+      lobSources.every(({ sheet, result, rows }) => sheet.result === result && result.rows === rows && (sheetsToExport !== undefined || isSheetInAllExportResults(sheet))) &&
       resources.every((resource) => {
         if (!connections) return true;
         const config = connections.getConfig(resource.connectionId);
@@ -1994,8 +2016,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const exportOptions = await showXlsxHeaderDialog(true);
     if (exportOptions === null) return true;
     if (!isCurrent()) throw new Error("Export result context changed");
-    const mode = exportOptions.executionMode ?? (await showExportExecutionModeDialog());
-    if (mode === null) return true;
+    const mode = exportOptions.executionMode ?? getDefaultExportExecutionMode();
     const outputPath = await promptExportSavePath({ defaultFileName: fileName, filters: [{ name: "Excel", extensions: ["xlsx"] }], preferredPath: settings.preferredExportPath });
     if (!outputPath) return true;
     if (!isCurrent()) throw new Error("Export result context changed");
@@ -2142,8 +2163,27 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
     await runExclusiveExport(async () => {
       try {
-        const sheets = (sheetsToExport ?? allExportResults?.value ?? []).filter((sheet) => sheet.result.columns.length > 0);
+        let sheets = (sheetsToExport ?? allExportResults?.value ?? []).filter((sheet) => sheet.result.columns.length > 0);
         if (sheets.length === 0) return;
+
+        // 与 exportMemoryResultSheetsXlsx 相同：导出全部结果集且激活结果集分页
+        // 未完整时，重跑查询拉全量，避免只导出当前页（#13726）。
+        const completedResultResults = new Set<QueryResult>();
+        if (sheetsToExport === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
+          const activeIndex = sheets.findIndex((sheet) => sheet.result === options.snapshotResult?.value);
+          if (activeIndex >= 0) {
+            // 与 exportMemoryResultSheetsXlsx 相同：补全失败（含取消）时中止导出，
+            // 不静默回退到当前页，错误由外层统一 toast 报错。
+            const fullResult = await fullExportResult();
+            if (fullResult?.columns.length) {
+              sheets = sheets.map((sheet, index) => (index === activeIndex ? { ...sheet, result: fullResult } : sheet));
+              completedResultResults.add(fullResult);
+            }
+          }
+        }
+        // 补全后的激活 sheet 是重建对象，不再与 allExportResults 共享引用，但
+        // snapshotResult 引用一致性已保证其仍为当前激活结果集，故豁免成员检查。
+        const isSheetInAllExportResults = (sheet: DataGridExportSheet) => completedResultResults.has(sheet.result) || !!allExportResults?.value?.some((origin) => origin === sheet || origin.result === sheet.result);
 
         let outputPath = exportFileName("query-results", "xlsx", { allResults: true });
         if (isTauriRuntime()) {
@@ -2161,7 +2201,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         const worksheets = [];
         for (const sheet of sheets) {
           const sourceRows = sheet.result.rows;
-          const rows = await materializeExportSnapshot(sheet.result, () => sheet.result.rows === sourceRows && (sheetsToExport !== undefined || !!allExportResults?.value?.includes(sheet)));
+          const rows = await materializeExportSnapshot(sheet.result, () => sheet.result.rows === sourceRows && (sheetsToExport !== undefined || isSheetInAllExportResults(sheet)));
           if (sheet.result.large_value_refs?.length || sheet.result.large_value_cells?.some((cell) => cell.value_ref)) assertSnapshotXlsxCellLengths(rows);
           worksheets.push({
             sheetName: sheet.sheetName,
@@ -2189,6 +2229,83 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   async function exportAllResultsXlsxWithSql() {
     await exportResultSheetsXlsxResult(undefined, true);
+  }
+
+  /**
+   * 把本次执行的全部结果集堆叠进同一个 XLSX worksheet（issue #13370）：每个结果
+   * 块输出「标题行 + 列头行 + 数据行」，块间以空行分隔，让数据来源一眼可见。
+   * 两条写入路径（Tauri/Rust 与 Web/本地构建）都按 columns.length 生成每行单元格，
+   * 因此标题/列头/数据行统一 pad 到最大列宽，columns 本身承载首个标题行。
+   * 合并表没有统一列语义，列头模式/自动筛选等 sheet 级选项不适用，故跳过
+   * 列头选项对话框，直接以纯行数据导出。
+   */
+  async function exportAllResultsMergedXlsxResult(includeSqlSheet: boolean) {
+    await runExclusiveExport(async () => {
+      try {
+        const sheets = (allExportResults?.value ?? []).filter((sheet) => sheet.result.columns.length > 0);
+        if (sheets.length === 0) return;
+
+        let outputPath = exportFileName("query-results", "xlsx", { allResults: true });
+        if (isTauriRuntime()) {
+          const path = await promptExportSavePath({
+            defaultFileName: outputPath,
+            filters: [{ name: "Excel", extensions: ["xlsx"] }],
+            preferredPath: useSettingsStore().editorSettings.preferredExportPath,
+          });
+          if (!path) return;
+          outputPath = path;
+        }
+
+        const exportPattern = useSettingsStore().editorSettings.globalDateTimeExportFormat;
+        // 先按各结果集自身的列类型做时间格式化，再统一 pad 进合并表
+        const blocks: Array<{ title: string; header: string[]; rows: CellValue[][] }> = [];
+        for (const [index, sheet] of sheets.entries()) {
+          const sourceRows = sheet.result.rows;
+          const rows = await materializeExportSnapshot(sheet.result, () => sheet.result.rows === sourceRows && !!allExportResults?.value?.includes(sheet));
+          if (sheet.result.large_value_refs?.length || sheet.result.large_value_cells?.some((cell) => cell.value_ref)) assertSnapshotXlsxCellLengths(rows);
+          blocks.push({
+            title: `${index + 1}. ${sheet.sheetName}`,
+            header: [...sheet.result.columns],
+            rows: formatTemporalRowsForExport(rows, sheet.result.column_types ?? [], exportPattern),
+          });
+        }
+
+        const width = blocks.reduce((width, block) => block.rows.reduce((width, row) => Math.max(width, row.length), Math.max(width, block.header.length)), 1);
+        // 列宽取所有块的最大列数；不足的行用 null 补齐成空单元格，
+        // 保证任一写入路径都不会把超宽行的尾部列截掉
+        const padRow = (row: CellValue[]): CellValue[] => (row.length >= width ? row : [...row, ...Array<null>(width - row.length).fill(null)]);
+        const mergedRows: CellValue[][] = [];
+        for (const [index, block] of blocks.entries()) {
+          // The first title is already the worksheet header (`columns`).
+          if (index > 0) {
+            mergedRows.push(padRow([]));
+            mergedRows.push(padRow([block.title]));
+          }
+          mergedRows.push(padRow(block.header));
+          for (const row of block.rows) mergedRows.push(padRow([...row]));
+        }
+        const merged = {
+          sheetName: t("grid.exportAllResultsSingleSheetName"),
+          columns: [blocks[0]!.title, ...Array<string>(width - 1).fill("")],
+          rows: mergedRows,
+          autoFilter: false,
+        };
+
+        const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet(sheets.map((sheet) => ({ resultName: sheet.sheetName, sql: sheet.sql || sheet.result.sourceStatement || "" }))) : undefined;
+        await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [merged, { ...sqlWorksheet, autoFilter: false }] : [merged], false, exportPattern || undefined);
+        notifyExportSuccess(outputPath);
+      } catch (e: any) {
+        toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
+      }
+    });
+  }
+
+  async function exportAllResultsMergedXlsx() {
+    await exportAllResultsMergedXlsxResult(false);
+  }
+
+  async function exportAllResultsMergedXlsxWithSql() {
+    await exportAllResultsMergedXlsxResult(true);
   }
 
   /** SQL 文件导出与 SQL INSERT 复制共用同一主键处理模式。 */
@@ -2323,8 +2440,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const preparingStore = isTauriRuntime() && getActivePinia() ? useConnectionStore() : undefined;
     const originalConfig = preparingStore?.getConfig(request.connectionId);
     const fingerprint = originalConfig ? connectionConfigFingerprint(originalConfig) : undefined;
-    const mode = openAfterExport ? "immediate" : (selectedMode ?? sqlExportOptions?.executionMode ?? (await showExportExecutionModeDialog()));
-    if (mode === null) return true;
+    const mode = openAfterExport ? "immediate" : (selectedMode ?? sqlExportOptions?.executionMode ?? getDefaultExportExecutionMode());
     const connStore = mode === "queued" ? useConnectionStore() : undefined;
     const fmt = FORMAT_META[format];
     const splitSqlOutput = format === "sql" && request.splitMaxMb !== undefined;
@@ -2421,7 +2537,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (exportCancelHandler) {
       exportCancelHandler.value = () => tracker.cancelTask(exportId);
     }
-    const ownsView = () => !scopeDisposed && currentExportViewId === exportId;
+    const ownsView = () => !task.removed && !scopeDisposed && currentExportViewId === exportId;
     const updateView = () => {
       if (ownsView()) {
         if (exportProgressState) exportProgressState.value = { ...exportProgressState.value, status: task.status, startedAt: task.startedAt, finishedAt: task.finishedAt, errorMessage: task.errorMessage };
@@ -2470,7 +2586,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         });
         if (!terminalSeen) tracker.updateTableExportTask(exportId, progress);
         terminalSeen ||= progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled";
-        if (progress.status === "Done") {
+        if (progress.status === "Done" && !task.removed) {
           notifyExportSuccess(openAfterExport ? undefined : outputPath);
           if (openAfterExport && isTauriRuntime()) await api.openQueryResultTempFile(outputPath);
         }
@@ -2564,8 +2680,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const extension = fmt?.ext ?? format;
     const filterName = fmt?.label ?? format.toUpperCase();
     let outputPath = exportFileName("query-result", extension);
-    const mode = openAfterExport ? "immediate" : (selectedMode ?? sqlExportOptions?.executionMode ?? (await showExportExecutionModeDialog()));
-    if (mode === null) return true;
+    const mode = openAfterExport ? "immediate" : (selectedMode ?? sqlExportOptions?.executionMode ?? getDefaultExportExecutionMode());
     if (isTauriRuntime()) {
       if (openAfterExport) outputPath = await api.createQueryResultTempFile(extension);
       else {
@@ -2891,6 +3006,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     exportCurrentPageXlsxWithSql,
     exportAllResultsXlsx,
     exportAllResultsXlsxWithSql,
+    exportAllResultsMergedXlsx,
+    exportAllResultsMergedXlsxWithSql,
     exportResultSheetsXlsx: (sheets: DataGridExportSheet[]) => exportResultSheetsXlsxResult(sheets, false),
     exportSql,
     exportCurrentPageSql,

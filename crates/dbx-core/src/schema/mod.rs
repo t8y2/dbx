@@ -1442,13 +1442,17 @@ fn single_table_comment_from_query_result(result: db::QueryResult) -> Result<Opt
 }
 
 fn oracle_table_comments_sql(schema: &str, table_names: &[String]) -> Option<String> {
+    oracle_table_comments_sql_for_owner(&oracle_owner_filter(schema), table_names)
+}
+
+fn oracle_table_comments_sql_for_owner(owner: &str, table_names: &[String]) -> Option<String> {
     if table_names.is_empty() {
         return None;
     }
     let names = table_names.iter().map(|name| sql_string(name)).collect::<Vec<_>>().join(", ");
     Some(format!(
         "SELECT TABLE_NAME, COMMENTS FROM ALL_TAB_COMMENTS WHERE OWNER = {} AND TABLE_NAME IN ({}) AND TABLE_TYPE IN ('TABLE', 'VIEW') AND COMMENTS IS NOT NULL",
-        oracle_owner_filter(schema),
+        owner,
         names,
     ))
 }
@@ -2306,6 +2310,53 @@ async fn load_oracle_table_comments_for_objects(
     let comments = oracle_table_comments_for_names(client, database, schema, &table_names, timeout_duration).await?;
     apply_oracle_object_table_comments(objects, &comments);
     Ok(())
+}
+
+/// Fills table and view comments on an exact-identity object list. The owner and
+/// names are matched verbatim, because case-folding them could attach the comment
+/// of a different object such as `APP.T` to `"app"."t"`. Comments are decorative
+/// here, so a failed lookup is logged and keeps the listing usable.
+async fn load_oracle_exact_table_comments_for_objects(
+    client: &mut db::agent_driver::AgentDriverClient,
+    database: &str,
+    owner: &str,
+    objects: &mut [db::ObjectInfo],
+    timeout_duration: Option<Duration>,
+) {
+    let table_names = objects
+        .iter()
+        .filter(|object| oracle_object_info_can_have_table_comment(object) && comment_is_blank(&object.comment))
+        .map(|object| object.name.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let owner_literal = sql_string(owner);
+    let mut comments = HashMap::new();
+    for chunk in table_names.chunks(ORACLE_TABLE_COMMENT_BATCH_SIZE) {
+        let Some(sql) = oracle_table_comments_sql_for_owner(&owner_literal, chunk) else {
+            continue;
+        };
+        let params = agent_execute_query_params(
+            &sql,
+            (!database.is_empty()).then_some(database),
+            None,
+            QueryExecutionOptions { max_rows: Some(chunk.len()), ..Default::default() },
+        );
+        match client.execute_query_with_timeout::<db::QueryResult>(params, timeout_duration).await {
+            Ok(result) => comments.extend(table_comments_from_query_result(result)),
+            Err(error) => {
+                log::warn!("[schema][oracle:list_objects:comment-lookup-failed] owner={owner} error={error}");
+                break;
+            }
+        }
+    }
+    for object in objects.iter_mut().filter(|object| oracle_object_info_can_have_table_comment(object)) {
+        if comment_is_blank(&object.comment) {
+            if let Some(comment) = comments.get(&object.name) {
+                object.comment = Some(comment.clone());
+            }
+        }
+    }
 }
 
 /// Runs an object-statistics fallback chain against an arbitrary query

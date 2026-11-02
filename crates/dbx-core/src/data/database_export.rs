@@ -6655,6 +6655,7 @@ mod tests {
                 Default::default(),
                 false,
                 None,
+                false,
             )
             .unwrap();
             let output = String::from_utf8(output).unwrap();

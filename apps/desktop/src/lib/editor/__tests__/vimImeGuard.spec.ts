@@ -128,6 +128,29 @@ describe("Vim IME command guard", () => {
     expect(view.state.doc.toString()).toBe("xELECT 1;\nSELECT 2;\nSELECT 3;");
   });
 
+  it("replaces the character when an IME commits the literal r waits for (#11240)", () => {
+    const { view } = editor();
+    key(view, "r");
+    expect(getCM(view)?.state.vim?.expectLiteralNext).toBe(true);
+
+    // No keydown for the committed character: an IME only delivers the text.
+    expect(input(view, "中")).toBe(true);
+
+    expect(view.state.doc.toString()).toBe(`中ELECT 1;
+SELECT 2;
+SELECT 3;`);
+    expect(getCM(view)?.state.vim?.expectLiteralNext).toBe(false);
+  });
+
+  it("does not insert a multi-character IME commit while Vim waits for a literal", () => {
+    const { view } = editor();
+    key(view, "r");
+
+    expect(input(view, "你好")).toBe(true);
+
+    expect(view.state.doc.toString()).toBe(sample);
+  });
+
   it("does not consume system shortcuts, dead keys or insert-mode keydowns", () => {
     const { view } = editor();
     expect(key(view, "Process", { code: "KeyJ", keyCode: 229, metaKey: true }).defaultPrevented).toBe(false);

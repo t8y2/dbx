@@ -71,10 +71,18 @@ export function createVimImeGuard({ EditorView, ViewPlugin }: Pick<ViewModule, "
     // first, then swallow text that an IME commits without a usable keydown.
     // Vim edits and clipboard paste dispatch transactions directly, so this
     // does not block commands that intentionally change the document.
-    EditorView.inputHandler.of((view) => {
+    EditorView.inputHandler.of((view, _from, _to, text) => {
       const cm = getCM(view);
       const vim = cm?.state.vim;
-      return !!vim && !vim.insertMode && !vim.expectLiteralNext && !cm.state.dialog;
+      if (!vim || vim.insertMode || cm.state.dialog) return false;
+      // An IME commit has no keydown, so `r`/`f`/`t` waiting for a literal would
+      // take the text as an ordinary insertion instead of replacing the character
+      // under the cursor (#11240). Hand the character to Vim's own literal path;
+      // anything else is swallowed rather than becoming SQL in normal mode.
+      if (vim.expectLiteralNext && [...text].length === 1) {
+        cm.state.vimPlugin?.handleKey(new KeyboardEvent("keydown", { key: text }), view);
+      }
+      return true;
     }),
   ];
 }

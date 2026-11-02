@@ -1187,8 +1187,11 @@ test("all-results merged XLSX stacks every result set into one worksheet with ti
   // 即合并表宽度；标题行 + 列头行 + 数据行 + 块间空行，窄块行 pad 到同一宽度。
   assert.equal(worksheets.length, 1);
   assert.equal(worksheets[0].autoFilter, false);
+  const { buildXlsxWorkbookMulti } = await import("../../apps/desktop/src/lib/export/xlsxExport.ts");
+  const workbookXml = new TextDecoder().decode(buildXlsxWorkbookMulti(worksheets));
+  assert.equal([...workbookXml.matchAll(/>1\. Result 1<\/t>/g)].length, 1, "the first block title appears once in the actual workbook");
+
   assert.deepEqual(worksheets[0].rows, [
-    ["1. Result 1", null],
     ["id", "name"],
     [1, "Ada"],
     [null, null],
@@ -1425,4 +1428,14 @@ test("copyCell applies column formatter when active and preserves raw values whe
   } finally {
     restoreStorage();
   }
+});
+
+test("all-results merged XLSX accepts result sets exceeding the JavaScript argument limit", async () => {
+  const rows = Array.from({ length: 140_000 }, (_, index) => [index]);
+  const { composable } = buildExportHarness({ allExportResults: [{ sheetName: "Large", result: { columns: ["id"], rows, affected_rows: 0, execution_time_ms: 1 } }] });
+  await composable.exportAllResultsMergedXlsx();
+  assert.equal(apiMock.exportQueryResultsXlsx.mock.calls.length, 1);
+  const sheet = apiMock.exportQueryResultsXlsx.mock.calls[0][1][0];
+  assert.equal(sheet.rows.length, rows.length + 1);
+  assert.deepEqual(sheet.rows.at(-1), [139_999]);
 });

@@ -2272,14 +2272,17 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           });
         }
 
-        const width = Math.max(...blocks.map((block) => Math.max(block.header.length, ...block.rows.map((row) => row.length))), 1);
+        const width = blocks.reduce((width, block) => block.rows.reduce((width, row) => Math.max(width, row.length), Math.max(width, block.header.length)), 1);
         // 列宽取所有块的最大列数；不足的行用 null 补齐成空单元格，
         // 保证任一写入路径都不会把超宽行的尾部列截掉
         const padRow = (row: CellValue[]): CellValue[] => (row.length >= width ? row : [...row, ...Array<null>(width - row.length).fill(null)]);
         const mergedRows: CellValue[][] = [];
         for (const [index, block] of blocks.entries()) {
-          if (index > 0) mergedRows.push(padRow([]));
-          mergedRows.push(padRow([block.title]));
+          // The first title is already the worksheet header (`columns`).
+          if (index > 0) {
+            mergedRows.push(padRow([]));
+            mergedRows.push(padRow([block.title]));
+          }
           mergedRows.push(padRow(block.header));
           for (const row of block.rows) mergedRows.push(padRow([...row]));
         }

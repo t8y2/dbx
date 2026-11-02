@@ -1,6 +1,6 @@
 use super::column_format::has_dameng_identity;
 use super::dialect::{capabilities_for, StructureDialect};
-use super::indexes::has_existing_index_change;
+use super::indexes::{has_existing_index_change, has_existing_index_change_for_database};
 use super::types::{EditableStructureColumn, TableStructureSqlOptions};
 use super::util::{clean, normalize_default, original_default};
 use crate::models::connection::DatabaseType;
@@ -46,11 +46,10 @@ pub fn validate_draft(options: &TableStructureSqlOptions) -> Vec<String> {
     validate_dameng_identity(options, &active_columns, &mut warnings);
     validate_mysql_literal_defaults(options, &active_columns, &mut warnings);
     validate_gin_opclass_warnings(options, &mut warnings);
-    for index in options
-        .indexes
-        .iter()
-        .filter(|index| !index.marked_for_drop && (index.original.is_none() || has_existing_index_change(index)))
-    {
+    for index in options.indexes.iter().filter(|index| {
+        !index.marked_for_drop
+            && (index.original.is_none() || has_existing_index_change_for_database(index, options.database_type))
+    }) {
         if clean(&index.name).is_empty() {
             warnings.push("Index name cannot be empty.".to_string());
         }

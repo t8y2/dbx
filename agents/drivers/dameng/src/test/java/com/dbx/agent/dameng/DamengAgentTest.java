@@ -490,6 +490,19 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void constrainedObjectQueriesIncludeTypesAndBodies() {
+        DamengAgent.MetadataQuery query = DamengAgent.buildConstrainedObjectsQuery(
+            "APP", new MetadataListConstraints(null, 20, null, List.of("TYPE", "TYPE_BODY")));
+        assertTrue(query.sql().contains("o.OBJECT_TYPE IN (?, ?)"));
+        assertEquals(List.of("APP", "TYPE", "TYPE BODY", 20), query.args());
+
+        DamengAgent.MetadataQuery raw = DamengAgent.buildRawConstrainedObjectsQuery(
+            "APP", new MetadataListConstraints(null, null, null, List.of("TYPE", "TYPE_BODY")));
+        assertTrue(raw.sql().contains("o.OBJECT_TYPE IN (?, ?)"));
+        assertEquals(List.of("APP", "TYPE", "TYPE BODY"), raw.args());
+    }
+
+    @Test
     void rawObjectQueryIncludesDamengPackageBodyCatalogType() {
         DamengAgent.MetadataQuery query = DamengAgent.buildRawConstrainedObjectsQuery(
             "APP",

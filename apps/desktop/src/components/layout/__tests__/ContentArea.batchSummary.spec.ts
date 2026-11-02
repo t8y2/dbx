@@ -12,6 +12,7 @@ vi.mock("@/components/grid/DataGrid.vue", () => ({ __esModule: true, default: { 
 import ContentArea from "../ContentArea.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -34,9 +35,10 @@ function batch(executionId: string, total: number, finishedAt?: number): BatchSq
   };
 }
 
-async function mountTab(options: { batch?: BatchSqlExecution; isExecuting?: boolean; results?: QueryResult[] }) {
+async function mountTab(options: { batch?: BatchSqlExecution; isExecuting?: boolean; results?: QueryResult[]; defaultView?: "result" | "summary" }) {
   const pinia = createPinia();
   setActivePinia(pinia);
+  useSettingsStore().editorSettings.multiStatementDefaultView = options.defaultView ?? "result";
   const connection = { id: "mysql", name: "MySQL", db_type: "mysql" as const, host: "localhost", port: 3306, username: "", password: "" };
   useConnectionStore().connections = [connection];
   const results = options.results ?? [];
@@ -67,6 +69,7 @@ async function mountTab(options: { batch?: BatchSqlExecution; isExecuting?: bool
           executableSql: "",
           formatSqlRequest: null,
           compressSqlRequest: null,
+          keywordCaseRequest: null,
           selectedSql: "",
           cursorPos: 0,
           resultOnly: true,
@@ -88,14 +91,14 @@ async function mountTab(options: { batch?: BatchSqlExecution; isExecuting?: bool
 
 describe("batch execution output view", () => {
   it("opens the summary while a multi-statement run is in progress", async () => {
-    const { state, tab } = await mountTab({ batch: batch("run-1", 3) });
+    const { state, tab } = await mountTab({ batch: batch("run-1", 3), defaultView: "summary" });
 
     expect(state.view).toBe("summary");
     expect(useQueryStore().tabs.find((candidate) => candidate.id === tab.id)?.uiState?.batchSummaryExecutionId).toBe("run-1");
   });
 
   it("keeps the view the user picks during that run", async () => {
-    const { state, tab } = await mountTab({ batch: batch("run-1", 3) });
+    const { state, tab } = await mountTab({ batch: batch("run-1", 3), defaultView: "summary" });
     expect(state.view).toBe("summary");
 
     state.view = "result";
@@ -107,7 +110,7 @@ describe("batch execution output view", () => {
   });
 
   it("opens the summary again for the next run", async () => {
-    const { state, tab } = await mountTab({ batch: batch("run-1", 3) });
+    const { state, tab } = await mountTab({ batch: batch("run-1", 3), defaultView: "summary" });
     state.view = "result";
     await nextTick();
 
@@ -117,6 +120,61 @@ describe("batch execution output view", () => {
 
     expect(state.view).toBe("summary");
     expect(useQueryStore().tabs.find((candidate) => candidate.id === tab.id)?.uiState?.batchSummaryExecutionId).toBe("run-2");
+  });
+
+  it("keeps the default result grid across multiple runs and completion", async () => {
+    const { state, tab } = await mountTab({ batch: batch("run-1", 2) });
+    expect(state.view).toBe("result");
+
+    for (const executionId of ["run-1", "run-2"]) {
+      tab.isExecuting = true;
+      tab.batchSqlExecution = batch(executionId, 2);
+      await nextTick();
+      expect(state.view).toBe("result");
+      tab.result = { columns: ["a"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+      tab.results = [tab.result];
+      tab.batchSqlExecution = batch(executionId, 2, Date.now());
+      tab.isExecuting = false;
+      await nextTick();
+      expect(state.view).toBe("result");
+    }
+  });
+
+  it("honors summary to result and back to summary between executions", async () => {
+    const { state, tab } = await mountTab({ batch: batch("run-1", 2), defaultView: "summary" });
+    expect(state.view).toBe("summary");
+    tab.result = { columns: ["a"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    tab.results = [tab.result];
+    tab.batchSqlExecution = batch("run-1", 2, Date.now());
+    tab.isExecuting = false;
+    await nextTick();
+
+    useSettingsStore().editorSettings.multiStatementDefaultView = "result";
+    await nextTick();
+    expect(state.view).toBe("summary");
+    // The execution entry point selects the configured view before starting.
+    state.view = "result";
+    tab.isExecuting = true;
+    tab.batchSqlExecution = batch("run-2", 2);
+    await nextTick();
+    await nextTick();
+    expect(state.view).toBe("result");
+    tab.batchSqlExecution = batch("run-2", 2, Date.now());
+    tab.isExecuting = false;
+    await nextTick();
+    expect(state.view).toBe("result");
+
+    useSettingsStore().editorSettings.multiStatementDefaultView = "summary";
+    tab.isExecuting = true;
+    tab.batchSqlExecution = batch("run-3", 2);
+    await nextTick();
+    await nextTick();
+    expect(state.view).toBe("summary");
+  });
+
+  it("still shows the summary when a completed batch has no tabular results", async () => {
+    const { state } = await mountTab({ batch: batch("run-1", 2, Date.now()), isExecuting: false, results: [{ columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 }] });
+    expect(state.view).toBe("summary");
   });
 
   it("leaves a single-statement execution on its result grid", async () => {

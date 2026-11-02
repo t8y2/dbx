@@ -44,7 +44,7 @@ percent-encoding = "2"
 encoding_rs = "0.8"
 log = "0.4"
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["compat"] }
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 fs2 = "0.4"

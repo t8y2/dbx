@@ -200,6 +200,10 @@ Parameters can be entered as strings, numbers, booleans, `NULL`, or raw SQL valu
 
 Formatting and compacting only change editor text; they do not execute SQL.
 
+## PL/SQL Debugging
+
+For Oracle and OceanBase Oracle mode, use the debug entry points to step through procedures, functions, package members, and anonymous blocks. See [PL/SQL Debugging](/en/docs/plsql-debug) for startup, explicit debug compilation, recovery, and transaction boundaries.
+
 ## Explain Plan
 
 Explain Plan accepts query-like SQL that is safe to analyze, such as `SELECT`, `WITH`, `TABLE`, or `VALUES`. Supported databases can return:
@@ -210,6 +214,14 @@ Explain Plan accepts query-like SQL that is safe to analyze, such as `SELECT`, `
 - Raw details returned by the database
 
 `EXPLAIN` semantics vary by database, and some engines provide only table or text output. A plan reflects optimizer estimates rather than real production performance; evaluate it together with data volume, statistics, indexes, and measured runtime.
+
+### Inspect Existing Session Evidence
+
+For Oracle and OceanBase Oracle connections, open **Process List** from the connection context menu, then choose **Diagnostics** on a session row to inspect SQL, an existing plan, statistics and waits, and long operations. This reads evidence already retained by the database; it does not execute the target SQL or generate a new plan.
+
+Diagnostics freezes the session and SQL identity captured when opened. Refresh reads the same target. If the session moves to another SQL statement, the page marks the change instead of attaching the new statement's data to the original result. Select explicitly when several audit requests or cached plans match. SQL text shows its completeness. Plan rows are estimates; Oracle cursor counters, OB request statistics, and cached-plan cumulative statistics have separate scope labels.
+
+**Stop reading** ends the local wait and attempts to cancel diagnostic queries without terminating the target session. Permission errors, unavailable views, evicted cache entries, and uncollected data have distinct states. Failed refreshes retain earlier data with its sampling time. An empty long-operation result does not mean the SQL has finished. OB long operations show available timing information without inventing a work percentage.
 
 ## Query History
 

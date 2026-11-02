@@ -4,7 +4,7 @@ import { DATABASE_SCHEMA_QUALIFIED_TYPES } from "@/lib/database/databaseCapabili
 import { jdbcDriverProfileUsesSchemaQualification } from "@/lib/database/jdbcDialect";
 import * as api from "@/lib/backend/api.ts";
 import { parseSqlServerLinkedSchema, sqlServerLinkedTableName } from "@/lib/database/sqlServerLinkedServers.ts";
-import { isExplicitlyQuotedSqlIdentifier, quoteGaussDbJdbcIdentifier, requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier.ts";
+import { isExplicitlyQuotedSqlIdentifier, quoteGaussDbJdbcIdentifier, requiresClickhouseIdentifierQuote, requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier.ts";
 import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
 import { sqlSemanticTableNameSpans } from "@/lib/sql/semantic/model";
 import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
@@ -149,8 +149,9 @@ function quoteWithDelimiter(name: string, delimiter: string): string {
 function requiresIdentifierQuote(databaseType: DatabaseType | undefined, name: string, identifierQuote?: string): boolean {
   if (isExplicitlyQuotedSqlIdentifier(name)) return false;
   switch (databaseType) {
-    case "mysql":
     case "clickhouse":
+      return requiresClickhouseIdentifierQuote(name);
+    case "mysql":
     case "hive":
     case "argo":
     case "transwarp":
@@ -201,8 +202,8 @@ function quoteCypherIdentifier(name: string): string {
   return `\`${name.replace(/`/g, "``")}\``;
 }
 
-export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "databaseType" | "driverProfile" | "identifierQuote" | "schema" | "tableName" | "catalog" | "database" | "includeDatabaseName" | "quoteIdentifiers">): string {
-  const { databaseType, driverProfile, identifierQuote, schema, tableName, catalog, database, includeDatabaseName, quoteIdentifiers } = options;
+export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "databaseType" | "driverProfile" | "identifierQuote" | "schema" | "tableName" | "catalog" | "database" | "includeDatabaseName" | "quoteIdentifiers"> & { defaultSchema?: string }): string {
+  const { databaseType, driverProfile, identifierQuote, schema, tableName, catalog, database, includeDatabaseName, quoteIdentifiers, defaultSchema } = options;
   const quoteTable = (name: string) => (quoteIdentifiers === false ? quoteTableIdentifierIfNeeded(databaseType, name, identifierQuote) : quoteTableIdentifier(databaseType, name));
   const quoteTableData = (name: string) => (quoteIdentifiers === false ? quoteTableIdentifierIfNeeded(databaseType, name, identifierQuote) : quoteTableDataIdentifier(databaseType, name, identifierQuote));
   if (databaseType === "gbase8s" || (databaseType === "informix" && driverProfile?.trim().toLowerCase() === "gbase8s")) {
@@ -230,8 +231,21 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
     return quoteTable(tableName);
   }
   if ((databaseType === "gaussdb" || databaseType === "opengauss" || databaseType === "postgres" || databaseType === "kingbase") && identifierQuote != null) {
+    // On the PostgreSQL family the schema — not the database, which these
+    // engines cannot cross on one connection — is the addressing dimension.
+    // It stays omitted by default (#9110), but a table outside the
+    // connection's default schema is always qualified (#13235): a bare name
+    // would silently resolve through search_path into the default schema's
+    // table. Callers without a known defaultSchema keep the legacy behavior.
     const quotedTable = quoteTableData(tableName);
-    if (dropsSchemaQualifier(databaseType, includeDatabaseName)) return quotedTable;
+    if (dropsSchemaQualifier(databaseType, includeDatabaseName)) {
+      const trimmedSchema = schema?.trim();
+      const trimmedDefault = defaultSchema?.trim();
+      if (trimmedSchema && trimmedDefault && trimmedSchema !== trimmedDefault) {
+        return `${quoteTableData(trimmedSchema)}.${quotedTable}`;
+      }
+      return quotedTable;
+    }
     const trimmedSchema = schema?.trim();
     if (trimmedSchema) {
       return `${quoteTableData(trimmedSchema)}.${quotedTable}`;
@@ -443,8 +457,8 @@ export function normalizeWhereInput(whereInput?: string): string {
  * so the columns must be awaited before the statement is generated rather than
  * refreshed in the background.
  *
- * * MySQL / PostgreSQL: the large-value preview projection is derived from the
- *   column types and primary keys.
+ * * MySQL / PostgreSQL / Oracle: the large-value preview projection is derived
+ *   from the column types and primary keys.
  * * Salesforce: SOQL has no `SELECT *`. With no known fields the backend builder
  *   falls back to the `FIELDS(ALL)` selector, which the org only accepts with
  *   `LIMIT 200` or less — awaiting the describe keeps every page size working.
@@ -452,7 +466,7 @@ export function normalizeWhereInput(whereInput?: string): string {
  *   vertex/edge value instead of separate property columns.
  */
 export function requiresEagerTableMetadataForDataOpen(databaseType: DatabaseType | undefined): boolean {
-  return databaseType === "mysql" || databaseType === "postgres" || databaseType === "salesforce" || databaseType === "neo4j" || databaseType === "nebula";
+  return databaseType === "mysql" || databaseType === "postgres" || databaseType === "oracle" || databaseType === "salesforce" || databaseType === "neo4j" || databaseType === "nebula";
 }
 
 export async function buildTableSelectSql(options: BuildTableSelectSqlOptions): Promise<string> {

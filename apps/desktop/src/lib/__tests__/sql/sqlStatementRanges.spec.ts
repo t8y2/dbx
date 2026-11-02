@@ -2510,6 +2510,85 @@ WHERE t2.product_name = '12345'
     expect(rangeSqlTexts(ranges)).toEqual(["BEGIN TRAN", "UPDATE dbo.T SET x = 1", "COMMIT"]);
   });
 
+  const sqlServerTryCatchBatch = [
+    "SET XACT_ABORT ON;",
+    "",
+    "BEGIN TRY",
+    "    BEGIN TRANSACTION;",
+    "",
+    "    UPDATE [dbo].[Documents]",
+    "    SET [Deleted] = 0",
+    "    WHERE [Deleted] = 1;",
+    "",
+    "    DECLARE @Updated int = @@ROWCOUNT;",
+    "",
+    "    IF EXISTS (SELECT 1 FROM [dbo].[Documents] WHERE [Deleted] = 1)",
+    "        THROW 50001, N'Rows with Deleted = 1 still exist.', 1;",
+    "",
+    "    COMMIT TRANSACTION;",
+    "",
+    "    SELECT N'OK' AS Result, @Updated AS RowsUpdated;",
+    "END TRY",
+    "BEGIN CATCH",
+    "    IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;",
+    "    THROW;",
+    "END CATCH;",
+  ].join("\n");
+  // The batch range starts at the real `BEGIN TRY` token, so the blank line
+  // and semicolon around the statement are not part of it.
+  const sqlServerTryCatchRange = sqlServerTryCatchBatch.slice(sqlServerTryCatchBatch.indexOf("BEGIN TRY")).replace(/;$/, "");
+
+  // #13051: a top-level BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH script
+  // must execute as one batch — splitting it at the top-level `;` sends
+  // fragments like `BEGIN TRANSACTION` alone and SQL Server rejects them.
+  it("keeps a SQL Server top-level TRY/CATCH script as one batch after the leading statement", () => {
+    const ranges = executableStatementRanges(sqlServerTryCatchBatch, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["SET XACT_ABORT ON", sqlServerTryCatchRange]);
+  });
+
+  it("keeps the statement after END CATCH as its own SQL Server range", () => {
+    const ranges = executableStatementRanges(`${sqlServerTryCatchBatch}\nSELECT 999;`, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["SET XACT_ABORT ON", sqlServerTryCatchRange, "SELECT 999"]);
+  });
+
+  it("keeps two consecutive SQL Server TRY/CATCH scripts as two ranges", () => {
+    const second = sqlServerTryCatchBatch.replace(/\[dbo\]\.\[Documents\]/g, "[dbo].[Docs]");
+    const ranges = executableStatementRanges(`${sqlServerTryCatchBatch}\n${second};`, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["SET XACT_ABORT ON", sqlServerTryCatchRange, "SET XACT_ABORT ON", second.slice(second.indexOf("BEGIN TRY")).replace(/;$/, "")]);
+  });
+
+  it("keeps a SQL Server top-level plain BEGIN/END block whole", () => {
+    const sql = ["BEGIN", "    SELECT 1;", "    SELECT 2;", "END"].join("\n");
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([sql]);
+  });
+
+  // A bare `BEGIN` is the first keystroke of every SQL Server block: the merge
+  // reads the word after `BEGIN` to tell a block from `BEGIN TRAN`, and a
+  // missing token must not be treated as one (it crashed the splitter).
+  it("splits a lone SQL Server BEGIN without merging", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges("BEGIN", "sqlserver"))).toEqual(["BEGIN"]);
+  });
+
+  it("splits a SQL Server BEGIN terminated by a semicolon without merging", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges("BEGIN;", "sqlserver"))).toEqual(["BEGIN"]);
+  });
+
+  it("splits a SQL Server BEGIN followed by a comment without merging", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges("BEGIN -- draft block", "sqlserver"))).toEqual(["BEGIN"]);
+  });
+
+  it("ends a SQL Server TRY batch without a CATCH at END TRY", () => {
+    const sql = ["BEGIN TRY", "    SELECT 1;", "END TRY", "SELECT 999;"].join("\n");
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["BEGIN TRY\n    SELECT 1;\nEND TRY", "SELECT 999"]);
+  });
+
   // The depth carried across fragments decides where a batch ends: fragments
   // after the closing `END` are independent statements, so every following
   // statement keeps its own execution icon.

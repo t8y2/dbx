@@ -142,7 +142,7 @@ describe("query result SQL export progress", () => {
     expect(progressState.value.startedAt).toEqual(expect.any(Number));
     expect(progressState.value.finishedAt).toEqual(expect.any(Number));
     expect(cancelHandler.value).toBeNull();
-    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "sql", exportTableName: "users", exportColumnTypes: ["int4", "text"] }), expect.any(Function));
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "sql", exportTableName: "users", exportColumnTypes: ["int4", "text"] }), expect.any(Function), true);
   });
 
   it("passes a resolved Oracle owner as the INSERT target without changing query execution schema", async () => {
@@ -168,7 +168,7 @@ describe("query result SQL export progress", () => {
     await state.exportSql();
 
     expect(queryResultExportRequest).toHaveBeenCalledWith(expect.objectContaining({ exportTableName: "USERS", exportSchema: "APP_OWNER" }));
-    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ schema: "CURRENT_USER", exportSchema: "APP_OWNER", exportTableName: "USERS" }), expect.any(Function));
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ schema: "CURRENT_USER", exportSchema: "APP_OWNER", exportTableName: "USERS" }), expect.any(Function), true);
   });
 
   it("does not infer a target table for query results without a unique source", async () => {
@@ -195,7 +195,7 @@ describe("query result SQL export progress", () => {
     await state.exportSql();
 
     expect(queryResultExportRequest).toHaveBeenCalledWith(expect.objectContaining({ exportTableName: undefined, exportSchema: undefined }));
-    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ exportTableName: undefined, exportSchema: undefined }), expect.any(Function));
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ exportTableName: undefined, exportSchema: undefined }), expect.any(Function), true);
   });
 
   it("forwards result column EXTRA metadata so identity INSERT exports can be replayed", async () => {
@@ -214,7 +214,7 @@ describe("query result SQL export progress", () => {
 
     await state.exportSql();
 
-    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "sql", exportColumnTypes: ["int4", "text"], exportColumnExtras: ["identity(1,1)", null] }), expect.any(Function));
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "sql", exportColumnTypes: ["int4", "text"], exportColumnExtras: ["identity(1,1)", null] }), expect.any(Function), true);
   });
 
   it("routes incomplete query-result JSON exports through the streaming backend", async () => {
@@ -222,7 +222,7 @@ describe("query result SQL export progress", () => {
 
     await state.exportJson();
 
-    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "json", sql: "SELECT id, name FROM users" }), expect.any(Function));
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "json", sql: "SELECT id, name FROM users" }), expect.any(Function), true);
   });
 });
 
@@ -238,7 +238,7 @@ describe("open query result as XLSX", () => {
       return progress;
     });
     await useDataGridExport(createOptions()).openXlsx();
-    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "xlsx", filePath: "/tmp/dbx-query-results/result.xlsx" }), expect.any(Function));
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "xlsx", filePath: "/tmp/dbx-query-results/result.xlsx" }), expect.any(Function), true);
     if (status === "Done") expect(api.openQueryResultTempFile).toHaveBeenCalledWith("/tmp/dbx-query-results/result.xlsx");
     else expect(api.openQueryResultTempFile).not.toHaveBeenCalled();
   });

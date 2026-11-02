@@ -1,13 +1,15 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, reactive, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const backend = vi.hoisted(() => ({
   documentFindDocuments: vi.fn(),
   documentCountDocuments: vi.fn(),
   cancelQuery: vi.fn(),
+  closeQuerySession: vi.fn(),
   ensureConnected: vi.fn(),
+  getConfig: vi.fn(),
   documentInsertDocument: vi.fn(),
   documentUpdateDocument: vi.fn(),
   documentDeleteDocument: vi.fn(),
@@ -18,6 +20,7 @@ const dataGrid = vi.hoisted(() => ({
   reload: undefined as (() => Promise<void>) | undefined,
   rows: [] as unknown[],
   columns: [] as string[],
+  captureExport: undefined as (() => ((progress?: unknown, control?: { signal: AbortSignal }) => Promise<unknown>) | undefined) | undefined,
 }));
 
 const settings = vi.hoisted(() => ({
@@ -50,6 +53,7 @@ vi.mock("@/lib/backend/api", () => ({
   documentCountDocuments: backend.documentCountDocuments,
   dynamodbDescribeTable: vi.fn(),
   cancelQuery: backend.cancelQuery,
+  closeQuerySession: backend.closeQuerySession,
   documentInsertDocument: backend.documentInsertDocument,
   documentUpdateDocument: backend.documentUpdateDocument,
   documentDeleteDocument: backend.documentDeleteDocument,
@@ -57,7 +61,7 @@ vi.mock("@/lib/backend/api", () => ({
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
-  useConnectionStore: () => ({ ensureConnected: backend.ensureConnected }),
+  useConnectionStore: () => ({ ensureConnected: backend.ensureConnected, getConfig: backend.getConfig }),
 }));
 
 vi.mock("@/stores/settingsStore", () => ({
@@ -77,6 +81,7 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
         pageOffset: { type: Number, required: false },
         pageLimit: { type: Number, required: false },
         pageSizePreference: { type: String, required: false },
+        captureFullExportResult: { type: Function, required: false },
       },
       setup(props, { attrs, expose }) {
         dataGrid.reload = attrs.onReload as typeof dataGrid.reload;
@@ -101,6 +106,7 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
           resetInfiniteScrollState: vi.fn(),
         });
         return () => {
+          dataGrid.captureExport = props.captureFullExportResult as typeof dataGrid.captureExport;
           const result = props.result as { rows: unknown[]; columns?: string[] };
           dataGrid.rows = result.rows;
           dataGrid.columns = result.columns ?? [];
@@ -159,12 +165,12 @@ async function flushUi() {
   }
 }
 
-async function mountBrowser() {
+async function mountBrowser(databaseType = "mongodb") {
   app = createApp(DocumentBrowser, {
     connectionId: "mongo-1",
     database: "test",
     collection: "docs",
-    databaseType: "mongodb",
+    databaseType,
   });
   app.mount(root!);
   await flushUi();
@@ -190,16 +196,19 @@ beforeEach(async () => {
   backend.documentFindDocuments.mockReset();
   backend.documentCountDocuments.mockReset();
   backend.cancelQuery.mockReset();
+  backend.closeQuerySession.mockReset().mockResolvedValue(undefined);
   backend.ensureConnected.mockReset();
   backend.documentInsertDocument.mockReset();
   backend.documentUpdateDocument.mockReset();
   backend.documentDeleteDocument.mockReset();
   backend.documentSaveMeilisearchBatch.mockReset();
   backend.ensureConnected.mockResolvedValue(undefined);
+  backend.getConfig.mockReturnValue({ id: "mongo-1", name: "Mongo", db_type: "mongodb" });
   backend.documentCountDocuments.mockResolvedValue(0);
   dataGrid.reload = undefined;
   dataGrid.rows = [];
   dataGrid.columns = [];
+  dataGrid.captureExport = undefined;
 
   root = document.createElement("div");
   document.body.appendChild(root);
@@ -214,6 +223,101 @@ afterEach(() => {
 });
 
 describe("DocumentBrowser empty collection refresh entry (issue #8093)", () => {
+  it("preserves Extended JSON across all captured Mongo export pages", async () => {
+    backend.documentFindDocuments.mockResolvedValue(documentResult(1, 1, 1));
+    await mountBrowser();
+    const fetch = dataGrid.captureExport!()!;
+    backend.documentFindDocuments.mockClear();
+    const extended = [1, 2, 3].map((id) => ({ _id: { $oid: String(id).padStart(24, "0") }, value: { $numberLong: String(id) } }));
+    backend.documentFindDocuments.mockResolvedValueOnce({ ...documentResult(1, 2, 3), extended_documents: extended.slice(0, 2) });
+    backend.documentFindDocuments.mockResolvedValueOnce({ ...documentResult(3, 1, 3), extended_documents: extended.slice(2) });
+    const result = (await fetch()) as { mongo_copy_documents: unknown[]; rows: unknown[]; has_more: boolean };
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(2);
+    expect(result.rows).toHaveLength(3);
+    expect(result.mongo_copy_documents).toEqual(extended);
+    expect(result.has_more).toBe(false);
+    expect(backend.closeQuerySession).not.toHaveBeenCalled();
+  });
+
+  it.each(["resolve", "reject"] as const)("waits for captured Elasticsearch cursor cleanup (%s)", async (completion) => {
+    backend.getConfig.mockReturnValue({ id: "mongo-1", name: "ES", db_type: "elasticsearch" });
+    backend.documentFindDocuments.mockResolvedValue(documentResult(1, 1, 1));
+    await mountBrowser("elasticsearch");
+    const fetch = dataGrid.captureExport!()!;
+    backend.documentFindDocuments.mockClear();
+    backend.documentFindDocuments.mockResolvedValueOnce({ ...documentResult(1, 2, 3), next_cursor: "export-cursor" });
+    backend.documentFindDocuments.mockResolvedValueOnce(documentResult(3, 1, 3));
+    let close!: () => void;
+    let fail!: (error: Error) => void;
+    backend.closeQuerySession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          close = resolve;
+          fail = reject;
+        }),
+    );
+    let settled = false;
+    const pending = fetch()
+      .catch((error) => error)
+      .finally(() => {
+        settled = true;
+      });
+    await vi.waitFor(() => expect(backend.closeQuerySession).toHaveBeenCalledWith("mongo-1", "test", "export-cursor"));
+    expect(settled).toBe(false);
+    if (completion === "resolve") close();
+    else fail(new Error("cursor close reply lost"));
+    const result = await pending;
+    if (completion === "resolve") expect(result).toMatchObject({ rows: expect.any(Array), has_more: false });
+    else expect(result).toMatchObject({ status: "unknown" });
+  });
+
+  it.each(["resolve", "reject"] as const)("waits for a captured document request after cancellation (%s)", async (completion) => {
+    backend.documentFindDocuments.mockResolvedValue(documentResult(1, 1, 1));
+    await mountBrowser();
+    const fetch = dataGrid.captureExport!()!;
+    backend.documentFindDocuments.mockClear();
+    let resolveRead!: (value: unknown) => void;
+    let rejectRead!: (error: Error) => void;
+    backend.documentFindDocuments.mockImplementationOnce(
+      () =>
+        new Promise((resolve, reject) => {
+          resolveRead = resolve;
+          rejectRead = reject;
+        }),
+    );
+    const controller = new AbortController();
+    const pending = fetch(undefined, { signal: controller.signal }).catch((error) => error);
+    await vi.waitFor(() => expect(backend.documentFindDocuments).toHaveBeenCalledOnce());
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    controller.abort();
+    await flushUi();
+    expect(settled).toBe(false);
+    if (completion === "resolve") resolveRead(documentResult(1, 2, 4));
+    else rejectRead(new Error("transport lost"));
+    expect(await pending).toMatchObject({ status: completion === "resolve" ? "cancelled" : "unknown" });
+    expect(backend.documentFindDocuments).toHaveBeenCalledOnce();
+    expect(backend.cancelQuery).not.toHaveBeenCalled();
+  });
+
+  it("keeps a captured export bound to its original database and collection", async () => {
+    backend.documentFindDocuments.mockResolvedValue(documentResult(1, 1, 1));
+    const props = reactive({ connectionId: "mongo-1", database: "test", collection: "docs", databaseType: "mongodb" as const });
+    app = createApp({ render: () => h(DocumentBrowser, props) });
+    app.mount(root!);
+    await flushUi();
+    const fetch = dataGrid.captureExport!()!;
+    props.database = "other";
+    props.collection = "private_docs";
+    await flushUi();
+    backend.documentFindDocuments.mockClear();
+    await fetch();
+    expect(backend.documentFindDocuments).toHaveBeenCalledOnce();
+    expect(backend.documentFindDocuments.mock.calls[0]!.slice(0, 3)).toEqual(["mongo-1", "test", "docs"]);
+  });
+
   it("still reports non-empty columns for a collection that has never returned any document", async () => {
     backend.documentFindDocuments.mockResolvedValueOnce(documentResult(1, 0, 0));
 

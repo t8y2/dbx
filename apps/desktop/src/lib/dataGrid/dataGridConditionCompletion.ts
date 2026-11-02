@@ -52,7 +52,10 @@ export function dataGridConditionColumnOptions(columns: readonly DataGridConditi
   // Oracle-family identifier quoting needs the completion apply dialect; the
   // CodeMirror syntax dialect has no Oracle entry and falls back to MySQL,
   // which never quotes, so case-sensitive columns would insert unresolvable.
-  const dialect = databaseType !== undefined && ORACLE_COMPAT_IDENTIFIER_DATABASES.has(databaseType) ? "oracle" : codeMirrorSqlDialect(databaseType);
+  // ClickHouse needs its own quoting dialect for the same reason: the
+  // CodeMirror fallback is MySQL, whose bare pattern permits non-ASCII
+  // characters that ClickHouse rejects (#13687).
+  const dialect = databaseType !== undefined && ORACLE_COMPAT_IDENTIFIER_DATABASES.has(databaseType) ? "oracle" : databaseType === "clickhouse" ? "clickhouse" : codeMirrorSqlDialect(databaseType);
   return columns.map((column) => {
     const name = typeof column === "string" ? column : column.name;
     const insertText = quoteSqlIdentifier(name, dialect);

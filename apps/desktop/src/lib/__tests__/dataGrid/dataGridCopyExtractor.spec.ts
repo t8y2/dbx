@@ -168,4 +168,10 @@ describe("data-grid extractor options", () => {
     expect(normalizeVisibleDataGridCopyExtractors(["php", "php", "unknown", "csv"])).toEqual(["csv", "php"]);
     expect(normalizeVisibleDataGridCopyExtractors([])).toEqual([]);
   });
+  it("keeps the two-row header format through normalization (#13305)", () => {
+    const normalized = normalizeDataGridExtractorOptions({ extractor: "tsv-with-headers", dsv: { headerFormat: "name-and-description-two-rows" } });
+    expect(normalized.dsv.headerFormat).toBe("name-and-description-two-rows");
+    const rejected = normalizeDataGridExtractorOptions({ extractor: "tsv", dsv: { headerFormat: "made-up" } });
+    expect(rejected.dsv.headerFormat).toBe("name");
+  });
 });

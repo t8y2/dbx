@@ -2,6 +2,7 @@ import { nextTick } from "vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { requestDetachedTableOpen } from "@/lib/tabs/detachedTableOpen";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import type { TreeNode } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
@@ -14,6 +15,7 @@ import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { buildTableSelectSql, requiresEagerTableMetadataForDataOpen } from "@/lib/table/tableSelectSql";
 import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { physicalTablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { canActivateExistingDataTableTab } from "@/lib/tabs/dataTabActivation";
@@ -195,6 +197,7 @@ export function useSidebarDataOpenRuntime() {
       tab.resultSortMode = undefined;
       tab.resultLocalSortOriginalRows = undefined;
       tab.resultLocalSortOriginalLargeValueCells = undefined;
+      tab.resultLocalSortOriginalRawKeyCells = undefined;
       tab.resultLocalSortOriginalMongoDocuments = undefined;
       tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
       tab.resultSortedSql = undefined;
@@ -266,6 +269,7 @@ export function useSidebarDataOpenRuntime() {
     // 接管该 tab：登记本次导航代次，作废在途的 openTableTarget/openData 旧代次
     // ——旧导航即使目标身份相同（同表不同 whereInput）也不得再落地
     const navigationToken = beginDataTabNavigation(tabId);
+    const ownsNavigation = () => isCurrentDataTabNavigation(tabId, navigationToken) && (request?.isCurrent() ?? true) && options.isCurrent?.() !== false;
 
     // Cancel any previous execution on this tab before starting a new one
     const existingTab = queryStore.tabs.find((t) => t.id === tabId);
@@ -274,14 +278,12 @@ export function useSidebarDataOpenRuntime() {
       logPhase("previous-execution-cancelled", { tabId });
       // 取消等待期间可能有更晚的导航（openTableTarget/openData）接管本 tab：
       // 本代次已作废，不得再写占位元数据/executionId 覆盖新导航
-      if (!isCurrentDataTabNavigation(tabId, navigationToken) || options.isCurrent?.() === false) {
+      if (!ownsNavigation()) {
         logPhase("superseded-during-cancel", { tabId });
+        endDataTabNavigation(tabId, navigationToken);
         return;
       }
     }
-    // 取消窗口之后由 executionId 比对（isActive）保护，代次使命完成即注销；
-    // 已作废的旧 token 不因删除而复活（比对按 token 同一性）
-    endDataTabNavigation(tabId, navigationToken);
 
     const openDataId = uuid();
     // Clear previous result so DataGrid doesn't show its internal loading overlay (without stop button)
@@ -334,6 +336,13 @@ export function useSidebarDataOpenRuntime() {
       if (pendingTab) pendingTab.tableMetaPending = true;
     }
     queryStore.setExecutingWithId(tabId, openDataId);
+    // #13308: with the detached-open setting on, the freshly opened table moves
+    // into its own window once the first load settles. Ask only after the reused
+    // tab's previous result is cleared and this load is scheduled, so a stale
+    // errored result cannot satisfy the settle check before the reload starts.
+    if (settingsStore.editorSettings.openTablesInDetachedWindow) {
+      requestDetachedTableOpen(() => queryStore.tabs.find((entry) => entry.id === tabId));
+    }
     request?.registerCancel(async () => {
       const current = queryStore.tabs.find((item) => item.id === tabId);
       if (current?.isExecuting && current.executionId === openDataId) {
@@ -350,7 +359,21 @@ export function useSidebarDataOpenRuntime() {
     await nextTick();
 
     // Helper to check if this openData call is still active (not superseded by a newer click)
-    const isActive = () => (request?.isCurrent() ?? true) && queryStore.tabs.find((t) => t.id === tabId)?.executionId === openDataId;
+    const isActive = () => ownsNavigation() && queryStore.tabs.find((t) => t.id === tabId)?.executionId === openDataId;
+
+    // 执行发布后的结果身份：executeTabSql 启动即把 tab.executionId 换成其内部
+    // 执行 id，此后 isActive 不再可用。执行后的错误落地改按"本流程发布的
+    // 结果仍在 tab 上"判定，而不是仅靠导航 token——导航 token 识别不了
+    // 同页签新手动执行对 executionId 的替换（#13007 复审 P1）。
+    let publishedTab: (typeof queryStore.tabs)[number] | undefined;
+    let publishedResult: (typeof queryStore.tabs)[number]["result"];
+    let publishedResultGeneration: (typeof queryStore.tabs)[number]["resultViewGeneration"];
+    let ownsPublishedResult = false;
+    const stillOwnsPublishedResult = () => {
+      if (!ownsPublishedResult) return false;
+      const current = queryStore.tabs.find((item) => item.id === tabId);
+      return !!current && ownsNavigation() && current === publishedTab && !current.isExecuting && current.executionId === undefined && current.result === publishedResult && current.resultViewGeneration === publishedResultGeneration;
+    };
 
     try {
       openDataLog("info", "ensure-connected:start", { traceId, elapsed: elapsed() });
@@ -401,28 +424,33 @@ export function useSidebarDataOpenRuntime() {
       const loadedTableMeta = cachedTableMeta ?? queryStore.tabs.find((item) => item.id === tabId)?.tableMeta;
       const columns = loadedTableMeta?.columns ?? [];
       const primaryKeys = loadedTableMeta?.primaryKeys ?? [];
-      const defaultSort = resolveTableDefaultSort(settingsStore.editorSettings, effectiveDbType, loadedTableMeta?.physicalPrimaryKeys ?? physicalTablePrimaryKeys(columns), connectionStore.connectionIdentifierQuote?.(node.connectionId));
+      const defaultSort = resolveTableDefaultSort(settingsStore.editorSettings, effectiveDbType, loadedTableMeta?.physicalPrimaryKeys ?? physicalTablePrimaryKeys(columns, undefined, effectiveDbType), connectionStore.connectionIdentifierQuote?.(node.connectionId));
       const defaultOrderBy = defaultSort.orderBy;
-      const includeRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableType);
-      const sql = await buildTableSelectSql({
-        databaseType: effectiveDbType,
-        driverProfile: config?.driver_profile || (config?.db_type === "gbase8s" ? "gbase8s" : undefined),
-        serverVersion: connectionStore.getConfig(node.connectionId)?.database_info?.productVersion,
-        identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
-        schema: connectionTableSqlSchema(config, tableSchema),
-        database: node.database,
-        tableName: node.label,
-        tableType,
-        catalog: node.catalog,
-        columns: columns.map((column) => column.name),
-        primaryKeys,
-        ...tableDataLargeValuePreviewOptions(effectiveDbType, columns, primaryKeys, limit),
-        includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
-        limit,
-        includeRowId,
-        injectDefaultTimeSeriesWhere: true,
-        orderBy: defaultOrderBy,
-      });
+      // #12647：首开路径同样尊重"该连接的行定位器已被引擎拒绝"的记忆，否则
+      // 被降级过的连接每次重新单击表都会再发一次注定失败的定位器查询。
+      const includeRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableType) && !rowIdLocatorUnsupported(node.connectionId);
+      const buildOpenSql = (withRowId: boolean) =>
+        buildTableSelectSql({
+          databaseType: effectiveDbType,
+          driverProfile: config?.driver_profile || (config?.db_type === "gbase8s" ? "gbase8s" : undefined),
+          serverVersion: connectionStore.getConfig(node.connectionId)?.database_info?.productVersion,
+          identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
+          schema: connectionTableSqlSchema(config, tableSchema),
+          database: node.database,
+          tableName: node.label,
+          tableType,
+          catalog: node.catalog,
+          columns: columns.map((column) => column.name),
+          primaryKeys,
+          ...tableDataLargeValuePreviewOptions(effectiveDbType, columns, primaryKeys, limit, config?.db_type === "jdbc"),
+          includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+          limit,
+          includeRowId: withRowId,
+          injectDefaultTimeSeriesWhere: true,
+          orderBy: defaultOrderBy,
+        });
+      const sql = await buildOpenSql(includeRowId);
+      let finalExecutedSql = sql;
       // SQL 构建是异步后端调用：期间更晚的导航（openData/openTableTarget）
       // 接管会替换 executionId，旧流程不得再覆盖 SQL/启动查询
       if (!isActive()) {
@@ -443,14 +471,59 @@ export function useSidebarDataOpenRuntime() {
       logPhase("sql-updated", { tabId });
 
       openDataLog("info", "execute:start", { traceId, tabId, elapsed: elapsed() });
-      await queryStore.executeTabSql(tabId, sql, {
-        sourceTraceId: traceId,
-        skipEnsureConnected: true,
-        pagination: { limit, offset: 0 },
-      });
+      const executeOptions = { sourceTraceId: traceId, skipEnsureConnected: true, pagination: { limit, offset: 0 } };
+      let openExecuteError: unknown = undefined;
+      let openExecutePublished: boolean | undefined;
+      let landedOpenExecuteError = false;
+      try {
+        openExecutePublished = await queryStore.executeTabSql(tabId, sql, executeOptions);
+      } catch (error) {
+        openExecuteError = error;
+      }
+      // 行定位器被引擎拒绝时的降级（#12647）：首开路径与 reload 路径保持同一
+      // 降级语义——去掉定位器重试一次，成功后才记住该连接；失败不更新能力
+      // 标记，让真实的服务端错误可见。执行失败既可能以异常上抛，也可能落成带
+      // execution_error 的结果，两种形态都归一到结果上再判定。
+      if (openExecuteError !== undefined) {
+        const failedTab = queryStore.tabs.find((item) => item.id === tabId);
+        if (ownsNavigation() && failedTab && openedTab && failedTab === openedTab && !failedTab.isExecuting && !failedTab.result) {
+          queryStore.setErrorResult(tabId, openExecuteError);
+          landedOpenExecuteError = true;
+        }
+      }
+      const failedTab = queryStore.tabs.find((item) => item.id === tabId);
+      if (openExecutePublished === false || !ownsNavigation() || !failedTab || !openedTab || failedTab !== openedTab || failedTab.isExecuting) return;
+      // 只有能证明当前结果是本流程发布/归一的，才把它登记为本流程的结果身
+      // 份：执行以异常收场且上方的 setErrorResult 没有落地（结果已被占用，
+      // 可能属于已完成的同页签新执行）时，本流程不得再基于当前结果降级或
+      // 落地错误。执行成功发布（true）或结果为空时当前结果即本流程的。
+      if (openExecuteError !== undefined && !landedOpenExecuteError) return;
+      publishedTab = failedTab;
+      publishedResult = failedTab.result;
+      publishedResultGeneration = failedTab.resultViewGeneration;
+      ownsPublishedResult = true;
+      if (shouldRetryWithoutRowIdLocator(sql, publishedResult)) {
+        try {
+          const fallbackSql = await buildOpenSql(false);
+          if (!stillOwnsPublishedResult()) return;
+          queryStore.updateSql(tabId, fallbackSql);
+          const fallbackPublished = await queryStore.executeTabSql(tabId, fallbackSql, executeOptions);
+          const retryTab = queryStore.tabs.find((item) => item.id === tabId);
+          if (fallbackPublished === false || !ownsNavigation() || !retryTab || retryTab !== openedTab || retryTab.isExecuting) {
+            return;
+          }
+          finalExecutedSql = fallbackSql;
+          if (shouldKeepRowIdLocatorDisabled(retryTab.result)) markRowIdLocatorUnsupported(node.connectionId);
+        } catch {
+          // Fallback execution keeps its own error result visible and must not
+          // change the connection capability memory.
+        }
+      } else if (openExecuteError !== undefined) {
+        throw openExecuteError;
+      }
       openDataLog("info", "execute:done", { traceId, tabId, elapsed: elapsed() });
       const sortedTab = queryStore.tabs.find((item) => item.id === tabId);
-      if ((request?.isCurrent() ?? true) && sortedTab && sortedTab === openedTab && sortedTab.sql === sql) {
+      if ((request?.isCurrent() ?? true) && sortedTab && sortedTab === openedTab && sortedTab.sql === finalExecutedSql) {
         applyTableDefaultSortResult(sortedTab, defaultSort, queryStore.sortTabResultLocally);
       }
       logPhase("execute-tab-sql", { tabId });
@@ -459,13 +532,20 @@ export function useSidebarDataOpenRuntime() {
         logPhase("metadata-started", { tabId, deferredForTransport: isNavicatMysqlTunnel ? "navicat_mysql" : "driver" });
       }
     } catch (e: any) {
-      if (!isActive()) {
+      // 准备阶段（连接/元数据/SQL 构建）的失败仍按执行身份判定所有权：同页签
+      // 的新手动执行会替换 executionId，导航 token 看不见这次替换，旧流程不得
+      // 用 setErrorResult 覆盖新执行的执行状态。执行已发布后的失败（上面的
+      // openExecuteError 重抛、结果后处理）改按结果身份判定。
+      const ownsErrorLanding = ownsPublishedResult ? stillOwnsPublishedResult() : isActive();
+      if (!ownsErrorLanding) {
         logPhase("superseded-after-error", { tabId });
         return;
       }
       openDataLog("error", "error", { traceId, elapsed: elapsed(), error: e });
       logPhase("error", { tabId });
       queryStore.setErrorResult(tabId, e);
+    } finally {
+      endDataTabNavigation(tabId, navigationToken);
     }
   }
 

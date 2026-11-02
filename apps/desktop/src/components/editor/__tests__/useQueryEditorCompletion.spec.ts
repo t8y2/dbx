@@ -101,7 +101,7 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
     parent.remove();
   });
   const provide = (explicit = true) => completion.provideSqlCompletions(new CompletionContext(currentView.state, currentView.state.selection.main.head, explicit));
-  return { props, currentView, view, store, settings, runtime, completion, provide, startCompletion };
+  return { props, currentView, view, store, settings, runtime, metadata, completion, provide, startCompletion };
 }
 
 describe.each([false, true])("OceanBase standalone routine completion (semantic=%s)", (semanticCompletionEnabled) => {
@@ -306,6 +306,39 @@ describe.each([false, true])("Snowflake namespace completion (semantic=%s)", (se
     props.modelValue = quotedSql;
     currentView.dispatch({ changes: { from: 0, to: currentView.state.doc.length, insert: quotedSql }, selection: { anchor: quotedSql.length } });
     expect((await provide())?.options.map((option) => option.label)).toEqual(["QUOTED_TABLE"]);
+  });
+
+  it("drops an in-flight table response after the completion cache resets", async () => {
+    const { metadata, store, props } = createHarness({ database: "a", modelValue: "SELECT * FROM " });
+    let resolveOld!: (tables: SqlCompletionTable[]) => void;
+    store.listCompletionTables.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+    );
+    const old = metadata.listCompletionTablesWithLatencyBudget("connection", "a", "", 100);
+    await Promise.resolve();
+
+    props.database = "b";
+    metadata.refreshCompletionCache();
+    store.listCompletionTables.mockResolvedValue([{ name: "NEW_TABLE", database: "b" }]);
+    resolveOld([{ name: "OLD_TABLE", database: "a" }]);
+    await old;
+
+    expect(metadata.cachedTables.map((table) => table.name)).not.toContain("OLD_TABLE");
+    const tables = await metadata.listCompletionTablesWithLatencyBudget("connection", "b", "", 100);
+    expect(tables.map((table) => table.name)).toContain("NEW_TABLE");
+  });
+
+  it("prefetches the active database completion tables", async () => {
+    const { metadata, store } = createHarness({ database: "shop" });
+    store.listCompletionTables.mockResolvedValue([{ name: "TIS_ORDER", database: "shop" }]);
+
+    await metadata.prefetchCompletionTables();
+
+    expect(store.listCompletionTables).toHaveBeenCalledWith("connection", "shop", "", 500, undefined, false, undefined, undefined, { activateConnection: false });
+    expect(metadata.cachedTables.map((table) => table.name)).toContain("TIS_ORDER");
   });
 
   it.each([false, true])("preserves the quote-identifiers preference (%s) for mixed-case table insertion", async (quoteIdentifiers) => {
@@ -648,7 +681,8 @@ sf`,
       // synchronous snippet-only localResult.
       await provide(false);
       await new Promise((resolve) => setTimeout(resolve, 150));
-      expect(store.listCompletionColumns).toHaveBeenCalled();
+      const columnFetchArgs = store.listCompletionColumns.mock.calls[0];
+      expect(columnFetchArgs?.slice(0, 3)).toEqual(["connection", "demo", "users"]);
     } finally {
       vi.useFakeTimers();
     }
@@ -709,4 +743,55 @@ describe("quoted identifier completion results (issue #12008)", () => {
       vi.useFakeTimers();
     }
   }, 8000);
+});
+
+describe.each([false, true])("bare alias-dot column resolution (semantic=%s)", (semanticCompletionEnabled) => {
+  beforeEach(() => vi.useRealTimers());
+
+  const aliasDotSql = "SELECT * FROM users u WHERE u.";
+
+  it("fetches column metadata at a bare `alias.` position when nothing is cached yet (#12227 #12692)", async () => {
+    const { provide, store } = createHarness({ databaseType: "postgres", dialect: "postgres", modelValue: aliasDotSql }, undefined, semanticCompletionEnabled);
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "users" }]);
+    store.listCompletionColumns.mockResolvedValue([
+      { name: "id", table: "users" },
+      { name: "email", table: "users" },
+    ]);
+    const result = await provide(false);
+    const columnFetchArgs = store.listCompletionColumns.mock.calls[0];
+    expect(columnFetchArgs?.slice(0, 3)).toEqual(["connection", "demo", "users"]);
+    expect(result?.options.some((option) => option.label === "id")).toBe(true);
+  });
+
+  it("still serves cached columns synchronously at a bare `alias.` position without a remote fetch", async () => {
+    const { provide, store } = createHarness({ databaseType: "postgres", dialect: "postgres", modelValue: aliasDotSql }, undefined, semanticCompletionEnabled);
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "users" }]);
+    store.lookupLocalCompletionColumns.mockReturnValue([{ name: "id", table: "users" }]);
+    const result = await provide(false);
+    expect(result?.options.some((option) => option.label === "id")).toBe(true);
+    expect(store.listCompletionColumns).not.toHaveBeenCalled();
+  });
+
+  it("keeps an empty non-qualifier position from fetching metadata", async () => {
+    const { provide, store } = createHarness({ databaseType: "postgres", dialect: "postgres", modelValue: "SELECT * FROM users u WHERE " }, undefined, semanticCompletionEnabled);
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "users" }]);
+    await provide(false);
+    expect(store.listCompletionColumns).not.toHaveBeenCalled();
+  });
+
+  it("keeps schema-qualified table dots on the instant local table path", async () => {
+    const { provide, store } = createHarness({ databaseType: "postgres", dialect: "postgres", modelValue: "SELECT * FROM myschema." }, undefined, semanticCompletionEnabled);
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "users", schema: "myschema" }]);
+    const result = await provide(false);
+    expect(store.listCompletionTables).not.toHaveBeenCalled();
+    expect(result?.options.some((option) => option.label === "users")).toBe(true);
+  });
+
+  it("fetches schema-qualified column metadata at a bare `schema.table.` position", async () => {
+    const { provide, store } = createHarness({ databaseType: "postgres", dialect: "postgres", modelValue: "SELECT * FROM myschema.users WHERE myschema.users." }, undefined, semanticCompletionEnabled);
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "users", schema: "myschema" }]);
+    store.listCompletionColumns.mockResolvedValue([{ name: "id", table: "users", schema: "myschema" }]);
+    const result = await provide(false);
+    expect(result?.options.some((option) => option.label === "id")).toBe(true);
+  });
 });

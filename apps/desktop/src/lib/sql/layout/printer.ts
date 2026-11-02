@@ -213,7 +213,9 @@ function printRuleList(writer: Writer, items: AstNode[][], baseColumn: number, c
       writer.write(" ".repeat(alignment.aliasColumn - alignment.expression.length));
       writer.write(`${alignment.asKeyword} ${alignment.alias}`);
     } else {
-      printRuleElement(writer, itemNodes, baseColumn, ctx);
+      // An item's nested blocks and leading comments belong to its actual
+      // column, not the enclosing clause's keyword column (#13650).
+      printRuleElement(writer, itemNodes, writer.column, ctx);
     }
     if (comma === "after" && index < items.length - 1) writer.write(",");
   });
@@ -265,7 +267,7 @@ function printRuleElement(writer: Writer, nodes: AstNode[], baseColumn: number, 
   for (let index = 0; index < nodes.length;) {
     const node = nodes[index];
     if (node.type === "line_comment" || node.type === "block_comment" || node.type === "disable_comment") {
-      if (/[\r\n]/.test(node.precedingWhitespace)) writer.newline(baseColumn);
+      if (/[\r\n]/.test(node.precedingWhitespace) && writer.column !== baseColumn) writer.newline(baseColumn);
       else writer.space();
       writer.write(node.text);
       if (node.type !== "block_comment") writer.markLineComment();
@@ -328,8 +330,9 @@ function printRuleElement(writer: Writer, nodes: AstNode[], baseColumn: number, 
           writer.space();
           writer.write(keywordText(branch.thenKw, ctx));
         } else writer.write(keywordText(branch.elseKw, ctx));
-        writer.space();
-        printRuleElement(writer, branch.result, baseColumn + ctx.options.indentWidth, caseCtx);
+        if (inlineCase) writer.space();
+        else writer.newline(baseColumn + ctx.options.indentWidth * 2);
+        printRuleElement(writer, branch.result, inlineCase ? baseColumn : baseColumn + ctx.options.indentWidth * 2, caseCtx);
         printRuleComments(writer, branch.trailingComments, writer.column, ctx);
       }
       if (inlineCase) writer.space();

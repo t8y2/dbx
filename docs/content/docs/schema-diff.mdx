@@ -85,7 +85,7 @@ Options load dialect-specific defaults. Objects without reliable metadata or syn
 - Batch mode and table-name patterns
 - System-object visibility
 
-Filtering controls comparison scope, not permissions. Objects the current account cannot read do not appear.
+Filtering controls scope without granting permissions. Incomplete Oracle routine reads retain identified objects and issues; an unlisted object is not proven absent. Other metadata also remains limited by the account's visibility.
 
 ### Rename Detection
 
@@ -118,6 +118,20 @@ The final deployment page repeats the target server, database, schema, database 
 When the target is MySQL, deployment review also offers **Ignore foreign key checks**. It brackets the deployment script — and its rollback script — with `SET FOREIGN_KEY_CHECKS = 0` and `SET FOREIGN_KEY_CHECKS = 1`, so tables that reference each other can be dropped and recreated in any order. The option is off by default; it has no effect on other engines, which do not have the session variable.
 
 <Callout type="info">Run in transaction provides full rollback only when the target database and statements support transactional DDL. MySQL and other databases can implicitly commit DDL.</Callout>
+
+### Oracle Standalone Procedures and Functions
+
+Standalone `PROCEDURE` and `FUNCTION` objects on Oracle and OceanBase Oracle use a dedicated read and deployment path. Both endpoints must use the same product; Oracle-to-OceanBase conversion is not automatic. Packages, types, synonyms, and database links are outside this migration path.
+
+The routine list retains added, modified, removed, and equal objects. Select a row to compare or copy its original source. Incomplete reads and kind conflicts retain the readable text and reason without generating an executable operation. A failed read never establishes absence.
+
+In deployment review, edit each target draft in the existing editor and choose **Validate again**. Automatic adaptation changes only the declaration's target schema and outer delimiters, not schema references in the body. Validation resolves references from the final text against the target catalog and recalculates execution order. New objects use `CREATE` without replacing a competing name. Replacement and deletion also require complete incoming-caller visibility. **Refresh baseline, keep draft** retains drafts when the catalog has changed, so they can be reviewed and validated again.
+
+Automatic dependency analysis currently accepts scalar declarations, `NULL`, returns, assignments, resolvable routine calls, and single-table static `SELECT ... INTO`. Dynamic SQL, loops, exception blocks, and other unsupported syntax produce positioned issues. Correct the draft or remove the object from this selection; original-source viewing, copying, and ordinary source editing remain available.
+
+Execution records acknowledgment and readback separately for each object. Verification requires a terminal request, a matching definition, `VALID` status, and no compilation errors. Warnings remain visible. An acknowledged but `INVALID` object stops later steps and retains compiler coordinates. Correcting it creates a new approval for unfinished steps without replaying completed objects.
+
+Closing review stops only the next dispatch, not the current database request. Reopening the same comparison within the application process restores its drafts and records. For an unknown outcome, choose **Check original request** rather than retrying under a new ID; establish termination before another write. **Preview recovery script** prepares a separately confirmed DDL operation, not a transaction rollback. It rejects intervening target changes. Missing deleted grants or other recovery material leave the available definition copyable but block one-click restoration.
 
 ## Dialect Semantics
 
@@ -190,7 +204,7 @@ Delete synchronization is the highest-risk option. If target-local data is allow
 
 ## Known Boundaries
 
-- Dynamic SQL, procedure behavior, application code, and external ETL are outside schema comparison
+- Schema comparison does not establish equivalent dynamic SQL, routine runtime behavior, application code, or external ETL
 - Rename detection is a similarity suggestion, not a confirmed conclusion
 - Formatting differences can produce text changes with equivalent semantics
 - Data compare reads the selected scope and is not suitable for unfiltered huge tables

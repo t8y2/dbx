@@ -1,6 +1,6 @@
 import type { Command, EditorView, KeyBinding } from "@codemirror/view";
 import { shortcutToCodeMirrorKey, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
-import { isExecuteSqlShortcut, isExecuteSqlInNewResultTabShortcut, isExplainSqlShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isExecuteSqlShortcut, isExecuteAllSqlShortcut, isExecuteSqlInNewResultTabShortcut, isExplainSqlShortcut } from "@/lib/editor/keyboardShortcuts";
 
 const SAFARI_POST_COMPOSITION_KEY_WINDOW_MS = 100;
 
@@ -82,7 +82,7 @@ export function createQueryEditorExecutionShortcutHandler(options: { getShortcut
   return (event: KeyboardEvent) => {
     if (!event.repeat && !options.isExecuting?.()) return false;
     const shortcuts = options.getShortcuts();
-    const isExecution = isExecuteSqlShortcut(event, shortcuts) || isExecuteSqlInNewResultTabShortcut(event, shortcuts) || (options.enableExplainShortcut?.() && isExplainSqlShortcut(event, shortcuts));
+    const isExecution = isExecuteSqlShortcut(event, shortcuts) || isExecuteAllSqlShortcut(event, shortcuts) || isExecuteSqlInNewResultTabShortcut(event, shortcuts) || (options.enableExplainShortcut?.() && isExplainSqlShortcut(event, shortcuts));
     if (!isExecution) return false;
     event.preventDefault();
     event.stopPropagation();

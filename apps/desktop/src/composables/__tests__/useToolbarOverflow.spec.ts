@@ -98,7 +98,7 @@ describe("useToolbarOverflow", () => {
     const { rootRef, tierRef } = createHarness([() => flag.value]);
     let contentGrew = false;
 
-    rootRef.value = fakeRow(200, (tier) => (tier >= 1 ? 180 : contentGrew ? 260 : 180), tierRef);
+    rootRef.value = fakeRow(200, (tier) => (tier >= 1 ? 140 : contentGrew ? 260 : 140), tierRef);
     await flush();
     expect(tierRef.value).toBe(0);
 
@@ -109,6 +109,13 @@ describe("useToolbarOverflow", () => {
     flag.value += 1;
     await flush();
     expect(tierRef.value).toBe(1);
+
+    // The conditional control disappeared: content shrunk back to where tier 0
+    // fits with ample slack without the pane resizing.
+    contentGrew = false;
+    flag.value += 1;
+    await flush();
+    expect(tierRef.value).toBe(0);
   });
 
   it("starts from the full layout when a row re-attaches instead of inheriting a stale tier", async () => {

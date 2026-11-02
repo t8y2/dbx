@@ -1,6 +1,6 @@
 ---
 title: FAQ
-description: Frequently asked questions about DBX, including where connection data is stored and how to customize the data directory.
+description: Frequently asked questions about DBX, including where connection data is stored, how to customize the data directory, and what the notes file connection setting is for.
 ---
 
 <Callout type="info">Common questions about DBX Desktop. This page starts with data storage and the data directory, and more entries will be added over time.</Callout>
@@ -35,15 +35,17 @@ description: Frequently asked questions about DBX, including where connection da
 
 ## Linux Window Flickering or Missing Content
 
-The Linux main window draws a rounded, shadowed floating frame on GNOME when a compositing manager is running. On other desktops (KDE, XFCE, Cinnamon, ...) it uses an opaque background by default to avoid transparent-window compositing problems with some graphics driver and WebKitGTK combinations. Neither mode disables GPU acceleration or changes the Wayland/X11 backend.
+The Linux main window draws a rounded, shadowed floating frame on GNOME in a Wayland session when a compositing manager is running. GNOME on X11 ("GNOME on Xorg") and other desktops (KDE, XFCE, Cinnamon, ...) use an opaque background by default to avoid transparent-window compositing problems with some graphics driver and WebKitGTK combinations. Neither mode disables GPU acceleration or changes the Wayland/X11 backend.
 
-The default can be overridden with an environment variable. To force the floating frame on another desktop:
+If the window flickers, turn off **Settings → Appearance → Window transparency**, apply the change, then fully quit DBX (including its tray process) and restart. The switch is on by default and follows the desktop detection rules.
+
+Environment overrides take priority over the setting. To force the floating frame on X11 or another desktop:
 
 ```bash
 DBX_LINUX_FLOATING_FRAME=1 dbx
 ```
 
-To force the opaque window on GNOME, for example if you see flickering, missing content or redraws only after resizing, quit DBX completely, including its tray process, and restart with `DBX_LINUX_FLOATING_FRAME=0 dbx`. The frame is never used without a compositing manager. For AppImage installations, replace `dbx` with the actual AppImage path.
+To force the opaque window on GNOME Wayland, for example if you see flickering, missing content or redraws only after resizing, quit DBX completely, including its tray process, and restart with `DBX_LINUX_FLOATING_FRAME=0 dbx`. The frame is never used without a compositing manager. For AppImage installations, replace `dbx` with the actual AppImage path.
 
 If the default opaque window still has problems, include the DBX version, installation format, KDE/Plasma version, Wayland/X11 session type, graphics hardware and driver details, and system WebKitGTK version in your report.
 
@@ -60,3 +62,13 @@ Save and reconnect. The native driver converts query results, SQL and bound para
 Use these parameters only when the declared database encoding differs from its text bytes. The server must report `server_encoding=LATIN1` and `standard_conforming_strings=on`. On reads, values that cannot be converted retain their original text and produce a query warning; valid values still decode normally. Byte-truncated masked values, such as half a multibyte character followed by asterisks, do not abort the whole query and are never replaced with NULL or replacement characters. Writes still reject characters that the selected encoding cannot represent. Connections without these parameters use normal PostgreSQL encoding conversion.
 
 COPY imports support DBX's default text format; transfers use the row-based INSERT path. Use row-based import/export for raw COPY output or other COPY formats.
+
+## What is the "Notes file" connection setting?
+
+The **Notes file** setting (config key `docs_notes_path`) is where the [Database documentation](/en/docs/database-docs) feature stores its notes. You'll find it in the **Advanced** section of the connection form.
+
+- Leave it empty and notes live in the DBX app data directory, one file per connection, with no setup.
+- Point it at a file in your repository (for example `docs/dbx-docs.json`) to commit table and column notes with your code and review schema documentation in pull requests.
+- The notes themselves are written in the viewer that opens when you right-click a table in the object browser and choose **Documentation**. They support Markdown and colour-coded groups, autosave, and the AI assistant reads the same file as descriptions for the matching tables and columns.
+
+See [Database documentation](/en/docs/database-docs) for the file format, warning behaviour, and DBML export.

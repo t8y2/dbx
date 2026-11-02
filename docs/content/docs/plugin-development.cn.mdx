@@ -145,8 +145,24 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 - `host.data:read` 允许 `window.dbxPlugin.queryData` 在用户授权给插件的连接上执行一条只读 SQL（见 [只读数据查询](#只读数据查询)）。每个连接都需要用户同意；它不会授予写入、DDL 或重连。
 - `host.connections:read` 允许通过 `window.dbxPlugin.getConnections()` 或 `window.dbxPlugin.connections.list()` 获取当前所有已配置连接的只读脱敏信息（见 [连接信息读取](#连接信息读取)）。
 - `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 8 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
+- `host.openUrl:http(s)://host[:port]` 允许请求打开指定站点，最多 8 个精确 origin；与网络权限独立，不允许路径、凭据、通配符或尾部斜杠。使用标准化的 `URL.origin`（默认端口应省略）；IPv6 地址使用方括号。
+
 - `backend.transport` 默认是 `stdio-jsonl`；需要二进制帧时使用 `stdio-framed`，并同时声明 `host.binary`。
 - `backend.executable`、`ui.root` 和 `ui.entry` 必须指向包内文件；带原生后端的包必须为每个目标平台提供对应可执行文件。
+
+### 打开外部网址
+
+在 manifest 中声明例如 `"host.openUrl:https://dbxio.com"`，再调用：
+
+```js
+if (window.dbxPlugin.capabilities?.openUrl) {
+  const { opened } = await window.dbxPlugin.openUrl("https://dbxio.com/cn/docs/plugins");
+}
+```
+
+每次请求都由 DBX 显示插件名称和完整目标网址，只有用户在宿主确认后才打开。Web / Docker 通过宿主的可信链接点击打开新标签页，桌面端使用系统浏览器；取消或关闭工作台返回 `{ opened: false }`，非法网址或未声明站点会拒绝请求。同一工作台同时只接受一个待确认请求。`opened: true` 表示已发起打开，不代表目标网页成功加载。
+
+接口只接受不带用户名、密码的 HTTP / HTTPS URL，最长 4,096 字符；不支持 `javascript:`、`file:` 等协议。iframe 仍保留 `sandbox="allow-scripts"`，不会获得任意弹窗、顶层导航或网络访问能力。旧宿主可能在安装时拒绝新权限；宿主或 SDK Dev Host 没有 `capabilities.openUrl` 时应隐藏入口，不要探测调用。
 
 ### Connection Provider
 
@@ -633,8 +649,8 @@ const offDrag = fileTransfer.onDragState((active) => showDropOverlay(active));
 | `beginSave({ name, contentType?, size? })` | 原生保存对话框 + 写句柄；返回 `{ handleId, chunkBytes }`，用户取消时为 `null`。                                                                                                                                                                                                                                                                                                                                                                              |
 | `write(handleId, offset, data)`            | 写入一个分块（二进制 transfer 或 base64）；返回 `{ written, nextOffset }`。                                                                                                                                                                                                                                                                                                                                                                                  |
 | `finish(handleId)` / `cancel(handleId)`    | 冲洗并关闭写句柄 / 丢弃任意句柄。                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `onDrop(fn)`                               | 拖入本工作台的文件以读句柄送达；拖入文件夹会被展开为其中包含的文件（`.git` 等点开头文件与目录会被跳过），每个文件额外携带 `relativePath`（以 `/` 分隔、以拖入文件夹自身名字开头的路径，如 `folder/nested/a.csv`），可用于还原拖入的目录结构，也能区分不同拖入根目录下的同名文件。监听器签名为 `(files, { dropId, truncated })`：`dropId` 标识本次拖入的整组条目（取消与进度记账的分组键），`truncated` 为 `true` 表示展开因 2000 文件或 8 层深度上限被截断。 |
-| `onDragState(fn)`                          | 是否有系统拖拽悬在本工作台上方；用它驱动拖放遮罩。                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `onDrop(fn)`                               | 拖入本工作台的文件以读句柄送达；拖入文件夹会被展开为其中包含的文件（`.git` 等点开头文件与目录会被跳过），每个文件额外携带 `relativePath`（以 `/` 分隔、以拖入文件夹自身名字开头的路径，如 `folder/nested/a.csv`），可用于还原拖入的目录结构，也能区分不同拖入根目录下的同名文件。监听器签名为 `(files, { dropId, truncated, position })`：`dropId` 标识本次拖入的整组条目（取消与进度记账的分组键），`truncated` 为 `true` 表示展开因 2000 文件或 8 层深度上限被截断，`position` 为 drop 落点相对于 iframe 视口内的 CSS 坐标 `{ x, y }`。 |
+| `onDragState(fn)`                          | 是否有系统拖拽悬在本工作台上方；用它驱动拖放遮罩或高亮悬停元素。监听器签名为 `(active, position)`：`active` 为布尔值，`position` 为光标当前相对于 iframe 视口内的 CSS 坐标 `{ x, y }`（拖拽移出或结束时为 `undefined`）。 |
 
 桌面端与网页端的行为差异：请以 init 消息里 additive 的 `capabilities.fileTransfer` 标志位（`pick`、`beginSave`、`read`、`drop`、`folderExpansion`）做能力探测，不要靠试调用。桌面端 `pick` / `beginSave` 走原生对话框、`onDrop` 接收系统拖放（句柄由宿主惰性打开，读时分块流式，因此超大文件夹与大文件都不会占满句柄；选取文件数超过共享句柄池时自动降级为惰性条目，不会静默丢弃）。网页端 `pick` 回退到浏览器文件选择器、`beginSave` 回退为内存缓冲加浏览器下载、`onDrop` / `onDragState` 不会触发（`drop`/`folderExpansion` 为 `false`）、句柄也没有 `relativePath`。`onDrop` 只在拖放落点位于本插件工作台区域内时触发；落点在宿主其他区域时保持宿主自身的行为。
 

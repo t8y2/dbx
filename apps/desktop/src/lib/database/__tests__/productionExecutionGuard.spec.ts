@@ -241,3 +241,29 @@ describe("production context execution guard (non-SQL)", () => {
     expect(useProductionSafetyStore().pending).toBeUndefined();
   });
 });
+
+describe("background SQL safety for data compare", () => {
+  beforeEach(() => setActivePinia(createPinia()));
+
+  it("retains production confirmation for a large script referencing another database", async () => {
+    const sql = "/*" + "x".repeat(70_000) + "*/ UPDATE prod_app.users SET active = 1 WHERE id = 1";
+    const execute = vi.fn().mockResolvedValue("done");
+    const pending = executeWithProductionSqlGuard({ connection: connection(), database: "scratch", sql, analyzeInBackground: true, execute });
+    await vi.waitFor(() => expect(useProductionSafetyStore().pending?.sql).toBe(sql));
+    expect(execute).not.toHaveBeenCalled();
+    useProductionSafetyStore().cancel();
+    await expect(pending).resolves.toBeUndefined();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("retains read-only unlocking for a large generated script", async () => {
+    const sql = "/*" + "x".repeat(70_000) + "*/ UPDATE users SET active = 1 WHERE id = 1";
+    const execute = vi.fn();
+    const pending = executeWithProductionSqlGuard({ connection: connection({ read_only: true }), database: "scratch", sql, analyzeInBackground: true, execute });
+    await vi.waitFor(() => expect(useReadOnlyUnlockStore().pending?.connectionId).toBe("conn-1"));
+    expect(execute).not.toHaveBeenCalled();
+    useReadOnlyUnlockStore().cancel();
+    await expect(pending).resolves.toBeUndefined();
+    expect(execute).not.toHaveBeenCalled();
+  });
+});

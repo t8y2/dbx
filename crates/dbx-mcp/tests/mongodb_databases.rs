@@ -2,7 +2,8 @@ use std::{sync::Arc, time::Duration};
 
 use dbx_core::{
     models::connection::ConnectionConfig,
-    storage::{McpConnectionPolicy, McpDatabaseScope, McpGlobalPolicy, Storage},
+    persistence::test_storage,
+    storage::{McpConnectionPolicy, McpDatabaseScope, McpGlobalPolicy},
 };
 use dbx_mcp::{DbxMcpServer, LocalBackend, McpScope};
 use rmcp::{
@@ -44,7 +45,7 @@ async fn list_databases(
 ) -> CallToolResult {
     let directory = tempdir().expect("temporary data directory");
     let db_path = directory.path().join("dbx.db");
-    let storage = Storage::open(&db_path).await.expect("open storage");
+    let storage = test_storage::open(&db_path).await.expect("open isolated storage");
     storage.save_connections(&[connection]).await.expect("save connection");
     storage
         .save_mcp_global_policy(&McpGlobalPolicy {
@@ -171,7 +172,7 @@ for line in sys.stdin:
     )
     .expect("write Agent fixture");
     let storage_path = directory.path().join("dbx.db");
-    let storage = Storage::open(&storage_path).await.expect("open storage");
+    let storage = test_storage::open(&storage_path).await.expect("open isolated storage");
     let mut connection = mongo_connection();
     connection.driver_profile = Some("mongodb-legacy".to_string());
     connection.keepalive_interval_secs = 0;

@@ -66,6 +66,20 @@ pub async fn list_tables_filtered(
     Ok(tables)
 }
 
+/// Sidebar table-tree pagination: count top-level relations and include the
+/// partitions below each returned root (PostgreSQL-family behavior).
+pub async fn list_table_roots_page_filtered(
+    pool: &Pool,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<TableInfo>, String> {
+    let mut tables = db::postgres::list_table_roots_page_filtered(pool, schema, filter, limit, offset, false).await?;
+    annotate_external_tables(pool, schema, &mut tables).await;
+    Ok(tables)
+}
+
 pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, String> {
     let mut objects = db::postgres::list_objects(pool, schema, true, true, false).await?;
     let names = objects.iter().map(|object| object.name.clone()).collect::<Vec<_>>();

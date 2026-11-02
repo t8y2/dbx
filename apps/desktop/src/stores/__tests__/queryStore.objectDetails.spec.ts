@@ -13,6 +13,7 @@ const backend = vi.hoisted(() => ({
   buildEditableObjectSource: vi.fn(async (input: { source: string }) => input.source),
   executeQuery: vi.fn(),
   executeMulti: vi.fn(),
+  analyzeEditableQueryEditability: vi.fn(async () => ({ editable: false, reason: "computed-columns" })),
   prepareQueryPaginationExecutionPlan: vi.fn(async (input: { sql: string }) => ({ sqlToExecute: input.sql })),
   checkConnectionHealth: vi.fn(async () => undefined),
   saveOpenTabsState: vi.fn(async () => {}),
@@ -105,5 +106,7 @@ describe("object detail identity through the real source store", () => {
     const outcome = await execution.tryExecute();
     expect(outcome, JSON.stringify(outcome)).toMatchObject({ status: "started", ok: true });
     expect(backend.executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT 1 FROM DUAL", "APP", expect.any(String), expect.any(Object));
+    await vi.waitFor(() => expect(tab.queryEditabilityReason).toBe("computed-columns"));
+    expect(backend.analyzeEditableQueryEditability).toHaveBeenCalledWith("SELECT 1 FROM DUAL");
   });
 });

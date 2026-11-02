@@ -9,7 +9,7 @@ import java.sql.SQLTransientConnectionException;
 import java.util.Locale;
 import java.util.concurrent.CancellationException;
 
-final class AgentRpcError extends RuntimeException {
+public final class AgentRpcError extends RuntimeException {
     private final String category;
     private final boolean retryable;
     private final String disposition;
@@ -18,6 +18,10 @@ final class AgentRpcError extends RuntimeException {
     private final String sqlState;
     private final Integer vendorCode;
     private final String exceptionClass;
+
+    public static AgentRpcError requestRejected(String message) {
+        return new AgentRpcError(message, "protocol", false, "keep", "request", "not_started", null, null, null, null);
+    }
 
     private AgentRpcError(
         String message,
@@ -124,6 +128,13 @@ final class AgentRpcError extends RuntimeException {
         SQLException sqlError = find(error, SQLException.class);
         if (sqlError != null) {
             String sqlState = sqlError.getSQLState();
+            if ("HY001".equals(sqlState) && AgentProtocol.PL_DEBUG_SESSION_METHODS.contains(method)) {
+                // OB reports native tenant-memory exhaustion using a connection
+                // exception subclass. The server error is not a broken socket;
+                // dropping this controller could let the target auto-continue.
+                return new AgentRpcError(message(error), "resource", false, "keep", stage, operationOutcome(stage),
+                    sqlState, sqlError.getErrorCode(), safeClassName(sqlError), error);
+            }
             String category = sqlError instanceof SQLTimeoutException ? "timeout" : null;
             boolean connectionError = "connect".equals(stage)
                 || "validate".equals(stage)

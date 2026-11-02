@@ -84,6 +84,23 @@ pub(super) fn quote_new_ident(database_type: Option<DatabaseType>, dialect: Stru
     }
 }
 
+/// The stored name corresponding to the same creation rule as `quote_new_ident`.
+pub(super) fn created_identifier_name(
+    database_type: Option<DatabaseType>,
+    dialect: StructureDialect,
+    name: &str,
+) -> String {
+    if database_type == Some(DatabaseType::Oracle)
+        && dialect == StructureDialect::Oracle
+        && is_simple_oracle_identifier(name)
+        && !is_oracle_reserved_identifier(name)
+    {
+        name.to_ascii_uppercase()
+    } else {
+        name.to_owned()
+    }
+}
+
 /// Reference spelling that resolves to an object created through [`quote_new_ident`]'s Oracle path.
 ///
 /// Plain Oracle identifiers are created unquoted and are therefore stored uppercase-folded; a

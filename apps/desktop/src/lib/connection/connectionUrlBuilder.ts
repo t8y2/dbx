@@ -1,3 +1,4 @@
+import { elasticsearchAuthTypeFromConfig } from "@/lib/connection/elasticsearchKibanaProxy";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { GAUSSDB_M_JDBC_DRIVER_PROFILE } from "@/lib/database/jdbcDialect";
 import { effectiveRedisDatabaseIndex } from "@/lib/redis/redisDatabaseIndex";
@@ -12,18 +13,18 @@ import { redactConnectionStringSecrets } from "@/lib/connection/connectionString
  * from the menu instead of guessing a wrong URL.
  *
  * Password safety: the primary formats (`url`, `jdbcUrl`, `dsn`) never embed
- * the stored password. Formats that do (`urlWithPassword`,
+ * the stored password. Formats that do (`password`, `urlWithPassword`,
  * `jdbcUrlWithCredentials`, `dsnWithPassword`) are only offered when a
  * password is actually available, and the caller gates them behind an
  * explicit confirmation.
  */
 
-export type ConnectionUrlCopyFormat = "url" | "urlWithPassword" | "jdbcUrl" | "jdbcUrlWithCredentials" | "hostPort" | "dsn" | "dsnWithPassword" | "psqlCommand";
+export type ConnectionUrlCopyFormat = "url" | "urlWithPassword" | "jdbcUrl" | "jdbcUrlWithCredentials" | "hostPort" | "dsn" | "dsnWithPassword" | "psqlCommand" | "password";
 
 /** Formats whose output embeds the stored password; callers should confirm before copying. */
-export const CONNECTION_URL_COPY_WITH_PASSWORD_FORMATS: ReadonlySet<ConnectionUrlCopyFormat> = new Set(["urlWithPassword", "jdbcUrlWithCredentials", "dsnWithPassword"]);
+export const CONNECTION_URL_COPY_WITH_PASSWORD_FORMATS: ReadonlySet<ConnectionUrlCopyFormat> = new Set(["urlWithPassword", "jdbcUrlWithCredentials", "dsnWithPassword", "password"]);
 
-export type ConnectionUrlCopyConfig = Pick<ConnectionConfig, "db_type" | "host" | "port" | "username" | "password" | "database" | "url_params" | "ssl" | "connection_string"> & Partial<Pick<ConnectionConfig, "driver_profile" | "oracle_connection_type">>;
+export type ConnectionUrlCopyConfig = Pick<ConnectionConfig, "db_type" | "host" | "port" | "username" | "password" | "database" | "url_params" | "ssl" | "connection_string"> & Partial<Pick<ConnectionConfig, "driver_profile" | "oracle_connection_type" | "external_config">>;
 
 export interface ConnectionUrlCopyOptions {
   /** Overrides `config.database` (e.g. the database tree node that was right-clicked). */
@@ -292,7 +293,8 @@ function buildStandardUrl(config: ConnectionUrlCopyConfig, options: ConnectionUr
 
   const database = effectiveDatabase(config, options);
   const encode = scheme === "oceanbase" ? encodeOceanBaseUrlCredential : config.db_type === "oracle" ? encodeOracleUrlCredential : encodeCredential;
-  const userInfo = buildUserInfo(config, options.includePassword, encode, scheme === "oceanbase" ? encodeOceanBaseUrlUsername : encode);
+  const usesApiKey = config.db_type === "elasticsearch" && elasticsearchAuthTypeFromConfig(config.external_config) === "apiKey";
+  const userInfo = usesApiKey ? "" : buildUserInfo(config, options.includePassword, encode, scheme === "oceanbase" ? encodeOceanBaseUrlUsername : encode);
   const hostPart = formatHostForUrl(host);
   const portPart = shouldAppendPort(config) ? `:${config.port}` : "";
   const path = database ? `/${encodeURIComponent(database)}` : "";
@@ -576,6 +578,13 @@ export function connectionUrlCopyFormats(config: ConnectionUrlCopyConfig | undef
     if (dsnWithPassword && hasSecret && dsnWithPassword !== dsn) formats.push("dsnWithPassword");
     if (buildPsqlCommand(candidate, {})) formats.push("psqlCommand");
   }
+  // The URL variants must percent-encode credentials to keep the URL parseable
+  // (`@` in a password becomes `%40`), so clients that never percent-decode —
+  // or simply pasting into another app's password field — need this verbatim
+  // escape hatch (issue #13388). Skipped for Elasticsearch API-key connections,
+  // where the stored secret is not a password.
+  const usesApiKey = candidate.db_type === "elasticsearch" && elasticsearchAuthTypeFromConfig(candidate.external_config) === "apiKey";
+  if (candidate.password && !usesApiKey) formats.push("password");
   return formats;
 }
 
@@ -599,6 +608,8 @@ export function buildConnectionUrlCopy(config: ConnectionUrlCopyConfig | undefin
       return isPostgresWireFamily(candidate) ? buildKeyvalueDsn(candidate, { ...options, includePassword: true }) : null;
     case "psqlCommand":
       return isPostgresWireFamily(candidate) ? buildPsqlCommand(candidate, options ?? {}) : null;
+    case "password":
+      return candidate.password || null;
     default:
       return null;
   }

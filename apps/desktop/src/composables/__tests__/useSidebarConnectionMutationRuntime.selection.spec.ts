@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { shallowRef } from "vue";
 import { connectionDeleteTargetSnapshot, connectionGroupDeleteTargetSnapshot, deleteConnectionsWithGroup, showDeleteConfirm, showDeleteGroupConfirm, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
-import type { TreeNode } from "@/types/database";
+import type { ConnectionConfig, TreeNode } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
@@ -74,7 +74,9 @@ function connectionStore(selectedTreeNodeIds: string[]) {
     findConnectionNode: vi.fn((_id: string): TreeNode | null => null),
     expandConnectionGroups: vi.fn(),
     isTreeNodeChildrenLoaded: vi.fn(() => false),
-    getConfig: vi.fn(() => undefined),
+    getConfig: vi.fn((_id: string): ConnectionConfig | undefined => undefined),
+    addConnection: vi.fn().mockResolvedValue(undefined),
+    groupIdForConnection: vi.fn((_id: string): string | null => null),
     isDefaultDatabase: vi.fn(() => false),
   };
 }
@@ -476,5 +478,40 @@ describe("sidebar connection disconnect selection", () => {
 
     expect(store.disconnect).toHaveBeenCalledWith("conn-3");
     expect(store.disconnect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("sidebar connection duplication", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sidebarFormTarget.value = null;
+  });
+
+  it("copies the connection without the fixed SSH local port of the original", async () => {
+    const node = connectionNode("conn-1");
+    const store = connectionStore([node.id]);
+    const source: ConnectionConfig = {
+      id: "conn-1",
+      name: "Tunnelled",
+      db_type: "postgres",
+      host: "db.internal",
+      port: 5432,
+      username: "app",
+      password: "secret",
+      transport_layers: [{ type: "ssh", id: "bastion", host: "bastion.example.com", port: 22, user: "root", local_port: 4059 }],
+    };
+    store.getConfig.mockReturnValue(source);
+    store.groupIdForConnection.mockReturnValue("group-1");
+    const { duplicateConnection } = runtime(node, store, [node]);
+
+    await duplicateConnection();
+
+    expect(store.addConnection).toHaveBeenCalledTimes(1);
+    const [copy, groupId] = store.addConnection.mock.calls[0];
+    expect(copy).toMatchObject({ name: "Tunnelled (Copy)", host: "db.internal", transport_layers: [{ type: "ssh", id: "bastion", host: "bastion.example.com" }] });
+    expect(copy.id).not.toBe("conn-1");
+    expect(copy.transport_layers[0]).not.toHaveProperty("local_port");
+    expect(groupId).toBe("group-1");
+    expect(source.transport_layers?.[0]).toMatchObject({ local_port: 4059 });
   });
 });

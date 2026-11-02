@@ -13,11 +13,13 @@ fn xugu_table_ddl_is_unavailable(sql: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct PreparedTableDdl {
+pub(crate) struct PreparedTableDdl {
     pub ddl: String,
     pub reused_source_ddl: bool,
     pub deferred_fk_alters: Vec<String>,
     pub deferred_fk_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_evidence: Option<serde_json::Value>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -33,6 +35,23 @@ pub(super) async fn prepare_table_ddl(
     table_comment: Option<&str>,
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
 ) -> Result<PreparedTableDdl, String> {
+    if mysql_xugu::is_pair(source_db_type, target_db_type) {
+        let ddl = crate::schema::get_table_transfer_ddl_core(
+            state,
+            &request.source_connection_id,
+            &request.source_database,
+            &request.source_schema,
+            table,
+        )
+        .await
+        .map_err(|error| format!("Cannot read complete MySQL DDL for '{table}': {error}"))?;
+        return mysql_xugu::prepare(&ddl, columns, &request.target_schema, target_table);
+    }
+    let source_columns = if request.has_package_selection() {
+        Some(serde_json::to_value(columns).map_err(|error| error.to_string())?)
+    } else {
+        None
+    };
     let rebuild = request.drop_target_before_create;
     // Every column reference below (CREATE TABLE, keys) uses the target-side names.
     let target_columns = request.target_columns(columns);
@@ -108,6 +127,7 @@ pub(super) async fn prepare_table_ddl(
     }
 
     let mut reused_source_ddl = false;
+    let mut source_definition = None;
     let ddl = if can_reuse {
         let (source_ddl, source_ddl_was_read) = if let Some(catalog) =
             resolve_external_transfer_catalog(request.source_catalog.as_deref(), source_db_type)
@@ -191,6 +211,9 @@ pub(super) async fn prepare_table_ddl(
                 ),
             }
         };
+        if source_columns.is_some() && source_ddl_was_read {
+            source_definition = Some(source_ddl.clone());
+        }
         if contains_oceanbase_mysql_table_options(&source_ddl)
             && !db::oceanbase_mysql::is_profile(target_db_type, target_driver_profile.as_deref())
         {
@@ -272,7 +295,17 @@ pub(super) async fn prepare_table_ddl(
             generate_mysql_foreign_key_alter_statements(&foreign_keys, request, target_table, target_db_type);
     }
 
-    Ok(PreparedTableDdl { ddl, reused_source_ddl, deferred_fk_alters, deferred_fk_names })
+    let source_evidence = source_columns.map(|columns| {
+        serde_json::json!({
+            "columns": columns,
+            "tableComment": table_comment,
+            "foreignKeys": foreign_keys,
+            "sourceDdl": source_definition,
+            "sourceDriverProfile": source_driver_profile,
+            "targetDriverProfile": target_driver_profile,
+        })
+    });
+    Ok(PreparedTableDdl { ddl, reused_source_ddl, deferred_fk_alters, deferred_fk_names, source_evidence })
 }
 
 #[cfg(test)]
@@ -309,6 +342,67 @@ mod tests {
             },
             db::ColumnInfo { name: "parent_id".into(), data_type: "INTEGER".into(), ..Default::default() },
         ]
+    }
+
+    #[tokio::test]
+    async fn package_table_plans_keep_generation_inputs_without_changing_legacy_payloads() {
+        let (state, _directory) = state_fixture().await;
+        let mut request = request(false);
+        let source_columns = columns();
+        let known = HashMap::from([("child".into(), Vec::new())]);
+        let ordinary = prepare_table_ddl(
+            &state,
+            &request,
+            "child",
+            "renamed",
+            &DatabaseType::Oracle,
+            &DatabaseType::OceanbaseOracle,
+            "unused-source-pool",
+            &source_columns,
+            Some("source comment"),
+            &known,
+        )
+        .await
+        .unwrap();
+        assert!(ordinary.source_evidence.is_none());
+        assert!(serde_json::to_value(&ordinary).unwrap().get("source_evidence").is_none());
+        request.objects =
+            Some(vec![TransferObjectSelection { object_type: TransferObjectKind::Package, names: vec!["P".into()] }]);
+        let reviewed = prepare_table_ddl(
+            &state,
+            &request,
+            "child",
+            "renamed",
+            &DatabaseType::Oracle,
+            &DatabaseType::OceanbaseOracle,
+            "unused-source-pool",
+            &source_columns,
+            Some("source comment"),
+            &known,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reviewed.ddl, ordinary.ddl);
+        assert!(!reviewed.reused_source_ddl);
+        let evidence = reviewed.source_evidence.unwrap();
+        assert_eq!(evidence["columns"], serde_json::to_value(&source_columns).unwrap());
+        assert_eq!(evidence["tableComment"], "source comment");
+        assert!(evidence["sourceDdl"].is_null());
+        let changed = prepare_table_ddl(
+            &state,
+            &request,
+            "child",
+            "renamed",
+            &DatabaseType::Oracle,
+            &DatabaseType::OceanbaseOracle,
+            "unused-source-pool",
+            &source_columns,
+            Some("changed comment"),
+            &known,
+        )
+        .await
+        .unwrap();
+        assert_ne!(changed.source_evidence.unwrap(), evidence);
     }
 
     #[tokio::test]

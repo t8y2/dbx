@@ -130,5 +130,65 @@ describe("sqlFileTreeFilter", () => {
       expect(result.autoExpanded.size).toBe(0);
       expect(result.matchCount).toBe(0);
     });
+
+    it("keeps content-matching files whose names do not match and auto-expands their parents", () => {
+      // "needle" matches no file or folder name in the fixture.
+      const result = filterAndSortSqlFileEntries(sampleEntries, "needle", "asc", new Set(["/sql/queries/get_orders.sql", "/sql/migrations/2024/01_init.sql"]), "content");
+
+      expect(result.entries.map((e) => e.name)).toEqual(["migrations", "queries"]);
+      const migrations = result.entries.find((e) => e.name === "migrations")!;
+      expect(migrations.children.map((c) => c.name)).toEqual(["2024"]);
+      expect(migrations.children[0].children.map((c) => c.name)).toEqual(["01_init.sql"]);
+      const queries = result.entries.find((e) => e.name === "queries")!;
+      expect(queries.children.map((c) => c.name)).toEqual(["get_orders.sql"]);
+
+      expect(Array.from(result.autoExpanded).sort()).toEqual(["/sql/migrations", "/sql/migrations/2024", "/sql/queries"]);
+      // matchCount drives folder visibility in the panel, so content-only hits must count.
+      expect(result.matchCount).toBeGreaterThan(0);
+    });
+
+    it("preserves manual order for content-only matches", () => {
+      const manualOrder = { "/sql/queries": ["/sql/queries/select_user.sql", "/sql/queries/get_orders.sql"] };
+      const result = filterAndSortSqlFileEntries(sampleEntries, "needle", "manual", new Set(["/sql/queries/get_orders.sql", "/sql/queries/select_user.sql"]), "content", manualOrder);
+
+      expect(result.entries.map((entry) => entry.name)).toEqual(["queries"]);
+      expect(result.entries[0].children.map((entry) => entry.name)).toEqual(["select_user.sql", "get_orders.sql"]);
+      expect(result.autoExpanded.has("/sql/queries")).toBe(true);
+      expect(result.matchCount).toBe(2);
+    });
+
+    it("normalizes entry paths before comparing them with the content-match set", () => {
+      // Scanned entries keep native separators on Windows while content-search
+      // paths are normalized, so the comparison has to normalize the entry side.
+      const windowsEntries: SqlFileEntry[] = [{ name: "queries", path: "C:\\sql\\queries", is_dir: true, children: [{ name: "get_orders.sql", path: "C:\\sql\\queries\\get_orders.sql", is_dir: false, children: [] }] }];
+      const result = filterAndSortSqlFileEntries(windowsEntries, "needle", "asc", new Set(["C:/sql/queries/get_orders.sql"]), "content");
+
+      const queries = result.entries.find((e) => e.name === "queries");
+      expect(queries?.children.map((c) => c.name)).toEqual(["get_orders.sql"]);
+      expect(result.autoExpanded.has("C:\\sql\\queries")).toBe(true);
+    });
+
+    it("defaults to name matching even when content hits are supplied", () => {
+      const result = filterAndSortSqlFileEntries(sampleEntries, "user", "asc", new Set(["/sql/queries/get_orders.sql"]));
+
+      const queries = result.entries.find((e) => e.name === "queries")!;
+      expect(queries.children.map((c) => c.name)).toEqual(["select_user.sql"]);
+      expect(result.entries.map((e) => e.name)).toEqual(["migrations", "queries"]);
+    });
+
+    it("does not include name-only files or whole matching directories in content mode", () => {
+      const result = filterAndSortSqlFileEntries(sampleEntries, "queries", "asc", new Set(["/sql/queries/get_orders.sql"]), "content");
+      expect(result.entries.map((entry) => entry.name)).toEqual(["queries"]);
+      expect(result.entries[0].children.map((entry) => entry.name)).toEqual(["get_orders.sql"]);
+      expect(filterAndSortSqlFileEntries(sampleEntries, "user", "asc", new Set(), "content").entries).toEqual([]);
+    });
+
+    it("ignores an empty content-match set", () => {
+      const withEmpty = filterAndSortSqlFileEntries(sampleEntries, "user", "asc", new Set());
+      const withoutSet = filterAndSortSqlFileEntries(sampleEntries, "user", "asc");
+
+      expect(withEmpty.entries).toEqual(withoutSet.entries);
+      expect(withEmpty.matchCount).toBe(withoutSet.matchCount);
+    });
   });
 });

@@ -1,6 +1,14 @@
 package com.dbx.agent.oceanbaseoracle;
 
 import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.MetadataReadOptions;
+import com.dbx.agent.AgentRpcTestSupport;
+import com.dbx.agent.AgentProtocol;
+import com.dbx.agent.TriggerInfo;
+import com.google.gson.JsonParser;
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonElement;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.test.TestSupport;
@@ -11,8 +19,10 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -23,6 +33,129 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 class OceanBaseOracleObjectListTest {
+    private static final String[] TRIGGER_COLUMNS = {"OWNER", "TRIGGER_NAME", "TRIGGERING_EVENT", "TRIGGER_TYPE", "STATUS", "TABLE_OWNER", "TABLE_NAME", "BASE_OBJECT_TYPE", "WHEN_CLAUSE", "TRIGGER_BODY", "DBX_TRIGGER_OBJECT_MARKER", "OWNER", "OBJECT_NAME", "OBJECT_ID", "LAST_DDL_TIME", "STATUS"};
+
+    private static String[] triggerRow() {
+        return row(" Owner ", " Trigger ", "INSERT", "INSTEAD OF", "DISABLED", " Parent Owner ", " View ", "VIEW", null,
+            "BEGIN NULL; END;", " Trigger ", " Owner ", " Trigger ", "9007199254740993", "2026-10-21 08:00:00", "INVALID");
+    }
+
+    @Test
+    void exactSchemaRpcFiltersBeforePagingThenEnrichesOnlyThatPage() throws Exception {
+        JdbcFixture jdbc = new JdbcFixture();
+        JdbcCall page = jdbc.rows(row(" Trigger ", "TRIGGER", null));
+        JdbcCall metadata = jdbc.rows(triggerRow()).columns(TRIGGER_COLUMNS);
+        ObjectInfo object = new Gson().fromJson(rpc(jdbc, AgentProtocol.METHOD_LIST_OBJECTS,
+            "{\"schema\":\" Owner \",\"object_types\":[\"TRIGGER\"],\"filter\":\"trig\",\"limit\":1,\"offset\":2,\"identity_mode\":\"exact\"}"), ObjectInfo[].class)[0];
+        assertEquals(" Trigger ", object.getName());
+        assertEquals(" Parent Owner ", object.getParent_schema());
+        assertEquals("VIEW", object.getTrigger().getOracle_metadata().scope());
+        assertFalse(object.getValid());
+        assertFalse(object.getTrigger().getEnabled());
+        assertTrue(page.sql.indexOf("UPPER(o.OBJECT_NAME)") < page.sql.indexOf("WHERE ROWNUM <= ?"));
+        assertEquals(List.of(" Owner ", "TRIGGER", "%T%R%I%G%", "%T%R%I%G%", 3L, 2), page.args);
+        assertEquals(List.of(" Owner ", " Trigger "), metadata.args);
+        assertFalse(metadata.sql.contains("ALL_SOURCE"));
+        assertNull(object.getTrigger().getStatement());
+        page.assertClosed(); metadata.assertClosed();
+    }
+
+    @Test
+    void exactOwningObjectRpcUsesParentOwnerNotTriggerOwner() throws Exception {
+        JdbcFixture jdbc = new JdbcFixture();
+        JdbcCall metadata = jdbc.rows(triggerRow()).columns(TRIGGER_COLUMNS);
+        TriggerInfo trigger = new Gson().fromJson(rpc(jdbc, AgentProtocol.METHOD_LIST_TRIGGERS,
+            "{\"schema\":\" Parent Owner \",\"table\":\" View \",\"identity_mode\":\"exact\"}"), TriggerInfo[].class)[0];
+        assertEquals(" Owner ", trigger.getOracle_metadata().owner());
+        assertEquals(" Parent Owner ", trigger.getOracle_metadata().parent().owner());
+        assertEquals(List.of(" Parent Owner ", " View "), metadata.args);
+        assertTrue(metadata.sql.contains("t.TABLE_OWNER = ? AND t.TABLE_NAME = ?"));
+        metadata.assertClosed();
+    }
+
+    @Test
+    void exactSourceRpcReadsFullDefinitionErrorsAndChecksIdentityAgain() throws Exception {
+        JdbcFixture jdbc = new JdbcFixture();
+        JdbcCall before = jdbc.rows(triggerRow()).columns(TRIGGER_COLUMNS);
+        String definition = "TRIGGER \" Trigger \" INSTEAD OF INSERT ON \" Parent Owner \".\" View \"\nFOR EACH ROW DISABLE BEGIN NULL; END;";
+        JdbcCall source = jdbc.rows(row("1", definition));
+        JdbcCall errors = jdbc.rows(row("1", "3", "7", "Missing procedure", "ERROR"));
+        JdbcCall after = jdbc.rows(triggerRow()).columns(TRIGGER_COLUMNS);
+        ObjectSource result = new Gson().fromJson(rpc(jdbc, AgentProtocol.METHOD_GET_OBJECT_SOURCE,
+            "{\"schema\":\" Owner \",\"name\":\" Trigger \",\"object_type\":\"TRIGGER\",\"identity_mode\":\"exact\"}"), ObjectSource.class);
+        assertEquals(definition, result.getSource());
+        assertTrue(result.getTrigger().getOracle_metadata().definition().complete());
+        assertFalse(result.getTrigger().getValid());
+        assertEquals("Missing procedure", result.getTrigger().getOracle_metadata().errors().get(0).text());
+        for (JdbcCall call : List.of(before, source, errors, after)) {
+            assertEquals(List.of(" Owner ", " Trigger "), call.args);
+            call.assertClosed();
+        }
+    }
+
+    @Test
+    void aDeniedSummaryReadRetainsThePageAndUnknownStates() {
+        JdbcFixture jdbc = new JdbcFixture();
+        jdbc.rows(row(" Trigger ", "TRIGGER", null));
+        JdbcCall denied = jdbc.rows();
+        denied.executeFailure = new SQLException("ORA-01031: insufficient privileges", "42000", 1031);
+        ObjectInfo result = jdbc.agent.listObjects(" Owner ", constraints(null, 1, 0, "TRIGGER"), MetadataReadOptions.EXACT).get(0);
+        assertEquals(" Trigger ", result.getName());
+        assertNull(result.getTrigger().getEnabled());
+        assertNull(result.getTrigger().getValid());
+        assertEquals("denied", result.getTrigger().getOracle_metadata().reads().get("enabled").state());
+        assertTrue(denied.statementClosed);
+    }
+
+    @Test
+    void exactMetadataFallbackRetainsTheExportedStateAppendix() {
+        JdbcFixture jdbc = new JdbcFixture();
+        jdbc.rows(triggerRow()).columns(TRIGGER_COLUMNS);
+        jdbc.rows();
+        String exported = "CREATE TRIGGER \" Owner \".\" Trigger \" INSTEAD OF INSERT ON \" Parent Owner \".\" View \" FOR EACH ROW BEGIN NULL; END;\nALTER TRIGGER \" Owner \".\" Trigger \" DISABLE;";
+        JdbcCall metadata = jdbc.rows(row(exported));
+        jdbc.rows();
+        jdbc.rows(triggerRow()).columns(TRIGGER_COLUMNS);
+        ObjectSource result = jdbc.agent.getObjectSource(" Owner ", " Trigger ", "TRIGGER", MetadataReadOptions.EXACT);
+        assertEquals(exported, result.getSource());
+        assertEquals("DBMS_METADATA", result.getTrigger().getOracle_metadata().definition().origin());
+        assertTrue(result.getTrigger().getOracle_metadata().definition().complete());
+        assertEquals(List.of("TRIGGER", " Trigger ", " Owner "), metadata.args);
+        assertFalse(result.getTrigger().getEnabled());
+    }
+
+    @Test
+    void schemaIndexPagesPreserveBothOwnersAndRawNames() {
+        JdbcFixture jdbc = new JdbcFixture();
+        JdbcCall call = jdbc.rows(row(" Ix (a) ", "INDEX", null, "Table Owner", " T(a) "));
+        List<ObjectInfo> objects = jdbc.agent.listObjects("Index Owner", constraints("Ix", 2, 2, "INDEX"));
+
+        assertEquals(1, objects.size());
+        String json = new com.google.gson.Gson().toJson(objects.get(0));
+        com.google.gson.JsonObject object = com.google.gson.JsonParser.parseString(json).getAsJsonObject();
+        assertEquals(" Ix (a) ", object.get("name").getAsString());
+        assertEquals("Index Owner", object.get("schema").getAsString());
+        assertEquals("INDEX", object.get("object_type").getAsString());
+        assertEquals("Table Owner", object.get("parent_schema").getAsString());
+        assertEquals(" T(a) ", object.get("parent_name").getAsString());
+        assertEquals(List.of("Index Owner", "INDEX", "%I%X%", "%I%X%", 4L, 2), call.args);
+        call.assertClosed();
+    }
+
+    @Test
+    void schemaIndexDictionaryFailureDoesNotBecomeAnEmptyPage() {
+        JdbcFixture jdbc = new JdbcFixture();
+        JdbcCall call = jdbc.rows();
+        SQLException denied = new SQLException("ORA-01031: insufficient privileges", "42000", 1031);
+        call.executeFailure = denied;
+
+        RuntimeException error = assertThrows(RuntimeException.class,
+            () -> jdbc.agent.listObjects("APP", constraints(null, 2, 0, "INDEX")));
+
+        assertSame(denied, error.getCause());
+        assertTrue(call.statementClosed);
+    }
+
     @Test
     void tableAndViewCommentsSurviveObjectListing() {
         JdbcFixture jdbc = new JdbcFixture();
@@ -78,13 +211,13 @@ class OceanBaseOracleObjectListTest {
             };
 
             assertEquals(List.of("APP", "TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE",
-                "PACKAGE BODY", "SEQUENCE", "SYNONYM", "TYPE", "TYPE BODY"), call.args);
+                "PACKAGE BODY", "SEQUENCE", "SYNONYM", "TYPE", "TYPE BODY", "INDEX"), call.args);
             assertEquals(List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE",
                 "PACKAGE_BODY", "SEQUENCE", "SYNONYM"), objects.stream().map(ObjectInfo::getObject_type).toList());
             assertEquals(8, objects.size());
             assertTrue(objects.stream().allMatch(object -> "APP".equals(object.getSchema())));
             assertTrue(objects.stream().allMatch(object -> object.getValid() == null));
-            assertTrue(call.sql.contains("OBJECT_TYPE IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"), call.sql);
+            assertTrue(call.sql.contains("OBJECT_TYPE IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"), call.sql);
             assertFalse(call.sql.contains("ROWNUM"), call.sql);
             assertObjectOrder(call.sql);
             call.assertClosed();
@@ -143,6 +276,29 @@ class OceanBaseOracleObjectListTest {
             jdbc.agent.listObjects("APP", constraints(null, 3, 0, "TYPE", "TYPE_BODY")));
         assertEquals(List.of("APP", "TYPE", "TYPE BODY", 3L, 0), call.args);
         call.assertClosed();
+    }
+
+    @Test
+    void typeBodySourcePreservesQuotedIdentityAndIsReadOnly() {
+        JdbcFixture jdbc = new JdbcFixture();
+        JdbcCall call = jdbc.rows(row("TYPE BODY \"Mixed Type\" AS\n"), row("END;\n"));
+
+        ObjectSource source = jdbc.agent.getObjectSource("Mixed.Owner", "Mixed Type", "TYPE_BODY");
+
+        assertEquals("CREATE OR REPLACE TYPE BODY \"Mixed Type\" AS\nEND;", source.getSource());
+        assertEquals("TYPE_BODY", source.getObject_type());
+        assertFalse(source.isEditable());
+        assertEquals(List.of("Mixed.Owner", "Mixed Type", "TYPE BODY"), call.args);
+        call.assertClosed();
+    }
+
+    @Test
+    void missingTypeSourceFailsInsteadOfReturningAnEmptyEditor() {
+        JdbcFixture jdbc = new JdbcFixture();
+        jdbc.rows();
+        jdbc.rows();
+
+        assertThrows(RuntimeException.class, () -> jdbc.agent.getObjectSource("APP", "MISSING_T", "TYPE"));
     }
 
     @Test
@@ -341,6 +497,16 @@ class OceanBaseOracleObjectListTest {
         return new MetadataListConstraints(filter, limit, offset, Arrays.asList(types));
     }
 
+    private static JsonElement rpc(JdbcFixture jdbc, String method, String params) {
+        JsonObject request = new JsonObject();
+        request.addProperty("id", 1);
+        request.addProperty("method", method);
+        request.add("params", JsonParser.parseString(params));
+        JsonObject response = JsonParser.parseString(AgentRpcTestSupport.handleRequest(jdbc.agent, request.toString())).getAsJsonObject();
+        assertFalse(response.has("error"), response.toString());
+        return response.get("result");
+    }
+
     private static String[] row(String... columns) {
         return columns;
     }
@@ -369,6 +535,12 @@ class OceanBaseOracleObjectListTest {
                 if (method.getName().equals("isClosed")) {
                     return false;
                 }
+                if (method.getName().equals("getMetaData")) {
+                    return proxy(DatabaseMetaData.class, (metadata, metadataMethod, values) -> {
+                        if (metadataMethod.getName().equals("getDatabaseProductVersion")) return "4.2.5.7_107";
+                        throw new AssertionError("Unexpected database metadata method: " + metadataMethod.getName());
+                    });
+                }
                 throw new AssertionError("Unexpected connection method: " + method.getName());
             }));
         }
@@ -388,9 +560,15 @@ class OceanBaseOracleObjectListTest {
         SQLException readFailure;
         boolean statementClosed;
         boolean resultClosed;
+        String[] columns;
 
         JdbcCall(String[][] rows) {
             this.rows = rows;
+        }
+
+        JdbcCall columns(String... labels) {
+            columns = labels;
+            return this;
         }
 
         PreparedStatement statement() {
@@ -425,8 +603,16 @@ class OceanBaseOracleObjectListTest {
                     }
                     yield cursor[0] < rows.length;
                 }
-                case "getString" -> (Integer) values[0] <= rows[cursor[0]].length
+                case "getString", "getObject" -> (Integer) values[0] <= rows[cursor[0]].length
                     ? rows[cursor[0]][(Integer) values[0] - 1] : null;
+                case "getLong" -> Long.parseLong(rows[cursor[0]][(Integer) values[0] - 1]);
+                case "wasNull" -> false;
+                case "getCharacterStream" -> null;
+                case "getMetaData" -> proxy(ResultSetMetaData.class, (metadata, metadataMethod, args) -> switch (metadataMethod.getName()) {
+                    case "getColumnCount" -> columns.length;
+                    case "getColumnLabel" -> columns[(Integer) args[0] - 1];
+                    default -> throw new AssertionError("Unexpected result metadata method: " + metadataMethod.getName());
+                });
                 case "close" -> {
                     resultClosed = true;
                     yield null;

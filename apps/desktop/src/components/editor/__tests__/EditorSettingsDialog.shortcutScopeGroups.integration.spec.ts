@@ -212,7 +212,7 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     hoisted.shortcuts = defaults();
     const host = await mountShortcutsTab();
 
-    expect(groupLabels(host)).toEqual(["settings.shortcutScopeGlobal", "settings.shortcutScopeEditor", "settings.shortcutScopeGrid", "settings.shortcutScopeSearch", "settings.shortcutScopeSidebar"]);
+    expect(groupLabels(host)).toEqual(["settings.shortcutScopeGlobal", "plDebug.start.title", "settings.shortcutScopeEditor", "settings.shortcutScopeGrid", "settings.shortcutScopeSearch", "settings.shortcutScopeSidebar"]);
 
     // Scope moved into the group header — rows must not repeat it.
     const rendered = rows(host);
@@ -403,13 +403,14 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
 
     const scopes = new Set(SHORTCUT_DEFINITIONS.map((definition) => definition.scope));
     const rendered = groupLabels(host).map((label) => {
+      if (label === "plDebug.start.title") return "debug";
       const raw = label.replace("settings.shortcutScope", "");
       return raw.charAt(0).toLowerCase() + raw.slice(1);
     });
 
     // Only scopes that actually have actions render, but whatever renders must be
     // a sub-sequence of the dispatch order (global -> editor -> grid -> search -> sidebar).
-    const dispatchOrder = ["global", "editor", "grid", "search", "sidebar"];
+    const dispatchOrder = ["global", "debug", "editor", "grid", "search", "sidebar"];
     for (const scope of rendered) expect(scopes).toContain(scope);
     const positions = rendered.map((scope) => dispatchOrder.indexOf(scope));
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
@@ -423,7 +424,7 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     const crossBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-warning/30"]');
     const conflictBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-destructive/25"]');
 
-    // F2 also navigates editor bookmarks; cross-scope overlaps stay informational.
+    // Debugger/quickOpen and bookmark navigation add informational cross-scope overlaps.
     expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=7");
     expect(conflictBadge()).toBeNull();
 

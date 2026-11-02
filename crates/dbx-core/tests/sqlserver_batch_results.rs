@@ -236,3 +236,76 @@ async fn sqlserver_duplicate_join_columns_page_without_leaking_rowcount() {
             .expect("execute query after ROWCOUNT page");
     assert_eq!(follow_up.rows.len(), 2);
 }
+
+/// The desktop grid only ever shows `max_rows` rows. Reading the rest of the
+/// TDS stream costs ~10-15us per discarded row, which is what turns a
+/// few-hundred-ms query into a 10s+ stall when the executed SQL is unbounded.
+/// The stopping path must return the same bounded result but leave the client
+/// flagged for pool replacement instead of draining the whole result.
+#[tokio::test]
+#[ignore = "requires DBX_TEST_SQLSERVER_HOST and DBX_TEST_SQLSERVER_PASSWORD"]
+async fn sqlserver_stops_reading_after_row_limit_and_flags_the_connection() {
+    let mut client = connect_sqlserver().await;
+
+    // A huge streaming result that needs no fixture tables: every SQL Server
+    // has sys.all_columns, and the cross join keeps producing rows forever.
+    let sql = "SELECT a.object_id, b.object_id FROM sys.all_columns a CROSS JOIN sys.all_columns b";
+
+    let started = std::time::Instant::now();
+    let result = sqlserver::execute_query_with_max_rows_stopping(&mut client, sql, Some(100))
+        .await
+        .expect("execute stopping query");
+    let elapsed = started.elapsed();
+
+    assert_eq!(result.rows.len(), 100);
+    assert!(result.truncated, "the row limit must still be reported as truncation");
+    assert!(client.take_abandoned_after_row_limit(), "the client must be flagged for pool replacement");
+    assert!(!client.take_abandoned_after_row_limit(), "the flag must be one-shot");
+    assert!(elapsed < Duration::from_secs(30), "stopping must not drain the result: {elapsed:?}");
+
+    // The abandoned client is never reused. A replacement connection (what the
+    // pool creates after removing the abandoned one) must work normally.
+    let mut replacement = connect_sqlserver().await;
+    let health = sqlserver::execute_query_with_max_rows(&mut replacement, "SELECT 1 AS ok", Some(10))
+        .await
+        .expect("replacement connection query");
+    assert_eq!(health.rows.len(), 1);
+
+    // A result that fits under the limit keeps the connection usable.
+    let mut small = connect_sqlserver().await;
+    let small_result = sqlserver::execute_query_with_max_rows_stopping(&mut small, "SELECT 1 AS ok", Some(10))
+        .await
+        .expect("execute small stopping query");
+    assert_eq!(small_result.rows.len(), 1);
+    assert!(!small_result.truncated);
+    assert!(!small.take_abandoned_after_row_limit());
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_TEST_SQLSERVER_HOST and DBX_TEST_SQLSERVER_PASSWORD"]
+async fn sqlserver_stopping_path_finishes_stored_procedure_side_effects() {
+    let mut client = connect_sqlserver().await;
+    sqlserver::execute_query(
+        &mut client,
+        "CREATE TABLE #dbx_row_limit_marker (value INT); INSERT INTO #dbx_row_limit_marker VALUES (0);",
+    )
+    .await
+    .unwrap();
+    sqlserver::execute_query(
+        &mut client,
+        "CREATE PROCEDURE #dbx_row_limit_proc AS BEGIN SET NOCOUNT ON; \
+         SELECT TOP (100000) a.object_id FROM sys.all_columns a CROSS JOIN sys.all_columns b; \
+         UPDATE #dbx_row_limit_marker SET value = 1; END;",
+    )
+    .await
+    .unwrap();
+
+    let result = sqlserver::execute_query_with_max_rows_stopping(&mut client, "EXEC #dbx_row_limit_proc", Some(1))
+        .await
+        .unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.truncated);
+    assert!(!client.take_abandoned_after_row_limit(), "a procedure must finish before returning");
+    let marker = sqlserver::execute_query(&mut client, "SELECT value FROM #dbx_row_limit_marker").await.unwrap();
+    assert_eq!(marker.rows[0][0].as_i64(), Some(1));
+}

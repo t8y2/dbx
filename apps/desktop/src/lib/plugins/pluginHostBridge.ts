@@ -1,4 +1,5 @@
 import { PLUGIN_AI_TASKS } from "./pluginAiCompletion";
+import { permittedPluginUrl } from "./pluginOpenUrl";
 import type { PluginAiProvider, PluginAiModel, PluginAiGenerateRequest, PluginAiStreamRequest, PluginAiStreamChunkEvent, PluginAiTask } from "./pluginAiCompletion";
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
@@ -128,6 +129,11 @@ export interface PluginFileHandleMeta {
   relativePath?: string;
 }
 
+export interface PluginDragPosition {
+  x: number;
+  y: number;
+}
+
 export interface PluginPickFilesOptions {
   multiple?: boolean;
 }
@@ -156,6 +162,8 @@ export const MAX_PLUGIN_STORAGE_VALUE_BYTES = 256 * 1024;
 export const MAX_PLUGIN_STORAGE_KEY_CHARS = 256;
 
 export interface PluginHostBridgeApi {
+  /** Must display trusted host consent for every request; never launch directly. */
+  openUrl?(url: string): Promise<{ opened: boolean }>;
   invoke<T = unknown>(pluginId: string, method: string, params?: unknown, timeoutMs?: number): Promise<T>;
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
   sendBinary(pluginId: string, channel: string, dataBase64: string): Promise<void>;
@@ -500,6 +508,7 @@ export class PluginHostBridge {
       // Additive capability advertisement: an older host omits `planApi`, and a
       // plugin must treat the absence as "unsupported" rather than probing.
       capabilities: {
+        openUrl: !!this.api.openUrl,
         downloadFile: !!this.api.downloadFile,
         planApi: !!this.api.getPlanCapabilities && !!this.api.explainPlan,
         [PLUGIN_SCHEMA_METADATA_CAPABILITY]: !!this.api.getTableMetadata,
@@ -607,13 +616,27 @@ export class PluginHostBridge {
   }
 
   /** Tell the plugin whether an OS-level file drag is currently over its workbench. */
-  forwardDragState(active: boolean): void {
-    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "dragstate", active });
+  forwardDragState(active: boolean, position?: PluginDragPosition): void {
+    this.post({
+      source: HOST_MESSAGE_SOURCE,
+      version: BRIDGE_VERSION,
+      type: "dragstate",
+      active,
+      position: position ? { x: position.x, y: position.y } : undefined,
+    });
   }
 
   /** Hand the plugin already-opened handles for files dropped onto its workbench. */
-  forwardFileDrop(files: PluginFileHandleMeta[], drop?: { dropId?: string; truncated?: boolean }): void {
-    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "filedrop", files, dropId: drop?.dropId, truncated: drop?.truncated === true });
+  forwardFileDrop(files: PluginFileHandleMeta[], drop?: { dropId?: string; truncated?: boolean; position?: PluginDragPosition }): void {
+    this.post({
+      source: HOST_MESSAGE_SOURCE,
+      version: BRIDGE_VERSION,
+      type: "filedrop",
+      files,
+      dropId: drop?.dropId,
+      truncated: drop?.truncated === true,
+      position: drop?.position ? { x: drop.position.x, y: drop.position.y } : undefined,
+    });
   }
 
   private async handleRequest(request: PluginRequestMessage, target: Window): Promise<void> {
@@ -627,6 +650,12 @@ export class PluginHostBridge {
   }
 
   private async dispatch(method: string, params: unknown, binary?: ArrayBuffer): Promise<unknown> {
+    if (method === "host.openUrl") {
+      const input = requireRecord(params, "open URL params");
+      const url = permittedPluginUrl(input.url, this.plugin.manifest.permissions);
+      if (!this.api.openUrl) throw new Error("Host URL opening is unavailable");
+      return this.api.openUrl(url);
+    }
     if (method === "host.downloadFile") {
       if (!this.api.downloadFile) throw new Error("Streaming file downloads require the desktop host");
       const input = requireRecord(params, "download params");
@@ -1434,6 +1463,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         return request('backend.sendBinary', { channel }, { transfer: bytes });
       },
       readAsset: (path) => request('ui.readAsset', { path }),
+      openUrl: (url) => request('host.openUrl', { url }),
       readAssetUrl: async (path) => {
         const asset = await request('ui.readAsset', { path });
         return URL.createObjectURL(new Blob([decode(asset.dataBase64)], { type: asset.contentType }));
@@ -1599,14 +1629,24 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         document.dispatchEvent(new CustomEvent('dbx-plugin-binary', { detail: payload }));
       } else if (message.type === 'filedrop') {
         const files = Array.isArray(message.files) ? message.files : [];
+        const position = (message.position && typeof message.position.x === 'number' && typeof message.position.y === 'number')
+          ? { x: message.position.x, y: message.position.y }
+          : undefined;
         // The drop metadata rides as a second listener argument so existing
         // single-parameter listeners keep working unchanged.
-        const drop = { dropId: typeof message.dropId === 'string' ? message.dropId : undefined, truncated: message.truncated === true };
+        const drop = {
+          dropId: typeof message.dropId === 'string' ? message.dropId : undefined,
+          truncated: message.truncated === true,
+          position,
+        };
         listeners.filedrop.forEach((listener) => listener(files, drop));
         document.dispatchEvent(new CustomEvent('dbx-plugin-filedrop', { detail: { files, drop } }));
       } else if (message.type === 'dragstate') {
         const active = message.active === true;
-        listeners.dragstate.forEach((listener) => listener(active));
+        const position = (message.position && typeof message.position.x === 'number' && typeof message.position.y === 'number')
+          ? { x: message.position.x, y: message.position.y }
+          : undefined;
+        listeners.dragstate.forEach((listener) => listener(active, position));
         document.dispatchEvent(new CustomEvent('dbx-plugin-dragstate', { detail: active }));
       } else if (message.type === 'workbench/close') {
         const notifyClose = (listener) => Promise.resolve().then(listener).catch(() => undefined);
@@ -1616,13 +1656,21 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         });
       }
     });
+    // The close-tab shortcut listens in the BUBBLE phase and yields to events a
+    // plugin input already consumed. A capture-phase listener runs before the
+    // focused control, so a terminal (xterm) handling Ctrl+W as "delete word"
+    // had the tab closed underneath it: the host posted closeTab before the
+    // terminal ever saw the key. Bubbling lets the focused control run first;
+    // xterm calls preventDefault()+stopPropagation() for the keys it sends, and
+    // any other consumer only needs preventDefault() to keep the tab open.
     addEventListener('keydown', (event) => {
+      if (event.defaultPrevented) return;
       const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
       if (key !== 'w' || (!event.metaKey && !event.ctrlKey) || event.altKey || event.shiftKey || event.isComposing) return;
       event.preventDefault();
       event.stopPropagation();
       parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'shortcut', shortcut: 'closeTab' }, '*');
-    }, true);
+    });
     parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'ready', features: ['workbench.close'] }, '*');
   })();`;
 }

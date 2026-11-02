@@ -5,6 +5,7 @@ import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/
 import type { DatabaseType } from "@/types/generated/databaseTypes";
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
 import type { GraphResult } from "@/lib/graph/graphResult";
+import type { OracleRoutinePlanDraft } from "@/types/schemaDiff";
 
 export type { DatabaseType } from "@/types/generated/databaseTypes";
 
@@ -139,6 +140,8 @@ export interface CompletionAssistantResponse {
 export interface ConnectionConfig {
   id: string;
   name: string;
+  /** Read-only response identity retained when a saved JDBC URL is protected. */
+  readonly jdbc_dialect?: "oceanbase-oracle";
   note?: string;
   db_type: DatabaseType;
   driver_profile?: string;
@@ -155,8 +158,10 @@ export interface ConnectionConfig {
   visible_database_patterns?: string[];
   visible_schemas?: Record<string, string[]>;
   show_system_schemas?: boolean;
-  /** Whether to show Oracle / OceanBase-Oracle database links node in the sidebar tree. Defaults to true. */
+  /** Connection-level sidebar display preferences. Absent means shown. */
   show_database_links?: boolean;
+  show_native_jobs?: boolean;
+  show_user_admin?: boolean;
   /** Load every page when the sidebar's Tables group is opened for this connection. */
   sidebar_auto_load_all_tables?: boolean;
   attached_databases?: AttachedDatabaseConfig[];
@@ -317,8 +322,21 @@ export interface SshTunnelConfig {
   key_passphrase?: string;
   connect_timeout_secs?: number;
   expose_lan?: boolean;
+  /**
+   * Fixed local port (1-65535) the tunnel listens on while the connection is
+   * open, so other local tools can reuse it. Only the last enabled layer uses
+   * it, and only when it is an inline SSH layer (not a shared tunnel profile).
+   * Absent means a random free port. It binds `0.0.0.0` instead of `127.0.0.1`
+   * when `expose_lan` is on.
+   */
+  local_port?: number;
   use_ssh_agent?: boolean;
   ssh_agent_sock_path?: string;
+  /**
+   * SHA-256 fingerprint (`SHA256:...`) of the one SSH agent identity to use.
+   * Empty means every identity the agent reports is tried, in order.
+   */
+  ssh_agent_key_fingerprint?: string;
   /**
    * UI-facing choice of login method. Drives which credential inputs the
    * connection dialog shows; the backend still probes "none" then falls
@@ -348,6 +366,12 @@ export interface SshTunnelConfig {
    * and `enabled` are kept).
    */
   profile_id?: string;
+}
+
+export interface SshAgentIdentity {
+  fingerprint: string;
+  algorithm: string;
+  comment: string;
 }
 
 export interface SshConfigHostEntry {
@@ -717,6 +741,12 @@ export interface PluginMcpContribution {
   description?: string;
   ai_tools?: boolean;
   external_tools?: boolean;
+  /** Optional grouping of the plugin's tools for the MCP settings UI. */
+  toolsets?: Array<{ id: string; title: string; description?: string }>;
+  /** Optional per-tool declarations keyed by tool name. */
+  tools?: Record<string, { toolset?: string; access?: "read" | "write" | "full" }>;
+  /** Optional sub-scope below a connection (e.g. a Kubernetes namespace). */
+  scope?: { kind: string; title: string; argument: string; list_method?: string };
 }
 
 /**
@@ -865,6 +895,8 @@ export interface PluginMarketplacePlugin {
   icon?: string;
   tags: string[];
   permissions: string[];
+  /** The plugin provides MCP tools (manifest declares an `mcp` contribution). */
+  mcpTools?: boolean;
   source?: string;
   homepage?: string;
   license?: string;
@@ -1130,6 +1162,7 @@ export interface ObjectSource {
   editable?: boolean;
   /** Optional structured metadata exposed by generic JDBC sidecars. */
   routine_parameters?: RoutineParameterMetadata[];
+  trigger?: TriggerInfo | null;
 }
 
 export interface MysqlEventInfo {
@@ -1154,7 +1187,7 @@ export interface MysqlEventInfo {
   source?: string | null;
 }
 
-export type CustomTypeKind = "base" | "composite" | "domain" | "enum" | "range" | "multirange";
+export type CustomTypeKind = "base" | "composite" | "domain" | "enum" | "range" | "multirange" | "object" | "collection" | "other";
 
 export interface CustomTypeMember {
   name: string;
@@ -1199,6 +1232,75 @@ export interface CustomTypeDdl {
   warnings?: string[];
 }
 
+export interface TypeMetadataRead {
+  state: "available" | "incomplete" | "unavailable" | "unsupported";
+  reason?: string | null;
+}
+
+export interface OracleTypeAttribute {
+  name: string;
+  ordinal?: number | null;
+  typeOwner?: string | null;
+  typeName?: string | null;
+  typeModifier?: string | null;
+  length?: number | null;
+  precision?: number | null;
+  scale?: number | null;
+}
+
+export interface OracleTypeMethodParameter {
+  name?: string | null;
+  ordinal?: number | null;
+  mode?: string | null;
+  typeOwner?: string | null;
+  typeName?: string | null;
+  typeModifier?: string | null;
+}
+
+export interface OracleTypeMethod {
+  name: string;
+  number?: number | null;
+  kind?: string | null;
+  parameterCount?: number | null;
+  resultCount?: number | null;
+  parameters: OracleTypeMethodParameter[];
+  results: OracleTypeMethodParameter[];
+  parametersRead: TypeMetadataRead;
+  resultsRead: TypeMetadataRead;
+}
+
+export interface OracleTypeCollection {
+  kind?: string | null;
+  upperBound?: number | null;
+  elementOwner?: string | null;
+  elementName?: string | null;
+  elementModifier?: string | null;
+  length?: number | null;
+  precision?: number | null;
+  scale?: number | null;
+}
+
+export interface OracleTypeMetadata {
+  status?: string | null;
+  typeCode?: string | null;
+  isFinal?: boolean | null;
+  instantiable?: boolean | null;
+  supertypeOwner?: string | null;
+  supertypeName?: string | null;
+  attributeCount?: number | null;
+  methodCount?: number | null;
+  bodyVisible?: boolean | null;
+  bodyStatus?: string | null;
+  propertiesRead: TypeMetadataRead;
+  bodyRead: TypeMetadataRead;
+  attributesRead: TypeMetadataRead;
+  methodsRead: TypeMetadataRead;
+  collectionRead: TypeMetadataRead;
+  attributes: OracleTypeAttribute[];
+  methods: OracleTypeMethod[];
+  collection?: OracleTypeCollection | null;
+}
+
 export interface CustomTypeDetails {
   name: string;
   schema: string;
@@ -1207,6 +1309,203 @@ export interface CustomTypeDetails {
   members: CustomTypeMember[];
   properties: CustomTypeProperties;
   ddl?: CustomTypeDdl | null;
+  oracleMetadata?: OracleTypeMetadata | null;
+}
+
+export interface TypeRecoveryContext {
+  planId: string;
+  stepId: string;
+}
+
+export interface TypeExecutionBinding extends TypeRecoveryContext {
+  executionId: string;
+  connectionId: string;
+  database: string;
+  schema: string | null;
+  sql: string;
+}
+
+export interface OracleTypeManagementTarget {
+  connectionId: string;
+  database: string;
+  owner: string;
+  name: string;
+}
+
+export interface OracleTypeManagementObjectKey {
+  owner: string;
+  name: string;
+  objectType: string;
+}
+
+export interface OracleTypeDataRelationKey {
+  owner: string;
+  name: string;
+}
+export interface OracleTypeDataField {
+  sourcePath: string[];
+  objectNull: boolean;
+  oldColumn: string;
+  expectedColumn: string;
+  targetPath: string[];
+  targetObjectNull?: boolean;
+  unchanged: boolean;
+}
+export interface OracleTypeDataMappingInput {
+  id: string;
+  source: OracleTypeDataRelationKey;
+  old: OracleTypeDataRelationKey;
+  expected: OracleTypeDataRelationKey;
+  target: OracleTypeDataRelationKey;
+  fields: OracleTypeDataField[];
+}
+export interface OracleTypeDataProjection {
+  path: string[];
+  objectNull: boolean;
+  dataType: string;
+}
+export interface OracleTypeDataRelation {
+  relation: OracleTypeDataRelationKey;
+  objectId: string;
+  readOnly: boolean | null;
+  structure: string;
+  projection: OracleTypeDataProjection[];
+}
+export interface OracleTypeDataBaseline {
+  relation: OracleTypeDataRelation;
+  rowCount: number;
+  fingerprint: string;
+}
+export interface OracleTypeDataManifest {
+  mapping: OracleTypeDataMappingInput;
+  original: OracleTypeDataBaseline;
+  old: OracleTypeDataBaseline;
+  expected: OracleTypeDataBaseline;
+  preparedTarget?: OracleTypeDataBaseline | null;
+  verifiedTarget?: OracleTypeDataBaseline | null;
+}
+export interface OracleTypeDataRequest {
+  target: OracleTypeManagementTarget;
+  action: "describe" | "register" | "verify" | "validate_insert";
+  relation?: OracleTypeDataRelationKey;
+  mapping?: OracleTypeDataMappingInput;
+  manifest?: OracleTypeDataManifest;
+  sql?: string;
+}
+export interface OracleTypeDataResult {
+  relation?: OracleTypeDataRelation | null;
+  manifest?: OracleTypeDataManifest | null;
+  insertSql?: string | null;
+}
+
+/** Database-native evolution keeps data in place. These guards contain no row values. */
+export interface OracleTypeEvolutionManifest {
+  target: OracleTypeManagementTarget;
+  sourceBefore: string;
+  sourceAfter: string;
+  statements: string[];
+  metadata: string;
+  phase: number;
+}
+export interface OracleTypeEvolutionRequest {
+  target: OracleTypeManagementTarget;
+  sourceBefore: string;
+  sourceAfter: string;
+  manifest?: OracleTypeEvolutionManifest;
+}
+
+export interface OracleTypeManagementPrivilege {
+  grantee: string;
+  privilege: string;
+  grantable?: boolean | null;
+  hierarchy?: boolean | null;
+  grantor?: string | null;
+  privilegeId?: string | null;
+  privilegeType?: string | null;
+  columnId?: string | null;
+}
+
+export interface OracleTypeManagementObject {
+  owner: string;
+  name: string;
+  objectType: string;
+  exists?: boolean | null;
+  objectId?: string | null;
+  status?: string | null;
+  statusRead: TypeMetadataRead;
+  triggerEnabled?: boolean | null;
+  triggerEnabledRead?: TypeMetadataRead | null;
+  source?: string | null;
+  sourceRead: TypeMetadataRead;
+  sourceFingerprint?: string | null;
+  errors: OracleTypeManagementError[];
+  errorsRead: TypeMetadataRead;
+  directPrivileges: OracleTypeManagementPrivilege[];
+  privilegesRead: TypeMetadataRead;
+}
+
+export interface OracleTypeManagementError {
+  line: number;
+  position: number;
+  text: string;
+}
+
+export interface OracleTypeManagementDependency {
+  owner: string;
+  name: string;
+  objectType: string;
+  referencedOwner: string;
+  referencedName: string;
+  referencedType: string;
+  referencedLink?: string | null;
+}
+
+export interface OracleTypeManagementReference {
+  owner: string;
+  tableName: string;
+  columnName?: string | null;
+  dataTypeOwner?: string | null;
+  dataType?: string | null;
+  tableStatus?: string | null;
+  tableReadOnly?: boolean | null;
+}
+
+export interface OracleTypeManagementSnapshot {
+  target: OracleTypeManagementTarget;
+  visibilityScope: string;
+  actingUser?: string | null;
+  actingUserRead: TypeMetadataRead;
+  details?: CustomTypeDetails | null;
+  detailsRead: TypeMetadataRead;
+  typeSource?: string | null;
+  typeSourceRead: TypeMetadataRead;
+  bodySource?: string | null;
+  bodySourceRead: TypeMetadataRead;
+  objects: OracleTypeManagementObject[];
+  dependencies: OracleTypeManagementDependency[];
+  dependenciesRead: TypeMetadataRead;
+  persistentReferences: OracleTypeManagementReference[];
+  persistentReferencesRead: TypeMetadataRead;
+  directPrivileges: OracleTypeManagementPrivilege[];
+  privilegesRead: TypeMetadataRead;
+}
+
+export type OracleTypeManagementSqlOperation = "save_spec" | "save_body" | "drop_spec" | "drop_body" | "grant_execute" | "grant_privilege" | "rebuild_source" | "compile_spec" | "compile_trigger";
+export interface OracleTypeManagementSqlInput {
+  databaseType: DatabaseType;
+  operation: OracleTypeManagementSqlOperation;
+  owner: string;
+  name: string;
+  source?: string | null;
+  grantee?: string | null;
+  grantable?: boolean;
+  objectType?: ObjectSourceKind;
+  privilege?: string;
+  triggerEnabled?: boolean;
+}
+export interface OracleTypeManagementSqlResult {
+  statements: string[];
+  sourceFingerprint?: string | null;
 }
 
 export interface ColumnInfo {
@@ -1237,6 +1536,8 @@ export interface SqlServerColumnMetadata extends ColumnInfo {
 }
 
 export interface IndexInfo {
+  /** Dictionary-derived index owner; absent in older or non-owner metadata. */
+  owner?: string | null;
   name: string;
   columns: string[];
   is_unique: boolean;
@@ -1289,6 +1590,43 @@ export interface TriggerInfo {
   comment?: string | null;
   created_at?: string | null;
   statement?: string | null;
+  oracle_metadata?: OracleTriggerMetadata | null;
+}
+
+/** Missing metadata means a provider has not established exact identity. */
+export interface MetadataReadOptions {
+  identityMode?: "exact";
+  catalog?: string;
+}
+
+export interface OracleTriggerParent {
+  owner: string;
+  name: string;
+  objectType: "TABLE" | "VIEW";
+  objectId?: string | null;
+}
+
+export interface OracleTriggerReadState {
+  state: "available" | "empty" | "denied" | "unavailable" | "unsupported" | "error" | "incomplete";
+  message?: string | null;
+}
+
+export interface OracleTriggerMetadata {
+  contractVersion: 1;
+  identityMode: "exact";
+  engine: "oracle" | "oceanbase-oracle" | "dm";
+  engineVersion?: string | null;
+  owner: string;
+  name: string;
+  scope: "TABLE" | "VIEW" | "SCHEMA" | "DATABASE" | "TIMER" | "OTHER" | "UNKNOWN";
+  scopeType?: string | null;
+  scopeOwner?: string | null;
+  parent?: OracleTriggerParent | null;
+  objectId?: string | null;
+  lastDdlTime?: string | null;
+  definition?: { origin: string; format: "ddl" | "declaration" | "body"; complete: boolean } | null;
+  errors?: { sequence: number; line: number; position: number; text: string; severity?: string | null }[] | null;
+  reads: Partial<Record<"identity" | "scope" | "parent" | "enabled" | "validity" | "definition" | "errors", OracleTriggerReadState>>;
 }
 
 export interface ConstraintInfo {
@@ -1438,6 +1776,8 @@ export interface QueryResult {
   appended_from_row_count?: number;
   /** Set for synthesized query execution failures. */
   execution_error?: true;
+  /** Frontend execution that published this result; absent on older cached results. */
+  sourceExecutionId?: string;
   /** Set only for SQL Server informational messages emitted by the backend. */
   server_message?: true;
   /** Manual-transaction UX marker for sticky proven-read-only dialects (Oracle,
@@ -1507,12 +1847,37 @@ export interface QueryResult {
   total_is_exact?: boolean;
   truncated?: boolean;
   /** Variable-length cells represented by bounded previews in `rows`. */
-  large_value_cells?: Array<{ row_index: number; column_index: number; original_bytes: number; value_ref?: string }>;
+  large_value_cells?: Array<{
+    row_index: number;
+    column_index: number;
+    /** With value_ref, zero can mean an unknown byte size, not an empty value. */
+    original_bytes: number;
+    value_ref?: string;
+    pending_decode?: boolean;
+  }>;
+  /** Authoritative original keys for internal reads; never derive these from interpreted display text. */
+  raw_key_cells?: Array<{ row_index: number; column_index: number; value: string | number | boolean | null }>;
   /** Frontend-only original result connection, independent of the currently active tab. */
   large_value_context?: { connectionId: string; database: string; clientSessionId?: string; txnSessionId?: string; catalog?: string };
   /** Retained result refs also cover cells already hydrated into complete local values. */
   large_value_refs?: string[];
+  /** Frontend-only dispatch identity; absent on results without captured provenance. */
+  legacy_export_source?: {
+    connectionId: string;
+    database: string;
+    schema?: string;
+    catalog?: string;
+    databaseType?: DatabaseType;
+    connectionFingerprint: string;
+    identifierQuote?: string;
+    serverVersion?: string;
+    statementSql?: string;
+    hiddenPrimaryKeys?: Array<{ sourceName: string; alias: string }>;
+    ordinaryReadSafe: boolean;
+  };
   session_id?: string | null;
+  /** Frontend-only owner of a manual transaction's result cursor, including retained runs. */
+  manual_transaction_session_id?: string;
   has_more?: boolean;
   /** Frontend-only SQL page lookahead, independent of the driver's cursor has_more. */
   page_has_more?: boolean;
@@ -1644,6 +2009,7 @@ export interface QueryResultRun {
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
   resultLocalSortOriginalLargeValueCells?: QueryResult["large_value_cells"];
+  resultLocalSortOriginalRawKeyCells?: QueryResult["raw_key_cells"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   orderByInput?: string;
@@ -1791,6 +2157,7 @@ export type TreeNodeType =
   | "oracle-db-link"
   | "group-jobs"
   | "group-packages"
+  | "group-package-bodies"
   | "group-partitions"
   | "group-extensions"
   | "group-event-triggers"
@@ -1804,6 +2171,7 @@ export type TreeNodeType =
   | "dameng-users"
   | "dameng-roles"
   | "dameng-job-admin"
+  | "database-job-admin"
   | "saved-sql-root"
   | "saved-sql-folder"
   | "saved-sql-file"
@@ -1892,6 +2260,8 @@ export interface TreeNode {
   schema?: string;
   tableName?: string;
   objectName?: string;
+  /** Distinguishes schema indexes from the existing table-child index actions. */
+  objectScope?: "schema";
   signature?: string;
   customTypeKind?: CustomTypeKind;
   hasMembers?: boolean;
@@ -1928,6 +2298,7 @@ export interface TreeNode {
   meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | EventTriggerInfo | VectorCollectionMeta | MongoCollectionMeta | CustomTypeTreeMemberMeta;
   loadMore?: {
     parentId: string;
+    objectType?: "INDEX";
     offset: number;
     pageSize: number;
     /** Backend filter and global-search identity for OceanBase metadata pages. */
@@ -1955,7 +2326,7 @@ export interface TableNameFilter {
   excludePatterns: string[];
 }
 
-export type TableInfoTab = "info" | "columns" | "indexes" | "foreignKeys" | "constraints" | "triggers" | "partitions" | "ddl";
+export type TableInfoTab = "info" | "columns" | "indexes" | "foreignKeys" | "constraints" | "triggers" | "partitions" | "ddl" | "relations";
 
 /** PostgreSQL declarative partitioning strategy (`pg_partitioned_table.partstrat`). */
 export type PgPartitionKind = "range" | "list" | "hash";
@@ -1996,6 +2367,17 @@ export interface PgTablePartitioning {
 export interface TableStructureEditorTarget {
   kind: "column" | "index";
   name: string;
+  /** Raw schema-index owner; omitted by legacy table-child navigation. */
+  owner?: string;
+  /** Schema-index requests are consumed once by the existing draft editor. */
+  action?: "create" | "delete";
+}
+
+export interface SchemaIndexIdentity {
+  schema: string;
+  name: string;
+  parentSchema: string;
+  parentName: string;
 }
 
 export interface TableStructureEditorDraft {
@@ -2006,6 +2388,9 @@ export interface TableStructureEditorDraft {
   /** Original DDL and display preference retained so restoring a draft cannot change its baseline. */
   rawDdlContent?: string;
   excludeDdlStorage?: boolean;
+  includeDdlStorage?: boolean;
+  compactDdlSql?: boolean;
+  separateDdlIndexes?: boolean;
   /** Edited DDL script, or null/undefined when the DDL tab was left untouched. */
   ddlDraft?: string | null;
   newTableName: string;
@@ -2015,10 +2400,15 @@ export interface TableStructureEditorDraft {
   originalMysqlAutoIncrementValue?: string;
   mysqlTableEngine?: string;
   originalMysqlTableEngine?: string;
+  mysqlTableCharset?: string;
+  originalMysqlTableCharset?: string;
+  mysqlTableCollation?: string;
+  originalMysqlTableCollation?: string;
   physicalOptions?: import("@/lib/table/tablePhysicalOptions").TablePhysicalOptionsDraft;
   starrocksLayoutDraft?: import("@/lib/table/starrocksAlterOptions").StarRocksLayoutDraft;
   starrocksSortColumns?: string[];
   starrocksPhysicalOptions?: import("@/lib/table/starrocksPhysicalOptions").StarRocksPhysicalOptionsDraft;
+  postgresForeignTable?: import("@/lib/table/postgresForeignTable").PostgresForeignTableDraft;
   tableOwner?: string;
   originalTableOwner?: string;
   columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];
@@ -2034,6 +2424,11 @@ export interface TableStructureEditorDraft {
     remaining: import("@/lib/table/tableStructureEditorSql").OracleForeignKeyDefinition[];
     uncertainSteps: string[];
   };
+  oracleTriggerStructureRecovery?: {
+    target: import("@/lib/database/oracleTriggerStructurePlan").OracleTriggerStructureTarget;
+    steps: import("@/lib/database/oracleTriggerPlan").OracleTriggerStructureStepResult[];
+    details: string;
+  };
   constraintsLoaded?: boolean;
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
   triggersLoaded?: boolean;
@@ -2048,6 +2443,12 @@ export interface TableStructureEditorDraft {
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   /** Request id of the structureInitialTab the editor already applied; remounts must not replay a consumed initial tab over the restored draft. */
   appliedInitialTabRequestId?: number;
+  appliedInitialTargetRequestId?: number;
+  oracleIndexRecovery?: {
+    target: string;
+    completedCreates: import("@/lib/database/oracleIndexes").OracleIndexDefinition[];
+    refreshError?: string;
+  };
   initialized: boolean;
 }
 
@@ -2058,7 +2459,7 @@ export interface TableStructureEditorViewport {
 
 export type ObjectBrowserViewMode = "list" | "grid" | "compact";
 
-export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "events" | "sequences" | "packages" | "types";
+export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "events" | "sequences" | "indexes" | "packages" | "types";
 
 export interface ObjectBrowserViewport {
   scrollTop: number;
@@ -2214,6 +2615,7 @@ export interface QueryTab {
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
   resultLocalSortOriginalLargeValueCells?: QueryResult["large_value_cells"];
+  resultLocalSortOriginalRawKeyCells?: QueryResult["raw_key_cells"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   orderByInput?: string;
@@ -2333,8 +2735,10 @@ export interface QueryTab {
     | "dameng-users"
     | "dameng-roles"
     | "dameng-jobs"
+    | "database-jobs"
     | "processlist"
     | "sqlserver-trace"
+    | "pl-debug"
     | "mysql-dashboard"
     | "postgres-dashboard"
     | "xugu-dashboard"
@@ -2359,6 +2763,8 @@ export interface QueryTab {
   };
   /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */
   hbaseCreateTableOnOpen?: boolean;
+  /** Connection-level native Job selection; bodies and backend context IDs are not persisted. */
+  nativeJobAdmin?: { kind: "scheduler"; owner: string; name: string } | { kind: "legacy"; jobId: string } | { kind: "dameng-native"; jobId: string; name: string };
   mqTenant?: string;
   mqInitialTab?: "topics";
   mqttInitialTopic?: string;
@@ -2370,11 +2776,24 @@ export interface QueryTab {
   nacosTargetRequestId?: number;
   nacosConfigEditorViewport?: NacosConfigEditorViewport;
   structureTableName?: string;
+  structureExactIdentity?: boolean;
   /** Navigation type of the opened structure object; views matter for "view data" routing. */
   structureTableType?: "table" | "view";
   structureInitialTab?: TableInfoTab;
   structureInitialTabRequestId?: number;
   structureInitialTarget?: TableStructureEditorTarget;
+  /** Runtime-only request to locate an object in the existing read-only properties. */
+  objectPropertiesRequest?: {
+    requestId: string;
+    connectionId: string;
+    database: string;
+    schema: string;
+    catalog?: string;
+    name: string;
+    objectType: "TABLE" | "VIEW" | "MATERIALIZED_VIEW";
+    initialTab: TableInfoTab;
+    focusObject?: { owner: string; name: string; type: "INDEX" };
+  };
   structureDraft?: TableStructureEditorDraft;
   databaseSearchState?: DatabaseSearchTabState;
   objectBrowser?: {
@@ -2386,7 +2805,11 @@ export interface QueryTab {
     eventOpenRequestId?: number;
     /** 显式的"新建事件"请求：单调递增，用于让已复用 tab 也能重复进入 CREATE 编辑器 */
     eventCreateRequestId?: number;
-    initialObjectFilter?: "tables" | "events";
+    initialObjectFilter?: "tables" | "events" | "indexes";
+    indexRequestSequence?: number;
+    indexCreateRequestId?: number;
+    initialViewTarget?: SchemaIndexIdentity;
+    initialViewRequestId?: number;
     filter?: ObjectBrowserFilter;
     searchQuery?: string;
     viewport?: ObjectBrowserViewport;
@@ -2401,13 +2824,16 @@ export interface QueryTab {
     catalog?: string;
     name: string;
     objectType: ObjectSourceKind;
-    section: "source" | "dependencies" | "dependents";
+    section: "source" | "dependencies" | "dependents" | "foreignKeys" | "ownership";
   };
   ddlViewer?: {
     schema?: string;
+    explicitOwner?: string;
     tableName: string;
     objectType?: ObjectSourceKind;
     formatDialect?: SqlFormatDialect;
+    displaySource?: string;
+    separateIndexes?: boolean;
   };
   /**
    * 「先出 tab 再加载」的中间态：DDL 新标签已经可见，但 DDL 还在路上
@@ -2428,6 +2854,10 @@ export interface QueryTab {
     objectType: ObjectSourceKind;
     signature?: string;
   };
+  /** Durable TYPE definitions and step records; restored plans require fresh verification. */
+  typeManagementDraft?: import("@/lib/table/oracleTypeManagement").OracleTypeManagementDraft;
+  /** Explicit edit mode; TYPE source opens read-only and restores read-only. */
+  typeSourceEditing?: boolean;
   /**
    * 「先出 UI 再加载」的中间态：源码 tab 已经可见，但源码还在路上
    * （ensureConnected + getObjectSource）。让 tab 栏与编辑区在等待期间就有反馈，
@@ -2558,6 +2988,13 @@ export interface QueryTab {
     collection: string;
     idColumn: "_id";
   };
+  /**
+   * MongoDB query tabs only. "sql" compiles the editor text to a mongo-shell
+   * command before the existing execution path runs it. Absent means shell.
+   */
+  mongoQueryLanguage?: "shell" | "sql";
+  /** Shell text produced by the latest SQL-mode execution. Not persisted. */
+  mongoGeneratedShell?: string;
   mongoBucket?: {
     bucketName: string;
   };
@@ -2637,6 +3074,8 @@ export interface SavedSqlLibrary {
 }
 
 /** Serializable configuration of a saved data-transfer task. */
+export type TransferPackageDraft = Pick<OracleRoutinePlanDraft, "identity" | "sourceName" | "sql" | "packageBodySource" | "packageContract" | "confirmPackagePair"> & { reviewedTargetDraft?: boolean };
+
 export interface TransferTaskConfig {
   sourceConnectionId: string;
   /** Undefined means the connection's built-in/default catalog. */
@@ -2649,6 +3088,7 @@ export interface TransferTaskConfig {
   targetSchema?: string;
   /** Selected object names grouped by object kind (TABLE, VIEW, ...). */
   objects: Partial<Record<TransferObjectKind, string[]>>;
+  oraclePackageDrafts?: TransferPackageDraft[];
   content: TransferContent;
   mode: TransferMode;
   targetTableNameCase: TransferTableNameCase;

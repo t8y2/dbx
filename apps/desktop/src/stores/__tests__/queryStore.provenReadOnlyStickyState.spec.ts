@@ -543,7 +543,8 @@ describe("queryStore Oracle/OceanBase manual-transaction sticky state (behavior 
     // No classificationSql is sent and no sticky state exists for non-sticky
     // dialects: commit/rollback follow the legacy always-visible rule.
     const args = mocks.executeInManualTransaction.mock.calls[0]!;
-    expect(args.at(-1)).toBeUndefined();
+    expect(args[8]).toBeUndefined();
+    expect(args[12]).toBe(true);
     expect(tab.txnPossiblyDirty).toBeUndefined();
     expect(tab.txnSessionId).toBe("txn-jdbc");
   });

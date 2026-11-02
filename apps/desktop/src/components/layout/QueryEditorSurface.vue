@@ -11,13 +11,11 @@ const emit = defineEmits<ContentAreaSurfaceEmits>();
 const surfaceProps = computed<ContentAreaSurfaceProps>(() => ({
   activeTab: props.activeTab,
   activeConnection: props.activeConnection,
-  executableSql: props.executableSql,
+  hasExecutableSql: props.hasExecutableSql,
   activeOutputView: props.activeOutputView,
   formatSqlRequest: props.formatSqlRequest,
   compressSqlRequest: props.compressSqlRequest,
   keywordCaseRequest: props.keywordCaseRequest,
-  selectedSql: props.selectedSql,
-  cursorPos: props.cursorPos,
   blockDangerousRedisCommands: props.blockDangerousRedisCommands,
 }));
 const contentEmits = createContentSurfaceEventForwarders(emit);
@@ -34,6 +32,7 @@ defineExpose<QueryEditorSurfaceHandle>({
   refreshQueryEditorCompletionCache: () => contentAreaRef.value?.refreshQueryEditorCompletionCache() ?? false,
   handleModRTarget: (target: Element) => contentAreaRef.value?.handleModRTarget(target) ?? false,
   requestQueryEditorExecute: () => contentAreaRef.value?.requestQueryEditorExecute() ?? false,
+  requestQueryEditorExecuteAll: () => contentAreaRef.value?.requestQueryEditorExecuteAll() ?? false,
   captureQueryEditorExecutionSnapshot: () => contentAreaRef.value?.captureQueryEditorExecutionSnapshot(),
   requestQueryEditorExecuteInNewResultTab: () => contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab() ?? false,
   requestQueryEditorPreviewChanges: (stackSql?: string) => Promise.resolve(contentAreaRef.value?.requestQueryEditorPreviewChanges(stackSql) ?? false),

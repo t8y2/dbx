@@ -78,6 +78,7 @@ const DESKTOP_DEVICE_LOCAL_SETTINGS: &[&str] = &[
 ];
 const NON_SYNCABLE_DESKTOP_SETTINGS: &[&str] = &["debug_logging_enabled"];
 const NON_SYNCABLE_EDITOR_SETTINGS: &[&str] = &[
+    "sidebarShowUserAdmin",
     "updateNotificationsEnabled",
     "autoDownloadUpdates",
     "autoUpdateApp",
@@ -3445,6 +3446,17 @@ mod tests {
     };
     use crate::persistence::secret_codec::{managed_key_path, SecretKeyPolicy};
 
+    #[test]
+    fn sidebar_user_admin_migration_input_is_not_cloud_synced() {
+        let settings = serde_json::json!({ "sidebarShowUserAdmin": false, "sidebarFontSize": 14 });
+        for selection in [None, Some(vec!["sidebarShowUserAdmin".into(), "sidebarFontSize".into()])] {
+            assert_eq!(
+                super::select_syncable_editor_settings(Some(settings.clone()), selection.as_ref()),
+                Some(serde_json::json!({ "sidebarFontSize": 14 }))
+            );
+        }
+    }
+
     fn make_test_config(name: &str, is_default: bool) -> AiConfigItem {
         AiConfigItem {
             id: format!("cfg-{name}"),
@@ -3688,6 +3700,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -3779,6 +3793,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -4123,6 +4139,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: Some("CREATE SECRET (TYPE quack, TOKEN 'token-value');".to_string()),
             color: None,
@@ -4140,8 +4158,10 @@ mod tests {
                     key_passphrase: "hop-passphrase".to_string(),
                     connect_timeout_secs: 5,
                     expose_lan: false,
+                    local_port: None,
                     use_ssh_agent: false,
                     ssh_agent_sock_path: String::new(),
+                    ssh_agent_key_fingerprint: String::new(),
                     auth_method: "password".to_string(),
                     allow_exec_channel_proxy: false,
                     proxy_command: String::new(),
@@ -5827,8 +5847,10 @@ mod tests {
             key_passphrase: String::new(),
             connect_timeout_secs: 5,
             expose_lan: false,
+            local_port: None,
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
+            ssh_agent_key_fingerprint: String::new(),
             auth_method: "password".to_string(),
             allow_exec_channel_proxy: false,
             proxy_command: String::new(),

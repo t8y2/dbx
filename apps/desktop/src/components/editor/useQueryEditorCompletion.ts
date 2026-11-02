@@ -781,6 +781,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     if (isGraphQueryDatabase(props.databaseType)) return provideGraphCompletions(context, props.databaseType);
     const fullDoc = currentState.doc.toString();
     if (props.databaseType === "mongodb") {
+      if (props.mongoQueryLanguage === "sql") return null;
       return provideMongoCompletions(currentState, position, explicit);
     }
     if (props.databaseType === "meilisearch" || props.databaseType === "solr" || props.databaseType === "couchdb") return null;
@@ -815,7 +816,8 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       const analysis = await getEditorSqlCompletionAnalysis(fullDoc, position, currentState);
       if (!analysis || context.aborted || epoch !== completionEpoch) return null;
       analyzedCtes = { sql: fullDoc, definitions: analysis.cteDefinitions };
-      const { sequenceLiteralContext, databaseLinkContext, useDatabaseCompletion } = analysis;
+      const sequenceLiteralContext = settingsStore.editorSettings.sequenceCompletionEnabled ? analysis.sequenceLiteralContext : null;
+      const { databaseLinkContext, useDatabaseCompletion } = analysis;
       if (analysis.suppressed && !sequenceLiteralContext) return null;
       const useDatabasePrefix = useDatabaseCompletion?.prefix ?? null;
 
@@ -933,6 +935,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
+          sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
       }
@@ -998,6 +1001,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
+          sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
       }
@@ -1009,6 +1013,12 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
         prefix: completionContext.prefix,
         typedActivation,
         selectListColumnContext: completionContext.selectListColumnContext,
+        // The cursor sits right after `alias.` with nothing typed yet: columns for the
+        // referenced table are exactly what the user is asking for, so cold metadata
+        // must still be fetched instead of silently yielding no candidates (#12227).
+        // Table-name dots (`FROM myschema.`) share this shape but must keep their
+        // instant local path, hence the tableNameCompletion exclusion.
+        qualifierDot: !tableNameCompletion && !!completionContext.qualifier && !completionContext.prefix,
       });
       const shouldResolveAsyncCompletion = tableNameCompletion || shouldResolveColumnCompletion;
       const localResult = buildLocalSqlCompletionResult(completionContext, fullDoc, position, completionScope);
@@ -1112,7 +1122,8 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     const expectedDoc = currentView?.state.doc;
     const analysis = await getEditorSqlCompletionAnalysis(fullDoc, position, currentView?.state);
     if (!analysis || view.value !== currentView || currentView?.state.doc !== expectedDoc || settingsStore.editorSettings.completionTriggerMode !== mode) return false;
-    const { sequenceLiteralContext, databaseLinkContext, useDatabaseCompletion } = analysis;
+    const sequenceLiteralContext = settingsStore.editorSettings.sequenceCompletionEnabled ? analysis.sequenceLiteralContext : null;
+    const { databaseLinkContext, useDatabaseCompletion } = analysis;
     if (analysis.suppressed && !sequenceLiteralContext) return false;
     const context = databaseLinkContext ?? sequenceLiteralContext ?? analysis.completionContext;
     const prevChar = fullDoc[position - 1] ?? "";
@@ -1315,6 +1326,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
+      sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
     });
 
     return buildSqlCompletionResult(items, completionContext, fullDoc, position);
@@ -1547,7 +1559,8 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
 
   function completionObjectKindsForContext(completionContext: ReturnType<typeof getSqlCompletionContext>): CompletionAssistantObjectKind[] {
     if (completionContext.contextKind === "exec") return ["procedure"];
-    if (isSequenceCompletionDatabase(props.databaseType)) {
+    const allowSequences = settingsStore.editorSettings.sequenceCompletionEnabled;
+    if (allowSequences && isSequenceCompletionDatabase(props.databaseType)) {
       if (completionContext.suggestColumns && completionContext.referencedTables.length > 0 && !completionContext.qualifier) {
         return ["function", "sequence"];
       }
@@ -1852,6 +1865,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
+      sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
     });
 
     return buildSqlCompletionResult(items, completionContext, fullDoc, position);

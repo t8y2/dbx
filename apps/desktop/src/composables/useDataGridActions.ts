@@ -9,7 +9,7 @@ import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions, tableDataPreviewRowBudget } from "@/lib/dataGrid/dataGridLargeValues";
 import { elasticsearchCursorPageJumpRequestCount } from "@/lib/dataGrid/dataGridPagination";
 import { editablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
-import { markRowIdLocatorSupported, markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
+import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { loadVirtualRowIdentifier } from "@/lib/table/virtualRowIdentifier";
 import * as api from "@/lib/backend/api";
@@ -68,6 +68,12 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return activeTab.value?.id === tabId ? activeTab.value : undefined;
   }
 
+  function refreshActiveResultRunOptions(tab: QueryTab): { refreshActiveResultRun?: boolean } {
+    // Reloads/pagination/sorting re-run the displayed SQL; they are result-view
+    // operations and must not capture another result run when auto-keep is on.
+    return tab.mode === "query" ? { refreshActiveResultRun: true } : {};
+  }
+
   function activeQueryTargetOptions(tab: QueryTab) {
     const executionTarget = queryStore.activeResultExecutionTarget(tab.id);
     if (!executionTarget) return {};
@@ -110,15 +116,15 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return typeof limit === "number" && limit > 0 ? { limit, offset: 0 } : undefined;
   }
 
-  function buildTableSql(tab: QueryTab, options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string; previewPageSize?: number } = {}): Promise<string> {
-    const { previewPageSize, ...sqlOptions } = options;
+  function buildTableSql(tab: QueryTab, options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string; previewPageSize?: number; includeRowId?: boolean } = {}): Promise<string> {
+    const { previewPageSize, includeRowId, ...sqlOptions } = options;
     const config = connectionStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const tableMeta = tableMetaForDataTab(tab);
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : (tableMeta?.primaryKeys ?? []);
     // 已确认该连接拒绝合成行定位器（如 Hologres 拒绝 tableoid，#12647）时不再注入，
     // 避免无主键表每次打开都报错。
-    const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta?.tableType) && !rowIdLocatorUnsupported(tab.connectionId);
+    const useRowId = includeRowId ?? (shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta?.tableType) && !rowIdLocatorUnsupported(tab.connectionId));
     // 列投影只信任真实元数据列：tableMetaForDataTab 的 fallback 列来自查询
     // 结果（可能是失败结果的 ["Error"]），进入 SQL 会生成非法投影；
     // 真实列缺失时省略 columns 让 builder 生成 SELECT *
@@ -138,7 +144,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       catalog: tableMeta?.catalog,
       columns: realColumns?.map((column) => column.name),
       primaryKeys,
-      ...tableDataLargeValuePreviewOptions(effectiveDbType, realColumns ?? [], primaryKeys, previewPageSize ?? limit),
+      ...tableDataLargeValuePreviewOptions(effectiveDbType, realColumns ?? [], primaryKeys, previewPageSize ?? limit, config?.db_type === "jdbc"),
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       includeRowId: useRowId,
       limit,
@@ -149,18 +155,17 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
 
   // 行定位器被服务端拒绝时的降级执行（#12647）：首次带定位器的加载失败后，
   // 去掉定位器重试一次；重试成功才记住该连接，之后由 buildTableSql 直接跳过
-  // 定位器。重试也失败则还原标记，让真实的服务端错误可见。
+  // 定位器。重试失败不改共享能力状态，让真实的服务端错误可见。
   async function executeTableDataSqlWithRowIdFallback(tab: QueryTab, sql: string, executeOptions: Parameters<typeof queryStore.executeTabSql>[2], rebuildSql: () => Promise<string>): Promise<void> {
     await queryStore.executeTabSql(tab.id, sql, executeOptions);
-    if (!shouldRetryWithoutRowIdLocator(sql, tab.connectionId, tabResultFor(tab))) return;
-    markRowIdLocatorUnsupported(tab.connectionId);
+    if (!shouldRetryWithoutRowIdLocator(sql, tabResultFor(tab))) return;
     try {
       const fallbackSql = await rebuildSql();
       queryStore.updateSql(tab.id, fallbackSql);
       await queryStore.executeTabSql(tab.id, fallbackSql, executeOptions);
-      if (!shouldKeepRowIdLocatorDisabled(tabResultFor(tab))) markRowIdLocatorSupported(tab.connectionId);
+      if (shouldKeepRowIdLocatorDisabled(tabResultFor(tab))) markRowIdLocatorUnsupported(tab.connectionId);
     } catch {
-      markRowIdLocatorSupported(tab.connectionId);
+      // Keep the fallback/build error visible without changing shared capability memory.
     }
   }
 
@@ -185,7 +190,6 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     // still receive its result. Only the latest request may update this tab.
     const requestToken = {};
     metadataRequests.set(tab, requestToken);
-    tab.tableMetaPending = true;
     const metadataGenerationAtStart = connectionStore.metadataGenerationFor(target.connectionId, target.database);
     const trace = options.trace;
 
@@ -197,7 +201,18 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       return false;
     }
     const config = connectionStore.getConfig(target.connectionId);
+    const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const querySchema = metadataSchemaForConnection(config, target.database, target.schema);
+    // MySQL owns its row identity across a refresh (see below). Every other
+    // database keeps the existing behavior: the edit gate is closed while the
+    // fresh metadata load runs.
+    if (effectiveDbType !== "mysql") tab.tableMetaPending = true;
+    // MySQL columns do not always report the key that the table loader found
+    // through index discovery (for example unique-key identities). A manual
+    // refresh must not replace that known row identity with an empty set while
+    // the background index load is still running, otherwise `tableMetaPending`
+    // turns the data grid read-only and hides all edit controls (#13503).
+    const preserveMysqlRowIdentity = effectiveDbType === "mysql" && tableMeta.columns.length > 0;
     console.info("[DBX][reloadData:metadata:get-columns:start]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), schema: querySchema, table: target.tableName, columnsOnly: options.columnsOnly === true });
     // 复用共享表元数据缓存（30s TTL + in-flight 去重），多个入口对同一张表
     // 不再各自往返 getColumns/listIndexes。跨连接生命周期的强制重建走 force，
@@ -215,13 +230,14 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
             catalog: target.catalog,
             force: options.force === true,
           });
-          const primaryKeys = editablePrimaryKeys(effectiveDatabaseTypeForConnection(config), columns, target.tableType);
-          const virtualPrimaryKeys = primaryKeys.length > 0 ? [] : loadVirtualRowIdentifier({ connectionId: target.connectionId, database: target.database, catalog: target.catalog, schema: querySchema, tableName: target.tableName }, columns);
+          const declaredPrimaryKeys = editablePrimaryKeys(effectiveDatabaseTypeForConnection(config), columns, target.tableType);
+          const virtualPrimaryKeys = declaredPrimaryKeys.length > 0 ? [] : loadVirtualRowIdentifier({ connectionId: target.connectionId, database: target.database, catalog: target.catalog, schema: querySchema, tableName: target.tableName }, columns);
+          const primaryKeys = declaredPrimaryKeys.length > 0 ? declaredPrimaryKeys : virtualPrimaryKeys.length > 0 ? virtualPrimaryKeys : preserveMysqlRowIdentity ? tableMeta.primaryKeys : [];
           return {
             columns,
-            primaryKeys: primaryKeys.length > 0 ? primaryKeys : virtualPrimaryKeys,
+            primaryKeys,
             ...(virtualPrimaryKeys.length ? { virtualPrimaryKeys } : {}),
-            rowIdentityResolved: primaryKeys.length > 0 || virtualPrimaryKeys.length > 0,
+            rowIdentityResolved: primaryKeys.length > 0 || virtualPrimaryKeys.length > 0 || (preserveMysqlRowIdentity && columns.length > 0),
           };
         })()
       : await (async () => {
@@ -236,11 +252,20 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
             catalog: target.catalog,
             force: options.force === true,
           });
+          // If index discovery failed, columns alone cannot recover a MySQL
+          // key that was already known; keep the previous identity instead of
+          // leaving the tab read-only (#13473, #13503). A successful discovery
+          // that reports no keys still clears it.
+          const preservedMysqlPrimaryKeys = preserveMysqlRowIdentity && metadata.rowIdentityResolved === false && metadata.primaryKeys.length === 0 ? tableMeta.primaryKeys : [];
+          const primaryKeys = metadata.primaryKeys.length > 0 ? metadata.primaryKeys : preservedMysqlPrimaryKeys;
           return {
             columns: metadata.columns,
-            primaryKeys: metadata.primaryKeys,
+            primaryKeys,
             ...(metadata.virtualPrimaryKeys?.length ? { virtualPrimaryKeys: metadata.virtualPrimaryKeys } : {}),
-            rowIdentityResolved: metadata.rowIdentityResolved !== false,
+            // A failed index load leaves rowIdentityResolved false (and uncached), but keys the
+            // columns already declare still identify rows. Preserved MySQL keys or a table that
+            // was already resolved as keyless need no unique-index fallback to keep editing.
+            rowIdentityResolved: metadata.rowIdentityResolved !== false || primaryKeys.length > 0 || (preserveMysqlRowIdentity && metadata.columns.length > 0),
           };
         })();
     const columns = loaded.columns;
@@ -363,10 +388,11 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         const connectionGeneration = connectionStore.metadataGenerationFor(tab.connectionId, tab.database);
         const lifecycleStale = isDataTabMetadataLifecycleStale(tab, connectionGeneration);
         const shouldRefreshMetadata = lifecycleStale || tab.tableMetaPending || !hasRealTableMetaColumns || metadataAgeMs > DATA_TAB_METADATA_TTL_MS;
+        const effectiveDbType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(tab.connectionId));
         // Dameng 元数据必须与数据查询串行（同 useSidebarDataOpenRuntime），
         // 延后到查询完成后再启动。主动刷新和跨生命周期重建除外：必须先拿到新列再
         // 构建 SQL，否则第一次 toolbar reload 仍会沿用断链前的显式列列表。
-        const deferMetadataRefresh = intent !== "refresh" && !lifecycleStale && effectiveDatabaseTypeForConnection(connectionStore.getConfig(tab.connectionId)) === "dameng";
+        const deferMetadataRefresh = intent !== "refresh" && !lifecycleStale && effectiveDbType === "dameng";
         const startMetadataRefresh = () => {
           console.info("[DBX][reloadData:metadata:background:start]", { traceId, elapsed: elapsed(), reason: hasRealTableMetaColumns ? "stale" : "missing", metadataAgeMs });
           void refreshDataTabTableMeta(tab, { force: lifecycleStale, trace: { traceId, elapsed } })
@@ -422,7 +448,23 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
           queryStore.clearInvalidDataTabSort(tab.id);
           const rebuiltColumnNames = tab.tableMeta?.columns.map((column) => column.name) ?? [];
           incomingSortMissing = rebuiltColumnNames.length > 0 && simpleDataGridOrderByReferencesMissingColumn(orderBy, rebuiltColumnNames);
-          if (incomingSortMissing) tab.orderByInput = undefined;
+          if (incomingSortMissing) {
+            // 移除 ORDER BY 时必须同步熄灭列头排序图标（issue #13350）：这里的
+            // 清理发生在元数据重建之后，clearInvalidDataTabSort 早已用旧列清单
+            // 判定过一次；若排序状态仍指向存活的列，它不会被前者清掉，只清
+            // orderByInput 会留下「图标亮、数据无序」的错位。字段集合与
+            // queryStore.clearInvalidDataTabSortState 的失效排序清理保持一致。
+            tab.orderByInput = undefined;
+            tab.resultSortColumn = undefined;
+            tab.resultSortColumnIndex = undefined;
+            tab.resultSortDirection = undefined;
+            tab.resultSortMode = undefined;
+            tab.resultSortedSql = undefined;
+            tab.resultLocalSortOriginalRows = undefined;
+            tab.resultLocalSortOriginalLargeValueCells = undefined;
+            tab.resultLocalSortOriginalMongoDocuments = undefined;
+            tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
+          }
           if (intent === "refresh" && !lifecycleStale) {
             void refreshDataTabTableMeta(tab, { force: false, trace: { traceId, elapsed } })
               .then(() => {
@@ -437,7 +479,28 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
           // 挂起等待，防止数据查询先返回后编辑/保存以空 primaryKeys 短暂可用，
           // 走整行 WHERE 保存路径（#3727）。真实元数据经 setTableMeta 落地后解除
           if (!hasRealTableMetaColumns) tab.tableMetaPending = true;
-          if (!deferMetadataRefresh) startMetadataRefresh();
+          // Oracle 的 LOB 预览投影依赖列清单：缺失时先等元数据落地再构建 SQL，
+          // 否则恢复 tab 的翻页会退回无截断的 SELECT *。MySQL/PostgreSQL 维持
+          // 既有语义——reload 先执行、元数据后台补（app-test
+          // "data reload executes before slow metadata refresh completes"）。
+          if (!hasRealTableMetaColumns && effectiveDbType === "oracle") {
+            console.info("[DBX][reloadData:metadata:await:missing]", { traceId, elapsed: elapsed() });
+            try {
+              const rebuilt = await refreshDataTabTableMeta(tab, { force: false, trace: { traceId, elapsed } });
+              console.info("[DBX][reloadData:metadata:await:done]", { traceId, elapsed: elapsed(), rebuilt });
+              if (!rebuilt) {
+                stopPreparing();
+                return;
+              }
+            } catch (e: any) {
+              console.warn("[DBX][reloadData:metadata:await:error]", { traceId, elapsed: elapsed(), error: e });
+              stopPreparing();
+              toast(e?.message || String(e), 5000);
+              throw e;
+            }
+          } else if (!deferMetadataRefresh) {
+            startMetadataRefresh();
+          }
         } else {
           console.info("[DBX][reloadData:metadata:skip]", { traceId, elapsed: elapsed(), columnCount: tab.tableMeta!.columns.length, metadataAgeMs });
         }
@@ -460,7 +523,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
                 pagination: { limit: pageLimit, offset: pageOffset },
                 preserveResultDuringExecution: true,
               },
-              () => buildTableSql(tab, { whereInput, orderBy: incomingSortMissing ? undefined : orderBy, limit: pageLimit, offset: pageOffset }),
+              () => buildTableSql(tab, { whereInput, orderBy: incomingSortMissing ? undefined : orderBy, limit: pageLimit, offset: pageOffset, includeRowId: false }),
             );
           } else {
             await queryStore.executeTabSql(tab.id, nextSql, {
@@ -491,6 +554,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       tab.resultSortedSql = undefined;
       await queryStore.executeTabSql(tab.id, resultGroupSql, {
         ...activeQueryTargetOptions(tab),
+        ...refreshActiveResultRunOptions(tab),
         resultBaseSql: resultGroupSql,
         resultSortedSql: undefined,
         preserveResultDuringExecution: true,
@@ -503,6 +567,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const rebuildHiddenKeySort = !!tab.result?.hidden_column_indexes?.length && tab.resultSortMode === "database" && !!tab.resultSortDirection && !!tab.resultSortColumn && !!sortColumns;
       await queryStore.executeTabSql(tab.id, rebuildHiddenKeySort ? (tab.resultBaseSql ?? tab.sql) : tab.resultSortedSql, {
         ...activeQueryTargetOptions(tab),
+        ...refreshActiveResultRunOptions(tab),
         resultBaseSql: tab.resultBaseSql ?? tab.sql,
         ...(rebuildHiddenKeySort
           ? {
@@ -523,6 +588,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const hasMultiResults = tab.mode === "query" && (tab.results?.length ?? 0) > 1;
       await queryStore.executeTabSql(tab.id, sql, {
         ...(tab.mode === "query" ? activeQueryTargetOptions(tab) : {}),
+        ...refreshActiveResultRunOptions(tab),
         resultBaseSql: sql,
         resultSortedSql: undefined,
         preserveResultDuringExecution: true,
@@ -556,6 +622,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const executePage = (pageOffset: number, pageSessionId?: string, retainDisplayedResult = false) =>
         queryStore.executeTabSql(tab.id, baseSql, {
           ...activeQueryTargetOptions(tab),
+          ...refreshActiveResultRunOptions(tab),
           resultBaseSql,
           resultSortedSql: tab.resultSortedSql,
           ...(hasDatabaseSort
@@ -683,6 +750,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
           offset,
           whereInput,
           orderBy: orderBy ?? tab.orderByInput,
+          includeRowId: false,
           previewPageSize: tableDataPreviewRowBudget({
             limit,
             offset,
@@ -740,6 +808,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     if (!direction) {
       await queryStore.executeTabSql(tab.id, baseSql, {
         ...activeQueryTargetOptions(tab),
+        ...refreshActiveResultRunOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: undefined,
         ...(pagination ? { pagination } : {}),
@@ -761,6 +830,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       queryStore.updateSql(tab.id, sortedSql);
       await queryStore.executeTabSql(tab.id, sortedSql, {
         ...activeQueryTargetOptions(tab),
+        ...refreshActiveResultRunOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: sortedSql,
         ...(pagination ? { pagination } : {}),
@@ -792,6 +862,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       }
       await queryStore.executeTabSql(tab.id, built.sql, {
         ...activeQueryTargetOptions(tab),
+        ...refreshActiveResultRunOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: built.sql,
         ...(pagination ? { pagination } : {}),
@@ -803,6 +874,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     }
     await queryStore.executeTabSql(tab.id, baseSql, {
       ...activeQueryTargetOptions(tab),
+      ...refreshActiveResultRunOptions(tab),
       resultBaseSql: baseSql,
       querySort: {
         resultColumns: sortColumns.resultColumns,

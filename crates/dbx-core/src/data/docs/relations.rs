@@ -185,6 +185,7 @@ mod tests {
 
     fn unique_index(name: &str, columns: &[&str]) -> IndexInfo {
         IndexInfo {
+            owner: None,
             key_directions: Vec::new(),
             visibility: None,
             key_metadata_complete: false,

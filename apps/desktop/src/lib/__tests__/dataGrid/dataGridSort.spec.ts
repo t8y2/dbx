@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compareDataGridValues, databaseSortSupportedForDatabase, primaryKeyTieBreakerIndexes, simpleDataGridOrderByColumn, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn } from "@/lib/dataGrid/dataGridSort";
+import { compareDataGridValues, databaseSortSupportedForDatabase, primaryKeyTieBreakerIndexes, simpleDataGridOrderByColumn, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn, sortDataGridRows } from "@/lib/dataGrid/dataGridSort";
 
 describe("databaseSortSupportedForDatabase", () => {
   it("keeps database-side sorting for databases that support ORDER BY", () => {
@@ -77,6 +77,41 @@ describe("compareDataGridValues numeric ordering", () => {
     const columnType = "NUMBER(38,12)";
     expect(compareDataGridValues("9007199254740993.123456789012", "9007199254740993.123456789013", columnType)).toBeLessThan(0);
     expect(compareDataGridValues("-9007199254740993.123456789013", "-9007199254740993.123456789012", columnType)).toBeLessThan(0);
+  });
+
+  it("sorts bigint primary keys numerically without columnType (issue #13668)", () => {
+    // When columnType is omitted or undefined, numeric strings such as bigint IDs
+    // must compare numerically rather than using string dictionary collation.
+    expect(compareDataGridValues("9249", "92489")).toBeLessThan(0);
+    expect(compareDataGridValues("92489", "9249")).toBeGreaterThan(0);
+    expect(compareDataGridValues("92492", "100000")).toBeLessThan(0);
+    expect(compareDataGridValues("92492", "1786326962000000000")).toBeLessThan(0);
+    expect(compareDataGridValues("-10", "-5")).toBeLessThan(0);
+  });
+
+  it("sorts MySQL bigint(20) and unsigned bigint columns numerically (issue #13668)", () => {
+    for (const columnType of ["bigint", "bigint(20)", "bigint unsigned", "bigint(20) unsigned", "unsigned bigint"]) {
+      expect(compareDataGridValues("9249", "92489", columnType)).toBeLessThan(0);
+      expect(compareDataGridValues("92492", "100000", columnType)).toBeLessThan(0);
+      expect(compareDataGridValues("92492", "1786326962000000000", columnType)).toBeLessThan(0);
+    }
+  });
+
+  it("orders native bigint cell values", () => {
+    expect(compareDataGridValues(9249n, 92489n)).toBeLessThan(0);
+    expect(compareDataGridValues(1786326962000000000n, 92492n)).toBeGreaterThan(0);
+    expect(compareDataGridValues(-10n, -5n)).toBeLessThan(0);
+    expect(compareDataGridValues(42n, 42n)).toBe(0);
+  });
+
+  it("sorts rows by bigint column in descending and ascending order", () => {
+    const rows = [["92492"], ["92491"], ["92490"], ["9249"], ["92489"], ["100000"], ["1786326962000000000"]];
+
+    const sortedDesc = sortDataGridRows(rows, 0, "desc", "bigint(20)");
+    expect(sortedDesc).toEqual([["1786326962000000000"], ["100000"], ["92492"], ["92491"], ["92490"], ["92489"], ["9249"]]);
+
+    const sortedAsc = sortDataGridRows(rows, 0, "asc", "bigint(20)");
+    expect(sortedAsc).toEqual([["9249"], ["92489"], ["92490"], ["92491"], ["92492"], ["100000"], ["1786326962000000000"]]);
   });
 });
 

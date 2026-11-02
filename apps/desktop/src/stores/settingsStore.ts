@@ -1101,6 +1101,8 @@ export interface EditorSettings {
   dataGridLoadAllInToolbar: boolean;
   showSaveResult: boolean;
   warnIncompleteExport: boolean;
+  defaultExportMode: "immediate" | "queued";
+  dataGridHideToolbarLabels: boolean;
   /**
    * Global Oracle Instant Client location (the directory that contains
    * oci.dll / libclnts). Shared by every Oracle connection whose driver mode
@@ -1502,6 +1504,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridLoadAllInToolbar: false,
   showSaveResult: true,
   warnIncompleteExport: true,
+  defaultExportMode: "immediate",
+  dataGridHideToolbarLabels: false,
   oracleOciClientPath: "",
   damengClientBinDir: "",
   oracleOciNlsLang: "",
@@ -2223,6 +2227,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridLoadAllInToolbar: settings.dataGridLoadAllInToolbar === true,
     showSaveResult: settings.showSaveResult !== false,
     warnIncompleteExport: settings.warnIncompleteExport !== false,
+    defaultExportMode: settings.defaultExportMode === "queued" ? "queued" : "immediate",
+    dataGridHideToolbarLabels: settings.dataGridHideToolbarLabels === true,
     oracleOciNlsLang: typeof settings.oracleOciNlsLang === "string" ? settings.oracleOciNlsLang.trim() : "",
     oracleOciTnsAdmin: typeof settings.oracleOciTnsAdmin === "string" ? settings.oracleOciTnsAdmin.trim() : "",
     oracleOciClientPath: typeof settings.oracleOciClientPath === "string" ? settings.oracleOciClientPath.trim() : "",
@@ -3185,6 +3191,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridLoadAllInToolbar !== undefined) editorSettings.value.dataGridLoadAllInToolbar = partial.dataGridLoadAllInToolbar === true;
     if (partial.showSaveResult !== undefined) editorSettings.value.showSaveResult = partial.showSaveResult !== false;
     if (partial.warnIncompleteExport !== undefined) editorSettings.value.warnIncompleteExport = partial.warnIncompleteExport !== false;
+    if (partial.defaultExportMode !== undefined) editorSettings.value.defaultExportMode = partial.defaultExportMode === "queued" ? "queued" : "immediate";
+    if (partial.dataGridHideToolbarLabels !== undefined) editorSettings.value.dataGridHideToolbarLabels = partial.dataGridHideToolbarLabels === true;
     if (partial.oracleOciNlsLang !== undefined) editorSettings.value.oracleOciNlsLang = partial.oracleOciNlsLang.trim();
     if (partial.oracleOciTnsAdmin !== undefined) editorSettings.value.oracleOciTnsAdmin = partial.oracleOciTnsAdmin.trim();
     if (partial.oracleOciClientPath !== undefined) editorSettings.value.oracleOciClientPath = partial.oracleOciClientPath.trim();

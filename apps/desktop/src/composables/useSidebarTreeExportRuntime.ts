@@ -38,7 +38,7 @@ import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import type { SqlInsertDialect } from "@/lib/export/sqlInsertMode";
 import { uuid } from "@/lib/common/utils";
-import { showExportExecutionModeDialog } from "@/lib/export/exportExecutionMode";
+import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 import type { ManualExportMode } from "@/lib/export/manualExportQueue";
@@ -490,6 +490,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         open: true,
         showHeaderOptions: hasComments,
         showExecutionMode: isTauriRuntime(),
+        initialExecutionMode: getDefaultExportExecutionMode(),
         onConfirm: (exportOptions: XlsxExportOptions) => {
           resolve(exportOptions);
           app.unmount();
@@ -818,8 +819,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     const preferredPath = settingsStore.editorSettings.preferredExportPath;
     const format = outputFormat === "bsonGzip" ? "bson" : outputFormat;
     const extension = outputFormat === "bsonGzip" ? "bson.gz" : outputFormat;
-    const mode = await showExportExecutionModeDialog();
-    if (mode === null) return;
+    const mode = getDefaultExportExecutionMode();
     const outputPath = await promptExportSavePath({ defaultFileName: `${collection}.${extension}`, filters: [{ name: exportFilterName(extension), extensions: [outputFormat === "bsonGzip" ? "gz" : extension] }], preferredPath });
     if (!outputPath) return;
     const task = addExportTask(collection, format, outputPath);
@@ -947,8 +947,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       return;
     }
 
-    const mode = isTauriRuntime() ? await showExportExecutionModeDialog() : undefined;
-    if (mode === null) return;
+    const mode = isTauriRuntime() ? getDefaultExportExecutionMode() : undefined;
 
     const outputDirectory = await resolveMultiTableExportDirectory(targets.length);
     if (outputDirectory === null) return;
@@ -991,8 +990,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
 
     const xlsxOptions = await showSidebarTreeXlsxHeaderDialog(hasComments);
     if (xlsxOptions === null) return;
-    const mode = isTauriRuntime() ? (xlsxOptions.executionMode ?? (await showExportExecutionModeDialog())) : undefined;
-    if (mode === null) return;
+    const mode = isTauriRuntime() ? (xlsxOptions.executionMode ?? getDefaultExportExecutionMode()) : undefined;
 
     const outputDirectory = await resolveMultiTableExportDirectory(targets.length);
     if (outputDirectory === null) return;

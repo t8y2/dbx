@@ -752,6 +752,23 @@ describe("DataGrid multi-chunk load-all run", () => {
   });
 });
 
+describe("DataGrid result column count", () => {
+  it.each(["results", "table-data"])("shows the returned column count for %s, including empty results", async (context) => {
+    const { host, gridState } = mountGrid();
+    gridState.value = { context, result: { columns: ["id", "name", "email"], rows: [[1, "Alice", "alice@example.test"]], affected_rows: 0, execution_time_ms: 1 } };
+    await settle();
+    const count = () => host.querySelector("[data-grid-column-count]")?.textContent;
+    expect(count()).toBe(i18n.global.t("grid.columnsCount", { count: 3 }));
+    gridState.value = { context, result: { columns: ["id", "name"], rows: [], affected_rows: 0, execution_time_ms: 1 } };
+    await settle();
+    expect(count()).toBe(i18n.global.t("grid.columnsCount", { count: 2 }));
+    gridState.value = { context, result: { columns: [], rows: [], affected_rows: 7, execution_time_ms: 1 } };
+    await settle();
+    expect(host.querySelector("[data-grid-column-count]")).toBeNull();
+    expect(host.textContent).toContain(i18n.global.t("grid.rowsAffected", { count: 7 }));
+  });
+});
+
 describe("total page count in the result footer (#13848)", () => {
   function pageCount(host: HTMLElement) {
     return host.querySelector("[data-pagination-total-pages]");

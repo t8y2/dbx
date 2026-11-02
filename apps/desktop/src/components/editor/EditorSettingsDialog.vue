@@ -113,6 +113,7 @@ import {
   type TabSortMode,
   type WelcomePageMode,
   type UpdateDownloadSource,
+  type UpdateChannel,
   type CsvQuoteMode,
   type CsvNullMode,
   type QueryResultExportFileNameSource,
@@ -1082,6 +1083,7 @@ const editExportRowLimitEnabled = ref(settingsStore.editorSettings.exportRowLimi
 const editExportRowLimit = ref(settingsStore.editorSettings.exportRowLimit);
 const editQueryExportKeysetOptimizationEnabled = ref(settingsStore.editorSettings.queryExportKeysetOptimizationEnabled);
 const editUpdateDownloadSource = ref<UpdateDownloadSource>(settingsStore.editorSettings.updateDownloadSource);
+const editUpdateChannel = ref<UpdateChannel>(settingsStore.editorSettings.updateChannel);
 const editToolbarItems = ref({ ...settingsStore.editorSettings.toolbarItems });
 // Desktop-only toolbar buttons (always-on-top) can never render in the Web build, so their switches stay out of the Web settings dialog.
 const toolbarVisibilityItems = computed(() => visibleToolbarVisibilityItems(TOOLBAR_VISIBILITY_ITEMS, isWeb));
@@ -1392,6 +1394,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     exportRowLimit: editExportRowLimit.value,
     queryExportKeysetOptimizationEnabled: editQueryExportKeysetOptimizationEnabled.value,
     updateDownloadSource: editUpdateDownloadSource.value,
+    updateChannel: editUpdateChannel.value,
     toolbarItems: { ...editToolbarItems.value },
     snippets: editSnippets.value,
     snippetTriggerKey: editSnippetTriggerKey.value,
@@ -2098,6 +2101,7 @@ function syncEditorSettingsDraftFromStore() {
   editExportRowLimit.value = settingsStore.editorSettings.exportRowLimit;
   editQueryExportKeysetOptimizationEnabled.value = settingsStore.editorSettings.queryExportKeysetOptimizationEnabled;
   editUpdateDownloadSource.value = settingsStore.editorSettings.updateDownloadSource;
+  editUpdateChannel.value = settingsStore.editorSettings.updateChannel;
   editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
   editSnippets.value = settingsStore.editorSettings.snippets.map(editableSnippet);
   editSnippetTriggerKey.value = settingsStore.editorSettings.snippetTriggerKey;
@@ -2274,6 +2278,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   globalDateTimeExportFormat: editGlobalDateTimeExportFormat,
   globalDateTimeImportFormat: editGlobalDateTimeImportFormat,
   updateDownloadSource: editUpdateDownloadSource,
+  updateChannel: editUpdateChannel,
   toolbarItems: editToolbarItems,
   snippets: editSnippets,
   snippetTriggerKey: editSnippetTriggerKey,
@@ -2700,6 +2705,13 @@ async function applySettings() {
 }
 
 async function applySettingsAndClose() {
+  // With nothing staged there is nothing to persist, so the button only closes.
+  // It used to be disabled in that state, which read as "the button does
+  // nothing" (#13862).
+  if (!hasChanges()) {
+    closeSettings();
+    return;
+  }
   if (await applySettingsForResult()) {
     closeSettings();
   }
@@ -2924,6 +2936,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editAutoUpdateMcp.value = DEFAULT_EDITOR_SETTINGS.autoUpdateMcp;
     editAutoUpdatePlugins.value = DEFAULT_EDITOR_SETTINGS.autoUpdatePlugins;
     editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
+    editUpdateChannel.value = DEFAULT_EDITOR_SETTINGS.updateChannel;
   }
 }
 
@@ -3094,6 +3107,7 @@ function resetAllDefaults() {
   editExportRowLimit.value = DEFAULT_EDITOR_SETTINGS.exportRowLimit;
   editQueryExportKeysetOptimizationEnabled.value = DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled;
   editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
+  editUpdateChannel.value = DEFAULT_EDITOR_SETTINGS.updateChannel;
   editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
   editSnippets.value = DEFAULT_SQL_SNIPPETS.map((s) => ({ ...s }));
   editSnippetTriggerKey.value = DEFAULT_EDITOR_SETTINGS.snippetTriggerKey;
@@ -3408,6 +3422,10 @@ function onUiScaleChange(value: unknown) {
 
 function onUpdateDownloadSourceChange(v: any) {
   if (v === "official" || v === "cnb") editUpdateDownloadSource.value = v;
+}
+
+function onUpdateChannelChange(v: any) {
+  if (v === "stable" || v === "beta") editUpdateChannel.value = v;
 }
 
 function setSidebarObjectDisplay(value: "grouped" | "simple") {
@@ -6023,7 +6041,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
       if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
       await settingsStore.updateDesktopSettings(result.desktopSettings);
       await connectionStore.initFromDisk();
-      await savedSqlStore.initFromStorage();
+      await savedSqlStore.reloadFromStorage();
       await tunnelProfileStore.refresh();
       await settingsStore.reloadAiConfigs();
       let message = t("settings.localBackupImportSuccess", { path: localBackupPath.value });
@@ -6056,7 +6074,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
       if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
       await settingsStore.updateDesktopSettings(result.desktopSettings);
       await connectionStore.initFromDisk();
-      await savedSqlStore.initFromStorage();
+      await savedSqlStore.reloadFromStorage();
       await tunnelProfileStore.refresh();
       await settingsStore.reloadAiConfigs();
       let message = t("settings.syncSnippetDownloadSuccess", { bytes: result.summary.bytes, id: result.summary.snippetId });
@@ -6088,7 +6106,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
     if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
     await settingsStore.updateDesktopSettings(result.desktopSettings);
     await connectionStore.initFromDisk();
-    await savedSqlStore.initFromStorage();
+    await savedSqlStore.reloadFromStorage();
     await tunnelProfileStore.refresh();
     await settingsStore.reloadAiConfigs();
     recordWebDavSyncSuccess(config);
@@ -13616,6 +13634,20 @@ LIMIT 100;</pre>
 
               <div class="flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between">
                 <div class="min-w-0 space-y-1">
+                  <Label>{{ t("settings.updateChannel") }}</Label>
+                  <p class="text-sm text-muted-foreground">{{ t("settings.updateChannelDescription") }}</p>
+                </div>
+                <Select :model-value="editUpdateChannel" @update:model-value="onUpdateChannelChange">
+                  <SelectTrigger class="h-9 w-full sm:w-[180px]"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="stable">{{ t("settings.updateChannelStable") }}</SelectItem>
+                    <SelectItem value="beta">{{ t("settings.updateChannelBeta") }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div class="flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div class="min-w-0 space-y-1">
                   <Label>{{ t("settings.updateDownloadSource") }}</Label>
                   <p class="text-sm text-muted-foreground">{{ t("settings.updateDownloadSourceDescription") }}</p>
                 </div>
@@ -13842,7 +13874,7 @@ LIMIT 100;</pre>
         <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
           {{ t("settings.apply") }}
         </Button>
-        <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettingsAndClose">
+        <Button :disabled="hasApplyBlocker" @click="applySettingsAndClose">
           {{ t("settings.applyAndClose") }}
         </Button>
       </DialogFooter>
@@ -13918,7 +13950,7 @@ LIMIT 100;</pre>
         <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
           {{ t("settings.apply") }}
         </Button>
-        <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettingsAndClose">
+        <Button :disabled="hasApplyBlocker" @click="applySettingsAndClose">
           {{ t("settings.applyAndClose") }}
         </Button>
       </DialogFooter>
@@ -13943,7 +13975,7 @@ LIMIT 100;</pre>
         <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
           {{ t("settings.apply") }}
         </Button>
-        <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettingsAndClose">
+        <Button :disabled="hasApplyBlocker" @click="applySettingsAndClose">
           {{ t("settings.applyAndClose") }}
         </Button>
       </DialogFooter>

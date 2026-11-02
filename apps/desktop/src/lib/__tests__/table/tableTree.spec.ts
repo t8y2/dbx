@@ -802,3 +802,23 @@ describe("package and package body groups (#13239)", () => {
     expect(!packagesGroup || (packagesGroup.children ?? []).length === 0).toBe(true);
   });
 });
+
+describe("withoutTableTreeLoadMoreNodes", () => {
+  const loadMore = (id: string, objectType?: "INDEX"): TreeNode => ({ id, label: "More", type: "load-more", loadMore: { parentId: "p", offset: 1, pageSize: 1, ...(objectType ? { objectType } : {}) } });
+
+  it("drops nested table load-more cursors, keeps index cursors and always returns a fresh list", () => {
+    const untouchedChildren: TreeNode[] = [{ id: "c", label: "c", type: "column" }];
+    const untouched: TreeNode = { id: "t0", label: "t0", type: "table", children: untouchedChildren };
+    const partitions: TreeNode = { id: "g", label: "g", type: "group-partitions", children: [{ id: "t1", label: "t1", type: "table" }, loadMore("nested")] };
+    const indexCursor = loadMore("idx", "INDEX");
+    const input = [untouched, partitions, loadMore("top"), indexCursor];
+
+    const result = withoutTableTreeLoadMoreNodes(input);
+
+    expect(result.map((node) => node.id)).toEqual(["t0", "g", "idx"]);
+    expect(partitions.children!.map((node) => node.id)).toEqual(["t1"]);
+    expect(untouched.children).toBe(untouchedChildren);
+    expect(withoutTableTreeLoadMoreNodes(result)).not.toBe(result);
+    expect(withoutTableTreeLoadMoreNodes(undefined)).toEqual([]);
+  });
+});

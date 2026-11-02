@@ -159,6 +159,7 @@ export type InterfaceLayout = "separated" | "classic";
 export type WelcomePageMode = "intro" | "workspace";
 
 export type UpdateDownloadSource = "official" | "cnb";
+export type UpdateChannel = "stable" | "beta";
 export type SqlSemanticDiagnosticsMode = "auto" | "enabled" | "disabled";
 export type OpenTabsRestoreMode = "all" | "pinned" | "none";
 export type AppCloseUnsavedTabsMode = "prompt" | "keep-drafts";
@@ -839,6 +840,8 @@ const DATA_GRID_RENDER_MODES = ["dom", "canvas"] as const;
 export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
 const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
 export type DataGridSearchMode = (typeof DATA_GRID_SEARCH_MODES)[number];
+const DATA_GRID_SELECTION_SUMMARY_METRICS = ["sum", "average", "min", "max", "count", "distinct", "cells", "rows"] as const;
+export type DataGridSelectionSummaryMetric = (typeof DATA_GRID_SELECTION_SUMMARY_METRICS)[number];
 const DATA_GRID_ROW_NUMBER_MODES = ["view", "source"] as const;
 export type DataGridRowNumberMode = (typeof DATA_GRID_ROW_NUMBER_MODES)[number];
 /** How a double click inside a SQL string literal picks text: the whole string value, or just one word. */
@@ -1091,6 +1094,7 @@ export interface EditorSettings {
   showResultSourceDatabase: boolean;
   /** Show SQL in the footer of query results and table data grids. */
   showDataGridStatusSql: boolean;
+  dataGridSelectionSummaryMetric: DataGridSelectionSummaryMetric;
   dataGridExportInToolbar: boolean;
   dataGridLoadAllInToolbar: boolean;
   showSaveResult: boolean;
@@ -1188,7 +1192,7 @@ export interface EditorSettings {
   sidebarMenuHiddenPrimaryActions: SidebarMenuPinnedActions;
   sidebarMenuOrder: SidebarMenuOrder;
   sidebarConnectionSortMode: ConnectionListSortMode;
-  sidebarSearchMatchMode: "fuzzy" | "contains";
+  sidebarSearchMatchMode: "fuzzy" | "contains" | "exact";
   sidebarObjectDisplay: "grouped" | "simple";
   routineSourceOpenMode: "query-tab" | "dialog";
   sidebarTableSearchEnabled: boolean;
@@ -1267,6 +1271,7 @@ export interface EditorSettings {
   exportRowLimit: number;
   queryExportKeysetOptimizationEnabled: boolean;
   updateDownloadSource: UpdateDownloadSource;
+  updateChannel: UpdateChannel;
   ignoredUpdateVersion: string;
   pluginShortcuts: PluginShortcutSettings;
   /** Plugin ids the user granted `script-src 'unsafe-eval'` in the workbench sandbox. */
@@ -1488,6 +1493,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showColumnHeaderTooltips: true,
   showResultSourceDatabase: true,
   showDataGridStatusSql: true,
+  dataGridSelectionSummaryMetric: "sum",
   dataGridExportInToolbar: false,
   dataGridLoadAllInToolbar: false,
   showSaveResult: true,
@@ -1625,6 +1631,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   exportRowLimit: 100000,
   queryExportKeysetOptimizationEnabled: true,
   updateDownloadSource: "official",
+  updateChannel: "stable",
   ignoredUpdateVersion: "",
   pluginShortcuts: normalizePluginShortcutSettings(undefined),
   pluginGraphicsEngineIds: [],
@@ -1749,6 +1756,10 @@ function normalizeDataGridSearchMode(value: unknown): DataGridSearchMode {
   return DATA_GRID_SEARCH_MODES.includes(value as DataGridSearchMode) ? (value as DataGridSearchMode) : DEFAULT_EDITOR_SETTINGS.dataGridSearchMode;
 }
 
+function normalizeDataGridSelectionSummaryMetric(value: unknown): DataGridSelectionSummaryMetric {
+  return DATA_GRID_SELECTION_SUMMARY_METRICS.includes(value as DataGridSelectionSummaryMetric) ? (value as DataGridSelectionSummaryMetric) : DEFAULT_EDITOR_SETTINGS.dataGridSelectionSummaryMetric;
+}
+
 function normalizeDataGridRowNumberMode(value: unknown): DataGridRowNumberMode {
   return DATA_GRID_ROW_NUMBER_MODES.includes(value as DataGridRowNumberMode) ? (value as DataGridRowNumberMode) : DEFAULT_EDITOR_SETTINGS.dataGridRowNumberMode;
 }
@@ -1808,6 +1819,10 @@ function normalizeUpdateDownloadSource(value: unknown): UpdateDownloadSource {
   // Preserve the intent of users who previously selected the mainland-China mirror.
   if (value === "atomgit") return "cnb";
   return value === "cnb" ? "cnb" : DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
+}
+
+function normalizeUpdateChannel(value: unknown): UpdateChannel {
+  return value === "beta" ? "beta" : "stable";
 }
 
 function normalizeSqlSemanticDiagnosticsMode(value: unknown, legacyEnabled?: unknown): SqlSemanticDiagnosticsMode {
@@ -2197,6 +2212,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showColumnHeaderTooltips: settings.showColumnHeaderTooltips ?? DEFAULT_EDITOR_SETTINGS.showColumnHeaderTooltips,
     showResultSourceDatabase: settings.showResultSourceDatabase ?? DEFAULT_EDITOR_SETTINGS.showResultSourceDatabase,
     showDataGridStatusSql: settings.showDataGridStatusSql !== false,
+    dataGridSelectionSummaryMetric: normalizeDataGridSelectionSummaryMetric(settings.dataGridSelectionSummaryMetric),
     dataGridExportInToolbar: settings.dataGridExportInToolbar === true,
     dataGridLoadAllInToolbar: settings.dataGridLoadAllInToolbar === true,
     showSaveResult: settings.showSaveResult !== false,
@@ -2268,7 +2284,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarMenuHiddenPrimaryActions: normalizeSidebarMenuPinnedActions(settings.sidebarMenuHiddenPrimaryActions),
     sidebarMenuOrder: normalizeSidebarMenuOrder(settings.sidebarMenuOrder),
     sidebarConnectionSortMode: normalizeConnectionListSortMode(settings.sidebarConnectionSortMode),
-    sidebarSearchMatchMode: settings.sidebarSearchMatchMode === "contains" ? "contains" : "fuzzy",
+    sidebarSearchMatchMode: settings.sidebarSearchMatchMode === "contains" || settings.sidebarSearchMatchMode === "exact" ? settings.sidebarSearchMatchMode : "fuzzy",
     sidebarObjectDisplay: settings.sidebarObjectDisplay === "simple" || settings.sidebarObjectDisplay === "grouped" ? settings.sidebarObjectDisplay : DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay,
     routineSourceOpenMode: settings.routineSourceOpenMode === "query-tab" || settings.routineSourceOpenMode === "dialog" ? settings.routineSourceOpenMode : DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode,
     sidebarTableSearchEnabled: typeof settings.sidebarTableSearchEnabled === "boolean" ? settings.sidebarTableSearchEnabled : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled,
@@ -2389,6 +2405,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     exportRowLimit: typeof settings.exportRowLimit === "number" && settings.exportRowLimit >= 100 && settings.exportRowLimit <= 2147483647 ? Math.round(settings.exportRowLimit) : DEFAULT_EDITOR_SETTINGS.exportRowLimit,
     queryExportKeysetOptimizationEnabled: typeof settings.queryExportKeysetOptimizationEnabled === "boolean" ? settings.queryExportKeysetOptimizationEnabled : DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled,
     updateDownloadSource: normalizeUpdateDownloadSource(settings.updateDownloadSource),
+    updateChannel: normalizeUpdateChannel(settings.updateChannel),
     ignoredUpdateVersion: typeof settings.ignoredUpdateVersion === "string" ? settings.ignoredUpdateVersion : DEFAULT_EDITOR_SETTINGS.ignoredUpdateVersion,
     pluginShortcuts: normalizePluginShortcutSettings(settings.pluginShortcuts),
     pluginGraphicsEngineIds: normalizePluginGraphicsEngineIds(settings.pluginGraphicsEngineIds),
@@ -2635,7 +2652,17 @@ export const useSettingsStore = defineStore("settings", () => {
           const needsDataGridExtractorOptionsMigration =
             (typeof savedSettings.dataGridExtractorOptionsMigrationVersion !== "number" || savedSettings.dataGridExtractorOptionsMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION) && (savedNullText === "NULL" || savedSqlIncludeDatabaseName === false);
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
-          if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsWelcomePageDefaultMigration || needsCompactTabTitleDefaultMigration || needsTabNavigationShortcutMigration || needsSidebarBrowseObjectsMigration || needsDataGridExtractorOptionsMigration) {
+          const savedUpdateChannel = (saved as { updateChannel?: unknown }).updateChannel;
+          if (
+            savedUpdateDownloadSource === "atomgit" ||
+            savedUpdateChannel !== normalizeUpdateChannel(savedUpdateChannel) ||
+            needsExecuteModeDefaultMigration ||
+            needsWelcomePageDefaultMigration ||
+            needsCompactTabTitleDefaultMigration ||
+            needsTabNavigationShortcutMigration ||
+            needsSidebarBrowseObjectsMigration ||
+            needsDataGridExtractorOptionsMigration
+          ) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.
             await enqueueEditorSettingsSave().catch(() => {});
           }
@@ -3144,6 +3171,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showColumnTypesInHeader !== undefined) editorSettings.value.showColumnTypesInHeader = partial.showColumnTypesInHeader;
     if (partial.showColumnHeaderTooltips !== undefined) editorSettings.value.showColumnHeaderTooltips = partial.showColumnHeaderTooltips;
     if (partial.showResultSourceDatabase !== undefined) editorSettings.value.showResultSourceDatabase = partial.showResultSourceDatabase;
+    if (partial.dataGridSelectionSummaryMetric !== undefined) editorSettings.value.dataGridSelectionSummaryMetric = normalizeDataGridSelectionSummaryMetric(partial.dataGridSelectionSummaryMetric);
     if (partial.showDataGridStatusSql !== undefined) editorSettings.value.showDataGridStatusSql = partial.showDataGridStatusSql !== false;
     if (partial.dataGridExportInToolbar !== undefined) editorSettings.value.dataGridExportInToolbar = partial.dataGridExportInToolbar === true;
     if (partial.dataGridLoadAllInToolbar !== undefined) editorSettings.value.dataGridLoadAllInToolbar = partial.dataGridLoadAllInToolbar === true;
@@ -3222,7 +3250,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarMenuHiddenPrimaryActions !== undefined) editorSettings.value.sidebarMenuHiddenPrimaryActions = normalizeSidebarMenuPinnedActions(partial.sidebarMenuHiddenPrimaryActions);
     if (partial.sidebarMenuOrder !== undefined) editorSettings.value.sidebarMenuOrder = normalizeSidebarMenuOrder(partial.sidebarMenuOrder);
     if (partial.sidebarConnectionSortMode !== undefined) editorSettings.value.sidebarConnectionSortMode = normalizeConnectionListSortMode(partial.sidebarConnectionSortMode);
-    if (partial.sidebarSearchMatchMode !== undefined) editorSettings.value.sidebarSearchMatchMode = partial.sidebarSearchMatchMode === "contains" ? "contains" : "fuzzy";
+    if (partial.sidebarSearchMatchMode !== undefined) editorSettings.value.sidebarSearchMatchMode = partial.sidebarSearchMatchMode === "contains" || partial.sidebarSearchMatchMode === "exact" ? partial.sidebarSearchMatchMode : "fuzzy";
     if (partial.sidebarObjectDisplay !== undefined) editorSettings.value.sidebarObjectDisplay = partial.sidebarObjectDisplay;
     if (partial.routineSourceOpenMode !== undefined) editorSettings.value.routineSourceOpenMode = partial.routineSourceOpenMode;
     if (partial.sidebarTableSearchEnabled !== undefined) editorSettings.value.sidebarTableSearchEnabled = partial.sidebarTableSearchEnabled;
@@ -3299,6 +3327,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.exportRowLimit !== undefined) editorSettings.value.exportRowLimit = Math.min(2147483647, Math.max(100, Math.round(partial.exportRowLimit)));
     if (partial.queryExportKeysetOptimizationEnabled !== undefined) editorSettings.value.queryExportKeysetOptimizationEnabled = partial.queryExportKeysetOptimizationEnabled;
     if (partial.updateDownloadSource !== undefined) editorSettings.value.updateDownloadSource = normalizeUpdateDownloadSource(partial.updateDownloadSource);
+    if (partial.updateChannel !== undefined) editorSettings.value.updateChannel = normalizeUpdateChannel(partial.updateChannel);
     if (partial.ignoredUpdateVersion !== undefined) editorSettings.value.ignoredUpdateVersion = typeof partial.ignoredUpdateVersion === "string" ? partial.ignoredUpdateVersion : "";
     if (partial.pluginShortcuts !== undefined) editorSettings.value.pluginShortcuts = normalizePluginShortcutSettings(partial.pluginShortcuts);
     if (partial.pluginGraphicsEngineIds !== undefined) editorSettings.value.pluginGraphicsEngineIds = normalizePluginGraphicsEngineIds(partial.pluginGraphicsEngineIds);

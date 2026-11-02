@@ -174,6 +174,7 @@ import type {
   UpdateInfo,
   DownloadedUpdate,
   UpdateDownloadSource,
+  UpdateChannel,
   RedisCollectionPage,
   RedisBlob,
   RedisDatabaseInfo,
@@ -539,6 +540,10 @@ export async function testConnection(config: ConnectionConfig): Promise<string> 
   return post("/api/connection/test", { config });
 }
 
+export async function connectionParameters(config: ConnectionConfig): Promise<import("@/lib/connection/connectionParameterCatalog").ConnectionParameterMetadata> {
+  return post("/api/connection/parameters", { config });
+}
+
 export async function testSshTunnel(config: ConnectionConfig): Promise<string> {
   return post("/api/connection/test-ssh-tunnel", { config });
 }
@@ -877,14 +882,36 @@ export async function readPluginUiAsset(pluginId: string, path: string): Promise
   return pluginAssetPayload(`/api/plugins/${encodeURIComponent(pluginId)}/ui/${encodedPath}`);
 }
 
+type PluginEventSubscriber = { onEvent: (event: PluginEvent) => void; onBinary?: (event: PluginBinaryEvent) => void };
+
+const pluginEventSubscribers = new Set<PluginEventSubscriber>();
+let pluginEventSource: EventSource | undefined;
+
+/**
+ * Every plugin host shares one `/api/plugins/events` stream (#14027). A stream per
+ * workbench held one of the browser's six HTTP/1.1 connections per origin each, so
+ * a few open workbenches starved every later `fetch` (plugin invoke, reconnect),
+ * which then queued forever without an error.
+ */
 export async function subscribePluginEvents(onEvent: (event: PluginEvent) => void, onBinary?: (event: PluginBinaryEvent) => void): Promise<() => void> {
-  const source = new EventSource(apiUrl("/api/plugins/events"));
-  source.onmessage = (message) => {
-    const payload = JSON.parse(message.data) as ({ kind: "event" } & PluginEvent) | ({ kind: "binary" } & PluginBinaryEvent) | { kind: "lagged" };
-    if (payload.kind === "event") onEvent(payload);
-    if (payload.kind === "binary") onBinary?.(payload);
+  const subscriber: PluginEventSubscriber = { onEvent, onBinary };
+  pluginEventSubscribers.add(subscriber);
+  if (!pluginEventSource) {
+    const source = new EventSource(apiUrl("/api/plugins/events"));
+    source.onmessage = (message) => {
+      const payload = JSON.parse(message.data) as ({ kind: "event" } & PluginEvent) | ({ kind: "binary" } & PluginBinaryEvent) | { kind: "lagged" };
+      for (const current of pluginEventSubscribers) {
+        if (payload.kind === "event") current.onEvent(payload);
+        if (payload.kind === "binary") current.onBinary?.(payload);
+      }
+    };
+    pluginEventSource = source;
+  }
+  return () => {
+    if (!pluginEventSubscribers.delete(subscriber) || pluginEventSubscribers.size > 0) return;
+    pluginEventSource?.close();
+    pluginEventSource = undefined;
   };
-  return () => source.close();
 }
 
 /**
@@ -5833,10 +5860,11 @@ export async function deleteHistoryEntry(id: string): Promise<void> {
 // Updates
 // ---------------------------------------------------------------------------
 
-export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource): Promise<UpdateInfo> {
+export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource, channel: UpdateChannel = "stable"): Promise<UpdateInfo> {
   const params = new URLSearchParams();
   if (locale) params.set("locale", locale);
   if (source) params.set("source", source);
+  params.set("channel", channel);
   const query = params.size > 0 ? `?${params.toString()}` : "";
   return get(`/api/update/check${query}`);
 }
@@ -5844,6 +5872,16 @@ export async function checkForUpdates(locale?: string, source?: UpdateDownloadSo
 export async function fetchChangelog(lang?: string): Promise<import("@/lib/app/changelog").ChangelogData> {
   const query = lang ? `?lang=${encodeURIComponent(lang)}` : "";
   return get(`/api/changelog${query}`);
+}
+
+export async function fetchChangelogIndex(lang?: string): Promise<import("@/lib/app/changelog").ChangelogIndexData> {
+  const query = lang ? `?lang=${encodeURIComponent(lang)}` : "";
+  return get(`/api/changelog/index${query}`);
+}
+
+export async function fetchChangelogRelease(lang: string | undefined, tag: string): Promise<import("@/lib/app/changelog").ChangelogRelease> {
+  const query = lang ? `?lang=${encodeURIComponent(lang)}` : "";
+  return get(`/api/changelog/releases/${encodeURIComponent(tag)}${query}`);
 }
 
 export async function checkMcpServerStatus(): Promise<import("@/lib/backend/tauri").McpServerStatus> {
@@ -5896,7 +5934,7 @@ export async function getSystemProxyUrl(): Promise<string | null> {
   return null;
 }
 
-export async function downloadUpdate(_source: UpdateDownloadSource, _latestVersion: string, _attemptId: string, _releaseNotes?: string): Promise<DownloadedUpdate> {
+export async function downloadUpdate(_source: UpdateDownloadSource, _latestVersion: string, _attemptId: string, _releaseNotes?: string, _channel: UpdateChannel = "stable", _releaseTag?: string): Promise<DownloadedUpdate> {
   throw new Error("In-app update downloads are only available in the desktop app.");
 }
 

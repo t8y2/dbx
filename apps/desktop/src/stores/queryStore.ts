@@ -4829,6 +4829,16 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   const hasDirtyTabs = computed(() => tabs.value.some((tab) => isTabDirty(tab)));
+  // Dirtiness compares the full SQL text, so a render that calls isTabDirty() re-runs on every keystroke.
+  // Joining the dirty ids into a string gives the set a stable identity: it only changes when some tab's
+  // dirty state actually flips, which is all the tab strip needs to know while typing.
+  const dirtyTabIdsKey = computed(() =>
+    tabs.value
+      .filter((tab) => isTabDirty(tab))
+      .map((tab) => tab.id)
+      .join("\n"),
+  );
+  const dirtyTabIds = computed(() => new Set(dirtyTabIdsKey.value ? dirtyTabIdsKey.value.split("\n") : []));
   const shouldConfirmUnsavedSqlClose = computed(() => useSettingsStore().editorSettings.confirmUnsavedSqlClose);
   const keepUnsavedTabsDraftsOnAppClose = computed(() => useSettingsStore().editorSettings.appCloseUnsavedTabsMode === "keep-drafts");
   const requiresAppCloseDraftPersist = computed(
@@ -11722,6 +11732,7 @@ export const useQueryStore = defineStore("query", () => {
     closeConfirmContext,
     closeConfirmDirtyTabIds,
     hasDirtyTabs,
+    dirtyTabIds,
     requiresAppCloseDraftPersist,
     isConfirmingAppClose,
     createTab,

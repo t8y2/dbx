@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { blockingDesktopAiRunsForUpdate } from "@/lib/ai/desktopAiRunRegistry";
-import { setupUpdatePreparation, prepareUpdateWithDraftRecovery, isUpdatePreparationActive } from "@/lib/app/updatePreparation";
+import { setupUpdatePreparation, prepareUpdateWithDraftRecovery, isUpdatePreparationActive, UpdatePreparationError } from "@/lib/app/updatePreparation";
+import { describeConfigUpdateBlock, type UpdateBlockingConfigState, type UpdateConfigTranslator } from "@/lib/app/updatePreparationSurfaces";
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent, provide } from "vue";
 import { MCP_CALL_HISTORY_OPEN_EVENT, type McpCallHistoryRequest } from "@/lib/mcp/mcpCallHistory";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
@@ -17,6 +18,7 @@ import { createGroupTabBarPortal, GROUP_TAB_BAR_PORTAL } from "@/components/layo
 import PluginShortcutBar from "@/components/plugins/PluginShortcutBar.vue";
 import SidebarDangerDialogHost from "@/components/sidebar/SidebarDangerDialogHost.vue";
 import AppSidebar from "@/components/layout/AppSidebar.vue";
+import SidebarReveal from "@/components/layout/SidebarReveal.vue";
 import SqlEditorWorkspace from "@/components/layout/SqlEditorWorkspace.vue";
 import { EDITOR_TOOLBAR_ACTIONS } from "@/components/layout/editorToolbarActions";
 import AppDialogs from "@/components/layout/AppDialogs.vue";
@@ -179,6 +181,7 @@ import {
   switchToTabIndexFromShortcut,
   tabSwitcherDirectionFromShortcut,
 } from "@/lib/editor/keyboardShortcuts";
+import { normalizeShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import { DBX_VIM_ACTION_EVENT, type DbxVimActionEvent } from "@/lib/editor/vimDbxActions";
 import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
 import { initialTabSwitcherSelection, moveTabSwitcherSelection, tabSwitcherOrder } from "@/lib/tabs/tabSwitcher";
@@ -373,46 +376,50 @@ const isDetachedWindowContext = windowContext.kind === "detached-tab";
 const detachedContextTabId = windowContext.kind === "detached-tab" ? windowContext.tabId : undefined;
 let updateWindowReady = false;
 let updatePreparation: Awaited<ReturnType<typeof setupUpdatePreparation>> | undefined;
+const translateUpdateSurface: UpdateConfigTranslator = (key, named) => (named ? t(key, named) : t(key));
+/** Snapshot of every surface that must be closed before the installer may run. */
+function updateBlockingConfigState(): UpdateBlockingConfigState {
+  return {
+    pendingAppClose: pendingAppCloseAction.value !== null,
+    connectionDialog: showConnectionDialog.value,
+    saveSqlDialog: showSaveSqlDialog.value,
+    ddlDialog: showQueryEditorDdlDialog.value,
+    objectSourceDialog: showQueryEditorObjectSourceDialog.value,
+    sqlParameterDialog: showSqlParameterDialog.value,
+    dangerDialog: showDangerDialog.value,
+    multiDbExecuteDialog: showMultiDbExecuteDialog.value,
+    transferDialog: dialogs.showTransferDialog.value,
+    sqlFileDialog: dialogs.showSqlFileDialog.value,
+    tableImportDialog: dialogs.showTableImportDialog.value,
+    mongoImportDialog: dialogs.showMongoImportDialog.value,
+    dataGenerateDialog: dialogs.showTableDataGenerateDialog.value,
+    databaseExportDialog: dialogs.showDatabaseExportDialog.value,
+    schemaDiffDialog: dialogs.showSchemaDiffDialog.value,
+    dataCompareDialog: dialogs.showDataCompareDialog.value,
+    configPassphraseDialog: dialogs.showConfigPassphraseDialog.value,
+    configPassphraseExportMode: dialogs.configPassphraseMode.value === "export",
+    configConnectionSelectDialog: dialogs.showConfigConnectionSelectDialog.value,
+    configConnectionSelectExportMode: dialogs.configConnectionSelectMode.value === "export",
+    configUnencryptedExportConfirm: dialogs.showConfigUnencryptedExportConfirm.value,
+    importLayoutConfirm: dialogs.showImportLayoutConfirm.value,
+    configExportBusy: dialogs.configExportBusy.value,
+    importApplying: dialogs.applyingImportSelection.value,
+  };
+}
 async function initializeUpdatePreparation() {
   if (!isDesktop || updatePreparation) return;
   updatePreparation = await setupUpdatePreparation({
     translate: (key) => t(key),
     assertSafe() {
-      if (!updateWindowReady) throw new Error(t("updates.preparationNotReady"));
+      if (!updateWindowReady) throw new UpdatePreparationError(t("updates.preparationNotReady"), "not_ready");
       if (trackedUpdateTaskCount.value > 0 || blockingDesktopAiRunsForUpdate().length > 0 || queryStore.tabs.some((tab) => tab.isCancelling || tab.isExplaining || tab.txnSessionId)) {
-        throw new Error(t("updates.preparationTasks"));
+        throw new UpdatePreparationError(t("updates.preparationTasks"), "tasks");
       }
       if (queryStore.tabs.some((tab) => (tab.pendingDataChangeCount ?? 0) > 0 || tab.hasPendingDataEditorDraft)) {
-        throw new Error(t("updates.preparationDrafts"));
+        throw new UpdatePreparationError(t("updates.preparationDrafts"), "drafts");
       }
-      if (
-        pendingAppCloseAction.value ||
-        showConnectionDialog.value ||
-        showSaveSqlDialog.value ||
-        showQueryEditorDdlDialog.value ||
-        showQueryEditorObjectSourceDialog.value ||
-        showSqlParameterDialog.value ||
-        showDangerDialog.value ||
-        showMultiDbExecuteDialog.value ||
-        [
-          dialogs.showTransferDialog,
-          dialogs.showSqlFileDialog,
-          dialogs.showTableImportDialog,
-          dialogs.showMongoImportDialog,
-          dialogs.showTableDataGenerateDialog,
-          dialogs.showDatabaseExportDialog,
-          dialogs.showSchemaDiffDialog,
-          dialogs.showDataCompareDialog,
-          dialogs.showConfigPassphraseDialog,
-          dialogs.showConfigConnectionSelectDialog,
-          dialogs.showConfigUnencryptedExportConfirm,
-          dialogs.showImportLayoutConfirm,
-          dialogs.configExportBusy,
-          dialogs.applyingImportSelection,
-        ].some((state) => state.value)
-      ) {
-        throw new Error(t("updates.preparationConfig"));
-      }
+      const configBlock = describeConfigUpdateBlock(updateBlockingConfigState(), translateUpdateSurface);
+      if (configBlock) throw new UpdatePreparationError(configBlock.message, configBlock.code);
     },
     async persist() {
       await nextTick();
@@ -564,6 +571,7 @@ provide(OPEN_PLUGIN_AI_CONVERSATION, (request) => {
   });
 });
 const appSidebarRef = ref<InstanceType<typeof AppSidebar> | null>(null);
+const sidebarRevealRef = ref<InstanceType<typeof SidebarReveal> | null>(null);
 const appTabBarRef = ref<InstanceType<typeof AppTabBar> | null>(null);
 const settingsPageRef = ref<InstanceType<typeof EditorSettingsPage> | null>(null);
 const contentAreaRef = ref<InstanceType<typeof SqlEditorWorkspace> | null>(null);
@@ -1089,6 +1097,10 @@ const executableSql = computed(() => {
       })
     : "";
 });
+
+// Descendants only need to know whether there is anything to run. Handing them the SQL text itself
+// would re-render the whole editor shell on every keystroke.
+const hasExecutableSql = computed(() => executableSql.value.trim().length > 0);
 
 async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot, executionTab?: QueryTab) {
   const tab = executionTab ?? activeTab.value;
@@ -3756,6 +3768,7 @@ function openDbxWebsite() {
 }
 
 function setSidebarOpen(open: boolean) {
+  sidebarRevealRef.value?.dismiss();
   sidebarOpen.value = open;
   safeLocalStorageSet("dbx-sidebar-open", open ? "true" : "false");
 }
@@ -4510,7 +4523,7 @@ function handleTabSwitcherKeydownCapture(e: KeyboardEvent) {
 function handleGlobalSearchKeydownCapture(e: KeyboardEvent) {
   if (canCaptureModifierDoubleTapSearch(e)) modifierDoubleTapSearch.handleKeydown(e);
   if (isShortcutEditingKeydown(e)) return;
-  if (e.defaultPrevented || !isGlobalSearchShortcut(e, settingsStore.editorSettings.shortcuts)) return;
+  if (e.defaultPrevented || !isGlobalSearchShortcut(e, normalizeShortcutSettings(settingsStore.editorSettings.shortcuts))) return;
   e.preventDefault();
   e.stopPropagation();
   quickOpenForceContent.value = true;
@@ -4518,7 +4531,7 @@ function handleGlobalSearchKeydownCapture(e: KeyboardEvent) {
 }
 
 function handleAuxiliarySearchKeydownCapture(e: KeyboardEvent) {
-  if (e.defaultPrevented || !isFocusSearchShortcut(e, settingsStore.editorSettings.shortcuts)) return;
+  if (e.defaultPrevented || !isFocusSearchShortcut(e, normalizeShortcutSettings(settingsStore.editorSettings.shortcuts))) return;
   const target = e.target instanceof Element ? e.target : document.activeElement instanceof Element ? document.activeElement : null;
   // 快捷键录入表面（每行录入框、SQL 录入框、#11787 的录入态）自己拥有键盘：焦点搜索键
   // 默认就是 Mod+F，若在这里把焦点抢到设置页顶部的全局搜索框，用户正在录入的 Ctrl+F
@@ -4711,7 +4724,9 @@ function handleVimDbxAppAction(event: Event) {
 async function handleKeydown(e: KeyboardEvent) {
   if (e.defaultPrevented) return;
 
-  const shortcuts = settingsStore.editorSettings.shortcuts;
+  // Every isXxxShortcut below normalizes what it is given; handing it an already
+  // normalized plain object keeps that to a cheap cache hit per key press.
+  const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
   if (showTabSwitcher.value) return;
   if (isFocusWhereShortcut(e, shortcuts) && !showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value) {
     const target = e.target instanceof Element ? e.target : null;
@@ -5483,25 +5498,25 @@ onUnmounted(() => {
           @logout="handleWebLogout"
         />
 
-        <div :class="isDetachedWindowContext ? 'flex-1 flex min-h-0' : isClassicLayout ? 'app-layout-classic flex-1 flex min-h-0' : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'">
+        <div class="relative" :class="isDetachedWindowContext ? 'flex-1 flex min-h-0' : isClassicLayout ? 'app-layout-classic flex-1 flex min-h-0' : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'">
           <PluginShortcutBar v-if="!isDetachedWindowContext && !isZenMode && settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position.startsWith('left-')" :position="settingsStore.editorSettings.pluginShortcuts.position" />
-          <AppSidebar
-            v-if="!isDetachedWindowContext"
-            v-show="sidebarOpen && !isZenMode"
-            ref="appSidebarRef"
-            :sidebar-width="sidebarWidth"
-            :classic-layout="isClassicLayout"
-            @import="dialogs.onImportClick"
-            @export="dialogs.onExportClick"
-            @start-resize="startSidebarResize"
-            @collapse="setSidebarOpen(false)"
-            @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
-            @open-connection-settings="(connectionId) => openConnectionSettings(connectionId, 'advanced')"
-            @add-to-ai="addToAi"
-            @open-dependency-object="onOpenDependencyObject"
-            @mousedown="rememberSidebarSearchSurface"
-            @focusin="rememberSidebarSearchSurface"
-          />
+          <SidebarReveal v-if="!isDetachedWindowContext" ref="sidebarRevealRef" :pinned="sidebarOpen" :enabled="!isZenMode" :classic-layout="isClassicLayout">
+            <AppSidebar
+              ref="appSidebarRef"
+              :sidebar-width="sidebarWidth"
+              :classic-layout="isClassicLayout"
+              @import="dialogs.onImportClick"
+              @export="dialogs.onExportClick"
+              @start-resize="startSidebarResize"
+              @collapse="setSidebarOpen(false)"
+              @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
+              @open-connection-settings="(connectionId) => openConnectionSettings(connectionId, 'advanced')"
+              @add-to-ai="addToAi"
+              @open-dependency-object="onOpenDependencyObject"
+              @mousedown="rememberSidebarSearchSurface"
+              @focusin="rememberSidebarSearchSurface"
+            />
+          </SidebarReveal>
 
           <div
             data-editor-content
@@ -5648,13 +5663,11 @@ onUnmounted(() => {
                     :can-detach-tabs="isDesktop"
                     :detached-drop-target="detachedDropTargetTabId !== null"
                     @detach-tab="detachTab"
-                    :executable-sql="executableSql"
+                    :has-executable-sql="hasExecutableSql"
                     :active-output-view="activeOutputView"
                     :format-sql-request="formatSqlRequest"
                     :compress-sql-request="compressSqlRequest"
                     :keyword-case-request="keywordCaseRequest"
-                    :selected-sql="selectedSql"
-                    :cursor-pos="cursorPos"
                     :block-dangerous-redis-commands="blockDangerousRedisCommands"
                     :zen-mode="isZenMode"
                     @update:active-output-view="

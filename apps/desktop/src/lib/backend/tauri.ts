@@ -2194,6 +2194,8 @@ export async function executeMulti(
      *  (`BEGIN` / `START TRANSACTION`) open across executions until COMMIT /
      *  ROLLBACK instead of rolling it back when the batch ends. */
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
   },
 ): Promise<QueryResult[]> {
   const diagnosticsEnabled = isDebugLoggingEnabled();
@@ -2268,6 +2270,8 @@ export async function executeMultiWithProgress(
     continueOnError?: boolean;
     executionMode?: "simple";
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
     executionId?: string;
   },
 ): Promise<QueryResult[]> {
@@ -2413,6 +2417,7 @@ export async function executeInManualTransaction(
   timeoutSecs?: number,
   boundStatements?: BlobBoundStatement[],
   deferLobs?: boolean,
+  reportCompilationErrors?: boolean,
 ): Promise<QueryResult[]> {
   return invokeBackend("execute_in_manual_transaction", {
     txnSessionId,
@@ -2428,6 +2433,7 @@ export async function executeInManualTransaction(
     timeoutSecs,
     boundStatements,
     deferLobs,
+    reportCompilationErrors,
   });
 }
 

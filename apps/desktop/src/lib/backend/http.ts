@@ -1730,6 +1730,8 @@ export async function executeMulti(
      *  (`BEGIN` / `START TRANSACTION`) open across executions until COMMIT /
      *  ROLLBACK instead of rolling it back when the batch ends. */
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
   },
 ): Promise<QueryResult[]> {
   return postQueryWithDiagnostics(
@@ -1784,6 +1786,8 @@ export async function executeMultiWithProgress(
     continueOnError?: boolean;
     executionMode?: "simple";
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
     executionId?: string;
   },
 ): Promise<QueryResult[]> {
@@ -1949,6 +1953,7 @@ export async function executeInManualTransaction(
   _timeoutSecs?: number,
   _boundStatements?: BlobBoundStatement[],
   _deferLobs?: boolean,
+  _reportCompilationErrors?: boolean,
 ): Promise<QueryResult[]> {
   throw new Error("Manual transaction management is only available in the desktop app.");
 }

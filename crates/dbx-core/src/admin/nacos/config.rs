@@ -38,6 +38,14 @@ pub enum NacosVersionMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
+pub enum NacosNamespaceDiscovery {
+    #[default]
+    Automatic,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
 pub enum NacosApiPlane {
     #[default]
     Admin,
@@ -80,12 +88,14 @@ pub struct NacosAdminConfig {
     pub namespace: String,
     #[serde(default)]
     pub context_path: String,
-    /// Namespace IDs supplied for an official Nacos ordinary user that cannot
-    /// call the namespace or authorization management APIs. They define the
-    /// discoverable scope; Nacos still authorizes every configuration and
-    /// naming request.
+    /// Explicit namespace IDs for manual discovery, or the ordinary-user
+    /// fallback when directory access is denied. Nacos still authorizes every
+    /// configuration and naming request.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_namespaces: Vec<String>,
+    /// Explicit IDs are used without a namespace-directory request in manual mode.
+    #[serde(default)]
+    pub namespace_discovery: NacosNamespaceDiscovery,
     /// Optional r-nacos authenticated-console address. This is separate from
     /// the OpenAPI server address because r-nacos exposes console-only APIs
     /// (including config history plus config type and description metadata) on
@@ -187,6 +197,7 @@ impl NacosAdminConfig {
                 namespace: cfg.database.clone().unwrap_or_default(),
                 context_path: String::new(),
                 managed_namespaces: Vec::new(),
+                namespace_discovery: Default::default(),
                 rnacos_console_addr: String::new(),
                 rnacos_history_enabled: None,
                 rnacos_console_auth: NacosRNacosConsoleAuth::Inherit,
@@ -236,6 +247,9 @@ impl NacosAdminConfig {
             }
         }
         self.managed_namespaces = managed_namespaces;
+        if self.namespace_discovery == NacosNamespaceDiscovery::Manual && self.managed_namespaces.is_empty() {
+            return Err("Manual namespace discovery requires at least one namespace ID".to_string());
+        }
         self.rnacos_console_addr = if self.rnacos_console_addr.trim().is_empty() {
             String::new()
         } else {
@@ -668,5 +682,40 @@ mod tests {
             NacosAdminConfig::from_connection(&cfg).unwrap().with_rnacos_console_endpoint("127.0.0.1", 49153).unwrap();
 
         assert_eq!(parsed.rnacos_console_addr, "https://127.0.0.1:49153/gateway");
+    }
+
+    #[test]
+    fn manual_namespace_discovery_accepts_explicit_ids_without_authentication() {
+        let cfg = connection_with_external(serde_json::json!({
+            "serverAddr": "http://127.0.0.1:8848",
+            "namespaceDiscovery": "manual",
+            "managedNamespaces": [" prod ", "prod", "pre"],
+            "auth": { "kind": "none" }
+        }));
+        let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
+        assert_eq!(parsed.namespace_discovery, NacosNamespaceDiscovery::Manual);
+        assert_eq!(parsed.managed_namespaces, vec!["prod", "pre"]);
+    }
+
+    #[test]
+    fn manual_namespace_discovery_requires_a_nonempty_scope() {
+        let cfg = connection_with_external(serde_json::json!({
+            "serverAddr": "http://127.0.0.1:8848",
+            "namespaceDiscovery": "manual",
+            "managedNamespaces": [" "]
+        }));
+        assert!(NacosAdminConfig::from_connection(&cfg).unwrap_err().contains("at least one namespace ID"));
+    }
+
+    #[test]
+    fn legacy_connections_keep_automatic_namespace_discovery() {
+        let cfg = connection_with_external(serde_json::json!({
+            "serverAddr": "http://127.0.0.1:8848",
+            "managedNamespaces": ["prod"]
+        }));
+        assert_eq!(
+            NacosAdminConfig::from_connection(&cfg).unwrap().namespace_discovery,
+            NacosNamespaceDiscovery::Automatic
+        );
     }
 }

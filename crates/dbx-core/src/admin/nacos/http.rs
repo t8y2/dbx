@@ -11,7 +11,9 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::nacos::config::{NacosAdminConfig, NacosApiPlane, NacosAuthConfig, NacosImplementation, NacosVersionMode};
+use crate::nacos::config::{
+    NacosAdminConfig, NacosApiPlane, NacosAuthConfig, NacosImplementation, NacosNamespaceDiscovery, NacosVersionMode,
+};
 use crate::nacos::port::{NacosAdmin, NacosNamespaceAuthorizationSnapshot};
 use crate::nacos::types::*;
 
@@ -210,6 +212,25 @@ impl NacosOpenApiAdmin {
             global_admin: AtomicU8::new(0),
             access_control_capabilities: StdRwLock::new(None),
         })
+    }
+
+    async fn verify_manual_namespace_configs(&self, namespaces: &[String]) -> Result<(), String> {
+        for namespace in namespaces {
+            // Empty lists are valid. Authentication, authorization and transport
+            // failures are propagated rather than being hidden by manual scope.
+            self.list_configs(NacosConfigQuery {
+                namespace: Some(namespace.clone()),
+                group: None,
+                group_contains: false,
+                data_id: None,
+                app_name: None,
+                search: None,
+                page_no: Some(1),
+                page_size: Some(1),
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     fn endpoint_with_context(&self, path: &str, context_path: &str) -> Result<String, String> {
@@ -1788,8 +1809,8 @@ impl NacosAdmin for NacosOpenApiAdmin {
     }
 
     fn explicitly_scoped_namespace_ids(&self) -> Option<Vec<String>> {
-        (!self.is_explicit_rnacos()
-            && matches!(self.cfg.auth, NacosAuthConfig::UsernamePassword { .. })
+        ((self.cfg.namespace_discovery == NacosNamespaceDiscovery::Manual
+            || (!self.is_explicit_rnacos() && matches!(self.cfg.auth, NacosAuthConfig::UsernamePassword { .. })))
             && !self.cfg.managed_namespaces.is_empty())
         .then(|| self.cfg.managed_namespaces.clone())
     }
@@ -1807,6 +1828,14 @@ impl NacosAdmin for NacosOpenApiAdmin {
         let is_rnacos = self.is_explicit_rnacos() || state.as_ref().is_some_and(|state| state.is_rnacos_compatible);
         self.detected_rnacos.store(is_rnacos, Ordering::Relaxed);
         let _ = self.access_token().await?;
+        if self.cfg.namespace_discovery == NacosNamespaceDiscovery::Manual {
+            let namespace = self
+                .cfg
+                .managed_namespaces
+                .first()
+                .ok_or("Manual namespace discovery requires at least one namespace ID")?;
+            self.verify_manual_namespace_configs(std::slice::from_ref(namespace)).await?;
+        }
         if let Err(error) = self.list_namespaces().await {
             // r-nacos can authenticate and serve configuration reads without
             // exposing a namespace directory. The connection dialog will
@@ -1847,7 +1876,11 @@ impl NacosAdmin for NacosOpenApiAdmin {
         if !is_rnacos && is_v3 && self.is_v3_console() {
             capabilities.supports_raw_api = false;
         }
-        if !is_rnacos && is_v3 && !self.cfg.managed_namespaces.is_empty() {
+        if self.cfg.namespace_discovery != NacosNamespaceDiscovery::Manual
+            && !is_rnacos
+            && is_v3
+            && !self.cfg.managed_namespaces.is_empty()
+        {
             // A namespace directory can include entries that an ordinary user
             // is not allowed to open. With no user-selected scope, validating
             // the first entry (commonly `public`) rejects the connection before
@@ -1880,6 +1913,10 @@ impl NacosAdmin for NacosOpenApiAdmin {
 
     async fn test_connection_with_scope_validation(&self) -> Result<NacosConnectionInfo, String> {
         let info = self.test_connection().await?;
+        if self.cfg.namespace_discovery == NacosNamespaceDiscovery::Manual {
+            self.verify_manual_namespace_configs(&self.cfg.managed_namespaces[1..]).await?;
+            return Ok(info);
+        }
         if self.is_rnacos_compatible() || self.cfg.managed_namespaces.is_empty() {
             return Ok(info);
         }
@@ -2298,6 +2335,21 @@ impl NacosAdmin for NacosOpenApiAdmin {
     }
 
     async fn list_namespaces(&self) -> Result<Vec<NacosNamespaceInfo>, String> {
+        if self.cfg.namespace_discovery == NacosNamespaceDiscovery::Manual {
+            return Ok(self
+                .cfg
+                .managed_namespaces
+                .iter()
+                .map(|namespace| NacosNamespaceInfo {
+                    namespace: namespace.clone(),
+                    namespace_show_name: namespace.clone(),
+                    namespace_desc: None,
+                    config_count: None,
+                    quota: None,
+                    namespace_type: None,
+                })
+                .collect());
+        }
         if self.is_rnacos_compatible() {
             // Namespace discovery is not part of r-nacos' client OpenAPI
             // contract. Do not turn a failed optional console login into a
@@ -4696,6 +4748,7 @@ mod tests {
             namespace: String::new(),
             context_path: String::new(),
             managed_namespaces: Vec::new(),
+            namespace_discovery: Default::default(),
             rnacos_console_addr: String::new(),
             rnacos_history_enabled: None,
             rnacos_console_auth: Default::default(),
@@ -4706,6 +4759,74 @@ mod tests {
             page_size: 100,
             connect_override: None,
         }
+    }
+
+    #[tokio::test]
+    async fn manual_namespace_discovery_skips_directory_and_verifies_each_config_scope() {
+        for implementation in [NacosImplementation::Nacos, NacosImplementation::RNacos] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let mut checked = Vec::new();
+                while checked.len() < 2 {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let target = read_request_target(&mut socket).await;
+                    assert!(!target.contains("/namespaces"), "directory request: {target}");
+                    assert!(!target.contains("/namespace/list"), "directory request: {target}");
+                    if target.starts_with("/nacos/v1/cs/configs?") {
+                        let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+                        let params = url.query_pairs().collect::<HashMap<_, _>>();
+                        assert_eq!(params.get("pageSize").map(|v| v.as_ref()), Some("1"));
+                        checked.push(params.get("tenant").unwrap().to_string());
+                        write_json_response(&mut socket, r#"{"totalCount":0,"pageItems":[]}"#).await;
+                    } else {
+                        // Optional server-state probing must not be confused with directory discovery.
+                        write_json_response(&mut socket, "{}").await;
+                    }
+                }
+                checked
+            });
+            let mut config = test_admin_config(format!("http://{address}"));
+            config.implementation = Some(implementation);
+            config.version_mode = Some(NacosVersionMode::V2);
+            config.context_path = "/nacos".to_string();
+            config.namespace_discovery = NacosNamespaceDiscovery::Manual;
+            config.managed_namespaces = vec!["prod".to_string(), "pre".to_string()];
+            let admin = NacosOpenApiAdmin::new(config).unwrap();
+            let namespaces = admin.list_namespaces().await.unwrap();
+            assert_eq!(namespaces.iter().map(|n| n.namespace.as_str()).collect::<Vec<_>>(), ["prod", "pre"]);
+            admin.test_connection_with_scope_validation().await.unwrap();
+            assert_eq!(server.await.unwrap(), ["prod", "pre"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_namespace_discovery_does_not_hide_config_authorization_failures() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let target = read_request_target(&mut socket).await;
+                if target.starts_with("/v1/cs/configs?") {
+                    tokio::io::AsyncWriteExt::write_all(
+                        &mut socket,
+                        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 13\r\nConnection: close\r\n\r\naccess denied",
+                    )
+                    .await
+                    .unwrap();
+                    break;
+                }
+                assert!(!target.contains("/namespaces"));
+                write_json_response(&mut socket, "{}").await;
+            }
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.namespace_discovery = NacosNamespaceDiscovery::Manual;
+        config.managed_namespaces = vec!["prod".to_string()];
+        let error = NacosOpenApiAdmin::new(config).unwrap().test_connection().await.unwrap_err();
+        assert!(error.contains("403"), "{error}");
+        server.await.unwrap();
     }
 
     #[tokio::test]

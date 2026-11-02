@@ -416,7 +416,6 @@ const visibleNacosNamespaceSelection = ref<Set<string>>(new Set());
 const visibleNacosNamespaceSearchText = ref("");
 const visibleNacosNamespaceError = ref("");
 const visibleNacosNamespaceListingPermissionDenied = ref(false);
-const isResolvingManualNacosNamespaces = ref(false);
 const visibleNacosNamespaceAccessMode = ref<"automatic" | "manual">("automatic");
 const nacosDynamicAllNamespaces = ref(false);
 const visibleNacosNamespaceDynamicAllSupported = ref(false);
@@ -1141,6 +1140,7 @@ const nacosServerAddr = ref("");
 const nacosContextPath = ref("");
 const nacosConsoleUrl = ref("");
 const nacosManagedNamespacesText = ref("");
+const nacosNamespaceDiscovery = ref<"automatic" | "manual">("automatic");
 const nacosRNacosConsoleAddr = ref("");
 const nacosHistoryEnabled = ref(false);
 const nacosConsoleAuthKind = ref<NacosRNacosConsoleAuth["kind"]>("inherit");
@@ -1573,6 +1573,7 @@ function resetNacosFields(config?: Partial<NacosAdminConfig>) {
   nacosContextPath.value = contextPath;
   nacosConsoleUrl.value = config?.consoleUrl?.trim() || "";
   nacosManagedNamespacesText.value = (config?.managedNamespaces || []).join("\n");
+  nacosNamespaceDiscovery.value = config?.namespaceDiscovery || "automatic";
   nacosDynamicAllNamespaces.value = !!config && !config.managedNamespaces?.length && !Array.isArray(form.value.visible_databases);
   nacosRNacosConsoleAddr.value = config?.rnacosConsoleAddr?.trim() || "";
   nacosHistoryEnabled.value = config?.rnacosHistoryEnabled ?? !!config?.rnacosConsoleAddr;
@@ -2311,7 +2312,7 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     throw new Error(t("connection.nacosRNacosConsoleUrlRequired"));
   }
   let rnacosConsoleAuth: NacosRNacosConsoleAuth | undefined;
-  const managedNamespaces = nacosImplementation.value === "nacos" && nacosAuthKind.value === "usernamePassword" ? parseNacosManagedNamespaces(nacosManagedNamespacesText.value) : [];
+  const managedNamespaces = nacosNamespaceDiscovery.value === "manual" || (nacosImplementation.value === "nacos" && nacosAuthKind.value === "usernamePassword") ? parseNacosManagedNamespaces(nacosManagedNamespacesText.value) : [];
   let metricsUrl: string | undefined;
   let consoleUrl: string | undefined;
   const usesIndependentConsoleUrl = nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "admin";
@@ -2349,6 +2350,7 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     contextPath: normalized.contextPath || undefined,
     consoleUrl,
     managedNamespaces: managedNamespaces.length ? managedNamespaces : undefined,
+    namespaceDiscovery: nacosNamespaceDiscovery.value,
     rnacosConsoleAddr: rnacosConsoleConfigured ? nacosRNacosConsoleAddr.value.trim() : undefined,
     rnacosHistoryEnabled: nacosImplementation.value === "rnacos" ? nacosHistoryEnabled.value : undefined,
     rnacosConsoleAuth,
@@ -4259,15 +4261,10 @@ const agentDriverFocus = computed<DriverStoreFocus>(() => ({ target: "driver", d
 const h2DriverMissing = computed(() => form.value.db_type === "h2" && isH2FileMode.value && agentDrivers.value.find((d) => d.db_type === "h2")?.installed !== true);
 const canChooseVisibleNacosNamespaces = computed(() => form.value.db_type === "nacos");
 const isNacosV3AdminPlane = computed(() => nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "admin");
-const isNacosV3ConsolePlane = computed(() => nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "console");
 const canDetectNacosNamespaceAccess = computed(() => form.value.db_type === "nacos" && nacosAuthKind.value === "usernamePassword");
-const nacosManualNamespaceLabelKey = computed(() => (isNacosV3AdminPlane.value ? "nacos.nacosManagedNamespaces" : "nacos.nacosManagedNamespacesNameOrId"));
-const nacosManualNamespacePlaceholderKey = computed(() => (isNacosV3AdminPlane.value ? "nacos.nacosManagedNamespacesIdPlaceholder" : "nacos.nacosManagedNamespacesPlaceholder"));
-const nacosManualNamespaceHintKey = computed(() => {
-  if (isNacosV3AdminPlane.value) return "nacos.nacosV3AdminManagedNamespacesHint";
-  if (isNacosV3ConsolePlane.value) return "nacos.nacosV3ConsoleManagedNamespacesHint";
-  return "nacos.nacosManagedNamespacesHint";
-});
+const nacosManualNamespaceLabelKey = "nacos.nacosManagedNamespaces";
+const nacosManualNamespacePlaceholderKey = "nacos.nacosManagedNamespacesIdPlaceholder";
+const nacosManualNamespaceHintKey = "nacos.nacosManualNamespaceDiscoveryHint";
 const nacosNamespacePickerTitleKey = computed(() => (canDetectNacosNamespaceAccess.value ? "nacos.nacosDetectAccessibleNamespaces" : "nacos.nacosVisibleNamespacesTitle"));
 const nacosNamespacePickerDescriptionKey = computed(() => (canDetectNacosNamespaceAccess.value ? "nacos.nacosDetectAccessibleNamespacesHint" : "nacos.nacosVisibleNamespacesDescription"));
 function hasNacosNamespaceScopeForSave(): boolean {
@@ -5892,7 +5889,6 @@ function resetVisibleNacosNamespaceDraftState() {
   visibleNacosNamespaceSearchText.value = "";
   visibleNacosNamespaceError.value = "";
   visibleNacosNamespaceListingPermissionDenied.value = false;
-  isResolvingManualNacosNamespaces.value = false;
   visibleNacosNamespaceAccessMode.value = "automatic";
   visibleNacosNamespaceDynamicAllSupported.value = false;
 }
@@ -5984,56 +5980,6 @@ function normalizeVisibleNacosNamespaceSelection(selected: Iterable<string>, nam
   return normalizeNacosNamespaceSelection(selected, namespaces);
 }
 
-function normalizeManualNacosNamespaceNames(namespaces: string[], availableNamespaces: NacosNamespaceInfo[]): string[] {
-  const namespaceIds = new Map(availableNamespaces.map((namespace) => [nacosNamespaceIdentity(namespace.namespace), namespace.namespace]));
-  const namespaceNames = new Map<string, string[]>();
-  for (const namespace of availableNamespaces) {
-    const name = nacosNamespaceLabel(namespace).trim();
-    if (!name) continue;
-    namespaceNames.set(name, [...(namespaceNames.get(name) || []), namespace.namespace]);
-  }
-
-  const normalized: string[] = [];
-  const seen = new Set<string>();
-  for (const namespace of namespaces) {
-    const namespaceId = namespaceIds.get(nacosNamespaceIdentity(namespace));
-    const matchingNames = namespaceNames.get(namespace.trim()) || [];
-    // Display names are only safe to convert when the server returned one
-    // exact match. Keep unknown or ambiguous values intact so the regular
-    // permission check can report them instead of targeting a wrong namespace.
-    const value = namespaceId ?? (matchingNames.length === 1 ? matchingNames[0] : namespace);
-    const identity = nacosNamespaceIdentity(value);
-    if (!seen.has(identity)) {
-      seen.add(identity);
-      normalized.push(value);
-    }
-  }
-  return normalized;
-}
-
-async function resolveManualNacosNamespaceNames(namespaces: string[]): Promise<string[]> {
-  const draftId = buildDraftVisibleDatabasesConnectionId(uuid());
-  try {
-    const submittedConfig = connectionConfigForSubmit(draftId);
-    const draftConfig = {
-      ...submittedConfig,
-      // Resolve display names against the authenticated directory rather than
-      // passing them as namespace IDs to the configuration and naming APIs.
-      external_config: submittedConfig.db_type === "nacos" ? { ...(submittedConfig.external_config as NacosAdminConfig), managedNamespaces: undefined } : submittedConfig.external_config,
-      id: draftId,
-      one_time: true,
-    };
-    await api.connectDb(draftConfig);
-    return normalizeManualNacosNamespaceNames(namespaces, await loadReadableNacosNamespaces(draftId, api));
-  } catch {
-    // Some Nacos deployments do not expose a readable namespace directory to
-    // ordinary users. Preserve manually entered IDs for the normal test path.
-    return namespaces;
-  } finally {
-    await api.disconnectDb(draftId).catch(() => undefined);
-  }
-}
-
 function isNacosNamespaceListingPermissionError(error: unknown): boolean {
   const message = errorMessage(error);
   if (/NACOS_ERROR\[rnacosNamespaceDirectoryUnavailable\]/.test(message)) return true;
@@ -6041,9 +5987,15 @@ function isNacosNamespaceListingPermissionError(error: unknown): boolean {
   return /\/v3\/(?:admin|console)\/core\/namespace\/list/.test(message) && /\b403\b/.test(message) && /authorization failed/i.test(message);
 }
 
-async function openVisibleNacosNamespacesPicker() {
+async function openVisibleNacosNamespacesPicker(forceAutomatic = false) {
   if (!ensureConnectionHostResolvedFromUrl()) return;
   if (!canChooseVisibleNacosNamespaces.value || isLoadingVisibleNacosNamespaces.value) return;
+
+  if (!forceAutomatic && nacosNamespaceDiscovery.value === "manual") {
+    visibleNacosNamespaceAccessMode.value = "manual";
+    showVisibleNacosNamespacesDialog.value = true;
+    return;
+  }
 
   isLoadingVisibleNacosNamespaces.value = true;
   visibleNacosNamespaceError.value = "";
@@ -6060,7 +6012,7 @@ async function openVisibleNacosNamespacesPicker() {
       // Automatic detection must not inherit a previously saved manual scope.
       // Otherwise it would only rediscover that old subset instead of checking
       // what the currently configured account can really access.
-      external_config: canDetectNacosNamespaceAccess.value && submittedConfig.db_type === "nacos" ? { ...(submittedConfig.external_config as NacosAdminConfig), managedNamespaces: undefined } : submittedConfig.external_config,
+      external_config: submittedConfig.db_type === "nacos" ? { ...(submittedConfig.external_config as NacosAdminConfig), managedNamespaces: undefined, namespaceDiscovery: "automatic" as const } : submittedConfig.external_config,
       visible_databases: undefined,
       id: draftId,
       one_time: true,
@@ -6112,6 +6064,7 @@ function clearVisibleNacosNamespaceSelection() {
 
 function showAllVisibleNacosNamespaces() {
   nacosDynamicAllNamespaces.value = true;
+  nacosNamespaceDiscovery.value = "automatic";
   nacosManagedNamespacesText.value = "";
   form.value.visible_databases = undefined;
   resetVisibleNacosNamespaceDraftState();
@@ -6121,16 +6074,12 @@ async function saveVisibleNacosNamespaceSelection() {
   if (!visibleNacosNamespaceCanSave.value) return;
   if (visibleNacosNamespaceAccessMode.value === "manual") {
     const manualNamespaces = parseNacosManagedNamespaces(nacosManagedNamespacesText.value);
-    isResolvingManualNacosNamespaces.value = true;
-    // r-nacos does not promise a namespace directory on its client OpenAPI.
-    // Preserve user-provided IDs directly so scoped config access does not
-    // require a separate console login.
-    const resolvedNamespaces = isNacosV3AdminPlane.value || nacosImplementation.value === "rnacos" ? manualNamespaces : await resolveManualNacosNamespaceNames(manualNamespaces);
-    isResolvingManualNacosNamespaces.value = false;
-    nacosManagedNamespacesText.value = resolvedNamespaces.join("\n");
-    form.value.visible_databases = resolvedNamespaces;
+    nacosManagedNamespacesText.value = manualNamespaces.join("\n");
+    nacosNamespaceDiscovery.value = "manual";
+    form.value.visible_databases = manualNamespaces;
     nacosDynamicAllNamespaces.value = false;
   } else {
+    nacosNamespaceDiscovery.value = "automatic";
     nacosManagedNamespacesText.value = "";
     const selected = normalizeVisibleNacosNamespaceSelection(visibleNacosNamespaceSelection.value, visibleNacosNamespaces.value);
     const all = normalizeVisibleNacosNamespaceSelection(visibleNacosNamespaces.value.map(nacosNamespaceValue), visibleNacosNamespaces.value);
@@ -6139,6 +6088,7 @@ async function saveVisibleNacosNamespaceSelection() {
     form.value.visible_databases = useDynamicAll ? undefined : selected;
     nacosDynamicAllNamespaces.value = useDynamicAll;
   }
+  resetTestState();
   showVisibleNacosNamespacesDialog.value = false;
 }
 
@@ -6691,6 +6641,7 @@ watch(
     nacosScopeFingerprintBaseline = current;
     nacosManagedNamespacesText.value = "";
     nacosDynamicAllNamespaces.value = false;
+    nacosNamespaceDiscovery.value = "automatic";
     form.value.visible_databases = undefined;
     resetVisibleNacosNamespaceDraftState();
     resetTestState();
@@ -11317,7 +11268,7 @@ function openExternalUrl(url: string) {
             </Button>
           </template>
           <template v-else>
-            <Button v-if="canChooseVisibleNacosNamespaces" variant="outline" class="shrink-0" :disabled="isTesting || isTestingSshTunnel || isSaving || isLoadingVisibleNacosNamespaces || !hasRequiredConnectionTarget" @click="openVisibleNacosNamespacesPicker">
+            <Button v-if="canChooseVisibleNacosNamespaces" variant="outline" class="shrink-0" :disabled="isTesting || isTestingSshTunnel || isSaving || isLoadingVisibleNacosNamespaces || !hasRequiredConnectionTarget" @click="openVisibleNacosNamespacesPicker()">
               <Loader2 v-if="isLoadingVisibleNacosNamespaces" class="mr-1.5 h-4 w-4 animate-spin" />
               <ListFilter v-else class="mr-1.5 h-4 w-4" />
               {{ t(nacosNamespacePickerTitleKey) }}
@@ -11424,9 +11375,9 @@ function openExternalUrl(url: string) {
       </DialogHeader>
 
       <Tabs v-model="visibleNacosNamespaceAccessMode" class="grid gap-3">
-        <TabsList class="grid h-9 w-full" :class="canDetectNacosNamespaceAccess ? 'grid-cols-2' : 'grid-cols-1'">
-          <TabsTrigger value="automatic">{{ t("nacos.nacosNamespaceAccessAutomatic") }}</TabsTrigger>
-          <TabsTrigger v-if="canDetectNacosNamespaceAccess" value="manual">{{ t("nacos.nacosNamespaceAccessManual") }}</TabsTrigger>
+        <TabsList class="grid h-9 w-full grid-cols-2">
+          <TabsTrigger value="automatic" @click="openVisibleNacosNamespacesPicker(true)">{{ t("nacos.nacosNamespaceAccessAutomatic") }}</TabsTrigger>
+          <TabsTrigger value="manual" :disabled="isLoadingVisibleNacosNamespaces">{{ t("nacos.nacosNamespaceAccessManual") }}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="automatic" class="m-0 grid gap-3">
@@ -11452,7 +11403,7 @@ function openExternalUrl(url: string) {
             </div>
             <div v-else-if="visibleNacosNamespaceListingPermissionDenied" class="grid gap-3 p-3 text-sm text-destructive">
               <p>{{ visibleNacosNamespaceError }}</p>
-              <Button v-if="canDetectNacosNamespaceAccess" variant="outline" size="sm" class="justify-self-start" @click="visibleNacosNamespaceAccessMode = 'manual'">
+              <Button variant="outline" size="sm" class="justify-self-start" @click="visibleNacosNamespaceAccessMode = 'manual'">
                 {{ t("nacos.nacosNamespaceAccessManual") }}
               </Button>
             </div>
@@ -11475,8 +11426,7 @@ function openExternalUrl(url: string) {
           </div>
         </TabsContent>
 
-        <TabsContent v-if="canDetectNacosNamespaceAccess" value="manual" class="m-0 grid gap-3">
-          <p class="text-xs leading-5 text-muted-foreground">{{ t("nacos.nacosNamespaceAccessScopeHint") }}</p>
+        <TabsContent value="manual" class="m-0 grid gap-3">
           <div v-if="isNacosV3AdminPlane" class="flex gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs leading-5 text-amber-800 dark:text-amber-300">
             <ShieldAlert class="mt-0.5 h-4 w-4 shrink-0" />
             <p>{{ t("nacos.nacosV3AdminManagedNamespacesHint") }}</p>
@@ -11495,13 +11445,13 @@ function openExternalUrl(url: string) {
             />
             <p class="text-[11px] leading-4 text-muted-foreground">{{ t(nacosManualNamespaceHintKey) }}</p>
           </div>
-          <p v-if="!visibleNacosNamespaceCanSave" class="text-xs text-destructive">{{ t("nacos.nacosOrdinaryNamespacesRequired") }}</p>
+          <p v-if="!visibleNacosNamespaceCanSave" class="text-xs text-destructive">{{ t("nacos.nacosManualNamespaceIdsRequired") }}</p>
         </TabsContent>
       </Tabs>
 
       <DialogFooter>
         <Button variant="outline" @click="showVisibleNacosNamespacesDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="isResolvingManualNacosNamespaces || !visibleNacosNamespaceCanSave || (visibleNacosNamespaceAccessMode === 'automatic' && (isLoadingVisibleNacosNamespaces || !!visibleNacosNamespaceError))" @click="saveVisibleNacosNamespaceSelection">{{ t("nacos.save") }}</Button>
+        <Button :disabled="!visibleNacosNamespaceCanSave || (visibleNacosNamespaceAccessMode === 'automatic' && (isLoadingVisibleNacosNamespaces || !!visibleNacosNamespaceError))" @click="saveVisibleNacosNamespaceSelection">{{ t("nacos.save") }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

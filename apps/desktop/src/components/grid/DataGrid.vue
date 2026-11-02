@@ -2878,6 +2878,8 @@ const columnHeaderMeasurementKey = computed(() => [tableFontSize.value, tableFon
 let columnHeaderMeasureContext: CanvasRenderingContext2D | null | undefined;
 let triggerGrowColumnWidths: (() => void) | undefined;
 
+// Invalidate cached canvas font metrics after the configured fonts finish loading.
+const dataGridFontReadyTick = ref(0);
 if (typeof document !== "undefined" && document.fonts) {
   let fontLoadRequestId = 0;
   watch(

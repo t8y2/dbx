@@ -121,6 +121,8 @@ export default withEnglishFallback({
   docs,
   dataDictionary,
   pluginPlatform: {
+    openUrlTitle: "Buka URL eksternal",
+    openUrlPrompt: "Plugin {name} ingin membuka URL ini di browser Anda.",
     dataAccessConsent: '"{name}" ingin membaca data dari koneksi "{connection}". Selama koneksi tersebut terbuka, plugin dapat menjalankan kueri read-only pada koneksi itu hingga Anda mencabut aksesnya di Plugin Center. Izinkan?',
     dataAccessConsentTitle: "Permintaan Akses Data",
     mcpToolsBadge: "Alat MCP",

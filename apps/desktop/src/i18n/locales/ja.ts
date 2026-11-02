@@ -608,6 +608,8 @@ export default withEnglishFallback({
   docs,
   dataDictionary,
   pluginPlatform: {
+    openUrlTitle: "外部 URL を開く",
+    openUrlPrompt: "プラグイン {name} が次の URL をブラウザーで開こうとしています。",
     dataAccessConsent: "「{name}」が接続「{connection}」のデータの読み取りを要求しています。許可すると、プラグインセンターで取り消すまで、この接続が開いている間はプラグインが読み取り専用クエリを実行できます。許可しますか？",
     dataAccessConsentTitle: "データアクセスの要求",
     mcpToolsBadge: "MCP ツール",

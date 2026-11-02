@@ -607,6 +607,8 @@ export default withEnglishFallback({
   docs,
   dataDictionary,
   pluginPlatform: {
+    openUrlTitle: "Apri URL esterno",
+    openUrlPrompt: "Il plugin {name} vuole aprire questo URL nel browser.",
     dataAccessConsent: '"{name}" vuole leggere i dati della connessione "{connection}". Finché la connessione è aperta, il plugin potrà eseguire query di sola lettura su di essa finché non revochi l\'accesso nel Centro plugin. Consentire?',
     dataAccessConsentTitle: "Richiesta di accesso ai dati",
     mcpToolsBadge: "Strumenti MCP",

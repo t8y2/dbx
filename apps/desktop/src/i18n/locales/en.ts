@@ -805,6 +805,8 @@ export default {
   docs,
   dataDictionary,
   pluginPlatform: {
+    openUrlTitle: "Open external URL",
+    openUrlPrompt: "Plugin {name} wants to open this URL in your browser.",
     dataAccessConsent: '"{name}" wants to read data from the connection "{connection}". While that connection is open, the plugin can run read-only queries on it until you revoke access in the Plugin Center. Allow?',
     dataAccessConsentTitle: "Data Access Request",
     mcpToolsBadge: "MCP tools",

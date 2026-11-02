@@ -211,6 +211,8 @@ export default withEnglishFallback({
   docs,
   dataDictionary,
   pluginPlatform: {
+    openUrlTitle: "Otwórz zewnętrzny URL",
+    openUrlPrompt: "Wtyczka {name} chce otworzyć ten URL w przeglądarce.",
     mcpToolsBadge: "Narzędzia MCP",
     mcpToolsBadgeHint: "Ta wtyczka udostępnia narzędzia MCP. Włącz je i nadaj uprawnienia w Ustawienia → MCP → Możliwości.",
     mcpToolsFilter: "Tylko wtyczki z narzędziami MCP ({count})",

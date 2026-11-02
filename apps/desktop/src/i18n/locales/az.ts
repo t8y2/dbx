@@ -82,6 +82,8 @@ export default withEnglishFallback({
   sidebarMenu,
   oracleIndex: { mixedDraft: "Oracle indeks dəyişikliklərini digər cədvəl quruluşu dəyişikliklərindən ayrıca tətbiq edin." },
   pluginPlatform: {
+    openUrlTitle: "Xarici URL aç",
+    openUrlPrompt: "{name} plagini bu URL-ni brauzerinizdə açmaq istəyir.",
     dataAccessConsent: '"{name}" "{connection}" bağlantısındakı məlumatları oxumaq istəyir. Bu bağlantı açıq olduqca plagin, Plagin Mərkəzində girişi ləğv edənə qədər orada yalnız oxuma sorğuları icra edə bilər. İcazə verilsin?',
     dataAccessConsentTitle: "Məlumat girişi sorğusu",
     mcpToolsBadge: "MCP alətləri",

@@ -590,6 +590,8 @@ export default withEnglishFallback({
   docs,
   dataDictionary,
   pluginPlatform: {
+    openUrlTitle: "開啟外部網址",
+    openUrlPrompt: "外掛程式 {name} 要求在瀏覽器中開啟以下網址。",
     dataAccessConsent: "「{name}」請求讀取連線「{connection}」中的資料。在該連線開啟期間，外掛可以對它執行唯讀查詢，直到你在外掛中心撤銷授權。是否允許？",
     dataAccessConsentTitle: "資料存取請求",
     mcpToolsBadge: "MCP 工具",

@@ -576,6 +576,8 @@ export default withEnglishFallback({
     },
   },
   pluginPlatform: {
+    openUrlTitle: "Открыть внешнюю ссылку",
+    openUrlPrompt: "Плагин {name} запрашивает открытие этой ссылки в браузере.",
     dataAccessConsent: "«{name}» запрашивает чтение данных подключения «{connection}». Пока подключение открыто, плагин сможет выполнять в нём запросы только на чтение, пока вы не отзовёте доступ в Центре плагинов. Разрешить?",
     dataAccessConsentTitle: "Запрос доступа к данным",
     mcpToolsBadge: "Инструменты MCP",

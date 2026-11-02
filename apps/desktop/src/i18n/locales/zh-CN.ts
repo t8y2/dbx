@@ -750,6 +750,8 @@ export default withEnglishFallback({
   docs,
   dataDictionary,
   pluginPlatform: {
+    openUrlTitle: "打开外部网址",
+    openUrlPrompt: "插件 {name} 请求在浏览器中打开以下网址。",
     dataAccessConsent: "「{name}」请求读取连接「{connection}」中的数据。在该连接打开期间，插件可以对它执行只读查询，直到你在插件中心撤销授权。是否允许？",
     dataAccessConsentTitle: "数据访问请求",
     mcpToolsBadge: "MCP 工具",

@@ -1195,7 +1195,8 @@ jobs:
           versioned="s3://${R2_BUCKET_NAME}/releases/beta/${{ inputs.release_tag || github.ref_name }}/"
           if aws s3api head-object --bucket "$R2_BUCKET_NAME" --key "releases/beta/${{ inputs.release_tag || github.ref_name }}/latest.json" --endpoint-url "$endpoint" >/dev/null 2>&1; then
             aws s3 cp "${versioned}latest.json" "$RUNNER_TEMP/existing-beta-manifest.json" --endpoint-url "$endpoint"
-            if ! cmp -s "$RUNNER_TEMP/manifest/latest.json" "$RUNNER_TEMP/existing-beta-manifest.json"; then
+            # sync-changelog fills in `notes` after publishing; ignore it on reruns.
+            if ! cmp -s <(jq -S 'del(.notes)' "$RUNNER_TEMP/manifest/latest.json") <(jq -S 'del(.notes)' "$RUNNER_TEMP/existing-beta-manifest.json"); then
               echo "::error::Immutable beta manifest already exists for ${{ inputs.release_tag || github.ref_name }} with different contents."
               exit 1
             fi

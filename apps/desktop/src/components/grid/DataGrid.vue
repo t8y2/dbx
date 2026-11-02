@@ -90,6 +90,7 @@ import DataGridToolbar from "@/components/grid/DataGridToolbar.vue";
 import DataGridVirtualRowIdentifier from "@/components/grid/DataGridVirtualRowIdentifier.vue";
 import DataGridExtractorDialog from "@/components/grid/DataGridExtractorDialog.vue";
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
+import { dataGridColumnSourceText } from "@/lib/dataGrid/columnSourceText";
 import { formatDataGridColumnMetadataForCopy } from "@/lib/dataGrid/dataGridColumnMetadataCopy";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
@@ -503,6 +504,7 @@ const columnHeaderLabels = computed(() => ({
   copyColumnName: t("grid.copyColumnName"),
   copyColumnComment: t("grid.copyColumnComment"),
   columnName: t("grid.columnName"),
+  columnSource: t("grid.columnSource"),
   columnType: t("grid.columnType"),
   columnComment: t("grid.columnComment"),
   nullable: t("structureEditor.nullable"),
@@ -6329,8 +6331,13 @@ function scrollToCurrentMatch() {
     syncCanvasViewport();
     return;
   }
-  const rowEl = scrollEl.querySelector(`[data-row-index="${match.displayRow}"]`) as HTMLElement | null;
-  if (rowEl) rowEl.scrollIntoView({ block: "center" });
+  // The DOM grid only renders rows near the viewport, so a match far away (for
+  // example after a sort moved it) has no element yet: scroll to it first.
+  scrollDomRowIntoView(match.displayRow, "nearest");
+  requestAnimationFrame(() => {
+    const rowEl = gridRef.value?.querySelector<HTMLElement>(`[data-row-index="${match.displayRow}"]`);
+    rowEl?.scrollIntoView({ block: "center" });
+  });
 }
 
 function scrollTransposeFieldIntoView(visibleFieldIndex: number, alignment: TransposeScrollAlignment = "start") {
@@ -7656,6 +7663,10 @@ const activeCellDetail = computed(() => {
   const cell = detailCell.value;
   return cell ? cellDetailFor(cell.rowIndex, cell.col) : null;
 });
+
+function columnSourceText(actualColIdx: number): string | undefined {
+  return dataGridColumnSourceText(props.queryDisplaySourceColumns?.[actualColIdx]);
+}
 
 function columnInfoText(actualColIdx: number, includeName = true): string {
   const column = props.result.columns[actualColIdx];
@@ -16038,6 +16049,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     :show-comment-line="reserveColumnCommentLine"
                     :tooltip-column-type="columnTypeMap.get(col.name)"
                     :tooltip-column-comment="resolvedColumnComment(col.name, col.actualColIdx)"
+                    :tooltip-column-source="columnSourceText(col.actualColIdx)"
                     :column-nullability="headerColumnNullability(col.actualColIdx)"
                     :type-class="typeColorClass(headerColumnType(col.name, col.actualColIdx))"
                     :drag-class="columnHeaderDragClass(col.visibleColIdx)"
@@ -16045,6 +16057,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     :copy-column-name-label="columnHeaderLabels.copyColumnName"
                     :copy-column-comment-label="columnHeaderLabels.copyColumnComment"
                     :column-name-label="columnHeaderLabels.columnName"
+                    :column-source-label="columnHeaderLabels.columnSource"
                     :column-type-label="columnHeaderLabels.columnType"
                     :column-comment-label="columnHeaderLabels.columnComment"
                     :nullable-label="columnHeaderLabels.nullable"
@@ -17375,6 +17388,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             {{ t("grid.calculateTotalRowsInline") }}
           </button>
         </span>
+        <span v-if="hasData" data-grid-column-count class="shrink-0">{{ t("grid.columnsCount", { count: result.columns.length }) }}</span>
         <span v-if="showTruncationWarning" class="shrink-0 text-amber-500 text-xs">(truncated)</span>
         <span v-if="!hasData" class="shrink-0">{{ t("grid.rowsAffected", { count: result.affected_rows }) }}</span>
         <QueryTimingDetails v-if="isResultsContext" :result="result" :render-ms="resultViewUpdateMs" />

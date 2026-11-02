@@ -189,6 +189,9 @@ impl MqttConnectionConfig {
 #[serde(rename_all = "camelCase")]
 pub struct MqttSavedTopic {
     pub topic: String,
+    /// Display-only alias; absent in configurations saved by older versions.
+    #[serde(default)]
+    pub alias: String,
     #[serde(default)]
     pub qos: MqttQoS,
     #[serde(default)]
@@ -392,5 +395,27 @@ mod tests {
         });
         let config: MqttConnectionConfig = serde_json::from_value(json).unwrap();
         assert!(!config.host.trim().is_empty() || config.host.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod saved_topic_alias_tests {
+    use super::*;
+
+    #[test]
+    fn saved_topic_alias_round_trips_without_changing_topic() {
+        let config: MqttSavedTopic =
+            serde_json::from_str(r#"{"topic":"devices/+/status","alias":"设备状态","enabled":false}"#).unwrap();
+        let restored: MqttSavedTopic = serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(restored.alias, "设备状态");
+        assert_eq!(restored.topic, "devices/+/status");
+        assert!(!restored.enabled);
+    }
+
+    #[test]
+    fn older_saved_topics_default_to_empty_alias() {
+        let config: MqttSavedTopic = serde_json::from_str(r#"{"topic":"devices/#"}"#).unwrap();
+        assert_eq!(config.alias, "");
+        assert!(config.enabled);
     }
 }

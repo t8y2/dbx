@@ -1,6 +1,6 @@
 {
   "name": "dbx",
-  "version": "0.6.61",
+  "version": "0.6.64",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -159,6 +159,7 @@
   "pnpm": {
     "overrides": {
       "happy-dom": "~20.10.6",
+      "@lezer/common": "1.5.3",
       "@codemirror/view": "6.43.0"
     }
   }

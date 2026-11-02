@@ -1028,6 +1028,64 @@ pub async fn list_tables_core(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::TableInfo>, String> {
+    list_tables_core_impl(
+        state,
+        connection_id,
+        database,
+        schema,
+        filter,
+        limit,
+        offset,
+        object_types,
+        table_name_filter,
+        false,
+    )
+    .await
+}
+
+/// Sidebar table-tree variant of [`list_tables_core`]: for PostgreSQL-family
+/// connections `limit`/`offset` count top-level relations, and every partition
+/// below a returned root is included in the same page. Other drivers ignore
+/// the flag and keep row-based pagination.
+pub async fn list_table_roots_page_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
+) -> Result<Vec<db::TableInfo>, String> {
+    list_tables_core_impl(
+        state,
+        connection_id,
+        database,
+        schema,
+        filter,
+        limit,
+        offset,
+        object_types,
+        table_name_filter,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn list_tables_core_impl(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
+    page_table_roots: bool,
+) -> Result<Vec<db::TableInfo>, String> {
     let db_config = connection_config(state, connection_id).await;
     if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
         validate_oceanbase_metadata_page(limit, offset)?;
@@ -1053,6 +1111,7 @@ pub async fn list_tables_core(
                 object_types,
                 table_name_filter,
                 metadata_session.client_session_id(),
+                page_table_roots,
             )
         },
     )
@@ -2523,6 +2582,7 @@ fn message_queue_topic_tables(topics: Vec<crate::mq::TopicInfo>) -> Vec<db::Tabl
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn list_tables_once(
     state: &AppState,
     connection_id: &str,
@@ -2534,6 +2594,7 @@ async fn list_tables_once(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
     client_session_id: Option<&str>,
+    page_table_roots: bool,
 ) -> Result<Vec<db::TableInfo>, String> {
     let pool_key =
         state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
@@ -2922,17 +2983,25 @@ async fn list_tables_once(
                 db::cloudberry::list_tables_filtered(p, schema, filter, None, None)
                     .await
                     .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
+            } else if page_table_roots {
+                db::cloudberry::list_table_roots_page_filtered(p, schema, filter, limit, offset).await
             } else {
                 db::cloudberry::list_tables_filtered(p, schema, filter, limit, offset).await
             }
         }
         PoolKind::Postgres(p) => {
             if requests_table_objects_only(object_types) && table_name_filter.is_none_or(TableNameFilter::is_empty) {
-                db::postgres::list_table_objects_filtered(p, schema, filter, limit, offset).await
+                if page_table_roots {
+                    db::postgres::list_table_roots_page_filtered(p, schema, filter, limit, offset, true).await
+                } else {
+                    db::postgres::list_table_objects_filtered(p, schema, filter, limit, offset).await
+                }
             } else if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
                 db::postgres::list_tables_filtered(p, schema, filter, None, None)
                     .await
                     .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
+            } else if page_table_roots {
+                db::postgres::list_table_roots_page_filtered(p, schema, filter, limit, offset, false).await
             } else {
                 db::postgres::list_tables_filtered(p, schema, filter, limit, offset).await
             }
@@ -10754,7 +10823,7 @@ async fn get_table_ddl_core_with_options(
             schema: if schema.trim().is_empty() { None } else { Some(schema.to_string()) },
             name: table.to_string(),
             source: source.source,
-            identifier_quote,
+            identifier_quote: identifier_quote.clone(),
         });
         // Oracle-family comments live in dictionary tables, not inside CREATE VIEW.
         // Append COMMENT ON so table-properties DDL / hover match the structure editor.
@@ -10773,6 +10842,21 @@ async fn get_table_ddl_core_with_options(
                     &ddl,
                     client_session_id,
                     pool_key.as_deref(),
+                )
+                .await,
+            ));
+        }
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
+            return Ok(sanitize_ddl_string(
+                enrich_kingbase_view_ddl_with_comments(
+                    state,
+                    connection_id,
+                    database,
+                    schema,
+                    table,
+                    &ddl,
+                    identifier_quote.as_deref(),
+                    client_session_id,
                 )
                 .await,
             ));
@@ -13422,6 +13506,67 @@ fn append_oracle_comments_to_ddl(
         }
     }
     result
+}
+
+/// Render the view and column comments that `CREATE VIEW` cannot carry.
+///
+/// PostgreSQL-derived engines reject `COMMENT ON TABLE` for a view, so this uses
+/// `COMMENT ON VIEW` rather than [`append_oracle_comments_to_ddl`].
+fn append_kingbase_view_comments_to_ddl(
+    ddl: &str,
+    schema: &str,
+    view: &str,
+    identifier_quote: Option<&str>,
+    view_comment: Option<&str>,
+    columns: &[db::ColumnInfo],
+) -> String {
+    let quote = |value: &str| if identifier_quote == Some("`") { mysql_ident(value) } else { oracle_ident(value) };
+    let view_ref = if schema.trim().is_empty() { quote(view) } else { format!("{}.{}", quote(schema), quote(view)) };
+    let mut result = ddl.to_string();
+    if let Some(comment) = view_comment.map(str::trim).filter(|comment| !comment.is_empty()) {
+        result.push_str(&format!("\nCOMMENT ON VIEW {view_ref} IS {};", sql_string(comment)));
+    }
+    for column in columns {
+        if let Some(comment) = column.comment.as_deref().map(str::trim).filter(|comment| !comment.is_empty()) {
+            result.push_str(&format!(
+                "\nCOMMENT ON COLUMN {view_ref}.{} IS {};",
+                quote(&column.name),
+                sql_string(comment)
+            ));
+        }
+    }
+    result
+}
+
+/// Failures are logged and the view definition is returned without comments.
+async fn enrich_kingbase_view_ddl_with_comments(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    view: &str,
+    ddl: &str,
+    identifier_quote: Option<&str>,
+    client_session_id: Option<&str>,
+) -> String {
+    let view_comment =
+        get_table_comment_core_for_session(state, connection_id, database, schema, view, client_session_id)
+            .await
+            .unwrap_or_else(|error| {
+                log::debug!(
+                    "[schema][kingbase:view-ddl:view-comment-failed] connection_id={connection_id} schema={schema} view={view} error={error}"
+                );
+                None
+            });
+    let columns = get_columns_core_for_session(state, connection_id, database, schema, view, client_session_id)
+        .await
+        .unwrap_or_else(|error| {
+            log::debug!(
+                "[schema][kingbase:view-ddl:column-comments-failed] connection_id={connection_id} schema={schema} view={view} error={error}"
+            );
+            Vec::new()
+        });
+    append_kingbase_view_comments_to_ddl(ddl, schema, view, identifier_quote, view_comment.as_deref(), &columns)
 }
 
 fn should_append_oracle_style_comment_ddl(config: Option<&ConnectionConfig>) -> bool {

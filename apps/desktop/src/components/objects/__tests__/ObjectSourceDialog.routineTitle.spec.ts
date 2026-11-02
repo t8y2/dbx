@@ -108,6 +108,7 @@ describe("ObjectSourceDialog dynamic edit label and title", () => {
 
     editBtn!.click();
     await vi.waitFor(() => expect(document.querySelector("[role='dialog']")?.textContent).toContain("Edit Object - calculate_bonus"));
+    expect(document.querySelector<HTMLButtonElement>('button[aria-label="contextMenu.sqlPreview"]')?.disabled).toBe(false);
   });
 
   it("uses Edit View for views in view mode and editing title", async () => {
@@ -119,5 +120,6 @@ describe("ObjectSourceDialog dynamic edit label and title", () => {
 
     editBtn!.click();
     await vi.waitFor(() => expect(document.querySelector("[role='dialog']")?.textContent).toContain("Edit View - active_users"));
+    expect(document.querySelector('button[aria-label="contextMenu.sqlPreview"]')).toBeNull();
   });
 });

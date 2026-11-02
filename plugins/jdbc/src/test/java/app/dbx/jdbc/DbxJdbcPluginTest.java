@@ -51,6 +51,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class DbxJdbcPluginTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Test
+    void readsRealH2DriverParametersWithoutConnecting() throws Exception {
+        try (java.net.ServerSocket listener = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
+            listener.setSoTimeout(200);
+            JsonNode response = request("connectionParameters", """
+                { "connection": {
+                  "connection_string": "jdbc:h2:tcp://127.0.0.1:%d/metadata-only",
+                  "jdbc_driver_class": "org.h2.Driver", "username": "sa", "password": "not-for-metadata"
+                }}
+                """.formatted(listener.getLocalPort()));
+            assertFalse(response.has("error"), response.toString());
+            assertTrue(response.path("result").isArray());
+            // H2 deliberately reports no DriverPropertyInfo entries; keep custom editing available.
+            assertTrue(response.path("result").isEmpty());
+            assertFalse(response.toString().contains("not-for-metadata"));
+            assertThrows(java.net.SocketTimeoutException.class, listener::accept);
+        }
+    }
     private static final String CONNECTION = """
         {
           "connection_string": "jdbc:h2:mem:dbx_ctx;DB_CLOSE_DELAY=-1",

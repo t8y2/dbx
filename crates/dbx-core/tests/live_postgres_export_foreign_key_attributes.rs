@@ -109,6 +109,7 @@ async fn live_postgres_export_preserves_foreign_key_actions_and_deferral() {
             include_objects: false,
             include_create_database: false,
             drop_table_if_exists: false,
+            omit_database_qualifier: false,
             omit_auto_increment: false,
             preserve_original_language: false,
             fail_on_error: true,

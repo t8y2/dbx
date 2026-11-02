@@ -868,6 +868,7 @@ public final class DbxJdbcPlugin {
                 params.path("offset").asLong(-1), params.path("limit").asInt(0)));
             case "release_large_value" -> MAPPER.valueToTree(Map.of("released",
                 connectionState().largeValues.release(requireText(params, "valueRef"))));
+            case "connectionParameters" -> MAPPER.valueToTree(connectionParameters(connection));
             case "testConnection" -> connectionTestResult(openConnection(connection));
             case "connect" -> {
                 openConnection(connection);
@@ -5001,6 +5002,18 @@ public final class DbxJdbcPlugin {
             return url;
         }
         return appendJdbcUrlParam(url, "key", password);
+    }
+
+    static List<Map<String, Object>> connectionParameters(JsonNode connection) throws SQLException {
+        String url = jdbcUrl(connection);
+        if (url == null || url.isBlank()) return List.of();
+        Properties properties = new Properties();
+        String username = optionalText(connection, "username");
+        String password = optionalText(connection, "password");
+        if (username != null) properties.setProperty("user", username);
+        if (password != null) properties.setProperty("password", password);
+        Driver driver = registeredDriver == null ? DriverManager.getDriver(url) : registeredDriver;
+        return JdbcConnectionParameters.describe(driver, url, properties);
     }
 
     static String jdbcUrl(JsonNode connection) {

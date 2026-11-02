@@ -377,9 +377,9 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
           : supportsQueryEditorSqlLanguage(props.databaseType)
             ? syntaxParsingEnabled()
               ? langSql.sql({
-                  dialect: createDbxCodeMirrorSqlDialect(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
+                  dialect: createDbxCodeMirrorSqlDialect(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value, sqlStatementParameterOptions()),
                 })
-              : createLargeDocumentSqlLanguage(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType)
+              : createLargeDocumentSqlLanguage(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlStatementParameterOptions())
             : [],
       // Non-SQL editors (MongoDB shell) keep the SQL grammar for highlighting, so override the
       // comment marker that toggleLineComment reads from language data.

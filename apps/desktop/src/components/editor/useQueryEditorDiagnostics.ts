@@ -3,7 +3,7 @@ import type { useSettingsStore } from "@/stores/settingsStore";
 import type { useConnectionStore } from "@/stores/connectionStore";
 import type { QueryEditorProps, CompletionMetadataScope } from "./queryEditorTypes";
 import * as api from "@/lib/backend/api";
-import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
+import { maskSqlParametersForAnalysis, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import { createSqlDiagnosticAnalysisWorker } from "@/lib/sql/sqlDiagnosticAnalysisWorker";
 import { isGraphQueryDatabase } from "@/lib/graph/graphQueryProfiles";
 
@@ -438,26 +438,27 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
     for (const range of diagnosticRanges) {
       if (mysqlRoutineAnalysis?.routineRanges.some((routineRange) => rangesOverlap(routineRange, range))) continue;
       try {
+        const analysisSql = maskSqlParametersForAnalysis(range.sql, sqlStatementParameterOptions());
         const referenceDialect = sqlReferenceAnalysisDialectFor({
           databaseType: props.databaseType,
           identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
           fallbackDialect: props.databaseType === "kingbase" ? (options.sqlSyntaxDialect?.() ?? sqlBehaviorDialect() ?? "postgres") : (props.formatDialect ?? props.dialect ?? "generic"),
         });
-        const { analysis, keywordDiagnostic } = await analyzeSqlDiagnosticReferences(range.sql, referenceDialect, (statement) => api.analyzeSqlReferences(statement, referenceDialect));
+        const { analysis, keywordDiagnostic } = await analyzeSqlDiagnosticReferences(analysisSql, referenceDialect, (statement) => api.analyzeSqlReferences(statement, referenceDialect));
         if (runId !== semanticDiagnosticRunId) return;
         if (keywordDiagnostic) nextDiagnostics.push(...offsetSqlSemanticDiagnostics([keywordDiagnostic], range, sql));
 
         const semanticCursor = Math.max(0, Math.min(currentView.state.selection.main.head - range.from, range.sql.length));
         const semanticModel =
           SEMANTIC_SQL_COMPLETION_ENABLED && !backgroundAnalysis && !keywordDiagnostic
-            ? buildSqlSemanticModel(range.sql, semanticCursor, {
+            ? buildSqlSemanticModel(analysisSql, semanticCursor, {
                 databaseType: props.databaseType,
                 dialect: sqlBehaviorDialect(),
               })
             : null;
         const semanticAnalysis =
           SEMANTIC_SQL_COMPLETION_ENABLED && backgroundAnalysis && !keywordDiagnostic
-            ? (await diagnosticAnalysisWorker.analyze({ sql: range.sql, cursor: semanticCursor, databaseType: props.databaseType, dialect: sqlBehaviorDialect(), visibleRanges: [], referenceAnalysis: analysis }))?.referenceAnalysis
+            ? (await diagnosticAnalysisWorker.analyze({ sql: analysisSql, cursor: semanticCursor, databaseType: props.databaseType, dialect: sqlBehaviorDialect(), visibleRanges: [], referenceAnalysis: analysis }))?.referenceAnalysis
             : semanticModel
               ? mergeSqlSemanticReferenceAnalysis(analysis, semanticModel)
               : analysis;
@@ -465,7 +466,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
         const metadataScope = semanticDiagnosticMetadataScope(sql, range);
         const scopedAnalysis = {
           ...semanticAnalysis,
-          tables: semanticDiagnosticTablesForScope(semanticAnalysis.tables, metadataScope, range.sql),
+          tables: semanticDiagnosticTablesForScope(semanticAnalysis.tables, metadataScope, analysisSql),
         };
         const { tables, missingTables } = await enrichSemanticDiagnosticTables(scopedAnalysis.tables, metadataScope);
         const columnMetadataMissingTables = await ensureColumnsForSemanticDiagnostics(tables, metadataScope);
@@ -483,7 +484,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
               columnsByTable: metadata.cachedColumnsByTable,
               missingTables,
               loadedColumnTables: metadata.loadedColumnsByTable,
-              sql: range.sql,
+              sql: analysisSql,
               databaseType: props.databaseType,
               currentSchema: metadataScope.schema,
             }),
@@ -562,7 +563,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
     const ranges = sqlSemanticDiagnosticRangesForViewport(sql, [{ from: 0, to: sql.length }], props.databaseType, props.databaseType === "sqlserver" ? undefined : runtime.executableStatementRangeCache?.ranges, sqlStatementParameterOptions()).slice(0, MAX_SQL_UNKNOWN_OBJECT_STATEMENTS);
     if (ranges.length === 0) return [];
 
-    const metadataEpoch = `${resolveSqlDialectId({ databaseType: props.databaseType, dialect: sqlBehaviorDialect() })}|${props.connectionId}|${props.database}|${props.schema ?? ""}|${props.databaseType}|${semanticDiagnosticRunId}|${metadata.cachedColumnsByTable.size}:${metadata.loadedColumnsByTable.size}`;
+    const metadataEpoch = `${resolveSqlDialectId({ databaseType: props.databaseType, dialect: sqlBehaviorDialect() })}|${props.connectionId}|${props.database}|${props.schema ?? ""}|${props.databaseType}|${semanticDiagnosticRunId}|${metadata.cachedColumnsByTable.size}:${metadata.loadedColumnsByTable.size}|${JSON.stringify(sqlStatementParameterOptions())}`;
 
     const spans: SqlUnknownObjectSpan[] = [];
     let analyzedStatements = 0;
@@ -580,12 +581,13 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
 
       const statementSpans: SqlUnknownObjectSpan[] = [];
       try {
+        const analysisSql = maskSqlParametersForAnalysis(range.sql, sqlStatementParameterOptions());
         const referenceDialect = sqlReferenceAnalysisDialectFor({
           databaseType: props.databaseType,
           identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
           fallbackDialect: props.databaseType === "kingbase" ? (options.sqlSyntaxDialect?.() ?? sqlBehaviorDialect() ?? "postgres") : (props.formatDialect ?? props.dialect ?? "generic"),
         });
-        const { analysis, keywordDiagnostic } = await analyzeSqlDiagnosticReferences(range.sql, referenceDialect, (statement) => api.analyzeSqlReferences(statement, referenceDialect));
+        const { analysis, keywordDiagnostic } = await analyzeSqlDiagnosticReferences(analysisSql, referenceDialect, (statement) => api.analyzeSqlReferences(statement, referenceDialect));
         if (currentView.state.doc !== doc) return [];
         if (keywordDiagnostic) {
           const [diagnostic] = offsetSqlSemanticDiagnostics([keywordDiagnostic], range, sql);
@@ -596,7 +598,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
         const semanticCursor = Math.max(0, Math.min(currentView.state.selection.main.head - range.from, range.sql.length));
         const semanticModel =
           SEMANTIC_SQL_COMPLETION_ENABLED && !keywordDiagnostic
-            ? buildSqlSemanticModel(range.sql, semanticCursor, {
+            ? buildSqlSemanticModel(analysisSql, semanticCursor, {
                 databaseType: props.databaseType,
                 dialect: sqlBehaviorDialect(),
               })
@@ -605,7 +607,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
         const metadataScope = semanticDiagnosticMetadataScope(sql, range);
         const scopedAnalysis = {
           ...semanticAnalysis,
-          tables: semanticDiagnosticTablesForScope(semanticAnalysis.tables, metadataScope, range.sql),
+          tables: semanticDiagnosticTablesForScope(semanticAnalysis.tables, metadataScope, analysisSql),
         };
         const { tables, missingTables } = await enrichSemanticDiagnosticTables(scopedAnalysis.tables, metadataScope);
         const loadedColumnsBefore = metadata.loadedColumnsByTable.size;
@@ -624,7 +626,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
               columnsByTable: metadata.cachedColumnsByTable,
               missingTables,
               loadedColumnTables: metadata.loadedColumnsByTable,
-              sql: range.sql,
+              sql: analysisSql,
               databaseType: props.databaseType,
               currentSchema: metadataScope.schema,
             },

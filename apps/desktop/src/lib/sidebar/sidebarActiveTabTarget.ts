@@ -414,9 +414,45 @@ export function findSidebarNodeForTarget(target: ActiveTabSidebarTarget, flatNod
   return flatNodes.find((item) => matchesTarget(item.node, target)) ?? null;
 }
 
+export interface ActiveSidebarSelectionPlan {
+  /** The selection target moved (new active tab, or the preference was just enabled). */
+  moved: boolean;
+  /** Scroll the sidebar so the selected row is visible. */
+  scroll: boolean;
+  /** Expand hidden ancestors to reveal the selected row. */
+  reveal: boolean;
+}
+
+/**
+ * Decides what the passive auto-selection may do on a tree update (#13895).
+ *
+ * The tree map changes for reasons that have nothing to do with the active tab —
+ * collapsing a group, loading a sibling's metadata, filtering — so a selection
+ * that did not move must stay put and, importantly, must not reopen a group the
+ * user just collapsed. The one exception is a tab whose row has not been revealed
+ * yet (`revealedTabId`): the restored tab of a session, or a tab opened before its
+ * metadata arrived, still has to be expanded and scrolled to once it shows up.
+ *
+ * Scope: this governs the passive selection only. Whether clicking a row or its
+ * arrow expands, collapses, or opens something is the click handler's business and
+ * is deliberately not decided here.
+ */
+export function planActiveSidebarSelection(options: {
+  activeTabId: string | null | undefined;
+  previousActiveTabId: string | null | undefined;
+  autoSelectEnabled: boolean;
+  previousAutoSelectEnabled: boolean | undefined;
+  /** Tab whose row the sidebar has already revealed and scrolled to, if any. */
+  revealedTabId?: string | null;
+}): ActiveSidebarSelectionPlan {
+  if (!options.autoSelectEnabled) return { moved: false, scroll: false, reveal: false };
+  const moved = options.activeTabId !== options.previousActiveTabId || options.previousAutoSelectEnabled === false;
+  const notYetRevealed = !!options.activeTabId && options.revealedTabId !== options.activeTabId;
+  return { moved, scroll: moved, reveal: moved || notYetRevealed };
+}
+
 export function shouldScrollActiveSidebarSelection(options: { activeTabId: string | null | undefined; previousActiveTabId: string | null | undefined; autoSelectEnabled: boolean; previousAutoSelectEnabled: boolean | undefined }): boolean {
-  if (!options.autoSelectEnabled) return false;
-  return options.activeTabId !== options.previousActiveTabId || (options.autoSelectEnabled && options.previousAutoSelectEnabled === false);
+  return planActiveSidebarSelection(options).scroll;
 }
 
 // nearest is used for passive auto-selection; smart keeps context for the existing toolbar action.

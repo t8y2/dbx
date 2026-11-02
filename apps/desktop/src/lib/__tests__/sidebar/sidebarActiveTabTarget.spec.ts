@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeTabSidebarTarget, matchesTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
+import { activeTabSidebarTarget, matchesTarget, planActiveSidebarSelection, shouldScrollActiveSidebarSelection } from "@/lib/sidebar/sidebarActiveTabTarget";
 import { findLoadedTableTargetForCandidate, queryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
 import type { QueryTab, TreeNode } from "@/types/database";
 
@@ -115,5 +115,60 @@ describe("management page sidebar targets", () => {
     expect(matchesTarget({ ...node, type: "connection" }, target!)).toBe(false);
     expect(matchesTarget({ ...node, connectionId: "other" }, target!)).toBe(false);
     expect(activeTabSidebarTarget({ mode, connectionId: "" } as QueryTab)).toBeNull();
+  });
+});
+
+describe("passive active-tab selection", () => {
+  const enabled = { autoSelectEnabled: true, previousAutoSelectEnabled: true };
+
+  it("reveals and scrolls when a different tab becomes active", () => {
+    const plan = planActiveSidebarSelection({ ...enabled, activeTabId: "tab-b", previousActiveTabId: "tab-a", revealedTabId: "tab-a" });
+
+    expect(plan).toEqual({ moved: true, scroll: true, reveal: true });
+  });
+
+  it("only selects on a tree update that keeps an already revealed tab", () => {
+    // Collapsing a connection, loading a sibling's metadata, or changing a filter
+    // all rebuild the flat tree while the active tab stays the same. Revealing here
+    // would reopen the group the user just collapsed (#13895).
+    const plan = planActiveSidebarSelection({ ...enabled, activeTabId: "tab-a", previousActiveTabId: "tab-a", revealedTabId: "tab-a" });
+
+    expect(plan).toEqual({ moved: false, scroll: false, reveal: false });
+  });
+
+  it("still reveals a tab whose row was never reached", () => {
+    // Restored sessions and tabs opened before their metadata arrived: the first
+    // attempt finds no node, so the next tree update has to finish the reveal.
+    const plan = planActiveSidebarSelection({ ...enabled, activeTabId: "tab-a", previousActiveTabId: "tab-a", revealedTabId: null });
+
+    expect(plan).toEqual({ moved: false, scroll: false, reveal: true });
+  });
+
+  it("reveals the current tab when the preference is switched on", () => {
+    const plan = planActiveSidebarSelection({ autoSelectEnabled: true, previousAutoSelectEnabled: false, activeTabId: "tab-a", previousActiveTabId: "tab-a", revealedTabId: "tab-b" });
+
+    expect(plan).toEqual({ moved: true, scroll: true, reveal: true });
+  });
+
+  it("does nothing while the preference is off", () => {
+    const plan = planActiveSidebarSelection({ autoSelectEnabled: false, previousAutoSelectEnabled: false, activeTabId: "tab-b", previousActiveTabId: "tab-a", revealedTabId: null });
+
+    expect(plan).toEqual({ moved: false, scroll: false, reveal: false });
+  });
+
+  it("keeps scrolling tied to a moved selection", () => {
+    const cases = [
+      { autoSelectEnabled: true, previousAutoSelectEnabled: true, activeTabId: "a", previousActiveTabId: "b", revealedTabId: "b" },
+      { autoSelectEnabled: true, previousAutoSelectEnabled: true, activeTabId: "a", previousActiveTabId: "a", revealedTabId: "a" },
+      { autoSelectEnabled: true, previousAutoSelectEnabled: true, activeTabId: "a", previousActiveTabId: "a", revealedTabId: null },
+      { autoSelectEnabled: true, previousAutoSelectEnabled: false, activeTabId: "a", previousActiveTabId: "a", revealedTabId: "a" },
+      { autoSelectEnabled: false, previousAutoSelectEnabled: undefined, activeTabId: "a", previousActiveTabId: "b", revealedTabId: null },
+    ];
+
+    for (const options of cases) {
+      const plan = planActiveSidebarSelection(options);
+      expect(plan.scroll).toBe(plan.moved);
+      expect(shouldScrollActiveSidebarSelection(options)).toBe(plan.scroll);
+    }
   });
 });

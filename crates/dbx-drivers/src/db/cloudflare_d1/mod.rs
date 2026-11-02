@@ -8,8 +8,8 @@ use super::{
 };
 use crate::models::connection::{ConnectionConfig, ProxyType, TransportLayerConfig};
 use crate::types::{
-    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectSource, ObjectSourceKind, QueryResult, TableInfo,
-    TriggerInfo,
+    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectSource, ObjectSourceKind, ObjectStatistics, QueryResult,
+    TableInfo, TriggerInfo,
 };
 
 mod sql_guard;
@@ -243,6 +243,39 @@ pub async fn list_tables(client: &CloudflareD1Client, _schema: &str) -> Result<V
             }
         })
         .collect())
+}
+
+/// Object browser statistics: per-table COUNT(*). D1 exposes no per-table
+/// size metadata, so sizes stay null. Decorative data: failed counts degrade
+/// to null instead of erroring.
+pub async fn list_object_statistics(client: &CloudflareD1Client, _schema: &str) -> Result<Vec<ObjectStatistics>, String> {
+    let result = query_inner(
+        client,
+        "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name <> '_cf_KV' ORDER BY name",
+    )
+    .await?;
+    let names: Vec<String> = result.rows.iter().filter_map(|row| value_as_string(row.first())).collect();
+    let mut stats = Vec::with_capacity(names.len());
+    for name in names {
+        let estimated_rows = query_inner(client, &format!("SELECT COUNT(*) FROM {}", sqlite_ident(&name)))
+            .await
+            .ok()
+            .and_then(|result| {
+                result
+                    .rows
+                    .first()
+                    .and_then(|row| row.first())
+                    .and_then(|value| value.as_i64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
+            });
+        stats.push(ObjectStatistics {
+            name,
+            schema: Some("main".to_string()),
+            estimated_rows,
+            total_bytes: None,
+            ..Default::default()
+        });
+    }
+    Ok(stats)
 }
 
 pub async fn get_columns(client: &CloudflareD1Client, _schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {

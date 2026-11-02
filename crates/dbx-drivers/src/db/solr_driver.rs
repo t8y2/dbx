@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use super::{apply_tls_certificates, http_client_builder, with_connection_timeout};
 use crate::db::document_result::DocumentQueryResult;
-use crate::types::QueryResult;
+use crate::types::{ObjectStatistics, QueryResult};
 
 const SOLR_PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
@@ -219,6 +219,31 @@ pub async fn list_cores(client: &SolrClient) -> Result<Vec<String>, String> {
         .unwrap_or_default();
     names.sort();
     Ok(names)
+}
+
+/// Object browser statistics: per-core document counts and index sizes from
+/// the core STATUS admin endpoint (a single request covers every core).
+/// Decorative data: missing fields degrade to null instead of erroring.
+pub async fn list_object_statistics(client: &SolrClient) -> Result<Vec<ObjectStatistics>, String> {
+    let resp = client
+        .get("/admin/cores?action=STATUS&wt=json")
+        .send()
+        .await
+        .map_err(|e| format!("Solr request failed: {e}"))?;
+    let body = read_solr_json(resp).await?;
+    let mut stats = Vec::new();
+    if let Some(status) = body.get("status").and_then(Value::as_object) {
+        for (name, core) in status {
+            let index = core.get("index");
+            stats.push(ObjectStatistics {
+                name: name.clone(),
+                estimated_rows: index.and_then(|index| index.get("numDocs")).and_then(Value::as_i64),
+                total_bytes: index.and_then(|index| index.get("sizeInBytes")).and_then(Value::as_i64),
+                ..Default::default()
+            });
+        }
+    }
+    Ok(stats)
 }
 
 #[derive(Deserialize)]

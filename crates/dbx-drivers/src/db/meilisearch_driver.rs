@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use super::{http_client_builder, ColumnInfo};
 use crate::db::document_result::DocumentQueryResult;
 use crate::models::connection::DatabaseConnectionInfo;
-use crate::types::QueryResult;
+use crate::types::{ObjectStatistics, QueryResult};
 
 const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
@@ -1085,6 +1085,50 @@ pub async fn get_index_stats(client: &MeilisearchClient, index: &str) -> Result<
         .await
         .map_err(|error| format!("Meilisearch request failed: {error}"))?;
     response_json(response, "index stats lookup").await
+}
+
+fn statistics_from_stats_value(name: String, stats: &Value) -> ObjectStatistics {
+    ObjectStatistics {
+        name,
+        estimated_rows: stats.get("numberOfDocuments").and_then(Value::as_i64),
+        total_bytes: stats
+            .get("rawDocumentDbSize")
+            .and_then(Value::as_i64)
+            .or_else(|| stats.get("onDiskSize").and_then(Value::as_i64)),
+        ..Default::default()
+    }
+}
+
+/// Object browser statistics: document counts and per-index store sizes.
+/// The instance `GET /stats` endpoint covers every index in one request but
+/// needs broader key permissions, so fall back to per-index stats lookups.
+/// Decorative data: unreachable indexes are skipped instead of erroring.
+pub async fn list_object_statistics(client: &MeilisearchClient) -> Result<Vec<ObjectStatistics>, String> {
+    if let Ok(response) = client.get("/stats").send().await {
+        if let Ok(value) = response_json(response, "instance stats lookup").await {
+            if let Some(indexes) = value.get("indexes").and_then(Value::as_object) {
+                return Ok(indexes
+                    .iter()
+                    .map(|(uid, stats)| statistics_from_stats_value(uid.clone(), stats))
+                    .collect());
+            }
+        }
+    }
+    let mut stats = Vec::new();
+    for uid in list_indexes(client).await? {
+        let Ok(response) = client
+            .get(&format!("/indexes/{}/stats", encode_path_segment(&uid)))
+            .send()
+            .await
+        else {
+            continue;
+        };
+        let Ok(value) = response_json(response, "index stats lookup").await else {
+            continue;
+        };
+        stats.push(statistics_from_stats_value(uid, &value));
+    }
+    Ok(stats)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

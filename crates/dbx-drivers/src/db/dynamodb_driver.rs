@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 
 use crate::db::document_result::DocumentQueryResult;
 use crate::models::connection::ConnectionConfig;
-use crate::types::QueryResult;
+use crate::types::{ObjectStatistics, QueryResult};
 
 const DEFAULT_REGION: &str = "us-east-1";
 const MAX_PAGE_SIZE: i32 = 1000;
@@ -761,6 +761,25 @@ pub async fn describe_table(client: &DynamoDbClient, table_name: &str) -> Result
     };
     client.table_cache.write().await.insert(table_name.to_string(), description.clone());
     Ok(description)
+}
+
+/// Object browser statistics: item counts and table sizes from DescribeTable
+/// (eventually consistent, refreshed every ~6h by DynamoDB). Decorative data:
+/// failed describes degrade to skipped entries instead of erroring.
+pub async fn list_object_statistics(client: &DynamoDbClient) -> Result<Vec<ObjectStatistics>, String> {
+    let mut stats = Vec::new();
+    for name in list_tables(client).await? {
+        let Ok(table) = describe_table(client, &name).await else {
+            continue;
+        };
+        stats.push(ObjectStatistics {
+            name,
+            estimated_rows: Some(table.item_count as i64),
+            total_bytes: Some(table.size_bytes as i64),
+            ..Default::default()
+        });
+    }
+    Ok(stats)
 }
 
 fn index_projection(projection: Option<&aws_sdk_dynamodb::types::Projection>) -> (String, Vec<String>) {

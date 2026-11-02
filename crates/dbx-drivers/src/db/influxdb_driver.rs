@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use super::with_connection_timeout;
 use crate::models::connection::ConnectionConfig;
 use crate::sql::starts_with_executable_sql_keyword;
-use crate::types::{ColumnInfo, DatabaseInfo, QueryResult, TableInfo};
+use crate::types::{ColumnInfo, DatabaseInfo, ObjectStatistics, QueryResult, TableInfo};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InfluxdbApiVersion {
@@ -439,6 +439,43 @@ pub async fn list_tables(client: &InfluxdbClient, database: &str) -> Result<Vec<
             parent_name: None,
         })
         .collect())
+}
+
+/// Object browser statistics: per-measurement point counts via InfluxQL
+/// `SELECT COUNT(*)` (1.x only; the Flux API has no cheap equivalent, so v2
+/// rows stay without stats). InfluxDB exposes no per-measurement sizes.
+/// Decorative data: failed counts degrade to null instead of erroring.
+pub async fn list_object_statistics(client: &InfluxdbClient, database: &str) -> Result<Vec<ObjectStatistics>, String> {
+    if client.version == InfluxdbApiVersion::V2 {
+        return Ok(vec![]);
+    }
+    let mut stats = Vec::new();
+    for table in list_tables(client, database).await? {
+        let estimated_rows = influx_query(
+            client,
+            &format!("SELECT COUNT(*) FROM {}", quote_influx_identifier(&table.name)),
+            Some(database),
+        )
+        .await
+        .ok()
+        .and_then(|result| {
+            result
+                .results
+                .first()
+                .and_then(|r| r.series.first())
+                .and_then(|s| s.values.first())
+                .and_then(|row| row.get(1))
+                .and_then(|value| value.as_i64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
+        });
+        stats.push(ObjectStatistics {
+            name: table.name,
+            schema: Some(database.to_string()),
+            estimated_rows,
+            total_bytes: None,
+            ..Default::default()
+        });
+    }
+    Ok(stats)
 }
 
 pub async fn get_columns(client: &InfluxdbClient, database: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {

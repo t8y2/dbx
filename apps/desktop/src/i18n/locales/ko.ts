@@ -861,6 +861,7 @@ export default withEnglishFallback({
     workbenchUnavailableFallback: "플러그인 워크벤치를 사용할 수 없습니다",
     pluginIncompatible: "플러그인이 호환되지 않습니다",
     loadingTitle: "{title} 로드 중",
+    compatibilityErrors: "호환성 검사 실패",
   },
   auth: {
     rateLimited: "{seconds}초 후에 다시 시도해 주세요",

@@ -839,6 +839,7 @@ export default withEnglishFallback({
     workbenchUnavailableFallback: "外掛工作台無法使用",
     pluginIncompatible: "外掛不相容",
     loadingTitle: "正在載入 {title}",
+    compatibilityErrors: "相容性檢查失敗",
   },
   auth: {
     rateLimited: "請 {seconds} 秒後再試",

@@ -854,6 +854,7 @@ export default withEnglishFallback({
     workbenchUnavailableFallback: "A área de trabalho do plugin não está disponível",
     pluginIncompatible: "O plugin não é compatível",
     loadingTitle: "Carregando {title}",
+    compatibilityErrors: "Falha na verificação de compatibilidade",
   },
   auth: {
     rateLimited: "Tente novamente em {seconds}s",

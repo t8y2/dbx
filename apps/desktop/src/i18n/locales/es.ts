@@ -860,6 +860,7 @@ export default withEnglishFallback({
     workbenchUnavailableFallback: "El área de trabajo del plugin no está disponible",
     pluginIncompatible: "El plugin no es compatible",
     loadingTitle: "Cargando {title}",
+    compatibilityErrors: "Error en la comprobación de compatibilidad",
   },
   auth: {
     rateLimited: "Vuelva a intentarlo en {seconds} s",

@@ -1571,6 +1571,7 @@ for line in sys.stdin:
             admin_url: String::new(),
             auth,
             tls_skip_verify,
+            tls: None,
             pinned_version: None,
             token_signing: None,
             connect_override: None,

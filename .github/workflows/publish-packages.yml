@@ -409,7 +409,9 @@ jobs:
           manifest_key="releases/stable/${{ steps.version.outputs.tag }}/latest.json"
           if aws s3api head-object --bucket "${{ secrets.R2_BUCKET_NAME }}" --key "$manifest_key" --endpoint-url "$endpoint" >/dev/null 2>&1; then
             aws s3 cp "s3://${{ secrets.R2_BUCKET_NAME }}/${manifest_key}" "$RUNNER_TEMP/existing-stable-manifest.json" --endpoint-url "$endpoint"
-            if ! cmp -s assets/latest.json "$RUNNER_TEMP/existing-stable-manifest.json"; then
+            # sync-changelog fills in `notes` after a successful publish, so a
+            # rerun must not treat that field as a content change.
+            if ! cmp -s <(jq -S 'del(.notes)' assets/latest.json) <(jq -S 'del(.notes)' "$RUNNER_TEMP/existing-stable-manifest.json"); then
               echo "::error::Immutable stable manifest already exists for ${{ steps.version.outputs.tag }} with different contents."
               exit 1
             fi

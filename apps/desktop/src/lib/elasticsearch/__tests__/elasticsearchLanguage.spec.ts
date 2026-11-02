@@ -28,7 +28,8 @@ GET /orders/_count
 
 function stateFor(text: string, databaseType: "elasticsearch" | "easysearch" = "elasticsearch") {
   const state = EditorState.create({ doc: text, extensions: [elasticsearchLanguage(StandardSQL.language.parser), createSqlBlockFoldService(databaseType)] });
-  ensureSyntaxTree(state, text.length, 5_000);
+  const tree = ensureSyntaxTree(state, text.length, 30_000);
+  if (!tree) throw new Error("Elasticsearch test syntax tree did not finish parsing");
   return state;
 }
 

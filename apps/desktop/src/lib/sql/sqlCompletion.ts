@@ -1004,11 +1004,14 @@ function isTableTriggerKeyword(keyword: string, options: SqlSemanticBuildOptions
 }
 
 /** APPLY is only a table-source trigger as the CROSS/OUTER APPLY operator; a bare `apply`
- *  may be a table name and must keep clause keywords available (issue #13829). */
-function isApplyOperatorTrigger(lastWord: string, beforeToken: string): boolean {
+ *  may be a table name and must keep clause keywords available (issue #13829). The gap
+ *  between CROSS/OUTER and APPLY may hold comments, so the remainder is comment-masked
+ *  before the prefix check (PR #13889 review follow-up). */
+function isApplyOperatorTrigger(lastWord: string, beforeToken: string, databaseType?: DatabaseType): boolean {
   if (lastWord !== "apply") return false;
-  const withoutApply = beforeToken.slice(0, beforeToken.length - "apply".length).trimEnd();
-  return /(?:^|[\s(])(?:cross|outer)$/i.test(withoutApply);
+  const withoutApply = beforeToken.slice(0, beforeToken.length - "apply".length);
+  const masked = maskSqlLiteralsAndComments(withoutApply, databaseType).trimEnd();
+  return /(?:^|[\s(])(?:cross|outer)$/i.test(masked);
 }
 
 // Keywords that only make sense in DDL / statement-start contexts (not inside SELECT/INSERT/UPDATE/DELETE)
@@ -3047,7 +3050,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   // identical arguments three times, which was cheap when it was regex-based but now runs a full
   // tokenizeSqlSemantic pass, so the duplicate work is worth avoiding.
   const inTableListContext = isInTableListContext(beforeToken, options.databaseType);
-  const applyTableTrigger = isApplyOperatorTrigger(lastWord, beforeToken);
+  const applyTableTrigger = isApplyOperatorTrigger(lastWord, beforeToken, options.databaseType);
   const afterTableTrigger = isTableTriggerKeyword(lastWord, options) || applyTableTrigger || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
   const exclusiveTableSuggestions = EXCLUSIVE_TABLE_TRIGGER_KEYWORDS.has(lastWord) || applyTableTrigger || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
   const tableAliasAfterCursor = hasTableAliasAfterCursor(sql, cursor);

@@ -2,7 +2,7 @@
 import { computed, ref, shallowRef, nextTick, watch, onMounted, onBeforeUnmount, toRaw } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette, Copy } from "@lucide/vue";
+import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, ArrowUpDown, Columns3, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette, Copy } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -11,6 +11,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import DataGrid from "@/components/grid/DataGrid.vue";
+import DataGridSortBuilder from "@/components/grid/DataGridSortBuilder.vue";
+import DataGridSortWorkbench from "@/components/grid/DataGridSortWorkbench.vue";
+import DataGridTextSortWorkbench from "@/components/grid/DataGridTextSortWorkbench.vue";
+import { useDataGridSortBuilder } from "@/composables/useDataGridSortBuilder";
+import { buildMongoSortInput, parseMongoFilterRules, parseMongoSortInput } from "@/lib/document/documentConditionSync";
 import DataGridColumnLayoutPopover from "@/components/grid/DataGridColumnLayoutPopover.vue";
 import DataGridFreezeFirstColumnControl from "@/components/grid/DataGridFreezeFirstColumnControl.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
@@ -832,6 +837,93 @@ const documentStructuredFilterCount = computed(() => {
   }, 0);
 });
 const currentDocumentFilterModeOptions = computed(() => documentFilterModeOptionsFor(documentStoreProvider.value.kind));
+const documentSortBuilder = useDataGridSortBuilder({
+  columns: documentFilterFieldOptions,
+  cacheKey: () => props.stateKey ?? "",
+  scopeKey: () => JSON.stringify([props.connectionId, props.database, props.collection]),
+});
+const documentSortRules = documentSortBuilder.rules;
+const documentSortBuilderOpen = documentSortBuilder.open;
+const documentSortView = computed(() => settingsStore.editorSettings.dataGridFilterEditorView ?? "quick");
+const documentSortPreview = computed(() => buildMongoSortInput(documentSortRules.value) ?? sortInput.value);
+const documentPrimarySort = computed(() => parseMongoSortInput(sortInput.value)?.[0]);
+const documentFilterTextDraft = ref<string>();
+watch(
+  [filterInput, appliedDocumentFilter],
+  () => {
+    documentFilterTextDraft.value = undefined;
+  },
+  { flush: "sync" },
+);
+const displayedDocumentFilter = computed({
+  get: () => {
+    if (documentFilterTextDraft.value !== undefined) return documentFilterTextDraft.value;
+    if (documentStoreProvider.value.kind !== "mongodb" || !appliedDocumentFilter.value) return filterInput.value;
+    try {
+      return currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, "mongodb") ?? "";
+    } catch {
+      return filterInput.value;
+    }
+  },
+  set: (value: string) => {
+    if (documentStoreProvider.value.kind !== "mongodb") {
+      filterInput.value = value;
+      return;
+    }
+    let filter: Record<string, unknown> | undefined;
+    try {
+      filter = JSON.parse(currentDocumentFilterJson(value, null, "mongodb") ?? "{}");
+    } catch {
+      // Keep incomplete text editable; validation runs when the user applies it.
+    }
+    const rules = filter ? parseMongoFilterRules(filter) : undefined;
+    documentFilterRules.value = rules?.map((rule) => ({ ...rule, id: uuid() })) ?? [];
+    appliedDocumentFilter.value = rules?.length ? filter! : null;
+    filterInput.value = rules?.length ? "" : value;
+    documentFilterTextDraft.value = value;
+  },
+});
+
+watch(
+  sortInput,
+  (value) => {
+    if (documentStoreProvider.value.kind !== "mongodb") return;
+    const rules = parseMongoSortInput(value);
+    if (buildMongoSortInput(documentSortRules.value) !== (value.trim() || "{}")) documentSortRules.value = rules?.map((rule) => ({ ...rule, id: uuid() })) ?? [];
+    documentSortBuilder.markApplied(value);
+  },
+  { immediate: true },
+);
+
+watch(
+  [documentSortView, () => settingsStore.editorSettings.dataGridKeepFilterEditorExpanded],
+  ([view, expanded]) => {
+    documentSortBuilder.setOpen(view !== "quick" && expanded === true);
+  },
+  { immediate: true },
+);
+
+function applyDocumentSortRules() {
+  const sort = buildMongoSortInput(documentSortRules.value);
+  if (!sort || sort === "{}") {
+    toast(t("grid.sortBuilderCompleteRuleFirst"));
+    return;
+  }
+  sortInput.value = sort;
+  if (documentSortView.value === "quick") documentSortBuilder.setOpen(false);
+  applyFilter();
+}
+
+function applyOnlyDocumentSortRule(id: string) {
+  documentSortBuilder.enableOnlyRule(id);
+  applyDocumentSortRules();
+}
+
+function clearDocumentSortRules() {
+  documentSortBuilder.clear();
+  sortInput.value = "";
+  applyFilter();
+}
 const documentLoadingLabelKey = computed(() => (documentLoadCancelling.value ? "common.stopping" : "common.loading"));
 let documentLoadingTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -1078,7 +1170,7 @@ function resizeDocumentQueryInputs() {
 
 function formatFilterInput() {
   try {
-    filterInput.value = formatDocumentQueryInput(filterInput.value, documentStoreProvider.value.kind);
+    displayedDocumentFilter.value = formatDocumentQueryInput(displayedDocumentFilter.value, documentStoreProvider.value.kind);
     error.value = "";
     void nextTick(resizeDocumentQueryInputs);
   } catch (e: unknown) {
@@ -1096,7 +1188,7 @@ function formatSortInput() {
   }
 }
 
-watch([filterInput, sortInput], () => {
+watch([displayedDocumentFilter, sortInput], () => {
   void nextTick(resizeDocumentQueryInputs);
 });
 
@@ -1135,7 +1227,7 @@ function documentQueryCompletionInputEl(target: DocumentQueryCompletionTarget): 
 }
 
 function documentQueryCompletionText(target: DocumentQueryCompletionTarget): string {
-  return target === "filter" ? filterInput.value : sortInput.value;
+  return target === "filter" ? displayedDocumentFilter.value : sortInput.value;
 }
 
 // Walking every loaded document is too much to redo on each keystroke — under
@@ -1281,7 +1373,7 @@ function acceptDocumentQueryCompletion(index = documentQueryCompletionIndex.valu
 
   const { target, text, from, to, insertion } = completion;
   const next = `${text.slice(0, from)}${insertion.text}${text.slice(to)}`;
-  if (target === "filter") filterInput.value = next;
+  if (target === "filter") displayedDocumentFilter.value = next;
   else sortInput.value = next;
   dismissDocumentQueryCompletions();
 
@@ -1332,7 +1424,7 @@ function openDocumentQueryDocument(event: InputEvent, target: DocumentQueryCompl
   if ([...text].length !== 1 || !/^[$_"'\p{L}\p{N}]$/u.test(text) || prefix.from !== 0 || prefix.prefix !== text) return false;
   if (documentQueryCompletionInputEl(target)?.selectionStart !== text.length) return false;
 
-  if (target === "filter") filterInput.value = `{${text}}`;
+  if (target === "filter") displayedDocumentFilter.value = `{${text}}`;
   else sortInput.value = `{${text}}`;
 
   // Rewriting the model moves the caret to the end, past the `}` we just added,
@@ -1441,6 +1533,10 @@ const documentQueryPreview = computed(() => {
 });
 
 async function applyDocumentStructuredFilters() {
+  if (!documentFilterRules.value.length) {
+    documentFilterBuilderError.value = t("grid.filterBuilderCompleteRuleFirst");
+    return;
+  }
   if (documentStoreProvider.value.kind === "elasticsearch") {
     appliedDocumentFilter.value = elasticsearchStructuredFilter(buildElasticsearchQueryFromRules(documentFilterRules.value));
     documentFilterBuilderOpen.value = false;
@@ -1464,6 +1560,10 @@ async function applyDocumentStructuredFilters() {
   }
   documentFilterBuilderError.value = "";
   error.value = "";
+  if (!items.length) {
+    documentFilterBuilderError.value = t("grid.filterBuilderCompleteRuleFirst");
+    return;
+  }
   const structured = combineDocumentFilterConditions(
     items.map((item) => item.condition),
     items.map((item) => item.rule),
@@ -1489,6 +1589,7 @@ async function loadDocumentStoreSchemaFields() {
 
 function clearDocumentFilters(clearLocalFilter?: (columnIndex?: number) => void) {
   appliedDocumentFilter.value = null;
+  displayedDocumentFilter.value = "";
   resetDocumentFilterBuilder();
   clearLocalFilter?.();
   applyFilter();
@@ -2191,7 +2292,8 @@ async function paginate(offset: number, limit: number) {
   }
 }
 
-function onSort(column: string, _columnIndex: number, direction: "asc" | "desc" | null) {
+function onSort(column: string, _columnIndex: number, direction: "asc" | "desc" | null, _whereInput?: string, mode = "database") {
+  if (mode === "local") return;
   if (documentStoreProvider.value.kind === "dynamodb" && direction && dynamodbSelectedKey.value?.sortKey?.name !== column) {
     error.value = t("dynamodb.sortKeyOnly", { key: dynamodbSelectedKey.value?.sortKey?.name || t("dynamodb.none") });
     return;
@@ -3039,6 +3141,9 @@ defineExpose({ focusSearch });
       :mongo-update-target="mongoUpdateTarget"
       :editable="documentStoreEditable"
       :custom-save-handler="customSaveHandler"
+      :sort-column="documentStoreProvider.kind === 'mongodb' ? documentPrimarySort?.columnName : undefined"
+      :sort-column-index="documentStoreProvider.kind === 'mongodb' && documentPrimarySort ? gridResult.columns.indexOf(documentPrimarySort.columnName) : undefined"
+      :sort-direction="documentStoreProvider.kind === 'mongodb' ? documentPrimarySort?.direction : undefined"
       :loading="loading"
       :sql="documentStoreLabels.queryPreview"
       :page-offset="page * pageSize"
@@ -3063,6 +3168,7 @@ defineExpose({ focusSearch });
               <PopoverTrigger as-child>
                 <button
                   type="button"
+                  :aria-label="t('grid.filter')"
                   class="relative flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
                   :class="hasLocalColumnFilters || appliedDocumentFilter ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
                   @click="ensureDocumentFilterRule"
@@ -3300,7 +3406,8 @@ defineExpose({ focusSearch });
             <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0">{{ documentStoreLabels.filterInputLabel }}</span>
             <textarea
               ref="filterInputRef"
-              v-model="filterInput"
+              v-model="displayedDocumentFilter"
+              :aria-label="documentStoreLabels.filterInputLabel"
               autocapitalize="off"
               autocorrect="off"
               spellcheck="false"
@@ -3326,15 +3433,15 @@ defineExpose({ focusSearch });
               @select="selectDocumentQueryCompletion"
               @accept="acceptDocumentQueryCompletion"
             />
-            <button v-if="filterInput.trim()" type="button" class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground" title="Format JSON" aria-label="Format JSON" @click="formatFilterInput">
+            <button v-if="displayedDocumentFilter.trim()" type="button" class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground" title="Format JSON" aria-label="Format JSON" @click="formatFilterInput">
               <Braces class="w-3 h-3" />
             </button>
             <button
-              v-if="filterInput.trim()"
+              v-if="displayedDocumentFilter.trim()"
               type="button"
               class="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground"
               @click="
-                filterInput = '';
+                displayedDocumentFilter = '';
                 applyFilter();
               "
             >
@@ -3351,10 +3458,42 @@ defineExpose({ focusSearch });
             <span class="h-5 w-px bg-border group-hover:bg-primary/60" />
           </button>
           <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0">
+            <Popover v-if="documentStoreProvider.kind === 'mongodb' && documentSortView === 'quick'" v-model:open="documentSortBuilderOpen">
+              <PopoverTrigger as-child>
+                <button type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded border text-muted-foreground hover:bg-accent" :aria-label="t('grid.sort')" @click="!documentSortRules.length && documentSortBuilder.addRule()">
+                  <ArrowUpDown class="h-3 w-3" />
+                </button>
+              </PopoverTrigger>
+              <PopoverContent class="w-[min(90vw,640px)] p-3" align="start">
+                <DataGridSortBuilder
+                  :rules="documentSortRules"
+                  :columns="documentFilterFieldOptions"
+                  @add="documentSortBuilder.addRule"
+                  @remove="documentSortBuilder.removeRule"
+                  @move="documentSortBuilder.moveRule"
+                  @update-rule="documentSortBuilder.updateRule"
+                  @apply="applyDocumentSortRules"
+                  @apply-only="applyOnlyDocumentSortRule"
+                  @reset="documentSortBuilder.reset"
+                  @clear="clearDocumentSortRules"
+                />
+              </PopoverContent>
+            </Popover>
+            <button
+              v-else-if="documentStoreProvider.kind === 'mongodb'"
+              type="button"
+              class="flex h-5 w-5 shrink-0 items-center justify-center rounded border text-muted-foreground hover:bg-accent"
+              :aria-label="t('grid.sort')"
+              :aria-expanded="documentSortBuilderOpen"
+              @click="documentSortBuilder.setOpen(!documentSortBuilderOpen)"
+            >
+              <ArrowUpDown class="h-3 w-3" />
+            </button>
             <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0">{{ documentStoreLabels.sortInputLabel }}</span>
             <textarea
               ref="sortInputRef"
               v-model="sortInput"
+              :aria-label="documentStoreLabels.sortInputLabel"
               autocapitalize="off"
               autocorrect="off"
               spellcheck="false"
@@ -3396,6 +3535,27 @@ defineExpose({ focusSearch });
             </button>
           </div>
         </div>
+      </template>
+      <template #query-workbenches>
+        <component
+          :is="documentSortView === 'text' ? DataGridTextSortWorkbench : DataGridSortWorkbench"
+          v-if="documentStoreProvider.kind === 'mongodb' && documentSortView !== 'quick' && documentSortBuilderOpen"
+          :height="settingsStore.editorSettings.dataGridTextFilterPanelHeight"
+          :sql-preview="documentSortPreview"
+          preview-label="sort"
+          :rules="documentSortRules"
+          :columns="documentFilterFieldOptions"
+          @update:height="(height: number) => settingsStore.updateEditorSettings({ dataGridTextFilterPanelHeight: height })"
+          @add-rule="documentSortBuilder.addRule"
+          @remove-rule="documentSortBuilder.removeRule"
+          @move-rule="documentSortBuilder.moveRule"
+          @update-rule="documentSortBuilder.updateRule"
+          @apply-only="applyOnlyDocumentSortRule"
+          @apply="applyDocumentSortRules"
+          @reset="documentSortBuilder.reset"
+          @clear="clearDocumentSortRules"
+          @copy-sql="copyToClipboard(documentSortPreview)"
+        />
       </template>
     </DataGrid>
 

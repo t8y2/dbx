@@ -406,7 +406,23 @@ function parseMongoExistingFieldInputValue(raw: Exclude<MongoInputValue, null>, 
   }
   const typedNumber = mongoTypedNumberInputValue(raw, mongoDocumentNumericValueType(originalValue));
   if (typedNumber !== undefined) return typedNumber;
-  return parseMongoDocumentInputValue(raw);
+  if (typeof raw === "string" && originalValue && typeof originalValue === "object" && !Array.isArray(originalValue)) {
+    const object = originalValue as Record<string, unknown>;
+    if (Object.keys(object).length === 1) {
+      if (typeof object.$oid === "string" && MONGO_OBJECT_ID_PATTERN.test(raw.trim())) return { $oid: raw.trim() };
+      if ("$date" in object) {
+        const date = normalizeMongoDateInput(raw);
+        if (date) return { $date: date };
+      }
+    }
+  }
+  const parsed = parseMongoDocumentInputValue(raw);
+  // Replacing a whole structured cell must not silently save malformed JSON
+  // as BSON text. An explicitly quoted JSON string still permits a type change.
+  if (originalValue && typeof originalValue === "object" && !mongoDocumentNumericValueType(originalValue) && typeof raw === "string" && parsed === raw) {
+    throw new Error("Invalid MongoDB value. Enter valid JSON or a BSON literal; quote a string value explicitly.");
+  }
+  return parsed;
 }
 
 const MONGO_DECIMAL_INPUT_PATTERN = /^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;

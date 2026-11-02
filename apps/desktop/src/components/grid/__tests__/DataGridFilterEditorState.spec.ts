@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, markRaw, nextTick, type App, type PropType } from "vue";
+import { createApp, defineComponent, h, markRaw, nextTick, reactive, type App, type PropType } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -99,7 +99,7 @@ function applyButton(host: HTMLElement, view: DataGridFilterEditorView): HTMLBut
   return button;
 }
 
-function mountGrid(view: DataGridFilterEditorView, keepExpanded: boolean) {
+function mountGrid(view: DataGridFilterEditorView, keepExpanded: boolean, initialWhereInput?: string, initialOrderByInput?: string, overrides: Record<string, unknown> = {}) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -127,6 +127,8 @@ function mountGrid(view: DataGridFilterEditorView, keepExpanded: boolean) {
             default: () =>
               h(DataGrid, {
                 result,
+                initialWhereInput,
+                initialOrderByInput,
                 databaseType: "mysql",
                 context: "table-data",
                 tableMeta: {
@@ -135,6 +137,7 @@ function mountGrid(view: DataGridFilterEditorView, keepExpanded: boolean) {
                   primaryKeys: ["id"],
                 },
                 onExecuteSql,
+                ...overrides,
               }),
           },
         );
@@ -186,7 +189,7 @@ afterEach(() => {
 
 describe.each(["conditions", "text"] as const)("DataGrid %s filter editor state", (view) => {
   it("keeps a manually opened editor open after apply and still allows manual close", async () => {
-    const { host, onExecuteSql } = mountGrid(view, false);
+    const { host, onExecuteSql } = mountGrid(view, false, "id = 1");
     await settle();
 
     expect(host.querySelector(panelSelector(view))).toBeNull();
@@ -255,8 +258,19 @@ describe("DataGrid custom filter menu", () => {
 });
 
 describe("DataGrid quick filter editor state", () => {
+  it("keeps empty filter application open and does not execute a query (#13355)", async () => {
+    const { host, onExecuteSql } = mountGrid("quick", false);
+    await settle();
+    filterToggle(host).click();
+    await settle();
+    const apply = [...document.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.trim() === "Apply Filter")!;
+    apply.click();
+    await settle();
+    expect(onExecuteSql).not.toHaveBeenCalled();
+    expect(filterToggle(host).getAttribute("aria-expanded")).toBe("true");
+  });
   it("continues to close its popover after apply", async () => {
-    const { host, onExecuteSql } = mountGrid("quick", true);
+    const { host, onExecuteSql } = mountGrid("quick", true, "id = 1");
     await settle();
 
     const toggle = filterToggle(host);
@@ -270,5 +284,119 @@ describe("DataGrid quick filter editor state", () => {
     apply.click();
     await vi.waitFor(() => expect(onExecuteSql).toHaveBeenCalledOnce());
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  });
+});
+
+describe("DataGrid text and builder synchronization (#13355)", () => {
+  it("stores the applied sort state without dropping secondary fields and clears its fallback", async () => {
+    const state = reactive<Record<string, unknown>>({
+      result: { columns: ["id", "name"], rows: [[1, "alpha"]], affected_rows: 0, execution_time_ms: 0 },
+      tableMeta: {
+        tableName: "items",
+        columns: [
+          { name: "id", data_type: "int" },
+          { name: "name", data_type: "varchar" },
+        ],
+        primaryKeys: ["id"],
+      },
+      sortColumn: undefined,
+      sortColumnIndex: undefined,
+      sortDirection: undefined,
+      sortMode: undefined,
+    });
+    for (const key of ["sortColumn", "sortColumnIndex", "sortDirection", "sortMode"])
+      state[`onUpdate:${key}`] = (value: unknown) => {
+        state[key] = value;
+      };
+    const { host } = mountGrid("conditions", false, undefined, undefined, state);
+    await settle();
+    const text = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="ORDER BY"]')!;
+    text.value = "`id` DESC, `name` ASC";
+    text.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    sortToggle(host).click();
+    await settle();
+    const panel = host.querySelector("[data-grid-sort-workbench]")!;
+    const apply = [...panel.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Apply Sort")!;
+    apply.click();
+    await vi.waitFor(() => expect(state.sortColumn).toBe("id"));
+    expect(state.sortDirection).toBe("desc");
+    expect(text.value).toBe("`id` DESC, `name` ASC");
+    expect(backendMocks.buildTableSelectSql).toHaveBeenLastCalledWith(expect.objectContaining({ orderBy: "`id` DESC, `name` ASC" }));
+    [...panel.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Clear Sort")!.click();
+    await vi.waitFor(() => expect(state.sortColumn).toBeUndefined());
+    expect(state.sortDirection).toBeUndefined();
+    expect(text.value).toBe("");
+    expect(backendMocks.buildTableSelectSql).toHaveBeenLastCalledWith(expect.objectContaining({ orderBy: undefined }));
+  });
+  it("retains a MongoDB controlled sort arrow without SQL table metadata", async () => {
+    const sort = reactive({ context: "results", databaseType: "mongodb", onExecuteSql: undefined, tableMeta: undefined, sortColumn: "id" as string | undefined, sortColumnIndex: 0, sortDirection: "desc" as string | undefined });
+    const { host } = mountGrid("conditions", false, undefined, undefined, sort);
+    await settle();
+    expect(host.querySelector('button[aria-label="Sort: id DESC"]')).not.toBeNull();
+    sort.sortColumn = undefined;
+    sort.sortDirection = undefined;
+    await settle();
+    expect(host.querySelector('button[aria-label="Sort: id DESC"]')).toBeNull();
+    expect(host.querySelector('button[aria-label="Sort: id"]')).not.toBeNull();
+  });
+  it("imports restored text sorting without applying the same field twice", async () => {
+    const { host } = mountGrid("conditions", false, undefined, "`id` ASC");
+    await settle();
+    sortToggle(host).click();
+    await settle();
+    const panel = host.querySelector("[data-grid-sort-workbench]")!;
+    const apply = [...panel.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Apply Sort")!;
+    apply.click();
+    await vi.waitFor(() => expect(backendMocks.buildTableSelectSql).toHaveBeenLastCalledWith(expect.objectContaining({ orderBy: "`id` ASC" })));
+  });
+  it("edits a text filter through the panel without duplicating the previous condition", async () => {
+    const { host } = mountGrid("conditions", false);
+    await settle();
+    const text = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="WHERE"]')!;
+    text.value = "id = 6";
+    text.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    filterToggle(host).click();
+    await settle();
+    const editor = host.querySelector<HTMLInputElement>("[data-filter-value-editor]")!;
+    expect(editor.value).toBe("6");
+    editor.value = "7";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    applyButton(host, "conditions").click();
+    await vi.waitFor(() => expect(text.value).toBe("`id` = 7"));
+    expect(backendMocks.buildTableSelectSql).toHaveBeenLastCalledWith(expect.objectContaining({ whereInput: "`id` = 7" }));
+  });
+
+  it("keeps incomplete and complex filter text editable", async () => {
+    const { host } = mountGrid("conditions", false);
+    await settle();
+    const text = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="WHERE"]')!;
+    for (const value of ["id ", "COALESCE(id, 0) = 1 ", "id = 'unfinished"]) {
+      text.value = value;
+      text.dispatchEvent(new Event("input", { bubbles: true }));
+      await settle();
+      expect(text.value).toBe(value);
+    }
+  });
+
+  it("synchronizes text sorting with its builder and the column arrow", async () => {
+    const { host } = mountGrid("conditions", false);
+    await settle();
+    const text = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="ORDER BY"]')!;
+    text.value = "`id` DESC";
+    text.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    sortToggle(host).click();
+    await settle();
+    const panel = host.querySelector("[data-grid-sort-workbench]")!;
+    expect(panel.textContent).toContain("id");
+    expect(panel.textContent).toContain("DESC");
+    const apply = [...panel.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Apply Sort")!;
+    apply.click();
+    await vi.waitFor(() => expect(backendMocks.buildTableSelectSql).toHaveBeenLastCalledWith(expect.objectContaining({ orderBy: "`id` DESC" })));
+    expect(text.value).toBe("`id` DESC");
+    expect(host.querySelector('button[aria-label="Sort: id DESC"]')).not.toBeNull();
   });
 });

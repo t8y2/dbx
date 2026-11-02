@@ -8,6 +8,7 @@ import type { DataGridStructuredSortRule } from "@/composables/useDataGridSortBu
 
 const props = defineProps<{
   sqlPreview: string;
+  previewLabel?: string;
   rules: readonly DataGridStructuredSortRule[];
   columns: readonly string[];
   commentByColumn?: ReadonlyMap<string, string>;
@@ -71,9 +72,9 @@ watch(
     <footer class="flex min-w-0 items-center gap-2 border-t bg-background/35 px-2 py-1">
       <Button variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-xs" :disabled="!columns.length" @click="emit('addRule')"><Plus class="mr-1 h-3.5 w-3.5" />{{ t("grid.sortBuilderAddRule") }}</Button>
       <div class="flex min-w-0 flex-1 items-center gap-1.5 border-l pl-2">
-        <span class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t("grid.sortSqlPreview") }}</span>
+        <span class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ previewLabel ?? t("grid.sortSqlPreview") }}</span>
         <code class="min-w-0 flex-1 truncate rounded bg-muted/35 px-1.5 py-0.5 text-[11px]" :class="sqlPreview ? 'text-foreground' : 'text-muted-foreground'" :title="previewText">{{ previewText }}</code>
-        <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="!sqlPreview" :aria-label="t('grid.copySortSql')" @click="emit('copySql')"><Copy class="h-3 w-3" /></Button>
+        <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="!sqlPreview" :aria-label="previewLabel ? `${t('grid.copy')} ${previewLabel}` : t('grid.copySortSql')" @click="emit('copySql')"><Copy class="h-3 w-3" /></Button>
       </div>
       <Button variant="outline" size="sm" class="h-7 shrink-0 px-2 text-xs" @click="emit('reset')"><RotateCcw class="mr-1 h-3.5 w-3.5" />{{ t("grid.sortBuilderReset") }}</Button>
       <Button variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-xs text-muted-foreground hover:text-destructive" :disabled="busy" @click="emit('clear')"><Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearSort") }}</Button>

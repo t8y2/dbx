@@ -191,19 +191,46 @@ where
             if skip_fk_sort {
                 (request.tables.clone(), std::collections::HashMap::new())
             } else {
-                super::transfer::sort_tables_by_fk_dependency_with_foreign_keys(
+                match super::transfer::sort_tables_by_fk_dependency_cancellable(
                     &state,
                     &request.source_connection_id,
                     &request.source_database,
                     &request.source_schema,
                     &request.tables,
                     true,
+                    Some(&transfer_id),
                 )
                 .await
-                .unwrap_or_else(|e| {
-                    log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
-                    (request.tables.clone(), std::collections::HashMap::new())
-                })
+                {
+                    Ok(sorted) => sorted,
+                    Err(e) if e == "Cancelled" => {
+                        emit_terminal_progress(
+                            &app,
+                            history.as_ref(),
+                            TransferProgress {
+                                oracle_package_approval: None,
+                                oracle_package_preflight: None,
+                                oracle_routine_operation: None,
+                                transfer_id: transfer_id.clone(),
+                                table: String::new(),
+                                table_index: 0,
+                                total_tables,
+                                rows_transferred: 0,
+                                total_rows: None,
+                                status: TransferStatus::Cancelled,
+                                error: None,
+                                terminal: true,
+                            },
+                        )
+                        .await;
+                        super::transfer::clear_cancelled(&transfer_id).await;
+                        return;
+                    }
+                    Err(e) => {
+                        log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
+                        (request.tables.clone(), std::collections::HashMap::new())
+                    }
+                }
             }
         };
 
@@ -272,19 +299,46 @@ where
         let mut backup_drop_order: Vec<String> = Vec::new();
         let backup_names = if request.drop_target_before_create {
             // Re-sort tables in children-first order for the rename pre-pass
-            let (tables_for_rename, _) = super::transfer::sort_tables_by_fk_dependency_with_foreign_keys(
+            let tables_for_rename = match super::transfer::sort_tables_by_fk_dependency_cancellable(
                 &state,
                 &request.target_connection_id,
                 &request.target_database,
                 &request.target_schema,
                 &sorted_tables,
                 false, // parents_first=false: children first
+                Some(&transfer_id),
             )
             .await
-            .unwrap_or_else(|e| {
-                log::warn!("[transfer] failed to sort tables for rename pre-pass, using original order: {e}");
-                (sorted_tables.clone(), std::collections::HashMap::new())
-            });
+            {
+                Ok((sorted, _)) => sorted,
+                Err(e) if e == "Cancelled" => {
+                    emit_terminal_progress(
+                        &app,
+                        history.as_ref(),
+                        TransferProgress {
+                            oracle_package_approval: None,
+                            oracle_package_preflight: None,
+                            oracle_routine_operation: None,
+                            transfer_id: transfer_id.clone(),
+                            table: "rename pre-pass".to_string(),
+                            table_index: 0,
+                            total_tables,
+                            rows_transferred: 0,
+                            total_rows: None,
+                            status: TransferStatus::Cancelled,
+                            error: None,
+                            terminal: true,
+                        },
+                    )
+                    .await;
+                    super::transfer::clear_cancelled(&transfer_id).await;
+                    return;
+                }
+                Err(e) => {
+                    log::warn!("[transfer] failed to sort tables for rename pre-pass, using original order: {e}");
+                    sorted_tables.clone()
+                }
+            };
             backup_drop_order = tables_for_rename.clone();
 
             match super::transfer::rename_tables_to_backup(
@@ -429,6 +483,7 @@ where
         {
             Ok(cleared) => cleared,
             Err(e) => {
+                let cancelled = e == "Cancelled";
                 emit_terminal_progress(
                     &app,
                     history.as_ref(),
@@ -442,8 +497,8 @@ where
                         total_tables,
                         rows_transferred: last_rows_transferred,
                         total_rows: last_total_rows,
-                        status: TransferStatus::Error,
-                        error: Some(e),
+                        status: if cancelled { TransferStatus::Cancelled } else { TransferStatus::Error },
+                        error: if cancelled { None } else { Some(e) },
                         terminal: true,
                     },
                 )
@@ -1018,5 +1073,83 @@ mod tests {
             "data-only no-op must not emit schema-object progress"
         );
         assert!(!super::super::transfer::is_cancelled(&transfer_id).await);
+    }
+
+    #[tokio::test]
+    async fn cancel_during_foreign_key_sort_stops_before_any_table_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, directory.path().join("plugins")));
+
+        for id in ["source", "target"] {
+            let path = directory.path().join(format!("{id}.db"));
+            crate::db::sqlite::connect_path_create_if_missing(path.to_str().unwrap()).await.unwrap();
+            let config: ConnectionConfig = serde_json::from_value(json!({
+                "id": id,
+                "name": id,
+                "db_type": "sqlite",
+                "host": path.to_str().unwrap(),
+                "port": 0,
+                "username": "",
+                "password": "",
+                "database": null,
+                "one_time": false,
+                "save_password": false,
+                "read_only": false
+            }))
+            .unwrap();
+            state.configs.write().await.insert(id.to_string(), config);
+        }
+        let source_pool = super::super::transfer::ensure_transfer_pool(&state, "source", "main", None).await.unwrap();
+        let target_pool = super::super::transfer::ensure_transfer_pool(&state, "target", "main", None).await.unwrap();
+        let request: TransferRequest = serde_json::from_value(json!({
+            "transferId": uuid::Uuid::new_v4().to_string(),
+            "sourceConnectionId": "source",
+            "sourceDatabase": "main",
+            "sourceSchema": "main",
+            "targetConnectionId": "target",
+            "targetDatabase": "main",
+            "targetSchema": "main",
+            "tables": ["a", "b"],
+            "createTable": false,
+            "dropTargetBeforeCreate": false,
+            "dropTargetConfirmed": false,
+            "content": "dataOnly",
+            "objects": [],
+            "mode": "append",
+            "batchSize": 1000
+        }))
+        .unwrap();
+        let transfer_id = request.transfer_id.clone();
+
+        super::super::transfer::set_cancelled(&transfer_id).await;
+        let sorted = super::super::transfer::sort_tables_by_fk_dependency_cancellable(
+            &state,
+            "source",
+            "main",
+            "main",
+            &request.tables,
+            true,
+            Some(&transfer_id),
+        )
+        .await;
+        assert_eq!(sorted.unwrap_err(), "Cancelled");
+
+        let terminal = run_transfer(
+            state,
+            request,
+            DatabaseType::Sqlite,
+            DatabaseType::Sqlite,
+            source_pool,
+            target_pool,
+            None,
+            None,
+            |_| {},
+        )
+        .await;
+        assert!(terminal.terminal);
+        assert!(matches!(terminal.status, TransferStatus::Cancelled));
+        assert!(terminal.table.is_empty(), "cancel must be honoured before the per-table loop starts");
+        assert!(!super::super::transfer::is_cancelled(&transfer_id).await, "cancel flag must be cleared");
     }
 }

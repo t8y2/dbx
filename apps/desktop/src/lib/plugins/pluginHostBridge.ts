@@ -635,15 +635,6 @@ export class PluginHostBridge {
     });
   }
 
-  /** Tell the plugin UI that its workbench container was resized or transitioned to active. */
-  notifyLayout(): void {
-    this.post({
-      source: HOST_MESSAGE_SOURCE,
-      version: BRIDGE_VERSION,
-      type: "layout",
-    });
-  }
-
   private async handleRequest(request: PluginRequestMessage, target: Window): Promise<void> {
     try {
       enforcePayloadLimit(request.params);
@@ -1325,7 +1316,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     .replace(/\u2029/g, "\\u2029");
   return `(() => {
     const pending = new Map();
-    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set(), close: new Set(), layout: new Set() };
+    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set(), close: new Set() };
     let sequence = 0;
     let contributionId;
     let context;
@@ -1577,7 +1568,6 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       onBinary: (listener) => { listeners.binary.add(listener); return () => listeners.binary.delete(listener); },
       onContext: (listener) => { listeners.context.add(listener); return () => listeners.context.delete(listener); },
       onInit: (listener) => { listeners.init.add(listener); if (context !== undefined) listener(context); return () => listeners.init.delete(listener); },
-      onLayout: (listener) => { listeners.layout.add(listener); return () => listeners.layout.delete(listener); },
       // §8.3 workbench/close handshake: the host sends workbench/close before
       // tearing the webview down; the plugin releases its workbench scope (PTY
       // sessions, subscriptions) in the listeners and the SDK acks once every
@@ -1647,12 +1637,6 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
           : undefined;
         listeners.dragstate.forEach((listener) => listener(active, position));
         document.dispatchEvent(new CustomEvent('dbx-plugin-dragstate', { detail: active }));
-      } else if (message.type === 'layout') {
-        try {
-          window.dispatchEvent(new Event('resize'));
-        } catch {}
-        listeners.layout.forEach((listener) => listener(message));
-        document.dispatchEvent(new CustomEvent('dbx-plugin-layout', { detail: message }));
       } else if (message.type === 'workbench/close') {
         const notifyClose = (listener) => Promise.resolve().then(listener).catch(() => undefined);
         Promise.allSettled([...listeners.close].map(notifyClose)).finally(() => {

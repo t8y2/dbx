@@ -127,3 +127,16 @@ describe("aiAgentStepPresentation", () => {
     });
   });
 });
+
+it("cancels only live approvals belonging to the stopped session", async () => {
+  const { cancelSessionToolApprovals } = await import("../aiAgentStepPresentation");
+  const make = (sessionId: string, status: "pending" | "submitting" | "approved") => ({
+    key: status,
+    labelKey: "tool",
+    tone: "active" as const,
+    approval: { sessionId, status, approvalId: status, pluginName: "test", pluginTool: "exec", connectionName: "test", args: {}, expiresAtMs: Date.now() + 1000 },
+  });
+  const messages = [{ agentSteps: [make("old", "pending"), make("old", "submitting"), make("old", "approved"), make("new", "pending")] }];
+  cancelSessionToolApprovals(messages, "old");
+  expect(messages[0].agentSteps.map((step) => step.approval.status)).toEqual(["cancelled", "cancelled", "approved", "pending"]);
+});

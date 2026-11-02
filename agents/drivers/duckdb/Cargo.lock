@@ -1596,6 +1596,7 @@ dependencies = [
  "nix",
  "reqwest",
  "serde",
+ "semver",
  "tokio",
  "uuid",
  "windows-sys 0.61.2",

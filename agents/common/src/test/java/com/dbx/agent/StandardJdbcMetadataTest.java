@@ -9,7 +9,9 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -721,6 +723,50 @@ class StandardJdbcMetadataTest {
         assertEquals("", foreignKeys.get(0).getName());
         assertEquals("CUSTOMER_ID", foreignKeys.get(0).getColumn());
         assertEquals(Collections.emptyList(), StandardJdbcMetadata.INSTANCE.listTriggers("APP", "ORDERS"));
+    }
+
+    @Test
+    void unscopedCompletionPreservesSchemasForSubsequentColumnLookup() throws Exception {
+        try (Connection conn = DriverManager.getConnection("jdbc:h2:mem:completion_schemas");
+             Statement sql = conn.createStatement()) {
+            sql.execute("CREATE SCHEMA APP");
+            sql.execute("CREATE SCHEMA \"SalesApp\"");
+            sql.execute("CREATE TABLE APP.CT_CITYAREA (APP_ID INT)");
+            sql.execute("CREATE TABLE \"SalesApp\".CT_CITYAREA (SALES_ID INT)");
+
+            CompletionAssistantResponse tables = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(
+                conn, profile, null,
+                request(null, null, "CT_CITYAREA", List.of(CompletionAssistantObjectKind.TABLE), null)
+            );
+
+            assertEquals(List.of("APP", "SalesApp"), tables.getCandidates().stream()
+                .map(CompletionAssistantCandidate::getSchema).sorted().toList());
+            for (CompletionAssistantCandidate table : tables.getCandidates()) {
+                CompletionAssistantResponse columns = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(
+                    conn, profile, null,
+                    request(null, table.getSchema(), "", List.of(CompletionAssistantObjectKind.COLUMN), table.getName())
+                );
+                assertEquals(List.of("APP".equals(table.getSchema()) ? "APP_ID" : "SALES_ID"),
+                    columns.getCandidates().stream().map(CompletionAssistantCandidate::getName).toList());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({",APP", "'',APP", "'   ',APP", "ActualOwner,ActualOwner"})
+    void completionUsesRowSchemaWithRequestedSchemaFallback(String rowSchema, String expectedSchema) {
+        Connection conn = connection(
+            rows(),
+            rows(row("TABLE_NAME", "ACCOUNTS", "TABLE_TYPE", "TABLE", "TABLE_SCHEM", rowSchema)),
+            rows(), rows(), rows(), rows()
+        );
+
+        CompletionAssistantResponse tables = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(
+            conn, profile, "sales",
+            request("sales", "APP", "ACC", List.of(CompletionAssistantObjectKind.TABLE), null)
+        );
+
+        assertEquals(expectedSchema, tables.getCandidates().get(0).getSchema());
     }
 
     @Test

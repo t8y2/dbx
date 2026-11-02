@@ -4216,6 +4216,55 @@ test("suggests explicit foreign-key join when the joined table owns the key", ()
   assert.ok(fkJoin, "should suggest FK join when the right side owns the foreign key");
 });
 
+// The editor keys metadata as `schema.table` even when the query leaves the schema out.
+const unqualifiedJoinTables: SqlCompletionTable[] = [
+  { name: "ac_tables", schema: "public", type: "table" },
+  { name: "cdc_columns", schema: "public", type: "table" },
+  { name: "cdc_columns", schema: "audit", type: "table" },
+];
+const unqualifiedJoinColumnsByTable = new Map<string, SqlCompletionColumn[]>([
+  ["public.ac_tables", [{ name: "id", table: "ac_tables", dataType: "integer" }]],
+  [
+    "public.cdc_columns",
+    [
+      { name: "id", table: "cdc_columns", dataType: "integer" },
+      { name: "table_id", table: "cdc_columns", dataType: "integer" },
+    ],
+  ],
+]);
+const publicCdcForeignKey: SqlCompletionForeignKey = { name: "cdc_columns_table_id_fkey", column: "table_id", ref_table: "ac_tables", ref_column: "id" };
+const auditCdcForeignKey: SqlCompletionForeignKey = { name: "cdc_columns_source_id_fkey", column: "source_id", ref_table: "ac_tables", ref_column: "id" };
+
+test("suggests foreign-key join conditions after ON for unqualified tables in the current schema", () => {
+  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([["public.cdc_columns", [publicCdcForeignKey]]]);
+  for (const currentSchema of ["public", undefined]) {
+    for (const sql of ["select * from ac_tables ac join cdc_columns cdc on ", "select *\nfrom ac_tables ac\njoin cdc_columns cdc\non "]) {
+      const items = buildSqlCompletionItems(sql, sql.length, { tables: unqualifiedJoinTables, columnsByTable: unqualifiedJoinColumnsByTable, foreignKeysByTable, currentSchema });
+      assert.equal(items[0]?.label, "cdc.table_id = ac.id", `${sql} (${currentSchema})`);
+      assert.equal(items[0]?.detail, "JOIN condition from foreign key", `${sql} (${currentSchema})`);
+    }
+  }
+
+  const prefixSql = "select * from ac_tables ac join cdc_columns cdc on cdc";
+  const prefixItems = buildSqlCompletionItems(prefixSql, prefixSql.length, { tables: unqualifiedJoinTables, columnsByTable: unqualifiedJoinColumnsByTable, foreignKeysByTable, currentSchema: "public" });
+  assert.ok(prefixItems.some((item) => item.label === "cdc.table_id = ac.id" && item.detail === "JOIN condition from foreign key"));
+});
+
+test("resolves unqualified foreign-key joins through the current schema when a table name spans schemas", () => {
+  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([
+    ["public.cdc_columns", [publicCdcForeignKey]],
+    ["audit.cdc_columns", [auditCdcForeignKey]],
+  ]);
+  const sql = "select * from ac_tables ac join cdc_columns cdc on ";
+
+  const scoped = buildSqlCompletionItems(sql, sql.length, { tables: unqualifiedJoinTables, columnsByTable: new Map(), foreignKeysByTable, currentSchema: "public" });
+  const fkLabels = (items: typeof scoped) => items.filter((item) => item.detail === "JOIN condition from foreign key").map((item) => item.label);
+  assert.deepEqual(fkLabels(scoped), ["cdc.table_id = ac.id"]);
+
+  const unscoped = buildSqlCompletionItems(sql, sql.length, { tables: unqualifiedJoinTables, columnsByTable: new Map(), foreignKeysByTable });
+  assert.deepEqual(fkLabels(unscoped), [], "an ambiguous table name must not borrow foreign keys from either schema");
+});
+
 test("boosts foreign-key related table candidates in JOIN table context", () => {
   const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([["public.orders", [{ name: "orders_user_id_fkey", column: "user_id", ref_table: "users", ref_column: "id" }]]]);
   const sql = "select * from public.orders o join us";

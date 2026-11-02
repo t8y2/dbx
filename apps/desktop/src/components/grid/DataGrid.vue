@@ -496,6 +496,28 @@ async function hydrateLargeValueCell(rowId: number, columnIndex: number): Promis
 }
 
 const { t } = useI18n();
+
+// Header chrome strings depend only on the locale. Resolving them inside the per-column v-for costs a
+// vue-i18n call per label per column on every render and for every freshly mounted grid.
+const columnHeaderLabels = computed(() => ({
+  copyColumnName: t("grid.copyColumnName"),
+  copyColumnComment: t("grid.copyColumnComment"),
+  columnName: t("grid.columnName"),
+  columnType: t("grid.columnType"),
+  columnComment: t("grid.columnComment"),
+  nullable: t("structureEditor.nullable"),
+  yes: t("structureEditor.yes"),
+  no: t("structureEditor.no"),
+  columnIndex: t("grid.tableInfoIndexes"),
+  primaryIndex: t("grid.columnPrimaryIndex"),
+  uniqueIndex: t("grid.columnUniqueIndex"),
+  regularIndex: t("grid.columnRegularIndex"),
+  formatterActive: t("grid.columnFormatterActive"),
+  highlightActive: t("grid.highlightActive"),
+  sort: t("grid.sort"),
+  columnActions: t("grid.columnActions"),
+}));
+
 const slots = useSlots();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
@@ -1058,19 +1080,21 @@ function currentColumnSortState(): DataGridColumnSortState {
   };
 }
 
+const sortMenuLabels = computed(() => ({
+  databaseAscending: t("grid.sortDatabaseAscending"),
+  databaseDescending: t("grid.sortDatabaseDescending"),
+  currentPageAscending: t("grid.sortCurrentPageAscending"),
+  currentPageDescending: t("grid.sortCurrentPageDescending"),
+  clear: t("grid.clearSort"),
+}));
+
 function sortMenuItems(column: string, columnIndex: number) {
   return createDataGridSortMenuItems({
     column,
     columnIndex,
     state: currentColumnSortState(),
     databaseSortEnabled: props.databaseSortEnabled !== false && databaseSortSupportedForDatabase(resolvedDatabaseType.value),
-    labels: {
-      databaseAscending: t("grid.sortDatabaseAscending"),
-      databaseDescending: t("grid.sortDatabaseDescending"),
-      currentPageAscending: t("grid.sortCurrentPageAscending"),
-      currentPageDescending: t("grid.sortCurrentPageDescending"),
-      clear: t("grid.clearSort"),
-    },
+    labels: sortMenuLabels.value,
     icons: {
       database: Database,
       ascending: ArrowUp,
@@ -1682,14 +1706,16 @@ function openCompactLocalFilter(colIdx: number, mode: LocalFilterMode = "local")
   });
 }
 
+const compactColumnActionLabels = computed(() => ({
+  formatter: t("grid.columnFormatter"),
+  clearFormatter: t("grid.clearFormatter"),
+  localFilter: t("grid.localFilter"),
+  serverFilter: t("grid.databaseValueFilter"),
+}));
+
 function compactColumnActionMenuItems(columnIndex: number) {
   return createDataGridCompactColumnActionItems({
-    labels: {
-      formatter: t("grid.columnFormatter"),
-      clearFormatter: t("grid.clearFormatter"),
-      localFilter: t("grid.localFilter"),
-      serverFilter: t("grid.databaseValueFilter"),
-    },
+    labels: compactColumnActionLabels.value,
     icons: { formatter: Code2, clearFormatter: Eraser, filter: Filter, database: Database },
     formatterAvailable: !!formatterKeyForColumn(columnIndex),
     formatterActive: columnHasFormatter(columnIndex),
@@ -6303,8 +6329,13 @@ function scrollToCurrentMatch() {
     syncCanvasViewport();
     return;
   }
-  const rowEl = scrollEl.querySelector(`[data-row-index="${match.displayRow}"]`) as HTMLElement | null;
-  if (rowEl) rowEl.scrollIntoView({ block: "center" });
+  // The DOM grid only renders rows near the viewport, so a match far away (for
+  // example after a sort moved it) has no element yet: scroll to it first.
+  scrollDomRowIntoView(match.displayRow, "nearest");
+  requestAnimationFrame(() => {
+    const rowEl = gridRef.value?.querySelector<HTMLElement>(`[data-row-index="${match.displayRow}"]`);
+    rowEl?.scrollIntoView({ block: "center" });
+  });
 }
 
 function scrollTransposeFieldIntoView(visibleFieldIndex: number, alignment: TransposeScrollAlignment = "start") {
@@ -9845,32 +9876,33 @@ const {
   exportCanMinimize,
 });
 
+const copyExtractorLabels = computed<Record<DataGridCopyExtractorId, string>>(() => ({
+  raw: t("grid.copyExtractorRaw"),
+  tsv: "TSV",
+  "tsv-with-headers": t("grid.copyExtractorWithHeaders", { format: "TSV" }),
+  csv: "CSV",
+  "csv-with-headers": t("grid.copyExtractorWithHeaders", { format: "CSV" }),
+  "pipe-separated": t("grid.copyExtractorPipeSeparated"),
+  dsv: "DSV",
+  json: t("grid.copyExtractorJsonArray"),
+  "json-lines": "JSON Lines",
+  "one-row": t("grid.copyExtractorOneRow"),
+  "sql-in-list": t("grid.copyExtractorSqlInList"),
+  "sql-inserts": t("grid.copyExtractorSqlInserts"),
+  "sql-deletes-inserts": t("grid.copyExtractorSqlDeletesInserts"),
+  "sql-updates": t("grid.copyExtractorSqlUpdates"),
+  "sql-select": t("grid.copyExtractorSqlSelect"),
+  "where-clause": t("grid.copyExtractorWhereClause"),
+  markdown: "Markdown",
+  html: "HTML",
+  xml: "XML",
+  pretty: t("grid.copyExtractorPretty"),
+  dbunit: "DbUnit",
+  php: "PHP",
+}));
+
 function copyExtractorLabel(extractor: DataGridCopyExtractorId): string {
-  const labels: Record<DataGridCopyExtractorId, string> = {
-    raw: t("grid.copyExtractorRaw"),
-    tsv: "TSV",
-    "tsv-with-headers": t("grid.copyExtractorWithHeaders", { format: "TSV" }),
-    csv: "CSV",
-    "csv-with-headers": t("grid.copyExtractorWithHeaders", { format: "CSV" }),
-    "pipe-separated": t("grid.copyExtractorPipeSeparated"),
-    dsv: "DSV",
-    json: t("grid.copyExtractorJsonArray"),
-    "json-lines": "JSON Lines",
-    "one-row": t("grid.copyExtractorOneRow"),
-    "sql-in-list": t("grid.copyExtractorSqlInList"),
-    "sql-inserts": t("grid.copyExtractorSqlInserts"),
-    "sql-deletes-inserts": t("grid.copyExtractorSqlDeletesInserts"),
-    "sql-updates": t("grid.copyExtractorSqlUpdates"),
-    "sql-select": t("grid.copyExtractorSqlSelect"),
-    "where-clause": t("grid.copyExtractorWhereClause"),
-    markdown: "Markdown",
-    html: "HTML",
-    xml: "XML",
-    pretty: t("grid.copyExtractorPretty"),
-    dbunit: "DbUnit",
-    php: "PHP",
-  };
-  return labels[extractor];
+  return copyExtractorLabels.value[extractor];
 }
 
 function copyPreferenceLabel(preference: DataGridCopyPreference): string {
@@ -15714,7 +15746,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                           data-grid-transpose-column-sort
                           type="button"
                           class="ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
-                          :title="t('grid.sort')"
+                          :title="columnHeaderLabels.sort"
                           :aria-label="t('grid.sort')"
                           @mousedown.stop
                           @click.stop="toggleTransposeColumnSort"
@@ -16015,23 +16047,23 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     :type-class="typeColorClass(headerColumnType(col.name, col.actualColIdx))"
                     :drag-class="columnHeaderDragClass(col.visibleColIdx)"
                     :column-style="columnHeaderStyle(col.visibleColIdx)"
-                    :copy-column-name-label="t('grid.copyColumnName')"
-                    :copy-column-comment-label="t('grid.copyColumnComment')"
-                    :column-name-label="t('grid.columnName')"
-                    :column-type-label="t('grid.columnType')"
-                    :column-comment-label="t('grid.columnComment')"
-                    :nullable-label="t('structureEditor.nullable')"
-                    :yes-label="t('structureEditor.yes')"
-                    :no-label="t('structureEditor.no')"
-                    :column-index-label="t('grid.tableInfoIndexes')"
-                    :column-primary-index-label="t('grid.columnPrimaryIndex')"
-                    :column-unique-index-label="t('grid.columnUniqueIndex')"
-                    :column-regular-index-label="t('grid.columnRegularIndex')"
+                    :copy-column-name-label="columnHeaderLabels.copyColumnName"
+                    :copy-column-comment-label="columnHeaderLabels.copyColumnComment"
+                    :column-name-label="columnHeaderLabels.columnName"
+                    :column-type-label="columnHeaderLabels.columnType"
+                    :column-comment-label="columnHeaderLabels.columnComment"
+                    :nullable-label="columnHeaderLabels.nullable"
+                    :yes-label="columnHeaderLabels.yes"
+                    :no-label="columnHeaderLabels.no"
+                    :column-index-label="columnHeaderLabels.columnIndex"
+                    :column-primary-index-label="columnHeaderLabels.primaryIndex"
+                    :column-unique-index-label="columnHeaderLabels.uniqueIndex"
+                    :column-regular-index-label="columnHeaderLabels.regularIndex"
                     :column-index-kind="showIndexIndicatorsInHeader ? columnIndexMap.get(columnIndexNameKey(col.name)) : undefined"
                     :formatter-active="columnHasFormatter(col.actualColIdx)"
-                    :formatter-label="t('grid.columnFormatterActive')"
+                    :formatter-label="columnHeaderLabels.formatterActive"
                     :highlight-active="columnHasHighlight(col.actualColIdx)"
-                    :highlight-label="t('grid.highlightActive')"
+                    :highlight-label="columnHeaderLabels.highlightActive"
                     @pointerdown="startColumnHeaderDrag(col.visibleColIdx, $event)"
                     @click-capture="onHeaderClickCapture"
                     @click="onHeaderClick(col.visibleColIdx, $event)"
@@ -16096,7 +16128,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                               type="button"
                               class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
                               :class="columnHasFormatter(col.actualColIdx) || localFilterActive(col.actualColIdx) ? 'text-primary opacity-90' : 'opacity-80'"
-                              :title="t('grid.columnActions')"
+                              :title="columnHeaderLabels.columnActions"
                               :aria-expanded="open"
                               @click.stop="toggle"
                             >

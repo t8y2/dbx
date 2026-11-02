@@ -1417,15 +1417,27 @@ fn validate_engine_requirement(label: &str, requirement: &str, actual: &str, err
             return;
         }
     };
-    let actual = match Version::parse(actual.trim()) {
+    let mut actual = match Version::parse(actual.trim()) {
         Ok(actual) => actual,
         Err(error) => {
             errors.push(format!("Invalid installed {label} version '{actual}': {error}"));
             return;
         }
     };
-    if !requirement.matches(&actual) {
-        errors.push(format!("Plugin requires {label} {requirement}, but {actual} is installed"));
+    // Release candidates and daily beta builds are built from the same source
+    // release as their stable counterpart. SemVer intentionally sorts
+    // `0.6.63-beta.*` below `0.6.63`, which would make a plugin requiring the
+    // current stable release appear incompatible in a beta DBX build. Try the
+    // real version first so ranges such as `<0.6.63` retain their normal
+    // prerelease semantics, then retry with the stable release baseline.
+    let installed_version = actual.to_string();
+    let matches = requirement.matches(&actual)
+        || (label == "DBX" && !actual.pre.is_empty() && {
+            actual.pre = semver::Prerelease::EMPTY;
+            requirement.matches(&actual)
+        });
+    if !matches {
+        errors.push(format!("Plugin requires {label} {requirement}, but {installed_version} is installed"));
     }
 }
 
@@ -3223,6 +3235,30 @@ mod tests {
         let compatibility = manifest.compatibility(dir.path(), "0.6.16");
         assert!(!compatibility.compatible, "{:?}", compatibility.errors);
         assert!(compatibility.errors.iter().any(|error| error.contains(">=999.0.0")), "{:?}", compatibility.errors);
+    }
+
+    #[test]
+    fn compatibility_uses_stable_baseline_for_beta_dbx_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.beta",
+            "name": "Beta",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.6.63", "host_api": "^1.0" }
+        }))
+        .unwrap();
+
+        let beta = manifest.compatibility(dir.path(), "0.6.63-beta.20261101.3");
+        assert!(beta.compatible, "{:?}", beta.errors);
+
+        let too_new = manifest.compatibility(dir.path(), "0.6.62-beta.20261101.3");
+        assert!(!too_new.compatible, "{:?}", too_new.errors);
+        assert!(too_new.errors.iter().any(|error| error.contains("0.6.62-beta.20261101.3")), "{:?}", too_new.errors);
+
+        let stable = manifest.compatibility(dir.path(), "0.6.62");
+        assert!(!stable.compatible, "{:?}", stable.errors);
     }
 
     #[test]

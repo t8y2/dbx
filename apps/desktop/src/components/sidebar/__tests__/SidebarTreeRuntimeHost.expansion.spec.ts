@@ -107,7 +107,8 @@ const mountedApps: App[] = [];
 const compiledSearchHandlers = compileConnectionTreeTestScript(["onSearchToggle", "onNodeToggled"]);
 
 function searchHandlers(searchCollapsedIds: { value: Set<string> }) {
-  const bindings = { searchCollapsedIds, isTreeSearchFiltering: ref(true), store: connectionStore, syncSidebarTreeNodeExpansion, sidebarLayoutMonitor: { recordEvent: vi.fn() } };
+  const searchExpandedIds = ref(new Set<string>());
+  const bindings = { searchCollapsedIds, searchExpandedIds, isTreeSearchFiltering: ref(true), store: connectionStore, syncSidebarTreeNodeExpansion, sidebarLayoutMonitor: { recordEvent: vi.fn() } };
   return new Function(...Object.keys(bindings), `${compiledSearchHandlers}; return { onSearchToggle, onNodeToggled };`)(...Object.values(bindings)) as {
     onSearchToggle: (node: TreeNode) => void;
     onNodeToggled: (node: TreeNode, expanded: boolean) => void;

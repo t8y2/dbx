@@ -1479,6 +1479,8 @@ async fn serve() -> Result<(), String> {
         .route("/version", get(routes::update::get_version))
         .route("/update/check", get(routes::update::check_for_updates))
         .route("/changelog", get(routes::update::fetch_changelog))
+        .route("/changelog/index", get(routes::update::fetch_changelog_index))
+        .route("/changelog/releases/{tag}", get(routes::update::fetch_changelog_release))
         // Layout
         .route("/layout/sidebar", post(routes::layout::save_sidebar_layout).get(routes::layout::load_sidebar_layout))
         .route(

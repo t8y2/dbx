@@ -1439,7 +1439,7 @@ function removeTabDragGhost() {
 }
 
 function isDirtyTab(tab: QueryTab) {
-  return queryStore.isTabDirty(tab);
+  return queryStore.dirtyTabIds.has(tab.id);
 }
 
 function tabTitleStyle(tab: QueryTab): CSSProperties | undefined {

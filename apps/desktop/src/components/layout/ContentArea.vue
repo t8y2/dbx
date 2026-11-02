@@ -2331,7 +2331,7 @@ defineExpose({
                 :read-only="!!activeTab.ddlViewer || (managedTypeSource && (!activeTab.typeSourceEditing || unfinishedTypeChange || verifiedTypeDeletion))"
                 :hide-execution-controls="!!activeTab.ddlViewer || managedTypeSource"
                 enable-explain-shortcut
-                :can-explain="!activeTab.isExecuting && !activeTab.isExplaining && !!executableSql.trim()"
+                :can-explain="!activeTab.isExecuting && !activeTab.isExplaining && hasExecutableSql"
                 :is-executing="activeTab.isExecuting"
                 @update:model-value="emit('editorUpdate', activeTab.id, $event)"
                 @selection-change="emit('editorSelectionChange', activeTab.id, $event)"

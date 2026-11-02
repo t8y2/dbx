@@ -129,7 +129,7 @@ import { createInsertValueHintsExtension, requestInsertValueHintsRefresh, suppor
 import { createSqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
 import { createSqlUnknownObjectHighlights, refreshSqlUnknownObjectHighlights } from "@/lib/editor/codemirrorSqlUnknownObjectHighlights";
-import { shouldUseQueryEditorLargeDocumentMode, shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
+import { shouldParseQueryEditorSyntax, shouldUseQueryEditorLargeDocumentMode, shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
 import { startsQueryEditorRectangularSelection } from "@/lib/editor/queryEditorPointerSelection";
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
 
@@ -518,6 +518,7 @@ interface EditorGestureEvent extends Event {
 const codeMirrorRuntime = createQueryEditorCodeMirrorRuntime();
 const largeDocumentMode = ref(shouldUseQueryEditorLargeDocumentMode(props.modelValue));
 const boundedEditorAnalysisEnabled = () => largeDocumentMode.value;
+const syntaxParsingEnabled = ref(shouldParseQueryEditorSyntax(props.modelValue.length));
 
 let previewContextRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let editorIsActive = true;
@@ -2216,6 +2217,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
       executeSqlStatementFromGutter,
       signatureHelpWindowChars: SQL_SIGNATURE_HELP_WINDOW_CHARS,
       boundedAnalysisEnabled: boundedEditorAnalysisEnabled,
+      syntaxParsingEnabled: () => syntaxParsingEnabled.value,
     });
     const initialSettings = settingsStore.editorSettings;
     const theme = await loadEditorTheme(initialSettings.theme, editorThemeAppearance(), getCurrentCustomThemeColors(), themePalette.value);
@@ -2226,6 +2228,14 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
     const { currentStatementFrameExtension, activeLineHighlighter } = sqlExtensions.createViewDecorations();
     function updateLargeDocumentMode(currentView: EditorViewType) {
       largeDocumentMode.value = shouldUseQueryEditorLargeDocumentModeForSize(currentView.state.doc.length, currentView.state.doc.lines);
+      const parseSyntax = shouldParseQueryEditorSyntax(currentView.state.doc.length);
+      if (parseSyntax === syntaxParsingEnabled.value) return;
+      syntaxParsingEnabled.value = parseSyntax;
+      // An update listener cannot dispatch, so the grammar swap runs right after the current update.
+      queueMicrotask(() => {
+        if (view.value !== currentView || !codeMirrorRuntime.sqlLanguageComp || !codeMirrorRuntime.buildSqlLanguageExtension) return;
+        currentView.dispatch({ effects: codeMirrorRuntime.sqlLanguageComp.reconfigure(codeMirrorRuntime.buildSqlLanguageExtension()) });
+      });
     }
     const editorElement = editorRef.value;
     if (!editorElement) return;

@@ -656,6 +656,43 @@ export function expandToSqlStatementWindow(sql: string, from: number, to: number
   return result;
 }
 
+/** How far past the requested range `expandToBoundedSqlStatementWindow` is willing to look. */
+export const BOUNDED_STATEMENT_WINDOW_PADDING = 32 * 1024;
+
+/**
+ * `expandToSqlStatementWindow` for presentation-only callers (viewport colouring).
+ *
+ * The exact window grows until the statement really ends, so one huge statement (a
+ * 100k-value `IN (...)` list, a multi-million-character `INSERT ... VALUES`) makes every
+ * pass cost the whole statement. Here the lexer only sees `padding` characters on each side
+ * of the requested range; a statement that is longer than that is cut at the slice edge.
+ * Callers that decide behaviour from the window (execution, completion) must keep using
+ * `expandToSqlStatementWindow`.
+ */
+export function expandToBoundedSqlStatementWindow(sql: string, from: number, to: number, dialectId = "mysql", padding = BOUNDED_STATEMENT_WINDOW_PADDING): TextRange {
+  const safeFrom = Math.max(0, Math.min(from, sql.length));
+  const safeTo = Math.max(safeFrom, Math.min(to, sql.length));
+  let sliceFrom = Math.max(0, safeFrom - padding);
+  const sliceTo = Math.min(sql.length, safeTo + padding);
+  if (sliceFrom === 0 && sliceTo === sql.length) return expandToSqlStatementWindow(sql, from, to, dialectId);
+
+  if (sliceFrom > 0) {
+    // Start on a line boundary so the slice does not open in the middle of a token.
+    const lineStart = sql.indexOf("\n", sliceFrom);
+    if (lineStart !== -1 && lineStart + 1 <= safeFrom) sliceFrom = lineStart + 1;
+    // Inside a PostgreSQL `$tag$ ... $tag$` body, a slice that still contains the opening tag would
+    // make the whole body one opaque literal; start just past the tag instead.
+    if (sql.slice(sliceFrom, sliceTo).includes("$")) {
+      const dollarQuoteStart = findEnclosingDollarQuoteStart(sql, safeFrom);
+      const openingTag = dollarQuoteStart === null ? null : matchDollarQuoteTag(sql, dollarQuoteStart);
+      if (dollarQuoteStart !== null && openingTag) sliceFrom = Math.max(sliceFrom, dollarQuoteStart + openingTag.length);
+    }
+  }
+
+  const window = expandToSqlStatementWindow(sql.slice(sliceFrom, sliceTo), safeFrom - sliceFrom, safeTo - sliceFrom, dialectId);
+  return { from: window.from + sliceFrom, to: window.to + sliceFrom };
+}
+
 function mergeTextRanges(ranges: readonly TextRange[]): TextRange[] {
   if (ranges.length === 0) return [];
   const sorted = [...ranges].sort((a, b) => a.from - b.from || a.to - b.to);
@@ -786,4 +823,13 @@ export function parseInsertValueHintsAtCursor(sql: string, cursor: number, optio
   const clause = parseInsertClause(statementTokens, span);
   if (!clause) return [];
   return buildInsertValueHints([clause], options);
+}
+
+/**
+ * Whether a database type runs SQL-family statements, where INSERT column
+ * hints (and their SELECT extension) apply. NoSQL/document stores are excluded;
+ * keep this list in sync instead of re-inlining it at call sites.
+ */
+export function supportsInsertValueHints(databaseType: string | undefined | null): boolean {
+  return databaseType !== "redis" && databaseType !== "mongodb" && databaseType !== "elasticsearch" && databaseType !== "easysearch" && databaseType !== "meilisearch" && databaseType !== "solr" && databaseType !== "couchdb" && databaseType !== "victoriametrics" && databaseType !== "salesforce";
 }

@@ -854,6 +854,7 @@ export default withEnglishFallback({
     workbenchUnavailableFallback: "プラグインワークベンチは利用できません",
     pluginIncompatible: "プラグインに互換性がありません",
     loadingTitle: "{title} を読み込み中",
+    compatibilityErrors: "互換性チェックに失敗しました",
   },
   auth: {
     rateLimited: "{seconds} 秒後に再試行してください",

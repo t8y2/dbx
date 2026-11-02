@@ -2585,6 +2585,7 @@ export default withEnglishFallback({
     fitImage: "Görünüme Sığdır",
     openImage: "Görseli Aç",
     columnName: "Sütun",
+    columnSource: "Kaynak",
     columnType: "Tür",
     columnComment: "Açıklama",
     rowNumber: "Satır",

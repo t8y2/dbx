@@ -2894,6 +2894,7 @@ export default withEnglishFallback({
     fitImage: "Sesuaikan ke Tampilan",
     openImage: "Buka Gambar",
     columnName: "Kolom",
+    columnSource: "Sumber",
     columnType: "Jenis",
     columnComment: "Komentar",
     rowNumber: "Baris",

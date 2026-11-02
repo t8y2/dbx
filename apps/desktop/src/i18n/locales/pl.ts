@@ -2942,6 +2942,7 @@ export default withEnglishFallback({
     fitImage: "Dopasuj do widoku",
     openImage: "Otwórz obraz",
     columnName: "Kolumna",
+    columnSource: "Źródło",
     columnType: "Typ",
     columnComment: "Komentarz",
     rowNumber: "Wiersz",

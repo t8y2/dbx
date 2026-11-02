@@ -3379,6 +3379,7 @@ export default withEnglishFallback({
     fitImage: "보기에 맞춤",
     openImage: "이미지 열기",
     columnName: "컬럼",
+    columnSource: "원본",
     columnType: "타입",
     columnComment: "주석",
     columnInfo: "열 정보",

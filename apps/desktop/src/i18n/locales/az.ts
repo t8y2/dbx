@@ -2593,6 +2593,7 @@ export default withEnglishFallback({
     fitImage: "Görünüşə sığdır",
     openImage: "Şəkli aç",
     columnName: "Sütun",
+    columnSource: "Mənbə",
     columnType: "Növ",
     columnComment: "Şərh",
     rowNumber: "Sətir",

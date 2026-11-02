@@ -3512,6 +3512,7 @@ export default withEnglishFallback({
     fitImage: "По размеру окна",
     openImage: "Открыть изображение",
     columnName: "Столбец",
+    columnSource: "Источник",
     columnType: "Тип",
     columnComment: "Комментарий",
     rowNumber: "Строка",

@@ -3753,6 +3753,7 @@ export default withEnglishFallback({
     fitImage: "适合显示区域",
     openImage: "打开图片",
     columnName: "列名",
+    columnSource: "来源",
     columnType: "类型",
     columnComment: "注释",
     columnInfo: "字段信息",

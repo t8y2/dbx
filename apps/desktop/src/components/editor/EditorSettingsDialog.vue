@@ -6041,7 +6041,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
       if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
       await settingsStore.updateDesktopSettings(result.desktopSettings);
       await connectionStore.initFromDisk();
-      await savedSqlStore.initFromStorage();
+      await savedSqlStore.reloadFromStorage();
       await tunnelProfileStore.refresh();
       await settingsStore.reloadAiConfigs();
       let message = t("settings.localBackupImportSuccess", { path: localBackupPath.value });
@@ -6074,7 +6074,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
       if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
       await settingsStore.updateDesktopSettings(result.desktopSettings);
       await connectionStore.initFromDisk();
-      await savedSqlStore.initFromStorage();
+      await savedSqlStore.reloadFromStorage();
       await tunnelProfileStore.refresh();
       await settingsStore.reloadAiConfigs();
       let message = t("settings.syncSnippetDownloadSuccess", { bytes: result.summary.bytes, id: result.summary.snippetId });
@@ -6106,7 +6106,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
     if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
     await settingsStore.updateDesktopSettings(result.desktopSettings);
     await connectionStore.initFromDisk();
-    await savedSqlStore.initFromStorage();
+    await savedSqlStore.reloadFromStorage();
     await tunnelProfileStore.refresh();
     await settingsStore.reloadAiConfigs();
     recordWebDavSyncSuccess(config);

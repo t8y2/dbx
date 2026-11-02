@@ -186,6 +186,16 @@ func (s *IoTDBRpcDataSet) Close() (err error) {
 }
 
 func (s *IoTDBRpcDataSet) Next() (result bool, err error) {
+	return s.NextWithContext(context.Background())
+}
+
+// NextWithContext reads the next row, driving fetchResults with the caller's
+// context so a cancelled or timed-out query stops paging instead of waiting
+// for the blocking Thrift call to return (#13935 review round 3).
+func (s *IoTDBRpcDataSet) NextWithContext(ctx context.Context) (result bool, err error) {
+	if err = ctx.Err(); err != nil {
+		return false, err
+	}
 	if s.hasCachedBlock() {
 		s.lastReadWasNull = false
 		err = s.constructOneRow()
@@ -200,7 +210,7 @@ func (s *IoTDBRpcDataSet) Next() (result bool, err error) {
 	}
 
 	if s.moreData {
-		hasResultSet, err := s.fetchResults()
+		hasResultSet, err := s.fetchResults(ctx)
 		if err != nil {
 			return false, err
 		}
@@ -219,7 +229,7 @@ func (s *IoTDBRpcDataSet) Next() (result bool, err error) {
 	return false, nil
 }
 
-func (s *IoTDBRpcDataSet) fetchResults() (bool, error) {
+func (s *IoTDBRpcDataSet) fetchResults(ctx context.Context) (bool, error) {
 	if s.isClosed {
 		return false, fmt.Errorf("this data set is already closed")
 	}
@@ -232,7 +242,7 @@ func (s *IoTDBRpcDataSet) fetchResults() (bool, error) {
 	}
 	req.Timeout = s.timeout
 
-	resp, err := s.client.FetchResultsV2(context.Background(), &req)
+	resp, err := s.client.FetchResultsV2(ctx, &req)
 
 	if err != nil {
 		return false, err

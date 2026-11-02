@@ -543,7 +543,13 @@ func (s *Session) ExecuteQueryStatementWithContext(ctx context.Context, sql stri
 	resp, err := s.client.ExecuteQueryStatementV2(ctx, &request)
 
 	if err != nil && resp == nil {
-		if s.reconnect() {
+		// A cancelled or expired context must stop here: reconnecting and
+		// replaying the statement would outlive the caller's deadline
+		// (#13935 review round 3).
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if s.reconnectWithContext(ctx) {
 			request.SessionId = s.sessionId
 			request.StatementId = s.requestStatementId
 			resp, err = s.client.ExecuteQueryStatementV2(ctx, &request)
@@ -1434,9 +1440,17 @@ func newClusterSessionWithSqlDialect(clusterConfig *ClusterConfig) (Session, err
 }
 
 func (s *Session) initClusterConn(node endPoint) error {
+	return s.initClusterConnWithContext(context.Background(), node)
+}
+
+// reconnectDialTimeoutMS bounds one dial attempt during a transparent
+// reconnect, so a black-holed endpoint cannot extend a cancelled query.
+const reconnectDialTimeoutMS = 5000
+
+func (s *Session) initClusterConnWithContext(ctx context.Context, node endPoint) error {
 	var err error
 
-	s.trans, err = newTransport(node.Host, node.Port, 0, s.config.TLSConfig)
+	s.trans, err = newTransport(node.Host, node.Port, reconnectDialTimeoutMS, s.config.TLSConfig)
 	if err != nil {
 		return err
 	}
@@ -1467,12 +1481,12 @@ func (s *Session) initClusterConn(node endPoint) error {
 		Password: &s.config.Password,
 	}
 
-	resp, err := s.client.OpenSession(context.Background(), &req)
+	resp, err := s.client.OpenSession(ctx, &req)
 	if err != nil {
 		return err
 	}
 	s.sessionId = resp.GetSessionId()
-	s.requestStatementId, err = s.client.RequestStatementId(context.Background(), s.sessionId)
+	s.requestStatementId, err = s.client.RequestStatementId(ctx, s.sessionId)
 	return err
 }
 
@@ -1492,13 +1506,27 @@ func getConfig(host string, port string, userName string, passWord string, fetch
 }
 
 func (s *Session) reconnect() bool {
-	var err error
+	return s.reconnectWithContext(context.Background())
+}
+
+// reconnectWithContext re-establishes the session while honoring the caller's
+// context: once it is cancelled or its deadline has passed, no further connect
+// attempt is made and the caller stops retrying the statement (#13935 review
+// round 3). Connect attempts also carry a bounded dial timeout instead of
+// waiting indefinitely.
+func (s *Session) reconnectWithContext(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	connectedSuccess := false
 
 	for i := 0; i < s.config.ConnectRetryMax; i++ {
 		for i := range s.endPointList {
+			if ctx.Err() != nil {
+				return false
+			}
 			ep := s.endPointList[i]
-			err = s.initClusterConn(ep)
+			err := s.initClusterConnWithContext(ctx, ep)
 			if err == nil {
 				connectedSuccess = true
 				break

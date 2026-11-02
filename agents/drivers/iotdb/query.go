@@ -273,7 +273,7 @@ func (s *server) nextDatasetRow(ctx context.Context, state *querySession) ([]any
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
-	hasNext, err := state.dataset.Next()
+	hasNext, err := state.dataset.NextWithContext(ctx)
 	if err != nil || !hasNext {
 		return nil, false, err
 	}
@@ -388,7 +388,7 @@ func readDataset(ctx context.Context, dataset *client.SessionDataSet, connected 
 		if err := ctx.Err(); err != nil {
 			return nil, false, err
 		}
-		hasNext, err := dataset.Next()
+		hasNext, err := dataset.NextWithContext(ctx)
 		if err != nil {
 			return nil, false, err
 		}
@@ -407,7 +407,7 @@ func readDataset(ctx context.Context, dataset *client.SessionDataSet, connected 
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
-	hasNext, err := dataset.Next()
+	hasNext, err := dataset.NextWithContext(ctx)
 	return rows, hasNext, err
 }
 

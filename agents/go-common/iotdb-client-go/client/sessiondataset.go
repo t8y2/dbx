@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"time"
 
 	"github.com/apache/iotdb-client-go/v2/rpc"
@@ -19,7 +20,12 @@ func NewSessionDataSet(sql string, columnNameList []string, columnTypeList []str
 }
 
 func (s *SessionDataSet) Next() (bool, error) {
-	return s.ioTDBRpcDataSet.Next()
+	return s.ioTDBRpcDataSet.NextWithContext(context.Background())
+}
+
+// NextWithContext forwards the caller's context to the paged fetch RPCs.
+func (s *SessionDataSet) NextWithContext(ctx context.Context) (bool, error) {
+	return s.ioTDBRpcDataSet.NextWithContext(ctx)
 }
 
 func (s *SessionDataSet) Close() error {

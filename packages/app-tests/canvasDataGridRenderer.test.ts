@@ -6,7 +6,10 @@ import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, resolveD
 function rgbChannels(color: string): number[] {
   const match = color.match(/rgba?\(([^)]+)\)/);
   assert.ok(match, `not an rgb colour: ${color}`);
-  return match[1]!.split(",").slice(0, 3).map((part) => Number.parseFloat(part.trim()));
+  return match[1]!
+    .split(",")
+    .slice(0, 3)
+    .map((part) => Number.parseFloat(part.trim()));
 }
 
 /** 最大单通道差值：用于证明「一眼可辨」，而不是仅仅不相等。 */
@@ -99,7 +102,7 @@ test("pending new rows are visually distinct from striped rows and the base surf
 });
 
 test("pending new rows keep their own colour when they hold the active cursor", () => {
-  const theme = { background: "bg-base", rowMuted: "row-muted", rowNew: "row-new", rowDeleted: "row-deleted", cellActive: "active-blue", cellSelected: "selected-blue" };
+  const theme = { background: "bg-base", rowMuted: "row-muted", rowNew: "row-new", rowDeleted: "row-deleted", cellActive: "active-blue", cellSelected: "selected-blue", rowSelected: "selected-blue" };
   const newRow = { displayIndex: 0, isDeleted: false, isNew: true, isDraft: false };
   const baseRow = { displayIndex: 0, isDeleted: false, isNew: false, isDraft: false };
 
@@ -222,4 +225,3 @@ test("drawBooleanCheckbox renders checked and unchecked state with clean backgro
   assert.ok(calls.some((c) => c.method === "strokeRect"));
   assert.ok(calls.some((c) => c.method === "stroke"));
 });
-

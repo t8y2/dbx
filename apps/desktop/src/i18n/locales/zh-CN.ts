@@ -946,6 +946,7 @@ export default withEnglishFallback({
     noInstalledPluginsDescription: "安装已签名的 .dbxp，或仅在本地开发时明确允许未签名包。",
     compatible: "兼容",
     blocked: "已阻止",
+    compatibilityErrors: "兼容性检查失败",
     rollback: "回滚",
     uninstall: "卸载",
     rollbackConfirm: "将此插件回滚到上一个已安装版本？",

@@ -361,6 +361,7 @@ fn build_query_result(rows: Vec<serde_json::Value>, start: Instant) -> QueryResu
         deferred_large_value_cells: Vec::new(),
         column_sortables: columns.iter().map(|_| false).collect(),
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         columns,
         column_types: vec![],

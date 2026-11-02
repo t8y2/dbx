@@ -53,7 +53,7 @@ async function settle() {
 }
 
 function transposeFieldNames(host: HTMLElement): string[] {
-  return [...host.querySelectorAll<HTMLElement>("[data-grid-transpose-column-index]")].map((field) => field.textContent?.trim().split("\n")[0] ?? "");
+  return [...host.querySelectorAll<HTMLElement>("[data-grid-transpose-column-index]")].map((field) => field.querySelector<HTMLElement>("[data-grid-transpose-field-name]")?.textContent?.trim() ?? field.textContent?.trim().split("\n")[0] ?? "");
 }
 
 function mountGrid(context: "table-data" | "results" = "table-data") {
@@ -278,5 +278,34 @@ describe("DataGrid transpose sorting", () => {
     const autoFittedWidth = parseInt(headerInfoCell.style.width, 10);
     expect(autoFittedWidth).toBeGreaterThan(120);
     expect(rowInfoCell?.style.width).toBe(`${autoFittedWidth}px`);
+  });
+
+  it("displays column comments and types in transpose view by default and allows toolbar toggling", async () => {
+    const { host, settingsStore } = mountGrid();
+    await settle();
+    await openTranspose(host);
+
+    // Displayed by default without manual configuration
+    expect(host.querySelectorAll("[data-grid-transpose-comment-line]")).toHaveLength(2);
+    expect(host.querySelectorAll("[data-grid-transpose-type-line]")).toHaveLength(2);
+    expect(host.querySelector("[data-grid-transpose-comment-line]")?.textContent).toContain("Display name with a long comment");
+    expect(host.querySelector("[data-grid-transpose-type-line]")?.textContent).toContain("varchar");
+
+    // Toggle via toolbar button
+    const toggleBtn = host.querySelector<HTMLButtonElement>("[data-grid-transpose-toggle-metadata]");
+    expect(toggleBtn).not.toBeNull();
+    toggleBtn!.click();
+    await settle();
+
+    expect(settingsStore.editorSettings.dataGridShowTransposeFieldMetadata).toBe(false);
+    expect(host.querySelectorAll("[data-grid-transpose-comment-line]")).toHaveLength(0);
+    expect(host.querySelectorAll("[data-grid-transpose-type-line]")).toHaveLength(0);
+
+    // Toggle back on via toolbar button
+    toggleBtn!.click();
+    await settle();
+    expect(settingsStore.editorSettings.dataGridShowTransposeFieldMetadata).toBe(true);
+    expect(host.querySelectorAll("[data-grid-transpose-comment-line]")).toHaveLength(2);
+    expect(host.querySelectorAll("[data-grid-transpose-type-line]")).toHaveLength(2);
   });
 });

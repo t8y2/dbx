@@ -2101,9 +2101,9 @@ describe("sqlCompletion scoped context classification", () => {
     // The CTE is what the statement selects from, so it outranks a catalog table
     // that only matched by initials.
     expect(cteIndex).toBeLessThan(items.findIndex((item) => item.label === "tb_market_price"));
-    // The alias snippet for the relation being typed stays available, matching
-    // the document's existing alias-completion behaviour.
-    expect(items.some((item) => item.type === "snippet" && item.apply === "tm ")).toBe(true);
+    // The alias snippet for the relation being typed must not be offered,
+    // avoiding replacing the table name being completed (#13750).
+    expect(items.some((item) => item.type === "snippet" && item.apply === "tm ")).toBe(false);
   });
 
   it("offers a star-projection CTE as a table candidate without a duplicate alias snippet", () => {

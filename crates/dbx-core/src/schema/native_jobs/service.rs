@@ -387,7 +387,7 @@ pub(super) async fn open_pool(
     Ok((session, pool))
 }
 
-async fn runtime_identity(
+pub async fn runtime_identity(
     config: &ConnectionConfig,
     pool: &PoolKind,
     database: &str,
@@ -395,47 +395,60 @@ async fn runtime_identity(
     runtime_identity_in_session(config, pool, database, None).await
 }
 
-async fn runtime_identity_in_session(
+pub(super) async fn runtime_identity_in_session(
     config: &ConnectionConfig,
     pool: &PoolKind,
     database: &str,
     physical: Option<&NativeJobPhysicalSession>,
 ) -> Result<NativeJobRuntimeIdentity, &'static str> {
     let timeout = super::super::agent_metadata_timeout(Some(config));
-    let info = match pool {
+    let probed_info = match pool {
         PoolKind::Agent(client) => {
             if let Some(physical) = physical {
                 let mut params = serde_json::json!({});
                 physical.bind(&mut params);
-                let value: Value = client
+                client
                     .lock()
                     .await
                     .call_typed_with_timeout("connection_info", params, timeout)
                     .await
-                    .map_err(|_| "native_job_runtime_identity_failed")?;
-                database_info_from_protocol_value(&value)
+                    .ok()
+                    .and_then(|value| database_info_from_protocol_value(&value))
             } else {
-                client
-                    .lock()
-                    .await
-                    .connection_info(timeout)
-                    .await
-                    .map_err(|_| "native_job_runtime_identity_failed")?
-                    .database_info
+                client.lock().await.connection_info(timeout).await.ok().and_then(|info| info.database_info)
             }
         }
-        PoolKind::ExternalDriver { config, session, .. } => {
-            let mut params = serde_json::json!({ "connection": config.as_ref() });
+        PoolKind::ExternalDriver { config: driver_config, session, .. } => {
+            let mut params = serde_json::json!({ "connection": driver_config.as_ref() });
             if let Some(physical) = physical {
                 physical.bind(&mut params);
             }
-            let value: Value = session
+            session
                 .invoke_with_timeout("connectionInfo", params, timeout)
                 .await
-                .map_err(|_| "native_job_runtime_identity_failed")?;
-            database_info_from_protocol_value(&value)
+                .ok()
+                .and_then(|value| database_info_from_protocol_value(&value))
         }
         _ => return Err("native_job_driver_route_missing"),
+    };
+    let info = match (probed_info, config.database_info.clone()) {
+        (Some(mut probed), Some(saved)) => {
+            if probed.product_name.is_none() {
+                probed.product_name = saved.product_name;
+            }
+            if probed.product_version.is_none() {
+                probed.product_version = saved.product_version;
+            }
+            if probed.current_database.is_none() {
+                probed.current_database = saved.current_database;
+            }
+            if probed.compatibility_mode.is_none() {
+                probed.compatibility_mode = saved.compatibility_mode;
+            }
+            Some(probed)
+        }
+        (Some(probed), None) => Some(probed),
+        (None, saved) => saved,
     };
     let engine = resolve_engine(config, info.as_ref())?;
     let query = NativeJobCatalogQuery {

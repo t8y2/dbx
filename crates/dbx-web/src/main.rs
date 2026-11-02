@@ -656,6 +656,7 @@ async fn serve() -> Result<(), String> {
         // Connection
         .route("/connection/test", post(routes::connection::test_connection))
         .route("/connection/test-info", post(routes::connection::test_connection_with_info))
+        .route("/connection/parameters", post(routes::connection::connection_parameters))
         .route("/connection/test-ssh-tunnel", post(routes::connection::test_ssh_tunnel))
         .route("/connection/connect", post(routes::connection::connect_db))
         .route("/connection/database-info", post(routes::connection::connected_database_info))
@@ -1015,6 +1016,7 @@ async fn serve() -> Result<(), String> {
         .route("/redis/list-databases", post(routes::redis::list_databases))
         .route("/redis/scan-keys", post(routes::redis::scan_keys))
         .route("/redis/scan-keys-batch", post(routes::redis::scan_keys_batch))
+        .route("/redis/key-metadata-batch", post(routes::redis::key_metadata_batch))
         .route("/redis/scan-values", post(routes::redis::scan_values))
         .route("/redis/get-value", post(routes::redis::get_value))
         .route("/redis/get-raw-value", post(routes::redis::get_raw_value))
@@ -1477,6 +1479,8 @@ async fn serve() -> Result<(), String> {
         .route("/version", get(routes::update::get_version))
         .route("/update/check", get(routes::update::check_for_updates))
         .route("/changelog", get(routes::update::fetch_changelog))
+        .route("/changelog/index", get(routes::update::fetch_changelog_index))
+        .route("/changelog/releases/{tag}", get(routes::update::fetch_changelog_release))
         // Layout
         .route("/layout/sidebar", post(routes::layout::save_sidebar_layout).get(routes::layout::load_sidebar_layout))
         .route(

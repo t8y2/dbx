@@ -7,6 +7,7 @@ import {
   buildTableTreeNodes,
   mergeTableInfosIntoObjects,
   mergeTableTreePageChildren,
+  partitionPageTables,
   tablePageRowAnchorKey,
   tablePartitionGroups,
   syncTablePartitionGroups,
@@ -557,6 +558,39 @@ describe("PostgreSQL table hierarchy", () => {
   });
 });
 
+describe("PostgreSQL root-paged table windows", () => {
+  const table = (name: string, parentName?: string): TableInfo => ({
+    name,
+    table_type: "BASE TABLE",
+    comment: null,
+    ...(parentName ? { parent_schema: "public", parent_name: parentName } : {}),
+  });
+
+  it("keeps every partition below the roots that fit the page", () => {
+    const tables = [table("orders"), table("orders_2025", "orders"), table("orders_2026", "orders"), table("orders_2026_01", "orders_2026"), table("users"), table("users_2026", "users")];
+
+    expect(partitionPageTables(tables, 2)).toEqual(tables);
+  });
+
+  it("drops the probe root with its complete multi-level subtree", () => {
+    const tables = [table("orders"), table("orders_2026", "orders"), table("orders_2026_01", "orders_2026"), table("users"), table("users_2026", "users"), table("z_probe"), table("z_probe_2026", "z_probe"), table("z_probe_2026_01", "z_probe_2026")];
+
+    expect(partitionPageTables(tables, 2).map((row) => row.name)).toEqual(["orders", "orders_2026", "orders_2026_01", "users", "users_2026"]);
+  });
+
+  it("matches roots by name when the backend resolves a blank schema", () => {
+    const tables = [table("orders"), table("orders_2026", "orders"), table("z_probe"), table("z_probe_2026", "z_probe")];
+
+    expect(partitionPageTables(tables, 1)).toEqual([tables[0], tables[1]]);
+  });
+
+  it("keeps roots whose names differ only by case distinct", () => {
+    const tables = [table("Orders"), table("orders"), table("z_probe")];
+
+    expect(partitionPageTables(tables, 2)).toEqual([tables[0], tables[1]]);
+  });
+});
+
 describe("TDengine table hierarchy", () => {
   it("synchronizes only partition groups and keeps hidden-only loaded children usable", () => {
     const nodes = decorateDatabaseSavedSqlTreeNodes(
@@ -643,6 +677,25 @@ describe("TDengine table hierarchy", () => {
       isExpanded: true,
     });
     expect(nodes[0].children?.[0].children?.map((node) => node.label)).toEqual(["device_a", "device_b"]);
+  });
+
+  it("keeps all supertables visible at the root when a supertable has many child tables (#13728)", () => {
+    const childTables = Array.from({ length: 998 }, (_, i) => ({
+      name: `sub_${String(i).padStart(4, "0")}`,
+      table_type: "TABLE",
+      comment: null,
+      parent_name: "stable_b",
+    }));
+    const tables: TableInfo[] = [{ name: "stable_a", table_type: "STABLE", comment: null }, { name: "stable_b", table_type: "STABLE", comment: null }, { name: "stable_c", table_type: "STABLE", comment: null }, ...childTables.slice(0, 997)];
+
+    const nodes = buildTableTreeNodes({ ...context, tables });
+
+    expect(nodes.map((node) => node.label)).toEqual(["stable_a", "stable_b", "stable_c"]);
+    expect(nodes[1].children?.[0]).toMatchObject({
+      type: "group-partitions",
+      label: "tree.childTables",
+      objectCount: 997,
+    });
   });
 
   it("attaches child tables loaded on later pages to the existing supertable", () => {
@@ -781,5 +834,25 @@ describe("package and package body groups (#13239)", () => {
     // Empty groups may be omitted entirely rather than rendered with zero children.
     const packagesGroup = nodes.find((node) => node.type === "group-packages");
     expect(!packagesGroup || (packagesGroup.children ?? []).length === 0).toBe(true);
+  });
+});
+
+describe("withoutTableTreeLoadMoreNodes", () => {
+  const loadMore = (id: string, objectType?: "INDEX"): TreeNode => ({ id, label: "More", type: "load-more", loadMore: { parentId: "p", offset: 1, pageSize: 1, ...(objectType ? { objectType } : {}) } });
+
+  it("drops nested table load-more cursors, keeps index cursors and always returns a fresh list", () => {
+    const untouchedChildren: TreeNode[] = [{ id: "c", label: "c", type: "column" }];
+    const untouched: TreeNode = { id: "t0", label: "t0", type: "table", children: untouchedChildren };
+    const partitions: TreeNode = { id: "g", label: "g", type: "group-partitions", children: [{ id: "t1", label: "t1", type: "table" }, loadMore("nested")] };
+    const indexCursor = loadMore("idx", "INDEX");
+    const input = [untouched, partitions, loadMore("top"), indexCursor];
+
+    const result = withoutTableTreeLoadMoreNodes(input);
+
+    expect(result.map((node) => node.id)).toEqual(["t0", "g", "idx"]);
+    expect(partitions.children!.map((node) => node.id)).toEqual(["t1"]);
+    expect(untouched.children).toBe(untouchedChildren);
+    expect(withoutTableTreeLoadMoreNodes(result)).not.toBe(result);
+    expect(withoutTableTreeLoadMoreNodes(undefined)).toEqual([]);
   });
 });

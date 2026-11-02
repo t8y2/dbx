@@ -6,7 +6,7 @@ import { useExportTracker } from "@/composables/useExportTracker";
 import type { ConnectionConfig } from "@/types/database";
 import type { DatabaseExportRequest, ExportProgress } from "@/lib/backend/api";
 
-const mocks = vi.hoisted(() => ({ export: vi.fn(), begin: vi.fn(), rollback: vi.fn(), cancel: vi.fn(), toast: vi.fn(), listSchemas: vi.fn() }));
+const mocks = vi.hoisted(() => ({ export: vi.fn(), begin: vi.fn(), rollback: vi.fn(), cancel: vi.fn(), toast: vi.fn(), listSchemas: vi.fn(), settings: { defaultExportMode: "immediate" } }));
 vi.mock("@/lib/backend/api", () => ({
   listDatabases: vi.fn(async () => [{ name: "app" }, { name: "other" }]),
   listSchemas: mocks.listSchemas,
@@ -21,7 +21,7 @@ vi.mock("@/lib/backend/api", () => ({
   recordDatabaseExportDestination: vi.fn(async () => undefined),
 }));
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: [connection], getConfig: () => connection, ensureConnected: vi.fn(async () => undefined) }) }));
-vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: {} }) }));
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: mocks.settings }) }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@/lib/export/exportPath", () => ({ promptExportSavePath: vi.fn(async () => "C:/exports/original.sql"), autoRevealExportedPathIfConfigured: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(async () => "C:/exports") }));
@@ -57,6 +57,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   operations.length = 0;
+  mocks.settings.defaultExportMode = "immediate";
   connection.db_type = "mysql";
   mocks.listSchemas.mockResolvedValue(["public"]);
   mocks.begin.mockReset().mockImplementation(async (_id, database) => ({ sessionId: `snapshot-${database}` }));
@@ -114,6 +115,19 @@ function terminal(index: number, status: "Done" | "Cancelled" = "Done", resolve 
   operation.progress({ exportId: operation.request.exportId, currentObject: "orders", objectIndex: 1, totalObjects: 1, rowsExported: 7, totalRows: 7, status, error: null });
   if (resolve) operation.resolve();
 }
+it("reloads the global default on reopen without persisting a one-off override", async () => {
+  mocks.settings.defaultExportMode = "queued";
+  const dialog = await mountDialog();
+  expect(dialog.host.querySelector<HTMLInputElement>('input[value="queued"]')!.checked).toBe(true);
+  dialog.host.querySelector<HTMLInputElement>('input[value="immediate"]')!.click();
+  await nextTick();
+  expect(mocks.settings.defaultExportMode).toBe("queued");
+  dialog.open.value = false;
+  await nextTick();
+  dialog.open.value = true;
+  await nextTick();
+  await vi.waitFor(() => expect(dialog.host.querySelector<HTMLInputElement>('input[value="queued"]')!.checked).toBe(true));
+});
 it("does not begin a snapshot or database export while queued and cancels waiting without RPCs", async () => {
   const tracker = useExportTracker();
   let release!: () => void;
@@ -206,4 +220,36 @@ it("does not release the queue when rollback completion is unknown", async () =>
   await vi.waitFor(() => expect(tracker.tasks.value[0]!.status).toBe("Unknown"));
   expect(next).not.toHaveBeenCalled();
   expect(tracker.tasks.value[0]!.errorMessage).toBe("rollback reply lost");
+});
+
+it.each([false, true])("recovers the UI lease without rolling back a still-running snapshot (batch: %s)", async (batch) => {
+  const tracker = useExportTracker();
+  const dialog = await mountDialog(batch);
+  await dialog.start();
+  await vi.waitFor(() => expect(operations).toHaveLength(1));
+  const root = tracker.tasks.value[0]!;
+  const next = vi.fn().mockResolvedValue("settled");
+  tracker.submitExportTask(tracker.addTask("next", "csv", "different-output.csv"), "queued", next);
+  vi.useFakeTimers();
+  try {
+    await tracker.cancelTask(root.exportId);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(root.canRecoverCancellation).toBe(true);
+    expect(mocks.rollback).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
+    tracker.recoverCancelledTask(root.exportId);
+    expect(next).toHaveBeenCalledOnce();
+    expect(mocks.rollback).not.toHaveBeenCalled();
+    expect(operations).toHaveLength(1);
+    mocks.toast.mockClear();
+    terminal(0, "Done");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.rollback).toHaveBeenCalledOnce();
+    expect(operations).toHaveLength(1);
+    expect(next).toHaveBeenCalledOnce();
+    expect(tracker.tasks.value).not.toContain(root);
+    expect(mocks.toast).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
 });

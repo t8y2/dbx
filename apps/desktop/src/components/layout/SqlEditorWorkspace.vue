@@ -7,7 +7,7 @@ import "./sqlEditorWorkspace.css";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { createGroupTabBarPortal, GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
-import { hasQueryOutput } from "@/lib/query/queryOutput";
+import { hasFocusableQueryResult, hasQueryOutput } from "@/lib/query/queryOutput";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { beginPanelResize, endPanelResize } from "@/lib/app/panelResizeState";
 import { Button } from "@/components/ui/button";
@@ -47,13 +47,11 @@ const workspaceClass = computed(() => (typeof attrs.class === "string" ? attrs.c
 const surfaceProps = computed(() => ({
   activeTab: props.activeTab,
   activeConnection: props.activeConnection,
-  executableSql: props.executableSql,
+  hasExecutableSql: props.hasExecutableSql,
   activeOutputView: props.activeOutputView,
   formatSqlRequest: props.formatSqlRequest,
   compressSqlRequest: props.compressSqlRequest,
   keywordCaseRequest: props.keywordCaseRequest,
-  selectedSql: props.selectedSql,
-  cursorPos: props.cursorPos,
   blockDangerousRedisCommands: props.blockDangerousRedisCommands,
   zenMode: props.zenMode,
 }));
@@ -62,6 +60,8 @@ const editorGroupBindings = computed(() => ({ ...surfaceProps.value, ...contentE
 const resultSurfaceBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits, activeTab: activeQueryTab.value! }));
 
 defineExpose({
+  focusResultGrid,
+  focusSqlEditor,
   focusSearch: (target: Element | null = null) => {
     const element = commandTargetElement(target);
     // The shared result pane (and its Teleported cell-detail dialog) lives
@@ -183,6 +183,28 @@ function toggleSharedResultsPane(): boolean {
   if (!hasSharedOutput.value) return false;
   showResultPane.value = !showResultPane.value;
   return true;
+}
+
+let focusRequest = 0;
+function focusResultGrid(): boolean {
+  const tab = activeQueryTab.value;
+  if (props.contentSuppressed || !tab || !hasFocusableQueryResult(tab) || isObjectDependencySection(tab)) return false;
+  const request = ++focusRequest;
+  const result = tab.result;
+  showResultPane.value = true;
+  void nextTick(() => {
+    if (request === focusRequest && activeQueryTab.value?.id === tab.id && activeQueryTab.value.result === result && isResultPaneVisible.value) {
+      resultSurfaceRef.value?.focusResultGrid();
+    }
+  });
+  return true;
+}
+
+function focusSqlEditor(): boolean {
+  if (props.contentSuppressed) return false;
+  ++focusRequest;
+  resultSurfaceRef.value?.cancelResultGridFocus();
+  return activeEditorGroup()?.focusSqlEditor() ?? false;
 }
 
 // Restores the pre-split "running a query re-expands the results pane"

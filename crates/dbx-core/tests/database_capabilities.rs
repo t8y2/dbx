@@ -560,3 +560,18 @@ fn opengauss_declares_table_import_support() {
     assert!(opengauss.capabilities.sql_file_execution);
     assert!(opengauss.capabilities.data_transfer);
 }
+
+#[test]
+fn saphana_declares_table_import_support() {
+    let manifest = driver_manifest();
+    let hana = manifest
+        .drivers
+        .iter()
+        .find(|driver| driver.db_type == DatabaseType::SapHana)
+        .expect("SAP HANA manifest entry");
+
+    assert!(hana.capabilities.table_import);
+    // Import into an existing table needs table editing and SQL execution.
+    assert!(hana.capabilities.table_data_edit);
+    assert!(hana.capabilities.sql_file_execution);
+}

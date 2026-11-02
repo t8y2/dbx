@@ -44,6 +44,8 @@ pub struct ExecuteQueryRequest {
     /// ROLLBACK. Defaults to the historical cleanup when omitted.
     #[serde(default)]
     pub preserve_explicit_transaction: bool,
+    #[serde(default)]
+    pub report_compilation_errors: bool,
 }
 
 #[derive(Deserialize)]
@@ -705,6 +707,7 @@ pub async fn execute_multi(
             continue_on_error: req.continue_on_error.unwrap_or(false),
             execution_mode: req.execution_mode.unwrap_or_default(),
             preserve_explicit_transaction: req.preserve_explicit_transaction,
+            report_compilation_errors: req.report_compilation_errors,
         },
     )
     .await;
@@ -1916,6 +1919,7 @@ mod tests {
                 deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![vec![serde_json::json!("relation customer_orders does not exist")]],
                 affected_rows: 0,

@@ -138,6 +138,13 @@ pub struct DatabaseExportRequest {
     pub include_create_database: bool,
     #[serde(default)]
     pub drop_table_if_exists: bool,
+    /// Omit the database qualifier from MySQL-family table references in the
+    /// exported SQL (INSERT targets keep plain `table` names; the `USE`
+    /// preamble stays the authority for the database). Defaults to `false`
+    /// (preserve `db`.`table`) for callers that import into a different
+    /// database than the one named by the dump (issue #13509).
+    #[serde(default)]
+    pub omit_database_qualifier: bool,
     /// Drop the table-level `AUTO_INCREMENT=N` clause from exported MySQL DDL,
     /// so the script can initialize a fresh database without pinning a sequence
     /// position. No-op for non-MySQL databases. Defaults to `false` (preserve).
@@ -633,6 +640,9 @@ pub struct BuildDatabaseSqlExportOptions {
     /// Defaults to `false` (preserve). See `DatabaseExportRequest::omit_auto_increment`.
     #[serde(default)]
     pub omit_auto_increment: bool,
+    /// See `DatabaseExportRequest::omit_database_qualifier`.
+    #[serde(default)]
+    pub omit_database_qualifier: bool,
     /// See `DatabaseExportRequest::preserve_original_language`.
     #[serde(default)]
     pub preserve_original_language: bool,
@@ -2060,13 +2070,21 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
             lines.push(format!("-- Exported rows: {}", table.rows.len()));
         }
 
+        // #13509: with the `USE` preamble as the database authority, MySQL-family
+        // dumps can drop the `db`. qualifier so the script replays against any
+        // database the USE targets.
+        let mysql_omit = options.omit_database_qualifier
+            && table.database_type.as_ref().is_some_and(supports_database_qualifier_omission);
+        // Both dialects must honor the flag: Source dialect prefers the passed
+        // pre-qualified name over the schema, so it has to be cleared too
+        // (#13601 review point 3).
         let inserts = build_export_insert_statements_excluding_with_dialect(
             BuildExportInsertStatementsOptions {
                 database_type: table.database_type,
                 identifier_quote: table.identifier_quote.clone(),
-                schema: table.schema,
+                schema: if mysql_omit { None } else { table.schema.clone() },
                 table_name: table.table_name,
-                qualified_table_name: table.qualified_table_name,
+                qualified_table_name: if mysql_omit { None } else { table.qualified_table_name },
                 columns: table.columns,
                 column_types: table.column_types,
                 column_extras: table.column_extras,
@@ -2882,6 +2900,12 @@ pub async fn begin_database_backup_snapshot_core_for_export(
     database: &str,
     export_id: Option<&str>,
 ) -> Result<DatabaseBackupSnapshot, String> {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        connection_id,
+        crate::query::mysql_data_charset_policy::EXPORT_UNSUPPORTED,
+    )
+    .await?;
     let db_type = state
         .configs
         .read()
@@ -3128,7 +3152,15 @@ fn write_database_export_rows<W: Write>(
         SqlInsertMode::default(),
         false,
         None,
+        false,
     )
+}
+
+/// MySQL-family engines are the ones whose whole-database dump pairs a `USE`
+/// preamble with `db`.`table` targets; other engines ignore the flag so a
+/// persisted option can never strip a PostgreSQL/Oracle schema (#13601).
+fn supports_database_qualifier_omission(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::Doris | DatabaseType::StarRocks)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3145,6 +3177,7 @@ fn write_database_export_rows_with_mode<W: Write>(
     insert_mode: SqlInsertMode,
     preserve_original_language: bool,
     table_ddl: Option<&str>,
+    omit_database_qualifier: bool,
 ) -> Result<(), String> {
     let normalized_column_extras;
     let column_extras = if *db_type == DatabaseType::Dameng && table_ddl.is_some_and(is_dameng_auto_increment_ddl) {
@@ -3206,7 +3239,17 @@ fn write_database_export_rows_with_mode<W: Write>(
     // Database exports use the same table qualification as the SELECT/DDL
     // path and the legacy typed INSERT writer. In particular, MySQL uses the
     // selected database rather than a schema-qualified table name.
-    let qualified_table_name = crate::transfer::qualified_table(table, schema, db_type, None);
+    // `omit_database_qualifier` drops the schema qualifier for the MySQL
+    // family: the export's `USE` preamble already sets the database, and a
+    // `db`.`table` INSERT target pins the dump to one database (#13509).
+    // Rebuild with an empty schema instead of stripping the rendered name:
+    // MySQL-family targets never carry a schema prefix, so a table whose own
+    // name contains a dot must not be split at that dot (#13601).
+    let qualified_table_name = if omit_database_qualifier && supports_database_qualifier_omission(db_type) {
+        crate::transfer::qualified_table(table, "", db_type, None)
+    } else {
+        crate::transfer::qualified_table(table, schema, db_type, None)
+    };
     // Batch database exports do not currently thread a per-connection identifier
     // quote through BuildDatabaseSqlExportOptions; Kingbase MySQL-compat users
     // should fall back to the single-table export path which carries the quote.
@@ -3214,7 +3257,15 @@ fn write_database_export_rows_with_mode<W: Write>(
         BuildExportInsertStatementsOptions {
             database_type: Some(*db_type),
             identifier_quote: None,
-            schema: (!schema.is_empty()).then(|| schema.to_string()),
+            // Standard dialect re-derives `db`.`table` from the schema, so the
+            // flag also has to blank it there — but only for engines that own
+            // the flag; a persisted `true` must not strip a PostgreSQL schema
+            // (#13601).
+            schema: if omit_database_qualifier && supports_database_qualifier_omission(db_type) {
+                None
+            } else {
+                (!schema.is_empty()).then(|| schema.to_string())
+            },
             table_name: Some(table.to_string()),
             qualified_table_name: Some(qualified_table_name),
             columns: insert_columns.to_vec(),
@@ -3510,13 +3561,32 @@ async fn ensure_export_destination_dir(
         save_export_destination_identity(state, dir, current_identity.as_ref()).await?;
         return Ok(current_identity);
     } else {
+        // The recorded state is `Option<Option<_>>`: an outer `Some` means the
+        // directory was previously used by dbx (or recorded when the schedule
+        // was configured); the inner value carries its filesystem identity.
         if recorded_identity.is_some() {
-            return Err(format!(
-                "Backup directory {} is missing. It was configured or previously used for exports to \
-                 this location, so dbx will not recreate it automatically -- if this is on a removable \
-                 or network drive, reconnect it and try again.",
-                dir.display()
-            ));
+            // Recreating the directory is only safe when it would land on the
+            // same filesystem it was recorded on, so compare the recorded
+            // identity against the destination's parent. A missing or
+            // differently-resolving parent keeps the fail-closed behavior for
+            // vanished removable/network mounts (#6327). A matching parent
+            // means dbx removed the empty leaf itself -- backup deletion
+            // cleans up the per-run directory once its files are gone -- and
+            // the next run must be able to recreate it (#13610). A record
+            // without a usable identity cannot prove the filesystem and also
+            // keeps failing closed.
+            let parent_identity = dir.parent().and_then(export_destination_identity_for_path);
+            let same_filesystem = recorded_identity.flatten().is_some_and(|recorded| {
+                !recorded_export_destination_identity_mismatch(&recorded, parent_identity.as_ref())
+            });
+            if !same_filesystem {
+                return Err(format!(
+                    "Backup directory {} is missing. It was configured or previously used for exports to \
+                     this location, so dbx will not recreate it automatically -- if this is on a removable \
+                     or network drive, reconnect it and try again.",
+                    dir.display()
+                ));
+            }
         }
         // A run-specific child directory is intentionally new on every
         // scheduled backup. Before creating it, still honor a recorded parent
@@ -3698,6 +3768,12 @@ pub async fn export_database_sql_core(
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        &request.connection_id,
+        crate::query::mysql_data_charset_policy::EXPORT_UNSUPPORTED,
+    )
+    .await?;
     let db_type = state
         .configs
         .read()
@@ -4812,6 +4888,7 @@ async fn export_database_sql_core_inner(
                                     request.insert_mode,
                                     request.preserve_original_language,
                                     table_ddl_text.as_deref(),
+                                    request.omit_database_qualifier,
                                 )?;
                                 total_rows_exported += rows.len() as u64;
                                 on_progress(ExportProgress {
@@ -4932,6 +5009,7 @@ async fn export_database_sql_core_inner(
                             request.insert_mode,
                             request.preserve_original_language,
                             table_ddl_text.as_deref(),
+                            request.omit_database_qualifier,
                         )?;
                         total_rows_exported += row_count as u64;
                         if use_keyset {
@@ -5595,6 +5673,7 @@ mod tests {
             include_create_database: false,
             drop_table_if_exists: false,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             fail_on_error: false,
             prevent_overwrite: false,
             output_compression: Default::default(),
@@ -6962,6 +7041,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             preserve_original_language: false,
         })
         .expect("build SQL Server database export");
@@ -8354,6 +8434,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             preserve_original_language: false,
         })
         .unwrap();
@@ -8428,6 +8509,139 @@ mod tests {
     }
 
     #[test]
+    fn qualifier_omission_strips_only_the_database_even_for_dotted_tables() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("orders.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // A table whose own name contains a dot renders as `app`.`order.items`;
+        // the strip removes the leading database, never the table (#13601).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1)]],
+            &["id".to_string()],
+            &[Some("int".to_string())],
+            &[None],
+            "order.items",
+            "app",
+            &DatabaseType::Mysql,
+            SqlInsertDialect::Standard,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO `order.items` (`id`) VALUES (1);
+
+"
+        );
+    }
+
+    #[test]
+    fn source_dialect_keeps_dotted_mysql_table_when_omitting_qualifier() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("orders.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // Source dialect reuses the qualified target verbatim; with the
+        // qualifier omitted the dotted table name must survive intact
+        // instead of being split at its own dot (#13601).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1)]],
+            &["id".to_string()],
+            &[Some("int".to_string())],
+            &[None],
+            "order.items",
+            "app",
+            &DatabaseType::Mysql,
+            SqlInsertDialect::Source,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        let sql = std::fs::read_to_string(path).unwrap();
+        assert!(sql.contains("INSERT INTO `order.items`"), "unexpected export: {sql}");
+    }
+
+    #[test]
+    fn qualifier_omission_is_ignored_for_non_mysql_engines() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("users.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // A persisted `true` must not strip a PostgreSQL schema when the
+        // exported engine is not the MySQL family (#13601 review point 1).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1)]],
+            &["id".to_string()],
+            &[Some("int".to_string())],
+            &[None],
+            "users",
+            "app",
+            &DatabaseType::Postgres,
+            SqlInsertDialect::Standard,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO \"app\".\"users\" (\"id\") VALUES (1);
+
+"
+        );
+    }
+
+    #[test]
+    fn mysql_export_can_omit_the_database_qualifier_from_insert_targets() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("users.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // The USE preamble owns the database context, so the flag drops the
+        // `db`. prefix in both Standard and Source dialects (#13509).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1), json!("Ada")]],
+            &["id".to_string(), "name".to_string()],
+            &[Some("int".to_string()), Some("varchar(32)".to_string())],
+            &[None, None],
+            "users",
+            "app",
+            &DatabaseType::Mysql,
+            SqlInsertDialect::Standard,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');
+
+"
+        );
+    }
+
+    #[test]
     fn database_row_writer_standard_dialect_uses_mysql_backticks() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("users.sql");
@@ -8472,6 +8686,7 @@ mod tests {
             SqlInsertMode::Single,
             false,
             None,
+            false,
         )
         .unwrap();
         drop(file);
@@ -8828,6 +9043,7 @@ mod tests {
             SqlInsertMode::Single,
             false,
             Some(ddl),
+            false,
         )
         .unwrap();
         drop(file);
@@ -8907,6 +9123,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             preserve_original_language: false,
         })
         .unwrap();
@@ -9272,6 +9489,37 @@ mod tests {
 
         assert!(result.is_err(), "a destination that existed before should not be silently recreated");
         assert!(!destination.exists(), "the backup directory must not be resurrected on the wrong filesystem");
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    // Regression test for #13610: deleting the last backup of a run removes the
+    // emptied per-run directory (`remove_empty_directories`), while its recorded
+    // destination identity survives in state. The next run into the same dated
+    // directory refused to recreate it even though dbx itself had removed the
+    // directory and the parent still resolved to the same filesystem. The
+    // vanished-mount refusals above stay intact: there the parent is missing,
+    // so the identity comparison fails closed.
+    #[tokio::test]
+    async fn ensure_export_destination_dir_recreates_a_recorded_destination_whose_parent_kept_the_same_filesystem() {
+        let scratch = std::env::temp_dir().join(format!("dbx-export-dest-cleaned-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let state = test_app_state(&scratch).await;
+
+        let destination = scratch.join("backups").join("mydb");
+        ensure_export_destination_dir(&state, &destination).await.expect("initial export should create the directory");
+        assert!(destination.is_dir());
+
+        // Simulates dbx's own cleanup after the last backup file in the
+        // directory is deleted: the empty run directory is removed, its parent
+        // stays.
+        std::fs::remove_dir(&destination).unwrap();
+        assert!(!destination.exists());
+
+        ensure_export_destination_dir(&state, &destination)
+            .await
+            .expect("a leaf directory dbx itself removed must be recreated when the parent still matches");
+        assert!(destination.is_dir());
 
         let _ = std::fs::remove_dir_all(&scratch);
     }

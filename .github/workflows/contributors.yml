@@ -14,6 +14,9 @@ concurrency:
 
 jobs:
   update:
+    # 这条流水线依赖上游的 owner PAT，推送会改写仓库 main；fork 不该跑它，
+    # 否则 fork 的 main 会被推离上游镜像（同 sync-mirrors.yml）。
+    if: github.repository == 't8y2/dbx'
     runs-on: ubuntu-latest
     steps:
       # main 的 ruleset 要求改动走 PR，默认 GITHUB_TOKEN 直推会被 GH013 拒掉；

@@ -35,6 +35,9 @@ export type ShortcutActionId =
   | "previousStatement"
   | "nextStatement"
   | "statementStart"
+  | "toggleBookmark"
+  | "nextBookmark"
+  | "previousBookmark"
   | "extendSelection"
   | "addNextSelectionOccurrence"
   | "selectAllSelectionOccurrences"
@@ -377,6 +380,24 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutStatementStart",
     scope: "editor",
     defaultShortcut: "Alt+Home",
+  },
+  {
+    id: "toggleBookmark",
+    labelKey: "settings.shortcutToggleBookmark",
+    scope: "editor",
+    defaultShortcut: "Mod+F2",
+  },
+  {
+    id: "nextBookmark",
+    labelKey: "settings.shortcutNextBookmark",
+    scope: "editor",
+    defaultShortcut: "F2",
+  },
+  {
+    id: "previousBookmark",
+    labelKey: "settings.shortcutPreviousBookmark",
+    scope: "editor",
+    defaultShortcut: "Shift+F2",
   },
   {
     id: "extendSelection",

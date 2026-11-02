@@ -58,6 +58,7 @@ import {
   emptyLayout,
   appendConnectionToLayout,
   removeConnectionFromSidebarLayout,
+  restoreSidebarLayoutDeletion,
   findConnectionLocation,
   createGroup as createGroupOp,
   renameGroup as renameGroupOp,
@@ -718,9 +719,11 @@ export const useConnectionStore = defineStore("connection", () => {
   let sidebarLayoutSyncTimer: ReturnType<typeof setInterval> | null = null;
   let sidebarLayoutSyncInFlight = false;
   let sidebarLayoutPersistInFlight: Promise<void> | null = null;
+  /** Keep polling paused until all deletion writes and recovery have settled. */
+  const sidebarLayoutDeletionEdits = new Set<Set<string>>();
   /** Tail of the save chain: writes must land in the order they were issued. */
   let sidebarLayoutSaveChain: Promise<unknown> = Promise.resolve();
-  /** Issued writes, so a rollback knows whether a newer write already won. */
+  /** Issued writes, so a stale snapshot never retries over a newer edit. */
   let sidebarLayoutSaveVersion = 0;
   /** JSON of the layout we know the storage holds. Anything else in memory is an
    *  unsaved local edit, and a poll that reads the old row must not revert it. */
@@ -10501,23 +10504,25 @@ export const useConnectionStore = defineStore("connection", () => {
     let appliedLayout = previousLayout;
     let connectionsPersisted = false;
     let timeoutSettingsPersisted = false;
-    let layoutSaveStarted = false;
-    let layoutSaveVersion = 0;
-
-    let revisionAfterOwnSave = sidebarLayoutRevision;
+    let layoutSaveResult: Promise<{ error?: unknown }> | null = null;
+    let targetLayout = previousLayout;
+    const editedPlacements = new Set<string>();
+    sidebarLayoutDeletionEdits.add(editedPlacements);
     try {
       // Drop the members from the live layout first: a debounced snapshot taken
       // while the connection writes below are in flight would otherwise still
       // contain them and put the deleted rows back on disk.
-      const targetLayout = applyLayout(sidebarLayout.value);
+      targetLayout = applyLayout(sidebarLayout.value);
       if (targetLayout !== sidebarLayout.value) {
         sidebarLayout.value = targetLayout;
         sidebarLayoutRevision += 1;
         rebuildTreeNodes();
-        layoutSaveStarted = true;
-        const queued = queueSidebarLayoutSave(targetLayout);
-        layoutSaveVersion = queued.version;
-        revisionAfterOwnSave = sidebarLayoutRevision;
+        // Attach a rejection handler immediately: configuration writes below
+        // may still be pending when this save exhausts its retries.
+        layoutSaveResult = queueSidebarLayoutSave(targetLayout).promise.then(
+          () => ({}),
+          (error: unknown) => ({ error }),
+        );
       }
       if (connectionsChanged) {
         await persistConnections(nextConnections, removedConnectionIds);
@@ -10527,17 +10532,24 @@ export const useConnectionStore = defineStore("connection", () => {
         await persistTimeoutInheritanceIds(nextConnectTimeoutIds, nextQueryTimeoutIds);
         timeoutSettingsPersisted = true;
       }
-      if (layoutSaveStarted) {
-        await sidebarLayoutSaveChain;
+      if (layoutSaveResult) {
+        const result = await layoutSaveResult;
+        if ("error" in result) throw result.error;
         appliedLayout = targetLayout;
       }
     } catch (error) {
       const rollbackErrors: unknown[] = [];
-      // A newer write already reflects a newer decision; restoring the layout we
-      // tried to delete would land after it and undo the user's latest edit.
-      if (layoutSaveStarted && layoutSaveVersion === sidebarLayoutSaveVersion && revisionAfterOwnSave === sidebarLayoutRevision) {
+      // Drain this operation's retries before issuing recovery. Otherwise a
+      // delayed deletion attempt could commit after the restored snapshot.
+      await layoutSaveResult;
+      if (layoutSaveResult) {
+        sidebarLayout.value = restoreSidebarLayoutDeletion(previousLayout, targetLayout, sidebarLayout.value, editedPlacements);
+        sidebarLayoutRevision += 1;
+        rebuildTreeNodes();
+        if (layoutPersistTimer) clearTimeout(layoutPersistTimer);
+        layoutPersistTimer = null;
         try {
-          await queueSidebarLayoutSave(previousLayout).promise;
+          await queueSidebarLayoutSave(sidebarLayout.value).promise;
         } catch (rollbackError) {
           rollbackErrors.push(rollbackError);
         }
@@ -10563,6 +10575,8 @@ export const useConnectionStore = defineStore("connection", () => {
         throw recoveryError;
       }
       throw error;
+    } finally {
+      sidebarLayoutDeletionEdits.delete(editedPlacements);
     }
     return appliedLayout;
   }
@@ -10691,7 +10705,7 @@ export const useConnectionStore = defineStore("connection", () => {
    *  queued or in flight, discarded when anything bumped the revision during the
    *  read, and ignored when memory holds a layout the storage does not have yet. */
   async function syncSidebarLayoutOnce(): Promise<void> {
-    if (sidebarLayoutSyncInFlight || layoutPersistTimer || sidebarLayoutPersistInFlight) return;
+    if (sidebarLayoutSyncInFlight || sidebarLayoutDeletionEdits.size || layoutPersistTimer || sidebarLayoutPersistInFlight) return;
     const revision = sidebarLayoutRevision;
     const local = JSON.stringify(sidebarLayout.value);
     if (sidebarLayoutPersisted !== null && local !== sidebarLayoutPersisted) return;
@@ -10935,6 +10949,12 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     syncPinnedTreeState(mergedNodes);
     treeNodes.value = mergedNodes;
+  }
+
+  function markSidebarLayoutPlacementsEdited(ids: readonly string[]) {
+    for (const edits of sidebarLayoutDeletionEdits) {
+      for (const id of ids) edits.add(id);
+    }
   }
 
   function updateLayoutAndRebuild(nextLayout: SidebarLayout) {
@@ -11433,6 +11453,15 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function applySidebarLayout(layout: SidebarLayout) {
+    // Import/merge is an explicit placement decision too; recovery must not
+    // move its connections back into groups removed by an older deletion.
+    markSidebarLayoutPlacementsEdited([
+      ...layout.order.filter((entry) => entry.type === "connection").map((entry) => entry.id),
+      ...connectionIdsInGroupsOp(
+        layout,
+        layout.groups.map((group) => group.id),
+      ),
+    ]);
     const reconciledLayout = reconcileLayout(
       connections.value.map((c) => c.id),
       mergeSidebarLayout(sidebarLayout.value, layout),
@@ -11485,7 +11514,7 @@ export const useConnectionStore = defineStore("connection", () => {
         const layoutRevisionBeforeRead = sidebarLayoutRevision;
         const savedLayout = await api.loadSidebarLayout();
         const currentLayout = sidebarLayout.value.groups.length || sidebarLayout.value.order.length ? sidebarLayout.value : null;
-        const hasPendingLayoutWrite = layoutPersistTimer !== null || sidebarLayoutPersistInFlight !== null;
+        const hasPendingLayoutWrite = sidebarLayoutDeletionEdits.size > 0 || layoutPersistTimer !== null || sidebarLayoutPersistInFlight !== null;
         const editedWhileReading = layoutRevisionBeforeRead !== sidebarLayoutRevision;
         sidebarLayout.value =
           hasPendingLayoutWrite || editedWhileReading
@@ -11801,15 +11830,18 @@ export const useConnectionStore = defineStore("connection", () => {
       updateLayoutAndRebuild(expandGroupsOp(sidebarLayout.value, groupIds));
     },
     moveConnectionToGroup(connectionId: string, groupId: string | null) {
+      markSidebarLayoutPlacementsEdited([connectionId]);
       updateLayoutAndRebuild(moveConnectionToGroupOp(sidebarLayout.value, connectionId, groupId));
     },
     groupIdForConnection(connectionId: string): string | null {
       return findConnectionLocation(sidebarLayout.value, connectionId)?.groupId ?? null;
     },
     reorderSidebarEntry(draggedId: string, targetId: string, position: DropPosition) {
+      markSidebarLayoutPlacementsEdited([draggedId]);
       updateLayoutAndRebuild(reorderEntryOp(sidebarLayout.value, draggedId, targetId, position));
     },
     reorderSidebarEntries(draggedIds: string[], targetId: string, position: DropPosition, options?: ReorderEntriesOptions) {
+      markSidebarLayoutPlacementsEdited(draggedIds);
       const layout = reorderEntriesOp(sidebarLayout.value, draggedIds, targetId, position, options);
       if (layout !== sidebarLayout.value) updateLayoutAndRebuild(layout);
     },

@@ -9051,7 +9051,8 @@ pub fn postgres_statement_returns_rows(sql: &str) -> bool {
     // its rows. The first word alone cannot decide this: `EXECUTE prepared` is a
     // different statement whose row count depends on the prepared SQL, so keep
     // it on the command path (#13870).
-    if starts_with_executable_sql_keyword_sequence(sql, &["EXECUTE", "DIRECT"]) {
+    // ON separates this routing syntax from a prepared statement named DIRECT.
+    if starts_with_executable_sql_keyword_sequence(sql, &["EXECUTE", "DIRECT", "ON"]) {
         return true;
     }
 
@@ -12803,7 +12804,12 @@ mod tests {
 
         // A plain prepared-statement EXECUTE may be DML, so it keeps using the
         // command path and its affected-row count.
-        for sql in ["EXECUTE prepared_statement", "EXECUTED DIRECT ON (dn_1) 'SELECT 1'"] {
+        for sql in [
+            "EXECUTE prepared_statement",
+            "EXECUTE DIRECT",
+            "EXECUTE DIRECT(1)",
+            "EXECUTED DIRECT ON (dn_1) 'SELECT 1'",
+        ] {
             assert!(!postgres_statement_returns_rows(sql), "expected command result for: {sql}");
         }
     }

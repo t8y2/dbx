@@ -18,7 +18,7 @@ const connectionStore = {
   connectingIds: new Set<string>(),
   connectionMultiSelectActive: false,
   connections: [],
-  getConfig: () => ({ id: "hana-1", db_type: "saphana" }),
+  getConfig: vi.fn(() => ({ id: "hana-1", db_type: "saphana" })),
   isDefaultDatabase: () => false,
   isDefaultSchema: () => false,
   isPinnedTreeNodeReorderTarget: () => false,
@@ -106,5 +106,24 @@ describe("TreeItem empty database filter badge", () => {
     );
     expect(container.textContent).toContain("12");
     expect(container.textContent).toContain("filtered");
+  });
+
+  it.each([
+    ["oracle", "object", "Object type"],
+    ["oracle", "collection", "Collection type"],
+    ["oracle", "other-kind", "Other type"],
+    ["postgres", "enum", "Enum"],
+  ])("renders the %s custom type kind with its existing locale key", async (dbType, kind, expected) => {
+    connectionStore.getConfig.mockReturnValue({ id: "hana-1", db_type: dbType });
+    const container = await mountTreeItem({
+      id: `${dbType}:type`,
+      label: "TYPE_OBJ",
+      type: "type",
+      connectionId: "hana-1",
+      database: "app",
+      customTypeKind: kind,
+    } as TreeNode);
+    expect(container.textContent).toContain(expected);
+    expect(container.textContent).not.toContain(`${dbType === "postgres" ? "oracleType" : "customType"}.kinds`);
   });
 });

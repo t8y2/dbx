@@ -136,6 +136,7 @@ The grid supports individual cells, rectangular ranges, full rows, and multiple 
 - Use column comments as copied names for business-facing extracts
 - Generate one multi-row `INSERT` or separate `INSERT` statements
 - Exclude primary keys when creating a template for new records
+- Include qualified database names by default when copying rows as SQL DML (`INSERT` and `UPDATE`); migration re-enables this by default for users who previously unchecked it, and it can be customized in extractor settings
 
 When DBX can resolve a foreign-key relationship, a cell can navigate to the referenced record. This depends on metadata and target-connection permissions.
 

@@ -86,3 +86,35 @@ test("strips the generated OFFSET ROWS FETCH FIRST suffix fully", () => {
 
   assert.equal(sqlErrorSqlMatchesEditor(editorSql, executedSql), true);
 });
+
+test("underlines only the missing schema.table object, not a following column access", () => {
+  const sql = "SELECT hr.emp.empno FROM hr.emp";
+  const message = (offset: number) => `ORA-00942: table or view does not exist error occur at position: ${offset}`;
+  const objectFrom = sql.indexOf("hr.emp");
+  const objectTo = objectFrom + "hr.emp".length;
+
+  assert.deepEqual(sqlErrorDecorationRange(sql, message(objectFrom), "oracle"), { from: objectFrom, to: objectTo });
+  // A position inside `emp` still belongs to `hr.emp`, not to `emp.empno`.
+  assert.deepEqual(sqlErrorDecorationRange(sql, message(objectFrom + 4), "oracle"), { from: objectFrom, to: objectTo });
+
+  const tableFrom = sql.lastIndexOf("hr.emp");
+  assert.deepEqual(sqlErrorDecorationRange(sql, message(tableFrom), "oracle"), { from: tableFrom, to: tableFrom + "hr.emp".length });
+});
+
+test("keeps a reported keyword position tight to the keyword", () => {
+  const sql = "SELECT hr.emp.empno FROM hr.emp";
+  const keywordFrom = sql.indexOf("FROM");
+
+  // The walk must not extend a keyword position into the object that follows it.
+  assert.deepEqual(sqlErrorDecorationRange(sql, `ORA-00942 error occur at position: ${keywordFrom}`, "oracle"), { from: keywordFrom, to: keywordFrom + "FROM".length });
+});
+
+test("does not apply Oracle object expansion to other database types", () => {
+  const sql = "SELECT /* 中文 */ * FROM missing";
+  const utf16Offset = sql.indexOf("missing");
+  const byteOffset = new TextEncoder().encode(sql.slice(0, utf16Offset)).length;
+  const message = `ORA-00942: table or view does not exist error occur at position: ${byteOffset}`;
+
+  assert.deepEqual(sqlErrorDecorationRange(sql, message, "oracle"), { from: utf16Offset, to: utf16Offset + "missing".length });
+  assert.deepEqual(sqlErrorDecorationRange(sql, message, "postgres"), { from: byteOffset, to: byteOffset + 1 });
+});

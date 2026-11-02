@@ -43,15 +43,32 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
 }
 
 describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
+  it("tracks the result-tab click setting in the draft without changing saved settings", () => {
+    const settings = makeSettings({ pinResultTabOnClick: true });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.pinResultTabOnClick = false;
+    expect(settings.pinResultTabOnClick).toBe(true);
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+    expect(editorSettingsPatchFromDraft(draft, base)).toMatchObject({ pinResultTabOnClick: false });
+  });
+
   it("captures and saves the column comment placement preference", () => {
     const base = editorSettingsDraftFromSettings(makeSettings({ dataGridColumnCommentsInInfoArea: false, dataGridTransposeMetadataInInfoColumn: false }));
     const draft = editorSettingsDraftFromSettings(makeSettings({ dataGridColumnCommentsInInfoArea: true, dataGridTransposeMetadataInInfoColumn: true }));
     expect(draft.dataGridColumnCommentsInInfoArea).toBe(true);
     expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ dataGridColumnCommentsInInfoArea: true, dataGridTransposeMetadataInInfoColumn: true });
   });
-  it("keeps connection and query timeout ownership outside editor settings", () => {
-    expect(EDITOR_SETTINGS_DRAFT_KEYS).not.toContain("globalConnectTimeoutSecs");
-    expect(EDITOR_SETTINGS_DRAFT_KEYS).not.toContain("globalQueryTimeoutSecs");
+  it("exposes the global connect/query timeouts in the settings draft (#13233)", () => {
+    // 设置页现在直接展示并允许调整全局超时（issue #13233），草稿键必须包含这两个字段，
+    // 且落盘口径与连接编辑对话框一致：连接超时 1~300 秒，查询超时 0~3600 秒（0=不限）。
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("globalConnectTimeoutSecs");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("globalQueryTimeoutSecs");
+    const settings = makeSettings({ globalConnectTimeoutSecs: 10, globalQueryTimeoutSecs: 60 } as Partial<EditorSettings>);
+    const draft = editorSettingsDraftFromSettings(settings);
+    draft.globalConnectTimeoutSecs = 9999;
+    draft.globalQueryTimeoutSecs = 0;
+    expect(editorSettingsPatchFromDraft(draft, editorSettingsDraftFromSettings(settings))).toEqual({ globalConnectTimeoutSecs: 300, globalQueryTimeoutSecs: 0 });
   });
 
   it("includes showLineNumbers", () => {
@@ -72,6 +89,12 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("queryResultExportFileNameSource");
     const draft = editorSettingsDraftFromSettings(makeSettings({ queryResultExportFileNameSource: "tab-title" } as Partial<EditorSettings>));
     expect(draft.queryResultExportFileNameSource).toBe("tab-title");
+  });
+
+  it("includes colorizeConnectionTabsScope (#12955)", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("colorizeConnectionTabsScope");
+    const draft = editorSettingsDraftFromSettings(makeSettings({ colorizeConnectionTabsScope: "active" } as Partial<EditorSettings>));
+    expect(draft.colorizeConnectionTabsScope).toBe("active");
   });
 
   it("includes continueOnErrorOnBatch", () => {
@@ -209,6 +232,15 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(editorSettingsDraftChanged(draft, base)).toBe(true);
     expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ functionCompletionIncludeParams: false });
   });
+
+  it("includes sequenceCompletionEnabled in draft keys, draft conversion, and patch", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("sequenceCompletionEnabled");
+    const draft = editorSettingsDraftFromSettings(makeSettings({ sequenceCompletionEnabled: false }));
+    const base = editorSettingsDraftFromSettings(makeSettings({ sequenceCompletionEnabled: true }));
+    expect(draft.sequenceCompletionEnabled).toBe(false);
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ sequenceCompletionEnabled: false });
+  });
 });
 
 describe("editorSettingsDraftFromSettings", () => {
@@ -243,12 +275,14 @@ describe("editorSettingsDraftFromSettings", () => {
     expect(base.sqlVariableSyntaxOverrides).toEqual({ mysql: { shell: false } });
   });
 
-  it("does not include persisted global timeout values in editor drafts", () => {
+  it("includes persisted global timeout values in editor drafts (#13233)", () => {
+    // 设置页直接展示全局超时后（issue #13233），草稿必须携带落盘值且走同一 normalize 口径；
+    // 未修改时不应产生这两个字段的 patch，避免 Apply 误覆盖。
     const settings = makeSettings({ globalConnectTimeoutSecs: 17, globalQueryTimeoutSecs: 43 });
     const draft = editorSettingsDraftFromSettings(settings);
 
-    expect(draft).not.toHaveProperty("globalConnectTimeoutSecs");
-    expect(draft).not.toHaveProperty("globalQueryTimeoutSecs");
+    expect(draft.globalConnectTimeoutSecs).toBe(17);
+    expect(draft.globalQueryTimeoutSecs).toBe(43);
     expect(editorSettingsPatchFromDraft(draft, draft)).not.toHaveProperty("globalConnectTimeoutSecs");
     expect(editorSettingsPatchFromDraft(draft, draft)).not.toHaveProperty("globalQueryTimeoutSecs");
   });

@@ -29,6 +29,12 @@ export interface SelectionSummary {
   /** Exact decimal text, so integers beyond 2^53 and DECIMAL scales survive. */
   sum: string;
   average: string | null;
+  /** Smallest participating numeric value as exact decimal text (#13286). */
+  min: string | null;
+  /** Largest participating numeric value as exact decimal text (#13286). */
+  max: string | null;
+  /** Distinct participating numeric values, compared by exact decimal text (#13286). */
+  distinctCount: number;
 }
 
 export interface SelectionSummaryOptions {
@@ -184,9 +190,20 @@ function rescaleDecimal(value: ExactDecimal, scale: number): bigint {
   return value.scale === scale ? value.coefficient : value.coefficient * 10n ** BigInt(scale - value.scale);
 }
 
+/** Compares two exact decimals by rescaling to the finer of the two scales. */
+function compareExactDecimal(left: ExactDecimal, right: ExactDecimal): number {
+  const scale = Math.max(left.scale, right.scale);
+  const a = rescaleDecimal(left, scale);
+  const b = rescaleDecimal(right, scale);
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /** Adds a cell to an exact running total; `resolved` is the number the cell counts as. */
 export function addExactSelectionValue(sum: ExactDecimal, value: GridCellValue, resolved: number): ExactDecimal {
-  const exact = exactSelectionValue(value, resolved);
+  return addExactDecimal(sum, exactSelectionValue(value, resolved));
+}
+
+function addExactDecimal(sum: ExactDecimal, exact: ExactDecimal): ExactDecimal {
   const scale = Math.max(sum.scale, exact.scale);
   return { coefficient: rescaleDecimal(sum, scale) + rescaleDecimal(exact, scale), scale };
 }
@@ -214,13 +231,20 @@ export function summarizeSelection(selection: SelectionData, options: SelectionS
   const numericValue = options.numericValue ?? plainSelectionNumericValue;
   let numericCount = 0;
   let sum: ExactDecimal = { coefficient: 0n, scale: 0 };
+  let min: ExactDecimal | null = null;
+  let max: ExactDecimal | null = null;
+  const distinctValues = new Set<string>();
 
   for (const row of selection.rows) {
     for (const value of row) {
       const resolved = numericValue(value);
       if (resolved === undefined || !Number.isFinite(resolved)) continue;
       numericCount += 1;
-      sum = addExactSelectionValue(sum, value, resolved);
+      const exact = exactSelectionValue(value, resolved);
+      sum = addExactDecimal(sum, exact);
+      if (min === null || compareExactDecimal(exact, min) < 0) min = exact;
+      if (max === null || compareExactDecimal(exact, max) > 0) max = exact;
+      distinctValues.add(exactDecimalText(exact));
     }
   }
 
@@ -233,6 +257,9 @@ export function summarizeSelection(selection: SelectionData, options: SelectionS
     numericCount,
     sum: exactDecimalText(sum),
     average,
+    min: min === null ? null : exactDecimalText(min),
+    max: max === null ? null : exactDecimalText(max),
+    distinctCount: distinctValues.size,
   };
 }
 
@@ -243,6 +270,9 @@ export function createPendingSelectionSummary(cellCount: number, rowCount: numbe
     numericCount: 0,
     sum: "0",
     average: null,
+    min: null,
+    max: null,
+    distinctCount: 0,
   };
 }
 

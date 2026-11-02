@@ -46,6 +46,10 @@ export function showSidebarRowProductionBadge(node: Pick<TreeNode, "type" | "dat
   return active && ((scope === "database" && productionContainerTypes.has(node.type)) || (scope === "table" && productionObjectTypes.has(node.type)));
 }
 
+export function isSidebarProductionContainer(node: Pick<TreeNode, "type">): boolean {
+  return node.type === "connection" || productionContainerTypes.has(node.type);
+}
+
 export function showSidebarStickyProductionBadge(node: Pick<TreeNode, "database"> | undefined, connection: ConnectionConfig | undefined): boolean {
   // Only connection scope needs a separate fixed badge. Database/schema and
   // table/object scopes render the badge on the fixed row itself.

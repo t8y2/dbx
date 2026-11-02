@@ -31,7 +31,7 @@ describe("OceanBase copy readability and compatibility", () => {
     expect(buildConnectionUrlCopy(connection, "urlWithPassword")).toBe("oceanbase://admin@tenant@cluster:secret@db.example.com:2881/appdb");
     expect(buildConnectionUrlCopy(connection, "jdbcUrl")).toBe("jdbc:oceanbase://db.example.com:2881/appdb");
     expect(buildConnectionUrlCopy(connection, "jdbcUrlWithCredentials")).toBe("jdbc:oceanbase://db.example.com:2881/appdb?user=admin@tenant@cluster&password=secret");
-    expect(connectionUrlCopyFormats(connection)).toEqual(["url", "urlWithPassword", "jdbcUrl", "jdbcUrlWithCredentials", "hostPort"]);
+    expect(connectionUrlCopyFormats(connection)).toEqual(["url", "urlWithPassword", "jdbcUrl", "jdbcUrlWithCredentials", "hostPort", "password"]);
     for (const format of ["url", "urlWithPassword", "jdbcUrlWithCredentials"] as const) {
       const parsed = parseConnectionUrl(buildConnectionUrlCopy(connection, format)!);
       expect(parsed.username).toBe(connection.username);
@@ -90,7 +90,7 @@ describe("OceanBase copy readability and compatibility", () => {
 
 describe("connectionUrlCopyFormats", () => {
   it("lists all formats for a PostgreSQL connection with a stored password", () => {
-    expect(connectionUrlCopyFormats(config({}))).toEqual(["url", "urlWithPassword", "jdbcUrl", "jdbcUrlWithCredentials", "hostPort", "dsn", "dsnWithPassword", "psqlCommand"]);
+    expect(connectionUrlCopyFormats(config({}))).toEqual(["url", "urlWithPassword", "jdbcUrl", "jdbcUrlWithCredentials", "hostPort", "dsn", "dsnWithPassword", "psqlCommand", "password"]);
   });
 
   it("drops every password-inclusive format when no password is stored", () => {
@@ -116,7 +116,7 @@ describe("connectionUrlCopyFormats", () => {
 
   it("keeps H2 server mode available through its explicit connection string", () => {
     const formats = connectionUrlCopyFormats(config({ db_type: "h2", host: "db.example.com", port: 9092, connection_string: "jdbc:h2:tcp://db.example.com:9092/~/test" }));
-    expect(formats).toEqual(["url", "hostPort"]);
+    expect(formats).toEqual(["url", "hostPort", "password"]);
   });
 
   it("hides URL copy for service-registry and message-queue connections", () => {
@@ -126,7 +126,7 @@ describe("connectionUrlCopyFormats", () => {
 
   it("offers only JDBC formats for hive-family connections", () => {
     const formats = connectionUrlCopyFormats(config({ db_type: "hive", host: "hive.example.com", port: 10000, database: "dw" }));
-    expect(formats).toEqual(["jdbcUrl", "jdbcUrlWithCredentials", "hostPort"]);
+    expect(formats).toEqual(["jdbcUrl", "jdbcUrlWithCredentials", "hostPort", "password"]);
   });
 
   it("uses semicolon options when copying an Inceptor JDBC URL", () => {
@@ -427,5 +427,27 @@ describe("buildConnectionUrlCopy host:port, DSN and psql", () => {
     expect(connectionUrlCopyFormats(config({ db_type: "gaussdb", driver_profile: "gaussdb-m" }))).not.toContain("dsn");
     expect(buildConnectionUrlCopy(config({ db_type: "mysql", port: 3306 }), "dsn")).toBeNull();
     expect(buildConnectionUrlCopy(config({ db_type: "mysql", port: 3306 }), "dsnWithPassword")).toBeNull();
+  });
+});
+
+describe("Elasticsearch API key connection URL copies", () => {
+  it("copies only the endpoint and never represents an API key as Basic-auth userinfo", () => {
+    const search = config({ db_type: "elasticsearch", host: "search.example.com", port: 9243, ssl: true, database: "", username: "stale-user", password: "synthetic-api-key", external_config: { authType: "apiKey" } });
+    expect(buildConnectionUrlCopy(search, "url")).toBe("https://search.example.com:9243");
+    expect(buildConnectionUrlCopy(search, "urlWithPassword")).toBe("https://search.example.com:9243");
+    expect(connectionUrlCopyFormats(search)).toEqual(["url", "hostPort"]);
+  });
+});
+
+describe("raw password copy format", () => {
+  it("copies the stored password verbatim instead of the percent-encoded URL fragment", () => {
+    const password = "Jv@S#2I^x%40";
+    expect(buildConnectionUrlCopy(config({ password }), "password")).toBe(password);
+    expect(connectionUrlCopyFormats(config({ password }))).toContain("password");
+  });
+
+  it("omits the raw password item when no password is stored", () => {
+    expect(buildConnectionUrlCopy(config({ password: "" }), "password")).toBeNull();
+    expect(connectionUrlCopyFormats(config({ password: "" }))).not.toContain("password");
   });
 });

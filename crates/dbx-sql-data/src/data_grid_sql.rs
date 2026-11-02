@@ -2843,10 +2843,22 @@ pub fn format_grid_sql_literal_with_identifier_quote(
             return timestamp.to_string();
         }
     }
+    if column_info.map(|column| is_uuid_column_type(&column.data_type)).unwrap_or(false) {
+        if let Some(literal) = format_hex_uuid_literal(&text) {
+            return literal;
+        }
+    }
     if is_mysql_binary_literal_column(database_type, column_info) {
         if let Some(literal) = format_mysql_binary_literal_text(&text) {
             // DBX result values expose binary columns as prefixed hex; keep them
             // as MySQL hex literals so copied INSERT/UPDATE SQL round-trips bytes.
+            return literal;
+        }
+    }
+    if is_sqlserver_binary_literal_column(database_type, column_info) {
+        if let Some(literal) = format_sqlserver_binary_literal_text(&text) {
+            // SQL Server timestamp/rowversion values are binary counters, not
+            // Unicode strings. Keyless row predicates must compare their bytes.
             return literal;
         }
     }
@@ -3305,6 +3317,53 @@ fn is_mysql_binary_column_type(data_type: &str) -> bool {
     matches!(base, "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob")
 }
 
+fn is_uuid_column_type(data_type: &str) -> bool {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ']).next().unwrap_or("").trim();
+    matches!(base, "uuid" | "uniqueidentifier")
+}
+
+fn format_hex_uuid_literal(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let hex = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X"))?;
+    if !hex.is_ascii() {
+        return None;
+    }
+    let hex_bytes = hex.as_bytes();
+    if hex_bytes.len() == 72 && hex_bytes.iter().all(|b| b.is_ascii_hexdigit()) {
+        let mut bytes = Vec::with_capacity(36);
+        for chunk in hex_bytes.chunks_exact(2) {
+            let s = std::str::from_utf8(chunk).ok()?;
+            let byte = u8::from_str_radix(s, 16).ok()?;
+            bytes.push(byte);
+        }
+        if bytes.len() == 36
+            && bytes.iter().enumerate().all(|(idx, &b)| {
+                if idx == 8 || idx == 13 || idx == 18 || idx == 23 {
+                    b == b'-'
+                } else {
+                    b.is_ascii_hexdigit()
+                }
+            })
+        {
+            let uuid_str = std::str::from_utf8(&bytes).ok()?;
+            return Some(format!("'{uuid_str}'"));
+        }
+    }
+    if hex_bytes.len() == 32 && hex_bytes.iter().all(|b| b.is_ascii_hexdigit()) {
+        let lower = hex.to_ascii_lowercase();
+        return Some(format!(
+            "'{}-{}-{}-{}-{}'",
+            &lower[0..8],
+            &lower[8..12],
+            &lower[12..16],
+            &lower[16..20],
+            &lower[20..32]
+        ));
+    }
+    None
+}
+
 fn format_mysql_binary_literal_text(text: &str) -> Option<String> {
     let trimmed = text.trim();
     let hex = trimmed.strip_prefix("0x")?;
@@ -3315,12 +3374,40 @@ fn format_mysql_binary_literal_text(text: &str) -> Option<String> {
     }
 }
 
+fn is_sqlserver_binary_literal_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> bool {
+    database_type == Some(DatabaseType::SqlServer)
+        && column_info.is_some_and(|column| {
+            let normalized = column.data_type.trim().trim_matches('"').to_ascii_lowercase();
+            let base = normalized.split(['(', ' ', '\t', '\n']).next().unwrap_or("");
+            matches!(base, "binary" | "varbinary" | "timestamp" | "rowversion")
+        })
+}
+
+fn format_sqlserver_binary_literal_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let hex = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X"))?;
+    if hex.len() % 2 == 0 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(format!("0x{hex}"))
+    } else {
+        None
+    }
+}
+
 fn is_postgres_binary_literal_column(
     database_type: Option<DatabaseType>,
     column_info: Option<&DataGridColumnInfo>,
 ) -> bool {
     database_type == Some(DatabaseType::Postgres)
-        && column_info.is_some_and(|column| column.data_type.trim().eq_ignore_ascii_case("bytea"))
+        && column_info.is_some_and(|column| {
+            let data_type = column.data_type.trim();
+            // accept an optional single schema qualifier (pg_catalog.bytea) so the write-back
+            // literal path stays aligned with the frontend BYTEA_TYPE_RE edit gate
+            let bytea_name = data_type.split_once('.').map_or(data_type, |(_, name)| name);
+            bytea_name.eq_ignore_ascii_case("bytea")
+        })
 }
 
 fn format_postgres_binary_literal_text(text: &str) -> Option<String> {
@@ -10995,6 +11082,73 @@ mod tests {
     }
 
     #[test]
+    fn uuid_column_literals_decode_prefixed_hex_values() {
+        let uuid_col = column("id", "uuid", false, None);
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("0x30316130353762662d326262642d373061362d623363332d353665623430396130663935"),
+                Some(DatabaseType::Mysql),
+                Some(&uuid_col)
+            ),
+            "'01a057bf-2bbd-70a6-b3c3-56eb409a0f95'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("0x01a057bf2bbd70a6b3c356eb409a0f95"),
+                Some(DatabaseType::Mysql),
+                Some(&uuid_col)
+            ),
+            "'01a057bf-2bbd-70a6-b3c3-56eb409a0f95'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("01a057bf-2bbd-70a6-b3c3-56eb409a0f95"),
+                Some(DatabaseType::Mysql),
+                Some(&uuid_col)
+            ),
+            "'01a057bf-2bbd-70a6-b3c3-56eb409a0f95'"
+        );
+    }
+
+    #[test]
+    fn uuid_column_literals_handle_malformed_unicode_safely() {
+        let uuid_col = column("id", "uuid", false, None);
+
+        // 3-byte UTF-8 char '你' + 69 ASCII chars = 72 bytes. Slicing at byte index 2 must not panic.
+        let malformed_72_bytes = format!("0x你{}", "0".repeat(69));
+        assert_eq!(malformed_72_bytes.len(), 2 + 3 + 69); // 74 bytes with prefix '0x'
+        assert_eq!(format_hex_uuid_literal(&malformed_72_bytes), None);
+        // format_grid_sql_literal falls back safely to quoted string without panicking
+        assert_eq!(
+            format_grid_sql_literal(&json!(malformed_72_bytes), Some(DatabaseType::Mysql), Some(&uuid_col)),
+            format!("'{}'", malformed_72_bytes.replace('\\', "\\\\").replace('\'', "\\'"))
+        );
+
+        // 10 3-byte UTF-8 chars (30 bytes) + 2 ASCII chars = 32 bytes
+        let malformed_32_bytes = format!("0x{}00", "你".repeat(10));
+        assert_eq!(format_hex_uuid_literal(&malformed_32_bytes), None);
+
+        // Non-hex ASCII chars
+        let non_hex_72 = format!("0x{}", "g".repeat(72));
+        assert_eq!(format_hex_uuid_literal(&non_hex_72), None);
+        let non_hex_32 = format!("0x{}", "z".repeat(32));
+        assert_eq!(format_hex_uuid_literal(&non_hex_32), None);
+    }
+
+    #[test]
+    fn binary_columns_preserve_canonical_hex_for_ascii_uuid() {
+        let binary_col = column("payload", "binary(36)", false, None);
+        let varbinary_col = column("payload", "varbinary(36)", false, None);
+        let hex = "0x30316130353762662d326262642d373061362d623363332d353665623430396130663935";
+
+        // MySQL binary columns emit the canonical 0x<hex> literal unchanged;
+        // the important part of the fix is that content-shape UUID guessing
+        // no longer turns this into a quoted '01a057bf-...' UUID string.
+        assert_eq!(format_grid_sql_literal(&json!(hex), Some(DatabaseType::Mysql), Some(&binary_col)), hex);
+        assert_eq!(format_grid_sql_literal(&json!(hex), Some(DatabaseType::Mysql), Some(&varbinary_col)), hex);
+    }
+
+    #[test]
     fn postgres_bytea_literals_decode_prefixed_hex_values() {
         let bytea = column("payload", "bytea", true, None);
         let text = column("label", "text", true, None);
@@ -11009,6 +11163,25 @@ mod tests {
         );
         assert_eq!(format_grid_sql_literal(&json!("0xabc"), Some(DatabaseType::Postgres), Some(&bytea)), "'0xabc'");
         assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(DatabaseType::Postgres), Some(&text)), "'0x00ab'");
+    }
+
+    #[test]
+    fn postgres_bytea_literal_gate_accepts_schema_qualified_and_rejects_arrays() {
+        let qualified = column("payload", "pg_catalog.bytea", true, None);
+        let array = column("payload", "bytea[]", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&json!("0x00aBff"), Some(DatabaseType::Postgres), Some(&qualified)),
+            "decode('00aBff', 'hex')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("0x00aBff"), Some(DatabaseType::Postgres), Some(&array)),
+            "'0x00aBff'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("0x00aBff"), Some(DatabaseType::Gaussdb), Some(&qualified)),
+            "'0x00aBff'"
+        );
     }
 
     #[test]
@@ -11093,6 +11266,82 @@ mod tests {
             result.statements,
             vec![format!(r#"UPDATE "DBX_TEST"."DBX9708_JSON" SET "VAL" = '{nested_json}' WHERE "ID" = 1;"#)]
         );
+    }
+
+    #[test]
+    fn sqlserver_binary_literals_preserve_prefixed_hex_values() {
+        for data_type in ["timestamp", "ROWVERSION", "binary(8)", "VARBINARY(MAX)"] {
+            let binary = column("version", data_type, true, None);
+            for (value, expected) in [
+                ("0x0000000000639f1c", "0x0000000000639f1c"),
+                ("0x00aBff", "0x00aBff"),
+                ("0X00aBff", "0x00aBff"),
+                ("0x", "0x"),
+            ] {
+                assert_eq!(
+                    format_grid_sql_literal(&json!(value), Some(DatabaseType::SqlServer), Some(&binary)),
+                    expected,
+                    "{data_type}: {value}"
+                );
+            }
+            assert_eq!(format_grid_sql_literal(&Value::Null, Some(DatabaseType::SqlServer), Some(&binary)), "NULL");
+        }
+    }
+
+    #[test]
+    fn sqlserver_binary_literals_keep_invalid_hex_and_text_columns_quoted() {
+        let binary = column("version", "timestamp", true, None);
+        for (value, expected) in [
+            ("0x0g", "N'0x0g'"),
+            ("0x123", "N'0x123'"),
+            ("0x你", "N'0x你'"),
+            ("0x00; DELETE FROM users", "N'0x00; DELETE FROM users'"),
+            ("0x00' OR 1=1--", "N'0x00'' OR 1=1--'"),
+        ] {
+            assert_eq!(format_grid_sql_literal(&json!(value), Some(DatabaseType::SqlServer), Some(&binary)), expected);
+        }
+        for data_type in ["nvarchar(50)", "datetime2", "timestamped", "notbinary"] {
+            let text = column("value", data_type, true, None);
+            assert_eq!(
+                format_grid_sql_literal(&json!("0x00ab"), Some(DatabaseType::SqlServer), Some(&text)),
+                "N'0x00ab'"
+            );
+        }
+        assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(DatabaseType::SqlServer), None), "N'0x00ab'");
+        for database_type in [DatabaseType::Postgres, DatabaseType::Mysql] {
+            assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(database_type), Some(&binary)), "'0x00ab'");
+        }
+    }
+
+    #[test]
+    fn sqlserver_keyless_save_uses_binary_rowversion_predicates() {
+        // Table metadata calls this timestamp/rowversion; TDS result metadata
+        // may instead report binary/varbinary. Both must preserve the bytes.
+        for data_type in ["timestamp", "rowversion", "binary(8)", "varbinary(8)"] {
+            let mut options = mysql_people_save_options(2);
+            options.database_type = Some(DatabaseType::SqlServer);
+            options.table_meta.schema = Some("dbo".into());
+            options.table_meta.primary_keys.clear();
+            options.table_meta.columns.as_mut().unwrap().push(column("version", data_type, false, None));
+            options.columns.push("version".into());
+            options.rows[0].push(json!("0x0000000000639f1c"));
+            options.rows[1].push(json!("0x0000000000639f1d"));
+            options.dirty_rows = vec![(0, vec![(1, json!("blocked"))])];
+            options.deleted_rows = vec![1];
+
+            let result = prepare_data_grid_save(options);
+            assert_eq!(result.validation_error, None);
+            assert_eq!(
+                result.statements,
+                vec![
+                    "UPDATE [dbo].[people] SET [status] = N'blocked' WHERE [id] = 1 AND [status] = N'active' AND [version] = 0x0000000000639f1c;",
+                    "DELETE FROM [dbo].[people] WHERE [id] = 2 AND [status] = N'active' AND [version] = 0x0000000000639f1d;",
+                ],
+                "{data_type}"
+            );
+            assert_eq!(result.keyless_guards.len(), 2);
+            assert_guards_cover_statement_predicates(&result);
+        }
     }
 
     #[test]

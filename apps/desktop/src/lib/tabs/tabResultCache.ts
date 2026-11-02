@@ -28,6 +28,7 @@ export interface TabResultSnapshot {
    */
   resultLocalSortOriginalRows?: QueryResult["rows"];
   resultLocalSortOriginalLargeValueCells?: QueryResult["large_value_cells"];
+  resultLocalSortOriginalRawKeyCells?: QueryResult["raw_key_cells"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   resultRuns?: QueryTab["resultRuns"];
@@ -63,6 +64,7 @@ interface ColumnarQueryResult {
   spatial_columns?: QueryResult["spatial_columns"];
   spatial_values?: QueryResult["spatial_values"];
   large_value_cells?: QueryResult["large_value_cells"];
+  raw_key_cells?: QueryResult["raw_key_cells"];
   execution_error?: true;
   statement_index?: number;
   column_types?: string[];
@@ -83,6 +85,8 @@ interface ColumnarQueryResult {
   truncated?: boolean;
   has_more?: boolean;
   page_has_more?: boolean;
+  sqlPage?: QueryResult["sqlPage"];
+  executedStatement?: string;
   sourceLabel?: string;
   sourceLabelKind?: QueryResult["sourceLabelKind"];
   sourceQualifier?: string;
@@ -366,6 +370,7 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
     large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
+    raw_key_cells: result.raw_key_cells?.map((cell) => ({ ...cell })),
     rows: result.rows.map((row) => [...row]),
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
@@ -382,6 +387,8 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     session_id: undefined,
     has_more: result.has_more,
     page_has_more: result.page_has_more,
+    sqlPage: result.sqlPage ? { ...result.sqlPage } : undefined,
+    executedStatement: result.executedStatement,
     sourceLabel: result.sourceLabel,
     sourceLabelKind: result.sourceLabelKind,
     sourceQualifier: result.sourceQualifier,
@@ -403,6 +410,7 @@ function stripResultRunSessionIds(resultRuns: QueryTab["resultRuns"]): QueryTab[
     results: stripResultSessionIds(run.results),
     resultLocalSortOriginalRows: run.resultLocalSortOriginalRows?.map((row) => [...row]),
     resultLocalSortOriginalLargeValueCells: run.resultLocalSortOriginalLargeValueCells?.map((cell) => ({ ...cell })),
+    resultLocalSortOriginalRawKeyCells: run.resultLocalSortOriginalRawKeyCells?.map((cell) => ({ ...cell })),
     resultLocalSortOriginalMongoDocuments: run.resultLocalSortOriginalMongoDocuments ? clonePlain(run.resultLocalSortOriginalMongoDocuments) : undefined,
     resultLocalSortOriginalMongoCopyDocuments: run.resultLocalSortOriginalMongoCopyDocuments ? clonePlain(run.resultLocalSortOriginalMongoCopyDocuments) : undefined,
     resultSessionId: undefined,
@@ -433,6 +441,7 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
     large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
+    raw_key_cells: result.raw_key_cells?.map((cell) => ({ ...cell })),
     rowCount,
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
@@ -448,6 +457,8 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     truncated: result.truncated,
     has_more: result.has_more,
     page_has_more: result.page_has_more,
+    sqlPage: result.sqlPage ? { ...result.sqlPage } : undefined,
+    executedStatement: result.executedStatement,
     sourceLabel: result.sourceLabel,
     sourceLabelKind: result.sourceLabelKind,
     sourceQualifier: result.sourceQualifier,
@@ -472,6 +483,7 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
     large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
+    raw_key_cells: result.raw_key_cells?.map((cell) => ({ ...cell })),
     rows,
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
@@ -488,6 +500,8 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     session_id: undefined,
     has_more: result.has_more,
     page_has_more: result.page_has_more,
+    sqlPage: result.sqlPage ? { ...result.sqlPage } : undefined,
+    executedStatement: result.executedStatement,
     sourceLabel: result.sourceLabel,
     sourceLabelKind: result.sourceLabelKind,
     sourceQualifier: result.sourceQualifier,
@@ -810,6 +824,8 @@ export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undef
     activeResultIndex: tab.activeResultIndex,
     resultEditorFingerprint: tab.resultEditorFingerprint,
     resultLocalSortOriginalRows: tab.resultLocalSortOriginalRows?.map((row) => [...row]),
+    resultLocalSortOriginalLargeValueCells: tab.resultLocalSortOriginalLargeValueCells?.map((cell) => ({ ...cell })),
+    resultLocalSortOriginalRawKeyCells: tab.resultLocalSortOriginalRawKeyCells?.map((cell) => ({ ...cell })),
     resultLocalSortOriginalMongoDocuments: tab.resultLocalSortOriginalMongoDocuments ? clonePlain(tab.resultLocalSortOriginalMongoDocuments) : undefined,
     resultLocalSortOriginalMongoCopyDocuments: tab.resultLocalSortOriginalMongoCopyDocuments ? clonePlain(tab.resultLocalSortOriginalMongoCopyDocuments) : undefined,
     resultRuns: stripResultRunSessionIds(tab.resultRuns),

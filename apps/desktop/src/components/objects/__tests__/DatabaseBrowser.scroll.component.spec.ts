@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, reactive, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DatabaseBrowser from "../DatabaseBrowser.vue";
 import { provideTabUiState, TAB_UI_STATE_TRACK_DEBOUNCE_MS } from "@/lib/tabs/tabUiState";
@@ -20,7 +20,8 @@ const mocks = vi.hoisted(() => ({
   listDatabases: vi.fn(),
   listDatabaseMetadata: vi.fn(),
   editorSettings: {
-    objectBrowserViewMode: "list" as "list" | "grid",
+    objectBrowserViewMode: "list" as "list" | "grid" | "compact",
+    objectBrowserCompactWidth: 160,
   },
 }));
 
@@ -45,9 +46,9 @@ vi.mock("@/stores/queryStore", () => ({
 
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
-    editorSettings: mocks.editorSettings,
+    editorSettings: reactive(mocks.editorSettings),
     updateEditorSettings: (patch: Partial<typeof mocks.editorSettings>) => {
-      Object.assign(mocks.editorSettings, patch);
+      Object.assign(reactive(mocks.editorSettings), patch);
     },
   }),
 }));
@@ -95,6 +96,7 @@ describe("DatabaseBrowser scroll position preservation (#12432)", () => {
     mocks.listDatabases.mockResolvedValue(testDatabases);
     mocks.listDatabaseMetadata.mockResolvedValue([]);
     mocks.editorSettings.objectBrowserViewMode = "list";
+    mocks.editorSettings.objectBrowserCompactWidth = 160;
   });
 
   afterEach(() => {
@@ -104,6 +106,24 @@ describe("DatabaseBrowser scroll position preservation (#12432)", () => {
     app = undefined;
     host = undefined;
     vi.clearAllMocks();
+  });
+
+  it("updates compact width immediately without losing cards", async () => {
+    mocks.editorSettings.objectBrowserViewMode = "compact";
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    app = createApp(DatabaseBrowser, { connection: testConnection });
+    app.mount(host);
+    await vi.waitFor(() => expect(host!.querySelectorAll(".grid.content-start .h-7")).toHaveLength(testDatabases.length));
+    const scroller = host.querySelector<HTMLElement>(".grid.content-start")!;
+    expect(scroller.style.gridTemplateColumns).toBe("repeat(auto-fill, minmax(min(160px, 100%), 1fr))");
+    const select = host.querySelector<HTMLSelectElement>("[data-compact-width-select]")!;
+    select.value = "200";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await nextTick();
+    expect(scroller.style.gridTemplateColumns).toBe("repeat(auto-fill, minmax(min(200px, 100%), 1fr))");
+    expect(mocks.editorSettings.objectBrowserCompactWidth).toBe(200);
+    expect(scroller.querySelectorAll(".h-7")).toHaveLength(testDatabases.length);
   });
 
   it("restores scrollTop from tab UI state when mounting in list view", async () => {

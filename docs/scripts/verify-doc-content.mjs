@@ -59,7 +59,7 @@ const knownSlugs = new Set(pages.keys());
 
 for (const file of files) {
   const fullPath = path.join(docsDir, file);
-  const content = fs.readFileSync(fullPath, "utf8");
+  const content = fs.readFileSync(fullPath, "utf8").replaceAll("\r\n", "\n");
   const expectedLanguage = languageOfFile(file);
   const frontmatter = content.match(/^---\n([\s\S]*?)\n---/);
 
@@ -88,7 +88,7 @@ for (const file of files) {
 }
 
 const databaseSupportSource = fs.readFileSync(path.join(repositoryDir, "docs/data/databaseSupport.ts"), "utf8");
-const connectionProfilesSource = fs.readFileSync(path.join(repositoryDir, "apps/desktop/src/types/generated/connectionProfiles.ts"), "utf8");
+const connectionProfilesSource = fs.readFileSync(path.join(repositoryDir, "apps/desktop/src/types/generated/connectionProfiles.ts"), "utf8").replaceAll("\r\n", "\n");
 const jdbcProductProfilesSource = fs.readFileSync(path.join(repositoryDir, "apps/desktop/src/lib/database/jdbcProductProfiles.ts"), "utf8");
 const connectionOptionsMatch = connectionProfilesSource.match(/export const CONNECTION_PICKER_OPTIONS = \[([\s\S]*?)\n\] as const satisfies readonly ConnectionPickerOption\[\];/);
 const jdbcProductProfilesMatch = jdbcProductProfilesSource.match(/JDBC_PRODUCT_PROFILES = \[([^\]]*)\]/);
@@ -126,7 +126,7 @@ if (!connectionOptionsMatch) {
         continue;
       }
 
-      const profileSource = fs.readFileSync(path.join(repositoryDir, "apps/desktop/src", `${profileImport[1]}.ts`), "utf8");
+      const profileSource = fs.readFileSync(path.join(repositoryDir, "apps/desktop/src", `${profileImport[1]}.ts`), "utf8").replaceAll("\r\n", "\n");
       const profileBody = profileSource.match(new RegExp(`export const ${profileName}[^=]*= \\{([\\s\\S]*?)\\n\\};`));
       const idExpression = profileBody?.[1].match(/\bid:\s*([^,\n]+)/)?.[1].trim();
       const directId = idExpression?.match(/^"([^"]+)"$/)?.[1];

@@ -127,3 +127,45 @@ describe("sqlFormatterConfig layout style", () => {
     expect(parseSqlFormatterConfig(JSON.stringify({ version: 3, formatter: "sql-formatter", options: {} }))).toEqual({ ok: false, message: "Unsupported config version." });
   });
 });
+
+describe("SQL formatter custom rule configuration", () => {
+  it.each([20, 50, 76, 80, 120, 500])("accepts a width of %i columns", (expressionWidth) => {
+    const result = parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options: { expressionWidth } }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.settings.expressionWidth).toBe(expressionWidth);
+  });
+
+  it.each([19, 501, 76.5, "76", null])("rejects an invalid width %s", (expressionWidth) => {
+    expect(parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options: { expressionWidth } }))).toEqual({ ok: false, message: "Invalid formatter option value: expressionWidth." });
+  });
+
+  it.each([
+    { listLayout: "unknown" },
+    { selectListLayout: "unknown" },
+    { insertListLayout: false },
+    { updateListLayout: 3 },
+    { customRulesEnabled: "true" },
+    { alignSelectAliases: 1 },
+    { alignUpdateAssignments: null },
+    { selectCommaPosition: "middle" },
+    { insertCommaPosition: true },
+    { updateCommaPosition: "middle" },
+    { whereLogicalOperatorNewline: "unknown" },
+    { onLogicalOperatorNewline: 1 },
+    { expressionLogicalOperatorNewline: false },
+    { listItemAlignment: "left" },
+    { newlineBeforeJoinOn: 1 },
+    { collapseShortStatements: null },
+    { emptyLineMode: "unknown" },
+  ])("rejects invalid explicit custom options %j", (options) => {
+    const result = parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options }));
+    expect(result.ok).toBe(false);
+  });
+
+  it("keeps custom rule settings out of third-party formatter options", () => {
+    const options = sqlFormatterOptions({ customRulesEnabled: true, selectListLayout: "singleLine", expressionWidth: 76 });
+    expect(options.expressionWidth).toBe(76);
+    expect(options).not.toHaveProperty("customRulesEnabled");
+    expect(options).not.toHaveProperty("selectListLayout");
+  });
+});

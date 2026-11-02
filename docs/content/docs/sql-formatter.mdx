@@ -21,6 +21,7 @@ DBX currently uses dedicated formatter grammars for:
 | PostgreSQL, openGauss, GaussDB, KingbaseES, Redshift, and related profiles | PostgreSQL |
 | SQLite, Turso, rqlite, and Cloudflare D1 | SQLite |
 | SQL Server | Transact-SQL |
+| Oracle and OceanBase Oracle mode | PL/SQL |
 | ClickHouse | ClickHouse |
 | Other SQL databases | Generic SQL, with one PostgreSQL-grammar retry when needed |
 
@@ -32,7 +33,7 @@ The default `dbx` layout uses DBX's layout rules: explicit `AS` aliases align, a
 
 `classic` uses sql-formatter's own layout and is also the DBX default from before v0.6.16. To reproduce that earlier output exactly, set **Expression width** to `50` and **FROM clause layout** to the new-line value; the JSON equivalent is `"expressionWidth": 50` and `"fromClauseLayout": "newLine"` next to `"layoutStyle": "classic"`. The result matches v0.6.15 except on Oracle, where the byte/multibyte function variants (`SUBSTRB`, `INSTR2`, `LENGTHB` and the rest of that family) keep the newer fix that normalizes them as functions.
 
-Switching the layout style only changes the engine; it never rewrites the other options. The two indent styles (`tabularLeft`, `tabularRight`) always use sql-formatter's own layout, in either mode.
+With custom rules disabled, switching the layout style never rewrites the other options. The two tabular indent styles (`tabularLeft`, `tabularRight`) use sql-formatter's own layout.
 
 ## Configure Formatting Options
 
@@ -47,7 +48,7 @@ Open **Settings → SQL Formatter**. Form mode exposes:
 | Tab width | `2` or `4` |
 | Logical operator newline | `before`, `after`, or `none` to keep them on the same line |
 | FROM clause layout | `sameLine` keeps the first table on the `FROM` line, `newLine` moves it below |
-| Expression width | `50`, `80`, or `120` |
+| Expression width | An integer from `20` to `500`, such as `76`; long literals are never truncated |
 | Lines between queries | `0`, `1`, or `2` |
 | Preserve empty lines | Keeps blank lines between statements |
 | Dense operators | Reduces spaces around operators |
@@ -56,9 +57,37 @@ Open **Settings → SQL Formatter**. Form mode exposes:
 
 **Restore Defaults** restores the formatter settings defined by the current DBX build. Click **Apply** in the settings dialog to persist changes.
 
+## Separate SELECT, INSERT, and UPDATE Rules
+
+Enable custom rules in the existing formatter panel to configure the three list types independently. Custom rules are off by default. Enabling them selects the rule layout, which supports left- or right-aligned keywords. Disabling them restores the selected base layout, including `classic`, without discarding your rule values.
+
+Choose a general list mode, then override it for SELECT projections, INSERT target columns and each VALUES row, or UPDATE SET assignments:
+
+| Mode | Layout |
+| --- | --- |
+| `singleLine` | Keep the list on one line, even beyond the target width; line comments still require a line break |
+| `fit` | Use one line if the list fits; otherwise put each item on its own line |
+| `vertical` | Put each item on its own line |
+| `wrap` | Pack complete items onto each line up to the target width |
+
+Choose `inherit` for a DML list to use the general rule. General rules also apply to function arguments, IN, GROUP BY, and ORDER BY lists, without splitting commas inside literals. Required breaks in nested lists and conditions take precedence over collapsing an outer short statement.
+
+Additional controls:
+
+- `listItemAlignment` aligns continuation lines with the first item (`firstItem`) or one indent step (`indent`). `alignSelectAliases` and `alignUpdateAssignments` independently align multiline explicit `AS` aliases and SET equals signs when safe.
+- `selectCommaPosition`, `insertCommaPosition`, and `updateCommaPosition` independently select leading or trailing commas, or `inherit` the global `commaPosition`.
+- `whereLogicalOperatorNewline`, `onLogicalOperatorNewline`, and `expressionLogicalOperatorNewline` control AND/OR in WHERE, JOIN ON, and other expressions. Values are `before`, `after`, `none`, or `inherit`. `newlineBeforeJoinOn` starts ON on a new line. BETWEEN's own AND is not a condition separator.
+- `collapseShortStatements` allows short statements on one line but cannot override required breaks. `emptyLineMode` removes code-only blank lines (`remove`), collapses consecutive blank lines to one (`single`), preserves them (`preserve`), or inherits `preserveEmptyLines` (`inherit`). Blank lines inside literals and comments remain intact.
+
+While custom rules are applied, `remove` and `single` also limit generated spacing between queries to `0` and `1` blank lines, respectively. Disabling custom rules or falling back to the base layout restores the saved query spacing.
+
+Edit the sample SQL and dialect in the panel to preview changes before applying them. The preview never executes SQL or replaces an open query. Formatting the same SQL in the editor with the same dialect and settings produces the same result; text outside a selection stays unchanged and editor undo restores the original.
+
+Inputs outside the rule model, such as complete procedural blocks, retain the selected base formatting behavior and report that custom rules were not applied. Select an independent SELECT, INSERT, or UPDATE inside a procedure to apply the rules to that selection. PL/SQL declarations, `:=` assignment alignment, and arbitrary casing dictionaries are not provided.
+
 ## JSON Mode and Import / Export
 
-JSON mode is useful for exact editing, copying, or moving formatter settings. The current file contains only `version`, `formatter`, and `options`:
+JSON mode is useful for exact editing, copying, or moving formatter settings. A file contains `version`, `formatter`, and `options`. This older example still imports; omitted custom-rule options receive their defaults:
 
 ```json
 {
@@ -95,6 +124,8 @@ The JSON editor validates the draft continuously. DBX blocks apply or import whe
 - a value is outside the range accepted by the current build.
 
 **Export Config** downloads `dbx-sql-formatter.json`. Import replaces only SQL formatter options; it does not change connections, editor shortcuts, or other DBX settings. Use [Configuration Cloud Sync](/en/docs/cloud-sync) when you need a broader settings migration.
+
+Exports include all custom rules. This version accepts older v1/v2 formatter files and application-setting backups that lack the new fields. Older application versions may reject files containing new fields, so keep the original file when moving between versions.
 
 ## Parameter Recognition
 

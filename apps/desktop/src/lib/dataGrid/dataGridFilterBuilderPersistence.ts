@@ -1,6 +1,7 @@
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
+import { dataGridColumnNameKey, dataGridSqlTextReferencesAnyColumn } from "@/lib/dataGrid/dataGridDropColumn";
 
 export type DataGridCachedServerColumnFilter = {
   condition: string;
@@ -187,6 +188,33 @@ export function clearDataGridStructuredFilterStatesForTab(tabId: string) {
     if (cacheKey.startsWith(`${tabId}-`)) structuredFilterStateCache.delete(cacheKey);
   }
   persistToStorage();
+}
+
+/** Migrate a table tab's filters before its metadata and refresh SQL change. */
+export async function removeDataGridStructuredFilterColumnsForTab(tabId: string, columns: readonly string[], droppedColumns: readonly string[], caseSensitive: boolean, buildWhere: (rules: DataGridStructuredFilterRule[]) => Promise<string>): Promise<DataGridStructuredFilterCacheState | undefined> {
+  ensureHydrated();
+  const state = structuredFilterStateCache.get(tabId);
+  if (!state || droppedColumns.length === 0) return undefined;
+  const key = (name: string) => dataGridColumnNameKey(name, caseSensitive);
+  const dropped = new Set(droppedColumns.map(key));
+  const remainingColumns = columns.filter((name) => !dropped.has(key(name)));
+  const rules = state.rules.filter((rule) => !dropped.has(key(rule.columnName)));
+  const manualWhereInput = dataGridSqlTextReferencesAnyColumn(state.manualWhereInput, droppedColumns, caseSensitive) ? "" : state.manualWhereInput;
+  const serverColumnFilters: Record<number, DataGridCachedServerColumnFilter> = {};
+  for (const [indexText, filter] of Object.entries(state.serverColumnFilters)) {
+    const column = columns[Number(indexText)];
+    if (!column || dropped.has(key(column)) || dataGridSqlTextReferencesAnyColumn(filter.condition, droppedColumns, caseSensitive)) continue;
+    serverColumnFilters[remainingColumns.indexOf(column)] = filter;
+  }
+  const appliedWhereInput = rules.length === state.rules.length ? state.appliedWhereInput : await buildWhere(cloneDataGridStructuredFilterRules(rules));
+  // The last scope component is the column list; preserve the tab's own schema
+  // and connection components instead of reconstructing them from another pane.
+  const scopeParts = state.scopeKey.split("\u0001");
+  scopeParts[scopeParts.length - 1] = remainingColumns.join("\0");
+  const next = { scopeKey: scopeParts.join("\u0001"), rules, manualWhereInput, appliedWhereInput, serverColumnFilters };
+  structuredFilterStateCache.set(tabId, cloneState(next));
+  persistToStorage();
+  return next;
 }
 
 export function clearDataGridStructuredFilterStates() {

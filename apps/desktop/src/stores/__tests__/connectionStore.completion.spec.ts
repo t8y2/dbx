@@ -2219,4 +2219,36 @@ describe("connectionStore completion assistant", () => {
 
     expect(listSchemas).toHaveBeenCalledTimes(52);
   });
+
+  it("searches local completion tables and column prefixes by comment (#12033)", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [
+        { name: "t_user", kind: "table", schema: "public", comment: "用户基础信息表" },
+        { name: "t_order", kind: "table", schema: "public", comment: "订单表" },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    await store.listCompletionTables("pg-1", "app", "", 20, "public");
+
+    // Match by Chinese comment
+    const matchedByComment = store.lookupLocalCompletionTables("pg-1", "app", "用户", 20, "public");
+    expect(matchedByComment.map((t) => t.name)).toEqual(["t_user"]);
+
+    // Match by comment pinyin initials
+    const matchedByPinyin = store.lookupLocalCompletionTables("pg-1", "app", "ddb", 20, "public");
+    expect(matchedByPinyin.map((t) => t.name)).toEqual(["t_order"]);
+  });
 });

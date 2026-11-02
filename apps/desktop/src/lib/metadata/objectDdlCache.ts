@@ -31,6 +31,9 @@ export interface ObjectDdlRequest {
   tableName: string;
   objectType?: ObjectSourceKind;
   catalog?: string;
+  exactIdentity?: boolean;
+  separateIndexes?: boolean;
+  explicitOwner?: string;
 }
 
 export interface ObjectDdlLoadResult {
@@ -65,7 +68,7 @@ function cacheSegment(value: string | undefined): string {
 }
 
 export function objectDdlCacheKey(request: ObjectDdlRequest): string {
-  return `${[OBJECT_DDL_CACHE_PREFIX, cacheSegment(request.connectionId), cacheSegment(request.database), cacheSegment(request.schema), cacheSegment(request.tableName), cacheSegment(request.catalog), cacheSegment(request.objectType ?? "TABLE")].join(":")}:`;
+  return `${[OBJECT_DDL_CACHE_PREFIX, cacheSegment(request.connectionId), cacheSegment(request.database), cacheSegment(request.schema), cacheSegment(request.tableName), cacheSegment(request.catalog), cacheSegment(request.objectType ?? "TABLE"), ...(request.exactIdentity ? ["exact-v1"] : []), ...(request.separateIndexes ? ["separate-indexes-v1"] : []), ...(request.separateIndexes && request.explicitOwner !== undefined ? ["owner-v1", cacheSegment(request.explicitOwner)] : [])].join(":")}:`;
 }
 
 function invalidationPrefix(match: MetadataCacheInvalidation): string {
@@ -154,11 +157,18 @@ async function loadRemoteDdl(request: ObjectDdlRequest, cacheKey: string, force:
   };
   signal.addEventListener("abort", cancel, { once: true });
   recordMetadataCacheRemoteMiss(cacheKey);
+  const remote = request.exactIdentity
+    ? request.separateIndexes
+      ? api.getTableDdl(request.connectionId, request.database, request.schema, request.tableName, request.objectType, request.catalog, false, true, true, request.explicitOwner)
+      : api.getTableDdl(request.connectionId, request.database, request.schema, request.tableName, request.objectType, request.catalog, false, true)
+    : request.separateIndexes
+      ? api.getTableDisplayDdl(request.connectionId, request.database, request.schema, request.tableName, request.objectType, request.catalog, true, request.explicitOwner)
+      : api.getTableDisplayDdl(request.connectionId, request.database, request.schema, request.tableName, request.objectType, request.catalog);
   entry.promise = waitForMetadata(
-    api.getTableDisplayDdl(request.connectionId, request.database, request.schema, request.tableName, request.objectType, request.catalog).then((rawDdl) => {
+    remote.then((rawDdl) => {
       const ddl = sanitizeDdl(rawDdl);
       const current = !entry.invalidated;
-      if (current && ddl.length <= MAX_PERSISTED_DDL_CHARS) {
+      if (current && !request.exactIdentity && ddl.length <= MAX_PERSISTED_DDL_CHARS) {
         const envelope: ObjectDdlCacheEnvelope = { version: 1, cachedAt: new Date().toISOString(), ddl };
         setMetadataRuntimeCache(cacheKey, ddl, request.connectionId);
         persistSchemaCache(cacheKey, envelope, () => entry.invalidated);
@@ -209,6 +219,7 @@ async function loadObjectDdlInternal(request: ObjectDdlRequest, signal: AbortSig
   if (!options?.force) {
     const runtime = getMetadataRuntimeCache<string>(cacheKey);
     if (runtime) return { ddl: runtime.value, cacheStatus: "memory" };
+    if (request.exactIdentity) return { ddl: await loadRemoteDdl(request, cacheKey, false, signal), cacheStatus: "remote" };
     const readToken = activeCacheReads.begin(cacheKey);
     let cached: string | null;
     try {
@@ -249,20 +260,26 @@ export async function invalidateObjectDdlCache(match: MetadataCacheInvalidation,
   if (metaSettled.status === "rejected") throw toObjectCacheInvalidationError(metaSettled.reason, prefix);
 }
 
-export async function invalidateObjectDdl(request: ObjectDdlRequest): Promise<void> {
+export async function invalidateObjectDdl(request: ObjectDdlRequest, options?: ObjectCacheInvalidationOptions & { metadata?: boolean }): Promise<void> {
   const cacheKey = objectDdlCacheKey(request);
   activeCacheReads.invalidatePrefix(cacheKey);
   invalidateRemoteLoad(cacheKey);
   invalidateMetadataRuntimeCachePrefix(cacheKey);
-  await Promise.allSettled([
+  const results = await Promise.allSettled([
     invalidatePersistedPrefix(cacheKey),
-    invalidateObjectMetadataCache({
-      connectionId: request.connectionId,
-      database: request.database,
-      schema: request.schema,
-      tableName: request.tableName,
-    }),
+    options?.metadata === false
+      ? Promise.resolve()
+      : invalidateObjectMetadataCache(
+          {
+            connectionId: request.connectionId,
+            database: request.database,
+            schema: request.schema,
+            tableName: request.tableName,
+          },
+          options,
+        ),
   ]);
+  if (options?.strict) for (const result of results) if (result.status === "rejected") throw toObjectCacheInvalidationError(result.reason, cacheKey);
 }
 
 /** Invalidate active loads for a disconnected connection without deleting its persisted snapshot. */

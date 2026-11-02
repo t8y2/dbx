@@ -33,6 +33,10 @@ pub enum MqttAuth {
     Password { username: String, password: String },
     #[serde(rename = "certificate")]
     Certificate {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        username: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        password: String,
         #[serde(rename = "caCertPath")]
         ca_cert_path: Option<String>,
         #[serde(rename = "clientCertPath")]
@@ -49,6 +53,14 @@ pub enum MqttTlsVerificationMode {
 }
 
 impl MqttAuth {
+    pub fn credentials(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Password { username, password } => Some((username, password)),
+            Self::Certificate { username, password, .. } if !username.is_empty() => Some((username, password)),
+            _ => None,
+        }
+    }
+
     pub fn kind_str(&self) -> &'static str {
         match self {
             MqttAuth::None => "none",
@@ -189,6 +201,9 @@ impl MqttConnectionConfig {
 #[serde(rename_all = "camelCase")]
 pub struct MqttSavedTopic {
     pub topic: String,
+    /// Display-only alias; absent in configurations saved by older versions.
+    #[serde(default)]
+    pub alias: String,
     #[serde(default)]
     pub qos: MqttQoS,
     #[serde(default)]
@@ -392,5 +407,27 @@ mod tests {
         });
         let config: MqttConnectionConfig = serde_json::from_value(json).unwrap();
         assert!(!config.host.trim().is_empty() || config.host.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod saved_topic_alias_tests {
+    use super::*;
+
+    #[test]
+    fn saved_topic_alias_round_trips_without_changing_topic() {
+        let config: MqttSavedTopic =
+            serde_json::from_str(r#"{"topic":"devices/+/status","alias":"设备状态","enabled":false}"#).unwrap();
+        let restored: MqttSavedTopic = serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(restored.alias, "设备状态");
+        assert_eq!(restored.topic, "devices/+/status");
+        assert!(!restored.enabled);
+    }
+
+    #[test]
+    fn older_saved_topics_default_to_empty_alias() {
+        let config: MqttSavedTopic = serde_json::from_str(r#"{"topic":"devices/#"}"#).unwrap();
+        assert_eq!(config.alias, "");
+        assert!(config.enabled);
     }
 }

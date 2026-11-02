@@ -569,6 +569,8 @@ async fn serve() -> Result<(), String> {
         ))
     };
 
+    app_state.set_honor_fixed_ssh_local_ports(true);
+
     // Password hash: env var takes priority, then database
     let password_disabled = std::env::var("DBX_DISABLE_PASSWORD")
         .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
@@ -654,6 +656,7 @@ async fn serve() -> Result<(), String> {
         // Connection
         .route("/connection/test", post(routes::connection::test_connection))
         .route("/connection/test-info", post(routes::connection::test_connection_with_info))
+        .route("/connection/parameters", post(routes::connection::connection_parameters))
         .route("/connection/test-ssh-tunnel", post(routes::connection::test_ssh_tunnel))
         .route("/connection/connect", post(routes::connection::connect_db))
         .route("/connection/database-info", post(routes::connection::connected_database_info))
@@ -789,6 +792,7 @@ async fn serve() -> Result<(), String> {
         .route("/schema/mysql/auto-increment", get(routes::schema::get_mysql_table_auto_increment))
         .route("/schema/schemas", get(routes::schema::list_schemas))
         .route("/schema/tables", get(routes::schema::list_tables))
+        .route("/schema/table-comment", get(routes::schema::get_table_comment))
         .route("/schema/objects", get(routes::schema::list_objects))
         .route("/schema/object-statistics", get(routes::schema::list_object_statistics))
         .route("/schema/completion-objects", get(routes::schema::list_completion_objects))
@@ -796,6 +800,21 @@ async fn serve() -> Result<(), String> {
         .route("/schema/object-source", get(routes::schema::get_object_source))
         .route("/schema/event-info", get(routes::schema::get_event_info))
         .route("/schema/custom-type-details", get(routes::schema::get_custom_type_details))
+        .route("/schema/native-jobs/context", post(routes::native_jobs::open_context))
+        .route("/schema/native-jobs/list", post(routes::native_jobs::list))
+        .route("/schema/native-jobs/references", post(routes::native_jobs::references))
+        .route("/schema/native-jobs/read", post(routes::native_jobs::read))
+        .route("/schema/native-jobs/prepare", post(routes::native_jobs::prepare))
+        .route("/schema/native-jobs/apply", post(routes::native_jobs::apply))
+        .route("/schema/native-jobs/status", post(routes::native_jobs::status))
+        .route("/schema/native-jobs/cancel", post(routes::native_jobs::cancel))
+        .route("/schema/oracle-type-data", post(routes::schema::verify_oracle_type_data))
+        .route("/schema/oracle-type-evolution", post(routes::schema::prepare_oracle_type_evolution))
+        .route(
+            "/schema/oracle-type-management-snapshot",
+            get(routes::schema::get_oracle_type_management_snapshot)
+                .post(routes::schema::read_oracle_type_management_snapshot),
+        )
         .route("/schema/columns", get(routes::schema::list_columns))
         .route("/plugin/table-metadata", post(routes::schema::get_plugin_table_metadata))
         .route("/schema/all-columns", get(routes::schema::get_all_columns))
@@ -813,6 +832,13 @@ async fn serve() -> Result<(), String> {
         .route("/schema/invalid-indexes", get(routes::schema::list_invalid_indexes))
         .route("/schema/subpartitions", get(routes::schema::list_subpartitions))
         .route("/schema/functions", get(routes::schema::list_functions))
+        .route("/schema/diff-routines", get(routes::schema::load_schema_diff_routines))
+        .route("/schema/routine-save", post(routes::schema::prepare_oracle_routine_save))
+        .route("/schema/routine-plan", post(routes::schema::prepare_oracle_routine_plan))
+        .route("/schema/routine-recovery", post(routes::schema::prepare_oracle_routine_recovery))
+        .route("/schema/routine-execute", post(routes::schema::execute_oracle_routine_operation))
+        .route("/schema/routine-operation", get(routes::schema::observe_oracle_routine_operation))
+        .route("/schema/routine-operation-references", post(routes::schema::update_oracle_routine_operation_references))
         .route("/schema/sequences", get(routes::schema::list_sequences))
         .route("/schema/rules", get(routes::schema::list_rules))
         .route("/schema/owners", get(routes::schema::list_owners))
@@ -845,6 +871,7 @@ async fn serve() -> Result<(), String> {
         .route("/tab-runtime-cache/prune", post(routes::tab_runtime_cache::prune_tab_runtime_cache))
         .route("/tab-runtime-cache/owner", delete(routes::tab_runtime_cache::delete_tab_runtime_cache_owner))
         // Query
+        .merge(routes::pl_debug::router())
         .route("/query/execute", post(routes::query::execute_query))
         .route("/query/execute-conditional-update", post(routes::query::execute_conditional_update))
         .route("/query/execute-multi", post(routes::query::execute_multi))
@@ -867,6 +894,8 @@ async fn serve() -> Result<(), String> {
         .route("/query/build-create-user-sql", post(routes::query::build_create_user_sql))
         .route("/query/build-table-select-sql", post(routes::query::build_table_select_sql))
         .route("/query/build-database-search-sql", post(routes::query::build_database_search_sql))
+        .route("/query/build-database-search-columns-sql", post(routes::query::build_database_search_columns_sql))
+        .route("/query/build-database-search-probe-sql", post(routes::query::build_database_search_probe_sql))
         .route("/query/build-database-structure-search-sql", post(routes::query::build_database_structure_search_sql))
         .route("/query/supports-database-structure-search", post(routes::query::supports_database_structure_search))
         .route("/query/build-search-result-where", post(routes::query::build_search_result_where))
@@ -888,6 +917,7 @@ async fn serve() -> Result<(), String> {
         .route("/query/build-drop-schema-sql", post(routes::query::build_drop_schema_sql))
         .route("/query/build-duplicate-table-structure-sql", post(routes::query::build_duplicate_table_structure_sql))
         .route("/query/build-copy-table-data-sql", post(routes::query::build_copy_table_data_sql))
+        .route("/query/build-oracle-type-management-sql", post(routes::query::build_oracle_type_management_sql))
         .route(
             "/query/build-executable-object-source-statements",
             post(routes::query::build_executable_object_source_statements),
@@ -896,6 +926,7 @@ async fn serve() -> Result<(), String> {
             "/query/validate-oracle-executable-object-source",
             post(routes::query::validate_oracle_executable_object_source),
         )
+        .route("/query/prepare-oracle-trigger-sql", post(routes::query::prepare_oracle_trigger_sql))
         .route(
             "/query/fingerprint-oracle-routine-object-source",
             post(routes::query::fingerprint_oracle_routine_object_source),
@@ -985,6 +1016,7 @@ async fn serve() -> Result<(), String> {
         .route("/redis/list-databases", post(routes::redis::list_databases))
         .route("/redis/scan-keys", post(routes::redis::scan_keys))
         .route("/redis/scan-keys-batch", post(routes::redis::scan_keys_batch))
+        .route("/redis/key-metadata-batch", post(routes::redis::key_metadata_batch))
         .route("/redis/scan-values", post(routes::redis::scan_values))
         .route("/redis/get-value", post(routes::redis::get_value))
         .route("/redis/get-raw-value", post(routes::redis::get_raw_value))
@@ -1447,6 +1479,8 @@ async fn serve() -> Result<(), String> {
         .route("/version", get(routes::update::get_version))
         .route("/update/check", get(routes::update::check_for_updates))
         .route("/changelog", get(routes::update::fetch_changelog))
+        .route("/changelog/index", get(routes::update::fetch_changelog_index))
+        .route("/changelog/releases/{tag}", get(routes::update::fetch_changelog_release))
         // Layout
         .route("/layout/sidebar", post(routes::layout::save_sidebar_layout).get(routes::layout::load_sidebar_layout))
         .route(
@@ -1466,6 +1500,14 @@ async fn serve() -> Result<(), String> {
             "/app-settings/mcp-policy",
             get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
         )
+        .route("/app-settings/mcp-tool-catalog", get(routes::app_settings::load_mcp_tool_catalog))
+        .route("/app-settings/mcp-access-policy", get(routes::app_settings::load_mcp_access_policy))
+        .route("/app-settings/mcp-access-policy/recover", post(routes::app_settings::reset_invalid_mcp_access_policy))
+        .route("/app-settings/mcp-access-policy/plugin-scope", put(routes::app_settings::set_mcp_plugin_scope_rule))
+        .route("/app-settings/plugin-mcp", get(routes::app_settings::list_plugin_mcp_views))
+        .route("/app-settings/plugin-mcp/view", post(routes::app_settings::load_plugin_mcp_view))
+        .route("/app-settings/plugin-mcp/scopes", post(routes::app_settings::list_plugin_mcp_scopes))
+        .route("/app-settings/plugin-mcp/grant", put(routes::app_settings::save_plugin_mcp_grant))
         .route("/app-settings/mcp-http-status", get(routes::app_settings::load_web_mcp_http_status))
         .route("/app-settings/mcp-http", put(routes::app_settings::save_web_mcp_http_settings))
         .route("/app-settings/mcp-http/rotate-token", post(routes::app_settings::rotate_web_mcp_token))

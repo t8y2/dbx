@@ -367,11 +367,11 @@ fn hint_arguments(tokens: &[TokenWithSpan]) -> Option<Vec<usize>> {
         let name = name.value.to_uppercase();
         pos += 1;
         if matches!(name.as_str(), "ALL_ROWS" | "FIRST_ROWS" | "RULE")
-            && !tokens.get(pos).is_some_and(|t| t.token == Token::LParen)
+            && tokens.get(pos).is_none_or(|t| t.token != Token::LParen)
         {
             continue;
         }
-        if !tokens.get(pos).is_some_and(|t| t.token == Token::LParen) {
+        if tokens.get(pos).is_none_or(|t| t.token != Token::LParen) {
             return None;
         }
         pos += 1;
@@ -382,7 +382,7 @@ fn hint_arguments(tokens: &[TokenWithSpan]) -> Option<Vec<usize>> {
         {
             pos += 1;
         }
-        if pos == start || !tokens.get(pos).is_some_and(|t| t.token == Token::RParen) {
+        if pos == start || tokens.get(pos).is_none_or(|t| t.token != Token::RParen) {
             return None;
         }
         match name.as_str() {

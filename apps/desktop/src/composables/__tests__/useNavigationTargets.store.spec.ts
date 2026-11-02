@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
     // 与真实 store 一致：setTableMeta 记录连接元数据代次
     metadataGenerationFor: vi.fn(() => 0),
     refreshObjectListTreeNode: vi.fn(),
+    refreshTableColumnsTree: vi.fn(),
     invalidateCompletionTableCache: vi.fn(),
   },
   settingsStore: {

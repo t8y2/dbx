@@ -32,7 +32,7 @@ describe("Thai locale", () => {
     expect(localeFromLanguageTag("th_TH")).toBe("th");
     expect(detectLocaleFromLanguages(["fr-FR", "th-TH"])).toBe("th");
     expect(detectLocaleFromLanguages(["fr-FR"])).toBe("en");
-    expect(LOCALE_OPTIONS).toContainEqual({ value: "th", flag: "🇹🇭", label: "ภาษาไทย" });
+    expect(LOCALE_OPTIONS).toContainEqual(expect.objectContaining({ value: "th", flag: "🇹🇭", label: "ภาษาไทย" }));
   });
 
   it("compiles and interpolates Thai through Vue I18n", () => {

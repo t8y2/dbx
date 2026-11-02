@@ -60,7 +60,12 @@ pub struct TransactionIoSuccess {
 
 #[derive(Debug)]
 pub enum TransactionIoError {
-    Server { code: u16, message: String },
+    /// Rejected locally before sending SQL; the physical session is unchanged.
+    Policy(String),
+    Server {
+        code: u16,
+        message: String,
+    },
     Transport(String),
 }
 
@@ -80,6 +85,7 @@ pub struct MysqlTransactionIo {
     connection_id: String,
     database: String,
     client_session_id: String,
+    data_charset: Option<dbx_core::db::mysql::MySqlDataCharset>,
 }
 
 impl MysqlTransactionIo {
@@ -89,8 +95,9 @@ impl MysqlTransactionIo {
         connection_id: String,
         database: String,
         client_session_id: String,
+        data_charset: Option<dbx_core::db::mysql::MySqlDataCharset>,
     ) -> Self {
-        Self { conn: Some(conn), state, connection_id, database, client_session_id }
+        Self { conn: Some(conn), state, connection_id, database, client_session_id, data_charset }
     }
 
     fn conn(&mut self) -> Result<&mut mysql_async::Conn, TransactionIoError> {
@@ -105,9 +112,17 @@ impl TransactionIo for MysqlTransactionIo {
         sql: &str,
         max_rows: Option<usize>,
     ) -> Result<TransactionIoSuccess, TransactionIoError> {
-        let execution = dbx_core::db::mysql::execute_transaction_statement_on_conn(self.conn()?, sql, max_rows)
-            .await
-            .map_err(map_mysql_transaction_error)?;
+        check_mysql_data_charset_transaction_sql(self.data_charset, sql, &self.connection_id)
+            .map_err(TransactionIoError::Policy)?;
+        let data_charset = self.data_charset;
+        let execution = dbx_core::db::mysql::execute_transaction_statement_on_conn_with_data_charset(
+            self.conn()?,
+            sql,
+            max_rows,
+            data_charset,
+        )
+        .await
+        .map_err(map_mysql_transaction_error)?;
         Ok(TransactionIoSuccess { result: execution.result, in_transaction: execution.in_transaction })
     }
 
@@ -124,6 +139,20 @@ impl TransactionIo for MysqlTransactionIo {
             .close_client_session_pool(&self.connection_id, Some(&self.database), &self.client_session_id)
             .await;
     }
+}
+
+fn check_mysql_data_charset_transaction_sql(
+    data_charset: Option<dbx_core::db::mysql::MySqlDataCharset>,
+    sql: &str,
+    connection_id: &str,
+) -> Result<(), String> {
+    // These exact statements are emitted by the owner lifecycle. User queries
+    // are separately prohibited from issuing transaction control by the server.
+    // Do not admit arbitrary START/COMMIT/ROLLBACK prefixes or session changes.
+    if data_charset.is_some() && !matches!(sql, "START TRANSACTION" | "COMMIT" | "ROLLBACK") {
+        dbx_core::query::mysql_data_charset_policy::check_sql(sql, connection_id)?;
+    }
+    Ok(())
 }
 
 fn map_mysql_transaction_error(error: dbx_core::db::mysql::MySqlTransactionError) -> TransactionIoError {
@@ -577,6 +606,10 @@ async fn handle_command(
             }));
             false
         }
+        Ok(Err(TransactionIoError::Policy(message))) => {
+            let _ = command.response.send(Err(failure("TRANSACTION_SQL_BLOCKED", message, None, current)));
+            false
+        }
         Ok(Err(TransactionIoError::Server { code, message })) => {
             if is_commit {
                 set_unknown(inner);
@@ -668,6 +701,18 @@ fn failure(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn data_charset_fixed_session_policy_preserves_only_exact_lifecycle_commands() {
+        use dbx_core::db::mysql::MySqlDataCharset;
+        for sql in ["SELECT 1", "START TRANSACTION", "COMMIT", "ROLLBACK"] {
+            assert!(super::check_mysql_data_charset_transaction_sql(Some(MySqlDataCharset::Gbk), sql, "test").is_ok());
+        }
+        for sql in ["UPDATE t SET value=1", "SET NAMES latin1", "SET @v=1", "COMMIT; UPDATE t SET value=1"] {
+            assert!(super::check_mysql_data_charset_transaction_sql(Some(MySqlDataCharset::Gbk), sql, "test").is_err());
+            assert!(super::check_mysql_data_charset_transaction_sql(None, sql, "test").is_ok());
+        }
+    }
+
     use std::{
         collections::VecDeque,
         sync::{
@@ -689,6 +734,7 @@ mod tests {
     #[derive(Clone)]
     enum Step {
         Success { in_transaction: bool },
+        PolicyError,
         ServerError { code: u16, message: &'static str },
         TransportError(&'static str),
         Ping { in_transaction: bool },
@@ -738,6 +784,7 @@ mod tests {
             self.max_active_calls.fetch_max(active, Ordering::SeqCst);
             let result = match step {
                 Step::Success { in_transaction } => Ok(TransactionIoSuccess { result: empty_result(), in_transaction }),
+                Step::PolicyError => Err(TransactionIoError::Policy("MYSQL_DATA_CHARSET_READ_ONLY".into())),
                 Step::ServerError { code, message } => {
                     Err(TransactionIoError::Server { code, message: message.to_string() })
                 }
@@ -787,6 +834,7 @@ mod tests {
     fn step_name(step: &Step) -> &'static str {
         match step {
             Step::Success { .. } => "success",
+            Step::PolicyError => "policy error",
             Step::ServerError { .. } => "server error",
             Step::TransportError(_) => "transport error",
             Step::Ping { .. } => "ping",
@@ -799,8 +847,10 @@ mod tests {
         QueryResult {
             columns: Vec::new(),
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: Vec::new(),
+            raw_key_cells: Vec::new(),
             spatial_values: Vec::new(),
             rows: Vec::new(),
             affected_rows: 0,
@@ -821,6 +871,25 @@ mod tests {
             operation_timeout: Duration::from_secs(30),
             cleanup_timeout: Duration::from_secs(1),
         }
+    }
+
+    #[tokio::test]
+    async fn data_charset_policy_denial_preserves_owner_state_without_ping_or_disconnect() {
+        let (io, probe) = ScriptedIo::new([
+            Step::Success { in_transaction: true },
+            Step::PolicyError,
+            Step::Success { in_transaction: false },
+        ]);
+        let owner = TransactionOwner::spawn(io, config());
+        owner.acquire().await.unwrap().begin().await.unwrap();
+        let error = owner.acquire().await.unwrap().query("UPDATE t SET v=1", None).await.unwrap_err();
+        assert_eq!(error.code, "TRANSACTION_SQL_BLOCKED");
+        assert_eq!(error.mysql_code, None);
+        assert_eq!(error.state, TransactionState::Active);
+        assert_eq!(probe.ping_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.disconnects.load(Ordering::SeqCst), 0);
+        owner.acquire().await.unwrap().rollback().await.unwrap();
+        owner.close().await.unwrap();
     }
 
     #[tokio::test]

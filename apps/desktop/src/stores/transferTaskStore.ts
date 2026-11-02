@@ -2,7 +2,7 @@ import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
 import * as api from "@/lib/backend/api";
-import type { TransferTask, TransferTaskConfig, TransferTaskFolder, TransferTaskLibrary } from "@/types/database";
+import type { TransferPackageDraft, TransferTask, TransferTaskConfig, TransferTaskFolder, TransferTaskLibrary } from "@/types/database";
 import { resolveTransferStrategy, transferStrategyOptions } from "@/components/transfer/transferStrategy";
 import { MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 
@@ -76,6 +76,25 @@ function normalizeTransferOperationTimeoutSecs(raw: unknown): number | undefined
   return raw;
 }
 
+function normalizePackageDrafts(raw: unknown): TransferPackageDraft[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const drafts: TransferPackageDraft[] = [];
+  for (const value of raw) {
+    const identity = value?.identity;
+    if (!identity || typeof identity.owner !== "string" || typeof identity.name !== "string" || (identity.kind !== "PACKAGE" && identity.kind !== "PACKAGE_BODY")) continue;
+    drafts.push({
+      identity: { owner: identity.owner, name: identity.name, kind: identity.kind },
+      sourceName: typeof value.sourceName === "string" ? value.sourceName : undefined,
+      sql: typeof value.sql === "string" ? value.sql : undefined,
+      packageBodySource: value.packageBodySource === "source" || value.packageBodySource === "target" ? value.packageBodySource : undefined,
+      packageContract: value.packageContract === "source" || value.packageContract === "target" ? value.packageContract : undefined,
+      confirmPackagePair: value.confirmPackagePair === true,
+      reviewedTargetDraft: value.reviewedTargetDraft === true,
+    });
+  }
+  return drafts.length ? drafts : undefined;
+}
+
 function normalizeTask(raw: unknown): TransferTask | null {
   if (!raw || typeof raw !== "object") return null;
   const candidate = raw as Partial<TransferTask>;
@@ -103,9 +122,11 @@ function normalizeTask(raw: unknown): TransferTask | null {
       targetDatabase: String(config.targetDatabase),
       targetSchema: config.targetSchema || undefined,
       objects,
+      oraclePackageDrafts: normalizePackageDrafts(config.oraclePackageDrafts),
       content: config.content ?? "structureAndData",
       ...transferStrategyOptions(resolveTransferStrategy(config)),
       targetTableNameCase: config.targetTableNameCase ?? "preserve",
+      targetColumnNameCase: config.targetColumnNameCase ?? "preserve",
       quoteTargetColumnNames: config.quoteTargetColumnNames ?? true,
       batchSize: typeof config.batchSize === "number" && config.batchSize > 0 ? config.batchSize : 1000,
       operationTimeoutSecs: normalizeTransferOperationTimeoutSecs(config.operationTimeoutSecs),
@@ -305,6 +326,7 @@ export const useTransferTaskStore = defineStore("transferTasks", () => {
       ...input.config,
       ...transferStrategyOptions(resolveTransferStrategy(input.config)),
       operationTimeoutSecs: normalizeTransferOperationTimeoutSecs(input.config.operationTimeoutSecs),
+      oraclePackageDrafts: normalizePackageDrafts(input.config.oraclePackageDrafts),
       dropTargetConfirmed: false,
     };
     const task: TransferTask = existing

@@ -21,6 +21,7 @@ DBX 当前对以下方言使用专用格式化语法：
 | PostgreSQL、openGauss、GaussDB、KingbaseES、Redshift 等兼容连接 | PostgreSQL |
 | SQLite、Turso、rqlite、Cloudflare D1 | SQLite |
 | SQL Server | Transact-SQL |
+| Oracle、OceanBase Oracle 模式 | PL/SQL |
 | ClickHouse | ClickHouse |
 | 其他 SQL 数据库 | 通用 SQL；必要时再尝试 PostgreSQL 语法 |
 
@@ -32,7 +33,7 @@ MongoDB 查询编辑器使用单独的 Mongo Shell 格式化器，不使用本�
 
 `classic` 使用 sql-formatter 自身的排版，也是 v0.6.16 之前 DBX 的默认风格。如需精确还原此前输出，可把**表达式宽度**设为 `50`、**FROM 子句布局**设为换行；JSON 中对应为 `"expressionWidth": 50`、`"fromClauseLayout": "newLine"`，与 `"layoutStyle": "classic"` 并列。除 Oracle 外结果与 v0.6.15 一致：Oracle 的字节/多字节函数变体（`SUBSTRB`、`INSTR2`、`LENGTHB` 等同族函数）保留较新的修复，会被规范为函数形式。
 
-切换排版风格只切引擎，不会顺带改写其它选项。两种缩进样式（`tabularLeft`、`tabularRight`）在两种风格下都使用 sql-formatter 自身的排版。
+未启用自定义规则时，切换排版风格不会顺带改写其它选项，两种表格式缩进（`tabularLeft`、`tabularRight`）都使用 sql-formatter 自身的排版。
 
 ## 配置格式化选项
 
@@ -47,7 +48,7 @@ MongoDB 查询编辑器使用单独的 Mongo Shell 格式化器，不使用本�
 | Tab 宽度 | `2` 或 `4` |
 | 逻辑操作符换行 | `before`、`after`，或 `none` 保持在同一行 |
 | FROM 子句排版 | `sameLine` 让首个表留在 `FROM` 行，`newLine` 让它换到下一行 |
-| 表达式宽度 | `50`、`80` 或 `120` |
+| 表达式宽度 | `20`–`500` 的整数，例如 `76`；长字面量不会被截断 |
 | 查询间空行 | `0`、`1` 或 `2` |
 | 保留空行 | 保留语句之间的空行 |
 | 紧凑操作符 | 减少操作符周围的空格 |
@@ -56,9 +57,37 @@ MongoDB 查询编辑器使用单独的 Mongo Shell 格式化器，不使用本�
 
 **恢复默认值**会恢复当前代码定义的默认格式化设置。设置窗口中的改动需要点击 **应用** 才会持久化。
 
+## 分别控制 SELECT、INSERT 和 UPDATE
+
+在原格式化面板中启用自定义规则，再分别调整三类列表。自定义规则默认关闭；开启后使用规则布局，可与关键字左对齐或右对齐组合。关闭开关会恢复原先选择的基础布局，包括 `classic`，并保留已填写的规则值。
+
+四种列表模式适用于通用列表，也可由 SELECT 字段、INSERT 目标列与 VALUES 行、UPDATE SET 项分别覆盖：
+
+| 模式 | 排版方式 |
+| --- | --- |
+| `singleLine` | 列表保持单行，允许超出目标宽度；行注释仍保留必要的换行 |
+| `fit` | 放得下时单行，否则每项一行 |
+| `vertical` | 每项一行 |
+| `wrap` | 每行放入尽可能多的完整项，超过目标宽度时换行 |
+
+DML 选择 `inherit` 时继承通用规则。通用规则也用于函数参数、IN、GROUP BY、ORDER BY 等列表，不拆分字符串中的逗号。嵌套列表或条件要求的换行优先于外层短语句合并。
+
+其他细粒度选项：
+
+- `listItemAlignment` 选择续行对齐首项（`firstItem`）或缩进一级（`indent`）。`alignSelectAliases` 和 `alignUpdateAssignments` 分别控制多行显式 `AS` 与 SET 等号对齐；无法安全对齐时保留正常排版。
+- `selectCommaPosition`、`insertCommaPosition`、`updateCommaPosition` 分别选择前置、后置逗号，或以 `inherit` 使用全局 `commaPosition`。
+- `whereLogicalOperatorNewline`、`onLogicalOperatorNewline`、`expressionLogicalOperatorNewline` 分别控制 WHERE、JOIN ON 和其他表达式的 AND/OR，接受 `before`、`after`、`none` 或 `inherit`。`newlineBeforeJoinOn` 控制 ON 前换行。BETWEEN 自身的 AND 不会被当作条件分隔符。
+- `collapseShortStatements` 允许短语句合并为单行，但不能覆盖明确要求的换行。`emptyLineMode` 可移除代码空行（`remove`）、将连续空行合并为一行（`single`）、保留空行（`preserve`），或以 `inherit` 沿用原 `preserveEmptyLines`；字符串和注释内部空行不受影响。
+
+自定义规则生效时，`remove` 和 `single` 也将生成的查询间空行分别限制为 `0` 和 `1`；关闭规则或降级到基础布局后恢复原先保存的查询间隔。
+
+先在面板内输入 SQL、选择方言并观察即时预览，再应用设置。预览不会执行 SQL，也不会覆盖已打开的查询。用同一方言和设置在编辑器中格式化相同 SQL，结果与预览一致；选区外文本保持原样，可通过编辑器撤销恢复。
+
+完整过程块等超出规则模型的输入仍使用已选择的基础布局，并提示本次未应用自定义规则。需要细调过程内的查询时，选中独立 SELECT、INSERT 或 UPDATE 再格式化。本功能不提供 PL/SQL 过程声明、`:=` 赋值对齐或任意大小写词典。
+
 ## JSON 模式与导入导出
 
-JSON 模式适合精确编辑、复制或迁移格式化器配置。当前配置文件只包含 `version`、`formatter` 和 `options`：
+JSON 模式适合精确编辑、复制或迁移格式化器配置。配置文件包含 `version`、`formatter` 和 `options`；以下旧配置示例仍可导入，省略的新规则使用默认值：
 
 ```json
 {
@@ -95,6 +124,8 @@ JSON 编辑器会实时校验配置。以下情况会阻止应用或导入：
 - 字段值不在当前代码允许的范围内。
 
 点击 **导出配置** 会下载 `dbx-sql-formatter.json`。导入只替换 SQL 格式化选项，不会修改连接、编辑器快捷键或其他 DBX 设置。完整设置迁移请参阅[配置云同步](/cn/docs/cloud-sync)。
+
+导出会保存全部自定义规则。当前版本可导入缺少新字段的 v1/v2 配置及旧应用设置备份；旧版程序可能拒绝含新字段的配置，跨版本迁移时请保留原文件。
 
 ## 参数识别
 

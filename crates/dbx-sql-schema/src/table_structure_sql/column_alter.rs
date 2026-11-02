@@ -221,7 +221,7 @@ fn is_column_extra_empty(extra: &ColumnExtra) -> bool {
     !extra.auto_increment.unwrap_or(false)
         && !extra.on_update_current_timestamp.unwrap_or(false)
         && is_column_identity_empty(&extra.identity)
-        && !extra.generated.as_ref().is_some_and(|generated| !generated.expression.trim().is_empty())
+        && extra.generated.as_ref().is_none_or(|generated| generated.expression.trim().is_empty())
         && !extra.manticore_indexed.unwrap_or(false)
         && !extra.manticore_stored.unwrap_or(false)
         && !extra.manticore_attribute.unwrap_or(false)

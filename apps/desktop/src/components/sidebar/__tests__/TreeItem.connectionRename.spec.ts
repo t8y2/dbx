@@ -160,6 +160,39 @@ describe("TreeItem connection quick rename", () => {
     expect(renameConnection).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["Enter", connection.name],
+    ["Escape", "Reporting EU"],
+  ])("restores focus to the connection row after %s dismisses rename", async (key, value) => {
+    const { container, input } = await mountConnectionRename();
+    typeName(input, value);
+
+    press(input, key);
+
+    const row = container.querySelector<HTMLElement>(`[data-node-id="${connection.id}"]`);
+    await vi.waitFor(() => expect(document.activeElement).toBe(row));
+  });
+
+  it("keeps focus on the element the user clicked when a blur commits rename", async () => {
+    const { container, input } = await mountConnectionRename();
+    typeName(input, "Reporting EU");
+
+    const outside = document.createElement("button");
+    container.append(outside);
+    outside.focus();
+    input.dispatchEvent(new FocusEvent("blur"));
+
+    await nextTick();
+    await nextTick();
+
+    // The blur commit must not steal focus back to the tree row: the user
+    // deliberately moved focus elsewhere before the commit landed.
+    const row = container.querySelector<HTMLElement>(`[data-node-id="${connection.id}"]`);
+    expect(document.activeElement).toBe(outside);
+    expect(document.activeElement).not.toBe(row);
+    expect(renameConnection).toHaveBeenCalledWith(connection.id, "Reporting EU");
+  });
+
   it.each(["", "   ", connection.name])("cancels blank or unchanged input %j", async (name) => {
     const { input } = await mountConnectionRename();
     typeName(input, name);

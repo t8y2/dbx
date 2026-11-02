@@ -33,6 +33,9 @@ fn send_transfer_progress(channel: &TransferProgressChannel, progress: &transfer
 
 fn terminal_transfer_error(req: &TransferRequest, error: impl ToString) -> transfer::TransferProgress {
     transfer::TransferProgress {
+        oracle_package_approval: None,
+        oracle_package_preflight: None,
+        oracle_routine_operation: None,
         transfer_id: req.transfer_id.clone(),
         table: String::new(),
         table_index: 0,
@@ -85,6 +88,7 @@ pub async fn start_transfer(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let operation_timeout_secs = body.operation_timeout_secs;
     let req = body.request;
+    transfer::check_data_charset_transfer(&state.app, &req).await.map_err(AppError::from)?;
     transfer::validate_transfer_request(&req).map_err(AppError::from)?;
     transfer::validate_transfer_operation_timeout(operation_timeout_secs).map_err(AppError::from)?;
 
@@ -320,7 +324,8 @@ mod tests {
     };
     use dbx_core::persistence::task_history::{TaskRunItemsQuery, TaskRunStatus, TransferObjectSelectionMode};
     use dbx_core::transfer::{
-        TransferContent, TransferMode, TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
+        TransferColumnNameCase, TransferContent, TransferMode, TransferOwnershipPolicy, TransferRequest,
+        TransferTableNameCase,
     };
 
     fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
@@ -348,6 +353,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -424,10 +431,12 @@ mod tests {
             create_table: false,
             drop_target_before_create: false,
             drop_target_confirmed: false,
+            oracle_packages: None,
             content: TransferContent::DataOnly,
             objects: Some(Vec::new()),
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
+            target_column_name_case: TransferColumnNameCase::Preserve,
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 1000,

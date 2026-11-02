@@ -84,7 +84,7 @@ describe("MQTT 控制台消息暂停自动滚动 (issue #5615)", () => {
     await nextTick();
     expect(container.textContent).toContain("payload-0");
 
-    vi.advanceTimersByTime(3000);
+    vi.advanceTimersByTime(1000);
     await Promise.resolve();
     expect(mqttGetMessagesMock).toHaveBeenCalledTimes(2);
 

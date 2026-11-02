@@ -123,7 +123,26 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     let Some(strategy) = estimated_plan_strategy(options.database_type) else {
         return explain_err("unsupported");
     };
+    build_explain_sql_with_strategy(options, strategy)
+}
 
+/// Builds the only validated GaussDB(DWS) Estimated Plan form. This does not
+/// make `DatabaseType::Gaussdb` generally supported: callers must first verify
+/// the explicit DWS connection profile and supported server version.
+pub fn build_gaussdb_dws_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
+    if options.database_type != Some(DatabaseType::Gaussdb) {
+        return explain_err("unsupported");
+    }
+    if options.analyze == Some(true) {
+        return explain_err("unsafe");
+    }
+    build_explain_sql_with_strategy(options, gaussdb_dws_estimated_plan_strategy())
+}
+
+fn build_explain_sql_with_strategy(
+    options: ExplainSqlOptions,
+    strategy: EstimatedPlanStrategy,
+) -> ExplainSqlBuildResult {
     let source = strip_trailing_semicolons(options.sql.trim());
     if source.is_empty() {
         return explain_err("empty");
@@ -215,6 +234,13 @@ pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<Es
         DatabaseType::Postgres => {
             EstimatedPlanStrategy { sql_generation: Postgres, acquisition: GeneratedSql, format: Json }
         }
+        // openGauss documents EXPLAIN (FORMAT TEXT|XML|JSON|YAML) but JSON output
+        // additionally depends on the session's explain_perf_mode; plain text avoids
+        // assuming that GUC, so the plan is generated as plain `EXPLAIN <statement>`
+        // text (#13055).
+        DatabaseType::OpenGauss => {
+            EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text }
+        }
         DatabaseType::Questdb => {
             EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text }
         }
@@ -237,6 +263,16 @@ pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<Es
         _ => return None,
     };
     Some(strategy)
+}
+
+/// The version-gated strategy used only for an explicitly identified and
+/// validated Huawei DWS connection. Generic GaussDB remains unsupported.
+pub const fn gaussdb_dws_estimated_plan_strategy() -> EstimatedPlanStrategy {
+    EstimatedPlanStrategy {
+        sql_generation: EstimatedPlanSqlGeneration::Postgres,
+        acquisition: EstimatedPlanAcquisition::GeneratedSql,
+        format: EstimatedPlanFormat::Json,
+    }
 }
 
 /// Payload encoding defined by the estimated-plan strategy for this dialect.
@@ -2138,6 +2174,56 @@ mod tests {
     }
 
     #[test]
+    fn gaussdb_dws_strategy_is_explicit_and_keeps_the_generic_dialect_closed() {
+        use EstimatedPlanAcquisition::GeneratedSql;
+        use EstimatedPlanFormat::Json;
+
+        let strategy = gaussdb_dws_estimated_plan_strategy();
+        assert_eq!(strategy.acquisition(), GeneratedSql);
+        assert_eq!(strategy.format(), Json);
+        assert!(estimated_plan_strategy(Some(DatabaseType::Gaussdb)).is_none());
+        assert!(!supports_explain_plan(Some(DatabaseType::Gaussdb)));
+
+        let result = build_gaussdb_dws_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::Gaussdb),
+            format: None,
+            analyze: None,
+            sql: "SELECT 1".to_string(),
+        });
+        assert_eq!(result.sql.as_deref(), Some("EXPLAIN (FORMAT JSON) SELECT 1"));
+        assert!(result.ok);
+
+        for options in [
+            ExplainSqlOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                format: None,
+                analyze: Some(true),
+                sql: "SELECT 1".to_string(),
+            },
+            ExplainSqlOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                format: None,
+                analyze: None,
+                sql: "DELETE FROM users".to_string(),
+            },
+        ] {
+            assert!(!build_gaussdb_dws_explain_sql(options).ok);
+        }
+
+        assert_eq!(
+            build_gaussdb_dws_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                format: None,
+                analyze: None,
+                sql: "SELECT 1".to_string(),
+            })
+            .reason
+            .as_deref(),
+            Some("unsupported")
+        );
+    }
+
+    #[test]
     fn estimated_plan_strategy_matches_capability_sql_format_and_acquisition() {
         use EstimatedPlanAcquisition::{DriverNative, GeneratedSql, SqlServerShowPlanSession};
         use EstimatedPlanFormat::{Json, Text, Xml};
@@ -2147,6 +2233,7 @@ mod tests {
             (DatabaseType::Doris, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Xugu, "EXPLAIN VERBOSE SELECT 1", Text, GeneratedSql),
             (DatabaseType::Postgres, "EXPLAIN (FORMAT JSON) SELECT 1", Json, GeneratedSql),
+            (DatabaseType::OpenGauss, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Questdb, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Dameng, "EXPLAIN SELECT 1", Text, DriverNative),
             (DatabaseType::Oracle, "EXPLAIN PLAN FOR SELECT 1", Text, DriverNative),
@@ -2936,6 +3023,23 @@ mod tests {
                 &format!("DBX DYNAMODB {operation}\ntable: \"orders\""),
                 DatabaseType::DynamoDb
             ));
+        }
+    }
+
+    #[test]
+    fn classifies_dynamodb_partiql_reads_and_writes_for_read_only_protection() {
+        assert!(!is_write_sql_for_database(
+            "SELECT * FROM \"items\" WHERE \"status\"='PENDING'",
+            DatabaseType::DynamoDb
+        ));
+        assert!(!is_write_sql_for_database("-- comment\nSELECT 'UPDATE' FROM \"items\"", DatabaseType::DynamoDb));
+        for statement in [
+            "INSERT INTO \"items\" VALUE {'pk':'x'}",
+            "UPDATE \"items\" SET flag=true WHERE pk='x'",
+            "DELETE FROM \"items\" WHERE pk='x'",
+            "SELECT * FROM \"items\"; DELETE FROM \"items\" WHERE pk='x'",
+        ] {
+            assert!(is_write_sql_for_database(statement, DatabaseType::DynamoDb), "{statement}");
         }
     }
 

@@ -41,6 +41,15 @@ export interface DataGridLoadAllSegment {
   limit: number;
 }
 
+export interface DataGridSurfaceBusyOptions {
+  isRefreshingData: boolean;
+  loading: boolean;
+  pageJumpBusy: boolean;
+  rowPreparationBusy?: boolean;
+  manualTotalRowCountLoading?: boolean;
+  manualTotalRowCountCoversSurface?: boolean;
+}
+
 export type DataGridInexactTotalRowCountMode = "at-least" | "estimated";
 
 export const ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS = 100;
@@ -70,6 +79,17 @@ export function dataGridTotalRowCountLabelKey(totalRowCountIsExact: boolean, ine
 export function showDataGridRerunTotalCountAction(options: { canCalculateTotalRowCount: boolean; displayedTotalRowCount?: number; totalRowCountIsExact: boolean }): boolean {
   if (!options.canCalculateTotalRowCount || options.totalRowCountIsExact !== true) return false;
   return typeof options.displayedTotalRowCount === "number" && Number.isFinite(options.displayedTotalRowCount) && options.displayedTotalRowCount >= 0;
+}
+
+/**
+ * The full-surface overlay (translucent cover + spinner + elapsed timer) is for
+ * real data reloads and page navigation only. A plain "count total rows" click
+ * runs in the background and reports progress in the result footer; covering
+ * the grid made it look like the table itself was being refreshed.
+ */
+export function isDataGridSurfaceBusy(options: DataGridSurfaceBusyOptions): boolean {
+  const manualCountCoversSurface = options.manualTotalRowCountLoading === true && options.manualTotalRowCountCoversSurface === true;
+  return options.isRefreshingData || options.loading || manualCountCoversSurface || options.pageJumpBusy || options.rowPreparationBusy === true;
 }
 
 export function resolveDataGridPaginationTotal(options: { paginationTotalRowCount?: number; serverKnownTotalRowCount?: number; totalRowCountIsExact: boolean; maxRows?: number }): number | undefined {
@@ -122,7 +142,17 @@ export function hasCompleteLocalDataGridResult(options: CompleteLocalDataGridRes
   if (options.pageHasMore === false) return true;
 
   const pageLimit = Math.max(1, options.pageLimit);
-  if (options.rowCount < pageLimit) return true;
+  if (options.rowCount < pageLimit) {
+    // A short first page is normally the last page, but a known total that
+    // exceeds the rows already loaded means more data is still pending (the
+    // count and the loaded page disagree). Treating that as complete would
+    // make "export all" write only the loaded page instead of the full
+    // result. Keep this consistent with canGoNextDataGridPage, which uses
+    // totalRowCount the same way.
+    const shortPageTotal = options.totalRowCount;
+    if (typeof shortPageTotal === "number" && Number.isFinite(shortPageTotal) && shortPageTotal > options.rowCount) return false;
+    return true;
+  }
 
   const totalRowCount = options.totalRowCount;
   return typeof totalRowCount === "number" && Number.isFinite(totalRowCount) && totalRowCount >= 0 && options.rowCount >= totalRowCount;

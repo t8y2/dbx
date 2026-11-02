@@ -4,15 +4,18 @@ import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import type { XlsxExportOptions, XlsxHeaderMode } from "@/lib/export/xlsxHeader";
+import ExportExecutionMode from "./ExportExecutionMode.vue";
+import type { ManualExportMode } from "@/lib/export/manualExportQueue";
 
 const { t } = useI18n();
 
-const props = withDefaults(defineProps<{ showHeaderOptions?: boolean }>(), {
+const props = withDefaults(defineProps<{ showHeaderOptions?: boolean; showExecutionMode?: boolean }>(), {
   showHeaderOptions: true,
 });
 const open = defineModel<boolean>("open", { default: false });
 const selected = ref<XlsxHeaderMode>("name");
 const autoFilter = ref(false);
+const executionMode = ref<ManualExportMode>("immediate");
 
 const emit = defineEmits<{
   confirm: [options: XlsxExportOptions];
@@ -21,7 +24,7 @@ const emit = defineEmits<{
 
 function onConfirm() {
   open.value = false;
-  emit("confirm", { headerMode: selected.value, autoFilter: autoFilter.value });
+  emit("confirm", { headerMode: selected.value, autoFilter: autoFilter.value, ...(props.showExecutionMode ? { executionMode: executionMode.value } : {}) });
 }
 
 function onCancel() {
@@ -70,6 +73,7 @@ function onOpenChange(value: boolean) {
             <span class="text-sm">{{ t("grid.xlsxIncludeAutoFilter") }}</span>
           </label>
         </div>
+        <ExportExecutionMode v-if="props.showExecutionMode" v-model="executionMode" />
       </div>
       <DialogFooter>
         <Button variant="outline" @click="onCancel">{{ t("common.cancel") }}</Button>

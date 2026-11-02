@@ -113,8 +113,13 @@ export class RedisCollectionSearchController {
   browse(scope: RedisCollectionScope, items: RedisCollectionItem[], cursor: number) {
     const current = this.session;
     const sameScope = current && this.sameScope(current.scope, scope);
-    if (!sameScope || current.state.query || current.state.cursor !== cursor) this.prepare(scope, "");
-    this.session!.state = { status: "searching", query: "", items, cursor };
+    if (!sameScope || current.state.query || current.state.cursor !== cursor) {
+      this.invalidate();
+      this.browsingSession = undefined;
+      this.session = { scope: { ...scope }, state: { status: "searching", query: "", items, cursor } };
+    } else {
+      this.session!.state = { ...this.session!.state, status: "searching", query: "", items, cursor };
+    }
     return this.start();
   }
 

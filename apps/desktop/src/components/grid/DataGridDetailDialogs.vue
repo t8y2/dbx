@@ -5,13 +5,16 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { cellDetailPreviewText } from "@/lib/dataGrid/cellDetailPresentation";
 import { filterDataGridDetailFields, type DataGridCellDetail, type DataGridColumnDetail, type DataGridRowDetail } from "@/lib/dataGrid/dataGridDetail";
+import type { DatabaseType } from "@/types/database";
 import { detailNavigationDelta, shouldIgnoreDataGridDetailNavigation, type DataGridDetailNavigationDelta } from "@/lib/dataGrid/dataGridDetailNavigation";
 
 const { t } = useI18n();
 const props = defineProps<{
   rowDetail: DataGridRowDetail | null;
   columnDetail: DataGridColumnDetail | null;
+  databaseType?: DatabaseType;
   typeColorClass: (type: string) => string;
   openImagePreview: (src: string, title: string) => void;
   copyRowDetailFieldValue: (field: DataGridCellDetail) => void;
@@ -99,7 +102,7 @@ function onColumnDetailKeydown(event: KeyboardEvent) {
                 <a v-if="field.imagePreviewUrl" :href="field.imagePreviewUrl" role="button" class="mb-2 block max-h-48 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(field.imagePreviewUrl, field.column)"
                   ><img :src="field.imagePreviewUrl" :alt="field.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-48 w-full object-contain"
                 /></a>
-                <pre class="dbx-data-grid-value-font max-h-44 overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.isNull ?? field.value === null }">{{ field.rawValuePreview }}</pre>
+                <pre class="dbx-data-grid-value-font max-h-44 overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.isNull ?? field.value === null }">{{ cellDetailPreviewText(field, databaseType) }}</pre>
                 <div v-if="field.isValuePreviewTruncated" class="mt-1 text-[11px] text-muted-foreground">{{ t("grid.largeValuePreviewHint", { count: field.rawValuePreview.length }) }}</div>
                 <div v-if="field.formattedJson" class="mt-2 space-y-1">
                   <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>
@@ -169,7 +172,7 @@ function onColumnDetailKeydown(event: KeyboardEvent) {
                 <a v-if="field.imagePreviewUrl" :href="field.imagePreviewUrl" role="button" class="mb-2 block max-h-40 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(field.imagePreviewUrl, field.column)"
                   ><img :src="field.imagePreviewUrl" :alt="field.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-40 w-full object-contain"
                 /></a>
-                <pre class="dbx-data-grid-value-font max-h-36 overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.isNull ?? field.value === null }">{{ field.rawValuePreview }}</pre>
+                <pre class="dbx-data-grid-value-font max-h-36 overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.isNull ?? field.value === null }">{{ cellDetailPreviewText(field, databaseType) }}</pre>
                 <div v-if="field.isValuePreviewTruncated" class="mt-1 text-[11px] text-muted-foreground">{{ t("grid.largeValuePreviewHint", { count: field.rawValuePreview.length }) }}</div>
                 <div v-if="field.formattedJson" class="mt-2 space-y-1">
                   <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>

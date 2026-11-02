@@ -8,6 +8,10 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
+import SavePasswordCheckbox from "@/components/connection/SavePasswordCheckbox.vue";
+import ConnectionParametersDialog from "@/components/connection/ConnectionParametersDialog.vue";
+import { parseConnectionParameters, patchConnectionParameter } from "@/lib/connection/connectionParameterDocument";
+import { connectionParameterSyntax, type ConnectionParameterDefinition } from "@/lib/connection/connectionParameterCatalog";
 import { Label } from "@/components/ui/label";
 import { sidebarProductionBadgeScope } from "@/lib/sidebar/sidebarProductionBadge";
 import type { ProductionBadgeScope } from "@/types/database";
@@ -31,6 +35,7 @@ import type {
   PluginFormField,
   PluginFormFieldValue,
   ProxyTunnelConfig,
+  SshAgentIdentity,
   SshConfigHostEntry,
   SshTunnelConfig,
   TransportLayerConfig,
@@ -49,6 +54,7 @@ import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSum
 import { insertSqliteRemoteTransportLayer, isSqliteRemoteTransportLayerType, sqliteRemoteTransportError } from "@/lib/connection/sqliteRemoteTransport";
 import { sanitizeConnectionCredentials } from "@/lib/connection/credentialSanitizer";
 import { applySshAuthMethod, inferSshAuthMethod } from "@/lib/connection/sshAuthMethod";
+import { editableSshLocalPort, normalizeSshLocalPort, sshLocalPortState, sshLocalPortSupportedForConnection } from "@/lib/connection/sshLocalPort";
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
 import { canPersistConnectionTestResult, connectionEditDraftSyncAction } from "./connectionEditDraftSync";
 import { createConnectionNoteVisibilityDraft, persistConnectionNoteVisibilityDraft as persistConnectionNoteVisibilityDraftState, resetConnectionNoteVisibilityDraft, setConnectionNoteVisibilityDraft, syncConnectionNoteVisibilityDraft } from "./connectionNoteVisibilityDraft";
@@ -95,8 +101,18 @@ import {
 } from "@/lib/connection/timeoutLimits";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
 import { applyConnectionDeepLinkUpdate, resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
-import { connectionDeepLinkServiceHydrationValue, parseConnectionDeepLink, parseConnectionDeepLinkUpdate, parseServiceConnectionUrl, type ConnectionDeepLinkDraft, type ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
+import {
+  connectionDeepLinkServiceHydrationValue,
+  parseConnectionDeepLink,
+  parseConnectionDeepLinkUpdate,
+  parseServiceConnectionUrl,
+  shouldAutoConfirmConnectionDeepLink,
+  shouldAutoConfirmConnectionPrefill,
+  type ConnectionDeepLinkDraft,
+  type ConnectionDeepLinkUpdate,
+} from "@/lib/connection/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
+import { MYSQL_DATA_CHARSETS, mysqlDataCharset, setMysqlDataCharset, mysqlDataCharsetValidation, supportsMysqlDataCharset } from "@/lib/connection/mysqlDataCharset";
 import { parseGaussdbHosts, serializeGaussdbHosts, type GaussdbHostEntry } from "@/lib/connection/gaussdbHosts";
 import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/database/h2Connection";
 import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/zookeeper/zookeeperConnection";
@@ -107,6 +123,9 @@ import { looksLikeMongoSrvHost, mongodbAuthFailureHint, mongoConnectionUsesOidc,
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
 import { supportsOracleDatabaseLinks } from "@/lib/database/oracleDatabaseLinks";
+import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
+import { nativeJobAdminSupported } from "@/lib/database/nativeJobAdmin";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
 import { DAMENG_BUILTIN_DRIVER_PROFILE, DAMENG_CUSTOM_DRIVER_PROFILE, DAMENG_DEFAULT_JDBC_DRIVER_CLASS, damengCustomJdbcUrl, damengDriverModeForConfig, defaultDamengJdbcUrl, type DamengDriverMode } from "@/lib/database/damengDriverOptions";
 import { doltSystemTablesVisible, isDoltDriverProfile, setDoltSystemTablesVisible } from "@/lib/database/doltProfile";
@@ -131,10 +150,11 @@ import { assertCompleteDatabaseCategories, databaseSelectionForCategory } from "
 import { loadConnectionPickerView, saveConnectionPickerView, type DbPickerView } from "@/lib/connection/connectionPickerViewPreference";
 import { buildRocketMqConfig, hydrateRocketMqConfig, isRocketMqConfigValid, rocketMqConnectionTarget } from "@/lib/connection/rocketmqConfig";
 import { normalizeRabbitmqAddresses, parseRabbitmqAddress } from "@/lib/connection/rabbitmqAddresses";
-import { pluginFieldIsRequired, pluginFieldIsVisible } from "@/lib/plugins/pluginFieldConditions";
+import { pluginFieldHasValue as pluginFieldHasValueOf, pluginFieldIsRequired, pluginFieldIsVisible } from "@/lib/plugins/pluginFieldConditions";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, requestAgentInstallCancellation, resolveAgentInstallOutcome, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
+import { parseSqlServerHostPort } from "@/lib/sqlserver/sqlServerHostPort";
 import { normalizeNacosConsoleUrl, normalizeNacosEndpoint, normalizeNacosMetricsUrl, parseNacosManagedNamespaces } from "@/lib/nacos/nacosAdmin";
 import { loadReadableNacosNamespaces, nacosNamespaceIdentity, normalizeNacosNamespaceSelection } from "@/lib/nacos/nacosNamespaceVisibility";
 import {
@@ -169,10 +189,10 @@ import {
   Trash2,
 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
-import { resolveVisibleDatabaseSaveAction } from "@/components/sidebar/visibleDatabasesDialogState";
-import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
+import { resolveVisibleDatabaseSaveAction, visibleDatabasePatternsWithoutMatchAll } from "@/components/sidebar/visibleDatabasesDialogState";
+import { MATCH_ALL_VISIBLE_DATABASE_PATTERN, canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
 import { isSchemaAware, isSingleDatabase, supportsDataDictionary, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
-import { normalizeConnectionScope, normalizeConnectionTimeouts } from "@/lib/connection/connectionSubmitNormalization";
+import { normalizeConnectionIdentityFields, normalizeConnectionScope, normalizeConnectionTimeouts } from "@/lib/connection/connectionSubmitNormalization";
 import { databaseConnectionFormKind, databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import CloudflareD1ConnectionFields from "@/components/connection/CloudflareD1ConnectionFields.vue";
@@ -184,6 +204,8 @@ import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudfla
 import { hasSpannerResourcePath, isSpannerConnection, normalizeSpannerConnection } from "@/lib/connection/spannerResourcePath";
 import {
   buildElasticsearchExternalConfig,
+  elasticsearchAuthTypeFromConfig,
+  type ElasticsearchAuthType,
   elasticsearchConnectionModeFromConfig,
   elasticsearchConnectivityCheckDisabledFromConfig,
   elasticsearchConnectivityCheckPathFromConfig,
@@ -473,6 +495,8 @@ const defaultForm = (): ConnectionForm => ({
   read_only: false,
   show_system_schemas: false,
   show_database_links: true,
+  show_native_jobs: true,
+  show_user_admin: true,
   sidebar_auto_load_all_tables: false,
   is_production: false,
   production_databases: [],
@@ -487,6 +511,7 @@ function resetCassandraTlsFields(externalConfig: unknown) {
   Object.assign(cassandraTls, cassandraTlsConfigFromExternalConfig(externalConfig));
 }
 
+const elasticsearchAuthType = ref<ElasticsearchAuthType>("basic");
 const elasticsearchConnectionMode = ref<ElasticsearchConnectionMode>("direct");
 const elasticsearchKibanaBasePath = ref("");
 const elasticsearchConnectivityCheckPath = ref("");
@@ -496,7 +521,15 @@ const elasticsearchConnectionPorts = ref<Record<ElasticsearchConnectionMode, num
   direct: 9200,
   kibana: 5601,
 });
+function switchElasticsearchAuthType(authType: ElasticsearchAuthType) {
+  if (authType === elasticsearchAuthType.value) return;
+  elasticsearchAuthType.value = authType;
+  form.value.password = "";
+  resetTestState();
+}
+
 function resetElasticsearchProxyFields(externalConfig?: unknown) {
+  elasticsearchAuthType.value = elasticsearchAuthTypeFromConfig(externalConfig);
   const mode = elasticsearchConnectionModeFromConfig(externalConfig);
   elasticsearchConnectionMode.value = mode;
   elasticsearchKibanaBasePath.value = elasticsearchKibanaBasePathFromConfig(externalConfig);
@@ -532,6 +565,7 @@ function defaultSshTunnel(): SshTunnelConfig {
     expose_lan: false,
     use_ssh_agent: false,
     ssh_agent_sock_path: "",
+    ssh_agent_key_fingerprint: "",
     auth_method: "password",
     allow_exec_channel_proxy: false,
     proxy_command: "",
@@ -551,8 +585,10 @@ function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
     key_passphrase: hop.key_passphrase || "",
     connect_timeout_secs: Number(hop.connect_timeout_secs) || 5,
     expose_lan: !!hop.expose_lan,
+    local_port: hop.enabled === false ? normalizeSshLocalPort(hop.local_port) : editableSshLocalPort(hop.local_port),
     use_ssh_agent: !!hop.use_ssh_agent,
     ssh_agent_sock_path: hop.ssh_agent_sock_path || "",
+    ssh_agent_key_fingerprint: hop.ssh_agent_key_fingerprint || "",
     auth_method: hop.auth_method || inferSshAuthMethod(hop),
     allow_exec_channel_proxy: !!hop.allow_exec_channel_proxy,
     proxy_command: hop.proxy_command || "",
@@ -580,6 +616,7 @@ function defaultHttpTunnel(): HttpTunnelConfig {
     enabled: true,
     url: "",
     token: "",
+    protocol: "dbx_tcp",
     connect_timeout_secs: 10,
   };
 }
@@ -605,6 +642,7 @@ function normalizeHttpTunnel(layer: Partial<HttpTunnelConfig>): HttpTunnelConfig
     enabled: layer.enabled !== false,
     url: layer.url || "",
     token: layer.token || "",
+    protocol: layer.protocol === "navicat_mysql" ? "navicat_mysql" : "dbx_tcp",
     connect_timeout_secs: Number(layer.connect_timeout_secs) || 10,
     profile_id: layer.profile_id || undefined,
   };
@@ -668,6 +706,26 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 }
 
 const form = ref(defaultForm());
+const parameterEditorOpen = ref(false);
+watch(open, (value) => {
+  if (!value) parameterEditorOpen.value = false;
+});
+const parameterDriverDefinitions = ref<ConnectionParameterDefinition[]>([]);
+const parameterMetadataLoading = ref(false);
+const parameterMetadataError = ref("");
+let parameterMetadataRequest = 0;
+const configuredParameterCount = computed(() => parseConnectionParameters(form.value.url_params || "", connectionParameterSyntax(form.value)).entries.length);
+function applyConnectionParameters(value: string) {
+  form.value.url_params = value;
+  resetTestState();
+}
+const sidebarVisibilitySettings = computed(() => {
+  const config = { ...form.value, database_info: visibleTestDatabaseInfo.value ?? visibleSavedDatabaseInfo.value ?? undefined } as ConnectionConfig;
+  return [
+    { key: "show_native_jobs" as const, label: "connection.showNativeJobs", hint: "connection.showNativeJobsHint", supported: nativeJobAdminSupported(config) },
+    { key: "show_user_admin" as const, label: "connection.showUserAdmin", hint: "connection.showUserAdminHint", supported: connectionSupportsDatabaseUserAdmin(config) || effectiveDatabaseTypeForConnection(config) === "xugu" },
+  ].filter((setting) => setting.supported);
+});
 const supportsAutomaticTableLoading = computed(() => supportsDataDictionary(form.value.db_type) && !DIRECT_SIDEBAR_OBJECT_TYPES.has(form.value.db_type));
 const redisKeyTemplatesText = ref("");
 const noteTextareaRef = ref<HTMLTextAreaElement | null>(null);
@@ -680,6 +738,7 @@ const gaussdbDriverMode = computed<GaussdbConnectionMode>({
   },
 });
 const isGaussdbMJdbcConnection = computed(() => gaussdbDriverMode.value === "m-jdbc");
+const isGaussdbDwsConnection = computed(() => gaussdbDriverMode.value === "dws");
 const showGaussdbIdentifierQuoteStyle = computed(() => supportsGaussdbIdentifierQuoteStyle(form.value));
 const gaussdbQuoteStyle = computed<GaussdbIdentifierQuoteStyle>({
   get: () => gaussdbIdentifierQuoteStyle(form.value),
@@ -801,6 +860,34 @@ function setSqlServerPortExplicit(config: Pick<ConnectionConfig, "db_type"> & { 
 
 function markSqlServerPortExplicit() {
   setSqlServerPortExplicit(form.value, true);
+}
+
+function handleHostBlur() {
+  if (form.value.db_type === "sqlserver") {
+    const parsed = parseSqlServerHostPort(form.value.host, form.value.port);
+    form.value.host = parsed.host;
+    if (parsed.portExplicit && parsed.port !== undefined) {
+      form.value.port = parsed.port;
+      markSqlServerPortExplicit();
+      resetTestState();
+    }
+  }
+}
+
+function handleHostPaste(event: ClipboardEvent) {
+  if (form.value.db_type === "sqlserver") {
+    const text = event.clipboardData?.getData("text") || "";
+    if (text.includes(",") || text.toLowerCase().startsWith("tcp:") || text.includes(":")) {
+      const parsed = parseSqlServerHostPort(text, form.value.port);
+      if (parsed.portExplicit) {
+        event.preventDefault();
+        form.value.host = parsed.host;
+        form.value.port = parsed.port!;
+        markSqlServerPortExplicit();
+        resetTestState();
+      }
+    }
+  }
 }
 
 const keepaliveEnabled = computed({
@@ -1233,6 +1320,29 @@ function parsedJdbcDriverPaths(): string[] {
     .filter(Boolean);
 }
 
+watch([parameterEditorOpen, () => form.value.db_type, () => form.value.driver_profile, () => form.value.connection_string, () => form.value.url_params, () => form.value.jdbc_driver_class, jdbcDriverPathsInput], async ([isOpen]) => {
+  const request = ++parameterMetadataRequest;
+  parameterDriverDefinitions.value = [];
+  parameterMetadataError.value = "";
+  parameterMetadataLoading.value = false;
+  if (!isOpen) return;
+  const runtime = databaseManifestEntry(form.value.db_type)?.runtimeMode;
+  if ((runtime === "native" || runtime === "file") && !form.value.driver_profile?.includes("legacy")) return;
+  if (form.value.db_type === "oracle") return;
+  parameterMetadataLoading.value = true;
+  try {
+    const config = { ...form.value, id: editingId.value || "parameter-metadata-draft", jdbc_driver_paths: parsedJdbcDriverPaths() } as ConnectionConfig;
+    const metadata = await api.connectionParameters(config);
+    if (request !== parameterMetadataRequest) return;
+    parameterDriverDefinitions.value = metadata.parameters;
+    if (!metadata.available) parameterMetadataError.value = "unavailable";
+  } catch {
+    if (request === parameterMetadataRequest) parameterMetadataError.value = "unavailable";
+  } finally {
+    if (request === parameterMetadataRequest) parameterMetadataLoading.value = false;
+  }
+});
+
 function applyCustomColor(value: string) {
   form.value.color = value;
   customColorInput.value = value;
@@ -1537,8 +1647,8 @@ function resetMqttFields(config?: Partial<MqttConnectionConfig>) {
     mqttClientKeyPath.value = "";
   } else if (auth && auth.kind === "certificate") {
     mqttAuthKind.value = "certificate";
-    mqttUsername.value = "";
-    mqttPassword.value = "";
+    mqttUsername.value = auth.username || "";
+    mqttPassword.value = auth.password || "";
     mqttCaCertPath.value = auth.caCertPath || "";
     mqttClientCertPath.value = auth.clientCertPath || "";
     mqttClientKeyPath.value = auth.clientKeyPath || "";
@@ -1565,7 +1675,7 @@ function buildMqttExternalConfig(): MqttConnectionConfig {
     mqttAuthKind.value === "password"
       ? { kind: "password", username: mqttUsername.value, password: mqttPassword.value }
       : mqttAuthKind.value === "certificate"
-        ? { kind: "certificate", caCertPath: mqttCaCertPath.value || undefined, clientCertPath: mqttClientCertPath.value || undefined, clientKeyPath: mqttClientKeyPath.value || undefined }
+        ? { kind: "certificate", username: mqttUsername.value || undefined, password: mqttUsername.value ? mqttPassword.value : undefined, caCertPath: mqttCaCertPath.value || undefined, clientCertPath: mqttClientCertPath.value || undefined, clientKeyPath: mqttClientKeyPath.value || undefined }
         : { kind: "none" };
 
   return {
@@ -3070,6 +3180,9 @@ function applyRequestedPluginProvider(target: PluginCenterFocus | null | undefin
 }
 
 function switchOceanbaseMode(mode: "mysql" | "oracle") {
+  const port = form.value.port;
+  const sourceProfile = oceanbaseSubMode.value === "mysql" ? "oceanbase" : "oceanbase-oracle";
+  const preservePort = port !== driverProfiles[sourceProfile].port;
   oceanbaseSubMode.value = mode;
   if (mode === "mysql") {
     applyProfile("oceanbase", false);
@@ -3077,6 +3190,7 @@ function switchOceanbaseMode(mode: "mysql" | "oracle") {
     applyProfile("oceanbase-oracle", false);
     selectedType.value = "oceanbase";
   }
+  if (preservePort) form.value.port = port;
   resetTestState();
 }
 
@@ -3090,6 +3204,12 @@ function switchGbaseProfile(profile: GbaseProfile) {
 
 let applyingConnectionUpdate = false;
 let appliedConnectionUpdate: ConnectionDeepLinkUpdate | null = null;
+
+/**
+ * 免确认保存的去重键。必须早于下面这个 `immediate` watcher 声明——更新链接的
+ * 自动保存就在该 watcher 里触发，晚声明会命中 TDZ。
+ */
+const submittedAutoCreatePrefillKey = ref<string | null>(null);
 
 function finishApplyingConnectionUpdate() {
   void nextTick(() => {
@@ -3140,13 +3260,14 @@ watch(
         driver_label: config.driver_label || oceanbasePatch?.driver_label || driverProfiles[profile]?.label || config.db_type,
         ...savedMysqlTlsFormFields(config),
         agent_java_options: config.agent_java_options || [],
-        host: config.db_type === "h2" && h2FilePathFromJdbcUrl(config.connection_string) ? h2FilePathFromJdbcUrl(config.connection_string) : config.host,
-        port: profile === "tdengine" && (config.port === 0 || config.port === 6030) ? 6041 : config.port,
+        host: config.db_type === "sqlserver" ? parseSqlServerHostPort(config.host, config.port).host : config.db_type === "h2" && h2FilePathFromJdbcUrl(config.connection_string) ? h2FilePathFromJdbcUrl(config.connection_string) : config.host,
+        port: config.db_type === "sqlserver" ? (parseSqlServerHostPort(config.host, config.port).port ?? config.port) : profile === "tdengine" && (config.port === 0 || config.port === 6030) ? 6041 : config.port,
         username: config.username,
         password: config.password,
         // Show the index the backend actually connects with; legacy dirty values
         // (e.g. redis-cli flags in the field) are healed when the form is saved.
         database: config.db_type === "redis" ? normalizeRedisDatabaseValue(config.database) || "" : config.database,
+        default_schema: config.default_schema,
         color: config.color || "",
         transport_layers: transportLayersForConfig(legacyConfig),
         connect_timeout_secs: config.connect_timeout_inherit === true ? settingsStore.editorSettings.globalConnectTimeoutSecs : config.connect_timeout_secs || 10,
@@ -3173,6 +3294,7 @@ watch(
         redis_cluster_nodes: config.redis_cluster_nodes || "",
         redis_key_separator: config.redis_key_separator ?? ":",
         redis_scan_page_size: config.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT,
+        redis_database_aliases: config.redis_database_aliases ? { ...config.redis_database_aliases } : undefined,
         redis_key_templates: normalizeRedisKeyTemplates(config.redis_key_templates),
         redis_key_filter: config.redis_key_filter ?? "",
         redis_key_grouping: config.redis_key_grouping,
@@ -3186,14 +3308,22 @@ watch(
         read_only: config.read_only || false,
         show_system_schemas: config.show_system_schemas || false,
         show_database_links: config.show_database_links !== false,
+        show_native_jobs: config.show_native_jobs !== false,
+        show_user_admin: config.show_user_admin !== false,
         sidebar_auto_load_all_tables: config.sidebar_auto_load_all_tables === true,
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
         production_badge_scope: sidebarProductionBadgeScope(config),
         visible_databases: config.visible_databases,
+        // 通配符筛选由侧栏弹窗维护；编辑连接时也要带上，否则保存会把它清掉，
+        // “显示全部（含系统库）”的 `%` 也会在下次打开编辑器时丢失。
+        visible_database_patterns: config.visible_database_patterns,
         visible_schemas: config.visible_schemas,
         save_password: config.save_password !== false,
       };
+      if (config.db_type === "sqlserver" && parseSqlServerHostPort(config.host, config.port).portExplicit) {
+        markSqlServerPortExplicit();
+      }
       redisKeyTemplatesText.value = redisKeyTemplatesToTextarea(form.value.redis_key_templates);
       oracleTnsAdminPath.value = parseOracleTnsConnectionString(config.connection_string)?.tnsAdmin || "";
       productionProtectionEnabled.value = !!config.is_production || (config.production_databases?.length ?? 0) > 0;
@@ -3276,7 +3406,10 @@ watch(
       customDriverName.value = isCustomCompatibleProfile() ? config.driver_label || "" : "";
       dialogStep.value = "config";
       configTab.value = initialConfigTab();
-      if (props.updatePrefill) finishApplyingConnectionUpdate();
+      if (props.updatePrefill) {
+        finishApplyingConnectionUpdate();
+        submitUpdateIfAutoConfirmed(props.updatePrefill);
+      }
       // Form/profile watchers normalize derived fields in this flush. Capture
       // the saved baseline afterwards so those initial changes are not treated
       // as user edits that invalidate persisted database metadata.
@@ -3842,7 +3975,12 @@ const isH2FileMode = computed(() => form.value.db_type === "h2" && h2ConnectionM
 const isH2CustomDriver = computed(() => form.value.db_type === "h2" && form.value.driver_profile === "h2-custom");
 const usesLocalFilePathInput = computed(() => isLocalFileTypeDb(form.value.db_type) && (form.value.db_type !== "h2" || isH2FileMode.value));
 
-const connectionUrlPlaceholder = computed(() => getUrlPlaceholder(form.value.db_type, form.value.driver_profile));
+const connectionUrlPlaceholder = computed(() => {
+  if (form.value.db_type === "h2") {
+    return isH2FileMode.value ? getUrlPlaceholder("h2", "file") : getUrlPlaceholder("h2", form.value.driver_profile);
+  }
+  return getUrlPlaceholder(form.value.db_type, form.value.driver_profile);
+});
 const jdbcUsernamePlaceholder = computed(() => (form.value.driver_profile === "dremio" || isJdbcProductConnection.value ? "" : "sa"));
 const filePathPlaceholder = computed(() => {
   if (form.value.db_type === "duckdb") return "/path/to/database.duckdb or :memory:";
@@ -3889,7 +4027,6 @@ const tlsCapableDatabaseTypes = new Set<DatabaseType>([
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type) || supportsMysqlTlsTab(form.value.db_type, selectedType.value));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse" || form.value.db_type === "victoriametrics");
 const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase" && form.value.db_type !== "nebula");
-const showGenericUrlParamsHint = computed(() => form.value.db_type === "mysql" || form.value.db_type === "doris" || form.value.db_type === "starrocks");
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => mysqlTlsOptionsSupported(form.value.db_type, selectedType.value));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
@@ -4006,6 +4143,16 @@ const firebirdCharset = computed({
   },
 });
 const FIREBIRD_DATA_CHARSET_OPTIONS = ["GBK", "GB18030", "BIG5"];
+const mysqlDataCharsetValue = computed({
+  get: () => mysqlDataCharset(form.value.url_params),
+  set: (value: string) => {
+    form.value.url_params = setMysqlDataCharset(form.value.url_params, value);
+  },
+});
+const mysqlDataCharsetItems = computed(() => {
+  const current = mysqlDataCharsetValue.value;
+  return current !== "default" && !MYSQL_DATA_CHARSETS.some((value) => value === current) ? [current, ...MYSQL_DATA_CHARSETS] : MYSQL_DATA_CHARSETS;
+});
 const firebirdDataCharsetItems = computed(() => {
   const current = getUrlParam(form.value.url_params, "dataCharset");
   return current && !FIREBIRD_DATA_CHARSET_OPTIONS.includes(current) ? [current, ...FIREBIRD_DATA_CHARSET_OPTIONS] : FIREBIRD_DATA_CHARSET_OPTIONS;
@@ -4348,8 +4495,7 @@ function pluginFieldValue(field: PluginFormField): PluginFormFieldValue {
 }
 
 function pluginFieldHasValue(field: PluginFormField): boolean {
-  const value = pluginFieldValue(field);
-  return typeof value === "string" ? value.trim().length > 0 : value !== undefined;
+  return pluginFieldHasValueOf(field, pluginFieldValue(field));
 }
 
 function pluginFieldValueByKey(key: string): PluginFormFieldValue {
@@ -4844,6 +4990,7 @@ function connectionConfigForSshTunnelTest(id: string): ConnectionConfig {
 
 function connectionConfigForSubmit(id: string, generatedName = "", validatePluginRequired = true): ConnectionConfig {
   let config: LegacyConnectionConfig;
+  let preserveExistingShowDatabaseLinks = false;
   if (isPluginConnection.value) {
     const entry = selectedPluginProvider.value;
     if (!entry) throw new Error(pluginLoadError.value || t("connection.pluginProviderUnavailable"));
@@ -4903,6 +5050,9 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
   }
   config.database_info = undefined;
   config.database = normalizeStoredConnectionDatabase(config.db_type, config.database);
+  // Plugin providers own their field semantics; trim only the built-in form where a
+  // hostname/user name/database can never carry meaningful surrounding whitespace.
+  if (!isPluginConnection.value) normalizeConnectionIdentityFields(config);
   config.note = config.note?.trim() || undefined;
   if (selectedType.value === "oceanbase" && (config.driver_profile === "oceanbase" || config.driver_profile === "oceanbase-oracle")) {
     Object.assign(config, oceanbaseModeConnectionPatch(oceanbaseSubMode.value));
@@ -4942,6 +5092,20 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.host = serialized.host;
     config.port = serialized.port;
   }
+  // Hostnames and usernames cannot contain leading/trailing whitespace, so a
+  // stray space (typically from copy-pasting) can only be a mistake — but it
+  // still reaches the driver and fails in a way the error message does not
+  // make visible. Passwords are left untouched because surrounding spaces can
+  // be significant, and file-path hosts (SQLite/DuckDB/H2 file mode) keep
+  // their exact value for the same reason.
+  const usesLocalFilePathHost = isLocalFileTypeDb(config.db_type) && (config.db_type !== "h2" || h2ConnectionModeForConfig(config) === "file");
+  if (!usesLocalFilePathHost && typeof config.host === "string") {
+    config.host = config.host.trim();
+  }
+  if (typeof config.username === "string") {
+    config.username = config.username.trim();
+  }
+  config.database = config.database?.trim() || undefined;
   if (isCloudflareD1Connection(config)) {
     normalizeCloudflareD1Connection(config);
     if (!hasCloudflareD1Credentials(config)) {
@@ -5155,12 +5319,22 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
       config.external_config = { ...existing, auth };
     }
   } else if (config.db_type === "elasticsearch") {
-    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value, elasticsearchIndexGroupingPattern.value, elasticsearchConnectivityCheckDisabled.value);
+    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value, elasticsearchIndexGroupingPattern.value, elasticsearchConnectivityCheckDisabled.value, elasticsearchAuthType.value);
+    if (elasticsearchAuthType.value === "apiKey") {
+      config.username = "";
+      config.password = config.password.trim();
+    }
   } else if (config.db_type === "meilisearch") {
     config.username = "";
     config.password = config.password.trim();
     config.database = undefined;
   } else if (config.db_type === "sqlserver") {
+    const parsed = parseSqlServerHostPort(config.host, config.port);
+    config.host = parsed.host;
+    if (parsed.portExplicit && parsed.port !== undefined) {
+      config.port = parsed.port;
+      setSqlServerPortExplicit(config, true);
+    }
     if (!connectionUpdateExternalConfigPreserved(config)) config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
     const style = gaussdbIdentifierQuoteStyle(config);
@@ -5278,12 +5452,10 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
       // pasted into the field) are stored as the index the backend connects with.
       const database = normalizeRedisDatabaseValue(config.database);
       config.database = database;
-      form.value.database = database || "";
     }
     {
       const templates = normalizeRedisKeyTemplates(redisKeyTemplatesText.value);
       config.redis_key_templates = templates.length > 0 ? templates : undefined;
-      form.value.redis_key_templates = templates;
     }
   }
   if (config.db_type === "zookeeper") {
@@ -5316,6 +5488,13 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
       throw new Error(t("connection.etcdClientCertPairRequired"));
     }
+  } else if (config.db_type === "redis") {
+    config.etcd_endpoints = undefined;
+    config.client_cert_path = config.client_cert_path?.trim() || "";
+    config.client_key_path = config.client_key_path?.trim() || "";
+    if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
+      throw new Error(t("connection.redisClientCertPairRequired"));
+    }
   } else if (form.value.db_type !== "consul" && config.db_type !== "elasticsearch" && config.db_type !== "easysearch" && config.db_type !== "solr") {
     config.etcd_endpoints = undefined;
     config.client_cert_path = undefined;
@@ -5337,6 +5516,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.db_type !== "doris" &&
     config.db_type !== "mongodb" &&
     config.db_type !== "victoriametrics" &&
+    config.db_type !== "redis" &&
     config.db_type !== "zookeeper" &&
     config.db_type !== "elasticsearch" &&
     config.db_type !== "easysearch" &&
@@ -5386,8 +5566,18 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
         config.connection_string = config.connection_string?.trim() || JDBCX_DEFAULT_URL;
         config.jdbc_driver_class = config.jdbc_driver_class?.trim() || JDBCX_JDBC_DRIVER_CLASS;
       } else {
-        config.host = "";
-        config.port = 0;
+        const keepsExistingTarget = editingId.value === id && props.editConfig?.id === id && config.db_type === props.editConfig.db_type && config.driver_profile === props.editConfig.driver_profile && config.connection_string === props.editConfig.connection_string;
+        if (!keepsExistingTarget) {
+          config.host = "";
+          config.port = 0;
+        } else if (props.editConfig.production_badge_scope == null && config.production_badge_scope === sidebarProductionBadgeScope(props.editConfig)) {
+          config.production_badge_scope = undefined;
+        }
+        preserveExistingShowDatabaseLinks = keepsExistingTarget && !supportsOracleDatabaseLinks(config.db_type);
+        if (preserveExistingShowDatabaseLinks) {
+          // Generic JDBC has no DB-link toggle; retain the saved target setting.
+          config.show_database_links = props.editConfig?.show_database_links;
+        }
         config.connection_string = config.connection_string?.trim() || "";
       }
     } else if (config.db_type === "prestosql") {
@@ -5461,12 +5651,16 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.visible_databases = Array.isArray(config.visible_databases) && config.visible_databases.length > 0 ? config.visible_databases : undefined;
   }
   if (!config.show_system_schemas) config.show_system_schemas = undefined;
-  if (config.show_database_links !== false) config.show_database_links = undefined;
+  if (config.show_database_links !== false && !preserveExistingShowDatabaseLinks) config.show_database_links = undefined;
+  if (config.show_native_jobs !== false) config.show_native_jobs = undefined;
+  if (config.show_user_admin !== false) config.show_user_admin = undefined;
   if (!config.sidebar_auto_load_all_tables) config.sidebar_auto_load_all_tables = undefined;
   if (config.visible_schemas && Object.keys(config.visible_schemas).length === 0) config.visible_schemas = undefined;
   if (config.agent_java_options && config.agent_java_options.length === 0) config.agent_java_options = undefined;
   // Pasted credentials may carry invisible characters that trim() keeps (#9043).
   sanitizeConnectionCredentials(config);
+  const mysqlCharsetError = mysqlDataCharsetValidation(config);
+  if (mysqlCharsetError) throw new Error(t(mysqlCharsetError));
   return config as ConnectionConfig;
 }
 
@@ -5511,22 +5705,11 @@ function setSqliteExtensionPaths(params: string | undefined, paths: string): str
 }
 
 function setUrlParam(params: string | undefined, key: string, value: string): string {
-  const parsed = new URLSearchParams((params || "").trim().replace(/^\?/, ""));
-  const normalized = value.trim();
-  if (normalized) {
-    parsed.set(key, normalized);
-  } else {
-    parsed.delete(key);
-  }
-  return parsed.toString();
+  return patchConnectionParameter(params, key, value.trim() || null);
 }
 
 function deleteUrlParams(params: string | undefined, keys: string[]): string {
-  const parsed = new URLSearchParams((params || "").trim().replace(/^\?/, ""));
-  for (const key of keys) {
-    parsed.delete(key);
-  }
-  return parsed.toString();
+  return keys.reduce((value, key) => patchConnectionParameter(value, key, null), params || "");
 }
 
 function mysqlTlsModeFromParams(params: string | undefined, ssl: boolean | undefined): string {
@@ -5674,7 +5857,7 @@ function parseEtcdEndpoint(value: string): { scheme?: string; host: string; port
 }
 
 function isOracleSysUser(config: Pick<ConnectionConfig, "db_type" | "username">): boolean {
-  return config.db_type === "oracle" && config.username.trim().toLowerCase() === "sys";
+  return config.db_type === "oracle" && typeof config.username === "string" && config.username.trim().toLowerCase() === "sys";
 }
 
 function resetTestState() {
@@ -6085,8 +6268,13 @@ function showAllVisibleDatabases() {
   if (visibleFilterUsesSchemas.value) {
     handleDraftSchemasShowAll();
     form.value.visible_databases = undefined;
+    // schema 模式下的兜底通配符同样会重新隐藏对象；"显示全部"要一并清掉。
+    form.value.visible_database_patterns = undefined;
   } else {
     form.value.visible_databases = undefined;
+    // 未筛选时系统库默认隐藏。用户展开系统库后点“显示全部”，说明全选范围包含系统库：
+    // 用全匹配通配符记住这一意图，既不冻结当前库名，之后新建的库也仍然自动可见。
+    form.value.visible_database_patterns = visibleDatabaseShowSystem.value && visibleDatabaseHasSystemObjects.value ? [MATCH_ALL_VISIBLE_DATABASE_PATTERN] : undefined;
   }
   visibleDatabaseSelection.value = new Set();
   visibleDatabaseNames.value = [];
@@ -6110,12 +6298,14 @@ function saveVisibleDatabaseSelection() {
       defaultVisibleNames: defaultListedVisibleDatabaseNames.value,
       configured: form.value.visible_databases,
       configuredPatterns: form.value.visible_database_patterns,
-      patterns: form.value.visible_database_patterns ?? [],
+      patterns: visibleDatabasePatternsWithoutMatchAll(form.value.visible_database_patterns),
     });
     if (action.type === "clear") {
       form.value.visible_databases = undefined;
+      form.value.visible_database_patterns = undefined;
     } else if (action.type === "set") {
       form.value.visible_databases = action.databaseNames;
+      form.value.visible_database_patterns = action.patterns.length > 0 ? action.patterns : undefined;
     }
   }
   showVisibleDatabasesDialog.value = false;
@@ -6270,9 +6460,7 @@ function resetForm(options: { preservePickerState?: boolean } = {}) {
   resetTestState();
 }
 
-const submittedOneTimePrefillKey = ref<string | null>(null);
-
-function oneTimePrefillKey(draft: ConnectionDeepLinkDraft) {
+function prefillDraftKey(draft: ConnectionDeepLinkDraft) {
   return JSON.stringify([
     draft.name,
     draft.dbType,
@@ -6290,14 +6478,35 @@ function oneTimePrefillKey(draft: ConnectionDeepLinkDraft) {
     draft.oracleConnectionType,
     draft.useMongoUrl,
     draft.serviceConfig,
+    draft.mqConfig,
   ]);
 }
 
-function submitOneTimePrefill(draft: ConnectionDeepLinkDraft) {
-  if (!draft.oneTime) return;
-  const key = oneTimePrefillKey(draft);
-  if (submittedOneTimePrefillKey.value === key) return;
-  submittedOneTimePrefillKey.value = key;
+/**
+ * 免确认保存连接深链。
+ *
+ * `one_time` 临时连接一直是自动提交的；设置项 `deepLinkConnectionConfirmMode`
+ * 打开对应形态后，新建（`create`）与带 `id` 的更新（`update`）链接也走同一条路径：
+ * 弹窗完成预填后立刻保存，用户不需要再点确认。
+ *
+ * 仍然复用弹窗自己的 `save()`，因此驱动安装、URL 解析、校验等逻辑与手动保存完全一致；
+ * 一旦校验失败，`save()` 返回 false 且弹窗保持打开，用户可以继续手动补全。
+ */
+function submitPrefillIfAutoConfirmed(draft: ConnectionDeepLinkDraft) {
+  if (!shouldAutoConfirmConnectionPrefill(draft, settingsStore.editorSettings.deepLinkConnectionConfirmMode)) return;
+  const key = prefillDraftKey(draft);
+  if (submittedAutoCreatePrefillKey.value === key) return;
+  submittedAutoCreatePrefillKey.value = key;
+  void nextTick(() => save());
+}
+
+/** 带 `id` 的更新链接：预填完成后按设置决定是否直接保存。 */
+function submitUpdateIfAutoConfirmed(update: ConnectionDeepLinkUpdate) {
+  if (!shouldAutoConfirmConnectionDeepLink("update", settingsStore.editorSettings.deepLinkConnectionConfirmMode)) return;
+  const key = `update:${update.connectionId}:${JSON.stringify(update.patch)}`;
+  if (submittedAutoCreatePrefillKey.value === key) return;
+  submittedAutoCreatePrefillKey.value = key;
+  // 让表单 watcher 先跑完一轮派生字段归一化，再按当前表单内容保存。
   void nextTick(() => save());
 }
 
@@ -6331,6 +6540,7 @@ function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
   } else if (draft.serviceConfig?.kind === "nacos") {
     hydrateNacosFields(connectionDeepLinkServiceHydrationValue(draft.serviceConfig));
   }
+  if (draft.mqConfig) hydrateMqFields(draft.mqConfig);
   oracleTnsAdminPath.value = parseOracleTnsConnectionString(form.value.connection_string)?.tnsAdmin || "";
   selectedType.value = draft.driverProfile;
   if (form.value.db_type === "h2") {
@@ -6345,6 +6555,14 @@ function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
     selectedType.value = "gbase";
   }
   customDriverName.value = isCustomCompatibleProfile() ? draft.driverLabel : "";
+  if (form.value.db_type === "sqlserver") {
+    const parsed = parseSqlServerHostPort(form.value.host, form.value.port);
+    form.value.host = parsed.host;
+    if (parsed.portExplicit && parsed.port !== undefined) {
+      form.value.port = parsed.port;
+      markSqlServerPortExplicit();
+    }
+  }
   mongoUseUrl.value = !!draft.useMongoUrl;
   if (draft.name?.trim()) {
     form.value.name = draft.name.trim();
@@ -6359,7 +6577,7 @@ function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
 function applyConnectionPrefill(draft: ConnectionDeepLinkDraft) {
   resetForm();
   applyConnectionDraftToForm(draft);
-  submitOneTimePrefill(draft);
+  submitPrefillIfAutoConfirmed(draft);
 }
 
 watch(
@@ -6367,7 +6585,7 @@ watch(
   (value) => {
     if (!value) {
       const draftId = editingId.value ? null : draftTestConnectionId.value;
-      submittedOneTimePrefillKey.value = null;
+      submittedAutoCreatePrefillKey.value = null;
       resetForm();
       if (draftId) {
         void api.disconnectDb(draftId).catch(() => undefined);
@@ -6541,6 +6759,7 @@ function addHttpTunnel() {
 function duplicateTransportLayer(layer: TransportLayerConfig) {
   if (sqliteRemoteTransportRestricted.value && !isSqliteRemoteTransportLayerType(layer.type)) return;
   const next = normalizeTransportLayer({ ...layer, id: uuid(), name: layer.name ? `${layer.name} copy` : "" });
+  if (next.type === "ssh") delete next.local_port;
   form.value.transport_layers = sqliteRemoteTransportRestricted.value ? insertSqliteRemoteTransportLayer(transportLayers.value, next) : [...transportLayers.value, next];
   selectedTransportLayerId.value = next.id;
   resetTestState();
@@ -6593,10 +6812,43 @@ function updateSelectedProxyType(value: unknown) {
   resetTestState();
 }
 
+function updateSelectedHttpTunnelProtocol(value: unknown) {
+  const layer = selectedHttpTunnelLayer.value;
+  if (!layer) return;
+  layer.protocol = String(value) === "navicat_mysql" ? "navicat_mysql" : "dbx_tcp";
+  if (layer.protocol === "navicat_mysql") layer.token = "";
+  if (layer.protocol === "navicat_mysql" && layer.url.trim()) {
+    try {
+      const url = new URL(layer.url.trim());
+      if (url.pathname.endsWith("/")) {
+        url.pathname += "ntunnel_mysql.php";
+        layer.url = url.toString();
+      } else {
+        layer.url = url.toString();
+      }
+    } catch {
+      // Keep invalid input unchanged so the submit validation can report it.
+    }
+  }
+  resetTestState();
+}
+
+const selectedHttpTunnelProtocol = computed({
+  get: () => selectedHttpTunnelLayer.value?.protocol || "dbx_tcp",
+  set: (value: string) => updateSelectedHttpTunnelProtocol(value),
+});
+
 function updateSelectedSshAuthMethod(value: unknown) {
   const layer = selectedSshLayer.value;
   if (!layer) return;
   applySshAuthMethod(layer, value);
+  resetTestState();
+}
+
+function updateSelectedSshLocalPort(value: unknown) {
+  const layer = selectedSshLayer.value;
+  if (!layer) return;
+  layer.local_port = editableSshLocalPort(value);
   resetTestState();
 }
 
@@ -6605,6 +6857,7 @@ function validateTransportLayers(config: LegacyConnectionConfig) {
   if (config.db_type === "sqlite" && sqliteRemoteTransportError(layers)) {
     throw new Error(t("connection.sqliteTransportSshOnly"));
   }
+  const lastEnabledIndex = layers.reduce((last, layer, index) => (layer.enabled === false ? last : index), -1);
   layers.forEach((layer, index) => {
     if (layer.enabled === false) return;
     // Profile-referencing layers are stubs: the shared profile supplies the
@@ -6634,6 +6887,10 @@ function validateTransportLayers(config: LegacyConnectionConfig) {
       if (!Number.isFinite(timeout) || timeout < 1 || timeout > 300) {
         throw new Error(t("connection.sshHopInvalidTimeout", { hop: label }));
       }
+      const localPortState = sshLocalPortState(layer.local_port);
+      if (localPortState === "invalid") throw new Error(t("connection.sshHopInvalidLocalPort", { hop: label }));
+      if (localPortState === "valid" && index !== lastEnabledIndex) throw new Error(t("connection.sshHopLocalPortNotLast", { hop: label }));
+      if (localPortState === "valid" && !sshLocalPortSupportedForConnection(config, mqSystemKind.value, selectedPluginProvider.value?.contribution.proxy_route)) throw new Error(t("connection.sshHopLocalPortUnsupported", { hop: label }));
     }
   });
 }
@@ -6817,6 +7074,58 @@ async function browseSshKeyPath(target?: SshTunnelConfig | null) {
   }
 }
 
+const SSH_AGENT_ALL_IDENTITIES = "__all__";
+const sshAgentIdentities = ref<SshAgentIdentity[]>([]);
+const sshAgentIdentitiesLoading = ref(false);
+const sshAgentIdentitiesError = ref("");
+let sshAgentIdentitiesTimer: ReturnType<typeof setTimeout> | undefined;
+let sshAgentIdentitiesRequest = 0;
+
+const sshAgentIdentityOptions = computed(() => {
+  const fingerprint = selectedSshLayer.value?.ssh_agent_key_fingerprint || "";
+  if (!fingerprint || sshAgentIdentities.value.some((identity) => identity.fingerprint === fingerprint)) {
+    return sshAgentIdentities.value;
+  }
+  return [{ fingerprint, algorithm: "", comment: "" }, ...sshAgentIdentities.value];
+});
+
+function sshAgentIdentityLabel(identity: SshAgentIdentity) {
+  if (!identity.comment) return identity.fingerprint;
+  return identity.algorithm ? `${identity.comment} (${identity.algorithm})` : identity.comment;
+}
+
+function updateSelectedSshAgentKeyFingerprint(value: unknown) {
+  if (!selectedSshLayer.value) return;
+  const fingerprint = String(value);
+  selectedSshLayer.value.ssh_agent_key_fingerprint = fingerprint === SSH_AGENT_ALL_IDENTITIES ? "" : fingerprint;
+}
+
+async function loadSshAgentIdentities(sshAgentSockPath: string) {
+  const request = ++sshAgentIdentitiesRequest;
+  sshAgentIdentitiesLoading.value = true;
+  sshAgentIdentitiesError.value = "";
+  try {
+    const identities = await api.listSshAgentIdentities(sshAgentSockPath);
+    if (request === sshAgentIdentitiesRequest) sshAgentIdentities.value = identities;
+  } catch (cause) {
+    if (request === sshAgentIdentitiesRequest) {
+      sshAgentIdentitiesError.value = t("connection.sshAgentKeyLoadFailed", { error: cause instanceof Error ? cause.message : String(cause) });
+    }
+  } finally {
+    if (request === sshAgentIdentitiesRequest) sshAgentIdentitiesLoading.value = false;
+  }
+}
+
+watch(
+  () => (selectedSshLayer.value?.auth_method === "agent" ? selectedSshLayer.value.ssh_agent_sock_path || "" : null),
+  (sshAgentSockPath) => {
+    if (sshAgentSockPath === null) return;
+    clearTimeout(sshAgentIdentitiesTimer);
+    sshAgentIdentitiesTimer = setTimeout(() => void loadSshAgentIdentities(sshAgentSockPath), 400);
+  },
+  { immediate: true },
+);
+
 async function browseCaCertPath() {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -6911,6 +7220,29 @@ async function browseEtcdTlsFile(target: "ca" | "cert" | "key") {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       title: target === "ca" ? t("connection.etcdCaCertBrowse") : target === "cert" ? t("connection.etcdClientCertBrowse") : t("connection.etcdClientKeyBrowse"),
+      multiple: false,
+      filters: [
+        { name: "PEM", extensions: ["pem", "crt", "cer", "key"] },
+        { name: "All Files", extensions: ["*"] },
+      ],
+    });
+    if (selected && typeof selected === "string") {
+      if (target === "ca") {
+        form.value.ca_cert_path = selected;
+      } else if (target === "cert") {
+        form.value.client_cert_path = selected;
+      } else {
+        form.value.client_key_path = selected;
+      }
+    }
+  }
+}
+
+async function browseRedisTlsFile(target: "ca" | "cert" | "key") {
+  if (isTauriRuntime()) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      title: target === "ca" ? t("connection.redisCaCertBrowse") : target === "cert" ? t("connection.redisClientCertBrowse") : t("connection.redisClientKeyBrowse"),
       multiple: false,
       filters: [
         { name: "PEM", extensions: ["pem", "crt", "cer", "key"] },
@@ -7193,7 +7525,7 @@ function openExternalUrl(url: string) {
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <Dialog :open="open && !parameterEditorOpen" @update:open="open = $event">
     <DialogContent
       :style="dialogContentStyle"
       class="connection-dialog-content"
@@ -7605,18 +7937,7 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
-                    <div class="grid grid-cols-4 items-center gap-4">
-                      <span />
-                      <div class="col-span-3 flex items-center gap-1.5 text-sm">
-                        <label class="flex items-center gap-2">
-                          <input v-model="form.save_password" type="checkbox" class="h-4 w-4 rounded border-border accent-primary" :aria-label="t('connection.savePassword')" />
-                          <span class="whitespace-nowrap">{{ t("connection.savePassword") }}</span>
-                        </label>
-                        <HelpTooltip :label="t('connection.savePassword')">
-                          {{ form.save_password ? t("connection.savePasswordHint") : t("connection.savePasswordSessionHint") }}
-                        </HelpTooltip>
-                      </div>
-                    </div>
+                    <SavePasswordCheckbox v-model="form.save_password" />
                     <div class="grid grid-cols-4 items-start gap-4">
                       <Label :class="connectionLabelTopClass">{{ t("connection.jdbcDriverPaths") }}</Label>
                       <div class="col-span-3 space-y-2">
@@ -7677,6 +7998,13 @@ function openExternalUrl(url: string) {
                           </Button>
                         </div>
                       </div>
+                    </div>
+                    <div v-if="supportsGenericUrlParams" class="connection-parameters-row grid grid-cols-4 items-center gap-4">
+                      <Label for="connection-parameters-open" :class="connectionLabelClass">{{ t("connection.parameterEditor.title") }}</Label>
+                      <Button id="connection-parameters-open" type="button" variant="outline" class="col-span-3 justify-between" @click="parameterEditorOpen = true">
+                        <span class="font-normal text-muted-foreground">{{ configuredParameterCount ? t("connection.parameterEditor.configuredCount", { count: configuredParameterCount }) : t("connection.parameterEditor.default") }}</span>
+                        <span>{{ t("connection.parameterEditor.configure") }}</span>
+                      </Button>
                     </div>
                   </template>
 
@@ -7755,6 +8083,7 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelClass">{{ t("connection.sqliteCipherKey") }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.sqliteCipherKeyPlaceholder')" />
                     </div>
+                    <SavePasswordCheckbox v-if="form.db_type === 'sqlite' && !sqliteUsesSsh" v-model="form.save_password" />
                     <div v-if="form.db_type === 'sqlite' && !sqliteUsesSsh" class="grid grid-cols-4 items-start gap-4">
                       <Label :class="connectionLabelTopClass">{{ t("connection.sqliteExtensions") }}</Label>
                       <div class="col-span-3 space-y-1">
@@ -7802,6 +8131,7 @@ function openExternalUrl(url: string) {
                         <Label :class="connectionLabelClass">{{ t("connection.password") }}{{ form.db_type === "access" ? t("connection.optionalSuffix") : "" }}</Label>
                         <PasswordInput v-model="form.password" class="col-span-3" />
                       </div>
+                      <SavePasswordCheckbox v-model="form.save_password" />
                     </template>
                   </template>
 
@@ -7847,7 +8177,7 @@ function openExternalUrl(url: string) {
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.rocketmqConnectionMode") }}</Label>
                         <Select v-model="mqRocketmqConnectionMode">
-                          <SelectTrigger class="col-span-3"><SelectValue /></SelectTrigger>
+                          <SelectTrigger class="col-span-3 h-9"><SelectValue /></SelectTrigger>
                           <SelectContent>
                             <SelectItem value="remoting">Remoting</SelectItem>
                             <SelectItem value="proxy">Proxy (gRPC)</SelectItem>
@@ -7932,7 +8262,7 @@ function openExternalUrl(url: string) {
                       <div v-if="mqSystemKind === 'kafka'" class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.mqSaslMechanism") }}</Label>
                         <Select v-model="mqKafkaSaslMechanism">
-                          <SelectTrigger class="col-span-3 h-9">
+                          <SelectTrigger class="col-span-3 h-9 w-full min-w-0">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
@@ -8024,7 +8354,7 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelSmallClass">{{ t("connection.mqTls") }}</Label>
                       <label class="col-span-3 inline-flex items-center gap-2">
                         <input type="checkbox" v-model="mqTlsSkipVerify" class="mr-0" />
-                        <span class="text-xs text-muted-foreground">{{ t("connection.mqTlsSkipVerify") }}</span>
+                        <span class="text-sm text-muted-foreground">{{ t("connection.mqTlsSkipVerify") }}</span>
                       </label>
                     </div>
                     <div v-if="mqSystemKind === 'pulsar'" class="grid grid-cols-4 items-center gap-4">
@@ -8212,7 +8542,7 @@ function openExternalUrl(url: string) {
                         <Label :class="connectionLabelSmallClass">{{ t("connection.redisSentinelTls") }}</Label>
                         <label class="col-span-3 inline-flex items-center gap-2">
                           <input type="checkbox" v-model="form.redis_sentinel_tls" class="mr-0" />
-                          <span class="text-xs text-muted-foreground">{{ t("connection.redisSentinelTlsHint") }}</span>
+                          <span class="text-sm text-muted-foreground">{{ t("connection.redisSentinelTlsHint") }}</span>
                         </label>
                       </div>
                     </template>
@@ -8235,6 +8565,7 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.databasePlaceholder')" />
                     </div>
+                    <SavePasswordCheckbox v-model="form.save_password" />
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.redisKeySeparator") }}</Label>
                       <Input v-model="form.redis_key_separator" class="col-span-3 h-8 text-xs" placeholder=":" />
@@ -8270,6 +8601,7 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelClass">{{ t("connection.consulToken") }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.consulTokenPlaceholder')" />
                     </div>
+                    <SavePasswordCheckbox v-model="form.save_password" />
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.consulDatacenter") }}</Label>
                       <Input v-model="consulDatacenter" class="col-span-3" placeholder="dc1" />
@@ -8375,6 +8707,7 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
+                    <SavePasswordCheckbox v-model="form.save_password" />
                   </template>
 
                   <!-- ZooKeeper: host, connect string, user, password -->
@@ -8418,6 +8751,7 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
+                    <SavePasswordCheckbox v-model="form.save_password" />
                   </template>
 
                   <!-- DynamoDB: endpoint, region, AWS credentials -->
@@ -8446,6 +8780,7 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelClass">{{ t("connection.dynamodbSecretAccessKey") }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
+                    <SavePasswordCheckbox v-model="form.save_password" />
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.dynamodbSessionToken") }}</Label>
                       <PasswordInput v-model="form.connection_string" class="col-span-3" :placeholder="t('connection.dynamodbSessionTokenPlaceholder')" />
@@ -8550,6 +8885,7 @@ function openExternalUrl(url: string) {
                         <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                         <PasswordInput v-model="form.password" class="col-span-3" />
                       </div>
+                      <SavePasswordCheckbox v-if="mongoAuthMechanism !== 'MONGODB-OIDC'" v-model="form.save_password" />
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.defaultDatabase") }}</Label>
                         <Input v-model="form.database" class="col-span-3" :placeholder="t('connection.databasePlaceholder')" />
@@ -8631,7 +8967,7 @@ function openExternalUrl(url: string) {
                         <Button size="sm" :variant="mqttAuthKind === 'certificate' ? 'default' : 'outline'" @click="mqttAuthKind = 'certificate'">{{ t("connection.mqttAuthCertificate") }}</Button>
                       </div>
                     </div>
-                    <template v-if="mqttAuthKind === 'password'">
+                    <template v-if="mqttAuthKind === 'password' || mqttAuthKind === 'certificate'">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.mqttUsername") }}</Label>
                         <Input v-model="mqttUsername" class="col-span-3" :placeholder="t('connection.mqttUsernamePlaceholder')" />
@@ -8641,7 +8977,7 @@ function openExternalUrl(url: string) {
                         <Input v-model="mqttPassword" type="password" class="col-span-3" :placeholder="t('connection.mqttPasswordPlaceholder')" />
                       </div>
                     </template>
-                    <template v-else-if="mqttAuthKind === 'certificate'">
+                    <template v-if="mqttAuthKind === 'certificate'">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.mqttCaCertPath") }}</Label>
                         <Input v-model="mqttCaCertPath" class="col-span-3" placeholder="/path/to/ca.pem" />
@@ -8701,6 +9037,7 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
+                    <SavePasswordCheckbox v-model="form.save_password" />
                     <div class="grid grid-cols-4 items-start gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.victoriametricsApiPath") }}</Label>
                       <div class="col-span-3 space-y-1.5">
@@ -8757,6 +9094,7 @@ function openExternalUrl(url: string) {
                         <Label :class="connectionLabelClass">Token</Label>
                         <PasswordInput v-model="form.password" class="col-span-3" />
                       </div>
+                      <SavePasswordCheckbox v-model="form.save_password" />
                     </template>
                     <template v-else-if="influxDbVersion === '3'">
                       <div class="grid grid-cols-4 items-center gap-4">
@@ -8767,6 +9105,7 @@ function openExternalUrl(url: string) {
                         <Label :class="connectionLabelClass">Token</Label>
                         <PasswordInput v-model="form.password" class="col-span-3" />
                       </div>
+                      <SavePasswordCheckbox v-model="form.save_password" />
                     </template>
                     <template v-else>
                       <div class="grid grid-cols-4 items-center gap-4">
@@ -8777,6 +9116,7 @@ function openExternalUrl(url: string) {
                         <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                         <PasswordInput v-model="form.password" class="col-span-3" />
                       </div>
+                      <SavePasswordCheckbox v-model="form.save_password" />
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.database") }}</Label>
                         <Input v-model="form.database" class="col-span-3" :placeholder="t('connection.databasePlaceholder')" />
@@ -8805,6 +9145,7 @@ function openExternalUrl(url: string) {
                       <PasswordInput v-model="form.password" class="col-span-3" placeholder="eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9..." />
                     </div>
 
+                    <SavePasswordCheckbox v-model="form.save_password" />
                     <div class="grid grid-cols-4 items-start gap-4">
                       <span />
                       <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.tursoTokenHint") }} <code class="px-1 py-0.5 rounded bg-muted text-xs">turso db tokens create &lt;database-name&gt;</code></p>
@@ -8894,6 +9235,7 @@ function openExternalUrl(url: string) {
                         <Label :class="connectionLabelClass">{{ t("connection.salesforceAccessToken") }}</Label>
                         <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.salesforceAccessTokenPlaceholder')" />
                       </div>
+                      <SavePasswordCheckbox v-model="form.save_password" />
                       <div class="grid grid-cols-4 items-start gap-4">
                         <span />
                         <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceAccessTokenHint") }}</p>
@@ -9207,7 +9549,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div v-else-if="form.db_type !== 'oracle' || form.oracle_connection_type !== 'tns'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ form.db_type === "elasticsearch" && elasticsearchConnectionMode === "kibana" ? t("connection.elasticsearchKibanaHost") : t("connection.host") }}</Label>
-                      <Input v-model="form.host" class="col-span-2" />
+                      <Input v-model="form.host" class="col-span-2" @blur="handleHostBlur" @paste="handleHostPaste" />
                       <Input v-model.number="form.port" type="number" class="col-span-1" @input="markSqlServerPortExplicit" />
                     </div>
 
@@ -9254,28 +9596,25 @@ function openExternalUrl(url: string) {
                       <Input v-model="form.informix_server" class="col-span-3" placeholder="ol_informix1170" />
                     </div>
 
-                    <div v-if="form.db_type !== 'meilisearch' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.mqAuth") }}</Label>
+                      <div class="col-span-3 flex items-center gap-2">
+                        <Button type="button" size="sm" :variant="elasticsearchAuthType === 'basic' ? 'default' : 'outline'" :aria-pressed="elasticsearchAuthType === 'basic'" @click="switchElasticsearchAuthType('basic')">{{ t("connection.mqAuthBasic") }}</Button>
+                        <Button type="button" size="sm" :variant="elasticsearchAuthType === 'apiKey' ? 'default' : 'outline'" :aria-pressed="elasticsearchAuthType === 'apiKey'" @click="switchElasticsearchAuthType('apiKey')">{{ t("connection.mqAuthApiKey") }}</Button>
+                      </div>
+                    </div>
+
+                    <div v-if="form.db_type !== 'meilisearch' && form.db_type !== 'spanner' && !(form.db_type === 'elasticsearch' && elasticsearchAuthType === 'apiKey')" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                       <Input v-model="form.username" class="col-span-3" />
                     </div>
 
                     <div v-if="form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">{{ form.db_type === "meilisearch" ? t("connection.mqAuthApiKey") : t("connection.password") }}</Label>
-                      <PasswordInput v-model="form.password" class="col-span-3" />
+                      <Label :class="connectionLabelClass">{{ form.db_type === "meilisearch" || (form.db_type === "elasticsearch" && elasticsearchAuthType === "apiKey") ? t("connection.mqAuthApiKey") : t("connection.password") }}</Label>
+                      <PasswordInput v-model="form.password" class="col-span-3" :placeholder="form.db_type === 'elasticsearch' && elasticsearchAuthType === 'apiKey' ? 'Base64(id:api_key)' : undefined" />
                     </div>
 
-                    <div v-if="form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
-                      <span />
-                      <div class="col-span-3 flex items-center gap-1.5 text-sm">
-                        <label class="flex items-center gap-2">
-                          <input v-model="form.save_password" type="checkbox" class="h-4 w-4 rounded border-border accent-primary" :aria-label="t('connection.savePassword')" />
-                          <span class="whitespace-nowrap">{{ t("connection.savePassword") }}</span>
-                        </label>
-                        <HelpTooltip :label="t('connection.savePassword')">
-                          {{ form.save_password ? t("connection.savePasswordHint") : t("connection.savePasswordSessionHint") }}
-                        </HelpTooltip>
-                      </div>
-                    </div>
+                    <SavePasswordCheckbox v-if="form.db_type !== 'spanner'" v-model="form.save_password" />
 
                     <div v-if="form.db_type !== 'hbase' && form.db_type !== 'meilisearch' && form.db_type !== 'solr' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ databaseLabel }}</Label>
@@ -9455,7 +9794,7 @@ function openExternalUrl(url: string) {
                           <Label :class="connectionLabelSmallClass">{{ t("connection.hiveTicketCache") }}</Label>
                           <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                             <input type="checkbox" v-model="hiveUseSubjectCredsOnlyFalse" class="mr-0" />
-                            <span class="text-xs text-muted-foreground">{{ t("connection.hiveTicketCacheFallback") }}</span>
+                            <span class="text-sm text-muted-foreground">{{ t("connection.hiveTicketCacheFallback") }}</span>
                           </label>
                         </div>
                         <div class="grid grid-cols-4 items-start gap-4">
@@ -9510,14 +9849,6 @@ function openExternalUrl(url: string) {
                       </p>
                     </div>
 
-                    <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelSmallClass">SYSDBA</Label>
-                      <label class="col-span-3 flex items-center gap-2 cursor-pointer">
-                        <input type="checkbox" v-model="form.sysdba" class="mr-0" :disabled="isOracleSysUser(form)" />
-                        <span class="text-xs text-muted-foreground">as SYSDBA</span>
-                      </label>
-                    </div>
-
                     <div v-if="form.db_type === 'firebird'" class="grid grid-cols-4 items-start gap-4">
                       <Label :class="connectionLabelTopClass">{{ t("connection.firebirdCharset") }}</Label>
                       <div class="col-span-3 space-y-1.5">
@@ -9550,44 +9881,27 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
 
-                    <div v-if="supportsGenericUrlParams" class="connection-url-params-row grid grid-cols-4 items-start gap-4" :class="{ 'connection-url-params-row--compact': !showGenericUrlParamsHint, 'connection-url-params-row--with-hint': showGenericUrlParamsHint }">
-                      <Label :class="[connectionLabelClass, 'connection-url-params-label']">{{ t("connection.urlParams") }}</Label>
+                    <div v-if="supportsMysqlDataCharset(form)" class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelTopClass">{{ t("connection.mysqlDataCharset") }}</Label>
                       <div class="col-span-3 space-y-1.5">
-                        <Input
-                          v-model="form.url_params"
-                          :placeholder="
-                            form.db_type === 'mysql'
-                              ? 'charset=utf8mb4'
-                              : form.db_type === 'doris' || form.db_type === 'starrocks'
-                                ? 'sessionVariables=query_timeout=60'
-                                : form.db_type === 'saphana'
-                                  ? 'databaseName=TENANT_DB'
-                                  : form.db_type === 'clickhouse'
-                                    ? 'secure=true'
-                                    : form.db_type === 'bigquery'
-                                      ? 'OAuthType=0;OAuthServiceAcctEmail=svc@project.iam.gserviceaccount.com;OAuthPvtKeyPath=/path/key.json'
-                                      : form.db_type === 'spanner'
-                                        ? 'credentials=/path/key.json;autocommit=true'
-                                        : form.db_type === 'informix'
-                                          ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
-                                          : form.db_type === 'spark'
-                                            ? 'catalog=paimon_catalog'
-                                            : form.db_type === 'cassandra'
-                                              ? 'localdatacenter=dc1'
-                                              : form.db_type === 'transwarp'
-                                                ? 'fetchSize=500;auth=noSasl'
-                                                : form.db_type === 'firebird'
-                                                  ? 'charSet=GBK'
-                                                  : 'sslmode=prefer'
-                          "
-                        />
-                        <p v-if="showGenericUrlParamsHint" class="text-xs leading-5 text-muted-foreground">
-                          {{ t("connection.localInfilePathHint") }}
-                        </p>
-                        <p v-if="form.db_type === 'mysql'" class="text-xs leading-5 text-muted-foreground">
-                          {{ t("connection.sessionVariablesHint") }}
-                        </p>
+                        <Select v-model="mysqlDataCharsetValue">
+                          <SelectTrigger id="mysql-data-charset" class="h-9"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="default">{{ t("common.default") }}</SelectItem>
+                            <SelectItem v-for="charset in mysqlDataCharsetItems" :key="charset" :value="charset">{{ charset }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.mysqlDataCharsetHint") }}</p>
+                        <p v-if="mysqlDataCharsetValue !== 'default'" class="text-xs leading-5 text-muted-foreground">{{ t("connection.mysqlDataCharsetReadOnly") }} {{ t("connection.mysqlDataCharsetExportHint") }}</p>
                       </div>
+                    </div>
+
+                    <div v-if="supportsGenericUrlParams" class="connection-parameters-row grid grid-cols-4 items-center gap-4">
+                      <Label for="connection-parameters-open" :class="connectionLabelClass">{{ t("connection.parameterEditor.title") }}</Label>
+                      <Button id="connection-parameters-open" type="button" variant="outline" class="col-span-3 justify-between" @click="parameterEditorOpen = true">
+                        <span class="font-normal text-muted-foreground">{{ configuredParameterCount ? t("connection.parameterEditor.configuredCount", { count: configuredParameterCount }) : t("connection.parameterEditor.default") }}</span>
+                        <span>{{ t("connection.parameterEditor.configure") }}</span>
+                      </Button>
                     </div>
 
                     <div v-if="form.db_type === 'dameng'" class="grid grid-cols-4 items-start gap-4">
@@ -9720,7 +10034,7 @@ function openExternalUrl(url: string) {
                       />
                       <div class="mt-1.5 flex shrink-0 items-center gap-2">
                         <div class="flex items-center gap-1">
-                          <Label for="connection-note-sidebar-visibility" class="text-xs font-normal text-muted-foreground">
+                          <Label for="connection-note-sidebar-visibility" class="text-sm font-normal text-muted-foreground">
                             {{ t("connection.noteShow") }}
                           </Label>
                           <Tooltip>
@@ -9746,7 +10060,7 @@ function openExternalUrl(url: string) {
                   <Label :class="connectionLabelSmallClass">SSL/TLS</Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="tlsEnabled" class="mr-0" />
-                    <span class="text-xs text-muted-foreground">{{ t("connection.sslEnable") }}</span>
+                    <span class="text-sm text-muted-foreground">{{ t("connection.sslEnable") }}</span>
                   </label>
                 </div>
 
@@ -9844,6 +10158,55 @@ function openExternalUrl(url: string) {
                     </span>
                   </label>
                 </div>
+
+                <template v-if="form.db_type === 'redis'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.redisCaCert") }}</Label>
+                    <div class="col-span-3 flex items-center gap-1">
+                      <Input v-model="form.ca_cert_path" class="flex-1" :placeholder="t('connection.redisCaCertPlaceholder')" :disabled="!form.ssl" />
+                      <Tooltip v-if="isDesktop">
+                        <TooltipTrigger as-child>
+                          <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="!form.ssl" @click="browseRedisTlsFile('ca')">
+                            <FolderOpen class="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{{ t("connection.redisCaCertBrowse") }}</TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.redisClientCert") }}</Label>
+                    <div class="col-span-3 flex items-center gap-1">
+                      <Input v-model="form.client_cert_path" class="flex-1" :placeholder="t('connection.redisClientCertPlaceholder')" :disabled="!form.ssl" />
+                      <Tooltip v-if="isDesktop">
+                        <TooltipTrigger as-child>
+                          <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="!form.ssl" @click="browseRedisTlsFile('cert')">
+                            <FolderOpen class="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{{ t("connection.redisClientCertBrowse") }}</TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.redisClientKey") }}</Label>
+                    <div class="col-span-3 flex items-center gap-1">
+                      <Input v-model="form.client_key_path" class="flex-1" :placeholder="t('connection.redisClientKeyPlaceholder')" :disabled="!form.ssl" />
+                      <Tooltip v-if="isDesktop">
+                        <TooltipTrigger as-child>
+                          <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="!form.ssl" @click="browseRedisTlsFile('key')">
+                            <FolderOpen class="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{{ t("connection.redisClientKeyBrowse") }}</TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <span />
+                    <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.redisTlsCertificateHint") }}</p>
+                  </div>
+                </template>
 
                 <template v-if="form.db_type === 'etcd' || form.db_type === 'consul' || form.db_type === 'zookeeper' || form.db_type === 'elasticsearch' || form.db_type === 'easysearch' || form.db_type === 'nebula'">
                   <div class="grid grid-cols-4 items-start gap-4">
@@ -10182,7 +10545,7 @@ function openExternalUrl(url: string) {
                         </div>
                         <label class="inline-flex shrink-0 items-center gap-2">
                           <Switch v-model="nacosHistoryEnabled" />
-                          <span class="text-xs text-muted-foreground">{{ t("nacos.nacosEnabled") }}</span>
+                          <span class="text-sm text-muted-foreground">{{ t("nacos.nacosEnabled") }}</span>
                         </label>
                       </div>
                       <div class="grid gap-1.5">
@@ -10223,7 +10586,7 @@ function openExternalUrl(url: string) {
                       </div>
                       <span class="inline-flex shrink-0 items-center gap-2">
                         <input v-model="nacosTlsSkipVerify" type="checkbox" class="mr-0" />
-                        <span class="text-xs text-muted-foreground">{{ t("connection.nacosTlsSkipVerify") }}</span>
+                        <span class="text-sm text-muted-foreground">{{ t("connection.nacosTlsSkipVerify") }}</span>
                       </span>
                     </label>
                   </div>
@@ -10239,10 +10602,11 @@ function openExternalUrl(url: string) {
                       <SelectContent>
                         <SelectItem value="native">{{ t("connection.gaussdbConnectionModeNative") }}</SelectItem>
                         <SelectItem value="m-jdbc">{{ t("connection.gaussdbConnectionModeMJdbc") }}</SelectItem>
+                        <SelectItem value="dws">{{ t("connection.gaussdbConnectionModeDws") }}</SelectItem>
                       </SelectContent>
                     </Select>
                     <p class="text-xs leading-5 text-muted-foreground">
-                      {{ isGaussdbMJdbcConnection ? t("connection.gaussdbConnectionModeMJdbcHint") : t("connection.gaussdbConnectionModeNativeHint") }}
+                      {{ isGaussdbMJdbcConnection ? t("connection.gaussdbConnectionModeMJdbcHint") : isGaussdbDwsConnection ? t("connection.gaussdbConnectionModeDwsHint") : t("connection.gaussdbConnectionModeNativeHint") }}
                     </p>
                   </div>
                 </div>
@@ -10337,243 +10701,271 @@ function openExternalUrl(url: string) {
                     </p>
                   </div>
                 </div>
-                <div class="grid grid-cols-4 items-center gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("connection.connectTimeout") }}</Label>
-                  <div class="col-span-3 grid grid-cols-2 gap-2">
-                    <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.connect_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
-                      <input id="connect-timeout-global" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
-                      <div class="flex min-w-0 flex-1 items-center gap-1">
-                        <label for="connect-timeout-global" class="min-w-0 cursor-pointer truncate text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
-                        <HelpTooltip :label="t('connection.globalConnectTimeoutHint')" content-class="max-w-[280px]">
-                          {{ t("connection.globalConnectTimeoutHint") }}
-                        </HelpTooltip>
+                <section class="connection-advanced-section grid content-start gap-4 rounded-lg border p-4">
+                  <h3 class="text-base font-bold">{{ t("connection.advancedConnectionBehavior") }}</h3>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.connectTimeout") }}</Label>
+                    <div class="col-span-3 grid grid-cols-2 gap-2">
+                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.connect_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                        <input id="connect-timeout-global" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
+                        <div class="flex min-w-0 flex-1 items-center gap-1">
+                          <label for="connect-timeout-global" class="min-w-0 cursor-pointer truncate text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
+                          <HelpTooltip :label="t('connection.globalConnectTimeoutHint')" content-class="max-w-[280px]">
+                            {{ t("connection.globalConnectTimeoutHint") }}
+                          </HelpTooltip>
+                        </div>
+                        <Input
+                          v-model.number="editGlobalConnectTimeoutSecs"
+                          type="number"
+                          min="1"
+                          :max="MAX_CONNECT_TIMEOUT_SECS"
+                          step="1"
+                          class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20"
+                          :disabled="form.connect_timeout_inherit !== true"
+                          @input="clampConnectTimeoutInput($event, 'global')"
+                        />
                       </div>
-                      <Input
-                        v-model.number="editGlobalConnectTimeoutSecs"
-                        type="number"
-                        min="1"
-                        :max="MAX_CONNECT_TIMEOUT_SECS"
-                        step="1"
-                        class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20"
-                        :disabled="form.connect_timeout_inherit !== true"
-                        @input="clampConnectTimeoutInput($event, 'global')"
-                      />
-                    </div>
-                    <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.connect_timeout_inherit !== true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
-                      <input id="connect-timeout-connection" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="false" class="h-3.5 w-3.5 shrink-0 accent-primary" />
-                      <label for="connect-timeout-connection" class="min-w-0 flex-1 cursor-pointer truncate text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
-                      <Input
-                        v-model.number="form.connect_timeout_secs"
-                        type="number"
-                        min="1"
-                        :max="MAX_CONNECT_TIMEOUT_SECS"
-                        step="1"
-                        class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20"
-                        :disabled="form.connect_timeout_inherit === true"
-                        @input="clampConnectTimeoutInput($event, 'connection')"
-                      />
+                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.connect_timeout_inherit !== true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                        <input id="connect-timeout-connection" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="false" class="h-3.5 w-3.5 shrink-0 accent-primary" />
+                        <label for="connect-timeout-connection" class="min-w-0 flex-1 cursor-pointer truncate text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
+                        <Input
+                          v-model.number="form.connect_timeout_secs"
+                          type="number"
+                          min="1"
+                          :max="MAX_CONNECT_TIMEOUT_SECS"
+                          step="1"
+                          class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20"
+                          :disabled="form.connect_timeout_inherit === true"
+                          @input="clampConnectTimeoutInput($event, 'connection')"
+                        />
+                      </div>
                     </div>
                   </div>
-                </div>
-                <div v-if="form.db_type === 'etcd'" class="grid grid-cols-4 items-start gap-4">
-                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.etcdGrpcMaxInbound") }}</Label>
-                  <div class="col-span-3 space-y-1">
-                    <Input v-model.number="etcdGrpcMaxInboundMessageSizeMiB" type="number" :min="ETCD_GRPC_MAX_INBOUND_MIN_MIB" :max="ETCD_GRPC_MAX_INBOUND_MAX_MIB" step="1" />
-                    <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.etcdGrpcMaxInboundHint") }}</p>
+                  <div v-if="form.db_type === 'etcd'" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.etcdGrpcMaxInbound") }}</Label>
+                    <div class="col-span-3 space-y-1">
+                      <Input v-model.number="etcdGrpcMaxInboundMessageSizeMiB" type="number" :min="ETCD_GRPC_MAX_INBOUND_MIN_MIB" :max="ETCD_GRPC_MAX_INBOUND_MAX_MIB" step="1" />
+                      <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.etcdGrpcMaxInboundHint") }}</p>
+                    </div>
                   </div>
-                </div>
-                <!-- query_timeout_secs only feeds the database query pipeline
+                  <!-- query_timeout_secs only feeds the database query pipeline
                      (dataGrid/queryStore); plugin connections like SSH never
                      consume it, so the generic radio would only suggest a
                      budget the provider cannot honor. -->
-                <div v-if="!isPluginConnection" class="grid grid-cols-4 items-center gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("connection.queryTimeout") }}</Label>
-                  <div class="col-span-3 grid grid-cols-2 gap-2">
-                    <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.query_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
-                      <input id="query-timeout-global" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
-                      <div class="flex min-w-0 flex-1 items-center gap-1">
-                        <label for="query-timeout-global" class="min-w-0 cursor-pointer truncate text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
-                        <HelpTooltip :label="t('connection.globalQueryTimeoutHint')" content-class="max-w-[280px]">
-                          {{ t("connection.globalQueryTimeoutHint") }}
-                        </HelpTooltip>
-                      </div>
-                      <Input v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.query_timeout_inherit !== true" @input="clampQueryTimeoutInput($event, 'global')" />
-                    </div>
-                    <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.query_timeout_inherit !== true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
-                      <input id="query-timeout-connection" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="false" class="h-3.5 w-3.5 shrink-0 accent-primary" />
-                      <label for="query-timeout-connection" class="min-w-0 flex-1 cursor-pointer truncate text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
-                      <Input v-model.number="form.query_timeout_secs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.query_timeout_inherit === true" @input="clampQueryTimeoutInput($event, 'connection')" />
-                    </div>
-                  </div>
-                </div>
-                <div v-show="supportsIdleTimeoutSetting" class="grid grid-cols-4 items-start gap-4">
-                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.idleTimeout") }}</Label>
-                  <div class="col-span-3 space-y-1">
-                    <Input v-model.number="form.idle_timeout_secs" type="number" min="0" :max="MAX_IDLE_TIMEOUT_SECS" step="1" @input="clampIdleTimeoutInput($event)" />
-                    <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.idleTimeoutHint") }}</p>
-                  </div>
-                </div>
-                <div v-show="supportsManualTransactionTimeoutSetting" class="grid grid-cols-4 items-start gap-4">
-                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.manualTransactionTimeout") }}</Label>
-                  <div class="col-span-3 space-y-1">
-                    <Input v-model.number="form.manual_transaction_timeout_secs" type="number" :min="MIN_MANUAL_TRANSACTION_TIMEOUT_SECS" :max="MAX_MANUAL_TRANSACTION_TIMEOUT_SECS" step="1" />
-                    <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.manualTransactionTimeoutHint", { min: MIN_MANUAL_TRANSACTION_TIMEOUT_SECS, max: MAX_MANUAL_TRANSACTION_TIMEOUT_SECS }) }}</p>
-                  </div>
-                </div>
-                <!-- 空闲自动断开由后端在连接池层面实现，所有方言均适用，故不做方言门控：
-                     即使上面的「空闲超时」被 v-show 隐藏，这里也要展示。 -->
-                <div class="grid grid-cols-4 items-start gap-4">
-                  <Label :class="connectionLabelSmallPaddedClass">
-                    <span class="inline-flex items-center gap-1">{{ t("connection.idleDisconnect") }} <HelpTooltip :label="t('connection.idleDisconnectHint')" content-class="max-w-[280px]" /></span>
-                  </Label>
-                  <div class="col-span-3 space-y-1">
-                    <div class="flex items-center gap-2">
-                      <Switch v-model="idleDisconnectEnabled" />
-                      <Input v-model.number="form.idle_disconnect_secs" type="number" min="1" :max="MAX_IDLE_DISCONNECT_SECS" step="1" class="flex-1" :disabled="!idleDisconnectEnabled" @input="clampIdleDisconnectInput($event)" />
-                    </div>
-                    <p v-if="idleDisconnectKeepaliveWarning" class="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-xs leading-5 text-amber-700 dark:text-amber-400">
-                      {{ t("connection.idleDisconnectKeepaliveWarning") }}
-                    </p>
-                  </div>
-                </div>
-                <div class="grid grid-cols-4 items-center gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("connection.keepaliveInterval") }}</Label>
-                  <div class="col-span-3 flex items-center gap-2">
-                    <Switch v-model="keepaliveEnabled" />
-                    <Input v-model.number="form.keepalive_interval_secs" type="number" min="1" max="3600" step="1" class="flex-1" :disabled="!keepaliveEnabled" />
-                  </div>
-                </div>
-                <div v-if="supportsDoltSystemTables" class="grid grid-cols-4 items-center gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("connection.doltShowSystemTables") }}</Label>
-                  <label class="col-span-3 flex items-center gap-2 cursor-pointer">
-                    <input v-model="showDoltSystemTables" type="checkbox" class="mr-0" />
-                    <span class="text-xs text-muted-foreground">{{ t("connection.doltShowSystemTablesHint") }}</span>
-                  </label>
-                </div>
-                <div class="grid grid-cols-4 items-center gap-4">
-                  <Label :class="connectionLabelSmallClass">
-                    <span class="inline-flex items-center gap-1">{{ t("connection.readOnly") }} <HelpTooltip :label="t('connection.readOnlyExplanation')" /></span>
-                  </Label>
-                  <label class="col-span-3 flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" v-model="form.read_only" class="mr-0" />
-                    <span class="text-xs text-muted-foreground">{{ t("connection.readOnlyHint") }}</span>
-                  </label>
-                </div>
-                <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-center gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("connection.showSystemSchemas") }}</Label>
-                  <label class="col-span-3 flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" v-model="form.show_system_schemas" class="mr-0" />
-                    <span class="text-xs text-muted-foreground">{{ t("connection.showSystemSchemasHint") }}</span>
-                  </label>
-                </div>
-                <div v-if="supportsOracleDatabaseLinks(form.db_type)" class="grid grid-cols-4 items-center gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("connection.showDatabaseLinks") }}</Label>
-                  <label class="col-span-3 flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" v-model="form.show_database_links" class="mr-0" />
-                    <span class="text-xs text-muted-foreground">{{ t("connection.showDatabaseLinksHint") }}</span>
-                  </label>
-                </div>
-                <div v-if="supportsAutomaticTableLoading" class="grid grid-cols-4 items-start gap-4">
-                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.tableLoading") }}</Label>
-                  <div class="col-span-3 grid gap-1.5">
-                    <label class="flex cursor-pointer items-center gap-2">
-                      <Switch v-model="form.sidebar_auto_load_all_tables" />
-                      <span class="text-sm font-medium">{{ t("connection.autoLoadAllTables") }}</span>
-                    </label>
-                    <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.autoLoadAllTablesHint") }}</p>
-                  </div>
-                </div>
-                <!-- Documentation notes are a relational-only feature, so this
-                     follows the same isSchemaAware gate as the row above. -->
-                <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-start gap-4">
-                  <Label :class="connectionLabelTopClass">{{ t("connection.docsNotesPath") }}</Label>
-                  <div class="col-span-3 space-y-1">
-                    <Input v-model="form.docs_notes_path" :placeholder="t('connection.docsNotesPathPlaceholder')" spellcheck="false" />
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("connection.docsNotesPathHint") }}
-                    </p>
-                  </div>
-                </div>
-                <div v-if="!isPluginConnection" class="grid grid-cols-4 items-start gap-4 rounded-[6px] border border-red-500/25 bg-red-500/[0.035] px-3 py-2.5">
-                  <Label :class="[connectionLabelSmallClass, 'pt-0.5 text-red-700 dark:text-red-300']">
-                    <span class="inline-flex items-center justify-end gap-1"><ShieldAlert class="h-3.5 w-3.5" />PROD <HelpTooltip :label="t('production.explanation')" trigger-class="text-red-700/70 dark:text-red-300/70" /></span>
-                  </Label>
-                  <div class="col-span-3 grid gap-2">
-                    <div class="flex items-center justify-between gap-3">
-                      <Label class="text-sm font-medium">{{ t("production.enable") }}</Label>
-                      <Switch :model-value="productionProtectionEnabled" @update:model-value="setProductionProtectionEnabled" />
-                    </div>
-                    <p v-if="!productionProtectionEnabled" class="text-xs leading-5 text-muted-foreground">{{ t(productionDisabledDescriptionKey) }}</p>
-                    <template v-else>
-                      <Label class="text-xs font-medium">{{ t("production.scope") }}</Label>
-                      <Tabs v-model="productionScope" class="w-full">
-                        <TabsList class="grid h-8 w-full grid-cols-2">
-                          <TabsTrigger value="connection" class="text-xs">{{ t(productionScopeAllLabelKey) }}</TabsTrigger>
-                          <TabsTrigger value="databases" class="text-xs" :disabled="!canSelectProductionDatabases" :title="canSelectProductionDatabases ? undefined : t('production.singleDatabaseScopeHint')">{{ t(productionScopeSelectedLabelKey) }}</TabsTrigger>
-                        </TabsList>
-                      </Tabs>
-                      <p class="text-xs leading-5 text-muted-foreground">{{ productionScope === "connection" ? t(productionConnectionDescriptionKey) : t(productionScopeDescriptionKey) }}</p>
-                      <div v-if="productionScope === 'databases'" class="grid gap-1.5">
-                        <div class="flex items-center justify-between gap-3">
-                          <Label class="text-xs font-medium">{{ t(productionScopeResourceLabelKey) }}</Label>
-                          <span class="text-xs text-muted-foreground">{{ productionDatabaseSummary }}</span>
+                  <div v-if="!isPluginConnection" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.queryTimeout") }}</Label>
+                    <div class="col-span-3 grid grid-cols-2 gap-2">
+                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.query_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                        <input id="query-timeout-global" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
+                        <div class="flex min-w-0 flex-1 items-center gap-1">
+                          <label for="query-timeout-global" class="min-w-0 cursor-pointer truncate text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
+                          <HelpTooltip :label="t('connection.globalQueryTimeoutHint')" content-class="max-w-[280px]">
+                            {{ t("connection.globalQueryTimeoutHint") }}
+                          </HelpTooltip>
                         </div>
-                        <Button type="button" variant="outline" size="sm" class="justify-start" :disabled="isTesting || isSaving || isLoadingProductionDatabases || !hasRequiredConnectionTarget" @click="openProductionDatabasesPicker">
-                          <Loader2 v-if="isLoadingProductionDatabases" class="mr-1.5 h-4 w-4 animate-spin" />
-                          <ListFilter v-else class="mr-1.5 h-4 w-4" />
-                          {{ t(productionScopePickerLabelKey) }}
-                        </Button>
+                        <Input v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.query_timeout_inherit !== true" @input="clampQueryTimeoutInput($event, 'global')" />
                       </div>
-                      <div class="grid gap-1.5 pt-1">
-                        <Label for="production-badge-scope" class="text-xs font-medium">{{ t("production.badgeScope") }}</Label>
-                        <Select :model-value="form.production_badge_scope || 'database'" @update:model-value="form.production_badge_scope = $event as ProductionBadgeScope">
-                          <SelectTrigger id="production-badge-scope" class="h-8" :aria-label="t('production.badgeScope')"><SelectValue /></SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="connection">{{ t("production.badgeScopeConnection") }}</SelectItem>
-                            <SelectItem value="database">{{ t("production.badgeScopeDatabase") }}</SelectItem>
-                            <SelectItem value="table">{{ t("production.badgeScopeTable") }}</SelectItem>
-                          </SelectContent>
-                        </Select>
-                        <p class="text-xs leading-5 text-muted-foreground">{{ t(`production.badgeScopeHint${form.production_badge_scope === "connection" ? "Connection" : form.production_badge_scope === "table" ? "Table" : "Database"}`) }}</p>
-                        <p class="text-xs leading-5 text-muted-foreground">{{ t("production.badgeScopeSafetyHint") }}</p>
+                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.query_timeout_inherit !== true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                        <input id="query-timeout-connection" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="false" class="h-3.5 w-3.5 shrink-0 accent-primary" />
+                        <label for="query-timeout-connection" class="min-w-0 flex-1 cursor-pointer truncate text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
+                        <Input v-model.number="form.query_timeout_secs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.query_timeout_inherit === true" @input="clampQueryTimeoutInput($event, 'connection')" />
                       </div>
-                    </template>
-                  </div>
-                </div>
-                <div v-show="form.db_type === 'redis'" class="grid grid-cols-4 items-center gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("settings.redisScanPageSize") }}</Label>
-                  <div class="col-span-3 flex flex-col gap-1">
-                    <Select :model-value="String(form.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT)" @update:model-value="form.redis_scan_page_size = Number($event)">
-                      <SelectTrigger>
-                        <SelectValue :placeholder="t('settings.redisScanPageSize')" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem v-for="size in REDIS_SCAN_PAGE_SIZE_OPTIONS" :key="size" :value="String(size)">
-                          {{ t("settings.redisScanPageSizeOption", { count: size }) }}
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.redisScanPageSizeDescription") }}</p>
-                  </div>
-                </div>
-                <div v-if="form.db_type === 'redis'" class="grid grid-cols-4 items-start gap-4">
-                  <Label for="redis-value-preview-limit-input" :class="connectionLabelTopClass">{{ t("settings.redisValuePreviewLimit") }}</Label>
-                  <div class="col-span-3 space-y-1">
-                    <div class="flex items-center gap-2">
-                      <Input id="redis-value-preview-limit-input" v-model.number="editRedisValuePreviewLimitKiB" type="number" :min="REDIS_VALUE_PREVIEW_LIMIT_KIB_MIN" :max="REDIS_VALUE_PREVIEW_LIMIT_KIB_MAX" step="1" class="h-8 w-32 text-xs" />
-                      <span class="text-xs text-muted-foreground">KiB</span>
                     </div>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.redisValuePreviewLimitDescription") }}</p>
                   </div>
-                </div>
+                  <div v-show="supportsIdleTimeoutSetting" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.idleTimeout") }}</Label>
+                    <div class="col-span-3 space-y-1">
+                      <Input v-model.number="form.idle_timeout_secs" type="number" min="0" :max="MAX_IDLE_TIMEOUT_SECS" step="1" @input="clampIdleTimeoutInput($event)" />
+                      <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.idleTimeoutHint") }}</p>
+                    </div>
+                  </div>
+                  <div v-show="supportsManualTransactionTimeoutSetting" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.manualTransactionTimeout") }}</Label>
+                    <div class="col-span-3 space-y-1">
+                      <Input v-model.number="form.manual_transaction_timeout_secs" type="number" :min="MIN_MANUAL_TRANSACTION_TIMEOUT_SECS" :max="MAX_MANUAL_TRANSACTION_TIMEOUT_SECS" step="1" />
+                      <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.manualTransactionTimeoutHint", { min: MIN_MANUAL_TRANSACTION_TIMEOUT_SECS, max: MAX_MANUAL_TRANSACTION_TIMEOUT_SECS }) }}</p>
+                    </div>
+                  </div>
+                  <!-- 空闲自动断开由后端在连接池层面实现，所有方言均适用，故不做方言门控：
+                     即使上面的「空闲超时」被 v-show 隐藏，这里也要展示。 -->
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelSmallPaddedClass">
+                      <span class="inline-flex items-center gap-1">{{ t("connection.idleDisconnect") }} <HelpTooltip :label="t('connection.idleDisconnectHint')" content-class="max-w-[280px]" /></span>
+                    </Label>
+                    <div class="col-span-3 space-y-1">
+                      <div class="flex items-center gap-2">
+                        <Switch v-model="idleDisconnectEnabled" />
+                        <Input v-model.number="form.idle_disconnect_secs" type="number" min="1" :max="MAX_IDLE_DISCONNECT_SECS" step="1" class="flex-1" :disabled="!idleDisconnectEnabled" @input="clampIdleDisconnectInput($event)" />
+                      </div>
+                      <p v-if="idleDisconnectKeepaliveWarning" class="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-xs leading-5 text-amber-700 dark:text-amber-400">
+                        {{ t("connection.idleDisconnectKeepaliveWarning") }}
+                      </p>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.keepaliveInterval") }}</Label>
+                    <div class="col-span-3 flex items-center gap-2">
+                      <Switch v-model="keepaliveEnabled" />
+                      <Input v-model.number="form.keepalive_interval_secs" type="number" min="1" max="3600" step="1" class="flex-1" :disabled="!keepaliveEnabled" />
+                    </div>
+                  </div>
+                </section>
+                <section class="connection-advanced-section grid content-start gap-4 rounded-lg border p-4">
+                  <h3 class="text-base font-bold">{{ t("connection.advancedOperationProtection") }}</h3>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">
+                      <span class="inline-flex items-center gap-1">{{ t("connection.readOnly") }} <HelpTooltip :label="t('connection.readOnlyExplanation')" /></span>
+                    </Label>
+                    <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" v-model="form.read_only" class="mr-0" />
+                      <span class="text-xs text-muted-foreground">{{ t("connection.readOnlyHint") }}</span>
+                    </label>
+                  </div>
+                  <div v-if="!isPluginConnection" class="grid grid-cols-4 items-start gap-4 rounded-[6px] border border-red-500/25 bg-red-500/[0.035] px-3 py-2.5">
+                    <Label :class="[connectionLabelSmallClass, 'pt-0.5 text-red-700 dark:text-red-300']">
+                      <span class="inline-flex items-center justify-end gap-1"><ShieldAlert class="h-3.5 w-3.5" />PROD <HelpTooltip :label="t('production.explanation')" trigger-class="text-red-700/70 dark:text-red-300/70" /></span>
+                    </Label>
+                    <div class="col-span-3 grid gap-2">
+                      <div class="flex items-center justify-between gap-3">
+                        <Label class="text-sm font-medium">{{ t("production.enable") }}</Label>
+                        <Switch :model-value="productionProtectionEnabled" @update:model-value="setProductionProtectionEnabled" />
+                      </div>
+                      <p v-if="!productionProtectionEnabled" class="text-xs leading-5 text-muted-foreground">{{ t(productionDisabledDescriptionKey) }}</p>
+                      <template v-else>
+                        <Label class="text-xs font-medium">{{ t("production.scope") }}</Label>
+                        <Tabs v-model="productionScope" class="w-full">
+                          <TabsList class="grid h-8 w-full grid-cols-2">
+                            <TabsTrigger value="connection" class="text-xs">{{ t(productionScopeAllLabelKey) }}</TabsTrigger>
+                            <TabsTrigger value="databases" class="text-xs" :disabled="!canSelectProductionDatabases" :title="canSelectProductionDatabases ? undefined : t('production.singleDatabaseScopeHint')">{{ t(productionScopeSelectedLabelKey) }}</TabsTrigger>
+                          </TabsList>
+                        </Tabs>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ productionScope === "connection" ? t(productionConnectionDescriptionKey) : t(productionScopeDescriptionKey) }}</p>
+                        <div v-if="productionScope === 'databases'" class="grid gap-1.5">
+                          <div class="flex items-center justify-between gap-3">
+                            <Label class="text-xs font-medium">{{ t(productionScopeResourceLabelKey) }}</Label>
+                            <span class="text-xs text-muted-foreground">{{ productionDatabaseSummary }}</span>
+                          </div>
+                          <Button type="button" variant="outline" size="sm" class="justify-start" :disabled="isTesting || isSaving || isLoadingProductionDatabases || !hasRequiredConnectionTarget" @click="openProductionDatabasesPicker">
+                            <Loader2 v-if="isLoadingProductionDatabases" class="mr-1.5 h-4 w-4 animate-spin" />
+                            <ListFilter v-else class="mr-1.5 h-4 w-4" />
+                            {{ t(productionScopePickerLabelKey) }}
+                          </Button>
+                        </div>
+                        <div class="grid gap-1.5 pt-1">
+                          <Label for="production-badge-scope" class="text-xs font-medium">{{ t("production.badgeScope") }}</Label>
+                          <Select :model-value="form.production_badge_scope || 'database'" @update:model-value="form.production_badge_scope = $event as ProductionBadgeScope">
+                            <SelectTrigger id="production-badge-scope" class="h-8" :aria-label="t('production.badgeScope')"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="connection">{{ t("production.badgeScopeConnection") }}</SelectItem>
+                              <SelectItem value="database">{{ t("production.badgeScopeDatabase") }}</SelectItem>
+                              <SelectItem value="table">{{ t("production.badgeScopeTable") }}</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <p class="text-xs leading-5 text-muted-foreground">{{ t(`production.badgeScopeHint${form.production_badge_scope === "connection" ? "Connection" : form.production_badge_scope === "table" ? "Table" : "Database"}`) }}</p>
+                          <p class="text-xs leading-5 text-muted-foreground">{{ t("production.badgeScopeSafetyHint") }}</p>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                  <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">
+                      <span class="inline-flex items-center gap-1">SYSDBA <HelpTooltip :label="t('connection.oracleSysdbaHint')" content-class="max-w-[320px]" /></span>
+                    </Label>
+                    <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" v-model="form.sysdba" class="mr-0" :disabled="isOracleSysUser(form)" />
+                      <span class="text-sm text-muted-foreground">{{ t("connection.oracleSysdbaEnable") }}</span>
+                    </label>
+                  </div>
+                </section>
+                <section
+                  v-if="supportsDoltSystemTables || isSchemaAware(form.db_type) || supportsOracleDatabaseLinks(form.db_type) || sidebarVisibilitySettings.length > 0 || supportsAutomaticTableLoading || form.db_type === 'redis'"
+                  class="connection-advanced-section grid content-start gap-4 rounded-lg border p-4"
+                >
+                  <h3 class="text-base font-bold">{{ t("connection.advancedObjectBrowsing") }}</h3>
+                  <div v-if="supportsDoltSystemTables" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.doltShowSystemTables") }}</Label>
+                    <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                      <input v-model="showDoltSystemTables" type="checkbox" class="mr-0" />
+                      <span class="text-xs text-muted-foreground">{{ t("connection.doltShowSystemTablesHint") }}</span>
+                    </label>
+                  </div>
+                  <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.showSystemSchemas") }}</Label>
+                    <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" v-model="form.show_system_schemas" class="mr-0" />
+                      <span class="text-xs text-muted-foreground">{{ t("connection.showSystemSchemasHint") }}</span>
+                    </label>
+                  </div>
+                  <div v-if="supportsOracleDatabaseLinks(form.db_type)" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.showDatabaseLinks") }}</Label>
+                    <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" v-model="form.show_database_links" class="mr-0" />
+                      <span class="text-xs text-muted-foreground">{{ t("connection.showDatabaseLinksHint") }}</span>
+                    </label>
+                  </div>
+                  <div v-for="setting in sidebarVisibilitySettings" :key="setting.key" class="grid grid-cols-4 items-center gap-4">
+                    <Label :for="`sidebar-${setting.key}`" :class="connectionLabelSmallClass">{{ t(setting.label) }}</Label>
+                    <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                      <input :id="`sidebar-${setting.key}`" type="checkbox" v-model="form[setting.key]" :aria-label="t(setting.label)" class="mr-0" />
+                      <span class="text-xs text-muted-foreground">{{ t(setting.hint) }}</span>
+                    </label>
+                  </div>
+                  <div v-if="supportsAutomaticTableLoading" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.tableLoading") }}</Label>
+                    <div class="col-span-3 grid gap-1.5">
+                      <label class="flex cursor-pointer items-center gap-2">
+                        <Switch v-model="form.sidebar_auto_load_all_tables" />
+                        <span class="text-sm font-medium">{{ t("connection.autoLoadAllTables") }}</span>
+                      </label>
+                      <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.autoLoadAllTablesHint") }}</p>
+                    </div>
+                  </div>
+                  <!-- Documentation notes are a relational-only feature, so this
+                     follows the same isSchemaAware gate as the row above. -->
+                  <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelTopClass">{{ t("connection.docsNotesPath") }}</Label>
+                    <div class="col-span-3 space-y-1">
+                      <Input v-model="form.docs_notes_path" :placeholder="t('connection.docsNotesPathPlaceholder')" spellcheck="false" />
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("connection.docsNotesPathHint") }}
+                      </p>
+                    </div>
+                  </div>
+                  <div v-if="form.db_type === 'redis'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("settings.redisScanPageSize") }}</Label>
+                    <div class="col-span-3 flex flex-col gap-1">
+                      <Select :model-value="String(form.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT)" @update:model-value="form.redis_scan_page_size = Number($event)">
+                        <SelectTrigger>
+                          <SelectValue :placeholder="t('settings.redisScanPageSize')" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem v-for="size in REDIS_SCAN_PAGE_SIZE_OPTIONS" :key="size" :value="String(size)">
+                            {{ t("settings.redisScanPageSizeOption", { count: size }) }}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p class="text-xs text-muted-foreground">{{ t("settings.redisScanPageSizeDescription") }}</p>
+                    </div>
+                  </div>
+                  <div v-if="form.db_type === 'redis'" class="grid grid-cols-4 items-start gap-4">
+                    <Label for="redis-value-preview-limit-input" :class="connectionLabelTopClass">{{ t("settings.redisValuePreviewLimit") }}</Label>
+                    <div class="col-span-3 space-y-1">
+                      <div class="flex items-center gap-2">
+                        <Input id="redis-value-preview-limit-input" v-model.number="editRedisValuePreviewLimitKiB" type="number" :min="REDIS_VALUE_PREVIEW_LIMIT_KIB_MIN" :max="REDIS_VALUE_PREVIEW_LIMIT_KIB_MAX" step="1" class="h-8 w-32 text-xs" />
+                        <span class="text-sm text-muted-foreground">KiB</span>
+                      </div>
+                      <p class="text-xs text-muted-foreground">{{ t("settings.redisValuePreviewLimitDescription") }}</p>
+                    </div>
+                  </div>
+                </section>
               </div>
             </TabsContent>
 
             <TabsContent v-if="canUseTransportLayers" value="transport" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
-              <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto overflow-x-hidden pt-4 pr-2 pb-6">
-                <div class="connection-label-wide-grid grid min-w-0 grid-cols-4 items-start gap-4">
+              <div class="connection-form-body connection-transport-form-body grid min-h-0 w-full flex-1 scroll-pb-6 gap-4 overflow-y-auto overflow-x-hidden pt-4 pr-2 pb-6">
+                <div class="connection-label-wide-grid grid w-full min-w-0 grid-cols-4 items-start gap-4">
                   <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.sshHops") }}</Label>
-                  <div class="col-span-3 grid min-w-0 gap-3">
+                  <div class="col-span-3 grid w-full min-w-0 gap-3">
                     <div class="flex min-w-0 flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
                       <template v-for="(segment, index) in transportPathSegments" :key="`${segment}-${index}`">
                         <span class="inline-block max-w-full truncate rounded border bg-muted/40 px-2 py-1">{{ segment }}</span>
@@ -10586,7 +10978,7 @@ function openExternalUrl(url: string) {
                         :key="hop.id"
                         type="button"
                         draggable="true"
-                        class="connection-transport-layer-option flex min-h-10 items-center gap-2 rounded-md border px-2 text-left text-xs transition-colors"
+                        class="connection-transport-layer-option flex min-h-10 w-full min-w-0 items-center gap-2 rounded-md border px-2 text-left text-xs transition-colors"
                         :class="hop.id === selectedTransportLayer?.id ? 'connection-transport-layer-option--selected border-primary bg-primary/5' : 'hover:bg-muted/50'"
                         @click="selectedTransportLayerId = hop.id"
                         @dragstart="draggedTransportLayerId = hop.id"
@@ -10675,18 +11067,20 @@ function openExternalUrl(url: string) {
                       <span v-else class="text-red-500">{{ t("connection.tunnelProfileMissing") }}</span>
                     </div>
                   </div>
-                  <div v-if="!selectedLayerProfileId" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="!selectedLayerProfileId" class="grid min-w-0 grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">Type</Label>
-                    <Select :model-value="selectedTransportLayer.type" @update:model-value="(value: any) => changeSelectedTransportLayerType(value)">
-                      <SelectTrigger class="col-span-3 h-9">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="ssh">SSH</SelectItem>
-                        <SelectItem value="proxy">Proxy</SelectItem>
-                        <SelectItem v-if="!sqliteRemoteTransportRestricted" value="http_tunnel">{{ t("connection.httpTunnel") }}</SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <div class="col-span-3 min-w-0">
+                      <Select :model-value="selectedTransportLayer.type" @update:model-value="(value: any) => changeSelectedTransportLayerType(value)">
+                        <SelectTrigger class="h-9 w-full min-w-0">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="ssh">SSH</SelectItem>
+                          <SelectItem value="proxy">Proxy</SelectItem>
+                          <SelectItem v-if="!sqliteRemoteTransportRestricted" value="http_tunnel">{{ t("connection.httpTunnel") }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
                   <template v-if="selectedSshLayer && !selectedLayerProfileId">
                     <div class="grid grid-cols-4 items-center gap-4">
@@ -10701,20 +11095,22 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshUser") }}</Label>
                       <Input v-model="selectedSshLayer.user" class="col-span-3" placeholder="root" :disabled="selectedSshLayer.enabled === false" />
                     </div>
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <div class="grid min-w-0 grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshAuthMethod") }}</Label>
-                      <Select :model-value="selectedSshLayer.auth_method || 'password'" :disabled="selectedSshLayer.enabled === false" @update:model-value="updateSelectedSshAuthMethod">
-                        <SelectTrigger class="col-span-3 h-9">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
-                          <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
-                          <SelectItem value="key+password">{{ t("connection.sshAuthMethodKeyPassword") }}</SelectItem>
-                          <SelectItem value="agent">{{ t("connection.sshUseAgent") }}</SelectItem>
-                          <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
-                        </SelectContent>
-                      </Select>
+                      <div class="col-span-3 min-w-0">
+                        <Select :model-value="selectedSshLayer.auth_method || 'password'" :disabled="selectedSshLayer.enabled === false" @update:model-value="updateSelectedSshAuthMethod">
+                          <SelectTrigger class="h-9 w-full min-w-0">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
+                            <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
+                            <SelectItem value="key+password">{{ t("connection.sshAuthMethodKeyPassword") }}</SelectItem>
+                            <SelectItem value="agent">{{ t("connection.sshUseAgent") }}</SelectItem>
+                            <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
                     </div>
                     <div v-if="selectedSshLayer.auth_method === 'key' || selectedSshLayer.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshKeyPath") }}</Label>
@@ -10746,18 +11142,54 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshAgentSockPath") }}</Label>
                       <Input v-model="selectedSshLayer.ssh_agent_sock_path" class="col-span-3" :placeholder="t('connection.sshAgentSockPathPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
+                    <div v-if="selectedSshLayer.auth_method === 'agent'" class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshAgentKey") }}</Label>
+                      <div class="col-span-3 flex min-w-0 items-center gap-1">
+                        <div class="min-w-0 flex-1">
+                          <Select :model-value="selectedSshLayer.ssh_agent_key_fingerprint || SSH_AGENT_ALL_IDENTITIES" :disabled="selectedSshLayer.enabled === false" @update:model-value="updateSelectedSshAgentKeyFingerprint">
+                            <SelectTrigger class="h-9 w-full min-w-0">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem :value="SSH_AGENT_ALL_IDENTITIES">{{ t("connection.sshAgentKeyAll") }}</SelectItem>
+                              <SelectItem v-for="identity in sshAgentIdentityOptions" :key="identity.fingerprint" :value="identity.fingerprint" :title="identity.fingerprint">
+                                {{ sshAgentIdentityLabel(identity) }}
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :title="t('connection.sshAgentKeyRefresh')" :disabled="selectedSshLayer.enabled === false || sshAgentIdentitiesLoading" @click="loadSshAgentIdentities(selectedSshLayer.ssh_agent_sock_path || '')">
+                          <Loader2 v-if="sshAgentIdentitiesLoading" class="h-4 w-4 animate-spin" />
+                          <RefreshCw v-else class="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                    <div v-if="selectedSshLayer.auth_method === 'agent'" class="grid grid-cols-4 items-start gap-4">
+                      <span />
+                      <div class="col-span-3 text-xs text-muted-foreground">
+                        <p>{{ t("connection.sshAgentKeyHint") }}</p>
+                        <p v-if="sshAgentIdentitiesError" class="mt-1">{{ sshAgentIdentitiesError }}</p>
+                      </div>
+                    </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <span />
                       <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                         <input type="checkbox" v-model="selectedSshLayer.expose_lan" class="mr-0" :disabled="selectedSshLayer.enabled === false" />
-                        <span class="text-xs text-muted-foreground">{{ t("connection.sshExposeLan") }}</span>
+                        <span class="text-sm text-muted-foreground">{{ t("connection.sshExposeLan") }}</span>
                       </label>
+                    </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshLocalPort") }}</Label>
+                      <div class="col-span-3 space-y-1">
+                        <Input :model-value="selectedSshLayer.local_port ?? ''" type="number" min="1" max="65535" step="1" :placeholder="t('connection.sshLocalPortPlaceholder')" :disabled="selectedSshLayer.enabled === false" @update:model-value="updateSelectedSshLocalPort" />
+                        <p class="text-xs text-muted-foreground">{{ t("connection.sshLocalPortHint") }}</p>
+                      </div>
                     </div>
                     <div class="grid grid-cols-4 items-start gap-4">
                       <span />
                       <label class="col-span-3 flex items-start gap-2 cursor-pointer">
                         <input type="checkbox" v-model="selectedSshLayer.allow_exec_channel_proxy" class="mt-0.5 mr-0" :disabled="selectedSshLayer.enabled === false" />
-                        <span class="text-xs text-muted-foreground">{{ t("connection.sshAllowExecChannelProxy") }}</span>
+                        <span class="text-sm text-muted-foreground">{{ t("connection.sshAllowExecChannelProxy") }}</span>
                       </label>
                     </div>
                     <div class="grid grid-cols-4 items-start gap-4">
@@ -10773,17 +11205,19 @@ function openExternalUrl(url: string) {
                     </div>
                   </template>
                   <template v-else-if="selectedProxyLayer && !selectedLayerProfileId">
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <div class="grid min-w-0 grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.proxyType") }}</Label>
-                      <Select :model-value="selectedProxyLayer.proxy_type || 'socks5'" :disabled="selectedProxyLayer.enabled === false" @update:model-value="updateSelectedProxyType">
-                        <SelectTrigger class="col-span-3 h-9">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="socks5">SOCKS5</SelectItem>
-                          <SelectItem value="http">HTTP CONNECT</SelectItem>
-                        </SelectContent>
-                      </Select>
+                      <div class="col-span-3 min-w-0">
+                        <Select :model-value="selectedProxyLayer.proxy_type || 'socks5'" :disabled="selectedProxyLayer.enabled === false" @update:model-value="updateSelectedProxyType">
+                          <SelectTrigger class="h-9 w-full min-w-0">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="socks5">SOCKS5</SelectItem>
+                            <SelectItem value="http">HTTP CONNECT</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.proxyHost") }}</Label>
@@ -10800,17 +11234,43 @@ function openExternalUrl(url: string) {
                     </div>
                   </template>
                   <template v-else-if="selectedHttpTunnelLayer && !selectedLayerProfileId">
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <div class="grid min-w-0 grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.httpTunnelProtocol") }}</Label>
+                      <div class="col-span-3 min-w-0">
+                        <Select v-model="selectedHttpTunnelProtocol" :disabled="selectedHttpTunnelLayer!.enabled === false">
+                          <SelectTrigger class="w-full min-w-0"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="dbx_tcp">{{ t("connection.httpTunnelProtocolDbx") }}</SelectItem>
+                            <SelectItem v-if="form.db_type === 'mysql'" value="navicat_mysql">{{ t("connection.httpTunnelProtocolNavicat") }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                    <div class="grid min-w-0 grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.httpTunnelUrl") }}</Label>
-                      <Input v-model="selectedHttpTunnelLayer!.url" class="col-span-3" placeholder="https://dbx.example.com/dbx_tunnel.php" :disabled="selectedHttpTunnelLayer!.enabled === false" />
+                      <div class="col-span-3 min-w-0">
+                        <Input
+                          v-model="selectedHttpTunnelLayer!.url"
+                          class="w-full min-w-0"
+                          :placeholder="selectedHttpTunnelLayer!.protocol === 'navicat_mysql' ? 'https://example.com/ntunnel_mysql.php' : 'https://dbx.example.com/dbx_tunnel.php'"
+                          :disabled="selectedHttpTunnelLayer!.enabled === false"
+                        />
+                      </div>
                     </div>
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="selectedHttpTunnelLayer!.protocol === 'navicat_mysql'" class="col-span-4 min-w-0 text-xs text-muted-foreground">
+                      {{ t("connection.httpTunnelNavicatHint") }}
+                    </div>
+                    <div v-if="selectedHttpTunnelLayer!.protocol !== 'navicat_mysql'" class="grid min-w-0 grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.httpTunnelToken") }}</Label>
-                      <PasswordInput v-model="selectedHttpTunnelLayer!.token" class="col-span-3" :placeholder="t('connection.httpTunnelTokenPlaceholder')" :disabled="selectedHttpTunnelLayer!.enabled === false" />
+                      <div class="col-span-3 min-w-0">
+                        <PasswordInput v-model="selectedHttpTunnelLayer!.token" class="w-full min-w-0" :placeholder="t('connection.httpTunnelTokenPlaceholder')" :disabled="selectedHttpTunnelLayer!.enabled === false" />
+                      </div>
                     </div>
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <div class="grid min-w-0 grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.httpTunnelConnectTimeout") }}</Label>
-                      <Input v-model.number="selectedHttpTunnelLayer!.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" :disabled="selectedHttpTunnelLayer!.enabled === false" />
+                      <div class="col-span-3 min-w-0">
+                        <Input v-model.number="selectedHttpTunnelLayer!.connect_timeout_secs" type="number" min="1" max="300" step="1" class="w-full min-w-0" :disabled="selectedHttpTunnelLayer!.enabled === false" />
+                      </div>
                     </div>
                   </template>
                 </template>
@@ -10927,6 +11387,8 @@ function openExternalUrl(url: string) {
       </DialogFooter>
     </DialogContent>
   </Dialog>
+
+  <ConnectionParametersDialog v-if="open" v-model:open="parameterEditorOpen" :model-value="form.url_params" :context="form" :definitions="parameterDriverDefinitions" :loading="parameterMetadataLoading" :metadata-error="parameterMetadataError" @apply="applyConnectionParameters" />
 
   <Dialog v-model:open="showConnectionErrorDialog">
     <DialogContent class="min-w-0 sm:max-w-[680px]">
@@ -11242,12 +11704,43 @@ function openExternalUrl(url: string) {
   /* Preserve every form section's natural height; the form viewport owns
    * scrolling and must never shrink cards into collapsed grid rows. */
   align-content: start;
+  /* Overlay scrollbars need padding too; older WebViews ignore gutter. */
+  padding-right: 1rem;
+  scrollbar-gutter: stable;
 }
 
 .connection-form-body--nacos {
   /* Authentication fields are conditional. Keep every Nacos card at its
    * max-content height when they appear, and scroll the form as a whole. */
   grid-auto-rows: max-content;
+}
+
+/* The transport editor contains nested four-column rows. Keep the outer
+ * scrolling container strictly vertical so legacy WebViews cannot auto-place
+ * the rows beside each other when a tunnel protocol changes its fields. */
+.connection-transport-form-body {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  align-content: stretch !important;
+}
+
+.connection-transport-form-body > .connection-label-wide-grid,
+.connection-transport-form-body > .grid {
+  width: 100% !important;
+  min-width: 0 !important;
+  flex: 0 0 auto !important;
+}
+
+.connection-transport-form-body > .grid.grid-cols-4,
+.connection-transport-form-body > .connection-label-wide-grid.grid-cols-4 {
+  grid-template-columns: minmax(7rem, 0.8fr) repeat(3, minmax(0, 1fr)) !important;
+}
+
+.connection-transport-form-body > .grid.grid-cols-4 > .col-span-3,
+.connection-transport-form-body > .connection-label-wide-grid.grid-cols-4 > .col-span-3 {
+  grid-column: 2 / -1 !important;
+  min-width: 0 !important;
 }
 
 @media (max-height: 720px) {
@@ -11307,8 +11800,41 @@ html.dbx-legacy-webview.dark .connection-transport-layer-option--selected:hover 
   border-radius: var(--dbx-radius-fixed-4, 4px);
 }
 
+.connection-config-step .connection-form-body :is(label, button, [data-slot="input"], [data-slot="select-trigger"], textarea),
+.connection-config-step .connection-form-body label :is(.text-xs, .text-sm):not(.text-muted-foreground) {
+  font-size: var(--text-sm, 0.875rem);
+  line-height: var(--text-sm--line-height, 1.25rem);
+}
+
+.connection-config-step .connection-form-body [data-slot="label"]:not(.font-normal) {
+  font-weight: 500;
+}
+
+.connection-config-step .connection-form-body :is(label:not([data-slot="label"]), [data-slot="input"], [data-slot="select-trigger"], textarea) {
+  font-weight: 400;
+}
+
+.connection-config-step .connection-form-body label:not([data-slot="label"]) .font-medium {
+  font-weight: inherit;
+}
+
+.connection-config-step .connection-form-body :is(p, .text-xs.text-muted-foreground, [class~="text-[11px]"]) {
+  font-size: var(--text-xs, 0.75rem);
+  line-height: 1.25rem;
+  font-weight: 400;
+}
+
 .connection-dialog-content[data-wide="true"] .grid.grid-cols-4 {
   grid-template-columns: minmax(5.5rem, 0.7fr) repeat(3, minmax(0, 1fr));
+}
+
+/* Group padding reduces the label space; keep short labels on one line. */
+.connection-dialog-content .connection-advanced-section > .grid.grid-cols-4 {
+  grid-template-columns: minmax(7.5rem, 1fr) repeat(3, minmax(0, 1fr));
+}
+
+.connection-advanced-section > .grid > [data-slot="label"] {
+  text-wrap: balance;
 }
 
 .connection-dialog-content[data-wide="true"] .connection-form-body {

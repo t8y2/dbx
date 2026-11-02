@@ -1,5 +1,6 @@
-import type { DatabaseType, ObjectInfo, TableInfo, TreeNode, TreeNodeType } from "@/types/database";
-import { normalizeSidebarObjectKind, type SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
+import type { DatabaseType, ObjectInfo, OracleTriggerMetadata, TableInfo, TreeNode, TreeNodeType, TriggerInfo } from "@/types/database";
+import { normalizeSidebarObjectKind, supportsSchemaIndexManagement, type SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
+import { exactOracleTriggerMetadata, exactOracleTriggerObjectMetadata, oracleTriggerIdentityKey } from "@/lib/database/oracleTriggerIdentity";
 
 const databaseObjectNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
@@ -120,7 +121,9 @@ function foldedPartitionObjectLookupKey(objectType: string, schema: string | und
  * purpose: an anchor must never look "changed" because the server cased a name
  * differently between two responses.
  */
-export function tablePageRowAnchorKey(name: string, schema?: string | null, parentName?: string | null) {
+export function tablePageRowAnchorKey(name: string, schema?: string | null, parentName?: string | null, trigger?: TriggerInfo | null) {
+  const metadata = exactOracleTriggerMetadata(trigger);
+  if (metadata && metadata.name === name) return JSON.stringify(["oracle-trigger/v1", metadata.owner, metadata.name, metadata.objectId ?? null]);
   return `${(schema || "").toLowerCase()}\0${(parentName || "").toLowerCase()}\0${name.toLowerCase()}`;
 }
 
@@ -289,6 +292,48 @@ export function mergeTableInfosIntoObjects(objects: readonly ObjectInfo[], table
   return merged;
 }
 
+/**
+ * Selects the rows of one root-paged table window. Root paging counts only
+ * top-level relations (`parent_name` empty) against the page size, and the
+ * backend returns every partition below each counted root plus one probe root
+ * so the caller can detect another page. Drop the probe root and its whole
+ * subtree here so a page never renders more roots than the configured size.
+ */
+export function partitionPageTables(tables: readonly TableInfo[], pageSize: number): TableInfo[] {
+  const rootCount = tables.reduce((count, table) => count + (table.parent_name ? 0 : 1), 0);
+  if (rootCount <= pageSize) return [...tables];
+
+  // The window is scoped to one schema, where relation names are unique, so the
+  // server-provided names identify a root and its descendants unambiguously.
+  const retainedRoots = new Set<string>();
+  for (const table of tables) {
+    if (table.parent_name) continue;
+    if (retainedRoots.size >= pageSize) break;
+    retainedRoots.add(table.name);
+  }
+
+  const byName = new Map<string, TableInfo>();
+  for (const table of tables) byName.set(table.name, table);
+
+  const rootNameOf = (table: TableInfo): string | undefined => {
+    let current = table;
+    const seen = new Set<string>();
+    while (current.parent_name) {
+      if (seen.has(current.parent_name)) return undefined;
+      seen.add(current.parent_name);
+      const parent = byName.get(current.parent_name);
+      if (!parent) return undefined;
+      current = parent;
+    }
+    return current.name;
+  };
+
+  return tables.filter((table) => {
+    const rootName = rootNameOf(table);
+    return rootName !== undefined && retainedRoots.has(rootName);
+  });
+}
+
 export function filterSimpleSidebarSupplementalObjects(objects: readonly ObjectInfo[]): ObjectInfo[] {
   return objects.filter((object) => {
     const objectType = normalizeObjectType(object.object_type);
@@ -367,6 +412,19 @@ export function tablePartitionGroups(node: TreeNode): TreeNode[] {
   return partitionGroupChildren(node);
 }
 
+// Saved-SQL decoration and persisted-tree decoding can clone visible children
+// independently of hiddenChildren. Before mutating or releasing a table, retain
+// its visible partition groups as the authoritative loaded state (including the
+// load-more cursor), rather than resurrecting an older hidden snapshot.
+export function syncTablePartitionGroups(node: TreeNode): void {
+  if (node.type !== "table") return;
+  const groups = node.children?.filter((child) => child.type === "group-partitions") ?? [];
+  if (!groups.length) return;
+  const hiddenGroups = node.hiddenChildren?.filter((child) => child.type === "group-partitions") ?? [];
+  if (groups.length === hiddenGroups.length && groups.every((group, index) => group === hiddenGroups[index])) return;
+  node.hiddenChildren = [...(node.hiddenChildren?.filter((child) => child.type !== "group-partitions") ?? []), ...groups];
+}
+
 export function hasTablePartitionGroups(node: TreeNode): boolean {
   return partitionGroupChildren(node).length > 0;
 }
@@ -411,20 +469,35 @@ export function appendTableTreeLoadMoreNode(children: TreeNode[], loadMoreNode: 
   // paginates the whole schema, so nesting its global cursor under whichever
   // partition happens to end the page can hide all remaining schema objects.
   const childGroup = parentNode && isSuperTable(parentNode) ? tablePartitionGroups(parentNode)[0] : undefined;
-  if (!childGroup) return [...children, loadMoreNode];
+  if (!childGroup || !parentNode) return [...children, loadMoreNode];
 
+  syncTablePartitionGroups(parentNode);
   childGroup.children = [...(childGroup.children ?? []), loadMoreNode];
   return children;
 }
 
+const isKeptTableTreeNode = (node: TreeNode) => node.type !== "load-more" || node.loadMore?.objectType === "INDEX";
+
+// Returns `nodes` itself when nothing was removed, and only reassigns a child list that changed,
+// so a long page of childless table rows is not rebuilt (and re-triggered) on every page load.
+function pruneTableTreeLoadMoreNodes(nodes: TreeNode[]): TreeNode[] {
+  const kept = nodes.every(isKeptTableTreeNode) ? nodes : nodes.filter(isKeptTableTreeNode);
+  for (const node of kept) {
+    if (node.children?.length) {
+      const children = pruneTableTreeLoadMoreNodes(node.children);
+      if (children !== node.children) node.children = children;
+    }
+    if (node.hiddenChildren?.length) {
+      const hiddenChildren = pruneTableTreeLoadMoreNodes(node.hiddenChildren);
+      if (hiddenChildren !== node.hiddenChildren) node.hiddenChildren = hiddenChildren;
+    }
+  }
+  return kept;
+}
+
 export function withoutTableTreeLoadMoreNodes(nodes: TreeNode[] | undefined): TreeNode[] {
-  return (nodes ?? [])
-    .filter((node) => node.type !== "load-more")
-    .map((node) => {
-      if (node.children) node.children = withoutTableTreeLoadMoreNodes(node.children);
-      if (node.hiddenChildren) node.hiddenChildren = withoutTableTreeLoadMoreNodes(node.hiddenChildren);
-      return node;
-    });
+  const pruned = pruneTableTreeLoadMoreNodes(nodes ?? []);
+  return pruned === nodes ? [...pruned] : pruned;
 }
 
 export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChildren: TreeNode[], connectionId: string, database: string): TreeNode[] {
@@ -439,6 +512,9 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
   const nodeKey = (node: TreeNode) => exactObjectIdentityKey("TABLE", node.schema, node.label);
   const collect = (nodes: readonly TreeNode[]) => {
     for (const node of nodes) {
+      // Do not let a cloned hidden parent overwrite its visible counterpart in
+      // the index when a later page adds another level of partitions.
+      syncTablePartitionGroups(node);
       if (node.type === "table") {
         nodesByKey.set(nodeKey(node), node);
       }
@@ -498,12 +574,21 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
     return group;
   };
 
+  // Accumulate a page per parent: scanning/copying/sorting the growing group
+  // for every child makes large STABLEs quadratic, especially through Vue proxies.
+  const pendingGroups = new Map<TreeNode, { children: TreeNode[]; keys: Set<string> }>();
   const addToParent = (parent: TreeNode, child: TreeNode) => {
     const group = ensurePartitionGroup(parent);
-    const children = group.children ?? [];
-    if (!children.some((node) => nodeKey(node) === nodeKey(child))) {
-      group.children = sortDatabaseObjectsByName([...children, child], (node) => node.label);
-      group.objectCount = group.children.length;
+    let pending = pendingGroups.get(group);
+    if (!pending) {
+      const children = [...(group.children ?? [])];
+      pending = { children, keys: new Set(children.map(nodeKey)) };
+      pendingGroups.set(group, pending);
+    }
+    const key = nodeKey(child);
+    if (!pending.keys.has(key)) {
+      pending.keys.add(key);
+      pending.children.push(child);
     }
   };
 
@@ -540,6 +625,10 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
 
   for (const node of incomingNodes) {
     addNode(node);
+  }
+  for (const [group, pending] of pendingGroups) {
+    group.children = sortDatabaseObjectsByName(pending.children, (node) => node.label);
+    group.objectCount = group.children.length;
   }
 
   return sortDatabaseObjectsByName(roots, (node) => node.label);
@@ -649,24 +738,33 @@ function coalesceXuguPackageObjects(objects: readonly ObjectInfo[], databaseType
   return result;
 }
 
-export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, schema, objects, databaseType }: { nodeId: string; connectionId: string; database: string; schema?: string; objects: ObjectInfo[]; databaseType?: DatabaseType }): TreeNode[] {
+export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, schema, catalog, objects, databaseType }: { nodeId: string; connectionId: string; database: string; schema?: string; catalog?: string; objects: ObjectInfo[]; databaseType?: DatabaseType }): TreeNode[] {
   const seen = new Set<string>();
   const tableEntries: TableTreeEntry[] = [];
   const objectNodes: TreeNode[] = [];
 
   for (const obj of coalesceXuguPackageObjects(objects, databaseType)) {
+    const exactTrigger = exactOracleTriggerObjectMetadata(obj);
+    if (exactTrigger) {
+      const key = oracleTriggerIdentityKey(exactTrigger, catalog);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      objectNodes.push(exactTriggerTreeNode(nodeId, connectionId, database, obj, exactTrigger, catalog));
+      continue;
+    }
     const objectType = normalizeObjectType(obj.object_type);
-    if (!["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"].includes(objectType)) {
+    const schemaIndex = objectType === "INDEX" && supportsSchemaIndexManagement(databaseType);
+    if (!schemaIndex && !["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"].includes(objectType)) {
       continue;
     }
 
-    const name = normalizeDatabaseObjectName(obj.name);
+    const name = schemaIndex ? obj.name : normalizeDatabaseObjectName(obj.name);
     if (!name) continue;
 
-    const childSchema = obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
+    const childSchema = schemaIndex ? (obj.schema ?? schema) : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
     const signature = obj.signature?.trim() || "";
-    const triggerParentName = objectType === "TRIGGER" && obj.parent_name ? normalizeDatabaseObjectName(obj.parent_name) : undefined;
-    const triggerParentSchema = objectType === "TRIGGER" && obj.parent_schema ? normalizeDatabaseObjectName(obj.parent_schema) : undefined;
+    const triggerParentName = schemaIndex ? (obj.parent_name ?? undefined) : objectType === "TRIGGER" && obj.parent_name ? normalizeDatabaseObjectName(obj.parent_name) : undefined;
+    const triggerParentSchema = schemaIndex ? (obj.parent_schema ?? undefined) : objectType === "TRIGGER" && obj.parent_schema ? normalizeDatabaseObjectName(obj.parent_schema) : undefined;
     const dedupeKey = `${exactObjectIdentityKey(objectType, childSchema, name, signature)}\0${triggerParentName || ""}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
@@ -689,11 +787,16 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
     } else {
       const simpleNodeType = simpleObjectNodeType(objectType);
       objectNodes.push({
-        id: objectType === "VIEW" || objectType === "MATERIALIZED_VIEW" ? entry.node.id : `${nodeId}:${childSchema ? `${childSchema}:` : ""}${name}:${signature}:${triggerParentName || ""}:${objectType}`,
+        id: schemaIndex
+          ? `${nodeId}:index:${JSON.stringify([childSchema, name, triggerParentSchema, triggerParentName])}`
+          : objectType === "VIEW" || objectType === "MATERIALIZED_VIEW"
+            ? entry.node.id
+            : `${nodeId}:${childSchema ? `${childSchema}:` : ""}${name}:${signature}:${triggerParentName || ""}:${objectType}`,
         label: signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `${name}(${signature})` : triggerParentName ? `${name} (${triggerParentName})` : name,
         type: simpleNodeType,
         objectName: name,
-        signature: signature || undefined,
+        objectScope: schemaIndex ? "schema" : undefined,
+        signature: objectType === "FUNCTION" || objectType === "PROCEDURE" ? (obj.signature == null ? undefined : signature) : signature || undefined,
         customTypeKind: obj.custom_type_kind ?? undefined,
         hasMembers: obj.has_members ?? undefined,
         comment: obj.comment,
@@ -715,6 +818,29 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
   }
 
   return [...buildPartitionTree(tableEntries, connectionId, database), ...sortDatabaseObjectsByName(objectNodes, (node) => node.label)];
+}
+
+function exactTriggerTreeNode(nodeId: string, connectionId: string, database: string, object: ObjectInfo, metadata: OracleTriggerMetadata, catalog?: string): TreeNode {
+  const parent = metadata.scope === "TABLE" || metadata.scope === "VIEW" ? metadata.parent : undefined;
+  return {
+    id: `${nodeId}:${oracleTriggerIdentityKey(metadata, catalog)}`,
+    label: parent ? `${metadata.name} (${parent.name})` : metadata.name,
+    type: "trigger",
+    connectionId,
+    database,
+    catalog,
+    schema: metadata.owner,
+    objectName: metadata.name,
+    parentSchema: parent?.owner,
+    parentName: parent?.name,
+    parentType: parent?.objectType === "VIEW" ? "view" : parent?.objectType === "TABLE" ? "table" : undefined,
+    tableName: parent?.name,
+    valid: object.trigger?.valid ?? object.valid,
+    comment: object.comment,
+    meta: object.trigger ?? undefined,
+    isExpanded: false,
+    children: undefined,
+  };
 }
 
 function simpleObjectNodeType(objectType: DatabaseObjectTreeKind): TreeNodeType {
@@ -830,9 +956,18 @@ const groupDefs: Array<{
   {
     key: "__packages",
     label: "tree.packages",
-    objectTypes: ["PACKAGE", "PACKAGE_BODY"],
+    objectTypes: ["PACKAGE"],
     nodeType: "group-packages",
-    childType: (objectType) => (objectType === "PACKAGE_BODY" ? "package-body" : "package"),
+    childType: "package",
+  },
+  {
+    // #13239: package bodies live in their own group (PL/SQL Developer style)
+    // so browsing/editing the body no longer risks picking the spec.
+    key: "__package_bodies",
+    label: "tree.packageBodies",
+    objectTypes: ["PACKAGE_BODY"],
+    nodeType: "group-package-bodies",
+    childType: "package-body",
   },
   {
     key: "__types",
@@ -859,6 +994,7 @@ const objectGroupNodeTypes = new Set<TreeNodeType>([
   "group-synonyms",
   "group-jobs",
   "group-packages",
+  "group-package-bodies",
   "group-types",
 ]);
 
@@ -897,31 +1033,69 @@ export function buildObjectGroupPlaceholderNodes({
 }
 
 export function objectGroupRefreshParentId(node: TreeNode): string | null {
+  if (node.tableName) return null;
   if (!objectGroupNodeTypes.has(node.type)) return null;
   const suffixStart = node.id.lastIndexOf(":__");
   if (suffixStart < 0) return null;
   return node.id.slice(0, suffixStart);
 }
 
-export function objectTypesForGroupNode(type: TreeNodeType): DatabaseObjectTreeKind[] | null {
-  return groupDefs.find((def) => def.nodeType === type)?.objectTypes ?? null;
+/**
+ * #13239: Xugu folds a package body into its package spec node, so the packages
+ * group must still fetch and keep PACKAGE_BODY rows — a body that only arrives
+ * on a later page then collapses into the spec child through
+ * `coalesceXuguPackageObjects`. Other drivers keep bodies in their own
+ * `__package_bodies` group.
+ */
+export function objectTypesForGroupNode(type: TreeNodeType, databaseType?: DatabaseType): DatabaseObjectTreeKind[] | null {
+  const objectTypes = groupDefs.find((def) => def.nodeType === type)?.objectTypes ?? null;
+  return objectTypes && type === "group-packages" && databaseType === "xugu" ? ["PACKAGE", "PACKAGE_BODY"] : objectTypes;
 }
 
-export function buildGroupedObjectTreeNodes({ nodeId, connectionId, database, schema, objects, databaseType, groupNodeType }: { nodeId: string; connectionId: string; database: string; schema?: string; objects: ObjectInfo[]; databaseType?: DatabaseType; groupNodeType?: TreeNodeType }): TreeNode[] {
+export function buildGroupedObjectTreeNodes({
+  nodeId,
+  connectionId,
+  database,
+  schema,
+  catalog,
+  objects,
+  databaseType,
+  groupNodeType,
+}: {
+  nodeId: string;
+  connectionId: string;
+  database: string;
+  schema?: string;
+  catalog?: string;
+  objects: ObjectInfo[];
+  databaseType?: DatabaseType;
+  groupNodeType?: TreeNodeType;
+}): TreeNode[] {
   const buckets = new Map<string, ObjectInfo[]>();
   const seen = new Set<string>();
   for (const obj of coalesceXuguPackageObjects(objects, databaseType)) {
-    const name = normalizeDatabaseObjectName(obj.name);
-    if (!name) continue;
+    const exactTrigger = exactOracleTriggerObjectMetadata(obj);
+    if (exactTrigger) {
+      const key = oracleTriggerIdentityKey(exactTrigger, catalog);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const bucket = buckets.get("TRIGGER") ?? [];
+      bucket.push(obj);
+      buckets.set("TRIGGER", bucket);
+      continue;
+    }
     const t = normalizeObjectType(obj.object_type);
-    const objectSchema = obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema || "";
+    const schemaIndex = t === "INDEX" && supportsSchemaIndexManagement(databaseType);
+    const name = schemaIndex ? obj.name : normalizeDatabaseObjectName(obj.name);
+    if (!name) continue;
+    const objectSchema = schemaIndex ? (obj.schema ?? schema ?? "") : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema || "";
     const signature = (obj.signature ?? "").trim();
     const triggerParentName = t === "TRIGGER" && obj.parent_name ? normalizeDatabaseObjectName(obj.parent_name) : "";
     const key = `${exactObjectIdentityKey(t, objectSchema, name, signature)}\0${triggerParentName}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const arr = buckets.get(t) ?? [];
-    arr.push({ ...obj, name, schema: obj.schema ? normalizeDatabaseObjectName(obj.schema) : obj.schema });
+    arr.push({ ...obj, name, schema: schemaIndex ? obj.schema : obj.schema ? normalizeDatabaseObjectName(obj.schema) : obj.schema });
     buckets.set(t, arr);
   }
 
@@ -941,20 +1115,24 @@ export function buildGroupedObjectTreeNodes({ nodeId, connectionId, database, sc
           objectType: def.objectTypes[0] as "TABLE" | "VIEW" | "MATERIALIZED_VIEW",
         })
       : sortDatabaseObjectsByName(items, (obj) => obj.name).map((obj) => {
-          const childSchema = obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
+          const exactTrigger = exactOracleTriggerObjectMetadata(obj);
+          if (exactTrigger) return exactTriggerTreeNode(`${nodeId}:${def.key}`, connectionId, database, obj, exactTrigger, catalog);
           const objectType = normalizeObjectType(obj.object_type);
+          const schemaIndex = objectType === "INDEX" && supportsSchemaIndexManagement(databaseType);
+          const childSchema = schemaIndex ? (obj.schema ?? schema) : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
           const childType = typeof def.childType === "function" ? def.childType(objectType) : def.childType;
           const objectTypeSuffix = objectType === "PACKAGE" || objectType === "PACKAGE_BODY" || objectType === "TYPE" || objectType === "TYPE_BODY" ? `:${objectType}` : "";
           const signature = obj.signature?.trim() || "";
           const signatureIdPart = signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `:${signature}` : "";
-          const triggerParentName = (objectType === "TRIGGER" || objectType === "INDEX") && obj.parent_name ? normalizeDatabaseObjectName(obj.parent_name) : undefined;
-          const triggerParentSchema = objectType === "TRIGGER" && obj.parent_schema ? normalizeDatabaseObjectName(obj.parent_schema) : undefined;
+          const triggerParentName = schemaIndex ? (obj.parent_name ?? undefined) : (objectType === "TRIGGER" || objectType === "INDEX") && obj.parent_name ? normalizeDatabaseObjectName(obj.parent_name) : undefined;
+          const triggerParentSchema = schemaIndex ? (obj.parent_schema ?? undefined) : objectType === "TRIGGER" && obj.parent_schema ? normalizeDatabaseObjectName(obj.parent_schema) : undefined;
           return {
-            id: `${nodeId}:${def.key}:${childSchema ? `${childSchema}:` : ""}${obj.name}${signatureIdPart}${triggerParentName ? `:${triggerParentName}` : ""}${objectTypeSuffix}`,
+            id: schemaIndex ? `${nodeId}:${def.key}:${JSON.stringify([childSchema, obj.name, triggerParentSchema, triggerParentName])}` : `${nodeId}:${def.key}:${childSchema ? `${childSchema}:` : ""}${obj.name}${signatureIdPart}${triggerParentName ? `:${triggerParentName}` : ""}${objectTypeSuffix}`,
             label: signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `${obj.name}(${signature})` : triggerParentName ? `${obj.name} (${triggerParentName})` : obj.name,
             type: childType,
             objectName: obj.name,
-            signature: signature || undefined,
+            objectScope: schemaIndex ? ("schema" as const) : undefined,
+            signature: objectType === "FUNCTION" || objectType === "PROCEDURE" ? (obj.signature == null ? undefined : signature) : signature || undefined,
             customTypeKind: obj.custom_type_kind ?? undefined,
             hasMembers: obj.has_members ?? undefined,
             comment: obj.comment,

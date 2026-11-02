@@ -127,6 +127,7 @@ export function createQueryEditorHoverContent(options: QueryEditorHoverContentOp
         layoutController || handleCopy || searchController
           ? () => {
               layoutController?.mount();
+              searchController?.pinTooltip(dom.closest<HTMLElement>(".cm-tooltip") ?? dom);
               if (handleCopy) document.addEventListener("copy", handleCopy);
             }
           : undefined,

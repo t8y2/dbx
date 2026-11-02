@@ -170,4 +170,13 @@ describe("shouldResolveSqlColumnCompletion", () => {
   it("keeps empty non-SELECT column contexts from fetching metadata", () => {
     expect(shouldResolveSqlColumnCompletion({ suggestColumns: true, hasReferencedTables: true, prefix: "", typedActivation: false, selectListColumnContext: false })).toBe(false);
   });
+
+  it("resolves a bare `alias.` position so cold metadata is fetched (#12227 #12692)", () => {
+    expect(shouldResolveSqlColumnCompletion({ suggestColumns: true, hasReferencedTables: true, prefix: "", typedActivation: false, selectListColumnContext: false, qualifierDot: true })).toBe(true);
+  });
+
+  it("does not let qualifierDot override a disabled column context", () => {
+    expect(shouldResolveSqlColumnCompletion({ suggestColumns: false, hasReferencedTables: true, prefix: "", typedActivation: false, selectListColumnContext: false, qualifierDot: true })).toBe(false);
+    expect(shouldResolveSqlColumnCompletion({ suggestColumns: true, hasReferencedTables: false, prefix: "", typedActivation: false, selectListColumnContext: false, qualifierDot: true })).toBe(false);
+  });
 });

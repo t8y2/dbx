@@ -1,4 +1,5 @@
 import { useConnectionStore } from "@/stores/connectionStore";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { hexToRgba } from "@/lib/common/color";
 import { isLegacyWebView } from "@/lib/ui/legacyWebView";
@@ -12,6 +13,7 @@ import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import type { SqlErrorPosition } from "@/lib/backend/errorUtils";
 import { queryResultSourceNameParts } from "@/lib/sql/queryResultSource";
+import { normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 import type { BatchSqlExecution, ConnectionConfig, DatabaseType, QueryResult, QueryResultRun, QueryTab } from "@/types/database";
 import type { ResultTabNamingMode } from "@/stores/settingsStore";
 
@@ -75,7 +77,8 @@ export function tabConnectionColor(connectionId: string): string {
 
 export function isConnectionReadonly(connectionId: string): boolean {
   const connectionStore = useConnectionStore();
-  return connectionStore.getConfig(connectionId)?.read_only ?? false;
+  const connection = connectionStore.getConfig(connectionId);
+  return mysqlDataCharsetEnabled(connection) || connection?.read_only === true;
 }
 
 function jdbcTargetLabel(connection: ConnectionConfig): string {
@@ -272,6 +275,10 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
   const compact = settingsStore.editorSettings.compactTabTitle;
   if (isPreviewTab(tab)) return tab.title;
   if (useConnectionStore().getConfig(tab.connectionId)?.db_type === "redis") {
+    // Redis query tabs normally identify their logical database (db0/db1), but a
+    // saved SQL file or external SQL file is a document: show its file title
+    // instead, otherwise every Redis file tab looks like the same database.
+    if (!tab.isDefaultQuery && (tab.savedSqlId || tab.externalSqlPath) && tab.title.trim()) return tab.title;
     return tab.database ? database : connectionDisplayName(tab.connectionId);
   }
   if (tab.mode === "data" && tab.tableMeta?.tableName) {
@@ -462,6 +469,14 @@ export function middleEllipsis(value: string, maxLength = 24): string {
   return `${value.slice(0, startLength)}...${end}`;
 }
 
+// 无来源对象的结果（如外层 SELECT * FROM (...) 包装查询）页签 tooltip 会回退到 SQL 文本；
+// 整条语句会把浮层撑成遮挡工作区的巨块并拦截点击，这里折叠空白并限制长度 (#13266)
+export function sourceStatementTooltip(statement: string | undefined, maxLength = 160): string | undefined {
+  const singleLine = statement?.replace(/\s+/g, " ").trim();
+  if (!singleLine) return undefined;
+  return singleLine.length > maxLength ? `${singleLine.slice(0, maxLength)}…` : singleLine;
+}
+
 export function resultSqlForGrid(tab: Pick<QueryTab, "result" | "resultBaseSql" | "lastExecutedSql" | "sql">): string {
   return tab.result?.sourceStatement || tab.resultBaseSql || tab.lastExecutedSql || tab.sql;
 }
@@ -545,20 +560,24 @@ export function statementExecutionMarkers(
   if (!results?.length || sqlTextFingerprint(editorSql) !== executionEditorFingerprint) return [];
   const submittedStatements = statementRanges(submittedSql, databaseType, parameterOptions);
   if (submittedStatements.length <= 1) return [];
-  const editorStatements = submittedSql === editorSql ? submittedStatements : statementRanges(editorSql, databaseType, parameterOptions);
+  const submittedStatementTexts = new Set(submittedStatements.map((statement) => statement.sql));
 
   const byLine = new Map<number, { success: number; error: number }>();
   for (const result of results) {
-    if (!Number.isInteger(result.statement_index) || result.statement_index! < 0) continue;
-    const statementIndex = result.statement_index!;
-    const submittedStatement = submittedStatements[statementIndex];
-    if (!submittedStatement || submittedStatement.sql !== result.sourceStatement) continue;
-    const range =
-      typeof result.sourceFrom === "number" && typeof result.sourceTo === "number" && editorSql.slice(result.sourceFrom, result.sourceTo) === result.sourceStatement
-        ? { from: result.sourceFrom, to: result.sourceTo, sql: result.sourceStatement }
-        : editorStatements[statementIndex]?.sql === result.sourceStatement
-          ? editorStatements[statementIndex]
-          : undefined;
+    if (result.server_message === true || !result.sourceStatement) continue;
+    const statementIndex = result.statement_index;
+    if (statementIndex !== undefined && (!Number.isInteger(statementIndex) || statementIndex < 0)) continue;
+    const absoluteRange =
+      Number.isInteger(result.sourceFrom) && Number.isInteger(result.sourceTo) && result.sourceFrom! >= 0 && result.sourceTo! > result.sourceFrom! && result.sourceTo! <= editorSql.length && editorSql.slice(result.sourceFrom, result.sourceTo) === result.sourceStatement
+        ? { from: result.sourceFrom!, to: result.sourceTo!, sql: result.sourceStatement }
+        : undefined;
+    // Manual transactions and non-streaming drivers can omit statement indexes.
+    // Their preserved editor ranges still identify the executed selection; never
+    // infer an unindexed result's position from its order in the result array.
+    if (statementIndex === undefined) {
+      if (!absoluteRange || !submittedStatementTexts.has(result.sourceStatement)) continue;
+    } else if (submittedStatements[statementIndex]?.sql !== result.sourceStatement) continue;
+    const range = absoluteRange ?? (submittedSql === editorSql && statementIndex !== undefined ? submittedStatements[statementIndex] : undefined);
     if (!range) continue;
     const from = lineStartOffset(editorSql, range.from);
     const current = byLine.get(from) ?? { success: 0, error: 0 };
@@ -601,7 +620,7 @@ export function tabularResultItems(results: QueryResult[] | undefined, options: 
         label: displaySource,
         displayLabel,
         labelTruncated: !!displaySource && displayLabel !== displaySource,
-        title: item.result.sourceLabel || item.result.sourceStatement,
+        title: item.result.sourceLabel || sourceStatementTooltip(item.result.sourceStatement),
       };
     });
 }
@@ -664,8 +683,15 @@ export function resultGridCacheKey(tab: Pick<QueryTab, "id" | "activeResultRunId
   return `${tab.id}-${tab.activeResultRunId ?? "current"}-${tab.activeResultIndex ?? 0}`;
 }
 
-export function resultGridColumnWidthCacheKey(tab: Pick<QueryTab, "id"> & Partial<Pick<QueryTab, "activeResultIndex">>): string {
-  return `result-column-width-${tab.id}-${tab.activeResultIndex ?? 0}`;
+export function resultGridColumnWidthCacheKey(tab: Pick<QueryTab, "id"> & Partial<Pick<QueryTab, "activeResultIndex" | "externalSqlPath" | "savedSqlId">>): string {
+  const resultIndex = tab.activeResultIndex ?? 0;
+  if (tab.externalSqlPath) {
+    return `result-column-width-file-${normalizeExternalSqlPath(tab.externalSqlPath)}-${resultIndex}`;
+  }
+  if (tab.savedSqlId) {
+    return `result-column-width-saved-${tab.savedSqlId}-${resultIndex}`;
+  }
+  return `result-column-width-${tab.id}-${resultIndex}`;
 }
 
 export function resultGridInstanceKey(tab: Pick<QueryTab, "id" | "activeResultRunId" | "activeResultIndex" | "resultGridRevision">): string {
@@ -780,7 +806,7 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
 export function tabDatabaseIconType(tab: QueryTab): string {
   const connectionStore = useConnectionStore();
   const connection = connectionStore.getConfig(tab.connectionId);
-  if (!connection) return "mq";
+  if (!connection) return tab.mode === "mq" ? "mq" : "unknown";
   if (connection.db_type === "mq") {
     const externalConfig = connection.external_config as { systemKind?: unknown } | undefined;
     const systemKind = typeof externalConfig?.systemKind === "string" ? externalConfig.systemKind : "";
@@ -848,7 +874,8 @@ export function appTabActiveIndicator(): string {
 }
 
 export function tabColorStyle(tab: QueryTab, active: boolean, isClassic: boolean): CSSProperties | undefined {
-  if (!useSettingsStore().editorSettings.colorizeConnectionTabs) {
+  const settings = useSettingsStore().editorSettings;
+  if (!settings.colorizeConnectionTabs || (settings.colorizeConnectionTabsScope === "active" && !active)) {
     const activeIndicator = appTabActiveIndicator();
     const background = appTabActiveBackground();
     if (isClassic) return active ? { "--app-tab-background": background, boxShadow: activeIndicator } : undefined;

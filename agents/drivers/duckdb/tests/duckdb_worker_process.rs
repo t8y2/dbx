@@ -16,6 +16,27 @@ use tokio_util::sync::CancellationToken;
 
 static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[path = "../../../../crates/dbx-core/tests/support/duckdb_export.rs"]
+mod export_regressions;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_query_pages_preserve_one_execution() {
+    let _guard = duckdb_worker_process_test_guard().await;
+    export_regressions::run_query_pages(PathBuf::from(env!("CARGO_BIN_EXE_dbx-duckdb-driver")));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_parquet_exports_preserve_rows_and_project_totals() {
+    let _guard = duckdb_worker_process_test_guard().await;
+    export_regressions::run_parquet_exports(PathBuf::from(env!("CARGO_BIN_EXE_dbx-duckdb-driver")));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_export_snapshots_preserve_values_and_cleanup() {
+    let _guard = duckdb_worker_process_test_guard().await;
+    export_regressions::run_snapshot_cleanup(PathBuf::from(env!("CARGO_BIN_EXE_dbx-duckdb-driver")));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_process_reads_view_source() {
     let _guard = duckdb_worker_process_test_guard().await;

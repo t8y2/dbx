@@ -22,6 +22,7 @@ vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: mocks.ensureConnected,
     getConfig: () => connection,
+    tableNameFilterForScope: () => undefined,
     orderByPinnedTreeNodes: (rows: unknown[]) => rows,
   }),
 }));
@@ -96,7 +97,7 @@ afterEach(() => {
   invalidateObjectBrowserRowsCache({});
 });
 
-async function mountBrowser(overrides: Partial<InstanceType<typeof ObjectBrowser>["$props"]> = {}) {
+async function mountBrowser(overrides: Partial<InstanceType<typeof ObjectBrowser>["$props"]> = {}, expectedObjectRequests = 1) {
   const props = reactive({ connection, database: "app", initialEventCreateRequestId: 1 as number | undefined, ...overrides });
   const browser = ref<InstanceType<typeof ObjectBrowser> | null>(null);
   const host = document.createElement("div");
@@ -104,7 +105,7 @@ async function mountBrowser(overrides: Partial<InstanceType<typeof ObjectBrowser
   const app = createApp({ setup: () => () => h(ObjectBrowser, { ...props, ref: browser }) });
   mountedApps.push({ app, host });
   app.mount(host);
-  await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledOnce());
+  await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(expectedObjectRequests));
   await nextTick();
   return { browser, host, props };
 }
@@ -183,7 +184,7 @@ describe("ObjectBrowser event editor rendering", () => {
     mocks.listObjects.mockRejectedValue(new Error("objects unavailable"));
     const { host } = await mountBrowser();
 
-    expect(host.textContent).toContain("objects unavailable");
+    await vi.waitFor(() => expect(host.textContent).toContain("objects unavailable"));
     expect(host.querySelector("[data-event-editor]")).toBeNull();
   });
 });

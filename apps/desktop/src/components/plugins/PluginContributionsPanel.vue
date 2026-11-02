@@ -45,6 +45,7 @@ import { useToast } from "@/composables/useToast";
 import PluginShortcutSettings from "./PluginShortcutSettings.vue";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import PluginAiAccessSection from "@/components/plugins/PluginAiAccessSection.vue";
+import { installedPluginProvidesMcpTools, marketplacePluginProvidesMcpTools } from "@/lib/plugins/pluginMcpMark";
 import PluginGraphicsEngineSection from "@/components/plugins/PluginGraphicsEngineSection.vue";
 import * as api from "@/lib/backend/api";
 import { clearPluginIconCache } from "@/lib/plugins/pluginIconResolver";
@@ -59,6 +60,7 @@ import {
   buildInstalledUpdateIndex,
   buildMarketplacePluginListings,
   compareVersions,
+  fetchPluginInstallCounts,
   filterMarketplacePluginListings,
   formatMarketplaceReleasedDate,
   marketplaceHomepageUrl,
@@ -68,6 +70,7 @@ import {
   type InstalledPluginUpdateEntry,
   type MarketplacePluginListing,
   type MarketplacePluginSortMode,
+  type PluginInstallCounts,
   type PluginSourceChange,
 } from "@/lib/plugins/pluginMarketplace";
 import { isBatchSelectableListing, runBatch, type BatchOutcome } from "@/lib/plugins/pluginBatch";
@@ -184,7 +187,7 @@ const marketplaceRepositoryId = ref("all");
 const marketplaceDetailKey = ref("");
 const marketplaceDetailOpen = ref(false);
 const marketplaceViewMode = ref<"grid" | "list">(safeLocalStorageGet(MARKETPLACE_VIEW_MODE_STORAGE_KEY) === "list" ? "list" : "grid");
-const MARKETPLACE_SORT_MODES: MarketplacePluginSortMode[] = ["name", "recently-updated", "recently-listed", "updates-first"];
+const MARKETPLACE_SORT_MODES: MarketplacePluginSortMode[] = ["name", "installs", "recently-updated", "recently-listed", "updates-first"];
 // "name" stays the default: the batch specs select listings positionally, so a persisted
 // value must be re-validated against the known modes before it may change the order.
 const marketplaceSortMode = ref<MarketplacePluginSortMode>(
@@ -207,7 +210,11 @@ const mutationRunning = computed(() => batchRunning.value || !!marketplaceInstal
 
 const registry = computed(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value));
 const pinnedPluginIds = ref<string[]>(loadPinnedPluginIds());
-const definitions = computed(() => sortPluginsPinnedFirst(registry.value.listPlugins(), pinnedPluginIds.value));
+// "MCP tools" filter: plugins carrying the provides-MCP-tools mark.
+const installedMcpOnly = ref(false);
+const allDefinitions = computed(() => sortPluginsPinnedFirst(registry.value.listPlugins(), pinnedPluginIds.value));
+const installedMcpCount = computed(() => allDefinitions.value.filter((definition) => installedPluginProvidesMcpTools(definition.plugin)).length);
+const definitions = computed(() => (installedMcpOnly.value ? allDefinitions.value.filter((definition) => installedPluginProvidesMcpTools(definition.plugin)) : allDefinitions.value));
 const isPluginPinned = (pluginId: string) => pinnedPluginIds.value.includes(pluginId);
 const togglePluginPinned = (pluginId: string) => {
   pinnedPluginIds.value = isPluginPinned(pluginId) ? pinnedPluginIds.value.filter((id) => id !== pluginId) : [...pinnedPluginIds.value, pluginId];
@@ -229,7 +236,9 @@ const selectedConnection = computed(() => providerConnections.value.find((connec
 const marketplaceListings = computed(() => buildMarketplacePluginListings(catalogResults.value, installedPlugins.value, appLocale.value));
 const filteredMarketplaceListings = computed(() => filterMarketplacePluginListings(marketplaceListings.value, marketplaceQuery.value, marketplaceRepositoryId.value).filter((listing) => !marketplacePublisher.value || listing.plugin.publisher === marketplacePublisher.value));
 // Render order only: batch selection and update execution keep the builder's name order.
-const sortedMarketplaceListings = computed(() => sortMarketplacePluginListings(filteredMarketplaceListings.value, marketplaceSortMode.value));
+const pluginInstallCounts = ref<PluginInstallCounts>({});
+let installCountRequest = 0;
+const sortedMarketplaceListings = computed(() => sortMarketplacePluginListings(filteredMarketplaceListings.value, marketplaceSortMode.value, pluginInstallCounts.value));
 const selectedMarketplaceListing = computed(() => marketplaceListings.value.find((listing) => listing.key === marketplaceDetailKey.value) || null);
 const detailOpening = ref(false);
 const detailChooseEntry = ref(false);
@@ -555,8 +564,31 @@ async function refresh(preferredPluginId = props.focusTarget?.pluginId || select
   }
 }
 
+function listingInstallCount(pluginId: string): number {
+  const value = pluginInstallCounts.value[pluginId];
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function formatInstallCount(count: number): string {
+  try {
+    return new Intl.NumberFormat(appLocale.value).format(count);
+  } catch {
+    return String(count);
+  }
+}
+
+// Stats stay decorative: a slow or failed request must not hold the catalog,
+// and a newer refresh or unmount drops the stale response.
+function loadPluginInstallCounts() {
+  const request = ++installCountRequest;
+  void fetchPluginInstallCounts().then((counts) => {
+    if (request === installCountRequest && counts) pluginInstallCounts.value = counts;
+  });
+}
+
 async function refreshMarketplace() {
   marketplaceLoading.value = true;
+  loadPluginInstallCounts();
   let loaded = false;
   try {
     catalogResults.value = await api.fetchPluginMarketplaceCatalogs();
@@ -1368,6 +1400,7 @@ onMounted(() => {
 watch(marketplaceViewMode, (mode) => safeLocalStorageSet(MARKETPLACE_VIEW_MODE_STORAGE_KEY, mode));
 watch(marketplaceSortMode, (mode) => safeLocalStorageSet(MARKETPLACE_SORT_MODE_STORAGE_KEY, mode));
 onBeforeUnmount(() => {
+  installCountRequest += 1;
   detailSessionGeneration += 1;
   window.clearTimeout(recentlyCompletedTimer);
   window.removeEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, handleComponentPluginsUpdated);
@@ -1437,6 +1470,7 @@ onBeforeUnmount(() => {
                 <SelectTrigger data-plugin-marketplace-sort class="h-8 min-w-0 flex-1 text-xs @min-[54rem]:w-32 @min-[54rem]:flex-none" :aria-label="t('pluginPlatform.sortBy')"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="name">{{ t("pluginPlatform.sortByName") }}</SelectItem>
+                  <SelectItem value="installs">{{ t("pluginPlatform.sortByInstalls") }}</SelectItem>
                   <SelectItem value="recently-updated">{{ t("pluginPlatform.sortByRecentlyUpdated") }}</SelectItem>
                   <SelectItem value="recently-listed">{{ t("pluginPlatform.sortByRecentlyListed") }}</SelectItem>
                   <SelectItem value="updates-first">{{ t("pluginPlatform.sortByUpdatesFirst") }}</SelectItem>
@@ -1512,7 +1546,12 @@ onBeforeUnmount(() => {
               <div class="flex min-w-0 items-start gap-3">
                 <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-10 shrink-0 rounded-lg border bg-background p-1.5" />
                 <div class="min-w-0 flex-1">
-                  <div class="truncate text-sm font-semibold" :title="listing.name">{{ listing.name }}</div>
+                  <div class="flex min-w-0 items-center gap-1.5">
+                    <div class="truncate text-sm font-semibold" :title="listing.name">{{ listing.name }}</div>
+                    <span v-if="marketplacePluginProvidesMcpTools(listing.plugin)" class="shrink-0 rounded border border-primary/40 px-1 text-[10px] font-medium leading-4 text-primary" :title="t('pluginPlatform.mcpToolsBadgeHint')" data-marketplace-mcp-badge>{{
+                      t("pluginPlatform.mcpToolsBadge")
+                    }}</span>
+                  </div>
                   <div class="mt-1 flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
                     <BadgeCheck v-if="listing.verified" class="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" :aria-label="t('pluginPlatform.verified')" />
                     <span class="min-w-0 truncate"
@@ -1585,20 +1624,23 @@ onBeforeUnmount(() => {
                 <TooltipContent side="bottom" class="max-w-md whitespace-pre-wrap break-words">{{ listing.description || t("pluginPlatform.noDescription") }}</TooltipContent>
               </Tooltip>
               <div class="marketplace-footer mt-auto flex items-center justify-between gap-3 pt-4">
-                <div class="flex min-w-0 flex-1 items-baseline gap-1.5 text-[11px] text-muted-foreground">
-                  <span v-if="listing.status === 'unsupported'" class="min-w-0 truncate">{{ t("pluginPlatform.unsupportedTarget", { target: listing.target }) }}</span>
-                  <!-- Versions are stated only in this footer (no separate badge above): the update case
-                       keeps installed and catalog latest in one sentence so neither reads as the other,
-                       and the plain install state leads with the full catalog version that never shrinks
-                       while license and release date absorb the truncation. -->
-                  <span v-else-if="listing.installed && listing.status === 'update'" class="min-w-0 truncate">{{ t("pluginPlatform.installedVersionUpdatable", { installed: listing.installed.manifest.version, latest: listing.plugin.latestVersion }) }}</span>
-                  <span v-else-if="listing.installed" class="min-w-0 truncate">{{ t("pluginPlatform.installedVersion", { version: listing.installed.manifest.version }) }}</span>
-                  <template v-else>
-                    <span class="shrink-0 font-medium">v{{ listing.plugin.latestVersion }}</span>
-                    <span class="min-w-0 truncate"
-                      >{{ listing.plugin.license || t("pluginPlatform.licenseUnknown") }}<span v-if="listing.latestVersionReleasedAt"> · {{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span></span
-                    >
-                  </template>
+                <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <div class="flex min-w-0 items-baseline gap-1.5 text-[11px] text-muted-foreground">
+                    <span v-if="listing.status === 'unsupported'" class="min-w-0 truncate">{{ t("pluginPlatform.unsupportedTarget", { target: listing.target }) }}</span>
+                    <!-- Versions are stated only in this footer (no separate badge above): the update case
+                         keeps installed and catalog latest in one sentence so neither reads as the other,
+                         and the plain install state leads with the full catalog version that never shrinks
+                         while license and release date absorb the truncation. -->
+                    <span v-else-if="listing.installed && listing.status === 'update'" class="min-w-0 truncate">{{ t("pluginPlatform.installedVersionUpdatable", { installed: listing.installed.manifest.version, latest: listing.plugin.latestVersion }) }}</span>
+                    <span v-else-if="listing.installed" class="min-w-0 truncate">{{ t("pluginPlatform.installedVersion", { version: listing.installed.manifest.version }) }}</span>
+                    <template v-else>
+                      <span class="shrink-0 font-medium">v{{ listing.plugin.latestVersion }}</span>
+                      <span class="min-w-0 truncate"
+                        >{{ listing.plugin.license || t("pluginPlatform.licenseUnknown") }}<span v-if="listing.latestVersionReleasedAt"> · {{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span></span
+                      >
+                    </template>
+                  </div>
+                  <div v-if="listingInstallCount(listing.plugin.id)" class="text-[11px] tabular-nums text-muted-foreground">{{ t("pluginPlatform.installCount", { count: formatInstallCount(listingInstallCount(listing.plugin.id)) }) }}</div>
                 </div>
                 <button
                   type="button"
@@ -1642,6 +1684,9 @@ onBeforeUnmount(() => {
                 <div class="flex min-w-0 items-center gap-1">
                   <span class="truncate text-sm font-semibold" :title="listing.name">{{ listing.name }}</span>
                   <BadgeCheck v-if="listing.verified" class="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" :aria-label="t('pluginPlatform.verified')" />
+                  <span v-if="marketplacePluginProvidesMcpTools(listing.plugin)" class="shrink-0 rounded border border-primary/40 px-1 text-[10px] font-medium leading-4 text-primary" :title="t('pluginPlatform.mcpToolsBadgeHint')" data-marketplace-mcp-badge>{{
+                    t("pluginPlatform.mcpToolsBadge")
+                  }}</span>
                 </div>
                 <div class="mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
                   <span class="min-w-0 truncate"
@@ -1650,6 +1695,7 @@ onBeforeUnmount(() => {
                   >
                   <span class="shrink-0">· v{{ listing.plugin.latestVersion }}</span>
                   <span v-if="listing.latestVersionReleasedAt" class="shrink-0">· {{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span>
+                  <span v-if="listingInstallCount(listing.plugin.id)" class="shrink-0 tabular-nums">· {{ t("pluginPlatform.installCount", { count: formatInstallCount(listingInstallCount(listing.plugin.id)) }) }}</span>
                   <button
                     v-if="listing.plugin.source"
                     type="button"
@@ -1773,6 +1819,10 @@ onBeforeUnmount(() => {
           </div>
           <div class="grid min-h-0 flex-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
             <div class="space-y-1 rounded-lg border bg-muted/10 p-2">
+              <label v-if="installedMcpCount || installedMcpOnly" class="flex items-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground" data-plugin-mcp-filter>
+                <input v-model="installedMcpOnly" type="checkbox" />
+                {{ t("pluginPlatform.mcpToolsFilter", { count: installedMcpCount }) }}
+              </label>
               <div
                 v-for="definition in definitions"
                 :key="definition.plugin.manifest.id"
@@ -1801,6 +1851,7 @@ onBeforeUnmount(() => {
                         <ArrowUp class="size-2.5" />v{{ installedUpdateEntryFor(definition.plugin.manifest.id)?.listing.plugin.latestVersion }}
                       </span>
                       <Badge :variant="definition.plugin.compatibility.compatible ? 'secondary' : 'destructive'" class="h-4 px-1.5 text-[10px]">{{ definition.plugin.compatibility.compatible ? t("pluginPlatform.compatible") : t("pluginPlatform.blocked") }}</Badge>
+                      <Badge v-if="installedPluginProvidesMcpTools(definition.plugin)" variant="outline" class="h-4 border-primary/40 px-1.5 text-[10px] text-primary" :title="t('pluginPlatform.mcpToolsBadgeHint')" data-plugin-mcp-badge>{{ t("pluginPlatform.mcpToolsBadge") }}</Badge>
                       <Badge v-if="catalogChecked && !catalogPartialFailure && !pluginInCatalog(definition.plugin.manifest.id)" variant="outline" class="h-4 border-dashed px-1.5 text-[10px] text-muted-foreground" :title="t('pluginPlatform.notInRepositoriesHint')">{{
                         t("pluginPlatform.notInRepositories")
                       }}</Badge>
@@ -1879,6 +1930,13 @@ onBeforeUnmount(() => {
                       >{{ t("pluginPlatform.installedVersionUpdatable", { installed: selectedDefinition?.plugin.manifest.version || "0.0.0", latest: selectedUpdateEntry.listing.plugin.latestVersion }) }} · {{ selectedUpdateEntry.repositoryName }}</span
                     >
                   </div>
+                </div>
+
+                <div v-if="!selectedDefinition.plugin.compatibility.compatible && selectedDefinition.plugin.compatibility.errors?.length" class="space-y-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-xs" role="alert" data-plugin-compatibility-errors>
+                  <div class="font-medium text-destructive">{{ t("pluginPlatform.compatibilityErrors") }}</div>
+                  <ul class="list-disc space-y-1 pl-5 text-muted-foreground">
+                    <li v-for="error in selectedDefinition.plugin.compatibility.errors" :key="error" class="break-words">{{ error }}</li>
+                  </ul>
                 </div>
 
                 <PluginAiAccessSection :key="selectedDefinition.plugin.manifest.id" :plugin="selectedDefinition.plugin" />
@@ -2075,6 +2133,7 @@ onBeforeUnmount(() => {
                 </DialogTitle>
                 <DialogDescription class="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
                   <BadgeCheck v-if="selectedMarketplaceListing.verified" class="size-3.5 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" />
+                  <span v-if="marketplacePluginProvidesMcpTools(selectedMarketplaceListing.plugin)" class="rounded border border-primary/40 px-1 text-[10px] font-medium leading-4 text-primary" :title="t('pluginPlatform.mcpToolsBadgeHint')">{{ t("pluginPlatform.mcpToolsBadge") }}</span>
                   <button type="button" class="rounded-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click.stop="filterByPublisher(selectedMarketplaceListing.plugin.publisher)">
                     {{ selectedMarketplaceListing.plugin.publisher }}
                   </button>
@@ -2129,7 +2188,7 @@ onBeforeUnmount(() => {
                   <h3 class="text-sm font-semibold">{{ t("pluginPlatform.pluginDetailsIntroduction") }}</h3>
                   <p class="whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{{ selectedMarketplaceListing.description || t("pluginPlatform.noDescription") }}</p>
                 </section>
-                <div class="grid gap-3 text-xs @min-[40rem]:grid-cols-3">
+                <div class="grid grid-cols-2 gap-3 text-xs @min-[40rem]:grid-cols-4">
                   <div class="rounded-lg border p-3">
                     <div class="text-muted-foreground">{{ t("pluginPlatform.pluginDetailsVersion") }}</div>
                     <div class="mt-1 font-medium">v{{ selectedMarketplaceListing.plugin.latestVersion }}</div>
@@ -2141,6 +2200,10 @@ onBeforeUnmount(() => {
                   <div class="rounded-lg border p-3">
                     <div class="text-muted-foreground">{{ t("pluginPlatform.pluginDetailsReleaseDate") }}</div>
                     <div class="mt-1 font-medium">{{ formatMarketplaceReleasedDate(selectedMarketplaceListing.latestVersionReleasedAt, appLocale) || "—" }}</div>
+                  </div>
+                  <div class="rounded-lg border p-3">
+                    <div class="text-muted-foreground">{{ t("pluginPlatform.sortByInstalls") }}</div>
+                    <div class="mt-1 font-medium tabular-nums">{{ listingInstallCount(selectedMarketplaceListing.plugin.id) ? formatInstallCount(listingInstallCount(selectedMarketplaceListing.plugin.id)) : "—" }}</div>
                   </div>
                 </div>
                 <div v-if="selectedMarketplaceListing.plugin.tags.length" class="flex flex-wrap gap-1.5">

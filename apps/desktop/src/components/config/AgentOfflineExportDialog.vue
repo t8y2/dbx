@@ -6,6 +6,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { HelpTooltip } from "@/components/ui/tooltip";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import type { AgentOfflineExportCandidate, AgentOfflineExportPreview, AgentOfflineExportUnavailableReason } from "@/lib/backend/api";
 
@@ -19,7 +22,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:open": [value: boolean];
-  confirm: [driverKeys: string[]];
+  confirm: [driverKeys: string[], includeJres: boolean];
 }>();
 
 const { t } = useI18n();
@@ -37,6 +40,7 @@ const candidates = computed(() => props.preview?.candidates ?? []);
 const eligibleCandidates = computed(() => candidates.value.filter((candidate) => candidate.eligible));
 const selectedCandidates = computed(() => eligibleCandidates.value.filter((candidate) => selectedDriverKeys.value.includes(candidate.dbType)));
 const selectedJres = computed(() => new Set(selectedCandidates.value.map((candidate) => candidate.requiredJre).filter((jre): jre is string => Boolean(jre))));
+const includeJres = ref(true);
 const selectedCount = computed(() => selectedDriverKeys.value.length);
 const canConfirm = computed(() => selectedCount.value > 0 && !props.loading && !props.exporting && !props.error);
 
@@ -74,7 +78,7 @@ function clearSelection() {
 
 function confirm() {
   if (!canConfirm.value) return;
-  emit("confirm", [...selectedDriverKeys.value]);
+  emit("confirm", [...selectedDriverKeys.value], includeJres.value);
 }
 
 function formatSize(bytes: number) {
@@ -165,8 +169,17 @@ function unavailableReason(reason: AgentOfflineExportUnavailableReason | null) {
             </label>
           </ScrollArea>
 
+          <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+            <div class="flex items-center gap-2">
+              <Label for="offline-export-include-jres">{{ t("driverStore.offlineExportIncludeJres") }}</Label>
+              <HelpTooltip :label="t('driverStore.offlineExportIncludeJres')">
+                {{ t("driverStore.offlineExportIncludeJresDescription") }}
+              </HelpTooltip>
+            </div>
+            <Switch id="offline-export-include-jres" v-model="includeJres" />
+          </div>
           <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-            {{ t("driverStore.offlineExportJreSummary", { count: selectedJres.size }) }}
+            {{ includeJres ? t("driverStore.offlineExportJreSummary", { count: selectedJres.size }) : t("driverStore.offlineExportJreSkippedSummary") }}
           </div>
 
           <div class="flex items-start gap-2 rounded-md border border-green-500/20 bg-green-500/5 px-3 py-2 text-xs text-muted-foreground">

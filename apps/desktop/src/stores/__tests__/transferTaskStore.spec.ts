@@ -82,6 +82,44 @@ describe("transferTaskStore", () => {
     expect(store.getTask("legacy-selection")?.config.objects).toEqual({});
   });
 
+  it.each([
+    ["source", "source"],
+    ["target", "target"],
+    [undefined, undefined],
+    ["invalid", undefined],
+  ] as const)("round-trips package body choice %s without retaining approvals or operation records", async (bodySource, expectedSource) => {
+    const sql = 'CREATE PACKAGE BODY "T"."Pkg.With.Dot" AS -- 中文😀\nEND;';
+    const config = makeConfig({
+      objects: { PACKAGE_BODY: ["Pkg.With.Dot"] },
+      oraclePackageDrafts: [
+        {
+          identity: { owner: "T", name: "Pkg.With.Dot", kind: "PACKAGE_BODY" },
+          sql,
+          packageBodySource: bodySource,
+          packageContract: "target",
+          reviewedTargetDraft: true,
+          operation: { operationId: "old-operation" },
+          baselineOperationId: "old-operation",
+          supersedesOperationId: "old-preparation",
+        } as never,
+      ],
+    });
+    const store = useTransferTaskStore();
+    const saved = await store.saveTask({ name: "package-body-draft", config });
+    expect(saved.config.oraclePackageDrafts?.[0].packageBodySource).toBe(expectedSource);
+    const persisted = vi.mocked(api.saveTransferTaskLibrary).mock.calls.at(-1)![0];
+    expect(JSON.stringify(persisted)).not.toContain("old-operation");
+    expect(JSON.stringify(persisted)).not.toContain("old-preparation");
+    vi.mocked(api.loadTransferTaskLibrary).mockResolvedValue(persisted);
+    setActivePinia(createPinia());
+    const reloaded = useTransferTaskStore();
+    await reloaded.initFromStorage();
+    expect(reloaded.getTask(saved.id)?.config.objects).toEqual({ PACKAGE_BODY: ["Pkg.With.Dot"] });
+    expect(reloaded.getTask(saved.id)?.config.oraclePackageDrafts).toEqual([expect.objectContaining({ identity: { owner: "T", name: "Pkg.With.Dot", kind: "PACKAGE_BODY" }, sql, packageContract: "target", reviewedTargetDraft: true })]);
+    expect(reloaded.getTask(saved.id)?.config.oraclePackageDrafts?.[0].packageBodySource).toBe(expectedSource);
+    expect(reloaded.getTask(saved.id)?.config.dropTargetConfirmed).toBe(false);
+  });
+
   it("round-trips TABLE-only and TABLE + VIEW task selections", async () => {
     const store = useTransferTaskStore();
     const tableOnly = await store.saveTask({ name: "table-only", config: makeConfig({ objects: { TABLE: ["orders"] } }) });
@@ -113,6 +151,24 @@ describe("transferTaskStore", () => {
     await store.initFromStorage();
 
     expect(store.tasks[0]?.config.quoteTargetColumnNames).toBe(true);
+  });
+
+  it("round-trips the target column name case and defaults legacy tasks to preserve", async () => {
+    const legacyConfig = makeConfig() as Partial<TransferTaskConfig>;
+    const store = useTransferTaskStore();
+    const saved = await store.saveTask({ name: "upper", config: makeConfig({ targetColumnNameCase: "upper" }) });
+    vi.mocked(api.loadTransferTaskLibrary).mockResolvedValue({
+      version: 1,
+      folders: [],
+      tasks: [saved, { id: "legacy", name: "legacy", config: legacyConfig, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
+    } as unknown as TransferTaskLibrary);
+
+    setActivePinia(createPinia());
+    const reloaded = useTransferTaskStore();
+    await reloaded.initFromStorage();
+
+    expect(reloaded.getTask(saved.id)?.config.targetColumnNameCase).toBe("upper");
+    expect(reloaded.getTask("legacy")?.config.targetColumnNameCase).toBe("preserve");
   });
 
   it("keeps legacy tasks on inherited timeouts and round-trips a custom timeout", async () => {

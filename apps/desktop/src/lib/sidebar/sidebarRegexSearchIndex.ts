@@ -1,7 +1,7 @@
 import type { TableInfo, TreeNode, TreeNodeType } from "@/types/database";
 import type { SidebarRegexIndexScope, SidebarRegexScopeIdentity } from "@/lib/sidebar/sidebarSearchTree";
 
-export const regexLocalTableParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables"]);
+export const regexLocalTableParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views"]);
 
 export function regexTableSearchParents(nodes: readonly TreeNode[], result: TreeNode[] = []): TreeNode[] {
   for (const node of nodes) {

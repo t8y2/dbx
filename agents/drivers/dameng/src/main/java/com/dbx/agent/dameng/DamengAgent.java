@@ -12,8 +12,10 @@ import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.MetadataReadOptions;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
+import com.dbx.agent.OracleTriggerReader;
 import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
@@ -145,6 +147,11 @@ public final class DamengAgent extends AbstractJdbcAgent {
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
         return buildUrl(params);
+    }
+
+    @Override
+    protected java.sql.Driver connectionMetadataDriver(String jdbcUrl) throws Exception {
+        return externalDriver == null ? super.connectionMetadataDriver(jdbcUrl) : externalDriver;
     }
 
     @Override
@@ -575,6 +582,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
+    public boolean supportsExactMetadataIdentity() { return !legacyJdbcMetadata; }
+
+    @Override
     public List<TableInfo> listTables(String schema, List<String> objectTypes) {
         return queryConstrainedTables(schema, new MetadataListConstraints(null, null, null, objectTypes));
     }
@@ -586,6 +596,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     private List<TableInfo> queryConstrainedTables(String rawSchema, MetadataListConstraints constraints) {
         final String schema = normalizeSchema(rawSchema);
+        if (constraints.isExactIdentity()) {
+            if (legacyJdbcMetadata) throw new UnsupportedOperationException("Legacy DM metadata does not support exact_metadata_identity_v1");
+            return withViewValidity(executeConstrainedTables(buildAccessibleConstrainedTablesQuery(schema, constraints), constraints), schema);
+        }
         if (legacyJdbcMetadata) {
             return withViewValidity(executeJdbcMetadataTables(schema, constraints), schema);
         }
@@ -990,7 +1004,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
             || constraints.objectTypeAllowed("FUNCTION")
             || constraints.objectTypeAllowed("SEQUENCE")
             || constraints.objectTypeAllowed("PACKAGE")
-            || constraints.objectTypeAllowed("PACKAGE_BODY");
+            || constraints.objectTypeAllowed("PACKAGE_BODY")
+            || constraints.hasObjectTypes() && constraints.objectTypeAllowed("TRIGGER")
+            || constraints.objectTypeAllowed("TYPE")
+            || constraints.objectTypeAllowed("TYPE_BODY");
     }
 
     private static void appendDamengObjectTypePredicate(
@@ -1041,6 +1058,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (constraints.objectTypeAllowed("PACKAGE_BODY")) {
             result.add("PACKAGE BODY");
         }
+        if (constraints.hasObjectTypes() && constraints.objectTypeAllowed("TRIGGER")) result.add("TRIGGER");
+        if (constraints.objectTypeAllowed("TYPE")) {
+            result.add("TYPE");
+        }
+        if (constraints.objectTypeAllowed("TYPE_BODY")) {
+            result.add("TYPE BODY");
+        }
         return result;
     }
 
@@ -1074,6 +1098,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
         }
         if (constraints.objectTypeAllowed("PACKAGE_BODY")) {
             result.add("PACKAGE BODY");
+        }
+        if (constraints.hasObjectTypes() && constraints.objectTypeAllowed("TRIGGER")) result.add("TRIGGER");
+        if (constraints.objectTypeAllowed("TYPE")) {
+            result.add("TYPE");
+        }
+        if (constraints.objectTypeAllowed("TYPE_BODY")) {
+            result.add("TYPE BODY");
         }
         return result;
     }
@@ -1174,14 +1205,77 @@ public final class DamengAgent extends AbstractJdbcAgent {
         return queryConstrainedObjects(schema, MetadataListConstraints.orNone(constraints));
     }
 
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints, MetadataReadOptions options) {
+        if (options == null || !options.exact() || legacyJdbcMetadata) return listObjects(schema, constraints);
+        if (schema == null || schema.isEmpty()) throw new IllegalArgumentException("Exact metadata requires an owner");
+        MetadataListConstraints requested = MetadataListConstraints.orNone(constraints);
+        if (!requested.hasObjectTypes()) {
+            List<String> kinds = damengObjectTypes(MetadataListConstraints.NONE);
+            kinds.add("TRIGGER");
+            requested = new MetadataListConstraints(requested.getFilter(), requested.getLimit(), requested.getOffset(), kinds);
+        }
+        List<ObjectInfo> objects = queryConstrainedObjectsWithoutValidity(schema, requested, true);
+        applyViewValidity(objects, schema);
+        if (objects.stream().anyMatch(object -> "TRIGGER".equals(object.getObject_type()))) {
+            uncheckedVoid(() -> new OracleTriggerReader(requireConnected(), "dm").enrichObjects(objects, schema));
+        }
+        return objects;
+    }
+
     private List<ObjectInfo> queryConstrainedObjects(String rawSchema, MetadataListConstraints constraints) {
         final String schema = normalizeSchema(rawSchema);
-        List<ObjectInfo> objects = queryConstrainedObjectsWithoutValidity(schema, constraints);
+        List<ObjectInfo> objects;
+        if (constraints.objectTypeAllowed("INDEX") && (constraints.hasObjectTypes() || constraints.isExactIdentity())) {
+            // Merge before paging: separate dictionary sources must not each consume the offset.
+            objects = new ArrayList<>();
+            List<String> otherTypes = damengObjectTypes(constraints);
+            if (!otherTypes.isEmpty()) {
+                objects.addAll(queryConstrainedObjectsWithoutValidity(schema,
+                    new MetadataListConstraints(constraints.getFilter(), null, null, otherTypes, constraints.isExactIdentity())));
+            }
+            objects.addAll(querySchemaIndexes(schema, constraints.withoutPaging()));
+            objects.sort(java.util.Comparator.comparing(ObjectInfo::getName).thenComparing(ObjectInfo::getObject_type));
+            objects = constraints.filterObjects(objects);
+        } else {
+            objects = queryConstrainedObjectsWithoutValidity(schema, constraints);
+        }
         applyViewValidity(objects, schema);
         return objects;
     }
 
+    private List<ObjectInfo> querySchemaIndexes(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            List<Object> args = new ArrayList<>();
+            args.add(schema);
+            StringBuilder sql = new StringBuilder("SELECT OWNER, INDEX_NAME, TABLE_OWNER, TABLE_NAME FROM ALL_INDEXES i WHERE i.OWNER = ?");
+            appendNameFilter(sql, args, "i.INDEX_NAME", constraints);
+            sql.append(" ORDER BY i.INDEX_NAME");
+            List<ObjectInfo> objects = new ArrayList<>();
+            try (PreparedStatement statement = requireConnected().prepareStatement(sql.toString())) {
+                bind(statement, args);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        ObjectInfo index = new ObjectInfo(rows.getString(2), "INDEX", rows.getString(1), null);
+                        index.setParent_schema(rows.getString(3));
+                        index.setParent_name(rows.getString(4));
+                        objects.add(index);
+                    }
+                }
+            }
+            return constraints.filterObjects(objects);
+        });
+    }
+
     private List<ObjectInfo> queryConstrainedObjectsWithoutValidity(String schema, MetadataListConstraints constraints) {
+        return queryConstrainedObjectsWithoutValidity(schema, constraints, false);
+    }
+
+    private List<ObjectInfo> queryConstrainedObjectsWithoutValidity(String schema, MetadataListConstraints constraints, boolean requireDictionary) {
+        if (constraints.isExactIdentity()) {
+            if (legacyJdbcMetadata) throw new UnsupportedOperationException("Legacy DM metadata does not support exact_metadata_identity_v1");
+            return executeConstrainedObjects(schema, buildAccessibleConstrainedObjectsQuery(schema, constraints), constraints);
+        }
         if (legacyJdbcMetadata) {
             return executeJdbcMetadataObjects(schema, constraints);
         }
@@ -1233,6 +1327,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
             permissionError.addSuppressed(e);
         }
+        if (requireDictionary) throw permissionError;
         try {
             return executeJdbcMetadataObjects(schema, constraints);
         } catch (RuntimeException e) {
@@ -1436,7 +1531,11 @@ public final class DamengAgent extends AbstractJdbcAgent {
             RuntimeException dbmsError;
             try {
                 String source = readDbmsMetadataObjectSource(dbmsType, name, schema);
-                return new ObjectSource(name, objectType, schema, source);
+                if (isOracleFamilyType(objectType) && !notBlank(source)) {
+                    dbmsError = new IllegalStateException("DM8 returned empty type source for " + schema + "." + name);
+                } else {
+                    return new ObjectSource(name, objectType, schema, source, !isOracleFamilyType(objectType));
+                }
             } catch (Exception error) {
                 // 检查型异常（SQLException 等）由 unchecked 透传后在此处统一处理。
                 RuntimeException runtimeError = error instanceof RuntimeException runtime ? runtime : new RuntimeException(error);
@@ -1446,12 +1545,32 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 dbmsError = runtimeError;
             }
             try {
-                return buildCatalogObjectSource(schema, name, objectType, dbmsError);
+                ObjectSource source = buildCatalogObjectSource(schema, name, objectType, dbmsError);
+                if (isOracleFamilyType(objectType)) {
+                    if (source == null || !notBlank(source.getSource()) || source.getSource().startsWith(CATALOG_BODY_HINT)) {
+                        throw new IllegalStateException("DM8 could not read complete type source for " + schema + "." + name, dbmsError);
+                    }
+                    return new ObjectSource(name, objectType, schema, source.getSource(), false);
+                }
+                return source;
             } catch (RuntimeException fallbackError) {
                 fallbackError.addSuppressed(dbmsError);
                 throw fallbackError;
             }
         });
+    }
+
+    @Override
+    public ObjectSource getObjectSource(String schema, String name, String objectType, MetadataReadOptions options) {
+        if (options == null || !options.exact() || legacyJdbcMetadata || !"TRIGGER".equalsIgnoreCase(objectType)) {
+            return getObjectSource(schema, name, objectType);
+        }
+        return unchecked(() -> new OracleTriggerReader(requireConnected(), "dm").getObjectSource(schema, name));
+    }
+
+    private static boolean isOracleFamilyType(String objectType) {
+        String normalized = normalizeObjectSourceType(objectType);
+        return "TYPE".equals(normalized) || "TYPE_BODY".equals(normalized);
     }
 
     private String readDbmsMetadataObjectSource(String dbmsType, String name, String schema) throws Exception {
@@ -1529,6 +1648,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 }
             }
             default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
+        }
+        if (isOracleFamilyType(objectType)) {
+            throw new IllegalStateException("DM8 could not read complete type source for " + schema + "." + name + " (" + objectType + ")", dbmsError);
         }
         return unavailableObjectSource(schema, name, objectType, dbmsError);
     }
@@ -1667,6 +1789,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
         String sourceType,
         String source
     ) {
+        if (isOracleFamilyType(objectType)) {
+            return oracleFamilyTypeSourceMatches(source, objectType);
+        }
         if (!("FUNCTION".equals(objectType) || "PROCEDURE".equals(objectType))
             || !"PROC".equalsIgnoreCase(sourceType)) {
             return true;
@@ -1675,6 +1800,30 @@ public final class DamengAgent extends AbstractJdbcAgent {
         return catalogType != null
             ? objectType.equals(catalogType)
             : routineSourceStartsWithType(source, objectType);
+    }
+
+    private static boolean oracleFamilyTypeSourceMatches(String source, String objectType) {
+        String expected = "TYPE_BODY".equals(normalizeObjectSourceType(objectType)) ? "TYPE BODY" : "TYPE";
+        String firstDeclaration = oracleFamilyTypeDeclaration(source.stripLeading());
+        return expected.equals(firstDeclaration);
+    }
+
+    private static String oracleFamilyTypeDeclaration(String source) {
+        String candidate = stripTypeDdlPrefix(source);
+        if (startsWithRoutineDeclaration(candidate, "TYPE BODY")) {
+            return "TYPE BODY";
+        }
+        return startsWithRoutineDeclaration(candidate, "TYPE") ? "TYPE" : "";
+    }
+
+    private static String stripTypeDdlPrefix(String source) {
+        String upper = source.toUpperCase(Locale.ROOT);
+        for (String prefix : List.of("CREATE OR REPLACE ", "CREATE ", "ALTER ")) {
+            if (upper.startsWith(prefix)) {
+                return source.substring(prefix.length()).stripLeading();
+            }
+        }
+        return source;
     }
 
     private String readDamengRoutineObjectType(String schema, String name) {
@@ -1760,12 +1909,20 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 JOIN SYS.SYSOBJECTS o ON o.ID = t.ID
                 JOIN SYS.SYSOBJECTS s ON s.ID = o.SCHID AND s.TYPE$ = 'SCH' AND s.NAME = ?
                 WHERE o.NAME = ?
-                ORDER BY t.SEQNO
                 """.stripIndent().trim();
+            boolean typedType = isOracleFamilyType(objectType);
+            if (typedType) {
+                sql += " AND EXISTS (SELECT 1 FROM ALL_OBJECTS a WHERE a.OBJECT_ID = o.ID"
+                    + " AND a.OWNER = s.NAME AND a.OBJECT_NAME = o.NAME AND a.OBJECT_TYPE = ?)";
+            }
+            sql += " ORDER BY t.SEQNO";
             StringBuilder source = new StringBuilder();
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
                 stmt.setString(1, schema);
                 stmt.setString(2, name);
+                if (typedType) {
+                    stmt.setString(3, "TYPE_BODY".equals(normalizeObjectSourceType(objectType)) ? "TYPE BODY" : "TYPE");
+                }
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String line = coalesce(readTextColumn(rs, 1));
@@ -1875,8 +2032,14 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     @Override
     public String getTableDdl(String rawSchema, String table) {
+        return getTableDdl(rawSchema, table, false);
+    }
+
+    @Override
+    public String getTableDdl(String rawSchema, String table, boolean exactIdentity) {
         final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
+            if (exactIdentity) throw new UnsupportedOperationException("Legacy DM metadata does not support exact_metadata_identity_v1");
             return super.getTableDdl(schema, table);
         }
         try {
@@ -1900,6 +2063,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 throw new IllegalArgumentException("Table not found: " + schema + "." + table);
             });
         } catch (RuntimeException error) {
+            if (exactIdentity) throw error;
             if (!isDamengMetadataUnavailableError(error)) {
                 throw error;
             }
@@ -2331,12 +2495,14 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 MAX(CASE WHEN constraint_metadata.TYPE$ = 'P' THEN 1 ELSE 0 END) AS IS_PK,
                 index_metadata.TYPE$,
                 MAX(CASE WHEN constraint_metadata.TYPE$ IN ('P', 'U') THEN 1 ELSE 0 END) AS CONSTRAINT_BACKED,
-                index_metadata.FLAG
+                index_metadata.FLAG, index_schema_object.NAME AS INDEX_OWNER
             FROM SYS.SYSOBJECTS schema_object
             JOIN SYS.SYSOBJECTS table_object ON table_object.SCHID = schema_object.ID
                 AND table_object.TYPE$ = 'SCHOBJ' AND table_object.SUBTYPE$ = 'UTAB'
             JOIN SYS.SYSOBJECTS index_object ON index_object.PID = table_object.ID
                 AND index_object.SUBTYPE$ = 'INDEX'
+            JOIN SYS.SYSOBJECTS index_schema_object ON index_schema_object.ID = index_object.SCHID
+                AND index_schema_object.TYPE$ = 'SCH'
             JOIN SYS.SYSINDEXES index_metadata ON index_metadata.ID = index_object.ID
             JOIN SYS.SYSCOLUMNS column_object ON column_object.ID = table_object.ID
                 AND SF_COL_IS_IDX_KEY(
@@ -2348,8 +2514,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 AND constraint_metadata.INDEXID = index_metadata.ID
                 AND constraint_metadata.TYPE$ IN ('P', 'U')
             WHERE schema_object.TYPE$ = 'SCH' AND schema_object.NAME = ? AND table_object.NAME = ?
-            GROUP BY index_object.NAME, index_metadata.ISUNIQUE, index_metadata.TYPE$, index_metadata.FLAG
-            ORDER BY index_object.NAME
+            GROUP BY index_schema_object.NAME, index_object.NAME, index_metadata.ISUNIQUE, index_metadata.TYPE$, index_metadata.FLAG
+            ORDER BY index_schema_object.NAME, index_object.NAME
             """.stripIndent().trim();
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
             stmt.setString(1, schema);
@@ -2369,6 +2535,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                         null
                     );
                     index.setConstraint_backed(constraintBacked);
+                    index.setOwner(rs.getString(8));
                     result.add(index);
                 }
             }
@@ -2386,14 +2553,14 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 i.UNIQUENESS,
                 CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK,
                 i.INDEX_TYPE,
-                CASE WHEN c.CONSTRAINT_TYPE IN ('P', 'U') THEN 1 ELSE 0 END AS CONSTRAINT_BACKED
+                CASE WHEN c.CONSTRAINT_TYPE IN ('P', 'U') THEN 1 ELSE 0 END AS CONSTRAINT_BACKED, i.OWNER AS INDEX_OWNER
             FROM ALL_INDEXES i
             JOIN ALL_IND_COLUMNS ic ON i.INDEX_NAME = ic.INDEX_NAME AND i.OWNER = ic.INDEX_OWNER AND i.TABLE_OWNER = ic.TABLE_OWNER
             LEFT JOIN ALL_CONSTRAINTS c ON i.INDEX_NAME = c.INDEX_NAME AND i.TABLE_OWNER = c.OWNER
                 AND c.CONSTRAINT_TYPE IN ('P', 'U')
             WHERE i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
-            GROUP BY i.INDEX_NAME, i.UNIQUENESS, c.CONSTRAINT_TYPE, i.INDEX_TYPE
-            ORDER BY i.INDEX_NAME
+            GROUP BY i.OWNER, i.INDEX_NAME, i.UNIQUENESS, c.CONSTRAINT_TYPE, i.INDEX_TYPE
+            ORDER BY i.OWNER, i.INDEX_NAME
             """.stripIndent().trim();
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
             stmt.setString(1, schema);
@@ -2411,6 +2578,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                         null
                     );
                     index.setConstraint_backed("1".equals(rs.getString(6)));
+                    index.setOwner(rs.getString(7));
                     result.add(index);
                 }
             }
@@ -2546,6 +2714,12 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 return readTriggerNames(schema, table);
             }
         });
+    }
+
+    @Override
+    public List<TriggerInfo> listTriggers(String schema, String table, MetadataReadOptions options) {
+        if (options == null || !options.exact() || legacyJdbcMetadata) return listTriggers(schema, table);
+        return unchecked(() -> new OracleTriggerReader(requireConnected(), "dm").listTriggers(schema, table));
     }
 
     /**
@@ -3440,7 +3614,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
         });
     }
 
+    @Override
+    public boolean supportsNativeJobSessions() { return true; }
+
     public static void main(String[] args) {
-        new MultiSessionJsonRpcServer(DamengAgent::new).run();
+        MultiSessionJsonRpcServer.withNativeJobSessions(DamengAgent::new).withExactMetadataIdentity().run();
     }
 }

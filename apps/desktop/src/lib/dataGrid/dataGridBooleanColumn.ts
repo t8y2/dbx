@@ -67,6 +67,11 @@ export function booleanCellDisplayText(value: unknown, style: BooleanCellValueSt
   return value ? "TRUE" : "FALSE";
 }
 
+/** Labels for the boolean dropdown editor; stored values stay `true`/`false`. */
+export function booleanCellEditorDisplayValues(style: BooleanCellValueStyle): string[] {
+  return style === "zero-one" ? ["1", "0"] : ["TRUE", "FALSE"];
+}
+
 export function parseBooleanCellEditorValue(value: string | null): boolean | null | undefined {
   if (value === null) return null;
   if (value === "true") return true;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { booleanCellDisplayText, normalizeBooleanCellValueStyle } from "@/lib/dataGrid/dataGridBooleanColumn";
+import { booleanCellDisplayText, booleanCellEditorDisplayValues, normalizeBooleanCellValueStyle } from "@/lib/dataGrid/dataGridBooleanColumn";
 
 describe("booleanCellDisplayText", () => {
   it("renders the uppercase TRUE/FALSE text by default", () => {
@@ -17,6 +17,13 @@ describe("booleanCellDisplayText", () => {
     expect(booleanCellDisplayText("true", "zero-one")).toBeUndefined();
     expect(booleanCellDisplayText(1, "zero-one")).toBeUndefined();
     expect(booleanCellDisplayText({}, "zero-one")).toBeUndefined();
+  });
+});
+
+describe("booleanCellEditorDisplayValues", () => {
+  it("uses the same TRUE/FALSE and 1/0 labels as the grid", () => {
+    expect(booleanCellEditorDisplayValues("true-false")).toEqual(["TRUE", "FALSE"]);
+    expect(booleanCellEditorDisplayValues("zero-one")).toEqual(["1", "0"]);
   });
 });
 

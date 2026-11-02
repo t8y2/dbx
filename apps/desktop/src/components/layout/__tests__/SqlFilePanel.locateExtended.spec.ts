@@ -125,9 +125,11 @@ describe("SQL file panel current file location", () => {
 
     expect(mocks.list).toHaveBeenCalledWith("C:/outside/", DEFAULT_SQL_FILE_FILTER, true);
     expect(getSqlFileFolderPaths()).toEqual(["C:/outside/"]);
-    const row = fileRow(host, scanPath)!;
-    expect(row.getAttribute("aria-current")).toBe("true");
-    expect(scroll.mock.contexts.at(-1)).toBe(row);
+    await vi.waitFor(() => {
+      const row = fileRow(host, scanPath)!;
+      expect(row.getAttribute("aria-current")).toBe("true");
+      expect(scroll.mock.contexts.at(-1)).toBe(row);
+    });
   });
 
   it("refreshes a known folder to locate a newly added file without adding another root", async () => {
@@ -137,8 +139,10 @@ describe("SQL file panel current file location", () => {
 
     expect(mocks.list).toHaveBeenCalledTimes(2);
     expect(getSqlFileFolderPaths()).toEqual(["C:/repo"]);
-    expect(fileRow(host)?.getAttribute("aria-current")).toBe("true");
-    expect(scroll.mock.contexts.at(-1)).toBe(fileRow(host));
+    await vi.waitFor(() => {
+      expect(fileRow(host)?.getAttribute("aria-current")).toBe("true");
+      expect(scroll.mock.contexts.at(-1)).toBe(fileRow(host));
+    });
   });
 
   it("keeps the file filter and reports hidden or missing files", async () => {

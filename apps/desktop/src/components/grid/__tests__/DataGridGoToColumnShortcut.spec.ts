@@ -84,7 +84,11 @@ function mountGrid(
     hidden_column_indexes: options.displayableColumns === false ? [0] : undefined,
   });
 
-  const grid = ref<{ tableInfoToolbarCapability: DataGridToolbarActionCapability; goToColumnToolbarCapability: DataGridToolbarActionCapability }>();
+  const grid = ref<{
+    tableInfoToolbarCapability: DataGridToolbarActionCapability;
+    goToColumnToolbarCapability: DataGridToolbarActionCapability;
+    moveDisplayableColumn: (fromDisplayableIndex: number, toDisplayableIndex: number) => void;
+  }>();
   const host = document.createElement("div");
   document.body.append(host);
   const Root = defineComponent({
@@ -197,6 +201,10 @@ function goToColumnItem(name: string, position: number): HTMLButtonElement {
   const button = [...document.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.replaceAll(/\s/g, "") === `${name}#${position}`);
   if (!button) throw new Error(`Go-to-column item ${name} not found`);
   return button;
+}
+
+function goToColumnOrder(): string[] {
+  return [...document.querySelectorAll<HTMLButtonElement>("[data-column-lookup-panel] button")].map((button) => button.textContent?.replaceAll(/\s/g, "") ?? "").filter((text) => text.includes("#"));
 }
 
 function goToColumnEvent(target: HTMLElement): KeyboardEvent {
@@ -458,6 +466,21 @@ describe("DataGrid go-to-column shortcut", () => {
 
     expect(enter.defaultPrevented).toBe(true);
     expect(host.querySelector("[data-column-lookup-panel]")).not.toBeNull();
+  });
+
+  it("lists columns in the local column order after the user reorders them", async () => {
+    const { host, grid } = mountGrid({ columns: ["id", "name"] });
+    await settle();
+
+    grid.value!.moveDisplayableColumn(1, 0);
+    await settle();
+
+    const root = gridRoot(host);
+    root.focus();
+    goToColumnEvent(root);
+    await settle();
+
+    expect(goToColumnOrder()).toEqual(["name#2", "id#1"]);
   });
 
   it("does not consume the configured shortcut without a displayable column", async () => {

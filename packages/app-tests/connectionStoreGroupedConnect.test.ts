@@ -55,7 +55,7 @@ test("connecting a grouped connection updates it in place instead of adding a ro
 
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
-    if (url === "/api/connection/list") {
+    if (url.split("?")[0] === "/api/connection/list") {
       return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
     }
     if (url === "/api/layout/sidebar") {
@@ -112,7 +112,7 @@ test("duplicating a grouped connection keeps the copy in the same group", async 
 
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
-    if (url === "/api/connection/list") {
+    if (url.split("?")[0] === "/api/connection/list") {
       return new Response(JSON.stringify(savedConnections), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     if (url === "/api/layout/sidebar") {
@@ -170,7 +170,7 @@ test("reloading connections preserves the current grouped layout when the saved 
 
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
-    if (url === "/api/connection/list") {
+    if (url.split("?")[0] === "/api/connection/list") {
       return new Response(JSON.stringify(savedConnections), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     if (url === "/api/layout/sidebar") {
@@ -214,7 +214,7 @@ test("importing grouped dbx connections remaps exported layout to new connection
 
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
-    if (url === "/api/connection/list") {
+    if (url.split("?")[0] === "/api/connection/list") {
       return new Response(JSON.stringify(savedConnections), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     if (url === "/api/layout/sidebar") {
@@ -274,7 +274,7 @@ test("importing DBeaver connections remaps and applies nested folder layout", as
 
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
-    if (url === "/api/connection/list") {
+    if (url.split("?")[0] === "/api/connection/list") {
       return new Response(JSON.stringify(savedConnections), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     if (url === "/api/layout/sidebar") {

@@ -1010,6 +1010,7 @@ export default {
     noInstalledPluginsDescription: "Install a signed .dbxp, or explicitly enable unsigned packages for local development.",
     compatible: "Compatible",
     blocked: "Blocked",
+    compatibilityErrors: "Compatibility checks failed",
     rollback: "Rollback",
     uninstall: "Uninstall",
     rollbackConfirm: "Roll back this plugin to the previous installed version?",

@@ -18,6 +18,7 @@ import { createGroupTabBarPortal, GROUP_TAB_BAR_PORTAL } from "@/components/layo
 import PluginShortcutBar from "@/components/plugins/PluginShortcutBar.vue";
 import SidebarDangerDialogHost from "@/components/sidebar/SidebarDangerDialogHost.vue";
 import AppSidebar from "@/components/layout/AppSidebar.vue";
+import SidebarReveal from "@/components/layout/SidebarReveal.vue";
 import SqlEditorWorkspace from "@/components/layout/SqlEditorWorkspace.vue";
 import { EDITOR_TOOLBAR_ACTIONS } from "@/components/layout/editorToolbarActions";
 import AppDialogs from "@/components/layout/AppDialogs.vue";
@@ -570,6 +571,7 @@ provide(OPEN_PLUGIN_AI_CONVERSATION, (request) => {
   });
 });
 const appSidebarRef = ref<InstanceType<typeof AppSidebar> | null>(null);
+const sidebarRevealRef = ref<InstanceType<typeof SidebarReveal> | null>(null);
 const appTabBarRef = ref<InstanceType<typeof AppTabBar> | null>(null);
 const settingsPageRef = ref<InstanceType<typeof EditorSettingsPage> | null>(null);
 const contentAreaRef = ref<InstanceType<typeof SqlEditorWorkspace> | null>(null);
@@ -3766,6 +3768,7 @@ function openDbxWebsite() {
 }
 
 function setSidebarOpen(open: boolean) {
+  sidebarRevealRef.value?.dismiss();
   sidebarOpen.value = open;
   safeLocalStorageSet("dbx-sidebar-open", open ? "true" : "false");
 }
@@ -5495,25 +5498,25 @@ onUnmounted(() => {
           @logout="handleWebLogout"
         />
 
-        <div :class="isDetachedWindowContext ? 'flex-1 flex min-h-0' : isClassicLayout ? 'app-layout-classic flex-1 flex min-h-0' : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'">
+        <div class="relative" :class="isDetachedWindowContext ? 'flex-1 flex min-h-0' : isClassicLayout ? 'app-layout-classic flex-1 flex min-h-0' : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'">
           <PluginShortcutBar v-if="!isDetachedWindowContext && !isZenMode && settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position.startsWith('left-')" :position="settingsStore.editorSettings.pluginShortcuts.position" />
-          <AppSidebar
-            v-if="!isDetachedWindowContext"
-            v-show="sidebarOpen && !isZenMode"
-            ref="appSidebarRef"
-            :sidebar-width="sidebarWidth"
-            :classic-layout="isClassicLayout"
-            @import="dialogs.onImportClick"
-            @export="dialogs.onExportClick"
-            @start-resize="startSidebarResize"
-            @collapse="setSidebarOpen(false)"
-            @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
-            @open-connection-settings="(connectionId) => openConnectionSettings(connectionId, 'advanced')"
-            @add-to-ai="addToAi"
-            @open-dependency-object="onOpenDependencyObject"
-            @mousedown="rememberSidebarSearchSurface"
-            @focusin="rememberSidebarSearchSurface"
-          />
+          <SidebarReveal v-if="!isDetachedWindowContext" ref="sidebarRevealRef" :pinned="sidebarOpen" :enabled="!isZenMode" :classic-layout="isClassicLayout">
+            <AppSidebar
+              ref="appSidebarRef"
+              :sidebar-width="sidebarWidth"
+              :classic-layout="isClassicLayout"
+              @import="dialogs.onImportClick"
+              @export="dialogs.onExportClick"
+              @start-resize="startSidebarResize"
+              @collapse="setSidebarOpen(false)"
+              @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
+              @open-connection-settings="(connectionId) => openConnectionSettings(connectionId, 'advanced')"
+              @add-to-ai="addToAi"
+              @open-dependency-object="onOpenDependencyObject"
+              @mousedown="rememberSidebarSearchSurface"
+              @focusin="rememberSidebarSearchSurface"
+            />
+          </SidebarReveal>
 
           <div
             data-editor-content

@@ -112,6 +112,7 @@ jobs:
   publish:
     name: Publish to Homebrew & Scoop
     needs: [publish-stable-alias, validate-candidate]
+    if: ${{ !cancelled() && needs.publish-stable-alias.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -327,6 +328,10 @@ jobs:
   upload-r2:
     name: Upload to R2
     needs: validate-candidate
+    # Plain version tags skip approve-promotion, and a skipped ancestor would
+    # skip every job after it. Each job below therefore checks its own
+    # dependencies instead of relying on the implicit success().
+    if: ${{ !cancelled() && needs.validate-candidate.result == 'success' }}
     outputs:
       tag: ${{ steps.version.outputs.tag }}
     runs-on: ubuntu-latest
@@ -427,6 +432,7 @@ jobs:
   promote-release:
     name: Promote to Release
     needs: [upload-r2, validate-candidate]
+    if: ${{ !cancelled() && needs.upload-r2.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -567,6 +573,7 @@ jobs:
     # promoted version is committed here. The daily beta job and local builds
     # read the source version, which would otherwise stay on an old release.
     needs: [validate-candidate, promote-release]
+    if: ${{ !cancelled() && needs.promote-release.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main
@@ -608,6 +615,7 @@ jobs:
   publish-stable-alias:
     name: Publish stable update aliases
     needs: [promote-release, upload-r2]
+    if: ${{ !cancelled() && needs.promote-release.result == 'success' && needs.upload-r2.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Copy immutable manifest to stable aliases
@@ -674,7 +682,7 @@ jobs:
   notify-qq:
     name: QQ Notify
     needs: [publish]
-    if: ${{ inputs.notify }}
+    if: ${{ !cancelled() && needs.publish.result == 'success' && inputs.notify }}
     runs-on: ubuntu-latest
     steps:
       - name: Build message
@@ -742,7 +750,7 @@ jobs:
   notify-feishu:
     name: Notify Feishu group
     needs: [publish]
-    if: ${{ inputs.notify }}
+    if: ${{ !cancelled() && needs.publish.result == 'success' && inputs.notify }}
     # Card sends after promotion so the title reflects the formal release.
     runs-on: ubuntu-latest
     steps:

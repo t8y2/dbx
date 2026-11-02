@@ -923,6 +923,7 @@ export default withEnglishFallback({
     workbenchUnavailableFallback: "Workbench ของ Plugin ไม่พร้อมใช้งาน",
     pluginIncompatible: "Plugin เข้ากันไม่ได้",
     loadingTitle: "กำลังโหลด {title}",
+    compatibilityErrors: "การตรวจสอบความเข้ากันได้ล้มเหลว",
   },
   auth: {
     rateLimited: "โปรดลองอีกครั้งใน {seconds} วินาที",

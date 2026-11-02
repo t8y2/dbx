@@ -17380,6 +17380,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             {{ t("grid.calculateTotalRowsInline") }}
           </button>
         </span>
+        <span v-if="hasData" data-grid-column-count class="shrink-0">{{ t("grid.columnsCount", { count: result.columns.length }) }}</span>
         <span v-if="showTruncationWarning" class="shrink-0 text-amber-500 text-xs">(truncated)</span>
         <span v-if="!hasData" class="shrink-0">{{ t("grid.rowsAffected", { count: result.affected_rows }) }}</span>
         <QueryTimingDetails v-if="isResultsContext" :result="result" :render-ms="resultViewUpdateMs" />

@@ -1401,7 +1401,7 @@ function runSqlShortcutAction(action: ReturnType<typeof enabledSqlShortcutAction
   } else {
     const line = currentView.state.doc.lineAt(head);
     const localHead = Math.min(Math.max(0, head - line.from), line.text.length);
-    selected = resolveSqlShortcutTableToken(line.text, { from: localHead, to: localHead, empty: true, head: localHead });
+    selected = resolveSqlShortcutTableToken(line.text, { from: localHead, to: localHead, empty: true, head: localHead }, resolveSqlDialectId(sqlCompletionDialectOptions()));
   }
   if (!selected) return false;
   const sql = buildSqlShortcutExecutionSql(action, selected, props.databaseType);

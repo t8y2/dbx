@@ -199,6 +199,27 @@ export function extractSqlParameters(sql: string, options?: SqlParameterOptions)
   return extractSqlParameterDescriptors(sql, options).map((descriptor) => descriptor.key);
 }
 
+/** Analyze client-side scalar parameters as values, keeping source offsets intact. */
+export function maskSqlParametersForAnalysis(sql: string, options?: SqlParameterOptions): string {
+  let from = 0;
+  const parts: string[] = [];
+  for (const range of sqlParameterAnalysisRanges(sql, options)) {
+    parts.push(sql.slice(from, range.from), "0", sql.slice(range.from + 1, range.to).replace(/[^\r\n]/g, " "));
+    from = range.to;
+  }
+  if (!from) return sql;
+  parts.push(sql.slice(from));
+  return parts.join("");
+}
+
+export function sqlParameterAnalysisRanges(sql: string, options?: SqlParameterOptions): Array<{ from: number; to: number }> {
+  // Quoted interpolation is already valid SQL. MyBatis XML blocks need their
+  // own structural analysis rather than replacement with a scalar value.
+  return findSqlParameterOccurrences(sql, options)
+    .filter((occurrence) => !occurrence.replacement)
+    .map(({ start, end }) => ({ from: start, to: end }));
+}
+
 export function extractSqlParameterDescriptors(sql: string, options?: SqlParameterOptions): SqlParameterDescriptor[] {
   const names = new Set<string>();
   const descriptors: SqlParameterDescriptor[] = [];

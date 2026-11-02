@@ -6355,7 +6355,8 @@ async function applyResponsiveControlMeasurement(panel: HTMLElement, panelWidth:
 
   const contextRow = panel.querySelector<HTMLElement>("[data-ai-composer-context-row]");
   const actionRow = panel.querySelector<HTMLElement>("[data-ai-composer-actions]");
-  const contextOverflow = hasHorizontalOverflow(contextRow) || hasOverflowingLabel(contextRow, ".ai-template-selector-label, .ai-skills-selector-label");
+  // Context fields wrap as complete controls; truncated names are intentional.
+  const contextOverflow = hasHorizontalOverflow(contextRow);
 
   compactContextControls.value = contextOverflow;
   if (actionControlsOverflow(actionRow)) {
@@ -7318,66 +7319,70 @@ async function openExternalUrl(url: string) {
         </div>
         <div class="resize-handle" @mousedown="startResize"></div>
         <div class="px-2 pb-2 pt-1">
-          <div data-ai-composer-context-row :class="['ai-prompt-context-row mb-1 flex min-w-0 items-center gap-x-1 text-xs text-foreground/80', showAiSchemaSelector && 'ai-prompt-context-row--schema', compactContextControls && 'ai-prompt-context-row--compact']">
+          <div data-ai-composer-context-row :class="['ai-prompt-context-row mb-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-foreground/80', showAiSchemaSelector && 'ai-prompt-context-row--schema', compactContextControls && 'ai-prompt-context-row--compact']">
             <div v-if="pluginContext && !connectionStore.connections.length" class="flex min-w-0 max-w-[14rem] items-center gap-1" data-ai-plugin-context :title="pluginContext.title">
               <ConnectionIcon v-if="pluginContextConnection" :connection="pluginContextConnection" class="h-3 w-3 shrink-0" />
               <Server v-else class="h-3 w-3 shrink-0" />
               <span class="truncate">{{ pluginComposerConnectionName }}</span>
             </div>
-            <template v-if="connectionStore.connections.length">
-              <ConnectionIcon v-if="boundConnection" :connection="boundConnection" class="h-3 w-3 shrink-0" />
-              <Server v-else class="h-3 w-3 shrink-0" />
-              <ConnectionTreeSelect
-                :model-value="boundConnectionId"
-                :connections="connectionStore.connections"
-                :layout="connectionStore.sidebarLayout"
-                :placeholder="t('editor.selectConnection')"
-                :search-placeholder="t('editor.searchConnection')"
-                :empty-text="t('grid.noSearchResults')"
-                :trigger-class="['h-5 min-w-0 max-w-full px-1 text-foreground/80', showAiSchemaSelector && 'max-w-56 flex-1']"
-                trigger-icon-class="h-3 w-3"
-                list-class="w-72 max-w-[calc(100vw-2rem)]"
-                @update:model-value="(v) => changeConnection(v)"
-              />
+            <div v-if="connectionStore.connections.length" class="flex min-w-0 max-w-full flex-none flex-wrap items-center gap-x-2 gap-y-1">
+              <div class="flex min-w-0 max-w-full flex-none items-center gap-1">
+                <ConnectionIcon v-if="boundConnection" :connection="boundConnection" class="h-3 w-3 shrink-0" />
+                <Server v-else class="h-3 w-3 shrink-0" />
+                <ConnectionTreeSelect
+                  :model-value="boundConnectionId"
+                  :connections="connectionStore.connections"
+                  :layout="connectionStore.sidebarLayout"
+                  :placeholder="t('editor.selectConnection')"
+                  :search-placeholder="t('editor.searchConnection')"
+                  :empty-text="t('grid.noSearchResults')"
+                  trigger-class="h-5 min-w-0 max-w-56 shrink px-1 text-foreground/80"
+                  trigger-icon-class="h-3 w-3"
+                  list-class="w-72 max-w-[calc(100vw-2rem)]"
+                  @update:model-value="(v) => changeConnection(v)"
+                />
+              </div>
               <template v-if="boundConnection && showAiDatabaseSelector">
-                <Popover
-                  @update:open="
-                    (open: boolean) => {
-                      if (open) loadDatabases();
-                    }
-                  "
-                >
-                  <PopoverTrigger as-child>
-                    <Button variant="ghost" :title="selectedDatabaseLabel" :aria-label="selectedDatabaseLabel" :class="['ai-database-selector-trigger h-5 min-w-0 max-w-64 justify-start gap-1 border-0 p-0 px-1 text-xs font-normal text-foreground/80 shadow-none', showAiSchemaSelector && 'flex-1']">
-                      <Database class="ai-database-selector-icon h-3 w-3 shrink-0 text-foreground/40" />
-                      <!-- Non-target databases are read-only context; the target is
+                <div class="flex min-w-0 max-w-full flex-none items-center">
+                  <Popover
+                    @update:open="
+                      (open: boolean) => {
+                        if (open) loadDatabases();
+                      }
+                    "
+                  >
+                    <PopoverTrigger as-child>
+                      <Button variant="ghost" :title="selectedDatabaseLabel" :aria-label="selectedDatabaseLabel" class="ai-database-selector-trigger h-5 min-w-0 max-w-64 shrink justify-start gap-1 border-0 p-0 px-1 text-xs font-normal text-foreground/80 shadow-none">
+                        <Database class="ai-database-selector-icon h-3 w-3 shrink-0 text-foreground/40" />
+                        <!-- Non-target databases are read-only context; the target is
                            where AI SQL actions run, so it is marked in the trigger (#12972). -->
-                      <span v-if="selectedNamespace" class="flex shrink-0 items-center" :title="t('ai.databaseTarget')" data-ai-database-target-icon>
-                        <Target class="h-3 w-3 text-primary/70" />
-                      </span>
-                      <span class="truncate">{{ selectedDatabaseLabel }}</span>
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent align="start" class="w-80 max-w-[calc(100vw-2rem)] p-1">
-                    <div class="relative mb-1 flex items-center border-b px-2 py-1">
-                      <Search class="pointer-events-none absolute left-3 h-3 w-3 text-muted-foreground" />
-                      <input v-model="databaseSearchQuery" type="search" class="h-6 w-full bg-transparent pl-5 text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('ai.searchDatabases')" />
-                    </div>
-                    <button v-if="selectedDatabases.length > 1" type="button" class="mb-1 flex w-full items-center justify-end gap-1 border-b px-2 py-1 text-xs" @click.stop="clearDatabaseSelection()"><X class="h-3 w-3" />{{ t("ai.clearDatabaseSelection") }}</button>
-                    <div class="max-h-64 overflow-y-auto overscroll-contain">
-                      <div v-for="option in filteredDbSelectOptions" :key="option.value" class="flex w-full min-w-0 items-center gap-1 rounded-sm pr-1 text-sm hover:bg-muted">
-                        <button type="button" :title="option.label" class="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left" @click="toggleDatabase(option.database)">
-                          <Check :class="['h-4 w-4 shrink-0', selectedDatabaseValues.has(option.database) ? 'opacity-100' : 'opacity-0']" />
-                          <span class="min-w-0 flex-1 truncate">{{ option.label }}</span>
-                        </button>
-                        <span v-if="isTargetNamespace(option.database)" class="shrink-0 rounded-sm bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary" data-ai-database-target>{{ t("ai.databaseTarget") }}</span>
-                        <button v-else type="button" class="shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-foreground/5 hover:text-foreground" data-ai-database-target-action @click.stop="setDatabaseTarget(option.database)">{{ t("ai.setDatabaseTarget") }}</button>
+                        <span v-if="selectedNamespace" class="flex shrink-0 items-center" :title="t('ai.databaseTarget')" data-ai-database-target-icon>
+                          <Target class="h-3 w-3 text-primary/70" />
+                        </span>
+                        <span class="truncate">{{ selectedDatabaseLabel }}</span>
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent align="start" class="w-80 max-w-[calc(100vw-2rem)] p-1">
+                      <div class="relative mb-1 flex items-center border-b px-2 py-1">
+                        <Search class="pointer-events-none absolute left-3 h-3 w-3 text-muted-foreground" />
+                        <input v-model="databaseSearchQuery" type="search" class="h-6 w-full bg-transparent pl-5 text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('ai.searchDatabases')" />
                       </div>
-                      <div v-if="!filteredDbSelectOptions.length" class="px-2 py-1.5 text-sm text-muted-foreground">{{ t("ai.noDatabasesFound") }}</div>
-                    </div>
-                  </PopoverContent>
-                </Popover>
-                <template v-if="showAiSchemaSelector">
+                      <button v-if="selectedDatabases.length > 1" type="button" class="mb-1 flex w-full items-center justify-end gap-1 border-b px-2 py-1 text-xs" @click.stop="clearDatabaseSelection()"><X class="h-3 w-3" />{{ t("ai.clearDatabaseSelection") }}</button>
+                      <div class="max-h-64 overflow-y-auto overscroll-contain">
+                        <div v-for="option in filteredDbSelectOptions" :key="option.value" class="flex w-full min-w-0 items-center gap-1 rounded-sm pr-1 text-sm hover:bg-muted">
+                          <button type="button" :title="option.label" class="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left" @click="toggleDatabase(option.database)">
+                            <Check :class="['h-4 w-4 shrink-0', selectedDatabaseValues.has(option.database) ? 'opacity-100' : 'opacity-0']" />
+                            <span class="min-w-0 flex-1 truncate">{{ option.label }}</span>
+                          </button>
+                          <span v-if="isTargetNamespace(option.database)" class="shrink-0 rounded-sm bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary" data-ai-database-target>{{ t("ai.databaseTarget") }}</span>
+                          <button v-else type="button" class="shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-foreground/5 hover:text-foreground" data-ai-database-target-action @click.stop="setDatabaseTarget(option.database)">{{ t("ai.setDatabaseTarget") }}</button>
+                        </div>
+                        <div v-if="!filteredDbSelectOptions.length" class="px-2 py-1.5 text-sm text-muted-foreground">{{ t("ai.noDatabasesFound") }}</div>
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                </div>
+                <div v-if="showAiSchemaSelector" class="flex min-w-0 max-w-full flex-none items-center gap-1">
                   <Layers class="h-3 w-3 shrink-0 text-foreground/40" />
                   <SearchableSelect
                     :model-value="boundSchema || ''"
@@ -7388,7 +7393,7 @@ async function openExternalUrl(url: string) {
                     :loading-text="t('common.loading')"
                     :loading="isLoadingSchemas(boundConnection.id, aiSchemaDatabaseKey)"
                     trigger-variant="ghost"
-                    trigger-class="h-5 min-w-0 max-w-36 flex-1 p-0 px-1 text-foreground/80"
+                    trigger-class="h-5 min-w-0 max-w-36 shrink p-0 px-1 text-foreground/80"
                     trigger-icon-class="h-3 w-3"
                     list-class="w-56"
                     @update:model-value="changeSchema"
@@ -7398,134 +7403,135 @@ async function openExternalUrl(url: string) {
                       }
                     "
                   />
-                </template>
+                </div>
               </template>
-            </template>
-            <span class="ai-prompt-context-spacer min-w-0 flex-1" />
-            <!-- Template selector -->
-            <Popover v-if="!pluginContext" v-model:open="showTemplateSelector">
-              <PopoverTrigger as-child>
-                <button
-                  type="button"
-                  class="ai-template-selector-trigger flex min-w-0 max-w-[40%] items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
-                  :aria-label="templateSelectorTriggerLabel"
-                  :title="templateSelectorTriggerLabel"
-                >
-                  <FileCode class="h-3 w-3" />
-                  <span class="ai-template-selector-label truncate">{{ templateSelectorTriggerLabel }}</span>
-                  <svg class="ai-template-selector-chevron h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
-                </button>
-              </PopoverTrigger>
-              <PopoverContent align="end" class="w-64 gap-0 p-1.5">
-                <div class="max-h-64 overflow-auto">
-                  <div v-if="!promptTemplateStore.isLoaded" class="px-3 py-4 text-center text-xs text-muted-foreground">
-                    {{ t("ai.templateSelectorLoading") }}
-                  </div>
-                  <div v-else-if="promptTemplateStore.templates.length === 0" class="px-3 py-4 text-center text-xs text-muted-foreground">
-                    {{ t("ai.templateSelectorEmpty") }}
-                  </div>
-                  <template v-else>
-                    <template v-for="tpl in promptTemplateStore.templates" :key="tpl.id">
-                      <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" @click="toggleTemplateId(tpl.id)">
-                        <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="activeTemplateIds.includes(tpl.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
-                          <Check v-if="activeTemplateIds.includes(tpl.id)" class="h-3 w-3" />
-                        </div>
-                        <div class="flex-1 truncate text-left">
-                          <div class="flex items-center gap-1 font-medium">
-                            <span class="truncate">{{ tpl.name }}</span>
-                            <Star v-if="isDefaultTemplateForCurrentDb(tpl.id)" class="h-3 w-3 shrink-0 text-amber-500" :title="t('ai.templateDefaultBadgeTitle', { type: currentDbTypeLabel() })" />
-                          </div>
-                          <div class="text-[10px] text-muted-foreground truncate">{{ tpl.content.slice(0, 60) }}</div>
-                        </div>
-                      </button>
-                    </template>
-                  </template>
-                </div>
-                <div v-if="promptTemplateStore.isLoaded && promptTemplateStore.templates.length > 0" class="border-t mt-1 pt-1 px-1">
-                  <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" @click="deselectAllTemplates">
-                    {{ t("ai.templateSelectorDeselectAll") }}
+            </div>
+            <div class="flex min-w-0 max-w-full flex-none items-center gap-1">
+              <!-- Template selector -->
+              <Popover v-if="!pluginContext" v-model:open="showTemplateSelector">
+                <PopoverTrigger as-child>
+                  <button
+                    type="button"
+                    class="ai-template-selector-trigger flex min-w-0 max-w-56 items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+                    :aria-label="templateSelectorTriggerLabel"
+                    :title="templateSelectorTriggerLabel"
+                  >
+                    <FileCode class="h-3 w-3 shrink-0" />
+                    <span class="ai-template-selector-label truncate">{{ templateSelectorTriggerLabel }}</span>
+                    <svg class="ai-template-selector-chevron h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
                   </button>
-                </div>
-              </PopoverContent>
-            </Popover>
-            <!-- Skill selector (read-only user SKILL.md library) -->
-            <Popover v-model:open="skillSelectorOpen">
-              <PopoverTrigger as-child>
-                <button
-                  type="button"
-                  class="ai-skills-selector-trigger flex min-w-0 items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
-                  :disabled="skillCapabilityUnavailable"
-                  :aria-label="skillSelectorTriggerLabel"
-                  :title="skillSelectorTriggerLabel"
-                >
-                  <Layers class="h-3 w-3" />
-                  <span class="ai-skills-selector-label truncate">{{ t("ai.skillsEntry") }}</span>
-                  <span v-if="selectedSkillIds.length" class="ai-skills-selector-count rounded-sm bg-primary px-1 text-[10px] font-medium text-primary-foreground">{{ selectedSkillIds.length }}</span>
-                </button>
-              </PopoverTrigger>
-              <PopoverContent align="end" class="w-72 gap-0 p-1.5">
-                <div class="max-h-64 overflow-auto">
-                  <div v-if="userSkillStore.isLoading && !userSkillStore.hasLoadedOnce" class="px-3 py-4 text-center text-xs text-muted-foreground">
-                    {{ t("ai.skillsLoading") }}
-                  </div>
-                  <div v-else-if="userSkillStore.lastError" class="space-y-1 px-3 py-4 text-center text-xs text-muted-foreground">
-                    <div>{{ t("ai.skillsLoadError") }}</div>
-                    <button type="button" class="text-[11px] text-primary hover:underline" @click="refreshSkills">
-                      {{ t("ai.skillsRetry") }}
-                    </button>
-                  </div>
-                  <div v-else-if="userSkillStore.totalCount === 0" class="px-3 py-4 text-center text-xs text-muted-foreground">
-                    {{ t("ai.skillsEmpty") }}
-                  </div>
-                  <template v-else>
-                    <template v-for="group in userSkillStore.groupedSkills" :key="group.source">
-                      <div class="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                        {{ t(group.source === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}
-                      </div>
-                      <!-- Same-root name collision: the model addresses skills by name + source,
-                           so it cannot pick between these two, and only changing one of the two
-                           frontmatter `name` values fixes it (the folder name is irrelevant). -->
-                      <div v-if="duplicateNamesBySource.get(group.source)?.size" class="ai-skill-duplicate-note mx-2 mb-1 rounded-sm bg-amber-500/10 px-2 py-1 text-[10px] leading-snug text-amber-600">
-                        {{ t("ai.skillsDuplicateNameNote") }}
-                      </div>
-                      <template v-for="skill in group.skills" :key="skill.id">
-                        <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" :aria-pressed="selectedSkillIds.includes(skill.id)" @click="toggleSkillSelected(skill.id)">
-                          <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="selectedSkillIds.includes(skill.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
-                            <Check v-if="selectedSkillIds.includes(skill.id)" class="h-3 w-3" />
+                </PopoverTrigger>
+                <PopoverContent align="end" class="w-64 gap-0 p-1.5">
+                  <div class="max-h-64 overflow-auto">
+                    <div v-if="!promptTemplateStore.isLoaded" class="px-3 py-4 text-center text-xs text-muted-foreground">
+                      {{ t("ai.templateSelectorLoading") }}
+                    </div>
+                    <div v-else-if="promptTemplateStore.templates.length === 0" class="px-3 py-4 text-center text-xs text-muted-foreground">
+                      {{ t("ai.templateSelectorEmpty") }}
+                    </div>
+                    <template v-else>
+                      <template v-for="tpl in promptTemplateStore.templates" :key="tpl.id">
+                        <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" @click="toggleTemplateId(tpl.id)">
+                          <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="activeTemplateIds.includes(tpl.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
+                            <Check v-if="activeTemplateIds.includes(tpl.id)" class="h-3 w-3" />
                           </div>
-                          <div class="min-w-0 flex-1 text-left">
-                            <div class="flex items-center gap-1">
-                              <span class="truncate font-medium">{{ skill.name }}</span>
-                              <span v-if="duplicateNamesBySource.get(group.source)?.has(skill.name)" class="ai-skill-duplicate-name inline-flex shrink-0 items-center gap-0.5 rounded-sm bg-amber-500/15 px-1 text-[10px] font-normal text-amber-600" :title="t('ai.skillsDuplicateName')">
-                                <AlertTriangle class="h-2.5 w-2.5" />
-                                {{ t("ai.skillsDuplicateName") }}
-                              </span>
+                          <div class="flex-1 truncate text-left">
+                            <div class="flex items-center gap-1 font-medium">
+                              <span class="truncate">{{ tpl.name }}</span>
+                              <Star v-if="isDefaultTemplateForCurrentDb(tpl.id)" class="h-3 w-3 shrink-0 text-amber-500" :title="t('ai.templateDefaultBadgeTitle', { type: currentDbTypeLabel() })" />
                             </div>
-                            <div class="truncate text-[10px] text-muted-foreground">{{ skill.description }}</div>
+                            <div class="text-[10px] text-muted-foreground truncate">{{ tpl.content.slice(0, 60) }}</div>
                           </div>
                         </button>
                       </template>
                     </template>
-                  </template>
-                </div>
-                <div class="border-t mt-1 px-1 pt-1">
-                  <div class="flex gap-1">
-                    <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50" :disabled="!canSelectAllSkills" @click="selectAllSkills">
-                      <Check class="h-3 w-3 shrink-0" />
-                      {{ t("ai.skillsSelectAll") }}
-                    </button>
-                    <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50" :disabled="selectedSkillIds.length === 0" @click="deselectAllSkills">
-                      <X class="h-3 w-3 shrink-0" />
-                      {{ t("ai.skillsDeselectAll") }}
+                  </div>
+                  <div v-if="promptTemplateStore.isLoaded && promptTemplateStore.templates.length > 0" class="border-t mt-1 pt-1 px-1">
+                    <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" @click="deselectAllTemplates">
+                      {{ t("ai.templateSelectorDeselectAll") }}
                     </button>
                   </div>
-                  <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="userSkillStore.isLoading" @click="refreshSkills">
-                    <Loader2 v-if="userSkillStore.isLoading" class="h-3 w-3 animate-spin" />
-                    {{ t("ai.skillsRefresh") }}
+                </PopoverContent>
+              </Popover>
+              <!-- Skill selector (read-only user SKILL.md library) -->
+              <Popover v-model:open="skillSelectorOpen">
+                <PopoverTrigger as-child>
+                  <button
+                    type="button"
+                    class="ai-skills-selector-trigger flex shrink-0 items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                    :disabled="skillCapabilityUnavailable"
+                    :aria-label="skillSelectorTriggerLabel"
+                    :title="skillSelectorTriggerLabel"
+                  >
+                    <Layers class="h-3 w-3 shrink-0" />
+                    <span class="ai-skills-selector-label truncate">{{ t("ai.skillsEntry") }}</span>
+                    <span v-if="selectedSkillIds.length" class="ai-skills-selector-count rounded-sm bg-primary px-1 text-[10px] font-medium text-primary-foreground">{{ selectedSkillIds.length }}</span>
                   </button>
-                </div>
-              </PopoverContent>
-            </Popover>
+                </PopoverTrigger>
+                <PopoverContent align="end" class="w-72 gap-0 p-1.5">
+                  <div class="max-h-64 overflow-auto">
+                    <div v-if="userSkillStore.isLoading && !userSkillStore.hasLoadedOnce" class="px-3 py-4 text-center text-xs text-muted-foreground">
+                      {{ t("ai.skillsLoading") }}
+                    </div>
+                    <div v-else-if="userSkillStore.lastError" class="space-y-1 px-3 py-4 text-center text-xs text-muted-foreground">
+                      <div>{{ t("ai.skillsLoadError") }}</div>
+                      <button type="button" class="text-[11px] text-primary hover:underline" @click="refreshSkills">
+                        {{ t("ai.skillsRetry") }}
+                      </button>
+                    </div>
+                    <div v-else-if="userSkillStore.totalCount === 0" class="px-3 py-4 text-center text-xs text-muted-foreground">
+                      {{ t("ai.skillsEmpty") }}
+                    </div>
+                    <template v-else>
+                      <template v-for="group in userSkillStore.groupedSkills" :key="group.source">
+                        <div class="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                          {{ t(group.source === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}
+                        </div>
+                        <!-- Same-root name collision: the model addresses skills by name + source,
+                           so it cannot pick between these two, and only changing one of the two
+                           frontmatter `name` values fixes it (the folder name is irrelevant). -->
+                        <div v-if="duplicateNamesBySource.get(group.source)?.size" class="ai-skill-duplicate-note mx-2 mb-1 rounded-sm bg-amber-500/10 px-2 py-1 text-[10px] leading-snug text-amber-600">
+                          {{ t("ai.skillsDuplicateNameNote") }}
+                        </div>
+                        <template v-for="skill in group.skills" :key="skill.id">
+                          <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" :aria-pressed="selectedSkillIds.includes(skill.id)" @click="toggleSkillSelected(skill.id)">
+                            <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="selectedSkillIds.includes(skill.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
+                              <Check v-if="selectedSkillIds.includes(skill.id)" class="h-3 w-3" />
+                            </div>
+                            <div class="min-w-0 flex-1 text-left">
+                              <div class="flex items-center gap-1">
+                                <span class="truncate font-medium">{{ skill.name }}</span>
+                                <span v-if="duplicateNamesBySource.get(group.source)?.has(skill.name)" class="ai-skill-duplicate-name inline-flex shrink-0 items-center gap-0.5 rounded-sm bg-amber-500/15 px-1 text-[10px] font-normal text-amber-600" :title="t('ai.skillsDuplicateName')">
+                                  <AlertTriangle class="h-2.5 w-2.5" />
+                                  {{ t("ai.skillsDuplicateName") }}
+                                </span>
+                              </div>
+                              <div class="truncate text-[10px] text-muted-foreground">{{ skill.description }}</div>
+                            </div>
+                          </button>
+                        </template>
+                      </template>
+                    </template>
+                  </div>
+                  <div class="border-t mt-1 px-1 pt-1">
+                    <div class="flex gap-1">
+                      <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50" :disabled="!canSelectAllSkills" @click="selectAllSkills">
+                        <Check class="h-3 w-3 shrink-0" />
+                        {{ t("ai.skillsSelectAll") }}
+                      </button>
+                      <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50" :disabled="selectedSkillIds.length === 0" @click="deselectAllSkills">
+                        <X class="h-3 w-3 shrink-0" />
+                        {{ t("ai.skillsDeselectAll") }}
+                      </button>
+                    </div>
+                    <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="userSkillStore.isLoading" @click="refreshSkills">
+                      <Loader2 v-if="userSkillStore.isLoading" class="h-3 w-3 animate-spin" />
+                      {{ t("ai.skillsRefresh") }}
+                    </button>
+                  </div>
+                </PopoverContent>
+              </Popover>
+            </div>
           </div>
           <div v-if="mentionOpen" class="absolute bottom-full left-2 right-2 z-20 mb-1 max-h-56 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md">
             <div v-if="mentionLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
@@ -8120,8 +8126,7 @@ async function openExternalUrl(url: string) {
 }
 
 .ai-prompt-context-row--compact .ai-template-selector-trigger,
-.ai-prompt-context-row--compact .ai-skills-selector-trigger,
-.ai-prompt-context-row--compact .ai-database-selector-trigger {
+.ai-prompt-context-row--compact .ai-skills-selector-trigger {
   flex: 0 0 1.5rem;
   width: 1.5rem;
   max-width: 1.5rem;
@@ -8133,8 +8138,7 @@ async function openExternalUrl(url: string) {
 .ai-prompt-context-row--compact .ai-template-selector-label,
 .ai-prompt-context-row--compact .ai-template-selector-chevron,
 .ai-prompt-context-row--compact .ai-skills-selector-label,
-.ai-prompt-context-row--compact .ai-skills-selector-count,
-.ai-prompt-context-row--compact .ai-database-selector-trigger > span {
+.ai-prompt-context-row--compact .ai-skills-selector-count {
   display: none;
 }
 

@@ -292,6 +292,48 @@ export function mergeTableInfosIntoObjects(objects: readonly ObjectInfo[], table
   return merged;
 }
 
+/**
+ * Selects the rows of one root-paged table window. Root paging counts only
+ * top-level relations (`parent_name` empty) against the page size, and the
+ * backend returns every partition below each counted root plus one probe root
+ * so the caller can detect another page. Drop the probe root and its whole
+ * subtree here so a page never renders more roots than the configured size.
+ */
+export function partitionPageTables(tables: readonly TableInfo[], pageSize: number): TableInfo[] {
+  const rootCount = tables.reduce((count, table) => count + (table.parent_name ? 0 : 1), 0);
+  if (rootCount <= pageSize) return [...tables];
+
+  // The window is scoped to one schema, where relation names are unique, so the
+  // server-provided names identify a root and its descendants unambiguously.
+  const retainedRoots = new Set<string>();
+  for (const table of tables) {
+    if (table.parent_name) continue;
+    if (retainedRoots.size >= pageSize) break;
+    retainedRoots.add(table.name);
+  }
+
+  const byName = new Map<string, TableInfo>();
+  for (const table of tables) byName.set(table.name, table);
+
+  const rootNameOf = (table: TableInfo): string | undefined => {
+    let current = table;
+    const seen = new Set<string>();
+    while (current.parent_name) {
+      if (seen.has(current.parent_name)) return undefined;
+      seen.add(current.parent_name);
+      const parent = byName.get(current.parent_name);
+      if (!parent) return undefined;
+      current = parent;
+    }
+    return current.name;
+  };
+
+  return tables.filter((table) => {
+    const rootName = rootNameOf(table);
+    return rootName !== undefined && retainedRoots.has(rootName);
+  });
+}
+
 export function filterSimpleSidebarSupplementalObjects(objects: readonly ObjectInfo[]): ObjectInfo[] {
   return objects.filter((object) => {
     const objectType = normalizeObjectType(object.object_type);

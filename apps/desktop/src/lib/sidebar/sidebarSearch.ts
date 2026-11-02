@@ -8,10 +8,11 @@ export type SidebarSearchMatchKind = "exact" | "prefix" | "word-prefix" | "subst
  * - `fuzzy`: today's ladder, including in-order subsequences ("101" finds "1001").
  * - `contains`: a literal LIKE '%q%' filter; abbreviation, subsequence,
  *   cross-word concatenation, and separator-blind tiers are disabled.
+ * - `exact`: case-insensitive whole-name equality; punctuation stays literal.
  * - `edges`: only literal whole-label start/end matches; no separator-blind
  *   variants, so mid-name words and separator-spanning queries never match.
  */
-export type SidebarSearchMatchMode = "fuzzy" | "contains" | "edges";
+export type SidebarSearchMatchMode = "fuzzy" | "contains" | "edges" | "exact";
 
 export interface SidebarSearchMatch {
   kind: SidebarSearchMatchKind;
@@ -185,6 +186,7 @@ function matchSidebarLabelWithRegex(label: string, query: string, regex: RegExp 
   const lowerQuery = query.toLowerCase();
 
   if (lowerLabel === lowerQuery) return { kind: "exact", score: 100 };
+  if (matchMode === "exact") return null;
   if (lowerLabel.startsWith(lowerQuery)) return { kind: "prefix", score: 90 };
 
   if (isAscii(lowerQuery) && !lowerQueryIsSubsequenceOf(lowerLabel, lowerQuery)) return null;
@@ -242,7 +244,7 @@ function slashDelimitedCandidate(query: string): boolean {
  * rather than degrading to the more restrictive `contains` ladder.
  */
 function normalizedMatchMode(mode: SidebarSearchMatchMode | undefined): SidebarSearchMatchMode {
-  return mode === "contains" || mode === "edges" ? mode : "fuzzy";
+  return mode === "contains" || mode === "edges" || mode === "exact" ? mode : "fuzzy";
 }
 
 export function createSidebarLabelMatcher(query: string, options: SidebarSearchMatcherOptions = {}): SidebarLabelMatcher {
@@ -253,6 +255,8 @@ export function createSidebarLabelMatcher(query: string, options: SidebarSearchM
     return (label) => matchSidebarLabelWithRegex(label, query, compiled.regex, compiled.invalid, matchMode);
   }
 
+  // Exact names remain literal, including slash-delimited object names.
+  if (matchMode === "exact") return (label) => matchSidebarLabelWithRegex(label, query, null, false, matchMode);
   const regex = parseSlashDelimitedRegexQuery(query);
   // A slash-delimited expression is an explicit regex request even when it is
   // malformed.  Do not silently reinterpret an invalid pattern as fuzzy text.

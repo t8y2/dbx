@@ -872,21 +872,70 @@ export function needsTabNavigationHistoryShortcutMigration(settings?: Partial<Sh
 
 // Keystroke handlers (editor keydown, global shortcut matching, Tab handling)
 // normalize the whole table on every key press, and a full pass re-parses every
-// binding. The result is a pure function of the configured values and the
-// platform, so identical input is served from a small content-keyed cache.
+// binding. The result is a pure function of the configured string values and the
+// platform, so it is cached per distinct table. A lookup compares the configured
+// values by index instead of serializing the table: hot paths call this a dozen
+// times per keystroke, and building a JSON key (plus copying the result) allocated
+// more per key press than everything else in the editor combined.
+interface NormalizedShortcutEntry {
+  platform: string;
+  /** Configured value per SHORTCUT_DEFINITIONS entry, `undefined` when not an explicit string. */
+  configured: readonly (string | undefined)[];
+  result: Readonly<ShortcutSettings>;
+}
+
 const NORMALIZED_SHORTCUT_CACHE_LIMIT = 8;
-const normalizedShortcutCache = new Map<string, ShortcutSettings>();
+const normalizedShortcutEntries: NormalizedShortcutEntry[] = [];
+// Fast path for the common case of the same (store-owned) settings object arriving again.
+const normalizedShortcutEntryByInput = new WeakMap<object, NormalizedShortcutEntry>();
+
+function normalizedShortcutEntryMatches(entry: NormalizedShortcutEntry, settings: Partial<ShortcutSettings> | undefined): boolean {
+  for (let index = 0; index < SHORTCUT_DEFINITIONS.length; index += 1) {
+    const value = settings?.[SHORTCUT_DEFINITIONS[index].id];
+    if ((typeof value === "string" ? value : undefined) !== entry.configured[index]) return false;
+  }
+  return true;
+}
+
+function resolveNormalizedShortcutEntry(settings: Partial<ShortcutSettings> | undefined, platform: string): NormalizedShortcutEntry {
+  if (settings) {
+    const direct = normalizedShortcutEntryByInput.get(settings);
+    if (direct && direct.platform === platform && normalizedShortcutEntryMatches(direct, settings)) return direct;
+  }
+  for (let index = 0; index < normalizedShortcutEntries.length; index += 1) {
+    const entry = normalizedShortcutEntries[index];
+    if (entry.platform !== platform || !normalizedShortcutEntryMatches(entry, settings)) continue;
+    if (index > 0) {
+      normalizedShortcutEntries.splice(index, 1);
+      normalizedShortcutEntries.unshift(entry);
+    }
+    if (settings) normalizedShortcutEntryByInput.set(settings, entry);
+    return entry;
+  }
+  const entry: NormalizedShortcutEntry = {
+    platform,
+    configured: SHORTCUT_DEFINITIONS.map((definition) => {
+      const value = settings?.[definition.id];
+      return typeof value === "string" ? value : undefined;
+    }),
+    result: Object.freeze(computeNormalizedShortcutSettings(settings, platform)),
+  };
+  normalizedShortcutEntries.unshift(entry);
+  if (normalizedShortcutEntries.length > NORMALIZED_SHORTCUT_CACHE_LIMIT) normalizedShortcutEntries.pop();
+  if (settings) normalizedShortcutEntryByInput.set(settings, entry);
+  return entry;
+}
 
 export function normalizeShortcutSettings(settings?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): ShortcutSettings {
-  // hasExplicitShortcut only counts string values, so JSON dropping `undefined`
-  // members cannot change the outcome.
-  const cacheKey = `${platform}\u0000${settings ? JSON.stringify(settings) : ""}`;
-  const cached = normalizedShortcutCache.get(cacheKey);
-  if (cached) return { ...cached };
-  const normalized = computeNormalizedShortcutSettings(settings, platform);
-  if (normalizedShortcutCache.size >= NORMALIZED_SHORTCUT_CACHE_LIMIT) normalizedShortcutCache.delete(normalizedShortcutCache.keys().next().value!);
-  normalizedShortcutCache.set(cacheKey, normalized);
-  return { ...normalized };
+  return { ...resolveNormalizedShortcutEntry(settings, platform).result };
+}
+
+/**
+ * Same table as `normalizeShortcutSettings`, without the defensive copy. The returned object is
+ * shared and frozen, so it is meant for per-keystroke matching that only reads one or a few actions.
+ */
+export function readNormalizedShortcutSettings(settings?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): Readonly<ShortcutSettings> {
+  return resolveNormalizedShortcutEntry(settings, platform).result;
 }
 
 function computeNormalizedShortcutSettings(settings: Partial<ShortcutSettings> | undefined, platform: string): ShortcutSettings {

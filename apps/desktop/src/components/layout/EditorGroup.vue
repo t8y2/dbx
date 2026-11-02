@@ -13,6 +13,7 @@ import { createNoopEditorToolbarActions, EDITOR_TOOLBAR_ACTIONS } from "./editor
 import { createContentSurfaceEventForwarders } from "@/lib/tabs/contentSurfaceEvents";
 import { isPreviewTab } from "@/lib/tabs/tabPresentation";
 import { resolveExecutableSql } from "@/lib/sql/sqlExecutionTarget";
+import { mayContainDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isOracleFamilyTypeSource } from "@/lib/database/databaseObjectCapabilities";
 import { usesProvenReadOnlyStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
@@ -59,13 +60,11 @@ const groupClass = computed(() => (typeof attrs.class === "string" ? attrs.class
 const surfaceProps = computed<ContentAreaSurfaceProps>(() => ({
   activeTab: activeTab.value!,
   activeConnection: activeConnection.value,
-  executableSql: props.executableSql,
+  hasExecutableSql: props.hasExecutableSql,
   activeOutputView: props.activeOutputView,
   formatSqlRequest: props.formatSqlRequest,
   compressSqlRequest: props.compressSqlRequest,
   keywordCaseRequest: props.keywordCaseRequest,
-  selectedSql: props.selectedSql,
-  cursorPos: props.cursorPos,
   blockDangerousRedisCommands: props.blockDangerousRedisCommands,
   zenMode: props.zenMode,
 }));
@@ -175,6 +174,9 @@ const groupExecutableSql = computed(() => {
     cursorPos: selection?.head ?? 0,
   });
 });
+// The toolbar only needs these two facts; passing the SQL text itself would re-render it on every keystroke.
+const groupHasExecutableSql = computed(() => groupExecutableSql.value.trim().length > 0);
+const groupExecutableSqlMayContainDml = computed(() => mayContainDmlStatement(groupExecutableSql.value));
 </script>
 
 <template>
@@ -216,7 +218,8 @@ const groupExecutableSql = computed(() => {
         ref="toolbarRef"
         :active-tab="activeTab"
         :active-connection="activeConnection"
-        :executable-sql="groupExecutableSql"
+        :has-executable-sql="groupHasExecutableSql"
+        :executable-sql-may-contain-dml="groupExecutableSqlMayContainDml"
         :explain-mode="toolbar.explainMode.value"
         :block-dangerous-redis-commands="toolbar.blockDangerousRedisCommands.value"
         :sql-keyword-case="settingsStore.editorSettings.sqlFormatter.keywordCase"

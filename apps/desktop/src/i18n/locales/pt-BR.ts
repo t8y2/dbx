@@ -11493,6 +11493,8 @@ export default withEnglishFallback({
     fileFilterPlaceholder: "Filtro de nome de arquivo",
     filterInvalid: "Filtro de arquivo inválido; o anterior foi mantido: {message}",
     fileFilterHint: "Use um curinga como *.sql ou *.sh, ou uma expressão regular como {regex}.",
+    openWithDefaultApp: "Abrir com o aplicativo padrão do sistema",
+    openWithDefaultAppFailed: "Falha ao abrir com o aplicativo padrão do sistema: {message}",
   },
   mqTopics: {
     title: "Gerenciamento de tópicos",

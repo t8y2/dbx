@@ -11499,6 +11499,8 @@ export default withEnglishFallback({
     fileFilterPlaceholder: "Filtro nome file",
     filterInvalid: "Filtro file non valido; viene mantenuto il precedente: {message}",
     fileFilterHint: "Usa un carattere jolly come *.sql o *.sh oppure un'espressione regolare come {regex}.",
+    openWithDefaultApp: "Apri con l'app predefinita del sistema",
+    openWithDefaultAppFailed: "Impossibile aprire con l'app predefinita del sistema: {message}",
   },
   mqTopics: {
     title: "Gestione topic",

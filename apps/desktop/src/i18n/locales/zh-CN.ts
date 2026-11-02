@@ -9468,6 +9468,8 @@ export default withEnglishFallback({
     pathCopied: "路径已复制",
     copyFailed: "复制路径失败",
     openFile: "打开",
+    openWithDefaultApp: "使用系统默认应用打开",
+    openWithDefaultAppFailed: "使用系统默认应用打开失败: {message}",
     executeSqlFile: "执行 SQL 文件",
     newSqlFile: "新建 SQL 文件",
     newSqlFileDescription: "将自动补充 .sql 后缀。",

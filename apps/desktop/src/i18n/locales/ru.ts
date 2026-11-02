@@ -9729,6 +9729,8 @@ export default withEnglishFallback({
     fileFilterPlaceholder: "Фильтр по имени файла",
     filterInvalid: "Неверный фильтр файлов, оставлен предыдущий: {message}",
     fileFilterHint: "Используйте шаблон, например *.sql или *.sh, либо регулярное выражение, например {regex}.",
+    openWithDefaultApp: "Открыть с помощью системного приложения по умолчанию",
+    openWithDefaultAppFailed: "Не удалось открыть с помощью системного приложения по умолчанию: {message}",
   },
   diff: {
     progress: {

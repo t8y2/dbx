@@ -9502,6 +9502,8 @@ export default {
     pathCopied: "Path copied",
     copyFailed: "Failed to copy path",
     openFile: "Open",
+    openWithDefaultApp: "Open with Default Application",
+    openWithDefaultAppFailed: "Failed to open with default application: {message}",
     executeSqlFile: "Execute SQL file",
     newSqlFile: "New SQL file",
     newSqlFileDescription: "The .sql extension is added automatically.",

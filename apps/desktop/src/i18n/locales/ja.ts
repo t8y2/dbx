@@ -11525,6 +11525,8 @@ export default withEnglishFallback({
     fileFilterPlaceholder: "ファイル名フィルター",
     filterInvalid: "ファイルフィルターが無効なため、以前の設定を維持しました：{message}",
     fileFilterHint: "*.sql や *.sh のようなワイルドカード、または {regex} のような正規表現を使用できます。",
+    openWithDefaultApp: "システムの既定のアプリで開く",
+    openWithDefaultAppFailed: "システムの既定のアプリで開けませんでした: {message}",
   },
   mqTopics: {
     title: "トピック管理",

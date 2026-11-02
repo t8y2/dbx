@@ -11751,6 +11751,8 @@ export default withEnglishFallback({
     fileFilterPlaceholder: "Filtro de nombre de archivo",
     filterInvalid: "Filtro de archivos no válido; se conserva el anterior: {message}",
     fileFilterHint: "Use un comodín como *.sql o *.sh, o una expresión regular como {regex}.",
+    openWithDefaultApp: "Abrir con la aplicación predeterminada del sistema",
+    openWithDefaultAppFailed: "Error al abrir con la aplicación predeterminada del sistema: {message}",
   },
   mqTopics: {
     title: "Administración de temas",

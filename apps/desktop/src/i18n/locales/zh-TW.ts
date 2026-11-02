@@ -11447,6 +11447,8 @@ export default withEnglishFallback({
     pathCopied: "路徑已複製",
     copyFailed: "複製路徑失敗",
     openFile: "開啟",
+    openWithDefaultApp: "使用系統預設應用程式開啟",
+    openWithDefaultAppFailed: "使用系統預設應用程式開啟失敗: {message}",
     executeSqlFile: "執行 SQL 檔案",
     newSqlFile: "新增 SQL 檔案",
     newSqlFileDescription: "將自動加入 .sql 副檔名。",

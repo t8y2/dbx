@@ -186,6 +186,7 @@ pub(in crate::schema::oracle_routines) async fn prepare_package_recovery(
         object.dependencies_complete = true;
     }
     let input = package::normalize_input(OracleRoutinePlanInput {
+        compact_sql: false,
         source: snapshot(&original.target, before),
         target,
         drafts,

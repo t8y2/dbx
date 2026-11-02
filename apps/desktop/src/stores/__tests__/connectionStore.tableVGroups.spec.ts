@@ -466,4 +466,138 @@ describe("connectionStore table virtual groups during disk reload", () => {
     expect(columnsGroup!.children?.some((node) => node.type === "table-vgroup")).toBe(false);
     expect(columnsGroup!.children?.map((node) => node.type)).toEqual(["column", "column"]);
   });
+
+  it("does not mount table virtual groups under database node when group-tables is present (issue #13030)", async () => {
+    const api = await import("@/lib/backend/api");
+    const { tableVGroupScopeKey } = await import("@/lib/table/tableVGroup");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const config: ConnectionConfig = { id: "mysql-13030", name: "MySQL", db_type: "mysql", host: "127.0.0.1", port: 3306, username: "root", password: "", database: "gtis_cloud" };
+    const scope = { connectionId: config.id, database: "gtis_cloud" };
+    const layout = {
+      version: 1,
+      enabled: true,
+      groups: [
+        { id: "g1", name: "国际物流表", collapsed: false },
+        { id: "g2", name: "备件物流表", collapsed: false },
+      ],
+      order: [
+        {
+          type: "group" as const,
+          id: "g1",
+          children: [{ type: "table" as const, name: "t_shipping" }],
+        },
+        {
+          type: "group" as const,
+          id: "g2",
+          children: [{ type: "table" as const, name: "t_parts" }],
+        },
+      ],
+    };
+    vi.mocked(api.loadConnections).mockResolvedValue([config]);
+    vi.mocked(api.loadTableVGroups).mockResolvedValue({ [tableVGroupScopeKey(scope)!]: layout });
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    const groupTables: TreeNode = {
+      id: `${config.id}:gtis_cloud:group-tables`,
+      label: "Tables",
+      type: "group-tables",
+      connectionId: config.id,
+      database: "gtis_cloud",
+      children: [
+        { id: `${config.id}:gtis_cloud:t_shipping`, label: "t_shipping", type: "table", connectionId: config.id, database: "gtis_cloud" },
+        { id: `${config.id}:gtis_cloud:t_parts`, label: "t_parts", type: "table", connectionId: config.id, database: "gtis_cloud" },
+        { id: `${config.id}:gtis_cloud:t_other`, label: "t_other", type: "table", connectionId: config.id, database: "gtis_cloud" },
+      ],
+      isExpanded: true,
+    };
+    const groupViews: TreeNode = {
+      id: `${config.id}:gtis_cloud:group-views`,
+      label: "Views",
+      type: "group-views",
+      connectionId: config.id,
+      database: "gtis_cloud",
+      children: [],
+    };
+    const database: TreeNode = {
+      id: `${config.id}:gtis_cloud`,
+      label: "gtis_cloud",
+      type: "database",
+      connectionId: config.id,
+      database: "gtis_cloud",
+      children: [groupTables, groupViews],
+      isExpanded: true,
+    };
+    store.connectedIds = new Set([config.id]);
+    store.treeNodes[0]!.isExpanded = true;
+    store.treeNodes[0]!.children!.push(database);
+
+    // Reproject layout or create a new group
+    store.createTableVGroup(groupTables, "新分组");
+
+    // Database children must NOT contain table-vgroup nodes
+    expect(database.children?.some((node) => node.type === "table-vgroup")).toBe(false);
+    expect(database.children?.map((node) => node.type)).toEqual(["group-tables", "group-views"]);
+
+    // Tables group node must contain the projected table-vgroups
+    expect(groupTables.children?.some((node) => node.type === "table-vgroup")).toBe(true);
+    const vgroupLabels = groupTables.children?.filter((node) => node.type === "table-vgroup").map((node) => node.label);
+    expect(vgroupLabels).toContain("国际物流表");
+    expect(vgroupLabels).toContain("备件物流表");
+    expect(vgroupLabels).toContain("新分组");
+  });
+
+  it("strips legacy or cached table virtual groups from database children when group-tables is loaded (issue #13030)", async () => {
+    const api = await import("@/lib/backend/api");
+    const { tableVGroupScopeKey } = await import("@/lib/table/tableVGroup");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const config: ConnectionConfig = { id: "mysql-13030-strip", name: "MySQL", db_type: "mysql", host: "127.0.0.1", port: 3306, username: "root", password: "", database: "gtis_cloud" };
+    const scope = { connectionId: config.id, database: "gtis_cloud" };
+    const layout = {
+      version: 1,
+      enabled: true,
+      groups: [{ id: "g1", name: "国际物流表", collapsed: false }],
+      order: [{ type: "group" as const, id: "g1", children: [] }],
+    };
+    vi.mocked(api.loadConnections).mockResolvedValue([config]);
+    vi.mocked(api.loadTableVGroups).mockResolvedValue({ [tableVGroupScopeKey(scope)!]: layout });
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    const leakedVGroup: TreeNode = {
+      id: "table-vgroup:g1",
+      label: "国际物流表",
+      type: "table-vgroup",
+      connectionId: config.id,
+      database: "gtis_cloud",
+      vgroupId: "g1",
+    };
+    const groupTables: TreeNode = {
+      id: `${config.id}:gtis_cloud:group-tables`,
+      label: "Tables",
+      type: "group-tables",
+      connectionId: config.id,
+      database: "gtis_cloud",
+      children: [],
+    };
+    const database: TreeNode = {
+      id: `${config.id}:gtis_cloud`,
+      label: "gtis_cloud",
+      type: "database",
+      connectionId: config.id,
+      database: "gtis_cloud",
+      children: [leakedVGroup, groupTables],
+      isExpanded: true,
+    };
+    store.connectedIds = new Set([config.id]);
+    store.treeNodes[0]!.isExpanded = true;
+    store.treeNodes[0]!.children!.push(database);
+
+    // Call reproject
+    store.createTableVGroup(groupTables, "新分组2");
+
+    // Database children must have the leaked table-vgroup stripped
+    expect(database.children?.some((node) => node.type === "table-vgroup")).toBe(false);
+    expect(database.children?.map((node) => node.type)).toEqual(["group-tables"]);
+  });
 });

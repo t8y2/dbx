@@ -325,7 +325,7 @@ fn transfer_input(
             });
         }
     }
-    Ok((OracleRoutinePlanInput { source, target, drafts }, skipped))
+    Ok((OracleRoutinePlanInput { compact_sql: false, source, target, drafts }, skipped))
 }
 
 async fn read_transfer_package_input(
@@ -1110,7 +1110,7 @@ mod tests {
             .map(|kind| RoutineIdentity { owner: "T".into(), name: "P".into(), kind })
             .collect::<Vec<_>>();
         let config: ConnectionConfig = serde_json::from_value(json!({"id":"T", "name":"test", "db_type":DatabaseType::OceanbaseOracle, "host":"localhost", "port":2881, "username":"T", "password":"", "database":null})).unwrap();
-        let mut input = OracleRoutinePlanInput { source, target, drafts: Vec::new() };
+        let mut input = OracleRoutinePlanInput { compact_sql: false, source, target, drafts: Vec::new() };
         let mut requests = Vec::new();
         for (index, identity) in selected.iter().enumerate() {
             let sql = if index == 0 {

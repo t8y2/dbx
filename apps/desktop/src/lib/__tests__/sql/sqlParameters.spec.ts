@@ -642,6 +642,53 @@ describe("extractSqlParameters", () => {
     ]);
   });
 
+  describe("bracketed-shell placeholders", () => {
+    it("recognizes [${name}] as a bracketed-shell parameter covering the brackets", () => {
+      const sql = "select * from t where id = [${userId}]";
+      expect(extractSqlParameterDescriptors(sql)).toEqual([{ key: "userId", name: "userId", syntax: "bracketed-shell", token: "[${userId}]" }]);
+      // Postgres must prefer bracketed-shell over its array-bracket handling too.
+      expect(extractSqlParameterDescriptors(sql, { databaseType: "postgres" })).toEqual([{ key: "userId", name: "userId", syntax: "bracketed-shell", token: "[${userId}]" }]);
+    });
+
+    it("replaces the whole [${name}] token so the brackets disappear", () => {
+      const sql = "select * from t where id = [${userId}]";
+      expect(substituteSqlParameters(sql, { userId: { kind: "number", value: "5" } })).toBe("select * from t where id = 5");
+      expect(substituteSqlParameters(sql, { userId: { kind: "string", value: "abc" } })).toBe("select * from t where id = 'abc'");
+    });
+
+    it("still recognizes bare ${name} as a shell parameter", () => {
+      expect(extractSqlParameterDescriptors("select ${name}")).toEqual([{ key: "name", name: "name", syntax: "shell", token: "${name}" }]);
+    });
+
+    it("falls back to shell recognition when the closing bracket is missing", () => {
+      const sql = "select [${name}";
+      expect(extractSqlParameterDescriptors(sql)).toEqual([{ key: "name", name: "name", syntax: "shell", token: "${name}" }]);
+      expect(substituteSqlParameters(sql, { name: { kind: "number", value: "7" } })).toBe("select [7");
+    });
+
+    it("falls back without swallowing characters when the inner name is invalid", () => {
+      const sql = "select [${bad-name}]";
+      expect(extractSqlParameterDescriptors(sql)).toEqual([]);
+      expect(substituteSqlParameters(sql, {})).toBe(sql);
+    });
+
+    it("does not recognize the syntax when bracketed-shell is disabled", () => {
+      const sql = "select * from t where id = [${userId}]";
+      expect(extractSqlParameterDescriptors(sql, { enabledSyntaxes: ["shell"] })).toEqual([]);
+      expect(substituteSqlParameters(sql, { userId: { kind: "number", value: "5" } }, { enabledSyntaxes: ["shell"] })).toBe(sql);
+      // Postgres never swallows brackets: the inner ${...} stays recognized as shell.
+      expect(extractSqlParameterDescriptors(sql, { databaseType: "postgres", enabledSyntaxes: ["shell"] })).toEqual([{ key: "userId", name: "userId", syntax: "shell", token: "${userId}" }]);
+    });
+
+    it("leaves bracketed-shell candidates inside string literals to embedded shell handling", () => {
+      const sql = "select '[${x}]' as c";
+      expect(extractSqlParameterDescriptors(sql)).toEqual([{ key: "x", name: "x", syntax: "shell", token: "${x}" }]);
+      // Existing behavior: the embedded ${x} inside the string is replaced as a
+      // string fragment while the brackets stay part of the literal.
+      expect(substituteSqlParameters(sql, { x: { kind: "string", value: "hi" } })).toBe("select '[hi]' as c");
+    });
+  });
+
   it("ignores declared SQL Server variables and system variables", () => {
     const sql = `
       declare @id int = 1, @name nvarchar(50);

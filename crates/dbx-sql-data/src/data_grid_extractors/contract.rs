@@ -84,6 +84,11 @@ pub enum DataGridHeaderFormat {
     Name,
     Description,
     Both,
+    /// `Both` on two stacked header rows: the description row first, then the
+    /// name row, so a two-line header pastes into documents with one row per
+    /// line (#13305). Columns without a description leave their description
+    /// cell empty.
+    NameAndDescriptionTwoRows,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

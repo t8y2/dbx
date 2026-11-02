@@ -18,6 +18,7 @@
     "contributing",
     "---Core Workflows---",
     "query-editor",
+    "plsql-debug",
     "data-grid",
     "schema-browser",
     "object-browser",

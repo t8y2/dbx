@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { reactive } from "vue";
 import { useSidebarDataOpenRuntime } from "@/composables/useSidebarDataOpenRuntime";
 import { markRowIdLocatorUnsupported, resetRowIdLocatorStateForTests, rowIdLocatorUnsupported } from "@/lib/table/tableRowIdSupport";
 import type { DataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
@@ -23,6 +24,9 @@ const mocks = vi.hoisted(() => ({
   buildTableSelectSql: vi.fn(),
   setErrorResult: vi.fn(),
   cancelTabExecution: vi.fn(),
+  tauriRuntime: true,
+  openTablesInDetachedWindow: false,
+  detachDispatch: vi.fn(),
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -49,7 +53,9 @@ vi.mock("@/stores/queryStore", () => ({
           return existing.id;
         }
       }
-      const tab = {
+      // 与真实 store 一致：tab 是响应式对象，settle watcher 才能观察到
+      // isExecuting/result 的变化（#13308 detached open 依赖此行为）。
+      const tab = reactive({
         id: `tab-${mocks.tabs.length + 1}`,
         connectionId,
         database,
@@ -62,7 +68,7 @@ vi.mock("@/stores/queryStore", () => ({
         isExecuting: false,
         isCancelling: false,
         isExplaining: false,
-      } as QueryTab;
+      }) as QueryTab;
       const activeIndex = options.insertAfterActive ? mocks.tabs.findIndex((item) => item.id === mocks.activeTabId) : -1;
       if (activeIndex >= 0) mocks.tabs.splice(activeIndex + 1, 0, tab);
       else mocks.tabs.push(tab);
@@ -108,12 +114,35 @@ vi.mock("@/stores/queryStore", () => ({
 }));
 
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { tableOpenSortMode: mocks.tableOpenSortMode, tableDatabaseSortDirection: "desc", tableLocalSortDirection: "asc", dataTabReuseMode: mocks.dataTabReuseMode, openDataTabsNextToActive: mocks.openDataTabsNextToActive, pageSize: 100 } }),
+  useSettingsStore: () => ({
+    editorSettings: {
+      tableOpenSortMode: mocks.tableOpenSortMode,
+      tableDatabaseSortDirection: "desc",
+      tableLocalSortDirection: "asc",
+      dataTabReuseMode: mocks.dataTabReuseMode,
+      openDataTabsNextToActive: mocks.openDataTabsNextToActive,
+      openTablesInDetachedWindow: mocks.openTablesInDetachedWindow,
+      pageSize: 100,
+    },
+  }),
 }));
 
 vi.mock("@/stores/tunnelProfileStore", () => ({
   useTunnelProfileStore: () => ({ profileById: () => undefined }),
 }));
+
+// The detached-open settle logic itself is the real implementation; only the
+// desktop gate and the dispatch destination are rerouted so the watcher's
+// behavior stays observable in the node test environment.
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => mocks.tauriRuntime }));
+
+vi.mock("@/lib/tabs/detachedTableOpen", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/tabs/detachedTableOpen")>();
+  return {
+    ...actual,
+    requestDetachedTableOpen: (getTab: () => QueryTab | undefined) => actual.requestDetachedTableOpen(getTab, mocks.detachDispatch),
+  };
+});
 
 vi.mock("@/lib/database/jdbcDialect", () => ({
   effectiveDatabaseTypeForConnection: () => mocks.databaseType,
@@ -179,6 +208,8 @@ describe("useSidebarDataOpenRuntime", () => {
     mocks.openDataTabsNextToActive = false;
     mocks.metadataGeneration = 0;
     mocks.includeSyntheticRowId = false;
+    mocks.tauriRuntime = true;
+    mocks.openTablesInDetachedWindow = false;
     resetRowIdLocatorStateForTests();
     mocks.ensureConnected.mockResolvedValue(undefined);
     mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM users");
@@ -538,6 +569,67 @@ describe("useSidebarDataOpenRuntime", () => {
 
     expect(mocks.tabs).toHaveLength(2);
     expect(mocks.tabs.map((tab) => tab.title)).toEqual(["users", "orders"]);
+  });
+
+  it("requests the detached open once after a fresh table tab's first load settles", async () => {
+    mocks.openTablesInDetachedWindow = true;
+    mocks.executeTabSql.mockImplementation(async (tabId: string) => {
+      const tab = mocks.tabs.find((candidate) => candidate.id === tabId)!;
+      tab.isExecuting = false;
+      tab.executionId = undefined;
+      tab.result = { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 0 } as any;
+      return true;
+    });
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mocks.tabs).toHaveLength(1);
+    expect(mocks.detachDispatch).toHaveBeenCalledExactlyOnceWith({ tabId: "tab-1" });
+  });
+
+  it("detaches a reused tab only after the fresh reload settles, not on its stale errored result", async () => {
+    mocks.openTablesInDetachedWindow = true;
+    // First open fails: the same-table tab keeps the errored result and idles.
+    mocks.executeTabSql.mockImplementation(async (tabId: string) => {
+      const tab = mocks.tabs.find((candidate) => candidate.id === tabId)!;
+      tab.isExecuting = false;
+      tab.executionId = undefined;
+      tab.result = { columns: ["Error"], execution_error: true, rows: [["boom"]], affected_rows: 0, execution_time_ms: 0 } as any;
+      return true;
+    });
+    await useSidebarDataOpenRuntime().openData(tableNode);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.tabs).toHaveLength(1);
+    mocks.detachDispatch.mockClear();
+
+    // Second open of the same table reuses the errored tab and reloads it.
+    let resolveSecondLoad: ((publishResult: boolean) => void) | undefined;
+    mocks.executeTabSql.mockImplementation((tabId: string) => {
+      const tab = mocks.tabs.find((candidate) => candidate.id === tabId)!;
+      return new Promise<boolean>((resolve) => {
+        resolveSecondLoad = (publishResult: boolean) => {
+          tab.isExecuting = false;
+          tab.executionId = undefined;
+          if (publishResult) {
+            tab.result = { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 0 } as any;
+          }
+          resolve(true);
+        };
+      });
+    });
+
+    const opened = useSidebarDataOpenRuntime().openData(tableNode);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The stale errored result must not satisfy the settle check: no detach
+    // while the fresh reload is still in flight.
+    expect(mocks.tabs).toHaveLength(1);
+    expect(mocks.detachDispatch).not.toHaveBeenCalled();
+
+    resolveSecondLoad!(true);
+    await opened;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.detachDispatch).toHaveBeenCalledExactlyOnceWith({ tabId: "tab-1" });
   });
 
   it("opens a new table data tab next to the active tab when enabled", async () => {

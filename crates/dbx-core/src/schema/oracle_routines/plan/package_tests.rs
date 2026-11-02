@@ -34,9 +34,22 @@ fn draft(kind: db::ObjectSourceKind, action: RoutinePlanAction) -> RoutinePlanDr
 }
 
 async fn build(source: &Catalog, target: &Catalog, drafts: Vec<RoutinePlanDraft>) -> BuiltPlan {
-    let input =
-        package::normalize_input(OracleRoutinePlanInput { source: snapshot(source), target: snapshot(target), drafts })
-            .unwrap();
+    build_with_compact(source, target, drafts, false).await
+}
+
+async fn build_with_compact(
+    source: &Catalog,
+    target: &Catalog,
+    drafts: Vec<RoutinePlanDraft>,
+    compact_sql: bool,
+) -> BuiltPlan {
+    let input = package::normalize_input(OracleRoutinePlanInput {
+        compact_sql,
+        source: snapshot(source),
+        target: snapshot(target),
+        drafts,
+    })
+    .unwrap();
     build_plan(
         Some(source),
         target,
@@ -49,10 +62,57 @@ async fn build(source: &Catalog, target: &Catalog, drafts: Vec<RoutinePlanDraft>
 }
 
 #[tokio::test]
+async fn package_generated_specification_and_selected_body_compact_without_changing_manual_or_recovery_text() {
+    for retained in [false, true] {
+        let mut originals = vec![specification("SOURCE", 2), body("SOURCE")];
+        for original in &mut originals {
+            original.source = original.source.as_ref().map(|source| source.replace(" AS ", " AS\n    "));
+        }
+        let source = Catalog::new("SOURCE", originals);
+        let target =
+            Catalog::new("OWNER", if retained { vec![specification("OWNER", 1), body("OWNER")] } else { vec![] });
+        let action = if retained { RoutinePlanAction::Replace } else { RoutinePlanAction::Create };
+        let mut spec = draft(db::ObjectSourceKind::Package, action);
+        spec.confirm_package_pair = retained;
+        let mut implementation = draft(db::ObjectSourceKind::PackageBody, action);
+        if retained {
+            implementation.package_body_source = Some(PackageBodySource::Target);
+        }
+        let drafts = vec![spec, implementation];
+        let expanded = build_with_compact(&source, &target, drafts.clone(), false).await.plan;
+        let compact = build_with_compact(&source, &target, drafts.clone(), true).await.plan;
+        assert!(expanded.ready, "{:?}", expanded.steps);
+        assert!(compact.ready, "{:?}", compact.steps);
+        for (before, after) in expanded.steps.iter().zip(&compact.steps) {
+            assert_eq!(after.sql, compact_oracle_ddl(&before.sql).unwrap());
+            assert_eq!(after.source_original, before.source_original);
+            assert_eq!(after.target_original, before.target_original);
+            assert_eq!(after.recovery_sql, before.recovery_sql);
+        }
+        let manual: Vec<_> = drafts
+            .into_iter()
+            .zip(&expanded.steps)
+            .map(|(mut draft, step)| {
+                draft.sql = Some(step.sql.clone());
+                draft
+            })
+            .collect();
+        let manual_baseline = build_with_compact(&source, &target, manual.clone(), false).await.plan;
+        let reviewed = build_with_compact(&source, &target, manual, true).await.plan;
+        assert!(manual_baseline.ready, "{:?}", manual_baseline.steps);
+        assert!(reviewed.ready, "{:?}", reviewed.steps);
+        for (before, after) in manual_baseline.steps.iter().zip(reviewed.steps) {
+            assert_eq!(after.sql, before.sql);
+        }
+    }
+}
+
+#[tokio::test]
 async fn transfer_batch_checks_the_initial_absent_pair_without_requiring_its_future_specification() {
     let source = Catalog::new("SOURCE", vec![specification("SOURCE", 1), body("SOURCE")]);
     let target = Catalog::new("OWNER", vec![]);
     let input = OracleRoutinePlanInput {
+        compact_sql: false,
         source: snapshot(&source),
         target: snapshot(&target),
         drafts: vec![
@@ -112,6 +172,7 @@ async fn transfer_claim_rechecks_frozen_approvals_before_any_table_stage_without
         );
         let mut target = Catalog::new("OWNER", vec![external]);
         let input = OracleRoutinePlanInput {
+            compact_sql: false,
             source: snapshot(&source),
             target: snapshot(&target),
             drafts: vec![draft(db::ObjectSourceKind::Package, RoutinePlanAction::Create)],
@@ -155,6 +216,7 @@ async fn pending_table_edits_only_supersede_the_original_pinned_prepared_new_pac
     let source = Catalog::new("SOURCE", vec![original]);
     let target = Catalog::new("OWNER", vec![]);
     let mut input = OracleRoutinePlanInput {
+        compact_sql: false,
         source: snapshot(&source),
         target: snapshot(&target),
         drafts: vec![draft(db::ObjectSourceKind::Package, RoutinePlanAction::Create)],
@@ -204,6 +266,7 @@ async fn completed_mixed_batch_registers_and_pins_once_without_rebaselining_comp
     );
     let mut target = Catalog::new("OWNER", vec![external]);
     let mut input = package::normalize_input(OracleRoutinePlanInput {
+        compact_sql: false,
         source: snapshot(&source),
         target: snapshot(&target),
         drafts: vec![
@@ -304,6 +367,7 @@ async fn pending_table_plan_keeps_complete_pair_and_order_without_registering_ap
     let source = Catalog::new("SOURCE", vec![spec, implementation]);
     let target = Catalog::new("OWNER", Vec::new());
     let input = package::normalize_input(OracleRoutinePlanInput {
+        compact_sql: false,
         source: snapshot(&source),
         target: snapshot(&target),
         drafts: vec![

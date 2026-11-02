@@ -581,6 +581,8 @@ export interface SendMessageRequest {
   payloadText?: string;
   headers: Record<string, string>;
   partition?: number;
+  /** RabbitMQ: AMQP BasicProperties, separate from custom headers. */
+  properties?: Record<string, string>;
   /** RabbitMQ: target exchange; empty means the default exchange. */
   exchange?: string;
   /** RabbitMQ: routing key used when publishing to an exchange. */

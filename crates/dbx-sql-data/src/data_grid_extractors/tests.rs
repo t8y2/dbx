@@ -613,7 +613,9 @@ fn csv_formula_protection_covers_fullwidth_prefixes_but_not_typed_negative_numbe
 }
 
 #[test]
-fn tsv_keeps_legacy_headers_and_does_not_apply_csv_only_options() {
+fn tsv_honors_header_null_and_advanced_options_like_csv() {
+    // #13305: TSV shares the CSV/DSV option set; only the separator is pinned
+    // and quoting stays off, so embedded double quotes stay verbatim.
     let mut request = request(DataGridExtractorId::TsvWithHeaders);
     request.columns = vec![column("=header", 0), column("value", 1)];
     request.selected_column_indexes = vec![0, 1];
@@ -623,7 +625,7 @@ fn tsv_keeps_legacy_headers_and_does_not_apply_csv_only_options() {
     request.options.dsv.line_feed_escape_string = "\\n".into();
 
     let result = extract_data_grid_selection(request).expect("TSV extraction");
-    assert_eq!(result.text, "=header\tvalue\n=SUM(A1)\t\"line1\nline2\"");
+    assert_eq!(result.text, "'=SUM(A1)\tline1\\nline2\n'=header\tvalue");
 }
 
 #[test]
@@ -650,6 +652,78 @@ fn extracts_raw_values_without_escaping_quotes() {
 
     assert_eq!(result.text, r#"{"msg":"success"}"#);
     assert_eq!(result.mime_type, "text/plain");
+}
+
+#[test]
+fn name_and_description_two_rows_header_stacks_description_above_name() {
+    let mut request = request(DataGridExtractorId::CsvWithHeaders);
+    request.columns = vec![column("amount", 0), column("name", 1)];
+    request.columns[0].description = Some("Amount in EUR".into());
+    request.selected_column_indexes = vec![0, 1];
+    request.rows = vec![vec![json!(1), json!("a")]];
+    request.options.dsv.header_format = DataGridHeaderFormat::NameAndDescriptionTwoRows;
+    request.options.dsv.header_position = DataGridHeaderPosition::Top;
+
+    let result = extract_data_grid_selection(request).expect("CSV extraction");
+    // A missing description leaves that cell empty on the description row.
+    assert_eq!(result.text, "Amount in EUR,\namount,name\n1,a");
+}
+
+#[test]
+fn name_and_description_two_rows_header_applies_case_and_bottom_position() {
+    let mut request = request(DataGridExtractorId::TsvWithHeaders);
+    request.columns = vec![column("amount", 0)];
+    request.columns[0].description = Some("Amount".into());
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![vec![json!(1)]];
+    request.options.dsv.header_format = DataGridHeaderFormat::NameAndDescriptionTwoRows;
+    request.options.dsv.header_position = DataGridHeaderPosition::Bottom;
+    request.options.dsv.header_case = DataGridHeaderCase::Upper;
+
+    let result = extract_data_grid_selection(request).expect("TSV extraction");
+    assert_eq!(result.text, "1\nAMOUNT\nAMOUNT");
+}
+
+#[test]
+fn tsv_default_still_writes_the_legacy_single_name_header() {
+    let mut request = request(DataGridExtractorId::TsvWithHeaders);
+    request.columns = vec![column("amount", 0)];
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![vec![json!(1)]];
+
+    let result = extract_data_grid_selection(request).expect("TSV extraction");
+    assert_eq!(result.text, "amount\n1");
+}
+
+#[test]
+fn tsv_honors_the_null_text_option() {
+    let mut request = request(DataGridExtractorId::Tsv);
+    request.columns = vec![column("amount", 0)];
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![vec![Value::Null]];
+    request.options.dsv.null_text = "NULL".into();
+
+    let result = extract_data_grid_selection(request).expect("TSV extraction");
+    assert_eq!(result.text, "NULL");
+}
+
+#[test]
+fn plain_tsv_ignores_persisted_dsv_options_unlike_tsv_with_headers() {
+    // The plain Tsv id is the implicit default of smart copy/cut; a user who
+    // saved non-legacy options while configuring CSV must not get header rows
+    // or formula escaping in plain Ctrl+C output (#13305 review).
+    let mut request = request(DataGridExtractorId::Tsv);
+    request.columns = vec![column("amount", 0)];
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![vec![Value::Number(serde_json::Number::from(1))]];
+    request.options.dsv.header_position = DataGridHeaderPosition::Top;
+    request.options.dsv.header_format = DataGridHeaderFormat::NameAndDescriptionTwoRows;
+    request.options.dsv.escape_formulas = true;
+
+    let result = extract_data_grid_selection(request).expect("TSV extraction");
+    // Legacy plain Tsv carries no header row and applies no formula escaping,
+    // even though persisted options ask for a two-row top header.
+    assert_eq!(result.text, "1");
 }
 
 #[test]

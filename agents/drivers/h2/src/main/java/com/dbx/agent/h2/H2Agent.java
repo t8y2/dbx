@@ -65,6 +65,11 @@ public class H2Agent extends AbstractJdbcAgent {
         }
     }
 
+    @Override
+    protected java.sql.Driver connectionMetadataDriver(String jdbcUrl) {
+        return loadedDriver.driver();
+    }
+
     private void selectDriver(ConnectParams params) throws Exception {
         H2DriverVersion selected = H2DriverVersion.select(params);
         if (selected == H2DriverVersion.CUSTOM) {

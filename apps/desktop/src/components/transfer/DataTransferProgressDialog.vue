@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertCircle, ArrowRightLeft, CheckCircle2, Loader2, Minimize2, X, XCircle } from "@lucide/vue";
+import { AlertCircle, ArrowRightLeft, CheckCircle2, ChevronDown, ChevronRight, Loader2, Minimize2, X, XCircle } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { formatDataTransferDuration, useExportTracker, type ExportTask } from "@/composables/useExportTracker";
@@ -38,6 +38,26 @@ const currentTime = ref(Date.now());
 let elapsedTimer: ReturnType<typeof setInterval> | undefined;
 
 const isActive = computed(() => ["Running", "Writing", "Cancelling"].includes(props.task.status));
+
+// 「执行日志」区（#13281）：逐表记录传输进度，默认展开、可折叠；新日志到达时自动滚到底部。
+const showTaskLog = ref(true);
+const taskLogEl = ref<HTMLElement>();
+watch(
+  () => props.task.logLines?.length ?? 0,
+  () => {
+    void nextTick(() => {
+      const el = taskLogEl.value;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  },
+);
+
+// 与 admin 面板的 formatClock 同款：日志时间戳只关心当天时分秒。
+function formatLogTime(at: number): string {
+  const d = new Date(at);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
 const progressPercent = computed(() => {
   if (props.task.status === "Done") return 100;
   if (!props.task.totalTables) return 0;
@@ -137,6 +157,21 @@ onBeforeUnmount(() => {
 
         <div v-if="task.errorMessage" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {{ translateBackendError(t, task.errorMessage) }}
+        </div>
+
+        <div v-if="task.logLines?.length" class="space-y-1.5">
+          <button type="button" class="flex w-full items-center gap-1.5 text-xs font-medium text-muted-foreground" @click="showTaskLog = !showTaskLog">
+            <ChevronDown v-if="showTaskLog" class="h-3.5 w-3.5" />
+            <ChevronRight v-else class="h-3.5 w-3.5" />
+            {{ t("transfer.log.title") }}
+            <span class="ml-auto tabular-nums">{{ task.logLines.length }}</span>
+          </button>
+          <div v-show="showTaskLog" ref="taskLogEl" class="max-h-44 overflow-y-auto rounded-md border bg-muted/30 px-3 py-2 font-mono text-xs leading-relaxed">
+            <div v-for="(line, index) in task.logLines" :key="index" class="flex gap-2" :class="line.level === 'error' ? 'text-destructive' : line.level === 'success' ? 'text-green-600 dark:text-green-400' : 'text-foreground'">
+              <span class="shrink-0 tabular-nums text-muted-foreground">{{ formatLogTime(line.at) }}</span>
+              <span class="min-w-0 break-words">{{ t(line.key, line.params ?? {}) }}</span>
+            </div>
+          </div>
         </div>
       </div>
 

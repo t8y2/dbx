@@ -14,7 +14,7 @@ vi.mock("@/components/ui/CustomContextMenu.vue", () => ({
     updated() {
       (this.$el as any).__ctxMenuItems = this.items;
     },
-    template: `<div class="ctx-menu-stub" :data-menu-items="JSON.stringify(items.map((item) => ({ label: item.label, disabled: item.disabled === true, visible: item.visible })))"><slot /></div>`,
+    template: `<div class="ctx-menu-stub" :data-menu-items="JSON.stringify(items.flatMap((item) => item.children ?? [item]).map((item) => ({ label: item.label, disabled: item.disabled === true, visible: item.visible })))"><slot /></div>`,
   },
 }));
 
@@ -107,6 +107,9 @@ function mountBar(
             tooltipDatabase: "Database:",
           },
           contextMenu: {
+            splitTab: "Split",
+            batchCloseTabs: "Close multiple tabs",
+            copyTabName: "Copy tab name",
             splitRight: "Split right",
             splitDown: "Split down",
             changeOrientation: "Change orientation",
@@ -126,7 +129,8 @@ function mountBar(
             fullTabTitle: "Full title",
             compactTabTitle: "Compact title",
           },
-          sidebar: { locateActiveTab: "Locate" },
+          sidebar: { locateActiveTab: "Locate", locateSqlFile: "Locate in SQL file list" },
+          sqlFileTree: { locateActiveFile: "Locate current file" },
         },
       },
     }),
@@ -548,6 +552,24 @@ describe("EditorGroupTabBar behavior", () => {
     host.remove();
   });
 
+  it("groups tab actions without dropping split and bulk close commands", async () => {
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "Query 1", "query");
+    const { app, host } = mountBar(store.groups[0].id, [id], id, pinia);
+    await settle();
+    const items = (tabPill(host, id).closest(".ctx-menu-stub") as any).__ctxMenuItems.filter((item: any) => item.visible !== false);
+    expect(items.map((item: any) => item.label)).toEqual(["Rename", "Duplicate", "Copy tab name", "Split", "", "Pin", "Save all tabs", "Reopen closed tab", "Close", "Close multiple tabs", "", "Full title", "Locate"]);
+    expect(items.find((item: any) => item.label === "Split").children.map((item: any) => item.label)).toEqual(["Split right", "Split down"]);
+    expect(
+      items
+        .find((item: any) => item.label === "Close multiple tabs")
+        .children.filter((item: any) => item.visible !== false)
+        .map((item: any) => item.label),
+    ).toEqual(["Close other tabs", "Close left tabs", "Close right tabs", "Close all tabs"]);
+    app.unmount();
+    host.remove();
+  });
+
   it("disables the split actions while only one tab exists, enabling them once a second tab joins", async () => {
     const store = useQueryStore();
     const onlyId = store.createTab("pg-1", "app", "Query 1", "query");
@@ -827,6 +849,37 @@ describe("EditorGroupTabBar behavior", () => {
     tabPill(host, secondId).querySelector<HTMLButtonElement>("button[aria-label='Close']")!.click();
     await settle();
     expect(store.tabs.some((tab) => tab.id === secondId)).toBe(false);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("shows locate current file menu item for saved sql tab and emits locate-sql-library-file", async () => {
+    const store = useQueryStore();
+    const queryTabId = store.createTab("pg-1", "app", "Query 1", "query");
+    const savedSqlTabId = store.createTab("pg-1", "app", "Saved Query", "query");
+    store.tabs.find((tab) => tab.id === savedSqlTabId)!.savedSqlId = "saved-sql-1";
+    const mainGroup = store.groups[0];
+
+    const onLocateSqlLibraryFile = vi.fn();
+    const { app, host } = mountBar(mainGroup.id, [queryTabId, savedSqlTabId], queryTabId, pinia, undefined, undefined, undefined, undefined, { "onLocate-sql-library-file": onLocateSqlLibraryFile });
+    await settle();
+
+    const rawMenuFor = (tabId: string) => {
+      const pill = tabPill(host, tabId);
+      const stub = pill.closest<HTMLElement>(".ctx-menu-stub") as any;
+      return (stub?.__ctxMenuItems ?? []) as Array<{ label: string; action?: () => void; visible?: boolean }>;
+    };
+
+    const regularLocateItem = rawMenuFor(queryTabId).find((item) => item.label === "Locate current file");
+    expect(regularLocateItem?.visible).toBe(false);
+
+    const savedSqlLocateItem = rawMenuFor(savedSqlTabId).find((item) => item.label === "Locate current file");
+    expect(savedSqlLocateItem?.visible).toBe(true);
+
+    savedSqlLocateItem?.action?.();
+    expect(onLocateSqlLibraryFile).toHaveBeenCalledTimes(1);
+    expect(onLocateSqlLibraryFile).toHaveBeenCalledWith(expect.objectContaining({ id: savedSqlTabId, savedSqlId: "saved-sql-1" }));
 
     app.unmount();
     host.remove();

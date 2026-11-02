@@ -81,6 +81,7 @@ export interface SavedOpenTab {
   tableComment?: QueryTab["tableComment"];
   tableMeta?: QueryTab["tableMeta"];
   mongoEditTarget?: QueryTab["mongoEditTarget"];
+  mongoQueryLanguage?: QueryTab["mongoQueryLanguage"];
   resultEvicted?: boolean;
   resultCacheKey?: string;
   resultRuns?: SavedQueryResultRun[];
@@ -234,6 +235,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.tableComment !== undefined ? { tableComment: tab.tableComment } : {}),
     tableMeta: tab.tableMeta,
     ...(tab.mongoEditTarget !== undefined ? { mongoEditTarget: tab.mongoEditTarget } : {}),
+    ...(tab.mongoQueryLanguage === "sql" ? { mongoQueryLanguage: "sql" as const } : {}),
     ...(tab.mode !== "data" && tab.resultEvicted ? { resultEvicted: true } : {}),
     ...(tab.mode !== "data" && tab.resultEvicted && tab.resultCacheKey !== undefined ? { resultCacheKey: tab.resultCacheKey } : {}),
     ...(tab.mode === "query" && tab.resultRuns?.length
@@ -277,6 +279,7 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
   try {
     const validConnectionIds = options.validConnectionIds ? new Set(options.validConnectionIds) : undefined;
     const saved = parsed.filter(isSavedOpenTab);
+    let restoredDebugger = false;
     const filtered = saved.filter((tab) => {
       const mode = tab.mode ?? "query";
       const recovery = restoreOracleTypeManagementDraft(tab.typeManagementDraft);
@@ -287,6 +290,10 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
       // 删除连接时按策略保留下来的非 SQL 页签会带 detachedConnectionName，等新建同名连接后
       // 重绑；不能在恢复阶段因为连接「暂时不存在」就把它们丢掉，否则 keep-all-tabs 形同虚设。
       if (mode !== "query" && !tab.detachedConnectionName && validConnectionIds && !validConnectionIds.has(tab.connectionId)) return false;
+      if (mode === "pl-debug") {
+        if (restoredDebugger) return false;
+        restoredDebugger = true;
+      }
       return true;
     });
     const tabs: QueryTab[] = filtered.map((tab) => {
@@ -303,6 +310,7 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
       return {
         ...tab,
         mode,
+        mongoQueryLanguage: tab.mongoQueryLanguage === "sql" ? "sql" : undefined,
         sql: typeof tab.sql === "string" ? tab.sql : "",
         isExecuting: false,
         redisMonitorActive: false,

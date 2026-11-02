@@ -58,15 +58,36 @@ impl From<&ConnectionConfig> for ConnectionSummary {
 }
 
 fn legacy_mcp_allow_writes() -> Option<bool> {
-    match std::env::var("DBX_MCP_ALLOW_WRITES").ok()?.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" => Some(true),
-        "0" | "false" => Some(false),
-        _ => None,
-    }
+    parse_legacy_mcp_allow_writes(&std::env::var("DBX_MCP_ALLOW_WRITES").ok()?)
+}
+
+fn parse_legacy_mcp_allow_writes(value: &str) -> Option<bool> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => true,
+        "0" | "false" | "no" | "yes" | "" => false,
+        // Fail closed for values that are not understood by the CLI flag
+        // parser; an invalid setting must never silently enable writes.
+        _ => false,
+    })
 }
 
 fn effective_mcp_policy(state: McpGlobalPolicyState) -> McpGlobalPolicy {
     effective_mcp_policy_with_legacy_allow_writes(state, legacy_mcp_allow_writes())
+}
+
+fn effective_mcp_access_policy(
+    mut access: dbx_core::mcp_access::McpAccessPolicy,
+) -> dbx_core::mcp_access::McpAccessPolicy {
+    // Both local storage and Web responses must honor the CLI run's read-only
+    // restriction. Cap every override while leaving visibility/scopes intact.
+    if legacy_mcp_allow_writes() == Some(false) {
+        let read = dbx_core::mcp_access::McpAccessLevel::Read;
+        access.default_access = access.default_access.min(read);
+        for rule in access.rules.values_mut() {
+            rule.access = rule.access.map(|level| level.min(read));
+        }
+    }
+    access
 }
 
 fn effective_mcp_policy_with_legacy_allow_writes(
@@ -281,8 +302,24 @@ impl DbxBackend for UnavailableBackend {
 #[async_trait]
 pub trait DbxBackend: Send + Sync {
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String>;
+    /// The v2 access policy, for decisions v1 cannot express (plugin
+    /// sub-scopes). Defaults to the v1 mapping, which carries no plugin
+    /// sub-scope rules and so admits every value at the connection level.
+    async fn load_mcp_access_policy(&self) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+        Ok(dbx_core::mcp_access::McpAccessPolicy::from_v1(&self.load_mcp_global_policy().await?))
+    }
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String>;
+
+    /// Whether the user has saved any MCP policy. Fresh installs have none,
+    /// in which case writable plugin connections fall back to their own
+    /// protection level (at least write) instead of the global default. Once
+    /// a policy is saved, its explicit settings are authoritative everywhere.
+    /// Unreadable storage counts as configured: unreadable hides, never widens.
+    async fn mcp_policy_configured(&self) -> bool {
+        false
+    }
+
     async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
         let _ = entry;
         Err("Query history is not supported by this backend.".to_string())
@@ -493,6 +530,26 @@ pub trait DbxBackend: Send + Sync {
         let _ = (token, connection_id, database, sql);
         Err("SQL_BLOCKED: Desktop approval is unavailable for this MCP backend.".to_string())
     }
+    /// Runs one product-provider operation (Nacos, Consul, …) on a resolved
+    /// connection. Policy, scope and access level are checked by the server
+    /// before this is reached.
+    async fn product_call(
+        &self,
+        connection: &ConnectionConfig,
+        call: &crate::products::ProductCall,
+    ) -> Result<Value, String> {
+        let _ = (connection, call);
+        Err("This MCP backend does not support product tools.".to_string())
+    }
+    /// Asks the desktop user to confirm one high-risk non-SQL tool call
+    /// (a plugin tool declared `full`, a dangerous Redis command). Returns
+    /// once the person answered: `Ok(())` to proceed, `Err` with a
+    /// `TOOL_BLOCKED:` message otherwise. Backends without a desktop UI
+    /// refuse, so a call needing confirmation never runs unconfirmed.
+    async fn approve_high_risk_tool(&self, request: &crate::approval::ToolApprovalRequest) -> Result<(), String> {
+        let _ = request;
+        Err("TOOL_BLOCKED: Desktop confirmation is unavailable for this MCP backend.".to_string())
+    }
     async fn collect_docs_snapshot(
         &self,
         connection: &ConnectionConfig,
@@ -520,6 +577,11 @@ pub trait DbxBackend: Send + Sync {
     async fn list_plugin_mcp_tools(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
         let _ = self;
         Err("Plugin tools are not supported by this backend.".to_string())
+    }
+    /// Lists a plugin-declared sub-scope for one saved connection.
+    async fn list_plugin_mcp_scopes(&self, plugin_id: &str, connection_id: &str) -> Result<Vec<String>, String> {
+        let _ = (plugin_id, connection_id);
+        Err("Plugin scope listing is not supported by this backend.".to_string())
     }
     /// Calls one plugin MCP tool. `connection_id` (already policy-checked by
     /// the server) selects the saved connection whose host-generated
@@ -977,40 +1039,77 @@ impl LocalBackend {
 
     /// Opt-in, parallel `mcp/tools` discovery for the external surface:
     /// installed + compatible + backend plugins whose manifest declares
-    /// `external_tools: true`. A plugin that fails to list skips itself
-    /// (with a warning) instead of failing the whole `tools/list`.
+    /// `external_tools: true`, narrowed by the user's per-plugin grant
+    /// (`dbx_core::plugin_mcp`). A plugin that fails to list skips itself
+    /// (with a warning) instead of failing the whole `tools/list`; an
+    /// unreadable grant store hides every plugin rather than widening.
     pub async fn detect_plugin_tool_providers(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
         let plugins = self.state.plugins.list_installed()?;
-        let candidates: Vec<(String, String)> = plugins
+        let grants = self.state.storage.load_plugin_mcp_grants().await.map_err(|error| {
+            log::warn!("[mcp] cannot read plugin MCP grants: {error}");
+            format!("Plugin MCP grants are unavailable: {error}")
+        })?;
+        let candidates: Vec<dbx_core::plugins::PluginManifest> = plugins
             .into_iter()
             .filter(|plugin| {
                 plugin.compatibility.compatible
                     && plugin.manifest.backend_entrypoint().is_some()
-                    && !plugin.manifest.external_tools_excluded()
+                    && dbx_core::plugin_mcp::author_allows_external(&plugin.manifest)
+                    && grants.get(&plugin.manifest.id).is_none_or(|grant| grant.external)
             })
-            .map(|plugin| (plugin.manifest.id.clone(), plugin.manifest.name.clone()))
+            .map(|plugin| plugin.manifest)
             .collect();
         // Discovery uses short-lived sessions: merely listing tools must not keep every
         // installed plugin loaded in every independent MCP host.
-        let probes = candidates.into_iter().map(|(plugin_id, plugin_name)| {
+        let probes = candidates.into_iter().map(|manifest| {
             let state = Arc::clone(&self.state);
             async move {
                 let listing = state
                     .plugin_host
-                    .probe::<Value>(&plugin_id, "mcp/tools", json!({}), Some(PLUGIN_TOOLS_PROBE_TIMEOUT))
+                    .probe::<Value>(&manifest.id, "mcp/tools", json!({}), Some(PLUGIN_TOOLS_PROBE_TIMEOUT))
                     .await;
-                (plugin_id, plugin_name, listing)
+                (manifest, listing)
             }
         });
         let mut providers = Vec::new();
-        for (plugin_id, plugin_name, listing) in futures::future::join_all(probes).await {
+        for (manifest, listing) in futures::future::join_all(probes).await {
+            let plugin_id = manifest.id.clone();
+            let plugin_name = manifest.name.clone();
             match listing {
                 Ok(value) => {
-                    let tools = dbx_core::ai::plugin_tools::parse_tool_list(&value);
+                    let tools = dbx_core::plugin_mcp::exposed_tools(
+                        &manifest,
+                        grants.get(&plugin_id),
+                        dbx_core::ai::plugin_tools::parse_tool_list(&value),
+                    );
                     if tools.is_empty() {
                         log::debug!("[mcp] plugin {plugin_id} exposes no MCP tools");
                     } else {
-                        providers.push(crate::plugin_tools::PluginToolProvider { plugin_id, plugin_name, tools });
+                        let scope = manifest
+                            .mcp_contribution()
+                            .and_then(|mcp| mcp.scope.as_ref())
+                            .map(|scope| (scope.kind.clone(), scope.argument.clone()));
+                        let scope_list_method = manifest
+                            .mcp_contribution()
+                            .and_then(|mcp| mcp.scope.as_ref())
+                            .and_then(|scope| scope.list_method.clone());
+                        let toolsets = tools
+                            .iter()
+                            .map(|tool| {
+                                (
+                                    tool.name.clone(),
+                                    dbx_core::plugin_mcp::tool_toolset(manifest.mcp_contribution(), &tool.name),
+                                )
+                            })
+                            .collect();
+                        providers.push(crate::plugin_tools::PluginToolProvider {
+                            plugin_id,
+                            plugin_name,
+                            tools,
+                            scope,
+                            scope_list_method,
+                            toolsets,
+                        });
                     }
                 }
                 Err(err) if plugin_lacks_mcp_surface(&err) => {
@@ -1149,6 +1248,34 @@ impl DbxBackend for LocalBackend {
             .map(ToOwned::to_owned)
             .ok_or_else(|| "SQL_BLOCKED: Invalid desktop approval response".to_string())
     }
+    async fn product_call(
+        &self,
+        connection: &ConnectionConfig,
+        call: &crate::products::ProductCall,
+    ) -> Result<Value, String> {
+        crate::products::dispatch_local(&self.state, &connection.id, call).await
+    }
+
+    async fn approve_high_risk_tool(&self, request: &crate::approval::ToolApprovalRequest) -> Result<(), String> {
+        let port = tokio::fs::read_to_string(self.data_dir.join("mcp-bridge-port"))
+            .await
+            .map_err(|_| "TOOL_BLOCKED: DBX desktop is not running, so the call cannot be confirmed.".to_string())?;
+        let response = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(100))
+            .build()
+            .map_err(|error| error.to_string())?
+            .post(format!("http://127.0.0.1:{}/approve-high-risk-tool", port.trim()))
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| format!("TOOL_BLOCKED: Desktop confirmation unavailable: {error}"))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(response.text().await.unwrap_or_else(|_| "TOOL_BLOCKED: Confirmation failed".to_string()))
+        }
+    }
+
     async fn consume_high_risk_sql_approval(
         &self,
         token: &str,
@@ -1174,11 +1301,51 @@ impl DbxBackend for LocalBackend {
         Ok(())
     }
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
-        self.state.storage.load_mcp_global_policy().await.map(effective_mcp_policy)
+        self.state.storage.load_enforced_mcp_policy().await.map(effective_mcp_policy)
+    }
+
+    async fn load_mcp_access_policy(&self) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+        self.state.storage.load_mcp_access_policy().await.map(effective_mcp_access_policy)
+    }
+
+    async fn mcp_policy_configured(&self) -> bool {
+        self.state.storage.load_enforced_mcp_policy().await.map(|state| state.configured).unwrap_or(true)
     }
 
     async fn list_plugin_mcp_tools(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
         self.detect_plugin_tool_providers().await
+    }
+
+    async fn list_plugin_mcp_scopes(&self, plugin_id: &str, connection_id: &str) -> Result<Vec<String>, String> {
+        let manifest = self
+            .state
+            .plugins
+            .list_installed()?
+            .into_iter()
+            .find(|plugin| plugin.manifest.id == plugin_id)
+            .ok_or_else(|| format!("Plugin `{plugin_id}` is not installed."))?
+            .manifest;
+        let method = manifest
+            .mcp_contribution()
+            .and_then(|mcp| mcp.scope.as_ref())
+            .and_then(|scope| scope.list_method.as_deref())
+            .ok_or_else(|| "This plugin does not declare a scope list method.".to_string())?;
+        let value = self
+            .state
+            .plugin_host
+            .invoke::<Value>(
+                plugin_id,
+                method,
+                json!({ "connectionId": connection_id }),
+                None,
+                Some(PLUGIN_TOOLS_PROBE_TIMEOUT),
+            )
+            .await?;
+        value
+            .get("values")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Plugin scope list must return { values: string[] }.".to_string())
+            .map(|values| values.iter().filter_map(Value::as_str).map(str::to_string).collect())
     }
 
     async fn call_plugin_mcp_tool(
@@ -1343,6 +1510,7 @@ impl DbxBackend for LocalBackend {
                 connection.id.clone(),
                 database.to_string(),
                 client_session_id.to_string(),
+                pool.data_charset(),
             ),
             owner_config,
             resource_permit,
@@ -1403,7 +1571,15 @@ impl DbxBackend for LocalBackend {
     ) -> dbx_core::sql::SqlExecutionPlan {
         let is_sqlserver_agent =
             dbx_core::query::connection_pool_is_sqlserver_agent(self.state.as_ref(), &connection.id, database).await;
-        dbx_core::query::query_execution_plan(sql, Some(connection.db_type), is_sqlserver_agent)
+        // Split with the connection's statement-splitting dialect, not its
+        // routing `db_type`: a JDBC SQL Server connection keeps control-flow
+        // batches whole (#13514), a JDBC Oracle connection keeps PL/SQL units
+        // whole, matching the core's own execution plan.
+        dbx_core::query::query_execution_plan(
+            sql,
+            Some(dbx_core::query::statement_split_database_type(connection)),
+            is_sqlserver_agent,
+        )
     }
 
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
@@ -1617,6 +1793,26 @@ impl DbxBackend for WebBackend {
             .await
             .map(effective_mcp_policy)
             .map_err(|error| format!("Invalid MCP policy response: {error}"))
+    }
+
+    async fn mcp_policy_configured(&self) -> bool {
+        // Same source as `load_mcp_global_policy` and as LocalBackend: the
+        // enforced global policy state's `configured` flag. Transport or
+        // parse failures count as configured — unreadable hides, never widens.
+        match self.request(reqwest::Method::GET, "/api/app-settings/mcp-policy", None).await {
+            Ok(response) => response.json::<McpGlobalPolicyState>().await.map(|state| state.configured).unwrap_or(true),
+            Err(_) => true,
+        }
+    }
+
+    async fn load_mcp_access_policy(&self) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+        let body = self
+            .request(reqwest::Method::GET, "/api/app-settings/mcp-access-policy", None)
+            .await?
+            .bytes()
+            .await
+            .map_err(|error| format!("Invalid MCP access policy response: {error}"))?;
+        parse_mcp_access_policy(&body).map(effective_mcp_access_policy)
     }
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
@@ -2765,6 +2961,10 @@ fn url_encode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
+fn parse_mcp_access_policy(body: &[u8]) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+    serde_json::from_slice(body).map_err(|error| format!("Invalid MCP access policy response: {error}"))
+}
+
 pub(crate) fn format_query_result(result: &dbx_core::db::QueryResult, max_rows: usize) -> String {
     let mut output = if result.columns.is_empty() {
         format!("Query executed. {} row(s) affected.", result.affected_rows)
@@ -2795,6 +2995,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<Value>>, affected_rows: u64)
         deferred_large_value_cells: Vec::new(),
         column_sortables: Vec::new(),
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows,
         affected_rows,
@@ -3208,12 +3409,14 @@ mod tests {
             read_only,
             allow_dangerous_sql: false,
             prompt_high_risk_sql: false,
+            call_confirmation: None,
             allowed_connection_ids: None,
             allowed_group_ids: Vec::new(),
             allowed_tool_names: None,
             connection_policies: Vec::new(),
             group_policies: Vec::new(),
             query_timeout_secs: None,
+            plugin_tools_mode: dbx_core::mcp_access::McpPluginToolsMode::Auto,
         }
     }
 
@@ -3244,6 +3447,16 @@ mod tests {
         // Unset env var leaves the policy as-is.
         assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), None).read_only);
         assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, true), None).read_only);
+    }
+
+    #[test]
+    fn legacy_allow_writes_parser_fails_closed_for_unknown_values() {
+        assert_eq!(parse_legacy_mcp_allow_writes("1"), Some(true));
+        assert_eq!(parse_legacy_mcp_allow_writes("yes"), Some(false));
+        assert_eq!(parse_legacy_mcp_allow_writes("0"), Some(false));
+        assert_eq!(parse_legacy_mcp_allow_writes("no"), Some(false));
+        assert_eq!(parse_legacy_mcp_allow_writes(""), Some(false));
+        assert_eq!(parse_legacy_mcp_allow_writes("unexpected"), Some(false));
     }
 
     #[test]
@@ -3428,6 +3641,243 @@ mod tests {
         server.join().unwrap();
         assert_eq!(request_receiver.recv().unwrap(), "GET /api/layout/sidebar HTTP/1.1");
         assert_eq!(paths.get("web-db"), Some(&vec!["Project".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn web_backend_policy_configured_follows_the_enforced_state() {
+        // `mcp_policy_configured` must mirror the same source the local
+        // backend uses: the enforced global policy state's `configured` flag.
+        // A configured (or unreadable) web source keeps the saved policy
+        // authoritative — unreadable hides, never widens.
+        for (body, expected) in [
+            (r#"{"configured":true,"readOnly":false,"allowDangerousSql":false}"#, true),
+            (r#"{"configured":false,"readOnly":true,"allowDangerousSql":false}"#, false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (request_sender, request_receiver) = mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    request.extend_from_slice(&buffer[..count]);
+                    if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                request_sender.send(String::from_utf8(request).unwrap().lines().next().unwrap().to_string()).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            });
+
+            let backend = WebBackend::new(format!("http://{address}"), String::new()).unwrap();
+            backend.auth.lock().await.checked = true;
+            let configured = backend.mcp_policy_configured().await;
+
+            server.join().unwrap();
+            assert_eq!(request_receiver.recv().unwrap(), "GET /api/app-settings/mcp-policy HTTP/1.1");
+            assert_eq!(configured, expected, "body: {body}");
+        }
+
+        // Unreachable desktop (transport error) counts as configured.
+        let backend = WebBackend::new("http://127.0.0.1:1".to_string(), String::new()).unwrap();
+        backend.auth.lock().await.checked = true;
+        assert!(backend.mcp_policy_configured().await);
+    }
+
+    #[tokio::test]
+    async fn web_backend_loads_v2_access_policy_with_plugin_scope_rules() {
+        // The desktop test suite normally exercises the HTTP path below. Some
+        // restricted CI sandboxes disallow local listeners altogether; the
+        // parser test that follows still covers the v2 wire shape there.
+        let Ok(listener) = TcpListener::bind("127.0.0.1:0") else { return };
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..count]);
+                if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            request_sender.send(String::from_utf8(request).unwrap().lines().next().unwrap().to_string()).unwrap();
+            let body = r#"{"version":2,"defaultAccess":"read","confirm":"off","visibility":"all","rules":[{"target":{"kind":"scope","connectionId":"plugin-connection","scope":"namespace","value":"dev"},"subScope":"selected"}],"pluginToolsMode":"lazy"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let backend = WebBackend::new(format!("http://{address}"), String::new()).unwrap();
+        backend.auth.lock().await.checked = true;
+        let policy = backend.load_mcp_access_policy().await.unwrap();
+
+        server.join().unwrap();
+        assert_eq!(request_receiver.recv().unwrap(), "GET /api/app-settings/mcp-access-policy HTTP/1.1");
+        assert_eq!(policy.version, 2);
+        assert_eq!(policy.plugin_tools_mode, dbx_core::mcp_access::McpPluginToolsMode::Lazy);
+        assert!(policy.rules.contains_key(&dbx_core::mcp_access::McpRuleTarget::Scope {
+            connection_id: "plugin-connection".to_string(),
+            scope: "namespace".to_string(),
+            value: "dev".to_string(),
+        }));
+    }
+
+    #[tokio::test]
+    async fn web_backend_enforces_run_scoped_read_only() {
+        use axum::{extract::Request, response::IntoResponse, Json, Router};
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy};
+        use rmcp::{model::CallToolRequestParams, ServiceExt};
+        const CHILD: &str = "DBX_MCP_WEB_READ_ONLY_TEST_CHILD";
+        // Never mutate the test runner's process-wide environment: exercise the
+        // real env reader in isolated children, as the CLI launches MCP.
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["0", "false", "1", "unset"] {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .args(["--exact", "backend::tests::web_backend_enforces_run_scoped_read_only", "--nocapture"])
+                    .env(CHILD, mode)
+                    .env_remove("DBX_MCP_CONFIRMED_WRITE_SQL");
+                if mode == "unset" {
+                    command.env_remove("DBX_MCP_ALLOW_WRITES");
+                } else {
+                    command.env("DBX_MCP_ALLOW_WRITES", mode);
+                }
+                assert!(command.status().unwrap().success(), "isolated Web mode {mode} failed");
+            }
+            return;
+        }
+        let restricted = matches!(std::env::var(CHILD).unwrap().as_str(), "0" | "false");
+        let access: McpAccessPolicy = serde_json::from_value(json!({
+            "version": 2, "defaultAccess": "full", "confirm": "off", "visibility": "all",
+            "pluginToolsMode": "lazy", "rules": [
+                {"target": {"kind": "group", "id": "team"}, "access": "write"},
+                {"target": {"kind": "connection", "id": "redis"}, "access": "full", "subScope": "selected"},
+                {"target": {"kind": "scope", "connectionId": "redis", "scope": "database", "value": "0"}, "access": "full", "visible": true},
+                {"target": {"kind": "scope", "connectionId": "redis", "scope": "database", "value": "2"}, "access": "read", "visible": true},
+                {"target": {"kind": "scope", "connectionId": "redis", "scope": "database", "value": "3"}, "access": "none", "visible": false},
+                {"target": {"kind": "connection", "id": "plugin"}, "subScope": "selected", "subScopeKind": "namespace", "toolsetCeilings": {"admin": "read"}},
+                {"target": {"kind": "scope", "connectionId": "plugin", "scope": "namespace", "value": "dev"}, "access": "write", "visible": true}
+            ]
+        })).unwrap();
+        let mut v1 = serde_json::to_value(access.to_v1()).unwrap();
+        v1["configured"] = json!(true);
+        let v2 = serde_json::to_value(&access).unwrap();
+        let executions = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let recorded = executions.clone();
+        let router = Router::new().fallback(move |request: Request| {
+            let (v1, v2, recorded) = (v1.clone(), v2.clone(), recorded.clone());
+            async move {
+                let response = match request.uri().path() {
+                    "/api/auth/check" => json!({"authenticated": true, "required": false, "setup_required": false}),
+                    "/api/app-settings/mcp-policy" => v1,
+                    "/api/app-settings/mcp-access-policy" => v2,
+                    "/api/connection/list" => json!([{
+                        "id": "redis", "name": "redis", "db_type": "redis", "host": "localhost",
+                        "port": 6379, "username": "", "password": "", "database": "0", "ssl": false
+                    }]),
+                    "/api/layout/sidebar" => json!({"groups": [], "order": []}),
+                    "/api/connection/connect" => json!({}),
+                    "/api/redis/execute-command" => {
+                        let body = axum::body::to_bytes(request.into_body(), 8192).await.unwrap();
+                        let arguments: Value = serde_json::from_slice(&body).unwrap();
+                        recorded.lock().unwrap().push(arguments.clone());
+                        json!({"command": arguments["command"], "safety": "allowed", "value": "OK"})
+                    }
+                    _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
+                };
+                Json(response).into_response()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let http_server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let backend = Arc::new(WebBackend::new(format!("http://{address}"), String::new()).unwrap());
+        let loaded = backend.load_mcp_access_policy().await.unwrap();
+        let full = if restricted { McpAccessLevel::Read } else { McpAccessLevel::Full };
+        let write = if restricted { McpAccessLevel::Read } else { McpAccessLevel::Write };
+        assert_eq!(loaded.default_access, full);
+        assert_eq!(loaded.resolve(&["team".into()], "unconfigured", None).level, write);
+        assert_eq!(loaded.resolve(&[], "redis", None).level, full);
+        assert_eq!(loaded.resolve(&[], "redis", Some(("database", "0"))).level, full);
+        assert_eq!(loaded.resolve(&[], "redis", Some(("database", "2"))).level, McpAccessLevel::Read);
+        assert!(!loaded.resolve(&[], "redis", Some(("database", "3"))).visible);
+        assert!(!loaded.resolve(&[], "redis", Some(("database", "1"))).visible);
+        assert_eq!(loaded.resolve(&[], "plugin", Some(("namespace", "dev"))).level, write);
+        assert!(!loaded.resolve(&[], "plugin", Some(("namespace", "prod"))).visible);
+        assert_eq!(loaded.toolset_ceiling("plugin", "admin"), Some(McpAccessLevel::Read));
+        assert_eq!(loaded.plugin_tools_mode, access.plugin_tools_mode);
+        if !restricted {
+            assert_eq!(loaded, access);
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let local = connection_mutation_backend(directory.path()).await;
+        local.state.storage.save_mcp_access_policy(&access).await.unwrap();
+        assert_eq!(local.load_mcp_access_policy().await.unwrap(), loaded);
+
+        let server = crate::DbxMcpServer::with_runtime_options(backend, crate::McpScope::default(), true);
+        let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+        let server_task = tokio::spawn(async move { server.serve(server_transport).await.unwrap() });
+        let client = ().serve(client_transport).await.unwrap();
+        for (db, command, error) in [
+            (0, "SET probe value", restricted.then_some("MCP_READ_ONLY")),
+            (0, "GET probe", None),
+            (2, "SET probe value", Some("MCP_READ_ONLY")),
+            (1, "GET probe", Some("DATABASE_OUT_OF_SCOPE")),
+        ] {
+            let before = executions.lock().unwrap().len();
+            let result = client
+                .peer()
+                .call_tool(CallToolRequestParams::new("dbx_execute_redis_command").with_arguments(
+                    json!({"connection_id": "redis", "db": db, "command": command}).as_object().unwrap().clone(),
+                ))
+                .await
+                .unwrap();
+            if let Some(error) = error {
+                assert_eq!(result.is_error, Some(true), "{result:?}");
+                assert!(result.content[0].as_text().unwrap().text.contains(error), "{result:?}");
+                assert_eq!(executions.lock().unwrap().len(), before, "denied call must not reach the execution API");
+            } else {
+                assert!(!result.is_error.unwrap_or(false), "{result:?}");
+                assert_eq!(executions.lock().unwrap().len(), before + 1);
+                assert_eq!(executions.lock().unwrap().last().unwrap()["command"], command);
+            }
+        }
+        client.cancel().await.unwrap();
+        server_task.await.unwrap().cancel().await.unwrap();
+        http_server.abort();
+    }
+
+    #[test]
+    fn parses_v2_access_policy_without_dropping_sub_scope_rules() {
+        let policy = parse_mcp_access_policy(
+            br#"{"version":2,"defaultAccess":"read","rules":[{"target":{"kind":"scope","connectionId":"c1","scope":"namespace","value":"dev"},"visible":true}],"pluginToolsMode":"auto"}"#,
+        )
+        .unwrap();
+        assert_eq!(policy.version, 2);
+        assert_eq!(policy.default_access, dbx_core::mcp_access::McpAccessLevel::Read);
+        assert_eq!(policy.rules.len(), 1);
+        assert!(policy.rules.contains_key(&dbx_core::mcp_access::McpRuleTarget::Scope {
+            connection_id: "c1".to_string(),
+            scope: "namespace".to_string(),
+            value: "dev".to_string(),
+        }));
     }
 
     #[test]
@@ -4469,19 +4919,12 @@ mod tests {
         let server_csr = dir.path().join("server.csr");
         let server_pem = dir.path().join("server.pem");
         let run = |args: &[&str]| {
-            let status = std::process::Command::new("openssl")
-                .args(args)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .unwrap();
             let output = std::process::Command::new("openssl").args(args).output().unwrap();
             assert!(
                 output.status.success(),
                 "openssl failed: {args:?} stderr={}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            let _ = status;
         };
         // Self-signed CA.
         run(&[
@@ -4517,7 +4960,12 @@ mod tests {
         // Server cert signed by the CA, with SAN for 127.0.0.1. The x509 -req
         // subcommand takes extensions via -extfile, not -addext.
         let ext_path = dir.path().join("server.ext");
-        std::fs::write(&ext_path, "subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n").unwrap();
+        // Native TLS on macOS requires an explicit TLS server purpose.
+        std::fs::write(
+            &ext_path,
+            "subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n",
+        )
+        .unwrap();
         run(&[
             "x509",
             "-req",

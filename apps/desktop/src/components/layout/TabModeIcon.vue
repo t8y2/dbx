@@ -37,7 +37,7 @@ defineProps<{ tab: QueryTab }>();
   <FileCode v-else-if="tab.objectSource?.objectType === 'PACKAGE_BODY'" />
   <Braces v-else-if="tab.objectSource?.objectType === 'TYPE'" />
   <FileCode v-else-if="tab.objectSource?.objectType === 'TYPE_BODY'" />
-  <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" />
+  <CalendarClock v-else-if="tab.mode === 'dameng-jobs' || tab.mode === 'database-jobs'" />
   <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" />
   <Gauge v-else-if="tab.mode === 'dolt-version-control'" />
   <PluginIcon v-else-if="tab.mode === 'plugin-workbench' && tab.pluginWorkbench" :plugin-id="tab.pluginWorkbench.pluginId" :contribution-id="tab.pluginWorkbench.contributionId" />

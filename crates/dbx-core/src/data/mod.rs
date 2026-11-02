@@ -5,6 +5,7 @@ pub mod dameng_dump;
 pub mod data_compare;
 pub mod database_export;
 pub mod docs;
+mod duckdb_export;
 pub mod export_runtime;
 pub mod grid_clipboard_guard;
 pub mod mongodb_dump;

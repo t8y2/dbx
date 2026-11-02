@@ -110,11 +110,9 @@ async fn test_agent_connection(
     config: &ConnectionConfig,
     host: &str,
     port: u16,
+    agent_env: &[(String, String)],
 ) -> Result<ConnectionTestResult, String> {
     let connect_params = agent_connect_params(config, host, port, config.database.as_deref().unwrap_or(""))?;
-    // Oracle OCI connections carry process-scoped client settings (`NLS_LANG`,
-    // Instant Client loader path): they have to reach the agent process itself.
-    let agent_env = state.agent_launch_env(config).await;
     let result = state
         .agent_manager
         .call_daemon_method_with_timeout_and_env::<serde_json::Value>(
@@ -123,7 +121,7 @@ async fn test_agent_connection(
             AgentMethod::TestConnection,
             connect_params,
             Some(agent_connect_timeout(config)),
-            &agent_env,
+            agent_env,
         )
         .await;
 
@@ -131,7 +129,6 @@ async fn test_agent_connection(
         Ok(response) => response,
         Err(err) => {
             if let Some(alternate_config) = oracle_alternate_connect_config(config, &err) {
-                let alternate_env = state.agent_launch_env(&alternate_config).await;
                 state
                     .agent_manager
                     .call_daemon_method_with_timeout_and_env::<serde_json::Value>(
@@ -145,7 +142,7 @@ async fn test_agent_connection(
                             alternate_config.database.as_deref().unwrap_or(""),
                         )?,
                         Some(agent_connect_timeout(&alternate_config)),
-                        &alternate_env,
+                        agent_env,
                     )
                     .await
                     .map_err(|alternate_err| {
@@ -179,11 +176,11 @@ async fn connect_agent_pool(
     config: &ConnectionConfig,
     host: &str,
     port: u16,
+    agent_env: &[(String, String)],
 ) -> Result<PoolKind, String> {
     let connect_params = agent_connect_params(config, host, port, config.effective_database().unwrap_or(""))?;
-    let agent_env = state.agent_launch_env(config).await;
     let mut client =
-        state.agent_manager.spawn_with_env(&config.db_type, config.driver_profile.as_deref(), &agent_env).await?;
+        state.agent_manager.spawn_with_env(&config.db_type, config.driver_profile.as_deref(), agent_env).await?;
     let connect_result = client
         .call_method_with_timeout::<serde_json::Value>(
             AgentMethod::Connect,
@@ -273,6 +270,90 @@ mod tests {
             .unwrap()
             .iter()
             .all(|loaded| loaded.db_type == DatabaseType::Jdbc));
+    }
+
+    #[tokio::test]
+    async fn transport_desktop_proxy_rejects_foreign_pending_debug_before_changing_configs() {
+        use dbx_core::query::pl_debug::{pl_debug_bootstrap_core, pl_debug_start_core, PlDebugAccess, PlDebugStart};
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, dir.path().join("plugins")));
+        let app = tauri::test::mock_builder()
+            .manage(state.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let original: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id":"protected-proxy", "name":"Protected proxy", "db_type":DatabaseType::Oracle,
+            "host":"127.0.0.1", "port":9, "database":"fixture", "username":"", "password":"",
+            "transport_layers":[{"type":"proxy","id":"proxy","host":"127.0.0.1","port":9}]
+        }))
+        .unwrap();
+        state.configs.write().await.insert(original.id.clone(), original.clone());
+        let browser = PlDebugAccess::web("browser-owner".into()).unwrap();
+        pl_debug_start_core(
+            &state,
+            &browser,
+            PlDebugStart {
+                server_epoch: serde_json::from_value(pl_debug_bootstrap_core(&state)["serverEpoch"].clone()).unwrap(),
+                operation_id: "pending-start".into(),
+                connection_id: original.id.clone(),
+                database: "fixture".into(),
+                client_session_id: "browser-view".into(),
+                target: serde_json::json!({"source":"BEGIN NULL; END;"}),
+                risk_accepted: false,
+                production_confirmed: false,
+                expected_connection_revision: None,
+            },
+        )
+        .unwrap();
+        let mut changed = original.clone();
+        changed.host = "127.0.0.2".into();
+        assert!(super::connection_final_proxy_port(app.state::<Arc<AppState>>(), changed).await.is_err());
+        assert_eq!(state.configs.read().await[&original.id].host, original.host);
+        assert_eq!(state.proxy_tunnels.local_port("protected-proxy:transport:0").await, None);
+        state.shutdown(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn transport_test_cleans_up_after_jdbc_adapter_preparation_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, dir.path().join("plugins")));
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id":"jdbc-probe", "name":"JDBC probe", "db_type":DatabaseType::Jdbc,
+            "host":"127.0.0.1", "port":9, "database":"fixture", "username":"", "password":"",
+            "connection_string":"jdbc:postgresql://127.0.0.1:9/fixture",
+            "transport_layers":[{"type":"proxy","id":"proxy","host":"127.0.0.1","port":9}]
+        }))
+        .unwrap();
+        state.connection_endpoint_attempt("jdbc-probe:test", &config).await.unwrap().endpoint.unwrap();
+        assert!(state.proxy_tunnels.local_port("jdbc-probe:test:transport:0").await.is_some());
+        let result = super::test_connection_with_info_impl(&state, config).await;
+        assert_eq!(result.unwrap_err(), "Plugin driver 'jdbc' is not installed");
+        assert_eq!(state.proxy_tunnels.local_port("jdbc-probe:test:transport:0").await, None);
+    }
+
+    #[tokio::test]
+    async fn transport_failed_connect_cleans_up_after_jdbc_adapter_preparation_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, dir.path().join("plugins")));
+        let app = tauri::test::mock_builder()
+            .manage(state.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id":"jdbc-connect", "name":"JDBC connect", "db_type":DatabaseType::Jdbc,
+            "host":"127.0.0.1", "port":9, "database":"fixture", "username":"", "password":"",
+            "connection_string":"jdbc:postgresql://127.0.0.1:9/fixture",
+            "transport_layers":[{"type":"proxy","id":"proxy","host":"127.0.0.1","port":9}]
+        }))
+        .unwrap();
+        state.connection_endpoint_attempt("jdbc-connect", &config).await.unwrap().endpoint.unwrap();
+        assert!(state.proxy_tunnels.local_port("jdbc-connect:transport:0").await.is_some());
+        let result = connect_db(app.state::<Arc<AppState>>(), config, None).await;
+        assert_eq!(result.unwrap_err(), "Plugin driver 'jdbc' is not installed");
+        assert_eq!(state.proxy_tunnels.local_port("jdbc-connect:transport:0").await, None);
     }
 
     fn rocketmq_config(password: &str) -> ConnectionConfig {
@@ -403,6 +484,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -1317,7 +1400,13 @@ async fn remove_connection_pools_for_connection_ids(state: &AppState, connection
 }
 
 #[tauri::command]
-pub async fn load_connections(state: State<'_, Arc<AppState>>) -> Result<Vec<ConnectionResponse>, String> {
+pub async fn load_connections(
+    state: State<'_, Arc<AppState>>,
+    legacy_sidebar_show_user_admin: Option<bool>,
+) -> Result<Vec<ConnectionResponse>, String> {
+    if let Some(visible) = legacy_sidebar_show_user_admin {
+        state.storage.migrate_sidebar_user_admin_visibility(visible).await?;
+    }
     load_connection_responses(state.inner()).await
 }
 
@@ -1385,25 +1474,14 @@ async fn connect_sqlite_from_config(config: &ConnectionConfig) -> Result<db::sql
 }
 
 async fn connect_sqlite_from_config_with_state(
-    state: Option<&AppState>,
+    transport: Option<(&AppState, &dbx_core::connection::ConnectionTransportStamp)>,
     connection_id: &str,
     config: &ConnectionConfig,
 ) -> Result<db::sqlite::SqliteHandle, String> {
     if db::sqlite_worker::sqlite_remote_worker_requested(config) {
-        let state =
-            state.ok_or_else(|| "Remote SQLite over SSH is only available in the DBX Desktop app".to_string())?;
-        let transport_layers = state.resolved_transport_layers(config).await?;
-        let worker = db::sqlite_worker::connect_sqlite_worker(
-            &state.tunnels,
-            &state.proxy_tunnels,
-            &state.http_tunnels,
-            &state.agent_manager,
-            state.storage.data_dir(),
-            connection_id,
-            config,
-            &transport_layers,
-        )
-        .await?;
+        let (state, stamp) =
+            transport.ok_or_else(|| "Remote SQLite over SSH is only available in the DBX Desktop app".to_string())?;
+        let worker = state.connect_sqlite_worker_with_transport(connection_id, config, stamp).await?;
         return Ok(db::sqlite::SqliteHandle::from_worker(worker));
     }
 
@@ -1472,6 +1550,14 @@ pub async fn test_ssh_tunnel(state: State<'_, Arc<AppState>>, config: Connection
     state.test_connection_ssh_tunnel(&config.canonicalized()).await
 }
 
+#[tauri::command]
+pub async fn connection_parameters(
+    state: State<'_, Arc<AppState>>,
+    config: ConnectionConfig,
+) -> Result<dbx_core::connection::parameters::ConnectionParameterMetadata, String> {
+    state.connection_parameter_metadata(&config).await
+}
+
 async fn test_connection_with_info_inner(
     state: &Arc<AppState>,
     config: ConnectionConfig,
@@ -1491,9 +1577,6 @@ async fn test_connection_with_info_inner(
     if let Some(token) = token {
         state.session_credentials.remove_if_current(&token);
     }
-    // The implementation has early error returns during adapter construction.
-    state.reset_connection_transport_for_config(&transport_id, &config).await;
-    state.reset_connection_transport_for_config(&config.id, &config).await;
     result
 }
 
@@ -1509,82 +1592,40 @@ async fn test_connection_with_info_impl(
     let tunnel_id = format!("{}:test", config.id);
     let has_transport_layers = config.has_effective_transport_layers();
     let connection_id = if has_transport_layers { tunnel_id.as_str() } else { config.id.as_str() };
-    let endpoint = state.plugin_connection_endpoint(connection_id, &config).await?;
-    let (host, port) = (endpoint.host.clone(), endpoint.port);
-    let runtime_proxy = endpoint.proxy;
-    // SOCKS-routed plugin tests dial through the route themselves; probing the
-    // logical endpoint (possibly empty host/port) would mislead.
-    let probe_result =
-        if runtime_proxy.is_some() { Ok(()) } else { probe_connection_endpoint(&config, &host, port).await };
-    let url = connection_url_for_endpoint(&config, &host, port);
-    let target = redacted_connection_url_for_endpoint(&config, &host, port);
-    let connect_timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
-    let idle_timeout = std::time::Duration::from_secs(config.idle_timeout_secs);
-    let gaussdb_m_jdbc_config = gaussdb_m_jdbc_command_config(&config, &host, port);
-    log::info!("[test_connection] db_type={:?} target={}", config.db_type, target);
-    if config.db_type == DatabaseType::Plugin {
-        let result = state.plugin_host.test_connection(&config, &host, port, runtime_proxy).await;
-        if has_transport_layers {
-            state.reset_connection_transport_for_config(&tunnel_id, &config).await;
+    let prepared = state.connection_endpoint_attempt(connection_id, &config).await?;
+    let result = async {
+        let endpoint = prepared.endpoint?;
+        let (host, port) = (endpoint.host.clone(), endpoint.port);
+        let runtime_proxy = endpoint.proxy;
+        // SOCKS-routed plugin tests dial through the route themselves; probing the
+        // logical endpoint (possibly empty host/port) would mislead.
+        let probe_result =
+            if runtime_proxy.is_some() { Ok(()) } else { probe_connection_endpoint(&config, &host, port).await };
+        let url = connection_url_for_endpoint(&config, &host, port);
+        let target = redacted_connection_url_for_endpoint(&config, &host, port);
+        let connect_timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
+        let idle_timeout = std::time::Duration::from_secs(config.idle_timeout_secs);
+        let gaussdb_m_jdbc_config = gaussdb_m_jdbc_command_config(&config, &host, port);
+        log::info!("[test_connection] db_type={:?} target={}", config.db_type, target);
+        if config.db_type == DatabaseType::Plugin {
+            return state.plugin_host.test_connection(&config, &host, port, runtime_proxy).await;
         }
-        return result;
-    }
-    let mut database_info = None;
-    let result = match probe_result {
-        Err(e) => Err(e),
-        Ok(()) => match config.db_type {
-            DatabaseType::Mysql if config.needs_bare_mysql() && !config.bare_mysql_uses_tls() => {
-                match db::mysql::connect_bare(&url, connect_timeout).await {
-                    Ok(pool) => {
-                        database_info = optional_mysql_database_info(&pool, &config).await;
-                        let _ = pool.disconnect().await;
-                        Ok("Connection successful".to_string())
+        let mut database_info = None;
+        let result = match probe_result {
+            Err(e) => Err(e),
+            Ok(()) => match config.db_type {
+                DatabaseType::Mysql if config.needs_bare_mysql() && !config.bare_mysql_uses_tls() => {
+                    match db::mysql::connect_bare(&url, connect_timeout).await {
+                        Ok(pool) => {
+                            database_info = optional_mysql_database_info(&pool, &config).await;
+                            let _ = pool.disconnect().await;
+                            Ok("Connection successful".to_string())
+                        }
+                        Err(e) => Err(e),
                     }
-                    Err(e) => Err(e),
                 }
-            }
-            DatabaseType::Mysql if config.needs_bare_mysql() && config.bare_mysql_uses_tls() => {
-                match db::mysql::connect_compatible_with_ca_cert_pool_limit_idle_and_setup(
-                    &url,
-                    Some(&config.ca_cert_path),
-                    connect_timeout,
-                    10,
-                    None,
-                    &[],
-                )
-                .await
-                {
-                    Ok(pool) => {
-                        database_info = optional_mysql_database_info(&pool, &config).await;
-                        let _ = pool.disconnect().await;
-                        Ok("Connection successful".to_string())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            DatabaseType::Mysql => {
-                match db::mysql::connect_with_ca_cert(&url, Some(&config.ca_cert_path), connect_timeout).await {
-                    Ok(pool) => {
-                        database_info = optional_mysql_database_info(&pool, &config).await;
-                        let _ = pool.disconnect().await;
-                        Ok("Connection successful".to_string())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            DatabaseType::Doris | DatabaseType::ManticoreSearch => {
-                match db::mysql::connect_bare(&url, connect_timeout).await {
-                    Ok(pool) => {
-                        database_info = optional_mysql_database_info(&pool, &config).await;
-                        let _ = pool.disconnect().await;
-                        Ok("Connection successful".to_string())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            DatabaseType::StarRocks => {
-                let connect = if config.bare_mysql_uses_tls() {
-                    db::mysql::connect_compatible_with_ca_cert_pool_limit_idle_and_setup(
+                DatabaseType::Mysql if config.needs_bare_mysql() && config.bare_mysql_uses_tls() => {
+                    match db::mysql::connect_compatible_with_ca_cert_pool_limit_idle_and_setup(
                         &url,
                         Some(&config.ca_cert_path),
                         connect_timeout,
@@ -1593,494 +1634,547 @@ async fn test_connection_with_info_impl(
                         &[],
                     )
                     .await
-                } else {
-                    db::mysql::connect_bare(&url, connect_timeout).await
-                };
-                match connect {
+                    {
+                        Ok(pool) => {
+                            database_info = optional_mysql_database_info(&pool, &config).await;
+                            let _ = pool.disconnect().await;
+                            Ok("Connection successful".to_string())
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                DatabaseType::Mysql => {
+                    match db::mysql::connect_with_ca_cert(&url, Some(&config.ca_cert_path), connect_timeout).await {
+                        Ok(pool) => {
+                            database_info = optional_mysql_database_info(&pool, &config).await;
+                            let _ = pool.disconnect().await;
+                            Ok("Connection successful".to_string())
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                DatabaseType::Doris | DatabaseType::ManticoreSearch => {
+                    match db::mysql::connect_bare(&url, connect_timeout).await {
+                        Ok(pool) => {
+                            database_info = optional_mysql_database_info(&pool, &config).await;
+                            let _ = pool.disconnect().await;
+                            Ok("Connection successful".to_string())
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                DatabaseType::StarRocks => {
+                    let connect = if config.bare_mysql_uses_tls() {
+                        db::mysql::connect_compatible_with_ca_cert_pool_limit_idle_and_setup(
+                            &url,
+                            Some(&config.ca_cert_path),
+                            connect_timeout,
+                            10,
+                            None,
+                            &[],
+                        )
+                        .await
+                    } else {
+                        db::mysql::connect_bare(&url, connect_timeout).await
+                    };
+                    match connect {
+                        Ok(pool) => {
+                            database_info = optional_mysql_database_info(&pool, &config).await;
+                            let _ = pool.disconnect().await;
+                            Ok("Connection successful".to_string())
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                DatabaseType::Gaussdb if gaussdb_m_jdbc_config.is_some() => {
+                    match state
+                        .test_external_driver_with_info("jdbc", gaussdb_m_jdbc_config.as_ref().expect("checked above"))
+                        .await
+                    {
+                        Ok(details) => {
+                            database_info = details.database_info;
+                            Ok(details.message)
+                        }
+                        Err(err) => Err(err),
+                    }
+                }
+                DatabaseType::Postgres
+                | DatabaseType::Redshift
+                | DatabaseType::Gaussdb
+                | DatabaseType::Kwdb
+                | DatabaseType::Questdb
+                | DatabaseType::OpenGauss => match db::postgres::connect(&url, connect_timeout).await {
                     Ok(pool) => {
-                        database_info = optional_mysql_database_info(&pool, &config).await;
-                        let _ = pool.disconnect().await;
+                        pool.close();
                         Ok("Connection successful".to_string())
                     }
                     Err(e) => Err(e),
-                }
-            }
-            DatabaseType::Gaussdb if gaussdb_m_jdbc_config.is_some() => {
-                match state
-                    .test_external_driver_with_info("jdbc", gaussdb_m_jdbc_config.as_ref().expect("checked above"))
+                },
+                DatabaseType::Sqlite => {
+                    match connect_sqlite_from_config_with_state(
+                        Some((state.as_ref(), &prepared.stamp)),
+                        connection_id,
+                        &config,
+                    )
                     .await
-                {
-                    Ok(details) => {
-                        database_info = details.database_info;
-                        Ok(details.message)
+                    {
+                        Ok(pool) => {
+                            pool.shutdown().await;
+                            Ok("Connection successful".to_string())
+                        }
+                        Err(e) => Err(e),
                     }
-                    Err(err) => Err(err),
                 }
-            }
-            DatabaseType::Postgres
-            | DatabaseType::Redshift
-            | DatabaseType::Gaussdb
-            | DatabaseType::Kwdb
-            | DatabaseType::Questdb
-            | DatabaseType::OpenGauss => match db::postgres::connect(&url, connect_timeout).await {
-                Ok(pool) => {
-                    pool.close();
+                DatabaseType::Redis => {
+                    // Keep the result inside the outer lifecycle so temporary transports
+                    // are reset after both successful and failed Redis tests.
+                    match test_redis_connection(state, &tunnel_id, &config, &host, port, connect_timeout).await {
+                        Ok(info) => {
+                            database_info = info;
+                            Ok("Connection successful".to_string())
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                #[cfg(feature = "duckdb-sidecar")]
+                DatabaseType::DuckDb => {
+                    state.test_duckdb_connection_config(&config).await?;
                     Ok("Connection successful".to_string())
                 }
-                Err(e) => Err(e),
-            },
-            DatabaseType::Sqlite => {
-                match connect_sqlite_from_config_with_state(Some(state.as_ref()), connection_id, &config).await {
-                    Ok(pool) => {
-                        pool.shutdown().await;
-                        Ok("Connection successful".to_string())
+                #[cfg(not(feature = "duckdb-sidecar"))]
+                DatabaseType::DuckDb => Err("DuckDB support is not compiled in this build".to_string()),
+                DatabaseType::MongoDb => {
+                    let uses_oidc = db::mongo_driver::mongo_uri_uses_oidc(&url);
+                    if mongo_uses_legacy_driver(&config) && !uses_oidc {
+                        let am = &state.agent_manager;
+                        let mut client = am.spawn(&config.db_type, config.driver_profile.as_deref()).await?;
+                        client
+                            .connect(mongo_legacy_connect_params(&config, &host, port)?)
+                            .await
+                            .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
+                        let version = client
+                            .mongo_server_version::<String>(config.effective_database().unwrap_or("admin"))
+                            .await
+                            .ok();
+                        client.disconnect().await.ok();
+                        return Ok(ConnectionTestResult::success("Connection successful (via legacy driver)")
+                            .with_database_info(version.map(|product_version| DatabaseConnectionInfo {
+                                product_name: Some("MongoDB".to_string()),
+                                product_version: Some(product_version),
+                                current_database: config.effective_database().map(str::to_string),
+                                driver_name: Some("MongoDB legacy Agent".to_string()),
+                                ..Default::default()
+                            })));
                     }
-                    Err(e) => Err(e),
-                }
-            }
-            DatabaseType::Redis => {
-                // Keep the result inside the outer lifecycle so temporary transports
-                // are reset after both successful and failed Redis tests.
-                match test_redis_connection(state, &tunnel_id, &config, &host, port, connect_timeout).await {
-                    Ok(info) => {
-                        database_info = info;
-                        Ok("Connection successful".to_string())
-                    }
-                    Err(error) => Err(error),
-                }
-            }
-            #[cfg(feature = "duckdb-sidecar")]
-            DatabaseType::DuckDb => {
-                state.test_duckdb_connection_config(&config).await?;
-                Ok("Connection successful".to_string())
-            }
-            #[cfg(not(feature = "duckdb-sidecar"))]
-            DatabaseType::DuckDb => Err("DuckDB support is not compiled in this build".to_string()),
-            DatabaseType::MongoDb => {
-                let uses_oidc = db::mongo_driver::mongo_uri_uses_oidc(&url);
-                if mongo_uses_legacy_driver(&config) && !uses_oidc {
-                    let am = &state.agent_manager;
-                    let mut client = am.spawn(&config.db_type, config.driver_profile.as_deref()).await?;
-                    client
-                        .connect(mongo_legacy_connect_params(&config, &host, port)?)
-                        .await
-                        .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
-                    let version = client
-                        .mongo_server_version::<String>(config.effective_database().unwrap_or("admin"))
-                        .await
-                        .ok();
-                    client.disconnect().await.ok();
-                    return Ok(ConnectionTestResult::success("Connection successful (via legacy driver)")
-                        .with_database_info(version.map(|product_version| DatabaseConnectionInfo {
+
+                    let native_err = match db::mongo_driver::connect_with_oidc(
+                        &url,
+                        connect_timeout,
+                        idle_timeout,
+                        state.mongo_oidc_browser_opener(),
+                    )
+                    .await
+                    {
+                        Ok(client) => {
+                            match db::mongo_driver::test_connection_for_url(
+                                &client,
+                                &url,
+                                connect_timeout,
+                                config.effective_database(),
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    let info = db::mongo_driver::database_connection_info(
+                                        &client,
+                                        config.effective_database(),
+                                    )
+                                    .await
+                                    .ok();
+                                    return Ok(
+                                        ConnectionTestResult::success("Connection successful").with_database_info(info)
+                                    );
+                                }
+                                Err(e) => e,
+                            }
+                        }
+                        Err(e) => e,
+                    };
+                    if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
+                        let mut client =
+                            spawn_mongo_legacy_fallback_agent(state.as_ref(), &config.db_type, &native_err).await?;
+                        client.connect(mongo_legacy_connect_params(&config, &host, port)?).await.map_err(|err| {
+                            mongo_legacy_fallback_error(
+                                &native_err,
+                                "Fallback with MongoDB (Legacy) driver failed",
+                                &mongo_legacy_error_with_auth_hint(&err),
+                            )
+                        })?;
+                        let version = client
+                            .mongo_server_version::<String>(config.effective_database().unwrap_or("admin"))
+                            .await
+                            .ok();
+                        client.disconnect().await.ok();
+                        database_info = version.map(|product_version| DatabaseConnectionInfo {
                             product_name: Some("MongoDB".to_string()),
                             product_version: Some(product_version),
                             current_database: config.effective_database().map(str::to_string),
                             driver_name: Some("MongoDB legacy Agent".to_string()),
                             ..Default::default()
-                        })));
-                }
-
-                let native_err = match db::mongo_driver::connect_with_oidc(
-                    &url,
-                    connect_timeout,
-                    idle_timeout,
-                    state.mongo_oidc_browser_opener(),
-                )
-                .await
-                {
-                    Ok(client) => {
-                        match db::mongo_driver::test_connection_for_url(
-                            &client,
-                            &url,
-                            connect_timeout,
-                            config.effective_database(),
-                        )
-                        .await
-                        {
-                            Ok(()) => {
-                                let info =
-                                    db::mongo_driver::database_connection_info(&client, config.effective_database())
-                                        .await
-                                        .ok();
-                                return Ok(
-                                    ConnectionTestResult::success("Connection successful").with_database_info(info)
-                                );
-                            }
-                            Err(e) => e,
-                        }
+                        });
+                        Ok("Connection successful (via legacy driver)".to_string())
+                    } else {
+                        Err(native_err)
                     }
-                    Err(e) => e,
-                };
-                if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
-                    let mut client =
-                        spawn_mongo_legacy_fallback_agent(state.as_ref(), &config.db_type, &native_err).await?;
-                    client.connect(mongo_legacy_connect_params(&config, &host, port)?).await.map_err(|err| {
-                        mongo_legacy_fallback_error(
-                            &native_err,
-                            "Fallback with MongoDB (Legacy) driver failed",
-                            &mongo_legacy_error_with_auth_hint(&err),
-                        )
-                    })?;
-                    let version = client
-                        .mongo_server_version::<String>(config.effective_database().unwrap_or("admin"))
+                }
+                DatabaseType::DynamoDb => {
+                    let client = db::dynamodb_driver::connect(&config, &host, port)?;
+                    db::dynamodb_driver::test_connection(&client, connect_timeout)
                         .await
-                        .ok();
-                    client.disconnect().await.ok();
-                    database_info = version.map(|product_version| DatabaseConnectionInfo {
-                        product_name: Some("MongoDB".to_string()),
-                        product_version: Some(product_version),
-                        current_database: config.effective_database().map(str::to_string),
-                        driver_name: Some("MongoDB legacy Agent".to_string()),
+                        .map(|_| "Connection successful".to_string())
+                }
+                DatabaseType::ClickHouse => {
+                    let username = if config.username.is_empty() { None } else { Some(config.username.clone()) };
+                    let password = if config.password.is_empty() { None } else { Some(config.password.clone()) };
+                    let client = db::clickhouse_driver::ChClient::new_with_ca_cert_and_proxy(
+                        &url,
+                        username,
+                        password,
+                        Some(&config.ca_cert_path),
+                        config.url_params.as_deref(),
+                        clickhouse_http_proxy(runtime_proxy.as_ref())?,
+                        connect_timeout,
+                    )?;
+                    db::clickhouse_driver::test_connection(&client, connect_timeout)
+                        .await
+                        .map(|_| "Connection successful".to_string())
+                }
+                DatabaseType::SqlServer => {
+                    match state.test_sqlserver_connection_with_info(&config, &host, port, connect_timeout).await {
+                        Ok(details) => {
+                            database_info = details.database_info;
+                            Ok(details.message)
+                        }
+                        Err(err) => Err(err),
+                    }
+                }
+                DatabaseType::Elasticsearch => {
+                    let mut client = db::elasticsearch_driver::EsClient::from_config(
+                        &url,
+                        Some(&config.username),
+                        Some(&config.password),
+                        config.ssl,
+                        config.url_params.as_deref(),
+                        config.external_config.as_ref(),
+                        connect_timeout,
+                        Some(config.ca_cert_path.as_str()),
+                        Some(config.client_cert_path.as_str()),
+                        Some(config.client_key_path.as_str()),
+                    )?;
+                    db::elasticsearch_driver::test_connection(&mut client, connect_timeout)
+                        .await
+                        .map(|_| "Connection successful".to_string())
+                }
+                DatabaseType::Salesforce => {
+                    let client = db::salesforce_driver::SfClient::from_config(
+                        &url,
+                        Some(&config.password),
+                        config.external_config.as_ref(),
+                        connect_timeout,
+                    )?;
+                    db::salesforce_driver::SfClient::test_connection(&client, connect_timeout)
+                        .await
+                        .map(|_| "Connection successful".to_string())
+                }
+                DatabaseType::Easysearch => {
+                    let mut client = db::easysearch_driver::EasysearchClient::from_config(
+                        &url,
+                        Some(&config.username),
+                        Some(&config.password),
+                        config.ssl,
+                        config.url_params.as_deref(),
+                        config.external_config.as_ref(),
+                        connect_timeout,
+                        Some(config.ca_cert_path.as_str()),
+                        Some(config.client_cert_path.as_str()),
+                        Some(config.client_key_path.as_str()),
+                    )?;
+                    db::easysearch_driver::test_connection(&mut client, connect_timeout)
+                        .await
+                        .map(|_| "Connection successful".to_string())
+                }
+                DatabaseType::Solr => {
+                    let mut client = db::solr_driver::SolrClient::from_config(
+                        &url,
+                        Some(&config.username),
+                        Some(&config.password),
+                        config.ssl,
+                        config.url_params.as_deref(),
+                        config.external_config.as_ref(),
+                        connect_timeout,
+                        Some(config.ca_cert_path.as_str()),
+                        Some(config.client_cert_path.as_str()),
+                        Some(config.client_key_path.as_str()),
+                    )?;
+                    db::solr_driver::test_connection(&mut client, connect_timeout)
+                        .await
+                        .map(|_| "Connection successful".to_string())
+                }
+                DatabaseType::CouchDb => {
+                    let client = db::couchdb_driver::CouchDbClient::from_config(
+                        &url,
+                        Some(&config.username),
+                        Some(&config.password),
+                        config.ssl,
+                        config.url_params.as_deref(),
+                        config.external_config.as_ref(),
+                        connect_timeout,
+                        Some(config.ca_cert_path.as_str()),
+                        Some(config.client_cert_path.as_str()),
+                        Some(config.client_key_path.as_str()),
+                    )?;
+                    db::couchdb_driver::test_connection(&client, connect_timeout).await?;
+                    database_info = db::couchdb_driver::database_connection_info(&client).await.ok();
+                    Ok("Connection successful".to_string())
+                }
+                DatabaseType::Meilisearch => {
+                    let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
+                        &url,
+                        Some(&config.password),
+                        config.ssl,
+                        config.url_params.as_deref(),
+                        config.external_config.as_ref(),
+                        connect_timeout,
+                    )?;
+                    db::meilisearch_driver::test_connection(&client, connect_timeout).await?;
+                    database_info = db::meilisearch_driver::database_connection_info(&client).await.ok();
+                    Ok("Connection successful".to_string())
+                }
+                DatabaseType::Hbase => {
+                    let client = db::hbase_driver::HBaseClient::new(
+                        &url,
+                        Some(&config.username),
+                        Some(&config.password),
+                        false,
+                        connect_timeout,
+                    )?;
+                    db::hbase_driver::test_connection(&client, connect_timeout).await?;
+                    database_info = db::hbase_driver::database_connection_info(&client).await.ok().flatten();
+                    Ok("Connection successful".to_string())
+                }
+                DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb => {
+                    let kind = match config.db_type {
+                        DatabaseType::Qdrant => db::vector_driver::VectorDbKind::Qdrant,
+                        DatabaseType::Milvus => db::vector_driver::VectorDbKind::Milvus,
+                        DatabaseType::Weaviate => db::vector_driver::VectorDbKind::Weaviate,
+                        DatabaseType::ChromaDb => db::vector_driver::VectorDbKind::ChromaDb,
+                        _ => unreachable!(),
+                    };
+                    let client = db::vector_driver::VectorClient::new(
+                        kind,
+                        &url,
+                        Some(&config.username),
+                        Some(&config.password),
+                        config.ssl,
+                        connect_timeout,
+                    )
+                    .with_database(config.database.as_deref());
+                    db::vector_driver::test_connection(&client, connect_timeout)
+                        .await
+                        .map(|_| "Connection successful".to_string())
+                }
+                DatabaseType::Rqlite => {
+                    let client = db::rqlite_driver::RqliteClient::new(
+                        &url,
+                        config.url_params.as_deref(),
+                        &config.username,
+                        &config.password,
+                        config.ssl,
+                        connect_timeout,
+                    )?;
+                    db::rqlite_driver::test_connection(&client, connect_timeout)
+                        .await
+                        .map(|_| "Connection successful".to_string())
+                }
+                DatabaseType::Turso => {
+                    let auth_token = if !config.password.is_empty() {
+                        config.password.clone()
+                    } else {
+                        config
+                            .url_params
+                            .as_deref()
+                            .and_then(|p| {
+                                p.trim()
+                                    .trim_start_matches('?')
+                                    .split('&')
+                                    .filter_map(|pair| pair.split_once('='))
+                                    .find(|(key, _)| {
+                                        let k = key.trim().to_ascii_lowercase();
+                                        k == "auth_token" || k == "authtoken" || k == "auth-token"
+                                    })
+                                    .map(|(_, value)| value.trim().to_string())
+                            })
+                            .unwrap_or_default()
+                    };
+                    // Route the test through the same transport-layer proxy resolution the
+                    // real connect uses: a test that bypasses the proxy may succeed while
+                    // the real connect fails through the proxy.
+                    let proxy = clickhouse_http_proxy(runtime_proxy.as_ref())?;
+                    let client = db::turso_driver::TursoClient::new_with_options(
+                        &url,
+                        &auth_token,
+                        config.ssl,
+                        connect_timeout,
+                        Some(config.ca_cert_path.as_str()),
+                        Some(config.client_cert_path.as_str()),
+                        Some(config.client_key_path.as_str()),
+                        proxy,
+                    )?;
+                    db::turso_driver::test_connection(&client, connect_timeout)
+                        .await
+                        .map(|_| "Connection successful".to_string())
+                }
+                DatabaseType::CloudflareD1 => db::cloudflare_d1_driver::connect(&config, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string()),
+                DatabaseType::InfluxDb => {
+                    let client = db::influxdb_driver::InfluxdbClient::new_for_config(&url, &config, connect_timeout)?;
+                    db::influxdb_driver::test_connection(&client, connect_timeout)
+                        .await
+                        .map(|_| "Connection successful".to_string())
+                }
+                DatabaseType::InfluxDb3 => {
+                    let client = db::influxdb3_driver::Influxdb3Client::new_for_config(&url, &config, connect_timeout)?;
+                    db::influxdb3_driver::test_connection(&client, connect_timeout)
+                        .await
+                        .map(|_| "Connection successful".to_string())
+                }
+                DatabaseType::VictoriaMetrics => {
+                    let client = db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(
+                        &url,
+                        &config,
+                        connect_timeout,
+                    )?;
+                    db::victoriametrics_driver::test_connection(&client, connect_timeout).await?;
+                    database_info =
+                        db::victoriametrics_driver::database_connection_info(&client, connect_timeout).await.ok();
+                    Ok("Connection successful".to_string())
+                }
+                DatabaseType::Nacos => {
+                    let admin_config = state.nacos_admin_config_for_connection(connection_id, &config).await?;
+                    let adapter = state.nacos_registry.build_transient_config(admin_config).await?;
+                    let info = adapter.test_connection_with_scope_validation().await?;
+                    database_info = dbx_core::nacos::service::database_info_from_connection(&info);
+                    Ok("Connection successful".to_string())
+                }
+                DatabaseType::Consul => {
+                    let mut consul_config = dbx_core::consul::ConsulConfig::from_connection(&config)?;
+                    let validate_agent_target = consul_config.agent_target.is_some();
+                    let original_host = consul_config.base_url.host_str().unwrap_or_default();
+                    let original_port = consul_config.base_url.port_or_known_default().unwrap_or(config.port);
+                    if host != original_host || port != original_port {
+                        consul_config = consul_config.with_connect_override(&host, port);
+                    }
+                    let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
+                    client.probe().await?;
+                    let identity = if validate_agent_target {
+                        Some(client.validate_configured_agent_target().await?)
+                    } else {
+                        client.agent_self().await.ok()
+                    };
+                    database_info = identity.as_ref().map(|identity| DatabaseConnectionInfo {
+                        product_name: Some("Consul".to_string()),
+                        product_version: identity.version.clone(),
+                        server_comment: Some(format!("Agent {}", identity.node)),
+                        driver_name: Some("Consul HTTP API".to_string()),
                         ..Default::default()
                     });
-                    Ok("Connection successful (via legacy driver)".to_string())
-                } else {
-                    Err(native_err)
-                }
-            }
-            DatabaseType::DynamoDb => {
-                let client = db::dynamodb_driver::connect(&config, &host, port)?;
-                db::dynamodb_driver::test_connection(&client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
-            }
-            DatabaseType::ClickHouse => {
-                let username = if config.username.is_empty() { None } else { Some(config.username.clone()) };
-                let password = if config.password.is_empty() { None } else { Some(config.password.clone()) };
-                let client = db::clickhouse_driver::ChClient::new_with_ca_cert_and_proxy(
-                    &url,
-                    username,
-                    password,
-                    Some(&config.ca_cert_path),
-                    config.url_params.as_deref(),
-                    clickhouse_http_proxy(runtime_proxy.as_ref())?,
-                    connect_timeout,
-                )?;
-                db::clickhouse_driver::test_connection(&client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
-            }
-            DatabaseType::SqlServer => {
-                match state.test_sqlserver_connection_with_info(&config, &host, port, connect_timeout).await {
-                    Ok(details) => {
-                        database_info = details.database_info;
-                        Ok(details.message)
-                    }
-                    Err(err) => Err(err),
-                }
-            }
-            DatabaseType::Elasticsearch => {
-                let mut client = db::elasticsearch_driver::EsClient::from_config(
-                    &url,
-                    Some(&config.username),
-                    Some(&config.password),
-                    config.ssl,
-                    config.url_params.as_deref(),
-                    config.external_config.as_ref(),
-                    connect_timeout,
-                    Some(config.ca_cert_path.as_str()),
-                    Some(config.client_cert_path.as_str()),
-                    Some(config.client_key_path.as_str()),
-                )?;
-                db::elasticsearch_driver::test_connection(&mut client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
-            }
-            DatabaseType::Salesforce => {
-                let client = db::salesforce_driver::SfClient::from_config(
-                    &url,
-                    Some(&config.password),
-                    config.external_config.as_ref(),
-                    connect_timeout,
-                )?;
-                db::salesforce_driver::SfClient::test_connection(&client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
-            }
-            DatabaseType::Easysearch => {
-                let mut client = db::easysearch_driver::EasysearchClient::from_config(
-                    &url,
-                    Some(&config.username),
-                    Some(&config.password),
-                    config.ssl,
-                    config.url_params.as_deref(),
-                    config.external_config.as_ref(),
-                    connect_timeout,
-                    Some(config.ca_cert_path.as_str()),
-                    Some(config.client_cert_path.as_str()),
-                    Some(config.client_key_path.as_str()),
-                )?;
-                db::easysearch_driver::test_connection(&mut client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
-            }
-            DatabaseType::Solr => {
-                let mut client = db::solr_driver::SolrClient::from_config(
-                    &url,
-                    Some(&config.username),
-                    Some(&config.password),
-                    config.ssl,
-                    config.url_params.as_deref(),
-                    config.external_config.as_ref(),
-                    connect_timeout,
-                    Some(config.ca_cert_path.as_str()),
-                    Some(config.client_cert_path.as_str()),
-                    Some(config.client_key_path.as_str()),
-                )?;
-                db::solr_driver::test_connection(&mut client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
-            }
-            DatabaseType::CouchDb => {
-                let client = db::couchdb_driver::CouchDbClient::from_config(
-                    &url,
-                    Some(&config.username),
-                    Some(&config.password),
-                    config.ssl,
-                    config.url_params.as_deref(),
-                    config.external_config.as_ref(),
-                    connect_timeout,
-                    Some(config.ca_cert_path.as_str()),
-                    Some(config.client_cert_path.as_str()),
-                    Some(config.client_key_path.as_str()),
-                )?;
-                db::couchdb_driver::test_connection(&client, connect_timeout).await?;
-                database_info = db::couchdb_driver::database_connection_info(&client).await.ok();
-                Ok("Connection successful".to_string())
-            }
-            DatabaseType::Meilisearch => {
-                let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
-                    &url,
-                    Some(&config.password),
-                    config.ssl,
-                    config.url_params.as_deref(),
-                    config.external_config.as_ref(),
-                    connect_timeout,
-                )?;
-                db::meilisearch_driver::test_connection(&client, connect_timeout).await?;
-                database_info = db::meilisearch_driver::database_connection_info(&client).await.ok();
-                Ok("Connection successful".to_string())
-            }
-            DatabaseType::Hbase => {
-                let client = db::hbase_driver::HBaseClient::new(
-                    &url,
-                    Some(&config.username),
-                    Some(&config.password),
-                    false,
-                    connect_timeout,
-                )?;
-                db::hbase_driver::test_connection(&client, connect_timeout).await?;
-                database_info = db::hbase_driver::database_connection_info(&client).await.ok().flatten();
-                Ok("Connection successful".to_string())
-            }
-            DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb => {
-                let kind = match config.db_type {
-                    DatabaseType::Qdrant => db::vector_driver::VectorDbKind::Qdrant,
-                    DatabaseType::Milvus => db::vector_driver::VectorDbKind::Milvus,
-                    DatabaseType::Weaviate => db::vector_driver::VectorDbKind::Weaviate,
-                    DatabaseType::ChromaDb => db::vector_driver::VectorDbKind::ChromaDb,
-                    _ => unreachable!(),
-                };
-                let client = db::vector_driver::VectorClient::new(
-                    kind,
-                    &url,
-                    Some(&config.username),
-                    Some(&config.password),
-                    config.ssl,
-                    connect_timeout,
-                )
-                .with_database(config.database.as_deref());
-                db::vector_driver::test_connection(&client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
-            }
-            DatabaseType::Rqlite => {
-                let client = db::rqlite_driver::RqliteClient::new(
-                    &url,
-                    config.url_params.as_deref(),
-                    &config.username,
-                    &config.password,
-                    config.ssl,
-                    connect_timeout,
-                )?;
-                db::rqlite_driver::test_connection(&client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
-            }
-            DatabaseType::Turso => {
-                let auth_token = if !config.password.is_empty() {
-                    config.password.clone()
-                } else {
-                    config
-                        .url_params
-                        .as_deref()
-                        .and_then(|p| {
-                            p.trim()
-                                .trim_start_matches('?')
-                                .split('&')
-                                .filter_map(|pair| pair.split_once('='))
-                                .find(|(key, _)| {
-                                    let k = key.trim().to_ascii_lowercase();
-                                    k == "auth_token" || k == "authtoken" || k == "auth-token"
-                                })
-                                .map(|(_, value)| value.trim().to_string())
+                    Ok(identity
+                        .map(|identity| {
+                            format!("Connection successful (Agent: {} at {})", identity.node, identity.address)
                         })
-                        .unwrap_or_default()
-                };
-                // Route the test through the same transport-layer proxy resolution the
-                // real connect uses: a test that bypasses the proxy may succeed while
-                // the real connect fails through the proxy.
-                let proxy = clickhouse_http_proxy(runtime_proxy.as_ref())?;
-                let client = db::turso_driver::TursoClient::new_with_options(
-                    &url,
-                    &auth_token,
-                    config.ssl,
-                    connect_timeout,
-                    Some(config.ca_cert_path.as_str()),
-                    Some(config.client_cert_path.as_str()),
-                    Some(config.client_key_path.as_str()),
-                    proxy,
-                )?;
-                db::turso_driver::test_connection(&client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
-            }
-            DatabaseType::CloudflareD1 => db::cloudflare_d1_driver::connect(&config, connect_timeout)
-                .await
-                .map(|_| "Connection successful".to_string()),
-            DatabaseType::InfluxDb => {
-                let client = db::influxdb_driver::InfluxdbClient::new_for_config(&url, &config, connect_timeout)?;
-                db::influxdb_driver::test_connection(&client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
-            }
-            DatabaseType::InfluxDb3 => {
-                let client = db::influxdb3_driver::Influxdb3Client::new_for_config(&url, &config, connect_timeout)?;
-                db::influxdb3_driver::test_connection(&client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
-            }
-            DatabaseType::VictoriaMetrics => {
-                let client =
-                    db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(&url, &config, connect_timeout)?;
-                db::victoriametrics_driver::test_connection(&client, connect_timeout).await?;
-                database_info =
-                    db::victoriametrics_driver::database_connection_info(&client, connect_timeout).await.ok();
-                Ok("Connection successful".to_string())
-            }
-            DatabaseType::Nacos => {
-                let admin_config = state.nacos_admin_config_for_connection(connection_id, &config).await?;
-                let adapter = state.nacos_registry.build_transient_config(admin_config).await?;
-                let info = adapter.test_connection_with_scope_validation().await?;
-                database_info = dbx_core::nacos::service::database_info_from_connection(&info);
-                Ok("Connection successful".to_string())
-            }
-            DatabaseType::Consul => {
-                let mut consul_config = dbx_core::consul::ConsulConfig::from_connection(&config)?;
-                let validate_agent_target = consul_config.agent_target.is_some();
-                let original_host = consul_config.base_url.host_str().unwrap_or_default();
-                let original_port = consul_config.base_url.port_or_known_default().unwrap_or(config.port);
-                if host != original_host || port != original_port {
-                    consul_config = consul_config.with_connect_override(&host, port);
+                        .unwrap_or_else(|| {
+                            "Connection successful (Agent identity unavailable; Agent writes disabled)".to_string()
+                        }))
                 }
-                let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
-                client.probe().await?;
-                let identity = if validate_agent_target {
-                    Some(client.validate_configured_agent_target().await?)
-                } else {
-                    client.agent_self().await.ok()
-                };
-                database_info = identity.as_ref().map(|identity| DatabaseConnectionInfo {
-                    product_name: Some("Consul".to_string()),
-                    product_version: identity.version.clone(),
-                    server_comment: Some(format!("Agent {}", identity.node)),
-                    driver_name: Some("Consul HTTP API".to_string()),
-                    ..Default::default()
-                });
-                Ok(identity
-                    .map(|identity| format!("Connection successful (Agent: {} at {})", identity.node, identity.address))
-                    .unwrap_or_else(|| {
-                        "Connection successful (Agent identity unavailable; Agent writes disabled)".to_string()
-                    }))
-            }
-            #[cfg(feature = "mq-admin")]
-            DatabaseType::MessageQueue => {
-                // Probe with a transient adapter so Test Connection never retains/replaces
-                // a live cached MQ agent for this connection id (same pattern as Nacos).
-                let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
-                let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, state);
-                let adapter = state.mq_registry.build_transient_config(mqc, agent_launch).await?;
-                let info = adapter.test_connection().await?;
-                database_info = Some(DatabaseConnectionInfo {
-                    product_name: Some(
-                        match info.system_kind {
-                            dbx_core::mq::types::MqSystemKind::Pulsar => "Pulsar",
-                            dbx_core::mq::types::MqSystemKind::Kafka => "Kafka",
-                            dbx_core::mq::types::MqSystemKind::RocketMq => "RocketMQ",
-                            dbx_core::mq::types::MqSystemKind::RabbitMq => "RabbitMQ",
-                        }
+                #[cfg(feature = "mq-admin")]
+                DatabaseType::MessageQueue => {
+                    // Probe with a transient adapter so Test Connection never retains/replaces
+                    // a live cached MQ agent for this connection id (same pattern as Nacos).
+                    let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
+                    let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, state);
+                    let adapter = state.mq_registry.build_transient_config(mqc, agent_launch).await?;
+                    let info = adapter.test_connection().await?;
+                    database_info = Some(DatabaseConnectionInfo {
+                        product_name: Some(
+                            match info.system_kind {
+                                dbx_core::mq::types::MqSystemKind::Pulsar => "Pulsar",
+                                dbx_core::mq::types::MqSystemKind::Kafka => "Kafka",
+                                dbx_core::mq::types::MqSystemKind::RocketMq => "RocketMQ",
+                                dbx_core::mq::types::MqSystemKind::RabbitMq => "RabbitMQ",
+                            }
+                            .to_string(),
+                        ),
+                        product_version: info.server_version,
+                        driver_name: Some("Message Queue Admin API".to_string()),
+                        ..Default::default()
+                    });
+                    Ok("Connection successful".to_string())
+                }
+                #[cfg(not(feature = "mq-admin"))]
+                DatabaseType::MessageQueue => Err(
+                    "Message queue admin support is not compiled in this build. Rebuild with the 'mq-admin' feature."
                         .to_string(),
-                    ),
-                    product_version: info.server_version,
-                    driver_name: Some("Message Queue Admin API".to_string()),
-                    ..Default::default()
-                });
-                Ok("Connection successful".to_string())
-            }
-            #[cfg(not(feature = "mq-admin"))]
-            DatabaseType::MessageQueue => {
-                Err("Message queue admin support is not compiled in this build. Rebuild with the 'mq-admin' feature."
-                    .to_string())
-            }
-            #[cfg(feature = "mq-admin")]
-            DatabaseType::Mqtt => {
-                let mqtt_config = dbx_core::mqtt::types::MqttConnectionConfig::from_connection(&config)?;
-                let client = dbx_core::mqtt::client::MqttClient::connect(mqtt_config).await?;
-                client.disconnect().await;
-                Ok("Connection successful".to_string())
-            }
-            #[cfg(not(feature = "mq-admin"))]
-            DatabaseType::Mqtt => {
-                Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string())
-            }
-            db_type if database_capabilities::is_agent_type(&db_type) => {
-                match test_agent_connection(state, &config, &host, port).await {
-                    Ok(details) => {
-                        database_info = details.database_info;
-                        Ok(details.message)
-                    }
-                    Err(err) => Err(err),
+                ),
+                #[cfg(feature = "mq-admin")]
+                DatabaseType::Mqtt => {
+                    let mqtt_config = dbx_core::mqtt::types::MqttConnectionConfig::from_connection(&config)?;
+                    let client = dbx_core::mqtt::client::MqttClient::connect(mqtt_config).await?;
+                    client.disconnect().await;
+                    Ok("Connection successful".to_string())
                 }
-            }
-            DatabaseType::PrestoSql => {
-                let jdbc_config = prestosql_jdbc_config_for_endpoint(&config, &host, port)?;
-                match state.test_external_driver_with_info("jdbc", &jdbc_config).await {
-                    Ok(details) => {
-                        database_info = details.database_info;
-                        Ok(details.message)
-                    }
-                    Err(err) => Err(err),
+                #[cfg(not(feature = "mq-admin"))]
+                DatabaseType::Mqtt => {
+                    Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string())
                 }
-            }
-            DatabaseType::Jdbc => {
-                let jdbc_config = jdbc_command_config_for_endpoint(&config, &host, port)?;
-                match state.test_external_driver_with_info("jdbc", &jdbc_config).await {
-                    Ok(details) => {
-                        database_info = details.database_info;
-                        Ok(details.message)
+                db_type if database_capabilities::is_agent_type(&db_type) => {
+                    match test_agent_connection(state, &config, &host, port, prepared.stamp.agent_launch_env()).await {
+                        Ok(details) => {
+                            database_info = details.database_info;
+                            Ok(details.message)
+                        }
+                        Err(err) => Err(err),
                     }
-                    Err(err) => Err(err),
                 }
-            }
-            db_type => Err(format!("Unsupported database type: {db_type:?}")),
-        },
-    };
+                DatabaseType::PrestoSql => {
+                    let jdbc_config = prestosql_jdbc_config_for_endpoint(&config, &host, port)?;
+                    match state.test_external_driver_with_info("jdbc", &jdbc_config).await {
+                        Ok(details) => {
+                            database_info = details.database_info;
+                            Ok(details.message)
+                        }
+                        Err(err) => Err(err),
+                    }
+                }
+                DatabaseType::Jdbc => {
+                    let jdbc_config = jdbc_command_config_for_endpoint(&config, &host, port)?;
+                    match state.test_external_driver_with_info("jdbc", &jdbc_config).await {
+                        Ok(details) => {
+                            database_info = details.database_info;
+                            Ok(details.message)
+                        }
+                        Err(err) => Err(err),
+                    }
+                }
+                db_type => Err(format!("Unsupported database type: {db_type:?}")),
+            },
+        };
 
-    if has_transport_layers {
-        state.reset_connection_transport_for_config(&tunnel_id, &config).await;
+        result.map(|message| ConnectionTestResult::success(message).with_database_info(database_info))
     }
-
-    result.map(|message| ConnectionTestResult::success(message).with_database_info(database_info))
+    .await;
+    state.reset_connection_transport_if_current(connection_id, &prepared.stamp).await;
+    result
 }
 
 /// Normalize legacy RocketMQ ACL copies and capture no-save SK before either
@@ -2127,15 +2221,25 @@ pub async fn connect_db(
 ) -> Result<String, String> {
     let (config, password) = prepare_rocketmq_runtime_config(config);
     let app = state.inner().clone();
-    let token = password.as_deref().and_then(|password| app.session_credentials.set("", &config.id, password));
-    let result = connect_db_inner(state, config, client_attempt).await;
-    if result.is_err() {
-        if let Some(token) = token {
-            // A stale failed attempt must not remove a newer attempt's credential.
-            app.session_credentials.remove_if_current(&token);
-        }
-    }
-    result
+    let access = dbx_core::query::pl_debug::PlDebugAccess::desktop();
+    let permit = dbx_core::query::pl_debug::pl_debug_claim_mutation_core(
+        &app,
+        Some(&access),
+        dbx_core::query::pl_debug::PlDebugMutationScope::Connections(vec![config.id.clone()]),
+    )?;
+    permit
+        .after_debug_cleanup(async {
+            let token = password.as_deref().and_then(|password| app.session_credentials.set("", &config.id, password));
+            let result = connect_db_inner(state, config, client_attempt).await;
+            if result.is_err() {
+                if let Some(token) = token {
+                    // A stale failed attempt must not remove a newer attempt's credential.
+                    app.session_credentials.remove_if_current(&token);
+                }
+            }
+            result
+        })
+        .await
 }
 
 async fn connect_db_inner(
@@ -2167,452 +2271,459 @@ async fn connect_db_inner(
     // 同连接其他 tab 的活跃终端一起杀死。用户显式断开仍走 disconnect_db 的
     // 完整关闭路径（会发 disconnect）。其他类型维持 detached 关闭不变。
     if db_config.db_type == DatabaseType::Plugin {
-        state.drop_connection_pools_without_close(&id).await;
+        state.drop_connection_pools_without_close_checked(&id).await?;
     } else {
-        state.remove_connection_pools_detached(&id).await;
+        state.remove_connection_pools_detached_checked(&id).await?;
     }
     drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&id)).await;
-    state.reset_connection_transport_for_config(&id, &db_config).await;
+    let prepared = state.connection_endpoint_attempt(&id, &db_config).await?;
+    let result = async {
+        let endpoint = prepared.endpoint?;
+        let (host, port) = (endpoint.host, endpoint.port);
+        let runtime_proxy = endpoint.proxy;
+        state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
+        if db_config.db_type != DatabaseType::Plugin {
+            probe_connection_endpoint(&db_config, &host, port).await?;
+        }
+        state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
+        let url = connection_url_for_endpoint(&db_config, &host, port);
+        let connect_timeout = std::time::Duration::from_secs(db_config.effective_connect_timeout_secs());
+        let idle_timeout = std::time::Duration::from_secs(db_config.idle_timeout_secs);
+        let gaussdb_m_jdbc_config = gaussdb_m_jdbc_command_config(&db_config, &host, port);
 
-    let endpoint = state.plugin_connection_endpoint(&id, &db_config).await?;
-    let (host, port) = (endpoint.host, endpoint.port);
-    let runtime_proxy = endpoint.proxy;
-    if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
-        state.reset_connection_transport_for_config(&id, &db_config).await;
-        return Err(err);
-    }
-    if db_config.db_type != DatabaseType::Plugin {
-        probe_connection_endpoint(&db_config, &host, port).await?;
-    }
-    if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
-        state.reset_connection_transport_for_config(&id, &db_config).await;
-        return Err(err);
-    }
-    let url = connection_url_for_endpoint(&db_config, &host, port);
-    let connect_timeout = std::time::Duration::from_secs(db_config.effective_connect_timeout_secs());
-    let idle_timeout = std::time::Duration::from_secs(db_config.idle_timeout_secs);
-    let gaussdb_m_jdbc_config = gaussdb_m_jdbc_command_config(&db_config, &host, port);
-
-    let pool = match db_config.db_type {
-        DatabaseType::Mysql => {
-            let (pool, mode) =
-                connect_mysql_metadata_pool(&config, &db_config, &host, port, connect_timeout, 3).await?;
-            PoolKind::Mysql(pool, mode)
-        }
-        DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch => PoolKind::Mysql(
-            connect_bare_metadata_pool(&db_config, &host, port, connect_timeout, 3).await?,
-            MysqlMode::Bare,
-        ),
-        DatabaseType::Gaussdb if gaussdb_m_jdbc_config.is_some() => {
-            state.external_driver_pool("jdbc", gaussdb_m_jdbc_config.as_ref().expect("checked above")).await?
-        }
-        DatabaseType::Postgres
-        | DatabaseType::Redshift
-        | DatabaseType::Gaussdb
-        | DatabaseType::Kwdb
-        | DatabaseType::Questdb
-        | DatabaseType::OpenGauss => PoolKind::Postgres(db::postgres::connect(&url, connect_timeout).await?),
-        DatabaseType::Sqlite => PoolKind::Sqlite(
-            connect_sqlite_from_config_with_state(Some(state.inner().as_ref()), &id, &db_config).await?,
-        ),
-        DatabaseType::Redis => {
-            let con = if db_config.uses_redis_cluster() {
-                db::redis_driver::RedisConnection::Cluster(state.connect_redis_cluster(&id, &db_config).await?)
-            } else if db_config.uses_redis_sentinel() {
-                db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
-                    state.connect_redis_sentinel(&id, &db_config).await?,
-                ))
-            } else {
-                db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
-                    db::redis_driver::connect_standalone(&db_config, &host, port, connect_timeout).await?,
-                ))
-            };
-            PoolKind::Redis(Arc::new(con))
-        }
-        #[cfg(feature = "duckdb-sidecar")]
-        DatabaseType::DuckDb => state.create_duckdb_pool(&db_config).await?,
-        #[cfg(not(feature = "duckdb-sidecar"))]
-        DatabaseType::DuckDb => return Err("DuckDB support is not compiled in this build".to_string()),
-        DatabaseType::MongoDb => {
-            let uses_oidc = db::mongo_driver::mongo_uri_uses_oidc(&url);
-            if mongo_uses_legacy_driver(&db_config) && !uses_oidc {
-                let mut client =
-                    state.agent_manager.spawn(&db_config.db_type, Some(MONGO_LEGACY_DRIVER_PROFILE)).await?;
-                state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
-                client
-                    .connect(mongo_legacy_connect_params(&db_config, &host, port)?)
-                    .await
-                    .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
-                state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
-                PoolKind::agent(client)
-            } else {
-                let native_err = match db::mongo_driver::connect_with_oidc(
-                    &url,
-                    connect_timeout,
-                    idle_timeout,
-                    state.mongo_oidc_browser_opener(),
-                )
-                .await
-                {
-                    Ok(client) => {
-                        state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
-                        match db::mongo_driver::test_connection_for_url(
-                            &client,
-                            &url,
-                            connect_timeout,
-                            db_config.effective_database(),
-                        )
-                        .await
-                        {
-                            Ok(()) => {
-                                state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
-                                if let Err(err) = state
-                                    .insert_connection_pool_for_attempt(
-                                        &id,
-                                        attempt,
-                                        id.clone(),
-                                        PoolKind::MongoDb(client),
-                                        &db_config,
-                                    )
-                                    .await
-                                {
-                                    state.reset_connection_transport_for_config(&id, &db_config).await;
-                                    return Err(err);
-                                }
-                                record_session_credential(state.inner(), &config, &id);
-                                let mut stored = config;
-                                if !stored.save_password {
-                                    stored.password.clear();
-                                }
-                                state.configs.write().await.insert(id.clone(), stored);
-                                return Ok(id);
-                            }
-                            Err(e) => e,
-                        }
-                    }
-                    Err(e) => e,
+        let pool = match db_config.db_type {
+            DatabaseType::Mysql => {
+                let (pool, mode) =
+                    connect_mysql_metadata_pool(&config, &db_config, &host, port, connect_timeout, 3).await?;
+                PoolKind::Mysql(pool, mode)
+            }
+            DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch => PoolKind::Mysql(
+                connect_bare_metadata_pool(&db_config, &host, port, connect_timeout, 3).await?,
+                MysqlMode::Bare,
+            ),
+            DatabaseType::Gaussdb if gaussdb_m_jdbc_config.is_some() => {
+                state.external_driver_pool("jdbc", gaussdb_m_jdbc_config.as_ref().expect("checked above")).await?
+            }
+            DatabaseType::Postgres
+            | DatabaseType::Redshift
+            | DatabaseType::Gaussdb
+            | DatabaseType::Kwdb
+            | DatabaseType::Questdb
+            | DatabaseType::OpenGauss => PoolKind::Postgres(db::postgres::connect(&url, connect_timeout).await?),
+            DatabaseType::Sqlite => PoolKind::Sqlite(
+                connect_sqlite_from_config_with_state(Some((state.inner().as_ref(), &prepared.stamp)), &id, &db_config)
+                    .await?,
+            ),
+            DatabaseType::Redis => {
+                let con = if db_config.uses_redis_cluster() {
+                    db::redis_driver::RedisConnection::Cluster(state.connect_redis_cluster(&id, &db_config).await?)
+                } else if db_config.uses_redis_sentinel() {
+                    db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
+                        state.connect_redis_sentinel(&id, &db_config).await?,
+                    ))
+                } else {
+                    db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
+                        db::redis_driver::connect_standalone(&db_config, &host, port, connect_timeout).await?,
+                    ))
                 };
-                if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
-                    log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
+                PoolKind::Redis(Arc::new(con))
+            }
+            #[cfg(feature = "duckdb-sidecar")]
+            DatabaseType::DuckDb => state.create_duckdb_pool(&db_config).await?,
+            #[cfg(not(feature = "duckdb-sidecar"))]
+            DatabaseType::DuckDb => return Err("DuckDB support is not compiled in this build".to_string()),
+            DatabaseType::MongoDb => {
+                let uses_oidc = db::mongo_driver::mongo_uri_uses_oidc(&url);
+                if mongo_uses_legacy_driver(&db_config) && !uses_oidc {
                     let mut client =
-                        spawn_mongo_legacy_fallback_agent(state.inner().as_ref(), &db_config.db_type, &native_err)
-                            .await?;
+                        state.agent_manager.spawn(&db_config.db_type, Some(MONGO_LEGACY_DRIVER_PROFILE)).await?;
                     state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
-                    client.connect(mongo_legacy_connect_params(&db_config, &host, port)?).await.map_err(|err| {
-                        mongo_legacy_fallback_error(
-                            &native_err,
-                            "Fallback with MongoDB (Legacy) driver failed",
-                            &mongo_legacy_error_with_auth_hint(&err),
-                        )
-                    })?;
+                    client
+                        .connect(mongo_legacy_connect_params(&db_config, &host, port)?)
+                        .await
+                        .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
                     state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
-                    persist_mongo_legacy_driver_profile(state.inner(), &connected_config).await?;
-                    mark_mongo_legacy_driver(&mut connected_config);
-                    connected_db_config = metadata_connection_config(&connected_config);
                     PoolKind::agent(client)
                 } else {
-                    return Err(native_err);
+                    let native_err = match db::mongo_driver::connect_with_oidc(
+                        &url,
+                        connect_timeout,
+                        idle_timeout,
+                        state.mongo_oidc_browser_opener(),
+                    )
+                    .await
+                    {
+                        Ok(client) => {
+                            state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
+                            match db::mongo_driver::test_connection_for_url(
+                                &client,
+                                &url,
+                                connect_timeout,
+                                db_config.effective_database(),
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
+                                    state
+                                        .insert_connection_pool_for_attempt_with_transport(
+                                            &id,
+                                            attempt,
+                                            id.clone(),
+                                            PoolKind::MongoDb(client),
+                                            &db_config,
+                                            &prepared.stamp,
+                                        )
+                                        .await?;
+                                    record_session_credential(state.inner(), &config, &id);
+                                    let mut stored = config;
+                                    if !stored.save_password {
+                                        stored.password.clear();
+                                    }
+                                    state.configs.write().await.insert(id.clone(), stored);
+                                    return Ok(id.clone());
+                                }
+                                Err(e) => e,
+                            }
+                        }
+                        Err(e) => e,
+                    };
+                    if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
+                        log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
+                        let mut client =
+                            spawn_mongo_legacy_fallback_agent(state.inner().as_ref(), &db_config.db_type, &native_err)
+                                .await?;
+                        state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
+                        client.connect(mongo_legacy_connect_params(&db_config, &host, port)?).await.map_err(|err| {
+                            mongo_legacy_fallback_error(
+                                &native_err,
+                                "Fallback with MongoDB (Legacy) driver failed",
+                                &mongo_legacy_error_with_auth_hint(&err),
+                            )
+                        })?;
+                        state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
+                        persist_mongo_legacy_driver_profile(state.inner(), &connected_config).await?;
+                        mark_mongo_legacy_driver(&mut connected_config);
+                        connected_db_config = metadata_connection_config(&connected_config);
+                        PoolKind::agent(client)
+                    } else {
+                        return Err(native_err);
+                    }
                 }
             }
-        }
-        DatabaseType::DynamoDb => {
-            let client = db::dynamodb_driver::connect(&db_config, &host, port)?;
-            db::dynamodb_driver::test_connection(&client, connect_timeout).await?;
-            PoolKind::DynamoDb(client)
-        }
-        DatabaseType::ClickHouse => {
-            let username = if db_config.username.is_empty() { None } else { Some(db_config.username.clone()) };
-            let password = if db_config.password.is_empty() { None } else { Some(db_config.password.clone()) };
-            log::info!("[connect_db] ClickHouse url={url} user={:?} has_pass={}", username, password.is_some());
-            let client = db::clickhouse_driver::ChClient::new_with_ca_cert_and_proxy(
-                &url,
-                username,
-                password,
-                Some(&db_config.ca_cert_path),
-                db_config.url_params.as_deref(),
-                clickhouse_http_proxy(runtime_proxy.as_ref())?,
-                connect_timeout,
-            )?;
-            db::clickhouse_driver::test_connection(&client, connect_timeout).await?;
-            PoolKind::ClickHouse(client)
-        }
-        DatabaseType::SqlServer => state.connect_sqlserver_pool(&db_config, &host, port, connect_timeout).await?,
-        DatabaseType::Elasticsearch => {
-            let mut client = db::elasticsearch_driver::EsClient::from_config(
-                &url,
-                Some(&db_config.username),
-                Some(&db_config.password),
-                db_config.ssl,
-                db_config.url_params.as_deref(),
-                db_config.external_config.as_ref(),
-                connect_timeout,
-                Some(db_config.ca_cert_path.as_str()),
-                Some(db_config.client_cert_path.as_str()),
-                Some(db_config.client_key_path.as_str()),
-            )?;
-            db::elasticsearch_driver::test_connection(&mut client, connect_timeout).await?;
-            PoolKind::Elasticsearch(client)
-        }
-        DatabaseType::Salesforce => {
-            let client = db::salesforce_driver::SfClient::from_config(
-                &url,
-                Some(&db_config.password),
-                db_config.external_config.as_ref(),
-                connect_timeout,
-            )?;
-            db::salesforce_driver::SfClient::test_connection(&client, connect_timeout).await?;
-            PoolKind::Salesforce(client)
-        }
-        DatabaseType::Easysearch => {
-            let mut client = db::easysearch_driver::EasysearchClient::from_config(
-                &url,
-                Some(&db_config.username),
-                Some(&db_config.password),
-                db_config.ssl,
-                db_config.url_params.as_deref(),
-                db_config.external_config.as_ref(),
-                connect_timeout,
-                Some(db_config.ca_cert_path.as_str()),
-                Some(db_config.client_cert_path.as_str()),
-                Some(db_config.client_key_path.as_str()),
-            )?;
-            db::easysearch_driver::test_connection(&mut client, connect_timeout).await?;
-            PoolKind::Easysearch(client)
-        }
-        DatabaseType::Solr => {
-            let mut client = db::solr_driver::SolrClient::from_config(
-                &url,
-                Some(&db_config.username),
-                Some(&db_config.password),
-                db_config.ssl,
-                db_config.url_params.as_deref(),
-                db_config.external_config.as_ref(),
-                connect_timeout,
-                Some(db_config.ca_cert_path.as_str()),
-                Some(db_config.client_cert_path.as_str()),
-                Some(db_config.client_key_path.as_str()),
-            )?;
-            db::solr_driver::test_connection(&mut client, connect_timeout).await?;
-            PoolKind::Solr(client)
-        }
-        DatabaseType::CouchDb => {
-            let client = db::couchdb_driver::CouchDbClient::from_config(
-                &url,
-                Some(&db_config.username),
-                Some(&db_config.password),
-                db_config.ssl,
-                db_config.url_params.as_deref(),
-                db_config.external_config.as_ref(),
-                connect_timeout,
-                Some(db_config.ca_cert_path.as_str()),
-                Some(db_config.client_cert_path.as_str()),
-                Some(db_config.client_key_path.as_str()),
-            )?;
-            db::couchdb_driver::test_connection(&client, connect_timeout).await?;
-            PoolKind::CouchDb(client)
-        }
-        DatabaseType::Meilisearch => {
-            let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
-                &url,
-                Some(&db_config.password),
-                db_config.ssl,
-                db_config.url_params.as_deref(),
-                db_config.external_config.as_ref(),
-                connect_timeout,
-            )?;
-            db::meilisearch_driver::test_connection(&client, connect_timeout).await?;
-            PoolKind::Meilisearch(client)
-        }
-        DatabaseType::Hbase => {
-            let client = db::hbase_driver::HBaseClient::new(
-                &url,
-                Some(&db_config.username),
-                Some(&db_config.password),
-                false,
-                connect_timeout,
-            )?;
-            db::hbase_driver::test_connection(&client, connect_timeout).await?;
-            PoolKind::HBase(client)
-        }
-        DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb => {
-            let kind = match db_config.db_type {
-                DatabaseType::Qdrant => db::vector_driver::VectorDbKind::Qdrant,
-                DatabaseType::Milvus => db::vector_driver::VectorDbKind::Milvus,
-                DatabaseType::Weaviate => db::vector_driver::VectorDbKind::Weaviate,
-                DatabaseType::ChromaDb => db::vector_driver::VectorDbKind::ChromaDb,
-                _ => unreachable!(),
-            };
-            let client = db::vector_driver::VectorClient::new(
-                kind,
-                &url,
-                Some(&db_config.username),
-                Some(&db_config.password),
-                db_config.ssl,
-                connect_timeout,
-            )
-            .with_database(db_config.database.as_deref());
-            db::vector_driver::test_connection(&client, connect_timeout).await?;
-            PoolKind::VectorDb(client)
-        }
-        DatabaseType::Rqlite => {
-            let client = db::rqlite_driver::RqliteClient::new(
-                &url,
-                db_config.url_params.as_deref(),
-                &db_config.username,
-                &db_config.password,
-                db_config.ssl,
-                connect_timeout,
-            )?;
-            db::rqlite_driver::test_connection(&client, connect_timeout).await?;
-            PoolKind::Rqlite(client)
-        }
-        DatabaseType::Turso => {
-            let auth_token = if !db_config.password.is_empty() {
-                db_config.password.clone()
-            } else {
-                db_config
-                    .url_params
-                    .as_deref()
-                    .and_then(|p| {
-                        p.trim()
-                            .trim_start_matches('?')
-                            .split('&')
-                            .filter_map(|pair| pair.split_once('='))
-                            .find(|(key, _)| {
-                                let k = key.trim().to_ascii_lowercase();
-                                k == "auth_token" || k == "authtoken" || k == "auth-token"
-                            })
-                            .map(|(_, value)| value.trim().to_string())
-                    })
-                    .unwrap_or_default()
-            };
-            // Same transport-layer proxy resolution as the test path and the real
-            // connect path in dbx-core: bypassing the proxy here would diverge from
-            // both.
-            let proxy = clickhouse_http_proxy(runtime_proxy.as_ref())?;
-            let client = db::turso_driver::TursoClient::new_with_options(
-                &url,
-                &auth_token,
-                db_config.ssl,
-                connect_timeout,
-                Some(db_config.ca_cert_path.as_str()),
-                Some(db_config.client_cert_path.as_str()),
-                Some(db_config.client_key_path.as_str()),
-                proxy,
-            )?;
-            db::turso_driver::test_connection(&client, connect_timeout).await?;
-            PoolKind::Turso(client)
-        }
-        DatabaseType::CloudflareD1 => {
-            PoolKind::CloudflareD1(db::cloudflare_d1_driver::connect(&db_config, connect_timeout).await?)
-        }
-        DatabaseType::InfluxDb => {
-            let client = db::influxdb_driver::InfluxdbClient::new_for_config(&url, &db_config, connect_timeout)?;
-            db::influxdb_driver::test_connection(&client, connect_timeout).await?;
-            PoolKind::InfluxDb(client)
-        }
-        DatabaseType::InfluxDb3 => {
-            let client = db::influxdb3_driver::Influxdb3Client::new_for_config(&url, &db_config, connect_timeout)?;
-            db::influxdb3_driver::test_connection(&client, connect_timeout).await?;
-            PoolKind::InfluxDb3(client)
-        }
-        DatabaseType::VictoriaMetrics => {
-            let client =
-                db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(&url, &db_config, connect_timeout)?;
-            db::victoriametrics_driver::test_connection(&client, connect_timeout).await?;
-            PoolKind::VictoriaMetrics(client)
-        }
-        DatabaseType::Nacos => {
-            let admin_config = state.nacos_admin_config_for_connection(&id, &config).await?;
-            let adapter = state.nacos_registry.build_transient_config(admin_config).await?;
-            adapter.test_connection().await?;
-            PoolKind::Nacos
-        }
-        DatabaseType::Consul => {
-            let mut consul_config = dbx_core::consul::ConsulConfig::from_connection(&db_config)?;
-            let original_host = consul_config.base_url.host_str().unwrap_or_default();
-            let original_port = consul_config.base_url.port_or_known_default().unwrap_or(db_config.port);
-            if host != original_host || port != original_port {
-                consul_config = consul_config.with_connect_override(&host, port);
+            DatabaseType::DynamoDb => {
+                let client = db::dynamodb_driver::connect(&db_config, &host, port)?;
+                db::dynamodb_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::DynamoDb(client)
             }
-            let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
-            client.probe().await?;
-            PoolKind::Consul(client)
-        }
-        #[cfg(feature = "mq-admin")]
-        DatabaseType::MessageQueue => {
-            let mqc = state.mq_admin_config_for_connection(&id, &config).await?;
-            let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, &state);
-            let build = match state.mq_registry.get_or_build_config(&id, mqc, agent_launch).await {
-                Ok(build) => build,
-                Err(err) => {
+            DatabaseType::ClickHouse => {
+                let username = if db_config.username.is_empty() { None } else { Some(db_config.username.clone()) };
+                let password = if db_config.password.is_empty() { None } else { Some(db_config.password.clone()) };
+                log::info!("[connect_db] ClickHouse url={url} user={:?} has_pass={}", username, password.is_some());
+                let client = db::clickhouse_driver::ChClient::new_with_ca_cert_and_proxy(
+                    &url,
+                    username,
+                    password,
+                    Some(&db_config.ca_cert_path),
+                    db_config.url_params.as_deref(),
+                    clickhouse_http_proxy(runtime_proxy.as_ref())?,
+                    connect_timeout,
+                )?;
+                db::clickhouse_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::ClickHouse(client)
+            }
+            DatabaseType::SqlServer => state.connect_sqlserver_pool(&db_config, &host, port, connect_timeout).await?,
+            DatabaseType::Elasticsearch => {
+                let mut client = db::elasticsearch_driver::EsClient::from_config(
+                    &url,
+                    Some(&db_config.username),
+                    Some(&db_config.password),
+                    db_config.ssl,
+                    db_config.url_params.as_deref(),
+                    db_config.external_config.as_ref(),
+                    connect_timeout,
+                    Some(db_config.ca_cert_path.as_str()),
+                    Some(db_config.client_cert_path.as_str()),
+                    Some(db_config.client_key_path.as_str()),
+                )?;
+                db::elasticsearch_driver::test_connection(&mut client, connect_timeout).await?;
+                PoolKind::Elasticsearch(client)
+            }
+            DatabaseType::Salesforce => {
+                let client = db::salesforce_driver::SfClient::from_config(
+                    &url,
+                    Some(&db_config.password),
+                    db_config.external_config.as_ref(),
+                    connect_timeout,
+                )?;
+                db::salesforce_driver::SfClient::test_connection(&client, connect_timeout).await?;
+                PoolKind::Salesforce(client)
+            }
+            DatabaseType::Easysearch => {
+                let mut client = db::easysearch_driver::EasysearchClient::from_config(
+                    &url,
+                    Some(&db_config.username),
+                    Some(&db_config.password),
+                    db_config.ssl,
+                    db_config.url_params.as_deref(),
+                    db_config.external_config.as_ref(),
+                    connect_timeout,
+                    Some(db_config.ca_cert_path.as_str()),
+                    Some(db_config.client_cert_path.as_str()),
+                    Some(db_config.client_key_path.as_str()),
+                )?;
+                db::easysearch_driver::test_connection(&mut client, connect_timeout).await?;
+                PoolKind::Easysearch(client)
+            }
+            DatabaseType::Solr => {
+                let mut client = db::solr_driver::SolrClient::from_config(
+                    &url,
+                    Some(&db_config.username),
+                    Some(&db_config.password),
+                    db_config.ssl,
+                    db_config.url_params.as_deref(),
+                    db_config.external_config.as_ref(),
+                    connect_timeout,
+                    Some(db_config.ca_cert_path.as_str()),
+                    Some(db_config.client_cert_path.as_str()),
+                    Some(db_config.client_key_path.as_str()),
+                )?;
+                db::solr_driver::test_connection(&mut client, connect_timeout).await?;
+                PoolKind::Solr(client)
+            }
+            DatabaseType::CouchDb => {
+                let client = db::couchdb_driver::CouchDbClient::from_config(
+                    &url,
+                    Some(&db_config.username),
+                    Some(&db_config.password),
+                    db_config.ssl,
+                    db_config.url_params.as_deref(),
+                    db_config.external_config.as_ref(),
+                    connect_timeout,
+                    Some(db_config.ca_cert_path.as_str()),
+                    Some(db_config.client_cert_path.as_str()),
+                    Some(db_config.client_key_path.as_str()),
+                )?;
+                db::couchdb_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::CouchDb(client)
+            }
+            DatabaseType::Meilisearch => {
+                let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
+                    &url,
+                    Some(&db_config.password),
+                    db_config.ssl,
+                    db_config.url_params.as_deref(),
+                    db_config.external_config.as_ref(),
+                    connect_timeout,
+                )?;
+                db::meilisearch_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::Meilisearch(client)
+            }
+            DatabaseType::Hbase => {
+                let client = db::hbase_driver::HBaseClient::new(
+                    &url,
+                    Some(&db_config.username),
+                    Some(&db_config.password),
+                    false,
+                    connect_timeout,
+                )?;
+                db::hbase_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::HBase(client)
+            }
+            DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb => {
+                let kind = match db_config.db_type {
+                    DatabaseType::Qdrant => db::vector_driver::VectorDbKind::Qdrant,
+                    DatabaseType::Milvus => db::vector_driver::VectorDbKind::Milvus,
+                    DatabaseType::Weaviate => db::vector_driver::VectorDbKind::Weaviate,
+                    DatabaseType::ChromaDb => db::vector_driver::VectorDbKind::ChromaDb,
+                    _ => unreachable!(),
+                };
+                let client = db::vector_driver::VectorClient::new(
+                    kind,
+                    &url,
+                    Some(&db_config.username),
+                    Some(&db_config.password),
+                    db_config.ssl,
+                    connect_timeout,
+                )
+                .with_database(db_config.database.as_deref());
+                db::vector_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::VectorDb(client)
+            }
+            DatabaseType::Rqlite => {
+                let client = db::rqlite_driver::RqliteClient::new(
+                    &url,
+                    db_config.url_params.as_deref(),
+                    &db_config.username,
+                    &db_config.password,
+                    db_config.ssl,
+                    connect_timeout,
+                )?;
+                db::rqlite_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::Rqlite(client)
+            }
+            DatabaseType::Turso => {
+                let auth_token = if !db_config.password.is_empty() {
+                    db_config.password.clone()
+                } else {
+                    db_config
+                        .url_params
+                        .as_deref()
+                        .and_then(|p| {
+                            p.trim()
+                                .trim_start_matches('?')
+                                .split('&')
+                                .filter_map(|pair| pair.split_once('='))
+                                .find(|(key, _)| {
+                                    let k = key.trim().to_ascii_lowercase();
+                                    k == "auth_token" || k == "authtoken" || k == "auth-token"
+                                })
+                                .map(|(_, value)| value.trim().to_string())
+                        })
+                        .unwrap_or_default()
+                };
+                // Same transport-layer proxy resolution as the test path and the real
+                // connect path in dbx-core: bypassing the proxy here would diverge from
+                // both.
+                let proxy = clickhouse_http_proxy(runtime_proxy.as_ref())?;
+                let client = db::turso_driver::TursoClient::new_with_options(
+                    &url,
+                    &auth_token,
+                    db_config.ssl,
+                    connect_timeout,
+                    Some(db_config.ca_cert_path.as_str()),
+                    Some(db_config.client_cert_path.as_str()),
+                    Some(db_config.client_key_path.as_str()),
+                    proxy,
+                )?;
+                db::turso_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::Turso(client)
+            }
+            DatabaseType::CloudflareD1 => {
+                PoolKind::CloudflareD1(db::cloudflare_d1_driver::connect(&db_config, connect_timeout).await?)
+            }
+            DatabaseType::InfluxDb => {
+                let client = db::influxdb_driver::InfluxdbClient::new_for_config(&url, &db_config, connect_timeout)?;
+                db::influxdb_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::InfluxDb(client)
+            }
+            DatabaseType::InfluxDb3 => {
+                let client = db::influxdb3_driver::Influxdb3Client::new_for_config(&url, &db_config, connect_timeout)?;
+                db::influxdb3_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::InfluxDb3(client)
+            }
+            DatabaseType::VictoriaMetrics => {
+                let client = db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(
+                    &url,
+                    &db_config,
+                    connect_timeout,
+                )?;
+                db::victoriametrics_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::VictoriaMetrics(client)
+            }
+            DatabaseType::Nacos => {
+                let admin_config = state.nacos_admin_config_for_connection(&id, &config).await?;
+                let adapter = state.nacos_registry.build_transient_config(admin_config).await?;
+                adapter.test_connection().await?;
+                PoolKind::Nacos
+            }
+            DatabaseType::Consul => {
+                let mut consul_config = dbx_core::consul::ConsulConfig::from_connection(&db_config)?;
+                let original_host = consul_config.base_url.host_str().unwrap_or_default();
+                let original_port = consul_config.base_url.port_or_known_default().unwrap_or(db_config.port);
+                if host != original_host || port != original_port {
+                    consul_config = consul_config.with_connect_override(&host, port);
+                }
+                let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
+                client.probe().await?;
+                PoolKind::Consul(client)
+            }
+            #[cfg(feature = "mq-admin")]
+            DatabaseType::MessageQueue => {
+                let mqc = state.mq_admin_config_for_connection(&id, &config).await?;
+                let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, &state);
+                let build = match state.mq_registry.get_or_build_config(&id, mqc, agent_launch).await {
+                    Ok(build) => build,
+                    Err(err) => {
+                        state.mq_registry.drop_connection(&id).await;
+                        return Err(err);
+                    }
+                };
+                if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
                     state.mq_registry.drop_connection(&id).await;
                     return Err(err);
                 }
-            };
-            if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
-                state.mq_registry.drop_connection(&id).await;
-                return Err(err);
+                if let Err(err) = dbx_core::mq::validate_mq_adapter_after_build(&build).await {
+                    state.mq_registry.drop_connection(&id).await;
+                    return Err(err);
+                }
+                if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
+                    state.mq_registry.drop_connection(&id).await;
+                    return Err(err);
+                }
+                PoolKind::MessageQueue
             }
-            if let Err(err) = dbx_core::mq::validate_mq_adapter_after_build(&build).await {
-                state.mq_registry.drop_connection(&id).await;
-                return Err(err);
+            #[cfg(not(feature = "mq-admin"))]
+            DatabaseType::MessageQueue => {
+                return Err(
+                    "Message queue admin support is not compiled in this build. Rebuild with the 'mq-admin' feature."
+                        .to_string(),
+                );
             }
-            if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
-                state.mq_registry.drop_connection(&id).await;
-                return Err(err);
+            db_type if database_capabilities::is_agent_type(&db_type) => {
+                connect_agent_pool(state.inner(), &db_config, &host, port, prepared.stamp.agent_launch_env()).await?
             }
-            PoolKind::MessageQueue
-        }
-        #[cfg(not(feature = "mq-admin"))]
-        DatabaseType::MessageQueue => {
-            return Err(
-                "Message queue admin support is not compiled in this build. Rebuild with the 'mq-admin' feature."
-                    .to_string(),
-            );
-        }
-        db_type if database_capabilities::is_agent_type(&db_type) => {
-            connect_agent_pool(state.inner(), &db_config, &host, port).await?
-        }
-        DatabaseType::PrestoSql => {
-            let jdbc_config = prestosql_jdbc_config_for_endpoint(&db_config, &host, port)?;
-            state.external_driver_pool("jdbc", &jdbc_config).await?
-        }
-        DatabaseType::Jdbc => {
-            let jdbc_config = jdbc_command_config_for_endpoint(&db_config, &host, port)?;
-            state.external_driver_pool("jdbc", &jdbc_config).await?
-        }
-        #[cfg(feature = "mq-admin")]
-        DatabaseType::Mqtt => {
-            let mqtt_config = dbx_core::mqtt::types::MqttConnectionConfig::from_connection(&db_config)?;
-            let client = dbx_core::mqtt::client::MqttClient::connect(mqtt_config).await?;
-            PoolKind::Mqtt(client)
-        }
-        #[cfg(not(feature = "mq-admin"))]
-        DatabaseType::Mqtt => {
-            return Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string());
-        }
-        DatabaseType::Plugin => PoolKind::PluginConnection(
-            state.plugin_host.connect_connection(&db_config, &host, port, runtime_proxy).await?,
-        ),
-        db_type => return Err(format!("Unsupported database type: {db_type:?}")),
-    };
+            DatabaseType::PrestoSql => {
+                let jdbc_config = prestosql_jdbc_config_for_endpoint(&db_config, &host, port)?;
+                state.external_driver_pool("jdbc", &jdbc_config).await?
+            }
+            DatabaseType::Jdbc => {
+                let jdbc_config = jdbc_command_config_for_endpoint(&db_config, &host, port)?;
+                state.external_driver_pool("jdbc", &jdbc_config).await?
+            }
+            #[cfg(feature = "mq-admin")]
+            DatabaseType::Mqtt => {
+                let mqtt_config = dbx_core::mqtt::types::MqttConnectionConfig::from_connection(&db_config)?;
+                let client = dbx_core::mqtt::client::MqttClient::connect(mqtt_config).await?;
+                PoolKind::Mqtt(client)
+            }
+            #[cfg(not(feature = "mq-admin"))]
+            DatabaseType::Mqtt => {
+                return Err(
+                    "MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string()
+                );
+            }
+            DatabaseType::Plugin => PoolKind::PluginConnection(
+                state.plugin_host.connect_connection(&db_config, &host, port, runtime_proxy).await?,
+            ),
+            db_type => return Err(format!("Unsupported database type: {db_type:?}")),
+        };
 
-    if let Err(err) =
-        state.insert_connection_pool_for_attempt(&id, attempt, id.clone(), pool, &connected_db_config).await
-    {
-        state.reset_connection_transport_for_config(&id, &connected_db_config).await;
-        return Err(err);
-    }
-    record_session_credential(state.inner(), &connected_config, &id);
-    // 存入全局运行态 configs 的配置脱敏（no-save 密码恒为空），明文只存在于会话凭据仓库。
-    let mut stored = connected_config;
-    if !stored.save_password {
-        stored.password.clear();
-    }
-    state.configs.write().await.insert(id.clone(), stored);
+        state
+            .insert_connection_pool_for_attempt_with_transport(
+                &id,
+                attempt,
+                id.clone(),
+                pool,
+                &connected_db_config,
+                &prepared.stamp,
+            )
+            .await?;
+        record_session_credential(state.inner(), &connected_config, &id);
+        // 存入全局运行态 configs 的配置脱敏（no-save 密码恒为空），明文只存在于会话凭据仓库。
+        let mut stored = connected_config;
+        if !stored.save_password {
+            stored.password.clear();
+        }
+        state.configs.write().await.insert(id.clone(), stored);
 
-    Ok(id)
+        Ok(id.clone())
+    }
+    .await;
+    if result.is_err() {
+        state.reset_connection_transport_if_current(&id, &prepared.stamp).await;
+    }
+    result
 }
 
 #[tauri::command]
@@ -2642,11 +2753,42 @@ pub async fn connection_final_proxy_port(
     if !stored_config.save_password {
         stored_config.password.clear();
     }
-    state.configs.write().await.insert(connection_id.clone(), stored_config);
-
-    let (_, port) = state.connection_host_port(&connection_id, &db_config).await?;
-    record_session_credential(state.inner(), &runtime_config, &connection_id);
-    Ok(port)
+    let needs_cleanup = |configs: &std::collections::HashMap<String, ConnectionConfig>| {
+        configs.get(&connection_id).is_none_or(|previous| {
+            !connection_configs_pool_equivalent(previous, &stored_config)
+                || !connection_configs_session_credentials_compatible(previous, &stored_config)
+        })
+    };
+    let access = dbx_core::query::pl_debug::PlDebugAccess::desktop();
+    for _ in 0..3 {
+        let affected = needs_cleanup(&*state.configs.read().await);
+        let permit = dbx_core::query::pl_debug::pl_debug_claim_mutation_core(
+            state.inner(),
+            Some(&access),
+            dbx_core::query::pl_debug::PlDebugMutationScope::Connections(if affected {
+                vec![connection_id.clone()]
+            } else {
+                Vec::new()
+            }),
+        )?;
+        let port = permit
+            .after_debug_cleanup(async {
+                let mut current = state.configs.write().await;
+                if needs_cleanup(&current) && !affected {
+                    return Ok(None);
+                }
+                current.insert(connection_id.clone(), stored_config.clone());
+                drop(current);
+                let (_, port) = state.connection_host_port(&connection_id, &db_config).await?;
+                record_session_credential(state.inner(), &runtime_config, &connection_id);
+                Ok(Some(port))
+            })
+            .await?;
+        if let Some(port) = port {
+            return Ok(port);
+        }
+    }
+    Err("Connection configuration changed while preparing the proxy; reload before trying again".into())
 }
 
 #[tauri::command]
@@ -2655,6 +2797,12 @@ pub async fn disconnect_db(
     connection_id: String,
     client_attempt: Option<u64>,
 ) -> Result<(), String> {
+    let access = dbx_core::query::pl_debug::PlDebugAccess::desktop();
+    let permit = dbx_core::query::pl_debug::pl_debug_claim_mutation_core(
+        state.inner(),
+        Some(&access),
+        dbx_core::query::pl_debug::PlDebugMutationScope::Connections(vec![connection_id.clone()]),
+    )?;
     let should_disconnect = if let Some(client_attempt) = client_attempt {
         state.supersede_connection_attempt_if_client_attempt(&connection_id, client_attempt).await
     } else {
@@ -2664,13 +2812,17 @@ pub async fn disconnect_db(
     if !should_disconnect {
         return Ok(());
     }
-    state.running_queries.cancel_connection(&connection_id);
-    state.remove_connection_pools_detached(&connection_id).await;
-    drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
-    drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
-    state.reset_connection_transport(&connection_id).await;
-    release_runtime_config_on_disconnect(state.inner(), &connection_id).await;
-    Ok(())
+    permit
+        .after_debug_cleanup(async {
+            state.running_queries.cancel_connection(&connection_id);
+            state.remove_connection_pools_detached_checked(&connection_id).await?;
+            drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
+            drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
+            state.reset_connection_transport_checked(&connection_id).await?;
+            release_runtime_config_on_disconnect(state.inner(), &connection_id).await;
+            Ok(())
+        })
+        .await
 }
 
 #[tauri::command]
@@ -2881,10 +3033,7 @@ pub async fn unlock_connection_writes(
     connection_id: String,
     duration_secs: u64,
 ) -> Result<WriteUnlockState, String> {
-    if !state.configs.read().await.contains_key(&connection_id) {
-        return Err("Connection not found".to_string());
-    }
-    let remaining_ms = state.write_unlock_windows.unlock(&connection_id, duration_secs).await?;
+    let remaining_ms = dbx_core::query::unlock_connection_writes_core(&state, &connection_id, duration_secs).await?;
     Ok(WriteUnlockState { remaining_ms })
 }
 

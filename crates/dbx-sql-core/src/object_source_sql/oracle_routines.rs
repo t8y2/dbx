@@ -165,6 +165,41 @@ pub fn comparable_oracle_routine_definition(mut input: OracleRoutineDefinitionIn
     })
 }
 
+pub fn compact_oracle_ddl(source: &str) -> Result<String, String> {
+    let tokens =
+        Tokenizer::new(&OracleDialect {}, source).tokenize_with_location().map_err(|error| error.to_string())?;
+    let mut result = String::new();
+    let mut cursor = 0;
+    for token in tokens.iter().filter(|token| {
+        !matches!(
+            token.token,
+            Token::Whitespace(Whitespace::Space | Whitespace::Tab | Whitespace::Newline) | Token::EOF
+        )
+    }) {
+        let start = routine_location_to_byte_offset(source, token.span.start).ok_or("Cannot locate DDL token")?;
+        let end = routine_location_to_byte_offset(source, token.span.end).ok_or("Cannot locate DDL token")?;
+        let gap = &source[cursor..start];
+        if let Some(last_newline) = gap.rfind(['\r', '\n']) {
+            result.push_str(if gap.contains("\r\n") {
+                "\r\n"
+            } else if gap.contains('\r') {
+                "\r"
+            } else {
+                "\n"
+            });
+            result.push_str(&gap[last_newline + 1..]);
+        } else if cursor == 0 {
+            result.push_str(gap);
+        } else if !gap.is_empty() {
+            result.push(' ');
+        }
+        result.push_str(&source[start..end]);
+        cursor = end;
+    }
+    result.push_str(&source[cursor..]);
+    Ok(result)
+}
+
 fn strip_client_delimiter(source: &str) -> Result<String, String> {
     let tokens =
         Tokenizer::new(&OracleDialect {}, source).tokenize_with_location().map_err(|error| error.to_string())?;
@@ -190,6 +225,31 @@ fn strip_client_delimiter(source: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_ddl_preserves_token_text_comments_and_line_boundaries() {
+        let source = "CREATE   FUNCTION \"中  文\" RETURN NUMBER AS\r\n\r\n  X VARCHAR2(20) := q'[a  b]'; -- keep  comment\r\nBEGIN\r\n  RETURN 1 -  - 2;\r\nEND;\r\n/\r\n";
+        let compact = compact_oracle_ddl(source).unwrap();
+        assert!(compact.starts_with("CREATE FUNCTION"));
+        assert!(compact.contains("AS\r\n  X"));
+        assert!(compact.contains("-- keep  comment\r\nBEGIN"));
+        assert!(compact.ends_with("END;\r\n/\r\n"));
+        let significant = |sql: &str| {
+            Tokenizer::new(&OracleDialect {}, sql)
+                .tokenize()
+                .unwrap()
+                .into_iter()
+                .filter(|token| {
+                    !matches!(
+                        token,
+                        Token::Whitespace(Whitespace::Space | Whitespace::Tab | Whitespace::Newline) | Token::EOF
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(significant(source), significant(&compact));
+        assert_eq!(compact_oracle_ddl(&compact).unwrap(), compact);
+    }
 
     fn input(source: &str) -> OracleRoutineDefinitionInput {
         OracleRoutineDefinitionInput {

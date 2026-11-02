@@ -5,8 +5,9 @@ use super::references::{
 };
 use super::*;
 use dbx_sql::object_source_sql::{
-    analyze_oracle_routine_draft, prepare_oracle_routine_definition, validate_oracle_routine_target_definition,
-    EditableObjectSourceSqlInput, OracleDraftIssue, OracleRoutineDefinitionInput,
+    analyze_oracle_routine_draft, compact_oracle_ddl, prepare_oracle_routine_definition,
+    validate_oracle_routine_target_definition, EditableObjectSourceSqlInput, OracleDraftIssue,
+    OracleRoutineDefinitionInput,
 };
 use std::collections::BTreeSet;
 
@@ -53,6 +54,8 @@ pub struct OracleRoutinePlanInput {
     pub source: RoutineSnapshot,
     pub target: RoutineSnapshot,
     pub drafts: Vec<RoutinePlanDraft>,
+    #[serde(default)]
+    pub compact_sql: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -901,6 +904,9 @@ async fn build_plan_with_tables(
                     let (owner, source) = if draft.package_body_source == Some(PackageBodySource::Target) { (&draft.identity.owner, step.target_original.as_deref().ok_or("The retained target body is unavailable")?) } else { (&input.source.endpoint.schema, step.source_original.as_deref().ok_or("Complete source is unavailable")?) };
                     adapted(&input.target.endpoint, &draft.identity, owner, source, replace)?
                 };
+                if input.compact_sql && draft.sql.is_none() {
+                    step.sql = compact_oracle_ddl(&step.sql)?;
+                }
             }
             step.recovery_sql = match &expected {
                 ExpectedRoutine::Absent(_) => Some(drop_sql(&draft.identity)),
@@ -1072,7 +1078,9 @@ async fn build_plan_with_tables(
     if input.source.endpoint.database_type != input.target.endpoint.database_type {
         for (draft, step) in input.drafts.iter().zip(&mut plan.steps) {
             if draft.sql.is_none() {
-                step.issues.push(problem(format!("Cross-product package conversion from {:?} to {:?} requires an explicitly reviewed target draft; retain the original source, review or edit this draft and validate it again", input.source.endpoint.database_type, input.target.endpoint.database_type)));
+                let mut issue = problem(format!("Cross-product package conversion from {:?} to {:?} requires an explicitly reviewed target draft; retain the original source, review or edit this draft and validate it again", input.source.endpoint.database_type, input.target.endpoint.database_type));
+                issue.code = "target-draft-review".into();
+                step.issues.push(issue);
             }
         }
     }

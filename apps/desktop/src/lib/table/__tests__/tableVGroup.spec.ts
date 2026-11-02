@@ -544,12 +544,12 @@ describe("container-kind scoped groups (views/procedures/triggers)", () => {
     expect(resolveTableVGroupScopeFromNode(tree, member)).toMatchObject({ connectionId: "conn-1", database: "db1", objectType: "views" });
   });
 
-  it("narrows reprojection candidates to the scope kind even without a member label", () => {
+  it("narrows reprojection candidates to the scope kind and prefers group-tables over database (issue #13030)", () => {
     const database: TreeNode = { id: "db:conn-1:db1", label: "db1", type: "database", connectionId: "conn-1", database: "db1" };
     const groupTables: TreeNode = { id: "gt:1", label: "Tables", type: "group-tables", connectionId: "conn-1", database: "db1" };
     const groupFunctions: TreeNode = { id: "gf:1", label: "Functions", type: "group-functions", connectionId: "conn-1", database: "db1", children: [{ id: "fn:1", label: "vg_count", type: "function", connectionId: "conn-1", database: "db1" }] };
     const tree: TreeNode[] = [{ ...database, children: [groupTables, groupFunctions] }];
-    expect(findTableVGroupContainerNode(tree, { connectionId: "conn-1", database: "db1", objectType: "tables" })).toBe(tree[0]);
+    expect(findTableVGroupContainerNode(tree, { connectionId: "conn-1", database: "db1", objectType: "tables" })).toBe(groupTables);
   });
 
   it("collects member names per container kind", () => {

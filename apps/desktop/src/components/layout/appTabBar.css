@@ -691,6 +691,17 @@
   border-top-width: 0;
 }
 
+/* Non-active group headers dim alongside their tabs (#13250): the 0.6.52
+ * inactive-tab dimming only touched the pills, so with several groups the
+ * header row no longer told you which group holds the active tab. */
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active) {
+  color: color-mix(in srgb, var(--foreground) 70%, transparent);
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header--active {
+  color: var(--foreground);
+}
+
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header:hover .tab-group-header-content,
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header--active .tab-group-header-content {
   background: color-mix(in srgb, var(--tab-group-color) 18%, transparent);
@@ -1288,6 +1299,10 @@ html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[d
   background: var(--tab-group-soft);
 }
 
+.vertical-tab-layout .tab-group-header:not(.tab-group-header--active) {
+  color: color-mix(in srgb, var(--foreground) 70%, transparent);
+}
+
 .vertical-tab-layout .tab-group-header--active {
   color: var(--tab-group-color);
 }
@@ -1514,6 +1529,56 @@ html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[d
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header--active .tab-group-header-content {
   background: color-mix(in srgb, var(--tab-group-color) 12%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tab-group-color) 28%, transparent);
+}
+
+/* Horizontal group headers share the same focus treatment in both row modes:
+ * reserve the colored fill and strong underline for the active group while
+ * retaining a small identity marker and faint underline on peers. */
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active) {
+  color: var(--muted-foreground);
+  font-weight: 500;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active) .tab-group-header-content {
+  background: transparent;
+  box-shadow: none;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active):hover .tab-group-header-content {
+  color: var(--foreground);
+  background: var(--muted);
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active)::after {
+  opacity: 0.3;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active) .tab-group-marker {
+  opacity: 0.35;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active) .tab-group-database-icon {
+  filter: grayscale(1);
+  opacity: 0.7;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active) .tab-group-count {
+  color: var(--muted-foreground);
+  background: color-mix(in srgb, var(--muted-foreground) 12%, transparent);
+}
+
+/* A colored ring distinguishes a collapsed group's hidden-tab count. */
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header--collapsed .tab-group-count {
+  box-shadow: inset 0 0 0 0.6px var(--tab-group-color);
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header:not(.tab-group-header--active) .tab-group-chevron {
+  color: inherit;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header--active::after {
+  height: 2.5px;
+  opacity: 1;
 }
 
 /* Vertical bars use the same neutral-label rule for the active group header. */

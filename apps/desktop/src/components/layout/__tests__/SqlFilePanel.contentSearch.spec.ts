@@ -101,6 +101,7 @@ function result(path: string, lines = [3], column = 8): SqlFileContentSearchResu
 }
 
 beforeEach(() => {
+  localStorage.clear();
   mocks.isTauri = true;
   mocks.search.mockReset();
   mocks.search.mockResolvedValue({ files: [], skippedFiles: [], truncated: false });
@@ -279,4 +280,17 @@ describe("SqlFilePanel content search", () => {
     expect(host.querySelector('[data-sql-file-path="/sql/queries/02_orders.sql"]')).not.toBeNull();
     expect(mocks.search).not.toHaveBeenCalled();
   });
+});
+
+it("remembers the file search mode independently of the SQL library", async () => {
+  localStorage.setItem("dbx-sql-library-search-mode", "name");
+  const first = await mountPanel();
+  await changeSearchMode(first.host, "content");
+  const mountedFirst = mounted.pop()!;
+  mountedFirst.app.unmount();
+  mountedFirst.host.remove();
+  const second = await mountPanel();
+  expect(second.host.querySelector<HTMLSelectElement>("[data-search-mode]")!.value).toBe("content");
+  expect(localStorage.getItem("dbx-sql-library-search-mode")).toBe("name");
+  expect(mocks.search).not.toHaveBeenCalled();
 });

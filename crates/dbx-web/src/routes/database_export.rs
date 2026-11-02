@@ -36,6 +36,13 @@ pub async fn start_database_export(
     Json(body): Json<StartExportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mut req = body.request;
+    dbx_core::query::mysql_data_charset_policy::reject_operation(
+        &state.app,
+        &req.connection_id,
+        dbx_core::query::mysql_data_charset_policy::EXPORT_UNSUPPORTED,
+    )
+    .await
+    .map_err(AppError::from)?;
     let export_id = req.export_id.clone();
 
     // Web mode: write to a server-side temp file instead of the client-supplied

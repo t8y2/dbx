@@ -49,6 +49,9 @@ describe("Oracle object dependencies", () => {
     expect(oracleDependencyProvider.supports(node({ type: "procedure", parentType: "package", parentName: "PKG" }))).toBe(false);
     expect(oracleDependencyProvider.supports(node({ type: "procedure", parentType: "package", parentName: "PKG", parentSchema: undefined }))).toBe(false);
     expect(oracleDependencyProvider.supports(node({ type: "column" }))).toBe(false);
-    expect(oracleDependencyProvider.supports(node({ type: "trigger" }))).toBe(true);
+    expect(oracleDependencyProvider.supports(node({ type: "trigger" }))).toBe(false);
+    const trigger = node({ type: "trigger", meta: { name: "RUN_JOB", event: "INSERT", timing: "BEFORE", oracle_metadata: { contractVersion: 1, identityMode: "exact", engine: "oracle", owner: "APP", name: "RUN_JOB", scope: "TABLE", reads: {} } } });
+    expect(oracleDependencyProvider.supports(trigger)).toBe(true);
+    expect(oracleDependencyProvider.buildQuery(trigger)).toContain("d.TYPE = 'TRIGGER'");
   });
 });

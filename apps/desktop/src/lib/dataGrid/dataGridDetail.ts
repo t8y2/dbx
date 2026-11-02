@@ -59,6 +59,8 @@ export interface BuildDataGridCellDetailOptions {
   databaseType?: DatabaseType;
   includeBinaryImagePreview?: boolean;
   isValuePreviewTruncated?: boolean;
+  /** Rendering only; never replaces the source value used by copy/export. */
+  pendingDecodePlaceholder?: string;
 }
 
 export interface BuildDataGridRowDetailOptions {
@@ -75,6 +77,7 @@ export interface BuildDataGridRowDetailOptions {
   isNullValue?: (value: CellValue) => boolean;
   isEditableColumn?: (columnIndex: number) => boolean;
   isValuePreviewTruncated?: (columnIndex: number) => boolean;
+  pendingDecodePlaceholder?: (columnIndex: number) => string | undefined;
 }
 
 export interface BuildDataGridColumnDetailRow {
@@ -83,6 +86,7 @@ export interface BuildDataGridColumnDetailRow {
   row: readonly CellValue[];
   isEditable?: boolean;
   isValuePreviewTruncated?: boolean;
+  pendingDecodePlaceholder?: string;
 }
 
 export interface BuildDataGridColumnDetailOptions {
@@ -105,9 +109,9 @@ export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions)
   const rawValue = options.rawValue?.(value, options.columnIndex) ?? displayCellValue(value);
   const isNull = options.isNullValue?.(value) ?? value === null;
   const displayValue = options.displayValue(value, options.columnIndex);
-  const formattedJson = typeof value === "string" ? detailFormattedJson(value, options.databaseType) : "";
-  const rawValuePreview = previewText(rawValue);
-  const displayValuePreview = previewText(displayValue);
+  const formattedJson = options.pendingDecodePlaceholder === undefined && typeof value === "string" ? detailFormattedJson(value, options.databaseType) : "";
+  const rawValuePreview = options.pendingDecodePlaceholder ?? previewText(rawValue);
+  const displayValuePreview = options.pendingDecodePlaceholder ?? previewText(displayValue);
   const type = detailColumnType(options.typeByColumn, options.resultColumnTypes, column, options.columnIndex);
 
   return {
@@ -124,10 +128,13 @@ export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions)
     displayValuePreview,
     isSourceTruncated: options.isValuePreviewTruncated === true,
     isValuePreviewTruncated: options.isValuePreviewTruncated === true || rawValuePreview.length < rawValue.length || displayValuePreview.length < displayValue.length,
-    imagePreviewUrl: cellImagePreviewUrl(value, type, {
-      binary: options.includeBinaryImagePreview !== false,
-      databaseType: options.databaseType,
-    }),
+    imagePreviewUrl:
+      options.pendingDecodePlaceholder === undefined
+        ? cellImagePreviewUrl(value, type, {
+            binary: options.includeBinaryImagePreview !== false,
+            databaseType: options.databaseType,
+          })
+        : null,
     length: isNull ? 0 : rawValue.length,
     isNull,
     formattedJson,
@@ -156,6 +163,7 @@ export function buildDataGridColumnDetail(options: BuildDataGridColumnDetailOpti
         isEditable: row.isEditable ?? false,
         includeBinaryImagePreview: false,
         isValuePreviewTruncated: row.isValuePreviewTruncated,
+        pendingDecodePlaceholder: row.pendingDecodePlaceholder,
       }),
     )
     .filter((field): field is DataGridCellDetail => field !== null);
@@ -187,6 +195,7 @@ export function buildDataGridRowDetail(options: BuildDataGridRowDetailOptions): 
         isEditable: options.isEditableColumn?.(columnIndex) ?? false,
         includeBinaryImagePreview: false,
         isValuePreviewTruncated: options.isValuePreviewTruncated?.(columnIndex),
+        pendingDecodePlaceholder: options.pendingDecodePlaceholder?.(columnIndex),
       }),
     )
     .filter((field): field is DataGridCellDetail => field !== null);

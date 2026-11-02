@@ -11,7 +11,7 @@ const backend = vi.hoisted(() => ({ executeQuery: vi.fn(), cancelQuery: vi.fn(as
 vi.mock("@/lib/backend/api", async (original) => ({ ...(await original<typeof import("@/lib/backend/api")>()), ...backend }));
 const target = { connectionId: "source-connection", database: "ORCL", schema: "Original.Owner", name: "P", objectType: "PROCEDURE" as const };
 const mounted: Array<{ app: App; host: HTMLElement; pinia: Pinia }> = [];
-function mountPanel(initial: ObjectDetailsSection = "source", identity: ObjectDependencyTarget = target, includeSource?: boolean) {
+function mountPanel(initial: ObjectDetailsSection = "source", identity: ObjectDependencyTarget = target, includeSource?: boolean, withOpen = true) {
   const pinia = createPinia();
   const connections = useConnectionStore(pinia);
   connections.connectedIds.add(target.connectionId);
@@ -27,7 +27,7 @@ function mountPanel(initial: ObjectDetailsSection = "source", identity: ObjectDe
           target: identity,
           includeSource,
           section: section.value,
-          open: open.value,
+          ...(withOpen ? { open: open.value } : {}),
           "onUpdate:section": (value: ObjectDetailsSection) => {
             section.value = value;
           },
@@ -71,6 +71,18 @@ afterEach(() => {
 });
 
 describe("object details shared sections", () => {
+  it("opens dependency sections when optional open is omitted, while an explicit close still suppresses reads", async () => {
+    const omitted = mountPanel("dependencies", target, undefined, false);
+    await vi.waitFor(() => expect(omitted.host.textContent).toContain("Mixed.Table"));
+    expect(omitted.host.querySelector('[data-object-section="dependencies"]')).not.toBeNull();
+    const closed = mountPanel();
+    closed.open.value = false;
+    closed.section.value = "dependencies";
+    await nextTick();
+    expect(closed.host.querySelector("[data-object-details]")).toBeNull();
+    expect(backend.executeQuery).toHaveBeenCalledOnce();
+  });
+
   it("shows foreign keys and owning objects separately in table properties without mounting a source editor", async () => {
     const identity: ObjectDependencyTarget = { ...target, name: "Child.Table", objectType: "TABLE" };
     const { host, onOpenObject } = mountPanel("dependencies", identity, false);

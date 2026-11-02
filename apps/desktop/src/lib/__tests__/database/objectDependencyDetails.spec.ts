@@ -1,13 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { isObjectDependencySection, objectDependencyNavigation, objectDependencyRows, objectDependencySql, objectDependencyTarget, objectForeignKeyRows, objectOwnershipRows, relationObjectNavigation, type ObjectDependencyRow } from "@/lib/database/objectDependencyDetails";
+import { isObjectDependencySection, objectDependencyNavigation, objectDependencyRows, objectDependencySql, objectDependencyTarget, objectRelationKinds, objectForeignKeyRows, objectOwnershipRows, relationObjectNavigation, type ObjectDependencyRow } from "@/lib/database/objectDependencyDetails";
 import { oracleObjectDependenciesSql } from "@/lib/database/oracleObjectDependencies";
 import { normalizeOracleNavigationTarget, sqlObjectNavigationContextTarget, sqlObjectNavigationSourceKind } from "@/lib/sql/sqlNavigation";
-import type { QueryResult, QueryTab } from "@/types/database";
+import type { QueryResult, QueryTab, TriggerInfo } from "@/types/database";
 
 const details = { connectionId: "original", database: "ORCL", schema: "Mixed.Schema", name: "Mixed.P", objectType: "PROCEDURE" as const, section: "dependencies" as const };
 const row: ObjectDependencyRow = { direction: "DEPENDS_ON", name: "Mixed.Table", schema: "Other.Schema", type: "TABLE", dependencyType: "HARD", link: "", sourceType: "PROCEDURE" };
 
 describe("object dependency details", () => {
+  it("uses the existing dependency query only for a matching exact DM8 trigger, never DM routines or a compatibility label", () => {
+    const trigger: TriggerInfo = { name: " Tr'ig ", timing: "BEFORE", event: "INSERT", oracle_metadata: { contractVersion: 1, identityMode: "exact", engine: "dm", engineVersion: "8.1.3", owner: " Owner ", name: " Tr'ig ", objectId: "trigger-id", scope: "TABLE", reads: {} } };
+    const triggerDetails = { ...details, schema: " Owner ", name: trigger.name, objectType: "TRIGGER" as const, catalog: " Catalog " };
+    const target = objectDependencyTarget(triggerDetails, "dameng", trigger);
+    expect(target).toEqual({ connectionId: details.connectionId, database: details.database, schema: " Owner ", name: " Tr'ig ", objectType: "TRIGGER", catalog: " Catalog ", databaseType: "dameng" });
+    expect(objectRelationKinds(target!)).toEqual(["dependencies"]);
+    expect(() => objectDependencySql(target!, "ownership")).toThrow("not supported");
+    expect(() => objectDependencySql(target!, "foreignKeys")).toThrow("not supported");
+    expect(objectDependencySql(target!)).toContain("d.NAME = ' Tr''ig '");
+    expect(objectDependencySql(target!)).toContain("d.TYPE = 'TRIGGER'");
+    expect(objectDependencySql(target!)).toContain("d.REFERENCED_TYPE = 'TRIGGER'");
+    expect(objectDependencyTarget(details, "dameng", trigger)).toBeUndefined();
+    expect(objectDependencyTarget(triggerDetails, "dameng")).toBeUndefined();
+    expect(objectDependencyTarget(triggerDetails, "oracle", trigger)).toBeUndefined();
+    expect(objectDependencyTarget({ ...triggerDetails, schema: "different" }, "dameng", trigger)).toBeUndefined();
+    trigger.oracle_metadata!.engineVersion = "6.0";
+    expect(objectDependencyTarget(triggerDetails, "dameng", trigger)).toBeUndefined();
+  });
+
   it("keeps captured identity and reuses the provider SQL without changing quoting or package scope", () => {
     const target = objectDependencyTarget(details, "oceanbase-oracle")!;
     expect(target).toEqual({ connectionId: "original", database: "ORCL", schema: "Mixed.Schema", name: "Mixed.P", objectType: "PROCEDURE" });

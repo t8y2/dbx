@@ -10,9 +10,10 @@ use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::foreign_keys::build_foreign_key_sql_for_new_table;
 use super::indexes::{build_create_index_statements, mysql_inline_index_definition, normalized_index_type};
 use super::mysql_engine::{append_mysql_table_option, validate_mysql_engine};
+use super::mysql_table_charset::mysql_table_charset_clause;
 use super::transwarp;
-use super::triggers::build_trigger_sql_for_new_table;
-use super::types::{TableStructureSqlOptions, TableStructureSqlResult};
+use super::triggers::{build_trigger_sql_for_new_table, build_trigger_sql_with_operations};
+use super::types::{TableStructureSqlOptions, TableStructureSqlPlan, TableStructureSqlResult};
 use super::util::{
     clean, format_default_for_sql, normalize_default, qualified_new_table, quote_ident, quote_new_ident, quote_string,
 };
@@ -45,6 +46,14 @@ pub fn build_create_table_sql_with_dialect_options(
     server_version: Option<&str>,
     dialect_options: CreateTableDialectOptions,
 ) -> TableStructureSqlResult {
+    build_create_table_sql_plan_with_dialect_options(options, server_version, dialect_options).sql
+}
+
+pub fn build_create_table_sql_plan_with_dialect_options(
+    options: TableStructureSqlOptions,
+    server_version: Option<&str>,
+    dialect_options: CreateTableDialectOptions,
+) -> TableStructureSqlPlan {
     build_create_table_sql_impl(options, None, server_version, dialect_options)
 }
 
@@ -58,7 +67,7 @@ pub(super) fn build_create_table_sql_with_partition_clause(
     options: TableStructureSqlOptions,
     partition_clause: Option<String>,
 ) -> TableStructureSqlResult {
-    build_create_table_sql_impl(options, partition_clause, None, CreateTableDialectOptions::default())
+    build_create_table_sql_impl(options, partition_clause, None, CreateTableDialectOptions::default()).sql
 }
 
 fn build_create_table_sql_impl(
@@ -66,7 +75,36 @@ fn build_create_table_sql_impl(
     partition_clause: Option<String>,
     server_version: Option<&str>,
     dialect_options: CreateTableDialectOptions,
-) -> TableStructureSqlResult {
+) -> TableStructureSqlPlan {
+    let native_mysql = options.database_type == Some(DatabaseType::Mysql)
+        && !options.is_gaussdb_m_mode
+        && options
+            .driver_profile
+            .as_deref()
+            .is_none_or(|profile| profile.trim().is_empty() || profile.trim().eq_ignore_ascii_case("mysql"));
+    let table_charset_clause = match dialect_options.mysql_table_charset.as_ref() {
+        Some(_) if !native_mysql => {
+            return TableStructureSqlResult {
+                statements: Vec::new(),
+                warnings: vec![
+                    "Setting the table character set is supported only for native MySQL connections.".to_string()
+                ],
+            }
+            .into();
+        }
+        Some(change) => match mysql_table_charset_clause(change) {
+            Ok(clause) => Some(clause),
+            Err(warning) => return TableStructureSqlResult { statements: Vec::new(), warnings: vec![warning] }.into(),
+        },
+        None => None,
+    };
+    let foreign_clause = match dialect_options.postgres_foreign_table.as_ref() {
+        Some(foreign) => match super::postgres_foreign_table::create_clause(&options, foreign) {
+            Ok(clause) => Some(clause),
+            Err(warnings) => return TableStructureSqlResult { statements: Vec::new(), warnings }.into(),
+        },
+        None => None,
+    };
     let create_dialect = create_table_dialect(&options, server_version, dialect_options);
     let capabilities;
     let dialect;
@@ -84,7 +122,9 @@ fn build_create_table_sql_impl(
     strip_inherited_mysql_column_charsets(&mut options);
     let ordered_foreign_keys = match super::oracle_foreign_keys::build_new_table_keys(&options) {
         Ok(statements) => statements,
-        Err(message) => return TableStructureSqlResult { statements: Vec::new(), warnings: vec![message.into()] },
+        Err(message) => {
+            return TableStructureSqlResult { statements: Vec::new(), warnings: vec![message.into()] }.into()
+        }
     };
     let mut warnings = Vec::new();
     warnings.extend(validate_mysql_engine(&options));
@@ -124,12 +164,6 @@ fn build_create_table_sql_impl(
     }
     // MySQL requires the supporting key to exist in the CREATE itself. A later
     // CREATE INDEX cannot rescue a table rejected for ERROR 1075.
-    let native_mysql = options.database_type == Some(DatabaseType::Mysql)
-        && !options.is_gaussdb_m_mode
-        && options
-            .driver_profile
-            .as_deref()
-            .is_none_or(|profile| profile.trim().is_empty() || profile.trim().eq_ignore_ascii_case("mysql"));
     let mut inline_auto_index = None;
     if native_mysql {
         let auto_columns: Vec<_> = active_columns
@@ -179,7 +213,7 @@ fn build_create_table_sql_impl(
     transwarp::validate_create_options(&options, &active_columns, &mut warnings);
     create_dialect.validate(&options, &active_columns, &mut warnings);
     if !warnings.is_empty() {
-        return TableStructureSqlResult { statements: Vec::new(), warnings };
+        return TableStructureSqlResult { statements: Vec::new(), warnings }.into();
     }
     let table = qualified_new_table(options.database_type, dialect, options.schema.as_deref(), &options.table_name);
     if dialect == StructureDialect::Dameng {
@@ -192,7 +226,7 @@ fn build_create_table_sql_impl(
             }
         }
         if !warnings.is_empty() {
-            return TableStructureSqlResult { statements: Vec::new(), warnings };
+            return TableStructureSqlResult { statements: Vec::new(), warnings }.into();
         }
     }
     if dialect == StructureDialect::Sqlite {
@@ -213,7 +247,7 @@ fn build_create_table_sql_impl(
             }
         }
         if !warnings.is_empty() {
-            return TableStructureSqlResult { statements: Vec::new(), warnings };
+            return TableStructureSqlResult { statements: Vec::new(), warnings }.into();
         }
     }
     let mut statements = Vec::new();
@@ -328,7 +362,9 @@ fn build_create_table_sql_impl(
         column_definitions.push(definition.clone());
     }
 
-    let mut create_table = format!("CREATE TABLE {table} (\n  {}\n)", column_definitions.join(",\n  "));
+    let is_foreign_table = foreign_clause.is_some();
+    let kind = if is_foreign_table { "FOREIGN TABLE" } else { "TABLE" };
+    let mut create_table = format!("CREATE {kind} {table} (\n  {}\n)", column_definitions.join(",\n  "));
     create_table.push_str(&create_dialect.after_columns(&options, &pk_list));
     create_table.push_str(&transwarp::create_table_suffix(&options, &active_columns, dialect));
     let mut create_table = match partition_clause {
@@ -338,11 +374,20 @@ fn build_create_table_sql_impl(
     create_table.push_str(&create_dialect.partition_clause(&active_columns));
     create_table.push_str(&create_dialect.after_partition(&active_columns, &pk_list));
     create_table.push_str(&create_dialect.sort_clause(&active_columns));
+    if let Some(clause) = foreign_clause {
+        create_table.push_str(&clause);
+    }
     statements.push(format!("{create_table};"));
 
     if let Some(engine) = options.mysql_engine.as_deref().map(str::trim).filter(|engine| !engine.is_empty()) {
         if let Some(statement) = statements.last_mut() {
             append_mysql_table_option(statement, &format!("ENGINE = {engine}"));
+        }
+    }
+
+    if let Some(clause) = table_charset_clause {
+        if let Some(statement) = statements.last_mut() {
+            append_mysql_table_option(statement, &clause);
         }
     }
 
@@ -371,7 +416,9 @@ fn build_create_table_sql_impl(
                     | StructureDialect::H2
                     | StructureDialect::SapHana
             ) {
-                statements.push(format!("COMMENT ON TABLE {table} IS {};", quote_string(&table_comment)));
+                let comment_kind =
+                    if dialect == StructureDialect::Postgres && is_foreign_table { "FOREIGN TABLE" } else { "TABLE" };
+                statements.push(format!("COMMENT ON {comment_kind} {table} IS {};", quote_string(&table_comment)));
             } else if dialect == StructureDialect::ClickHouse {
                 statements.push(format!("ALTER TABLE {table} MODIFY COMMENT {};", quote_string(&table_comment)));
             } else if dialect == StructureDialect::SqlServer {
@@ -466,7 +513,24 @@ fn build_create_table_sql_impl(
     } else {
         statements.extend(build_foreign_key_sql_for_new_table(&options, &mut warnings));
     }
-    statements.extend(build_trigger_sql_for_new_table(&options, &mut warnings));
+    let mut trigger_operations = Vec::new();
+    let oracle_trigger_contract = options.triggers.iter().any(|trigger| trigger.oracle_exact.is_some()).then_some(1);
+    let trigger_sql = if oracle_trigger_contract.is_some() {
+        build_trigger_sql_with_operations(
+            &options,
+            &mut warnings,
+            true,
+            statements.len(),
+            Some(&mut trigger_operations),
+        )
+    } else {
+        build_trigger_sql_for_new_table(&options, &mut warnings)
+    };
+    statements.extend(trigger_sql);
 
-    TableStructureSqlResult { statements, warnings }
+    TableStructureSqlPlan {
+        sql: TableStructureSqlResult { statements, warnings },
+        trigger_operations,
+        oracle_trigger_contract,
+    }
 }

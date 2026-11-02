@@ -20,6 +20,7 @@ vi.mock("@/lib/backend/api", () => apiMock);
 vi.mock("@/composables/useDialogSources", () => ({ openSchemaDiffSession: openMock }));
 vi.mock("@/composables/useExportTracker", () => ({ useExportTracker: () => trackerMock }));
 vi.mock("@/lib/schema/schemaDiffMetadataLoad", () => ({ loadSchemaDetails: vi.fn().mockResolvedValue([]) }));
+vi.mock("@/lib/metadata/objectMetadataCache", () => ({ invalidateObjectMetadataCache: vi.fn().mockResolvedValue(undefined) }));
 
 const { startSchemaDiffSession } = await import("../useSchemaDiffSession.ts");
 
@@ -85,12 +86,48 @@ test("applies every exclude rule before loading source and target details", asyn
   await waitForSession(session);
   assert.equal(session.status, "completed");
   assert.equal(vi.mocked(loadSchemaDetails).mock.calls.length, 2);
+  const { invalidateObjectMetadataCache } = await import("@/lib/metadata/objectMetadataCache");
+  assert.deepEqual(
+    vi.mocked(invalidateObjectMetadataCache).mock.calls.map(([match]) => match),
+    [
+      { connectionId: "source", database: "app" },
+      { connectionId: "target", database: "warehouse" },
+    ],
+  );
   for (const [tables] of vi.mocked(loadSchemaDetails).mock.calls) {
     assert.deepEqual(
       tables.map((table) => table.name),
       ["users"],
     );
   }
+  vi.clearAllMocks();
+});
+
+test("skips metadata cache invalidation when refreshMetadata is turned off", async () => {
+  const { loadSchemaDetails } = await import("@/lib/schema/schemaDiffMetadataLoad");
+  const { invalidateObjectMetadataCache } = await import("@/lib/metadata/objectMetadataCache");
+  vi.clearAllMocks();
+  apiMock.prepareSchemaDiff.mockResolvedValue({ diffs: [], renameCandidates: [], syncSql: "", rollbackSyncSql: "" });
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "source",
+      sourceDatabase: "app",
+      sourceSchema: "",
+      targetConnectionId: "target",
+      targetDatabase: "warehouse",
+      targetSchema: "",
+      sourceDbType: "mysql",
+      targetDbType: "mysql",
+      options: { functions: false, refreshMetadata: false },
+      ignoreComments: false,
+      label: "cached compare",
+    },
+    { tableListLoader: { load: vi.fn().mockResolvedValue([{ name: "users", table_type: "BASE TABLE" }]) } },
+  );
+  await waitForSession(session);
+  assert.equal(session.status, "completed");
+  assert.equal(vi.mocked(loadSchemaDetails).mock.calls.length, 2);
+  assert.equal(vi.mocked(invalidateObjectMetadataCache).mock.calls.length, 0);
   vi.clearAllMocks();
 });
 

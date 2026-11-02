@@ -1,3 +1,4 @@
+use dbx_core::mcp_access::{McpAccessLevel, McpCallDecision, McpConfirmPolicy};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -54,10 +55,39 @@ struct ConsumeSqlApprovalRequest {
 
 #[derive(Clone, Serialize)]
 struct SqlApprovalEvent {
+    allow_timed: bool,
     id: String,
     connection_name: String,
     database: String,
     sql: String,
+}
+
+/// A high-risk non-SQL tool call awaiting confirmation (plugin tool declared
+/// `full`, dangerous Redis command). Mirrors `dbx_mcp::approval::ToolApprovalRequest`.
+#[derive(Deserialize)]
+struct ToolApprovalRequest {
+    kind: String,
+    tool: String,
+    #[serde(default)]
+    plugin: Option<String>,
+    #[serde(default)]
+    connection_id: Option<String>,
+    #[serde(default)]
+    database: Option<String>,
+    detail: String,
+}
+
+/// Payload of the `mcp-tool-approval` event. Tool confirmations are one-shot:
+/// unlike SQL there is no exact statement to bind a timed grant to.
+#[derive(Clone, Serialize)]
+struct ToolApprovalEvent {
+    id: String,
+    kind: String,
+    tool: String,
+    plugin: Option<String>,
+    connection_name: Option<String>,
+    database: Option<String>,
+    detail: String,
 }
 
 #[derive(Clone, Copy)]
@@ -389,6 +419,8 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>, data_dir: PathBuf) {
                     handle_execute_query_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /approve-high-risk-sql") {
                     handle_sql_approval(&app, &st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /approve-high-risk-tool") {
+                    handle_tool_approval(&app, &st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /consume-high-risk-sql-approval") {
                     handle_consume_sql_approval(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /execute-query") {
@@ -542,6 +574,93 @@ mod tests {
     use dbx_core::storage::{McpConnectionPolicy, McpDatabasePolicy, McpDatabaseScope, McpGlobalPolicy};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn tool_approval_bridge_keeps_resource_overrides_under_global_read() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&root.path().join("storage.db")).await.unwrap();
+        let config = mysql_config(false);
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, root.path().join("plugins")));
+        let mut policy = McpGlobalPolicy { read_only: true, prompt_high_risk_sql: true, ..Default::default() };
+        policy.connection_policies.push(serde_json::from_value(serde_json::json!({
+            "connectionId": config.id, "readOnly": false, "executionModeConfigured": true, "executionModePolicyVersion": 1
+        })).unwrap());
+        state.storage.save_mcp_global_policy(&policy).await.unwrap();
+        let mut request = super::ToolApprovalRequest {
+            kind: "product_tool".into(),
+            tool: "dbx_nacos_delete_config".into(),
+            plugin: None,
+            connection_id: Some(config.id.clone()),
+            database: Some("dev".into()),
+            detail: "test".into(),
+        };
+        // The server has checked the resource-level grant; the bridge must not
+        // replace that resolved decision with the unrelated global default.
+        assert_eq!(super::tool_approval_target(&state, &request).await.unwrap(), Some(config.name.clone()));
+        request.connection_id = None;
+        assert!(super::tool_approval_target(&state, &request).await.is_err());
+        request.connection_id = Some(config.id.clone());
+        let mut protected = config.clone();
+        protected.read_only = true;
+        state.storage.save_connections(std::slice::from_ref(&protected)).await.unwrap();
+        assert!(super::tool_approval_target(&state, &request).await.unwrap_err().contains("CONNECTION_READ_ONLY"));
+        protected.read_only = false;
+        protected.is_production = true;
+        state.storage.save_connections(std::slice::from_ref(&protected)).await.unwrap();
+        assert!(super::tool_approval_target(&state, &request).await.unwrap_err().contains("PRODUCTION_WRITE_BLOCKED"));
+        policy.prompt_high_risk_sql = false;
+        state.storage.save_mcp_global_policy(&policy).await.unwrap();
+        assert!(super::tool_approval_target(&state, &request).await.unwrap_err().contains("TOOL_BLOCKED"));
+    }
+
+    #[tokio::test]
+    async fn call_safety_bridge_requires_confirmation_without_elevating_permissions() {
+        use dbx_core::mcp_access::McpConfirmPolicy;
+        let root = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&root.path().join("storage.db")).await.unwrap();
+        let config = mysql_config(false);
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, root.path().join("plugins")));
+        for full in [false, true] {
+            for approved in [false, true] {
+                let policy = McpGlobalPolicy {
+                    allow_dangerous_sql: full,
+                    call_confirmation: Some(McpConfirmPolicy::HighRisk),
+                    ..Default::default()
+                };
+                state.storage.save_mcp_global_policy(&policy).await.unwrap();
+                let result =
+                    super::ensure_mcp_sql_allowed_with_approval(&state, &config, "app", "DROP TABLE items", approved)
+                        .await;
+                assert_eq!(result.is_ok(), full && approved, "full={full} approved={approved}: {result:?}");
+                assert!(super::ensure_mcp_sql_allowed_with_approval(&state, &config, "app", "SELECT 1", false)
+                    .await
+                    .is_ok());
+            }
+        }
+        // The legacy boolean keeps its former meaning, including no prompt at Full.
+        for full in [false, true] {
+            state
+                .storage
+                .save_mcp_global_policy(&McpGlobalPolicy {
+                    allow_dangerous_sql: full,
+                    prompt_high_risk_sql: true,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert!(super::ensure_mcp_sql_allowed_with_approval(&state, &config, "app", "DROP TABLE items", true)
+                .await
+                .is_ok());
+            assert_eq!(
+                super::ensure_mcp_sql_allowed_with_approval(&state, &config, "app", "DROP TABLE items", false)
+                    .await
+                    .is_ok(),
+                full
+            );
+        }
+    }
 
     #[test]
     fn sql_approval_token_is_single_use_and_bound_to_target_and_text() {
@@ -1154,7 +1273,7 @@ async fn resolve_connection(
 async fn load_mcp_policy(state: &Arc<AppState>) -> Result<McpGlobalPolicy, String> {
     state
         .storage
-        .load_mcp_global_policy()
+        .load_enforced_mcp_policy()
         .await
         .map(|state| state.policy())
         .map_err(|error| mcp_policy_unavailable(error.to_string()))
@@ -1666,12 +1785,22 @@ async fn ensure_mcp_sql_allowed_with_approval(
             "MCP_READ_ONLY: MCP execution permission for database '{database}' is read-only. SQL write blocked."
         ));
     }
-    if !allow_dangerous_sql
-        && (risk == dbx_core::sql_risk::SqlRisk::Ddl
-            || dbx_core::sql_risk::is_dangerous_sql_for_database(sql, config.db_type))
-        && !(approved && policy.prompt_high_risk_sql && !read_only)
-    {
-        return Err("SQL_BLOCKED: High-risk SQL is disabled in DBX MCP settings.".to_string());
+    let high_risk = risk == dbx_core::sql_risk::SqlRisk::Ddl
+        || dbx_core::sql_risk::is_dangerous_sql_for_database(sql, config.db_type);
+    if high_risk {
+        match policy.confirmation_policy().decide(
+            McpAccessLevel::from_flags(read_only, allow_dangerous_sql),
+            McpAccessLevel::Full,
+            true,
+        ) {
+            McpCallDecision::Deny => {
+                return Err("SQL_BLOCKED: High-risk SQL is disabled in DBX MCP settings.".to_string())
+            }
+            McpCallDecision::Confirm if !approved => {
+                return Err("SQL_BLOCKED: This high-risk call requires confirmation.".to_string())
+            }
+            _ => {}
+        }
     }
     ensure_mcp_connection_sql_write_allowed(config, is_write)?;
     if is_write && dbx_core::production_safety::targets_production_database(config, database, sql) {
@@ -1707,12 +1836,14 @@ async fn handle_sql_approval(app: &AppHandle, state: &Arc<AppState>, body: &str,
     let group_ids = group_paths.get(&config.id).map(|path| path.ids.as_slice()).unwrap_or_default();
     let (read_only, allow_dangerous) =
         effective_database_execution_policy_with_groups(&policy, group_ids, &config.id, &req.database);
-    if !policy.prompt_high_risk_sql
-        || read_only
-        || allow_dangerous
-        || !(dbx_core::sql_risk::classify_sql_risk_for_database(&req.sql, config.db_type)
-            .is_ok_and(|risk| risk == dbx_core::sql_risk::SqlRisk::Ddl)
-            || dbx_core::sql_risk::is_dangerous_sql_for_database(&req.sql, config.db_type))
+    let high_risk = dbx_core::sql_risk::classify_sql_risk_for_database(&req.sql, config.db_type)
+        .is_ok_and(|risk| risk == dbx_core::sql_risk::SqlRisk::Ddl)
+        || dbx_core::sql_risk::is_dangerous_sql_for_database(&req.sql, config.db_type);
+    let confirmation = policy.confirmation_policy();
+    let allow_timed = confirmation == McpConfirmPolicy::Full;
+    if !high_risk
+        || confirmation.decide(McpAccessLevel::from_flags(read_only, allow_dangerous), McpAccessLevel::Full, true)
+            != McpCallDecision::Confirm
     {
         respond_error(stream, "403 Forbidden", "SQL_BLOCKED: High-risk SQL approval is unavailable.").await;
         return;
@@ -1728,7 +1859,10 @@ async fn handle_sql_approval(app: &AppHandle, state: &Arc<AppState>, body: &str,
         approvals
             .timed
             .retain(|grant_key, grant| grant.expires_at > now && (grant_key != &key || grant.valid_for(&config, now)));
-        Ok::<_, ()>((approvals.timed.contains_key(&key).then_some(SqlApprovalDecision::Hour), approvals.generation))
+        Ok::<_, ()>((
+            (allow_timed && approvals.timed.contains_key(&key)).then_some(SqlApprovalDecision::Hour),
+            approvals.generation,
+        ))
     })();
     let (decision, generation) = match existing {
         Ok(existing) => existing,
@@ -1756,6 +1890,7 @@ async fn handle_sql_approval(app: &AppHandle, state: &Arc<AppState>, body: &str,
             return;
         }
         let event = SqlApprovalEvent {
+            allow_timed,
             id: id.clone(),
             connection_name: config.name.clone(),
             database: req.database.clone(),
@@ -1776,7 +1911,8 @@ async fn handle_sql_approval(app: &AppHandle, state: &Arc<AppState>, body: &str,
             }
         }
     };
-    if matches!(decision, SqlApprovalDecision::Deny) {
+    if matches!(decision, SqlApprovalDecision::Deny) || (!allow_timed && !matches!(decision, SqlApprovalDecision::Once))
+    {
         respond_error(stream, "403 Forbidden", "SQL_BLOCKED: MCP approval denied.").await;
         return;
     }
@@ -1830,6 +1966,95 @@ async fn handle_sql_approval(app: &AppHandle, state: &Arc<AppState>, body: &str,
         return;
     }
     respond_json(stream, &serde_json::json!({ "token": token })).await;
+}
+
+/// The MCP server validates the exact tool/sub-scope level before requesting
+/// and after receiving confirmation. The bridge gates the shared switch and
+/// independent protections; a global read default cannot veto resource overrides.
+async fn tool_approval_target(state: &Arc<AppState>, req: &ToolApprovalRequest) -> Result<Option<String>, String> {
+    let policy = load_mcp_policy(state).await?;
+    if policy.confirmation_policy() == McpConfirmPolicy::Off || (req.connection_id.is_none() && policy.read_only) {
+        return Err("TOOL_BLOCKED: High-risk confirmation is unavailable in DBX MCP settings.".to_string());
+    }
+    let Some(id) = req.connection_id.as_deref() else { return Ok(None) };
+    let config = resolve_connection(state, Some(id), "").await?;
+    if config.read_only {
+        return Err("CONNECTION_READ_ONLY: The connection has read-only protection enabled.".to_string());
+    }
+    if dbx_core::production_safety::is_production_database(&config, req.database.as_deref().unwrap_or_default()) {
+        return Err("PRODUCTION_WRITE_BLOCKED: The target has production protection enabled.".to_string());
+    }
+    Ok(Some(config.name))
+}
+
+/// Shows a one-shot confirmation for a high-risk non-SQL tool call and answers
+/// once the person decided. Shares the pending queue (and its cap and policy
+/// generation) with SQL approvals, so a policy save cancels it too.
+async fn handle_tool_approval(app: &AppHandle, state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: ToolApprovalRequest = match serde_json::from_str(body) {
+        Ok(req) => req,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid tool approval request").await;
+            return;
+        }
+    };
+    let connection_name = match tool_approval_target(state, &req).await {
+        Ok(name) => name,
+        Err(error) => {
+            respond_error(stream, "403 Forbidden", &error).await;
+            return;
+        }
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let (sender, receiver) = oneshot::channel();
+    let queued = (|| {
+        let mut approvals =
+            sql_approvals().lock().map_err(|_| ("500 Internal Server Error", "MCP approval state unavailable"))?;
+        if approvals.pending.len() >= 16 {
+            return Err(("429 Too Many Requests", "Too many pending MCP approvals"));
+        }
+        approvals.pending.insert(id.clone(), sender);
+        Ok::<_, (&str, &str)>(approvals.generation)
+    })();
+    let generation = match queued {
+        Ok(generation) => generation,
+        Err((status, message)) => {
+            respond_error(stream, status, message).await;
+            return;
+        }
+    };
+    let event = ToolApprovalEvent {
+        id: id.clone(),
+        kind: req.kind,
+        tool: req.tool,
+        plugin: req.plugin,
+        connection_name,
+        database: req.database,
+        detail: req.detail,
+    };
+    if app.emit_to("main", "mcp-tool-approval", event).is_err() {
+        sql_approvals().lock().ok().map(|mut approvals| approvals.pending.remove(&id));
+        respond_error(stream, "503 Service Unavailable", "DBX approval window unavailable").await;
+        return;
+    }
+    let answer = tokio::time::timeout(Duration::from_secs(90), receiver).await;
+    sql_approvals().lock().ok().map(|mut approvals| approvals.pending.remove(&id));
+    let approved = matches!(answer, Ok(Ok(decision)) if !matches!(decision, SqlApprovalDecision::Deny));
+    if !approved {
+        let message = if answer.is_err() {
+            "TOOL_BLOCKED: MCP confirmation timed out."
+        } else {
+            "TOOL_BLOCKED: MCP confirmation denied."
+        };
+        respond_error(stream, "403 Forbidden", message).await;
+        return;
+    }
+    let revoked = sql_approvals().lock().map(|approvals| approvals.generation != generation).unwrap_or(true);
+    if revoked {
+        respond_error(stream, "403 Forbidden", "TOOL_BLOCKED: Approval revoked by policy change.").await;
+        return;
+    }
+    respond_json(stream, &serde_json::json!({ "ok": true })).await;
 }
 
 async fn handle_consume_sql_approval(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
@@ -2694,7 +2919,7 @@ async fn handle_redis_execute_command_data(state: &Arc<AppState>, body: &str, st
             return;
         }
     };
-    let cmd_name = argv[0].to_ascii_uppercase();
+    let cmd_name = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
     let safety = dbx_core::db::redis_driver::classify_command(&cmd_name);
     let centrally_approved_high_risk = safety == dbx_core::db::redis_driver::RedisCommandSafety::Blocked;
     if safety != dbx_core::db::redis_driver::RedisCommandSafety::Allowed {

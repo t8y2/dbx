@@ -10,12 +10,13 @@ import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { openSidebarDangerDialog } from "@/lib/sidebar/sidebarDangerDialog";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
+import { connectionUsesConnectionRootSchemaMode } from "@/lib/database/jdbcDialect";
 import { objectBrowserTargetForNamespaceRow } from "@/lib/database/objectBrowserTarget";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "@/components/sidebar/SidebarTreeItemDialogs.vue";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import * as api from "@/lib/backend/api";
-import { filterDatabaseNamesForConnection } from "@/lib/database/visibleDatabases";
+import { filterDatabaseNamesForConnection, filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import { formatObjectBrowserBytes, formatObjectBrowserTimestamp } from "@/lib/table/objectBrowserRows";
 import { requestObjectBrowserSearchFocus } from "@/lib/tabs/objectBrowserSearchFocus";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
@@ -196,11 +197,11 @@ function databaseContextMenuItems(row: DatabaseRow): ContextMenuItem[] {
         action: () => {
           const dbType = props.connection.db_type;
           const sql = dbType === "mysql" ? `SHOW CREATE DATABASE \`${row.name.replaceAll("`", "``")}\`;` : `-- ${row.name}\n-- Database DDL is not available for this driver.`;
-          queryStore.createTab(props.connection.id, row.name, `${row.name} - ${t("contextMenu.viewDdl")}`, "query", undefined, sql, undefined, { forceNew: true });
+          queryStore.createTab(props.connection.id, target.database, `${row.name} - ${t("contextMenu.viewDdl")}`, "query", target.schema, sql, undefined, { forceNew: true });
         },
         icon: Copy,
       },
-      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => queryStore.createTab(props.connection.id, row.name, `${row.name} - ${t("contextMenu.newQuery")}`, "query", undefined, undefined, undefined, { forceNew: true }), icon: TerminalSquare },
+      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => queryStore.createTab(props.connection.id, target.database, `${row.name} - ${t("contextMenu.newQuery")}`, "query", target.schema, undefined, undefined, { forceNew: true }), icon: TerminalSquare },
       { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: () => copyToClipboard(row.name), icon: Copy },
       { label: "", separator: true },
       {
@@ -403,7 +404,46 @@ async function refresh(): Promise<boolean> {
   loading.value = true;
   error.value = "";
   try {
+    if (connectionUsesConnectionRootSchemaMode(props.connection)) {
+      const database = props.connection.database || "";
+      let schemas: Array<{ name: string; comment?: string | null }> = [];
+      try {
+        schemas = await api.listSchemaInfos(props.connection.id, database);
+      } catch {
+        const names = await api.listSchemas(props.connection.id, database, true).catch(() => []);
+        schemas = names.map((name) => ({ name, comment: null }));
+      }
+      if (generation !== refreshGeneration) return true;
+      if (schemas.length === 0) {
+        const databases = await api.listDatabases(props.connection.id).catch(() => []);
+        if (generation !== refreshGeneration) return true;
+        schemas = databases.map((database) => ({ name: database.name, comment: database.comment ?? null }));
+      }
+      const visibleNames = new Set(
+        filterSchemaNamesForConnection(
+          schemas.map((schema) => schema.name),
+          props.connection,
+          database,
+        ),
+      );
+      rows.value = schemas
+        .filter((schema) => schema.name.trim() && visibleNames.has(schema.name))
+        .map((schema) => ({
+          name: schema.name,
+          sizeBytes: null,
+          createdAt: null,
+          updatedAt: null,
+          comment: schema.comment ?? null,
+          defaultCharset: null,
+          defaultCollation: null,
+        }));
+      loading.value = false;
+      restoreScrollPosition();
+      return true;
+    }
+
     const databases = await api.listDatabases(props.connection.id);
+    if (generation !== refreshGeneration) return true;
     const visibleNames = new Set(
       filterDatabaseNamesForConnection(
         databases.map((database) => database.name),

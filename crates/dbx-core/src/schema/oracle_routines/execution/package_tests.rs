@@ -457,6 +457,7 @@ async fn a_new_pair_dispatches_each_approved_statement_once_without_replaying_sp
         &source,
         &target,
         OracleRoutinePlanInput {
+            compact_sql: false,
             source: source.snapshot(),
             target: target.snapshot(),
             drafts: drafts(RoutinePlanAction::Create),
@@ -485,6 +486,7 @@ async fn cross_product_packages_require_final_target_drafts_and_keep_full_valida
             &source,
             &target,
             OracleRoutinePlanInput {
+                compact_sql: false,
                 source: source.snapshot(),
                 target: target.snapshot(),
                 drafts: drafts(RoutinePlanAction::Create),
@@ -505,7 +507,12 @@ async fn cross_product_packages_require_final_target_drafts_and_keep_full_valida
             &registry,
             &source,
             &target,
-            OracleRoutinePlanInput { source: source.snapshot(), target: target.snapshot(), drafts: invalid },
+            OracleRoutinePlanInput {
+                compact_sql: false,
+                source: source.snapshot(),
+                target: target.snapshot(),
+                drafts: invalid,
+            },
         )
         .await;
         assert!(!rejected.ready);
@@ -518,7 +525,12 @@ async fn cross_product_packages_require_final_target_drafts_and_keep_full_valida
             &registry,
             &source,
             &target,
-            OracleRoutinePlanInput { source: source.snapshot(), target: target.snapshot(), drafts: reviewed },
+            OracleRoutinePlanInput {
+                compact_sql: false,
+                source: source.snapshot(),
+                target: target.snapshot(),
+                drafts: reviewed,
+            },
         )
         .await;
         assert!(approved.ready, "{:?}", approved.steps);
@@ -552,6 +564,7 @@ async fn cross_product_package_attributes_remain_copyable_and_do_not_become_sile
             &source,
             &target,
             OracleRoutinePlanInput {
+                compact_sql: false,
                 source: source.snapshot(),
                 target: target.snapshot(),
                 drafts: drafts(RoutinePlanAction::Create),
@@ -572,7 +585,12 @@ async fn cross_product_package_attributes_remain_copyable_and_do_not_become_sile
             &registry,
             &source,
             &target,
-            OracleRoutinePlanInput { source: source.snapshot(), target: target.snapshot(), drafts: reviewed },
+            OracleRoutinePlanInput {
+                compact_sql: false,
+                source: source.snapshot(),
+                target: target.snapshot(),
+                drafts: reviewed,
+            },
         )
         .await;
         assert!(!manual.ready, "Manual review does not establish unknown {clause} capabilities");
@@ -608,7 +626,12 @@ async fn recovery_of_a_repaired_orphan_retains_its_original_body_without_approvi
         &registry,
         &source,
         &target,
-        OracleRoutinePlanInput { source: source.snapshot(), target: target.snapshot(), drafts: selected },
+        OracleRoutinePlanInput {
+            compact_sql: false,
+            source: source.snapshot(),
+            target: target.snapshot(),
+            drafts: selected,
+        },
     )
     .await;
     assert!(plan.ready, "{:?}", plan.steps);
@@ -645,6 +668,7 @@ async fn new_pair_recovery_uses_known_body_receipt_and_dispatches_only_one_packa
             &source,
             &target,
             OracleRoutinePlanInput {
+                compact_sql: false,
                 source: source.snapshot(),
                 target: target.snapshot(),
                 drafts: drafts(RoutinePlanAction::Create),
@@ -683,6 +707,7 @@ async fn replacement_recovery_reuses_pair_contract_and_restores_both_old_definit
         &source,
         &target,
         OracleRoutinePlanInput {
+            compact_sql: false,
             source: source.snapshot(),
             target: before.clone(),
             drafts: drafts(RoutinePlanAction::Replace),
@@ -732,6 +757,7 @@ async fn recovery_cannot_claim_a_third_party_pair_even_after_successful_readonly
         &source,
         &target,
         OracleRoutinePlanInput {
+            compact_sql: false,
             source: source.snapshot(),
             target: target.snapshot(),
             drafts: drafts(RoutinePlanAction::Create),
@@ -761,6 +787,7 @@ async fn unknown_related_body_blocks_recovery_and_new_grants_block_recovery_dele
             &source,
             &target,
             OracleRoutinePlanInput {
+                compact_sql: false,
                 source: source.snapshot(),
                 target: target.snapshot(),
                 drafts: drafts(RoutinePlanAction::Create),
@@ -796,7 +823,12 @@ async fn dropped_pair_recovery_restores_empty_grant_pair_but_preserves_nonempty_
             &registry,
             &source,
             &target,
-            OracleRoutinePlanInput { source: source.snapshot(), target: target.snapshot(), drafts: vec![spec] },
+            OracleRoutinePlanInput {
+                compact_sql: false,
+                source: source.snapshot(),
+                target: target.snapshot(),
+                drafts: vec![spec],
+            },
         )
         .await;
         let dropped = execute(&registry, &source, &target, &plan.steps[0]).await;
@@ -833,6 +865,7 @@ async fn recovery_after_spec_only_success_rebuilds_old_body_and_rejects_changes_
             &source,
             &target,
             OracleRoutinePlanInput {
+                compact_sql: false,
                 source: source.snapshot(),
                 target: target.snapshot(),
                 drafts: drafts(RoutinePlanAction::Replace),
@@ -870,6 +903,7 @@ async fn known_spec_post_state_allows_old_body_invalidation_but_not_unapproved_d
             &source,
             &target,
             OracleRoutinePlanInput {
+                compact_sql: false,
                 source: source.snapshot(),
                 target: target.snapshot(),
                 drafts: drafts(RoutinePlanAction::Replace),
@@ -893,6 +927,7 @@ async fn companion_edit_after_specification_stops_body_before_dispatch() {
         &source,
         &target,
         OracleRoutinePlanInput {
+            compact_sql: false,
             source: source.snapshot(),
             target: target.snapshot(),
             drafts: drafts(RoutinePlanAction::Replace),
@@ -919,6 +954,7 @@ async fn body_failure_preserves_verified_spec_and_correction_only_dispatches_a_n
         &source,
         &target,
         OracleRoutinePlanInput {
+            compact_sql: false,
             source: source.snapshot(),
             target: before.clone(),
             drafts: drafts(RoutinePlanAction::Create),
@@ -937,7 +973,12 @@ async fn body_failure_preserves_verified_spec_and_correction_only_dispatches_a_n
         &registry,
         &source,
         &target,
-        OracleRoutinePlanInput { source: source.snapshot(), target: before, drafts: vec![correction] },
+        OracleRoutinePlanInput {
+            compact_sql: false,
+            source: source.snapshot(),
+            target: before,
+            drafts: vec![correction],
+        },
     )
     .await;
     assert!(corrected.ready, "{:?}", corrected.steps);
@@ -958,7 +999,12 @@ async fn specification_change_during_body_write_is_kept_in_readback_but_never_re
         &registry,
         &source,
         &target,
-        OracleRoutinePlanInput { source: source.snapshot(), target: target.snapshot(), drafts: vec![body] },
+        OracleRoutinePlanInput {
+            compact_sql: false,
+            source: source.snapshot(),
+            target: target.snapshot(),
+            drafts: vec![body],
+        },
     )
     .await;
     assert!(plan.ready, "{:?}", plan.steps);
@@ -989,6 +1035,7 @@ async fn unknown_body_outcome_is_not_unlocked_by_matching_readback_or_a_new_spec
         &source,
         &target,
         OracleRoutinePlanInput {
+            compact_sql: false,
             source: source.snapshot(),
             target: target.snapshot(),
             drafts: drafts(RoutinePlanAction::Create),

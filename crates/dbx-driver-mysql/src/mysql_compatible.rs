@@ -282,23 +282,37 @@ fn merge_index_infos(target: &mut Vec<IndexInfo>, parsed: Vec<IndexInfo>) {
 
 fn indexes_from_create_table_ddl(ddl: &str) -> Vec<IndexInfo> {
     let mut indexes = Vec::new();
-    for raw_line in ddl.lines() {
-        let line = trim_ddl_definition_line(raw_line);
+    let lines: Vec<&str> = ddl.lines().collect();
+    let mut idx = 0;
+    while idx < lines.len() {
+        let raw_line = lines[idx];
+        let line = raw_line.trim();
+        idx += 1;
         if line.is_empty() {
             continue;
         }
         let upper = line.to_ascii_uppercase();
-        if upper.starts_with("PRIMARY KEY") {
-            if let Some(index) = table_key_index("PRIMARY", line, true, true, "PRIMARY KEY") {
-                indexes.push(index);
+        if upper.starts_with("PRIMARY KEY") || upper.starts_with("UNIQUE KEY") || upper.starts_with("INDEX ") {
+            let mut combined = line.to_string();
+            while first_parenthesized_content(&combined).is_none() && idx < lines.len() {
+                combined.push(' ');
+                combined.push_str(lines[idx].trim());
+                idx += 1;
             }
-        } else if upper.starts_with("UNIQUE KEY") {
-            if let Some(index) = table_key_index("UNIQUE KEY", line, true, false, "UNIQUE KEY") {
-                indexes.push(index);
-            }
-        } else if upper.starts_with("INDEX ") {
-            if let Some(index) = secondary_index(line) {
-                indexes.push(index);
+            let trimmed = trim_ddl_definition_line(&combined);
+            let upper_combined = trimmed.to_ascii_uppercase();
+            if upper_combined.starts_with("PRIMARY KEY") {
+                if let Some(index) = table_key_index("PRIMARY", trimmed, true, true, "PRIMARY KEY") {
+                    indexes.push(index);
+                }
+            } else if upper_combined.starts_with("UNIQUE KEY") {
+                if let Some(index) = table_key_index("UNIQUE KEY", trimmed, true, false, "UNIQUE KEY") {
+                    indexes.push(index);
+                }
+            } else if upper_combined.starts_with("INDEX ") {
+                if let Some(index) = secondary_index(trimmed) {
+                    indexes.push(index);
+                }
             }
         }
     }
@@ -572,6 +586,30 @@ UNIQUE KEY(`tenant_id`, `name``part`)
         assert_eq!(indexes[0].comment.as_deref(), Some("name's index"));
         assert_eq!(indexes[1].columns, vec!["tenant_id", "name`part"]);
         assert!(indexes[1].is_unique);
+    }
+
+    #[test]
+    fn doris_create_table_ddl_handles_multiline_unique_key() {
+        let ddl = r#"
+CREATE TABLE `test_multi` (
+  `id` bigint NULL,
+  `data_type` varchar(255) NULL
+) ENGINE=OLAP
+UNIQUE KEY(
+  `id`,
+  `data_type`
+)
+DISTRIBUTED BY HASH(`id`) BUCKETS 3
+"#;
+
+        let indexes = indexes_from_create_table_ddl(ddl);
+
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].name, "UNIQUE KEY");
+        assert_eq!(indexes[0].columns, vec!["id", "data_type"]);
+        assert!(indexes[0].is_unique);
+        assert!(!indexes[0].is_primary);
+        assert_eq!(indexes[0].index_type.as_deref(), Some("UNIQUE KEY"));
     }
 
     fn catalog_info(name: &str, catalog_type: &str, is_current: bool) -> crate::db::CatalogInfo {

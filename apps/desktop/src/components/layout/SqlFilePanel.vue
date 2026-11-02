@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useSqlPanelSearchMode } from "@/composables/useSqlPanelSearchMode";
 import SqlPanelSearch from "@/components/layout/SqlPanelSearch.vue";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
@@ -27,7 +28,8 @@ import { externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, formatSqlFi
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFilter, getSqlFileFolderPaths, saveSqlFileFilter, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
-import { filterAndSortSqlFileEntries, getSqlFileSortOrder, saveSqlFileSortOrder, type SqlFileSearchMode, type SqlFileSortOrder } from "@/lib/sql/sqlFileTreeFilter";
+import { getSqlFileFoldersUiState, saveSqlFileFoldersUiState, type SqlFileFolderUiState } from "@/lib/sqlFile/sqlFileUiState";
+import { filterAndSortSqlFileEntries, getSqlFileSortOrder, saveSqlFileSortOrder, type SqlFileSortOrder } from "@/lib/sql/sqlFileTreeFilter";
 import { orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib/selection/orderedListSelection";
 import { getSqlFileOpenMode, saveSqlFileOpenMode, type SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
 import { getSqlFileOrder, saveSqlFileOrder, reorderSqlFiles, remapSqlFileOrder, sqlFileParentPath, type SqlFileOrder } from "@/lib/sqlFile/sqlFileOrder";
@@ -56,6 +58,19 @@ interface FolderState {
 }
 
 const folders = ref<FolderState[]>([]);
+let uiStateInitialized = false;
+
+function persistFoldersUiState() {
+  if (!uiStateInitialized) return;
+  const state: Record<string, SqlFileFolderUiState> = {};
+  for (const f of folders.value) {
+    state[f.path] = {
+      collapsed: f.collapsed,
+      expanded: [...f.expanded],
+    };
+  }
+  saveSqlFileFoldersUiState(state);
+}
 const fileTree = ref<HTMLElement | null>(null);
 const locatingFile = ref(false);
 const currentFilePath = computed(() => {
@@ -73,7 +88,7 @@ const fileFilterRegexExample = "(?i)[.](sql|ddl|sh|py)$";
 
 const searchInput = ref<InstanceType<typeof SqlPanelSearch> | null>(null);
 const searchInputPending = ref(false);
-const searchMode = ref<SqlFileSearchMode>("name");
+const searchMode = useSqlPanelSearchMode("file");
 const searchQuery = ref("");
 const {
   searching: scanning,
@@ -205,6 +220,7 @@ async function locateFileTarget(path: string) {
   }
   target.folder.collapsed = false;
   target.folder.expanded = new Set([...target.folder.expanded, ...target.ancestors]);
+  persistFoldersUiState();
   const itemIndex = visibleItems.value.findIndex((item) => item.folder === target.folder && item.type === "file" && normalizeExternalSqlPath(item.path) === target.path);
   const item = visibleItems.value[itemIndex];
   if (!item) return;
@@ -253,6 +269,7 @@ function loadSavedFolders(): string[] {
 function saveFolders() {
   const paths = folders.value.map((f) => f.path);
   saveSqlFileFolderPaths(paths);
+  persistFoldersUiState();
 }
 
 async function pickFolder() {
@@ -361,6 +378,7 @@ async function loadFolderEntries(folderPath: string): Promise<string | null> {
         if (displayPath && stillPresent.has(displayPath)) nextExpanded.add(displayPath);
       }
       folders.value[target].expanded = nextExpanded;
+      persistFoldersUiState();
       // Selection keys already normalize both root and entry paths.
     }
   } catch (e: any) {
@@ -528,6 +546,7 @@ function toggleExpand(folder: FolderState, path: string) {
     next.add(path);
     folder.expanded = next;
   }
+  persistFoldersUiState();
 }
 
 function toggleFolderCollapse(folder: FolderState) {
@@ -542,6 +561,7 @@ function toggleFolderCollapse(folder: FolderState) {
   } else {
     folder.collapsed = !folder.collapsed;
   }
+  persistFoldersUiState();
 }
 
 // Expand/collapse every directory beneath the given top-level folder.
@@ -553,6 +573,7 @@ function setAllExpanded(folder: FolderState, expanded: boolean) {
   } else {
     folder.expanded = new Set();
   }
+  persistFoldersUiState();
 }
 
 function collectDirPaths(entries: SqlFileEntry[], into: Set<string>) {
@@ -628,13 +649,26 @@ watch([foldersInitialized, () => props.locateRequest], async ([initialized, requ
 
 onBeforeUnmount(() => {
   disposed = true;
+  persistFoldersUiState();
 });
 
 onMounted(async () => {
   // Restoring folders must not persist a partially loaded list. Register all
   // roots before scanning so closing the panel cannot discard saved roots.
   const saved = loadSavedFolders();
-  folders.value = saved.map((path) => ({ path, entries: [], expanded: new Set<string>(), loading: true, refreshing: false, collapsed: false }));
+  const uiStates = getSqlFileFoldersUiState();
+  folders.value = saved.map((path) => {
+    const ui = uiStates[path];
+    return {
+      path,
+      entries: [],
+      expanded: new Set<string>(ui?.expanded ?? []),
+      loading: true,
+      refreshing: false,
+      collapsed: ui?.collapsed === true,
+    };
+  });
+  uiStateInitialized = true;
   for (const path of saved) {
     if (disposed) return;
     await loadFolderEntries(path);
@@ -940,6 +974,7 @@ async function createSqlFolder() {
     if (folder) {
       folder.collapsed = false;
       folder.expanded = new Set([...folder.expanded, target.directoryPath, path]);
+      persistFoldersUiState();
     }
     activeKey.value = nodeKey(target.rootPath, "dir", path);
     selectedKeys.value = new Set();
@@ -1190,6 +1225,7 @@ function expandSubtree(target: Extract<ContextTarget, { kind: "dir" }>) {
   next.add(target.entry.path);
   collectDirPaths(target.entry.children, next);
   folder.expanded = next;
+  persistFoldersUiState();
 }
 
 function collapseSubtree(target: Extract<ContextTarget, { kind: "dir" }>) {
@@ -1203,6 +1239,7 @@ function collapseSubtree(target: Extract<ContextTarget, { kind: "dir" }>) {
     if (!subtree.has(p)) next.add(p);
   }
   folder.expanded = next;
+  persistFoldersUiState();
 }
 
 function clearContextTarget() {
@@ -1211,7 +1248,7 @@ function clearContextTarget() {
 </script>
 
 <template>
-  <div class="h-full flex flex-col overflow-hidden">
+  <div class="h-full flex flex-col overflow-hidden isolate">
     <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0 bg-muted/20">
       <span class="text-[13px] font-medium">{{ t("sqlFileTree.title") }}</span>
       <HelpTooltip :label="t('sqlFileTree.storageHelp')" side="bottom" :side-offset="4" trigger-class="h-4 w-4" content-class="max-w-[320px] whitespace-pre-line">
@@ -1306,7 +1343,7 @@ function clearContextTarget() {
             <div v-for="(folder, fi) in folders" :key="folder.path" class="border-b last:border-b-0">
               <div
                 data-sql-file-row="true"
-                class="flex cursor-default items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-muted-foreground bg-[color-mix(in_oklab,var(--muted)_10%,var(--background))] sticky top-0 select-none"
+                class="flex cursor-default items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-muted-foreground bg-[color-mix(in_oklab,var(--muted)_10%,var(--background))] sticky top-0 z-10 select-none"
                 :class="isPathHighlighted(folder.path, 'folderHeader', folder.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-[color-mix(in_oklab,var(--accent)_40%,var(--background))]'"
                 role="treeitem"
                 :id="visibleRowIds.get(folder)?.get(folder.path)"

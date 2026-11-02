@@ -41,6 +41,8 @@ public final class KafkaAgent {
     private static final PrintStream JSON_RPC_OUT = System.out;
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+    private static final int MAX_GROUP_QUERY_ADMINS = 12;
+    private static final int GROUPS_PER_QUERY_ADMIN = 16;
     private static final int MAX_PEEK_MESSAGE_COUNT = 100;
     private static final int MAX_PEEK_SCAN_RECORDS = 1_000;
     private static final int DEFAULT_SESSION_TIMEOUT_MS = 30_000;
@@ -66,6 +68,7 @@ public final class KafkaAgent {
     ));
 
     private static AdminClient adminClient;
+    private static final List<AdminClient> groupQueryAdmins = new ArrayList<>();
     private static KafkaProducer<String, byte[]> producer;
     private static JsonObject activeConnection;
     private static volatile boolean shutdownRequested;
@@ -160,8 +163,8 @@ public final class KafkaAgent {
             case "mq_get_topic_config" -> getTopicConfig(params);
             case "mq_alter_topic_config" -> alterTopicConfig(params);
             // Consumer groups
-            case "mq_list_consumer_groups" -> listConsumerGroups(params, requireAdmin());
-            case "mq_get_consumer_group_snapshot" -> getConsumerGroupSnapshot(params, requireAdmin());
+            case "mq_list_consumer_groups" -> listConsumerGroups(params, requireAdmin(), KafkaAgent::consumerGroupAdmins);
+            case "mq_get_consumer_group_snapshot" -> getConsumerGroupSnapshot(params, requireAdmin(), KafkaAgent::consumerGroupAdmins);
             case "mq_describe_consumer_group" -> describeConsumerGroup(params);
             case "mq_delete_consumer_group" -> deleteConsumerGroup(params);
             case "mq_reset_consumer_group_offsets" -> resetConsumerGroupOffsets(params);
@@ -283,6 +286,10 @@ public final class KafkaAgent {
     }
 
     private static void closeClients() {
+        for (AdminClient groupAdmin : groupQueryAdmins) {
+            groupAdmin.close(Duration.ZERO);
+        }
+        groupQueryAdmins.clear();
         if (adminClient != null) {
             adminClient.close(Duration.ofSeconds(5));
             adminClient = null;
@@ -1035,7 +1042,56 @@ public final class KafkaAgent {
         return descriptions;
     }
 
+    private static List<Admin> consumerGroupAdmins(int groupCount) {
+        int count = Math.min(MAX_GROUP_QUERY_ADMINS, (groupCount + GROUPS_PER_QUERY_ADMIN - 1) / GROUPS_PER_QUERY_ADMIN);
+        while (groupQueryAdmins.size() < count - 1) {
+            groupQueryAdmins.add(buildAdminClient(activeConnection));
+        }
+        List<Admin> admins = new ArrayList<>();
+        admins.add(adminClient);
+        admins.addAll(groupQueryAdmins.subList(0, count - 1));
+        return admins;
+    }
+
+    private record ConsumerGroupQueries(
+        DescribeConsumerGroupsResult descriptions,
+        Map<String, KafkaFuture<Map<TopicPartition, OffsetAndMetadata>>> offsets
+    ) {}
+
+    private static ConsumerGroupQueries startConsumerGroupQueries(List<String> groupIds, List<Admin> admins, long deadline) {
+        Map<String, KafkaFuture<ConsumerGroupDescription>> descriptions = new LinkedHashMap<>();
+        Map<String, KafkaFuture<Map<TopicPartition, OffsetAndMetadata>>> offsets = new LinkedHashMap<>();
+        // Older brokers cannot batch coordinator lookups or offset fetches, and
+        // Kafka Admin allows one in-flight request per connection. Independent
+        // clients bound that otherwise sequential work for large group lists.
+        for (int index = 0; index < admins.size(); index++) {
+            List<String> shard = new ArrayList<>();
+            Map<String, ListConsumerGroupOffsetsSpec> specs = new LinkedHashMap<>();
+            for (int groupIndex = index; groupIndex < groupIds.size(); groupIndex += admins.size()) {
+                String groupId = groupIds.get(groupIndex);
+                shard.add(groupId);
+                specs.put(groupId, new ListConsumerGroupOffsetsSpec());
+            }
+            if (shard.isEmpty()) continue;
+            Admin admin = admins.get(index);
+            ListConsumerGroupOffsetsResult result = admin.listConsumerGroupOffsets(
+                specs, new ListConsumerGroupOffsetsOptions().timeoutMs((int) remainingMillis(deadline))
+            );
+            descriptions.putAll(admin.describeConsumerGroups(
+                shard, new DescribeConsumerGroupsOptions().timeoutMs((int) remainingMillis(deadline))
+            ).describedGroups());
+            for (String groupId : shard) {
+                offsets.put(groupId, result.partitionsToOffsetAndMetadata(groupId));
+            }
+        }
+        return new ConsumerGroupQueries(new DescribeConsumerGroupsResult(descriptions), offsets);
+    }
+
     static Object listConsumerGroups(JsonObject params, Admin admin) throws Exception {
+        return listConsumerGroups(params, admin, ignored -> List.of(admin));
+    }
+
+    static Object listConsumerGroups(JsonObject params, Admin admin, java.util.function.IntFunction<List<Admin>> groupAdmins) throws Exception {
         int timeout = requestTimeout(params);
         long deadline = System.currentTimeMillis() + timeout;
         String filterTopic = stringOrEmpty(params, "topic");
@@ -1052,25 +1108,11 @@ public final class KafkaAgent {
             return Collections.singletonMap("groups", Collections.emptyList());
         }
 
-        // Start both independent lookups before waiting. A slow description must
-        // not consume the deadline before committed offsets can even be requested.
-        Map<String, ListConsumerGroupOffsetsSpec> offsetSpecs = new LinkedHashMap<>();
-        for (String groupId : groupIds) {
-            offsetSpecs.put(groupId, new ListConsumerGroupOffsetsSpec());
-        }
+        ConsumerGroupQueries queries = startConsumerGroupQueries(groupIds, groupAdmins.apply(groupIds.size()), deadline);
         Map<String, Map<TopicPartition, OffsetAndMetadata>> committedOffsets = new HashMap<>();
-        ListConsumerGroupOffsetsResult offsetsResult = admin.listConsumerGroupOffsets(
-            offsetSpecs,
-            new ListConsumerGroupOffsetsOptions().timeoutMs((int) remainingMillis(deadline))
-        );
-        DescribeConsumerGroupsResult described = admin.describeConsumerGroups(
-            groupIds,
-            new DescribeConsumerGroupsOptions().timeoutMs((int) remainingMillis(deadline))
-        );
         for (String groupId : groupIds) {
             try {
-                Map<TopicPartition, OffsetAndMetadata> rows = offsetsResult
-                    .partitionsToOffsetAndMetadata(groupId)
+                Map<TopicPartition, OffsetAndMetadata> rows = queries.offsets().get(groupId)
                     .get(remainingMillis(deadline), TimeUnit.MILLISECONDS);
                 committedOffsets.put(groupId, rows == null ? Collections.emptyMap() : rows);
             } catch (Exception error) {
@@ -1078,7 +1120,7 @@ public final class KafkaAgent {
                 logger().debug("Committed offsets unavailable for {}: {}", groupId, normalizeErrorMessage(error));
             }
         }
-        Map<String, ConsumerGroupDescription> descriptions = awaitGroupDescriptions(described, groupIds, deadline, (groupId, message) -> logger().debug("Consumer group details unavailable for {}: {}", groupId, message));
+        Map<String, ConsumerGroupDescription> descriptions = awaitGroupDescriptions(queries.descriptions(), groupIds, deadline, (groupId, message) -> logger().debug("Consumer group details unavailable for {}: {}", groupId, message));
 
         // End offsets: one batched Admin request limited to the requested
         // topic's partitions (deduplicated across groups). Without a topic
@@ -1206,6 +1248,10 @@ public final class KafkaAgent {
     }
 
     static Object getConsumerGroupSnapshot(JsonObject params, Admin admin) throws Exception {
+        return getConsumerGroupSnapshot(params, admin, ignored -> List.of(admin));
+    }
+
+    static Object getConsumerGroupSnapshot(JsonObject params, Admin admin, java.util.function.IntFunction<List<Admin>> groupAdmins) throws Exception {
         int timeout = requestTimeout(params);
         long deadline = System.currentTimeMillis() + timeout;
         Collection<ConsumerGroupListing> listings = admin.listConsumerGroups(
@@ -1226,24 +1272,10 @@ public final class KafkaAgent {
         Map<String, Boolean> committedOffsetsAvailable = new HashMap<>();
         Map<String, LinkedHashSet<String>> errors = new HashMap<>();
 
-        // Offset and description requests share one deadline, but neither needs
-        // the other's result. Launch both before awaiting per-group responses.
-        Map<String, ListConsumerGroupOffsetsSpec> offsetSpecs = new LinkedHashMap<>();
-        for (String groupId : groupIds) {
-            offsetSpecs.put(groupId, new ListConsumerGroupOffsetsSpec());
-        }
-        ListConsumerGroupOffsetsResult offsetsResult = admin.listConsumerGroupOffsets(
-            offsetSpecs,
-            new ListConsumerGroupOffsetsOptions().timeoutMs((int) remainingMillis(deadline))
-        );
-        DescribeConsumerGroupsResult described = admin.describeConsumerGroups(
-            groupIds,
-            new DescribeConsumerGroupsOptions().timeoutMs((int) remainingMillis(deadline))
-        );
+        ConsumerGroupQueries queries = startConsumerGroupQueries(groupIds, groupAdmins.apply(groupIds.size()), deadline);
         for (String groupId : groupIds) {
             try {
-                Map<TopicPartition, OffsetAndMetadata> groupOffsets = offsetsResult
-                    .partitionsToOffsetAndMetadata(groupId)
+                Map<TopicPartition, OffsetAndMetadata> groupOffsets = queries.offsets().get(groupId)
                     .get(remainingMillis(deadline), TimeUnit.MILLISECONDS);
                 committedOffsets.put(groupId, groupOffsets == null ? Collections.emptyMap() : groupOffsets);
                 committedOffsetsAvailable.put(groupId, true);
@@ -1253,7 +1285,7 @@ public final class KafkaAgent {
                 snapshotErrors(errors, groupId).add("Committed offsets unavailable: " + normalizeErrorMessage(error));
             }
         }
-        descriptions.putAll(awaitGroupDescriptions(described, groupIds, deadline, (groupId, message) -> snapshotErrors(errors, groupId).add("Consumer group details unavailable: " + message)));
+        descriptions.putAll(awaitGroupDescriptions(queries.descriptions(), groupIds, deadline, (groupId, message) -> snapshotErrors(errors, groupId).add("Consumer group details unavailable: " + message)));
 
         Map<String, Set<TopicPartition>> assignedPartitions = new HashMap<>();
         Set<TopicPartition> allPartitions = new LinkedHashSet<>();

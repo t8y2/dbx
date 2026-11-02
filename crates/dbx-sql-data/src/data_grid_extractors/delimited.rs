@@ -30,14 +30,8 @@ pub(super) fn write_dsv(
     };
     let mut first_row = true;
     if header_position == Some(DataGridHeaderPosition::Top) {
-        write_dsv_row(
-            output,
-            context.selected_columns.iter().map(|column| Cow::Owned(header_label(column, options))),
-            options,
-            options.include_row_header.then(|| "#".to_string()),
-            quote_char_triggers_quoting,
-        )?;
         first_row = false;
+        write_dsv_header_rows(context, output, options, quote_char_triggers_quoting)?;
     }
     for (row_index, row) in context.request.rows.iter().enumerate() {
         if !first_row {
@@ -78,19 +72,72 @@ pub(super) fn write_dsv(
         if !first_row {
             write_bytes(output, options.row_separator.as_bytes())?;
         }
-        write_dsv_row(
-            output,
-            context.selected_columns.iter().map(|column| Cow::Owned(header_label(column, options))),
-            options,
-            options.include_row_header.then(|| "#".to_string()),
-            quote_char_triggers_quoting,
-        )?;
+        write_dsv_header_rows(context, output, options, quote_char_triggers_quoting)?;
     }
     Ok(())
 }
 
+/// Writes the configured header rows at the current output position: one row
+/// for every format except `NameAndDescriptionTwoRows`, which stacks the
+/// description row above the name row (#13305).
+fn write_dsv_header_rows(
+    context: &ExtractContext<'_>,
+    output: &mut dyn Write,
+    options: &DataGridDsvOptions,
+    quote_char_triggers_quoting: bool,
+) -> Result<(), DataGridExtractError> {
+    if options.header_format == DataGridHeaderFormat::NameAndDescriptionTwoRows {
+        write_dsv_row(
+            output,
+            context.selected_columns.iter().map(|column| {
+                Cow::Owned(two_row_header_cell(column.description.as_deref().unwrap_or_default(), options))
+            }),
+            options,
+            options.include_row_header.then(|| "#".to_string()),
+            quote_char_triggers_quoting,
+        )?;
+        write_bytes(output, options.row_separator.as_bytes())?;
+        write_dsv_row(
+            output,
+            context
+                .selected_columns
+                .iter()
+                .map(|column| Cow::Owned(two_row_header_cell(&column.display_name, options))),
+            options,
+            options.include_row_header.then(|| "#".to_string()),
+            quote_char_triggers_quoting,
+        )?;
+        return Ok(());
+    }
+    write_dsv_row(
+        output,
+        context.selected_columns.iter().map(|column| Cow::Owned(header_label(column, options))),
+        options,
+        options.include_row_header.then(|| "#".to_string()),
+        quote_char_triggers_quoting,
+    )
+}
+
+/// A `NameAndDescriptionTwoRows` header cell: the same case, line-feed and
+/// formula transforms `header_label` applies, without the one-line fallback.
+fn two_row_header_cell(label: &str, options: &DataGridDsvOptions) -> String {
+    let mut cell = match options.header_case {
+        DataGridHeaderCase::Preserve => label.to_owned(),
+        DataGridHeaderCase::Upper => label.to_uppercase(),
+        DataGridHeaderCase::Lower => label.to_lowercase(),
+    };
+    cell = replace_line_feeds(cell, &options.line_feed_escape_string);
+    if options.escape_formulas && starts_formula(&cell) {
+        cell.insert(0, '\'');
+    }
+    cell
+}
+
 fn header_label(column: &super::DataGridExtractColumn, options: &DataGridDsvOptions) -> String {
     let label = match options.header_format {
+        // The two-row format never renders a single combined label; its cells
+        // come from two_row_header_cell instead.
+        DataGridHeaderFormat::NameAndDescriptionTwoRows => column.display_name.clone(),
         DataGridHeaderFormat::Name => column.display_name.clone(),
         DataGridHeaderFormat::Description => {
             column.description.as_deref().filter(|text| !text.is_empty()).unwrap_or(&column.display_name).to_owned()

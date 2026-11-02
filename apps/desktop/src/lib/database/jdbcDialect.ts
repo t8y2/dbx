@@ -154,6 +154,11 @@ export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConne
   if (connection.db_type === "spanner") return true;
   if (gaussdbIdentifierQuoteStyle(connection) !== "auto") return false;
   if (connection.db_type === "gaussdb") return true;
+  // openGauss inherits the database compatibility mode for identifier quoting:
+  // MySQL-compatible (B) databases only accept backticks, while A/PG modes use
+  // double quotes. The backend probes `pg_database.datcompatibility`, so fetch
+  // the reported quote instead of assuming the PostgreSQL default.
+  if (connection.db_type === "opengauss") return true;
   if (connection.db_type !== "jdbc") return false;
   const dialect = inferJdbcDialect(connection);
   return dialect === "jdbc" || ["gaussdb", "opengauss", "postgres"].includes(dialect ?? "");

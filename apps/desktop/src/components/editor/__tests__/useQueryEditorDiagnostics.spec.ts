@@ -117,6 +117,15 @@ describe("QueryEditor diagnostic scheduling ownership", () => {
     expect(buildDiagnostics).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ currentSchema: "APP" }));
   });
 
+  it("looks up a SQL Server cross-database table in its own database (#13947)", async () => {
+    const sql = "select top 10 * from mk_passport_api.dbo.orders order by id desc";
+    const { diagnostics, metadata } = createHarness({ databaseType: "sqlserver", dialect: "sqlserver", database: "master", modelValue: sql });
+    analyze.mockResolvedValue({ tables: [{ name: "orders", database: "mk_passport_api", schema: "dbo", span: { start_line: 1, start_column: 42, end_line: 1, end_column: 47 } }], columns: [] });
+    diagnostics.scheduleSemanticDiagnostics(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(metadata.findExactSemanticDiagnosticTable).toHaveBeenCalledWith(expect.objectContaining({ name: "orders", database: "mk_passport_api", schema: "dbo" }), expect.anything());
+  });
+
   it("maps a typed execution error onto a selected statement in a larger document", () => {
     const statement = "SELECT missing;";
     const modelValue = `SELECT 1;\n${statement}`;

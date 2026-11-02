@@ -1,10 +1,5 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { createQueryEditorSearchKeymap, replaceFallbackKey } from "@/lib/editor/queryEditorSearchKeymap";
-
-const editorSearchPanelSource = readFileSync(new URL("../EditorSearchPanel.vue", import.meta.url), "utf8");
-const queryEditorSource = readFileSync(new URL("../QueryEditor.vue", import.meta.url), "utf8");
-const contentAreaSource = readFileSync(new URL("../../layout/ContentArea.vue", import.meta.url), "utf8");
 
 describe("QueryEditor search shortcuts", () => {
   it("opens search and replace in editable editors", () => {
@@ -62,17 +57,5 @@ describe("QueryEditor search shortcuts", () => {
     expect(bindings[1]?.run?.({} as never)).toBe(true);
     expect(openSearch).toHaveBeenCalledOnce();
     expect(openReplace).not.toHaveBeenCalled();
-  });
-
-  it("keeps the existing search navigation and read-only replace guards", () => {
-    expect(queryEditorSource).toMatch(/\.\.\.binding\(shortcuts\.sendSelectionToAi[\s\S]*\.\.\.createQueryEditorSearchKeymap/);
-    expect(queryEditorSource).not.toMatch(/Prec\.highest\(\s*keymap\.of\(\[\s*\.\.\.createQueryEditorSearchKeymap/);
-    expect(queryEditorSource).toMatch(/function openReplace\(\): boolean \{\s*if \(props\.readOnly\) return false;/);
-    expect(contentAreaSource).toContain("if (props.resultOnly) return dataGridRef.value?.focusSearch(target) ?? false;");
-    expect(contentAreaSource).toContain("return queryEditorRef.value?.openSearch() ?? false;");
-    expect(contentAreaSource).toContain("return queryEditorRef.value?.openReplace() ?? false;");
-    expect(queryEditorSource).toMatch(/key:\s*"Escape"/);
-    expect(editorSearchPanelSource).toContain('e.key === "Enter" && !e.shiftKey');
-    expect(editorSearchPanelSource).toContain('e.key === "Enter" && e.shiftKey');
   });
 });

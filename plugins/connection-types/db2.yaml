@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 540
 dbType: db2
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Db2
 label: IBM DB2
 runtimeMode: agent

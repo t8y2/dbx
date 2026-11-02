@@ -2,6 +2,7 @@ import type { ColumnInfo, ConnectionConfig, DatabaseObjectType, DatabaseType, Fo
 import * as api from "@/lib/backend/api";
 import { createColumnDrafts, createForeignKeyDrafts, createIndexDrafts, createTriggerDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildTableStructureChangeSqlOptions } from "@/lib/table/tableStructureEditorSql";
+import { buildOceanbaseTableClone, type OceanbaseTableClone } from "./oceanbaseTableClone";
 
 export interface DropObjectSqlOptions {
   databaseType?: DatabaseType;
@@ -106,6 +107,7 @@ export interface DuplicateTableStructurePlan {
   sql: string;
   sourceColumns?: ColumnInfo[];
   executeAsScript: boolean;
+  oceanbaseClone?: OceanbaseTableClone;
 }
 
 export function collectDuplicateTableColumnComments(columns: readonly Pick<ColumnInfo, "name" | "comment">[]): Array<{ name: string; comment: string }> {
@@ -166,14 +168,6 @@ export function oracleDuplicateTableCreateOptions(options: { schema?: string | n
   };
 }
 
-function damengDuplicateTableName(targetName: string): string {
-  const hasLower = /[a-z]/.test(targetName);
-  const hasUpper = /[A-Z]/.test(targetName);
-  const hasSpecial = /[^a-zA-Z0-9_$#]/.test(targetName);
-  const hasInvalidStart = !/^[a-zA-Z_]/.test(targetName);
-  return (hasLower && hasUpper) || hasSpecial || hasInvalidStart ? targetName : targetName.toUpperCase();
-}
-
 function damengCloneIndexName(targetName: string, index: number): string {
   const normalized =
     targetName
@@ -198,7 +192,7 @@ export function damengDuplicateTableCreateOptions(options: { schema?: string | n
   return {
     databaseType: "dameng",
     schema: options.schema || undefined,
-    tableName: damengDuplicateTableName(options.targetName),
+    tableName: options.targetName,
     tableComment: options.tableComment || undefined,
     columns: createColumnDrafts(options.columns, "dameng").map((column, index) => ({
       ...column,
@@ -242,6 +236,7 @@ export function sqlServerClonePrimaryKeyConstraintName(indexes: IndexInfo[], tar
 }
 
 export async function buildDuplicateTableStructurePlan(options: DuplicateTableStructurePlanOptions): Promise<DuplicateTableStructurePlan> {
+  if (options.databaseType === "oceanbase-oracle") return buildOceanbaseTableClone(options);
   if (options.databaseType === "oracle") {
     const columnsPromise = options.sourceColumns ? Promise.resolve(options.sourceColumns) : api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
     const tableCommentPromise =
@@ -327,7 +322,7 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
   }
 
   let sourceColumns = options.sourceColumns;
-  if (options.databaseType === "vastbase") {
+  if (options.databaseType === "vastbase" || options.databaseType === "oscar") {
     sourceColumns ??= await api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
   }
   const sql = await buildDuplicateTableStructureSql({
@@ -336,7 +331,7 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
     sourceName: options.sourceName,
     targetName: options.targetName,
     tableComment: options.tableComment,
-    columnComments: options.databaseType === "vastbase" ? collectDuplicateTableColumnComments(sourceColumns ?? []) : [],
+    columnComments: options.databaseType === "vastbase" || options.databaseType === "oscar" ? collectDuplicateTableColumnComments(sourceColumns ?? []) : [],
     identifierQuote: options.identifierQuote,
   });
   return { sql, sourceColumns, executeAsScript: duplicateTableStructureRequiresScript(sql) };
@@ -386,10 +381,14 @@ export function buildMysqlAutoIncrementSql(options: MysqlAutoIncrementSqlOptions
   return api.buildMysqlAutoIncrementSql(options);
 }
 
-export function supportsNativeMysqlAutoIncrement(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined): boolean {
-  if (connection?.db_type !== "mysql") return false;
+const MYSQL_AUTO_INCREMENT_PROFILES = new Set(["mysql", "mariadb", "tidb", "oceanbase", "tdsql", "polardb", "greatsql", "custom_mysql", "dolt", "goldendb"]);
+
+export function supportsMysqlAutoIncrement(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined): boolean {
+  if (!connection) return false;
+  if (connection.db_type === "goldendb") return true;
+  if (connection.db_type !== "mysql") return false;
   const profile = connection.driver_profile?.trim().toLowerCase();
-  return !profile || profile === "mysql";
+  return !profile || MYSQL_AUTO_INCREMENT_PROFILES.has(profile);
 }
 
 const DROP_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss"];

@@ -98,6 +98,7 @@ const assetIcons: Record<string, string> = {
   exasol: "exasol",
   gbase: "gbase.png",
   gbase8a: "gbase.png",
+  gbase8c: "gbase.png",
   gbase8s: "gbase.png",
   tdsql: "tdsql",
   polardb: "polardb.webp",

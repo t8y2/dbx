@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 350
 dbType: yashandb
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Yashandb
 label: 崖山 YashanDB
 dialect: YashanDB

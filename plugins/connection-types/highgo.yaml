@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 280
 dbType: highgo
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Highgo
 label: 瀚高 HighGo
 dialect: HighGo

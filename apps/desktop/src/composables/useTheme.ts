@@ -28,7 +28,6 @@ import {
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { persistAppAppearancePatch } from "@/lib/app/appAppearance";
-import { isMacOS } from "@/lib/backend/platform";
 
 function isLinuxTauriRuntime() {
   return isTauriRuntime() && typeof navigator !== "undefined" && /linux/i.test(navigator.userAgent);
@@ -101,8 +100,6 @@ function writeRootToken(cssVar: string, value: string, options?: { debounceMs?: 
 let mediaQuery: MediaQueryList | null = null;
 let isListeningForSystemTheme = false;
 let cachedTauriWindow: typeof import("@tauri-apps/api/window") | null = null;
-let macOSAppIconSyncQueue: Promise<void> = Promise.resolve();
-let lastSyncedMacOSAppIconAppearance: boolean | null = null;
 
 function readSystemPrefersDark() {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
@@ -119,24 +116,6 @@ function setupSystemThemeListener() {
   };
   mediaQuery.addEventListener("change", onChange);
   isListeningForSystemTheme = true;
-}
-
-export function syncMacOSAppIconAppearance(isDark: boolean): Promise<void> {
-  if (!isTauriRuntime() || !isMacOS()) return Promise.resolve();
-  if (lastSyncedMacOSAppIconAppearance === isDark) return macOSAppIconSyncQueue;
-  lastSyncedMacOSAppIconAppearance = isDark;
-  macOSAppIconSyncQueue = macOSAppIconSyncQueue
-    .catch(() => {})
-    .then(async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("set_macos_app_icon_appearance", { isDark });
-      } catch {
-        // The bundle icon can fail to persist when the installed .app is read-only.
-        // The Rust side logs the native failure while the running icon still updates.
-      }
-    });
-  return macOSAppIconSyncQueue;
 }
 
 function applyThemePalette() {
@@ -167,28 +146,28 @@ function applyTheme() {
   requestAnimationFrame(() => doc.classList.remove("disable-transitions"));
   if (!isTauriRuntime()) return;
 
-  // Keep the persistent macOS app-bundle icon in step with the resolved app
-  // appearance, including system-theme changes. The backend preserves an
-  // explicitly selected black icon when the app is in light mode.
-  void syncMacOSAppIconAppearance(dark);
-
   const tauriTheme = getTauriThemeForMode(themeMode.value);
   // Tauri owns the Linux GTK preference. Calling setTheme(null) here forces it
   // to light, so only skip the native system-theme write and keep explicit modes.
   if (isLinuxTauriRuntime() && tauriTheme == null) return;
 
-  if (cachedTauriWindow) {
-    cachedTauriWindow
-      .getCurrentWindow()
-      .setTheme(tauriTheme)
-      .catch(() => {});
-  } else {
-    import("@tauri-apps/api/window").then((mod) => {
-      cachedTauriWindow = mod;
+  const applyTauriTheme = (mod: typeof import("@tauri-apps/api/window")) => {
+    try {
       mod
         .getCurrentWindow()
         .setTheme(tauriTheme)
         .catch(() => {});
+    } catch {
+      // The Tauri window API can throw synchronously when no native window exists.
+    }
+  };
+
+  if (cachedTauriWindow) {
+    applyTauriTheme(cachedTauriWindow);
+  } else {
+    import("@tauri-apps/api/window").then((mod) => {
+      cachedTauriWindow = mod;
+      applyTauriTheme(mod);
     });
   }
 }

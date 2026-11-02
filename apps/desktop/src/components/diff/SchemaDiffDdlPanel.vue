@@ -2,6 +2,7 @@
 import { ref, computed, watch, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -9,12 +10,15 @@ import { DEFAULT_CUSTOM_THEME_DDL_COLORS } from "@/stores/settingsStore";
 import { useDiffScrollSync } from "@/composables/useDiffScrollSync";
 import { buildHunks, type DiffLine } from "@/components/diff/DiffHunkBuilder";
 import { buildSchemaDiffHighlightSegments, type SchemaDiffHighlightSegment } from "@/lib/schema/schemaDiffHighlight";
+import { stripSchemaFromSql } from "@/lib/schema/schemaDiffDdlNormalize";
 import { findFirstSchemaDiffChangedLineNumber, findSchemaDiffDdlLineNumber } from "@/lib/schema/schemaDiffDdlLocate";
 import DiffSvgConnector from "@/components/diff/DiffSvgConnector.vue";
 import { FileCode, ScrollText, Copy, Play, FileDiff } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
+import { schemaDiffEffectiveSchema } from "@/lib/schema/schemaDiff";
 import type { SchemaDiffObject, CompatibilityWarning, DependencyGraph, PermissionDiff, MissingRollbackObject, RollbackCompleteness } from "@/lib/schema/schemaDiff";
+import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -37,6 +41,12 @@ function toRgba(hex: string, alpha: number): string {
 const props = defineProps<{
   selectedObject: SchemaDiffObject | null;
   focusedObject?: SchemaDiffObject | null;
+  sourceSchema?: string;
+  targetSchema?: string;
+  sourceDatabase?: string;
+  targetDatabase?: string;
+  sourceDbType?: string;
+  targetDbType?: string;
   deploySql: string;
   deploySqlAll: string;
   rollbackForwardSql?: string;
@@ -70,6 +80,29 @@ const rollbackRightPaneRef = ref<HTMLDivElement>();
 const rollbackContainerSize = ref({ width: 0, height: 0 });
 const rollbackConnectorKey = ref(0);
 
+// Off by default: raw DDL is what the comparison actually found, so hiding
+// schema qualifiers has to be an explicit per-dialog choice, not a sticky one.
+const ignoreSchemaName = ref(false);
+
+function toggleIgnoreSchemaName(val: boolean) {
+  ignoreSchemaName.value = val;
+}
+
+const effectiveSourceSchema = computed(() => schemaDiffEffectiveSchema(props.sourceDbType as DatabaseType | undefined, props.sourceDatabase ?? "", props.sourceSchema));
+const effectiveTargetSchema = computed(() => schemaDiffEffectiveSchema(props.targetDbType as DatabaseType | undefined, props.targetDatabase ?? "", props.targetSchema));
+
+const effectiveSourceDdl = computed(() => {
+  const ddl = props.selectedObject?.sourceDdl || "";
+  if (!ddl || !ignoreSchemaName.value) return ddl;
+  return stripSchemaFromSql(ddl, effectiveSourceSchema.value);
+});
+
+const effectiveTargetDdl = computed(() => {
+  const ddl = props.selectedObject?.targetDdl || "";
+  if (!ddl || !ignoreSchemaName.value) return ddl;
+  return stripSchemaFromSql(ddl, effectiveTargetSchema.value);
+});
+
 const rollbackHunks = computed(() => {
   if (!props.rollbackSql) return [];
   return buildHunks(props.rollbackForwardSql ?? props.deploySql, props.rollbackSql);
@@ -77,7 +110,7 @@ const rollbackHunks = computed(() => {
 
 const hunks = computed(() => {
   if (!props.selectedObject?.sourceDdl && !props.selectedObject?.targetDdl) return [];
-  return buildHunks(props.selectedObject?.sourceDdl || "", props.selectedObject?.targetDdl || "");
+  return buildHunks(effectiveSourceDdl.value, effectiveTargetDdl.value);
 });
 
 const { syncScroll, measureHunks } = useDiffScrollSync({
@@ -216,8 +249,8 @@ function locateFocusedObject() {
     focusedSourceLineNumber.value = focusedObject.operationType === "modify" ? findFirstSchemaDiffChangedLineNumber(hunks.value, "source") : null;
     focusedTargetLineNumber.value = focusedObject.operationType === "modify" ? findFirstSchemaDiffChangedLineNumber(hunks.value, "target") : null;
   } else {
-    focusedSourceLineNumber.value = findSchemaDiffDdlLineNumber(selectedObject.sourceDdl ?? "", focusedObject, "source");
-    focusedTargetLineNumber.value = findSchemaDiffDdlLineNumber(selectedObject.targetDdl ?? "", focusedObject, "target");
+    focusedSourceLineNumber.value = findSchemaDiffDdlLineNumber(effectiveSourceDdl.value, focusedObject, "source");
+    focusedTargetLineNumber.value = findSchemaDiffDdlLineNumber(effectiveTargetDdl.value, focusedObject, "target");
   }
   scrollPaneToLine(leftPaneRef.value, focusedSourceLineNumber.value);
   scrollPaneToLine(rightPaneRef.value, focusedTargetLineNumber.value);
@@ -282,6 +315,16 @@ function copyDeploySqlAll() {
   copyToClipboard(props.deploySqlAll);
   toast(t("diff.copied"), 2000);
 }
+
+function copySourceDdl() {
+  copyToClipboard(effectiveSourceDdl.value);
+  toast(t("diff.copied"), 2000);
+}
+
+function copyTargetDdl() {
+  copyToClipboard(effectiveTargetDdl.value);
+  toast(t("diff.copied"), 2000);
+}
 </script>
 
 <template>
@@ -336,6 +379,12 @@ function copyDeploySqlAll() {
         {{ t("diff.operation") }}
         <span class="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-purple-500 text-white font-bold">{{ permissionDiffs.length }}</span>
       </button>
+      <div v-if="activeTab === 'ddl'" class="ml-auto flex items-center pr-3">
+        <label class="flex items-center gap-1.5 text-xs cursor-pointer select-none text-muted-foreground hover:text-foreground">
+          <Switch size="sm" :model-value="ignoreSchemaName" :aria-label="t('diff.ignoreSchemaName')" @update:model-value="toggleIgnoreSchemaName(Boolean($event))" />
+          <span>{{ t("diff.ignoreSchemaName") }}</span>
+        </label>
+      </div>
     </div>
 
     <!-- DDL Compare -->
@@ -354,8 +403,12 @@ function copyDeploySqlAll() {
           <!-- Source DDL -->
           <Pane min-size="20">
             <div ref="leftPaneRef" class="h-full overflow-y-auto border-r" @scroll="handleScroll('left')">
-              <div class="sticky top-0 bg-background px-3 py-1.5 text-xs font-medium border-b z-10">
-                {{ t("diff.sourceDdl") }}
+              <div class="sticky top-0 bg-background px-3 py-1.5 text-xs font-medium border-b z-10 flex items-center justify-between">
+                <span>{{ t("diff.sourceDdl") }}{{ props.sourceSchema ? ` (${props.sourceSchema})` : "" }}</span>
+                <Button v-if="props.selectedObject?.sourceDdl" variant="ghost" size="sm" class="h-5 px-1.5 text-[11px] gap-1 text-muted-foreground hover:text-foreground" :title="t('diff.copy')" @click="copySourceDdl">
+                  <Copy class="w-3 h-3" />
+                  {{ t("diff.copy") }}
+                </Button>
               </div>
               <div v-for="hunk in hunks" :key="`left-${hunk.id}`" :data-hunk-id="hunk.id">
                 <div v-for="(line, idx) in hunk.leftLines" :key="`l-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :class="focusedLineClass(line, 'source')" :data-ddl-line-number="line.lineNumber ?? undefined" :style="{ backgroundColor: lineBackground(line) }">
@@ -378,8 +431,12 @@ function copyDeploySqlAll() {
           <!-- Target DDL -->
           <Pane min-size="20">
             <div ref="rightPaneRef" class="h-full overflow-y-auto" @scroll="handleScroll('right')">
-              <div class="sticky top-0 bg-background px-3 py-1.5 text-xs font-medium border-b z-10">
-                {{ t("diff.targetDdl") }}
+              <div class="sticky top-0 bg-background px-3 py-1.5 text-xs font-medium border-b z-10 flex items-center justify-between">
+                <span>{{ t("diff.targetDdl") }}{{ props.targetSchema ? ` (${props.targetSchema})` : "" }}</span>
+                <Button v-if="props.selectedObject?.targetDdl" variant="ghost" size="sm" class="h-5 px-1.5 text-[11px] gap-1 text-muted-foreground hover:text-foreground" :title="t('diff.copy')" @click="copyTargetDdl">
+                  <Copy class="w-3 h-3" />
+                  {{ t("diff.copy") }}
+                </Button>
               </div>
               <div v-for="hunk in hunks" :key="`right-${hunk.id}`" :data-hunk-id="hunk.id">
                 <div v-for="(line, idx) in hunk.rightLines" :key="`r-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :class="focusedLineClass(line, 'target')" :data-ddl-line-number="line.lineNumber ?? undefined" :style="{ backgroundColor: lineBackground(line) }">

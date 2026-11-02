@@ -982,8 +982,10 @@ fn solr_table_result(
     QueryResult {
         columns,
         column_types,
+        deferred_large_value_cells: Vec::new(),
         column_sortables: vec![],
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows,
         affected_rows: row_count,
@@ -1002,8 +1004,10 @@ fn solr_raw_json_response_result(status: u16, body_text: impl Into<String>, star
     QueryResult {
         columns: vec!["status".to_string(), "response".to_string()],
         column_types: Vec::new(),
+        deferred_large_value_cells: Vec::new(),
         column_sortables: vec![],
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows: vec![vec![Value::Number(status.into()), Value::String(body_text.into())]],
         affected_rows: 0,

@@ -133,6 +133,66 @@ fn discover_binary(
     Some(NativeInstallation { binary, version, kind })
 }
 
+/// Result of probing whether a background `dbx-mcp` launch can read the DBX
+/// encryption key from the OS credential store without user interaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeychainAccess {
+    Authorized,
+    NeedsAuthorization,
+    /// No DBX key exists yet; Desktop's data-security setup must run first.
+    KeyMissing,
+    /// The probe could not be interpreted, e.g. a binary predating the probe flag.
+    Unknown,
+    /// Not macOS, or no native `dbx-mcp` is installed: nothing to authorize.
+    NotApplicable,
+}
+
+const VERIFY_KEYCHAIN_ARGUMENT: &str = "--verify-keychain-access";
+const AUTHORIZE_KEYCHAIN_ARGUMENT: &str = "--authorize-keychain";
+const VERIFY_KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(5);
+// The user has to answer the macOS Keychain dialog, so allow time for it.
+const AUTHORIZE_KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(180);
+
+fn classify_keychain_probe(success: bool, stderr: &str) -> KeychainAccess {
+    if success {
+        KeychainAccess::Authorized
+    } else if stderr.contains("KEYRING_ACCESS_FAILED") {
+        KeychainAccess::NeedsAuthorization
+    } else if stderr.contains("SECRET_KEY_UNAVAILABLE") {
+        KeychainAccess::KeyMissing
+    } else {
+        KeychainAccess::Unknown
+    }
+}
+
+fn run_with_timeout(binary: &Path, argument: &str, timeout: Duration) -> Result<Output, String> {
+    let mut child = dbx_core::process::new_std_command(binary)
+        .arg(argument)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start {}: {error}", binary.display()))?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|error| format!("Failed to read the output of {}: {error}", binary.display()));
+            }
+            Ok(None) if started.elapsed() < timeout => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{} did not finish within {} seconds.", binary.display(), timeout.as_secs()));
+            }
+            Err(error) => return Err(format!("Failed to wait for {}: {error}", binary.display())),
+        }
+    }
+}
+
 pub(super) fn install_command() -> &'static str {
     if cfg!(windows) {
         "powershell -NoProfile -Command \"irm https://dbxio.com/install-mcp.ps1 | iex\""
@@ -147,6 +207,31 @@ impl NativeInstallation {
             NativeInstallationKind::Installer => "native",
             NativeInstallationKind::Homebrew => "homebrew",
         }
+    }
+
+    /// Non-interactive read of the key, exactly what an MCP client's background
+    /// launch performs. Only meaningful on macOS, where Keychain items carry a
+    /// per-application ACL that a fresh binary has not been granted.
+    pub fn keychain_access(&self) -> KeychainAccess {
+        if !cfg!(target_os = "macos") {
+            return KeychainAccess::NotApplicable;
+        }
+        match run_with_timeout(&self.binary, VERIFY_KEYCHAIN_ARGUMENT, VERIFY_KEYCHAIN_TIMEOUT) {
+            Ok(output) => classify_keychain_probe(output.status.success(), &String::from_utf8_lossy(&output.stderr)),
+            Err(_) => KeychainAccess::Unknown,
+        }
+    }
+
+    /// Runs the one-time `--authorize-keychain` recovery from this GUI process so
+    /// macOS can show its confirmation dialog.
+    pub fn authorize_keychain(&self) -> Result<String, String> {
+        if !cfg!(target_os = "macos") {
+            return Err("Keychain authorization is only needed on macOS.".to_string());
+        }
+        let output = run_with_timeout(&self.binary, AUTHORIZE_KEYCHAIN_ARGUMENT, AUTHORIZE_KEYCHAIN_TIMEOUT)?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        require_success(output, "dbx-mcp --authorize-keychain")?;
+        Ok(stdout)
     }
 
     pub fn install_command(&self) -> &'static str {
@@ -327,6 +412,50 @@ mod tests {
             standalone_bin_directory(Path::new(r"C:\Users\86139")).to_string_lossy(),
             r"C:\Users\86139\.dbx\bin"
         );
+    }
+
+    #[test]
+    fn keychain_probe_distinguishes_denied_missing_and_unrecognized() {
+        assert_eq!(classify_keychain_probe(true, ""), KeychainAccess::Authorized);
+        assert_eq!(
+            classify_keychain_probe(
+                false,
+                "Error: \"KEYRING_ACCESS_FAILED: existing DBX Keychain key cannot be authorized\""
+            ),
+            KeychainAccess::NeedsAuthorization
+        );
+        assert_eq!(
+            classify_keychain_probe(false, "Error: \"SECRET_KEY_UNAVAILABLE: no existing DBX Keychain key\""),
+            KeychainAccess::KeyMissing
+        );
+        // A binary that predates the probe flag rejects it as an unknown argument.
+        assert_eq!(
+            classify_keychain_probe(false, "Error: \"unknown DBX MCP argument: --verify-keychain-access\""),
+            KeychainAccess::Unknown
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keychain_probe_runner_captures_output_and_enforces_the_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let failing = directory.path().join("failing");
+        std::fs::write(&failing, "#!/bin/sh\necho KEYRING_ACCESS_FAILED >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&failing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = run_with_timeout(&failing, VERIFY_KEYCHAIN_ARGUMENT, Duration::from_secs(5)).unwrap();
+        assert!(!output.status.success());
+        assert_eq!(
+            classify_keychain_probe(output.status.success(), &String::from_utf8_lossy(&output.stderr)),
+            KeychainAccess::NeedsAuthorization
+        );
+
+        let stalled = directory.path().join("stalled");
+        std::fs::write(&stalled, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&stalled, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+        assert!(run_with_timeout(&stalled, VERIFY_KEYCHAIN_ARGUMENT, Duration::from_millis(300)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

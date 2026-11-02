@@ -5,10 +5,10 @@ use super::column_alter::{
     build_clickhouse_existing_column_sql, build_dameng_existing_column_sql, build_doris_existing_column_sql,
     build_h2_existing_column_sql, build_informix_existing_column_sql, build_iris_existing_column_sql,
     build_mysql_existing_column_clause, build_oracle_like_existing_column_sql, build_oscar_existing_column_sql,
-    build_postgres_existing_column_sql, build_questdb_existing_column_sql, build_sqlite_existing_column_sql,
-    build_sqlserver_drop_default_constraint_sql, build_sqlserver_existing_column_sql, build_xugu_existing_column_sql,
-    dameng_drops_identity, has_column_extra_change, has_existing_column_attribute_change,
-    validate_dameng_existing_identity_change,
+    build_postgres_existing_column_sql, build_questdb_existing_column_sql, build_saphana_existing_column_sql,
+    build_sqlite_existing_column_sql, build_sqlserver_drop_default_constraint_sql, build_sqlserver_existing_column_sql,
+    build_xugu_existing_column_sql, dameng_drops_identity, has_column_extra_change,
+    has_existing_column_attribute_change, validate_dameng_existing_identity_change,
 };
 use super::column_format::{
     column_definition, has_dameng_identity, is_dameng_identity_compatible_type, is_mysql_character_data_type,
@@ -233,7 +233,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             {
                 mysql_primary_key_column_clauses.push(format!(
                     "ADD COLUMN {}{position_clause}",
-                    column_definition(StructureDialect::Mysql, column)
+                    column_definition(StructureDialect::Mysql, column, None)
                 ));
             } else {
                 statements.extend(build_add_column_sql(
@@ -350,7 +350,12 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 } else if options.database_type == Some(crate::models::connection::DatabaseType::Xugu) {
                     statements.extend(build_xugu_existing_column_sql(&table, column));
                 } else {
-                    statements.extend(build_oracle_like_existing_column_sql(dialect, &table, column))
+                    statements.extend(build_oracle_like_existing_column_sql(
+                        dialect,
+                        &table,
+                        column,
+                        options.database_type,
+                    ))
                 }
             }
             StructureDialect::Dameng => {
@@ -377,6 +382,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             #[cfg(feature = "duckdb-sidecar")]
             StructureDialect::DuckDb => statements.extend(build_duckdb_existing_column_sql(&table, column)),
             StructureDialect::Questdb => statements.extend(build_questdb_existing_column_sql(&table, column)),
+            StructureDialect::SapHana => statements.extend(build_saphana_existing_column_sql(&table, column)),
             _ => warnings.push(format!("Editing existing columns is not supported for {database_label} yet.")),
         }
         if has_position_change {
@@ -717,10 +723,10 @@ pub(super) fn build_add_column_sql(
     table_name: &str,
     driver_profile: Option<&str>,
 ) -> Vec<String> {
-    let definition = column_definition(dialect, column);
+    let definition = column_definition(dialect, column, database_type);
     let mut statements = if database_type == Some(DatabaseType::Transwarp) {
         vec![format!("ALTER TABLE {table} ADD COLUMNS ({definition});")]
-    } else if is_oracle_like(dialect) || dialect == StructureDialect::Informix {
+    } else if is_oracle_like(dialect) || matches!(dialect, StructureDialect::Informix | StructureDialect::SapHana) {
         vec![format!("ALTER TABLE {table} ADD ({definition});")]
     } else {
         let add_keyword = if dialect == StructureDialect::SqlServer
@@ -735,7 +741,11 @@ pub(super) fn build_add_column_sql(
     if supports_comments
         && matches!(
             dialect,
-            StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::Oscar
+            StructureDialect::Postgres
+                | StructureDialect::Oracle
+                | StructureDialect::Dameng
+                | StructureDialect::Oscar
+                | StructureDialect::SapHana
         )
         && !clean(&column.comment).is_empty()
     {
@@ -767,7 +777,7 @@ pub(super) fn build_add_column_sql(
 
 pub(super) fn build_drop_column_sql(dialect: StructureDialect, table: &str, original: &ColumnInfo) -> Vec<String> {
     let column_name = &original.name;
-    if dialect == StructureDialect::Informix {
+    if matches!(dialect, StructureDialect::Informix | StructureDialect::SapHana) {
         return vec![format!("ALTER TABLE {table} DROP ({});", quote_ident(dialect, column_name))];
     }
     let mut statements = Vec::new();

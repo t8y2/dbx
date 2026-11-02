@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { buildEditorFontThemeRules, buildSqlCompletionThemeRules, EDITOR_FONT_FAMILY_CSS_VAR, editorDiagnosticColors, editorThemeAppearanceFor, IDE_EDITOR_THEMES, loadEditorTheme, resolveCustomThemeBackgrounds, resolveEditorTheme, SQL_BUILTIN_HIGHLIGHT_TAG } from "@/lib/editor/editorThemes";
+import {
+  buildEditorFontThemeRules,
+  buildSqlCompletionThemeRules,
+  EDITOR_FONT_FAMILY_CSS_VAR,
+  editorDiagnosticColors,
+  editorThemeAppearanceFor,
+  IDE_EDITOR_THEMES,
+  loadEditorTheme,
+  resolveCustomThemeBackgrounds,
+  resolveEditorTheme,
+  SQL_BUILTIN_HIGHLIGHT_TAG,
+  SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG,
+} from "@/lib/editor/editorThemes";
 import { DEFAULT_APP_CUSTOM_UI_COLORS, wcagContrastRatio, type AppThemePalette } from "@/lib/app/appTheme";
 import { DEFAULT_CUSTOM_THEME_COLORS, type CustomThemeColors, type EditorTheme } from "@/stores/settingsStore";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
@@ -264,6 +276,18 @@ describe("SQL completion theme", () => {
     });
     expect(rules[".cm-completionIcon"]).toMatchObject({ width: "15px", height: "15px", overflow: "hidden" });
   });
+
+  // #12099: sequence completions were typed "variable" but no icon mask was
+  // defined for that kind, so the menu rendered a blank icon slot.
+  it("defines completion icon masks for sequence and variable kinds", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    for (const key of [".cm-completionIcon-sequence", ".cm-completionIcon-variable"]) {
+      expect(rules[key]).toMatchObject({
+        "--dbx-completion-icon-mask": expect.stringContaining("data:image/svg+xml"),
+      });
+    }
+  });
 });
 
 describe("SQL builtin highlight tag", () => {
@@ -291,6 +315,43 @@ describe("SQL builtin highlight tag", () => {
     expect(classesByToken.get("count")).toBeDefined();
     expect(classesByToken.get("count")).not.toBe(classesByToken.get("t"));
     expect(classesByToken.get("count")).not.toBe(classesByToken.get("select"));
+  });
+});
+
+describe("SQL quoted identifier highlighting (#12122)", () => {
+  it("highlights quoted identifiers with identifier/variable color, distinct from string literals", async () => {
+    const { highlightTree, tags } = await import("@lezer/highlight");
+    const { HighlightStyle } = await import("@codemirror/language");
+    const style = HighlightStyle.define([
+      { tag: tags.keyword, color: "keyword" },
+      { tag: tags.string, color: "string" },
+      { tag: [tags.name, tags.variableName, SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG], color: "variable" },
+    ]);
+
+    const dialects = [
+      { name: "mysql", sql: "SELECT `col`, col, 'val' FROM `tbl`" },
+      { name: "postgres", sql: 'SELECT "col", col, \'val\' FROM "tbl"' },
+      { name: "sqlserver", sql: "SELECT [col], col, 'val' FROM [tbl]" },
+    ];
+
+    for (const { name, sql } of dialects) {
+      const dialect = createDbxCodeMirrorSqlDialect(langSql, name as any, name as any);
+      const tree = dialect.language.parser.parse(sql);
+      const classesByToken = new Map<string, string>();
+      highlightTree(tree, style, (from, to, cls) => classesByToken.set(sql.slice(from, to), cls));
+
+      const quotedCol = name === "mysql" ? "`col`" : name === "postgres" ? '"col"' : "[col]";
+      const quotedTbl = name === "mysql" ? "`tbl`" : name === "postgres" ? '"tbl"' : "[tbl]";
+
+      expect(classesByToken.get(quotedCol), `${name} quoted col`).toBe(classesByToken.get("col"));
+      expect(classesByToken.get(quotedCol), `${name} quoted col vs string`).not.toBe(classesByToken.get("'val'"));
+      expect(classesByToken.get(quotedTbl), `${name} quoted tbl`).toBe(classesByToken.get("col"));
+    }
+  });
+
+  it("maps SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG to special(string) for theme compatibility", async () => {
+    const { tags } = await import("@lezer/highlight");
+    expect(SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG).toBe(tags.special(tags.string));
   });
 });
 

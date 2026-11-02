@@ -34,6 +34,9 @@ export type UseDataGridSearchOptions<Row> = {
 const SEARCH_TOKEN_SEPARATOR = /[\s,()><=!&|]+/;
 const SEARCH_TOKEN_SUFFIX = /([^\s,()><=!&|]+)$/;
 const SEARCH_PAIRS: Record<string, string> = { "'": "'", '"': '"', "(": ")" };
+// limitDataGridCellDisplay appends this marker when it caps a cell's display
+// text; a search miss on such a cell can hide a match past the cut (#11956).
+const TRUNCATED_CELL_SUFFIX = "...";
 
 export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
   const searchText = ref("");
@@ -77,7 +80,17 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
       columns.forEach((_, col) => {
         if (options.isCellSearchable && !options.isCellSearchable(row, col)) return;
         const text = (pattern || sensitive) && options.getCellRawSearchText ? options.getCellRawSearchText(row, col) : options.getCellSearchText(row, col);
-        if (includes(text)) addMatch(displayRow, col);
+        if (includes(text)) {
+          addMatch(displayRow, col);
+          return;
+        }
+        // The cached display text may be truncated (hosts cap cell display
+        // length), so a plain miss can hide a match that sits past the cut.
+        // Re-check the full raw value of truncated cells — but not in replace
+        // mode, whose raw provider and scope stay display-driven.
+        if (!pattern && text.endsWith(TRUNCATED_CELL_SUFFIX) && options.getCellRawSearchText && includes(options.getCellRawSearchText(row, col))) {
+          addMatch(displayRow, col);
+        }
       });
     });
     return { keys, matchSet };
@@ -102,12 +115,18 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
   // A single-use token rather than a boolean flag: it is immune to Vue's async
   // watcher flush and self-invalidates if the user types during the restore window.
   let restoreToken: { searchText: string; matchIndex: number } | null = null;
+  let lastMatchKeys: number[] = [];
+  let userQueryRevision = 0;
+  let lastHandledUserQueryRevision = 0;
 
   watch([searchText, () => toValue(options.caseSensitive), () => toValue(options.literalQuery)], ([value]) => {
     clearTimer();
     const text = toValue(options.literalQuery) ? value : value.trim();
     const query = toValue(options.literalQuery) || effectiveCaseSensitive.value ? text : text.toLowerCase();
     const restoring = restoreToken !== null && restoreToken.searchText === value;
+    if (!restoring) {
+      userQueryRevision++;
+    }
     if (!query) deferredSearchText.value = "";
     // Restoring is not typing: resolve the query now so the row set (and, in
     // "filter" search mode, the content height) is settled before the grid's
@@ -143,8 +162,12 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
   watch(matchKeys, (value) => {
     const restored = restoreToken;
     restoreToken = null;
+    const isUserQuery = userQueryRevision !== lastHandledUserQueryRevision;
+    lastHandledUserQueryRevision = userQueryRevision;
+
     if (!value.length) {
       currentMatchIndex.value = -1;
+      lastMatchKeys = [];
       return;
     }
     if (restored) {
@@ -152,11 +175,30 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
       // scroll restore owns the viewport (#8524). Clamp because the match list may
       // have shifted while the tab was away.
       currentMatchIndex.value = Math.min(Math.max(restored.matchIndex, 0), value.length - 1);
+      lastMatchKeys = value;
       return;
     }
-    currentMatchIndex.value = 0;
-    const firstMatch = matchAt(0);
-    if (firstMatch) nextTick(() => options.onNavigate?.(firstMatch));
+    if (isUserQuery) {
+      currentMatchIndex.value = 0;
+      lastMatchKeys = value;
+      const firstMatch = matchAt(0);
+      if (firstMatch) nextTick(() => options.onNavigate?.(firstMatch));
+      return;
+    }
+
+    // Rows or cell edits changed the underlying data without a search query change:
+    // retain the current match position and do not navigate/scroll the viewport (#13241).
+    if (lastMatchKeys.length > 0 && currentMatchIndex.value >= 0 && currentMatchIndex.value < lastMatchKeys.length) {
+      const prevKey = lastMatchKeys[currentMatchIndex.value];
+      const nextIndex = value.indexOf(prevKey);
+      if (nextIndex >= 0) {
+        currentMatchIndex.value = nextIndex;
+        lastMatchKeys = value;
+        return;
+      }
+    }
+    currentMatchIndex.value = Math.min(Math.max(currentMatchIndex.value, 0), value.length - 1);
+    lastMatchKeys = value;
   });
 
   function acceptSuggestion(index = suggestionIndex.value) {

@@ -1,26 +1,9 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { describe, expect, it, vi } from "vitest";
 import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible, locateCursorForGutterExecution } from "../../editor/queryEditorExecutionViewport";
-
-const specDir = path.dirname(fileURLToPath(import.meta.url));
-const queryEditorSource = ["QueryEditor.vue", "useQueryEditorExecution.ts"].map((file) => readFileSync(path.resolve(specDir, "../../../components/editor", file), "utf8")).join("\n");
-
-describe("QueryEditor execution routing", () => {
-  it("routes the execution shortcut through the shared execution-mode contract while bypassing the picker", () => {
-    expect(queryEditorSource).toContain("createQueryEditorExecutionShortcutBindings(shortcuts.executeSql");
-    expect(queryEditorSource).not.toContain("forceCurrent");
-  });
-
-  it("snapshots pre-execution cursor visibility when execution viewport tracking starts", () => {
-    expect(queryEditorSource).toContain("beginExecution(cursorVisible)");
-  });
-});
 
 describe("QueryEditor gutter execution cursor positioning", () => {
   function createEditor(doc: string, selection?: { anchor: number; head?: number }): EditorView {

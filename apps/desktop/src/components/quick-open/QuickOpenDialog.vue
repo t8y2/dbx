@@ -1,16 +1,20 @@
 <script setup lang="ts">
-import { computed, ref, watch, nextTick } from "vue";
+import { computed, defineAsyncComponent, ref, watch, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import { Command, FileCode, FileText, Search, FolderPlus, SlidersHorizontal, X } from "@lucide/vue";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import { useQuickOpen, type QuickOpenItem } from "@/composables/useQuickOpen";
 import { usePluginCommandPalette } from "@/lib/plugins/pluginCommandPalette";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { getGlobalSearchRoots, saveGlobalSearchRoots, getGlobalSearchExtensions, saveGlobalSearchExtensions } from "@/lib/globalSearch/globalSearchSettings";
+
+const QuickOpenFilePreview = defineAsyncComponent(() => import("./QuickOpenFilePreview.vue"));
 
 const props = defineProps<{
   open: boolean;
@@ -28,8 +32,45 @@ const { t } = useI18n();
 // list refresh is driven by dbx:plugins-changed / focus / locale change, with a fallback refresh when the dialog opens.
 const pluginPalette = usePluginCommandPalette();
 const { toast } = useToast();
-const { searchQuery, filteredItems, selectedIndex, selectedItem, selectNext, selectPrevious, setQuery, loadExternalSqlFiles, loadPluginWorkbenches, contentMode, contentGroups, contentSelectedItem, contentSearching, setContentMode } = useQuickOpen({ extraItems: pluginPalette.items });
-const inputRef = ref<HTMLInputElement | null>(null);
+const {
+  searchQuery,
+  filteredItems,
+  selectedIndex,
+  selectedItem,
+  selectNext,
+  selectPrevious,
+  setQuery,
+  loadExternalSqlFiles,
+  loadPluginWorkbenches,
+  contentMode,
+  contentGroups,
+  contentSelectedItem,
+  contentSearching,
+  setContentMode: setSearchContentMode,
+  scopeConnectionIds,
+  scopeActive,
+  setScopeConnectionIds,
+} = useQuickOpen({ extraItems: pluginPalette.items });
+const previewEditing = ref(false);
+const pinnedPreviewItem = ref<QuickOpenItem | null>(null);
+const previewItem = computed(() => (previewEditing.value ? pinnedPreviewItem.value : contentSelectedItem.value));
+
+function handlePreviewEditing(value: boolean): void {
+  if (value) pinnedPreviewItem.value = contentSelectedItem.value ? { ...contentSelectedItem.value } : null;
+  if (value) searchSettingsOpen.value = false;
+  previewEditing.value = value;
+}
+
+function canLeavePreview(): boolean {
+  if (!previewEditing.value) return true;
+  toast(t("quickOpen.finishEditing"));
+  return false;
+}
+
+function setContentMode(value: boolean): void {
+  if (canLeavePreview()) setSearchContentMode(value);
+}
+const inputRef = ref<InstanceType<typeof Input> | null>(null);
 const listRef = ref<HTMLElement | null>(null);
 const settingsStore = useSettingsStore();
 const globalSearchShortcut = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.globalSearch || "Mod+Shift+F"));
@@ -38,6 +79,19 @@ const globalSearchShortcut = computed(() => formatShortcutDisplay(settingsStore.
 const searchSettingsOpen = ref(false);
 const searchRoots = ref<string[]>([]);
 const extensionsInput = ref("");
+
+// Connection scope: empty selection = all connections.
+const connectionStore = useConnectionStore();
+const scopeConnections = computed(() => connectionStore.connections);
+/** Select value for "all connections"; a real connection id never uses this sentinel. */
+const SCOPE_ALL_VALUE = "__all_connections__";
+
+const scopeSelection = computed<string>({
+  get: () => (scopeActive.value && scopeConnectionIds.value.length === 1 ? scopeConnectionIds.value[0] : SCOPE_ALL_VALUE),
+  set: (value) => {
+    setScopeConnectionIds(value === SCOPE_ALL_VALUE ? [] : [value]);
+  },
+});
 
 function refreshSearchSettings(): void {
   searchRoots.value = getGlobalSearchRoots();
@@ -112,10 +166,13 @@ function getHighlightedLineParts(item: QuickOpenItem): Array<{ text: string; hig
 
 const dialogOpen = computed({
   get: () => props.open,
-  set: (value) => emit("update:open", value),
+  set: (value) => {
+    if (value || canLeavePreview()) emit("update:open", value);
+  },
 });
 
 function handleKeyDown(e: KeyboardEvent): void {
+  if (previewEditing.value) return;
   if (e.key === "ArrowDown") {
     e.preventDefault();
     selectNext();
@@ -134,7 +191,19 @@ function handleKeyDown(e: KeyboardEvent): void {
   }
 }
 
+function handlePreviewNavigate(direction: -1 | 1): void {
+  if (previewEditing.value) return;
+  if (direction === 1) selectNext();
+  else selectPrevious();
+  inputRef.value?.$el.focus();
+}
+
+function openPreviewMatch(): void {
+  if (contentSelectedItem.value) handleSelect(contentSelectedItem.value);
+}
+
 function handleSelect(item: QuickOpenItem): void {
+  if (!canLeavePreview()) return;
   // Plugin commands execute inside this component: they are NOT dispatched to App.vue object navigation (that chain
   // connectionId-based connection/expand logic is meaningless for command entries); execution errors surface via the existing toast.
   if (item.type === "plugin_command") {
@@ -247,7 +316,7 @@ watch(
       // Refresh plugin workbench entries so installs/uninstalls show up without a restart
       void loadPluginWorkbenches();
       nextTick(() => {
-        inputRef.value?.focus();
+        inputRef.value?.$el.focus();
       });
     }
   },
@@ -274,13 +343,14 @@ watch(selectedIndex, async () => {
 <template>
   <Dialog :open="dialogOpen" @update:open="dialogOpen = $event">
     <DialogContent class="max-w-2xl p-0 gap-0 rounded-lg overflow-hidden">
-      <div class="flex flex-col bg-background">
+      <div class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] min-h-0 flex-col bg-background">
         <!-- Search Input -->
-        <div class="flex items-center gap-3 px-4 pr-12 py-3 border-b">
+        <div class="flex shrink-0 items-center gap-3 px-4 pr-12 py-3 border-b">
           <Command class="h-5 w-5 text-muted-foreground" />
           <Input
             ref="inputRef"
             v-model="searchQuery"
+            :disabled="previewEditing"
             type="text"
             :placeholder="contentMode ? t('quickOpen.contentPlaceholder') : t('quickOpen.placeholder')"
             class="flex-1 border-0 bg-transparent p-0 placeholder:text-muted-foreground focus-visible:ring-0 focus-visible:outline-none"
@@ -289,22 +359,38 @@ watch(selectedIndex, async () => {
           <div class="flex items-center gap-1 shrink-0">
             <!-- Object/file ⇄ file content mode toggle -->
             <div class="flex items-center rounded-md bg-muted p-0.5 text-muted-foreground">
-              <button class="flex h-7 w-7 items-center justify-center rounded" :class="contentMode ? 'hover:bg-muted-foreground/10' : 'bg-background text-foreground shadow-sm'" :title="t('quickOpen.modeObjects')" @click="setContentMode(false)">
+              <button :disabled="previewEditing" class="flex h-7 w-7 items-center justify-center rounded disabled:opacity-50" :class="contentMode ? 'hover:bg-muted-foreground/10' : 'bg-background text-foreground shadow-sm'" :title="t('quickOpen.modeObjects')" @click="setContentMode(false)">
                 <FileCode class="h-4 w-4" />
               </button>
-              <button class="flex h-7 w-7 items-center justify-center rounded" :class="contentMode ? 'bg-background text-foreground shadow-sm' : 'hover:bg-muted-foreground/10'" :title="t('quickOpen.modeContent')" @click="setContentMode(true)">
+              <button :disabled="previewEditing" class="flex h-7 w-7 items-center justify-center rounded disabled:opacity-50" :class="contentMode ? 'bg-background text-foreground shadow-sm' : 'hover:bg-muted-foreground/10'" :title="t('quickOpen.modeContent')" @click="setContentMode(true)">
                 <Search class="h-4 w-4" />
               </button>
             </div>
+            <!-- Connection scope: file-content search ignores connections, so the picker only shows in object mode. -->
+            <Select v-if="!contentMode" v-model="scopeSelection" :disabled="previewEditing">
+              <SelectTrigger class="h-7 w-[132px] gap-1 px-2 text-xs" :title="t('quickOpen.scope')">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem :value="SCOPE_ALL_VALUE">{{ t("quickOpen.scopeAll") }}</SelectItem>
+                <SelectItem v-for="conn in scopeConnections" :key="conn.id" :value="conn.id">{{ conn.name }}</SelectItem>
+              </SelectContent>
+            </Select>
             <!-- Search settings (roots & extensions) -->
-            <button class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :class="searchSettingsOpen ? 'bg-muted text-foreground' : ''" :title="t('quickOpen.searchSettings')" @click="searchSettingsOpen = !searchSettingsOpen">
+            <button
+              :disabled="previewEditing"
+              class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+              :class="searchSettingsOpen ? 'bg-muted text-foreground' : ''"
+              :title="t('quickOpen.searchSettings')"
+              @click="searchSettingsOpen = !searchSettingsOpen"
+            >
               <SlidersHorizontal class="h-4 w-4" />
             </button>
           </div>
         </div>
 
         <!-- Search settings panel -->
-        <div v-if="searchSettingsOpen" class="space-y-3 border-b bg-muted/30 px-4 py-3 text-sm">
+        <div v-if="searchSettingsOpen" class="max-h-[30vh] shrink-0 space-y-3 overflow-y-auto border-b bg-muted/30 px-4 py-3 text-sm">
           <div>
             <div class="mb-1.5 flex items-center justify-between">
               <span class="text-xs text-muted-foreground">{{ t("quickOpen.searchRoots") }}</span>
@@ -332,7 +418,7 @@ watch(selectedIndex, async () => {
         </div>
 
         <!-- Results List -->
-        <div ref="listRef" class="max-h-[400px] overflow-y-auto">
+        <div ref="listRef" class="min-h-0 overflow-y-auto" :class="contentMode ? 'max-h-[min(36vh,320px)]' : 'max-h-[400px]'">
           <!-- Content search mode: group matches by file (DataGrip-style) -->
           <template v-if="contentMode">
             <div v-if="contentSearching" class="px-4 py-8 text-center text-muted-foreground">
@@ -353,7 +439,7 @@ watch(selectedIndex, async () => {
                   <span class="text-xs text-muted-foreground whitespace-nowrap">{{ row.count }}</span>
                 </div>
                 <!-- Match line -->
-                <div v-else class="px-4 py-1.5 cursor-pointer" :data-selected="row.flatIndex === selectedIndex" :class="[row.flatIndex === selectedIndex ? 'bg-accent' : 'hover:bg-muted']" @click="handleSelect(row.item!)" @mouseenter="selectedIndex = row.flatIndex">
+                <div v-else class="px-4 py-1.5 cursor-pointer" :data-selected="row.flatIndex === selectedIndex" :class="[row.flatIndex === selectedIndex ? 'bg-accent' : 'hover:bg-muted']" @click="handleSelect(row.item!)" @mouseenter="!previewEditing && (selectedIndex = row.flatIndex)">
                   <!-- Filename-only match (no content hit): show highlighted file name -->
                   <div v-if="row.item!.line === 0" class="flex items-center gap-2 min-w-0">
                     <FileText class="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -413,10 +499,13 @@ watch(selectedIndex, async () => {
           </div>
         </div>
 
+        <QuickOpenFilePreview v-if="previewItem && (previewEditing || (contentMode && !contentSearching))" :item="previewItem" class="h-[min(32vh,280px)] shrink-0" @editing="handlePreviewEditing" @navigate="handlePreviewNavigate" @open="openPreviewMatch" @close="dialogOpen = false" />
+
         <!-- Footer -->
-        <div class="px-4 py-2 border-t text-xs text-muted-foreground flex justify-between">
+        <div class="shrink-0 flex flex-wrap justify-between gap-2 px-4 py-2 border-t text-xs text-muted-foreground">
           <div>{{ contentMode ? contentMatchCount : filteredItems.length }} {{ t("quickOpen.results") }}</div>
-          <div class="flex gap-4">
+          <div v-if="previewEditing" role="status">{{ t("quickOpen.finishEditing") }}</div>
+          <div v-else class="flex gap-4">
             <span><kbd class="px-2 py-1 rounded bg-muted">↑↓</kbd> {{ t("quickOpen.navigate") }}</span>
             <span><kbd class="px-2 py-1 rounded bg-muted">⏎</kbd> {{ t("quickOpen.select") }}</span>
             <span><kbd class="px-2 py-1 rounded bg-muted">ESC</kbd> {{ t("quickOpen.close") }}</span>

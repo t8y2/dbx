@@ -870,6 +870,7 @@ impl MqttClient {
                     } else {
                         saved.push(MqttSavedTopic {
                             topic: pending.topic.clone(),
+                            alias: String::new(),
                             qos: pending.qos,
                             no_local: pending.no_local,
                             enabled: true,
@@ -1033,6 +1034,7 @@ impl MqttClient {
     /// Save or update a subscription configuration without sending a broker request.
     pub async fn save_topic_config(&self, mut config: MqttSavedTopic) -> Result<(), String> {
         config.topic = config.topic.trim().to_string();
+        config.alias = config.alias.trim().to_string();
         validate_topic_filter(&config.topic)?;
         if config.no_local && !matches!(self.config.protocol_version, super::types::MqttProtocolVersion::V5) {
             return Err("MQTT 3.x 不支持 No Local 订阅选项".to_string());
@@ -1135,6 +1137,14 @@ impl MqttClient {
         filtered
     }
 
+    /// Remove one matching message from the live console buffer.
+    pub async fn delete_message(&self, message: &MqttMessage) {
+        let mut buffer = self.message_buffer.write().await;
+        if let Some(index) = buffer.iter().position(|candidate| mqtt_messages_match(candidate, message)) {
+            buffer.remove(index);
+        }
+    }
+
     pub async fn lock_message_history(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.message_history_operation.lock().await
     }
@@ -1212,6 +1222,16 @@ impl MqttClient {
             }
         }
     }
+}
+
+fn mqtt_messages_match(left: &MqttMessage, right: &MqttMessage) -> bool {
+    left.topic == right.topic
+        && left.payload_base64 == right.payload_base64
+        && left.payload_text == right.payload_text
+        && left.qos == right.qos
+        && left.retain == right.retain
+        && left.received_at_ms == right.received_at_ms
+        && left.direction == right.direction
 }
 
 impl Drop for MqttClient {
@@ -1318,7 +1338,7 @@ fn build_transport(
 }
 
 fn certificate_tls_configuration(auth: &MqttAuth, mode: MqttTlsVerificationMode) -> Result<TlsConfiguration, String> {
-    let MqttAuth::Certificate { ca_cert_path, client_cert_path, client_key_path } = auth else {
+    let MqttAuth::Certificate { ca_cert_path, client_cert_path, client_key_path, .. } = auth else {
         return Err("MQTT 证书认证配置无效".to_string());
     };
     let client_cert_path = client_cert_path.as_deref().filter(|path| !path.trim().is_empty());
@@ -1432,13 +1452,13 @@ impl ServerCertVerifier for NoCertificateVerification {
 }
 
 fn apply_credentials_v4(options: &mut MqttOptionsV4, auth: &MqttAuth) {
-    if let MqttAuth::Password { username, password } = auth {
+    if let Some((username, password)) = auth.credentials() {
         options.set_credentials(username, password);
     }
 }
 
 fn apply_credentials_v5(options: &mut MqttOptionsV5, auth: &MqttAuth) {
-    if let MqttAuth::Password { username, password } = auth {
+    if let Some((username, password)) = auth.credentials() {
         options.set_credentials(username, password);
     }
 }
@@ -1765,8 +1785,41 @@ mod tests {
     }
 
     #[test]
+    fn certificate_auth_preserves_credentials_for_both_protocols() {
+        let auth: MqttAuth = serde_json::from_value(serde_json::json!({
+            "kind": "certificate", "username": "device", "password": "secret",
+            "clientCertPath": "/client.crt", "clientKeyPath": "/client.key"
+        }))
+        .unwrap();
+        let mut v4 = MqttOptionsV4::new("dbx-test", "localhost", 8883);
+        let mut v5 = MqttOptionsV5::new("dbx-test", "localhost", 8883);
+        apply_credentials_v4(&mut v4, &auth);
+        apply_credentials_v5(&mut v5, &auth);
+        let expected = Some(("device".to_string(), "secret".to_string()));
+        assert_eq!(v4.credentials(), expected);
+        assert_eq!(v5.credentials(), expected);
+    }
+
+    #[test]
+    fn certificate_auth_without_credentials_remains_anonymous() {
+        let auth: MqttAuth = serde_json::from_value(serde_json::json!({ "kind": "certificate" })).unwrap();
+        let mut v4 = MqttOptionsV4::new("dbx-test", "localhost", 8883);
+        let mut v5 = MqttOptionsV5::new("dbx-test", "localhost", 8883);
+        apply_credentials_v4(&mut v4, &auth);
+        apply_credentials_v5(&mut v5, &auth);
+        assert_eq!(v4.credentials(), None);
+        assert_eq!(v5.credentials(), None);
+    }
+
+    #[test]
     fn certificate_auth_allows_server_only_tls() {
-        let auth = MqttAuth::Certificate { ca_cert_path: None, client_cert_path: None, client_key_path: None };
+        let auth = MqttAuth::Certificate {
+            username: String::new(),
+            password: String::new(),
+            ca_cert_path: None,
+            client_cert_path: None,
+            client_key_path: None,
+        };
 
         let transport =
             build_transport(MqttTransport::Tcp, Some(MqttTlsVerificationMode::VerifyServerCert), &auth).unwrap();
@@ -1777,11 +1830,15 @@ mod tests {
     #[test]
     fn certificate_auth_requires_client_certificate_and_key_as_a_pair() {
         let missing_cert = MqttAuth::Certificate {
+            username: String::new(),
+            password: String::new(),
             ca_cert_path: None,
             client_cert_path: None,
             client_key_path: Some("client.key".to_string()),
         };
         let missing_key = MqttAuth::Certificate {
+            username: String::new(),
+            password: String::new(),
             ca_cert_path: None,
             client_cert_path: Some("client.crt".to_string()),
             client_key_path: None,

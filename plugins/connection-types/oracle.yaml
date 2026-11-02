@@ -1,6 +1,9 @@
 schemaVersion: 1
 order: 130
 dbType: oracle
+compareModes: [schema, data]
+transferSupportLevel: verified
+transferObjectFamily: oracle
 rustVariant: Oracle
 label: Oracle
 dialect: Oracle

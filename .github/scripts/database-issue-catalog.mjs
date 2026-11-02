@@ -19,7 +19,7 @@ const extraAliases = {
   saphana: ["hana", "sap hana"],
   opengauss: ["open gauss"],
   "oceanbase-oracle": ["oceanbase oracle", "oceanbase oracle mode", "oceanbase oracle 模式"],
-  gbase: ["gbase 8a", "gbase8a", "gbase 8s", "gbase8s"],
+  gbase: ["gbase 8a", "gbase8a", "gbase 8c", "gbase8c", "gbase 8s", "gbase8s"],
   access: ["microsoft access", "ms access"],
   vastbase: ["vastbase g", "vastbaseg"],
   prestosql: ["presto", "presto sql"],

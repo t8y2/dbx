@@ -18,7 +18,7 @@ If you are not sure what to pick, choose an issue with clear reproduction steps,
 ### Prerequisites
 
 - Node.js >= 22.13.0
-- pnpm 10.27.0
+- pnpm 10.34.7
 - Rust >= 1.88
 - Make
 
@@ -173,3 +173,5 @@ Small PRs are easier to review and merge.
 - [Official docs](https://dbxio.com/en/docs/what-is-dbx)
 
 Merged contributors appear on the [DBX contributors wall](https://dbxio.com/en/community).
+
+The wall recognizes a GitHub account after it authors at least one PR merged into `t8y2/dbx`; commit counts alone do not qualify. Open your PR from the account you want credited.

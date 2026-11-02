@@ -1,3 +1,5 @@
+// @vitest-environment happy-dom
+
 import { describe, expect, it } from "vitest";
 import {
   eventToModifierOnlyShortcut,
@@ -7,8 +9,11 @@ import {
   shouldBlockCaretBrowsing,
   isConvertNamingStyleShortcut,
   isEditCellShortcut,
+  isEditSidebarTableStructureShortcut,
   isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
+  isExecuteSqlShortcut,
+  isDefaultQueryShortcutTarget,
   isGoToColumnShortcut,
   isFocusWhereShortcut,
   isGoToFirstPageShortcut,
@@ -16,15 +21,46 @@ import {
   isGoToNextPageShortcut,
   isGoToPreviousPageShortcut,
   isToggleZenModeShortcut,
+  isOpenConnectionPickerShortcut,
+  isOpenDatabasePickerShortcut,
+  isOpenSchemaPickerShortcut,
+  isSidebarFocusedTarget,
   isToggleAiPanelShortcut,
   matchesModifierOnlyShortcut,
   matchesShortcut,
+  saveShortcutSurface,
   tabSwitcherDirectionFromShortcut,
 } from "@/lib/editor/keyboardShortcuts";
 import { formatShortcutDisplay, isMacShortcutPlatform } from "@/lib/editor/shortcutDisplay";
 import { shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 
 describe("keyboard shortcut matching", () => {
+  it("routes Cmd+Enter by focus surface while preserving editor execution", () => {
+    const sidebar = document.createElement("div");
+    sidebar.dataset.appSidebar = "";
+    const row = document.createElement("button");
+    sidebar.append(row);
+    document.body.append(sidebar);
+
+    expect(isExecuteSqlShortcut({ key: "Enter", metaKey: true }, undefined)).toBe(true);
+    expect(isSidebarFocusedTarget(row, false)).toBe(true);
+    expect(isSidebarFocusedTarget(document.body, true)).toBe(true);
+    const editor = document.createElement("div");
+    editor.dataset.queryEditorRoot = "";
+    document.body.append(editor);
+    expect(isSidebarFocusedTarget(editor, false)).toBe(false);
+    expect(isSidebarFocusedTarget(document.createElement("textarea"), false)).toBe(false);
+    const objectSearch = document.createElement("input");
+    objectSearch.dataset.objectSearchInput = "";
+    document.body.append(objectSearch);
+    expect(isDefaultQueryShortcutTarget(objectSearch, false)).toBe(true);
+    expect(isDefaultQueryShortcutTarget(editor, false)).toBe(false);
+
+    sidebar.remove();
+    editor.remove();
+    objectSearch.remove();
+  });
+
   it("matches configured WHERE focus on macOS and Windows while respecting a cleared binding", () => {
     expect(isFocusWhereShortcut({ key: "L", metaKey: true, shiftKey: true }, { focusWhere: "Mod+Shift+L" }, "MacIntel")).toBe(true);
     expect(isFocusWhereShortcut({ key: "L", ctrlKey: true, shiftKey: true }, { focusWhere: "Mod+Shift+L" }, "Win32")).toBe(true);
@@ -81,6 +117,25 @@ describe("keyboard shortcut matching", () => {
   it("leaves unshifted and letter keys untouched", () => {
     expect(eventToShortcut({ key: "/", code: "Slash", ctrlKey: true }, "Win32")).toBe("Mod+/");
     expect(eventToShortcut({ key: "A", code: "KeyA", ctrlKey: true, shiftKey: true }, "Win32")).toBe("Shift+Mod+A");
+  });
+
+  it("records Mod+/ from Windows Chinese IME punctuation, Process keys, and numpad divide", () => {
+    // Chinese IME converts "/" to "、" (Ideographic comma)
+    expect(eventToShortcut({ key: "、", code: "Slash", ctrlKey: true }, "Win32")).toBe("Mod+/");
+    // Windows IME keydown with "Process" key
+    expect(eventToShortcut({ key: "Process", code: "Slash", ctrlKey: true }, "Win32")).toBe("Mod+/");
+    expect(eventToShortcut({ key: "Process", code: "Slash", ctrlKey: true, isComposing: true }, "Win32")).toBe("Mod+/");
+    // Numpad divide key (which may report "Divide" or "/")
+    expect(eventToShortcut({ key: "Divide", code: "NumpadDivide", ctrlKey: true }, "Win32")).toBe("Mod+/");
+    expect(eventToShortcut({ key: "/", code: "NumpadDivide", ctrlKey: true }, "Win32")).toBe("Mod+/");
+  });
+
+  it("matches Mod+/ against Chinese IME punctuation, Process keys, and numpad divide", () => {
+    expect(matchesShortcut({ key: "、", code: "Slash", ctrlKey: true }, "Mod+/", "Win32")).toBe(true);
+    expect(matchesShortcut({ key: "Process", code: "Slash", ctrlKey: true }, "Mod+/", "Win32")).toBe(true);
+    expect(matchesShortcut({ key: "Process", code: "Slash", ctrlKey: true, isComposing: true }, "Mod+/", "Win32")).toBe(true);
+    expect(matchesShortcut({ key: "Divide", code: "NumpadDivide", ctrlKey: true }, "Mod+/", "Win32")).toBe(true);
+    expect(matchesShortcut({ key: "/", code: "NumpadDivide", ctrlKey: true }, "Mod+/", "Win32")).toBe(true);
   });
 
   it.each([
@@ -194,6 +249,20 @@ describe("keyboard shortcut matching", () => {
     expect(isToggleZenModeShortcut(platformModEvent, { toggleZenMode: "" })).toBe(false);
   });
 
+  it("matches the toolbar picker shortcuts by default and with custom bindings", () => {
+    const modEvent = (key: string) => (isMacShortcutPlatform() ? { key, metaKey: true, altKey: true } : { key, ctrlKey: true, altKey: true });
+
+    expect(isOpenConnectionPickerShortcut(modEvent("c"))).toBe(true);
+    expect(isOpenDatabasePickerShortcut(modEvent("d"))).toBe(true);
+    expect(isOpenSchemaPickerShortcut(modEvent("s"))).toBe(true);
+    expect(isOpenConnectionPickerShortcut(modEvent("d"))).toBe(false);
+    expect(isOpenConnectionPickerShortcut({ ...modEvent("c"), altKey: false })).toBe(false);
+    expect(isOpenDatabasePickerShortcut({ key: "b", ctrlKey: true, altKey: true }, { openDatabasePicker: "Mod+Alt+B" })).toBe(true);
+    expect(isOpenDatabasePickerShortcut(modEvent("d"), { openDatabasePicker: "Mod+Alt+B" })).toBe(false);
+    expect(isOpenSchemaPickerShortcut(modEvent("s"), { openSchemaPicker: "" })).toBe(false);
+    expect(isOpenSchemaPickerShortcut({ ...modEvent("s"), isComposing: true })).toBe(false);
+  });
+
   it("matches the platform-specific AI panel shortcut", () => {
     expect(isToggleAiPanelShortcut({ key: "i", ctrlKey: true, metaKey: true }, undefined, "MacIntel")).toBe(true);
     expect(isToggleAiPanelShortcut({ key: "i", ctrlKey: true, altKey: true }, undefined, "Win32")).toBe(true);
@@ -246,6 +315,19 @@ describe("keyboard shortcut matching", () => {
     expect(isEditTableStructureShortcut({ key: "d", ctrlKey: true }, { editTableStructure: "Shift+Mod+E" }, "Win32")).toBe(false);
     expect(isEditTableStructureShortcut({ key: "d", ctrlKey: true }, { editTableStructure: "" }, "Win32")).toBe(false);
     expect(isEditTableStructureShortcut({ key: "d", ctrlKey: true, isComposing: true }, undefined, "Win32")).toBe(false);
+  });
+
+  it("matches the sidebar edit-table-structure shortcut F4", () => {
+    expect(isEditSidebarTableStructureShortcut({ key: "F4" }, undefined, "Win32")).toBe(true);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4" }, undefined, "MacIntel")).toBe(true);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4", ctrlKey: true }, undefined, "Win32")).toBe(false);
+  });
+
+  it("honors custom and disabled sidebar edit-table-structure shortcuts", () => {
+    expect(isEditSidebarTableStructureShortcut({ key: "s", ctrlKey: true, altKey: true }, { editSidebarTableStructure: "Mod+Alt+S" }, "Win32")).toBe(true);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4" }, { editSidebarTableStructure: "Mod+Alt+S" }, "Win32")).toBe(false);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4" }, { editSidebarTableStructure: "" }, "Win32")).toBe(false);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4", isComposing: true }, undefined, "Win32")).toBe(false);
   });
 
   it.each([
@@ -335,5 +417,37 @@ describe("shouldBlockCaretBrowsing", () => {
   it("does not block when F7 is bound to a custom shortcut action", () => {
     expect(shouldBlockCaretBrowsing({ key: "F7" }, { caretBrowsingEnabled: false, shortcuts: { executeSql: "F7" } })).toBe(false);
     expect(shouldBlockCaretBrowsing({ key: "F7" }, { caretBrowsingEnabled: false, shortcuts: { executeSql: "Ctrl+Enter" } })).toBe(true);
+  });
+});
+
+describe("saveShortcutSurface", () => {
+  it("applies the settings draft while the settings page owns the window", () => {
+    expect(saveShortcutSurface({ settingsPageOpen: true, activeTabMode: "query" })).toBe("settings");
+  });
+
+  it("keeps sending Ctrl+S to the save-SQL dialog for an active query tab", () => {
+    expect(saveShortcutSurface({ activeTabMode: "query" })).toBe("query");
+  });
+
+  it("stays out of the query branch while the save-SQL dialog is already open", () => {
+    expect(saveShortcutSurface({ activeTabMode: "query", saveSqlDialogOpen: true })).toBe("none");
+  });
+
+  it("does nothing for a non-query tab", () => {
+    expect(saveShortcutSurface({ activeTabMode: "table" })).toBe("none");
+    expect(saveShortcutSurface({ activeTabMode: null })).toBe("none");
+    expect(saveShortcutSurface({})).toBe("none");
+  });
+
+  // The plugin center and driver store also replace the content area while the
+  // previously active query tab stays active, so the active tab alone used to
+  // send Ctrl+S down the save-SQL branch (#13020).
+  it("does nothing while the plugin center or driver store is open", () => {
+    expect(saveShortcutSurface({ pluginCenterOpen: true, activeTabMode: "query" })).toBe("none");
+    expect(saveShortcutSurface({ driverStoreOpen: true, activeTabMode: "query" })).toBe("none");
+  });
+
+  it("prefers the settings page over the other browsing surfaces", () => {
+    expect(saveShortcutSurface({ settingsPageOpen: true, pluginCenterOpen: true, driverStoreOpen: true, activeTabMode: "query" })).toBe("settings");
   });
 });

@@ -3,6 +3,15 @@ import type { DatabaseType } from "@/types/database";
 export const BOOLEAN_CHECKBOX_SIZE = 13;
 export const BOOLEAN_CELL_EDITOR_VALUES = ["true", "false"];
 
+export const BOOLEAN_CELL_VALUE_STYLES = ["true-false", "zero-one"] as const;
+/** How the grid renders a boolean cell's text. */
+export type BooleanCellValueStyle = (typeof BOOLEAN_CELL_VALUE_STYLES)[number];
+export const DEFAULT_BOOLEAN_CELL_VALUE_STYLE: BooleanCellValueStyle = "true-false";
+
+export function normalizeBooleanCellValueStyle(value: unknown): BooleanCellValueStyle {
+  return BOOLEAN_CELL_VALUE_STYLES.includes(value as BooleanCellValueStyle) ? (value as BooleanCellValueStyle) : DEFAULT_BOOLEAN_CELL_VALUE_STYLE;
+}
+
 const MYSQL_BIT_BOOLEAN_DATABASE_TYPES = new Set<DatabaseType>(["mysql"]);
 
 export function isBooleanColumnType(dataType: string | undefined, databaseType?: DatabaseType): boolean {
@@ -43,6 +52,24 @@ export function booleanCellEditorValue(value: unknown): string {
   if (normalized === true) return "true";
   if (normalized === false) return "false";
   return "";
+}
+
+/**
+ * Text the grid shows for a boolean cell. `true-false` renders the uppercase
+ * TRUE/FALSE form the display-options label advertises and that DBeaver/Navicat
+ * use; `zero-one` matches the 1/0 form other database clients use for the same
+ * column (#12187). Non-boolean values return `undefined` so callers can fall
+ * through to the normal formatter.
+ */
+export function booleanCellDisplayText(value: unknown, style: BooleanCellValueStyle): string | undefined {
+  if (typeof value !== "boolean") return undefined;
+  if (style === "zero-one") return value ? "1" : "0";
+  return value ? "TRUE" : "FALSE";
+}
+
+/** Labels for the boolean dropdown editor; stored values stay `true`/`false`. */
+export function booleanCellEditorDisplayValues(style: BooleanCellValueStyle): string[] {
+  return style === "zero-one" ? ["1", "0"] : ["TRUE", "FALSE"];
 }
 
 export function parseBooleanCellEditorValue(value: string | null): boolean | null | undefined {

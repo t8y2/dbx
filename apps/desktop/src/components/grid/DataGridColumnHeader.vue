@@ -18,6 +18,8 @@ const props = defineProps<{
   columnComment?: string;
   tooltipColumnType?: string;
   tooltipColumnComment?: string;
+  /** `schema.table.column` of the column this result column came from, when known. */
+  tooltipColumnSource?: string;
   columnNullability?: "nullable" | "required";
   showTypeLine?: boolean;
   showCommentLine?: boolean;
@@ -25,9 +27,12 @@ const props = defineProps<{
   dragClass?: HTMLAttributes["class"];
   columnStyle?: CSSProperties;
   copyColumnNameLabel: string;
+  /** 与 nullableLabel 等同属「按条件渲染」的文案，未传时按钮 title 为空。 */
+  copyColumnCommentLabel?: string;
   columnNameLabel: string;
   columnTypeLabel: string;
   columnCommentLabel: string;
+  columnSourceLabel: string;
   nullableLabel?: string;
   yesLabel?: string;
   noLabel?: string;
@@ -60,6 +65,7 @@ const emit = defineEmits<{
   resizeStart: [event: MouseEvent];
   autoFit: [];
   copyName: [];
+  copyComment: [];
 }>();
 </script>
 
@@ -79,7 +85,7 @@ const emit = defineEmits<{
       <!-- 索引标识：显示在列名左侧 -->
       <KeyRound v-if="columnIndexKind === 'primary'" class="h-3 w-3 shrink-0" :class="columnIndexColorClass(columnIndexKind)" :title="columnIndexText(columnIndexKind)" />
       <Hash v-else-if="columnIndexKind && columnIndexKind !== 'none'" class="h-3 w-3 shrink-0" :class="columnIndexColorClass(columnIndexKind)" :title="columnIndexText(columnIndexKind)" />
-      <LightTooltip :text="name" side="bottom" :side-offset="4" :disabled="tooltipDisabled">
+      <LightTooltip :text="name" side="bottom" :side-offset="4" :disabled="tooltipDisabled" surface="popover" content-class="border border-border shadow-md">
         <span data-column-tooltip-trigger class="flex min-w-0 flex-1 flex-col overflow-hidden">
           <span class="flex min-w-0 items-center gap-1 leading-4">
             <span class="min-w-0 truncate">{{ name }}</span>
@@ -91,27 +97,36 @@ const emit = defineEmits<{
         </span>
         <template #content>
           <div class="dbx-column-info-tooltip grid min-w-56 grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 px-3 py-2">
-            <span class="text-background-solid/70">{{ columnNameLabel }}</span>
+            <span class="text-muted-foreground">{{ columnNameLabel }}</span>
             <span class="flex min-w-0 items-center gap-2">
               <span class="min-w-0 flex-1 truncate font-mono">{{ name }}</span>
-              <button data-column-header-copy-name type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-background/10" :title="copyColumnNameLabel" @click.stop="emit('copyName')">
+              <button data-column-header-copy-name type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-accent hover:text-accent-foreground" :title="copyColumnNameLabel" @click.stop="emit('copyName')">
                 <Copy class="h-3 w-3" />
               </button>
             </span>
             <template v-if="tooltipColumnType ?? columnType">
-              <span class="text-background-solid/70">{{ columnTypeLabel }}</span>
+              <span class="text-muted-foreground">{{ columnTypeLabel }}</span>
               <span :class="typeClass">{{ tooltipColumnType ?? columnType }}</span>
             </template>
+            <template v-if="tooltipColumnSource">
+              <span class="text-muted-foreground">{{ columnSourceLabel }}</span>
+              <span class="min-w-0 break-all font-mono">{{ tooltipColumnSource }}</span>
+            </template>
             <template v-if="tooltipColumnComment ?? columnComment">
-              <span class="text-background-solid/70">{{ columnCommentLabel }}</span>
-              <span>{{ tooltipColumnComment ?? columnComment }}</span>
+              <span class="text-muted-foreground">{{ columnCommentLabel }}</span>
+              <span class="flex min-w-0 items-start gap-2">
+                <span class="min-w-0 flex-1 break-words">{{ tooltipColumnComment ?? columnComment }}</span>
+                <button data-column-header-copy-comment type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-accent hover:text-accent-foreground" :title="copyColumnCommentLabel" @click.stop="emit('copyComment')">
+                  <Copy class="h-3 w-3" />
+                </button>
+              </span>
             </template>
             <template v-if="columnNullability">
-              <span class="text-background-solid/70">{{ nullableLabel }}</span>
+              <span class="text-muted-foreground">{{ nullableLabel }}</span>
               <span>{{ columnNullability === "nullable" ? yesLabel : noLabel }}</span>
             </template>
             <template v-if="columnIndexKind && columnIndexKind !== 'none'">
-              <span class="text-background-solid/70">{{ columnIndexLabel }}</span>
+              <span class="text-muted-foreground">{{ columnIndexLabel }}</span>
               <span class="flex items-center gap-1">
                 <KeyRound v-if="columnIndexKind === 'primary'" class="h-3 w-3" :class="columnIndexColorClass(columnIndexKind)" />
                 <Hash v-else class="h-3 w-3" :class="columnIndexColorClass(columnIndexKind)" />

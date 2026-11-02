@@ -63,6 +63,7 @@ const emit = defineEmits<{
   toggleValueSuggestion: [option: DataGridLocalFilterOption];
   toggleAllValueSuggestions: [];
   applyValueSuggestions: [];
+  customModeOrder: [];
 }>();
 const columnSearchInputs = new Map<string, HTMLInputElement>();
 const filterRuleElements = new Map<string, HTMLElement>();
@@ -70,6 +71,7 @@ const filterBuilderRootRef = ref<HTMLElement>();
 const pendingValueFocus = new Set<string>();
 const pendingKeyboardAddFocus = new Set<string>();
 const openColumnSelectIds = ref(new Set<string>());
+const openModeSelectIds = ref(new Set<string>());
 const activeColumnIndexes = ref<Record<string, number>>({});
 const focusedValueRuleId = ref<string>();
 const valueShortcutHintRuleId = ref<string>();
@@ -361,6 +363,22 @@ function setColumnSelectOpen(id: string, open: boolean) {
   openColumnSelectIds.value = next;
 }
 
+function setModeSelectOpen(id: string, open: boolean) {
+  const next = new Set(openModeSelectIds.value);
+  if (open) {
+    next.clear();
+    next.add(id);
+  } else {
+    next.delete(id);
+  }
+  openModeSelectIds.value = next;
+}
+
+function openCustomModeOrder(id: string) {
+  setModeSelectOpen(id, false);
+  emit("customModeOrder");
+}
+
 async function handleColumnSelectOpen(rule: DataGridStructuredFilterRule, open: boolean) {
   setColumnSelectOpen(rule.id, open);
   if (!open) return;
@@ -627,13 +645,15 @@ function blurValueRule(id: string) {
               </template>
             </SelectContent>
           </Select>
-          <Select :model-value="rule.mode" :disabled="rule.disabled" @update:model-value="(value: any) => emit('updateRule', rule.id, { mode: value as DataGridContextFilterMode })">
+          <Select :model-value="rule.mode" :open="openModeSelectIds.has(rule.id)" :disabled="rule.disabled" @update:model-value="(value: any) => emit('updateRule', rule.id, { mode: value as DataGridContextFilterMode })" @update:open="(open: boolean) => setModeSelectOpen(rule.id, open)">
             <SelectTrigger size="sm" class="w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate" :class="props.layout === 'text' ? 'h-6 rounded-none border-0 bg-transparent px-1 shadow-none focus-visible:ring-0' : 'h-7'"
               ><SelectValue
             /></SelectTrigger>
             <SelectContent
-              ><SelectItem v-for="option in props.modeOptions" :key="option.value" :value="option.value" class="rounded-none">{{ t(option.labelKey) }}</SelectItem></SelectContent
-            >
+              ><SelectItem v-for="option in props.modeOptions" :key="option.value" :value="option.value" class="rounded-none">{{ t(option.labelKey) }}</SelectItem>
+              <div class="my-1 border-t" />
+              <button type="button" class="flex w-full cursor-pointer items-center px-2 py-1.5 text-left text-xs text-muted-foreground outline-none hover:bg-accent hover:text-accent-foreground" @pointerdown.stop @click="openCustomModeOrder(rule.id)">{{ t("grid.filterModeOrderCustom") }}</button>
+            </SelectContent>
           </Select>
           <div v-if="props.layout === 'text'" class="flex min-w-0 items-center gap-1" :class="rule.disabled ? 'text-muted-foreground' : ''">
             <template v-if="filterModeUsesRange(rule.mode)">

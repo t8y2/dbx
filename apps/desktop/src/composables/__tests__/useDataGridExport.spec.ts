@@ -4,11 +4,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDataGridExport, type UseDataGridExportOptions } from "@/composables/useDataGridExport";
 import type { DatabaseType, QueryResult } from "@/types/database";
 import { buildDataGridCopyUpdateStatements } from "@/lib/dataGrid/dataGridSql";
-import { copyToClipboard } from "@/lib/common/clipboard";
+import { copyRichTextToClipboard, copyToClipboard } from "@/lib/common/clipboard";
 import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import type { CellSelectionMatrix, SelectionData } from "@/lib/dataGrid/gridSelection";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
-import { cancelQuery, extractDataGridSelection, exportQueryResultCsv, exportQueryResultJson, exportQueryResultMarkdown, exportQueryResultXlsx, exportSnapshotResult, readLargeValueChunk } from "@/lib/backend/api";
+import { cancelQuery, extractDataGridSelection, exportQueryResultCsv, exportQueryResultJson, exportQueryResultMarkdown, exportQueryResultXlsx, exportQueryResultsXlsx, exportSnapshotResult, readLargeValueChunk } from "@/lib/backend/api";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { clearDataGridClipboardCopy, parseDataGridClipboard } from "@/lib/dataGrid/dataGridClipboard";
 import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridExternalValue } from "@/lib/mongo/mongoDocumentValues";
@@ -34,6 +34,7 @@ vi.mock("@/lib/common/clipboard", async (importOriginal) => {
   return {
     ...original,
     copyToClipboard: vi.fn(),
+    copyRichTextToClipboard: vi.fn(),
   };
 });
 
@@ -54,6 +55,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     exportQueryResultJson: vi.fn(),
     exportQueryResultMarkdown: vi.fn(),
     exportQueryResultXlsx: vi.fn(),
+    exportQueryResultsXlsx: vi.fn(),
     exportSnapshotResult: vi.fn(),
     readLargeValueChunk: vi.fn(),
     cancelQuery: vi.fn(),
@@ -185,12 +187,61 @@ function createExportState(
 }
 
 describe("original LOB result exports", () => {
+  it("rejects unresolved legacy text in multi-sheet XLSX before writing any sheet", async () => {
+    const { original, state } = snapshotState({ mysqlDataCharsetReadOnly: computed(() => true), context: computed(() => "results") });
+    original.large_value_cells = [{ row_index: 0, column_index: 1, original_bytes: 20000, pending_decode: true }];
+    await state.exportResultSheetsXlsx([{ sheetName: "pending", result: original }]);
+    expect(exportQueryResultsXlsx).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("grid.largeValuePendingDecodeExport"), 5000);
+  });
+
+  it.each(["csv", "json"] as const)("rejects unresolved legacy text in complete-local %s instead of exporting a carrier prefix", async (format) => {
+    const { original, state } = snapshotState({ mysqlDataCharsetReadOnly: computed(() => true), context: computed(() => "results") });
+    original.large_value_cells = [{ row_index: 0, column_index: 1, original_bytes: 20000, pending_decode: true }];
+    await (format === "csv" ? state.exportCsv() : state.exportJson());
+    expect(exportSnapshotResult).not.toHaveBeenCalled();
+    expect(exportQueryResultCsv).not.toHaveBeenCalled();
+    expect(exportQueryResultJson).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("grid.largeValuePendingDecodeExport"), 5000);
+  });
+
+  it("exports selected legacy text only after full-value resolution", async () => {
+    const resolveSourceValues = vi.fn(async () => new Map([[1, new Map([[1, "缤纷彩虹完整值"]])]]));
+    const { original, state } = snapshotState({ mysqlDataCharsetReadOnly: computed(() => true), resolveSourceValues });
+    original.large_value_cells = [{ row_index: 0, column_index: 1, original_bytes: 20000, pending_decode: true }];
+    await state.exportCurrentPageCsv();
+    expect(resolveSourceValues).toHaveBeenCalledWith([1], [0, 1]);
+    expect(exportQueryResultCsv).toHaveBeenCalledWith(expect.any(String), ["id", "name"], [[1, "缤纷彩虹完整值"]], expect.anything(), expect.anything());
+  });
+
+  it("blocks compatibility SQL and unsupported local exports before extraction or saving", async () => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+    const { state } = snapshotState({ mysqlDataCharsetReadOnly: computed(() => true), hasCellSelection: computed(() => true), selectedCellMatrix: computed(() => ({ columns: ["name"], rows: [["缤纷彩虹"]], rowIds: [1], columnIndexes: [1] })) });
+    await state.exportSql();
+    await state.exportCurrentPageSql();
+    await state.exportMarkdown();
+    await state.exportCurrentPageMarkdown();
+    await state.exportHtml();
+    await state.exportCurrentPageHtml();
+    await state.exportTxt();
+    await state.exportCurrentPageTxt();
+    expect(await state.exportWithExtractor("sql-inserts")).toBe(false);
+    expect(await state.copyWithExtractor("sql-inserts")).toBe(false);
+    expect(await state.copyWithExtractor("where-clause")).toBe(false);
+    expect(state.canCopyWithExtractor("sql-updates")).toBe(false);
+    expect(state.canCopyWithExtractor("csv")).toBe(true);
+    expect(saveTextFile).not.toHaveBeenCalled();
+    expect(extractDataGridSelection).not.toHaveBeenCalled();
+    expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     setActivePinia(createPinia());
     vi.mocked(exportSnapshotResult).mockResolvedValue(undefined);
   });
-  function snapshotState() {
+  function snapshotState(overrides: Partial<UseDataGridExportOptions> = {}) {
     const original = {
       columns: ["id", "name"],
       rows: [[1, "preview"]],
@@ -204,6 +255,8 @@ describe("original LOB result exports", () => {
         snapshotResult: computed(() => original),
         hasCompleteLocalResult: computed(() => true),
         completeLocalResult: computed(() => original),
+        displayItems: computed(() => original.rows.map((data, sourceIndex) => ({ ...row(data), id: sourceIndex + 1, sourceIndex }))),
+        ...overrides,
       }),
     };
   }
@@ -222,6 +275,127 @@ describe("original LOB result exports", () => {
     expect(readLargeValueChunk).not.toHaveBeenCalled();
     expect(exportQueryResultCsv).not.toHaveBeenCalled();
     expect(exportQueryResultJson).not.toHaveBeenCalled();
+  });
+  it.each(["csv", "json"] as const)("formats the complete LOB before exporting %s", async (format) => {
+    const displayValue = vi.fn((value: CellValue) => `formatted:${value}`);
+    const { state } = snapshotState({
+      displayValue,
+      hasColumnFormatter: (index) => index === 1,
+      applyColumnFormattersOnExport: computed(() => true),
+    });
+    vi.mocked(readLargeValueChunk).mockResolvedValue({ status: "ok", data: "complete original text", next_offset: 22, eof: true, value_kind: "text" });
+    await (format === "csv" ? state.exportCsv() : state.exportJson());
+    expect(displayValue).toHaveBeenCalledWith("complete original text", 1);
+    expect(exportSnapshotResult).toHaveBeenCalledWith(expect.objectContaining({ format, rows: [[1, "formatted:complete original text"]], cells: [] }), expect.any(String), expect.any(AbortSignal));
+  });
+  it.each([
+    ["csv", "all"],
+    ["csv", "selected"],
+    ["csv", "page"],
+    ["json", "all"],
+    ["json", "selected"],
+    ["json", "page"],
+  ] as const)("preserves mixed formatted and streaming LOBs in %s %s export", async (format, scope) => {
+    const { original, state } = snapshotState({
+      columns: computed(() => ["id", "name", "binary"]),
+      columnTypes: computed(() => ["NUMBER", "CLOB", "BLOB"]),
+      displayValue: (value) => `formatted:${value}`,
+      hasColumnFormatter: (index) => index === 1,
+      applyColumnFormattersOnExport: computed(() => true),
+    });
+    original.columns.push("binary");
+    original.rows = [
+      [1, "preview", "0x00"],
+      [2, null, null],
+      [3, "", "0x"],
+    ];
+    original.large_value_cells!.push({ row_index: 0, column_index: 2, original_bytes: 1000, value_ref: "binary-locator" });
+    vi.mocked(readLargeValueChunk).mockResolvedValue({ status: "ok", data: "complete original text", next_offset: 22, eof: true, value_kind: "text" });
+    if (scope === "page") await (format === "csv" ? state.exportCurrentPageCsv() : state.exportCurrentPageJson());
+    else await (format === "csv" ? state.exportCsv(scope === "selected" ? [1, 2, 3] : undefined) : state.exportJson(scope === "selected" ? [1, 2, 3] : undefined));
+    expect(readLargeValueChunk).toHaveBeenCalledOnce();
+    expect(readLargeValueChunk).toHaveBeenCalledWith(expect.objectContaining({ valueRef: "original-locator" }));
+    expect(exportSnapshotResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rows: [
+          [1, "formatted:complete original text", "0x00"],
+          [2, null, null],
+          [3, "formatted:", "0x"],
+        ],
+        cells: [{ rowIndex: 0, columnIndex: 2, valueRef: "binary-locator" }],
+      }),
+      expect.any(String),
+      expect.any(AbortSignal),
+    );
+  });
+  it.each([false, true])("keeps unformatted snapshot LOBs streaming when formatter enabled=%s", async (enabled) => {
+    const { state } = snapshotState({
+      displayValue: (value) => `formatted:${value}`,
+      hasColumnFormatter: (index) => index === (enabled ? 9 : 1),
+      applyColumnFormattersOnExport: computed(() => enabled),
+    });
+    await state.exportJson();
+    expect(readLargeValueChunk).not.toHaveBeenCalled();
+    expect(exportSnapshotResult).toHaveBeenCalledWith(expect.objectContaining({ rows: [[1, "preview"]], cells: [{ rowIndex: 0, columnIndex: 1, valueRef: "original-locator" }] }), expect.any(String), expect.any(AbortSignal));
+  });
+  it("formats complete binary values using source indexes after column projection", async () => {
+    const displayValue = vi.fn((value: CellValue, index: number) => `${index}:${value}`);
+    const { original, state } = snapshotState({
+      columns: computed(() => ["binary", "id"]),
+      columnTypes: computed(() => ["BLOB", "NUMBER"]),
+      visibleColumnIndexes: computed(() => [2, 0]),
+      displayValue,
+      hasColumnFormatter: (index) => index === 2,
+      applyColumnFormattersOnExport: computed(() => true),
+    });
+    original.columns = ["id", "__DBX_PK_0", "binary"];
+    original.rows = [[1, "hidden", "0x00"]];
+    original.hidden_column_indexes = [1];
+    original.large_value_cells = [{ row_index: 0, column_index: 2, original_bytes: 4, value_ref: "binary-locator" }];
+    vi.mocked(readLargeValueChunk).mockResolvedValue({ status: "ok", data: "00ff0102", next_offset: 4, eof: true, value_kind: "binary" });
+    await state.exportCsv({ columnIndexes: [0] });
+    expect(displayValue).toHaveBeenCalledWith("0x00ff0102", 2);
+    expect(exportSnapshotResult).toHaveBeenCalledWith(expect.objectContaining({ columns: ["binary"], rows: [["2:0x00ff0102"]], cells: [] }), expect.any(String), expect.any(AbortSignal));
+  });
+  it.each(["cancel", "replacement", "disposal"] as const)("blocks formatted snapshot output after %s while a chunk is pending", async (change) => {
+    const scope = effectScope();
+    const cancelHandler = ref<(() => Promise<void>) | null>(null);
+    const current = ref<QueryResult>();
+    const { original, state } = scope.run(() =>
+      snapshotState({
+        snapshotResult: computed(() => current.value!),
+        displayValue: (value) => `formatted:${value}`,
+        hasColumnFormatter: (index) => index === 1,
+        applyColumnFormattersOnExport: computed(() => true),
+        exportCancelHandler: cancelHandler,
+      }),
+    )!;
+    current.value = original;
+    let deliver!: (chunk: Awaited<ReturnType<typeof readLargeValueChunk>>) => void;
+    vi.mocked(readLargeValueChunk).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          deliver = resolve;
+        }),
+    );
+    vi.mocked(cancelQuery).mockRejectedValue(new Error("cancel unavailable"));
+    let settled = false;
+    const pending = state.exportJson().finally(() => {
+      settled = true;
+    });
+    try {
+      await vi.waitFor(() => expect(readLargeValueChunk).toHaveBeenCalledOnce());
+      if (change === "cancel") await cancelHandler.value!().catch(() => undefined);
+      else if (change === "replacement") current.value = { ...original, rows: [[2, "new result"]] };
+      else scope.stop();
+      await vi.waitFor(() => expect(settled).toBe(true));
+      deliver({ status: "ok", data: "late", next_offset: 4, eof: true, value_kind: "text" });
+      await pending;
+      expect(exportSnapshotResult).not.toHaveBeenCalled();
+      expect(original.rows).toEqual([[1, "preview"]]);
+    } finally {
+      scope.stop();
+    }
   });
   it.each(["csv", "json"] as const)("preserves hidden-key filtering and the row limit for snapshot %s", async (format) => {
     const { state, original } = snapshotState();
@@ -492,6 +666,73 @@ describe("useDataGridExport prepared row statements", () => {
       }),
     );
     expect(copyToClipboard).toHaveBeenCalledWith("UPDATE users SET `name` = 'Ada', `active` = TRUE WHERE `id` = 7;");
+  });
+
+  it("builds a SQL DELETEs/INSERTs request when primary keys and rows are present", async () => {
+    const item = { ...row([7, "Ada", true]), sourceIndex: 0 };
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [0, 1],
+      columns: ["display_name", "active"],
+      rows: [["Ada", true]],
+    };
+    const options: UseDataGridExportOptions = {
+      columns: computed(() => ["display_name", "active"]),
+      displayItems: computed(() => [{ ...item, data: ["Ada", true], isDirtyCol: [false, false] }]),
+      allColumns: computed(() => ["id", "display_name", "active"]),
+      allDisplayItems: computed(() => [item]),
+      allSourceColumns: computed(() => ["id", "name", "active"]),
+      visibleColumnIndexes: computed(() => [1, 2]),
+      sql: computed(() => undefined),
+      tableMeta: computed(() => ({
+        tableName: "users",
+        primaryKeys: ["id"],
+        columns: [
+          { name: "id", data_type: "int", is_nullable: false, is_primary_key: true },
+          { name: "name", data_type: "varchar", is_nullable: false },
+          { name: "active", data_type: "boolean", is_nullable: false },
+        ],
+      })),
+      databaseType: computed(() => "mysql"),
+      connectionId: computed(() => "connection-1"),
+      database: computed(() => "dbx"),
+      context: computed(() => "table-data"),
+      sourceColumns: computed(() => ["name", "active"]),
+      columnTypes: computed(() => ["varchar", "boolean"]),
+      whereInput: computed(() => undefined),
+      orderBy: computed(() => undefined),
+      exportBatchSize: computed(() => 1000),
+      hasCellSelection: computed(() => true),
+      selectedCells: computed(() => matrix),
+      selectedCellMatrix: computed(() => matrix),
+      selectedRange: computed(() => ({ startRow: 0, endRow: 0, startCol: 1, endCol: 1 })),
+      contextCell: ref({ rowId: item.id, rowIndex: 0, col: 1 }),
+      contextSelectionIsSynthetic: ref(false),
+      getRowItem: (rowId) => (rowId === item.id ? item : undefined),
+      selectedRowIds: ref(new Set<number>()),
+      hasRowSelection: computed(() => false),
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({
+      text: "DELETE FROM users WHERE `id` = 7;\nINSERT INTO users (`name`, `active`) VALUES ('Ada', TRUE);",
+      mimeType: "application/sql",
+      fileExtension: "sql",
+      rowCount: 1,
+      columnCount: 2,
+    });
+    const state = useDataGridExport(options);
+
+    expect(state.canCopyWithExtractor("sql-deletes-inserts")).toBe(true);
+    await state.copyWithExtractor("sql-deletes-inserts");
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "sql-deletes-inserts",
+        selectedColumnIndexes: [0, 1],
+        rows: [["Ada", true, 7]],
+        selectionKind: "cells",
+      }),
+    );
+    expect(copyToClipboard).toHaveBeenCalledWith("DELETE FROM users WHERE `id` = 7;\nINSERT INTO users (`name`, `active`) VALUES ('Ada', TRUE);");
   });
 
   it("builds a SELECT request for exactly one explicitly selected cell", async () => {
@@ -825,6 +1066,7 @@ describe("useDataGridExport prepared row statements", () => {
     });
 
     expect(state.canCopyWithExtractor("sql-updates")).toBe(true);
+    expect(state.canCopyWithExtractor("sql-deletes-inserts")).toBe(true);
     expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
   });
 
@@ -1626,6 +1868,23 @@ describe("useDataGridExport prepared row statements", () => {
     expect(toast).toHaveBeenCalledWith("grid.copyExtractorWarningOmittedColumns", 5000);
   });
 
+  it("localizes PHP date ISO warnings after copying", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["created_at"], rows: [["not a date"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({
+      text: "not a date",
+      mimeType: "text/x-php",
+      fileExtension: "php",
+      rowCount: 1,
+      columnCount: 1,
+      warnings: [{ code: "php-date-not-iso", message: "backend text" }],
+    });
+    const state = createExportState(editableTable, ["created_at"], matrix, ["not a date"]);
+
+    await state.copyWithExtractor("php");
+
+    expect(toast).toHaveBeenCalledWith("grid.copyExtractorWarningPhpDateNotIso", 5000);
+  });
+
   it("reports extractor copy failure without presenting post-copy warnings", async () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[1]] };
     vi.mocked(extractDataGridSelection).mockResolvedValueOnce({
@@ -1725,18 +1984,19 @@ describe("useDataGridExport prepared row statements", () => {
     expect(vi.mocked(extractDataGridSelection).mock.lastCall?.[0].options.sql).toEqual(saved.sql);
   });
 
-  it("follows the extractor option for the copied SQL table qualifier (#11195)", async () => {
+  it("follows the extractor option for the copied SQL table qualifier (#11195, #12146)", async () => {
     const tableMeta: DataGridTableMeta = { ...editableTable, schema: "SYSDBA" };
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0, 1], columns: ["id", "name"], rows: [[1, "Ada"]] };
     vi.mocked(extractDataGridSelection).mockResolvedValue({ text: "copied", mimeType: "text/plain", fileExtension: "sql", rowCount: 1, columnCount: 2 });
-    const withDatabaseName = { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, includeDatabaseName: true } };
 
-    const enabled = createExportState(tableMeta, ["id", "name"], matrix, [1, "Ada"], undefined, matrix.rows, [], withDatabaseName, false, undefined, false, undefined, undefined, "dameng");
-    await enabled.copyWithExtractor("sql-inserts");
+    // 默认开启 includeDatabaseName：保留模式名
+    const defaultEnabled = createExportState(tableMeta, ["id", "name"], matrix, [1, "Ada"], undefined, matrix.rows, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, undefined, undefined, "dameng");
+    await defaultEnabled.copyWithExtractor("sql-inserts");
     expect(vi.mocked(extractDataGridSelection).mock.lastCall?.[0].tableMeta).toMatchObject({ schema: "SYSDBA", tableName: "users" });
 
-    // 未勾选（默认）时保持既有行为：把可选的库名/模式名前缀交给后端省略
-    const disabled = createExportState(tableMeta, ["id", "name"], matrix, [1, "Ada"], undefined, matrix.rows, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, undefined, undefined, "dameng");
+    // 显式未勾选时把可选的库名/模式名前缀交给后端省略
+    const withoutDatabaseName = { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, includeDatabaseName: false } };
+    const disabled = createExportState(tableMeta, ["id", "name"], matrix, [1, "Ada"], undefined, matrix.rows, [], withoutDatabaseName, false, undefined, false, undefined, undefined, "dameng");
     await disabled.copyWithExtractor("sql-inserts");
     expect(vi.mocked(extractDataGridSelection).mock.lastCall?.[0].tableMeta?.schema).toBeUndefined();
   });
@@ -2716,5 +2976,114 @@ describe("useDataGridExport VARBINARY 文本复制 (#7471)", () => {
       ["id", "name"],
       ["1", "0x616263"],
     ]);
+  });
+});
+
+// issue #12413：MySQL BLOB 列在网格里已经以文本预览显示（AES_DECRYPT 这类表达式的
+// 结果列常被报成 BLOB），复制单元格/复制行/复制全部必须还原成同一份文本，否则用户看到
+// `secret` 却粘贴出 hex。不可严格解码的 bytes 仍保持 hex，非 MySQL 的二进制列不受影响。
+describe("useDataGridExport MySQL BLOB 文本复制 (#12413)", () => {
+  const blobTable: DataGridTableMeta = {
+    tableName: "test_blob",
+    primaryKeys: ["id"],
+    columns: [
+      { name: "id", data_type: "int", is_nullable: false, is_primary_key: true },
+      { name: "secret", data_type: "blob", is_nullable: false },
+    ],
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearDataGridClipboardCopy();
+  });
+
+  it("复制文本型 BLOB 单元格时把 0x<hex> 还原为原始字符串", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["secret"], rows: [["0x616263"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "abc", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    const state = createExportState(blobTable, ["id", "secret"], matrix, [1, "0x616263"]);
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows: [["abc"]] }));
+    expect(copyToClipboard).toHaveBeenCalledWith("abc");
+    // OS 剪贴板是文本，DBX 内部剪贴板仍保留原 hex，粘回 BLOB 时不重编码、不丢字节。
+    expect(parseDataGridClipboard("abc")).toEqual([["0x616263"]]);
+  });
+
+  it("右键「复制单元格」对文本型 BLOB 直接写入原始字符串", async () => {
+    const state = createExportState(blobTable, ["id", "secret"], undefined, [1, "0x616263"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1);
+
+    await state.copyCell();
+
+    expect(copyToClipboard).toHaveBeenCalledWith("abc");
+  });
+
+  it("不可解码的 BLOB 保持 hex，非 MySQL 的二进制列不受影响", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["secret"], rows: [["0x00fffe"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "0x00fffe", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    const state = createExportState(blobTable, ["id", "secret"], matrix, [1, "0x00fffe"]);
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows: [["0x00fffe"]] }));
+
+    const textMatrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["secret"], rows: [["0x616263"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "0x616263", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    const sqliteState = createExportState(blobTable, ["id", "secret"], textMatrix, [1, "0x616263"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1, "sqlite");
+
+    await expect(sqliteState.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenLastCalledWith(expect.objectContaining({ extractor: "raw", rows: [["0x616263"]] }));
+  });
+
+  it("copies text-like Oracle-family blobs as text, matching the grid preview", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["secret"], rows: [["0x616263"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "abc", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    const state = createExportState(blobTable, ["id", "secret"], matrix, [1, "0x616263"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1, "oracle");
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows: [["abc"]] }));
+    expect(copyToClipboard).toHaveBeenCalledWith("abc");
+
+    // The SQL extractor keeps the canonical hex even for a text-like blob, mirroring
+    // the MySQL #12413 case: copy-as-INSERT must not decode bytes (#12679 review).
+    const sqlMatrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["secret"], rows: [["0x616263"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "INSERT INTO `test_blob` (`secret`) VALUES (0x616263);", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 1 });
+    const sqlState = createExportState(blobTable, ["id", "secret"], sqlMatrix, [1, "0x616263"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1, "oracle");
+
+    await expect(sqlState.copyWithExtractor("sql-inserts")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenLastCalledWith(expect.objectContaining({ extractor: "sql-inserts", rows: [[1, "0x616263"]] }));
+  });
+
+  it("copies text-like PostgreSQL bytea as text, matching the grid preview (#11987)", async () => {
+    const byteaTable: DataGridTableMeta = {
+      tableName: "test_bytea",
+      primaryKeys: ["id"],
+      columns: [
+        { name: "id", data_type: "int4", is_nullable: false, is_primary_key: true },
+        { name: "payload", data_type: "bytea", is_nullable: false },
+      ],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["payload"], rows: [["0x616263"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "abc", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    const state = createExportState(byteaTable, ["id", "payload"], matrix, [1, "0x616263"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1, "postgres");
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows: [["abc"]] }));
+    expect(copyToClipboard).toHaveBeenCalledWith("abc");
+  });
+
+  it("copies HTML with both rich and plain clipboard flavors", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["name"], rows: [["Ada"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "<table><tr><td>Ada</td></tr></table>", mimeType: "text/html", fileExtension: "html", rowCount: 1, columnCount: 1 });
+    const state = createExportState(editableTable, ["name"], matrix, ["Ada"]);
+
+    await expect(state.copyWithExtractor("html")).resolves.toBe(true);
+
+    expect(copyRichTextToClipboard).toHaveBeenCalledWith("<table><tr><td>Ada</td></tr></table>", "<table><tr><td>Ada</td></tr></table>");
+    expect(copyToClipboard).not.toHaveBeenCalled();
   });
 });

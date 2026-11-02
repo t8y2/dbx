@@ -1,6 +1,9 @@
 schemaVersion: 1
 order: 20
 dbType: postgres
+compareModes: [schema, data]
+transferSupportLevel: verified
+transferObjectFamily: postgres
 rustVariant: Postgres
 label: PostgreSQL
 dialect: PostgreSQL

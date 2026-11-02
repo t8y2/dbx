@@ -46,7 +46,7 @@ DBX Desktop uses Tauri, Vue, and Rust. The repository currently requires:
 | Tool | Version |
 | --- | --- |
 | Node.js | 22.13.0 or newer |
-| pnpm | 10.27.0 |
+| pnpm | 10.34.7 |
 | Rust | 1.88 or newer |
 | Git | Current stable version |
 | Make | Required on macOS and Linux; optional on Windows |
@@ -57,7 +57,7 @@ Install Node.js 22 or a newer LTS release from the [Node.js website](https://nod
 
 ```bash
 corepack enable
-corepack prepare pnpm@10.27.0 --activate
+corepack prepare pnpm@10.34.7 --activate
 node --version
 pnpm --version
 ```
@@ -65,7 +65,7 @@ pnpm --version
 If your Node.js installation does not include Corepack, use:
 
 ```bash
-npm install --global pnpm@10.27.0
+npm install --global pnpm@10.34.7
 ```
 
 ### Install Rust
@@ -481,7 +481,7 @@ This is expected. Use `make dev-fast` for a lightweight desktop build with defau
 Reactivate the repository version:
 
 ```bash
-corepack prepare pnpm@10.27.0 --activate
+corepack prepare pnpm@10.34.7 --activate
 ```
 
 ### The UI Does Not Reflect the Change

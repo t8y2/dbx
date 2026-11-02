@@ -78,6 +78,13 @@ afterEach(() => {
 });
 
 describe("TreeItem table metadata counts", () => {
+  it("translates the Schema index group and renders its index icon and count", async () => {
+    const container = await mountTreeItem({ id: "ob:APP:__indexes", type: "group-database-indexes", label: "tree.indexes", connectionId: "connection-1", database: "APP", schema: "APP", objectCount: 5, children: [] });
+    expect(container.textContent).toContain(i18n.global.t("tree.indexes"));
+    expect(container.textContent).not.toContain("tree.indexes");
+    expect(container.textContent).toContain("5");
+    expect(container.querySelector(".text-amber-400")).not.toBeNull();
+  });
   it("renders counts for loaded table metadata groups, including empty groups", async () => {
     const groups = [
       ["group-columns", "tree.columns", 2],

@@ -13,10 +13,12 @@ interface Props {
 const props = defineProps<Props>();
 const emit = defineEmits<{
   published: [];
+  "topic-changed": [topic: string];
 }>();
 const { t } = useI18n();
 
 const topic = ref(props.initialTopic || "");
+watch(topic, (value) => emit("topic-changed", value));
 const qos = ref<0 | 1 | 2>(0);
 const retain = ref(false);
 const payloadText = ref("");

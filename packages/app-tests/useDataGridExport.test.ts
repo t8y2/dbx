@@ -592,6 +592,40 @@ test("local SQL export maps the selected mode to the shared formatter", async ()
   }
 });
 
+test.each([
+  ["oracle", "all"],
+  ["oracle", "page"],
+  ["oceanbase-oracle", "all"],
+  ["oceanbase-oracle", "page"],
+] as const)("local %s %s SQL export preserves temporal precision and timezone", async (databaseType, scope) => {
+  const download = installTextDownloadCapture();
+  apiMock.buildExportSqlInsert.mockResolvedValueOnce("INSERT INTO fixture VALUES (1);");
+  const timestamp = "2026-10-13T12:34:56.123456789+08:00";
+  try {
+    const completeLocalResult: QueryResult = {
+      columns: ["id", "created_at"],
+      column_types: ["NUMBER", "TIMESTAMP WITH TIME ZONE"],
+      rows: [[1, timestamp]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      truncated: false,
+      has_more: false,
+    };
+    const { composable } = buildExportHarness({
+      databaseType,
+      columns: completeLocalResult.columns,
+      columnTypes: completeLocalResult.column_types,
+      rows: completeLocalResult.rows,
+      completeLocalResult,
+      displayValue: () => "2026-10-13 12:34:56",
+    });
+    await (scope === "all" ? composable.exportSql() : composable.exportCurrentPageSql());
+    assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].rows, [[1, timestamp]]);
+  } finally {
+    download.restore();
+  }
+});
+
 test("local SQL export defaults to the shared batch formatter", async () => {
   const download = installTextDownloadCapture();
   apiMock.buildExportSqlInsert.mockResolvedValueOnce("INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada'), (2, 'Lin');");

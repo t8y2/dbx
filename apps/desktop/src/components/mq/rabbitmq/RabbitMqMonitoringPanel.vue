@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import type { MqNodeInfo, MqOverviewInfo } from "@/types/mq";
 import { mqGetOverview, mqListNodes } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
+import AutoRefreshControl from "@/components/common/AutoRefreshControl.vue";
 
 interface Props {
   connectionId: string;
@@ -42,6 +43,15 @@ async function loadStats(options: { skipWhenHidden?: boolean } = {}) {
 
 function refreshNow() {
   void loadStats();
+}
+
+function disableAutoRefresh() {
+  autoRefresh.value = false;
+}
+
+function selectAutoRefreshInterval(seconds: number) {
+  refreshInterval.value = seconds;
+  autoRefresh.value = true;
 }
 
 function startAutoRefresh() {
@@ -146,19 +156,18 @@ onUnmounted(() => {
     <div class="panel-toolbar">
       <h3 class="section-title">{{ t("mqRabbitMqMonitoring.title") }}</h3>
       <div class="toolbar-actions">
-        <label class="checkbox-label">
-          <input type="checkbox" v-model="autoRefresh" />
-          <span>{{ t("mqMonitoring.autoRefresh") }}</span>
-        </label>
-        <select v-model.number="refreshInterval" :disabled="!autoRefresh" class="refresh-interval">
-          <option :value="5">{{ t("mqMonitoring.refreshInterval5s") }}</option>
-          <option :value="10">{{ t("mqMonitoring.refreshInterval10s") }}</option>
-          <option :value="30">{{ t("mqMonitoring.refreshInterval30s") }}</option>
-          <option :value="60">{{ t("mqMonitoring.refreshInterval60s") }}</option>
-        </select>
-        <button @click="refreshNow" :disabled="loading" class="btn-secondary">
-          {{ loading ? t("mqMonitoring.refreshing") : t("mqMonitoring.refreshNow") }}
-        </button>
+        <AutoRefreshControl
+          :enabled="autoRefresh"
+          :interval-seconds="refreshInterval"
+          :intervals="[5, 10, 30, 60]"
+          :loading="loading"
+          :label="t('mqMonitoring.autoRefresh')"
+          :off-label="t('serverDashboard.off')"
+          :refresh-label="loading ? t('mqMonitoring.refreshing') : t('mqMonitoring.refreshNow')"
+          @refresh="refreshNow"
+          @disable="disableAutoRefresh"
+          @select="selectAutoRefreshInterval"
+        />
       </div>
     </div>
 

@@ -45,6 +45,7 @@ async fn sqlserver_extended_events_probe_captures_rpc_and_batch_events() {
         &user,
         &password,
         Some(&database),
+        None,
         Duration::from_secs(15),
     )
     .await
@@ -145,6 +146,7 @@ async fn sqlserver_extended_events_probe_captures_rpc_and_batch_events() {
             &user,
             &password,
             Some(&database),
+            None,
             Duration::from_secs(15),
         )
         .await?;

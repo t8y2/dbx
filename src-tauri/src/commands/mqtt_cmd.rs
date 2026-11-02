@@ -267,6 +267,20 @@ pub async fn mqtt_clear_messages(state: State<'_, Arc<AppState>>, connection_id:
     mqtt_clear_messages_inner(&state, connection_id).await
 }
 
+/// Delete one message from the local MQTT console history and live buffer.
+#[tauri::command]
+pub async fn mqtt_delete_message(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    message: MqttMessage,
+) -> Result<(), String> {
+    let client = get_mqtt_client(&state, &connection_id).await?;
+    let _history_guard = client.lock_message_history().await;
+    state.storage.delete_mqtt_message_history_entry(&connection_id, &message).await?;
+    service::delete_message(&client, &message).await;
+    Ok(())
+}
+
 async fn mqtt_clear_messages_inner(state: &AppState, connection_id: String) -> Result<(), String> {
     mqtt_clear_messages_inner_with_hook(state, connection_id, || async {}).await
 }

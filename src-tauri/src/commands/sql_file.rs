@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::sql_file_import::{
     execute_sql_file_paths, execute_sql_file_zip_package_paths, export_sql_file_failure_log as derive_failure_log_file,
-    mysql_like_sql_file_bootstrap_analysis, prune_sql_file_failure_logs, read_sql_file_preview,
+    mysql_like_sql_file_bootstrap_analysis, prune_sql_file_failure_logs, read_sql_file_preview_with_encoding,
     sql_file_failure_log_text as derive_failure_log_text, sql_file_progress, start_sql_file_failure_log,
     SqlFileFailureLogDeriveError, SqlFileFailureLogFileInfo, SqlFileFailureLogFormat, SqlFileFailureLogHandle,
     SqlFileFailureLogInfo, SqlFileFailureLogKey, SqlFileFailureLogMeta, SqlFileFailureLogRegistry,
@@ -19,7 +19,7 @@ use dbx_core::sql_file_import::{
     SQL_FILE_FAILURE_LOG_DIR,
 };
 
-pub use dbx_core::sql::{SqlFilePreview, SqlFileRequest, SqlFileStatus};
+pub use dbx_core::sql::{SqlFileEncoding, SqlFilePreview, SqlFileRequest, SqlFileStatus};
 
 static SQL_FILE_EXECUTIONS: OnceLock<RwLock<HashMap<String, CancellationToken>>> = OnceLock::new();
 
@@ -50,12 +50,17 @@ struct SqlFileSummary {
 #[tauri::command]
 pub async fn inspect_sql_file_tables(
     file_path: String,
+    encoding: Option<SqlFileEncoding>,
 ) -> Result<Vec<dbx_core::sql_file_import::SqlFileTable>, String> {
-    dbx_core::sql_file_import::inspect_sql_file_tables(std::path::Path::new(&file_path)).await
+    dbx_core::sql_file_import::inspect_sql_file_tables_with_encoding(
+        std::path::Path::new(&file_path),
+        encoding.unwrap_or_default(),
+    )
+    .await
 }
 
 #[tauri::command]
-pub async fn preview_sql_file(file_path: String) -> Result<SqlFilePreview, String> {
+pub async fn preview_sql_file(file_path: String, encoding: Option<SqlFileEncoding>) -> Result<SqlFilePreview, String> {
     let path = PathBuf::from(&file_path);
     let metadata = tokio::fs::metadata(&path).await.map_err(|e| e.to_string())?;
     if path
@@ -83,7 +88,12 @@ pub async fn preview_sql_file(file_path: String) -> Result<SqlFilePreview, Strin
         })
         .await
         .map_err(|error| format!("Failed to extract SQL ZIP package: {error}"))??;
-        let prefix = read_sql_file_preview(PathBuf::from(&extracted_paths[0]).as_path(), 1_000_000).await?;
+        let prefix = read_sql_file_preview_with_encoding(
+            PathBuf::from(&extracted_paths[0]).as_path(),
+            1_000_000,
+            encoding.unwrap_or_default(),
+        )
+        .await?;
         let bootstrap_analysis = mysql_like_sql_file_bootstrap_analysis(&prefix);
         return Ok(SqlFilePreview {
             file_name: path.file_name().and_then(|name| name.to_str()).unwrap_or("package.zip").to_string(),
@@ -96,7 +106,7 @@ pub async fn preview_sql_file(file_path: String) -> Result<SqlFilePreview, Strin
             package_part_count: Some(package.part_names.len()),
         });
     }
-    let prefix = read_sql_file_preview(&path, 1_000_000).await?;
+    let prefix = read_sql_file_preview_with_encoding(&path, 1_000_000, encoding.unwrap_or_default()).await?;
     let bootstrap_analysis = mysql_like_sql_file_bootstrap_analysis(&prefix);
     let preview = prefix.chars().take(20_000).collect();
 

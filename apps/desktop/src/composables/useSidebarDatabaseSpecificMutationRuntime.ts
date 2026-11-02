@@ -21,6 +21,7 @@ import {
   mongoCreateIndexPreview,
   mongoDropAllIndexesPreview,
   mongoDropCollectionPreview,
+  mongoClearCollectionPreview,
   mongoDropIndexFailureCount,
   mongoDropDatabasePreview,
   mongoDropIndexPreview,
@@ -56,6 +57,8 @@ import {
   deleteNacosNamespaceLoading,
   showDropMongoCollectionConfirm,
   dropMongoCollectionLoading,
+  showClearMongoCollectionConfirm,
+  clearMongoCollectionLoading,
   showDropMongoIndexConfirm,
   dropMongoIndexLoading,
   showDropAllMongoIndexesConfirm,
@@ -101,6 +104,7 @@ import {
 interface SidebarDatabaseSpecificMutationRuntimeOptions {
   activeNode: ShallowRef<TreeNode>;
   connectionStore: ReturnType<typeof useConnectionStore>;
+  refreshDataTabsForTable?: (target: { connectionId: string; database: string; schemaCandidates?: Array<string | undefined>; name: string }) => Promise<number>;
 }
 
 function errorMessage(error: unknown): string {
@@ -161,6 +165,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   const canManageElasticsearchIndex = computed(() => canMutateElasticsearchIndexNode(activeNode.value));
 
   const canDropMongoCollection = computed(() => canMutateMongoCollectionNode(activeNode.value));
+  const canClearMongoCollection = computed(() => canMutateMongoCollectionNode(activeNode.value) && mongoCollectionKindFromNode(activeNode.value) === "collection");
   const canDropMilvusCollection = computed(() => activeNode.value.type === "vector-collection" && !!activeNode.value.connectionId && !!activeNode.value.database && connectionStore.getConfig(activeNode.value.connectionId)?.db_type === "milvus");
   const canRenameMongoCollection = computed(() => canRenameMongoCollectionNode(activeNode.value));
   const canCloneMongoCollection = computed(() => canCloneMongoCollectionNode(activeNode.value));
@@ -934,6 +939,12 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     showDropMongoCollectionConfirm.value = true;
   }
 
+  function clearMongoCollection() {
+    if (!canClearMongoCollection.value) return;
+    clearMongoCollectionLoading.value = false;
+    showClearMongoCollectionConfirm.value = true;
+  }
+
   function dropMilvusCollection() {
     dropMongoCollection();
   }
@@ -1093,6 +1104,43 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     });
   }
 
+  async function confirmClearMongoCollection() {
+    const node = sidebarDangerTarget.value ?? activeNode.value;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    if (!canMutateMongoCollectionNode(node) || mongoCollectionKindFromNode(node) !== "collection" || !connectionId || !database) return;
+    const collectionName = node.label;
+    await runMongoSidebarMutation({
+      connection: connectionStore.getConfig(connectionId),
+      database,
+      reviewText: mongoClearCollectionPreview(database, collectionName),
+      source: t("production.sourceSidebar"),
+      loading: clearMongoCollectionLoading,
+      beforeExecute: () => connectionStore.ensureConnected(connectionId),
+      execute: () => api.mongoDeleteDocuments(connectionId, database, collectionName, "{}", true),
+      onSuccess: async () => {
+        toast(t("contextMenu.clearCollectionSuccess", { name: collectionName }), 3000);
+        showClearMongoCollectionConfirm.value = false;
+        try {
+          await connectionStore.loadMongoCollections(connectionId, database);
+        } catch (error) {
+          toast(t("contextMenu.objectDropRefreshFailed", { message: translateBackendError(t, errorMessage(error)) }), 5000);
+        }
+        try {
+          await options.refreshDataTabsForTable?.({
+            connectionId,
+            database,
+            schemaCandidates: [undefined, database],
+            name: collectionName,
+          });
+        } catch (error) {
+          toast(t("contextMenu.objectDropRefreshFailed", { message: translateBackendError(t, errorMessage(error)) }), 5000);
+        }
+      },
+      onError: toastMutationError,
+    });
+  }
+
   async function confirmDropMilvusDatabase() {
     const node = sidebarDangerTarget.value ?? activeNode.value;
     const connectionId = node.connectionId;
@@ -1234,6 +1282,9 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     canDropMongoDatabase,
     canDropMilvusDatabase,
     canDropMongoCollection,
+    canClearMongoCollection,
+    clearMongoCollection,
+    confirmClearMongoCollection,
     canDropMilvusCollection,
     canRenameMongoCollection,
     canCloneMongoCollection,

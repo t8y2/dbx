@@ -131,7 +131,10 @@ fn db2_transfer_writes_multiple_rows_without_changing_backslashes_or_binary_valu
         &DatabaseType::Db2,
         None,
     );
-    assert_eq!(sql, "INSERT INTO \"APP\".\"EVENTS\" (\"PATH\", \"PAYLOAD\") VALUES\n('C:\\data\\O''Brien', BX'00ff'),\n('中文', BX'')");
+    assert_eq!(
+        sql,
+        "INSERT INTO \"APP\".\"EVENTS\" (\"PATH\", \"PAYLOAD\") VALUES\n('C:\\data\\O''Brien', BX'00ff'),\n('中文', BX'')"
+    );
     assert_eq!(transfer::escape_value_typed(&json!("0xFF"), &DatabaseType::Db2, Some("VARCHAR(20)")), "'0xFF'");
     assert_eq!(transfer::escape_value_typed(&json!(true), &DatabaseType::Db2, Some("BOOLEAN")), "TRUE");
     assert_eq!(transfer::escape_value(&json!(null), &DatabaseType::Db2), "NULL");

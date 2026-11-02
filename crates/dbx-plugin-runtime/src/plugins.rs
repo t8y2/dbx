@@ -12,6 +12,8 @@ mod host;
 mod installer;
 mod jdbc_sessions;
 mod lifecycle;
+#[cfg(all(test, any(windows, unix)))]
+mod lifecycle_tests;
 mod manifest;
 mod marketplace;
 mod runtime;
@@ -43,12 +45,13 @@ pub use marketplace::{
 
 pub use manifest::{
     current_plugin_target, resolve_safe_plugin_path, PluginBackendEntrypoint, PluginBackendTransport,
-    PluginCompatibility, PluginConnectionActionContribution, PluginConnectionActionVariant, PluginConnectionActionWhen,
-    PluginConnectionCapability, PluginConnectionProviderContribution, PluginContribution, PluginDriverManifest,
-    PluginEngines, PluginEntrypoints, PluginFieldCondition, PluginFieldConditionClause, PluginFieldConditionLiteral,
-    PluginFilesystemCapability, PluginFilesystemProviderContribution, PluginFormFieldBinding,
-    PluginFormFieldDefinition, PluginFormFieldOption, PluginFormFieldPicker, PluginFormFieldPickerKind,
-    PluginFormFieldType, PluginManifest, PluginUiEntrypoint, PluginWorkbenchContribution,
+    PluginCapabilityManifest, PluginCompatibility, PluginConnectionActionContribution, PluginConnectionActionVariant,
+    PluginConnectionActionWhen, PluginConnectionCapability, PluginConnectionProviderContribution, PluginContribution,
+    PluginDriverManifest, PluginEngines, PluginEntrypoints, PluginFieldCondition, PluginFieldConditionClause,
+    PluginFieldConditionLiteral, PluginFilesystemCapability, PluginFilesystemProviderContribution,
+    PluginFormFieldBinding, PluginFormFieldDefinition, PluginFormFieldOption, PluginFormFieldPicker,
+    PluginFormFieldPickerKind, PluginFormFieldType, PluginManifest, PluginMcpAccess, PluginMcpContribution,
+    PluginMcpScope, PluginMcpToolDeclaration, PluginMcpToolset, PluginUiEntrypoint, PluginWorkbenchContribution,
     PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD, PLUGIN_CONNECTION_DISCONNECT_METHOD,
     PLUGIN_CONNECTION_TEST_METHOD, SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_HOST_FEATURES,
     SUPPORTED_PLUGIN_MANIFEST_VERSION, SUPPORTED_PLUGIN_PERMISSIONS, SUPPORTED_PLUGIN_PROTOCOL_VERSION,
@@ -167,12 +170,8 @@ impl PluginRegistry {
     }
 
     pub fn new_with_app_version(root_dir: PathBuf, app_version: impl Into<String>) -> Self {
-        Self {
-            root_dir,
-            app_version: app_version.into(),
-            lifecycle: PluginLifecycle::default(),
-            jdbc_runtimes: Default::default(),
-        }
+        let lifecycle = PluginLifecycle::for_store(&root_dir);
+        Self { root_dir, app_version: app_version.into(), lifecycle, jdbc_runtimes: Default::default() }
     }
 
     pub fn lifecycle(&self) -> PluginLifecycle {
@@ -270,6 +269,89 @@ impl PluginRegistry {
         Ok(self.list_installed()?.into_iter().find(|plugin| plugin.manifest.id == plugin_id))
     }
 
+    pub fn find_capability(&self, capability_id: &str) -> Result<Option<InstalledPlugin>, String> {
+        Ok(self.list_installed()?.into_iter().find(|plugin| {
+            plugin.compatibility.compatible
+                && plugin.manifest.capabilities.iter().any(|capability| capability.id == capability_id)
+        }))
+    }
+
+    pub fn find_capability_for_plugin(
+        &self,
+        plugin_id: &str,
+        capability_id: &str,
+    ) -> Result<Option<InstalledPlugin>, String> {
+        Ok(self.find_plugin(plugin_id)?.filter(|plugin| {
+            plugin.compatibility.compatible
+                && plugin.manifest.capabilities.iter().any(|capability| capability.id == capability_id)
+        }))
+    }
+
+    pub async fn invoke_capability<T>(
+        &self,
+        capability_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
+        let plugin = self
+            .find_capability(capability_id)?
+            .ok_or_else(|| format!("Plugin capability '{capability_id}' is not installed"))?;
+        self.invoke_capability_on_plugin(plugin, capability_id, method, params).await
+    }
+
+    pub async fn invoke_capability_for_plugin<T>(
+        &self,
+        plugin_id: &str,
+        capability_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
+        let plugin = self
+            .find_capability_for_plugin(plugin_id, capability_id)?
+            .ok_or_else(|| format!("Plugin '{plugin_id}' capability '{capability_id}' is not installed"))?;
+        self.invoke_capability_on_plugin(plugin, capability_id, method, params).await
+    }
+
+    async fn invoke_capability_on_plugin<T>(
+        &self,
+        plugin: InstalledPlugin,
+        capability_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
+        let _operation = self.lifecycle.begin_operation(&plugin.manifest.id)?;
+        // A rollback in another host may have completed between discovery and admission.
+        let plugin = self.find_plugin(&plugin.manifest.id)?.ok_or("Plugin is no longer installed")?;
+        ensure_plugin_compatible(&plugin)?;
+        let env = PluginRuntimeEnv::default().with_plugin_data_dir(&self.plugin_data_dir(&plugin.manifest.id));
+        let runtime_lease = self.lifecycle.runtime_lease(&plugin.manifest.id)?;
+        let session =
+            PluginSidecarSession::start_with_runtime_lease(plugin, self.app_version.clone(), env, runtime_lease)
+                .await?;
+        let _cleanup = runtime::ShutdownOnDrop::new(session.clone());
+        let result =
+            session.invoke_with_timeout(method, params, Some(capability_id), Some(PLUGIN_REQUEST_TIMEOUT)).await;
+        match (result, session.shutdown().await) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(invoke_error), Ok(())) => Err(invoke_error),
+            (Ok(_), Err(shutdown_error)) => {
+                Err(format!("Plugin capability invocation completed but shutdown failed: {shutdown_error}"))
+            }
+            (Err(invoke_error), Err(shutdown_error)) => {
+                Err(format!("{invoke_error}; additionally failed to stop plugin: {shutdown_error}"))
+            }
+        }
+    }
+
     pub async fn invoke_driver<T>(&self, driver_id: &str, method: &str, params: serde_json::Value) -> Result<T, String>
     where
         T: DeserializeOwned,
@@ -310,8 +392,18 @@ impl PluginRegistry {
         // and makes the whole start -> invoke -> shutdown sequence mutually exclusive with an
         // install, rollback, or uninstall of the same plugin.
         let _operation = self.lifecycle.begin_operation(&plugin.manifest.id)?;
+        let current = self.find_driver(driver_id)?.ok_or("Plugin driver is no longer installed")?;
+        if current.manifest.id != plugin.manifest.id {
+            return Err(format!("Plugin driver '{driver_id}' changed. Please reconnect."));
+        }
+        let plugin = current;
+        ensure_plugin_compatible(&plugin)?;
         let env = env.with_plugin_data_dir(&self.plugin_data_dir(&plugin.manifest.id));
-        let session = PluginSidecarSession::start(plugin, self.app_version.clone(), env).await?;
+        let runtime_lease = self.lifecycle.runtime_lease(&plugin.manifest.id)?;
+        let session =
+            PluginSidecarSession::start_with_runtime_lease(plugin, self.app_version.clone(), env, runtime_lease)
+                .await?;
+        let _cleanup = runtime::ShutdownOnDrop::new(session.clone());
         let result = session.invoke_with_timeout(method, params, Some(driver_id), timeout_duration).await;
         match (result, session.shutdown().await) {
             (Ok(value), Ok(())) => Ok(value),
@@ -408,7 +500,8 @@ impl PluginDriverSession {
         env: PluginRuntimeEnv,
         activity: lifecycle::PluginUsageGuard,
     ) -> Result<Self, String> {
-        let sidecar = PluginSidecarSession::start(plugin, app_version, env).await?;
+        let runtime_lease = activity.runtime_lease()?;
+        let sidecar = PluginSidecarSession::start_with_runtime_lease(plugin, app_version, env, runtime_lease).await?;
         Ok(Self { sidecar, driver_id, _activity: Some(activity), logical: None })
     }
 
@@ -460,6 +553,34 @@ impl PluginDriverSession {
         if let Some(logical) = &self.logical {
             logical.close().await;
             return Ok(());
+        }
+        self.sidecar.shutdown().await
+    }
+
+    /// Confirm JDBC cleanup for an owned native-operation scope. Ordinary shutdown remains best effort.
+    pub async fn shutdown_confirmed(&self) -> Result<(), String> {
+        if let Some(logical) = &self.logical {
+            return logical.close_confirmed().await;
+        }
+        if self.driver_id == "jdbc" {
+            let closed: Result<serde_json::Value, _> = self
+                .sidecar
+                .invoke_with_timeout(
+                    "close",
+                    serde_json::json!({}),
+                    Some(&self.driver_id),
+                    Some(Duration::from_secs(3)),
+                )
+                .await;
+            let acknowledged = closed.and_then(|value| {
+                if value["ok"] == true {
+                    Ok(())
+                } else {
+                    Err("JDBC session cleanup was not confirmed".to_string())
+                }
+            });
+            let stopped = self.sidecar.shutdown().await;
+            return acknowledged.and(stopped);
         }
         self.sidecar.shutdown().await
     }
@@ -533,6 +654,8 @@ impl Drop for PluginDriverSession {
     fn drop(&mut self) {
         if let Some(logical) = &self.logical {
             logical.close_in_background();
+        } else {
+            drop(runtime::ShutdownOnDrop::new(self.sidecar.clone()));
         }
     }
 }
@@ -714,12 +837,14 @@ for line in sys.stdin:
     request = json.loads(line)
     params = request.get('params', {})
     if request['method'] == 'cancelStatement':
-        with open(os.path.join(root, 'cancelled'), 'w') as out:
+        with open(os.path.join(root, 'cancelled.tmp'), 'w') as out:
             out.write(params.get('cancelToken', ''))
+        os.replace(os.path.join(root, 'cancelled.tmp'), os.path.join(root, 'cancelled'))
         print(json.dumps({'id': request['id'], 'result': {'cancelled': True}}), flush=True)
     elif request['method'] == 'executeQuery' and params.get('sql') == 'slow':
-        with open(os.path.join(root, 'running'), 'w') as out:
+        with open(os.path.join(root, 'running.tmp'), 'w') as out:
             out.write(params.get('cancelToken', ''))
+        os.replace(os.path.join(root, 'running.tmp'), os.path.join(root, 'running'))
     else:
         print(json.dumps({'id': request['id'], 'result': {'token': params.get('cancelToken')}}), flush=True)
 "#,

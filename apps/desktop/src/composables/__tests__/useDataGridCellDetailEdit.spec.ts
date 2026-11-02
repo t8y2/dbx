@@ -179,10 +179,10 @@ describe("useDataGridCellDetailEdit", () => {
     await editor.startDetailEdit();
     syncEditor.mockClear();
     warnFormattedJsonEdit.mockClear();
+    editor.detailEditValue.value = compact;
     editor.formatDetailJsonDraft();
 
     expect(editor.detailEditValue.value).toBe('{\n  "owner": "zipg",\n  "tags": [\n    "a"\n  ]\n}');
-    expect(editor.detailEditOriginalValue.value).toBe(compact);
     expect(syncEditor).toHaveBeenLastCalledWith('{\n  "owner": "zipg",\n  "tags": [\n    "a"\n  ]\n}', "");
     expect(warnFormattedJsonEdit).not.toHaveBeenCalled();
 
@@ -191,5 +191,63 @@ describe("useDataGridCellDetailEdit", () => {
     editor.formatDetailJsonDraft();
     expect(editor.detailEditValue.value).toBe("not json");
     expect(syncEditor).not.toHaveBeenCalled();
+  });
+
+  // issue #12416：点「编辑」进入值编辑器时，结构化值直接以格式化草稿打开，
+  // 不需要用户再点一次「格式化 JSON」。
+  it("opens the value editor with a pretty-printed JSON draft", async () => {
+    const compact = '{"owner":"zipg","tags":["a"]}';
+    const pretty = '{\n  "owner": "zipg",\n  "tags": [\n    "a"\n  ]\n}';
+    const activeDetail = ref<DataGridCellDetail | null>(detail(compact, { type: "object" }));
+    const applyCellValue = vi.fn();
+    const warnFormattedJsonEdit = vi.fn();
+    const editor = useDataGridCellDetailEdit({
+      activeDetail: computed(() => activeDetail.value),
+      activeTab: ref("valueEditor"),
+      jsonFormatted: computed(() => false),
+      databaseType: computed(() => "mongodb"),
+      resultRows: computed(() => [["id", compact]]),
+      getColumnInfo: () => undefined,
+      getRowItem: () => ({ sourceIndex: 0, isNew: false, isDeleted: false }),
+      hydrateLargeValueCell: async () => true,
+      applyCellValue,
+      restoreCellValue: vi.fn(),
+      syncEditor: vi.fn(),
+      refreshDetail: vi.fn(),
+      warnFormattedJsonEdit,
+    });
+
+    await editor.startDetailEdit();
+
+    expect(editor.detailEditValue.value).toBe(pretty);
+    expect(editor.detailEditOriginalValue.value).toBe(pretty);
+    expect(editor.hasPendingDetailEditorDraft.value).toBe(false);
+
+    // 未改动的提交仍然写回原始（压缩）文本，不会把格式化后的空白静默落库。
+    editor.commitDetailEdit();
+    expect(applyCellValue).toHaveBeenLastCalledWith(3, 1, compact);
+  });
+
+  it("keeps plain text values unchanged when the value editor opens", async () => {
+    const activeDetail = ref<DataGridCellDetail | null>(detail("plain text"));
+    const editor = useDataGridCellDetailEdit({
+      activeDetail: computed(() => activeDetail.value),
+      activeTab: ref("valueEditor"),
+      jsonFormatted: computed(() => false),
+      databaseType: computed(() => "mongodb"),
+      resultRows: computed(() => [["id", "plain text"]]),
+      getColumnInfo: () => undefined,
+      getRowItem: () => ({ sourceIndex: 0, isNew: false, isDeleted: false }),
+      hydrateLargeValueCell: async () => true,
+      applyCellValue: vi.fn(),
+      restoreCellValue: vi.fn(),
+      syncEditor: vi.fn(),
+      refreshDetail: vi.fn(),
+      warnFormattedJsonEdit: vi.fn(),
+    });
+
+    await editor.startDetailEdit();
+
+    expect(editor.detailEditValue.value).toBe("plain text");
   });
 });

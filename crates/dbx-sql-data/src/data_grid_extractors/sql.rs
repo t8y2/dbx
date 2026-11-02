@@ -5,12 +5,15 @@ use super::{
 };
 use crate::data_grid_sql::{
     build_column_predicate, build_data_grid_copy_insert_statement_with_formatters,
-    build_data_grid_copy_update_statements, data_grid_generated_table_name, format_grid_copy_insert_sql_literal,
+    build_data_grid_copy_insert_statements_with_formatters, build_data_grid_copy_update_statements, column_info_for,
+    data_grid_delete_sql, data_grid_generated_table_name, data_grid_statement, format_grid_copy_insert_sql_literal,
     format_grid_sql_literal_with_identifier_quote, is_auto_generated_column, is_grid_insert_omitted_column,
     is_non_identity_generated_column, is_primary_key_column, supports_relational_copy_predicates, DataGridColumnInfo,
-    DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridPrimaryKeyMode, DataGridTableMeta,
+    DataGridCopyInsertMode, DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions,
+    DataGridPrimaryKeyMode, DataGridTableMeta,
 };
 use crate::models::connection::DatabaseType;
+use crate::sql_dialect::uses_single_row_insert_statements;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
 use dbx_types::types::is_opaque_aggregate_state_type;
 use serde_json::Value;
@@ -207,6 +210,168 @@ pub(super) fn write_sql_updates(
     Ok(sql_metadata(data.omitted_columns))
 }
 
+pub(super) fn write_sql_deletes_inserts(
+    context: &ExtractContext<'_>,
+    output: &mut dyn Write,
+) -> Result<WriteMetadata, DataGridExtractError> {
+    ensure_sql_builder_budget(context)?;
+    reject_selected_opaque_aggregate_states(context)?;
+    let table_meta = context.request.table_meta.as_ref().ok_or_else(|| {
+        DataGridExtractError::new(
+            DataGridExtractErrorCode::MissingTableMetadata,
+            "SQL DELETEs/INSERTs requires table metadata.",
+        )
+    })?;
+    if table_meta.primary_keys.is_empty() {
+        return Err(DataGridExtractError::new(
+            DataGridExtractErrorCode::MissingPrimaryKey,
+            "SQL DELETEs/INSERTs requires at least one primary key column.",
+        ));
+    }
+    if !supports_relational_copy_predicates(context.request.database_type) {
+        return Err(DataGridExtractError::new(
+            DataGridExtractErrorCode::UnsupportedDatabase,
+            "SQL DELETEs/INSERTs is not supported for this database type.",
+        ));
+    }
+
+    let mut primary_key_indices = Vec::with_capacity(table_meta.primary_keys.len());
+    for primary_key in &table_meta.primary_keys {
+        let col = context
+            .request
+            .columns
+            .iter()
+            .find(|column| {
+                normalized_name_eq(column.source_name.as_deref().unwrap_or(&column.display_name), primary_key)
+            })
+            .ok_or_else(|| {
+                DataGridExtractError::new(
+                    DataGridExtractErrorCode::MissingPrimaryKey,
+                    format!("Primary key column '{primary_key}' is not present in the result set."),
+                )
+            })?;
+        primary_key_indices.push((primary_key.as_str(), col.source_index));
+    }
+
+    for (row_index, row) in context.request.rows.iter().enumerate() {
+        for (pk_name, src_idx) in &primary_key_indices {
+            let val = row.get(*src_idx).unwrap_or(&Value::Null);
+            if val.is_null() {
+                return Err(DataGridExtractError::new(
+                    DataGridExtractErrorCode::NullPrimaryKey,
+                    format!("Row {row_index} has a NULL value for primary key '{pk_name}'."),
+                ));
+            }
+        }
+    }
+
+    let data = sql_selected_data(context, false)?;
+    let insert_statements = build_data_grid_copy_insert_statements_with_formatters(
+        DataGridCopyInsertStatementOptions {
+            database_type: context.request.database_type,
+            identifier_quote: context.request.identifier_quote.clone(),
+            table_meta: context.request.table_meta.clone(),
+            columns: data.columns,
+            column_types: Some(data.column_types),
+            source_columns: Some(data.source_columns),
+            rows: data.rows,
+            primary_key_mode: context.request.options.sql.primary_key_mode,
+            include_computed_columns: !context.request.options.sql.skip_computed_columns,
+            include_database_name: context.request.options.sql.include_database_name,
+            insert_mode: context.request.options.sql.insert_mode,
+        },
+        |reference| {
+            if context.request.options.sql.quote_identifiers {
+                reference
+            } else {
+                identifiers::unquote_optional_identifiers(
+                    reference,
+                    context.request.database_type,
+                    context.request.identifier_quote.as_deref(),
+                )
+            }
+        },
+        |value, database_type, info, identifier_quote| {
+            if context.request.options.sql.temporal_format == DataGridTemporalFormat::String {
+                if let Some(literal) = portable_temporal_literal(value, database_type, info) {
+                    return literal;
+                }
+            }
+            format_grid_copy_insert_sql_literal(value, database_type, info, identifier_quote)
+        },
+    )
+    .ok_or_else(|| {
+        DataGridExtractError::new(
+            DataGridExtractErrorCode::NoWritableColumns,
+            "No insertable columns remain after applying extractor column rules.",
+        )
+    })?;
+
+    let table = data_grid_generated_table_name(
+        context.request.database_type,
+        table_meta.catalog.as_deref(),
+        table_meta.schema.as_deref(),
+        table_meta.database.as_deref(),
+        &table_meta.table_name,
+        context.request.identifier_quote.as_deref(),
+        context.request.options.sql.include_database_name,
+    );
+    let table = if context.request.options.sql.quote_identifiers {
+        table
+    } else {
+        identifiers::unquote_optional_identifiers(
+            table,
+            context.request.database_type,
+            context.request.identifier_quote.as_deref(),
+        )
+    };
+
+    let column_info = table_meta.columns.as_deref().unwrap_or(&[]);
+    let primary_key_info: Vec<Option<&DataGridColumnInfo>> =
+        primary_key_indices.iter().map(|(pk_name, _)| column_info_for(column_info, pk_name)).collect();
+
+    let delete_statements: Vec<String> = context
+        .request
+        .rows
+        .iter()
+        .map(|row| {
+            let where_clause = primary_key_indices
+                .iter()
+                .enumerate()
+                .map(|(pk_index, (pk_name, src_idx))| {
+                    let val = row.get(*src_idx).unwrap_or(&Value::Null);
+                    let info = primary_key_info[pk_index];
+                    let quote = if context.request.options.sql.quote_identifiers {
+                        context.request.identifier_quote.as_deref()
+                    } else {
+                        None
+                    };
+                    build_column_predicate(context.request.database_type, pk_name, val, info, false, quote)
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            data_grid_statement(
+                context.request.database_type,
+                data_grid_delete_sql(context.request.database_type, &table, &where_clause),
+            )
+        })
+        .collect();
+
+    let is_row_by_row = context.request.options.sql.insert_mode == DataGridCopyInsertMode::RowByRow
+        || context.request.database_type.is_some_and(uses_single_row_insert_statements);
+
+    let statements = if is_row_by_row && delete_statements.len() == insert_statements.len() {
+        delete_statements.into_iter().zip(insert_statements).flat_map(|(del, ins)| [del, ins]).collect::<Vec<_>>()
+    } else {
+        let mut combined = delete_statements;
+        combined.extend(insert_statements);
+        combined
+    };
+
+    write_bytes(output, statements.join("\n").as_bytes())?;
+    Ok(sql_metadata(data.omitted_columns))
+}
+
 fn reject_selected_opaque_aggregate_states(context: &ExtractContext<'_>) -> Result<(), DataGridExtractError> {
     if context.selected_column_info.iter().flatten().any(|info| is_opaque_aggregate_state_type(&info.data_type)) {
         return Err(DataGridExtractError::new(
@@ -245,6 +410,7 @@ fn ensure_sql_builder_budget(context: &ExtractContext<'_>) -> Result<(), DataGri
     // the same predicate builder) repeats every selected column's identifier
     // once per row via OR'd row groups, just like SqlUpdates/row-by-row insert.
     let repeats_identifiers_per_row = context.request.extractor == super::DataGridExtractorId::SqlUpdates
+        || context.request.extractor == super::DataGridExtractorId::SqlDeletesInserts
         || context.request.options.sql.insert_mode == crate::data_grid_sql::DataGridCopyInsertMode::RowByRow
         || context.request.extractor == super::DataGridExtractorId::WhereClause
         || (context.request.extractor == super::DataGridExtractorId::SqlSelect

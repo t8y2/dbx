@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, ChevronDown, Copy, FileCode2 } from "@lucide/vue";
+import { ChevronDown, Copy, FileCode2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { useTabScroll } from "@/composables/useTabScroll";
-import type { tabularResultItems } from "@/lib/tabs/tabPresentation";
+import ResultSetNavigatorPopoverContent from "@/components/layout/ResultSetNavigatorPopoverContent.vue";
+import { filterResultItems, type ResultItem } from "@/components/layout/resultSetNavigator";
 
-type ResultItem = ReturnType<typeof tabularResultItems>[number];
 const props = withDefaults(
   defineProps<{
     items: ResultItem[];
@@ -18,6 +18,7 @@ const props = withDefaults(
     canExportXlsx?: boolean;
     displayMode?: "tabs" | "list";
     hasSiblingRunTabs?: boolean;
+    connectionColor?: string;
   }>(),
   {
     displayMode: "tabs",
@@ -32,29 +33,16 @@ const emit = defineEmits<{
 }>();
 const { t } = useI18n();
 const scroller = ref<HTMLElement | null>(null);
-const list = ref<HTMLElement | null>(null);
-const searchInput = ref<HTMLInputElement | null>(null);
 const batchSearchInput = ref<HTMLInputElement | null>(null);
 const open = ref(false);
-const search = ref("");
 const batchOpen = ref(false);
 const batchSearch = ref("");
 const selectedIndexes = ref<Set<number>>(new Set());
 const { hasTabOverflow, scrollThumbLeftPercent, scrollThumbWidthPercent, isScrollbarDragging, updateScrollButtons, onTabsWheel, startScrollbarDrag } = useTabScroll(scroller);
 const thumbStyle = computed(() => ({ left: `${scrollThumbLeftPercent.value}%`, width: `${scrollThumbWidthPercent.value}%` }));
-function filterResultItems(items: ResultItem[], rawQuery: string) {
-  const query = rawQuery.trim().toLocaleLowerCase();
-  if (!query) return items;
-  // A number is an exact result ordinal, not a substring of every SQL statement.
-  if (/^\d+$/.test(query)) return items.filter((item) => item.n === Number(query));
-  return items.filter((item) => [item.label, item.title, item.result.sourceName, item.result.sourceLabel, item.result.sourceStatement, t("tabs.resultN", { n: item.n })].some((value) => value?.toLocaleLowerCase().includes(query)));
-}
 
-const filteredItems = computed(() => {
-  return filterResultItems(props.items, search.value);
-});
 const filteredBatchItems = computed(() => {
-  return filterResultItems(props.items, batchSearch.value);
+  return filterResultItems(props.items, batchSearch.value, t);
 });
 const selectedBatchItems = computed(() => props.items.filter((item) => selectedIndexes.value.has(item.index)));
 // The active result may be a server message that tabularResultItems filters out;
@@ -80,9 +68,6 @@ watch(
   () => nextTick(revealActive),
   { flush: "post", immediate: true },
 );
-watch(open, () => {
-  search.value = "";
-});
 
 function select(item: ResultItem) {
   emit("select", item);
@@ -131,33 +116,6 @@ watch(
   },
   { immediate: true },
 );
-
-function focusListItem(index: number) {
-  const buttons = list.value?.querySelectorAll<HTMLButtonElement>("button");
-  if (!buttons?.length) return;
-  buttons[Math.max(0, Math.min(index, buttons.length - 1))]?.focus();
-}
-
-function onSearchKeydown(event: KeyboardEvent) {
-  if (event.isComposing) return;
-  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-    event.preventDefault();
-    focusListItem(event.key === "ArrowDown" ? 0 : filteredItems.value.length - 1);
-  } else if (event.key === "Enter" && filteredItems.value[0]) {
-    event.preventDefault();
-    select(filteredItems.value[0]);
-  }
-}
-
-function onListKeydown(event: KeyboardEvent, index: number) {
-  if (event.key === "ArrowUp" && index === 0) {
-    event.preventDefault();
-    searchInput.value?.focus();
-  } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
-    event.preventDefault();
-    focusListItem(event.key === "Home" ? 0 : event.key === "End" ? filteredItems.value.length - 1 : index + (event.key === "ArrowDown" ? 1 : -1));
-  }
-}
 </script>
 
 <template>
@@ -175,41 +133,12 @@ function onListKeydown(event: KeyboardEvent, index: number) {
               :title="activeItem?.label || activeItem?.title || (activeItem ? t('tabs.resultN', { n: activeItem.n }) : t('tabs.resultSets'))"
               :aria-label="activeItem?.displayLabel || activeItem?.label || (activeItem ? t('tabs.resultN', { n: activeItem.n }) : t('tabs.resultSets'))"
             >
+              <span v-if="connectionColor" data-result-connection-color class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: connectionColor }" aria-hidden="true" />
               <span class="truncate">{{ activeItem?.displayLabel || activeItem?.label || (activeItem ? t("tabs.resultN", { n: activeItem.n }) : t("tabs.resultSets")) }}</span>
               <ChevronDown class="h-3.5 w-3.5 shrink-0 opacity-70" />
             </Button>
           </PopoverTrigger>
-          <PopoverContent align="start" class="w-96 max-h-[var(--reka-popover-content-available-height)] max-w-[calc(100vw-2rem)] gap-1 p-1" @open-auto-focus.prevent="searchInput?.focus()">
-            <input
-              ref="searchInput"
-              v-model="search"
-              type="search"
-              class="m-1 shrink-0 rounded-md border bg-background px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              :placeholder="t('tabs.searchResults')"
-              :aria-label="t('tabs.searchResults')"
-              @keydown="onSearchKeydown"
-            />
-            <div ref="list" class="min-h-0 max-h-72 overflow-y-auto overscroll-contain" :aria-label="t('tabs.resultSets')">
-              <button
-                v-for="(item, index) in filteredItems"
-                :key="item.index"
-                type="button"
-                class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent focus-visible:bg-accent focus-visible:outline-none"
-                :aria-pressed="active && activeIndex === item.index"
-                @click="select(item)"
-                @keydown="onListKeydown($event, index)"
-              >
-                <Check class="h-3.5 w-3.5 shrink-0" :class="{ invisible: !active || activeIndex !== item.index }" />
-                <span class="min-w-0 flex-1">
-                  <span class="block truncate font-medium"
-                    >{{ t("tabs.resultN", { n: item.n }) }}<template v-if="item.label"> · {{ item.label }}</template></span
-                  >
-                  <span v-if="item.title" class="block truncate text-muted-foreground">{{ item.title }}</span>
-                </span>
-              </button>
-              <p v-if="!filteredItems.length" role="status" class="p-4 text-center text-xs text-muted-foreground">{{ t("tabs.noMatchingResults") }}</p>
-            </div>
-          </PopoverContent>
+          <ResultSetNavigatorPopoverContent align="start" :items="items" :active-index="activeIndex" :active="active" @select="select" />
         </Popover>
         <Button
           v-else
@@ -221,6 +150,7 @@ function onListKeydown(event: KeyboardEvent, index: number) {
           :title="activeItem?.label || activeItem?.title || (activeItem ? t('tabs.resultN', { n: activeItem.n }) : t('tabs.resultSets'))"
           :aria-label="activeItem?.displayLabel || activeItem?.label || (activeItem ? t('tabs.resultN', { n: activeItem.n }) : t('tabs.resultSets'))"
         >
+          <span v-if="connectionColor" data-result-connection-color class="mr-1 h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: connectionColor }" aria-hidden="true" />
           <span class="truncate">{{ activeItem?.displayLabel || activeItem?.label || (activeItem ? t("tabs.resultN", { n: activeItem.n }) : t("tabs.resultSets")) }}</span>
         </Button>
       </div>
@@ -230,6 +160,7 @@ function onListKeydown(event: KeyboardEvent, index: number) {
         <div ref="scroller" class="result-set-scroll flex h-full items-center gap-1 overflow-x-auto overflow-y-hidden px-1" @scroll="updateScrollButtons" @wheel="onTabsWheel">
           <LightTooltip v-for="item in items" :key="item.index" :text="item.label || item.title || t('tabs.resultN', { n: item.n })" :delay="150" :close-delay="0" nowrap>
             <Button size="sm" :variant="active && activeIndex === item.index ? 'default' : 'ghost'" class="h-6 max-w-48 shrink-0 px-2 text-xs" :data-active="active && activeIndex === item.index ? 'true' : undefined" :aria-pressed="active && activeIndex === item.index" @click="select(item)">
+              <span v-if="connectionColor" data-result-connection-color class="mr-1 h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: connectionColor }" aria-hidden="true" />
               <span class="truncate">{{ item.displayLabel || item.label || t("tabs.resultN", { n: item.n }) }}</span>
             </Button>
           </LightTooltip>
@@ -245,37 +176,7 @@ function onListKeydown(event: KeyboardEvent, index: number) {
             <ChevronDown class="h-3.5 w-3.5" />
           </Button>
         </PopoverTrigger>
-        <PopoverContent align="end" class="w-96 max-h-[var(--reka-popover-content-available-height)] max-w-[calc(100vw-2rem)] gap-1 p-1" @open-auto-focus.prevent="searchInput?.focus()">
-          <input
-            ref="searchInput"
-            v-model="search"
-            type="search"
-            class="m-1 shrink-0 rounded-md border bg-background px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            :placeholder="t('tabs.searchResults')"
-            :aria-label="t('tabs.searchResults')"
-            @keydown="onSearchKeydown"
-          />
-          <div ref="list" class="min-h-0 max-h-72 overflow-y-auto overscroll-contain" :aria-label="t('tabs.resultSets')">
-            <button
-              v-for="(item, index) in filteredItems"
-              :key="item.index"
-              type="button"
-              class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent focus-visible:bg-accent focus-visible:outline-none"
-              :aria-pressed="active && activeIndex === item.index"
-              @click="select(item)"
-              @keydown="onListKeydown($event, index)"
-            >
-              <Check class="h-3.5 w-3.5 shrink-0" :class="{ invisible: !active || activeIndex !== item.index }" />
-              <span class="min-w-0 flex-1">
-                <span class="block truncate font-medium"
-                  >{{ t("tabs.resultN", { n: item.n }) }}<template v-if="item.label"> · {{ item.label }}</template></span
-                >
-                <span v-if="item.title" class="block truncate text-muted-foreground">{{ item.title }}</span>
-              </span>
-            </button>
-            <p v-if="!filteredItems.length" role="status" class="p-4 text-center text-xs text-muted-foreground">{{ t("tabs.noMatchingResults") }}</p>
-          </div>
-        </PopoverContent>
+        <ResultSetNavigatorPopoverContent align="end" :items="items" :active-index="activeIndex" :active="active" @select="select" />
       </Popover>
     </template>
     <Popover v-if="items.length > 1" v-model:open="batchOpen">

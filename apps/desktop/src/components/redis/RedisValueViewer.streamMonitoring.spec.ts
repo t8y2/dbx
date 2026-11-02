@@ -231,7 +231,7 @@ describe("RedisValueViewer stream monitoring", () => {
     const host = mountViewer();
     await settle();
 
-    expect(mocks.redisGetValue).toHaveBeenCalledWith("redis-1", 2, "b3JkZXJz");
+    expect(mocks.redisGetValue).toHaveBeenCalledWith("redis-1", 2, "b3JkZXJz", 65536);
     expect(mocks.redisGetStreamGroups).not.toHaveBeenCalled();
 
     openGroups(host);

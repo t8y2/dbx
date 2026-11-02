@@ -39,6 +39,7 @@ export interface UseDataGridDistinctValueLoaderOptions {
   waitForTableMeta: () => Promise<DataGridDistinctValueTableMeta | null>;
   formatValue: (value: CellValue, columnIndex: number) => string;
   keyForValue?: (value: CellValue, columnInfo?: ColumnInfo) => string;
+  getWhereInput?: (columnIndex: number) => string | undefined;
 }
 
 type CachedDistinctValues = {
@@ -130,6 +131,7 @@ export function useDataGridDistinctValueLoader(options: UseDataGridDistinctValue
       tableMeta.tableName,
       request.columnName,
       request.searchValue?.trim() ?? "",
+      options.getWhereInput?.(request.columnIndex) ?? "",
       displayLimit,
       request.includeCounts !== false,
     ]);
@@ -158,6 +160,7 @@ export function useDataGridDistinctValueLoader(options: UseDataGridDistinctValue
 
       const columnInfo = tableMeta.columns.find((column) => column.name === request.columnName);
       const connection = options.getConnectionConfig();
+      const whereInput = options.getWhereInput?.(request.columnIndex);
       const sql = await buildDataGridColumnDistinctValuesSql({
         databaseType: options.getDatabaseType(),
         driverProfile: connection?.driver_profile,
@@ -168,6 +171,7 @@ export function useDataGridDistinctValueLoader(options: UseDataGridDistinctValue
         tableName: tableMeta.tableName,
         columnName: request.columnName,
         columnInfo,
+        ...(whereInput ? { whereInput } : {}),
         searchValue: request.searchValue?.trim() || undefined,
         limit: displayLimit,
         includeCounts: request.includeCounts !== false,

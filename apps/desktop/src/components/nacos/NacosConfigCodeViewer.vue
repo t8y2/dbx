@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { EditorState } from "@codemirror/state";
-import { EditorView, lineNumbers } from "@codemirror/view";
+import { EditorView, lineNumbers as lineNumbersExtension } from "@codemirror/view";
 import { basicSetup } from "codemirror";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
@@ -47,7 +47,7 @@ async function mount() {
       language,
       theme,
       editorFontTheme(EditorView, settingsStore.editorSettings.fontSize, settingsStore.editorSettings.fontFamily, { fixedHeight: true, scrollable: true }),
-      ...(props.lineNumbers ? [lineNumbers()] : []),
+      ...(props.lineNumbers ? [lineNumbersExtension()] : []),
       EditorState.readOnly.of(true),
       EditorView.editable.of(false),
       EditorView.theme({

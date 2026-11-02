@@ -54,8 +54,19 @@ vi.mock("@/stores/settingsStore", () => ({
   }),
 }));
 
-function column(name: string, comment: string | null, isPrimaryKey = false) {
-  return { name, data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: isPrimaryKey, extra: null, comment };
+function column(name: string, comment: string | null, isPrimaryKey = false, characterMaximumLength: number | null = 64) {
+  return {
+    name,
+    data_type: "varchar",
+    is_nullable: true,
+    column_default: null,
+    is_primary_key: isPrimaryKey,
+    extra: null,
+    comment,
+    character_maximum_length: characterMaximumLength,
+    numeric_precision: null,
+    numeric_scale: null,
+  };
 }
 
 const ordersColumns = [column("id", "订单ID", true), column("user_id", "下单用户"), column("amount", "订单金额")];
@@ -141,6 +152,8 @@ describe("queryStore multi-source result column comments", () => {
     // Comments are indexed by result ordinal, so the second `id` (users.id)
     // keeps its own comment instead of first-source-wins on the name.
     expect(tab.resultColumnComments).toEqual(["订单ID", "下单用户", "用户ID", "用户名"]);
+    // Declared lengths come from source ColumnInfo, not bare ResultSet types.
+    expect(tab.resultColumnTypeLabels).toEqual(["varchar(64)", "varchar(64)", "varchar(64)", "varchar(64)"]);
 
     // The display mapping carries both source identity and physical table
     // identity per ordinal, so display-only features can share table settings.

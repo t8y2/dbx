@@ -58,7 +58,7 @@ function mountBar(groupId: string, tabIds: string[], activeTabId: string, pinia:
         en: {
           common: { cancel: "Cancel", save: "Save", close: "Close", clear: "Clear" },
           connectionGroup: { ungroupedLabel: "Ungrouped" },
-          contextMenu: { setTabSuffix: "Set suffix", renameTab: "Rename", duplicateTab: "Duplicate", copyName: "Copy name", closeTab: "Close" },
+          contextMenu: { setTabSuffix: "Set suffix", renameTab: "Rename", duplicateTab: "Duplicate", copyName: "Copy name", closeTab: "Close", saveAllTabs: "Save all tabs" },
           sidebar: { locateActiveTab: "Locate" },
           tabs: {
             suffixDialogTitle: "Set tab suffix",

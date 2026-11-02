@@ -46,7 +46,7 @@ import {
   sqlServerUseCompletionDatabaseNames,
   sqlServerUseDatabaseBeforeCursor,
 } from "@/lib/sql/sqlCompletionLookupTarget";
-import { appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
+import { appendSqlCompletionSpace, additionalSnippetApplyTargets } from "@/lib/editor/sqlCompletionInsertion";
 import { completionReplacementTo, shouldResolveSqlColumnCompletion } from "@/lib/editor/batchColumnSelection";
 import { completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentation";
 import { supportsDatabaseNameCompletion } from "@/lib/database/databaseFeatureSupport";
@@ -474,7 +474,13 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
             replaceSelectWildcard: "replaceSelectWildcard" in item ? item.replaceSelectWildcard : undefined,
           });
           if (typeof originalApply === "function") {
-            originalApply(view, completionItem as never, from, replaceTo);
+            // Expand the snippet on every cursor that still carries the typed
+            // trigger prefix. Process targets from the end of the document
+            // backwards so each dispatch leaves the earlier ranges untouched.
+            const targets = [{ from, to: replaceTo }, ...additionalSnippetApplyTargets(view.state, from, to)].sort((left, right) => right.from - left.from);
+            for (const target of targets) {
+              originalApply(view, completionItem as never, target.from, target.to);
+            }
           } else {
             const insert = String(originalApply ?? item.label);
             view.dispatch({

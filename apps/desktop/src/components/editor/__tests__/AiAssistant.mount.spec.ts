@@ -922,6 +922,95 @@ describe("AiAssistant mount", () => {
 
   const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 
+  it("offers continuation outside a truncated code block and preserves the unsent draft", async () => {
+    aiAssistantMountApi.conversations = [storedConversation({ assistantMode: "ask", assistantAction: "general" })];
+    const partial = "```sql\nSELECT * FROM orders WHERE";
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      onEvent({ type: "text_delta", delta: partial });
+      onEvent({ type: "output_truncated" });
+      onEvent({ type: "agent_end" });
+      return partial;
+    };
+    const { container, errors, panelRef } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    const prompt = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    prompt.value = "Generate a query";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(container.querySelector<HTMLButtonElement>("[data-ai-continue-generation]")?.disabled).toBe(false));
+    const notice = container.querySelector("[data-ai-output-truncated]")!;
+    expect(notice.textContent).toContain(i18n.global.t("ai.outputTruncated"));
+    expect(notice.closest(".ai-code-block")).toBeNull();
+    expect(container.querySelector(".ai-code-block")?.textContent).not.toContain(i18n.global.t("ai.outputTruncated"));
+    const stored = aiAssistantMountApi.savedConversations.at(-1) as { messages: Array<{ content: string; kind?: string }> };
+    expect(stored.messages.at(-1)).toMatchObject({ content: partial, kind: "outputTruncated" });
+
+    // Stage an unrelated draft and selection; the continuation must send neither.
+    panelRef.value!.openExternalContext({
+      target: { connectionId: "conn-a", database: "db_a" },
+      selections: [{ source: "editor", label: "unsent.sql", content: "SELECT secret FROM unsent" }],
+      unresolvedKey: "ai.externalTargetUnavailable",
+    });
+    await settle();
+    prompt.value = "Keep this draft";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      await pending;
+      onEvent({ type: "text_delta", delta: " id = 1;" });
+      onEvent({ type: "agent_end" });
+      return " id = 1;";
+    };
+    const button = container.querySelector<HTMLButtonElement>("[data-ai-continue-generation]")!;
+    button.click();
+    button.click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(2));
+    const input = aiAssistantMountApi.runAgentStreamInputs[1] as AiRequestInput;
+    expect(input.instruction).toBe(i18n.global.t("ai.continueGenerationPrompt"));
+    expect(input.mode).toBe("ask");
+    expect(input.allowWriteSql).toBe(false);
+    expect(input.context.connectionId).toBe("conn-a");
+    expect(input.context.database).toBe("db_a");
+    expect(input.context.selections).toBeUndefined();
+    expect(aiAssistantMountApi.runAgentStreamHistories[1]).toContainEqual({ role: "assistant", content: partial });
+    expect(JSON.stringify(aiAssistantMountApi.runAgentStreamHistories[1])).not.toContain(i18n.global.t("ai.outputTruncated"));
+    expect(prompt.value).toBe("Keep this draft");
+    expect(container.querySelector("[data-ai-selection-chips]")?.textContent).toContain("unsent.sql");
+    finish();
+    await vi.waitFor(() => expect(container.querySelector("[data-ai-continue-generation]")).toBeNull());
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("restores the continuation button from a saved truncated reply, including an empty answer", async () => {
+    aiAssistantMountApi.conversations = [
+      storedConversation({
+        assistantMode: "ask",
+        assistantAction: "general",
+        messages: [
+          { role: "user", content: "previous question" },
+          { role: "assistant", content: "", kind: "outputTruncated" },
+        ],
+      }),
+    ];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    await vi.waitFor(() => expect(container.querySelector("[data-ai-continue-generation]")).not.toBeNull());
+    expect(container.querySelector("[data-ai-output-truncated]")?.textContent).toContain(i18n.global.t("ai.outputTruncated"));
+    container.querySelector<HTMLButtonElement>("[data-ai-continue-generation]")!.click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(1));
+    expect(aiAssistantMountApi.runAgentStreamHistories[0]).toEqual([{ role: "user", content: "previous question" }]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
   // #12075 review: a draft can never be reopened, so its picker selection must not
   // travel into a conversation opened from the list. The leak only surfaced one
   // step later — reopening that conversation showed the abandoned draft's pick

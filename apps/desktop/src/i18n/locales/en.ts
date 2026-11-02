@@ -5041,6 +5041,8 @@ export default {
     skillsGroupDefault: "Default directory",
     skillsGroupCustom: "Custom directory",
     outputTruncated: "Output reached the model limit and is incomplete. Continue to generate the rest.",
+    continueGeneration: "Continue generating",
+    continueGenerationPrompt: "Continue the previous truncated answer from where it stopped. Do not repeat earlier content or execute SQL.",
     skillsDuplicateName: "Duplicate name",
     skillsDuplicateNameNote: "Another skill in this directory has the same name, so the AI cannot tell them apart. Change the name field in one of their SKILL.md files.",
     skillsReasonNotFound: "The skill folder or SKILL.md no longer exists",

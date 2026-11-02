@@ -3796,6 +3796,8 @@ export default withEnglishFallback({
     contextWindowHint: "Token. Biarkan kosong untuk deteksi otomatis. Atur manual untuk model lokal/kustom.",
     maxOutputTokens: "Token Output Maksimum",
     maxOutputTokensAuto: "Otomatis (per tindakan)",
+    continueGeneration: "Lanjutkan pembuatan",
+    continueGenerationPrompt: "Lanjutkan jawaban sebelumnya yang terpotong dari bagian terakhir. Jangan mengulang konten sebelumnya atau menjalankan SQL.",
     maxOutputTokensHint: "Batas opsional per konfigurasi yang dikirim ke provider. Rentang: {min}–{max}. Permintaan Thinking tetap menggunakan setidaknya 8192 token.",
     maxRetriesGlobal: "Percobaan Ulang Maksimum",
     maxRetriesGlobalDescription: "Jumlah percobaan ulang otomatis pada galat API sementara (batas laju, timeout, gangguan jaringan). Berlaku untuk semua provider AI berbasis API. Provider CLI tidak terpengaruh.",

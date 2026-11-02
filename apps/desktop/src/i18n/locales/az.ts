@@ -3661,6 +3661,8 @@ export default withEnglishFallback({
     skillsGroupDefault: "Standart kataloq",
     skillsGroupCustom: "Xüsusi kataloq",
     outputTruncated: "Çıxış model limitinə çatdı və natamamdır. Davam edərək qalanını yaradın.",
+    continueGeneration: "Yaratmağa davam et",
+    continueGenerationPrompt: "Əvvəlki yarımçıq cavabı dayandığı yerdən davam etdir. Əvvəlki məzmunu təkrarlama və SQL icra etmə.",
     skillsDuplicateName: "Təkrarlanan ad",
     skillsDuplicateNameNote: "Bu kataloqdakı başqa bir skill eyni addan istifadə edir, ona görə AI onları ayıra bilmir. Onlardan birinin SKILL.md faylındakı name sahəsini dəyişdirin.",
     skillsReasonNotFound: "Skill qovluğu və ya SKILL.md artık mövcud deyil",

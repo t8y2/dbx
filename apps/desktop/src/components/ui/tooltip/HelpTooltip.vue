@@ -32,7 +32,7 @@ withDefaults(
     </button>
     <template #content>
       <div class="px-3 py-1.5 text-xs leading-relaxed" :class="contentClass">
-        <slot />
+        <slot>{{ label }}</slot>
       </div>
     </template>
   </LightTooltip>

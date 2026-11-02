@@ -1,7 +1,5 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
@@ -13,10 +11,6 @@ import { Tabs } from "@/components/ui/tabs";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useCellDetailEditor } from "@/composables/useCellDetailEditor";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
-
-const dataGridSource = readFileSync(resolve(import.meta.dirname, "../DataGrid.vue"), "utf8");
-const useDataGridCellDetailSource = readFileSync(resolve(import.meta.dirname, "../../../composables/useDataGridCellDetail.ts"), "utf8");
-const cellDetailDialogSource = readFileSync(resolve(import.meta.dirname, "../DataGridCellDetailDialog.vue"), "utf8");
 
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
@@ -86,14 +80,6 @@ afterEach(() => {
 });
 
 describe("DataGrid cell editor and value editor word wrap (#10506)", () => {
-  it("binds lineWrapping in useDataGridCellDetail, DataGrid valueDetailEditor, and cell detail dialog", () => {
-    // #10506: useDataGridCellDetail, DataGrid.vue (valueDetailEditor), and DataGridCellDetailDialog
-    // must connect CodeMirror lineWrapping to settingsStore.editorSettings.wordWrap
-    expect(useDataGridCellDetailSource).toMatch(/lineWrapping:\s*\(\)\s*=>\s*settingsStore\.editorSettings\.wordWrap/);
-    expect(dataGridSource).toMatch(/lineWrapping:\s*\(\)\s*=>\s*settingsStore\.editorSettings\.wordWrap/);
-    expect(cellDetailDialogSource).toMatch(/lineWrapping:\s*\(\)\s*=>\s*settingsStore\.editorSettings\.wordWrap/);
-  });
-
   it("dynamically toggles CodeMirror cm-lineWrapping in useCellDetailEditor based on wordWrap setting", async () => {
     const settingsStore = useSettingsStore();
     settingsStore.editorSettings.wordWrap = false;
@@ -123,6 +109,69 @@ describe("DataGrid cell editor and value editor word wrap (#10506)", () => {
     settingsStore.editorSettings.wordWrap = false;
     await nextTick();
     expect(cmContent?.classList.contains("cm-lineWrapping")).toBe(false);
+
+    editor.destroy();
+    host.remove();
+  });
+
+  it("auto-wraps a super long single-line value even when wordWrap is off (#12320)", async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.wordWrap = false;
+
+    const host = document.createElement("div");
+    document.body.append(host);
+
+    const editor = useCellDetailEditor({
+      editorTheme: () => "default",
+      appAppearance: () => "light",
+      appPalette: () => ({}) as any,
+      fontSize: () => 13,
+      fontFamily: () => "monospace",
+    });
+
+    await editor.create(host, "z".repeat(400));
+    const cmContent = host.querySelector(".cm-content");
+    expect(cmContent).not.toBeNull();
+    expect(cmContent?.classList.contains("cm-lineWrapping")).toBe(true);
+
+    // Shortening the value below the threshold releases the automatic fold.
+    editor.setValue("z".repeat(40));
+    await nextTick();
+    expect(cmContent?.classList.contains("cm-lineWrapping")).toBe(false);
+
+    // Growing it back into a super long single line folds it again.
+    editor.setValue("z".repeat(400));
+    await nextTick();
+    expect(cmContent?.classList.contains("cm-lineWrapping")).toBe(true);
+
+    editor.destroy();
+    host.remove();
+  });
+
+  it("keeps multi-line documents under the user's wrap choice even when long", async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.wordWrap = false;
+
+    const host = document.createElement("div");
+    document.body.append(host);
+
+    const editor = useCellDetailEditor({
+      editorTheme: () => "default",
+      appAppearance: () => "light",
+      appPalette: () => ({}) as any,
+      fontSize: () => 13,
+      fontFamily: () => "monospace",
+    });
+
+    await editor.create(host, `{"payload":"${"v".repeat(300)}"}\ntrailing`);
+    const cmContent = host.querySelector(".cm-content");
+    expect(cmContent).not.toBeNull();
+    expect(cmContent?.classList.contains("cm-lineWrapping")).toBe(false);
+
+    // Explicit toggle still wins for multi-line content.
+    settingsStore.editorSettings.wordWrap = true;
+    await nextTick();
+    expect(cmContent?.classList.contains("cm-lineWrapping")).toBe(true);
 
     editor.destroy();
     host.remove();

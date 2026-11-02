@@ -1,6 +1,9 @@
 schemaVersion: 1
 order: 260
 dbType: dameng
+compareModes: [schema, data]
+transferSupportLevel: family-compatible
+transferObjectFamily: oracle
 rustVariant: Dameng
 label: 达梦 DM8
 dialect: Dameng

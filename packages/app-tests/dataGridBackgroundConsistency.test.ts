@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
-import { resolveDataGridPaintTheme } from "../../apps/desktop/src/lib/dataGrid/dataGridPaintTheme.ts";
+import { DATA_GRID_DARK_NEW_ROW_BG, DATA_GRID_LIGHT_NEW_ROW_BG, resolveDataGridPaintTheme } from "../../apps/desktop/src/lib/dataGrid/dataGridPaintTheme.ts";
+
+function escapeColor(color: string): string {
+  return color.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 test("DataGrid DOM surfaces use one opaque theme background", () => {
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
@@ -20,6 +24,17 @@ test("DataGrid DOM surfaces use one opaque theme background", () => {
   assert.match(source, /item\.displayIndex % 2 === 1[\s\S]*?:\s*"var\(--data-grid-background\)";/);
 
   assert.doesNotMatch(source, /(?:canvas-grid-scroller|data-grid-scroller)[^}]*background-color:\s*var\(--background\)/s);
+});
+
+test("DataGrid DOM paints pending new rows with the same colour source as the canvas", () => {
+  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+
+  // DOM 行底色与 Canvas 的 theme.rowNew 必须来自同一个常量/变量，避免只改一侧而悄悄漂移
+  for (const color of [DATA_GRID_LIGHT_NEW_ROW_BG, DATA_GRID_DARK_NEW_ROW_BG]) {
+    assert.match(source, new RegExp(`--data-grid-row-new-bg:\\s*${escapeColor(color)};`));
+  }
+  // 现代浏览器走 color-mix 变体：与行号列的新行标记同族（emerald）但更淡
+  assert.match(source, /--data-grid-row-new-bg:\s*color-mix\(in oklab,\s*rgb\(16 185 129\) 10%,\s*var\(--background\)\);/);
 });
 
 test("DataGrid canvas background stays opaque when the wallpaper background has alpha", () => {

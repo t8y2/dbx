@@ -57,6 +57,7 @@ pub fn build_database_structure_search_sql(
         | DatabaseType::Kingbase
         | DatabaseType::Highgo
         | DatabaseType::Uxdb
+        | DatabaseType::Gbase8c
         | DatabaseType::Vastbase
         | DatabaseType::OpenGauss
         | DatabaseType::Gaussdb
@@ -76,11 +77,14 @@ pub fn build_database_structure_search_sql(
             oracle_family_structure_search_sql(options.schema.as_deref(), &options.database, &pattern_literal, limit)
         }
         DatabaseType::SqlServer => sqlserver_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        DatabaseType::Tdengine => tdengine_structure_search_sql(&options.database, &pattern_literal, limit),
+        // TDengine 没有 ESCAPE 语法，无法复用上面的转义模式，单独构造 "%term%"。
+        DatabaseType::Tdengine => {
+            tdengine_structure_search_sql(&options.database, &tdengine_like_pattern_literal(&term), limit)
+        }
         DatabaseType::Snowflake => snowflake_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        // gbase8s is Informix-compatible (see the table_structure_sql dialects)
-        // and has no information_schema; only MySQL-dialect Gbase 8a takes this path.
-        DatabaseType::Gbase if !driver_profile_is_gbase8s(options.driver_profile.as_deref()) => {
+        // GBase 8s is its own `Gbase8s` type (Informix-compatible, no information_schema)
+        // and falls through to the data search; only MySQL-dialect Gbase 8a takes this path.
+        DatabaseType::Gbase => {
             gbase_structure_search_sql(&options.database, options.schema.as_deref(), &pattern_literal, limit)
         }
         DatabaseType::Jdbc if driver_profile_is_mysql(options.driver_profile.as_deref()) => {
@@ -113,10 +117,6 @@ fn driver_profile_is_postgres(profile: Option<&str>) -> bool {
     profile.contains("postgres") || profile.contains("kingbase") || profile.contains("opengauss")
 }
 
-fn driver_profile_is_gbase8s(profile: Option<&str>) -> bool {
-    profile.map(str::trim).is_some_and(|profile| profile.to_ascii_lowercase().contains("gbase8s"))
-}
-
 fn driver_profile_is_oracle(profile: Option<&str>) -> bool {
     let profile = profile.map(str::trim).unwrap_or("").to_ascii_lowercase();
     profile.contains("oracle") || profile.contains("dameng") || profile.contains("dm")
@@ -134,16 +134,41 @@ fn mysql_family_structure_search_sql(
         format!(" AND TABLE_SCHEMA = {}", sql_string_literal(database))
     };
     let comment_match = format!(" OR LOWER(COLUMN_COMMENT) LIKE LOWER({}) ESCAPE '~'", pattern_literal);
+    let system_schemas = "TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')";
+    // 表注释分支单独限额，避免字段命中占满共享 LIMIT 后把表注释命中挤掉。
+    let table_limit = table_comment_search_limit(limit);
+    // 结构搜索同时覆盖「字段名/字段注释」与「表自身注释」两类命中：
+    // 字段命中来自 information_schema.COLUMNS，表注释命中单独走 information_schema.TABLES，
+    // 两个分支各自用子查询限额后再用 UNION ALL 合并统一排序，表级命中行的 column_name 为 NULL。
     format!(
-        "SELECT TABLE_SCHEMA AS object_schema, TABLE_NAME AS object_name, COLUMN_NAME AS column_name, \
-         COLUMN_COMMENT AS column_comment \
+        "SELECT * FROM ( \
+         SELECT TABLE_SCHEMA AS object_schema, TABLE_NAME AS object_name, COLUMN_NAME AS column_name, \
+         COLUMN_COMMENT AS column_comment, NULL AS table_comment \
          FROM information_schema.COLUMNS \
          WHERE (LOWER(COLUMN_NAME) LIKE LOWER({}) ESCAPE '~'{}) \
          {schema_filter} \
-         AND TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys') \
-         ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION \
-         LIMIT {limit}",
-        pattern_literal, comment_match,
+         AND {system_schemas} \
+         ORDER BY object_schema, object_name, column_name \
+         LIMIT {limit} ) AS field_hits \
+         UNION ALL \
+         SELECT * FROM ( \
+         SELECT TABLE_SCHEMA AS object_schema, TABLE_NAME AS object_name, NULL AS column_name, \
+         NULL AS column_comment, TABLE_COMMENT AS table_comment \
+         FROM information_schema.TABLES \
+         WHERE TABLE_TYPE = 'BASE TABLE' \
+         AND LOWER(COALESCE(TABLE_COMMENT, '')) LIKE LOWER({}) ESCAPE '~' \
+         {schema_filter} \
+         AND {system_schemas} \
+         ORDER BY object_schema, object_name \
+         LIMIT {table_limit} ) AS table_hits \
+         ORDER BY object_schema, object_name, column_name \
+         LIMIT {total_limit}",
+        pattern_literal,
+        comment_match,
+        pattern_literal,
+        limit = limit,
+        table_limit = table_limit,
+        total_limit = limit + table_limit,
     )
 }
 
@@ -153,9 +178,12 @@ fn postgres_family_structure_search_sql(schema: Option<&str>, pattern_literal: &
     } else {
         " AND n.nspname NOT IN ('pg_catalog', 'information_schema')".to_string()
     };
+    // 表注释分支单独限额，避免字段命中占满共享 LIMIT 后把表注释命中挤掉。
+    let table_limit = table_comment_search_limit(limit);
     format!(
-        "SELECT n.nspname AS object_schema, c.relname AS object_name, a.attname AS column_name, \
-         d.description AS column_comment \
+        "SELECT * FROM ( \
+         SELECT n.nspname AS object_schema, c.relname AS object_name, a.attname AS column_name, \
+         d.description AS column_comment, NULL AS table_comment \
          FROM pg_catalog.pg_attribute a \
          JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -165,11 +193,27 @@ fn postgres_family_structure_search_sql(schema: Option<&str>, pattern_literal: &
          {schema_filter} \
          AND (LOWER(a.attname::text) LIKE LOWER({pattern}) ESCAPE '~' \
               OR LOWER(COALESCE(d.description, '')) LIKE LOWER({pattern}) ESCAPE '~') \
-         ORDER BY n.nspname, c.relname, a.attnum \
-         LIMIT {limit}",
+         ORDER BY object_schema, object_name, column_name \
+         LIMIT {limit} ) AS field_hits \
+         UNION ALL \
+         SELECT * FROM ( \
+         SELECT n.nspname AS object_schema, c.relname AS object_name, NULL AS column_name, \
+         NULL AS column_comment, d.description AS table_comment \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         JOIN pg_catalog.pg_description d ON d.objoid = c.oid AND d.objsubid = 0 \
+         WHERE c.relkind IN ('r', 'v', 'm', 'f', 'p') \
+         {schema_filter} \
+         AND LOWER(COALESCE(d.description, '')) LIKE LOWER({pattern}) ESCAPE '~' \
+         ORDER BY object_schema, object_name \
+         LIMIT {table_limit} ) AS table_hits \
+         ORDER BY object_schema, object_name, column_name \
+         LIMIT {total_limit}",
         schema_filter = schema_filter,
         pattern = pattern_literal,
         limit = limit,
+        table_limit = table_limit,
+        total_limit = limit + table_limit,
     )
 }
 
@@ -188,16 +232,36 @@ fn sqlite_family_structure_search_sql(pattern_literal: &str, limit: usize) -> St
 }
 
 fn clickhouse_structure_search_sql(database: &str, pattern_literal: &str, limit: usize) -> String {
+    // ClickHouse 的 ORDER BY/LIMIT 只作用于最近的 SELECT，因此各分支先各自排序限额外，
+    // 再把 UNION 结果包一层子查询做统一排序与总限量。
+    // 这里用空串代替 NULL，避免 Nullable(Nothing) 参与 UNION 时的类型兼容问题。
+    let table_limit = table_comment_search_limit(limit);
     format!(
-        "SELECT database AS object_schema, table AS object_name, name AS column_name, comment AS column_comment \
+        "SELECT * FROM ( \
+         SELECT * FROM ( \
+         SELECT database AS object_schema, table AS object_name, name AS column_name, \
+         comment AS column_comment, '' AS table_comment \
          FROM system.columns \
          WHERE database = {db} \
          AND (lower(name) LIKE lower({pattern}) OR lower(comment) LIKE lower({pattern})) \
-         ORDER BY database, table, position \
-         LIMIT {limit}",
+         ORDER BY object_schema, object_name, column_name \
+         LIMIT {limit} ) \
+         UNION ALL \
+         SELECT * FROM ( \
+         SELECT database AS object_schema, name AS object_name, '' AS column_name, \
+         '' AS column_comment, comment AS table_comment \
+         FROM system.tables \
+         WHERE database = {db} \
+         AND lower(COALESCE(comment, '')) LIKE lower({pattern}) \
+         ORDER BY object_schema, object_name \
+         LIMIT {table_limit} ) \
+         ) ORDER BY object_schema, object_name, column_name \
+         LIMIT {total_limit}",
         db = sql_string_literal(database),
         pattern = pattern_literal,
         limit = limit,
+        table_limit = table_limit,
+        total_limit = limit + table_limit,
     )
 }
 
@@ -210,20 +274,34 @@ fn oracle_family_structure_search_sql(
     let owner = schema.filter(|value| !value.trim().is_empty()).unwrap_or(database);
     let owner_literal = sql_string_literal(owner);
     let name_expr = "LOWER(c.COLUMN_NAME)";
-    let bounded = format!(
+    // 表注释分支单独限额；Oracle 的 ROWNUM 需在排序后的子查询外层生效，因此各分支先排序再取头 N 条。
+    let table_limit = table_comment_search_limit(limit);
+    format!(
         "SELECT * FROM ( \
+         SELECT * FROM ( \
          SELECT c.OWNER AS object_schema, c.TABLE_NAME AS object_name, c.COLUMN_NAME AS column_name, m.COMMENTS AS column_comment \
+         , CAST(NULL AS VARCHAR2(4000)) AS table_comment \
          FROM ALL_TAB_COLUMNS c \
          LEFT JOIN ALL_COL_COMMENTS m ON c.OWNER = m.OWNER AND c.TABLE_NAME = m.TABLE_NAME AND c.COLUMN_NAME = m.COLUMN_NAME \
          WHERE c.OWNER = {owner} \
          AND ({name_expr} LIKE LOWER({pattern}) ESCAPE '~' OR LOWER(COALESCE(m.COMMENTS, '')) LIKE LOWER({pattern}) ESCAPE '~') \
-         ORDER BY c.TABLE_NAME, c.COLUMN_ID) WHERE ROWNUM <= {limit}",
+         ORDER BY 1, 2, 3) WHERE ROWNUM <= {limit} \
+         UNION ALL \
+         SELECT * FROM ( \
+         SELECT t.OWNER AS object_schema, t.TABLE_NAME AS object_name, CAST(NULL AS VARCHAR2(128)) AS column_name \
+         , CAST(NULL AS VARCHAR2(4000)) AS column_comment, t.COMMENTS AS table_comment \
+         FROM ALL_TAB_COMMENTS t \
+         WHERE t.OWNER = {owner} \
+         AND LOWER(COALESCE(t.COMMENTS, '')) LIKE LOWER({pattern}) ESCAPE '~' \
+         ORDER BY 1, 2) WHERE ROWNUM <= {table_limit} \
+         ORDER BY 1, 2, 3) WHERE ROWNUM <= {total_limit}",
         owner = owner_literal,
         name_expr = name_expr,
         pattern = pattern_literal,
         limit = limit,
-    );
-    bounded
+        table_limit = table_limit,
+        total_limit = limit + table_limit,
+    )
 }
 
 fn sqlserver_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
@@ -232,9 +310,20 @@ fn sqlserver_structure_search_sql(schema: Option<&str>, pattern_literal: &str, l
     } else {
         " AND c.TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA')".to_string()
     };
+    // SQL Server 的 TOP 不能直接作用在 UNION 的单个分支上，因此每个分支先在子查询内取 TOP，
+    // 再由外层对并集统一排序并取总 TOP。
+    let sys_schema_filter = if let Some(schema) = schema.filter(|value| !value.trim().is_empty()) {
+        format!(" AND s.name = {}", sql_string_literal(schema))
+    } else {
+        " AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')".to_string()
+    };
+    let table_limit = table_comment_search_limit(limit);
     format!(
-        "SELECT TOP {limit} c.TABLE_SCHEMA AS object_schema, c.TABLE_NAME AS object_name, c.COLUMN_NAME AS column_name, \
-         CAST(ep.value AS NVARCHAR(4000)) AS column_comment \
+        "SELECT TOP {total_limit} * FROM ( \
+         SELECT * FROM ( \
+         SELECT TOP {limit} * FROM ( \
+         SELECT c.TABLE_SCHEMA AS object_schema, c.TABLE_NAME AS object_name, c.COLUMN_NAME AS column_name, \
+         CAST(ep.value AS NVARCHAR(4000)) AS column_comment, CAST(NULL AS NVARCHAR(4000)) AS table_comment \
          FROM INFORMATION_SCHEMA.COLUMNS c \
          LEFT JOIN sys.tables t ON t.name = c.TABLE_NAME AND SCHEMA_NAME(t.schema_id) = c.TABLE_SCHEMA \
          LEFT JOIN sys.columns sc ON sc.object_id = t.object_id AND sc.name = c.COLUMN_NAME \
@@ -242,24 +331,71 @@ fn sqlserver_structure_search_sql(schema: Option<&str>, pattern_literal: &str, l
          WHERE (LOWER(c.COLUMN_NAME) LIKE LOWER({pattern}) ESCAPE '~' \
                 OR LOWER(COALESCE(CAST(ep.value AS NVARCHAR(4000)), '')) LIKE LOWER({pattern}) ESCAPE '~') \
          {schema_filter} \
-         ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION",
+         ) AS field_rows ORDER BY object_schema, object_name, column_name ) AS field_hits \
+         UNION ALL \
+         SELECT * FROM ( \
+         SELECT TOP {table_limit} * FROM ( \
+         SELECT s.name AS object_schema, o.name AS object_name, CAST(NULL AS NVARCHAR(128)) AS column_name, \
+         CAST(NULL AS NVARCHAR(4000)) AS column_comment, CAST(tep.value AS NVARCHAR(4000)) AS table_comment \
+         FROM sys.objects o \
+         JOIN sys.schemas s ON s.schema_id = o.schema_id \
+         JOIN sys.extended_properties tep ON tep.major_id = o.object_id AND tep.minor_id = 0 AND tep.name = 'MS_Description' \
+         WHERE o.type IN ('U', 'V') \
+         {sys_schema_filter} \
+         AND LOWER(COALESCE(CAST(tep.value AS NVARCHAR(4000)), '')) LIKE LOWER({pattern}) ESCAPE '~' \
+         ) AS table_rows ORDER BY object_schema, object_name ) AS table_hits \
+         ) AS r ORDER BY r.object_schema, r.object_name, r.column_name",
+        total_limit = limit + table_limit,
         limit = limit,
+        table_limit = table_limit,
         pattern = pattern_literal,
         schema_filter = schema_filter,
+        sys_schema_filter = sys_schema_filter,
     )
 }
 
 fn tdengine_structure_search_sql(database: &str, pattern_literal: &str, limit: usize) -> String {
+    // TDengine 的表注释来自 information_schema.ins_tables（普通表/子表）与 ins_stables（超级表）。
+    // 这里要遵守 TDengine 的三条语法约束：
+    // 1. LIMIT 只能出现在完整 query_expression（顶层语句或带括号的子查询）上，裸的 UNION 分支
+    //    不能各自带 LIMIT，因此每个分支都写成 `( SELECT ... LIMIT n )` 子查询；
+    // 2. 语法里没有 ESCAPE 子句，无法转义 %/_，模式直接使用 "%term%"（%/_ 按通配符处理），
+    //    精确匹配由前端在结果集上二次过滤，避免过度裁剪真实命中；
+    // 3. ins_columns 没有 note 列，TDengine 也没有列注释，因此列命中只匹配 col_name。
+    let table_limit = table_comment_search_limit(limit);
+    let db = sql_string_literal(database);
     format!(
-        "SELECT db_name AS object_schema, table_name AS object_name, col_name AS column_name, note AS column_comment \
+        "( SELECT db_name AS object_schema, table_name AS object_name, col_name AS column_name, \
+         '' AS column_comment, '' AS table_comment \
          FROM information_schema.ins_columns \
-         WHERE db_name = {db} \
-         AND (LOWER(col_name) LIKE LOWER({pattern}) ESCAPE '~' OR LOWER(COALESCE(note, '')) LIKE LOWER({pattern}) ESCAPE '~') \
-         LIMIT {limit}",
-        db = sql_string_literal(database),
+         WHERE db_name = {db} AND LOWER(col_name) LIKE {pattern} \
+         LIMIT {limit} ) \
+         UNION ALL \
+         ( SELECT db_name AS object_schema, table_name AS object_name, '' AS column_name, \
+         '' AS column_comment, table_comment AS table_comment \
+         FROM information_schema.ins_tables \
+         WHERE db_name = {db} AND table_comment IS NOT NULL AND LOWER(table_comment) LIKE {pattern} \
+         LIMIT {table_limit} ) \
+         UNION ALL \
+         ( SELECT db_name AS object_schema, stable_name AS object_name, '' AS column_name, \
+         '' AS column_comment, table_comment AS table_comment \
+         FROM information_schema.ins_stables \
+         WHERE db_name = {db} AND table_comment IS NOT NULL AND LOWER(table_comment) LIKE {pattern} \
+         LIMIT {table_limit} ) \
+         ORDER BY object_schema, object_name, column_name \
+         LIMIT {total_limit}",
+        db = db,
         pattern = pattern_literal,
         limit = limit,
+        table_limit = table_limit,
+        total_limit = limit + table_limit,
     )
+}
+
+/// TDengine 的 LIKE 语法没有 ESCAPE 子句，无法转义 `%`/`_`，因此直接使用 `%term%` 模式，
+/// 让 `%`/`_` 按通配符处理；精确匹配由前端在结果集上二次过滤，避免把带通配符的词条误判为精确子串。
+fn tdengine_like_pattern_literal(term: &str) -> String {
+    sql_string_literal(&format!("%{}%", clean_term(term).to_ascii_lowercase()))
 }
 
 fn snowflake_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
@@ -268,16 +404,33 @@ fn snowflake_structure_search_sql(schema: Option<&str>, pattern_literal: &str, l
     } else {
         String::new()
     };
+    // 表注释分支单独限额，避免字段命中占满共享 LIMIT 后把表注释命中挤掉。
+    let table_limit = table_comment_search_limit(limit);
     format!(
-        "SELECT table_schema AS object_schema, table_name AS object_name, column_name AS column_name, comment AS column_comment \
+        "SELECT * FROM ( \
+         SELECT table_schema AS object_schema, table_name AS object_name, column_name AS column_name, \
+         comment AS column_comment, NULL AS table_comment \
          FROM information_schema.columns \
          WHERE (LOWER(column_name) LIKE LOWER({pattern}) ESCAPE '~' OR LOWER(COALESCE(comment, '')) LIKE LOWER({pattern}) ESCAPE '~') \
          {schema_filter} \
-         ORDER BY table_schema, table_name, ordinal_position \
-         LIMIT {limit}",
+         ORDER BY object_schema, object_name, column_name \
+         LIMIT {limit} ) AS field_hits \
+         UNION ALL \
+         SELECT * FROM ( \
+         SELECT table_schema AS object_schema, table_name AS object_name, NULL AS column_name, \
+         NULL AS column_comment, comment AS table_comment \
+         FROM information_schema.tables \
+         WHERE LOWER(COALESCE(comment, '')) LIKE LOWER({pattern}) ESCAPE '~' \
+         {schema_filter} \
+         ORDER BY object_schema, object_name \
+         LIMIT {table_limit} ) AS table_hits \
+         ORDER BY object_schema, object_name, column_name \
+         LIMIT {total_limit}",
         pattern = pattern_literal,
         schema_filter = schema_filter,
         limit = limit,
+        table_limit = table_limit,
+        total_limit = limit + table_limit,
     )
 }
 
@@ -292,6 +445,16 @@ fn clean_term(term: &str) -> String {
 
 fn clamp_limit(limit: Option<usize>) -> usize {
     limit.unwrap_or(200).clamp(1, 5000)
+}
+
+/// 表级注释命中的独立结果预算。
+///
+/// 结构搜索把「字段命中」与「表注释命中」放在同一个 UNION 里，如果两者共用一个 LIMIT，
+/// 字段命中较多时表注释命中会被排序挤掉（对齐 DBeaver 按对象类型分配预算的做法）。
+/// 这里给表注释分支单独预留总限额的 1/4（至少 1 条），字段命中仍可使用完整的 limit，
+/// 外层上限为两者之和，保证表注释命中不会被字段命中挤占。
+fn table_comment_search_limit(limit: usize) -> usize {
+    (limit / 4).max(1)
 }
 
 fn sql_string_literal(value: &str) -> String {
@@ -429,15 +592,134 @@ mod tests {
 
         assert_eq!(
             build_database_structure_search_sql(DatabaseStructureSearchSqlOptions {
-                database_type: Some(DatabaseType::Gbase),
-                driver_profile: Some("gbase8s".to_string()),
+                database_type: Some(DatabaseType::Gbase8s),
+                driver_profile: None,
                 database: "app".to_string(),
                 schema: None,
                 term: "email".to_string(),
                 limit: Some(10),
             }),
             None,
-            "gbase8s is Informix-compatible and must fall back to data search"
+            "GBase 8s is Informix-compatible and must fall back to data search"
         );
+    }
+
+    #[test]
+    fn structure_search_includes_table_comment_branch() {
+        // 表注释命中要与字段命中一起返回：MySQL 家族额外走 information_schema.TABLES 分支。
+        let query = build_database_structure_search_sql(DatabaseStructureSearchSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            driver_profile: None,
+            database: "app".to_string(),
+            schema: None,
+            term: "order".to_string(),
+            limit: Some(80),
+        })
+        .unwrap();
+        assert!(query.sql.contains("UNION ALL"));
+        assert!(query.sql.contains("information_schema.TABLES"));
+        assert!(query.sql.contains("TABLE_COMMENT AS table_comment"));
+        assert!(query.sql.contains("LIMIT 80"));
+        // MySQL 家族的视图在 information_schema.TABLES 里的 TABLE_COMMENT 是字面量 'VIEW'，
+        // 必须按 BASE TABLE 过滤，否则搜索包含 "view" 子串的词会把所有视图误报为表级命中。
+        assert!(query.sql.contains("TABLE_TYPE = 'BASE TABLE'"));
+    }
+
+    #[test]
+    fn sqlserver_structure_search_hoists_top_outside_union() {
+        // SQL Server 的 TOP 不能直接作用在 UNION 的单个分支上：各分支先在子查询内取 TOP，
+        // 外层再对并集取总 TOP（30 + 30/4 = 37）。
+        let query = build_database_structure_search_sql(DatabaseStructureSearchSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            driver_profile: None,
+            database: "app".to_string(),
+            schema: None,
+            term: "name".to_string(),
+            limit: Some(30),
+        })
+        .unwrap();
+        assert!(query.sql.starts_with("SELECT TOP 37 * FROM ("));
+        assert!(query.sql.contains("sys.extended_properties"));
+        assert!(query.sql.contains("minor_id = 0"));
+    }
+
+    #[test]
+    fn structure_search_reserves_a_separate_budget_for_table_comments() {
+        // 字段命中用完整 limit，表注释命中额外预留，外层上限为两者之和，
+        // 这样字段命中再多也不会把表注释命中从 UNION 里挤掉。
+        let query = build_database_structure_search_sql(DatabaseStructureSearchSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            driver_profile: None,
+            database: "app".to_string(),
+            schema: None,
+            term: "order".to_string(),
+            limit: Some(80),
+        })
+        .unwrap();
+        assert!(query.sql.contains("AS field_hits"));
+        assert!(query.sql.contains("AS table_hits"));
+        // 字段分支保留完整的 80 条
+        assert!(query.sql.contains("LIMIT 80 ) AS field_hits"));
+        // 表注释分支预留 80 / 4 = 20 条
+        assert!(query.sql.contains("LIMIT 20 ) AS table_hits"));
+        // 外层上限 = 80 + 20，两个分支都取满也不会被裁掉
+        assert!(query.sql.contains("LIMIT 100"));
+    }
+
+    #[test]
+    fn tdengine_structure_search_matches_table_comments() {
+        // TDengine 表注释来自 ins_tables（普通表/子表）与 ins_stables（超级表）。
+        let query = build_database_structure_search_sql(DatabaseStructureSearchSqlOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            driver_profile: None,
+            database: "pm".to_string(),
+            schema: None,
+            term: "meter".to_string(),
+            limit: Some(40),
+        })
+        .unwrap();
+        assert!(query.sql.contains("information_schema.ins_columns"));
+        assert!(query.sql.contains("information_schema.ins_tables"));
+        assert!(query.sql.contains("information_schema.ins_stables"));
+        assert!(query.sql.contains("table_comment IS NOT NULL"));
+        assert!(query.sql.contains("db_name = 'pm'"));
+        // LIMIT 只能挂在括号子查询上：每个 UNION 分支都要自带括号（40 与 40/4=10）。
+        assert_eq!(query.sql.matches("( SELECT").count(), 3);
+        assert!(query.sql.contains("LIMIT 40 )"));
+        assert!(query.sql.contains("LIMIT 10 )"));
+        assert!(query.sql.contains("LIMIT 50"));
+        // TDengine 语法没有 ESCAPE，也没有列注释（ins_columns 没有 note 列），只匹配 col_name。
+        assert!(!query.sql.contains("ESCAPE"));
+        assert!(!query.sql.contains("note"));
+        assert!(query.sql.contains("LOWER(col_name) LIKE '%meter%'"));
+    }
+
+    #[test]
+    fn structure_search_table_comment_sources_per_dialect() {
+        // 关系型方言需各自提供表注释来源，缺失时不会打断字段搜索。
+        let cases = [
+            (DatabaseType::Postgres, "pg_description"),
+            (DatabaseType::Oracle, "ALL_TAB_COMMENTS"),
+            (DatabaseType::Snowflake, "information_schema.tables"),
+            (DatabaseType::ClickHouse, "system.tables"),
+            (DatabaseType::Tdengine, "information_schema.ins_tables"),
+        ];
+        for (database_type, expected) in cases {
+            let query = build_database_structure_search_sql(DatabaseStructureSearchSqlOptions {
+                database_type: Some(database_type),
+                driver_profile: None,
+                database: "app".to_string(),
+                schema: None,
+                term: "user".to_string(),
+                limit: Some(10),
+            })
+            .unwrap_or_else(|| panic!("expected structure search SQL for {:?}", database_type));
+            assert!(
+                query.sql.contains(expected),
+                "expected {:?} structure search SQL to reference {}",
+                database_type,
+                expected
+            );
+        }
     }
 }

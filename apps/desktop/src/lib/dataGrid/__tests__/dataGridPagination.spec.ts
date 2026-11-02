@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS, elasticsearchCursorPageJumpRequestCount, hasCompleteLocalDataGridResult, reconcileDataGridExactTotalWithObservedPage } from "@/lib/dataGrid/dataGridPagination";
+import { ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS, elasticsearchCursorPageJumpRequestCount, hasCompleteLocalDataGridResult, isDataGridSurfaceBusy, reconcileDataGridExactTotalWithObservedPage } from "@/lib/dataGrid/dataGridPagination";
 
 describe("Elasticsearch cursor page jumps", () => {
   it("counts only missing forward cursors", () => {
@@ -52,6 +52,58 @@ describe("complete local DataGrid results", () => {
         hasMore: false,
       }),
     ).toBe(false);
+  });
+
+  it("treats a short first page as incomplete when a known total exceeds the loaded rows (#13726)", () => {
+    // A first page shorter than the page limit is normally the last page, but
+    // when the known COUNT reports more rows than are loaded, more data is
+    // still pending. Marking it complete would make "export all" write only
+    // the loaded page instead of the full result set.
+    expect(
+      hasCompleteLocalDataGridResult({
+        isResultsContext: true,
+        rowCount: 300,
+        pageLimit: 500,
+        pageOffset: 0,
+        totalRowCount: 800,
+        truncated: false,
+        hasMore: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps a short first page complete when the known total matches the loaded rows", () => {
+    expect(
+      hasCompleteLocalDataGridResult({
+        isResultsContext: true,
+        rowCount: 300,
+        pageLimit: 500,
+        pageOffset: 0,
+        totalRowCount: 300,
+        truncated: false,
+        hasMore: false,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("DataGrid surface busy overlay", () => {
+  const idle = { isRefreshingData: false, loading: false, pageJumpBusy: false };
+
+  it("keeps the full-surface overlay off while a footer total-row count runs", () => {
+    expect(isDataGridSurfaceBusy({ ...idle, manualTotalRowCountLoading: true, manualTotalRowCountCoversSurface: false })).toBe(false);
+  });
+
+  it("covers the surface for count-then-navigate flows", () => {
+    expect(isDataGridSurfaceBusy({ ...idle, manualTotalRowCountLoading: true, manualTotalRowCountCoversSurface: true })).toBe(true);
+  });
+
+  it("covers the surface for real reloads, page jumps, and row preparation", () => {
+    expect(isDataGridSurfaceBusy({ ...idle, isRefreshingData: true })).toBe(true);
+    expect(isDataGridSurfaceBusy({ ...idle, loading: true })).toBe(true);
+    expect(isDataGridSurfaceBusy({ ...idle, pageJumpBusy: true })).toBe(true);
+    expect(isDataGridSurfaceBusy({ ...idle, rowPreparationBusy: true })).toBe(true);
+    expect(isDataGridSurfaceBusy(idle)).toBe(false);
   });
 });
 

@@ -177,6 +177,8 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,
+        show_native_jobs: None,
+        show_user_admin: None,
         attached_databases: Vec::new(),
         init_script: None,
         color: None,
@@ -184,6 +186,8 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         connect_timeout_secs: 15,
         query_timeout_secs: 120,
         idle_timeout_secs: 60,
+        manual_transaction_timeout_secs: 300,
+        idle_disconnect_secs: 0,
         keepalive_interval_secs: 0,
         ssl: std::env::var("DBX_BENCH_SSL").is_ok_and(|value| value.eq_ignore_ascii_case("true")),
         ca_cert_path: String::new(),
@@ -220,6 +224,7 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         read_only: false,
         is_production: false,
         production_databases: Vec::new(),
+        production_badge_scope: None,
         database_info: None,
     })
 }
@@ -405,6 +410,7 @@ fn import_request(
                 source_column: column.clone(),
                 target_column: column,
                 target_data_type: None,
+                generator: None,
             })
             .collect(),
         mode: TableImportMode::Append,
@@ -415,6 +421,7 @@ fn import_request(
         retain_source: false,
         conflict_policy: None,
         skip_duplicate_rows: false,
+        continue_on_error: false,
     }
 }
 

@@ -1,9 +1,11 @@
-import { requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
+import { requiresClickhouseIdentifierQuote, requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
 import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
 import type { SqlSemanticToken } from "@/lib/sql/semantic/types";
 import { formatSqlForDisplay, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { compactDdlSql } from "@/lib/sql/ddlCompact";
+import { formatStarRocksDdlForDisplay } from "@/lib/sql/starrocksDdlDisplay";
 import { dropsSchemaQualifier, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import type { DatabaseType } from "@/types/database";
 
@@ -29,8 +31,9 @@ type DdlColumnAttributePositions = {
 function canRenderUnquoted(identifier: string, dialect: SqlFormatDialect): boolean {
   switch (dialect) {
     case "mysql":
-    case "clickhouse":
       return !requiresMysqlIdentifierQuote(identifier);
+    case "clickhouse":
+      return !requiresClickhouseIdentifierQuote(identifier);
     case "postgres":
     case "sqlite":
     case "duckdb":
@@ -547,6 +550,7 @@ export function alignDdlColumnDefinitions(sql: string, dialect: SqlFormatDialect
 
 export interface DdlDisplayFormatOptions {
   dialect: SqlFormatDialect;
+  /** Effective type from effectiveDatabaseTypeForConnection, including MySQL driver profiles. */
   databaseType?: DatabaseType;
   database?: string;
   catalog?: string;
@@ -559,6 +563,7 @@ export interface DdlDisplayFormatOptions {
    * reloading the DDL.
    */
   excludeDdlStorage?: boolean;
+  compactDdlSql?: boolean;
 }
 
 /**
@@ -570,8 +575,9 @@ export interface DdlDisplayFormatOptions {
 export function applyDdlDisplayPreferences(sql: string, options: DdlDisplayFormatOptions): string {
   const qualified = applyDdlDatabaseQualifier(sql, options.dialect, options.databaseType, options.includeDatabaseName, options.database, options.catalog);
   const quoted = options.quoteIdentifiers ? qualified : omitDdlIdentifierQuotes(qualified, options.dialect);
-  const aligned = alignDdlColumnDefinitions(uppercaseDdlColumnTypes(quoted, options.dialect), options.dialect);
-  return options.excludeDdlStorage ? applyDdlStoragePreference(aligned, options.databaseType) : aligned;
+  const aligned = options.databaseType === "starrocks" ? formatStarRocksDdlForDisplay(quoted) : alignDdlColumnDefinitions(uppercaseDdlColumnTypes(quoted, options.dialect), options.dialect);
+  const filtered = options.excludeDdlStorage ? applyDdlStoragePreference(aligned, options.databaseType) : aligned;
+  return options.compactDdlSql ? compactDdlSql(filtered, options.databaseType) : filtered;
 }
 
 /**
@@ -581,5 +587,5 @@ export function applyDdlDisplayPreferences(sql: string, options: DdlDisplayForma
  * result of the object DDL fetch straight through it.
  */
 export async function formatDdlForDisplay(ddl: string, options: DdlDisplayFormatOptions, formatter: Partial<SqlFormatterSettings> = DEFAULT_SQL_FORMATTER_SETTINGS): Promise<string> {
-  return applyDdlDisplayPreferences(await formatSqlForDisplay(ddl, options.dialect, formatter), options);
+  return applyDdlDisplayPreferences(options.databaseType === "starrocks" ? ddl : await formatSqlForDisplay(ddl, options.dialect, formatter), options);
 }

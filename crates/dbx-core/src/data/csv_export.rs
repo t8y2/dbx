@@ -542,6 +542,7 @@ mod tests {
                     source_column: column.to_string(),
                     target_column: column.to_string(),
                     target_data_type: None,
+                    generator: None,
                 })
                 .collect(),
             mode: TableImportMode::Append,
@@ -552,6 +553,7 @@ mod tests {
             retain_source: false,
             conflict_policy: None,
             skip_duplicate_rows: false,
+            continue_on_error: false,
         };
         let summary = import_table_file_core(
             &state,

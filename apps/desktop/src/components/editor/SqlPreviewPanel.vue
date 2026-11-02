@@ -15,6 +15,7 @@ const props = defineProps<{
   sql: string;
   sqlFormatDialect?: SqlFormatDialect;
   loading?: boolean;
+  emptyMessage?: string;
   canUndo?: boolean;
   canRedo?: boolean;
 }>();
@@ -60,11 +61,41 @@ function selectPreviewContent() {
   return true;
 }
 
+/** Text the user actually highlighted inside the preview, if any. */
+function selectedPreviewText(): string {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return "";
+  const el = contentRef.value;
+  if (!el) return "";
+  // Only a selection that lives inside this preview counts; one leaked from the
+  // surrounding grid must not be copied as if it were the preview text.
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    const range = selection.getRangeAt(index);
+    if (!el.contains(range.commonAncestorContainer)) return "";
+  }
+  return selection.toString();
+}
+
+async function copySelectionOrAll(event: KeyboardEvent) {
+  const text = selectedPreviewText() || displaySql.value;
+  if (!text.trim()) return;
+  event.preventDefault();
+  event.stopPropagation();
+  await copyPreviewText(text);
+}
+
 function onContentKeydown(event: KeyboardEvent) {
-  if (!isPlainClipboardShortcut(event, "a")) return;
-  // Claim the shortcut before it reaches the surrounding data grid, then select
-  // the preview text instead of the grid cells.
-  if (selectPreviewContent()) event.preventDefault();
+  if (isPlainClipboardShortcut(event, "a")) {
+    // Claim the shortcut before it reaches the surrounding data grid, then select
+    // the preview text instead of the grid cells.
+    if (selectPreviewContent()) event.preventDefault();
+    return;
+  }
+  // A programmatically built selection (Ctrl+A above) is not guaranteed to reach
+  // the system clipboard through the webview's native copy, so copy it through the
+  // app clipboard instead: the toast already claimed success that never happened
+  // (#12167).
+  if (isPlainClipboardShortcut(event, "c")) void copySelectionOrAll(event);
 }
 
 async function initHighlighter() {
@@ -101,8 +132,12 @@ async function toggleFormat() {
 
   formatting.value = true;
   try {
-    formattedSql.value = await formatSqlText(props.sql, props.sqlFormatDialect ?? "generic", settingsStore.editorSettings.sqlFormatter);
+    let diagnostic: "custom-rules-fallback" | undefined;
+    formattedSql.value = await formatSqlText(props.sql, props.sqlFormatDialect ?? "generic", settingsStore.editorSettings.sqlFormatter, (value) => {
+      diagnostic = value;
+    });
     isFormatted.value = true;
+    if (diagnostic === "custom-rules-fallback") toast(t("settings.sqlFormatterFallbackNotice"), 4000);
     await highlightSql();
   } catch {
     toast(t("toolbar.formatSqlFailed"), 3000);
@@ -114,6 +149,10 @@ async function toggleFormat() {
 async function handleCopy() {
   const text = displaySql.value;
   if (!text.trim()) return;
+  await copyPreviewText(text);
+}
+
+async function copyPreviewText(text: string) {
   try {
     await copyToClipboard(text);
     toast(t("grid.copied"));
@@ -209,7 +248,7 @@ onMounted(() => {
 
       <!-- Empty -->
       <div v-else-if="!hasSql" class="flex items-center justify-center h-full text-xs text-muted-foreground">
-        {{ t("grid.previewSqlEmpty") }}
+        {{ emptyMessage || t("grid.previewSqlEmpty") }}
       </div>
 
       <!-- Shiki highlighted SQL -->

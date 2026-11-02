@@ -8,8 +8,9 @@
 //! Security note (known limitation, flagged for maintainers in the PR): Dameng requires
 //! `USERID` to be the FIRST command-line argument — unlike Oracle, the password cannot be
 //! moved into the `PARFILE`. So the password is necessarily visible in the process list
-//! (`ps -ef`) for the duration of the run. `PARFILE` is still used for the non-sensitive
-//! parameters to keep the command line short and debuggable.
+//! (`ps -ef`) for the duration of the run. `PARFILE` keeps the schema/table parameters out
+//! of the process list; FILE/LOG travel on the command line because Windows dexp rejects
+//! forward-slash paths there (#13585).
 
 use crate::models::connection::DatabaseType;
 
@@ -46,29 +47,69 @@ pub struct DamengDumpRequest {
     pub table_exists_action: Option<String>,
 }
 
+/// A bounded trailing slice of a tool's output, for appending to a failure message.
+///
+/// The tool's own log is preferred when it exists, but a parameter error stops the run
+/// before the LOG file is written; the console capture then carries the only copy of the
+/// real reason. Either way the tail is what matters — dexp prints its cause last.
+pub fn diagnostic_tail(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim_end_matches(['\n', '\r']);
+    if trimmed.len() <= max_chars {
+        return trimmed.to_string();
+    }
+    let floor = trimmed.len() - max_chars;
+    let start = floor + trimmed[floor..].find('\n').map_or(0, |i| i + 1);
+    trimmed[start..].to_string()
+}
+
 /// The `USERID` token, always the first argument: `USERID=<user>/<password>@<host>:<port>`.
 /// Password is NOT URL-escaped; Dameng accepts it verbatim. A `/` or `@` inside the user or
-/// password would be parsed as a field separator (the tool parses up to the first `@`), so
-/// callers must reject those up front via [`userid_field_error`] instead of launching.
+/// password would be parsed as a field separator (the tool parses up to the first `@`), and a
+/// space would end the token early, so callers must reject those up front via
+/// [`userid_field_error`] instead of launching.
 pub fn userid_token(user: &str, password: &str, host: &str, port: u16) -> String {
     format!("USERID={user}/{password}@{host}:{port}")
 }
 
 /// Returns the field name whose value cannot be encoded in the `USERID` token
-/// (`/` separates user/password, `@` starts the host part), or `None` if both
-/// are safe to pass.
+/// (`/` separates user/password, `@` starts the host part, a space ends the token),
+/// or `None` if both are safe to pass.
 pub fn userid_field_error(user: &str, password: &str) -> Option<&'static str> {
-    [(user, "username"), (password, "password")]
-        .into_iter()
-        .find_map(|(field, name)| (field.contains('/') || field.contains('@')).then_some(name))
+    [(user, "username"), (password, "password")].into_iter().find_map(|(field, name)| {
+        (field.contains('/') || field.contains('@') || field.contains(char::is_whitespace)).then_some(name)
+    })
+}
+
+/// Render a FILE/LOG path for the command line.
+///
+/// Dameng validates FILE/LOG as *file names*: its documentation lists `/` and `:`
+/// among the characters such a name may not contain. On Windows the tool does not
+/// treat a forward slash as a directory separator, so a normalised
+/// `D:/data/target.dmp` is rejected as "无效的文件路径" (#13585), while the native
+/// `D:\data\target.dmp` used in every documented Windows example is accepted.
+/// Windows-shaped paths therefore get the native separator back.
+///
+/// Nothing is quoted: [`build_command`] hands each value to `Command` as a single
+/// argv entry, so spaces survive without the `"` that Dameng also rejects.
+fn native_path_value(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let windows_shaped =
+        (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\'))
+            || path.starts_with("//");
+    if windows_shaped {
+        path.replace('/', "\\")
+    } else {
+        path.to_string()
+    }
 }
 
 /// Contents of the PARFILE: the non-sensitive parameters, one `KEY=value` per line.
-/// File/log paths are double-quoted so spaces and Windows backslashes survive.
+///
+/// FILE/LOG are deliberately not written here. They travel as command-line
+/// arguments (see [`build_command`]) so Windows paths keep their native
+/// separators and never pass through the PARFILE value parser (#13585).
 pub fn build_parfile_contents(req: &DamengDumpRequest) -> String {
     let mut lines: Vec<String> = Vec::new();
-    lines.push(format!("FILE=\"{}\"", req.file_path));
-    lines.push(format!("LOG=\"{}\"", req.log_path));
     if !req.schemas.is_empty() {
         lines.push(format!("SCHEMAS={}", req.schemas.join(",")));
     }
@@ -95,15 +136,52 @@ pub fn build_parfile_contents(req: &DamengDumpRequest) -> String {
     text
 }
 
-/// The full argv (program + USERID + PARFILE). The caller writes `parfile_path` (with
-/// [`build_parfile_contents`]) before invoking. USERID must be the first argument.
+/// The full argv (program + USERID + PARFILE + FILE + LOG). The caller writes
+/// `parfile_path` (with [`build_parfile_contents`]) before invoking. USERID must be
+/// the first argument.
+///
+/// FILE/LOG are command-line arguments rather than PARFILE lines: on Windows dexp
+/// validates them as file names and rejects the forward-slash form as an invalid
+/// path (#13585). `Command` passes each argument verbatim, so a native path with
+/// spaces needs no quoting.
 pub fn build_command(req: &DamengDumpRequest, parfile_path: &str) -> Vec<String> {
     vec![
         req.tool_path.clone(),
         userid_token(&req.user, &req.password, &req.host, req.port),
         format!("PARFILE={parfile_path}"),
+        format!("FILE={}", native_path_value(&req.file_path)),
+        format!("LOG={}", native_path_value(&req.log_path)),
     ]
 }
+
+/// Build the message the user sees for a run that did not report success.
+///
+/// `parse_dump_log` can only classify the text it was handed. Two cases leave it without a
+/// usable classification: the tool stops before writing its log file (log and console are
+/// both empty or generic), or it writes a log whose tail carries no recognised marker. The
+/// exit status and the raw output are the only evidence left, so both are folded in here —
+/// a bare "did not report success" tells the user nothing about which parameter upset dexp.
+pub fn failure_message(outcome: &DamengDumpOutcome, exit_code: Option<i32>, text: &str) -> String {
+    let mut message = outcome.error.clone().unwrap_or_else(|| "dexp/dimp did not report success".to_string());
+
+    if let Some(code) = exit_code {
+        if code != 0 {
+            message.push_str(&format!(" (exit code {code})"));
+        }
+    }
+
+    let tail = diagnostic_tail(text, DIAGNOSTIC_TAIL_MAX_CHARS);
+    if !tail.is_empty() && !message.contains(&tail) {
+        message.push_str("\n\n dexp/dimp output:\n");
+        message.push_str(&tail);
+    }
+
+    message
+}
+
+/// How much of the tool's output to attach to a failure message. dexp is chatty on success
+/// and quiet on failure, so a small slice still carries the cause while keeping the UI sane.
+const DIAGNOSTIC_TAIL_MAX_CHARS: usize = 4000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DamengDumpOutcome {
@@ -193,17 +271,102 @@ mod tests {
     }
 
     #[test]
-    fn export_parfile_matches_real_invocation() {
+    fn export_parfile_leaves_paths_to_the_command_line() {
         let par = build_parfile_contents(&req(DamengDumpKind::Export));
-        assert_eq!(par, "FILE=\"/tmp/dbx_dcss.dmp\"\nLOG=\"/tmp/dbx_dcss.log\"\nSCHEMAS=DCSS\nTABLESPACE=N\nDROP=N\n");
+        assert_eq!(par, "SCHEMAS=DCSS\nTABLESPACE=N\nDROP=N\n");
+        assert!(!par.contains("FILE="), "FILE must not ride in the PARFILE: {par}");
+        assert!(!par.contains("LOG="), "LOG must not ride in the PARFILE: {par}");
     }
 
     #[test]
-    fn command_puts_userid_first_then_parfile() {
+    fn command_passes_windows_paths_with_native_separators() {
+        let mut r = req(DamengDumpKind::Export);
+        r.file_path = r"C:\Users\dbx\dump.dcss.dmp".to_string();
+        r.log_path = r"C:\Users\dbx\AppData\Local\Temp\dbx-dameng-dump\task.log".to_string();
+        let argv = build_command(&r, r"C:\Users\dbx\AppData\Local\Temp\task.par");
+        assert!(argv.contains(&r"FILE=C:\Users\dbx\dump.dcss.dmp".to_string()), "got: {argv:?}");
+        assert!(
+            argv.contains(&r"LOG=C:\Users\dbx\AppData\Local\Temp\dbx-dameng-dump\task.log".to_string()),
+            "got: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn command_restores_backslashes_on_forward_slash_windows_paths() {
+        // #13585: the PARFILE path normaliser produced D:/data/... and dexp answered
+        // "无效的文件路径". The command line must carry the native form instead.
+        let mut r = req(DamengDumpKind::Import);
+        r.file_path = "D:/dumps/dcss.dmp".to_string();
+        let argv = build_command(&r, "/tmp/task.par");
+        assert!(argv.contains(&r"FILE=D:\dumps\dcss.dmp".to_string()), "got: {argv:?}");
+    }
+
+    #[test]
+    fn command_keeps_a_path_with_spaces_as_one_unquoted_argument() {
+        let mut r = req(DamengDumpKind::Export);
+        r.file_path = r"C:\Users\John Smith\dump.dmp".to_string();
+        let argv = build_command(&r, "/tmp/task.par");
+        assert!(argv.contains(&r"FILE=C:\Users\John Smith\dump.dmp".to_string()), "got: {argv:?}");
+        assert!(!argv.iter().any(|arg| arg.contains('"')), "quotes are invalid in FILE/LOG: {argv:?}");
+    }
+
+    #[test]
+    fn command_keeps_unix_paths_untouched() {
+        let argv = build_command(&req(DamengDumpKind::Export), "/tmp/dbx_dcss.par");
+        assert!(argv.contains(&"FILE=/tmp/dbx_dcss.dmp".to_string()), "got: {argv:?}");
+        assert!(argv.contains(&"LOG=/tmp/dbx_dcss.log".to_string()), "got: {argv:?}");
+    }
+
+    #[test]
+    fn userid_field_error_rejects_whitespace() {
+        assert_eq!(userid_field_error("SYSDBA", "Pass word01"), Some("password"));
+        assert_eq!(userid_field_error("SYSDBA", "Dameng+123"), None);
+    }
+
+    #[test]
+    fn diagnostic_tail_keeps_the_cause_and_stays_bounded() {
+        // trailing newlines go, the whole text comes back when it fits
+        assert_eq!(diagnostic_tail("a\nb\n", 10), "a\nb");
+        assert_eq!(diagnostic_tail("a\nb", 3), "a\nb");
+        // a zero budget asks for nothing
+        assert_eq!(diagnostic_tail("a\nb", 0), "");
+        let long = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let tail = diagnostic_tail(&long, 20);
+        assert!(tail.len() <= 24, "bounded: {tail}");
+        assert!(tail.ends_with("line 99"), "keeps the cause: {tail}");
+        assert!(tail.starts_with("line "), "cuts on a line boundary: {tail}");
+    }
+
+    #[test]
+    fn failure_message_carries_exit_code_and_raw_output() {
+        // The #12837 shape: an empty log plus an unrecognised-parameter line on the console.
+        let empty_parse = parse_dump_log("", DamengDumpKind::Export);
+        assert!(!empty_parse.success);
+        let message =
+            failure_message(&empty_parse, Some(3), "dexp: unrecognized parameter TABLESPACE\nusage: dexp ...");
+        assert!(message.contains("(exit code 3)"), "got: {message}");
+        assert!(message.contains("unrecognized parameter TABLESPACE"), "got: {message}");
+        assert!(message.contains("dexp/dimp output:"), "got: {message}");
+    }
+
+    #[test]
+    fn failure_message_stays_quiet_on_success_parse() {
+        let log = "dexp V8\n成功终止导出, 没有出现警告\n";
+        let outcome = parse_dump_log(log, DamengDumpKind::Export);
+        assert!(outcome.success);
+        // Not called on the success path, but it must not fabricate output for a parsed log.
+        let message = failure_message(&outcome, Some(0), log);
+        assert!(!message.contains("exit code"), "got: {message}");
+    }
+
+    #[test]
+    fn command_puts_userid_first_then_parfile_and_paths() {
         let argv = build_command(&req(DamengDumpKind::Export), "/tmp/dbx_dcss.par");
         assert_eq!(argv[0], "/opt/dmdbms/bin/dexp");
         assert_eq!(argv[1], "USERID=SYSDBA/Dameng123@127.0.0.1:5236");
         assert_eq!(argv[2], "PARFILE=/tmp/dbx_dcss.par");
+        assert_eq!(argv[3], "FILE=/tmp/dbx_dcss.dmp");
+        assert_eq!(argv[4], "LOG=/tmp/dbx_dcss.log");
     }
 
     #[test]

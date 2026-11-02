@@ -21,6 +21,7 @@ import {
   mongoCreateIndexPreview,
   mongoDropAllIndexesPreview,
   mongoDropCollectionPreview,
+  mongoClearCollectionPreview,
   mongoDropIndexFailureCount,
   mongoDropDatabasePreview,
   mongoDropIndexPreview,
@@ -56,6 +57,8 @@ import {
   deleteNacosNamespaceLoading,
   showDropMongoCollectionConfirm,
   dropMongoCollectionLoading,
+  showClearMongoCollectionConfirm,
+  clearMongoCollectionLoading,
   showDropMongoIndexConfirm,
   dropMongoIndexLoading,
   showDropAllMongoIndexesConfirm,
@@ -101,6 +104,7 @@ import {
 interface SidebarDatabaseSpecificMutationRuntimeOptions {
   activeNode: ShallowRef<TreeNode>;
   connectionStore: ReturnType<typeof useConnectionStore>;
+  refreshDataTabsForTable?: (target: { connectionId: string; database: string; schemaCandidates?: Array<string | undefined>; name: string }) => Promise<number>;
 }
 
 function errorMessage(error: unknown): string {
@@ -161,12 +165,13 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   const canManageElasticsearchIndex = computed(() => canMutateElasticsearchIndexNode(activeNode.value));
 
   const canDropMongoCollection = computed(() => canMutateMongoCollectionNode(activeNode.value));
+  const canClearMongoCollection = computed(() => canMutateMongoCollectionNode(activeNode.value) && mongoCollectionKindFromNode(activeNode.value) === "collection");
   const canDropMilvusCollection = computed(() => activeNode.value.type === "vector-collection" && !!activeNode.value.connectionId && !!activeNode.value.database && connectionStore.getConfig(activeNode.value.connectionId)?.db_type === "milvus");
   const canRenameMongoCollection = computed(() => canRenameMongoCollectionNode(activeNode.value));
   const canCloneMongoCollection = computed(() => canCloneMongoCollectionNode(activeNode.value));
 
   function toastMutationError(error: unknown) {
-    toast(t("contextMenu.tableOperationFailed", { message: errorMessage(error) }), 5000);
+    toast(t("contextMenu.tableOperationFailed", { message: errorMessage(error) }), { persistent: true });
   }
 
   function prepareRenameMongoCollectionDialog() {
@@ -234,7 +239,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
           }
         } catch (error) {
           connectionStore.removeTreeNode(node.id);
-          toast(t("contextMenu.objectDropRefreshFailed", { message: translateBackendError(t, errorMessage(error)) }), 5000);
+          toast(t("contextMenu.objectDropRefreshFailed", { message: translateBackendError(t, errorMessage(error)) }), { persistent: true });
         }
       },
       onError: (error) => {
@@ -547,7 +552,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       onSuccess: async (result) => {
         const failed = mongoDropIndexFailureCount(result);
         if (failed > 0) {
-          toast(t("contextMenu.dropIndexesPartialFailure", { success: result.dropped_names.length, failed }), 5000);
+          toast(t("contextMenu.dropIndexesPartialFailure", { success: result.dropped_names.length, failed }), { persistent: true });
         } else {
           toast(t("contextMenu.dropTableChildObjectSuccess", { name: row.name }), 3000);
         }
@@ -804,7 +809,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       await connectionStore.loadNacosNamespaces(connectionId, { force: true });
       return true;
     } catch (error: any) {
-      toast(translateBackendError(t, error), 5000);
+      toast(translateBackendError(t, error), { persistent: true });
       return false;
     }
   }
@@ -832,7 +837,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       try {
         await updateExplicitNacosNamespaceScope(node.connectionId, namespaceId, "add");
       } catch (error: any) {
-        toast(t("connection.saveFailed", { message: translateBackendError(t, error) }), 5000);
+        toast(t("connection.saveFailed", { message: translateBackendError(t, error) }), { persistent: true });
       }
       notifyNacosNamespacesChanged(node.connectionId);
       showCreateNacosNamespaceDialog.value = false;
@@ -842,7 +847,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
         if (liveNode) liveNode.isExpanded = true;
       }
     } catch (error: any) {
-      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
+      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), { persistent: true });
     } finally {
       createNacosNamespaceLoading.value = false;
     }
@@ -879,7 +884,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       toast(t("nacos.namespaceUpdated", { name: namespaceName }), 3000);
       await refreshNacosNamespacesAfterMutation(node.connectionId);
     } catch (error: any) {
-      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
+      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), { persistent: true });
     } finally {
       editNacosNamespaceLoading.value = false;
     }
@@ -920,10 +925,10 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
         try {
           await restoreExplicitNacosNamespaceScope(node.connectionId, scopeSnapshot);
         } catch (rollbackError: any) {
-          toast(t("connection.saveFailed", { message: translateBackendError(t, rollbackError) }), 5000);
+          toast(t("connection.saveFailed", { message: translateBackendError(t, rollbackError) }), { persistent: true });
         }
       }
-      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
+      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), { persistent: true });
     } finally {
       deleteNacosNamespaceLoading.value = false;
     }
@@ -932,6 +937,12 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   function dropMongoCollection() {
     dropMongoCollectionLoading.value = false;
     showDropMongoCollectionConfirm.value = true;
+  }
+
+  function clearMongoCollection() {
+    if (!canClearMongoCollection.value) return;
+    clearMongoCollectionLoading.value = false;
+    showClearMongoCollectionConfirm.value = true;
   }
 
   function dropMilvusCollection() {
@@ -979,7 +990,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
         },
       });
     } catch (error: unknown) {
-      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
+      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), { persistent: true });
       return;
     } finally {
       clearElasticsearchIndexLoading.value = false;
@@ -988,7 +999,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     if (executed === undefined) return;
     const result = executed.result;
     if (isPartialElasticsearchClear(result)) {
-      toast(t("contextMenu.elasticsearchClearIndexPartial", { index, deleted: result.deleted, total: result.total }), 6000);
+      toast(t("contextMenu.elasticsearchClearIndexPartial", { index, deleted: result.deleted, total: result.total }), { persistent: true });
     } else {
       toast(t("contextMenu.elasticsearchClearIndexDone", { index, deleted: result.deleted }), 3000);
     }
@@ -1012,7 +1023,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       const normalizedAlias = alias?.trim();
       toast(normalizedAlias ? t("redis.databaseAliasSaved", { db: node.database, alias: normalizedAlias }) : t("redis.databaseAliasCleared", { db: node.database }), 3000);
     } catch (error: any) {
-      toast(t("connection.saveFailed", { message: error?.message || String(error) }), 5000);
+      toast(t("connection.saveFailed", { message: error?.message || String(error) }), { persistent: true });
     } finally {
       redisDatabaseAliasSaving.value = false;
     }
@@ -1041,7 +1052,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       );
       toast(t("redis.flushDbSuccess", { db: node.database }), 3000);
     } catch (error: any) {
-      toast(t("contextMenu.tableOperationFailed", { message: error?.message || String(error) }), 5000);
+      toast(t("contextMenu.tableOperationFailed", { message: error?.message || String(error) }), { persistent: true });
     }
   }
 
@@ -1088,6 +1099,43 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
           await connectionStore.loadMongoDatabases(connectionId);
           await connectionStore.loadMongoCollections(connectionId, database);
         });
+      },
+      onError: toastMutationError,
+    });
+  }
+
+  async function confirmClearMongoCollection() {
+    const node = sidebarDangerTarget.value ?? activeNode.value;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    if (!canMutateMongoCollectionNode(node) || mongoCollectionKindFromNode(node) !== "collection" || !connectionId || !database) return;
+    const collectionName = node.label;
+    await runMongoSidebarMutation({
+      connection: connectionStore.getConfig(connectionId),
+      database,
+      reviewText: mongoClearCollectionPreview(database, collectionName),
+      source: t("production.sourceSidebar"),
+      loading: clearMongoCollectionLoading,
+      beforeExecute: () => connectionStore.ensureConnected(connectionId),
+      execute: () => api.mongoDeleteDocuments(connectionId, database, collectionName, "{}", true),
+      onSuccess: async () => {
+        toast(t("contextMenu.clearCollectionSuccess", { name: collectionName }), 3000);
+        showClearMongoCollectionConfirm.value = false;
+        try {
+          await connectionStore.loadMongoCollections(connectionId, database);
+        } catch (error) {
+          toast(t("contextMenu.objectDropRefreshFailed", { message: translateBackendError(t, errorMessage(error)) }), { persistent: true });
+        }
+        try {
+          await options.refreshDataTabsForTable?.({
+            connectionId,
+            database,
+            schemaCandidates: [undefined, database],
+            name: collectionName,
+          });
+        } catch (error) {
+          toast(t("contextMenu.objectDropRefreshFailed", { message: translateBackendError(t, errorMessage(error)) }), { persistent: true });
+        }
       },
       onError: toastMutationError,
     });
@@ -1146,7 +1194,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       await refresh();
     } catch (error) {
       connectionStore.removeTreeNode(node.id);
-      toast(t("contextMenu.objectDropRefreshFailed", { message: translateBackendError(t, errorMessage(error)) }), 5000);
+      toast(t("contextMenu.objectDropRefreshFailed", { message: translateBackendError(t, errorMessage(error)) }), { persistent: true });
     }
   }
 
@@ -1159,7 +1207,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
         collection: node.tableName || node.label,
       });
     } catch (error) {
-      toast(t("contextMenu.mongoIndexRefreshFailed", { message: translateBackendError(t, errorMessage(error)) }), 5000);
+      toast(t("contextMenu.mongoIndexRefreshFailed", { message: translateBackendError(t, errorMessage(error)) }), { persistent: true });
     }
   }
 
@@ -1187,7 +1235,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       onSuccess: (result) => {
         const failed = mongoDropIndexFailureCount(result);
         if (failed > 0) {
-          toast(t("contextMenu.dropIndexesPartialFailure", { success: result.dropped_names.length, failed }), 5000);
+          toast(t("contextMenu.dropIndexesPartialFailure", { success: result.dropped_names.length, failed }), { persistent: true });
         } else {
           toast(t("contextMenu.dropTableChildObjectSuccess", { name: indexName }), 3000);
         }
@@ -1220,7 +1268,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       onSuccess: (result) => {
         const failed = mongoDropIndexFailureCount(result);
         if (failed > 0) {
-          toast(t("contextMenu.dropIndexesPartialFailure", { success: result.dropped_names.length, failed }), 5000);
+          toast(t("contextMenu.dropIndexesPartialFailure", { success: result.dropped_names.length, failed }), { persistent: true });
         } else {
           toast(t("contextMenu.dropAllIndexesSuccess", { count: result.dropped_names.length, name: collectionName }), 3000);
         }
@@ -1234,6 +1282,9 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     canDropMongoDatabase,
     canDropMilvusDatabase,
     canDropMongoCollection,
+    canClearMongoCollection,
+    clearMongoCollection,
+    confirmClearMongoCollection,
     canDropMilvusCollection,
     canRenameMongoCollection,
     canCloneMongoCollection,

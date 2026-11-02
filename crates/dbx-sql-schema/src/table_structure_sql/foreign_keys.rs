@@ -100,7 +100,7 @@ fn has_foreign_key_change(foreign_key: &EditableStructureForeignKey, original: &
 fn drop_foreign_key_sql(dialect: StructureDialect, table: &str, name: &str) -> String {
     match dialect {
         StructureDialect::Mysql => format!("ALTER TABLE {table} DROP FOREIGN KEY {};", quote_ident(dialect, name)),
-        StructureDialect::Postgres | StructureDialect::Oracle => {
+        StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::SqlServer => {
             format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, name))
         }
         _ => unreachable!("foreign key SQL requested for unsupported dialect"),
@@ -170,6 +170,9 @@ fn action_clause(dialect: StructureDialect, prefix: &str, value: &str, warnings:
     let action = normalize_action(value);
     if action.is_empty() {
         return None;
+    }
+    if dialect == StructureDialect::SqlServer && action == "RESTRICT" {
+        return Some(format!("{prefix} NO ACTION"));
     }
     if dialect == StructureDialect::Oracle {
         if prefix == "ON UPDATE" {

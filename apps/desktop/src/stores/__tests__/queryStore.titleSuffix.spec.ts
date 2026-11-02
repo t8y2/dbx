@@ -1,5 +1,6 @@
-import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createPinia, disposePinia, setActivePinia, type Pinia } from "pinia";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { nextTick } from "vue";
 import { TAB_TITLE_SUFFIX_MAX_LENGTH } from "@/lib/tabs/tabPresentation";
 
 const mocks = vi.hoisted(() => ({
@@ -12,20 +13,31 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
 }));
 
 describe("queryStore tab title suffix", () => {
+  let pinia: Pinia;
+
   beforeEach(() => {
     vi.resetModules();
-    vi.unstubAllGlobals();
-    vi.useRealTimers();
+    vi.useFakeTimers();
     mocks.saveOpenTabsState.mockReset();
     mocks.saveOpenTabsState.mockResolvedValue(undefined);
     vi.stubGlobal("localStorage", { getItem: vi.fn(() => null), setItem: vi.fn(), removeItem: vi.fn() });
-    setActivePinia(createPinia());
+    pinia = createPinia();
+    setActivePinia(pinia);
+  });
+
+  afterEach(() => {
+    // Dispose watchers before restoring the clock so saves cannot leak into the next test.
+    disposePinia(pinia);
+    setActivePinia(undefined);
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   async function createStoreWithDataTab() {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
-    const id = store.createTab("pg-1", "app", "users", "data", "public");
+    const id = store.createTab("pg-1", "app", "scratch", "query");
     return { store, id };
   }
 
@@ -65,13 +77,14 @@ describe("queryStore tab title suffix", () => {
   });
 
   it("persists a suffix change on the debounced save", async () => {
-    vi.useFakeTimers();
     const { store, id } = await createStoreWithDataTab();
     // Let the creation-time save settle so only the suffix change is observed.
+    await nextTick();
     await vi.advanceTimersByTimeAsync(400);
     mocks.saveOpenTabsState.mockClear();
 
     store.setTabTitleSuffix(id, "待办");
+    await nextTick();
     await vi.advanceTimersByTimeAsync(400);
 
     expect(mocks.saveOpenTabsState).toHaveBeenCalled();
@@ -92,5 +105,22 @@ describe("queryStore tab title suffix", () => {
 
     store.setTabTitleSuffix(second, "");
     expect(numberOf(second)).toBe(2);
+  });
+
+  it("does not number or alter a data tab when a query tab is renamed to match its name", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const dataTab = store.createTab("pg-1", "app", "users", "data", "public", undefined, undefined, { forceNew: true });
+    const queryTab = store.createTab("pg-1", "app", "scratch", "query", undefined, undefined, undefined, { forceNew: true });
+
+    const dataTabInstance = store.tabs.find((t) => t.id === dataTab)!;
+    expect(dataTabInstance.titleNumber).toBeUndefined();
+
+    store.renameTab(queryTab, dataTabInstance.title);
+    await nextTick();
+
+    const queryTabInstance = store.tabs.find((t) => t.id === queryTab)!;
+    expect(dataTabInstance.titleNumber).toBeUndefined();
+    expect(queryTabInstance.titleNumber).toBeUndefined();
   });
 });

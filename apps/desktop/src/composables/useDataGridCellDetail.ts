@@ -6,7 +6,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { renderWktOnCanvas } from "@/lib/dataGrid/geometryPreview";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 
-export function useDataGridCellDetail(options: { detail: Ref<DataGridCellDetail>; editValue: Ref<string>; onCancel: () => void; onSave?: () => void }) {
+export function useDataGridCellDetail(options: { detail: Ref<DataGridCellDetail>; editValue: Ref<string>; onCancel: () => void; onClose?: () => void; onSave?: () => void }) {
   const settingsStore = useSettingsStore();
   const { isDark, themePalette } = useTheme();
   const geometryPreviewOpen = ref(false);
@@ -66,7 +66,7 @@ export function useDataGridCellDetail(options: { detail: Ref<DataGridCellDetail>
 
   watch(sideJsonPreviewContainer, async (element) => {
     if (element && !sideJsonEditor) {
-      const editor = useCellDetailEditor({ language: "json", readOnly: true, ...editorOptions() });
+      const editor = useCellDetailEditor({ language: "json", readOnly: true, onEscape: options.onClose, ...editorOptions() });
       sideJsonEditor = editor;
       await editor.create(element, options.detail.value.formattedJson ?? "", "json");
       if (sideJsonEditor === editor) {

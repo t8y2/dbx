@@ -37,7 +37,9 @@ export function useDataGridAutoRefresh(options: UseDataGridAutoRefreshOptions) {
 
   function setIntervalSeconds(seconds: number) {
     intervalSeconds.value = seconds;
-    if (enabled.value) start();
+    // Selecting an interval also starts auto-refresh, including after a stop.
+    enabled.value = true;
+    start();
   }
 
   function toggle() {

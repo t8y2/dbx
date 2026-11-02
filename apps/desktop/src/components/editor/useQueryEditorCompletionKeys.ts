@@ -181,11 +181,13 @@ export function useQueryEditorCompletionKeys(options: QueryEditorCompletionKeysO
     // A non-empty selection belongs to block editing, not word completion.
     if (!view.state.selection.main.empty) return false;
     const selected = codeMirrorRuntime.codeMirrorSelectedCompletion?.(view.state) as QueryCompletionOption | null | undefined;
-    const completionType = selected?.type;
+    const target = selected ?? getTargetCompletion(view);
+    const completionType = target?.type;
     if (completionType !== "keyword" && completionType !== "table" && completionType !== "column") return false;
     // Batch-selection rows own Space for checkbox toggling; this Prec.highest binding outranks their keymap.
-    if (selected?.dbxBatchColumnSelection || selected?.dbxBatchColumnSelectionAction) return false;
-    if (!(codeMirrorRuntime.codeMirrorAcceptCompletion?.(view) ?? false)) return false;
+    if (target?.dbxBatchColumnSelection || target?.dbxBatchColumnSelectionAction) return false;
+    const accepted = selected ? (codeMirrorRuntime.codeMirrorAcceptCompletion?.(view) ?? false) : acceptSelectedOrFirstCompletion(view, codeMirrorRuntime.codeMirrorAcceptCompletion, codeMirrorRuntime.codeMirrorSelectedCompletionIndex, codeMirrorRuntime.codeMirrorSelectFirstCompletion);
+    if (!accepted) return false;
 
     const selection = view.state.selection.main;
     if (!selection.empty) return true;

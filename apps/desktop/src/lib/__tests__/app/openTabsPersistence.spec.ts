@@ -21,6 +21,25 @@ function roundTrip(tabs: QueryTab[]) {
 }
 
 describe("openTabsPersistence originalSql round-trip", () => {
+  it("preserves retained result source connections independently of the editor connection", () => {
+    const base = { title: "Result", sequence: 1, sql: "SELECT 1", createdAt: 1 };
+    const [restored] = roundTrip([
+      queryTab({
+        connectionId: "editor",
+        resultRuns: [
+          { ...base, id: "ordinary", connectionId: "test" },
+          { ...base, id: "multi", connectionId: "editor", multiDbExecution: { kind: "multi-db", batchId: "batch", target: { connectionId: "production", database: "app" }, status: "success" } },
+          { ...base, id: "legacy" },
+          { ...base, id: "explicit-undefined", connectionId: undefined },
+        ],
+      }),
+    ]);
+    expect(restored.connectionId).toBe("editor");
+    expect(restored.resultRuns?.map((run) => run.connectionId)).toEqual(["test", "production", undefined, undefined]);
+    expect(restored.resultRuns?.[2]).not.toHaveProperty("connectionId");
+    expect(restored.resultRuns?.[3]).not.toHaveProperty("connectionId");
+  });
+
   it("preserves per-tab output view state across a round-trip", () => {
     const [restored] = roundTrip([queryTab({ uiState: { activeOutputView: "chart", redisResultViewMode: "console", resultPaneOpen: false } })]);
 
@@ -377,6 +396,22 @@ describe("openTabsPersistence detached connection tabs", () => {
 
     // SQL 页签不受 validConnectionIds 过滤，删除连接后保留下来的草稿页签才能跨重启存活。
     expect(tabs.map((tab) => tab.id)).toEqual(["orphan"]);
+    expect(tabs[0].detachedConnectionName).toBe("prod");
+  });
+
+  it("keeps a detached data/structure tab even though its connection no longer exists", () => {
+    // keep-all-tabs 会连同非 SQL 页签一起保留，它们带着 detachedConnectionName 等新建同名连接重绑；
+    // 若恢复阶段按 validConnectionIds 丢掉，重启后 keep-all-tabs 就形同虚设。
+    const saved = serializeOpenTabs([
+      queryTab({ id: "orphan-data", connectionId: "deleted-conn", database: "app", title: "users", mode: "data", detachedConnectionName: "prod" }),
+      queryTab({ id: "orphan-structure", connectionId: "deleted-conn", database: "app", title: "users 结构", mode: "structure", detachedConnectionName: "prod" }),
+      // 没有脱离标记的非 SQL 页签仍然要按连接有效性过滤掉。
+      queryTab({ id: "stray-data", connectionId: "deleted-conn", database: "app", title: "orders", mode: "data" }),
+    ]);
+
+    const { tabs } = restoreOpenTabsPayload({ tabs: saved, activeTabId: "orphan-data" }, { validConnectionIds: ["other-conn"] });
+
+    expect(tabs.map((tab) => tab.id)).toEqual(["orphan-data", "orphan-structure"]);
     expect(tabs[0].detachedConnectionName).toBe("prod");
   });
 

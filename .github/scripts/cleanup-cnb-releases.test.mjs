@@ -17,18 +17,11 @@ const appReleases = [
 ];
 
 test("retention only removes old releases from the selected family", () => {
-  const plan = planReleaseRetention(
-    [
-      release("agents-latest", "agents-latest", "2026-01-01T00:00:00Z"),
-      release("agent", "agents-v0.2.67", "2026-07-29T05:35:19Z"),
-      ...appReleases.toReversed(),
-    ],
-    {
-      currentTag: "v0.5.69",
-      tagPattern: "^v[0-9]+[.][0-9]+[.][0-9]+$",
-      retain: 5,
-    },
-  );
+  const plan = planReleaseRetention([release("agents-latest", "agents-latest", "2026-01-01T00:00:00Z"), release("agent", "agents-v0.2.67", "2026-07-29T05:35:19Z"), ...appReleases.toReversed()], {
+    currentTag: "v0.5.69",
+    tagPattern: "^v[0-9]+[.][0-9]+[.][0-9]+$",
+    retain: 5,
+  });
 
   assert.equal(plan.skipped, "");
   assert.deepEqual(

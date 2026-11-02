@@ -72,7 +72,7 @@ async function mountDialogs() {
 }
 
 describe("useDialogSources", () => {
-  it("runs the final import confirmation as a single flight", async () => {
+  it.each(["dbx", "rdm", "another-redis"] as const)("runs the final %s import confirmation as a single flight", async (source) => {
     let resolveApply!: (value: { count: number }) => void;
     const applyPromise = new Promise<{ count: number }>((resolve) => {
       resolveApply = resolve;
@@ -82,7 +82,9 @@ describe("useDialogSources", () => {
     mocks.store.applyConnectionsImport.mockReturnValue(applyPromise);
 
     const dialogs = await mountDialogs();
-    await dialogs.onImportClick("dbx");
+    await dialogs.onImportClick(source);
+    expect(mocks.store.readImportFile).toHaveBeenCalledWith(source);
+    expect(mocks.store.applyConnectionsImport).not.toHaveBeenCalled();
     dialogs.onConfigConnectionSelectConfirm(["imported"]);
     dialogs.onConfigConnectionSelectConfirm(["imported"]);
 

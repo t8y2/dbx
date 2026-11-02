@@ -7,7 +7,7 @@ import "./sqlEditorWorkspace.css";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { createGroupTabBarPortal, GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
-import { hasQueryOutput } from "@/lib/query/queryOutput";
+import { hasFocusableQueryResult, hasQueryOutput } from "@/lib/query/queryOutput";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { beginPanelResize, endPanelResize } from "@/lib/app/panelResizeState";
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,7 @@ import { createContentSurfaceEventForwarders } from "@/lib/tabs/contentSurfaceEv
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, StatementRange } from "./querySurfaces";
 import type { QueryTab, TableInfoTab } from "@/types/database";
 import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import { isObjectDependencySection } from "@/lib/database/objectDependencyDetails";
 
 defineOptions({ inheritAttrs: false });
 
@@ -46,21 +47,21 @@ const workspaceClass = computed(() => (typeof attrs.class === "string" ? attrs.c
 const surfaceProps = computed(() => ({
   activeTab: props.activeTab,
   activeConnection: props.activeConnection,
-  executableSql: props.executableSql,
+  hasExecutableSql: props.hasExecutableSql,
   activeOutputView: props.activeOutputView,
   formatSqlRequest: props.formatSqlRequest,
   compressSqlRequest: props.compressSqlRequest,
   keywordCaseRequest: props.keywordCaseRequest,
-  selectedSql: props.selectedSql,
-  cursorPos: props.cursorPos,
   blockDangerousRedisCommands: props.blockDangerousRedisCommands,
   zenMode: props.zenMode,
 }));
 const contentEmits = createContentSurfaceEventForwarders(emit);
 const editorGroupBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits }));
-const resultSurfaceBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits, activeTab: activeTab.value! }));
+const resultSurfaceBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits, activeTab: activeQueryTab.value! }));
 
 defineExpose({
+  focusResultGrid,
+  focusSqlEditor,
   focusSearch: (target: Element | null = null) => {
     const element = commandTargetElement(target);
     // The shared result pane (and its Teleported cell-detail dialog) lives
@@ -75,6 +76,9 @@ defineExpose({
   },
   focusWhere: () => activeEditorGroup()?.focusWhere() ?? false,
   openGoToColumn: () => activeEditorGroup()?.openGoToColumn() ?? false,
+  openConnectionPicker: () => activeEditorGroup()?.openConnectionPicker() ?? false,
+  openDatabasePicker: () => activeEditorGroup()?.openDatabasePicker() ?? false,
+  openSchemaPicker: () => activeEditorGroup()?.openSchemaPicker() ?? false,
   openTableStructureEditor: (initialTab?: TableInfoTab) => activeEditorGroup()?.openTableStructureEditor?.(initialTab) ?? false,
   refreshData: (target: Element | null = null) => {
     const element = commandTargetElement(target);
@@ -99,6 +103,7 @@ defineExpose({
     return group?.handleModRTarget(target) ?? false;
   },
   requestQueryEditorExecute: (tabId?: string) => editorGroupForTab(tabId)?.requestQueryEditorExecute() ?? false,
+  requestQueryEditorExecuteAll: (tabId?: string) => editorGroupForTab(tabId)?.requestQueryEditorExecuteAll() ?? false,
   captureQueryEditorExecutionSnapshot: (tabId?: string) => editorGroupForTab(tabId)?.captureQueryEditorExecutionSnapshot(),
   requestQueryEditorExecuteInNewResultTab: (tabId?: string) => editorGroupForTab(tabId)?.requestQueryEditorExecuteInNewResultTab() ?? false,
   requestQueryEditorPreviewChanges: (stackSql?: string) => activeEditorGroup()?.requestQueryEditorPreviewChanges(stackSql) ?? false,
@@ -141,9 +146,9 @@ function setTabBarTarget(groupId: string, element: unknown) {
   if (element instanceof HTMLElement) workspaceTabBarPortal.targets.set(groupId, element);
   else workspaceTabBarPortal.targets.delete(groupId);
 }
-const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
-const showSharedResult = computed(() => activeTab.value?.mode === "query");
-const hasSharedOutput = computed(() => showSharedResult.value && hasQueryOutput(activeTab.value));
+const activeQueryTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
+const showSharedResult = computed(() => activeQueryTab.value?.mode === "query");
+const hasSharedOutput = computed(() => showSharedResult.value && hasQueryOutput(activeQueryTab.value));
 
 const SHARED_RESULT_PANE_MIN_SIZE = 12;
 const SHARED_RESULT_PANE_MAX_SIZE = 80;
@@ -152,13 +157,13 @@ const SHARED_RESULT_PANE_STORAGE_KEY = "dbx-shared-results-pane-size";
 const storedResultPaneSize = Number(safeLocalStorageGet(SHARED_RESULT_PANE_STORAGE_KEY));
 const resultPaneSize = ref(Number.isFinite(storedResultPaneSize) && storedResultPaneSize >= SHARED_RESULT_PANE_MIN_SIZE && storedResultPaneSize <= SHARED_RESULT_PANE_MAX_SIZE ? storedResultPaneSize : SHARED_RESULT_PANE_DEFAULT_SIZE);
 const showResultPane = computed({
-  get: () => activeTab.value?.uiState?.resultPaneOpen ?? true,
+  get: () => activeQueryTab.value?.uiState?.resultPaneOpen ?? true,
   set: (open: boolean) => {
-    const tab = activeTab.value;
+    const tab = activeQueryTab.value;
     if (tab?.mode === "query") queryStore.updateTabUiState(tab.id, { resultPaneOpen: open });
   },
 });
-const isResultPaneVisible = computed(() => hasSharedOutput.value && showResultPane.value);
+const isResultPaneVisible = computed(() => hasSharedOutput.value && showResultPane.value && !isObjectDependencySection(activeQueryTab.value!));
 // Keep the pane mounted, but apply its target size immediately so available
 // results never wait for an expansion animation before becoming visible.
 const resultPaneTargetSize = computed(() => (isResultPaneVisible.value ? resultPaneSize.value : 0));
@@ -180,11 +185,33 @@ function toggleSharedResultsPane(): boolean {
   return true;
 }
 
+let focusRequest = 0;
+function focusResultGrid(): boolean {
+  const tab = activeQueryTab.value;
+  if (props.contentSuppressed || !tab || !hasFocusableQueryResult(tab) || isObjectDependencySection(tab)) return false;
+  const request = ++focusRequest;
+  const result = tab.result;
+  showResultPane.value = true;
+  void nextTick(() => {
+    if (request === focusRequest && activeQueryTab.value?.id === tab.id && activeQueryTab.value.result === result && isResultPaneVisible.value) {
+      resultSurfaceRef.value?.focusResultGrid();
+    }
+  });
+  return true;
+}
+
+function focusSqlEditor(): boolean {
+  if (props.contentSuppressed) return false;
+  ++focusRequest;
+  resultSurfaceRef.value?.cancelResultGridFocus();
+  return activeEditorGroup()?.focusSqlEditor() ?? false;
+}
+
 // Restores the pre-split "running a query re-expands the results pane"
 // behavior (see issue #6193): a collapsed shared pane comes back when the
 // active tab starts executing.
 watch(
-  () => [activeTab.value?.id, activeTab.value?.isExecuting, activeTab.value?.isExplaining] as const,
+  () => [activeQueryTab.value?.id, activeQueryTab.value?.isExecuting, activeQueryTab.value?.isExplaining] as const,
   ([, isExecuting, isExplaining]) => {
     if (isExecuting || isExplaining) showResultPane.value = true;
   },

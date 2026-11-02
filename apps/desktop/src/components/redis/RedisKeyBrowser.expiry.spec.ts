@@ -292,13 +292,14 @@ vi.mock("@/components/editor/DangerConfirmDialog.vue", async () => {
   const { defineComponent, h } = await import("vue");
   return {
     default: defineComponent({
-      props: { open: Boolean, loading: Boolean, details: String },
+      props: { open: Boolean, loading: Boolean, details: String, detailsText: String, sql: String },
       emits: ["confirm"],
       setup(props, { emit }) {
         return () =>
           props.open
             ? h("div", { "data-test-danger-dialog": "" }, [
-                h("div", { "data-test-danger-details": "" }, props.details),
+                h("div", { "data-test-danger-details": "" }, props.detailsText ?? props.details),
+                h("div", { "data-test-danger-sql": "" }, props.sql),
                 h(
                   "button",
                   {
@@ -1347,7 +1348,7 @@ describe("RedisKeyBrowser expiry creation", () => {
     await submitCreate();
 
     expectWriterBefore(mocks.redisSetString, mocks.redisSetTtl);
-    expect(mocks.redisGetValue).toHaveBeenCalledWith("connection", 0, KEY_RAW);
+    expect(mocks.redisGetValue).toHaveBeenCalledWith("connection", 0, KEY_RAW, 65536);
     expect(mocks.redisDeleteKey).not.toHaveBeenCalled();
     expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
     expect(mocks.toast).toHaveBeenCalledWith("TTL command failed", 5000);
@@ -1600,6 +1601,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
 
     expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
     expect(requiredElement<HTMLElement>("[data-test-danger-details]").textContent).toContain("session:current");
+    expect(requiredElement<HTMLElement>("[data-test-danger-sql]").textContent).toBe("DEL session:current");
     requiredElement<HTMLButtonElement>("[data-test-danger-confirm]").click();
     await settle();
 
@@ -1625,6 +1627,9 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
 
     expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
     expect(requiredElement<HTMLElement>("[data-test-danger-details]").textContent).toContain("MCP");
+    expect(requiredElement<HTMLElement>("[data-test-danger-sql]").textContent).toContain("python3");
+    expect(requiredElement<HTMLElement>("[data-test-danger-sql]").textContent).toContain("SCAN COUNT 500");
+    expect(requiredElement<HTMLElement>("[data-test-danger-sql]").textContent).toContain("MCP:*");
     requiredElement<HTMLButtonElement>("[data-test-danger-confirm]").click();
     await settle();
 
@@ -1638,7 +1643,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     expect(mocks.toast).toHaveBeenCalledWith("deleted 3001", 3000);
   });
 
-  it("preserves the cursor and finds a sparse fuzzy match after a bounded continuation", async () => {
+  it("finds a sparse fuzzy match within the keyspace-aware budget without manual load-more (#12412)", async () => {
     mocks.redisScanPageSize = 1_000;
     mountBrowser();
     await settle();
@@ -1654,15 +1659,17 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
       return Promise.resolve({ cursor: batch * 100, keys: [], total_keys: batch === 1 ? 200_000 : 0 });
     });
 
+    // DBSIZE 200k → 200 SCAN iterations of keyspace-aware budget: the
+    // automatic first page keeps scanning (8 backend calls) until the sparse
+    // match at iteration 64 instead of stopping after the old 50-iteration
+    // shared-budget slice (7 calls), so the match surfaces without a manual
+    // load-more click (#12412).
     await submitKeySearch("issue5012:target");
-    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(7));
-    await settle();
-    expect(document.body.textContent).not.toContain("target");
-    expect(document.body.textContent).toContain("redis.noKeysInScanHint");
-
-    clickButtonWithText("redis.loadMoreKeys");
     await vi.waitFor(() => expect(groupRowOrUndefined("issue5012")).toBeDefined());
-    expect(Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).map((element) => element.textContent)).not.toContain("target");
+    await settle();
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(8);
+    expect(document.body.textContent).not.toContain("target");
+
     groupRow("issue5012").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     await settle();
     await vi.waitFor(() => {
@@ -1670,7 +1677,14 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
       expect(labels).toContain("target");
     });
 
-    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(8);
+    // The cursor handed back with the matching page is preserved: the manual
+    // continuation resumes from cursor 801 and scans its own keyspace-aware
+    // page (200 iterations = 25 backend calls) past the end of the mock.
+    clickButtonWithText("redis.fetchMoreKeys");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(33));
+    await settle();
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(33);
+    expect(mocks.redisScanKeysBatch.mock.calls[8]?.[2]).toBe(801);
     expect(mocks.redisScanKeysBatch.mock.calls.every((call) => call[3] === "*issue5012:target*")).toBe(true);
   });
 
@@ -1688,20 +1702,27 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
       return Promise.resolve({ cursor: batch, keys: [], total_keys: batch === 1 ? 5_000_000 : 0 });
     });
 
+    // DBSIZE 5M → keyspace-aware budget = 1M COUNT = 1000 SCAN iterations, so
+    // the automatic first page spends up to 1000 iterations (125 backend calls
+    // at 8 iterations each) instead of the old shared 50-iteration slice (7
+    // calls), then stops with the cursor saved (#12412).
     await submitKeySearch("missing-key");
-    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(7));
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(125));
     await settle();
 
-    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(7);
-    expect(mocks.redisScanKeysBatch.mock.calls[mocks.redisScanKeysBatch.mock.calls.length - 1]?.[2]).toBe(6);
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(125);
+    expect(mocks.redisScanKeysBatch.mock.calls[124]?.[2]).toBe(124);
     expect(document.body.textContent).toContain("redis.noKeysInScanHint");
-    expect(Array.from(document.querySelectorAll("button")).some((button) => button.textContent?.includes("redis.loadMoreKeys"))).toBe(true);
+    expect(Array.from(document.querySelectorAll("button")).some((button) => button.textContent?.includes("redis.fetchMoreKeys"))).toBe(true);
 
-    clickButtonWithText("redis.loadMoreKeys");
-    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(14));
+    // The manual continuation resumes from the saved cursor with the same
+    // keyspace-aware per-page budget (another 1000 iterations) instead of
+    // falling back to the old 50k COUNT floor.
+    clickButtonWithText("redis.fetchMoreKeys");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(250));
 
-    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(14);
-    expect(mocks.redisScanKeysBatch.mock.calls[7]?.[2]).toBe(7);
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(250);
+    expect(mocks.redisScanKeysBatch.mock.calls[125]?.[2]).toBe(125);
     expect(document.body.textContent).toContain("redis.noKeysInScanHint");
   });
 
@@ -1731,12 +1752,11 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     await vi.waitFor(() => expect(document.body.textContent).toContain("first"));
     expect(requiredElement<HTMLElement>(".redis-key-count").textContent).toBe("1+ keys");
 
-    clickButtonWithText("redis.loadMoreKeys");
-    await vi.waitFor(() => expect(continuationBatch).toBe(7));
-    expect(document.body.textContent).toContain("first");
-    expect(document.body.textContent).not.toContain("next");
-
-    clickButtonWithText("redis.loadMoreKeys");
+    // One continuation click now scans the keyspace-aware budget (200k keys →
+    // 200 iterations) and reaches the next sparse match while keeping the
+    // already found key; previously the same click was cut off at the old
+    // 50-iteration slice just short of the match and needed a second click (#12412).
+    clickButtonWithText("redis.fetchMoreKeys");
     await vi.waitFor(() => expect(document.body.textContent).toContain("next"));
 
     expect(continuationBatch).toBe(8);
@@ -1817,13 +1837,13 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
 
     await submitKeySearch("old");
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 0 && call[3] === "*old*")).toHaveLength(1));
-    clickButtonWithText("redis.loadMoreKeys");
+    clickButtonWithText("redis.fetchMoreKeys");
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.some((call) => call[2] === 11)).toBe(true));
 
     await submitKeySearch("new");
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 0 && call[3] === "*new*")).toHaveLength(1));
     const firstCurrentLoadMore = await vi.waitFor(() => {
-      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((candidate) => candidate.textContent?.includes("redis.loadMoreKeys"));
+      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((candidate) => candidate.textContent?.includes("redis.fetchMoreKeys"));
       const button = buttons.find((candidate) => !candidate.disabled);
       expect(button).toBeDefined();
       return button!;
@@ -1831,7 +1851,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     firstCurrentLoadMore.click();
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 21)).toHaveLength(1));
     const secondCurrentLoadMore = await vi.waitFor(() => {
-      const button = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((candidate) => candidate.textContent?.includes("redis.loadMoreKeys") && !candidate.disabled);
+      const button = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((candidate) => candidate.textContent?.includes("redis.fetchMoreKeys") && !candidate.disabled);
       expect(button).toBeDefined();
       return button!;
     });
@@ -1841,7 +1861,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     oldContinuation.resolve({ cursor: 12, keys: [], total_keys: 0 });
     await settle();
 
-    const loadMoreButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((button) => button.textContent?.includes("redis.loadMoreKeys"));
+    const loadMoreButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((button) => button.textContent?.includes("redis.fetchMoreKeys"));
     expect(loadMoreButtons.length).toBeGreaterThan(0);
     expect(loadMoreButtons.every((button) => button.disabled)).toBe(true);
     loadMoreButtons[0]!.click();
@@ -1849,7 +1869,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 22)).toHaveLength(1);
 
     currentContinuation.resolve({ cursor: 0, keys: [currentLastPage], total_keys: 0 });
-    await vi.waitFor(() => expect(Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((button) => button.textContent?.includes("redis.loadMoreKeys"))).toHaveLength(0));
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((button) => button.textContent?.includes("redis.fetchMoreKeys"))).toHaveLength(0));
     const labels = Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).map((element) => element.textContent);
     expect(labels).toContain("new");
     expect(labels).not.toContain("old");
@@ -2020,7 +2040,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     await settle();
 
     await selectGroup("user");
-    clickButtonWithText("redis.loadMoreKeys");
+    clickButtonWithText("redis.fetchMoreKeys");
     await settle();
 
     const updatedUserCheckbox = groupCheckbox("user");
@@ -2213,8 +2233,12 @@ describe("RedisKeyBrowser interrupted Fetch All", () => {
     await submitKeySearch("group:second");
 
     expect(document.querySelector(`[data-redis-leaf="${buffered.key_raw}"]`)).not.toBeNull();
+    // The first footer click continues from the current cursor, so the sweep
+    // costs the same round trip as before.
     expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(2);
-    expect(document.body.textContent).not.toContain("redis.fetchAllKeys");
+    // The sweep completed, so the action bar keeps offering the full reload
+    // instead of disappearing together with the exhausted button.
+    expect(document.body.textContent).toContain("redis.refetchAllKeys");
   });
 
   it("filters a completed Fetch All snapshot while editing a key search", async () => {
@@ -2633,7 +2657,7 @@ describe("RedisKeyBrowser interrupted Fetch All", () => {
     mountBrowser();
     await settle();
 
-    expect(document.body.textContent).toContain("redis.loadMoreKeys");
+    expect(document.body.textContent).toContain("redis.fetchMoreKeys");
     const keyPane = requiredElement<HTMLElement>(".redis-key-pane");
     keyPane.focus();
     keyPane.dispatchEvent(new KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true, cancelable: true }));
@@ -2869,7 +2893,7 @@ describe("RedisKeyBrowser connection default key scope", () => {
     await submitKeySearch("*pending*");
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(7));
     await vi.waitFor(() => expect(requiredElement<HTMLElement>(".redis-key-count").textContent).toBe("0+ keys"));
-    clickButtonWithText("redis.loadMoreKeys");
+    clickButtonWithText("redis.fetchMoreKeys");
     await vi.waitFor(() => expect(requiredElement<HTMLElement>(".redis-key-count").textContent).toBe("1 keys"));
     expect(mocks.redisScanKeysBatch.mock.calls[7]?.[2]).toBe(7);
     expect(document.querySelector(`[data-redis-leaf="${outside.key_raw}"]`)).toBeNull();

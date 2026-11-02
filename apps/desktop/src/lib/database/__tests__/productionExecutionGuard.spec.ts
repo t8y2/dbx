@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from "../productionExecutionGuard";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
+import { useReadOnlyUnlockStore } from "@/stores/readOnlyUnlockStore";
 import type { ConnectionConfig } from "@/types/database";
 
 function connection(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
@@ -46,6 +47,42 @@ describe("production SQL execution guard", () => {
     store.confirm();
     await expect(pendingExecution).resolves.toBe("done");
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("reviews the entire batch mutation once and executes its callback once", async () => {
+    const batchSql = ['ALTER PROCEDURE "APP"."P1" COMPILE REUSE SETTINGS', 'ALTER PACKAGE "APP"."PKG" COMPILE SPECIFICATION REUSE SETTINGS', 'ALTER PACKAGE "APP"."PKG" COMPILE BODY REUSE SETTINGS'].join(";\n");
+    const execute = vi.fn().mockResolvedValue("completed");
+    const pending = executeWithProductionSqlGuard({
+      connection: connection({ db_type: "oracle", production_databases: ["app"] }),
+      database: "APP",
+      sql: batchSql,
+      source: "Invalid objects batch",
+      execute,
+    });
+
+    await Promise.resolve();
+    expect(useProductionSafetyStore().pending).toMatchObject({ sql: batchSql, database: "APP", source: "Invalid objects batch" });
+    expect(execute).not.toHaveBeenCalled();
+    useProductionSafetyStore().confirm();
+    await expect(pending).resolves.toBe("completed");
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("blocks a batch on a read-only connection until write access is explicitly unlocked", async () => {
+    const execute = vi.fn().mockResolvedValue("completed");
+    const pending = executeWithProductionSqlGuard({
+      connection: connection({ db_type: "oracle", read_only: true }),
+      database: "APP",
+      sql: 'ALTER PROCEDURE "APP"."P1" COMPILE;\nALTER PROCEDURE "APP"."P2" COMPILE',
+      source: "Invalid objects batch",
+      execute,
+    });
+
+    await vi.waitFor(() => expect(useReadOnlyUnlockStore().pending?.connectionId).toBe("conn-1"));
+    expect(execute).not.toHaveBeenCalled();
+    useReadOnlyUnlockStore().cancel();
+    await expect(pending).resolves.toBeUndefined();
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it("cancels production SQL without executing the callback", async () => {
@@ -179,5 +216,54 @@ describe("production context execution guard (non-SQL)", () => {
 
     expect(useProductionSafetyStore().pending).toBeUndefined();
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("connection scope confirms any marked database even when the current schema is unmarked", async () => {
+    const execute = vi.fn().mockResolvedValue("killed");
+    const pending = executeWithProductionContextGuard({
+      connection: connection({ db_type: "oracle", production_databases: ["PROD_A", "PROD_B"] }),
+      database: "scratch",
+      reviewText: "terminate session 42",
+      scope: "connection",
+      execute,
+    });
+    await Promise.resolve();
+    expect(useProductionSafetyStore().pending).toMatchObject({ productionDatabases: ["prod_a", "prod_b"] });
+    useProductionSafetyStore().confirm();
+    await expect(pending).resolves.toBe("killed");
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("connection scope leaves unmarked connections immediate and preserves the default database scope", async () => {
+    const execute = vi.fn().mockResolvedValue("done");
+    await expect(executeWithProductionContextGuard({ connection: connection({ db_type: "oracle", production_databases: [] }), database: "scratch", reviewText: "terminate session", scope: "connection", execute })).resolves.toBe("done");
+    await expect(executeWithProductionContextGuard({ connection: connection({ db_type: "oracle", production_databases: ["prod_a"] }), database: "scratch", reviewText: "legacy action", execute })).resolves.toBe("done");
+    expect(useProductionSafetyStore().pending).toBeUndefined();
+  });
+});
+
+describe("background SQL safety for data compare", () => {
+  beforeEach(() => setActivePinia(createPinia()));
+
+  it("retains production confirmation for a large script referencing another database", async () => {
+    const sql = "/*" + "x".repeat(70_000) + "*/ UPDATE prod_app.users SET active = 1 WHERE id = 1";
+    const execute = vi.fn().mockResolvedValue("done");
+    const pending = executeWithProductionSqlGuard({ connection: connection(), database: "scratch", sql, analyzeInBackground: true, execute });
+    await vi.waitFor(() => expect(useProductionSafetyStore().pending?.sql).toBe(sql));
+    expect(execute).not.toHaveBeenCalled();
+    useProductionSafetyStore().cancel();
+    await expect(pending).resolves.toBeUndefined();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("retains read-only unlocking for a large generated script", async () => {
+    const sql = "/*" + "x".repeat(70_000) + "*/ UPDATE users SET active = 1 WHERE id = 1";
+    const execute = vi.fn();
+    const pending = executeWithProductionSqlGuard({ connection: connection({ read_only: true }), database: "scratch", sql, analyzeInBackground: true, execute });
+    await vi.waitFor(() => expect(useReadOnlyUnlockStore().pending?.connectionId).toBe("conn-1"));
+    expect(execute).not.toHaveBeenCalled();
+    useReadOnlyUnlockStore().cancel();
+    await expect(pending).resolves.toBeUndefined();
+    expect(execute).not.toHaveBeenCalled();
   });
 });

@@ -1,0 +1,117 @@
+name: Daily Beta Release
+
+on:
+  schedule:
+    - cron: "15 2 * * *"
+  workflow_dispatch:
+    inputs:
+      base_version:
+        description: "Stable SemVer base to build (defaults to dbx-web Cargo.toml)"
+        required: false
+        type: string
+      force:
+        description: "Build even when the latest beta or stable release already contains this commit"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-beta-release
+  cancel-in-progress: false
+
+jobs:
+  create-beta:
+    name: Create daily beta tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Create beta draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_WORKFLOW_TOKEN: ${{ secrets.MCP_RELEASE_TOKEN }}
+          REQUESTED_BASE_VERSION: ${{ inputs.base_version }}
+          FORCE_BUILD: ${{ inputs.force }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          stable_tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName // empty' 2>/dev/null || true)"
+          stable_version="${stable_tag#v}"
+          stable_version="${stable_version%%-beta.*}"
+
+          base_version="$REQUESTED_BASE_VERSION"
+          if [[ -z "$base_version" ]]; then
+            base_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dbx-web") | .version')"
+            # A promoted beta becomes the stable release, so the next beta must
+            # build the following patch. Source versions ahead of that (a
+            # minor or major bump) still win.
+            if [[ "$stable_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              next_patch="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
+              base_version="$(printf '%s\n%s\n' "$base_version" "$next_patch" | sort -V | tail -n 1)"
+            fi
+          fi
+          if [[ ! "$base_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Beta base version is not a stable SemVer: $base_version"
+            exit 1
+          fi
+
+          if [[ "$stable_version" == "$base_version" ]]; then
+            echo "Source version $base_version matches stable; publishing a daily beta build from the current source."
+          fi
+
+          # Skip days without new commits: nothing changed since the last
+          # published beta (or the stable release) was built from this source.
+          # Automation commits marked [skip ci] (version sync, plugin version
+          # bumps) do not count as changes.
+          if [[ "$FORCE_BUILD" != "true" && -z "$REQUESTED_BASE_VERSION" ]]; then
+            latest_beta_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft \
+              --jq '.[] | select(.isDraft == false) | .tagName' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]{8}\.[0-9]+$' | sort -V | tail -n 1 || true)"
+            for built_tag in "$latest_beta_tag" "$stable_tag"; do
+              [[ -n "$built_tag" ]] || continue
+              comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${built_tag}...${GITHUB_SHA}" \
+                --jq '[.status, ([.commits[].commit.message | select(contains("[skip ci]") | not)] | length)] | @tsv' 2>/dev/null || true)"
+              read -r compare_status new_commits <<<"$comparison"
+              if [[ "$compare_status" =~ ^(identical|ahead|behind)$ && "${new_commits:-1}" == "0" ]]; then
+                echo "::notice::No new commits since ${built_tag}; skipping the daily beta build."
+                exit 0
+              fi
+            done
+          fi
+
+          date_suffix="$(date -u +%Y%m%d)"
+          sequence=1
+          while :; do
+            tag="v${base_version}-beta.${date_suffix}.${sequence}"
+            if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+              && ! gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >/dev/null 2>&1; then
+              break
+            fi
+            sequence=$((sequence + 1))
+          done
+
+          if [[ -z "$RELEASE_WORKFLOW_TOKEN" ]]; then
+            echo "::error::MCP_RELEASE_TOKEN is required to dispatch the release workflow because GITHUB_TOKEN-created events do not trigger another workflow."
+            exit 1
+          fi
+          # A draft release does not publish its tag. Dispatch requires an
+          # existing ref so every matrix job can check out this exact source.
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/tags/${tag}" -f "sha=${GITHUB_SHA}"
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --title "DBX ${base_version} Beta ${date_suffix}.${sequence}" \
+            --generate-notes
+          GH_TOKEN="$RELEASE_WORKFLOW_TOKEN" gh workflow run release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$tag" \
+            -f release_tag="$tag"
+          echo "Created beta draft release ${tag} and dispatched the Release workflow explicitly."

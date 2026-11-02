@@ -10,81 +10,12 @@ const MAX_QUERY_LENGTH = 480;
 const MAX_CANDIDATES = 3;
 const SEARCH_RESULT_LIMIT = 20;
 
-const ignoredSectionPatterns = [
-  /^来源$/i,
-  /^source$/i,
-  /数据库类型/i,
-  /database type/i,
-  /支持信息/i,
-  /support info/i,
-  /优先级/i,
-  /priority/i,
-  /补充信息/i,
-  /additional context/i,
-  /环境信息/i,
-  /environment/i,
-];
+const ignoredSectionPatterns = [/^来源$/i, /^source$/i, /数据库类型/i, /database type/i, /支持信息/i, /support info/i, /优先级/i, /priority/i, /补充信息/i, /additional context/i, /环境信息/i, /environment/i];
 
-const genericLatinTokens = new Set([
-  "ai",
-  "alter",
-  "bug",
-  "datagrip",
-  "dbeaver",
-  "dbx",
-  "delete",
-  "desktop",
-  "feature",
-  "from",
-  "insert",
-  "issue",
-  "navicat",
-  "question",
-  "request",
-  "select",
-  "sql",
-  "support",
-  "table",
-  "update",
-  "version",
-  "web",
-  "where",
-  "windows",
-]);
+const genericLatinTokens = new Set(["ai", "alter", "bug", "datagrip", "dbeaver", "dbx", "delete", "desktop", "feature", "from", "insert", "issue", "navicat", "question", "request", "select", "sql", "support", "table", "update", "version", "web", "where", "windows"]);
 
-const genericCjkTokens = new Set([
-  "一个",
-  "以及",
-  "使用",
-  "功能",
-  "可以",
-  "当前",
-  "支持",
-  "数据库",
-  "新增",
-  "增加",
-  "希望",
-  "异常",
-  "操作",
-  "所在",
-  "数据",
-  "显示",
-  "没有",
-  "现在",
-  "设置",
-  "问题",
-  "进行",
-  "错误",
-  "需要",
-]);
-const identifierQueryNoiseTokens = new Set([
-  "失效",
-  "弹出",
-  "快捷",
-  "提醒",
-  "时候",
-  "选择",
-]);
+const genericCjkTokens = new Set(["一个", "以及", "使用", "功能", "可以", "当前", "支持", "数据库", "新增", "增加", "希望", "异常", "操作", "所在", "数据", "显示", "没有", "现在", "设置", "问题", "进行", "错误", "需要"]);
+const identifierQueryNoiseTokens = new Set(["失效", "弹出", "快捷", "提醒", "时候", "选择"]);
 
 const cjkSegmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
 const databaseDrivers = databaseIssueDrivers;
@@ -107,7 +38,9 @@ function labelNames(labels) {
 }
 
 function stripIssuePrefix(title) {
-  return String(title || "").replace(/^\s*\[[^\]]+\]\s*/u, "").trim();
+  return String(title || "")
+    .replace(/^\s*\[[^\]]+\]\s*/u, "")
+    .trim();
 }
 
 function stripMarkdown(value) {
@@ -143,9 +76,7 @@ function databaseField(body) {
 }
 
 function relevantBody(body) {
-  const sections = parseIssueSections(body).filter(
-    ({ heading }) => !ignoredSectionPatterns.some((pattern) => pattern.test(heading)),
-  );
+  const sections = parseIssueSections(body).filter(({ heading }) => !ignoredSectionPatterns.some((pattern) => pattern.test(heading)));
   return stripMarkdown(sections.map(({ content }) => content).join("\n")).slice(0, 2400);
 }
 
@@ -197,9 +128,7 @@ function semanticTokens(value) {
 
 export function searchTitleTerms(issue) {
   const identifiers = technicalIdentifiers(issue);
-  const tokens = [...semanticTokens(stripIssuePrefix(issue.title))].filter(
-    (token) => identifiers.size === 0 || !identifierQueryNoiseTokens.has(token),
-  );
+  const tokens = [...semanticTokens(stripIssuePrefix(issue.title))].filter((token) => identifiers.size === 0 || !identifierQueryNoiseTokens.has(token));
   return tokens.slice(0, 8).join(" ").slice(0, MAX_QUERY_LENGTH);
 }
 
@@ -207,11 +136,7 @@ function latinTokens(value) {
   return new Set(
     normalizeText(value)
       .match(/[a-z0-9][a-z0-9+._-]{1,}/gu)
-      ?.filter((token) => (
-        !genericLatinTokens.has(token)
-        && !/^v?\d+(?:[._-]\d+)*$/u.test(token)
-        && !/^(.)\1{2,}$/u.test(token)
-      )) || [],
+      ?.filter((token) => !genericLatinTokens.has(token) && !/^v?\d+(?:[._-]\d+)*$/u.test(token) && !/^(.)\1{2,}$/u.test(token)) || [],
   );
 }
 
@@ -334,26 +259,15 @@ export function buildCorpusContext(issue, candidates) {
   const frequencies = new Map();
 
   for (const token of queryTitleTokens) {
-    const documentFrequency = candidateTitleTokens.reduce(
-      (count, tokens) => count + (tokens.has(token) ? 1 : 0),
-      0,
-    );
+    const documentFrequency = candidateTitleTokens.reduce((count, tokens) => count + (tokens.has(token) ? 1 : 0), 0);
     frequencies.set(token, documentFrequency);
     const queryFrequencyBoost = 1 + Math.log(Math.max(1, tokenOccurrenceCount(issueTitle, token)));
     weights.set(token, inverseDocumentFrequency(candidates.length, documentFrequency) * queryFrequencyBoost);
   }
 
-  const observedWeights = [...queryTitleTokens]
-    .filter((token) => (frequencies.get(token) || 0) > 0)
-    .map((token) => weights.get(token) || 0);
+  const observedWeights = [...queryTitleTokens].filter((token) => (frequencies.get(token) || 0) > 0).map((token) => weights.get(token) || 0);
   const maximumWeight = Math.max(0, ...observedWeights);
-  const anchorTokens = new Set(
-    [...queryTitleTokens].filter((token) => (
-      maximumWeight > 0
-      && (frequencies.get(token) || 0) > 0
-      && (weights.get(token) || 0) >= maximumWeight * 0.9
-    )),
-  );
+  const anchorTokens = new Set([...queryTitleTokens].filter((token) => maximumWeight > 0 && (frequencies.get(token) || 0) > 0 && (weights.get(token) || 0) >= maximumWeight * 0.9));
 
   return { queryTitleTokens, candidateTitleTokens, weights, anchorTokens };
 }
@@ -369,29 +283,18 @@ export function scoreCandidate(issue, candidate, rank = 0, corpusContext) {
   const candidateTitle = stripIssuePrefix(candidate.title);
   const issueBody = relevantBody(issue.body).slice(0, 1200);
   const candidateBody = relevantBody(candidate.body).slice(0, 1200);
-  const titleSimilarity = diceCoefficient(
-    characterNgrams(contentTitleText(issue)),
-    characterNgrams(contentTitleText(candidate)),
-  );
+  const titleSimilarity = diceCoefficient(characterNgrams(contentTitleText(issue)), characterNgrams(contentTitleText(candidate)));
   const bodySimilarity = diceCoefficient(characterNgrams(issueBody), characterNgrams(candidateBody));
   const context = corpusContext || buildCorpusContext(issue, [candidate]);
-  const candidateTitleTokens = corpusContext
-    ? context.candidateTitleTokens[rank]
-    : context.candidateTitleTokens[0];
+  const candidateTitleTokens = corpusContext ? context.candidateTitleTokens[rank] : context.candidateTitleTokens[0];
   const titleCoverage = weightedCoverage(context.queryTitleTokens, candidateTitleTokens, context.weights);
   const anchorHit = setsOverlap(candidateTitleTokens, context.anchorTokens);
   const issueIdentifiers = technicalIdentifiers(issue);
   const candidateIdentifiers = technicalIdentifiers(candidate);
-  const identifierCoverage = issueIdentifiers.size === 0
-    ? 0
-    : intersectionSize(issueIdentifiers, candidateIdentifiers) / issueIdentifiers.size;
+  const identifierCoverage = issueIdentifiers.size === 0 ? 0 : intersectionSize(issueIdentifiers, candidateIdentifiers) / issueIdentifiers.size;
   const rankPrior = 1 / Math.log2(rank + 2);
 
-  let score = titleCoverage * 0.45
-    + titleSimilarity * 0.25
-    + bodySimilarity * 0.1
-    + identifierCoverage * 0.15
-    + rankPrior * 0.05;
+  let score = titleCoverage * 0.45 + titleSimilarity * 0.25 + bodySimilarity * 0.1 + identifierCoverage * 0.15 + rankPrior * 0.05;
   const issueTypes = typeLabels(issue.labels);
   const candidateTypes = typeLabels(candidate.labels);
   if (issueTypes.size > 0 && candidateTypes.size > 0) {
@@ -401,10 +304,7 @@ export function scoreCandidate(issue, candidate, rank = 0, corpusContext) {
 
   // Like Discourse, retrieval is deliberately broad and public suggestions
   // require a separate threshold. Rare title terms act as BM25F-style anchors.
-  const accepted = score >= 0.34
-    || (anchorHit && titleCoverage >= 0.38 && score >= 0.2)
-    || (identifierCoverage >= 0.5 && titleCoverage >= 0.2 && score >= 0.28)
-    || (titleSimilarity + bodySimilarity >= 0.42 && score >= 0.28);
+  const accepted = score >= 0.34 || (anchorHit && titleCoverage >= 0.38 && score >= 0.2) || (identifierCoverage >= 0.5 && titleCoverage >= 0.2 && score >= 0.28) || (titleSimilarity + bodySimilarity >= 0.42 && score >= 0.28);
 
   return {
     accepted,
@@ -421,9 +321,7 @@ export function scoreCandidate(issue, candidate, rank = 0, corpusContext) {
 }
 
 export function rankCandidates(issue, items) {
-  const candidates = items.filter(
-    (candidate) => !candidate.pull_request && Number(candidate.number) !== Number(issue.number),
-  );
+  const candidates = items.filter((candidate) => !candidate.pull_request && Number(candidate.number) !== Number(issue.number));
   const context = buildCorpusContext(issue, candidates);
   return candidates
     .map((candidate, rank) => ({ candidate, ...scoreCandidate(issue, candidate, rank, context) }))
@@ -510,11 +408,13 @@ export async function run({ issue = loadIssue(), client } = {}) {
     return [];
   }
 
-  const github = client || new GitHubClient({
-    token: process.env.GITHUB_TOKEN,
-    repository: process.env.GITHUB_REPOSITORY,
-    apiBase: process.env.GITHUB_API_URL,
-  });
+  const github =
+    client ||
+    new GitHubClient({
+      token: process.env.GITHUB_TOKEN,
+      repository: process.env.GITHUB_REPOSITORY,
+      apiBase: process.env.GITHUB_API_URL,
+    });
   if (await github.hasExistingComment(issue.number)) {
     console.log("Similar issue comment already exists");
     return [];

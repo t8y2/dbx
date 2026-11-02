@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   fetchPluginMarketplaceCatalogs: vi.fn(),
   checkAgentUpdateBlockers: vi.fn(),
   upgradeAllAgents: vi.fn(),
+  listenAgentInstallProgress: vi.fn(),
   installJdbcPlugin: vi.fn(),
   installMcpServer: vi.fn(),
   installMarketplacePlugin: vi.fn(),
@@ -74,6 +75,7 @@ beforeEach(() => {
   mocks.buildMarketplacePluginListings.mockReturnValue([pluginUpdate]);
   mocks.checkAgentUpdateBlockers.mockResolvedValue([]);
   mocks.upgradeAllAgents.mockResolvedValue({ upgraded: 1, failed: [], cancelled: 0 });
+  mocks.listenAgentInstallProgress.mockResolvedValue(vi.fn());
   mocks.installJdbcPlugin.mockResolvedValue({ installed: true, update_available: false });
   mocks.installMcpServer.mockResolvedValue("updated");
   mocks.installMarketplacePlugin.mockResolvedValue({});
@@ -434,5 +436,59 @@ describe("useComponentUpdates", () => {
     const result = await updates.installCategory("plugins");
 
     expect(result.blockedPlugins).toEqual([{ pluginName: "Example plugin", reason: "operations" }]);
+  });
+
+  it("tracks driver install progress and batch counts during driver update", async () => {
+    let capturedHandler: ((payload: unknown) => void) | null = null;
+    mocks.listenAgentInstallProgress.mockImplementation(async (handler: (payload: unknown) => void) => {
+      capturedHandler = handler;
+      return () => {};
+    });
+
+    const upgradeDeferred = deferred<{ upgraded: number; failed: any[]; cancelled: number }>();
+    mocks.upgradeAllAgents.mockReturnValue(upgradeDeferred.promise);
+
+    const updates = useComponentUpdates({ isDesktop: true });
+    const updatePromise = updates.installCategory("drivers");
+
+    await vi.waitFor(() => expect(mocks.listenAgentInstallProgress).toHaveBeenCalledOnce());
+    expect(capturedHandler).not.toBeNull();
+
+    // Initial batch total is set from updatable drivers count
+    expect(updates.driverBatchTotal.value).toBe(1);
+    expect(updates.driverBatchCompleted.value).toBe(0);
+
+    // Simulate progress event for downloading mysql driver
+    capturedHandler!({
+      step: "driver",
+      db_type: "mysql",
+      downloaded: 40,
+      total: 100,
+      total_drivers: 1,
+    });
+
+    expect(updates.driverProgressMap.value.mysql).toMatchObject({
+      step: "driver",
+      db_type: "mysql",
+      downloaded: 40,
+      total: 100,
+    });
+
+    // Simulate completion of mysql driver
+    capturedHandler!({
+      step: "done",
+      db_type: "mysql",
+    });
+
+    expect(updates.driverBatchCompleted.value).toBe(1);
+    expect(updates.driverProgressMap.value.mysql).toBeNull();
+
+    upgradeDeferred.resolve({ upgraded: 1, failed: [], cancelled: 0 });
+    await updatePromise;
+
+    // After finish, progress map and counters reset
+    expect(updates.driverProgressMap.value).toEqual({});
+    expect(updates.driverBatchCompleted.value).toBe(0);
+    expect(updates.driverBatchTotal.value).toBe(0);
   });
 });

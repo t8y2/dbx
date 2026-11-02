@@ -17,12 +17,22 @@ const emit = defineEmits<{ created: [groupId: string] }>();
 
 const deleteConfirmMessage = computed(() => t("tableVGroup.deleteGroupConfirmMessage", { name: tableVGroupDeleteTarget.value?.name ?? "" }));
 
+const dialogTitle = computed(() => {
+  if (tableVGroupDialogTableNames.value.length) {
+    return t("tableVGroup.moveToNewGroup");
+  }
+  return tableVGroupDialogParentGroupId.value ? t("tableVGroup.newSubgroup") : t("connectionGroup.createGroup");
+});
+
 function confirmCreate() {
   const scope = tableVGroupDialogScope.value;
   const name = tableVGroupName.value.trim();
   if (!scope || !name) return;
   const groupId = connectionStore.createTableVGroup(scope, name, tableVGroupDialogParentGroupId.value);
   if (groupId) {
+    if (scope && "isExpanded" in scope) {
+      scope.isExpanded = true;
+    }
     // scope 即右键的源行节点，其 type 就是这批待移入行的类别（多选保证同类型）。
     const rowType = scope.type;
     for (const tableName of tableVGroupDialogTableNames.value) {
@@ -48,7 +58,7 @@ function confirmDelete() {
   <Dialog v-model:open="showTableVGroupDialog">
     <DialogContent class="max-w-sm">
       <DialogHeader>
-        <DialogTitle>{{ tableVGroupDialogTableNames.length ? t("tableVGroup.moveToNewGroup") : t("tableVGroup.newSubgroup") }}</DialogTitle>
+        <DialogTitle>{{ dialogTitle }}</DialogTitle>
       </DialogHeader>
       <Input v-model="tableVGroupName" :placeholder="t('connectionGroup.groupNamePlaceholder')" @keydown.enter.prevent="confirmCreate" />
       <DialogFooter>

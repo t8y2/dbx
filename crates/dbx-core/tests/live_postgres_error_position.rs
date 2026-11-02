@@ -141,6 +141,7 @@ async fn live_pg_multi_core_reports_error_position_in_the_backend_envelope() {
     let detail = backend_error.detail().unwrap_or_default();
     assert!(!detail.contains(SQL_ERROR_POSITION_MARKER), "detail must not leak the marker: {detail}");
     assert!(detail.contains("no_such_table"), "detail should keep the native message: {detail}");
+    assert!(detail.contains("SQLSTATE 42P01"), "detail should keep the native error code: {detail}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -193,6 +194,8 @@ fn live_connection_config(
         connect_timeout_secs: 10,
         query_timeout_secs: 30,
         idle_timeout_secs: 60,
+        manual_transaction_timeout_secs: 300,
+        idle_disconnect_secs: 0,
         keepalive_interval_secs: 0,
         ssl: false,
         ca_cert_path: String::new(),
@@ -229,9 +232,12 @@ fn live_connection_config(
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        production_badge_scope: None,
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,
+        show_native_jobs: None,
+        show_user_admin: None,
         database_info: None,
     }
 }

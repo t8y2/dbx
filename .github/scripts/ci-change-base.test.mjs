@@ -52,10 +52,7 @@ test("PR routing uses the exact test merge first parent, excluding unrelated mai
   assert.equal(base, fixture.actualBase);
   assert.notEqual(base, fixture.pullRequestHead);
   const files = changedPaths(base, fixture.root);
-  assert.deepEqual(files.toSorted(), [
-    "crates/dbx-core/tests/old.rs", "crates/dbx-core/tests/deleted.rs", "crates/dbx-core/tests/renamed\nfile.rs",
-    "crates/dbx-core/tests/runtime_diagnostic_history.rs", "crates/dbx-web/src/routes/transfer.rs",
-  ].toSorted());
+  assert.deepEqual(files.toSorted(), ["crates/dbx-core/tests/old.rs", "crates/dbx-core/tests/deleted.rs", "crates/dbx-core/tests/renamed\nfile.rs", "crates/dbx-core/tests/runtime_diagnostic_history.rs", "crates/dbx-web/src/routes/transfer.rs"].toSorted());
   const metadata = {
     workspace_members: ["dbx-core", "dbx-web", "dbx"],
     packages: [
@@ -66,7 +63,10 @@ test("PR routing uses the exact test merge first parent, excluding unrelated mai
   };
   const corrected = planCi({ files, metadata, root: fixture.root });
   assert.equal(corrected.rust_full, false);
-  assert.deepEqual(corrected.rust_matrix.include.map((entry) => entry.group), ["application"]);
+  assert.deepEqual(
+    corrected.rust_matrix.include.map((entry) => entry.group),
+    ["application"],
+  );
   assert.deepEqual(corrected.agent_rust.include, [{ driver: "duckdb" }]);
   assert.equal(corrected.agent_java, false);
   assert.deepEqual(corrected.agent_go.include, []);
@@ -90,7 +90,9 @@ test("a depth-two checkout preserves the PR parents and supports the base CLI", 
   assert.equal(changeBase({ eventName: "pull_request", root: checkout }), fixture.actualBase);
   assert.deepEqual(changedPaths(fixture.actualBase, checkout), changedPaths(fixture.actualBase, fixture.root));
   const output = execFileSync(process.execPath, [path.join(import.meta.dirname, "ci-change-base.mjs")], {
-    cwd: checkout, encoding: "utf8", env: { ...process.env, GITHUB_EVENT_NAME: "pull_request", BEFORE_SHA: fixture.staleBase },
+    cwd: checkout,
+    encoding: "utf8",
+    env: { ...process.env, GITHUB_EVENT_NAME: "pull_request", BEFORE_SHA: fixture.staleBase },
   });
   assert.equal(output.trim(), fixture.actualBase);
 });

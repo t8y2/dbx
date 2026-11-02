@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 640
 dbType: oscar
+compareModes: [schema, data]
 rustVariant: Oscar
 label: 神通 OSCAR
 runtimeMode: agent

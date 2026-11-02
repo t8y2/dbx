@@ -13,8 +13,13 @@ const LOGICAL_OPERATOR_NEWLINE_VALUES = ["before", "after", "none"] as const;
 const COMMA_POSITION_VALUES = ["after", "before"] as const;
 const FROM_CLAUSE_LAYOUT_VALUES = ["newLine", "sameLine"] as const;
 const TAB_WIDTH_VALUES = [2, 4] as const;
-const EXPRESSION_WIDTH_VALUES = [50, 80, 120] as const;
 const LINES_BETWEEN_QUERIES_VALUES = [0, 1, 2] as const;
+const LIST_LAYOUT_VALUES = ["singleLine", "fit", "vertical", "wrap"] as const;
+const LIST_LAYOUT_OVERRIDE_VALUES = ["inherit", ...LIST_LAYOUT_VALUES] as const;
+const COMMA_OVERRIDE_VALUES = ["inherit", ...COMMA_POSITION_VALUES] as const;
+const LOGICAL_OVERRIDE_VALUES = ["inherit", ...LOGICAL_OPERATOR_NEWLINE_VALUES] as const;
+const LIST_ALIGNMENT_VALUES = ["firstItem", "indent"] as const;
+const EMPTY_LINE_MODE_VALUES = ["inherit", "remove", "single", "preserve"] as const;
 const SQL_FORMATTER_PARAM_TYPE_MARKERS = ["?", ":", "$"] as const;
 const SQL_FORMATTER_NAMED_PARAM_TYPE_MARKERS = [":", "@", "$"] as const;
 const SQL_FORMATTER_LEGACY_OPTION_KEYS = new Set(["params"]);
@@ -26,8 +31,54 @@ export type SqlFormatterLogicalOperatorNewline = (typeof LOGICAL_OPERATOR_NEWLIN
 export type SqlFormatterCommaPosition = (typeof COMMA_POSITION_VALUES)[number];
 export type SqlFormatterFromClauseLayout = (typeof FROM_CLAUSE_LAYOUT_VALUES)[number];
 export type SqlFormatterTabWidth = (typeof TAB_WIDTH_VALUES)[number];
-export type SqlFormatterExpressionWidth = (typeof EXPRESSION_WIDTH_VALUES)[number];
+export type SqlFormatterExpressionWidth = number;
 export type SqlFormatterLinesBetweenQueries = (typeof LINES_BETWEEN_QUERIES_VALUES)[number];
+export type SqlFormatterListLayout = (typeof LIST_LAYOUT_VALUES)[number];
+export type SqlFormatterListLayoutOverride = (typeof LIST_LAYOUT_OVERRIDE_VALUES)[number];
+export type SqlFormatterCommaOverride = (typeof COMMA_OVERRIDE_VALUES)[number];
+export type SqlFormatterLogicalOverride = (typeof LOGICAL_OVERRIDE_VALUES)[number];
+export type SqlFormatterListAlignment = (typeof LIST_ALIGNMENT_VALUES)[number];
+export type SqlFormatterEmptyLineMode = (typeof EMPTY_LINE_MODE_VALUES)[number];
+
+export interface SqlFormatterRuleSettings {
+  customRulesEnabled: boolean;
+  listLayout: SqlFormatterListLayout;
+  selectListLayout: SqlFormatterListLayoutOverride;
+  insertListLayout: SqlFormatterListLayoutOverride;
+  updateListLayout: SqlFormatterListLayoutOverride;
+  listItemAlignment: SqlFormatterListAlignment;
+  alignSelectAliases: boolean;
+  alignUpdateAssignments: boolean;
+  selectCommaPosition: SqlFormatterCommaOverride;
+  insertCommaPosition: SqlFormatterCommaOverride;
+  updateCommaPosition: SqlFormatterCommaOverride;
+  whereLogicalOperatorNewline: SqlFormatterLogicalOverride;
+  onLogicalOperatorNewline: SqlFormatterLogicalOverride;
+  expressionLogicalOperatorNewline: SqlFormatterLogicalOverride;
+  newlineBeforeJoinOn: boolean;
+  collapseShortStatements: boolean;
+  emptyLineMode: SqlFormatterEmptyLineMode;
+}
+
+export const DEFAULT_SQL_FORMATTER_RULE_SETTINGS: SqlFormatterRuleSettings = {
+  customRulesEnabled: false,
+  listLayout: "fit",
+  selectListLayout: "vertical",
+  insertListLayout: "fit",
+  updateListLayout: "fit",
+  listItemAlignment: "firstItem",
+  alignSelectAliases: true,
+  alignUpdateAssignments: false,
+  selectCommaPosition: "inherit",
+  insertCommaPosition: "inherit",
+  updateCommaPosition: "inherit",
+  whereLogicalOperatorNewline: "inherit",
+  onLogicalOperatorNewline: "inherit",
+  expressionLogicalOperatorNewline: "inherit",
+  newlineBeforeJoinOn: false,
+  collapseShortStatements: true,
+  emptyLineMode: "inherit",
+};
 
 export interface SqlFormatterCustomParameter {
   regex: string;
@@ -46,7 +97,7 @@ export interface SqlFormatterParamTypes {
   custom?: SqlFormatterCustomParameter[];
 }
 
-export interface SqlFormatterOptionSettings {
+export interface SqlFormatterOptionSettings extends SqlFormatterRuleSettings {
   // DBX-private: selects which layout engine runs and never reaches
   // sql-formatter itself (see sqlFormatterOptions).
   layoutStyle: SqlFormatterLayoutStyle;
@@ -79,6 +130,7 @@ export interface SqlFormatterConfigFile {
 export type SqlFormatterConfigParseResult = { ok: true; settings: SqlFormatterSettings } | { ok: false; message: string };
 
 export const DEFAULT_SQL_FORMATTER_SETTINGS: SqlFormatterSettings = {
+  ...DEFAULT_SQL_FORMATTER_RULE_SETTINGS,
   layoutStyle: "dbx",
   keywordCase: "upper",
   dataTypeCase: "preserve",
@@ -105,6 +157,7 @@ export const DEFAULT_SQL_FORMATTER_SETTINGS: SqlFormatterSettings = {
 // stops importing wholesale, and given a row in the `expectedControls` list of
 // lib/settings/__tests__/settingsSearch.spec.ts so its search entry stays pinned.
 const SQL_FORMATTER_OPTION_KEYS = new Set<keyof SqlFormatterOptionSettings>([
+  ...(Object.keys(DEFAULT_SQL_FORMATTER_RULE_SETTINGS) as (keyof SqlFormatterRuleSettings)[]),
   "layoutStyle",
   "keywordCase",
   "dataTypeCase",
@@ -125,6 +178,23 @@ const SQL_FORMATTER_OPTION_KEYS = new Set<keyof SqlFormatterOptionSettings>([
 ]);
 
 const SQL_FORMATTER_OPTION_VALIDATORS: Record<keyof SqlFormatterOptionSettings, (value: unknown) => boolean> = {
+  customRulesEnabled: (value) => typeof value === "boolean",
+  listLayout: (value) => isStringChoice(value, LIST_LAYOUT_VALUES),
+  selectListLayout: (value) => isStringChoice(value, LIST_LAYOUT_OVERRIDE_VALUES),
+  insertListLayout: (value) => isStringChoice(value, LIST_LAYOUT_OVERRIDE_VALUES),
+  updateListLayout: (value) => isStringChoice(value, LIST_LAYOUT_OVERRIDE_VALUES),
+  listItemAlignment: (value) => isStringChoice(value, LIST_ALIGNMENT_VALUES),
+  alignSelectAliases: (value) => typeof value === "boolean",
+  alignUpdateAssignments: (value) => typeof value === "boolean",
+  selectCommaPosition: (value) => isStringChoice(value, COMMA_OVERRIDE_VALUES),
+  insertCommaPosition: (value) => isStringChoice(value, COMMA_OVERRIDE_VALUES),
+  updateCommaPosition: (value) => isStringChoice(value, COMMA_OVERRIDE_VALUES),
+  whereLogicalOperatorNewline: (value) => isStringChoice(value, LOGICAL_OVERRIDE_VALUES),
+  onLogicalOperatorNewline: (value) => isStringChoice(value, LOGICAL_OVERRIDE_VALUES),
+  expressionLogicalOperatorNewline: (value) => isStringChoice(value, LOGICAL_OVERRIDE_VALUES),
+  newlineBeforeJoinOn: (value) => typeof value === "boolean",
+  collapseShortStatements: (value) => typeof value === "boolean",
+  emptyLineMode: (value) => isStringChoice(value, EMPTY_LINE_MODE_VALUES),
   layoutStyle: (value) => isStringChoice(value, LAYOUT_STYLE_VALUES),
   keywordCase: (value) => isStringChoice(value, CASE_VALUES),
   dataTypeCase: (value) => isStringChoice(value, CASE_VALUES),
@@ -136,7 +206,7 @@ const SQL_FORMATTER_OPTION_VALIDATORS: Record<keyof SqlFormatterOptionSettings, 
   logicalOperatorNewline: (value) => isStringChoice(value, LOGICAL_OPERATOR_NEWLINE_VALUES),
   commaPosition: (value) => isStringChoice(value, COMMA_POSITION_VALUES),
   fromClauseLayout: (value) => isStringChoice(value, FROM_CLAUSE_LAYOUT_VALUES),
-  expressionWidth: (value) => isNumberChoice(value, EXPRESSION_WIDTH_VALUES),
+  expressionWidth: isExpressionWidth,
   linesBetweenQueries: (value) => isNumberChoice(value, LINES_BETWEEN_QUERIES_VALUES),
   preserveEmptyLines: (value) => typeof value === "boolean",
   denseOperators: (value) => typeof value === "boolean",
@@ -154,6 +224,10 @@ function isStringChoice(value: unknown, values: readonly string[]): boolean {
 
 function isNumberChoice(value: unknown, values: readonly number[]): boolean {
   return typeof value === "number" && values.includes(value);
+}
+
+function isExpressionWidth(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 20 && value <= 500;
 }
 
 function isMarkerArray<T extends readonly string[]>(value: unknown, markers: T): value is T[number][] {
@@ -209,6 +283,23 @@ function normalizeParamTypes(value: unknown, fallback: SqlFormatterParamTypes | 
 export function sqlFormatterOptionSettings(settings: unknown): SqlFormatterOptionSettings {
   const input = isObject(settings) ? settings : {};
   return {
+    customRulesEnabled: normalizeBoolean(input.customRulesEnabled, DEFAULT_SQL_FORMATTER_SETTINGS.customRulesEnabled),
+    listLayout: normalizeChoice(input.listLayout, LIST_LAYOUT_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.listLayout),
+    selectListLayout: normalizeChoice(input.selectListLayout, LIST_LAYOUT_OVERRIDE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.selectListLayout),
+    insertListLayout: normalizeChoice(input.insertListLayout, LIST_LAYOUT_OVERRIDE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.insertListLayout),
+    updateListLayout: normalizeChoice(input.updateListLayout, LIST_LAYOUT_OVERRIDE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.updateListLayout),
+    listItemAlignment: normalizeChoice(input.listItemAlignment, LIST_ALIGNMENT_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.listItemAlignment),
+    alignSelectAliases: normalizeBoolean(input.alignSelectAliases, DEFAULT_SQL_FORMATTER_SETTINGS.alignSelectAliases),
+    alignUpdateAssignments: normalizeBoolean(input.alignUpdateAssignments, DEFAULT_SQL_FORMATTER_SETTINGS.alignUpdateAssignments),
+    selectCommaPosition: normalizeChoice(input.selectCommaPosition, COMMA_OVERRIDE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.selectCommaPosition),
+    insertCommaPosition: normalizeChoice(input.insertCommaPosition, COMMA_OVERRIDE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.insertCommaPosition),
+    updateCommaPosition: normalizeChoice(input.updateCommaPosition, COMMA_OVERRIDE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.updateCommaPosition),
+    whereLogicalOperatorNewline: normalizeChoice(input.whereLogicalOperatorNewline, LOGICAL_OVERRIDE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.whereLogicalOperatorNewline),
+    onLogicalOperatorNewline: normalizeChoice(input.onLogicalOperatorNewline, LOGICAL_OVERRIDE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.onLogicalOperatorNewline),
+    expressionLogicalOperatorNewline: normalizeChoice(input.expressionLogicalOperatorNewline, LOGICAL_OVERRIDE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.expressionLogicalOperatorNewline),
+    newlineBeforeJoinOn: normalizeBoolean(input.newlineBeforeJoinOn, DEFAULT_SQL_FORMATTER_SETTINGS.newlineBeforeJoinOn),
+    collapseShortStatements: normalizeBoolean(input.collapseShortStatements, DEFAULT_SQL_FORMATTER_SETTINGS.collapseShortStatements),
+    emptyLineMode: normalizeChoice(input.emptyLineMode, EMPTY_LINE_MODE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.emptyLineMode),
     layoutStyle: normalizeChoice(input.layoutStyle, LAYOUT_STYLE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.layoutStyle),
     keywordCase: normalizeChoice(input.keywordCase, CASE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.keywordCase),
     dataTypeCase: normalizeChoice(input.dataTypeCase, CASE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.dataTypeCase),
@@ -220,7 +311,7 @@ export function sqlFormatterOptionSettings(settings: unknown): SqlFormatterOptio
     logicalOperatorNewline: normalizeChoice(input.logicalOperatorNewline, LOGICAL_OPERATOR_NEWLINE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.logicalOperatorNewline),
     commaPosition: normalizeChoice(input.commaPosition, COMMA_POSITION_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.commaPosition),
     fromClauseLayout: normalizeChoice(input.fromClauseLayout, FROM_CLAUSE_LAYOUT_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.fromClauseLayout),
-    expressionWidth: normalizeNumberChoice(input.expressionWidth, EXPRESSION_WIDTH_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.expressionWidth),
+    expressionWidth: isExpressionWidth(input.expressionWidth) ? input.expressionWidth : DEFAULT_SQL_FORMATTER_SETTINGS.expressionWidth,
     linesBetweenQueries: normalizeNumberChoice(input.linesBetweenQueries, LINES_BETWEEN_QUERIES_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.linesBetweenQueries),
     preserveEmptyLines: normalizeBoolean(input.preserveEmptyLines, DEFAULT_SQL_FORMATTER_SETTINGS.preserveEmptyLines),
     denseOperators: normalizeBoolean(input.denseOperators, DEFAULT_SQL_FORMATTER_SETTINGS.denseOperators),

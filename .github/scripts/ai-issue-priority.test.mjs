@@ -1,22 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  assessIssue,
-  createGitHubClient,
-  DEFAULT_MODEL,
-  formatSummary,
-  parseAssessment,
-  prepareIssue,
-  run,
-} from "./ai-issue-priority.mjs";
+import { assessIssue, createGitHubClient, DEFAULT_MODEL, formatSummary, parseAssessment, prepareIssue, run } from "./ai-issue-priority.mjs";
 
 const baseIssue = {
   number: 42,
   state: "open",
   title: "[Bug] Grid column alignment is inconsistent",
-  body: "### Description\n\nOnly the column header is misaligned; queries and editing work.\n\n"
-    + "### Priority (urgency)\n\nP0 Must fix next release\n\n### Additional information\n\nDBX on Linux.",
+  body: "### Description\n\nOnly the column header is misaligned; queries and editing work.\n\n" + "### Priority (urgency)\n\nP0 Must fix next release\n\n### Additional information\n\nDBX on Linux.",
   labels: [{ name: "bug" }, { name: "db/mysql" }, { name: "user-priority/P0" }],
 };
 
@@ -51,7 +42,9 @@ function fixture({ issue = baseIssue, latest = issue, result = assessment(), act
       if (method === "GET") return ++reads === 1 ? issue : latest;
       return {};
     },
-    fetchImpl: modelFetch(result, () => { modelCalls += 1; }),
+    fetchImpl: modelFetch(result, () => {
+      modelCalls += 1;
+    }),
   };
   return { options, calls, modelCalls: () => modelCalls };
 }
@@ -114,14 +107,7 @@ test("validates every priority and normalizes low-confidence or ungrounded decis
   for (const priority of ["P1", "P2", "P3", "needs-info"]) {
     assert.equal(parseAssessment(JSON.stringify(assessment({ priority })), prepared).priority, priority);
   }
-  for (const override of [
-    { confidence: "low" },
-    { evidence: [] },
-    { risk: "unknown" },
-    { priority: "P0", risk: "cosmetic" },
-    { priority: "P0", risk: "feature" },
-    { priority: "P0", risk: "data-loss", confidence: "medium" },
-  ]) {
+  for (const override of [{ confidence: "low" }, { evidence: [] }, { risk: "unknown" }, { priority: "P0", risk: "cosmetic" }, { priority: "P0", risk: "feature" }, { priority: "P0", risk: "data-loss", confidence: "medium" }]) {
     assert.equal(parseAssessment(JSON.stringify(assessment(override)), prepared).priority, "needs-info");
   }
   const criticalIssue = prepareIssue({ title: "Data loss", body: "Saving one row overwrites every row in the table." });
@@ -132,13 +118,25 @@ test("validates every priority and normalizes low-confidence or ungrounded decis
 test("rejects malformed, oversized, unknown and fabricated model results", () => {
   const prepared = prepareIssue(baseIssue);
   for (const invalid of [
-    "not JSON", "null", "[]", "```json\n{}\n```",
+    "not JSON",
+    "null",
+    "[]",
+    "```json\n{}\n```",
     ...[
-      { priority: "P9" }, { priority: "__proto__" }, { priority: "constructor" }, { priority: ["P0"] },
-      { confidence: "certain" }, { risk: "urgent" }, { reason: " " }, { reason: "x".repeat(601) },
-      { evidence: ["Invented widespread data loss"] }, { evidence: ["P0 Must fix next release"] },
-      { evidence: [""] }, { evidence: "not an array" },
-      { missing_information: ["x".repeat(251)] }, { missing_information: ["a", "b", "c", "d"] },
+      { priority: "P9" },
+      { priority: "__proto__" },
+      { priority: "constructor" },
+      { priority: ["P0"] },
+      { confidence: "certain" },
+      { risk: "urgent" },
+      { reason: " " },
+      { reason: "x".repeat(601) },
+      { evidence: ["Invented widespread data loss"] },
+      { evidence: ["P0 Must fix next release"] },
+      { evidence: [""] },
+      { evidence: "not an array" },
+      { missing_information: ["x".repeat(251)] },
+      { missing_information: ["a", "b", "c", "d"] },
     ].map((override) => JSON.stringify(assessment(override))),
   ]) {
     assert.throws(() => parseAssessment(invalid, prepared));
@@ -151,14 +149,22 @@ test("labels independently of reporter and maintainer priority, removing only ob
   const result = await run(state.options);
   assert.equal(result.label, "ai-priority/P3");
   assert.equal(state.modelCalls(), 1);
-  assert.deepEqual(state.calls.filter(({ method }) => method !== "GET"), [
-    { method: "POST", path: "/labels", body: {
-      name: "ai-priority/P3", color: "0e8a16",
-      description: "AI: low repair/implementation priority; minor or optional improvement",
-    } },
-    { method: "POST", path: "/issues/42/labels", body: { labels: ["ai-priority/P3"] } },
-    { method: "DELETE", path: "/issues/42/labels/ai-priority%2FP1", body: undefined },
-  ]);
+  assert.deepEqual(
+    state.calls.filter(({ method }) => method !== "GET"),
+    [
+      {
+        method: "POST",
+        path: "/labels",
+        body: {
+          name: "ai-priority/P3",
+          color: "0e8a16",
+          description: "AI: low repair/implementation priority; minor or optional improvement",
+        },
+      },
+      { method: "POST", path: "/issues/42/labels", body: { labels: ["ai-priority/P3"] } },
+      { method: "DELETE", path: "/issues/42/labels/ai-priority%2FP1", body: undefined },
+    ],
+  );
 });
 
 test("does not rewrite an unchanged AI label", async () => {
@@ -187,8 +193,7 @@ test("skips missing key, unrelated events, PRs, closed and opted-out issues befo
 test("edits reconcile priority even when a preceding workflow may have been canceled", async () => {
   for (const config of [
     { action: "edited", changes: { body: { from: baseIssue.body.replace("P0", "P3") } } },
-    { action: "edited", issue: { ...baseIssue, labels: [...baseIssue.labels, "ai-priority/P1"] },
-      changes: { body: { from: baseIssue.body.replace("P0", "P3") } } },
+    { action: "edited", issue: { ...baseIssue, labels: [...baseIssue.labels, "ai-priority/P1"] }, changes: { body: { from: baseIssue.body.replace("P0", "P3") } } },
     { action: "reopened" },
     { action: "edited", changes: { title: { from: "Old title" } } },
     { action: "edited", changes: { body: { from: "Old body" } } },
@@ -211,10 +216,7 @@ test("uses fresh issue content and rechecks eligibility before paid assessment",
 });
 
 test("does not publish stale results after changes, closure or maintainer opt-out", async () => {
-  for (const override of [
-    { title: "New title" }, { body: "New evidence" }, { labels: ["db/postgres"] },
-    { state: "closed" }, { labels: ["ai-priority/skip"] },
-  ]) {
+  for (const override of [{ title: "New title" }, { body: "New evidence" }, { labels: ["db/postgres"] }, { state: "closed" }, { labels: ["ai-priority/skip"] }]) {
     const state = fixture({ latest: { ...baseIssue, ...override } });
     assert.equal((await run(state.options)).skipped, "issue changed during assessment");
     assert.equal(state.modelCalls(), 1);
@@ -247,7 +249,9 @@ test("provider failures and invalid outputs preserve all existing labels and do 
     async () => Response.json({ error: "secret-response-body" }, { status: 401 }),
     async () => Response.json({ error: "secret-response-body" }, { status: 429 }),
     async () => Response.json({ error: "secret-response-body" }, { status: 500 }),
-    async () => { throw new Error("secret-response-body"); },
+    async () => {
+      throw new Error("secret-response-body");
+    },
     async () => new Response("secret-response-body"),
     async () => Response.json({ choices: [] }),
     async () => Response.json({ choices: [{ finish_reason: "length", message: { content: "secret-response-body" } }] }),
@@ -282,7 +286,10 @@ test("failed label addition never removes the previous AI priority", async () =>
     return original(method, path, body);
   };
   await assert.rejects(run(state.options), /GitHub unavailable/);
-  assert.equal(state.calls.some(({ method }) => method === "DELETE"), false);
+  assert.equal(
+    state.calls.some(({ method }) => method === "DELETE"),
+    false,
+  );
 });
 
 test("invalid issue numbers are rejected before requests", async () => {
@@ -299,7 +306,8 @@ test("GitHub client keeps credentials separate, uses timeouts and never includes
   assert.throws(() => createGitHubClient({ token: "fixture-token", repository: "https://other.example" }));
   const calls = [];
   const github = createGitHubClient({
-    token: "fixture-token", repository: "t8y2/dbx",
+    token: "fixture-token",
+    repository: "t8y2/dbx",
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
       return options.method === "DELETE" ? new Response(null, { status: 204 }) : Response.json(baseIssue);
@@ -311,7 +319,8 @@ test("GitHub client keeps credentials separate, uses timeouts and never includes
   assert.ok(calls[0].options.signal instanceof AbortSignal);
   assert.equal(await github("DELETE", "/issues/42/labels/test"), null);
   const failing = createGitHubClient({
-    token: "fixture-token", repository: "t8y2/dbx",
+    token: "fixture-token",
+    repository: "t8y2/dbx",
     fetchImpl: async () => new Response("secret-response-body", { status: 403 }),
   });
   await assert.rejects(failing("GET", "/issues/42"), (error) => {

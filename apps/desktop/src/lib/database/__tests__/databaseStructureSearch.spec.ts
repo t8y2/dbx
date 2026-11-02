@@ -23,6 +23,24 @@ describe("databaseStructureSearch", () => {
     expect(hits[0]?.tableType).toBe("VIEW");
   });
 
+  it("maps table comment rows into table-level hits without a column", () => {
+    const hits = mapStructureSearchRows(["object_schema", "object_name", "column_name", "column_comment", "table_comment"], [["public", "orders", null, null, "订单主表"]], "订单");
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.tableName).toBe("orders");
+    expect(hits[0]?.columnName).toBeUndefined();
+    expect(hits[0]?.tableComment).toBe("订单主表");
+    expect(hits[0]?.matchedIn).toEqual(["tableComment"]);
+  });
+
+  it("builds previews from table comment hits", () => {
+    const preview = structureHitPreview({
+      tableName: "orders",
+      tableComment: "订单主表",
+      matchedIn: ["tableComment"],
+    });
+    expect(preview).toBe("订单主表");
+  });
+
   it("builds previews from structure hits", () => {
     const preview = structureHitPreview({
       tableName: "users",

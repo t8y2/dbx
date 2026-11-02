@@ -8,8 +8,10 @@ import itLocale from "../locales/it";
 import ja from "../locales/ja";
 import ko from "../locales/ko";
 import ptBR from "../locales/pt-BR";
+import pl from "../locales/pl";
 import ru from "../locales/ru";
 import tr from "../locales/tr";
+import th from "../locales/th";
 import zhCN from "../locales/zh-CN";
 import zhTW from "../locales/zh-TW";
 
@@ -21,9 +23,9 @@ import zhTW from "../locales/zh-TW";
 vi.mock("../locales/fallback", () => ({ withEnglishFallback: (messages: Record<string, unknown>) => messages }));
 
 type Messages = Record<string, unknown>;
-type Locale = "az" | "en" | "es" | "id" | "it" | "ja" | "ko" | "pt-BR" | "ru" | "tr" | "zh-CN" | "zh-TW";
+type Locale = "az" | "en" | "es" | "id" | "it" | "ja" | "ko" | "pt-BR" | "pl" | "ru" | "th" | "tr" | "zh-CN" | "zh-TW";
 
-const declared: Record<Locale, Messages> = { az, en, es, id, it: itLocale, ja, ko, "pt-BR": ptBR, ru, tr, "zh-CN": zhCN, "zh-TW": zhTW };
+const declared: Record<Locale, Messages> = { az, en, es, id, it: itLocale, ja, ko, "pt-BR": ptBR, pl, ru, th, tr, "zh-CN": zhCN, "zh-TW": zhTW };
 const ALL_LOCALES = Object.keys(declared) as Locale[];
 const EXCEPT_AZ_TR = ALL_LOCALES.filter((locale) => locale !== "az" && locale !== "tr");
 
@@ -43,12 +45,20 @@ const under = (namespace: string, keys: string[]) => keys.map((key) => `${namesp
 // leaks the raw key path, and a key missing from a locale silently shows
 // English.
 const FEATURE_MESSAGES: FeatureMessages[] = [
+  { feature: "query connection group path preview", keys: ["connection.groupPath"], translated: true },
+  { feature: "SQL file includes", keys: under("sqlFile", ["resolveIncludes", "resolveIncludesHint"]), translated: true },
   { feature: "AstraFlow provider", keys: ["ai.astraflowDescription"], translated: true },
   { feature: "AI HTML preview (#6467)", keys: under("ai", ["htmlPreviewLabel", "htmlExpandPreview", "htmlExpandPreviewHint", "htmlSaveSafe", "htmlSaveFailed", "htmlCopySource", "htmlCopyRiskBody", "htmlCopyRiskAccept", "htmlCopyRiskRemember", "htmlCopyRiskToast"]) },
   { feature: "AI conversation export (#6467)", keys: under("ai", ["exportConversation", "conversationExportMarkdown", "conversationExportHtml", "conversationRoleUser", "conversationRoleAssistant", "conversationFailedMarker", "conversationExportEmpty"]) },
   { feature: "AI conversation management", keys: under("ai", ["renameConversation", "conversationRenameFailed", "clearDatabaseSelection", "searchDatabases", "noDatabasesFound"]) },
   { feature: "AI auto routing (#9118)", keys: ["ai.actions.auto", "ai.routing.recognizing", "ai.routing.chip", "ai.routing.switchTo", "ai.defaultAutoRouting", "ai.defaultAutoRoutingDescription"] },
+  {
+    feature: "AI SQL action feedback (#11962)",
+    keys: under("ai", ["sqlActionRunning", "sqlActionSucceeded", "sqlActionSucceededIn", "sqlActionSucceededRows", "sqlActionSucceededAffected", "sqlActionFailed", "sqlActionApplied", "sqlActionAppliedIn", "sqlActionEmptySql", "sqlActionBusy", "sqlActionNoConnection", "sqlActionViewTab"]),
+    translated: true,
+  },
   { feature: "plugin AI conversation", keys: ["ai.pluginHttpModelOnly", "ai.pluginWelcome", "ai.pluginFollowUp"] },
+  { feature: "editor find whole word (#13287)", keys: ["editor.search.wholeWord"], translated: true },
   { feature: "quick open", keys: ["quickOpen.*", "settings.shortcutGlobalSearch"] },
   {
     feature: "editor tab context menu",
@@ -67,6 +77,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
       "pinTab",
       "reopenClosedTab",
       "resetTabGroup",
+      "saveAllTabs",
       "splitDown",
       "splitRight",
       "unpinTab",
@@ -77,6 +88,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "offline Agent import", keys: ["driverStore.offlineImport*", "driverStore.offlineJreImport*"] },
   { feature: "driver runtime connection-owned message (#10412)", keys: ["driverStore.runtimeControlConnectionOwned"], translated: true },
   { feature: "multi-database execution and export progress", keys: ["multiDbExecute.*", "exportProgress.*"], locales: ["en", "zh-CN"] },
+  { feature: "PostgreSQL foreign table creation", keys: ["postgresForeignTable.*"], locales: ["en", "es", "it", "ja", "ko", "pt-BR", "ru", "th", "zh-CN", "zh-TW"], translated: true },
   { feature: "process list batch terminate", keys: under("processList", ["batchTerminate", "batchTerminateTitle", "batchTerminateConfirm", "batchTerminateRunning", "batchTerminateSummary"]) },
   { feature: "cached result fallback", keys: ["grid.cachedResultUnavailable", "grid.reexecuteQuery"] },
   { feature: "Nacos global replace", keys: ["nacos.contentReplace*", "nacos.replaceHistory.*"], locales: EXCEPT_AZ_TR, translated: true },
@@ -87,7 +99,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "SunDB bundled JDBC driver (#10732)", keys: ["connection.sundbCustomDriverHint"], translated: true },
   { feature: "user administration Host change", keys: ["userAdmin.changeHost", "userAdmin.newHost"], translated: true },
   { feature: "plugin batch actions", keys: ["pluginPlatform.batchDuplicateSources", "pluginPlatform.batchRefreshFailed"], locales: EXCEPT_AZ_TR },
-  { feature: "plugin marketplace sorting (#10078)", keys: under("pluginPlatform", ["sortBy", "sortByName", "sortByRecentlyUpdated", "sortByRecentlyListed", "sortByUpdatesFirst"]), locales: EXCEPT_AZ_TR, translated: true },
+  { feature: "plugin marketplace sorting (#10078)", keys: under("pluginPlatform", ["sortBy", "sortByName", "sortByRecentlyUpdated", "sortByRecentlyListed", "sortByUpdatesFirst", "sortByInstalls", "installCount"]), locales: EXCEPT_AZ_TR, translated: true },
   { feature: "shared refresh action (#8768)", keys: ["common.refresh"] },
   {
     feature: "Xugu field lineage scope and coverage",
@@ -130,6 +142,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     translated: true,
   },
   { feature: "sidebar search skip hint", keys: ["sidebar.searchConnectionSkipped"] },
+  { feature: "sidebar search match mode (#13505)", keys: under("sidebar", ["listOptions", "searchMatchMode", "searchMatchModeFuzzy", "searchMatchModeContains", "searchMatchModeTooltip"]), translated: true },
   { feature: "PostgreSQL legacy TLS", keys: ["connection.postgresLegacyTls", "connection.postgresLegacyTlsHint"] },
   { feature: "settings search sections", keys: ["settings.syncWebDavWebDescription", "settings.performanceSection"] },
   { feature: "local backup selection", keys: ["settings.localBackupSecretsPassphraseRequiredHint", "settings.localBackupPathLabel", "settings.localBackupPathUnset", "settings.localBackupChoosePath", "settings.localBackupPathRequired"], translated: true },
@@ -141,6 +154,18 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     translated: true,
   },
   { feature: "schema diff deploy ignores foreign key checks", keys: under("diff", ["ignoreForeignKeyChecks", "ignoreForeignKeyChecksHint"]), translated: true },
+  { feature: "shortcut recorder", keys: under("settings", ["shortcutRecordKeys", "shortcutRecordKeysRecordingHint", "shortcutRecordKeysWindowInactive"]), locales: ALL_LOCALES.filter((locale) => locale !== "th") },
+  { feature: "select current statement", keys: ["settings.shortcutSelectCurrentStatement", "editor.contextMenu.selectCurrentStatement"] },
+  {
+    feature: "statement navigation shortcuts",
+    keys: under("settings", ["shortcutPreviousStatement", "shortcutNextStatement", "shortcutStatementStart"]),
+    translated: true,
+  },
+  { feature: "MCP history kind", keys: ["history.kinds.mcp"] },
+  { feature: "editor selection to AI (#10058)", keys: under("ai", ["selectionChipLabel", "selectionChipDetail", "externalTargetUnavailable"]) },
+  { feature: "SQL formatter layout style", keys: under("settings", ["sqlFormatterLayoutStyle", "sqlFormatterLayoutStyleDbx", "sqlFormatterLayoutStyleClassic"]) },
+  { feature: "sidebar table structure shortcut", keys: ["settings.shortcutEditSidebarTableStructure"], locales: ALL_LOCALES.filter((locale) => locale !== "th") },
+  { feature: "MySQL AUTO_INCREMENT warnings", keys: under("structureEditor", ["mysqlAutoIncrementSingleColumn", "mysqlAutoIncrementRequiresIndex", "mysqlAutoIncrementRequiresNativeColumn"]) },
 ];
 
 function lookup(messages: unknown, path: string): unknown {
@@ -210,6 +235,11 @@ describe("feature message rendering", () => {
 });
 
 describe("feature message content rules", () => {
+  it.each(ALL_LOCALES)("%s renders include syntax literally instead of resolving an i18n link", (locale) => {
+    const i18n = createI18n({ legacy: false, locale, messages: { [locale]: declared[locale] } });
+    expect(i18n.global.t("sqlFile.resolveIncludesHint")).toContain("-- @include");
+    i18n.dispose();
+  });
   it.each(EXCEPT_AZ_TR)("%s keeps the Dameng validity labels as the database literals", (locale) => {
     const objects = (locale === "en" ? en : declared[locale]).objects as Messages | undefined;
     expect(objects?.validStatus ?? en.objects.validStatus).toBe("VALID");

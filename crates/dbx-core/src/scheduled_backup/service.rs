@@ -22,7 +22,11 @@ pub enum BackupCommand {
     Rename { id: String, name: String },
     DeleteRuns { ids: Vec<String> },
     File { id: String, index: usize },
+    Import { files: Vec<String> },
 }
+
+/// Source of history entries for backup files created outside DBX, such as Navicat `.nb3` archives.
+pub const IMPORTED_SOURCE: &str = "imported";
 
 #[derive(Clone)]
 pub struct BackupService {
@@ -100,7 +104,82 @@ impl BackupService {
                 self.delete_runs(ids).await?;
                 Ok(Value::Null)
             }
+            BackupCommand::Import { files } => {
+                serde_json::to_value(self.import_files(files).await?).map_err(|e| e.to_string())
+            }
         }
+    }
+
+    /// Lists backup files created outside DBX in the history so they can be restored later.
+    /// DBX never owns imported files: deleting the entry only removes it from the history.
+    async fn import_files(&self, files: Vec<String>) -> Result<Vec<BackupRun>, String> {
+        if files.is_empty() || files.len() > 100 {
+            return Err("Select between 1 and 100 backup files".into());
+        }
+        let known = self
+            .store
+            .snapshot()
+            .await?
+            .runs
+            .into_iter()
+            .flat_map(|run| run.files.into_iter().map(|file| file.file_path))
+            .collect::<std::collections::HashSet<_>>();
+        let mut runs = Vec::with_capacity(files.len());
+        for file in files {
+            bounded_text(&file, 4096, "Backup file")?;
+            let path = Path::new(&file);
+            let parent = path.parent().ok_or("Backup file has no parent directory")?;
+            let directory = self.validate_destination(&parent.to_string_lossy())?;
+            let metadata = std::fs::symlink_metadata(path).map_err(|e| format!("{file}: {e}"))?;
+            if !metadata.is_file() {
+                return Err(format!("Backup file is not a regular file: {file}"));
+            }
+            let resolved = path.canonicalize().map_err(|e| e.to_string())?;
+            let file_path = resolved.to_string_lossy().into_owned();
+            let name = resolved.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let lower = name.to_ascii_lowercase();
+            if !lower.ends_with(".sql") && !lower.ends_with(".sql.gz") && !lower.ends_with(".nb3") {
+                return Err(format!("Unsupported backup file (use .sql, .sql.gz or .nb3): {name}"));
+            }
+            if known.contains(&file_path) || runs.iter().any(|run: &BackupRun| run.files[0].file_path == file_path) {
+                return Err(format!("Backup file is already in the history: {name}"));
+            }
+            let modified = metadata.modified().ok().map(chrono::DateTime::<chrono::Utc>::from);
+            let (database, schema, started_at) = if crate::navicat_nb3::is_nb3_path(&resolved) {
+                let archive = crate::navicat_nb3::Nb3Archive::open(&resolved).map_err(|e| format!("{name}: {e}"))?;
+                let (database, schema) = archive.source_database_and_schema();
+                let started = archive.started_at().and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0));
+                (database, schema, started.or(modified))
+            } else {
+                (String::new(), String::new(), modified)
+            };
+            let display_name = match (database.is_empty(), schema.is_empty() || schema == database) {
+                (true, _) => name.clone(),
+                (false, true) => database.clone(),
+                (false, false) => format!("{database}.{schema}"),
+            };
+            record_export_destination_identity(&self.state, &directory).await?;
+            let now = chrono::Utc::now().to_rfc3339();
+            runs.push(BackupRun {
+                id: uuid::Uuid::new_v4().simple().to_string(),
+                schedule_id: None,
+                schedule_name: name,
+                display_name: None,
+                connection_id: String::new(),
+                connection_name: String::new(),
+                destination_directory: directory.to_string_lossy().into_owned(),
+                trigger: "manual".into(),
+                source: IMPORTED_SOURCE.into(),
+                status: "success".into(),
+                started_at: started_at.map(|time| time.to_rfc3339()).unwrap_or_else(|| now.clone()),
+                completed_at: Some(now),
+                files: vec![BackupFile { database, schema, display_name, file_path, owned: false }],
+                progress_percent: 100.0,
+                error: None,
+            });
+        }
+        self.store.insert_completed(runs.clone()).await?;
+        Ok(runs)
     }
 
     pub(crate) fn validate_destination(&self, path: &str) -> Result<PathBuf, String> {
@@ -142,7 +221,7 @@ impl BackupService {
             return Err("Backup file escaped its destination".into());
         }
         let name = resolved.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
-        if !name.ends_with(".sql") && !name.ends_with(".sql.gz") {
+        if !name.ends_with(".sql") && !name.ends_with(".sql.gz") && !name.ends_with(".nb3") {
             return Err("Not a SQL backup file".into());
         }
         Ok(resolved)
@@ -152,6 +231,7 @@ impl BackupService {
         let others = self.store.snapshot().await?.runs;
         let mut retained = Vec::new();
         let mut errors = Vec::new();
+        let mut emptied = Vec::new();
         for file in &run.files {
             if others.iter().any(|r| r.id != run.id && r.files.iter().any(|f| f.file_path == file.file_path)) {
                 continue;
@@ -167,18 +247,22 @@ impl BackupService {
                 continue;
             }
             match self.checked_file(run, path).await {
-                Ok(path) => {
-                    if let Err(e) = tokio::fs::remove_file(path).await {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            retained.push(file.clone());
-                            errors.push(e.to_string());
-                        }
+                Ok(path) => match tokio::fs::remove_file(&path).await {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        retained.push(file.clone());
+                        errors.push(e.to_string());
                     }
-                }
+                    _ => emptied.extend(path.parent().map(Path::to_path_buf)),
+                },
                 Err(error) => {
                     retained.push(file.clone());
                     errors.push(error);
                 }
+            }
+        }
+        if let Ok(root) = self.validate_destination(&run.destination_directory) {
+            for directory in emptied {
+                remove_empty_directories(&directory, &root).await;
             }
         }
         run.files = retained;
@@ -195,6 +279,11 @@ impl BackupService {
         }
         let mut errors = Vec::new();
         for mut run in self.store.mark_deleting(ids).await? {
+            if run.source == IMPORTED_SOURCE {
+                // Imported files belong to the user; only the history entry is removed.
+                self.store.remove_run(run.id).await?;
+                continue;
+            }
             if let Err(error) = self.cleanup(&mut run).await {
                 run.error = Some(format!("Backup cleanup failed: {error}"));
                 self.store.deletion_failed(run).await?;
@@ -208,5 +297,19 @@ impl BackupService {
         } else {
             Err(errors.join("; "))
         }
+    }
+}
+
+/// Removes the per-run directories left behind once their backup files are gone.
+/// `remove_dir` refuses non-empty directories, so folders still holding other runs'
+/// backups or the user's own files are kept, and the destination root is never removed.
+async fn remove_empty_directories(mut directory: &Path, root: &Path) {
+    while directory != root && directory.starts_with(root) {
+        let is_directory = tokio::fs::symlink_metadata(directory).await.is_ok_and(|m| m.is_dir());
+        if !is_directory || tokio::fs::remove_dir(directory).await.is_err() {
+            break;
+        }
+        let Some(parent) = directory.parent() else { break };
+        directory = parent;
     }
 }

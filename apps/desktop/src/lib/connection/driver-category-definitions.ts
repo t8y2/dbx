@@ -33,6 +33,7 @@ export const AGENT_DRIVER_CATEGORY_MAP: Readonly<Record<string, DriverCategoryKe
   exasol: "analytics",
   firebird: "sql",
   gbase8a: "domestic",
+  gbase8c: "domestic",
   gbase8s: "domestic",
   goldendb: "domestic",
   h2: "lightweight",

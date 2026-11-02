@@ -10,12 +10,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // pending user edits.
 
 const mocks = vi.hoisted(() => ({
+  revision: 0,
   connection: {
     id: "structure-revalidation",
     name: "MySQL",
     db_type: "mysql",
     driver_label: "MySQL",
     driver_profile: "",
+    query_timeout_secs: 30,
   },
   ensureConnected: vi.fn(),
   executeQuery: vi.fn(),
@@ -35,7 +37,7 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", async (original) => ({ ...(await original<typeof import("vue-i18n")>()), useI18n: () => ({ t: (key: string) => key }) }));
 
 vi.mock("@lucide/vue", async () => {
   const { defineComponent, h } = await import("vue");
@@ -230,12 +232,18 @@ vi.mock("@/components/editor/EditorSearchPanel.vue", async () => {
   };
 });
 
-vi.mock("@/stores/connectionStore", () => ({
-  useConnectionStore: () => ({
-    ensureConnected: mocks.ensureConnected,
-    getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? mocks.connection : undefined),
-  }),
-}));
+vi.mock("@/stores/connectionStore", async () => {
+  const { reactive } = await import("vue");
+  const config = reactive(mocks.connection);
+  return {
+    useConnectionStore: () => ({
+      ensureConnected: mocks.ensureConnected,
+      connectionStateRevision: () => mocks.revision,
+      isCurrentConnectionStateRevision: () => true,
+      getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? config : undefined),
+    }),
+  };
+});
 vi.mock("@/stores/productionSafetyStore", () => ({ useProductionSafetyStore: () => ({ requestConfirmation: vi.fn() }) }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ tableStructureRefreshVersion: () => 0 }) }));
 vi.mock("@/stores/historyStore", () => ({ useHistoryStore: () => ({ add: vi.fn() }) }));
@@ -269,11 +277,370 @@ vi.mock("@/lib/backend/api", () => ({
   getTablePartitionStatus: mocks.getTablePartitionStatus,
   getTableOwner: mocks.getTableOwner,
 }));
+vi.mock("@/lib/database/oracleConstraints", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/database/oracleConstraints")>();
+  return {
+    ...actual,
+    readOracleIndexSnapshot: vi.fn(async (target) => ({
+      user: target.schema || "TEST",
+      currentSchema: target.schema || "TEST",
+      database: target.database,
+      databaseName: "ORCL",
+      objectId: "1",
+      columns: [],
+      userColumns: [],
+      columnReadMode: "strict-base" as const,
+      indexes: [],
+      indexNames: [],
+    })),
+  };
+});
 
 import TableStructureEditor from "@/components/structure/TableStructureEditor.vue";
 import { createColumnDrafts, createIndexDrafts } from "@/lib/table/tableStructureEditorState";
 import type { TableStructureEditorDraft } from "@/types/database";
 import type { BuildTableStructureChangeSqlOptions, EditableStructureIndex } from "@/lib/table/tableStructureEditorSql";
+
+describe("Oracle issue 13032/13310 preview probe", () => {
+  it("keeps a complete draft preview when the inherited query timeout changes", async () => {
+    mocks.connection.db_type = "oracle";
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => ({ value: facet === "columns" ? [{ name: "REC_ID", data_type: "NUMBER", is_nullable: true, is_primary_key: false }] : facet === "comment" ? "" : [], cacheStatus: "remote" }));
+    mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: ["ALTER TABLE users RENAME COLUMN REC_ID TO CHANGED"], warnings: [] });
+    const root = await mountStructureEditor();
+    const input = root.querySelector<HTMLInputElement>("[data-column-name-input]")!;
+    input.value = "CHANGED";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(root.textContent).toContain("ALTER TABLE users"));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    useConnectionStore().getConfig(mocks.connection.id)!.query_timeout_secs = 45;
+    await settle();
+    expect(root.textContent).toContain("ALTER TABLE users");
+    expect([...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "structureEditor.apply")?.disabled).toBe(false);
+  });
+  it("clears the recovery error when the last incomplete column is removed", async () => {
+    mocks.connection.db_type = "oracle";
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => {
+      if (facet === "columns") throw new Error("probe metadata unavailable");
+      return { value: facet === "comment" ? "" : [], cacheStatus: "remote" };
+    });
+    const columns = createColumnDrafts(
+      [
+        { name: "REC_ID", data_type: "VARCHAR2(32)", is_nullable: false, is_primary_key: false },
+        { name: "KEEP", data_type: "VARCHAR2(32)", is_nullable: true, is_primary_key: false },
+      ],
+      "oracle",
+    );
+    columns[0]!.original = undefined;
+    const root = document.createElement("div");
+    document.body.append(root);
+    const app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      tableName: "users",
+      draft: {
+        initialized: true,
+        dirty: true,
+        activeTab: "columns",
+        newTableName: "",
+        tableComment: "",
+        originalTableComment: "",
+        columns,
+        indexes: [],
+        foreignKeys: [],
+        triggers: [],
+        loadedMetadataFacets: ["columns", "indexes", "comment"],
+      },
+    });
+    mountedApps.push(app);
+    app.mount(root);
+    await settle();
+    expect(root.textContent).toContain("probe metadata unavailable");
+    const missing = [...root.querySelectorAll<HTMLInputElement>("[data-column-name-input]")].find((input) => input.value === "REC_ID")!;
+    missing.closest("tr")!.querySelector<HTMLButtonElement>("[data-delete-column-shortcut-button]")!.click();
+    await settle();
+    const keep = root.querySelector<HTMLInputElement>("[data-column-name-input]")!;
+    keep.value = "KEPT_EDIT";
+    keep.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: ["ALTER TABLE users RENAME COLUMN KEEP TO KEPT_EDIT"], warnings: [] });
+    root.querySelector<HTMLButtonElement>("[data-refresh-structure-shortcut]")!.click();
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled());
+    expect(root.textContent).not.toContain("probe metadata unavailable");
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("KEPT_EDIT");
+    expect(mocks.buildTableStructureChangeSql.mock.calls.at(-1)![0].columns.map((column: { name: string }) => column.name)).toEqual(["KEPT_EDIT"]);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+  it.each(["success", "failure", "revision"])("isolates hydration completion after %s", async (outcome) => {
+    mocks.connection.db_type = "oracle";
+    let finishOld!: (value: unknown) => void;
+    let failOld!: (error: Error) => void;
+    let finishNew!: (value: unknown) => void;
+    let reads = 0;
+    const metadata = [{ name: "REC_ID", data_type: "VARCHAR2(32)", is_nullable: false, is_primary_key: false }];
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => {
+      if (facet === "columns") {
+        reads++;
+        if (reads === 1)
+          return new Promise((resolve, reject) => {
+            finishOld = resolve;
+            failOld = reject;
+          });
+        if (reads === 2)
+          return new Promise((resolve) => {
+            finishNew = resolve;
+          });
+      }
+      return { value: facet === "columns" ? metadata : facet === "comment" ? "" : [], cacheStatus: "remote" };
+    });
+    const columns = createColumnDrafts(metadata, "oracle");
+    columns[0]!.original = undefined;
+    columns[0]!.name = "WAIT_EDIT";
+    mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: ["ALTER TABLE users RENAME COLUMN REC_ID TO WAIT_EDIT"], warnings: [] });
+    const root = document.createElement("div");
+    document.body.append(root);
+    const app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      tableName: "users",
+      draft: {
+        initialized: true,
+        dirty: true,
+        activeTab: "columns",
+        newTableName: "",
+        tableComment: "",
+        originalTableComment: "",
+        columns,
+        indexes: [],
+        foreignKeys: [],
+        triggers: [],
+        loadedMetadataFacets: ["columns", "indexes", "comment"],
+      },
+    });
+    mountedApps.push(app);
+    app.mount(root);
+    await settle();
+    expect(root.querySelector("[aria-busy]")?.getAttribute("aria-busy")).toBe("true");
+    if (outcome === "revision") {
+      mocks.revision++;
+      finishOld({ value: metadata, cacheStatus: "remote" });
+      await settle();
+      expect(root.querySelector("[aria-busy]")?.getAttribute("aria-busy")).toBe("false");
+      expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
+      expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("WAIT_EDIT");
+      return;
+    }
+    root.querySelector<HTMLButtonElement>("[data-refresh-structure-shortcut]")!.click();
+    await vi.waitFor(() => expect(finishNew).toBeDefined());
+    if (outcome === "success") finishOld({ value: [{ name: "WRONG", data_type: "NUMBER", is_nullable: true }], cacheStatus: "remote" });
+    else failOld(new Error("stale hydration failure"));
+    await settle();
+    expect(root.querySelector("[aria-busy]")?.getAttribute("aria-busy")).toBe("true");
+    expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
+    finishNew({ value: metadata, cacheStatus: "remote" });
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled());
+    expect(root.textContent).not.toContain("stale hydration failure");
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("WAIT_EDIT");
+    expect(root.querySelectorAll("[data-column-name-input]")).toHaveLength(1);
+    expect(root.querySelector("[aria-busy]")?.getAttribute("aria-busy")).toBe("false");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+  it.each([
+    { databaseType: "oracle", exactIdentity: false },
+    { databaseType: "oceanbase-oracle", exactIdentity: false },
+    { databaseType: "oracle", exactIdentity: true },
+  ])("retries failed hydration without discarding edits ($databaseType/$exactIdentity)", async ({ databaseType, exactIdentity }) => {
+    mocks.connection.db_type = databaseType;
+    const { readOracleIndexSnapshot } = await import("@/lib/database/oracleConstraints");
+    let available = false;
+    const metadata = [{ name: "REC_ID", data_type: "VARCHAR2(32)", is_nullable: false, is_primary_key: false }];
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => {
+      if (facet === "columns" && !available) throw new Error("probe metadata unavailable");
+      return { value: facet === "columns" ? metadata : facet === "comment" ? "" : [], cacheStatus: "remote" };
+    });
+    const columns = createColumnDrafts(metadata, databaseType as "oracle" | "oceanbase-oracle");
+    columns[0]!.original = undefined;
+    const root = document.createElement("div");
+    document.body.append(root);
+    const app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      tableName: "users",
+      exactIdentity,
+      draft: {
+        initialized: true,
+        dirty: true,
+        activeTab: "columns",
+        newTableName: "",
+        tableComment: "",
+        originalTableComment: "",
+        columns,
+        indexes: [],
+        foreignKeys: [],
+        triggers: [],
+        loadedMetadataFacets: ["columns", "indexes", "comment"],
+      },
+    });
+    mountedApps.push(app);
+    app.mount(root);
+    await settle();
+    expect(root.textContent).toContain("probe metadata unavailable");
+    const input = root.querySelector<HTMLInputElement>("[data-column-name-input]")!;
+    input.value = "WAIT_EDIT";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    const refresh = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "structureEditor.refresh");
+    expect(refresh).toBeDefined();
+    refresh!.click();
+    await settle();
+    expect(root.textContent).toContain("probe metadata unavailable");
+    expect(root.querySelector("[aria-busy]")?.getAttribute("aria-busy")).toBe("false");
+    available = true;
+    mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: ["ALTER TABLE users RENAME COLUMN REC_ID TO WAIT_EDIT"], warnings: [] });
+    refresh!.click();
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled());
+    const options = mocks.buildTableStructureChangeSql.mock.calls.at(-1)![0];
+    expect(options.columns[0].name).toBe("WAIT_EDIT");
+    expect(options.columns[0].original.name).toBe("REC_ID");
+    expect(mocks.loadObjectMetadataFacet.mock.calls.some((call) => call[1] === "columns" && call[3]?.force === true)).toBe(true);
+    await vi.waitFor(() => expect(root.textContent).not.toContain("probe metadata unavailable"));
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("WAIT_EDIT");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    if (exactIdentity) await vi.waitFor(() => expect(readOracleIndexSnapshot).toHaveBeenCalled());
+  });
+  it("keeps edits made after failed hydration across deactivate and activate", async () => {
+    const { KeepAlive, h, ref } = await import("vue");
+    mocks.connection.db_type = "oracle";
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => {
+      if (facet === "columns") throw new Error("probe metadata unavailable");
+      return { value: facet === "comment" ? "" : [], cacheStatus: "remote" };
+    });
+    const draftColumns = createColumnDrafts([{ name: "REC_ID", data_type: "VARCHAR2(32)", is_nullable: false, is_primary_key: false }], "oracle");
+    draftColumns[0]!.original = undefined;
+    draftColumns[0]!.name = "REC_ID_CHANGED";
+    const props = {
+      connectionId: mocks.connection.id,
+      database: "test",
+      tableName: "users",
+      draft: {
+        initialized: true,
+        dirty: true,
+        activeTab: "columns" as const,
+        newTableName: "",
+        tableComment: "",
+        originalTableComment: "",
+        columns: draftColumns,
+        indexes: [],
+        foreignKeys: [],
+        triggers: [],
+        loadedMetadataFacets: ["columns", "indexes", "comment"],
+      },
+    };
+    const root = document.createElement("div");
+    document.body.append(root);
+    const shown = ref(true);
+    const app = createApp({ setup: () => () => h(KeepAlive, null, { default: () => (shown.value ? h(TableStructureEditor, props) : null) }) });
+    mountedApps.push(app);
+    app.mount(root);
+    await settle();
+    const input = root.querySelector<HTMLInputElement>("[data-column-name-input]")!;
+    input.value = "WAIT_EDIT";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    expect(input.value).toBe("WAIT_EDIT");
+    shown.value = false;
+    await settle();
+    shown.value = true;
+    await settle();
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("WAIT_EDIT");
+  });
+  it.each(["rejected", "empty", "unmatched"])("reports incomplete hydration without leaving a preview pending (%s)", async (outcome) => {
+    mocks.connection.db_type = "oracle";
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => {
+      if (facet === "columns") {
+        if (outcome === "rejected") throw new Error("probe metadata unavailable");
+        return { value: outcome === "empty" ? [] : [{ name: "OTHER", data_type: "NUMBER", is_nullable: true }], cacheStatus: "remote" };
+      }
+      return { value: facet === "comment" ? "" : [], cacheStatus: "remote" };
+    });
+    const draftColumns = createColumnDrafts([{ name: "REC_ID", data_type: "VARCHAR2(32)", is_nullable: false, is_primary_key: false }], "oracle");
+    draftColumns[0]!.original = undefined;
+    draftColumns[0]!.name = "REC_ID_CHANGED";
+    const root = document.createElement("div");
+    document.body.append(root);
+    const app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      tableName: "users",
+      draft: {
+        initialized: true,
+        dirty: true,
+        activeTab: "columns",
+        newTableName: "",
+        tableComment: "",
+        originalTableComment: "",
+        columns: draftColumns,
+        indexes: [],
+        foreignKeys: [],
+        triggers: [],
+        loadedMetadataFacets: ["columns", "indexes", "comment"],
+      },
+    });
+    mountedApps.push(app);
+    app.mount(root);
+    await settle();
+    await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet.mock.calls.some((call) => call[1] === "columns")).toBe(true));
+    await settle();
+    expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("REC_ID_CHANGED");
+    const apply = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "structureEditor.apply");
+    expect(apply?.disabled).toBe(true);
+    expect(root.querySelector("[aria-busy]")?.querySelectorAll(".animate-spin")).toHaveLength(0);
+    expect(root.querySelector("[aria-busy]")?.getAttribute("aria-busy")).toBe("false");
+    expect(root.textContent).toContain(outcome === "rejected" ? "probe metadata unavailable" : "oceanbasePrimaryKey.incompleteMetadata");
+    expect(root.querySelectorAll("[data-column-name-input]")).toHaveLength(1);
+  });
+  it.each(["immediate", "delayed-indexes", "delayed-builder"])("finishes SQL preview after adding a VARCHAR2 column (%s)", async (scenario) => {
+    mocks.connection.db_type = "oracle";
+    let resolveIndexes!: (value: unknown) => void;
+    let resolveBuilder!: (value: unknown) => void;
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => {
+      if (scenario === "delayed-indexes" && facet === "indexes")
+        return new Promise((resolve) => {
+          resolveIndexes = resolve;
+        });
+      return { value: facet === "columns" ? [{ name: "REC_ID", data_type: "VARCHAR2(32)", is_nullable: false, is_primary_key: false }] : facet === "comment" ? "" : [], cacheStatus: "remote" };
+    });
+    const built = { statements: ['ALTER TABLE users ADD ("test" VARCHAR2(255))'], warnings: [] };
+    mocks.buildTableStructureChangeSql.mockImplementation(async () =>
+      scenario === "delayed-builder"
+        ? new Promise((resolve) => {
+            resolveBuilder = resolve;
+          })
+        : built,
+    );
+    const root = await mountStructureEditor();
+    if (scenario === "delayed-indexes") {
+      expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
+      resolveIndexes({ value: [], cacheStatus: "remote" });
+      await settle();
+    }
+    const add = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "structureEditor.addColumn");
+    expect(add).toBeDefined();
+    add!.click();
+    await settle();
+    const fields = [...root.querySelectorAll<HTMLInputElement>("[data-column-name-input]")];
+    const field = fields.at(-1)!;
+    field.value = "test";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled());
+    if (scenario === "delayed-builder") resolveBuilder(built);
+    await vi.waitFor(() => expect(root.textContent).toContain("ALTER TABLE users ADD"));
+    const apply = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "structureEditor.apply");
+    expect(apply).toBeDefined();
+    expect(apply!.disabled).toBe(false);
+  });
+});
 
 const mountedApps: App[] = [];
 
@@ -317,6 +684,8 @@ async function mountStructureEditor(draft?: TableStructureEditorDraft, tableName
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.revision = 0;
+  mocks.connection.query_timeout_secs = 30;
   mocks.connection.db_type = "mysql";
   mocks.connection.driver_profile = "";
   mocks.ensureConnected.mockResolvedValue(undefined);
@@ -404,6 +773,70 @@ describe("TableStructureEditor column index actions", () => {
     await vi.waitFor(() => expect(latestDraft().indexes).toEqual(expect.arrayContaining([expect.objectContaining({ columns: ["region"], isUnique: true, isPrimary: false })])));
     expect(fieldRow(root, "region").classList.contains("structure-column-unique-key")).toBe(true);
     expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("navigates index search matches in sorted row order", async () => {
+    const indexDrafts = createIndexDrafts([
+      { name: "idx_z", columns: ["z"], is_unique: false, is_primary: false },
+      { name: "idx_a", columns: ["a"], is_unique: false, is_primary: false },
+    ]);
+    const draft = savedIndexDraft(indexDrafts[0]!);
+    draft.indexes = indexDrafts;
+
+    const root = await mountStructureEditor(draft);
+    const rows = [...root.querySelectorAll<HTMLElement>("[data-index-row-id]")];
+    expect(rows.map((row) => row.dataset.indexRowId)).toEqual(["existing:idx_z", "existing:idx_a"]);
+    const scrollSpies = new Map(rows.map((row) => [row.dataset.indexRowId!, vi.fn()]));
+    for (const row of rows) row.scrollIntoView = scrollSpies.get(row.dataset.indexRowId!)!;
+
+    root.querySelector<HTMLElement>("th[aria-sort]")!.click();
+    await settle();
+    expect([...root.querySelectorAll<HTMLElement>("[data-index-row-id]")].map((row) => row.dataset.indexRowId)).toEqual(["existing:idx_a", "existing:idx_z"]);
+
+    const search = root.querySelector<HTMLInputElement>('input[placeholder="structureEditor.searchIndexes"]')!;
+    search.value = "idx";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    search.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await settle();
+
+    expect(root.querySelector<HTMLElement>("[data-index-row-id].structure-column-search-current")?.dataset.indexRowId).toBe("existing:idx_a");
+    expect(scrollSpies.get("existing:idx_a")).toHaveBeenCalledOnce();
+    expect(scrollSpies.get("existing:idx_z")).not.toHaveBeenCalled();
+  });
+
+  it("focuses the newly added index when sorted before an older draft", async () => {
+    const seedDraft: EditableStructureIndex = {
+      id: "new:seed",
+      name: "idx_seed",
+      columns: ["z"],
+      nameEdited: true,
+      isUnique: false,
+      isPrimary: false,
+      filter: "",
+      indexType: "BTREE",
+      includedColumns: [],
+      comment: "",
+      concurrently: false,
+      columnOpclasses: [],
+      markedForDrop: false,
+    };
+    const draft = savedIndexDraft(seedDraft);
+    draft.indexes = [...createIndexDrafts([{ name: "idx_a", columns: ["a"], is_unique: false, is_primary: false }]), seedDraft];
+
+    const root = await mountStructureEditor(draft);
+    root.querySelector<HTMLElement>("th[aria-sort]")!.click();
+    await settle();
+
+    const addButton = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("structureEditor.addIndex"));
+    expect(addButton).toBeDefined();
+    addButton!.click();
+    await settle();
+
+    const activeInput = document.activeElement as HTMLInputElement | null;
+    expect(activeInput?.matches("[data-index-name-input]")).toBe(true);
+    expect(activeInput?.closest<HTMLElement>("[data-index-row-id]")?.dataset.indexRowIndex).toBe("0");
+    expect(activeInput?.value).toBe("");
   });
 
   it("builds a composite index in selection order and appends fields without duplicates", async () => {
@@ -610,8 +1043,6 @@ describe("TableStructureEditor column index actions", () => {
   it.each([
     ["Doris", "doris", "doris"],
     ["Doris MySQL profile", "mysql", "doris"],
-    ["StarRocks", "starrocks", "starrocks"],
-    ["StarRocks MySQL profile", "mysql", "starrocks"],
     ["GoldenDB", "goldendb", "goldendb"],
     ["SunDB", "sundb", "sundb"],
     ["Databend", "databend", "databend"],
@@ -623,6 +1054,23 @@ describe("TableStructureEditor column index actions", () => {
     await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
     menuButton("structureEditor.createNormalIndex").click();
     await expectIndexName(root, "USERS_EMAIL_IDX");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["StarRocks", "starrocks", "starrocks"],
+    ["StarRocks MySQL profile", "mysql", "starrocks"],
+  ] as const)("disables unsupported ordinary index creation on %s", async (_label, databaseType, driverProfile) => {
+    mocks.connection.db_type = databaseType;
+    mocks.connection.driver_profile = driverProfile;
+    loadMetadata();
+    const root = await mountStructureEditor();
+    await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
+    const button = menuButton("structureEditor.createNormalIndex");
+    expect(button.disabled).toBe(true);
+    button.click();
+    await settle();
+    expect(indexRow(root)).toBeNull();
     expect(mocks.executeBatch).not.toHaveBeenCalled();
   });
 

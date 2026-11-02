@@ -63,8 +63,13 @@ export function phoenixConnectionModeForConfig(config: PhoenixConnectionConfig):
   return connectionString.startsWith("jdbc:phoenix:thin:") || driverClass === PHOENIX_QUERY_SERVER_JDBC_DRIVER_CLASS.toLowerCase() ? "query-server" : "direct";
 }
 
+const PHOENIX_DIRECT_RUNTIME_FILE = /^phoenix-client-(?:embedded-)?hbase-.+\.jar$/i;
+const PHOENIX_LEGACY_DIRECT_RUNTIME_FILE = /^phoenix-.+-HBase-.+-client\.jar$/i;
+const PHOENIX_LEGACY_THIN_CLIENT_FILE = /-thin-client\.jar$/i;
+
 export function isPhoenixRuntimePath(path: string, mode: PhoenixConnectionMode): boolean {
   const parts = path.split(/[/\\]/);
   const fileName = parts[parts.length - 1] || path;
-  return mode === "direct" ? /^phoenix-client-(?:embedded-)?hbase-.+\.jar$/i.test(fileName) : /^phoenix-queryserver-client-.+\.jar$/i.test(fileName);
+  if (mode === "query-server") return /^phoenix-queryserver-client-.+\.jar$/i.test(fileName);
+  return PHOENIX_DIRECT_RUNTIME_FILE.test(fileName) || (PHOENIX_LEGACY_DIRECT_RUNTIME_FILE.test(fileName) && !PHOENIX_LEGACY_THIN_CLIENT_FILE.test(fileName));
 }

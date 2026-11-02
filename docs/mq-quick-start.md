@@ -149,6 +149,39 @@
 }
 ```
 
+## RocketMQ 5.x Proxy 接入
+
+在 RocketMQ 连接中选择接入模式：
+
+- **NameServer / Remoting**：保留原有行为，连接 NameServer 并访问 Broker。旧连接未指定模式时继续使用此模式。
+- **Proxy / gRPC**：填写官方 RocketMQ 5.x Proxy 的 gRPC `host:port`，例如 `proxy.example.com:8081`。这不是 NameServer 端口，也不是 SOCKS5 代理地址。
+
+Proxy 默认启用 TLS 并验证服务端证书及主机名。连接本地明文 Proxy 时应明确关闭 TLS。SSH／SOCKS 网络转发应配置在连接的传输设置中，逻辑 Proxy 地址仍用于 TLS 主机名校验。
+
+AK/SK 使用连接认证中的 Basic 用户名／密码字段；不需要认证时选择无认证。凭据遵循连接的“保存密码”设置，不应在 `extra` 中重复填写 `secretKey`。
+
+配置示例（示例不包含真实凭据）：
+
+```json
+{
+  "systemKind": "rocketmq",
+  "adminUrl": "",
+  "auth": { "kind": "none" },
+  "extra": {
+    "connectionMode": "proxy",
+    "proxyEndpoint": "proxy.example.com:8081",
+    "proxyTls": true,
+    "managementEnabled": false
+  }
+}
+```
+
+仅配置 Proxy 时，控制台允许手动输入已存在的 Topic，发送普通消息及 Key、Tag、用户属性。普通消息由 Proxy 选择实际队列，回执不提供可确认的队列 ID，因此 DBX 不展示猜测的分区或分区内 Offset。连接测试检查消息通道，不发送或消费消息；测试成功不代表拥有每个 Topic 的发送权限。全局 Topic 列表、Broker、消费组、ACL、消息查询、Trace、按 Offset 预览不作为纯 Proxy 的功能提供。首期也不提供事务、定时、FIFO 消息或指定分区发送。
+
+需要管理集群时，可开启可选管理通道，再填写 NameServer 地址和集群名。消息仍通过 Proxy 发送，管理操作复用 Remoting；因此客户端还需要访问 NameServer 和 Broker。控制台分别展示消息与管理通道状态，管理通道失败时保留可用的消息发送功能。
+
+Proxy 模式需要支持 `rocketmq_proxy_grpc` 的 RocketMQ Agent。遇到升级提示时，在驱动管理中更新 RocketMQ 驱动；旧 Agent 仍可用于原有 Remoting 连接。
+
 ## 使用示例
 
 ### 租户管理

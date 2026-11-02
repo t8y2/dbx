@@ -33,5 +33,23 @@ async fn count_supports_fast_accurate_and_browser_total_paths() {
     assert!(!browser_result.total_is_exact);
     assert_eq!(browser_result.documents.len(), 2);
 
+    // Without the total query the result only reports the rows it saw.
+    let filtered_page = mongo_driver::find_documents_extended_json_without_total(
+        &client,
+        &database,
+        &collection,
+        1,
+        5,
+        Some(r#"{"n":{"$gte":2}}"#),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(filtered_page.documents.len(), 1);
+    assert_eq!(filtered_page.total, 2);
+    assert!(!filtered_page.total_is_exact);
+
     mongo_driver::drop_collection(&client, &database, &collection).await.unwrap();
 }

@@ -90,14 +90,15 @@ export const GRID_SNAPSHOT_CSS = `
   border-radius: 8px;
   overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.4;
   text-align: left;
   box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
 }
 .dbx-grid-snapshot__bar { display: flex; width: 100%; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--dbx-grid-snapshot-border); }
 .dbx-grid-snapshot__dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
 .dbx-grid-snapshot__title { margin-left: 4px; font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dbx-grid-snapshot__table { border-collapse: separate; border-spacing: 0; table-layout: auto; width: 100%; }
-.dbx-grid-snapshot__cell { border-right: 1px solid var(--dbx-grid-snapshot-border); border-bottom: 1px solid var(--dbx-grid-snapshot-border); padding: 7px 10px; white-space: nowrap; vertical-align: top; }
+.dbx-grid-snapshot__table { border-collapse: separate; border-spacing: 0; table-layout: auto; width: 100%; line-height: 1.4; }
+.dbx-grid-snapshot__cell { border-right: 1px solid var(--dbx-grid-snapshot-border); border-bottom: 1px solid var(--dbx-grid-snapshot-border); padding: 7px 10px; white-space: nowrap; vertical-align: top; line-height: 1.4; }
 .dbx-grid-snapshot__cell--wrapped { max-width: 420px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dbx-grid-snapshot__cell:last-child { border-right: 0; }
 .dbx-grid-snapshot__table tbody tr:last-child .dbx-grid-snapshot__cell { border-bottom: 0; }
@@ -136,6 +137,7 @@ export function renderGridSnapshotHtml(source: GridSnapshotSource, options: Grid
   const wrapCells = options.wrapCells === true;
   const compact = options.compact === true;
   const cellPadding = compact ? "3px 8px" : "4px 12px";
+  const lastRowCellPadding = compact ? "3px 8px 5px" : "4px 12px 6px";
   const headerPadding = compact ? "4px 8px" : "6px 8px";
   const fontSize = compact ? "12px" : "13px";
   const rowNumberHeader = showRowNumbers ? `<th class="dbx-grid-snapshot__cell dbx-grid-snapshot__cell--header dbx-grid-snapshot__cell--row-number" style="background:${GRID_SNAPSHOT_HEADER[appearance]};color:${GRID_SNAPSHOT_MUTED[appearance]};padding:${headerPadding}">#</th>` : "";
@@ -151,15 +153,16 @@ export function renderGridSnapshotHtml(source: GridSnapshotSource, options: Grid
       : "";
   const displayRows: GridSnapshotCellValue[][] = transpose ? source.columns.map((_, columnIndex) => source.rows.map((row) => row[columnIndex] ?? null)) : source.rows;
   const body = displayRows
-    .map(
-      (row, rowIndex) =>
-        `<tr style="background:${options.stripedRows !== false && rowIndex % 2 === 1 ? GRID_SNAPSHOT_STRIPED_ROW[appearance] : GRID_SNAPSHOT_BACKGROUND[appearance]}">${showRowNumbers ? `<td class="dbx-grid-snapshot__cell dbx-grid-snapshot__cell--row-number" style="background:${GRID_SNAPSHOT_ROW_NUMBER[appearance]};color:${GRID_SNAPSHOT_MUTED[appearance]};padding:${cellPadding}">${rowIndex + 1}</td>` : ""}${transpose && showFieldNames ? renderFieldCell(source.columns[rowIndex] ?? "", rowIndex, "td") : ""}${row
-          .map((value) => {
-            const nullClass = value === null ? " dbx-grid-snapshot__cell--null" : "";
-            return `<td class="dbx-grid-snapshot__cell${wrapCells ? " dbx-grid-snapshot__cell--wrapped" : ""}${nullClass}" style="color:${value === null ? GRID_SNAPSHOT_MUTED[appearance] : GRID_SNAPSHOT_TEXT[appearance]};padding:${cellPadding}">${escapeHtml(formatGridSnapshotCell(value))}</td>`;
-          })
-          .join("")}</tr>`,
-    )
+    .map((row, rowIndex) => {
+      const isLastRow = rowIndex === displayRows.length - 1;
+      const rowPadding = isLastRow ? lastRowCellPadding : cellPadding;
+      return `<tr style="background:${options.stripedRows !== false && rowIndex % 2 === 1 ? GRID_SNAPSHOT_STRIPED_ROW[appearance] : GRID_SNAPSHOT_BACKGROUND[appearance]}">${showRowNumbers ? `<td class="dbx-grid-snapshot__cell dbx-grid-snapshot__cell--row-number" style="background:${GRID_SNAPSHOT_ROW_NUMBER[appearance]};color:${GRID_SNAPSHOT_MUTED[appearance]};padding:${rowPadding}">${rowIndex + 1}</td>` : ""}${transpose && showFieldNames ? renderFieldCell(source.columns[rowIndex] ?? "", rowIndex, "td") : ""}${row
+        .map((value) => {
+          const nullClass = value === null ? " dbx-grid-snapshot__cell--null" : "";
+          return `<td class="dbx-grid-snapshot__cell${wrapCells ? " dbx-grid-snapshot__cell--wrapped" : ""}${nullClass}" style="color:${value === null ? GRID_SNAPSHOT_MUTED[appearance] : GRID_SNAPSHOT_TEXT[appearance]};padding:${rowPadding}">${escapeHtml(formatGridSnapshotCell(value))}</td>`;
+        })
+        .join("")}</tr>`;
+    })
     .join("");
   const bar = options.showTrafficLights !== false || source.title ? renderSnapshotBar(source.title, appearance, options.showTrafficLights !== false) : "";
   return `<style>${GRID_SNAPSHOT_CSS}</style><div class="dbx-grid-snapshot" data-snapshot-appearance="${appearance}" style="background:${GRID_SNAPSHOT_BACKGROUND[appearance]};font-size:${fontSize};color:${GRID_SNAPSHOT_TEXT[appearance]};--dbx-grid-snapshot-border:${GRID_SNAPSHOT_BORDER[appearance]}">${bar}<table class="dbx-grid-snapshot__table">${header}<tbody>${body}</tbody></table></div>`;

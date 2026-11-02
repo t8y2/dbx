@@ -1905,8 +1905,10 @@ fn raw_response_result(status: u16, body: String, start: Instant, truncated: boo
     QueryResult {
         columns: vec!["status".to_string(), "response".to_string()],
         column_types: Vec::new(),
+        deferred_large_value_cells: Vec::new(),
         column_sortables: Vec::new(),
         spatial_columns: Vec::new(),
+        raw_key_cells: Vec::new(),
         spatial_values: Vec::new(),
         rows: vec![vec![Value::Number(status.into()), Value::String(body)]],
         affected_rows: 0,

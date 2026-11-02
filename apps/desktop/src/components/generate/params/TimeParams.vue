@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { RefreshCw } from "@lucide/vue";
+import { generateTimeInRange } from "@/lib/dataGrid/generatorTimeRange";
 import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 
 const props = defineProps<{ params: GeneratorParams }>();
@@ -12,17 +13,7 @@ const { t } = useI18n();
 
 const previewVal = computed(() => {
   void previewKey.value;
-  let sh = 0,
-    sm = 23;
-  if (!props.params.allDay) {
-    sh = parseInt(props.params.startTime ?? "00") || 0;
-    sm = parseInt(props.params.endTime ?? "23") || 23;
-  }
-  const h = Math.floor(Math.random() * (sm - sh + 1)) + sh;
-  const m = Math.floor(Math.random() * 60);
-  const s = Math.floor(Math.random() * 60);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+  return props.params.allDay ? generateTimeInRange() : generateTimeInRange(props.params.startTime, props.params.endTime);
 });
 
 const previewKey = ref(0);

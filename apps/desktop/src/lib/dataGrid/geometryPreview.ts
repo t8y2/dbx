@@ -217,6 +217,20 @@ export function isHexGeometry(value: string): boolean {
   return value.startsWith("0x");
 }
 
+const WKT_GEOMETRY_KEYWORDS = ["POINT", "LINESTRING", "POLYGON", "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION", "TRIANGLE", "TIN", "POLYHEDRALSURFACE", "CIRCULARSTRING", "COMPOUNDCURVE", "CURVEPOLYGON", "MULTICURVE", "MULTISURFACE"].join("|");
+
+const WKT_SHAPE_RE = new RegExp(`^(?:SRID=\\d+\\s*;\\s*)?(?:${WKT_GEOMETRY_KEYWORDS})\\s*(?:Z|M|ZM)?\\s*(?:\\(|EMPTY\\b)`, "i");
+
+/**
+ * Strict WKT gate for geometry-sniffing UI: the value must start with a known
+ * geometry keyword followed by coordinates or EMPTY. `parseWktGeometry` alone
+ * is too loose for detection — it accepts any text containing a parenthesized
+ * number or the word "empty".
+ */
+export function looksLikeWkt(value: string): boolean {
+  return WKT_SHAPE_RE.test(value.trim());
+}
+
 export function parseWktGeometry(wkt: string): ParsedWktGeometry | null {
   const cleaned = cleanWktInput(wkt);
   if (!cleaned || isHexGeometry(cleaned)) return null;

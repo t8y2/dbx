@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { QueryResult } from "@/types/database";
-import { mysqlTableCollationSql, parseMysqlTableCollation } from "@/lib/table/mysqlTableCollation";
+import { mysqlTableCollationSql, parseMysqlTableCharset, parseMysqlTableCollation } from "@/lib/table/mysqlTableCollation";
 
 function result(columns: string[], rows: QueryResult["rows"]): QueryResult {
   return { columns, rows, affected_rows: 0, execution_time_ms: 1 };
@@ -26,5 +26,16 @@ describe("mysqlTableCollation", () => {
     expect(parseMysqlTableCollation(result(["table_collation"], []))).toBe("");
     expect(parseMysqlTableCollation(result(["engine"], [["InnoDB"]]))).toBe("");
     expect(parseMysqlTableCollation(undefined)).toBe("");
+  });
+
+  it("derives the table charset and collation from the same metadata row", () => {
+    expect(parseMysqlTableCharset(result(["TABLE_COLLATION"], [[" utf8mb4_0900_ai_ci "]]))).toEqual({
+      charset: "utf8mb4",
+      collation: "utf8mb4_0900_ai_ci",
+    });
+    expect(parseMysqlTableCharset(result(["table_collation"], [[null]]))).toEqual({
+      charset: "",
+      collation: "",
+    });
   });
 });

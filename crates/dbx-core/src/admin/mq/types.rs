@@ -32,9 +32,22 @@ impl MqSystemKind {
 /// Capability flags. The frontend reads these to show/hide functionality, and
 /// the adapter computes them from the detected server version so unsupported
 /// features are hidden rather than failing at call time.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MqCapabilities {
+    #[serde(default = "capability_default_true")]
+    pub supports_list_topics: bool,
+    #[serde(default = "capability_default_true")]
+    pub supports_create_topic: bool,
+    #[serde(default = "capability_default_true")]
+    pub supports_delete_topic: bool,
+    #[serde(default = "capability_default_true")]
+    pub supports_topic_stats: bool,
+    #[serde(default = "capability_default_true")]
+    pub supports_broker_admin: bool,
+    #[serde(default = "capability_default_true")]
+    pub supports_producer_listing: bool,
+
     pub supports_tenants: bool,
     pub supports_namespaces: bool,
     pub supports_partitioned_topics: bool,
@@ -79,6 +92,49 @@ pub struct MqCapabilities {
     /// RabbitMQ: cluster overview & node monitoring via the management API.
     #[serde(default)]
     pub supports_cluster_monitoring: bool,
+}
+
+fn capability_default_true() -> bool {
+    true
+}
+
+impl Default for MqCapabilities {
+    fn default() -> Self {
+        Self {
+            supports_list_topics: true,
+            supports_create_topic: true,
+            supports_delete_topic: true,
+            supports_topic_stats: true,
+            supports_broker_admin: true,
+            supports_producer_listing: true,
+            supports_tenants: false,
+            supports_namespaces: false,
+            supports_partitioned_topics: false,
+            supports_subscriptions: false,
+            supports_create_subscription: false,
+            supports_reset_cursor: false,
+            supports_skip_messages: false,
+            supports_clear_backlog: false,
+            supports_peek_messages: false,
+            supports_expire_messages: false,
+            supports_rate_limits: false,
+            supports_backlog_quota: false,
+            supports_retention: false,
+            supports_permissions: false,
+            supports_geo_replication: false,
+            supports_token_management: false,
+            supports_raw_admin_api: false,
+            supports_send_message: false,
+            supports_message_query: false,
+            supports_dlq: false,
+            supports_message_trace: false,
+            supports_exchanges: false,
+            supports_client_connections: false,
+            supports_user_permissions: false,
+            supports_policies: false,
+            supports_cluster_monitoring: false,
+        }
+    }
 }
 
 /// Result of a connectivity test, including the detected server version and how
@@ -524,7 +580,8 @@ pub struct SubscriptionInfo {
     /// RocketMQ: subscribed topic names for this consumer group (cluster-wide listing).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub topics: Vec<String>,
-    /// RocketMQ: online consumer client count (cluster-wide listing).
+    /// Online consumer client count for RocketMQ groups or Kafka topic subscriptions.
+    /// Absent when member information is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub online_members: Option<u32>,
     /// RocketMQ: NORMAL / FIFO / SYSTEM (aligned with Dashboard).
@@ -801,6 +858,7 @@ pub enum PeekStartPosition {
     Latest,
     Earliest,
     Offset,
+    Timestamp,
 }
 
 /// Optional hints for reading messages. Non-Kafka adapters ignore
@@ -809,6 +867,8 @@ pub enum PeekStartPosition {
 /// earliest available message unless an older caller supplies `offset`.
 /// `start_position: Offset` requires a non-negative offset. When no partition
 /// is supplied, Kafka reads forward from that offset in every topic partition.
+/// `start_position: Timestamp` requires a non-negative epoch-millisecond
+/// `timestamp` and reads from the first record at or after it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeekMessagesOptions {
@@ -820,6 +880,10 @@ pub struct PeekMessagesOptions {
     pub partition: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<i64>,
+    /// Epoch milliseconds; used only with `start_position: Timestamp`, where
+    /// the agent resolves the first offset at or after this time per partition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1209,6 +1273,10 @@ pub struct SendMessageRequest {
     /// Optional message headers.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// RabbitMQ: standard AMQP BasicProperties, separate from custom headers.
+    /// Keys use AMQP snake_case names; values remain strings on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<HashMap<String, String>>,
     /// Optional target partition (Kafka). When `None`, the key-based partitioner
     /// is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1231,8 +1299,9 @@ pub struct SendMessageRequest {
 pub struct SendMessageResponse {
     /// Topic the message was written to.
     pub topic: String,
-    /// Partition the message was written to.
-    pub partition: i32,
+    /// Partition the message was written to, when the transport reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition: Option<i32>,
     /// Offset of the produced message.
     pub offset: i64,
     /// Broker-assigned timestamp, if available.
@@ -1243,6 +1312,23 @@ pub struct SendMessageResponse {
 #[cfg(test)]
 mod tests {
     use super::ResetPosition;
+
+    #[test]
+    fn send_result_partition_can_be_unknown_or_known() {
+        for partition in [None, Some(serde_json::Value::Null)] {
+            let mut value = serde_json::json!({ "topic": "events", "offset": 0 });
+            if let Some(partition) = partition {
+                value["partition"] = partition;
+            }
+            let result: super::SendMessageResponse = serde_json::from_value(value).unwrap();
+            assert!(serde_json::to_value(result).unwrap().get("partition").is_none());
+        }
+        let result: super::SendMessageResponse = serde_json::from_value(serde_json::json!({
+            "topic": "events", "offset": 17, "partition": 2
+        }))
+        .unwrap();
+        assert_eq!(serde_json::to_value(result).unwrap()["partition"], 2);
+    }
 
     #[test]
     fn reset_position_deserializes_camel_case_variant_fields() {
@@ -1301,6 +1387,27 @@ mod tests {
         assert!(req.exchange.is_none());
         assert!(req.routing_key.is_none());
         assert!(req.namespace.is_none());
+        assert!(serde_json::to_value(req).unwrap().get("properties").is_none());
+    }
+
+    #[test]
+    fn send_message_request_round_trips_rabbitmq_properties_separately_from_headers() {
+        let value = serde_json::json!({
+            "topic": "dbx-queue",
+            "payloadBase64": "aGVsbG8=",
+            "headers": { "content_type": "custom-header" },
+            "properties": {
+                "content_type": "application/json",
+                "delivery_mode": "2",
+                "priority": "0",
+                "expiration": "0",
+                "timestamp": "1735689600"
+            }
+        });
+        let req: super::SendMessageRequest = serde_json::from_value(value.clone()).expect("send request");
+        let round_trip = serde_json::to_value(req).expect("serialize send request");
+        assert_eq!(round_trip.get("properties"), value.get("properties"));
+        assert_eq!(round_trip.get("headers"), value.get("headers"));
     }
 
     #[test]
@@ -1518,6 +1625,32 @@ mod tests {
         assert_eq!(latest.start_position, Some(super::PeekStartPosition::Latest));
         let json = serde_json::to_value(latest).expect("serialize latest peek options");
         assert_eq!(json.get("startPosition").and_then(|value| value.as_str()), Some("latest"));
+    }
+
+    #[test]
+    fn peek_options_round_trip_timestamp_start_position() {
+        let timestamp: super::PeekMessagesOptions =
+            serde_json::from_str(r#"{"startPosition":"timestamp","timestamp":1700000000000}"#)
+                .expect("timestamp peek options");
+        assert_eq!(timestamp.start_position, Some(super::PeekStartPosition::Timestamp));
+        assert_eq!(timestamp.timestamp, Some(1_700_000_000_000));
+        let json = serde_json::to_value(&timestamp).expect("serialize timestamp peek options");
+        assert_eq!(json.get("startPosition").and_then(|value| value.as_str()), Some("timestamp"));
+        assert_eq!(json.get("timestamp").and_then(|value| value.as_i64()), Some(1_700_000_000_000));
+
+        // Every other start position still parses and carries no timestamp.
+        let earliest: super::PeekMessagesOptions =
+            serde_json::from_str(r#"{"startPosition":"earliest"}"#).expect("earliest peek options");
+        assert_eq!(earliest.start_position, Some(super::PeekStartPosition::Earliest));
+        assert_eq!(earliest.timestamp, None);
+
+        // Requests without a timestamp keep omitting the field, and unknown
+        // start positions still fail here instead of reaching the agent.
+        let legacy: super::PeekMessagesOptions =
+            serde_json::from_str(r#"{"partition":1}"#).expect("legacy peek options");
+        let json = serde_json::to_value(&legacy).expect("serialize legacy peek options");
+        assert!(json.get("timestamp").is_none());
+        assert!(serde_json::from_str::<super::PeekMessagesOptions>(r#"{"startPosition":"whenever"}"#).is_err());
     }
 
     #[test]

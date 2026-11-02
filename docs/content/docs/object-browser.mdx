@@ -38,6 +38,7 @@ Click or double-click an object to open a type-appropriate view:
 - Table or view data
 - Table structure, columns, indexes, foreign keys, triggers, and DDL
 - Source for views, procedures, functions, triggers, and other objects
+- Oracle, OceanBase Oracle, and Dameng TYPE details and read-only TYPE/TYPE BODY source
 - Database-specific administration interfaces
 
 Context menus can also provide:
@@ -50,6 +51,27 @@ Context menus can also provide:
 
 Available actions depend on database capabilities, connection read-only state, and account privileges.
 
+## Manage Indexes from a Schema
+
+Oracle, OceanBase Oracle, and Dameng provide a schema index group and an **Indexes** filter, including connections using their corresponding JDBC dialects. OceanBase JDBC must explicitly use an Oracle-mode URL; an ordinary OceanBase/MySQL URL does not select Oracle mode. The new entry requires verified exact object identities. If verification is unavailable, update the Agent or JDBC plugin and reconnect. Existing table-level entry points retain their original requirements.
+
+Schema indexes load in pages through the index group or **Indexes** filter, not the **All** list. In narrow windows, change the filter through the toolbar's more-actions menu.
+
+### Create the First Index
+
+1. Choose **Add Index** from the schema index group menu or the object browser's **Indexes** filter. The action is available even when the list is empty.
+2. Search for a visible parent table in the current connection, database, and schema. Confirm to open that table's structure editor. Selection and navigation execute no DDL.
+3. Complete the automatically added index draft, review the SQL, and apply it. Production connections retain the existing confirmation step.
+
+### Inspect, Edit, and Drop
+
+- Search the index list, load more results, or refresh it. Copying a name preserves dictionary spelling, case, and spaces.
+- Inspection reads the actual parent table's indexes, columns, and DDL. A same-owner index can open the table structure editor at the exact original index without discarding existing drafts.
+- Review the SQL before applying an edit: it may drop and rebuild the index. **Drop Index** or Delete opens a deletion draft in the parent editor; it does not execute `DROP INDEX` directly. Unmark the deletion before applying to cancel it.
+- Cross-owner indexes and indexes with an unverified owner are read-only through the new entry. Missing parent identities retain copy and refresh actions without guessing a target. Constraint-backed indexes, incomplete metadata, and unsupported variants retain the editor's existing checks and guidance.
+
+If metadata refresh fails after an applied operation, the result remains applied and refresh can be retried without executing DDL again. For partial or unknown results, inspect each statement and refresh the database state before handling the remaining drafts.
+
 ## Multi-Select and Bulk Actions
 
 Use checkboxes to select multiple objects. Depending on the database, bulk actions can include:
@@ -57,7 +79,7 @@ Use checkboxes to select multiple objects. Depending on the database, bulk actio
 - Open or copy multiple object names
 - Export or generate SQL in bulk
 - Drop, empty, or truncate selected tables
-- Drop selected indexes
+- Manage schema indexes individually through their parent tables, without central batch drop, table copy, or table export
 - Use cascade-aware batch actions for PostgreSQL and similar databases
 
 <Callout type="warn">Bulk drop, empty, and truncate operations can affect many objects. In production, verify selection, generated SQL, backups, and dependencies first.</Callout>
@@ -65,11 +87,31 @@ Use checkboxes to select multiple objects. Depending on the database, bulk actio
 ## DDL and Source
 
 - **View DDL** prefers definitions returned by the database or driver
-- **Object source** covers views, procedures, functions, triggers, and other editable objects
+- **Object source** covers views, procedures, functions, triggers, and other objects; Oracle, OceanBase Oracle, and Dameng TYPE/TYPE BODY source is read-only
+- In those three databases, open a TYPE row for its attributes, methods, collection details, status, and visible TYPE BODY pairing; use the Source tab to read or copy its definition
+- When a TYPE BODY is listed, open that row to read its source separately from the same-named TYPE
 - Source views support search and can open in the editor when the database and object allow it
 - Saving source or executing DDL passes through read-only, production, and dangerous-operation checks
 
 DBX shows the definition available from the active driver. Formatting, privileges/comments/storage properties, and direct edit support vary by database.
+Metadata sections identify incomplete, unavailable, or unsupported dictionary reads; only a successfully read empty section is presented as empty.
+
+For OceanBase Oracle mode over generic JDBC, use an explicit `jdbc:oceanbase:oracle://` URL so type listing, details, and source use the same dialect. A plain `jdbc:oceanbase://` URL does not identify Oracle mode.
+
+## Inspect and Edit Oracle-Family Triggers
+
+Exact trigger actions for Oracle, OceanBase Oracle, and DM8 depend on the actual driver and version. Older agents, unidentified dialects, or plugins without the metadata contract do not gain write access automatically. Native Oracle and DM8 live-database compatibility still needs validation; OceanBase evidence does not establish it.
+
+1. Select **Triggers**, search by name, and load more as needed. A single click opens the source side panel. To use a bound source tab, open the trigger from the object tree with the source-tab setting.
+2. Check the trigger owner and actual owning table/view or non-table scope. Enabled/disabled and valid/invalid are independent states. Failed or denied reads are shown separately.
+3. Edit the complete definition and save. Review the fixed target, execution schema, and actual SQL before confirming. A body-only, truncated, or unverified baseline cannot replace the object. Keep a manually completed candidate, repair permissions, explicitly reload authority, and preview again.
+4. Inspect the readback. An accepted statement does not prove that the trigger is valid. Read compilation errors in the same details or open invalid-object diagnostics, then return to source to repair them. Cursor navigation is offered only when the error location can be mapped to the current source accurately.
+
+Source, dependencies, and dependents share the existing details panel. Dependency and owning-object navigation use the actual owner and type; non-table triggers have no table navigation. Switching detail sections retains drafts and undo history. Closing or changing objects lets you cancel discarding a draft. Trigger-source refresh and retry retain the latest input rather than overwriting it.
+
+Enable, disable, and compile use native operations, not drop/recreate. Oracle/OceanBase replacement preserves a known disabled state. DM state restoration may require separate steps, and a failed compile never automatically re-enables the trigger.
+
+<Callout type="warn">DDL may commit one statement at a time. After an unknown or partial result, use **Verify without writing** or refresh to inspect actual state. DBX never automatically replays attempted writes. Keep the failed draft and generate a new preview for only the remaining changes after verification. Reload and compare when the object or definition has changed.</Callout>
 
 ## Object Tree vs. Object Browser
 

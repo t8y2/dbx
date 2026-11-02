@@ -2,14 +2,17 @@ import type { DatabaseType } from "@/types/database";
 
 export interface CanGoNextDataGridPageOptions {
   hasMore?: boolean;
+  pageHasMore?: boolean;
+  maxRows?: number;
   rowCount: number;
   pageSize: number;
   pageOffset?: number;
   currentPage?: number;
   totalRowCount?: number;
-  // True when every result row is already in memory (SQL editor result with no
-  // server-side pagination). rowCount IS the authoritative total in that case,
-  // so a full final page must not appear as "more available".
+  // True when the result came back without server-side pagination (SQL editor
+  // statements such as SHOW that cannot be wrapped in LIMIT/OFFSET). The grid
+  // renders every loaded row at once, so the result is a single page: re-running
+  // the statement for another page would return the same rows again.
   allRowsLoaded?: boolean;
 }
 
@@ -21,10 +24,12 @@ export interface CompleteLocalDataGridResultOptions {
   totalRowCount?: number;
   truncated?: boolean;
   hasMore?: boolean;
+  pageHasMore?: boolean;
 }
 
 export interface CanFetchNextDataGridSegmentOptions {
   hasMore?: boolean;
+  pageHasMore?: boolean;
   loadedRowCount: number;
   pageSize: number;
   totalRowCount?: number;
@@ -34,6 +39,15 @@ export interface CanFetchNextDataGridSegmentOptions {
 export interface DataGridLoadAllSegment {
   offset: number;
   limit: number;
+}
+
+export interface DataGridSurfaceBusyOptions {
+  isRefreshingData: boolean;
+  loading: boolean;
+  pageJumpBusy: boolean;
+  rowPreparationBusy?: boolean;
+  manualTotalRowCountLoading?: boolean;
+  manualTotalRowCountCoversSurface?: boolean;
 }
 
 export type DataGridInexactTotalRowCountMode = "at-least" | "estimated";
@@ -65,6 +79,17 @@ export function dataGridTotalRowCountLabelKey(totalRowCountIsExact: boolean, ine
 export function showDataGridRerunTotalCountAction(options: { canCalculateTotalRowCount: boolean; displayedTotalRowCount?: number; totalRowCountIsExact: boolean }): boolean {
   if (!options.canCalculateTotalRowCount || options.totalRowCountIsExact !== true) return false;
   return typeof options.displayedTotalRowCount === "number" && Number.isFinite(options.displayedTotalRowCount) && options.displayedTotalRowCount >= 0;
+}
+
+/**
+ * The full-surface overlay (translucent cover + spinner + elapsed timer) is for
+ * real data reloads and page navigation only. A plain "count total rows" click
+ * runs in the background and reports progress in the result footer; covering
+ * the grid made it look like the table itself was being refreshed.
+ */
+export function isDataGridSurfaceBusy(options: DataGridSurfaceBusyOptions): boolean {
+  const manualCountCoversSurface = options.manualTotalRowCountLoading === true && options.manualTotalRowCountCoversSurface === true;
+  return options.isRefreshingData || options.loading || manualCountCoversSurface || options.pageJumpBusy || options.rowPreparationBusy === true;
 }
 
 export function resolveDataGridPaginationTotal(options: { paginationTotalRowCount?: number; serverKnownTotalRowCount?: number; totalRowCountIsExact: boolean; maxRows?: number }): number | undefined {
@@ -111,36 +136,50 @@ export function reconcileDataGridExactTotalWithObservedPage(options: ReconcileDa
 }
 
 export function hasCompleteLocalDataGridResult(options: CompleteLocalDataGridResultOptions): boolean {
-  if (!options.isResultsContext || options.truncated === true || options.hasMore === true) return false;
+  if (!options.isResultsContext || options.truncated === true || options.hasMore === true || options.pageHasMore === true) return false;
   if (options.pageLimit === undefined) return true;
   if ((options.pageOffset ?? 0) !== 0) return false;
+  if (options.pageHasMore === false) return true;
 
   const pageLimit = Math.max(1, options.pageLimit);
-  if (options.rowCount < pageLimit) return true;
+  if (options.rowCount < pageLimit) {
+    // A short first page is normally the last page, but a known total that
+    // exceeds the rows already loaded means more data is still pending (the
+    // count and the loaded page disagree). Treating that as complete would
+    // make "export all" write only the loaded page instead of the full
+    // result. Keep this consistent with canGoNextDataGridPage, which uses
+    // totalRowCount the same way.
+    const shortPageTotal = options.totalRowCount;
+    if (typeof shortPageTotal === "number" && Number.isFinite(shortPageTotal) && shortPageTotal > options.rowCount) return false;
+    return true;
+  }
 
   const totalRowCount = options.totalRowCount;
   return typeof totalRowCount === "number" && Number.isFinite(totalRowCount) && totalRowCount >= 0 && options.rowCount >= totalRowCount;
 }
 
 export function canGoNextDataGridPage(options: CanGoNextDataGridPageOptions): boolean {
-  if (options.hasMore === true) return true;
+  if (options.allRowsLoaded === true) return false;
 
   const pageSize = Math.max(1, options.pageSize);
   const currentOffset = typeof options.pageOffset === "number" && options.pageOffset >= 0 ? options.pageOffset : Math.max(0, (options.currentPage ?? 1) - 1) * pageSize;
+  // Lookahead describes the source; discrete navigation still respects the row cap.
+  if (typeof options.pageHasMore === "boolean") {
+    if (options.maxRows !== undefined && currentOffset + pageSize >= options.maxRows) return false;
+    return options.pageHasMore;
+  }
+  if (options.hasMore === true) return true;
 
   const totalRowCount = options.totalRowCount;
   if (typeof totalRowCount === "number" && Number.isFinite(totalRowCount) && totalRowCount >= 0) {
     return currentOffset + pageSize < totalRowCount;
   }
 
-  if (options.allRowsLoaded === true) {
-    return currentOffset + pageSize < options.rowCount;
-  }
-
   return options.rowCount >= pageSize;
 }
 
 export function canFetchNextDataGridSegment(options: CanFetchNextDataGridSegmentOptions): boolean {
+  if (typeof options.pageHasMore === "boolean") return options.pageHasMore;
   if (options.hasMore === true) return true;
 
   const totalRowCount = options.totalRowCount;

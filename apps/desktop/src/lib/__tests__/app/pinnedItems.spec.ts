@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 import { reactive } from "vue";
 import {
   inheritNaturalTreeNodeOrder,
+  isPinnedKeyPresent,
   migrateLegacyPinnedTreeNodeIds,
   migrateLegacyPinnedTreeNodeOrder,
+  pinnedTreeNodeIdentityMatches,
   removePinnedTreeNodesFromOrder,
   reorderPinnedTreeNodeOrder,
   replacePinnedTreeNodeInOrder,
   syncPinnedTreeNodeStateInPlace,
+  treeNodePinIdentity,
   treeNodePinKey,
   updatePinnedTreeNodeInPlace,
 } from "@/lib/app/pinnedItems";
@@ -15,6 +18,23 @@ import { buildTreeNodesFromLayout } from "@/lib/sidebar/sidebarLayout";
 import type { ConnectionConfig, SidebarLayout, TreeNode } from "@/types/database";
 
 describe("sidebar pinned tree nodes", () => {
+  it("matches pinned keys by scoped identity, legacy id and redis index, and follows in-place set edits", () => {
+    const table = (name: string, database = "main"): TreeNode => ({ id: `c1:${database}:${name}`, label: name, type: "table", connectionId: "c1", database, objectName: name });
+    const redisDb = (label: string): TreeNode => ({ id: "r1:db1", label, type: "redis-db", connectionId: "r1", database: "1" });
+    const orders = table("orders");
+    const pinned = new Set<string>([treeNodePinKey(orders), treeNodePinKey(redisDb("db1"))]);
+
+    expect(isPinnedKeyPresent(orders, pinned)).toBe(true);
+    expect(isPinnedKeyPresent(table("users"), pinned)).toBe(false);
+    expect(isPinnedKeyPresent(table("orders", "other"), pinned)).toBe(false);
+    expect(isPinnedKeyPresent(redisDb("db1 (12 keys)"), pinned)).toBe(true);
+    expect(isPinnedKeyPresent({ ...orders, id: "c1:main:orders:renamed" }, pinned)).toBe(true);
+
+    pinned.add(table("users").id);
+    expect(isPinnedKeyPresent(table("users"), pinned)).toBe(true);
+    expect(isPinnedKeyPresent(orders, new Set())).toBe(false);
+  });
+
   it("reorders the pinned node within its parent", () => {
     const tree: TreeNode[] = [
       {
@@ -328,5 +348,62 @@ describe("sidebar pinned tree nodes", () => {
     syncPinnedTreeNodeStateInPlace(rebuilt, new Set());
 
     expect(rebuilt.map((node) => node.id)).toEqual(["group-a", "group-b"]);
+  });
+
+  it("produces stable pin identity for redis-db nodes across alias and count changes", () => {
+    const node1: TreeNode = {
+      id: "redis-1:db1",
+      label: "db1 (10)",
+      type: "redis-db",
+      connectionId: "redis-1",
+      database: "1",
+    };
+    const node1WithAlias: TreeNode = {
+      id: "redis-1:db1",
+      label: "db1 · orders (15)",
+      type: "redis-db",
+      connectionId: "redis-1",
+      database: "1",
+    };
+
+    expect(treeNodePinIdentity(node1).name).toBe("db1");
+    expect(treeNodePinIdentity(node1WithAlias).name).toBe("db1");
+    expect(treeNodePinKey(node1)).toBe(treeNodePinKey(node1WithAlias));
+
+    expect(pinnedTreeNodeIdentityMatches(treeNodePinIdentity(node1), treeNodePinIdentity(node1WithAlias))).toBe(true);
+  });
+
+  it("migrates legacy redis-db pin keys with previous labels in place", () => {
+    const db1: TreeNode = {
+      id: "redis-1:db1",
+      label: "db1 · orders (20)",
+      type: "redis-db",
+      connectionId: "redis-1",
+      database: "1",
+    };
+    const db2: TreeNode = {
+      id: "redis-1:db2",
+      label: "db2 · users (5)",
+      type: "redis-db",
+      connectionId: "redis-1",
+      database: "2",
+    };
+
+    // Simulate legacy pin keys containing previous labels or bare ids
+    const oldDb2Key = "redis-1:pin:v2:" + encodeURIComponent(JSON.stringify(["2", "", "", "redis-db", "db2 (3)", "", "redis-1:db2"]));
+    const oldDb1Key = "redis-1:pin:v2:" + encodeURIComponent(JSON.stringify(["1", "", "", "redis-db", "db1 (10)", "", "redis-1:db1"]));
+    const pinnedOrder = [oldDb2Key, oldDb1Key];
+
+    const result = migrateLegacyPinnedTreeNodeOrder([db1, db2], pinnedOrder);
+    expect(result.changed).toBe(true);
+    expect(result.order).toEqual([treeNodePinKey(db2), treeNodePinKey(db1)]);
+    expect(isPinnedKeyPresent(db1, result.ids)).toBe(true);
+    expect(isPinnedKeyPresent(db2, result.ids)).toBe(true);
+
+    const nodes = [db1, db2];
+    syncPinnedTreeNodeStateInPlace(nodes, result.ids, result.order);
+    expect(nodes.map((n) => n.database)).toEqual(["2", "1"]);
+    expect(nodes[0].pinned).toBe(true);
+    expect(nodes[1].pinned).toBe(true);
   });
 });

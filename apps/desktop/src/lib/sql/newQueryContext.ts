@@ -1,5 +1,6 @@
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
+import type { SqlFormatterCase } from "@/lib/sql/sqlFormatterConfig";
 import { metricRangeQuery, qualifiedTableName } from "@/lib/table/tableSelectSql";
 import type { ConnectionConfig, DatabaseType, QueryTab, TreeNode } from "@/types/database";
 
@@ -7,6 +8,8 @@ export interface NewQueryTarget {
   connectionId: string;
   database: string;
   schema?: string;
+  /** 该 schema 是否由用户显式选择，可参与 SQL Server 的未限定表名改写。 */
+  schemaQualifiesSql?: boolean;
   catalog?: string;
   shouldRefreshDefaultDatabase: boolean;
 }
@@ -36,9 +39,11 @@ export function findTreeNodeById(nodes: TreeNode[], id: string | null | undefine
 export function resolveNewQueryTarget(input: ResolveNewQueryTargetInput): NewQueryTarget | null {
   const primaryContext = input.preferredSource === "sidebar" ? input.selectedTreeNode || undefined : input.activeTab;
   const secondaryContext = input.preferredSource === "sidebar" ? input.activeTab : input.selectedTreeNode || undefined;
-  const primaryTarget = targetFromContext(primaryContext, input.connections);
+  const primaryKind: NewQueryContextSource = input.preferredSource === "sidebar" ? "sidebar" : "tab";
+  const secondaryKind: NewQueryContextSource = primaryKind === "sidebar" ? "tab" : "sidebar";
+  const primaryTarget = targetFromContext(primaryContext, input.connections, primaryKind);
   if (primaryTarget) return primaryTarget;
-  const secondaryTarget = targetFromContext(secondaryContext, input.connections);
+  const secondaryTarget = targetFromContext(secondaryContext, input.connections, secondaryKind);
   if (secondaryTarget) return secondaryTarget;
 
   const activeConnection = input.activeConnectionId ? input.connections.find((connection) => connection.id === input.activeConnectionId) : undefined;
@@ -68,8 +73,9 @@ function singleOnlineSqlConnection(connections: ResolveNewQueryTargetInput["conn
 }
 
 function targetFromContext(
-  context: Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog" | "objectBrowser" | "tableMeta"> | Pick<TreeNode, "connectionId" | "database" | "schema" | "catalog"> | undefined,
+  context: Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog" | "objectBrowser" | "tableMeta" | "schemaQualifiesSql"> | Pick<TreeNode, "connectionId" | "database" | "schema" | "catalog"> | undefined,
   connections: Pick<ConnectionConfig, "id" | "host" | "database" | "default_schema" | "db_type">[],
+  contextKind: NewQueryContextSource,
 ): NewQueryTarget | null {
   if (!context?.connectionId) return null;
   const connection = connections.find((item) => item.id === context.connectionId);
@@ -78,10 +84,17 @@ function targetFromContext(
   const database = connection.db_type === "sqlite" ? normalizeSqliteNamespace(contextDatabase, connection) : contextDatabase;
   const objectBrowser = "objectBrowser" in context ? context.objectBrowser : undefined;
   const tableMeta = "tableMeta" in context ? context.tableMeta : undefined;
+  const schema = context.schema ?? objectBrowser?.schema ?? tableMeta?.schema ?? connection.default_schema;
+  // 侧栏节点自身的 schema 都是用户点出来的；连接/库节点回落到 default_schema
+  // 时不算显式。页签只有显式选择（或来自更具体的对象上下文）才算显式，
+  // 避免把默认/恢复的 schema 带进执行。
+  const schemaQualifiesSql =
+    schema === undefined ? false : contextKind === "sidebar" ? context.schema !== undefined : ("schemaQualifiesSql" in context && context.schemaQualifiesSql === true) || (!!objectBrowser?.schema && schema === objectBrowser.schema) || (!!tableMeta?.schema && schema === tableMeta.schema);
   return {
     connectionId: context.connectionId,
     database,
-    schema: context.schema ?? objectBrowser?.schema ?? tableMeta?.schema ?? connection.default_schema,
+    schema,
+    ...(schemaQualifiesSql ? { schemaQualifiesSql: true } : {}),
     catalog: context.catalog ?? objectBrowser?.catalog ?? tableMeta?.catalog,
     shouldRefreshDefaultDatabase: !context.database,
   };
@@ -110,6 +123,7 @@ export interface ResolveNewQueryInitialSqlInput extends ResolveNewQueryTableInpu
   identifierQuote?: string;
   includeDatabaseName?: boolean;
   quoteIdentifiers?: boolean;
+  keywordCase?: SqlFormatterCase;
 }
 
 // Database types whose "table" view does not use standard SQL `SELECT * FROM <table>`
@@ -173,16 +187,25 @@ export function resolveNewQueryTable(input: ResolveNewQueryTableInput): NewQuery
  * full-history scan the moment the user hits Run. VictoriaMetrics
  * already has its own metric range template above.
  */
-export function buildSelectAllSql(databaseType: DatabaseType | undefined, table: Pick<NewQueryTable, "schema" | "catalog" | "tableName"> & Partial<Pick<NewQueryTable, "database">>, identifierQuote?: string, driverProfile?: string, includeDatabaseName = false, quoteIdentifiers = true): string {
+export function buildSelectAllSql(
+  databaseType: DatabaseType | undefined,
+  table: Pick<NewQueryTable, "schema" | "catalog" | "tableName"> & Partial<Pick<NewQueryTable, "database">>,
+  identifierQuote?: string,
+  driverProfile?: string,
+  includeDatabaseName = false,
+  quoteIdentifiers = true,
+  keywordCase?: SqlFormatterCase,
+): string {
   if (databaseType === "victoriametrics") return metricRangeQuery(table.tableName);
   const ref = qualifiedTableName({ databaseType, driverProfile, identifierQuote, database: table.database, schema: table.schema, catalog: table.catalog, tableName: table.tableName, includeDatabaseName, quoteIdentifiers });
+  const keywords = (sql: string) => (keywordCase === "lower" ? sql.toLowerCase() : sql);
   if (databaseType === "influxdb") {
-    return `SELECT * FROM ${ref} WHERE time > now() - 5m ORDER BY time DESC LIMIT 100`;
+    return `${keywords("SELECT * FROM")} ${ref} ${keywords("WHERE time > now() - 5m ORDER BY time DESC LIMIT 100")}`;
   }
   if (databaseType === "influxdb3") {
-    return `SELECT * FROM ${ref} WHERE time > now() - INTERVAL '5 minutes' ORDER BY time DESC LIMIT 100`;
+    return `${keywords("SELECT * FROM")} ${ref} ${keywords("WHERE time > now() - INTERVAL '5 minutes' ORDER BY time DESC LIMIT 100")}`;
   }
-  return `SELECT * FROM ${ref}`;
+  return `${keywords("SELECT * FROM")} ${ref}`;
 }
 
 /**
@@ -196,5 +219,5 @@ export function resolveNewQueryInitialSql(input: ResolveNewQueryInitialSqlInput)
   const table = resolveNewQueryTable(input);
   if (!table || table.connectionId !== input.targetConnectionId || table.database !== input.targetDatabase) return undefined;
 
-  return buildSelectAllSql(input.databaseType, table, input.identifierQuote, input.driverProfile, input.includeDatabaseName, input.quoteIdentifiers);
+  return buildSelectAllSql(input.databaseType, table, input.identifierQuote, input.driverProfile, input.includeDatabaseName, input.quoteIdentifiers, input.keywordCase);
 }

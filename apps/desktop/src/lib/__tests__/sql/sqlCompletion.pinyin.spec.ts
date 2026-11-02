@@ -177,3 +177,36 @@ describe("sqlCompletion identifier column matching", () => {
     expect(items.some((item) => item.label === "created_at")).toBe(false);
   });
 });
+
+describe("sqlCompletion comment matching", () => {
+  it("matches tables by Chinese comment and pinyin", () => {
+    const items = buildSqlCompletionItems("SELECT * FROM yh", "SELECT * FROM yh".length, {
+      databaseType: "mysql",
+      tables: [
+        { name: "t_user", type: "table", comment: "用户表" },
+        { name: "t_order", type: "table", comment: "订单表" },
+      ],
+      columnsByTable: new Map(),
+    });
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "t_user", type: "table" })]));
+    expect(items.some((item) => item.label === "t_order")).toBe(false);
+  });
+
+  it("matches columns by Chinese comment and pinyin", () => {
+    const items = buildSqlCompletionItems("SELECT * FROM t_user WHERE cjsj", "SELECT * FROM t_user WHERE cjsj".length, {
+      databaseType: "mysql",
+      tables: [{ name: "t_user", type: "table" }],
+      columnsByTable: new Map([
+        [
+          "t_user",
+          [
+            { name: "create_time", table: "t_user", comment: "创建时间" },
+            { name: "update_time", table: "t_user", comment: "更新时间" },
+          ],
+        ],
+      ]),
+    });
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "create_time", type: "column" })]));
+    expect(items.some((item) => item.label === "update_time")).toBe(false);
+  });
+});

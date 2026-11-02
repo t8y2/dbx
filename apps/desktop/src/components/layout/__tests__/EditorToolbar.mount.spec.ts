@@ -50,7 +50,36 @@ vi.mock("@/components/icons/DatabaseIcon.vue", () => ({
 vi.mock("@/components/connection/ConnectionTreeSelect.vue", () => ({
   default: {
     name: "ConnectionTreeSelectStub",
-    template: `<div />`,
+    emits: ["update:open"],
+    props: {
+      connections: { type: Array, default: () => [] },
+      modelValue: { type: String, default: "" },
+    },
+    data() {
+      return { open: false };
+    },
+    computed: {
+      selectedLabel() {
+        return this.connections.find((connection: { id: string }) => connection.id === this.modelValue)?.name || this.modelValue;
+      },
+    },
+    methods: {
+      toggleOpen() {
+        this.open = !this.open;
+        this.$emit("update:open", this.open);
+      },
+    },
+    template: `<div data-test="connection-selector"><button type="button" data-test="toggle-connection-picker" @click="toggleOpen" /><slot name="trigger-label" :label="selectedLabel" /></div>`,
+  },
+}));
+
+vi.mock("@/components/ui/LightTooltip.vue", () => ({
+  default: {
+    name: "LightTooltipStub",
+    props: {
+      disabled: { type: Boolean, default: false },
+    },
+    template: `<div data-test="connection-tooltip" :data-disabled="String(disabled)"><slot /><slot name="content" /></div>`,
   },
 }));
 
@@ -115,7 +144,8 @@ describe("EditorToolbar mount contract", () => {
         isExplaining: false,
       },
       activeConnection: connectionStore.getConfig("conn-1"),
-      executableSql: "SELECT 1",
+      hasExecutableSql: true,
+      executableSqlMayContainDml: false,
       explainMode: "explain",
       blockDangerousRedisCommands: false,
       sqlKeywordCase: "preserve",
@@ -140,6 +170,62 @@ describe("EditorToolbar mount contract", () => {
 
     expect(onToolbarExecute).toHaveBeenCalledTimes(1);
     expect(onToolbarExecute.mock.calls[0]?.[0]).toBe("pointer");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("emits toolbarExecuteAll when clicking the execute all button", async () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      {
+        id: "conn-1",
+        name: "conn",
+        db_type: "mysql",
+        color: "",
+      } as never,
+    ];
+
+    const host = createHost();
+    const onToolbarExecuteAll = vi.fn();
+    const app = createApp(EditorToolbar, {
+      activeTab: {
+        id: "tab-1",
+        title: "SQL",
+        connectionId: "conn-1",
+        database: "db",
+        sql: "SELECT 1;\nSELECT 2;",
+        mode: "query",
+        isExecuting: false,
+        isCancelling: false,
+        isExplaining: false,
+      },
+      activeConnection: connectionStore.getConfig("conn-1"),
+      hasExecutableSql: true,
+      executableSqlMayContainDml: false,
+      explainMode: "explain",
+      blockDangerousRedisCommands: false,
+      sqlKeywordCase: "preserve",
+      databaseRequiredSignal: 0,
+      autoCommit: true,
+      txnSessionId: undefined,
+      txnAutoRolledBack: false,
+      txnPossiblyDirty: false,
+      stickyProvenReadOnlyState: false,
+      onToolbarExecuteAll,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+
+    const executeAllButton = host.querySelector<HTMLButtonElement>('button[aria-label="toolbar.executeAllSql"]');
+    expect(executeAllButton).not.toBeNull();
+    executeAllButton!.dispatchEvent(new MouseEvent("click", { detail: 1, bubbles: true }));
+    await nextTick();
+
+    expect(onToolbarExecuteAll).toHaveBeenCalledTimes(1);
+    expect(onToolbarExecuteAll.mock.calls[0]?.[0]).toBe("pointer");
 
     app.unmount();
     host.remove();
@@ -188,7 +274,8 @@ describe("EditorToolbar mount contract", () => {
         isExplaining: false,
       },
       activeConnection: connectionStore.getConfig("conn-1"),
-      executableSql: selectedSql,
+      hasExecutableSql: true,
+      executableSqlMayContainDml: false,
       explainMode: "explain",
       blockDangerousRedisCommands: false,
       sqlKeywordCase: "preserve",
@@ -268,7 +355,8 @@ describe("EditorToolbar mount contract", () => {
                 isExplaining: false,
               },
               activeConnection: connection,
-              executableSql: fullSql,
+              hasExecutableSql: true,
+              executableSqlMayContainDml: false,
               explainMode: "explain",
               blockDangerousRedisCommands: false,
               sqlKeywordCase: "preserve",
@@ -348,7 +436,8 @@ describe("EditorToolbar mount contract", () => {
         isExplaining: false,
       },
       activeConnection: connectionStore.getConfig("conn-empty"),
-      executableSql: "",
+      hasExecutableSql: false,
+      executableSqlMayContainDml: false,
       explainMode: "explain",
       blockDangerousRedisCommands: false,
       sqlKeywordCase: "preserve",
@@ -418,7 +507,8 @@ describe("EditorToolbar mount contract", () => {
                 forceWordWrap: forceWordWrap.value,
               },
               activeConnection: connection,
-              executableSql: sql,
+              hasExecutableSql: true,
+              executableSqlMayContainDml: false,
               explainMode: "explain",
               blockDangerousRedisCommands: false,
               sqlKeywordCase: "preserve",
@@ -493,7 +583,8 @@ describe("EditorToolbar mount contract", () => {
         isExplaining: false,
       },
       activeConnection: connectionStore.getConfig("conn-redis"),
-      executableSql: 'SET user:1 "hello world"',
+      hasExecutableSql: true,
+      executableSqlMayContainDml: false,
       explainMode: "explain",
       blockDangerousRedisCommands: true,
       sqlKeywordCase: "preserve",
@@ -548,7 +639,8 @@ describe("EditorToolbar mount contract", () => {
         isExplaining: false,
       },
       activeConnection: connectionStore.getConfig("conn-pg"),
-      executableSql: "SELECT 1",
+      hasExecutableSql: true,
+      executableSqlMayContainDml: false,
       explainMode: "explain",
       blockDangerousRedisCommands: false,
       sqlKeywordCase: "preserve",
@@ -602,7 +694,8 @@ describe("EditorToolbar mount contract", () => {
         isExplaining: false,
       },
       activeConnection: connectionStore.getConfig("conn-1"),
-      executableSql: "SELECT 1;\nSELECT 2;",
+      hasExecutableSql: true,
+      executableSqlMayContainDml: false,
       explainMode: "explain",
       blockDangerousRedisCommands: false,
       sqlKeywordCase: "preserve",
@@ -669,7 +762,8 @@ describe("EditorToolbar mount contract", () => {
         isExplaining: false,
       },
       activeConnection: connectionStore.getConfig("conn-shortcut"),
-      executableSql: "SELECT 1",
+      hasExecutableSql: true,
+      executableSqlMayContainDml: false,
       explainMode: "explain",
       blockDangerousRedisCommands: false,
       sqlKeywordCase: "preserve",
@@ -690,6 +784,129 @@ describe("EditorToolbar mount contract", () => {
     expect(tooltips.some((text) => text.includes("toolbar.explainPlan (") && text.includes("E)"))).toBe(true);
     expect(tooltips.some((text) => text.includes("toolbar.formatSql (") && text.includes("F)"))).toBe(true);
     expect(tooltips.some((text) => text.includes("toolbar.saveSql (") && text.includes("S)"))).toBe(true);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("keeps the complete deep group path available in the sanitized detail preview", async () => {
+    const connectionStore = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.showConnectionGroupPath = true;
+    const longGroupName = "Production".repeat(30);
+    const fullGroupPath = `${longGroupName}/Asia Pacific/Orders`;
+    const connection = {
+      id: "conn-grouped",
+      name: "orders",
+      db_type: "postgres",
+      host: "db.example.com",
+      port: 5432,
+      database: "app",
+      username: "alice",
+      password: "secret",
+      connection_string: "postgres://alice:secret@db.example.com:5432/app",
+      color: "",
+    } as never;
+    connectionStore.connections = [connection];
+    connectionStore.sidebarLayout = {
+      groups: [
+        { id: "group-prod", name: longGroupName, collapsed: false },
+        { id: "group-region", name: "Asia Pacific", collapsed: false },
+        { id: "group-orders", name: "Orders", collapsed: false },
+      ],
+      order: [
+        {
+          type: "group",
+          id: "group-prod",
+          children: [{ type: "group", id: "group-region", children: [{ type: "group", id: "group-orders", children: [{ type: "connection", id: connection.id }] }] }],
+        },
+      ],
+    };
+
+    const host = createHost();
+    const app = createApp(EditorToolbar, {
+      activeTab: {
+        id: "tab-grouped",
+        title: "SQL",
+        connectionId: connection.id,
+        database: "app",
+        sql: "SELECT 1",
+        mode: "query",
+        isExecuting: false,
+        isCancelling: false,
+        isExplaining: false,
+      },
+      activeConnection: connectionStore.getConfig(connection.id),
+      hasExecutableSql: true,
+      executableSqlMayContainDml: false,
+      explainMode: "explain",
+      blockDangerousRedisCommands: false,
+      sqlKeywordCase: "preserve",
+      databaseRequiredSignal: 0,
+      autoCommit: true,
+      txnSessionId: undefined,
+      txnAutoRolledBack: false,
+      txnPossiblyDirty: false,
+      stickyProvenReadOnlyState: false,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+
+    const groupPath = host.querySelector<HTMLElement>("[data-connection-group-path]");
+    expect(groupPath?.parentElement?.parentElement?.getAttribute("aria-label")).toBe(`${fullGroupPath}/orders`);
+    expect(groupPath?.textContent).toBe(fullGroupPath);
+    expect(groupPath?.classList.contains("shrink-0")).toBe(true);
+    expect(groupPath?.classList.contains("max-w-[50%]")).toBe(false);
+    expect(groupPath?.nextElementSibling?.textContent).toBe("/");
+    const connectionName = groupPath?.nextElementSibling?.nextElementSibling;
+    expect(connectionName?.classList.contains("truncate")).toBe(true);
+    expect(connectionName?.classList.contains("flex-1")).toBe(true);
+    expect(host.textContent).toContain("orders");
+    expect(host.textContent).toContain("postgres://alice:***@db.example.com:5432/app");
+    expect(host.textContent).not.toContain("postgres://alice:secret@db.example.com:5432/app");
+    const detailPath = host.querySelector<HTMLElement>("[data-connection-detail-group-path]");
+    expect(detailPath?.textContent).toBe(fullGroupPath);
+    expect(detailPath?.previousElementSibling?.textContent).toBe("connection.groupPath");
+    expect(detailPath?.parentElement?.classList.contains("border-b")).toBe(false);
+    expect(detailPath?.classList.contains("truncate")).toBe(false);
+    expect(detailPath?.classList.contains("[overflow-wrap:anywhere]")).toBe(true);
+    const detailPanel = detailPath?.parentElement?.parentElement;
+    expect(detailPanel?.classList.contains("max-w-[min(22rem,calc(100vw-24px))]")).toBe(true);
+    expect(detailPanel?.classList.contains("max-w-[min(28rem,calc(100vw-24px))]")).toBe(false);
+    expect(detailPanel?.classList.contains("overflow-y-auto")).toBe(true);
+    expect(detailPanel?.classList.contains("max-h-[min(32rem,calc(100vh-24px))]")).toBe(true);
+
+    settingsStore.editorSettings.showConnectionGroupPath = false;
+    await nextTick();
+    expect(host.querySelector("[data-connection-group-path]")).toBeNull();
+    expect(host.querySelector("[data-connection-detail-group-path]")).toBeNull();
+    expect(host.textContent).not.toContain(longGroupName);
+    expect(host.textContent).toContain("orders");
+
+    const tooltip = host.querySelector<HTMLElement>('[data-test="connection-tooltip"]');
+    const pickerToggle = host.querySelector<HTMLButtonElement>('[data-test="toggle-connection-picker"]');
+    expect(tooltip?.dataset.disabled).toBe("false");
+    settingsStore.editorSettings.showConnectionGroupPath = true;
+    await nextTick();
+    expect(host.querySelector("[data-connection-detail-group-path]")?.textContent).toBe(fullGroupPath);
+    pickerToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await nextTick();
+    expect(tooltip?.dataset.disabled).toBe("true");
+    pickerToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await nextTick();
+    expect(tooltip?.dataset.disabled).toBe("false");
+
+    connectionStore.sidebarLayout.groups[0]!.name = "Staging";
+    await nextTick();
+    expect(host.querySelector("[data-connection-detail-group-path]")?.textContent).toBe("Staging/Asia Pacific/Orders");
+
+    connectionStore.sidebarLayout.order = [{ type: "connection", id: connection.id }];
+    await nextTick();
+    expect(host.querySelector("[data-connection-group-path]")).toBeNull();
+    expect(host.querySelector("[data-connection-detail-group-path]")).toBeNull();
+    expect(host.textContent).toContain("postgres://alice:***@db.example.com:5432/app");
 
     app.unmount();
     host.remove();

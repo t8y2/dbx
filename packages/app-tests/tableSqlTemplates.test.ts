@@ -27,6 +27,46 @@ test("builds SELECT template with explicit table columns", () => {
   );
 });
 
+test("builds SELECT template honoring lower keywordCase (#12933)", () => {
+  assert.equal(
+    buildTableSelectTemplate({
+      databaseType: "postgres",
+      schema: "public",
+      tableName: "users",
+      columns,
+      keywordCase: "lower",
+    }),
+    'select "id", "name", "created_at"\nfrom "public"."users";',
+  );
+  assert.equal(
+    buildTableSelectTemplate({
+      databaseType: "postgres",
+      schema: "public",
+      tableName: "users",
+      keywordCase: "lower",
+    }),
+    'select *\nfrom "public"."users";',
+  );
+  assert.equal(
+    buildTableSelectTemplate({
+      databaseType: "postgres",
+      schema: "public",
+      tableName: "users",
+      keywordCase: "upper",
+    }),
+    'SELECT *\nFROM "public"."users";',
+  );
+  assert.equal(
+    buildTableSelectTemplate({
+      databaseType: "postgres",
+      schema: "public",
+      tableName: "users",
+      keywordCase: "preserve",
+    }),
+    'SELECT *\nFROM "public"."users";',
+  );
+});
+
 test("builds a MetricsQL range query for VictoriaMetrics metrics", () => {
   assert.equal(buildTableSelectTemplate({ databaseType: "victoriametrics", tableName: "flag" }), '{__name__="flag"}[1h]');
 });

@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use mysql_async::prelude::*;
 
-use crate::types::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectInfo, TableInfo, TriggerInfo};
+use crate::types::{
+    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectInfo, ObjectSourceKind, TableInfo, TriggerInfo,
+};
 
 const CURRENT_SCHEMA_EXPRESSION: &str = "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')";
 
@@ -371,6 +373,153 @@ pub async fn list_triggers(pool: &mysql_async::Pool, schema: &str, table: &str) 
         .collect())
 }
 
+pub fn all_source_type(kind: &ObjectSourceKind) -> Option<&'static str> {
+    match kind {
+        ObjectSourceKind::Procedure => Some("PROCEDURE"),
+        ObjectSourceKind::Function => Some("FUNCTION"),
+        ObjectSourceKind::Package => Some("PACKAGE"),
+        ObjectSourceKind::PackageBody => Some("PACKAGE BODY"),
+        ObjectSourceKind::Trigger => Some("TRIGGER"),
+        ObjectSourceKind::Type => Some("TYPE"),
+        ObjectSourceKind::TypeBody => Some("TYPE BODY"),
+        _ => None,
+    }
+}
+
+pub fn metadata_ddl_type(kind: &ObjectSourceKind) -> Option<&'static str> {
+    match kind {
+        ObjectSourceKind::View => Some("VIEW"),
+        ObjectSourceKind::MaterializedView => Some("MATERIALIZED_VIEW"),
+        ObjectSourceKind::Procedure => Some("PROCEDURE"),
+        ObjectSourceKind::Function => Some("FUNCTION"),
+        ObjectSourceKind::Trigger => Some("TRIGGER"),
+        ObjectSourceKind::Sequence => Some("SEQUENCE"),
+        ObjectSourceKind::Synonym => Some("SYNONYM"),
+        ObjectSourceKind::Package => Some("PACKAGE"),
+        ObjectSourceKind::PackageBody => Some("PACKAGE_BODY"),
+        ObjectSourceKind::Type => Some("TYPE"),
+        ObjectSourceKind::TypeBody => Some("TYPE_BODY"),
+        _ => None,
+    }
+}
+
+pub fn all_source_sql(schema: &str, name: &str, source_type: &str) -> String {
+    format!(
+        "SELECT TEXT FROM ALL_SOURCE WHERE OWNER = {s} AND NAME = {n} AND TYPE = {t} ORDER BY LINE",
+        s = metadata_owner_sql(schema),
+        n = quote_value(name),
+        t = quote_value(source_type),
+    )
+}
+
+pub fn all_views_sql(schema: &str, name: &str) -> String {
+    format!(
+        "SELECT TEXT FROM ALL_VIEWS WHERE OWNER = {s} AND VIEW_NAME = {n}",
+        s = metadata_owner_sql(schema),
+        n = quote_value(name),
+    )
+}
+
+pub fn dbms_metadata_ddl_sql(schema: &str, name: &str, ddl_type: &str) -> String {
+    if schema.trim().is_empty() {
+        format!(
+            "SELECT DBMS_METADATA.GET_DDL({ddl}, {name}) FROM DUAL",
+            ddl = quote_value(ddl_type),
+            name = quote_value(name),
+        )
+    } else {
+        format!(
+            "SELECT DBMS_METADATA.GET_DDL({ddl}, {name}, {schema}) FROM DUAL",
+            ddl = quote_value(ddl_type),
+            name = quote_value(name),
+            schema = quote_value(schema),
+        )
+    }
+}
+
+pub fn editable_oracle_source(source: &str) -> String {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("CREATE"))
+        && (trimmed.len() == 6 || trimmed.as_bytes()[6].is_ascii_whitespace())
+    {
+        trimmed.to_string()
+    } else {
+        format!("CREATE OR REPLACE {trimmed}")
+    }
+}
+
+pub async fn get_object_source(
+    pool: &mysql_async::Pool,
+    schema: &str,
+    name: &str,
+    kind: &ObjectSourceKind,
+) -> Result<String, String> {
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+
+    // For routine and package types (PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY),
+    // query ALL_SOURCE first because DBMS_METADATA.GET_DDL can block or fail on OceanBase Oracle mode (#10212, #13628).
+    if let Some(source_type) = all_source_type(kind) {
+        let sql = all_source_sql(schema, name, source_type);
+        if let Ok(result) = conn.query_iter(&sql).await {
+            if let Ok(rows) = result.collect_and_drop::<mysql_async::Row>().await {
+                let mut full_source = String::new();
+                for row in rows {
+                    let line = get_str(&row, 0);
+                    full_source.push_str(&line);
+                }
+                if !full_source.trim().is_empty() {
+                    return Ok(editable_oracle_source(&full_source));
+                }
+            }
+        }
+    }
+
+    // For VIEW, DBMS_METADATA produces the complete CREATE OR REPLACE VIEW declaration.
+    // Fall back to ALL_VIEWS if DBMS_METADATA is unavailable or empty.
+    if matches!(kind, ObjectSourceKind::View) {
+        let metadata_sql = dbms_metadata_ddl_sql(schema, name, "VIEW");
+        if let Ok(result) = conn.query_iter(&metadata_sql).await {
+            if let Ok(rows) = result.collect_and_drop::<mysql_async::Row>().await {
+                if let Some(row) = rows.first() {
+                    let source = get_str(row, 0);
+                    if !source.trim().is_empty() {
+                        return Ok(editable_oracle_source(&source));
+                    }
+                }
+            }
+        }
+
+        let views_sql = all_views_sql(schema, name);
+        let result = conn.query_iter(&views_sql).await.map_err(|e| e.to_string())?;
+        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+        if let Some(row) = rows.first() {
+            let source = get_str(row, 0);
+            if !source.trim().is_empty() {
+                return Ok(source);
+            }
+        }
+        return Err("Object source not found".to_string());
+    }
+
+    // For other types or when ALL_SOURCE yielded nothing, fall back to DBMS_METADATA.GET_DDL.
+    if let Some(ddl_type) = metadata_ddl_type(kind) {
+        let sql = dbms_metadata_ddl_sql(schema, name, ddl_type);
+        let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+        if let Some(row) = rows.first() {
+            let source = get_str(row, 0);
+            if !source.trim().is_empty() {
+                return Ok(editable_oracle_source(&source));
+            }
+        }
+    }
+
+    Err("Object source not found".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,6 +582,8 @@ mod tests {
             list_indexes_sql("", "PERF_PROV_CONFIG"),
             list_foreign_keys_sql("", "PERF_PROV_CONFIG"),
             list_triggers_sql("", "PERF_PROV_CONFIG"),
+            all_source_sql("", "PKG", "PACKAGE BODY"),
+            all_views_sql("", "V"),
         ];
 
         for sql in statements {
@@ -451,11 +602,57 @@ mod tests {
             list_indexes_sql("SYS", "PERF_PROV_CONFIG"),
             list_foreign_keys_sql("SYS", "PERF_PROV_CONFIG"),
             list_triggers_sql("SYS", "PERF_PROV_CONFIG"),
+            all_source_sql("SYS", "PKG", "PACKAGE BODY"),
+            all_views_sql("SYS", "V"),
         ];
 
         for sql in statements {
             assert!(sql.contains("'SYS'"), "missing explicit schema in: {sql}");
             assert!(!sql.contains(CURRENT_SCHEMA_EXPRESSION), "unexpected current schema lookup in: {sql}");
         }
+    }
+
+    #[test]
+    fn ob_oracle_all_source_sql_for_package_body() {
+        let sql = all_source_sql("HR", "PAYROLL_PKG", "PACKAGE BODY");
+        assert_eq!(
+            sql,
+            "SELECT TEXT FROM ALL_SOURCE WHERE OWNER = 'HR' AND NAME = 'PAYROLL_PKG' AND TYPE = 'PACKAGE BODY' ORDER BY LINE"
+        );
+    }
+
+    #[test]
+    fn ob_oracle_dbms_metadata_ddl_sql() {
+        assert_eq!(
+            dbms_metadata_ddl_sql("HR", "PAYROLL_PKG", "PACKAGE_BODY"),
+            "SELECT DBMS_METADATA.GET_DDL('PACKAGE_BODY', 'PAYROLL_PKG', 'HR') FROM DUAL"
+        );
+        assert_eq!(
+            dbms_metadata_ddl_sql("", "PAYROLL_PKG", "PACKAGE_BODY"),
+            "SELECT DBMS_METADATA.GET_DDL('PACKAGE_BODY', 'PAYROLL_PKG') FROM DUAL"
+        );
+    }
+
+    #[test]
+    fn ob_oracle_editable_oracle_source_wraps_raw_source() {
+        assert_eq!(
+            editable_oracle_source("PACKAGE BODY pkg IS\nBEGIN\n  NULL;\nEND;"),
+            "CREATE OR REPLACE PACKAGE BODY pkg IS\nBEGIN\n  NULL;\nEND;"
+        );
+        assert_eq!(
+            editable_oracle_source("CREATE PACKAGE BODY pkg IS\nBEGIN\n  NULL;\nEND;"),
+            "CREATE PACKAGE BODY pkg IS\nBEGIN\n  NULL;\nEND;"
+        );
+        assert_eq!(
+            editable_oracle_source("CREATE OR REPLACE PACKAGE BODY pkg IS\nBEGIN\n  NULL;\nEND;"),
+            "CREATE OR REPLACE PACKAGE BODY pkg IS\nBEGIN\n  NULL;\nEND;"
+        );
+        assert_eq!(
+            editable_oracle_source("   create or replace package pkg is end;  "),
+            "create or replace package pkg is end;"
+        );
+        let commented = "--注释\nPACKAGE BODY pkg IS BEGIN NULL; END;";
+        assert_eq!(editable_oracle_source(commented), format!("CREATE OR REPLACE {commented}"));
+        assert_eq!(editable_oracle_source(""), "");
     }
 }

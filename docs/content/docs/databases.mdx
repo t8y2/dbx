@@ -26,6 +26,8 @@ Protocol compatibility covers only connection and selected dialect behavior. Ver
 - Cloudflare D1, Turso, and RQLite
 - H2 and local databases reached through JDBC URLs
 
+A self-hosted libSQL server (`sqld`) uses the Turso profile. Enter the server URL as the host, for example `http://127.0.0.1:8080`, and leave **Auth Token** empty unless the server checks JWTs (`--auth-jwt-key-file`). An `http://` URL stays plain HTTP while SSL is off; `libsql://` URLs and bare host names use HTTPS.
+
 Desktop file paths belong to the local computer. Docker/Web paths belong to the server container or mounted host storage; a path on the browser computer is not mapped automatically.
 
 ### Specialized Data Models and Services

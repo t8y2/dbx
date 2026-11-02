@@ -30,7 +30,7 @@ vi.mock("@/lib/backend/api", () => ({
   exportQueryResultJson: mocks.json,
   buildTableSelectSql: vi.fn(async ({ tableName }) => `SELECT * FROM ${tableName}`),
 }));
-vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ getConfig: () => connection, ensureConnected: vi.fn(async () => undefined), connectionIdentifierQuote: () => "`", orderByPinnedTreeNodes: (rows: unknown[]) => rows }) }));
+vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ getConfig: () => connection, ensureConnected: vi.fn(async () => undefined), connectionIdentifierQuote: () => "`", tableNameFilterForScope: () => undefined, orderByPinnedTreeNodes: (rows: unknown[]) => rows }) }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: mocks.settings }) }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));

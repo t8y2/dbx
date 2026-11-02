@@ -7,7 +7,7 @@ import { autoRevealExportedPathIfConfigured } from "@/lib/export/exportPath";
 import { releaseManualExport, submitManualExport, type ManualExportMode } from "@/lib/export/manualExportQueue";
 import { acceptOraclePackageTransferApproval, acceptOraclePackageTransferPreflight, acceptOracleRoutineDeploymentOperation, type OracleRoutineDeployment } from "@/lib/schema/oracleRoutineDeploy";
 
-export type BackgroundTaskKind = "table-export" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "data-generation" | "multi-db-execution" | "schema-diff" | "data-compare";
+export type BackgroundTaskKind = "table-export" | "table-copy" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "data-generation" | "multi-db-execution" | "schema-diff" | "data-compare";
 export type BackgroundTaskStatus = "Queued" | "Unknown" | "PreparingSnapshot" | "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
 export type DatabaseExportSource = "manual" | "scheduled";
 
@@ -102,6 +102,11 @@ export interface ExportTask {
   dictionaryWarnings?: number;
   dictionaryProgressKnown?: boolean;
   canCancel?: boolean;
+  canRemove?: boolean;
+  canRecoverCancellation?: boolean;
+  manualExportRootId?: string;
+  removed?: boolean;
+  copyPhase?: "preparing" | "structure" | "data" | "refreshing" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown";
   onOpen?: () => void;
   onRemove?: () => void;
 }
@@ -203,6 +208,16 @@ const taskMap = reactive<Map<string, ExportTask>>(new Map());
 const activeTransferRuns = new Set<string>();
 const packageTransferConfirmations = new WeakMap<ExportTask, api.OraclePackageTransferRequest>();
 const taskCancelHandlers = new Map<string, () => void | Promise<void>>();
+const manualExportRuns = new Map<string, { task: ExportTask; timer?: ReturnType<typeof setTimeout> }>();
+
+function clearCancellationRecovery(exportId: string) {
+  const run = manualExportRuns.get(exportId);
+  if (run?.timer) clearTimeout(run.timer);
+  if (run) run.timer = undefined;
+  for (const task of taskMap.values()) {
+    if (task.manualExportRootId === exportId) task.canRecoverCancellation = false;
+  }
+}
 const transferFailureStates = new Map<string, TransferFailureState>();
 const sqlFileFailureStates = new Map<string, SqlFileFailureState>();
 const textEncoder = new TextEncoder();
@@ -451,6 +466,7 @@ export function useExportTracker() {
   const hasActive = computed(() => activeCount.value > 0);
 
   function submitExportTask(task: ExportTask, mode: ManualExportMode, run: () => Promise<"settled" | "unknown">, onStateChange?: (task: ExportTask) => void) {
+    task.manualExportRootId = task.exportId;
     let handle: ReturnType<typeof submitManualExport>;
     const cancelQueued = () => {
       handle.cancelQueued();
@@ -458,8 +474,23 @@ export function useExportTracker() {
     handle = submitManualExport({
       id: task.exportId,
       mode,
-      run,
+      run() {
+        manualExportRuns.set(task.exportId, { task });
+        const finish = () => {
+          clearCancellationRecovery(task.exportId);
+          manualExportRuns.delete(task.exportId);
+        };
+        try {
+          const pending = run();
+          void pending.then(finish, finish);
+          return pending;
+        } catch (error) {
+          finish();
+          throw error;
+        }
+      },
       onStateChange(state, error) {
+        if (task.removed) return;
         if (state === "queued") {
           task.status = "Queued";
           task.startedAt = undefined;
@@ -495,6 +526,26 @@ export function useExportTracker() {
       totalRows: null,
       status: "Running",
       errorMessage: null,
+      startedAt: Date.now(),
+    });
+    taskMap.set(id, task);
+    return task;
+  }
+
+  function addTableCopyTask(id: string, label: string, onOpen: () => void): ExportTask {
+    const task = reactive<ExportTask>({
+      exportId: id,
+      kind: "table-copy",
+      tableName: label,
+      format: "",
+      filePath: "",
+      rowsExported: 0,
+      totalRows: null,
+      status: "Running",
+      errorMessage: null,
+      canCancel: true,
+      canRemove: false,
+      onOpen,
       startedAt: Date.now(),
     });
     taskMap.set(id, task);
@@ -823,6 +874,17 @@ export function useExportTracker() {
     task.status = "Cancelling";
   }
 
+  function markDataTransferTaskCancelling(transferId: string) {
+    const task = taskMap.get(transferId);
+    if (!task || task.kind !== "data-transfer" || task.status !== "Running") return;
+    task.status = "Cancelling";
+  }
+
+  function restoreDataTransferTaskRunning(transferId: string) {
+    const task = taskMap.get(transferId);
+    if (task?.kind === "data-transfer" && task.status === "Cancelling") task.status = "Running";
+  }
+
   function restoreDatabaseExportTaskRunning(exportId: string) {
     const task = taskMap.get(exportId);
     if (task?.kind === "database-export" && task.status === "Cancelling") task.status = "Running";
@@ -870,7 +932,10 @@ export function useExportTracker() {
     }
     const nextStatus = normalizeTransferStatus(progress.status, progress.terminal);
     const hadError = task.status === "Error";
-    task.status = hadError && nextStatus === "Done" ? "Error" : nextStatus;
+    // A cancel request is only acknowledged by the backend at its next checkpoint (between
+    // metadata reads or tables); keep showing "Cancelling" until a terminal event arrives.
+    if (task.status === "Cancelling" && nextStatus === "Running") task.status = "Cancelling";
+    else task.status = hadError && nextStatus === "Done" ? "Error" : nextStatus;
     task.errorMessage = progress.error || task.errorMessage || null;
     task.tableIndex = progress.tableIndex;
     task.totalTables = progress.totalTables;
@@ -932,6 +997,20 @@ export function useExportTracker() {
 
   function removeTask(exportId: string) {
     const task = taskMap.get(exportId);
+    if (task?.canRemove === false) return;
+    if (task?.status === "Unknown" && task.manualExportRootId) {
+      const rootId = task.manualExportRootId;
+      const members = [...taskMap.values()].filter((member) => member.manualExportRootId === rootId);
+      if (members.some((member) => member.canRemove === false)) return;
+      clearCancellationRecovery(rootId);
+      for (const member of members) {
+        member.removed = true;
+        taskMap.delete(member.exportId);
+        taskCancelHandlers.delete(member.exportId);
+      }
+      releaseManualExport(rootId);
+      return;
+    }
     if (task?.status === "Unknown") releaseManualExport(exportId);
     if (task && (task.status === "Done" || task.status === "Error" || task.status === "Cancelled")) cleanupFinishedTask(task);
     taskMap.delete(exportId);
@@ -942,7 +1021,7 @@ export function useExportTracker() {
 
   function clearFinished() {
     for (const [id, task] of taskMap) {
-      if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") {
+      if (task.canRemove !== false && (task.status === "Done" || task.status === "Error" || task.status === "Cancelled")) {
         cleanupFinishedTask(task);
         taskMap.delete(id);
         taskCancelHandlers.delete(id);
@@ -952,8 +1031,10 @@ export function useExportTracker() {
     }
   }
 
-  function registerTaskCancelHandler(exportId: string, handler: () => void | Promise<void>) {
+  function registerTaskCancelHandler(exportId: string, handler: () => void | Promise<void>, rootId?: string) {
     taskCancelHandlers.set(exportId, handler);
+    const task = taskMap.get(exportId);
+    if (task && rootId) task.manualExportRootId = rootId;
   }
 
   function unregisterTaskCancelHandler(exportId: string) {
@@ -964,6 +1045,16 @@ export function useExportTracker() {
     const task = taskMap.get(exportId);
     if (task?.canCancel === false) return;
     if (task && (task.kind === "table-export" || task.kind === "database-export") && (task.status === "Done" || task.status === "Error" || task.status === "Cancelled" || task.status === "Unknown" || task.status === "Cancelling")) return;
+    const rootId = task?.manualExportRootId;
+    const run = rootId ? manualExportRuns.get(rootId) : undefined;
+    if (run && !run.timer) {
+      run.timer = setTimeout(() => {
+        if (manualExportRuns.get(rootId!) !== run || run.task.removed) return;
+        for (const member of taskMap.values()) {
+          if (member.manualExportRootId === rootId && member.status === "Cancelling") member.canRecoverCancellation = true;
+        }
+      }, 30_000);
+    }
     try {
       const customHandler = taskCancelHandlers.get(exportId);
       if (customHandler) {
@@ -973,14 +1064,29 @@ export function useExportTracker() {
       } else if (task?.kind === "sql-file") {
         await api.cancelSqlFileExecution(exportId);
       } else if (task?.kind === "data-transfer") {
-        await api.cancelTransfer(exportId);
+        markDataTransferTaskCancelling(exportId);
+        try {
+          await api.cancelTransfer(exportId);
+        } catch (error) {
+          restoreDataTransferTaskRunning(exportId);
+          throw error;
+        }
       } else {
         markTableExportTaskCancelling(exportId);
         await api.cancelTableExport(exportId);
       }
-    } catch {
-      // ignore
+    } catch (error) {
+      if (run && !run.task.removed) run.task.errorMessage = error instanceof Error ? error.message : String(error);
     }
+  }
+
+  function recoverCancelledTask(exportId: string) {
+    const task = taskMap.get(exportId);
+    if (!task?.canRecoverCancellation || task.status !== "Cancelling" || task.canRemove === false) return;
+    const root = taskMap.get(task.manualExportRootId ?? exportId);
+    if (!root || root.canRemove === false) return;
+    root.status = "Unknown";
+    removeTask(root.exportId);
   }
 
   return {
@@ -989,6 +1095,7 @@ export function useExportTracker() {
     hasActive,
     submitExportTask,
     addTask,
+    addTableCopyTask,
     addDatabaseExportTask,
     addDataDictionaryTask,
     updateDataDictionaryTask,
@@ -1011,6 +1118,7 @@ export function useExportTracker() {
     registerTaskCancelHandler,
     unregisterTaskCancelHandler,
     removeTask,
+    recoverCancelledTask,
     clearFinished,
     cancelTask,
   };

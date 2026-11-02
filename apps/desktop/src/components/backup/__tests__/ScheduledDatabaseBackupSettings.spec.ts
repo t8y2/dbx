@@ -1350,4 +1350,172 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
       }),
     );
   });
+
+  it("visually displays selected databases as chips with a count badge and allows removing individual databases", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.listDatabases.mockResolvedValue([{ name: "analytics" }, { name: "application" }, { name: "billing" }]);
+    await mountSettings();
+
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    await showDatabaseOptions();
+
+    const checkboxes = Array.from(currentDialog().querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+    const appCb = checkboxes.find((item) => item.parentElement?.textContent?.trim() === "application");
+    const billCb = checkboxes.find((item) => item.parentElement?.textContent?.trim() === "billing");
+    if (!appCb || !billCb) throw new Error("Database checkboxes not found");
+
+    appCb.checked = true;
+    appCb.dispatchEvent(new Event("change", { bubbles: true }));
+    await flush();
+
+    billCb.checked = true;
+    billCb.dispatchEvent(new Event("change", { bubbles: true }));
+    await flush();
+
+    const badge = currentDialog().querySelector<HTMLElement>("[data-backup-selected-databases-badge]");
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent).toContain("2/3");
+
+    const chips = Array.from(currentDialog().querySelectorAll<HTMLElement>("[data-backup-selected-database-chip]"));
+    expect(chips).toHaveLength(2);
+    expect(chips[0].textContent).toContain("application");
+    expect(chips[1].textContent).toContain("billing");
+
+    // Remove application by clicking its chip remove button
+    const removeAppBtn = chips[0].querySelector<HTMLButtonElement>("[data-backup-remove-selected-database]");
+    if (!removeAppBtn) throw new Error("Remove button on chip not found");
+    removeAppBtn.click();
+    await flush();
+
+    const remainingChips = Array.from(currentDialog().querySelectorAll<HTMLElement>("[data-backup-selected-database-chip]"));
+    expect(remainingChips).toHaveLength(1);
+    expect(remainingChips[0].textContent).toContain("billing");
+    expect(badge!.textContent).toContain("1/3");
+  });
+
+  it("allows clearing all selected databases via clearSelection button", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.listDatabases.mockResolvedValue([{ name: "analytics" }, { name: "application" }, { name: "billing" }]);
+    await mountSettings();
+
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    await showDatabaseOptions();
+
+    const checkboxes = Array.from(currentDialog().querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+    const appCb = checkboxes.find((item) => item.parentElement?.textContent?.trim() === "application");
+    if (!appCb) throw new Error("Application checkbox not found");
+
+    appCb.checked = true;
+    appCb.dispatchEvent(new Event("change", { bubbles: true }));
+    await flush();
+
+    expect(currentDialog().querySelectorAll("[data-backup-selected-database-chip]")).toHaveLength(1);
+
+    const clearBtn = currentDialog().querySelector<HTMLButtonElement>("[data-backup-clear-selected-databases]");
+    if (!clearBtn) throw new Error("Clear selected databases button not found");
+    clearBtn.click();
+    await flush();
+
+    expect(currentDialog().querySelector("[data-backup-selected-databases-preview]")).toBeNull();
+    const badge = currentDialog().querySelector<HTMLElement>("[data-backup-selected-databases-badge]");
+    expect(badge!.textContent).toContain("0/3");
+  });
+
+  it("supports filtering database checklist to show only selected databases and batch selecting/deselecting", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.listDatabases.mockResolvedValue([{ name: "analytics" }, { name: "application" }, { name: "billing" }]);
+    await mountSettings();
+
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    await showDatabaseOptions();
+
+    // Select all filtered databases
+    const selectAllBtn = currentDialog().querySelector<HTMLButtonElement>("[data-backup-select-all-filtered]");
+    if (!selectAllBtn) throw new Error("Select all filtered button not found");
+    selectAllBtn.click();
+    await flush();
+
+    expect(currentDialog().querySelectorAll("[data-backup-selected-database-chip]")).toHaveLength(3);
+    const badge = currentDialog().querySelector<HTMLElement>("[data-backup-selected-databases-badge]");
+    expect(badge!.textContent).toContain("3/3");
+
+    // Toggle show only selected
+    const filterToggle = currentDialog().querySelector<HTMLButtonElement>("[data-backup-filter-selected-toggle]");
+    if (!filterToggle) throw new Error("Filter selected toggle not found");
+    filterToggle.click();
+    await flush();
+
+    // Deselect all filtered
+    const deselectBtn = currentDialog().querySelector<HTMLButtonElement>("[data-backup-deselect-all-filtered]");
+    if (!deselectBtn) throw new Error("Deselect all filtered button not found");
+    deselectBtn.click();
+    await flush();
+
+    expect(currentDialog().querySelector("[data-backup-selected-databases-preview]")).toBeNull();
+    expect(badge!.textContent).toContain("0/3");
+  });
+
+  it("displays visual chips and count badge immediately when editing an existing schedule with configured databases", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.listDatabases.mockResolvedValue([{ name: "analytics" }, { name: "application" }, { name: "billing" }]);
+    mocks.schedules.push(schedule({ id: "schedule-dbs", databases: ["analytics", "billing"] }));
+    await mountSettings();
+
+    buttonWithTitle(String(i18n.global.t("databaseBackup.edit"))).click();
+    await flush();
+
+    const badge = currentDialog().querySelector<HTMLElement>("[data-backup-selected-databases-badge]");
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent).toContain("2/3");
+
+    const chips = Array.from(currentDialog().querySelectorAll<HTMLElement>("[data-backup-selected-database-chip]"));
+    expect(chips).toHaveLength(2);
+    expect(chips[0].textContent).toContain("analytics");
+    expect(chips[1].textContent).toContain("billing");
+  });
+
+  it("keeps the seeded selection intact while the database list is still loading when editing a schedule", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    const databasesLoad = deferred<Array<{ name: string }>>();
+    mocks.listDatabases.mockReturnValueOnce(databasesLoad.promise);
+    mocks.schedules.push(schedule({ id: "schedule-loading", databases: ["analytics", "billing"] }));
+    await mountSettings();
+
+    buttonWithTitle(String(i18n.global.t("databaseBackup.edit"))).click();
+    await flush();
+
+    // While options are loading (options cleared) the chips area must not offer destructive removal.
+    expect(currentDialog().querySelector("[data-backup-selected-databases-preview]")).toBeNull();
+    expect(currentDialog().querySelectorAll("[data-backup-remove-selected-database]")).toHaveLength(0);
+    const badgeWhileLoading = currentDialog().querySelector<HTMLElement>("[data-backup-selected-databases-badge]");
+    expect(badgeWhileLoading?.textContent ?? "").not.toContain("/0");
+
+    databasesLoad.resolve([{ name: "analytics" }, { name: "application" }, { name: "billing" }]);
+    await flush();
+
+    const chips = Array.from(currentDialog().querySelectorAll<HTMLElement>("[data-backup-selected-database-chip]"));
+    expect(chips).toHaveLength(2);
+    expect(chips[0].textContent).toContain("analytics");
+    expect(chips[1].textContent).toContain("billing");
+    expect(currentDialog().querySelector<HTMLElement>("[data-backup-selected-databases-badge]")!.textContent).toContain("2/3");
+  });
+
+  it("does not offer chip removal or a stale count badge after loading the database list fails", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.listDatabases.mockRejectedValueOnce(new Error("database list unavailable"));
+    mocks.schedules.push(schedule({ id: "schedule-failed", databases: ["analytics", "billing"] }));
+    await mountSettings();
+
+    buttonWithTitle(String(i18n.global.t("databaseBackup.edit"))).click();
+    await flush();
+
+    expect(currentDialog().querySelector("[data-backup-database-load-error]")).not.toBeNull();
+    expect(currentDialog().querySelector("[data-backup-selected-databases-preview]")).toBeNull();
+    expect(currentDialog().querySelectorAll("[data-backup-selected-database-chip]")).toHaveLength(0);
+    expect(currentDialog().querySelectorAll("[data-backup-remove-selected-database]")).toHaveLength(0);
+    expect(currentDialog().querySelector("[data-backup-selected-databases-badge]")).toBeNull();
+  });
 });

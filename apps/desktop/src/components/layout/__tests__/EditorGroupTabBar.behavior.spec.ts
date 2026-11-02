@@ -14,7 +14,7 @@ vi.mock("@/components/ui/CustomContextMenu.vue", () => ({
     updated() {
       (this.$el as any).__ctxMenuItems = this.items;
     },
-    template: `<div class="ctx-menu-stub" :data-menu-items="JSON.stringify(items.map((item) => ({ label: item.label, disabled: item.disabled === true, visible: item.visible })))"><slot /></div>`,
+    template: `<div class="ctx-menu-stub" :data-menu-items="JSON.stringify(items.flatMap((item) => item.children ?? [item]).map((item) => ({ label: item.label, disabled: item.disabled === true, visible: item.visible })))"><slot /></div>`,
   },
 }));
 
@@ -107,6 +107,9 @@ function mountBar(
             tooltipDatabase: "Database:",
           },
           contextMenu: {
+            splitTab: "Split",
+            batchCloseTabs: "Close multiple tabs",
+            copyTabName: "Copy tab name",
             splitRight: "Split right",
             splitDown: "Split down",
             changeOrientation: "Change orientation",
@@ -545,6 +548,24 @@ describe("EditorGroupTabBar behavior", () => {
     expect(store.groups.find((group) => group.id === "target-group")?.tabIds).toEqual([secondId]);
     expect(store.groups.find((group) => group.id === mainGroup.id)?.tabIds).toEqual([firstId]);
 
+    app.unmount();
+    host.remove();
+  });
+
+  it("groups tab actions without dropping split and bulk close commands", async () => {
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "Query 1", "query");
+    const { app, host } = mountBar(store.groups[0].id, [id], id, pinia);
+    await settle();
+    const items = (tabPill(host, id).closest(".ctx-menu-stub") as any).__ctxMenuItems.filter((item: any) => item.visible !== false);
+    expect(items.map((item: any) => item.label)).toEqual(["Rename", "Duplicate", "Copy tab name", "Split", "", "Pin", "Save all tabs", "Reopen closed tab", "Close", "Close multiple tabs", "", "Full title", "Locate"]);
+    expect(items.find((item: any) => item.label === "Split").children.map((item: any) => item.label)).toEqual(["Split right", "Split down"]);
+    expect(
+      items
+        .find((item: any) => item.label === "Close multiple tabs")
+        .children.filter((item: any) => item.visible !== false)
+        .map((item: any) => item.label),
+    ).toEqual(["Close other tabs", "Close left tabs", "Close right tabs", "Close all tabs"]);
     app.unmount();
     host.remove();
   });

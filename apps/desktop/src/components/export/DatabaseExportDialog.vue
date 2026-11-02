@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import * as api from "@/lib/backend/api";
@@ -83,6 +84,7 @@ const includeObjects = ref(savedOptions.includeObjects);
 const includeCreateDatabase = ref(savedOptions.includeCreateDatabase);
 const dropTableIfExists = ref(savedOptions.dropTableIfExists);
 const omitAutoIncrement = ref(savedOptions.omitAutoIncrement);
+const omitDatabaseQualifier = ref(savedOptions.omitDatabaseQualifier);
 const preserveOriginalLanguage = ref(savedOptions.preserveOriginalLanguage);
 const splitSqlOutput = ref(savedOptions.splitSqlOutput);
 const splitSqlPartMaxMb = ref(savedOptions.splitSqlPartMaxMb);
@@ -100,6 +102,7 @@ function applyStoredExportOptions() {
   includeCreateDatabase.value = saved.includeCreateDatabase;
   dropTableIfExists.value = saved.dropTableIfExists;
   omitAutoIncrement.value = saved.omitAutoIncrement;
+  omitDatabaseQualifier.value = saved.omitDatabaseQualifier;
   preserveOriginalLanguage.value = saved.preserveOriginalLanguage;
   splitSqlOutput.value = saved.splitSqlOutput;
   splitSqlPartMaxMb.value = saved.splitSqlPartMaxMb;
@@ -115,6 +118,7 @@ function persistExportOptions() {
     includeCreateDatabase: includeCreateDatabase.value,
     dropTableIfExists: dropTableIfExists.value,
     omitAutoIncrement: omitAutoIncrement.value,
+    omitDatabaseQualifier: omitDatabaseQualifier.value,
     preserveOriginalLanguage: preserveOriginalLanguage.value,
     splitSqlOutput: splitSqlOutput.value,
     splitSqlPartMaxMb: normalizedSplitSqlPartMaxMb(),
@@ -183,6 +187,7 @@ const exportElapsedText = computed(() => {
 const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "solr", "couchdb", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "salesforce"].includes(c.db_type)));
 
 const canExport = computed(() => {
+  if (mysqlDataCharsetEnabled(store.getConfig(connectionId.value))) return false;
   const hasContent = includeStructure.value || includeData.value || includeObjects.value;
   if (!connectionId.value || !hasContent || isExporting.value) return false;
   if (exportAllDatabases.value) return selectedDatabases.value.length > 0 && !loadingMeta.value;
@@ -432,6 +437,7 @@ async function startDesktopExport() {
       includeCreateDatabase: includeCreateDatabase.value,
       dropTableIfExists: dropTableIfExists.value,
       omitAutoIncrement: omitAutoIncrement.value,
+      omitDatabaseQualifier: omitDatabaseQualifier.value,
       preserveOriginalLanguage: preserveOriginalLanguage.value,
       batchSize: 1000,
       splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
@@ -485,7 +491,7 @@ async function startDesktopExport() {
   batchDatabaseTotal.value = 0;
   batchRowsExported.value = 0;
   exportProgress.value = { exportId: id, currentObject: "", objectIndex: 0, totalObjects: 0, rowsExported: 0, totalRows: null, status: "Running", error: null, preparing: true };
-  const ownsView = () => !disposed && exportId.value === id;
+  const ownsView = () => !task.removed && !disposed && exportId.value === id;
   const sync = () => {
     if (!ownsView()) return;
     desktopTaskStatus.value = task.status;
@@ -600,7 +606,7 @@ async function startDesktopExport() {
         exportProgress.value = final;
         exportWarning.value = firstError;
       }
-      if (!cancelled) {
+      if (!cancelled && !task.removed) {
         if (captured.allDatabases)
           notifyExportComplete({
             filePath: firstFile || destination,
@@ -629,6 +635,7 @@ async function startDesktopExport() {
 }
 
 async function startExport() {
+  if (mysqlDataCharsetEnabled(store.getConfig(connectionId.value))) return;
   if (!canExport.value) return;
   if (isTauriRuntime()) {
     await startDesktopExport();
@@ -711,6 +718,7 @@ async function startExport() {
           includeCreateDatabase: includeCreateDatabase.value,
           dropTableIfExists: dropTableIfExists.value,
           omitAutoIncrement: omitAutoIncrement.value,
+          omitDatabaseQualifier: omitDatabaseQualifier.value,
           preserveOriginalLanguage: preserveOriginalLanguage.value,
           snapshotSessionId,
           batchSize: 1000,
@@ -862,6 +870,7 @@ async function startAllDatabasesExport() {
               includeCreateDatabase: includeCreateDatabase.value,
               dropTableIfExists: dropTableIfExists.value,
               omitAutoIncrement: omitAutoIncrement.value,
+              omitDatabaseQualifier: omitDatabaseQualifier.value,
               preserveOriginalLanguage: preserveOriginalLanguage.value,
               snapshotSessionId,
               batchSize: 1000,
@@ -1127,7 +1136,7 @@ watch(
   { immediate: true },
 );
 
-watch([includeStructure, includeData, insertDialect, insertMode, includeObjects, includeCreateDatabase, dropTableIfExists, omitAutoIncrement, preserveOriginalLanguage, splitSqlOutput, splitSqlPartMaxMb], () => {
+watch([includeStructure, includeData, insertDialect, insertMode, includeObjects, includeCreateDatabase, dropTableIfExists, omitAutoIncrement, omitDatabaseQualifier, preserveOriginalLanguage, splitSqlOutput, splitSqlPartMaxMb], () => {
   if (open.value) {
     persistExportOptions();
   }
@@ -1145,6 +1154,7 @@ watch([includeStructure, includeData, insertDialect, insertMode, includeObjects,
       </DialogHeader>
 
       <div class="flex-1 min-h-0 overflow-auto space-y-4 py-2">
+        <p v-if="mysqlDataCharsetEnabled(store.getConfig(connectionId))" class="text-xs text-muted-foreground">{{ t("connection.mysqlDataCharsetExportHint") }}</p>
         <!-- Connection / Database / Schema Selection -->
         <div v-if="!isExporting && !exportDone && !exportError && !exportCancelled" class="space-y-3">
           <div class="space-y-1.5">
@@ -1287,6 +1297,11 @@ watch([includeStructure, includeData, insertDialect, insertMode, includeObjects,
               <CheckSquare v-if="omitAutoIncrement" class="w-3.5 h-3.5 text-primary shrink-0" />
               <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
               {{ t("databaseExport.omitAutoIncrement") }}
+            </div>
+            <div v-if="includeData && isMysqlFamily" class="flex items-center gap-2 cursor-pointer text-xs" @click="omitDatabaseQualifier = !omitDatabaseQualifier">
+              <CheckSquare v-if="omitDatabaseQualifier" class="w-3.5 h-3.5 text-primary shrink-0" />
+              <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
+              {{ t("databaseExport.omitDatabaseQualifier") }}
             </div>
             <div v-if="includeData" class="flex items-center gap-2 cursor-pointer text-xs" @click="preserveOriginalLanguage = !preserveOriginalLanguage">
               <CheckSquare v-if="preserveOriginalLanguage" class="w-3.5 h-3.5 text-primary shrink-0" />

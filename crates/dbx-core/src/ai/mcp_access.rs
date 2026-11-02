@@ -25,13 +25,32 @@ use crate::storage::{McpDatabaseScope, McpGlobalPolicy};
 pub const MCP_ACCESS_POLICY_VERSION: u8 = 2;
 
 /// How plugin MCP tools are exposed to clients.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpPluginToolsMode {
     Auto,
     #[default]
     Flat,
     Lazy,
+}
+
+// Tolerant on purpose: the desktop app and the standalone `dbx-mcp` binary
+// version independently, so a policy written by a newer build may carry a
+// mode this build does not know. Rejecting the whole policy would take down
+// every MCP tool; fall back to `auto` and let Auto resolve instead.
+impl<'de> Deserialize<'de> for McpPluginToolsMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Ok(match text.as_str() {
+            "auto" => Self::Auto,
+            "flat" => Self::Flat,
+            "lazy" => Self::Lazy,
+            unknown => {
+                log::warn!("[mcp] unknown pluginToolsMode {unknown:?} in saved policy; falling back to auto");
+                Self::Auto
+            }
+        })
+    }
 }
 
 impl McpPluginToolsMode {
@@ -385,6 +404,27 @@ impl McpAccessPolicy {
     /// connection only permits selected scopes or no scopes.
     pub fn sub_scope_mode(&self, connection_id: &str) -> McpSubScopeMode {
         self.connection_rule(connection_id).and_then(|rule| rule.sub_scope).unwrap_or_default()
+    }
+
+    /// Effective level for a plugin connection. Identical to [`Self::resolve`]
+    /// except that a connection with no explicit connection/group rule falls
+    /// back to its own protection level instead of the global default:
+    /// read-only connections stay read, writable ones resolve to at least
+    /// write. Explicit rules (connection or group) always win.
+    pub fn resolve_plugin_connection(
+        &self,
+        group_ids: &[String],
+        connection_id: &str,
+        connection_read_only: bool,
+    ) -> McpResolvedAccess {
+        let mut resolved = self.resolve(group_ids, connection_id, None);
+        if resolved.source == McpAccessSource::Default
+            && !connection_read_only
+            && resolved.level < McpAccessLevel::Write
+        {
+            resolved.level = McpAccessLevel::Write;
+        }
+        resolved
     }
 
     /// Whether a request that enumerates every value of a sub-scope can be
@@ -1585,5 +1625,28 @@ mod tests {
         let round_trip: McpAccessPolicy = serde_json::from_value(serde_json::to_value(&policy).unwrap()).unwrap();
         assert_eq!(round_trip, policy);
         assert!(serde_json::to_value(&policy).unwrap()["rules"].is_array());
+    }
+}
+
+#[cfg(test)]
+mod plugin_tools_mode_tests {
+    use super::McpPluginToolsMode;
+
+    #[test]
+    fn plugin_tools_mode_serializes_lowercase_and_tolerates_unknown_values() {
+        assert_eq!(serde_json::to_value(McpPluginToolsMode::Flat).unwrap(), serde_json::json!("flat"));
+        assert_eq!(
+            serde_json::from_value::<McpPluginToolsMode>(serde_json::json!("flat")).unwrap(),
+            McpPluginToolsMode::Flat
+        );
+        assert_eq!(
+            serde_json::from_value::<McpPluginToolsMode>(serde_json::json!("lazy")).unwrap(),
+            McpPluginToolsMode::Lazy
+        );
+        // A mode written by a newer build must not take the whole policy down.
+        assert_eq!(
+            serde_json::from_value::<McpPluginToolsMode>(serde_json::json!("both")).unwrap(),
+            McpPluginToolsMode::Auto
+        );
     }
 }

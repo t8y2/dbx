@@ -1346,12 +1346,12 @@ fn show_webview2_runtime_dialog(damaged: bool) {
 
     let messages = crate::startup_messages::current();
     let log_path = startup_log_display_path();
-    let offline_url = crate::startup_messages::offline_installer_url();
+    let download_url = messages.download_page_url;
     let template = if damaged { messages.damaged_runtime } else { messages.missing_runtime };
-    let body = messages.render(template, &log_path, &offline_url);
+    let body = messages.render(template, &log_path, download_url);
     let open_download = windows_message_box(messages.title, &body, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON1) == IDYES;
     if open_download {
-        open_browser_url(&offline_url);
+        open_browser_url(download_url);
     }
 }
 
@@ -1368,8 +1368,8 @@ fn show_compatibility_failure_message(_attempted_history: &str) {
 
     let messages = crate::startup_messages::current();
     let log_path = startup_log_display_path();
-    let offline_url = crate::startup_messages::offline_installer_url();
-    let body = messages.render(messages.compatibility_failed, &log_path, &offline_url);
+    let download_url = messages.download_page_url;
+    let body = messages.render(messages.compatibility_failed, &log_path, download_url);
     let open_logs = windows_message_box(messages.title, &body, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON1) == IDYES;
     if open_logs {
         open_log_folder();
@@ -1386,8 +1386,8 @@ fn show_recovery_failure_message() {
 
     let messages = crate::startup_messages::current();
     let log_path = startup_log_display_path();
-    let offline_url = crate::startup_messages::offline_installer_url();
-    let body = messages.render(messages.recovery_disabled, &log_path, &offline_url);
+    let download_url = messages.download_page_url;
+    let body = messages.render(messages.recovery_disabled, &log_path, download_url);
     let open_logs = windows_message_box(messages.title, &body, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON1) == IDYES;
     if open_logs {
         open_log_folder();

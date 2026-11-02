@@ -8,7 +8,8 @@ import UpdateDialog from "@/components/layout/UpdateDialog.vue";
 const runtimeState = vi.hoisted(() => ({ tauri: true }));
 
 const updateMocks = vi.hoisted(() => ({
-  fetchChangelog: vi.fn(),
+  fetchChangelogIndex: vi.fn(),
+  fetchChangelogRelease: vi.fn(),
   getAppVersion: vi.fn(),
   openExternal: vi.fn(),
 }));
@@ -19,7 +20,7 @@ vi.mock("@/lib/backend/tauriRuntime", () => ({
 
 vi.mock("@/lib/app/changelog", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/app/changelog")>();
-  return { ...actual, fetchChangelog: updateMocks.fetchChangelog };
+  return { ...actual, fetchChangelogIndex: updateMocks.fetchChangelogIndex, fetchChangelogRelease: updateMocks.fetchChangelogRelease };
 });
 
 vi.mock("@/lib/backend/api", async (importOriginal) => {
@@ -156,7 +157,8 @@ async function clickOutside() {
 
 beforeEach(() => {
   // 默认没有历史版本：只有专门的历史版本用例才提供发布记录
-  updateMocks.fetchChangelog.mockResolvedValue({ updatedAt: "", releases: [] });
+  updateMocks.fetchChangelogIndex.mockResolvedValue({ updatedAt: "", releases: [] });
+  updateMocks.fetchChangelogRelease.mockResolvedValue({ tag: "", name: "", date: "", sections: [] });
   updateMocks.getAppVersion.mockResolvedValue("0.5.60");
   updateMocks.openExternal.mockClear();
 });
@@ -178,6 +180,81 @@ describe("UpdateDialog web runtime", () => {
     expect(buttonWithText("Open Release")).toBeDefined();
     expect(downloadButton()).toBeUndefined();
     expect(installDownloadedButton()).toBeUndefined();
+  });
+});
+
+describe("UpdateDialog update channels", () => {
+  it("marks beta updates and explains when switching back cannot downgrade", async () => {
+    await mountDialog(
+      0,
+      {},
+      vi.fn(async () => {}),
+      {
+        updateInfo: {
+          current_version: "0.6.60-beta.20261028.1",
+          latest_version: "0.6.59",
+          update_available: false,
+          portable_mode: false,
+          manual_update_only: false,
+          release_name: "DBX v0.6.59",
+          release_url: "https://github.com/t8y2/dbx/releases/tag/v0.6.59",
+          release_notes: "",
+          channel: "stable",
+          release_tag: "v0.6.59",
+          is_promoted: true,
+        },
+      },
+    );
+
+    expect(document.body.textContent).toContain("stable channel is older");
+
+    for (const app of mountedApps.splice(0)) app.unmount();
+    document.body.innerHTML = "";
+    await mountDialog(
+      0,
+      {},
+      vi.fn(async () => {}),
+      {
+        updateInfo: {
+          current_version: "0.6.60-beta.20261028.1",
+          latest_version: "0.6.60",
+          update_available: false,
+          portable_mode: false,
+          manual_update_only: false,
+          release_name: "DBX v0.6.60",
+          release_url: "https://github.com/t8y2/dbx/releases/tag/v0.6.60",
+          release_notes: "",
+          channel: "stable",
+          release_tag: "v0.6.60",
+          is_promoted: true,
+        },
+      },
+    );
+    expect(document.body.textContent).not.toContain("stable channel is older");
+
+    for (const app of mountedApps.splice(0)) app.unmount();
+    document.body.innerHTML = "";
+    await mountDialog(
+      0,
+      {},
+      vi.fn(async () => {}),
+      {
+        updateInfo: {
+          current_version: "0.6.59",
+          latest_version: "0.6.60-beta.20261028.1",
+          update_available: true,
+          portable_mode: false,
+          manual_update_only: false,
+          release_name: "DBX v0.6.60-beta.20261028.1",
+          release_url: "https://github.com/t8y2/dbx/releases/tag/v0.6.60-beta.20261028.1",
+          release_notes: "",
+          channel: "beta",
+          release_tag: "v0.6.60-beta.20261028.1",
+          is_promoted: false,
+        },
+      },
+    );
+    expect(document.body.textContent).toContain("Dev Beta channel");
   });
 });
 
@@ -231,6 +308,40 @@ describe("UpdateDialog active task guard", () => {
     await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 });
 
     expect(installDownloadedButton()?.disabled).toBe(false);
+  });
+});
+
+describe("UpdateDialog prepared package without a remote update (#13562)", () => {
+  const upToDateInfo = {
+    current_version: "0.5.61",
+    latest_version: "0.5.61",
+    update_available: false,
+    portable_mode: false,
+    manual_update_only: false,
+    release_name: "DBX v0.5.61",
+    release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.61",
+    release_notes: "",
+  };
+
+  it("keeps the install action reachable when the remote reports no update", async () => {
+    const installDownloaded = vi.fn(async () => {});
+    await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 }, installDownloaded, { updateInfo: upToDateInfo });
+
+    const button = installDownloadedButton();
+    expect(button).toBeDefined();
+    expect(button?.disabled).toBe(false);
+    button?.click();
+    await flushDialog();
+
+    expect(installDownloaded).toHaveBeenCalledOnce();
+  });
+
+  it("labels the prepared package with its own version", async () => {
+    await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 }, undefined, { updateInfo: upToDateInfo, updateDownloadedVersion: "0.5.62" });
+
+    expect(document.body.textContent).toContain("v0.5.62 is downloaded");
+    expect(document.body.textContent).not.toContain("DBX is up to date");
+    expect(document.body.textContent).not.toContain("v0.5.61 is downloaded");
   });
 });
 
@@ -413,8 +524,52 @@ describe("UpdateDialog release notes safety", () => {
   });
 });
 
+describe("UpdateDialog changelog", () => {
+  it("shows the shared changelog even when the current version has no update", async () => {
+    const checkUpdates = vi.fn();
+    updateMocks.fetchChangelogIndex.mockResolvedValue({
+      updatedAt: "2026-10-28",
+      releases: [{ tag: "v0.5.60", name: "DBX v0.5.60", date: "2026-10-28" }],
+    });
+    updateMocks.fetchChangelogRelease.mockResolvedValue({
+      tag: "v0.5.60",
+      name: "DBX v0.5.60",
+      date: "2026-10-28",
+      sections: [{ type: "fixed", title: "Fixed", items: [{ title: "A useful fix", desc: "Details of the fix" }] }],
+    });
+    await mountDialog(0, {}, undefined, { updateInfo: null, "onCheck-updates": checkUpdates });
+
+    const changelogTab = document.body.querySelector<HTMLButtonElement>('[data-update-tab="changelog"]');
+    expect(changelogTab).not.toBeNull();
+    changelogTab?.click();
+    await flushDialog();
+    buttonWithText("0.5.60")?.click();
+    await flushDialog();
+
+    expect(document.body.textContent).toContain("A useful fix");
+    expect(document.body.textContent).toContain("Details of the fix");
+    expect(downloadButton()).toBeUndefined();
+    const checkButton = buttonWithText(i18n.global.t("updates.check"));
+    expect(checkButton).toBeDefined();
+    checkButton?.click();
+    expect(checkUpdates).toHaveBeenCalledOnce();
+  });
+
+  it("keeps client update actions available after returning from the changelog", async () => {
+    const { downloadInBackground } = await mountDialog(0);
+    document.body.querySelector<HTMLButtonElement>('[data-update-tab="changelog"]')?.click();
+    await flushDialog();
+    expect(downloadButton()).toBeUndefined();
+    document.body.querySelector<HTMLButtonElement>('[data-update-tab="app"]')?.click();
+    await flushDialog();
+    downloadButton()?.click();
+    expect(downloadInBackground).toHaveBeenCalledOnce();
+  });
+});
+
 describe("UpdateDialog older versions", () => {
-  const release = (tag: string, date: string) => ({ tag, name: `DBX ${tag}`, date, sections: [] });
+  // The rollback list only needs index entries (tag/date); release bodies stay unloaded.
+  const release = (tag: string, date: string) => ({ tag, name: `DBX ${tag}`, date });
   const upToDateInfo = {
     current_version: "0.5.60",
     latest_version: "0.5.60",
@@ -429,7 +584,7 @@ describe("UpdateDialog older versions", () => {
   const historyButton = (text: string) => Array.from(historyRegion()?.querySelectorAll("button") ?? []).find((button) => button.textContent?.includes(text));
 
   it("lists only versions older than the current build and opens their release page", async () => {
-    updateMocks.fetchChangelog.mockResolvedValue({ updatedAt: "2026-09-10", releases: [release("v0.5.61", "2026-09-10"), release("v0.5.60", "2026-09-01"), release("v0.5.59", "2026-08-20")] });
+    updateMocks.fetchChangelogIndex.mockResolvedValue({ updatedAt: "2026-09-10", releases: [release("v0.5.61", "2026-09-10"), release("v0.5.60", "2026-09-01"), release("v0.5.59", "2026-08-20")] });
 
     await mountDialog(0, {}, undefined, { updateInfo: upToDateInfo, updateCheckMessage: "DBX is up to date (0.5.60)." });
     await flushDialog();
@@ -453,7 +608,7 @@ describe("UpdateDialog older versions", () => {
   });
 
   it("keeps the history collapsed until the user expands it", async () => {
-    updateMocks.fetchChangelog.mockResolvedValue({ updatedAt: "2026-09-10", releases: [release("v0.5.61", "2026-09-10"), release("v0.5.59", "2026-08-20")] });
+    updateMocks.fetchChangelogIndex.mockResolvedValue({ updatedAt: "2026-09-10", releases: [release("v0.5.61", "2026-09-10"), release("v0.5.59", "2026-08-20")] });
 
     await mountDialog(0);
     await flushDialog();
@@ -468,7 +623,7 @@ describe("UpdateDialog older versions", () => {
   });
 
   it("starts collapsed again after the dialog is reopened", async () => {
-    updateMocks.fetchChangelog.mockResolvedValue({ updatedAt: "2026-09-10", releases: [release("v0.5.61", "2026-09-10"), release("v0.5.59", "2026-08-20")] });
+    updateMocks.fetchChangelogIndex.mockResolvedValue({ updatedAt: "2026-09-10", releases: [release("v0.5.61", "2026-09-10"), release("v0.5.59", "2026-08-20")] });
 
     const { state } = await mountDialog(0, {}, undefined, { updateInfo: upToDateInfo, updateCheckMessage: "DBX is up to date (0.5.60)." });
     await flushDialog();
@@ -487,7 +642,7 @@ describe("UpdateDialog older versions", () => {
   });
 
   it("hides the history section when no release is older than the current build", async () => {
-    updateMocks.fetchChangelog.mockResolvedValue({ updatedAt: "2026-09-10", releases: [release("v0.5.61", "2026-09-10"), release("v0.5.60", "2026-09-01")] });
+    updateMocks.fetchChangelogIndex.mockResolvedValue({ updatedAt: "2026-09-10", releases: [release("v0.5.61", "2026-09-10"), release("v0.5.60", "2026-09-01")] });
 
     await mountDialog(0);
     await flushDialog();
@@ -496,7 +651,7 @@ describe("UpdateDialog older versions", () => {
   });
 
   it("surfaces a changelog load failure instead of hiding it silently", async () => {
-    updateMocks.fetchChangelog.mockRejectedValue(new Error("offline"));
+    updateMocks.fetchChangelogIndex.mockRejectedValue(new Error("offline"));
 
     await mountDialog(0, {}, undefined, { updateInfo: upToDateInfo, updateCheckMessage: "DBX is up to date (0.5.60)." });
     await flushDialog();

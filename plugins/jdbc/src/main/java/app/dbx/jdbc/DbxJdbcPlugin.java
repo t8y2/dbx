@@ -566,7 +566,7 @@ public final class DbxJdbcPlugin {
         String sessionId = optionalText(result, "session_id");
         for (JsonNode cell : result.path("large_value_cells")) connectionState().largeValues.release(cell.path("value_ref").asText());
         if (sessionId == null) sessionId = optionalText(params, "sessionId");
-        if (sessionId != null) closeQuerySession(sessionId);
+        if (sessionId != null) discardQuerySession(sessionId);
         throw new SQLException(RESPONSE_LIMIT_MESSAGE);
     }
 
@@ -868,6 +868,7 @@ public final class DbxJdbcPlugin {
                 params.path("offset").asLong(-1), params.path("limit").asInt(0)));
             case "release_large_value" -> MAPPER.valueToTree(Map.of("released",
                 connectionState().largeValues.release(requireText(params, "valueRef"))));
+            case "connectionParameters" -> MAPPER.valueToTree(connectionParameters(connection));
             case "testConnection" -> connectionTestResult(openConnection(connection));
             case "connect" -> {
                 openConnection(connection);
@@ -1906,7 +1907,10 @@ public final class DbxJdbcPlugin {
                 result.putNull("session_id");
                 result.put("has_more", false);
                 statement.close();
-                restorePagedQueryTransaction(conn, restoreAutoCommit);
+                // No cursor survives this statement, so end the transaction by
+                // committing: rollback here silently undid DDL/DML such as
+                // DROP TABLE or CREATE TABLE AS while reporting success (#13644).
+                commitPagedQueryTransaction(conn, restoreAutoCommit);
                 return result;
             }
 
@@ -1982,6 +1986,38 @@ public final class DbxJdbcPlugin {
         }
     }
 
+    /**
+     * Ends the transaction begun by {@link #beginPagedQueryTransaction} after a
+     * statement completed without leaving a cursor behind, or after a paged
+     * cursor was fully drained. The statement's effects are the user's intent,
+     * so the transaction is committed, not rolled back: a rolled-back DROP
+     * TABLE or CREATE TABLE AS silently vanished while DBX reported success
+     * (#13644). Only the caller that flipped auto-commit off owns the
+     * transaction; manual transactions end through their own commit/rollback
+     * entry points.
+     *
+     * <p>A failed commit is rethrown after a best-effort connection restore:
+     * a deferred constraint failure or a connection dropped during commit must
+     * reach the caller as an error, not as a success whose effects vanish.
+     * Secondary failures while clearing the broken transaction are ignored so
+     * the original commit error is what surfaces.
+     */
+    private static void commitPagedQueryTransaction(Connection connection, boolean ownedTransaction) throws SQLException {
+        if (!ownedTransaction) {
+            return;
+        }
+        try {
+            connection.commit();
+        } catch (SQLException | RuntimeException | Error error) {
+            restorePagedQueryTransaction(connection, true);
+            throw error;
+        }
+        try {
+            connection.setAutoCommit(true);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+        }
+    }
+
     private static JsonNode fetchQueryPage(String sessionId, int pageSize) throws SQLException {
         QuerySession session = connectionState().querySessions.get(sessionId);
         if (session == null) {
@@ -2032,7 +2068,7 @@ public final class DbxJdbcPlugin {
         return queryPageResult(session, rows, largeCells, false, true);
         } catch (SQLException | RuntimeException | LinkageError error) {
             for (JsonNode cell : largeCells) connectionState().largeValues.release(cell.path("value_ref").asText());
-            closeQuerySession(session.id);
+            discardQuerySession(session.id);
             throw error;
         }
     }
@@ -2054,13 +2090,22 @@ public final class DbxJdbcPlugin {
         return result;
     }
 
-    private static ObjectNode closeQuerySessionResult(String sessionId) {
+    private static ObjectNode closeQuerySessionResult(String sessionId) throws SQLException {
         ObjectNode result = MAPPER.createObjectNode();
         result.put("ok", closeQuerySession(sessionId));
         return result;
     }
 
-    private static boolean closeQuerySession(String sessionId) {
+    /**
+     * Success-path close: the cursor completed or the caller explicitly closed
+     * it, so the paging transaction ends by committing. JDBC reports -1 as the
+     * update count whenever the current result is a result set -- including
+     * INSERT ... RETURNING -- so effects cannot be classified from the driver;
+     * committing every completed statement is what keeps returned rows durable
+     * (#13644). A commit failure propagates ({@link #commitPagedQueryTransaction})
+     * instead of reporting the session as closed-ok.
+     */
+    private static boolean closeQuerySession(String sessionId) throws SQLException {
         QuerySession session = connectionState().querySessions.remove(sessionId);
         if (session == null) {
             return false;
@@ -2074,14 +2119,39 @@ public final class DbxJdbcPlugin {
             session.statement.close();
         } catch (Exception ignored) {
         }
-        restorePagedQueryTransaction(session.connection, session.restoreAutoCommit);
+        commitPagedQueryTransaction(session.connection, session.restoreAutoCommit);
         return true;
+    }
+
+    /**
+     * Error-path cleanup: a page failed or was cancelled, so an owned paging
+     * transaction ends with a rollback and never commits, and the cleanup does
+     * not mask the original error with a commit failure.
+     */
+    private static void discardQuerySession(String sessionId) {
+        QuerySession session = connectionState().querySessions.remove(sessionId);
+        if (session == null) {
+            return;
+        }
+        if (session.pendingRow != null) releaseRowValues(session.pendingRow);
+        try {
+            session.resultSet.close();
+        } catch (Exception ignored) {
+        }
+        try {
+            session.statement.close();
+        } catch (Exception ignored) {
+        }
+        restorePagedQueryTransaction(session.connection, session.restoreAutoCommit);
     }
 
     private static void closeAllQuerySessions() {
         List<String> sessionIds = new ArrayList<>(connectionState().querySessions.keySet());
         for (String sessionId : sessionIds) {
-            closeQuerySession(sessionId);
+            try {
+                closeQuerySession(sessionId);
+            } catch (SQLException ignored) {
+            }
         }
     }
 
@@ -4932,6 +5002,18 @@ public final class DbxJdbcPlugin {
             return url;
         }
         return appendJdbcUrlParam(url, "key", password);
+    }
+
+    static List<Map<String, Object>> connectionParameters(JsonNode connection) throws SQLException {
+        String url = jdbcUrl(connection);
+        if (url == null || url.isBlank()) return List.of();
+        Properties properties = new Properties();
+        String username = optionalText(connection, "username");
+        String password = optionalText(connection, "password");
+        if (username != null) properties.setProperty("user", username);
+        if (password != null) properties.setProperty("password", password);
+        Driver driver = registeredDriver == null ? DriverManager.getDriver(url) : registeredDriver;
+        return JdbcConnectionParameters.describe(driver, url, properties);
     }
 
     static String jdbcUrl(JsonNode connection) {

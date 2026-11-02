@@ -43,6 +43,7 @@ const { store, settings, backend, actualStoreHolder } = vi.hoisted(() => ({
     redisListDatabases: vi.fn(),
     listSchemas: vi.fn(),
     testConnectionWithInfo: vi.fn(),
+    connectionParameters: vi.fn(),
     listDatabases: vi.fn(),
     listPlugins: vi.fn(),
     listJdbcDrivers: vi.fn(),
@@ -88,7 +89,7 @@ vi.mock("@/components/ui/dialog", async () => {
       () =>
         props.open ? h("section", [h("button", { "data-testid": "dismiss-dialog", onClick: () => emit("update:open", false) }, "Dismiss"), slots.default?.()]) : null,
   });
-  return { Dialog, DialogContent: passthrough, DialogHeader: passthrough, DialogTitle: passthrough, DialogFooter: passthrough };
+  return { Dialog, DialogContent: passthrough, DialogHeader: passthrough, DialogTitle: passthrough, DialogDescription: passthrough, DialogFooter: passthrough };
 });
 vi.mock("@/components/ui/button", async () => {
   const { defineComponent, h } = await import("vue");
@@ -187,7 +188,7 @@ async function settle() {
   for (let i = 0; i < 8; i++) await nextTick();
 }
 
-async function mountDialog(config: ConnectionConfig, url: string, initiallyOpen = true) {
+async function mountDialog(config: ConnectionConfig, url = "", initiallyOpen = true) {
   const props = reactive({ open: initiallyOpen, editConfig: config, updatePrefill: url ? parseConnectionDeepLinkUpdate(url) : null });
   store.getConfig.mockReturnValue(config);
   const container = document.createElement("div");
@@ -251,7 +252,101 @@ afterEach(() => {
   actualStoreHolder.value = null;
 });
 
+describe.each([
+  { mode: "without edits", rename: false },
+  { mode: "after renaming", rename: true },
+])("ConnectionDialog saved connection settings $mode", ({ rename }) => {
+  it.each([
+    {
+      setting: "Redis database aliases",
+      config: savedConnection({ db_type: "redis", driver_profile: "redis", driver_label: "Redis", port: 6379, database: "0", redis_database_aliases: { "3": "orders", "7": "cache" } }),
+      expected: { redis_database_aliases: { "3": "orders", "7": "cache" } },
+    },
+    {
+      setting: "the default schema",
+      config: savedConnection({ db_type: "postgres", driver_profile: "postgres", driver_label: "PostgreSQL", port: 5432, default_schema: "archive" }),
+      expected: { default_schema: "archive" },
+    },
+  ])("preserves $setting when saving", async ({ config, expected }) => {
+    const originalName = config.name;
+    await mountDialog(config);
+    if (rename) {
+      const nameInput = [...document.querySelectorAll("input")].find((input) => input.value === originalName);
+      expect(nameInput).toBeTruthy();
+      nameInput!.value = "Renamed connection";
+      nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
+      await settle();
+    }
+
+    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save");
+    expect(save).toBeTruthy();
+    save!.click();
+    await vi.waitFor(() => expect(store.updateConnection).toHaveBeenCalledOnce());
+
+    expect(store.updateConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ...expected,
+        id: config.id,
+        name: rename ? "Renamed connection" : originalName,
+        password: config.password,
+      }),
+    );
+    expect(config).toEqual(expect.objectContaining({ ...expected, name: originalName }));
+    expect(store.addConnection).not.toHaveBeenCalled();
+  });
+});
+
 describe("ConnectionDialog deep-link edit confirmation", () => {
+  it.each([false, true])("prefills Kafka brokers and only saves on confirmation (SASL: %s)", async (sasl) => {
+    store.connect.mockResolvedValue(undefined);
+    backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: "kafka", installed: true }]);
+    const brokers = "broker-a.example.com:9092,[2001:db8::1]:19092";
+    const params = new URLSearchParams({ type: "kafka", name: "Example Kafka", bootstrap_servers: brokers });
+    if (sasl) {
+      params.set("security_protocol", "SASL_SSL");
+      params.set("sasl_mechanism", "SCRAM-SHA-512");
+      params.set("user", "app");
+      params.set("password", " secret+& ");
+    }
+    await mountNewDialog(`dbx://connection/new?${params}`);
+    expect([...document.querySelectorAll("input")].some((input) => input.value === brokers)).toBe(true);
+    if (sasl) expect([...document.querySelectorAll("input")].some((input) => input.value === " secret+& ")).toBe(true);
+    expect(store.addConnection).not.toHaveBeenCalled();
+    expect(store.connect).not.toHaveBeenCalled();
+    expect(backend.testConnectionWithInfo).not.toHaveBeenCalled();
+    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === i18n.global.t("connection.saveAndConnect"));
+    expect(save).toBeTruthy();
+    save!.click();
+    await settle();
+    expect(store.addConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        db_type: "mq",
+        driver_profile: "kafka",
+        host: "broker-a.example.com",
+        port: 9092,
+        ssl: sasl,
+        username: "",
+        password: "",
+        external_config: expect.objectContaining({
+          systemKind: "kafka",
+          adminUrl: "",
+          auth: sasl ? { kind: "basic", username: "app", password: " secret+& " } : { kind: "none" },
+          extra: expect.objectContaining({ bootstrapServers: brokers, securityProtocol: sasl ? "SASL_SSL" : "PLAINTEXT", ...(sasl ? { saslMechanism: "SCRAM-SHA-512" } : {}) }),
+        }),
+      }),
+      null,
+    );
+  });
+
+  it("replaces a Kafka prefill when only the later broker changes", async () => {
+    const first = "dbx://connection/new?type=kafka&bootstrap_servers=a:9092,b:9092";
+    const props = await mountNewDialog(first);
+    props.prefillConfig = parseConnectionDeepLink("dbx://connection/new?type=kafka&bootstrap_servers=a:9092,c:9092");
+    await settle();
+    expect([...document.querySelectorAll("input")].some((input) => input.value === "a:9092,c:9092")).toBe(true);
+    expect(store.addConnection).not.toHaveBeenCalled();
+  });
+
   it("saves a new OceanBase connection with its explicitly entered port after switching mode", async () => {
     backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: "oceanbase-oracle", installed: true }]);
     await mountNewDialog();
@@ -389,6 +484,34 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     });
   });
 
+  it("preserves the MySQL data charset through save and reopen without changing stored readonly", async () => {
+    const saved = savedConnection({ url_params: "charset=utf8mb4&dataCharset=GBK", read_only: false });
+    await mountDialog(saved, "");
+    expect(document.querySelector("#mysql-data-charset")?.textContent).toContain("GBK");
+    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save");
+    save!.click();
+    await settle();
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ url_params: "charset=utf8mb4&dataCharset=GBK", read_only: undefined }));
+    const persisted = store.updateConnection.mock.calls[0]![0] as ConnectionConfig;
+    for (const app of mountedApps.splice(0)) app.unmount();
+    document.body.innerHTML = "";
+    await mountDialog(persisted, "");
+    expect(document.querySelector("#mysql-data-charset")?.textContent).toContain("GBK");
+  });
+
+  it("rejects conflicting session charset on save instead of silently changing it", async () => {
+    await mountDialog(savedConnection({ url_params: "charset=latin1&dataCharset=GBK" }), "");
+    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save");
+    save!.click();
+    await settle();
+    expect(store.updateConnection).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("dataCharset requires the default");
+  });
+
+  it("does not expose the MySQL data charset selector for MariaDB", async () => {
+    await mountDialog(savedConnection({ driver_profile: "mariadb", driver_label: "MariaDB" }), "");
+    expect(document.querySelector("#mysql-data-charset")).toBeNull();
+  });
   it("shows the global Redis preview limit in advanced settings and persists it", async () => {
     visibleTab.value = "advanced";
     settings.editorSettings.redisValuePreviewLimitKiB = 64;
@@ -531,6 +654,33 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
       jdbc_driver_class: saved.jdbc_driver_class,
       jdbc_driver_paths: saved.jdbc_driver_paths,
     });
+  });
+
+  it.each([undefined, true, false] as const)("saves and reopens two-state sidebar opt-outs without changing production protection (%s)", async (value) => {
+    visibleTab.value = "advanced";
+    backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: "oracle", installed: true }]);
+    const saved = savedConnection({ db_type: "oracle", driver_profile: "oracle", production_databases: undefined, show_database_links: false, show_native_jobs: value, show_user_admin: value });
+    await mountDialog(saved, "");
+    for (const field of ["show_native_jobs", "show_user_admin"] as const) {
+      const checkbox = document.querySelector<HTMLInputElement>(`#sidebar-${field}`)!;
+      expect(checkbox.type).toBe("checkbox");
+      expect(checkbox.checked).toBe(value !== false);
+      checkbox.click();
+      await settle();
+    }
+    expect(document.querySelector('input[type="radio"][name^="sidebar-"]')).toBeNull();
+    [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save")!.click();
+    await settle();
+    const submitted = store.updateConnection.mock.calls[0][0] as ConnectionConfig;
+    expect(submitted.show_native_jobs).toBe(value === false ? undefined : false);
+    expect(submitted.show_user_admin).toBe(value === false ? undefined : false);
+    expect(submitted.show_database_links).toBe(false);
+    expect(submitted.is_production).toBe(saved.is_production);
+    expect(submitted.production_databases).toEqual(saved.production_databases);
+    for (const app of mountedApps.splice(0)) app.unmount();
+    document.body.innerHTML = "";
+    await mountDialog(submitted, "");
+    for (const field of ["show_native_jobs", "show_user_admin"] as const) expect(document.querySelector<HTMLInputElement>(`#sidebar-${field}`)!.checked).toBe(value === false);
   });
 
   it.each([true, false] as const)("preserves protected target settings through real Store load and Dialog save (%s DB links)", async (showDatabaseLinks) => {
@@ -686,6 +836,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     await settle();
     jdbcOption!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     await settle();
+    expect(document.querySelector("#connection-parameters-open")).toBeTruthy();
     const url = [...document.querySelectorAll<HTMLInputElement>("input")].find((input) => input.placeholder.startsWith("jdbc:"));
     expect(url).toBeTruthy();
     url!.value = "jdbc:example://host/db";
@@ -746,7 +897,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
   });
 
   it("hydrates a later-opened update without clearing omitted database or schema filters", async () => {
-    const saved = savedConnection({ db_type: "postgres", driver_profile: "postgres", driver_label: "PostgreSQL", url_params: "sslmode=require", visible_schemas: ["approved_schema"] });
+    const saved = savedConnection({ db_type: "postgres", driver_profile: "postgres", driver_label: "PostgreSQL", url_params: "sslmode=require", visible_schemas: ["approved_schema"], default_schema: "archive" });
     const props = await mountDialog(saved, "dbx://connection/new?id=saved-production&user=new-user&password=new-password", false);
     props.open = true;
     await settle();
@@ -769,6 +920,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
         password: "new-password",
         visible_databases: ["orders"],
         visible_schemas: ["approved_schema"],
+        default_schema: "archive",
       }),
     );
     expect(store.addConnection).not.toHaveBeenCalled();
@@ -883,5 +1035,64 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     await settle();
 
     expect(store.updateConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe("JDBC connection parameter entry and driver metadata", () => {
+  it("uses the current unsaved JAR selection and applies a driver property to the connection draft", async () => {
+    backend.connectionParameters.mockResolvedValue({
+      available: true,
+      parameters: [{ name: "ApplicationName", type: "string", source: "driver", description: "Application name reported to the server." }],
+    });
+    await mountDialog(
+      savedConnection({
+        db_type: "jdbc",
+        driver_profile: "jdbc",
+        driver_label: "JDBC",
+        host: "",
+        port: 0,
+        connection_string: "jdbc:postgresql://localhost/example",
+        jdbc_driver_class: "org.postgresql.Driver",
+        jdbc_driver_paths: ["/old/driver.jar"],
+        url_params: "unknown=%2f",
+      }),
+    );
+    const classpath = document.querySelector<HTMLTextAreaElement>(`textarea[placeholder="${i18n.global.t("connection.jdbcDriverPathsPlaceholder")}"]`);
+    expect(classpath).toBeTruthy();
+    classpath!.value = " /new/postgresql.jar \n/new/helper.jar";
+    classpath!.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    const entry = document.querySelector<HTMLButtonElement>("#connection-parameters-open");
+    expect(entry).toBeTruthy();
+    entry!.click();
+    await settle();
+    expect(backend.connectionParameters).toHaveBeenCalledWith(
+      expect.objectContaining({
+        db_type: "jdbc",
+        connection_string: "jdbc:postgresql://localhost/example",
+        jdbc_driver_class: "org.postgresql.Driver",
+        jdbc_driver_paths: ["/new/postgresql.jar", "/new/helper.jar"],
+      }),
+    );
+    const property = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "ApplicationName");
+    expect(property).toBeTruthy();
+    property!.click();
+    await settle();
+    const input = document.getElementById("connection-parameter-value") as HTMLInputElement;
+    input.value = "DBX metadata";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    const click = (text: string) => [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === text)!.click();
+    click("Apply");
+    await settle();
+    expect(store.updateConnection).not.toHaveBeenCalled();
+    click("Save");
+    await settle();
+    expect(store.updateConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url_params: "unknown=%2f&ApplicationName=DBX%20metadata",
+        jdbc_driver_paths: ["/new/postgresql.jar", "/new/helper.jar"],
+      }),
+    );
   });
 });

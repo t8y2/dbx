@@ -107,6 +107,11 @@ export function indentRoutineBlocks(sql: string, dialectId: string, indentWidth:
   let forceBreak = false;
   let previousWord = "";
   let previousToken: SqlSemanticToken | undefined;
+  const oracle = dialectId === "oracle";
+  const packageBody = oracle && tokens.some((value, index) => value.normalized === "package" && wordAt(tokens, index + 1) === "body");
+  const declarationLevels: number[] = [];
+  let cursorHeader = false;
+  let cursorQuery = false;
 
   const flush = () => {
     const trimmed = current.replace(/\s+$/, "");
@@ -128,6 +133,15 @@ export function indentRoutineBlocks(sql: string, dialectId: string, indentWidth:
     const nextWord = nextSignificantToken(tokens, index)?.normalized ?? "";
     const previous = previousSignificantToken(tokens, index);
     const isBlockBegin = word === "begin" && tokenValue.depth === 0 && !NON_BLOCK_BEGIN.has(nextWord);
+    // Package members have their own signatures and declaration sections.
+    // They must not inherit the package header's completed state.
+    const startsMember = packageBody && (word === "procedure" || word === "function") && (previous?.text === ";" || previousWord === "is" || previousWord === "as");
+    if (startsMember) {
+      startLine();
+      headerDone = false;
+    }
+    if (oracle && word === "cursor" && tokenValue.depth === 0 && declarationLevels[declarationLevels.length - 1] === level - 1) cursorHeader = true;
+    if (isBlockBegin && declarationLevels[declarationLevels.length - 1] === level - 1) level = declarationLevels.pop()!;
     // A `CASE` expression owns its `THEN`/`ELSE`/`END`; none of them is block syntax.
     const closesCase = word === "end" && tokenValue.depth === 0 && caseDepth > 0;
     const isBlockEnd = word === "end" && tokenValue.depth === 0 && caseDepth === 0;
@@ -144,16 +158,17 @@ export function indentRoutineBlocks(sql: string, dialectId: string, indentWidth:
     // A signature stays on one line even when the printer split it: the clause
     // rules have no clause to hang a routine header on, so some dialects emit it
     // one token per line.
-    const joinsHeader = !headerDone && !isHeaderSeparator && !isBlockBegin;
+    const joinsHeader = (!headerDone && !isHeaderSeparator && !isBlockBegin) || (packageBody && isHeaderSeparator) || cursorHeader;
     // `BEGIN TRY` / `END CATCH` name their block with a second keyword, which
     // the clause layout treats as its own token and breaks away.
-    const joinsBlockSuffix = (previousWord === "begin" && (word === "try" || word === "catch")) || (previousWord === "end" && END_SUFFIXES.has(word));
+    const joinsBlockSuffix = (previousWord === "begin" && (word === "try" || word === "catch")) || (previousWord === "end" && (END_SUFFIXES.has(word) || (oracle && previous?.normalized === "end" && (tokenValue.kind === "word" || tokenValue.kind === "quoted_identifier"))));
+    if (joinsBlockSuffix) forceBreak = false;
 
-    if (forceBreak || (gap.includes("\n") && !joinsHeader && !joinsBlockSuffix)) {
+    if ((forceBreak && !joinsBlockSuffix) || (gap.includes("\n") && !joinsHeader && !joinsBlockSuffix)) {
       startLine();
       forceBreak = false;
     }
-    if (isStatementStart || isBlockBegin || isBlockEnd || closesThenBlock || isHeaderSeparator || breaksBeforeElse) startLine();
+    if (isStatementStart || isBlockBegin || isBlockEnd || closesThenBlock || (isHeaderSeparator && !packageBody) || breaksBeforeElse) startLine();
     if (isBlockEnd || closesThenBlock) level = Math.max(0, level - 1);
 
     // The gap is empty exactly where the input had no whitespace (`a.b`, `(x)`),
@@ -194,10 +209,25 @@ export function indentRoutineBlocks(sql: string, dialectId: string, indentWidth:
       forceBreak = true;
     } else if (tokenValue.kind === "punctuation" && tokenValue.text === ";" && tokenValue.depth === 0) {
       forceBreak = true;
+      if (cursorQuery) {
+        level = Math.max(0, level - 1);
+        cursorQuery = false;
+      }
     } else if (tokenValue.kind === "comment" && (tokenValue.text.startsWith("--") || tokenValue.text.startsWith("#"))) {
       forceBreak = true;
     } else if (isHeaderSeparator) {
       headerDone = true;
+      forceBreak = true;
+      if (oracle) {
+        declarationLevels.push(level);
+        level += 1;
+      }
+    }
+
+    if (cursorHeader && word === "is") {
+      cursorHeader = false;
+      cursorQuery = true;
+      level += 1;
       forceBreak = true;
     }
 

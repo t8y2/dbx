@@ -167,6 +167,39 @@ describe("data grid queued table export", () => {
     finish(0);
   });
 
+  it("keeps the newer grid view and suppresses late success after manual recovery", async () => {
+    const { useDataGridExport } = await import("../useDataGridExport");
+    const { useExportTracker } = await import("../useExportTracker");
+    const { options, progress } = fixture();
+    const grid = useDataGridExport(options);
+    const tracker = useExportTracker();
+    await grid.exportCsv();
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    const root = tracker.tasks.value[0]!;
+    await grid.exportCsv();
+    vi.useFakeTimers();
+    try {
+      await tracker.cancelTask(root.exportId);
+      await vi.advanceTimersByTimeAsync(30_000);
+      tracker.recoverCancelledTask(root.exportId);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pending).toHaveLength(2);
+      expect(progress.value.filePath).toBe("C:/exports/report-2.csv");
+      const currentView = { ...progress.value };
+      mocks.toast.mockClear();
+      finish(0, "Done");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(progress.value).toEqual(currentView);
+      expect(mocks.toast).not.toHaveBeenCalled();
+      expect(mocks.openTemp).not.toHaveBeenCalled();
+      expect(tracker.tasks.value).not.toContain(root);
+      finish(1);
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("cancels a waiting file without starting a backend export", async () => {
     const { useDataGridExport } = await import("../useDataGridExport");
     const { options, progress } = fixture();

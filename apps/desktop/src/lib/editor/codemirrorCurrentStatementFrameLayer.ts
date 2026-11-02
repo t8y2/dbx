@@ -143,6 +143,34 @@ export function currentStatementFrameRect(view: Viewish, from: number, to: numbe
 interface CurrentStatementFrameModule {
   layer: (config: { above: boolean; class?: string; markers(view: EditorView): readonly LayerMarker[]; update(update: ViewUpdate, layer: HTMLElement): boolean }) => Extension;
   RectangleMarker: new (className: string, left: number, top: number, width: number | null, height: number) => LayerMarker;
+  /**
+   * Lets the layer notice that the editor DOM was rebuilt (document or decoration changes) so it
+   * can reuse a measured frame while nothing it depends on moved. Without it every measure
+   * cycle re-measures.
+   */
+  ViewPlugin?: { define(create: (view: EditorView) => { docViewUpdate?(view: EditorView): void }): Extension };
+}
+
+type FrameGeometryView = Viewish & { viewport?: { from: number; to: number } };
+
+/**
+ * What a measured frame depends on besides the document and the DOM generation: glyph and line
+ * metrics, the visible range (off-viewport lines are estimated, not probed), the wrapped height of
+ * the statement's first and last lines, and the content width soft-wrapped lines extend to.
+ */
+function frameGeometrySignature(view: FrameGeometryView, from: number, to: number): string {
+  const first = view.lineBlockAt(from);
+  const last = view.lineBlockAt(to);
+  return [view.scaleX, view.defaultCharacterWidth, view.defaultLineHeight, view.viewport?.from, view.viewport?.to, first.top, first.height, last.top, last.height, view.contentDOM.getBoundingClientRect().width].join("|");
+}
+
+interface MeasuredFrame {
+  doc: unknown;
+  domVersion: number;
+  from: number;
+  to: number;
+  geometry: string;
+  markers: readonly LayerMarker[];
 }
 
 /**
@@ -154,10 +182,16 @@ interface CurrentStatementFrameModule {
  */
 export function currentStatementFrameLayer(viewModule: CurrentStatementFrameModule, resolve: StatementFrameResolver, options?: { shouldRefresh?: (update: ViewUpdate) => boolean }): Extension {
   let lastRequest: StatementFrameRequest | null | undefined;
+  // CodeMirror asks every layer to measure on each geometry change and each DOM update, and one
+  // keystroke runs several such cycles. The measurement is a pure function of the document, the
+  // DOM generation and the geometry signature, so a repeat with all three unchanged reuses the
+  // markers (the layer then sees identical markers and leaves its DOM alone).
+  let measured: MeasuredFrame | undefined;
+  let domVersion = 0;
 
   const sameRequest = (left: StatementFrameRequest | null | undefined, right: StatementFrameRequest | null): boolean => left === right || (!!left && !!right && left.from === right.from && left.to === right.to);
 
-  return viewModule.layer({
+  const frameLayer = viewModule.layer({
     // Keep the outline above line decorations so opaque active-line colors
     // from editor themes cannot cover the frame border.
     above: true,
@@ -166,17 +200,24 @@ export function currentStatementFrameLayer(viewModule: CurrentStatementFrameModu
       const request = resolve(view);
       lastRequest = request;
       if (!request || request.to < request.from) return [];
+      const geometry = frameGeometrySignature(view, request.from, request.to);
+      if (measured && measured.doc === view.state.doc && measured.domVersion === domVersion && measured.from === request.from && measured.to === request.to && measured.geometry === geometry) {
+        return measured.markers;
+      }
       const rect = currentStatementFrameRect(view, request.from, request.to);
-      if (!rect) return [];
-      return [new viewModule.RectangleMarker("cm-db-currentStatementFrame", rect.left, rect.top, rect.width, rect.height)];
+      const markers = rect ? [new viewModule.RectangleMarker("cm-db-currentStatementFrame", rect.left, rect.top, rect.width, rect.height)] : [];
+      measured = { doc: view.state.doc, domVersion, from: request.from, to: request.to, geometry, markers };
+      return markers;
     },
     update(update) {
       if (update.docChanged || update.viewportChanged || update.geometryChanged || update.transactions.some((transaction) => transaction.reconfigured)) {
         lastRequest = undefined;
+        if (update.transactions.some((transaction) => transaction.reconfigured)) measured = undefined;
         return true;
       }
       if (options?.shouldRefresh?.(update)) {
         lastRequest = undefined;
+        measured = undefined;
         return true;
       }
       if (!update.selectionSet) return false;
@@ -189,4 +230,10 @@ export function currentStatementFrameLayer(viewModule: CurrentStatementFrameModu
       return true;
     },
   });
+  const domVersionPlugin = viewModule.ViewPlugin?.define(() => ({
+    docViewUpdate() {
+      domVersion += 1;
+    },
+  }));
+  return domVersionPlugin ? [frameLayer, domVersionPlugin] : frameLayer;
 }

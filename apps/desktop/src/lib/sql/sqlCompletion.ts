@@ -15,11 +15,20 @@ import { isEditorStatePlausibleFor, resolveLexicalLeafFromSyntaxTree, resolveSql
 import { DEFAULT_SQL_SNIPPETS, MANTICORESEARCH_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 import { BACKSLASH_ESCAPE_STRING_DIALECTS } from "@/lib/sql/sqlStatementRanges";
 import { requiresClickhouseIdentifierQuote, requiresMysqlIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
+import { isFullwidthParenthesis, MYSQL_FULLWIDTH_IDENTIFIER_CHARACTERS } from "@/lib/sql/sqlIdentifierCharacters";
 import { identifierMatchScore, matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { quoteTableIdentifier, quoteTableIdentifierIfNeeded } from "@/lib/table/tableSelectSql";
-import { driverProfileCompletionObjects, driverProfileCompletionTableMetadata, driverProfileCompletionTables, driverProfileFunctionSignatures, driverProfileRoutineSignatures, driverProfileSqlKeywords } from "@/lib/database/driverProfileExtensions";
-import { isCockroachDbDriverProfile } from "@/lib/database/cockroachdbProfile";
+import {
+  driverProfileCompletionObjects,
+  driverProfileCompletionTableMetadata,
+  driverProfileCompletionTables,
+  driverProfileContextKeywords,
+  driverProfileDataTypes,
+  driverProfileFunctionSignatures,
+  driverProfileRoutineSignatures,
+  driverProfileSqlKeywords,
+} from "@/lib/database/driverProfileExtensions";
 import { DORIS_FUNCTION_DOCS, DORIS_FUNCTION_SIGNATURES } from "@/lib/sql/doris/functions";
 import { DUCKDB_FUNCTION_SIGNATURES } from "@/lib/sql/functionSignatures/duckdb";
 import { HIVE_SPARK_FUNCTION_APPLY_TEMPLATES, HIVE_SPARK_FUNCTION_SIGNATURES } from "@/lib/sql/functionSignatures/hiveSpark";
@@ -376,6 +385,53 @@ const COMMON_SQL_KEYWORDS = [
   "BEGIN",
   "COMMIT",
   "ROLLBACK",
+  "TRANSACTION",
+  "START",
+  "TEMPORARY",
+  "SCHEMA",
+  "RENAME",
+  "CASCADE",
+  "RESTRICT",
+  "RETURNS",
+  "LANGUAGE",
+  "REVOKE",
+  "ROLE",
+  "COLLATE",
+  "FIRST",
+  "LAST",
+  "ROWS",
+  "LEVEL",
+  "DO",
+  "VARYING",
+  "NULLS",
+  "FETCH",
+  "ONLY",
+  "ROLLUP",
+  "CUBE",
+  "UNBOUNDED",
+  "PRECEDING",
+  "FOLLOWING",
+  "SAVEPOINT",
+  "RELEASE",
+  "PREPARE",
+  "EXECUTE",
+  "DEALLOCATE",
+  "ISOLATION",
+  "SERIALIZABLE",
+  "REPEATABLE",
+  "READ",
+  "COMMITTED",
+  "UNCOMMITTED",
+  "CALL",
+  "PROCEDURE",
+  "FUNCTION",
+  "TRIGGER",
+  "TYPE",
+  "ENUM",
+  "ALWAYS",
+  "PARTIAL",
+  "MAXVALUE",
+  "GROUPING",
   "TRUNCATE",
   "EXPLAIN",
   "ANALYZE",
@@ -409,6 +465,17 @@ const COMMON_SQL_KEYWORDS = [
 ];
 
 const POSTGRES_SQL_KEYWORDS = [
+  "SHOW",
+  "TEMP",
+  "SEQUENCE",
+  "INCREMENT",
+  "MINVALUE",
+  "CYCLE",
+  "OVERLAPS",
+  "INCLUDE",
+  "PUBLIC",
+  "WITHIN",
+  "WITHIN GROUP",
   "COMMENT",
   "BIGSERIAL",
   "JSON",
@@ -909,8 +976,10 @@ const HIGH_FREQUENCY_KEYWORDS = new Set([
   "EXISTS",
 ]);
 
-const TABLE_TRIGGER_KEYWORDS = new Set(["from", "join", "update", "into", "table", "describe", "explain", "apply"]);
-const EXCLUSIVE_TABLE_TRIGGER_KEYWORDS = new Set(["from", "join", "update", "into", "apply"]);
+// `apply` is intentionally absent: a bare `apply` is a perfectly valid table name
+// (issue #13829); only CROSS/OUTER APPLY is the table-source operator — see isApplyOperatorTrigger.
+const TABLE_TRIGGER_KEYWORDS = new Set(["from", "join", "update", "into", "table", "describe", "explain"]);
+const EXCLUSIVE_TABLE_TRIGGER_KEYWORDS = new Set(["from", "join", "update", "into"]);
 const JOIN_MODIFIERS = new Set(["left", "right", "inner", "outer", "cross", "full", "natural"]);
 const JOIN_MODIFIER_KEYWORD_PHRASES = ["LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "FULL JOIN", "CROSS JOIN", "NATURAL JOIN", "LEFT OUTER JOIN", "RIGHT OUTER JOIN", "FULL OUTER JOIN"];
 const PAIRED_KEYWORD_PREFIXES_BY_FOLLOWING: Readonly<Record<string, ReadonlySet<string>>> = {
@@ -933,6 +1002,17 @@ const EXACT_CUSTOM_SNIPPET_TRIGGER_BOOST = 40000;
 function isTableTriggerKeyword(keyword: string, options: SqlSemanticBuildOptions): boolean {
   const dialectId = resolveSqlDialectId(options);
   return TABLE_TRIGGER_KEYWORDS.has(keyword) || (keyword === "desc" && (dialectId === "mysql" || dialectId === "doris"));
+}
+
+/** APPLY is only a table-source trigger as the CROSS/OUTER APPLY operator; a bare `apply`
+ *  may be a table name and must keep clause keywords available (issue #13829). The gap
+ *  between CROSS/OUTER and APPLY may hold comments, so the remainder is comment-masked
+ *  before the prefix check (PR #13889 review follow-up). */
+function isApplyOperatorTrigger(lastWord: string, beforeToken: string, databaseType?: DatabaseType): boolean {
+  if (lastWord !== "apply") return false;
+  const withoutApply = beforeToken.slice(0, beforeToken.length - "apply".length);
+  const masked = maskSqlLiteralsAndComments(withoutApply, databaseType).trimEnd();
+  return /(?:^|[\s(])(?:cross|outer)$/i.test(masked);
 }
 
 // Keywords that only make sense in DDL / statement-start contexts (not inside SELECT/INSERT/UPDATE/DELETE)
@@ -1019,10 +1099,10 @@ const DATA_TYPE_KEYWORDS = new Set([
   "JSON",
   "JSONB",
   "UUID",
+  // Spanner and CockroachDB share these types. This set only classifies
+  // candidates; the active dialect's keyword table controls availability.
   "STRING",
   "BYTES",
-  "VECTOR",
-  "BOX2D",
   "SERIAL",
   "BIGSERIAL",
   "SMALLSERIAL",
@@ -2104,7 +2184,7 @@ class SqlCompletionProvider {
     }
 
     const emptyTableNameCompletion = !context.prefix && (context.suggestTables || context.exclusiveTableSuggestions);
-    if (!pendingJoinKeyword && !emptyTableNameCompletion && !context.tableAliasAfterCursor && context.referencedTables.length > 0 && !context.suggestColumns && !context.insertTable && supportsTableAliases(this.databaseType)) {
+    if (!pendingJoinKeyword && !emptyTableNameCompletion && !context.qualifier && !context.tableAliasAfterCursor && context.referencedTables.length > 0 && !context.suggestColumns && !context.insertTable && supportsTableAliases(this.databaseType)) {
       this.items.push(...buildAliasItems(context));
     }
 
@@ -2971,8 +3051,9 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   // identical arguments three times, which was cheap when it was regex-based but now runs a full
   // tokenizeSqlSemantic pass, so the duplicate work is worth avoiding.
   const inTableListContext = isInTableListContext(beforeToken, options.databaseType);
-  const afterTableTrigger = isTableTriggerKeyword(lastWord, options) || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
-  const exclusiveTableSuggestions = EXCLUSIVE_TABLE_TRIGGER_KEYWORDS.has(lastWord) || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
+  const applyTableTrigger = isApplyOperatorTrigger(lastWord, beforeToken, options.databaseType);
+  const afterTableTrigger = isTableTriggerKeyword(lastWord, options) || applyTableTrigger || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
+  const exclusiveTableSuggestions = EXCLUSIVE_TABLE_TRIGGER_KEYWORDS.has(lastWord) || applyTableTrigger || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
   const tableAliasAfterCursor = hasTableAliasAfterCursor(sql, cursor);
   const autoAliasTableCompletions = (lastWord === "from" || lastWord === "join" || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext) && !tableAliasAfterCursor;
   const exclusiveColumnSuggestions = !!qualifier && !exclusiveTableSuggestions && !insertInfo;
@@ -3263,7 +3344,7 @@ function isColumnDataTypeContext(beforeToken: string, databaseType: DatabaseType
   return isCreateTableColumnTypeContext(beforeToken, databaseType) || isAlterTableColumnTypeContext(beforeToken, databaseType);
 }
 
-function removeActiveTableCompletionReference(referencedTables: SqlCompletionReferencedTable[], prefix: string, qualifier?: string): SqlCompletionReferencedTable[] {
+export function removeActiveTableCompletionReference(referencedTables: SqlCompletionReferencedTable[], prefix: string, qualifier?: string): SqlCompletionReferencedTable[] {
   const activeName = normalizeIdentifierPart(prefix);
   const activeQualifier = qualifier ? normalizeIdentifierPart(qualifier) : undefined;
   return referencedTables.filter((table) => {
@@ -3323,9 +3404,9 @@ function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseTy
   let index = tail.length;
 
   while (index > 0) {
-    const parsed = parseTrailingIdentifierPart(tail, index);
+    const parsed = parseTrailingIdentifierPart(tail, index, databaseType);
     if (!parsed) {
-      const omittedSqlServerSchema = databaseType === "sqlserver" && tail[index - 1] === "." && parseTrailingIdentifierPart(tail, index - 1);
+      const omittedSqlServerSchema = databaseType === "sqlserver" && tail[index - 1] === "." && parseTrailingIdentifierPart(tail, index - 1, databaseType);
       if (!omittedSqlServerSchema) break;
       parts.unshift(SQLSERVER_DEFAULT_SCHEMA);
       index -= 1;
@@ -3362,7 +3443,7 @@ function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseTy
   };
 }
 
-function parseTrailingIdentifierPart(input: string, endExclusive: number): { start: number; raw: string } | null {
+function parseTrailingIdentifierPart(input: string, endExclusive: number, databaseType?: DatabaseType): { start: number; raw: string } | null {
   if (endExclusive <= 0) return null;
   const end = endExclusive - 1;
   const tailChar = input[end];
@@ -3407,13 +3488,14 @@ function parseTrailingIdentifierPart(input: string, endExclusive: number): { sta
       const high = input.charCodeAt(previous - 1);
       if (high >= 0xd800 && high <= 0xdbff) previous--;
     }
-    if (!SQL_IDENTIFIER_SUFFIX_CHAR.test(input.slice(previous, start))) break;
+    const char = input.slice(previous, start);
+    if (!SQL_IDENTIFIER_SUFFIX_CHAR.test(char) && !(databaseType === "mysql" && isFullwidthParenthesis(char))) break;
     start = previous;
   }
   if (start === endExclusive) return null;
   const raw = input.slice(start, endExclusive);
   const firstCodePoint = raw.codePointAt(0);
-  if (firstCodePoint === undefined || !SQL_IDENTIFIER_START_CHAR.test(String.fromCodePoint(firstCodePoint))) {
+  if (firstCodePoint === undefined || (!SQL_IDENTIFIER_START_CHAR.test(String.fromCodePoint(firstCodePoint)) && !(databaseType === "mysql" && isFullwidthParenthesis(String.fromCodePoint(firstCodePoint))))) {
     return null;
   }
 
@@ -3720,9 +3802,7 @@ function preferredKeywordsForCompletion(
   if (updateInfo?.afterTarget) keywords.push("SET");
   if (updateInfo?.afterSetAssignments) keywords.push("WHERE");
   if (deleteInfo?.afterTarget) keywords.push("WHERE");
-  // `AS OF SYSTEM TIME` 只能跟在 FROM 之后；用户输入 `AS O` 时只替换 `O`，
-  // 因此补全 `OF SYSTEM TIME`，避免重复插入 `AS`。
-  if (isCockroachDbDriverProfile(driverProfile) && /\bas$/i.test(beforeToken.trimEnd()) && /\bfrom\b/i.test(beforeToken)) keywords.push("OF SYSTEM TIME");
+  keywords.push(...driverProfileContextKeywords(driverProfile, { beforeCursor, beforeToken, databaseType }));
   return keywords;
 }
 
@@ -3918,6 +3998,11 @@ function buildTableRefPattern(unquotedIdentifier: string, aliasIdentifier: strin
 const TABLE_REF_PATTERN_ASCII = buildTableRefPattern(TABLE_REF_UNQUOTED_IDENTIFIER_ASCII, TABLE_REF_ALIAS_ASCII, false);
 const TABLE_REF_PATTERN_UNICODE_DEFAULT = buildTableRefPattern(TABLE_REF_UNQUOTED_IDENTIFIER_UNICODE, TABLE_REF_ALIAS_UNICODE, false);
 const TABLE_REF_PATTERN_UNICODE_SQLSERVER = buildTableRefPattern(TABLE_REF_UNQUOTED_IDENTIFIER_UNICODE, TABLE_REF_ALIAS_UNICODE, true);
+const TABLE_REF_PATTERN_MYSQL = buildTableRefPattern(
+  `[_\\p{ID_Start}${MYSQL_FULLWIDTH_IDENTIFIER_CHARACTERS}][@#${SQL_IDENTIFIER_CONTINUE_CHAR.source.slice(1, -1)}${MYSQL_FULLWIDTH_IDENTIFIER_CHARACTERS}]*`,
+  `[_\\p{ID_Start}${MYSQL_FULLWIDTH_IDENTIFIER_CHARACTERS}][${SQL_IDENTIFIER_CONTINUE_CHAR.source.slice(1, -1)}${MYSQL_FULLWIDTH_IDENTIFIER_CHARACTERS}]*`,
+  false,
+);
 
 /**
  * Masks string literals and comments so keyword/table-reference scanning never mistakes text
@@ -4133,7 +4218,7 @@ function extractReferencedTables(sql: string, databaseType?: DatabaseType): SqlC
   // Trino/Presto/Impala, Db2, Teradata) keep the ASCII-only shape to avoid false-positive matches.
   // An unresolved databaseType (e.g. a scratch editor before a connection is picked) also defaults
   // to ASCII-only, matching this function's behavior before dialect-aware Unicode matching existed.
-  const pattern = !databaseType || ASCII_ONLY_UNQUOTED_IDENTIFIER_DATABASES.has(databaseType) ? TABLE_REF_PATTERN_ASCII : databaseType === "sqlserver" ? TABLE_REF_PATTERN_UNICODE_SQLSERVER : TABLE_REF_PATTERN_UNICODE_DEFAULT;
+  const pattern = !databaseType || ASCII_ONLY_UNQUOTED_IDENTIFIER_DATABASES.has(databaseType) ? TABLE_REF_PATTERN_ASCII : databaseType === "mysql" ? TABLE_REF_PATTERN_MYSQL : databaseType === "sqlserver" ? TABLE_REF_PATTERN_UNICODE_SQLSERVER : TABLE_REF_PATTERN_UNICODE_DEFAULT;
   // These are shared module-level RegExp objects (built once for performance), so reset
   // lastIndex before each scan rather than relying on a fresh object per call.
   pattern.lastIndex = 0;
@@ -4141,6 +4226,7 @@ function extractReferencedTables(sql: string, databaseType?: DatabaseType): SqlC
   // FROM/JOIN table reference; double-quoted table names survive masking (see
   // maskSqlLiteralsAndComments), so the returned table info built from `match` is unaffected.
   const scanSql = maskSqlLiteralsAndComments(sql, databaseType);
+  const postgresIdentifiers = !!databaseType && POSTGRES_LIKE_IDENTIFIER_DATABASES.has(databaseType);
   const referenced: SqlCompletionReferencedTable[] = [];
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(scanSql)) !== null) {
@@ -4150,7 +4236,12 @@ function extractReferencedTables(sql: string, databaseType?: DatabaseType): SqlC
       pattern.lastIndex = match.index + match[0].length - alias.length;
     }
     const quotedName = !!rawName && (rawName.startsWith('"') || rawName.startsWith("`") || rawName.startsWith("["));
-    if (!quotedName && rawName && ALIAS_BLACKLIST.has(rawName.toLowerCase())) continue;
+    // Alias/clause words can still be legal unquoted PostgreSQL table names (#13742).
+    if (!quotedName && rawName && ALIAS_BLACKLIST.has(rawName.toLowerCase()) && (!postgresIdentifiers || requiresPostgresIdentifierQuote(rawName.toLowerCase()))) {
+      // A keyword-like projection (SELECT apply FROM ...) must not consume the real FROM.
+      pattern.lastIndex = match.index + match[0].search(/\s/) + 1;
+      continue;
+    }
     // Filter out SQL keywords that accidentally matched as aliases
     const cleanAlias = alias && !ALIAS_BLACKLIST.has(alias.toLowerCase()) ? alias : undefined;
     if (isElasticsearchStyleIndexName(rawName)) {
@@ -5692,6 +5783,8 @@ function buildReferencedAliasItems(context: SqlCompletionContext, t?: SqlComplet
 }
 
 function buildAliasItems(context: SqlCompletionContext): SqlCompletionItem[] {
+  if (context.qualifier) return [];
+  const inTableCompletion = context.suggestTables || context.exclusiveTableSuggestions;
   const items: SqlCompletionItem[] = [];
   const existingAliases = new Set(context.referencedTables.map((ref) => ref.alias?.toLowerCase()).filter((alias): alias is string => !!alias));
   const seen = new Set<string>(existingAliases);
@@ -5700,6 +5793,9 @@ function buildAliasItems(context: SqlCompletionContext): SqlCompletionItem[] {
     if (context.prefix && !matchesPrefix(ref.name, context.prefix)) continue;
     const candidate = generateAlias(ref.name, seen);
     if (!candidate || seen.has(candidate.toLowerCase())) continue;
+    // When the user is typing a table name, never suggest an alias snippet that would
+    // replace the table name with an acronym (#13750).
+    if (inTableCompletion && candidate.toLowerCase() !== context.prefix.toLowerCase()) continue;
     // A relation that is also offered as a table candidate must not duplicate
     // itself as a self-named alias snippet (CTEs and short table names);
     // half-typed relations without columns keep theirs.
@@ -6742,19 +6838,21 @@ function buildKeywordItems(prefix: string, context: SqlCompletionContext, databa
   // true there only reflects the `=` the predicate already used.
   const clauseKeywordExpected = !!prefix && !context.suggestTables && (!!context.afterTableReference || !!context.afterJoinCondition);
   const normalizedPrefix = prefix.toLowerCase();
+  const profileDataTypes = driverProfileDataTypes(driverProfile);
+  const dataTypeKeywords = profileDataTypes.length > 0 ? new Set([...DATA_TYPE_KEYWORDS, ...profileDataTypes]) : DATA_TYPE_KEYWORDS;
 
   return activeSqlKeywords(databaseType, driverProfile)
     .filter((keyword) => {
-      if (functionSignatures.has(keyword) && !DATA_TYPE_KEYWORDS.has(keyword) && !DUAL_ROLE_SQL_KEYWORDS.has(keyword)) return false;
+      if (functionSignatures.has(keyword) && !dataTypeKeywords.has(keyword) && !DUAL_ROLE_SQL_KEYWORDS.has(keyword)) return false;
       if (WINDOW_FUNCTIONS.has(keyword)) return false;
       if (!matchesPrefix(keyword, prefix)) return false;
-      if (!showDdl && isDml && (DDL_ONLY_KEYWORDS.has(keyword) || DATA_TYPE_KEYWORDS.has(keyword))) return false;
+      if (!showDdl && isDml && (DDL_ONLY_KEYWORDS.has(keyword) || dataTypeKeywords.has(keyword))) return false;
       if (context.followingKeyword && keyword.includes(" ") && keyword.toUpperCase().endsWith(` ${context.followingKeyword}`)) return false;
       return true;
     })
     .map((keyword) => {
       const base = computeBoost(keyword, prefix);
-      const isDataType = DATA_TYPE_KEYWORDS.has(keyword);
+      const isDataType = dataTypeKeywords.has(keyword);
       const freqBoost = !context.dataTypeContext && HIGH_FREQUENCY_KEYWORDS.has(keyword) ? 100 : 0;
       const typeBoost = context.dataTypeContext && isDataType ? 2500 : 0;
       const followingBoost = context.followingKeyword && isPairPrefixKeywordForFollowing(keyword, context.followingKeyword) ? 1300 : 0;

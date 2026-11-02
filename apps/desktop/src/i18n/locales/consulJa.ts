@@ -178,7 +178,7 @@ export const consulJaMessages = {
     indexes: "CreateIndex / ModifyIndex",
     sessionsAndLocks: "セッションとロック",
     sessions: "セッション",
-    sessionDescription: "セッションは Consul KV ロックで使用するリースに似た契約です。TTL 付きセッションには更新が必要です。TTL なしのセッションは明示的に破棄されるか、チェックで無効化されるまで存続します。",
+    sessionDescription: "セッションは Consul KV のロックに使われる、リースに似た仕組みです。TTL を設定したセッションは定期的な更新が必要です。TTL を設定しない場合は、明示的に破棄されるか、チェックによって無効化されるまで存続します。",
     createSession: "セッションを作成",
     searchSessions: "セッション名、ID、ノード、チェックを検索",
     sessionResultCount: "{total} 件中 {filtered} 件のセッションを表示",

@@ -4,8 +4,8 @@ export default {
   groupByTableGroup: "テーブルグループ",
   noGroup: "(グループなし)",
   noSchema: "(スキーマなし)",
-  search: "テーブル、カラム、グループを検索…",
-  columns: "カラム",
+  search: "テーブル、列、グループを検索…",
+  columns: "列",
   indexes: "インデックス",
   references: "参照",
   referencedBy: "参照元",
@@ -28,7 +28,7 @@ export default {
   searchLabel: "検索",
   groups: "グループ",
   relationships: "リレーションシップ",
-  columnHeader: "カラム",
+  columnHeader: "列",
   typeHeader: "型",
   settingsHeader: "設定",
   noteHeader: "メモ",
@@ -41,7 +41,7 @@ export default {
   theme: "テーマ",
   themeLight: "ライト",
   themeDark: "ダーク",
-  exportHtml: "HTMLをエクスポート…",
+  exportHtml: "HTML をエクスポート…",
   exporting: "エクスポート中…",
   exportFailed: "エクスポートできませんでした: {error}",
   warnings: {
@@ -51,19 +51,19 @@ export default {
     },
     noForeignKeyMetadata: {
       title: "リレーションシップを表示できません",
-      detail: "{engine} は外部キーのメタデータを返さないため、関係線は表示されません。これはこのエンジンの仕様です。",
+      detail: "{engine} は外部キーのメタデータを返さないため、関係線を表示できません。このエンジンから取得できる情報はすべて図に反映されています。",
     },
     commentsUnsupported: {
       title: "データベースのコメントは利用できません",
-      detail: "{engine} はテーブルやカラムのコメントをサポートしていないため、ここでの説明はすべてこのプロジェクトのメモから提供されています。",
+      detail: "{engine} はテーブルや列のコメントをサポートしていないため、ここでの説明はすべてこのプロジェクトのメモから提供されています。",
     },
     orphanedNotes: {
-      title: "対象がなくなったメモがあります",
-      detail: "{count} 件のメモが、既に存在しないテーブルまたはカラムを参照しています。何も削除されていません。メモファイルで再割り当てまたは削除してください。",
+      title: "対応するテーブルや列がないメモがあります",
+      detail: "{count} 件のメモが、存在しないテーブルまたは列を参照しています。メモは削除されていません。メモファイルで参照先を変更するか、メモを削除してください。",
     },
     dbmlOmitted: {
       title: "DBMLでは表現できません",
-      detail: "{table} の {item} はここに記載されていますが、エクスポートされたDBMLからは除外されています: {reason}。",
+      detail: "{table} の {item} はここに記載されていますが、エクスポートされた DBML からは除外されています: {reason}。",
     },
   },
 };

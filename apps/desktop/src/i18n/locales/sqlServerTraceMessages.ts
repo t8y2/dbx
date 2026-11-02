@@ -61,6 +61,44 @@ export const sqlServerTraceMessages = {
   },
 };
 
+// Japanese interface; retains the canonical key shape.
+export const sqlServerTraceMessagesJa = {
+  ...sqlServerTraceMessages,
+  title: "SQL Server アクティビティトレース",
+  start: "トレースを開始",
+  pause: "ポーリングを一時停止",
+  resume: "再開",
+  stop: "停止",
+  clear: "イベントを消去",
+  export: "絞り込み結果を CSV にエクスポート",
+  database: "データベース",
+  selectDatabase: "データベースを選択",
+  maxEvents: "イベント上限",
+  duration: "実行時間（分）",
+  statements: "ステートメント",
+  statementsHint: "ストアドプロシージャ内のステートメントを記録します。このイベントを有効にすると、処理負荷が大きくなる場合があります。",
+  highCost: "負荷が高くなります",
+  elapsed: "{seconds} 秒",
+  eventCount: "{visible} / {total} 件を表示",
+  permissionHint: "ALTER ANY EVENT SESSION および VIEW SERVER STATE 権限が必要です。",
+  filterSql: "プロシージャまたは SQL テキストで絞り込み",
+  filterLogin: "ログイン",
+  filterClient: "クライアントまたはホスト",
+  filterSession: "セッション ID",
+  noEvents: "トレースを開始し、別のセッションで SQL またはストアドプロシージャを実行してください。",
+  noMatches: "現在の絞り込み条件に一致するイベントはありません。",
+  statuses: { idle: "待機中", starting: "開始中", running: "実行中", paused: "ポーリング一時停止中", stopping: "停止中", stopped: "停止しました", error: "エラー" },
+  columns: { time: "時刻", event: "イベント", database: "データベース", sql: "プロシージャ / SQL とパラメーター", duration: "所要時間（ミリ秒）", cpu: "CPU 時間（ミリ秒）", reads: "読み取り数", writes: "書き込み数", rows: "行数", session: "セッション", login: "ログイン", host: "ホスト", client: "クライアント", result: "結果" },
+  autoStopped: { duration: "実行時間の上限に達したため、アクティビティトレースを停止しました。", events: "イベント数の上限に達したため、アクティビティトレースを停止しました。" },
+  capabilityErrors: {
+    "unsupported-version": "SQL Server {version} はこの拡張イベントトレースに対応していません。SQL Server 2008 以降が必要です。",
+    "unsupported-engine": "この SQL Server エディションはデータベーススコープの拡張イベントを使用しており、現在は対応していません。",
+    "alter-permission": "現在のログインには ALTER ANY EVENT SESSION 権限がありません。",
+    "view-permission": "現在のログインにはトレースイベントの読み取りに必要な VIEW SERVER STATE（サーバー状態の表示）権限がありません。",
+    "missing-capability": "この SQL Server インスタンスには必要な拡張イベント機能がありません: {capabilities}。",
+  },
+};
+
 // Polish interface overrides; retains all keys from the canonical English object.
 export const sqlServerTraceMessagesPl = {
   ...sqlServerTraceMessages,

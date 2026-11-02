@@ -120,4 +120,45 @@ describe("savedSqlStore directory sync", () => {
     expect(api.loadSavedSqlFile).not.toHaveBeenCalled();
     expect(api.syncSavedSqlDirectory).not.toHaveBeenCalled();
   });
+
+  it("reloads the library after a restore even when it was already initialized", async () => {
+    const store = useSavedSqlStore();
+    await store.initFromStorage();
+    const previousTreeVersion = store.treeVersion;
+    const restored = library(false);
+    restored.files = [{ ...restored.files[0], id: "restored", name: "restored.sql" }];
+    vi.mocked(api.loadSavedSqlLibrary).mockResolvedValue(restored);
+
+    await store.reloadFromStorage();
+
+    expect(store.files.map((file) => file.name)).toEqual(["restored.sql"]);
+    expect(store.treeVersion).toBeGreaterThan(previousTreeVersion);
+    expect(api.loadSavedSqlLibrary).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the existing library if reloading fails", async () => {
+    const store = useSavedSqlStore();
+    await store.initFromStorage();
+    vi.mocked(api.loadSavedSqlLibrary).mockRejectedValueOnce(new Error("read failed"));
+
+    await expect(store.reloadFromStorage()).rejects.toThrow("read failed");
+    expect(store.files.map((file) => file.name)).toEqual(["daily.sql", "weekly.sql"]);
+  });
+
+  it("waits for an in-flight initial read before reading the restored library", async () => {
+    let finishInitial!: (value: ReturnType<typeof library>) => void;
+    const initialRead = new Promise<ReturnType<typeof library>>((resolve) => { finishInitial = resolve; });
+    const restored = library(false);
+    restored.files = [{ ...restored.files[0], id: "restored", name: "restored.sql" }];
+    vi.mocked(api.loadSavedSqlLibrary).mockReturnValueOnce(initialRead).mockResolvedValueOnce(restored);
+    const store = useSavedSqlStore();
+    const initial = store.initFromStorage();
+    await Promise.resolve();
+    const reload = store.reloadFromStorage();
+    finishInitial(library(false));
+
+    await Promise.all([initial, reload]);
+
+    expect(store.files.map((file) => file.name)).toEqual(["restored.sql"]);
+  });
 });

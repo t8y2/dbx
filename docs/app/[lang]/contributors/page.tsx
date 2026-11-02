@@ -5,6 +5,7 @@ import { LandingFooter } from "@/components/landing/LandingFooter";
 import { LandingNav } from "@/components/landing/LandingNav";
 import type { ContributorActivityData } from "@/lib/contributorActivity";
 import { buildMetadata } from "@/lib/metadata";
+import { resolveLang } from "@/lib/i18n";
 
 const pageMetadata = {
   en: {
@@ -19,7 +20,7 @@ const pageMetadata = {
 
 export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
   const { lang } = await params;
-  const locale = lang === "cn" ? "cn" : "en";
+  const locale = resolveLang(lang);
   const metadata = pageMetadata[locale];
 
   return buildMetadata({
@@ -32,11 +33,11 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
 
 export default async function ContributorsPage({ params }: { params: Promise<{ lang: string }> }) {
   const { lang } = await params;
-  const locale = lang === "cn" ? "cn" : "en";
+  const locale = resolveLang(lang);
   const data = contributorSnapshot as ContributorActivityData;
 
   return (
-    <main className="landing min-h-screen bg-[#08080a]">
+    <main className="landing min-h-screen bg-landing-bg">
       <LandingNav lang={locale} active="contributors" />
       <ContributorsExperience data={data} lang={locale} />
       <LandingFooter lang={locale} />

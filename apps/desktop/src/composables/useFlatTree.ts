@@ -1,6 +1,12 @@
 import type { TreeNode, TreeNodeType } from "@/types/database";
 
-export const SIDEBAR_TREE_ROW_HEIGHT = 28;
+export const SIDEBAR_TREE_ROW_HEIGHT_DEFAULT = 28;
+export const SIDEBAR_TREE_ROW_HEIGHT_COMPACT = 24;
+export const SIDEBAR_TREE_ROW_HEIGHT = SIDEBAR_TREE_ROW_HEIGHT_DEFAULT;
+
+export function getSidebarTreeRowHeight(density?: string): number {
+  return density === "compact" ? SIDEBAR_TREE_ROW_HEIGHT_COMPACT : SIDEBAR_TREE_ROW_HEIGHT_DEFAULT;
+}
 export const SIDEBAR_TREE_SCROLL_BUFFER = 600;
 export const SIDEBAR_TREE_PRERENDER_COUNT = 48;
 
@@ -42,6 +48,7 @@ export interface FlatTreeIndex {
   stickyContainerIndexByIndex: Int32Array;
   nextDatabaseContainerIndexByIndex: Int32Array;
   nextSchemaContainerIndexByIndex: Int32Array;
+  nextBoundaryIndexByIndex: Int32Array;
 }
 
 interface FlatTreeIndexOptions {
@@ -140,9 +147,11 @@ export function createFlatTreeIndex(nodes: readonly FlatTreeNode[], options: Fla
   const stickyContainerIndexByIndex = new Int32Array(nodes.length);
   const nextDatabaseContainerIndexByIndex = new Int32Array(nodes.length);
   const nextSchemaContainerIndexByIndex = new Int32Array(nodes.length);
+  const nextBoundaryIndexByIndex = new Int32Array(nodes.length);
   stickyContainerIndexByIndex.fill(-1);
   nextDatabaseContainerIndexByIndex.fill(-1);
   nextSchemaContainerIndexByIndex.fill(-1);
+  nextBoundaryIndexByIndex.fill(-1);
 
   let databaseContainerIndex = -1;
   let schemaContainerIndex = -1;
@@ -170,9 +179,12 @@ export function createFlatTreeIndex(nodes: readonly FlatTreeNode[], options: Fla
 
   let nextDatabaseContainerIndex = -1;
   let nextSchemaContainerIndex = -1;
+  let nextBoundaryIndex = -1;
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const item = nodes[index];
+    nextBoundaryIndexByIndex[index] = nextBoundaryIndex;
     if (options.isBoundary(item.type)) {
+      nextBoundaryIndex = index;
       nextDatabaseContainerIndex = -1;
       nextSchemaContainerIndex = -1;
       continue;
@@ -193,5 +205,6 @@ export function createFlatTreeIndex(nodes: readonly FlatTreeNode[], options: Fla
     stickyContainerIndexByIndex,
     nextDatabaseContainerIndexByIndex,
     nextSchemaContainerIndexByIndex,
+    nextBoundaryIndexByIndex,
   };
 }

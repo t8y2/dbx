@@ -48,21 +48,9 @@ test("secondary write entrypoints use the shared production SQL guard", () => {
       executor: "api.executeQuery",
       sourceKey: "production.sourceSidebar",
     },
-    {
-      path: "apps/desktop/src/App.vue",
-      executor: "executeObjectSourceSave",
-      sourceKey: "production.sourceObjectSource",
-    },
-    {
-      path: "apps/desktop/src/components/objects/ObjectSourceDialog.vue",
-      executor: "executeObjectSourceSave",
-      sourceKey: "production.sourceObjectSource",
-    },
-    {
-      path: "apps/desktop/src/components/objects/ObjectBrowser.vue",
-      executor: "executeObjectSourceSave",
-      sourceKey: "production.sourceObjectSource",
-    },
+    // Source saves select a prepared executor by engine. Their confirmation and
+    // dispatch behavior is exercised by objectSourceTabSave.spec.ts and the real
+    // ObjectSourceDialog/ObjectBrowser component tests, not a callee-name match.
     {
       path: "apps/desktop/src/components/objects/ObjectBrowser.vue",
       executor: "api.executeQuery",
@@ -84,7 +72,7 @@ test("secondary write entrypoints use the shared production SQL guard", () => {
       sourceKey: "production.sourceAdmin",
     },
     {
-      path: "apps/desktop/src/components/admin/DamengJobAdmin.vue",
+      path: "apps/desktop/src/components/admin/DatabaseJobAdmin.vue",
       executor: "api.executeMulti",
       sourceKey: "production.sourceAdmin",
     },
@@ -150,7 +138,8 @@ test("mongo data-grid index deletions stay production-gated and refresh metadata
     assert.match(body, /finally\s*\{[\s\S]*?refreshMongoIndexMetadataAfterMutation/, `${name} must refresh index metadata even when deletion fails`);
     assert.ok(body.indexOf("runMongoMutation") < body.indexOf("api.mongoDropIndexes"), `production confirmation must wrap ${name}`);
   }
-  const refreshBody = functionBody(source, "refreshMongoIndexMetadataAfterMutation");
+  const metadataSource = readSource("apps/desktop/src/composables/useDataGridTableMetadataLoaders.ts");
+  const refreshBody = functionBody(metadataSource, "refreshMongoIndexMetadataAfterMutation");
   assert.match(refreshBody, /reloadIndexes/, "data-grid metadata must refresh after index deletion");
   assert.match(refreshBody, /refreshLoadedMongoIndexes/, "the loaded sidebar index tree must refresh after data-grid deletion");
   assert.match(functionBody(source, "confirmDropAllMongoIndexes"), /api\.mongoDropIndexes\([^;]*undefined,\s*false\)/, "drop all must use MongoDB wildcard semantics instead of the currently loaded index nodes");

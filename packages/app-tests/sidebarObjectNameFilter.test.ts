@@ -138,3 +138,108 @@ test("object-group filters keep table, view, procedure, and function scopes isol
   expect(liveGroup("group-functions").children?.map((child) => child.label)).toEqual(["fn_get_user", "internal_hash"]);
   expect(listObjects.mock.calls.at(-1)).toEqual([currentConnection.id, "app", "public", ["FUNCTION"], undefined, 1001, 0]);
 }, 15000);
+
+test("supports object-group filters on catalogless databases with empty database string", async () => {
+  const listTables = vi.fn(async (...args: unknown[]) => {
+    const objectTypes = args[6] as string[] | undefined;
+    const filter = args[8] as { includePatterns: string[]; excludePatterns: string[] } | undefined;
+    if (objectTypes?.[0] === "VIEW") {
+      if (filter?.includePatterns.includes("vw_%")) return [{ name: "vw_orders", table_type: "VIEW", comment: null }];
+      return [
+        { name: "vw_orders", table_type: "VIEW", comment: null },
+        { name: "other_view", table_type: "VIEW", comment: null },
+      ];
+    }
+    return [];
+  });
+
+  vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+  vi.doMock("@/lib/backend/api", () => ({
+    checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+    deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+    listObjects: vi.fn().mockResolvedValue([]),
+    listTables,
+    loadSchemaCache: vi.fn().mockResolvedValue(null),
+    saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+    saveConnections: vi.fn().mockResolvedValue(undefined),
+    saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+  }));
+
+  const { useConnectionStore } = await import("../../apps/desktop/src/stores/connectionStore.ts");
+  const store = useConnectionStore();
+  const hanaConnection: ConnectionConfig = {
+    id: "hana-1",
+    name: "SAP HANA",
+    db_type: "saphana",
+    host: "127.0.0.1",
+    port: 39015,
+    username: "SYSTEM",
+    password: "",
+    database: "",
+  } as ConnectionConfig;
+
+  const viewsGroup: TreeNode = {
+    id: "hana-1:::SYS:__views",
+    label: "tree.views",
+    type: "group-views",
+    connectionId: hanaConnection.id,
+    database: "",
+    schema: "SYS",
+    isExpanded: false,
+    children: [],
+  };
+  const schemaNode: TreeNode = {
+    id: "hana-1:::SYS",
+    label: "SYS",
+    type: "schema",
+    connectionId: hanaConnection.id,
+    database: "",
+    schema: "SYS",
+    isExpanded: true,
+    children: [viewsGroup],
+  };
+  const defaultDatabaseNode: TreeNode = {
+    id: "hana-1::",
+    label: "tree.defaultDatabase",
+    type: "database",
+    connectionId: hanaConnection.id,
+    database: "",
+    isExpanded: true,
+    children: [schemaNode],
+  };
+
+  store.connections = [hanaConnection];
+  store.connectedIds.add(hanaConnection.id);
+  store.treeNodes = [
+    {
+      id: hanaConnection.id,
+      label: hanaConnection.name,
+      type: "connection",
+      connectionId: hanaConnection.id,
+      isExpanded: true,
+      children: [defaultDatabaseNode],
+    },
+  ];
+
+  const scopeKey = store.tableNameFilterScopeKey({
+    connectionId: hanaConnection.id,
+    database: viewsGroup.database,
+    schema: viewsGroup.schema,
+    nodeKind: viewsGroup.type,
+  });
+  expect(scopeKey).toBeTruthy();
+
+  const revision = store.setSidebarTableNameFilter(scopeKey, { includePatterns: ["vw_%"], excludePatterns: [] });
+  await store.refreshTreeNodeForTableNameFilter(viewsGroup, scopeKey, revision);
+
+  expect(viewsGroup.children?.map((child) => child.label)).toEqual(["vw_orders"]);
+  expect(store.tableNameFilterForScope({
+    connectionId: hanaConnection.id,
+    database: "",
+    schema: "SYS",
+    nodeKind: "group-views",
+  })).toEqual({
+    includePatterns: ["vw_%"],
+    excludePatterns: [],
+  });
+});

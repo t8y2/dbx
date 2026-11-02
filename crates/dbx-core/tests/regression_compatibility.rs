@@ -1,4 +1,9 @@
-use dbx_core::data_compare::{DataCompareFromTablesPreparation, DataComparePreparation, DataCompareResult};
+use std::collections::HashMap;
+
+use dbx_core::data_compare::{
+    build_data_compare_sync_plan, DataCompareFromTablesPreparation, DataComparePreparation, DataCompareResult,
+    DataCompareRow, DataCompareSyncPlanOptions, DataCompareSyncPlanTableOptions,
+};
 use dbx_core::models::connection::DatabaseType;
 use dbx_core::schema_diff::{
     generate_schema_sync_sql, prepare_schema_diff, SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff,
@@ -15,6 +20,7 @@ fn basic_table_info(name: &str) -> TableInfo {
     TableInfo {
         name: name.to_string(),
         table_type: "BASE TABLE".to_string(),
+        valid: None,
         comment: None,
         parent_schema: None,
         parent_name: None,
@@ -26,6 +32,8 @@ fn col(name: &str, data_type: &str) -> ColumnInfo {
         name: name.to_string(),
         data_type: data_type.to_string(),
         resolved_schema: None,
+        resolved_table: None,
+        resolved_object_type: None,
         is_nullable: false,
         column_default: None,
         is_primary_key: false,
@@ -35,6 +43,7 @@ fn col(name: &str, data_type: &str) -> ColumnInfo {
         numeric_precision: None,
         numeric_scale: None,
         character_maximum_length: None,
+        metadata_capabilities: None,
         enum_values: None,
         character_set: None,
         collation: None,
@@ -144,6 +153,7 @@ fn generate_schema_sync_sql_output_invariant() {
         diff_type: "added".to_string(),
         object_type: None,
         name: "users".to_string(),
+        target_name: None,
         columns: Some(vec![]),
         indexes: None,
         foreign_keys: None,
@@ -236,6 +246,8 @@ fn data_compare_from_tables_preparation_optional_fields_default() {
         target_row_count: 0,
         source_truncated: false,
         target_truncated: false,
+        row_budget: 100_000,
+        sync_eligible: true,
         degradation_level: None,
         sampling_rate: None,
         confidence_score: None,
@@ -249,6 +261,9 @@ fn data_compare_from_tables_preparation_optional_fields_default() {
     // Core fields must be present
     assert!(json.get("result").is_some(), "result must be present");
     assert!(json.get("syncSql").is_some(), "syncSql must be present");
+    // The row budget travels with the preparation so the UI can flag a partial compare.
+    assert_eq!(json.get("rowBudget").and_then(|value| value.as_u64()), Some(100_000));
+    assert_eq!(json.get("syncEligible").and_then(|value| value.as_bool()), Some(true));
 
     // New optional fields should be absent when None
     assert!(json.get("degradationLevel").is_none(), "degradationLevel should be absent");
@@ -278,9 +293,39 @@ fn data_compare_from_tables_preparation_deserializes_old_format() {
 
     assert_eq!(prep.source_row_count, 100);
     assert_eq!(prep.target_row_count, 100);
+    assert!(!prep.sync_eligible, "legacy payloads without completeness evidence must fail closed");
     assert!(prep.degradation_level.is_none());
     assert!(prep.sampling_rate.is_none());
     assert!(prep.confidence_score.is_none());
+}
+
+#[test]
+fn incomplete_data_compare_cannot_generate_sync_sql() {
+    let plan = build_data_compare_sync_plan(DataCompareSyncPlanOptions {
+        tables: vec![DataCompareSyncPlanTableOptions {
+            table_name: "users".to_string(),
+            schema: Some("public".to_string()),
+            columns: vec!["id".to_string()],
+            key_columns: vec!["id".to_string()],
+            column_info: Vec::new(),
+            diff: DataCompareResult {
+                added: vec![DataCompareRow {
+                    key: "1".to_string(),
+                    key_values: HashMap::from([(String::from("id"), serde_json::json!(1))]),
+                    values: HashMap::from([(String::from("id"), serde_json::json!(1))]),
+                }],
+                removed: Vec::new(),
+                modified: Vec::new(),
+            },
+            database_type: Some(DatabaseType::Postgres),
+            pre_sync_statements: Vec::new(),
+            sync_eligible: false,
+        }],
+    });
+
+    assert_eq!(plan.statement_count, 0);
+    assert!(plan.sync_statements.is_empty());
+    assert!(plan.sync_sql.is_empty());
 }
 
 /// Verify that DataComparePreparation (the original struct) remains unchanged

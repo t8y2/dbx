@@ -2,7 +2,7 @@ import type { DiagramLayer } from "@/types/diagram";
 import type { DiagramPosition, DiagramTable } from "@/lib/diagram/erDiagram";
 import { layoutDiagramTables } from "@/lib/diagram/erDiagram";
 import { sizeLayerToFit } from "@/lib/diagram/size-layer";
-import { CARD_WIDTH, EMPTY_LAYER_HEIGHT, EMPTY_LAYER_WIDTH, GAP_X, GAP_Y, LAYER_CONTENT_PADDING, LAYER_HEADER_HEIGHT, MARGIN, columnsPerRowForWidth, tableCardHeight } from "@/lib/diagram/diagram-constants";
+import { CARD_WIDTH, EMPTY_LAYER_HEIGHT, EMPTY_LAYER_WIDTH, GAP_X, GAP_Y, LAYER_CONTENT_PADDING, LAYER_HEADER_HEIGHT, MARGIN, columnsPerRowForWidth, diagramTableCardHeight } from "@/lib/diagram/diagram-constants";
 
 export interface LtrAutoLayoutInput {
   tables: DiagramTable[];
@@ -30,7 +30,8 @@ type LayerBox = {
 function tableHeightsMap(tables: DiagramTable[]): Record<string, number> {
   const heights: Record<string, number> = {};
   for (const table of tables) {
-    heights[table.name] = tableCardHeight(table.columns?.length ?? 0);
+    // Comment lines are part of the rendered card, so layers and row wrapping include them.
+    heights[table.name] = diagramTableCardHeight(table);
   }
   return heights;
 }

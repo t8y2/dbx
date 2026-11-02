@@ -90,7 +90,7 @@ async function loadDatabases() {
   loadingDatabases.value = true;
   error.value = "";
   try {
-    await connectionStore.ensureConnected(props.connection.id);
+    await connectionStore.ensureConnected(props.connection.id, { skipIfClosedByUser: true });
     const result = await api.listDatabases(props.connection.id);
     databases.value = result.map((database) => database.name).filter(Boolean);
     if (!selectedDatabase.value || !databases.value.includes(selectedDatabase.value)) {
@@ -120,7 +120,7 @@ function syncHorizontalScrollbar() {
 function scrollTableHorizontally(event: WheelEvent) {
   const scroller = tableScroller.value;
   if (!scroller) return;
-  const delta = event.shiftKey ? event.deltaY : Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : 0;
+  const delta = event.shiftKey || event.altKey ? event.deltaY : Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : 0;
   if (!delta) return;
   const previousScrollLeft = scroller.scrollLeft;
   scroller.scrollLeft += delta;

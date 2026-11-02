@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { formatNacosHistoryTime } from "@/lib/nacos/nacosAdmin";
+import NacosConfigCodeViewer from "@/components/nacos/NacosConfigCodeViewer.vue";
 import type { NacosConfigHistoryItem, NacosConfigItem } from "@/types/nacos";
 
 const open = defineModel<boolean>("open", { default: false });
@@ -22,6 +23,7 @@ const props = withDefaults(
     readOnly?: boolean;
     viewingItem?: NacosConfigHistoryItem | null;
     viewingContent?: string;
+    viewingFormat?: string;
     viewingLoading?: boolean;
   }>(),
   {
@@ -31,6 +33,7 @@ const props = withDefaults(
     readOnly: false,
     viewingItem: null,
     viewingContent: "",
+    viewingFormat: "",
     viewingLoading: false,
   },
 );
@@ -208,7 +211,7 @@ function loadPage(pageNo: number) {
           <Loader2 class="mr-2 h-4 w-4 animate-spin" />
           {{ t("nacos.loadingHistory") }}
         </div>
-        <pre v-else class="min-h-full rounded-md border bg-background p-3 font-mono text-xs leading-5">{{ viewingContent || "" }}</pre>
+        <NacosConfigCodeViewer v-else :content="viewingContent || ''" :format="viewingFormat" :data-id="viewingItem?.dataId" class="min-h-full" />
       </div>
       <DialogFooter class="m-0 shrink-0 rounded-none border-t bg-background px-5 py-5 sm:py-4">
         <Button variant="outline" @click="detailOpen = false">{{ t("dangerDialog.cancel") }}</Button>
@@ -226,10 +229,5 @@ function loadPage(pageNo: number) {
 .nacos-config-history-detail-dialog {
   width: min(92vw, 1180px) !important;
   max-width: min(92vw, 1180px) !important;
-}
-
-.nacos-config-history-detail-dialog pre {
-  min-width: max-content;
-  white-space: pre;
 }
 </style>

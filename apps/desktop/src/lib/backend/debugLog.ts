@@ -12,6 +12,21 @@ interface DebugLogEntry {
   message: string;
 }
 
+export interface BrowserMemorySnapshot {
+  jsHeapUsedBytes?: number;
+  jsHeapTotalBytes?: number;
+  jsHeapLimitBytes?: number;
+  deviceMemoryGiB?: number;
+  hardwareConcurrency?: number;
+}
+
+export interface NativeProcessMemorySnapshot {
+  residentBytes: number;
+  virtualBytes: number;
+  totalMemoryBytes: number;
+  usedMemoryBytes: number;
+}
+
 let installed = false;
 let originalConsole: Partial<Record<DebugLogLevel, (...args: unknown[]) => void>> = {};
 
@@ -41,14 +56,69 @@ export function isDebugLoggingEnabled(): boolean {
   return safeLocalStorageGet(DEBUG_LOG_ENABLED_KEY) === "1";
 }
 
-function readEntries(): DebugLogEntry[] {
-  const raw = safeLocalStorageGet(DEBUG_LOG_ENTRIES_KEY);
+// The stored value is the whole entry array, so re-reading it costs a JSON
+// parse and rewriting it costs a JSON stringify plus a synchronous
+// localStorage write. Doing that per console call made every click and menu
+// interaction on a large document rewrite a multi-hundred-KB buffer, which is
+// itself a long task. Keep the parsed array as the working copy, only re-parse
+// when the stored value changed underneath us, and write back in batches.
+const DEBUG_LOG_FLUSH_DELAY_MS = 200;
+const DEBUG_LOG_FLUSH_HOOK_INSTALLED_KEY = "__dbxDebugLogFlushHook";
+let cachedRawEntries: string | null = null;
+let cachedEntries: DebugLogEntry[] = [];
+let pendingFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function parseEntries(raw: string | null): DebugLogEntry[] {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed.slice(-MAX_DEBUG_LOG_ENTRIES) : [];
   } catch {
     return [];
+  }
+}
+
+function readEntries(): DebugLogEntry[] {
+  const raw = safeLocalStorageGet(DEBUG_LOG_ENTRIES_KEY);
+  if (raw !== cachedRawEntries) {
+    cachedRawEntries = raw;
+    cachedEntries = parseEntries(raw);
+  }
+  return cachedEntries;
+}
+
+function flushEntries() {
+  if (pendingFlushTimer !== null) {
+    clearTimeout(pendingFlushTimer);
+    pendingFlushTimer = null;
+  }
+  const serialized = JSON.stringify(cachedEntries.slice(-MAX_DEBUG_LOG_ENTRIES));
+  cachedRawEntries = serialized;
+  safeLocalStorageSet(DEBUG_LOG_ENTRIES_KEY, serialized);
+}
+
+function scheduleEntriesFlush(immediate: boolean) {
+  if (immediate) {
+    flushEntries();
+    return;
+  }
+  if (pendingFlushTimer !== null) return;
+  pendingFlushTimer = setTimeout(() => {
+    pendingFlushTimer = null;
+    flushEntries();
+  }, DEBUG_LOG_FLUSH_DELAY_MS);
+}
+
+// A pending batch would be lost when the WebView is torn down or hidden.
+function installEntriesFlushHooks() {
+  const host = globalThis as Record<string, unknown>;
+  if (host[DEBUG_LOG_FLUSH_HOOK_INSTALLED_KEY]) return;
+  host[DEBUG_LOG_FLUSH_HOOK_INSTALLED_KEY] = true;
+  if (typeof window !== "undefined") window.addEventListener("pagehide", () => flushEntries());
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flushEntries();
+    });
   }
 }
 
@@ -112,7 +182,38 @@ export function appendDebugLog(level: DebugLogLevel, ...args: unknown[]) {
     level,
     message: formatArgs(args),
   });
-  safeLocalStorageSet(DEBUG_LOG_ENTRIES_KEY, JSON.stringify(entries.slice(-MAX_DEBUG_LOG_ENTRIES)));
+  if (entries.length > MAX_DEBUG_LOG_ENTRIES) entries.splice(0, entries.length - MAX_DEBUG_LOG_ENTRIES);
+  // Errors are the entries most likely to be needed after a crash.
+  scheduleEntriesFlush(level === "error");
+}
+
+export function getBrowserMemorySnapshot(): BrowserMemorySnapshot {
+  const snapshot: BrowserMemorySnapshot = {};
+  const memory = (typeof performance !== "undefined" ? performance : undefined) as
+    | (Performance & {
+        memory?: { usedJSHeapSize?: number; totalJSHeapSize?: number; jsHeapSizeLimit?: number };
+      })
+    | undefined;
+  if (memory?.memory?.usedJSHeapSize !== undefined) snapshot.jsHeapUsedBytes = memory.memory.usedJSHeapSize;
+  if (memory?.memory?.totalJSHeapSize !== undefined) snapshot.jsHeapTotalBytes = memory.memory.totalJSHeapSize;
+  if (memory?.memory?.jsHeapSizeLimit !== undefined) snapshot.jsHeapLimitBytes = memory.memory.jsHeapSizeLimit;
+  if (typeof navigator !== "undefined") {
+    const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
+    if (deviceMemory !== undefined) snapshot.deviceMemoryGiB = deviceMemory;
+    if (navigator.hardwareConcurrency) snapshot.hardwareConcurrency = navigator.hardwareConcurrency;
+  }
+  return snapshot;
+}
+
+export async function appendNativeProcessMemoryLog(event: string, context: Record<string, unknown> = {}) {
+  if (!isDebugLoggingEnabled() || !isTauriRuntimeLike()) return;
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const memory = await invoke<NativeProcessMemorySnapshot>("get_process_memory_info");
+    appendDebugLog("info", `[DBX][native-memory:${event}]`, { ...context, ...memory });
+  } catch (error) {
+    appendDebugLog("warn", `[DBX][native-memory:${event}:error]`, { ...context, error });
+  }
 }
 
 export function setDebugLoggingEnabled(enabled: boolean) {
@@ -129,6 +230,12 @@ export function setDebugLoggingEnabled(enabled: boolean) {
 }
 
 export function clearDebugLogs() {
+  if (pendingFlushTimer !== null) {
+    clearTimeout(pendingFlushTimer);
+    pendingFlushTimer = null;
+  }
+  cachedRawEntries = null;
+  cachedEntries = [];
   safeLocalStorageRemove(DEBUG_LOG_ENTRIES_KEY);
 }
 
@@ -185,6 +292,7 @@ function isTauriRuntimeLike(): boolean {
 export function installDebugLogCapture() {
   if (installed) return;
   installed = true;
+  installEntriesFlushHooks();
   originalConsole = {
     debug: console.debug.bind(console),
     info: console.info.bind(console),

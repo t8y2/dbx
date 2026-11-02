@@ -56,3 +56,21 @@ test("round-trips completion selection behavior through the editor settings draf
   assert.deepEqual(patch, { selectFirstCompletionOnOpen: false });
   assert.equal(editorSettingsDraftFromSettings({ ...DEFAULT_EDITOR_SETTINGS, ...patch }).selectFirstCompletionOnOpen, false);
 });
+
+test("round-trips the column header hover tooltip toggle through the editor settings draft", () => {
+  const base = editorSettingsDraftFromSettings(DEFAULT_EDITOR_SETTINGS);
+  assert.equal(base.showColumnHeaderTooltips, true);
+
+  const patch = editorSettingsPatchFromDraft({ ...base, showColumnHeaderTooltips: false }, base);
+
+  assert.deepEqual(patch, { showColumnHeaderTooltips: false });
+  assert.equal(editorSettingsDraftFromSettings({ ...DEFAULT_EDITOR_SETTINGS, ...patch }).showColumnHeaderTooltips, false);
+});
+
+test("round-trips the persisted CSV quote mode through the editor settings draft", () => {
+  const base = editorSettingsDraftFromSettings(DEFAULT_EDITOR_SETTINGS);
+  const patch = editorSettingsPatchFromDraft({ ...base, csvQuoteMode: "necessary" }, base);
+
+  assert.deepEqual(patch, { csvQuoteMode: "necessary" });
+  assert.equal(editorSettingsDraftFromSettings({ ...DEFAULT_EDITOR_SETTINGS, ...patch }).csvQuoteMode, "necessary");
+});

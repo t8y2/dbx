@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { buildTabResultSnapshot, decodeTabResultSnapshot, encodeTabResultSnapshot } from "../../apps/desktop/src/lib/tabs/tabResultCache.ts";
-import type { QueryTab } from "../../apps/desktop/src/types/database.ts";
+import type { QueryResult, QueryTab } from "../../apps/desktop/src/types/database.ts";
 
 function queryTab(overrides: Partial<QueryTab> = {}): QueryTab {
   return {
@@ -100,6 +100,74 @@ test("result snapshots strip session handles from result runs", () => {
   assert.deepEqual(snapshot?.resultRuns?.[0]?.resultLocalSortOriginalRows, [[2]]);
   assert.deepEqual(snapshot?.resultRuns?.[0]?.resultLocalSortOriginalMongoDocuments, [{ _id: "2", role: "maintainer" }]);
   assert.deepEqual(snapshot?.resultRuns?.[0]?.resultLocalSortOriginalMongoCopyDocuments, [{ _id: { $oid: "507f1f77bcf86cd799439012" } }]);
+});
+
+test("result snapshots preserve local column filters for all result windows", () => {
+  const result = (filters?: Record<string, string[]>): QueryResult => ({
+    columns: ["id", "status"],
+    rows: [[1, "active"]],
+    affected_rows: 0,
+    execution_time_ms: 1,
+    local_column_filters: filters,
+  });
+  const tab = queryTab({
+    result: result({ "1": ["str:root"] }),
+    results: [result({ "1": ["str:first"] }), result({ "1": ["str:second"] })],
+    activeResultIndex: 0,
+    resultRuns: [
+      {
+        id: "run-a",
+        title: "Run A",
+        sequence: 1,
+        sql: "select 1",
+        createdAt: 1,
+        result: result({ "1": ["str:run-a"] }),
+        results: [result({ "1": ["str:run-a-first"] }), result()],
+        activeResultIndex: 0,
+      },
+      {
+        id: "run-b",
+        title: "Run B",
+        sequence: 2,
+        sql: "select 2",
+        createdAt: 2,
+        result: result({ "1": ["str:run-b"] }),
+        results: [result({ "1": ["str:run-b-first"] })],
+        activeResultIndex: 0,
+      },
+    ],
+    activeResultRunId: "run-a",
+  });
+
+  const snapshot = buildTabResultSnapshot(tab);
+  assert.deepEqual(snapshot?.result?.local_column_filters, { "1": ["str:root"] });
+  assert.deepEqual(
+    snapshot?.results?.map((item) => item.local_column_filters),
+    [{ "1": ["str:first"] }, { "1": ["str:second"] }],
+  );
+  assert.deepEqual(
+    snapshot?.resultRuns?.map((run) => run.result?.local_column_filters),
+    [{ "1": ["str:run-a"] }, { "1": ["str:run-b"] }],
+  );
+  assert.deepEqual(
+    snapshot?.resultRuns?.[0]?.results?.map((item) => item.local_column_filters),
+    [{ "1": ["str:run-a-first"] }, undefined],
+  );
+
+  const restored = decodeTabResultSnapshot(encodeTabResultSnapshot(snapshot!));
+  assert.deepEqual(restored?.result?.local_column_filters, { "1": ["str:root"] });
+  assert.deepEqual(
+    restored?.results?.map((item) => item.local_column_filters),
+    [{ "1": ["str:first"] }, { "1": ["str:second"] }],
+  );
+  assert.deepEqual(
+    restored?.resultRuns?.map((run) => run.result?.local_column_filters),
+    [{ "1": ["str:run-a"] }, { "1": ["str:run-b"] }],
+  );
+  assert.deepEqual(
+    restored?.resultRuns?.[0]?.results?.map((item) => item.local_column_filters),
+    [{ "1": ["str:run-a-first"] }, undefined],
+  );
 });
 
 test("result snapshots encode as binary columnar payloads and decode back to rows", () => {

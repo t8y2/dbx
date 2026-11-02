@@ -1,0 +1,354 @@
+/**
+ * Client-side search for the SQL table-structure hover tooltip.
+ *
+ * The hover already renders the full table DDL (syntax-highlighted). When a
+ * table has many columns, finding one by eye is slow, so this module adds a
+ * compact search box that highlights matches inside the *already fetched* DDL
+ * text — no extra metadata or DDL request is made. Matching runs over the
+ * container's `textContent` — the same offset domain the highlight walker
+ * accumulates over its text nodes — never over the highlighted HTML, and uses
+ * substring search (not a `RegExp` built from user input) so special
+ * characters can never break matching. Keeping corpus and walker on the same
+ * source matters because the syntax highlighter renders line breaks as `<br>`
+ * elements: its `textContent` has no newline characters even though the raw
+ * DDL string does.
+ */
+
+const MATCH_ATTRIBUTE = "data-sql-hover-search-match";
+const MATCH_INDEX_ATTRIBUTE = "data-sql-hover-search-match-index";
+const ACTIVE_ATTRIBUTE = "data-sql-hover-search-active";
+
+export interface HoverSearchMatch {
+  /** Offset of the first matched character within the searched text. */
+  start: number;
+  /** Offset just past the last matched character within the searched text. */
+  end: number;
+}
+
+/**
+ * Find every case-insensitive, non-overlapping occurrence of `query` inside the
+ * searched text. A blank/whitespace-only query yields no matches (the caller
+ * treats this as "restore full content"). Uses `indexOf`, so arbitrary user
+ * input — including regex metacharacters like `()[]$.*` — is matched literally.
+ */
+export function findHoverSearchMatches(text: string, query: string): HoverSearchMatch[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [];
+  const haystack = text.toLowerCase();
+  const matches: HoverSearchMatch[] = [];
+  let from = 0;
+  for (;;) {
+    const index = haystack.indexOf(needle, from);
+    if (index === -1) break;
+    matches.push({ start: index, end: index + needle.length });
+    from = index + needle.length;
+  }
+  return matches;
+}
+
+/**
+ * Wrap each matched range in a `<mark>` by walking the container's text nodes,
+ * so the surrounding syntax-highlight spans are preserved untouched. A match
+ * that straddles two adjacent text nodes is highlighted per node segment.
+ * Match offsets are relative to the concatenated text-node content (the
+ * container's `textContent`); call {@link clearHoverSearchHighlights} (or
+ * restore the original HTML) before re-applying.
+ *
+ * Returns the created `<mark>` elements in document order, grouped by match
+ * index. Every fragment of the first match is tagged active.
+ */
+export function applyHoverSearchHighlights(container: HTMLElement, matches: HoverSearchMatch[]): HTMLElement[] {
+  if (matches.length === 0) return [];
+
+  // Snapshot text nodes with their global offsets before mutating the DOM.
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const textNodes: Array<{ node: Text; start: number; end: number }> = [];
+  let offset = 0;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const text = node as Text;
+    const length = text.data.length;
+    textNodes.push({ node: text, start: offset, end: offset + length });
+    offset += length;
+  }
+
+  const marks: HTMLElement[] = [];
+  let firstMatchIndex = 0;
+  for (const { node, start, end } of textNodes) {
+    while (firstMatchIndex < matches.length && matches[firstMatchIndex].end <= start) firstMatchIndex++;
+    if (firstMatchIndex === matches.length) break;
+    if (start === end || matches[firstMatchIndex].start >= end) continue;
+
+    const data = node.data;
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    for (let matchIndex = firstMatchIndex; matchIndex < matches.length && matches[matchIndex].start < end; matchIndex++) {
+      const match = matches[matchIndex];
+      const from = Math.max(match.start, start) - start;
+      const to = Math.min(match.end, end) - start;
+      if (from > cursor) fragment.appendChild(document.createTextNode(data.slice(cursor, from)));
+      const mark = document.createElement("mark");
+      mark.setAttribute(MATCH_ATTRIBUTE, "true");
+      mark.setAttribute(MATCH_INDEX_ATTRIBUTE, String(matchIndex));
+      if (matchIndex === 0) mark.setAttribute(ACTIVE_ATTRIBUTE, "true");
+      mark.className =
+        "rounded-[2px] bg-yellow-300/70 px-px text-inherit dark:bg-yellow-500/40 data-[sql-hover-search-active=true]:bg-yellow-400/90 data-[sql-hover-search-active=true]:outline data-[sql-hover-search-active=true]:outline-1 data-[sql-hover-search-active=true]:outline-yellow-600 dark:data-[sql-hover-search-active=true]:bg-yellow-500/70 dark:data-[sql-hover-search-active=true]:outline-yellow-400";
+      mark.textContent = data.slice(from, to);
+      fragment.appendChild(mark);
+      marks.push(mark);
+      cursor = to;
+    }
+    if (cursor < data.length) fragment.appendChild(document.createTextNode(data.slice(cursor)));
+    node.replaceWith(fragment);
+  }
+
+  return marks;
+}
+
+/** Remove every highlight mark, merging its text back into the surrounding nodes. */
+export function clearHoverSearchHighlights(container: HTMLElement): void {
+  const marks = container.querySelectorAll(`[${MATCH_ATTRIBUTE}]`);
+  for (const mark of marks) mark.replaceWith(...mark.childNodes);
+  container.normalize();
+}
+
+export interface HoverSearchController {
+  /** Row element to insert above the scrollable DDL content. */
+  element: HTMLElement;
+  /** No-result status element (inserted after the content by the caller). */
+  status: HTMLElement;
+  /** Focus the search input. */
+  focus(): void;
+  /**
+   * Keep the hover tooltip open while the search input has focus. CodeMirror
+   * closes hover tooltips on `mouseleave`, which Windows IME candidate windows
+   * trigger when they pop up over the pointer mid-composition.
+   */
+  pinTooltip(host: HTMLElement): void;
+  /** Remove listeners; safe to call once when the tooltip is destroyed. */
+  destroy(): void;
+}
+
+export interface HoverSearchOptions {
+  /** Scrollable element whose innerHTML holds the rendered DDL. */
+  target: HTMLElement;
+  /** The target's pristine innerHTML, restored before every re-highlight. */
+  originalHtml: string;
+  /** Input placeholder text. */
+  placeholder: string;
+  /** Message shown when a non-empty query has no matches. */
+  noResultLabel: string;
+  /** Optional debounce delay in milliseconds for typing. Defaults to 0. */
+  debounceMs?: number;
+}
+
+/**
+ * Build the compact search box + no-result status for the hover tooltip and
+ * wire live filtering. Interaction is isolated from the CodeMirror editor:
+ *
+ * - `pointerdown` stops propagation (but keeps default) so clicking the input
+ *   focuses it without the editor treating it as "hover ended".
+ * - `keydown`/`keyup` stop propagation so editor keymap shortcuts and IME
+ *   Enter/composition never fire or dismiss the tooltip while typing.
+ */
+export function createHoverSearch(options: HoverSearchOptions): HoverSearchController {
+  const { target, originalHtml, placeholder, noResultLabel, debounceMs = 0 } = options;
+
+  const element = document.createElement("div");
+  element.dataset.sqlHoverSearch = "true";
+  element.className = "mt-2 flex flex-none items-center gap-2";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.dataset.sqlHoverSearchInput = "true";
+  input.placeholder = placeholder;
+  input.setAttribute("aria-label", placeholder);
+  input.spellcheck = false;
+  input.autocomplete = "off";
+  input.className = "min-w-0 flex-1 rounded border border-border/60 bg-background px-2 py-1 text-[11px] leading-none text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+  element.appendChild(input);
+
+  const matchCount = document.createElement("span");
+  matchCount.dataset.sqlHoverSearchCount = "true";
+  matchCount.className = "shrink-0 text-[11px] tabular-nums text-muted-foreground";
+  matchCount.setAttribute("role", "status");
+  matchCount.setAttribute("aria-live", "polite");
+  matchCount.setAttribute("aria-atomic", "true");
+  matchCount.hidden = true;
+  element.appendChild(matchCount);
+
+  const status = document.createElement("div");
+  status.dataset.sqlHoverSearchEmpty = "true";
+  status.className = "mt-1.5 text-[11px] text-muted-foreground";
+  status.textContent = noResultLabel;
+  status.hidden = true;
+
+  let matchGroups: HTMLElement[][] = [];
+  let activeMatchIndex = -1;
+  let isComposing = false;
+  let isTargetPristine = true;
+  let lastSearchQuery: string | null = null;
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Cache pristine text content once from target/originalHtml to avoid
+  // querying target.textContent on every keystroke.
+  let pristineText = target.textContent ?? "";
+  if (!pristineText && originalHtml) {
+    const temp = document.createElement("div");
+    temp.innerHTML = originalHtml;
+    pristineText = temp.textContent ?? "";
+  }
+
+  const cancelPending = () => {
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+  };
+
+  const activateMatch = (index: number) => {
+    for (const mark of matchGroups[activeMatchIndex] ?? []) mark.removeAttribute(ACTIVE_ATTRIBUTE);
+    activeMatchIndex = index;
+    for (const mark of matchGroups[index]) mark.setAttribute(ACTIVE_ATTRIBUTE, "true");
+    matchCount.textContent = `${index + 1} / ${matchGroups.length}`;
+    matchGroups[index][0]?.scrollIntoView({ block: "nearest" });
+  };
+
+  const executeSearch = () => {
+    if (isComposing) return;
+    const query = input.value;
+    if (query === lastSearchQuery) return;
+    lastSearchQuery = query;
+
+    const hasQuery = query.trim().length > 0;
+    if (!hasQuery) {
+      if (!isTargetPristine) {
+        target.innerHTML = originalHtml;
+        isTargetPristine = true;
+      }
+      matchGroups = [];
+      activeMatchIndex = -1;
+      matchCount.hidden = true;
+      matchCount.textContent = "";
+      status.hidden = true;
+      return;
+    }
+
+    const matches = findHoverSearchMatches(pristineText, query);
+    matchCount.hidden = false;
+    matchCount.textContent = matches.length > 0 ? "" : "0 / 0";
+    status.hidden = matches.length > 0;
+
+    if (matches.length === 0) {
+      if (!isTargetPristine) {
+        target.innerHTML = originalHtml;
+        isTargetPristine = true;
+      }
+      matchGroups = [];
+      activeMatchIndex = -1;
+      return;
+    }
+
+    target.innerHTML = originalHtml;
+    const marks = applyHoverSearchHighlights(target, matches);
+    isTargetPristine = false;
+    matchGroups = Array.from({ length: matches.length }, () => []);
+    for (const mark of marks) matchGroups[Number(mark.getAttribute(MATCH_INDEX_ATTRIBUTE))].push(mark);
+    activateMatch(0);
+  };
+
+  const scheduleSearch = () => {
+    if (isComposing) return;
+    cancelPending();
+    if (debounceMs <= 0) {
+      executeSearch();
+    } else {
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
+        executeSearch();
+      }, debounceMs);
+    }
+  };
+
+  const flushSearch = () => {
+    cancelPending();
+    executeSearch();
+  };
+
+  const stopKeyboard = (event: KeyboardEvent) => {
+    // Keep editor keymap shortcuts and IME Enter/Escape from leaking out of the
+    // input; Escape clears the search but keeps the tooltip open.
+    event.stopPropagation();
+    if (event.type !== "keydown" || isComposing || event.isComposing || event.keyCode === 229) return;
+    if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault();
+      const hadPending = debounceTimer !== null || input.value !== lastSearchQuery;
+      flushSearch();
+      if (matchGroups.length > 0) {
+        if (!hadPending) {
+          activateMatch((activeMatchIndex + (event.shiftKey ? -1 : 1) + matchGroups.length) % matchGroups.length);
+        }
+      }
+    }
+    if (event.key === "Escape" && input.value) {
+      event.preventDefault();
+      cancelPending();
+      input.value = "";
+      executeSearch();
+    }
+  };
+  const stopPointer = (event: Event) => {
+    event.stopPropagation();
+  };
+  const startComposition = () => {
+    isComposing = true;
+    cancelPending();
+  };
+  const endComposition = () => {
+    isComposing = false;
+    scheduleSearch();
+  };
+
+  input.addEventListener("input", scheduleSearch);
+  input.addEventListener("keydown", stopKeyboard);
+  input.addEventListener("keyup", stopKeyboard);
+  input.addEventListener("compositionstart", startComposition);
+  input.addEventListener("compositionend", endComposition);
+  input.addEventListener("pointerdown", stopPointer);
+  input.addEventListener("mousedown", stopPointer);
+
+  let pinnedHost: HTMLElement | null = null;
+  const keepPinnedTooltipOpen = (event: Event) => {
+    if (event.target === pinnedHost && document.activeElement === input) event.stopImmediatePropagation();
+  };
+  const releasePinnedTooltip = () => {
+    // Hand the leave CodeMirror missed back to it once typing is over.
+    if (pinnedHost && !pinnedHost.matches(":hover")) pinnedHost.dispatchEvent(new MouseEvent("mouseleave"));
+  };
+
+  return {
+    element,
+    status,
+    focus() {
+      input.focus();
+    },
+    pinTooltip(host) {
+      pinnedHost = host;
+      // Capture on the document runs before CodeMirror's listener on the host.
+      document.addEventListener("mouseleave", keepPinnedTooltipOpen, true);
+      input.addEventListener("blur", releasePinnedTooltip);
+    },
+    destroy() {
+      cancelPending();
+      document.removeEventListener("mouseleave", keepPinnedTooltipOpen, true);
+      input.removeEventListener("blur", releasePinnedTooltip);
+      pinnedHost = null;
+      input.removeEventListener("input", scheduleSearch);
+      input.removeEventListener("keydown", stopKeyboard);
+      input.removeEventListener("keyup", stopKeyboard);
+      input.removeEventListener("compositionstart", startComposition);
+      input.removeEventListener("compositionend", endComposition);
+      input.removeEventListener("pointerdown", stopPointer);
+      input.removeEventListener("mousedown", stopPointer);
+    },
+  };
+}

@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 470
 dbType: h2
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: H2
 label: H2
 dialect: H2
@@ -50,7 +52,7 @@ capabilities:
   tableDataEdit: true
   tableStructureEdit: true
   tableImport: false
-  dataTransfer: false
+  dataTransfer: true
   sqlFileExecution: true
   databaseCreate: false
   fieldLineage: false

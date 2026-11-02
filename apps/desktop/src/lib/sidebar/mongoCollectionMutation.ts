@@ -66,6 +66,11 @@ export function mongoCollectionTableTypeFromNode(node: Pick<TreeNode, "meta">): 
   return kind === "view" ? "VIEW" : kind === "timeseries" ? "TIMESERIES" : "TABLE";
 }
 
+/** MongoDB materializes a database when its initialization collection is created. */
+export function mongoCreateDatabasePreview(database: string): string {
+  return `db.getSiblingDB(${JSON.stringify(database)}).createCollection("dbx_init");`;
+}
+
 export function toMongoCollectionKind(kind?: string | null): MongoCollectionKind {
   const normalized = (kind || "collection").toLowerCase();
   if (normalized === "view") return "view";
@@ -102,6 +107,10 @@ export function mongoCloneCollectionPreview(database: string, sourceName: string
 
 export function mongoDropCollectionPreview(database: string, collection: string): string {
   return `db.getSiblingDB(${JSON.stringify(database)}).getCollection(${JSON.stringify(collection)}).drop()`;
+}
+
+export function mongoClearCollectionPreview(database: string, collection: string): string {
+  return `db.getSiblingDB(${JSON.stringify(database)}).getCollection(${JSON.stringify(collection)}).deleteMany({})`;
 }
 
 export function mongoDropDatabasePreview(database: string): string {

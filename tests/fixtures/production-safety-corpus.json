@@ -308,5 +308,45 @@
     "active": false,
     "isMutation": true,
     "databases": []
+  },
+  {
+    "name": "sqlserver hash temp table keeps a later production delete in scope",
+    "dialect": "sqlserver",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "SELECT * FROM #tmp; DELETE FROM prod_app.dbo.users;",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "sqlserver backslash string keeps a later production delete in scope",
+    "dialect": "sqlserver",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "SELECT 'dir\\'; DELETE FROM prod_app.dbo.users;",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql hash comment keeps a commented delete out of scope",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "SELECT 1; # DELETE FROM prod_app.users",
+    "active": false,
+    "isMutation": false,
+    "databases": []
+  },
+  {
+    "name": "mysql backslash escape keeps the write inside the literal",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "SELECT 'it\\'s; DELETE FROM prod_app.users;'",
+    "active": false,
+    "isMutation": false,
+    "databases": []
   }
 ]

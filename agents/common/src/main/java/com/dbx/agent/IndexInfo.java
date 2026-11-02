@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Objects;
 
 public final class IndexInfo {
+    private String owner;
     private String name;
     private List<String> columns;
     private boolean is_unique;
@@ -18,6 +19,16 @@ public final class IndexInfo {
     // doesn't track this (provenance unknown for that dialect/path). Mirrors
     // crate::types::IndexInfo::key_is_expression on the Rust side (#6312 review).
     private List<Boolean> key_is_expression;
+    private List<String> key_directions = Collections.emptyList();
+    private String visibility;
+    private boolean key_metadata_complete;
+    private List<Integer> key_options = Collections.emptyList();
+    // True when this index is the object behind a table constraint (PRIMARY KEY / UNIQUE)
+    // instead of a standalone index. Dameng lists both kinds in ALL_INDEXES but only accepts
+    // index-level DDL for standalone ones, so the SQL builder needs to tell them apart
+    // (#7959). Mirrors crate::types::IndexInfo::constraint_backed on the Rust side; false
+    // when the introspection source doesn't report it.
+    private boolean constraint_backed;
 
     public IndexInfo() {
         this("", Collections.emptyList(), false, false);
@@ -66,6 +77,10 @@ public final class IndexInfo {
         return name;
     }
 
+    public String getOwner() { return owner; }
+
+    public void setOwner(String owner) { this.owner = owner; }
+
     public List<String> getColumns() {
         return columns;
     }
@@ -96,6 +111,26 @@ public final class IndexInfo {
 
     public List<Boolean> getKey_is_expression() {
         return key_is_expression;
+    }
+
+    public List<String> getKey_directions() {
+        return key_directions;
+    }
+
+    public String getVisibility() {
+        return visibility;
+    }
+
+    public boolean getKey_metadata_complete() {
+        return key_metadata_complete;
+    }
+
+    public List<Integer> getKey_options() {
+        return key_options;
+    }
+
+    public boolean getConstraint_backed() {
+        return constraint_backed;
     }
 
     public void setName(String name) {
@@ -134,6 +169,26 @@ public final class IndexInfo {
         this.key_is_expression = key_is_expression;
     }
 
+    public void setKey_directions(List<String> key_directions) {
+        this.key_directions = key_directions == null ? Collections.emptyList() : key_directions;
+    }
+
+    public void setVisibility(String visibility) {
+        this.visibility = visibility;
+    }
+
+    public void setKey_metadata_complete(boolean key_metadata_complete) {
+        this.key_metadata_complete = key_metadata_complete;
+    }
+
+    public void setKey_options(List<Integer> key_options) {
+        this.key_options = key_options == null ? Collections.emptyList() : key_options;
+    }
+
+    public void setConstraint_backed(boolean constraint_backed) {
+        this.constraint_backed = constraint_backed;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;
@@ -141,19 +196,39 @@ public final class IndexInfo {
         IndexInfo that = (IndexInfo) other;
         return is_unique == that.is_unique
             && is_primary == that.is_primary
+            && constraint_backed == that.constraint_backed
             && Objects.equals(name, that.name)
+            && Objects.equals(owner, that.owner)
             && Objects.equals(columns, that.columns)
             && Objects.equals(filter, that.filter)
             && Objects.equals(index_type, that.index_type)
             && Objects.equals(included_columns, that.included_columns)
             && Objects.equals(comment, that.comment)
-            && Objects.equals(key_is_expression, that.key_is_expression);
+            && Objects.equals(key_is_expression, that.key_is_expression)
+            && Objects.equals(key_directions, that.key_directions)
+            && Objects.equals(visibility, that.visibility)
+            && key_metadata_complete == that.key_metadata_complete
+            && Objects.equals(key_options, that.key_options);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(
-            name, columns, is_unique, is_primary, filter, index_type, included_columns, comment, key_is_expression
+            owner,
+            name,
+            columns,
+            is_unique,
+            is_primary,
+            filter,
+            index_type,
+            included_columns,
+            comment,
+            key_is_expression,
+            key_directions,
+            visibility,
+            key_metadata_complete,
+            key_options,
+            constraint_backed
         );
     }
 
@@ -168,6 +243,11 @@ public final class IndexInfo {
             + ", included_columns=" + included_columns
             + ", comment=" + comment
             + ", key_is_expression=" + key_is_expression
+            + ", key_directions=" + key_directions
+            + ", visibility=" + visibility
+            + ", key_metadata_complete=" + key_metadata_complete
+            + ", key_options=" + key_options
+            + ", constraint_backed=" + constraint_backed
             + ")";
     }
 }

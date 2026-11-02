@@ -1,4 +1,5 @@
 import type { InjectionKey } from "vue";
+import type { FlatTreeNode } from "@/composables/useFlatTree";
 import type { TreeNode } from "@/types/database";
 
 export interface SidebarTreeContext {
@@ -6,10 +7,16 @@ export interface SidebarTreeContext {
   getVisibleNodeIndex: (id: string) => number;
   getProjectedConnectionIds?: () => ReadonlySet<string> | null;
   isSearchProjectionActive?: () => boolean;
+  removeVerifiedTriggerNode?: (node: TreeNode) => void;
   getTreeLoadSearchOptions?: (node: TreeNode) => { searchFilter: string; allowGlobalSearchMismatch: true; expectedSidebarSearchQuery: string } | undefined;
   setTableSearchQuery?: (parentNodeId: string, query: string, local: boolean) => void;
   refreshTableSearchIndex?: (parentNodeId: string) => void;
   registerPasteHandler?: (nodeId: string, callback: () => void) => () => void;
+  /** Selectable visible rows (pseudo rows like table search controls are already
+   * filtered out) driving keyboard arrow navigation. */
+  getVisibleFlatNodes?: () => readonly FlatTreeNode[];
+  /** Moves DOM focus to a rendered row after keyboard navigation changed the selection. */
+  focusTreeNode?: (nodeId: string) => void;
 }
 
 export const sidebarTreeContextKey: InjectionKey<SidebarTreeContext> = Symbol("sidebar-tree-context");

@@ -5,12 +5,18 @@ use crate::commands::connection::{ensure_connection_writable, AppState};
 
 // Re-export types and functions used by other modules
 use dbx_core::models::connection::DatabaseType;
-pub use dbx_core::transfer::{
-    get_db_type, TransferOwnershipPreview, TransferProgress, TransferRequest, TransferStatus,
-};
+use dbx_core::persistence::task_history::{TaskHistoryStorageError, TaskLifecycleOwner, TransferTaskJournal};
+pub use dbx_core::transfer::{get_db_type, TransferOwnershipPreview, TransferProgress, TransferRequest};
 
 fn emit_progress(app: &AppHandle, progress: TransferProgress) {
     let _ = app.emit("transfer-progress", progress);
+}
+
+async fn emit_terminal_progress(app: &AppHandle, history: Option<&TransferTaskJournal>, progress: TransferProgress) {
+    if let Some(history) = history {
+        history.finish(&progress).await;
+    }
+    emit_progress(app, progress);
 }
 
 #[tauri::command]
@@ -18,10 +24,11 @@ pub async fn start_transfer(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     request: TransferRequest,
+    operation_timeout_secs: Option<u64>,
 ) -> Result<(), String> {
     let state = state.inner().clone();
-    let transfer_id = request.transfer_id.clone();
-
+    dbx_core::transfer::check_data_charset_transfer(&state, &request).await?;
+    dbx_core::transfer::validate_transfer_operation_timeout(operation_timeout_secs)?;
     // Reject transfer early if the target connection is read-only — writing to it is inherently required
     ensure_connection_writable(&state, &request.target_connection_id, "Transfer").await?;
 
@@ -29,6 +36,19 @@ pub async fn start_transfer(
     let source_db_type = get_db_type(&state, &request.source_connection_id).await?;
     let target_db_type = get_db_type(&state, &request.target_connection_id).await?;
     dbx_core::transfer::validate_transfer_request(&request)?;
+    dbx_core::transfer::validate_transfer_database_pair(&request, &source_db_type, &target_db_type)?;
+
+    // `drop_target_before_create` rebuilds target tables; gate the dialect and require an
+    // explicit confirmation for production databases.
+    dbx_core::transfer_rebuild::ensure_drop_target_allowed(
+        &state,
+        &request.target_connection_id,
+        &request.target_database,
+        target_db_type,
+        request.drop_target_before_create,
+        request.drop_target_confirmed,
+    )
+    .await?;
 
     // Cross-family object transfers are validated inside transfer_schema_objects:
     // only mechanically rewriteable kinds (views, sequences) are allowed.
@@ -56,314 +76,32 @@ pub async fn start_transfer(
     )
     .await?;
 
+    dbx_core::transfer::with_transfer_operation_timeout(
+        operation_timeout_secs,
+        dbx_core::transfer::ensure_transfer_source_types_supported(&state, &request, &source_pool_key),
+    )
+    .await?;
+
+    let history = match TransferTaskJournal::accept(&state.storage, &state, &request, TaskLifecycleOwner::Tauri).await {
+        Ok(history) => history,
+        Err(TaskHistoryStorageError::RunIdConflict) => return Err("TRANSFER_RUN_ID_CONFLICT".to_string()),
+        Err(error) => return Err(error.code().to_string()),
+    };
+
     tokio::spawn(async move {
-        // Sort tables by FK dependency so referenced tables are transferred first,
-        // and keep the foreign key metadata fetched along the way — MySQL-family
-        // targets reuse it per table below instead of re-querying it.
-        // Skip for external Doris/StarRocks catalogs — the database name does not
-        // exist in the default catalog and sorting is unnecessary (no FK constraints).
-        let (sorted_tables, known_foreign_keys) = {
-            let skip_fk_sort = {
-                let configs = state.configs.read().await;
-                configs
-                    .get(&request.source_connection_id)
-                    .and_then(|config| {
-                        dbx_core::transfer::resolve_external_transfer_catalog_for_config(
-                            request.source_catalog.as_deref(),
-                            config,
-                        )
-                    })
-                    .is_some()
-            };
-            if skip_fk_sort {
-                (request.tables.clone(), std::collections::HashMap::new())
-            } else {
-                dbx_core::transfer::sort_tables_by_fk_dependency_with_foreign_keys(
-                    &state,
-                    &request.source_connection_id,
-                    &request.source_database,
-                    &request.source_schema,
-                    &request.tables,
-                    true,
-                )
-                .await
-                .unwrap_or_else(|e| {
-                    log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
-                    (request.tables.clone(), std::collections::HashMap::new())
-                })
-            }
-        };
-
-        let total_tables = sorted_tables.len();
-        log::info!("[transfer] starting transfer_id={} tables={}", transfer_id, total_tables);
-
-        let mut failed_tables: Vec<String> = Vec::new();
-        let mut pending_fk_alters: Vec<(String, String)> = Vec::new();
-        let mut last_rows_transferred = 0_u64;
-        let mut last_total_rows = None;
-
-        if matches!(source_db_type, dbx_core::models::connection::DatabaseType::Postgres)
-            && matches!(target_db_type, dbx_core::models::connection::DatabaseType::Postgres)
-        {
-            match dbx_core::transfer::transfer_postgres_schema_dependencies(
-                &state,
-                &request,
-                &source_pool_key,
-                &target_pool_key,
-                |progress| {
-                    last_rows_transferred = progress.rows_transferred;
-                    last_total_rows = progress.total_rows;
-                    emit_progress(&app, progress);
-                },
-            )
-            .await
-            {
-                Ok(()) => {}
-                Err(e) if e == "Cancelled" => {
-                    emit_progress(
-                        &app,
-                        TransferProgress {
-                            transfer_id: transfer_id.clone(),
-                            table: "schema dependencies".to_string(),
-                            table_index: 0,
-                            total_tables,
-                            rows_transferred: last_rows_transferred,
-                            total_rows: last_total_rows,
-                            status: TransferStatus::Cancelled,
-                            error: None,
-                            terminal: true,
-                        },
-                    );
-                    dbx_core::transfer::clear_cancelled(&transfer_id).await;
-                    return;
-                }
-                Err(e) => {
-                    emit_progress(
-                        &app,
-                        TransferProgress {
-                            transfer_id: transfer_id.clone(),
-                            table: "schema dependencies".to_string(),
-                            table_index: 0,
-                            total_tables,
-                            rows_transferred: last_rows_transferred,
-                            total_rows: last_total_rows,
-                            status: TransferStatus::Error,
-                            error: Some(e),
-                            terminal: true,
-                        },
-                    );
-                    dbx_core::transfer::clear_cancelled(&transfer_id).await;
-                    return;
-                }
-            }
-        }
-        for (i, table) in sorted_tables.iter().enumerate() {
-            if dbx_core::transfer::is_cancelled(&transfer_id).await {
-                emit_progress(
-                    &app,
-                    TransferProgress {
-                        transfer_id: transfer_id.clone(),
-                        table: table.clone(),
-                        table_index: i,
-                        total_tables,
-                        rows_transferred: last_rows_transferred,
-                        total_rows: last_total_rows,
-                        status: TransferStatus::Cancelled,
-                        error: None,
-                        terminal: true,
-                    },
-                );
-                dbx_core::transfer::clear_cancelled(&transfer_id).await;
-                return;
-            }
-
-            log::info!("[transfer] table {}/{}: {}", i + 1, total_tables, table);
-
-            match dbx_core::transfer::transfer_table(
-                &state,
-                &request,
-                table,
-                i,
-                &source_db_type,
-                &target_db_type,
-                &source_pool_key,
-                &target_pool_key,
-                &known_foreign_keys,
-                &mut pending_fk_alters,
-                |progress| {
-                    last_rows_transferred = progress.rows_transferred;
-                    last_total_rows = progress.total_rows;
-                    emit_progress(&app, progress);
-                },
-            )
-            .await
-            {
-                Ok(rows) => {
-                    emit_progress(
-                        &app,
-                        TransferProgress {
-                            transfer_id: transfer_id.clone(),
-                            table: table.clone(),
-                            table_index: i,
-                            total_tables,
-                            rows_transferred: rows,
-                            total_rows: last_total_rows.or(Some(rows)),
-                            status: TransferStatus::TableDone,
-                            error: None,
-                            terminal: false,
-                        },
-                    );
-                }
-                Err(e) => {
-                    if e == "Cancelled" {
-                        emit_progress(
-                            &app,
-                            TransferProgress {
-                                transfer_id: transfer_id.clone(),
-                                table: table.clone(),
-                                table_index: i,
-                                total_tables,
-                                rows_transferred: last_rows_transferred,
-                                total_rows: last_total_rows,
-                                status: TransferStatus::Cancelled,
-                                error: None,
-                                terminal: true,
-                            },
-                        );
-                        dbx_core::transfer::clear_cancelled(&transfer_id).await;
-                        return;
-                    }
-                    failed_tables.push(table.clone());
-                    emit_progress(
-                        &app,
-                        TransferProgress {
-                            transfer_id: transfer_id.clone(),
-                            table: table.clone(),
-                            table_index: i,
-                            total_tables,
-                            rows_transferred: last_rows_transferred,
-                            total_rows: last_total_rows,
-                            status: TransferStatus::Error,
-                            error: Some(e),
-                            terminal: false,
-                        },
-                    );
-                }
-            }
-        }
-
-        // Add any foreign keys deferred during MySQL-family table creation now that
-        // every selected table exists — see transfer_table's use of
-        // strip_inline_foreign_key_constraint_lines for why these can't be created
-        // inline (a foreign key cycle has no valid CREATE TABLE order at all).
-        let mut failed_fk_tables: Vec<String> = Vec::new();
-        let mut failed_fk_count = 0usize;
-        for (table, alter_sql) in &pending_fk_alters {
-            if let Err(e) = dbx_core::transfer::execute_on_pool(&state, &target_pool_key, alter_sql).await {
-                log::warn!("[transfer] failed to add deferred foreign key constraint for {table}: {e}");
-                failed_fk_count += 1;
-                failed_fk_tables.push(table.clone());
-            }
-        }
-        if failed_fk_count > 0 {
-            failed_fk_tables.sort();
-            failed_fk_tables.dedup();
-            failed_tables.push(format!("{} foreign key(s) on: {}", failed_fk_count, failed_fk_tables.join(", ")));
-        }
-
-        // Transfer selected non-table objects (views, procedures, functions,
-        // triggers, sequences, events) after the per-table loop. The shared
-        // Core decision handles all content modes: DataOnly never
-        // transfers schema objects; PG→PG keeps the legacy empty-selection
-        // default only when structure participates in the transfer.
-        let mut object_outcome = dbx_core::transfer::TransferObjectOutcome::default();
-        match dbx_core::transfer::transfer_schema_objects(
-            &state,
-            &request,
-            &source_pool_key,
-            &target_pool_key,
+        let terminal = dbx_core::transfer_runner::run_transfer(
+            state,
+            request,
+            source_db_type,
+            target_db_type,
+            source_pool_key,
+            target_pool_key,
+            history.clone(),
+            operation_timeout_secs,
             |progress| emit_progress(&app, progress),
         )
-        .await
-        {
-            Ok(outcome) => {
-                object_outcome = outcome;
-            }
-            Err(e) if e == "Cancelled" => {
-                emit_progress(
-                    &app,
-                    TransferProgress {
-                        transfer_id: transfer_id.clone(),
-                        table: "schema objects".to_string(),
-                        table_index: total_tables,
-                        total_tables,
-                        rows_transferred: 0,
-                        total_rows: None,
-                        status: TransferStatus::Cancelled,
-                        error: None,
-                        terminal: true,
-                    },
-                );
-                dbx_core::transfer::clear_cancelled(&transfer_id).await;
-                return;
-            }
-            Err(e) => {
-                failed_tables.push("schema objects".to_string());
-                emit_progress(
-                    &app,
-                    TransferProgress {
-                        transfer_id: transfer_id.clone(),
-                        table: "schema objects".to_string(),
-                        table_index: total_tables,
-                        total_tables,
-                        rows_transferred: 0,
-                        total_rows: None,
-                        status: TransferStatus::Error,
-                        error: Some(e),
-                        terminal: false,
-                    },
-                );
-            }
-        }
-        if !object_outcome.failed.is_empty() {
-            failed_tables.push(format!("schema objects ({})", object_outcome.failed.len()));
-        }
-        let skip_suffix = if !object_outcome.skipped.is_empty() && failed_tables.is_empty() {
-            format!("，跳过 {} 个已存在对象", object_outcome.skipped.len())
-        } else if !object_outcome.skipped.is_empty() {
-            format!("；跳过 {} 个已存在对象", object_outcome.skipped.len())
-        } else {
-            String::new()
-        };
-
-        emit_progress(
-            &app,
-            TransferProgress {
-                transfer_id: transfer_id.clone(),
-                table: String::new(),
-                table_index: total_tables,
-                total_tables,
-                rows_transferred: last_rows_transferred,
-                total_rows: last_total_rows,
-                status: if failed_tables.is_empty() { TransferStatus::Done } else { TransferStatus::Error },
-                error: if failed_tables.is_empty() {
-                    if skip_suffix.is_empty() {
-                        None
-                    } else {
-                        Some(skip_suffix.clone())
-                    }
-                } else {
-                    Some(format!(
-                        "{} table(s) failed: {}{}",
-                        failed_tables.len(),
-                        failed_tables.iter().take(5).cloned().collect::<Vec<_>>().join(", "),
-                        skip_suffix
-                    ))
-                },
-                terminal: true,
-            },
-        );
-        dbx_core::transfer::clear_cancelled(&transfer_id).await;
+        .await;
+        emit_terminal_progress(&app, history.as_ref(), terminal).await;
     });
 
     Ok(())
@@ -378,6 +116,7 @@ pub async fn preview_transfer_ownership(
     let source_db_type = get_db_type(&state, &request.source_connection_id).await?;
     let target_db_type = get_db_type(&state, &request.target_connection_id).await?;
     dbx_core::transfer::validate_transfer_request(&request)?;
+    dbx_core::transfer::validate_transfer_database_pair(&request, &source_db_type, &target_db_type)?;
     let source_pool_key = dbx_core::transfer::ensure_transfer_pool(
         &state,
         &request.source_connection_id,

@@ -1,15 +1,35 @@
+import { styleTags, tags } from "@lezer/highlight";
 import type { SQLDialect } from "@codemirror/lang-sql";
 import type { DatabaseType } from "@/types/database";
 import { driverProfileSqlBuiltinTerms } from "@/lib/database/driverProfileExtensions";
+import { withSqlParameterHighlighting } from "./codemirrorSqlParameters";
+import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
 
-export type CodeMirrorSqlDialectName = "mysql" | "postgres" | "sqlserver" | "clickhouse";
+// In SQL, quoted identifiers (e.g. `col`, "col", [col]) represent column, table,
+// and schema names — not string literals (#12122). CodeMirror's SQL grammar tags
+// QuotedIdentifier as special(string) by default, which themes highlight as a
+// string literal. We retag QuotedIdentifier as tags.name so all themes (both DBX
+// custom/IDE themes and standard third-party themes) highlight quoted identifiers
+// identically to unquoted identifiers.
+const SQL_DIALECT_LANGUAGE_PROPS = [styleTags({ QuotedIdentifier: tags.name })];
 
-type CodeMirrorSqlLanguageModule = Pick<typeof import("@codemirror/lang-sql"), "Cassandra" | "MSSQL" | "MySQL" | "PLSQL" | "PostgreSQL" | "SQLite" | "SQLDialect" | "StandardSQL">;
+export type CodeMirrorSqlDialectName = "mysql" | "postgres" | "sqlserver" | "oracle" | "clickhouse" | "soql";
+
+export function supportsQueryEditorSqlLanguage(databaseType?: DatabaseType): boolean {
+  return databaseType !== "qdrant";
+}
+
+export type CodeMirrorSqlLanguageModule = Pick<typeof import("@codemirror/lang-sql"), "Cassandra" | "MSSQL" | "MySQL" | "PLSQL" | "PostgreSQL" | "SQLite" | "SQLDialect" | "StandardSQL">;
 
 const MYSQL_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "doris", "starrocks", "manticoresearch", "goldendb", "gbase"]);
 const POSTGRES_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss", "questdb"]);
 const ORACLE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["oracle", "dameng", "yashandb", "oscar", "oceanbase-oracle"]);
 const SQLITE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["sqlite", "rqlite", "turso", "cloudflare-d1"]);
+// Non-MySQL-wire dialects whose servers still interpret backslash escapes in string
+// literals; the mysql-family types are covered by isMysql at the define() site. Mirrors
+// BACKSLASH_ESCAPE_STRING_DIALECTS in lib/sql/sqlStatementRanges.ts so the editor
+// tokenizer and the statement splitter agree on escape semantics per dialect.
+const BACKSLASH_ESCAPE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["hive", "argo", "transwarp", "impala", "spark", "databend"]);
 
 const CODEMIRROR_SQLITE_EXTENSION_KEYWORDS = new Set("abort analyze attach autoincrement conflict database detach exclusive fail glob ignore index indexed instead isnull notnull offset plan pragma query raise regexp reindex rename replace temp vacuum virtual".split(" "));
 const STANDARD_SQL_TYPES = "array binary bit boolean char character clob date decimal double float int integer interval large national nchar nclob numeric object precision real smallint time timestamp varchar varying";
@@ -36,6 +56,7 @@ const DBX_COMMON_SQL_KEYWORDS = [
   "FILTER",
   "RECURSIVE",
   "SUMMARIZE",
+  "MATERIALIZED",
   "PRAGMA",
   "READ_CSV",
   "READ_PARQUET",
@@ -156,7 +177,132 @@ const CLICKHOUSE_TYPES = [
   .join(" ")
   .toLowerCase();
 
-const CLICKHOUSE_BUILTINS = ["now", "today", "toDate", "toDateTime", "toDateTime64", "toYYYYMM", "count", "sum", "avg", "min", "max", "uniq", "uniqExact", "argMin", "argMax", "groupArray", "arrayJoin", "mapKeys", "mapValues", "JSONExtract", "JSONExtractString"].join(" ").toLowerCase();
+const CLICKHOUSE_BUILTINS = ["now", "today", "toDate", "toDateTime", "toDateTime64", "toYYYYMM", "count", "sum", "avg", "min", "max", "uniq", "uniqExact", "argMin", "argMax", "groupArray", "arrayJoin", "mapKeys", "mapValues", "JSONExtract", "JSONExtractString", "mapFilter", "mapContains"]
+  .join(" ")
+  .toLowerCase();
+
+// Salesforce SOQL is a distinct query language: no JOINs, no DDL/DML keywords, no
+// identifier quoting, single-quoted strings only, and its own clause/operator set.
+// CodeMirror's tokenizer lowercases each word before lookup (lang-sql keywords()),
+// so every entry below is stored lowercase to guarantee a match. true/false/null are
+// omitted on purpose — lang-sql pre-registers them as Bool/Null tokens.
+const SOQL_KEYWORDS = [
+  // Clauses & query structure
+  "select",
+  "from",
+  "where",
+  "and",
+  "or",
+  "not",
+  "in",
+  "like",
+  "includes",
+  "excludes",
+  "order",
+  "by",
+  "group",
+  "having",
+  "limit",
+  "offset",
+  "asc",
+  "desc",
+  "nulls",
+  "first",
+  "last",
+  "all",
+  "distinct",
+  // TYPEOF (polymorphic field selection)
+  "typeof",
+  "when",
+  "then",
+  "else",
+  "end",
+  // WITH clauses
+  "with",
+  "security_enforced",
+  "user_mode",
+  "system_mode",
+  "fields",
+  "standard",
+  "custom",
+  "data",
+  "category",
+  "using",
+  "scope",
+  "above",
+  "below",
+  "above_or_below",
+  // FOR clauses (tracking / viewstat)
+  "for",
+  "view",
+  "reference",
+  "update",
+  "tracking",
+  "viewstat",
+  // Date literals (the non-parameterized forms; :n variants highlight the stem)
+  "yesterday",
+  "today",
+  "tomorrow",
+  "last_week",
+  "this_week",
+  "next_week",
+  "last_month",
+  "this_month",
+  "next_month",
+  "last_90_days",
+  "next_90_days",
+  "last_n_days",
+  "next_n_days",
+  "last_quarter",
+  "this_quarter",
+  "next_quarter",
+  "last_n_quarters",
+  "next_n_quarters",
+  "last_year",
+  "this_year",
+  "next_year",
+  "last_n_years",
+  "next_n_years",
+  "last_fiscal_quarter",
+  "this_fiscal_quarter",
+  "next_fiscal_quarter",
+  "last_n_fiscal_quarters",
+  "next_n_fiscal_quarters",
+  "last_fiscal_year",
+  "this_fiscal_year",
+  "next_fiscal_year",
+  "last_n_fiscal_years",
+  "next_n_fiscal_years",
+].join(" ");
+
+// SOQL aggregate + date/convert functions. Highlighted as builtins (callable names).
+const SOQL_BUILTINS = [
+  "count",
+  "count_distinct",
+  "sum",
+  "avg",
+  "min",
+  "max",
+  "grouping",
+  "convertcurrency",
+  "converttimezone",
+  "tolabel",
+  "format",
+  "calendar_month",
+  "calendar_quarter",
+  "calendar_year",
+  "day_in_month",
+  "day_in_week",
+  "day_in_year",
+  "day_only",
+  "fiscal_month",
+  "fiscal_quarter",
+  "fiscal_year",
+  "hour_in_day",
+  "week_in_month",
+  "week_only",
+  "month_in_year",
+].join(" ");
 
 // COUNT is stripped from Postgres keywords by postgresKeywordSyntaxTerms() (it's a
 // valid Postgres identifier name), so it's re-added here as a builtin function instead.
@@ -205,8 +351,14 @@ function standardSqlKeywordSyntaxTerms(langSql: CodeMirrorSqlLanguageModule): st
     .join(" ");
 }
 
-function codeMirrorBaseDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName, databaseType?: DatabaseType): SQLDialect {
+export function codeMirrorBaseDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName, databaseType?: DatabaseType): SQLDialect {
   if (databaseType) {
+    if (databaseType === "kingbase") {
+      if (dialectName === "oracle") return langSql.PLSQL;
+      if (dialectName === "mysql") return langSql.MySQL;
+      if (dialectName === "sqlserver") return langSql.MSSQL;
+      return langSql.PostgreSQL;
+    }
     if (databaseType === "clickhouse") return langSql.StandardSQL;
     if (MYSQL_CODEMIRROR_DATABASE_TYPES.has(databaseType)) return langSql.MySQL;
     if (POSTGRES_CODEMIRROR_DATABASE_TYPES.has(databaseType)) return langSql.PostgreSQL;
@@ -218,26 +370,51 @@ function codeMirrorBaseDialect(langSql: CodeMirrorSqlLanguageModule, dialectName
     return langSql.StandardSQL;
   }
   if (dialectName === "clickhouse") return langSql.StandardSQL;
+  if (dialectName === "oracle") return langSql.PLSQL;
   return dialectName === "postgres" ? langSql.PostgreSQL : dialectName === "sqlserver" ? langSql.MSSQL : langSql.MySQL;
 }
 
-export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName = "mysql", databaseType?: DatabaseType, driverProfile?: string): SQLDialect {
+export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName = "mysql", databaseType?: DatabaseType, driverProfile?: string, parameterOptions?: SqlParameterOptions): SQLDialect {
+  // SOQL is its own language, not a SQL superset: define it from a precise keyword
+  // set with no identifier quoting, single-quoted strings, and backslash escapes.
+  if (databaseType === "salesforce" || dialectName === "soql") {
+    return langSql.SQLDialect.define({
+      keywords: SOQL_KEYWORDS,
+      builtin: [SOQL_BUILTINS, driverProfileSqlBuiltinTerms(driverProfile)].filter(Boolean).join(" ") || undefined,
+      backslashEscapes: true,
+      doubleQuotedStrings: false,
+      caseInsensitiveIdentifiers: true,
+      identifierQuotes: "",
+      doubleDollarQuotedStrings: false,
+    }).configureLanguage({
+      props: SQL_DIALECT_LANGUAGE_PROPS,
+    });
+  }
   const baseDialect = codeMirrorBaseDialect(langSql, dialectName, databaseType);
   const isPostgres = baseDialect === langSql.PostgreSQL;
   const isMysql = baseDialect === langSql.MySQL;
   const isSqlServer = baseDialect === langSql.MSSQL;
   const isPlsql = baseDialect === langSql.PLSQL;
   const isClickHouse = databaseType === "clickhouse" || dialectName === "clickhouse";
-  const baseKeywords = isClickHouse ? standardSqlKeywordSyntaxTerms(langSql) : isPostgres ? postgresKeywordSyntaxTerms(baseDialect.spec.keywords || "") : baseDialect.spec.keywords || "";
-  const baseTypes = isClickHouse ? STANDARD_SQL_TYPES : baseDialect.spec.types || "";
+  // StandardSQL.spec exposes no vocabulary, so every StandardSQL-based dialect
+  // (generic JDBC, IRIS/Caché, H2, DB2, …) needs the reconstructed standard
+  // keyword set — without it SELECT/WHERE/AND highlight as plain identifiers.
+  const isStandardSql = isClickHouse || baseDialect === langSql.StandardSQL;
+  const baseKeywords = isStandardSql ? standardSqlKeywordSyntaxTerms(langSql) : isPostgres ? postgresKeywordSyntaxTerms(baseDialect.spec.keywords || "") : baseDialect.spec.keywords || "";
+  const baseTypes = isStandardSql ? STANDARD_SQL_TYPES : baseDialect.spec.types || "";
   const commonKeywords = isClickHouse ? DBX_COMMON_SQL_KEYWORDS.toLowerCase() : DBX_COMMON_SQL_KEYWORDS;
   const baseBuiltin = isSqlServer ? sqlServerBuiltinSyntaxTerms(baseDialect.spec.builtin || "") : baseDialect.spec.builtin || "";
 
-  return langSql.SQLDialect.define({
+  const dialect = langSql.SQLDialect.define({
     ...baseDialect.spec,
     keywords: [baseKeywords, commonKeywords, isClickHouse ? CLICKHOUSE_KEYWORDS : "", isPostgres ? POSTGRES_PLPGSQL_KEYWORDS : "", isSqlServer ? SQLSERVER_KEYWORDS : ""].filter(Boolean).join(" "),
     types: [baseTypes, isClickHouse ? CLICKHOUSE_TYPES : "", isPostgres ? POSTGRES_PLPGSQL_TYPES : ""].filter(Boolean).join(" ") || undefined,
     builtin: [baseBuiltin, isClickHouse ? CLICKHOUSE_BUILTINS : "", isPostgres ? `${POSTGRES_BUILTINS} ${POSTGRES_PLPGSQL_BUILTIN}` : "", isMysql ? MYSQL_BUILTINS : "", driverProfileSqlBuiltinTerms(driverProfile)].filter(Boolean).join(" ") || undefined,
+    // T-SQL temp tables (#local / ##global) otherwise tokenize the leading
+    // `#` as a parser error, breaking highlighting for the whole name. The
+    // specialVar scanner natively handles the doubled prefix and already
+    // covers @@variables, so # joins the same channel for SQL Server (#8267).
+    ...(isSqlServer ? { specialVar: `${baseDialect.spec.specialVar ?? ""}#` } : {}),
     ...(isClickHouse
       ? {
           identifierQuotes: '"`',
@@ -245,7 +422,15 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
           spaceAfterDashes: false,
         }
       : {}),
+    ...(isMysql || (databaseType && BACKSLASH_ESCAPE_CODEMIRROR_DATABASE_TYPES.has(databaseType))
+      ? {
+          backslashEscapes: true,
+        }
+      : {}),
     ...(isPlsql ? { doubleQuotedStrings: false } : {}),
     doubleDollarQuotedStrings: false,
+  }).configureLanguage({
+    props: SQL_DIALECT_LANGUAGE_PROPS,
   });
+  return withSqlParameterHighlighting(dialect, parameterOptions);
 }

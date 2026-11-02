@@ -1,6 +1,14 @@
-import { Text } from "@codemirror/state";
+import { ChangeSet, Text } from "@codemirror/state";
 import { describe, expect, it, vi } from "vitest";
-import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeParser } from "@/lib/sql/executableStatementRangeCache";
+import {
+  executableStatementRangeAtCursor,
+  executableStatementRangeCacheForDoc,
+  executableStatementRangeStartingAt,
+  mapStatementGutterStartIndex,
+  statementGutterStartIndexForCache,
+  statementGutterStartIndexHasStartAt,
+  type ExecutableStatementRangeParser,
+} from "@/lib/sql/executableStatementRangeCache";
 
 describe("executableStatementRangeCacheForDoc", () => {
   it("tracks MongoDB commands for current-statement framing", () => {
@@ -107,6 +115,32 @@ describe("executableStatementRangeCacheForDoc", () => {
     const cache = executableStatementRangeCacheForDoc(null, doc, "sqlserver");
 
     expect(executableStatementRangeStartingAt(cache, doc.line(2).from)?.sql).toBe(sql);
+    expect(executableStatementRangeAtCursor(cache, doc.line(2).from + 2)?.sql).toBe(sql);
+  });
+
+  it("keeps Kingbase SQLServer temporary tables executable at the cursor and gutter", () => {
+    const sql = "/*+ hint */\nSELECT\n#temporary_table.id\nFROM #temporary_table";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "kingbase", { compatibilityMode: "sqlserver" });
+    expect(executableStatementRangeStartingAt(cache, doc.line(2).from)?.sql).toBe(sql);
+    expect(executableStatementRangeAtCursor(cache, doc.line(3).from + 2)?.sql).toBe(sql);
+  });
+
+  it("resolves the SQL gutter after a Kingbase MySQL proxy directive", () => {
+    const sql = "/*proxy*/\nSELECT 1;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "kingbase", { compatibilityMode: "mysql" });
+    expect(executableStatementRangeStartingAt(cache, doc.line(2).from)?.sql).toBe(sql.slice(0, -1));
+  });
+
+  it("preserves PG JSON path operators in statements and cursor ranges", () => {
+    const statement = `SELECT '{"a":{"b":7}}'::jsonb\n#>> '{a,b}' AS value`;
+    const doc = Text.of(`${statement};\nSELECT 2;`.split("\n"));
+    for (const type of ["kingbase", "postgres"] as const) {
+      const cache = executableStatementRangeCacheForDoc(null, doc, type, { compatibilityMode: "pg" });
+      expect(cache.ranges.map((range) => range.sql)).toEqual([statement, "SELECT 2"]);
+      expect(executableStatementRangeAtCursor(cache, doc.line(2).from + 2)?.sql).toBe(statement);
+    }
   });
 
   it("does not attach ordinary leading block comments to gutter execution", () => {
@@ -235,5 +269,35 @@ describe("executableStatementRangeCacheForDoc", () => {
 
     expect(postgres).not.toBe(mysql);
     expect(parse).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("statementGutterStartIndex", () => {
+  it("derives membership from both statement starts and executable line starts", () => {
+    const doc = Text.of(["/*+ hint */", "SELECT 1;", "", "SELECT 2;"]);
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+    const index = statementGutterStartIndexForCache(cache);
+
+    // First statement: executable start lands on the directive's following line.
+    expect(statementGutterStartIndexHasStartAt(index, doc.line(2).from)).toBe(true);
+    expect(statementGutterStartIndexHasStartAt(index, doc.line(4).from)).toBe(true);
+    expect(statementGutterStartIndexHasStartAt(index, doc.line(3).from)).toBe(false);
+  });
+
+  it("shifts start positions through insertions and deletions", () => {
+    const doc = Text.of(["SELECT 1;", "SELECT 2;"]);
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+    const index = statementGutterStartIndexForCache(cache);
+    const secondLineStart = doc.line(2).from;
+    expect(statementGutterStartIndexHasStartAt(index, secondLineStart)).toBe(true);
+
+    const header = "-- lead\n";
+    const afterInsert = mapStatementGutterStartIndex(index, ChangeSet.of({ from: 0, to: 0, insert: header }, doc.length));
+    expect(statementGutterStartIndexHasStartAt(afterInsert, secondLineStart)).toBe(false);
+    expect(statementGutterStartIndexHasStartAt(afterInsert, secondLineStart + header.length)).toBe(true);
+
+    const afterDelete = mapStatementGutterStartIndex(index, ChangeSet.of({ from: 0, to: "SELECT 1;\n".length, insert: "" }, doc.length));
+    expect(statementGutterStartIndexHasStartAt(afterDelete, secondLineStart - "SELECT 1;\n".length)).toBe(true);
+    expect(statementGutterStartIndexHasStartAt(afterDelete, 0)).toBe(true);
   });
 });

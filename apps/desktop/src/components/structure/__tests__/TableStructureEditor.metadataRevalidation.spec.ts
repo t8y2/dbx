@@ -1,0 +1,1395 @@
+// @vitest-environment happy-dom
+
+import { createApp, nextTick, type App } from "vue";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Regression for #8816: the editor serves its initial load from the frontend
+// metadata cache, which in-app mutations only invalidate. A table rebuilt by
+// another session therefore reopened with stale columns; cache-served loads
+// must revalidate the affected facets in the background without clobbering
+// pending user edits.
+
+const mocks = vi.hoisted(() => ({
+  revision: 0,
+  connection: {
+    id: "structure-revalidation",
+    name: "MySQL",
+    db_type: "mysql",
+    driver_label: "MySQL",
+    driver_profile: "",
+    query_timeout_secs: 30,
+  },
+  ensureConnected: vi.fn(),
+  executeQuery: vi.fn(),
+  executeBatch: vi.fn(),
+  listDataTypes: vi.fn(),
+  buildTableStructureChangeSql: vi.fn(),
+  buildMysqlAutoIncrementSql: vi.fn(),
+  buildTableOwnerChangeSql: vi.fn(),
+  getTablePartitionStatus: vi.fn(),
+  getTableOwner: vi.fn(),
+  updateEditorSettings: vi.fn(),
+  loadObjectDdl: vi.fn(),
+  invalidateObjectDdl: vi.fn(),
+  loadObjectMetadataFacet: vi.fn(),
+  invalidateObjectMetadataCache: vi.fn(),
+  invalidateTableMetadataCache: vi.fn(),
+  toast: vi.fn(),
+}));
+
+vi.mock("vue-i18n", async (original) => ({ ...(await original<typeof import("vue-i18n")>()), useI18n: () => ({ t: (key: string) => key }) }));
+
+vi.mock("@lucide/vue", async () => {
+  const { defineComponent, h } = await import("vue");
+  const Icon = defineComponent({ name: "Icon", setup: () => () => h("span") });
+  return {
+    AlertTriangle: Icon,
+    Check: Icon,
+    ChevronDown: Icon,
+    ChevronLeft: Icon,
+    ChevronRight: Icon,
+    ChevronUp: Icon,
+    ClipboardList: Icon,
+    Copy: Icon,
+    Database: Icon,
+    Info: Icon,
+    Keyboard: Icon,
+    KeyRound: Icon,
+    ListChevronsUpDown: Icon,
+    Loader2: Icon,
+    Maximize2: Icon,
+    Pencil: Icon,
+    Plus: Icon,
+    RefreshCw: Icon,
+    RotateCcw: Icon,
+    Rows3: Icon,
+    Save: Icon,
+    Search: Icon,
+    Settings: Icon,
+    SlidersHorizontal: Icon,
+    Trash2: Icon,
+    UserRound: Icon,
+    X: Icon,
+  };
+});
+
+vi.mock("@/components/ui/button", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    Button: defineComponent({
+      name: "Button",
+      inheritAttrs: false,
+      setup:
+        (_props, { attrs, slots }) =>
+        () =>
+          h("button", attrs, slots.default?.()),
+    }),
+  };
+});
+vi.mock("@/components/ui/input", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    Input: defineComponent({
+      name: "Input",
+      inheritAttrs: false,
+      props: { modelValue: { type: [String, Number], default: "" } },
+      emits: ["update:modelValue"],
+      setup:
+        (props, { attrs, emit }) =>
+        () =>
+          h("input", {
+            ...attrs,
+            value: props.modelValue,
+            onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value),
+          }),
+    }),
+  };
+});
+vi.mock("@/components/ui/badge", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    Badge: defineComponent({
+      name: "Badge",
+      inheritAttrs: false,
+      setup:
+        (_props, { attrs, slots }) =>
+        () =>
+          h("span", attrs, slots.default?.()),
+    }),
+  };
+});
+vi.mock("@/components/ui/tabs", async () => {
+  const { defineComponent, h } = await import("vue");
+  const Div = defineComponent({
+    inheritAttrs: false,
+    setup:
+      (_props, { attrs, slots }) =>
+      () =>
+        h("div", attrs, slots.default?.()),
+  });
+  const TabsContent = defineComponent({
+    name: "MockTabsContent",
+    inheritAttrs: false,
+    setup:
+      (_props, { attrs, slots }) =>
+      () =>
+        h("div", attrs, slots.default?.()),
+  });
+  const TabsTrigger = defineComponent({
+    name: "MockTabsTrigger",
+    inheritAttrs: false,
+    props: { value: { type: String, required: true } },
+    setup:
+      (props, { attrs, slots }) =>
+      () =>
+        h("button", { ...attrs, type: "button", "data-tab-trigger": props.value }, slots.default?.()),
+  });
+  return { Tabs: Div, TabsContent, TabsList: Div, TabsTrigger };
+});
+vi.mock("@/components/ui/dropdown-menu", async () => {
+  const { defineComponent, h } = await import("vue");
+  const Div = defineComponent({
+    inheritAttrs: false,
+    setup:
+      (_props, { attrs, slots }) =>
+      () =>
+        h("div", attrs, slots.default?.()),
+  });
+  return { DropdownMenu: Div, DropdownMenuCheckboxItem: Div, DropdownMenuContent: Div, DropdownMenuItem: Div, DropdownMenuTrigger: Div };
+});
+vi.mock("@/components/ui/popover", async () => {
+  const { defineComponent, h } = await import("vue");
+  const Div = defineComponent({
+    inheritAttrs: false,
+    setup:
+      (_props, { attrs, slots }) =>
+      () =>
+        h("div", attrs, slots.default?.()),
+  });
+  return { Popover: Div, PopoverContent: Div, PopoverTrigger: Div };
+});
+vi.mock("@/components/ui/tooltip", async () => {
+  const { defineComponent, h } = await import("vue");
+  const Div = defineComponent({
+    inheritAttrs: false,
+    setup:
+      (_props, { attrs, slots }) =>
+      () =>
+        h("div", attrs, slots.default?.()),
+  });
+  return { Tooltip: Div, TooltipContent: Div, TooltipTrigger: Div };
+});
+vi.mock("@/components/ui/searchable-select", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    SearchableSelect: defineComponent({
+      name: "SearchableSelect",
+      inheritAttrs: false,
+      props: { modelValue: { type: String, default: "" } },
+      emits: ["update:modelValue"],
+      setup:
+        (props, { attrs }) =>
+        () =>
+          h("button", { ...attrs, type: "button", "data-model-value": props.modelValue }),
+    }),
+  };
+});
+vi.mock("@/components/ui/select", async () => {
+  const { defineComponent, h } = await import("vue");
+  const Div = defineComponent({
+    inheritAttrs: false,
+    setup:
+      (_props, { attrs, slots }) =>
+      () =>
+        h("div", attrs, slots.default?.()),
+  });
+  const Select = defineComponent({
+    inheritAttrs: false,
+    props: { modelValue: { type: String, default: "" } },
+    emits: ["update:modelValue"],
+    setup:
+      (props, { attrs, slots, emit }) =>
+      () =>
+        h("div", attrs, [
+          h(
+            "select",
+            { value: props.modelValue, onChange: (event: Event) => emit("update:modelValue", (event.target as HTMLSelectElement).value) },
+            ["BTREE", "FULLTEXT", "SPATIAL"].map((value) => h("option", { value }, value)),
+          ),
+          slots.default?.(),
+        ]),
+  });
+  return { Select, SelectContent: Div, SelectItem: Div, SelectTrigger: Div, SelectValue: Div };
+});
+vi.mock("@/components/editor/EditorSearchPanel.vue", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    default: defineComponent({
+      name: "MockEditorSearchPanel",
+      setup: () => ({ openSearch: () => false, closeSearch: () => false }),
+      render: () => h("div", { "data-editor-search-panel": "true" }),
+    }),
+  };
+});
+
+vi.mock("@/stores/connectionStore", async () => {
+  const { reactive } = await import("vue");
+  const config = reactive(mocks.connection);
+  return {
+    useConnectionStore: () => ({
+      ensureConnected: mocks.ensureConnected,
+      connectionStateRevision: () => mocks.revision,
+      isCurrentConnectionStateRevision: () => true,
+      getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? config : undefined),
+    }),
+  };
+});
+vi.mock("@/stores/productionSafetyStore", () => ({ useProductionSafetyStore: () => ({ requestConfirmation: vi.fn() }) }));
+vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ tableStructureRefreshVersion: () => 0 }) }));
+vi.mock("@/stores/historyStore", () => ({ useHistoryStore: () => ({ add: vi.fn() }) }));
+vi.mock("@/stores/settingsStore", () => ({
+  useSettingsStore: () => ({
+    editorSettings: { structureEditorDensity: "compact", sqlFormatter: {}, tableColumnTemplateFields: [], fontSize: 13, fontFamily: "monospace", theme: "default", generateSqlQuoteIdentifiers: true },
+    updateEditorSettings: mocks.updateEditorSettings,
+  }),
+}));
+vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: false }, themePalette: { value: "pearl" } }) }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
+vi.mock("@/lib/sql/sqlHighlighter", () => ({ createShikiSqlHighlighter: vi.fn(async () => (sql: string) => sql) }));
+vi.mock("@/lib/sql/sqlFormatter", () => ({
+  formatSqlForDisplay: vi.fn(async (sql: string) => sql),
+  sqlFormatDialectForDbType: vi.fn(() => "mysql"),
+}));
+vi.mock("@/lib/editor/editorThemes", () => ({ loadEditorTheme: vi.fn(async () => []), editorFontTheme: vi.fn(() => []) }));
+vi.mock("@/lib/metadata/objectDdlCache", () => ({
+  loadObjectDdl: mocks.loadObjectDdl,
+  invalidateObjectDdl: mocks.invalidateObjectDdl,
+}));
+vi.mock("@/lib/metadata/objectMetadataCache", () => ({ loadObjectMetadataFacet: mocks.loadObjectMetadataFacet, invalidateObjectMetadataCache: mocks.invalidateObjectMetadataCache }));
+vi.mock("@/lib/metadata/tableMetadataCache", () => ({ invalidateTableMetadataCache: mocks.invalidateTableMetadataCache }));
+vi.mock("@/lib/backend/api", () => ({
+  executeQuery: mocks.executeQuery,
+  executeBatch: mocks.executeBatch,
+  listDataTypes: mocks.listDataTypes,
+  buildTableStructureChangeSql: mocks.buildTableStructureChangeSql,
+  buildMysqlAutoIncrementSql: mocks.buildMysqlAutoIncrementSql,
+  buildTableOwnerChangeSql: mocks.buildTableOwnerChangeSql,
+  getTablePartitionStatus: mocks.getTablePartitionStatus,
+  getTableOwner: mocks.getTableOwner,
+}));
+vi.mock("@/lib/database/oracleConstraints", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/database/oracleConstraints")>();
+  return {
+    ...actual,
+    readOracleIndexSnapshot: vi.fn(async (target) => ({
+      user: target.schema || "TEST",
+      currentSchema: target.schema || "TEST",
+      database: target.database,
+      databaseName: "ORCL",
+      objectId: "1",
+      columns: [],
+      userColumns: [],
+      columnReadMode: "strict-base" as const,
+      indexes: [],
+      indexNames: [],
+    })),
+  };
+});
+
+import TableStructureEditor from "@/components/structure/TableStructureEditor.vue";
+import { createColumnDrafts, createIndexDrafts } from "@/lib/table/tableStructureEditorState";
+import type { TableStructureEditorDraft } from "@/types/database";
+import type { BuildTableStructureChangeSqlOptions, EditableStructureIndex } from "@/lib/table/tableStructureEditorSql";
+
+describe("Oracle issue 13032/13310 preview probe", () => {
+  it("keeps a complete draft preview when the inherited query timeout changes", async () => {
+    mocks.connection.db_type = "oracle";
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => ({ value: facet === "columns" ? [{ name: "REC_ID", data_type: "NUMBER", is_nullable: true, is_primary_key: false }] : facet === "comment" ? "" : [], cacheStatus: "remote" }));
+    mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: ["ALTER TABLE users RENAME COLUMN REC_ID TO CHANGED"], warnings: [] });
+    const root = await mountStructureEditor();
+    const input = root.querySelector<HTMLInputElement>("[data-column-name-input]")!;
+    input.value = "CHANGED";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(root.textContent).toContain("ALTER TABLE users"));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    useConnectionStore().getConfig(mocks.connection.id)!.query_timeout_secs = 45;
+    await settle();
+    expect(root.textContent).toContain("ALTER TABLE users");
+    expect([...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "structureEditor.apply")?.disabled).toBe(false);
+  });
+  it("clears the recovery error when the last incomplete column is removed", async () => {
+    mocks.connection.db_type = "oracle";
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => {
+      if (facet === "columns") throw new Error("probe metadata unavailable");
+      return { value: facet === "comment" ? "" : [], cacheStatus: "remote" };
+    });
+    const columns = createColumnDrafts(
+      [
+        { name: "REC_ID", data_type: "VARCHAR2(32)", is_nullable: false, is_primary_key: false },
+        { name: "KEEP", data_type: "VARCHAR2(32)", is_nullable: true, is_primary_key: false },
+      ],
+      "oracle",
+    );
+    columns[0]!.original = undefined;
+    const root = document.createElement("div");
+    document.body.append(root);
+    const app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      tableName: "users",
+      draft: {
+        initialized: true,
+        dirty: true,
+        activeTab: "columns",
+        newTableName: "",
+        tableComment: "",
+        originalTableComment: "",
+        columns,
+        indexes: [],
+        foreignKeys: [],
+        triggers: [],
+        loadedMetadataFacets: ["columns", "indexes", "comment"],
+      },
+    });
+    mountedApps.push(app);
+    app.mount(root);
+    await settle();
+    expect(root.textContent).toContain("probe metadata unavailable");
+    const missing = [...root.querySelectorAll<HTMLInputElement>("[data-column-name-input]")].find((input) => input.value === "REC_ID")!;
+    missing.closest("tr")!.querySelector<HTMLButtonElement>("[data-delete-column-shortcut-button]")!.click();
+    await settle();
+    const keep = root.querySelector<HTMLInputElement>("[data-column-name-input]")!;
+    keep.value = "KEPT_EDIT";
+    keep.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: ["ALTER TABLE users RENAME COLUMN KEEP TO KEPT_EDIT"], warnings: [] });
+    root.querySelector<HTMLButtonElement>("[data-refresh-structure-shortcut]")!.click();
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled());
+    expect(root.textContent).not.toContain("probe metadata unavailable");
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("KEPT_EDIT");
+    expect(mocks.buildTableStructureChangeSql.mock.calls.at(-1)![0].columns.map((column: { name: string }) => column.name)).toEqual(["KEPT_EDIT"]);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+  it.each(["success", "failure", "revision"])("isolates hydration completion after %s", async (outcome) => {
+    mocks.connection.db_type = "oracle";
+    let finishOld!: (value: unknown) => void;
+    let failOld!: (error: Error) => void;
+    let finishNew!: (value: unknown) => void;
+    let reads = 0;
+    const metadata = [{ name: "REC_ID", data_type: "VARCHAR2(32)", is_nullable: false, is_primary_key: false }];
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => {
+      if (facet === "columns") {
+        reads++;
+        if (reads === 1)
+          return new Promise((resolve, reject) => {
+            finishOld = resolve;
+            failOld = reject;
+          });
+        if (reads === 2)
+          return new Promise((resolve) => {
+            finishNew = resolve;
+          });
+      }
+      return { value: facet === "columns" ? metadata : facet === "comment" ? "" : [], cacheStatus: "remote" };
+    });
+    const columns = createColumnDrafts(metadata, "oracle");
+    columns[0]!.original = undefined;
+    columns[0]!.name = "WAIT_EDIT";
+    mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: ["ALTER TABLE users RENAME COLUMN REC_ID TO WAIT_EDIT"], warnings: [] });
+    const root = document.createElement("div");
+    document.body.append(root);
+    const app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      tableName: "users",
+      draft: {
+        initialized: true,
+        dirty: true,
+        activeTab: "columns",
+        newTableName: "",
+        tableComment: "",
+        originalTableComment: "",
+        columns,
+        indexes: [],
+        foreignKeys: [],
+        triggers: [],
+        loadedMetadataFacets: ["columns", "indexes", "comment"],
+      },
+    });
+    mountedApps.push(app);
+    app.mount(root);
+    await settle();
+    expect(root.querySelector("[aria-busy]")?.getAttribute("aria-busy")).toBe("true");
+    if (outcome === "revision") {
+      mocks.revision++;
+      finishOld({ value: metadata, cacheStatus: "remote" });
+      await settle();
+      expect(root.querySelector("[aria-busy]")?.getAttribute("aria-busy")).toBe("false");
+      expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
+      expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("WAIT_EDIT");
+      return;
+    }
+    root.querySelector<HTMLButtonElement>("[data-refresh-structure-shortcut]")!.click();
+    await vi.waitFor(() => expect(finishNew).toBeDefined());
+    if (outcome === "success") finishOld({ value: [{ name: "WRONG", data_type: "NUMBER", is_nullable: true }], cacheStatus: "remote" });
+    else failOld(new Error("stale hydration failure"));
+    await settle();
+    expect(root.querySelector("[aria-busy]")?.getAttribute("aria-busy")).toBe("true");
+    expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
+    finishNew({ value: metadata, cacheStatus: "remote" });
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled());
+    expect(root.textContent).not.toContain("stale hydration failure");
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("WAIT_EDIT");
+    expect(root.querySelectorAll("[data-column-name-input]")).toHaveLength(1);
+    expect(root.querySelector("[aria-busy]")?.getAttribute("aria-busy")).toBe("false");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+  it.each([
+    { databaseType: "oracle", exactIdentity: false },
+    { databaseType: "oceanbase-oracle", exactIdentity: false },
+    { databaseType: "oracle", exactIdentity: true },
+  ])("retries failed hydration without discarding edits ($databaseType/$exactIdentity)", async ({ databaseType, exactIdentity }) => {
+    mocks.connection.db_type = databaseType;
+    const { readOracleIndexSnapshot } = await import("@/lib/database/oracleConstraints");
+    let available = false;
+    const metadata = [{ name: "REC_ID", data_type: "VARCHAR2(32)", is_nullable: false, is_primary_key: false }];
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => {
+      if (facet === "columns" && !available) throw new Error("probe metadata unavailable");
+      return { value: facet === "columns" ? metadata : facet === "comment" ? "" : [], cacheStatus: "remote" };
+    });
+    const columns = createColumnDrafts(metadata, databaseType as "oracle" | "oceanbase-oracle");
+    columns[0]!.original = undefined;
+    const root = document.createElement("div");
+    document.body.append(root);
+    const app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      tableName: "users",
+      exactIdentity,
+      draft: {
+        initialized: true,
+        dirty: true,
+        activeTab: "columns",
+        newTableName: "",
+        tableComment: "",
+        originalTableComment: "",
+        columns,
+        indexes: [],
+        foreignKeys: [],
+        triggers: [],
+        loadedMetadataFacets: ["columns", "indexes", "comment"],
+      },
+    });
+    mountedApps.push(app);
+    app.mount(root);
+    await settle();
+    expect(root.textContent).toContain("probe metadata unavailable");
+    const input = root.querySelector<HTMLInputElement>("[data-column-name-input]")!;
+    input.value = "WAIT_EDIT";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    const refresh = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "structureEditor.refresh");
+    expect(refresh).toBeDefined();
+    refresh!.click();
+    await settle();
+    expect(root.textContent).toContain("probe metadata unavailable");
+    expect(root.querySelector("[aria-busy]")?.getAttribute("aria-busy")).toBe("false");
+    available = true;
+    mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: ["ALTER TABLE users RENAME COLUMN REC_ID TO WAIT_EDIT"], warnings: [] });
+    refresh!.click();
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled());
+    const options = mocks.buildTableStructureChangeSql.mock.calls.at(-1)![0];
+    expect(options.columns[0].name).toBe("WAIT_EDIT");
+    expect(options.columns[0].original.name).toBe("REC_ID");
+    expect(mocks.loadObjectMetadataFacet.mock.calls.some((call) => call[1] === "columns" && call[3]?.force === true)).toBe(true);
+    await vi.waitFor(() => expect(root.textContent).not.toContain("probe metadata unavailable"));
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("WAIT_EDIT");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    if (exactIdentity) await vi.waitFor(() => expect(readOracleIndexSnapshot).toHaveBeenCalled());
+  });
+  it("keeps edits made after failed hydration across deactivate and activate", async () => {
+    const { KeepAlive, h, ref } = await import("vue");
+    mocks.connection.db_type = "oracle";
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => {
+      if (facet === "columns") throw new Error("probe metadata unavailable");
+      return { value: facet === "comment" ? "" : [], cacheStatus: "remote" };
+    });
+    const draftColumns = createColumnDrafts([{ name: "REC_ID", data_type: "VARCHAR2(32)", is_nullable: false, is_primary_key: false }], "oracle");
+    draftColumns[0]!.original = undefined;
+    draftColumns[0]!.name = "REC_ID_CHANGED";
+    const props = {
+      connectionId: mocks.connection.id,
+      database: "test",
+      tableName: "users",
+      draft: {
+        initialized: true,
+        dirty: true,
+        activeTab: "columns" as const,
+        newTableName: "",
+        tableComment: "",
+        originalTableComment: "",
+        columns: draftColumns,
+        indexes: [],
+        foreignKeys: [],
+        triggers: [],
+        loadedMetadataFacets: ["columns", "indexes", "comment"],
+      },
+    };
+    const root = document.createElement("div");
+    document.body.append(root);
+    const shown = ref(true);
+    const app = createApp({ setup: () => () => h(KeepAlive, null, { default: () => (shown.value ? h(TableStructureEditor, props) : null) }) });
+    mountedApps.push(app);
+    app.mount(root);
+    await settle();
+    const input = root.querySelector<HTMLInputElement>("[data-column-name-input]")!;
+    input.value = "WAIT_EDIT";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    expect(input.value).toBe("WAIT_EDIT");
+    shown.value = false;
+    await settle();
+    shown.value = true;
+    await settle();
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("WAIT_EDIT");
+  });
+  it.each(["rejected", "empty", "unmatched"])("reports incomplete hydration without leaving a preview pending (%s)", async (outcome) => {
+    mocks.connection.db_type = "oracle";
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => {
+      if (facet === "columns") {
+        if (outcome === "rejected") throw new Error("probe metadata unavailable");
+        return { value: outcome === "empty" ? [] : [{ name: "OTHER", data_type: "NUMBER", is_nullable: true }], cacheStatus: "remote" };
+      }
+      return { value: facet === "comment" ? "" : [], cacheStatus: "remote" };
+    });
+    const draftColumns = createColumnDrafts([{ name: "REC_ID", data_type: "VARCHAR2(32)", is_nullable: false, is_primary_key: false }], "oracle");
+    draftColumns[0]!.original = undefined;
+    draftColumns[0]!.name = "REC_ID_CHANGED";
+    const root = document.createElement("div");
+    document.body.append(root);
+    const app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      tableName: "users",
+      draft: {
+        initialized: true,
+        dirty: true,
+        activeTab: "columns",
+        newTableName: "",
+        tableComment: "",
+        originalTableComment: "",
+        columns: draftColumns,
+        indexes: [],
+        foreignKeys: [],
+        triggers: [],
+        loadedMetadataFacets: ["columns", "indexes", "comment"],
+      },
+    });
+    mountedApps.push(app);
+    app.mount(root);
+    await settle();
+    await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet.mock.calls.some((call) => call[1] === "columns")).toBe(true));
+    await settle();
+    expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("REC_ID_CHANGED");
+    const apply = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "structureEditor.apply");
+    expect(apply?.disabled).toBe(true);
+    expect(root.querySelector("[aria-busy]")?.querySelectorAll(".animate-spin")).toHaveLength(0);
+    expect(root.querySelector("[aria-busy]")?.getAttribute("aria-busy")).toBe("false");
+    expect(root.textContent).toContain(outcome === "rejected" ? "probe metadata unavailable" : "oceanbasePrimaryKey.incompleteMetadata");
+    expect(root.querySelectorAll("[data-column-name-input]")).toHaveLength(1);
+  });
+  it.each(["immediate", "delayed-indexes", "delayed-builder"])("finishes SQL preview after adding a VARCHAR2 column (%s)", async (scenario) => {
+    mocks.connection.db_type = "oracle";
+    let resolveIndexes!: (value: unknown) => void;
+    let resolveBuilder!: (value: unknown) => void;
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => {
+      if (scenario === "delayed-indexes" && facet === "indexes")
+        return new Promise((resolve) => {
+          resolveIndexes = resolve;
+        });
+      return { value: facet === "columns" ? [{ name: "REC_ID", data_type: "VARCHAR2(32)", is_nullable: false, is_primary_key: false }] : facet === "comment" ? "" : [], cacheStatus: "remote" };
+    });
+    const built = { statements: ['ALTER TABLE users ADD ("test" VARCHAR2(255))'], warnings: [] };
+    mocks.buildTableStructureChangeSql.mockImplementation(async () =>
+      scenario === "delayed-builder"
+        ? new Promise((resolve) => {
+            resolveBuilder = resolve;
+          })
+        : built,
+    );
+    const root = await mountStructureEditor();
+    if (scenario === "delayed-indexes") {
+      expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
+      resolveIndexes({ value: [], cacheStatus: "remote" });
+      await settle();
+    }
+    const add = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "structureEditor.addColumn");
+    expect(add).toBeDefined();
+    add!.click();
+    await settle();
+    const fields = [...root.querySelectorAll<HTMLInputElement>("[data-column-name-input]")];
+    const field = fields.at(-1)!;
+    field.value = "test";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled());
+    if (scenario === "delayed-builder") resolveBuilder(built);
+    await vi.waitFor(() => expect(root.textContent).toContain("ALTER TABLE users ADD"));
+    const apply = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "structureEditor.apply");
+    expect(apply).toBeDefined();
+    expect(apply!.disabled).toBe(false);
+  });
+});
+
+const mountedApps: App[] = [];
+
+const initialColumns = [{ name: "id", data_type: "bigint", nullable: false, default_value: null, comment: "" }];
+const rebuiltColumns = [
+  { name: "id", data_type: "integer", nullable: false, default_value: null, comment: "" },
+  { name: "email", data_type: "varchar(255)", nullable: true, default_value: null, comment: "" },
+];
+
+function columnsFacetCalls() {
+  return mocks.loadObjectMetadataFacet.mock.calls.filter((call) => call[1] === "columns");
+}
+
+async function settle() {
+  for (let i = 0; i < 30; i++) {
+    await nextTick();
+    await Promise.resolve();
+  }
+}
+
+async function mountStructureEditor(draft?: TableStructureEditorDraft, tableName = "users") {
+  const root = document.createElement("div");
+  document.body.append(root);
+  const app = createApp(TableStructureEditor, {
+    connectionId: mocks.connection.id,
+    database: "test",
+    tableName,
+    draft,
+  });
+  mountedApps.push(app);
+  app.mount(root);
+  await vi.waitFor(
+    () => {
+      expect(root.textContent).toContain("structureEditor.noChanges");
+    },
+    { timeout: 3000 },
+  );
+  await settle();
+  return root;
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.revision = 0;
+  mocks.connection.query_timeout_secs = 30;
+  mocks.connection.db_type = "mysql";
+  mocks.connection.driver_profile = "";
+  mocks.ensureConnected.mockResolvedValue(undefined);
+  mocks.executeQuery.mockResolvedValue({ columns: [], rows: [] });
+  mocks.executeBatch.mockResolvedValue({ rowsAffected: 0 });
+  mocks.listDataTypes.mockResolvedValue([]);
+  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
+  mocks.getTableOwner.mockResolvedValue("");
+  mocks.buildTableOwnerChangeSql.mockResolvedValue({ statements: [], warnings: [] });
+  mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
+  mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint)", cacheStatus: "remote" });
+});
+
+describe("TableStructureEditor column index actions", () => {
+  const fields = [
+    { name: "id", data_type: "bigint", nullable: false, default_value: null, comment: "" },
+    { name: "email", data_type: "varchar(255)", nullable: true, default_value: null, comment: "" },
+    { name: "region", data_type: "varchar(32)", nullable: true, default_value: null, comment: "" },
+    { name: "metadata", data_type: "json", nullable: true, default_value: null, comment: "" },
+    { name: "location", data_type: "point", nullable: false, default_value: null, comment: "" },
+    { name: "area", data_type: "polygon", nullable: true, default_value: null, comment: "" },
+  ];
+
+  const columnMetadata = fields.map(({ nullable, default_value, ...column }) => ({ ...column, is_nullable: nullable, column_default: default_value, is_primary_key: false }));
+
+  function loadMetadata(indexes: unknown[] = []) {
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => ({ value: facet === "columns" ? columnMetadata : facet === "indexes" ? indexes : facet === "comment" ? "" : [], cacheStatus: "remote" }));
+  }
+
+  function savedIndexDraft(index: EditableStructureIndex): TableStructureEditorDraft {
+    return {
+      initialized: true,
+      dirty: true,
+      activeTab: "indexes",
+      newTableName: "",
+      tableComment: "",
+      originalTableComment: "",
+      columns: createColumnDrafts(columnMetadata, "mysql"),
+      indexes: [index],
+      foreignKeys: [],
+      triggers: [],
+      loadedMetadataFacets: ["columns", "indexes", "comment"],
+    };
+  }
+
+  function fieldRow(root: HTMLElement, name: string): HTMLElement {
+    const input = [...root.querySelectorAll<HTMLInputElement>("[data-column-name-input]")].find((item) => item.value === name);
+    if (!input) throw new Error(`Missing field ${name}`);
+    return input.closest<HTMLElement>("tr")!;
+  }
+
+  function menuButton(label: string): HTMLButtonElement {
+    const button = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].find((item) => item.textContent?.trim() === label);
+    if (!button) throw new Error(`Missing menu item ${label}`);
+    return button;
+  }
+
+  async function openSubmenu(row: HTMLElement, label: string) {
+    row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+    await settle();
+    menuButton(label).dispatchEvent(new MouseEvent("mouseenter"));
+    await settle();
+  }
+
+  function latestDraft(): BuildTableStructureChangeSqlOptions {
+    return mocks.buildTableStructureChangeSql.mock.calls.at(-1)?.[0];
+  }
+
+  function indexRow(root: HTMLElement, position = 0): HTMLElement {
+    return root.querySelector<HTMLElement>(`[data-index-row-index="${position}"]`)!;
+  }
+
+  async function expectIndexName(root: HTMLElement, name: string) {
+    await vi.waitFor(() => expect(indexRow(root).querySelector<HTMLInputElement>("[data-index-name-input]")?.value).toBe(name));
+  }
+
+  it("loads index membership on the fields tab and creates a unique index as a draft", async () => {
+    loadMetadata([{ name: "idx_email", columns: ["email"], is_unique: false, is_primary: false }]);
+    const root = await mountStructureEditor();
+    expect(fieldRow(root, "email").classList.contains("structure-column-index-key")).toBe(true);
+    expect(mocks.loadObjectMetadataFacet.mock.calls.some((call) => call[1] === "indexes")).toBe(true);
+
+    await openSubmenu(fieldRow(root, "region"), "structureEditor.createColumnIndex");
+    menuButton("structureEditor.createUniqueIndex").click();
+    await vi.waitFor(() => expect(latestDraft().indexes).toEqual(expect.arrayContaining([expect.objectContaining({ columns: ["region"], isUnique: true, isPrimary: false })])));
+    expect(fieldRow(root, "region").classList.contains("structure-column-unique-key")).toBe(true);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("navigates index search matches in sorted row order", async () => {
+    const indexDrafts = createIndexDrafts([
+      { name: "idx_z", columns: ["z"], is_unique: false, is_primary: false },
+      { name: "idx_a", columns: ["a"], is_unique: false, is_primary: false },
+    ]);
+    const draft = savedIndexDraft(indexDrafts[0]!);
+    draft.indexes = indexDrafts;
+
+    const root = await mountStructureEditor(draft);
+    const rows = [...root.querySelectorAll<HTMLElement>("[data-index-row-id]")];
+    expect(rows.map((row) => row.dataset.indexRowId)).toEqual(["existing:idx_z", "existing:idx_a"]);
+    const scrollSpies = new Map(rows.map((row) => [row.dataset.indexRowId!, vi.fn()]));
+    for (const row of rows) row.scrollIntoView = scrollSpies.get(row.dataset.indexRowId!)!;
+
+    root.querySelector<HTMLElement>("th[aria-sort]")!.click();
+    await settle();
+    expect([...root.querySelectorAll<HTMLElement>("[data-index-row-id]")].map((row) => row.dataset.indexRowId)).toEqual(["existing:idx_a", "existing:idx_z"]);
+
+    const search = root.querySelector<HTMLInputElement>('input[placeholder="structureEditor.searchIndexes"]')!;
+    search.value = "idx";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    search.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await settle();
+
+    expect(root.querySelector<HTMLElement>("[data-index-row-id].structure-column-search-current")?.dataset.indexRowId).toBe("existing:idx_a");
+    expect(scrollSpies.get("existing:idx_a")).toHaveBeenCalledOnce();
+    expect(scrollSpies.get("existing:idx_z")).not.toHaveBeenCalled();
+  });
+
+  it("focuses the newly added index when sorted before an older draft", async () => {
+    const seedDraft: EditableStructureIndex = {
+      id: "new:seed",
+      name: "idx_seed",
+      columns: ["z"],
+      nameEdited: true,
+      isUnique: false,
+      isPrimary: false,
+      filter: "",
+      indexType: "BTREE",
+      includedColumns: [],
+      comment: "",
+      concurrently: false,
+      columnOpclasses: [],
+      markedForDrop: false,
+    };
+    const draft = savedIndexDraft(seedDraft);
+    draft.indexes = [...createIndexDrafts([{ name: "idx_a", columns: ["a"], is_unique: false, is_primary: false }]), seedDraft];
+
+    const root = await mountStructureEditor(draft);
+    root.querySelector<HTMLElement>("th[aria-sort]")!.click();
+    await settle();
+
+    const addButton = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("structureEditor.addIndex"));
+    expect(addButton).toBeDefined();
+    addButton!.click();
+    await settle();
+
+    const activeInput = document.activeElement as HTMLInputElement | null;
+    expect(activeInput?.matches("[data-index-name-input]")).toBe(true);
+    expect(activeInput?.closest<HTMLElement>("[data-index-row-id]")?.dataset.indexRowIndex).toBe("0");
+    expect(activeInput?.value).toBe("");
+  });
+
+  it("builds a composite index in selection order and appends fields without duplicates", async () => {
+    loadMetadata();
+    const root = await mountStructureEditor();
+    fieldRow(root, "email").click();
+    fieldRow(root, "region").dispatchEvent(new MouseEvent("click", { bubbles: true, metaKey: true }));
+    await openSubmenu(fieldRow(root, "region"), "structureEditor.createCompositeIndex");
+    menuButton("structureEditor.createNormalIndex").click();
+    await vi.waitFor(() => expect(latestDraft().indexes[0]?.columns).toEqual(["email", "region"]));
+    expect(fieldRow(root, "email").classList.contains("structure-column-index-key")).toBe(true);
+    expect(fieldRow(root, "region").classList.contains("structure-column-index-key")).toBe(true);
+
+    await openSubmenu(fieldRow(root, "id"), "structureEditor.addColumnsToIndex");
+    menuButton(`${latestDraft().indexes[0].name} (email, region)`).click();
+    await vi.waitFor(() => expect(latestDraft().indexes[0]?.columns).toEqual(["email", "region", "id"]));
+    expect(latestDraft().indexes[0]?.columnOpclasses).toEqual([null, null, null]);
+
+    await openSubmenu(fieldRow(root, "id"), "structureEditor.addColumnsToIndex");
+    expect(menuButton(`${latestDraft().indexes[0].name} (email, region, id)`).disabled).toBe(true);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("creates one composite primary key and makes its members non-nullable", async () => {
+    loadMetadata();
+    const root = await mountStructureEditor();
+    fieldRow(root, "id").click();
+    fieldRow(root, "email").dispatchEvent(new MouseEvent("click", { bubbles: true, metaKey: true }));
+    await openSubmenu(fieldRow(root, "email"), "structureEditor.createCompositeIndex");
+    menuButton("structureEditor.createPrimaryIndex").click();
+    await vi.waitFor(() =>
+      expect(
+        latestDraft()
+          .columns.filter((column) => column.isPrimaryKey)
+          .map((column) => [column.name, column.isNullable]),
+      ).toEqual([
+        ["id", false],
+        ["email", false],
+      ]),
+    );
+    expect(latestDraft().indexes).toEqual([]);
+    await openSubmenu(fieldRow(root, "region"), "structureEditor.createColumnIndex");
+    expect(menuButton("structureEditor.createPrimaryIndex").disabled).toBe(true);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("colors every member of a composite unique index and ignores dropped indexes", async () => {
+    loadMetadata([{ name: "uniq_email_region", columns: ["email", "region"], is_unique: true, is_primary: false }]);
+    const root = await mountStructureEditor();
+    expect(fieldRow(root, "email").classList.contains("structure-column-unique-key")).toBe(true);
+    expect(fieldRow(root, "region").classList.contains("structure-column-unique-key")).toBe(true);
+    expect(fieldRow(root, "id").classList.contains("structure-column-unique-key")).toBe(false);
+    const drop = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "structureEditor.drop" && button.closest("tr")?.querySelector("[data-index-name-input]"));
+    expect(drop).toBeDefined();
+    drop!.click();
+    await settle();
+    expect(fieldRow(root, "email").classList.contains("structure-column-unique-key")).toBe(false);
+    expect(fieldRow(root, "region").classList.contains("structure-column-unique-key")).toBe(false);
+  });
+
+  it("keeps names stable for field changes and updates only the automatic type prefix", async () => {
+    loadMetadata();
+    const root = await mountStructureEditor();
+    await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
+    menuButton("structureEditor.createNormalIndex").click();
+    await expectIndexName(root, "idx_email");
+    indexRow(root).querySelector<HTMLElement>('[data-index-column="region"]')!.click();
+    await expectIndexName(root, "idx_email");
+    const unique = indexRow(root).querySelector<HTMLInputElement>("[data-index-unique]")!;
+    unique.checked = true;
+    unique.dispatchEvent(new Event("change"));
+    await expectIndexName(root, "uk_email");
+    const type = indexRow(root).querySelector<HTMLSelectElement>("[data-index-type] select")!;
+    type.value = "FULLTEXT";
+    type.dispatchEvent(new Event("change"));
+    await expectIndexName(root, "ft_email");
+    expect(unique.disabled).toBe(true);
+    expect(indexRow(root).classList.contains("structure-index-fulltext-key")).toBe(true);
+    expect(fieldRow(root, "email").classList.contains("structure-column-fulltext-key")).toBe(true);
+    const name = indexRow(root).querySelector<HTMLInputElement>("[data-index-name-input]")!;
+    name.value = "custom_search";
+    name.dispatchEvent(new Event("input"));
+    indexRow(root).querySelector<HTMLElement>('[data-index-column="region"]')!.click();
+    await expectIndexName(root, "custom_search");
+    indexRow(root).querySelector<HTMLButtonElement>("[data-regenerate-index-name]")!.click();
+    await expectIndexName(root, "ft_email");
+    type.value = "BTREE";
+    type.dispatchEvent(new Event("change"));
+    await expectIndexName(root, "idx_email");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps existing names stable unless regeneration is explicitly requested", async () => {
+    loadMetadata([{ name: "legacy_email", columns: ["email"], is_unique: true, is_primary: false }]);
+    const root = await mountStructureEditor();
+    indexRow(root).querySelector<HTMLElement>('[data-index-column="region"]')!.click();
+    await expectIndexName(root, "legacy_email");
+    indexRow(root).querySelector<HTMLButtonElement>("[data-regenerate-index-name]")!.click();
+    await expectIndexName(root, "uk_email");
+    indexRow(root).querySelector<HTMLElement>('[data-index-column="region"]')!.click();
+    await expectIndexName(root, "uk_email");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("remembers the first selected field even after removing every original member", async () => {
+    loadMetadata();
+    const root = await mountStructureEditor();
+    await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
+    menuButton("structureEditor.createNormalIndex").click();
+    await expectIndexName(root, "idx_email");
+    indexRow(root).querySelector<HTMLInputElement>('[data-index-column="region"]')!.click();
+    await settle();
+    indexRow(root).querySelector<HTMLInputElement>('[data-index-column="email"]')!.click();
+    await expectIndexName(root, "idx_email");
+    const unique = indexRow(root).querySelector<HTMLInputElement>("[data-index-unique]")!;
+    unique.checked = true;
+    unique.dispatchEvent(new Event("change"));
+    await expectIndexName(root, "uk_email");
+    indexRow(root).querySelector<HTMLInputElement>('[data-index-column="region"]')!.click();
+    await settle();
+    indexRow(root).querySelector<HTMLInputElement>('[data-index-column="location"]')!.click();
+    await expectIndexName(root, "uk_email");
+    await vi.waitFor(() => expect(latestDraft().indexes[0]).toMatchObject({ columns: ["location"], autoNameColumn: "email" }));
+    indexRow(root).querySelector<HTMLButtonElement>("[data-regenerate-index-name]")!.click();
+    await expectIndexName(root, "uk_location");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, false, true])("preserves a legacy saved name without a naming seed (nameEdited=%s)", async (nameEdited) => {
+    loadMetadata();
+    const [index] = createIndexDrafts([{ name: "USERS_EMAIL_REGION_IDX", columns: ["email", "region"], is_unique: false, is_primary: false }]);
+    delete index.original;
+    index.nameEdited = nameEdited;
+    const draft = savedIndexDraft(index);
+    const snapshot = JSON.stringify(draft);
+    const root = await mountStructureEditor(draft);
+    await expectIndexName(root, "USERS_EMAIL_REGION_IDX");
+    indexRow(root).querySelector<HTMLInputElement>('[data-index-column="email"]')!.click();
+    const unique = indexRow(root).querySelector<HTMLInputElement>("[data-index-unique]")!;
+    unique.checked = true;
+    unique.dispatchEvent(new Event("change"));
+    await vi.waitFor(() => expect(latestDraft().indexes[0]).toMatchObject({ name: "USERS_EMAIL_REGION_IDX", columns: ["region"], isUnique: true }));
+    expect(JSON.stringify(draft)).toBe(snapshot);
+    indexRow(root).querySelector<HTMLButtonElement>("[data-regenerate-index-name]")!.click();
+    await expectIndexName(root, "uk_region");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("restores the new naming seed even when its original field is no longer selected", async () => {
+    loadMetadata();
+    const [index] = createIndexDrafts([{ name: "idx_email", columns: ["region"], is_unique: false, is_primary: false }]);
+    delete index.original;
+    index.nameEdited = false;
+    index.autoNameColumn = "email";
+    const root = await mountStructureEditor(savedIndexDraft(index));
+    const unique = indexRow(root).querySelector<HTMLInputElement>("[data-index-unique]")!;
+    unique.checked = true;
+    unique.dispatchEvent(new Event("change"));
+    await expectIndexName(root, "uk_email");
+    await vi.waitFor(() => expect(latestDraft().indexes[0]).toMatchObject({ columns: ["region"], autoNameColumn: "email" }));
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, true])("supports legacy blank drafts without overwriting a manually cleared name (nameEdited=%s)", async (nameEdited) => {
+    loadMetadata();
+    const [index] = createIndexDrafts([{ name: "", columns: [], is_unique: false, is_primary: false }]);
+    delete index.original;
+    index.nameEdited = nameEdited;
+    const root = await mountStructureEditor(savedIndexDraft(index));
+    indexRow(root).querySelector<HTMLInputElement>('[data-index-column="email"]')!.click();
+    await expectIndexName(root, nameEdited ? "" : "idx_email");
+    await vi.waitFor(() => expect(latestDraft().indexes[0].columns).toEqual(["email"]));
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, ["columns", "comment"]] as const)("preserves saved index edits with incomplete legacy facet flags (%s)", async (facets) => {
+    loadMetadata([{ name: "server_index", columns: ["id"], is_unique: false, is_primary: false }]);
+    const [index] = createIndexDrafts([{ name: "pending_email", columns: ["email", "region"], is_unique: true, is_primary: false }]);
+    delete index.original;
+    const draft = savedIndexDraft(index);
+    draft.activeTab = "columns";
+    draft.loadedMetadataFacets = facets ? [...facets] : undefined;
+    const root = await mountStructureEditor(draft);
+    await expectIndexName(root, "pending_email");
+    await vi.waitFor(() => expect(latestDraft().indexes).toEqual([expect.objectContaining({ name: "pending_email", columns: ["email", "region"], isUnique: true })]));
+    expect(mocks.loadObjectMetadataFacet.mock.calls.filter((call) => call[1] === "indexes")).toHaveLength(0);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it.each(["postgres", "sqlite", "oracle", "sqlserver"])("retains table-qualified automatic names on %s", async (databaseType) => {
+    mocks.connection.db_type = databaseType;
+    loadMetadata();
+    for (const table of ["users", "orders"]) {
+      const root = await mountStructureEditor(undefined, table);
+      await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
+      menuButton("structureEditor.createNormalIndex").click();
+      await expectIndexName(root, `${table.toUpperCase()}_EMAIL_IDX`);
+      indexRow(root).querySelector<HTMLInputElement>('[data-index-column="region"]')!.click();
+      await expectIndexName(root, `${table.toUpperCase()}_EMAIL_IDX`);
+    }
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Doris", "doris", "doris"],
+    ["Doris MySQL profile", "mysql", "doris"],
+    ["GoldenDB", "goldendb", "goldendb"],
+    ["SunDB", "sundb", "sundb"],
+    ["Databend", "databend", "databend"],
+  ] as const)("retains table-qualified automatic names on %s", async (_label, databaseType, driverProfile) => {
+    mocks.connection.db_type = databaseType;
+    mocks.connection.driver_profile = driverProfile;
+    loadMetadata();
+    const root = await mountStructureEditor();
+    await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
+    menuButton("structureEditor.createNormalIndex").click();
+    await expectIndexName(root, "USERS_EMAIL_IDX");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["StarRocks", "starrocks", "starrocks"],
+    ["StarRocks MySQL profile", "mysql", "starrocks"],
+  ] as const)("disables unsupported ordinary index creation on %s", async (_label, databaseType, driverProfile) => {
+    mocks.connection.db_type = databaseType;
+    mocks.connection.driver_profile = driverProfile;
+    loadMetadata();
+    const root = await mountStructureEditor();
+    await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
+    const button = menuButton("structureEditor.createNormalIndex");
+    expect(button.disabled).toBe(true);
+    button.click();
+    await settle();
+    expect(indexRow(root)).toBeNull();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("preserves lowercase table-qualified naming for GaussDB M-mode", async () => {
+    mocks.connection.db_type = "gaussdb";
+    mocks.connection.driver_profile = "gaussdb-m";
+    loadMetadata();
+    const root = await mountStructureEditor();
+    await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
+    menuButton("structureEditor.createNormalIndex").click();
+    await expectIndexName(root, "users_email_idx");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps untouched historical special indexes out of validation for unrelated edits", async () => {
+    // Drivers may expose aliases that the newer frontend type whitelist does not recognize.
+    const columnsWithAlias = columnMetadata.map((column) => (column.name === "email" ? { ...column, data_type: "character varying(255)" } : column));
+    const indexes = [{ name: "legacy_search", columns: ["email"], is_unique: false, is_primary: false, index_type: "FULLTEXT" }];
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => ({ value: facet === "columns" ? columnsWithAlias : facet === "indexes" ? indexes : facet === "comment" ? "" : [], cacheStatus: "remote" }));
+    const root = await mountStructureEditor();
+    expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
+    const name = fieldRow(root, "region").querySelector<HTMLInputElement>("[data-column-name-input]")!;
+    name.value = "region_code";
+    name.dispatchEvent(new Event("input"));
+    await vi.waitFor(() => expect(latestDraft().columns.some((column) => column.name === "region_code")).toBe(true));
+    expect(latestDraft().indexes[0]).toMatchObject({ name: "legacy_search", columns: ["email"], original: indexes[0] });
+    expect(root.textContent).not.toContain("structureEditor.fulltextIndexColumns");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("still validates a changed field used by an existing spatial index", async () => {
+    loadMetadata([{ name: "legacy_location", columns: ["location"], is_unique: false, is_primary: false, index_type: "SPATIAL" }]);
+    const root = await mountStructureEditor();
+    const nullable = fieldRow(root, "location").querySelectorAll<HTMLInputElement>('input[type="checkbox"]')[0];
+    nullable.checked = true;
+    nullable.dispatchEvent(new Event("change"));
+    await vi.waitFor(() => expect(root.textContent).toContain("structureEditor.spatialIndexNullable"));
+    expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("shows selected checkboxes in index order and preserves selection when searching by name or type", async () => {
+    loadMetadata([{ name: "uk_region_email", columns: ["region", "email"], is_unique: true, is_primary: false }]);
+    const root = await mountStructureEditor();
+    const picker = indexRow(root).querySelector<HTMLElement>("[data-index-column-picker]")!;
+    const inputs = () => [...picker.querySelectorAll<HTMLInputElement>("[data-index-column]")];
+    expect(
+      inputs()
+        .slice(0, 2)
+        .map((input) => [input.dataset.indexColumn, input.checked]),
+    ).toEqual([
+      ["region", true],
+      ["email", true],
+    ]);
+    const search = picker.querySelector<HTMLInputElement>("[data-index-column-search]")!;
+    search.value = "varchar";
+    search.dispatchEvent(new Event("input"));
+    await settle();
+    expect(inputs().map((input) => input.dataset.indexColumn)).toEqual(["region", "email"]);
+    search.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    expect(document.activeElement).toBe(inputs()[0]);
+    inputs()[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    expect(document.activeElement).toBe(inputs()[1]);
+    search.value = "missing_field";
+    search.dispatchEvent(new Event("input"));
+    await settle();
+    expect(picker.textContent).toContain("structureEditor.noMatchingIndexColumns");
+    search.value = "";
+    search.dispatchEvent(new Event("input"));
+    await settle();
+    expect(
+      inputs()
+        .filter((input) => input.checked)
+        .map((input) => input.dataset.indexColumn),
+    ).toEqual(["region", "email"]);
+    inputs()[0].click();
+    await settle();
+    expect(
+      inputs()
+        .filter((input) => input.checked)
+        .map((input) => input.dataset.indexColumn),
+    ).toEqual(["email"]);
+    await expectIndexName(root, "uk_region_email");
+  });
+
+  it("shows distinct indicators for multiple index kinds on the same field", async () => {
+    loadMetadata([
+      { name: "uk_email", columns: ["email"], is_unique: true, is_primary: false },
+      { name: "idx_email_region", columns: ["email", "region"], is_unique: false, is_primary: false },
+      { name: "ft_email", columns: ["email"], is_unique: false, is_primary: false, index_type: "FULLTEXT" },
+      { name: "sp_location", columns: ["location"], is_unique: false, is_primary: false, index_type: "SPATIAL" },
+    ]);
+    const root = await mountStructureEditor();
+    expect([...fieldRow(root, "email").querySelectorAll<HTMLElement>("[data-index-kind]")].map((icon) => icon.dataset.indexKind)).toEqual(["unique", "index", "fulltext"]);
+    expect(fieldRow(root, "email").classList.contains("structure-column-unique-key")).toBe(true);
+    expect(fieldRow(root, "location").classList.contains("structure-column-spatial-key")).toBe(true);
+    expect(indexRow(root, 3).classList.contains("structure-index-spatial-key")).toBe(true);
+  });
+
+  it("disables incompatible special indexes and adding another column to a spatial index", async () => {
+    loadMetadata();
+    const root = await mountStructureEditor();
+    await openSubmenu(fieldRow(root, "metadata"), "structureEditor.createColumnIndex");
+    expect(menuButton("structureEditor.createFulltextIndex").disabled).toBe(true);
+    expect(menuButton("structureEditor.createSpatialIndex").disabled).toBe(true);
+    await openSubmenu(fieldRow(root, "area"), "structureEditor.createColumnIndex");
+    expect(menuButton("structureEditor.createSpatialIndex").disabled).toBe(true);
+    await openSubmenu(fieldRow(root, "location"), "structureEditor.createColumnIndex");
+    expect(menuButton("structureEditor.createSpatialIndex").disabled).toBe(false);
+    menuButton("structureEditor.createSpatialIndex").click();
+    await expectIndexName(root, "sp_location");
+    await openSubmenu(fieldRow(root, "email"), "structureEditor.addColumnsToIndex");
+    expect(menuButton("sp_location (location)").disabled).toBe(true);
+    // The action guard also protects against a stale/programmatically invoked menu item.
+    indexRow(root).querySelector<HTMLElement>('[data-index-column="email"]')!.click();
+    await vi.waitFor(() => expect(latestDraft().indexes[0]?.columns).toEqual(["location"]));
+    const nullable = fieldRow(root, "location").querySelectorAll<HTMLInputElement>('input[type="checkbox"]')[0];
+    nullable.checked = true;
+    nullable.dispatchEvent(new Event("change"));
+    await vi.waitFor(() => expect(root.textContent).toContain("structureEditor.spatialIndexNullable"));
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("renders checkboxes without dynamic yes/no toggle text (#8148)", async () => {
+    loadMetadata();
+    const root = await mountStructureEditor();
+    await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
+    menuButton("structureEditor.createNormalIndex").click();
+    await expectIndexName(root, "idx_email");
+
+    const unique = indexRow(root).querySelector<HTMLInputElement>("[data-index-unique]")!;
+    const uniqueCell = unique.closest("td")!;
+    expect(uniqueCell.textContent?.trim()).toBe("");
+
+    unique.checked = true;
+    unique.dispatchEvent(new Event("change"));
+    await settle();
+    expect(uniqueCell.textContent?.trim()).toBe("");
+
+    const nullable = fieldRow(root, "location").querySelector<HTMLInputElement>('input[aria-label="structureEditor.nullable"]')!;
+    const nullableCell = nullable.closest("td")!;
+    expect(nullableCell.textContent?.trim()).toBe("");
+
+    nullable.checked = true;
+    nullable.dispatchEvent(new Event("change"));
+    await settle();
+    expect(nullableCell.textContent?.trim()).toBe("");
+  });
+});
+
+afterEach(() => {
+  for (const app of mountedApps.splice(0)) app.unmount();
+  document.body.innerHTML = "";
+});
+
+describe("TableStructureEditor metadata revalidation (#8816)", () => {
+  it("re-fetches cache-served columns in the background and applies changes on a clean draft", async () => {
+    let columnsCalls = 0;
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request: unknown, facet: string) => {
+      if (facet === "columns") {
+        columnsCalls += 1;
+        return columnsCalls === 1 ? { value: initialColumns, cacheStatus: "memory" } : { value: rebuiltColumns, cacheStatus: "remote" };
+      }
+      if (facet === "comment") return { value: "", cacheStatus: "remote" };
+      return { value: [], cacheStatus: "remote" };
+    });
+
+    const root = await mountStructureEditor();
+
+    await vi.waitFor(() => expect(columnsFacetCalls().length).toBe(2), { timeout: 3000 });
+    expect(columnsFacetCalls()[1][3]).toEqual({ force: true });
+    expect(root.textContent).toContain("email");
+    // The revalidation must not loop: applying happens outside loadStructure.
+    await settle();
+    expect(columnsFacetCalls().length).toBe(2);
+  });
+
+  it("does not re-fetch when the initial load came from the remote source", async () => {
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request: unknown, facet: string) => {
+      if (facet === "columns") return { value: initialColumns, cacheStatus: "remote" };
+      if (facet === "comment") return { value: "", cacheStatus: "remote" };
+      return { value: [], cacheStatus: "remote" };
+    });
+
+    const root = await mountStructureEditor();
+    await settle();
+
+    expect(columnsFacetCalls().length).toBe(1);
+    expect(root.textContent).not.toContain("email");
+  });
+
+  it("keeps pending user edits when the background revalidation brings different columns", async () => {
+    let columnsCalls = 0;
+    let resolveRevalidation: ((result: { value: unknown; cacheStatus: string }) => void) | undefined;
+    mocks.loadObjectMetadataFacet.mockImplementation((_request: unknown, facet: string) => {
+      if (facet === "columns") {
+        columnsCalls += 1;
+        if (columnsCalls === 1) return Promise.resolve({ value: initialColumns, cacheStatus: "memory" });
+        return new Promise((resolve) => {
+          resolveRevalidation = resolve;
+        });
+      }
+      if (facet === "comment") return Promise.resolve({ value: "", cacheStatus: "remote" });
+      return Promise.resolve({ value: [], cacheStatus: "remote" });
+    });
+
+    const root = await mountStructureEditor();
+
+    // The background revalidation started and is held pending.
+    await vi.waitFor(() => expect(columnsFacetCalls().length).toBe(2), { timeout: 3000 });
+    expect(resolveRevalidation).toBeDefined();
+
+    // The user starts editing while the revalidation is in flight.
+    const nameInput = root.querySelector<HTMLInputElement>("[data-column-name-input]");
+    expect(nameInput).not.toBeNull();
+    nameInput!.value = "renamed_id";
+    nameInput!.dispatchEvent(new Event("input"));
+    await settle();
+
+    resolveRevalidation!({ value: rebuiltColumns, cacheStatus: "remote" });
+    await settle();
+
+    const renamedInput = root.querySelector<HTMLInputElement>("[data-column-name-input]");
+    expect(renamedInput?.value).toBe("renamed_id");
+    expect(root.textContent).not.toContain("email");
+  });
+
+  it("applies fresh columns even when the comment revalidation fails", async () => {
+    let columnsCalls = 0;
+    mocks.loadObjectMetadataFacet.mockImplementation((_request: unknown, facet: string, _loader?: unknown, options?: { force?: boolean }) => {
+      if (facet === "columns") {
+        columnsCalls += 1;
+        return Promise.resolve(columnsCalls === 1 ? { value: initialColumns, cacheStatus: "memory" } : { value: rebuiltColumns, cacheStatus: "remote" });
+      }
+      if (facet === "comment") {
+        // Cache-served first so the file comment is part of the revalidation.
+        if (options?.force) return Promise.reject(new Error("comment unavailable"));
+        return Promise.resolve({ value: "", cacheStatus: "memory" });
+      }
+      return Promise.resolve({ value: [], cacheStatus: "remote" });
+    });
+
+    const root = await mountStructureEditor();
+
+    await vi.waitFor(() => expect(columnsFacetCalls().length).toBe(2), { timeout: 3000 });
+    await settle();
+    expect(root.textContent).toContain("email");
+  });
+});
+
+describe("restored structure snapshots after external DDL", () => {
+  function restoredDraft(dirty: boolean | undefined): TableStructureEditorDraft {
+    return {
+      initialized: true,
+      dirty,
+      activeTab: "columns",
+      newTableName: "",
+      tableComment: "",
+      originalTableComment: "",
+      columns: createColumnDrafts(
+        initialColumns.map((column) => ({ name: column.name, data_type: column.data_type, is_nullable: column.nullable, column_default: column.default_value, is_primary_key: false, extra: null, comment: column.comment })),
+        "mysql",
+      ),
+      indexes: [],
+      foreignKeys: [],
+      triggers: [],
+      loadedMetadataFacets: ["columns", "comment"],
+    };
+  }
+
+  it("revalidates an explicitly clean restored snapshot", async () => {
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => ({ value: facet === "columns" ? rebuiltColumns : facet === "comment" ? "" : [], cacheStatus: "remote" }));
+    const root = await mountStructureEditor(restoredDraft(false));
+    await vi.waitFor(() => expect(Array.from(root.querySelectorAll<HTMLInputElement>("[data-column-name-input]")).map((input) => input.value)).toContain("email"));
+    expect(columnsFacetCalls()).toHaveLength(1);
+  });
+
+  it("loads missing indexes for legacy field-tab drafts without overwriting pending columns", async () => {
+    const indexes = [{ name: "legacy_id_idx", columns: ["id"], is_unique: false, is_primary: false }];
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => ({ value: facet === "columns" ? rebuiltColumns : facet === "indexes" ? indexes : facet === "comment" ? "" : [], cacheStatus: "remote" }));
+    const draft = restoredDraft(true);
+    delete draft.loadedMetadataFacets;
+    draft.columns[0].name = "local_id";
+    const root = await mountStructureEditor(draft);
+    await vi.waitFor(() => expect(root.querySelector<HTMLInputElement>("[data-index-name-input]")?.value).toBe("legacy_id_idx"));
+    const field = root.querySelector<HTMLInputElement>("[data-column-name-input]")!;
+    expect(field.value).toBe("local_id");
+    expect(field.closest("tr")?.classList.contains("structure-column-index-key")).toBe(true);
+    expect(columnsFacetCalls()).toHaveLength(0);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it.each([true, undefined])("preserves restored edits when dirty is %s", async (dirty) => {
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => ({ value: facet === "columns" ? rebuiltColumns : facet === "comment" ? "" : [], cacheStatus: "remote" }));
+    const draft = restoredDraft(dirty);
+    draft.columns[0].name = "local_edit";
+    const root = await mountStructureEditor(draft);
+    await settle();
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("local_edit");
+    expect(columnsFacetCalls()).toHaveLength(0);
+  });
+
+  it("preserves an edit started while restored snapshot validation is pending", async () => {
+    let resolveColumns!: (value: unknown) => void;
+    mocks.loadObjectMetadataFacet.mockImplementation((_request, facet) =>
+      facet === "columns"
+        ? new Promise((resolve) => {
+            resolveColumns = resolve;
+          })
+        : Promise.resolve({ value: facet === "comment" ? "" : [], cacheStatus: "remote" }),
+    );
+    const root = await mountStructureEditor(restoredDraft(false));
+    await vi.waitFor(() => expect(resolveColumns).toBeDefined());
+    const input = root.querySelector<HTMLInputElement>("[data-column-name-input]")!;
+    input.value = "local_edit";
+    input.dispatchEvent(new Event("input"));
+    await settle();
+    resolveColumns({ value: rebuiltColumns, cacheStatus: "remote" });
+    await settle();
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("local_edit");
+  });
+});

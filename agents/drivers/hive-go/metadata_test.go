@@ -36,6 +36,7 @@ func TestKyuubiConnectionInfoReportsNativeIdentity(t *testing.T) {
 	}
 	server := newScriptedServer(t, behavior)
 	server.params.DatabaseType = "kyuubi"
+	server.config.DatabaseType = "kyuubi"
 	server.config.Username = "fallback"
 
 	info, err := server.connectionInfo()
@@ -48,6 +49,9 @@ func TestKyuubiConnectionInfoReportsNativeIdentity(t *testing.T) {
 	databaseInfo, ok := info["databaseInfo"].(map[string]string)
 	if !ok || databaseInfo["productName"] != "Apache Kyuubi" || databaseInfo["driverName"] != "DBX Kyuubi Go Agent" {
 		t.Fatalf("unexpected Kyuubi database identity: %#v", info["databaseInfo"])
+	}
+	if info["identifierQuote"] != defaultHiveIdentifierQuote {
+		t.Fatalf("non-Trino Kyuubi identifier quote changed: %#v", info["identifierQuote"])
 	}
 }
 
@@ -89,6 +93,66 @@ func TestGetObjectSourceReturnsProtocolObject(t *testing.T) {
 	expected := "CREATE VIEW dbx_kyuubi_demo.high_value_orders\nAS SELECT id, customer, amount FROM dbx_kyuubi_demo.orders WHERE amount >= 50\n"
 	if source.Source != expected {
 		t.Fatalf("unexpected object source DDL: %q", source.Source)
+	}
+}
+
+func TestKyuubiTrinoUsesDoubleQuotesForMetadataFallbacksAndDDL(t *testing.T) {
+	behavior := &scriptedBehavior{
+		getTables: func(context.Context, string, string, []string) (gohive.MetadataResult, error) {
+			return gohive.MetadataResult{}, errors.New("metadata unsupported")
+		},
+		getColumns: func(context.Context, string, string, string) (gohive.MetadataResult, error) {
+			return gohive.MetadataResult{}, errors.New("metadata unsupported")
+		},
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			switch query {
+			case "SELECT VERSION()":
+				return newScriptedRows(ctx, []string{"version"}, []string{"STRING"}, [][]driver.Value{{"1.10.0"}}), nil
+			case "SELECT CURRENT_USER()":
+				return newScriptedRows(ctx, []string{"current_user"}, []string{"STRING"}, [][]driver.Value{{"dbx"}}), nil
+			case `SHOW TABLES IN "analytics"`:
+				return newScriptedRows(ctx, []string{"table_name"}, []string{"STRING"}, [][]driver.Value{{`event"log`}}), nil
+			case `DESCRIBE "analytics"."event""log"`:
+				return newScriptedRows(ctx, []string{"col_name", "data_type", "comment"}, []string{"STRING", "STRING", "STRING"}, [][]driver.Value{{"id", "bigint", ""}}), nil
+			case `SHOW CREATE TABLE "analytics"."event""log"`:
+				return newScriptedRows(ctx, []string{"create_table"}, []string{"STRING"}, [][]driver.Value{{`CREATE TABLE "analytics"."event""log" ("id" bigint)`}}), nil
+			default:
+				return nil, errors.New("unexpected query: " + query)
+			}
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "kyuubi"
+	server.config.DatabaseType = "kyuubi"
+	server.config.HiveConfiguration = map[string]string{"set:hivevar:kyuubi.engine.type": "TRINO"}
+
+	info, err := server.connectionInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info["identifierQuote"] != trinoIdentifierQuote {
+		t.Fatalf("unexpected Trino identifier quote: %#v", info["identifierQuote"])
+	}
+	tables, err := server.listTables("analytics", metadataListConstraints{ObjectTypes: []string{"TABLE"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(tables, []tableInfo{{Name: `event"log`, TableType: "TABLE"}}) {
+		t.Fatalf("unexpected fallback tables: %#v", tables)
+	}
+	columns, err := server.getColumns("analytics", `event"log`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(columns) != 1 || columns[0].Name != "id" {
+		t.Fatalf("unexpected fallback columns: %#v", columns)
+	}
+	ddl, err := server.getTableDDL("analytics", `event"log`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ddl != "CREATE TABLE \"analytics\".\"event\"\"log\" (\"id\" bigint)\n" {
+		t.Fatalf("unexpected Trino DDL: %q", ddl)
 	}
 }
 
@@ -478,4 +542,259 @@ func TestListViewsReturnsFallbackErrorWhenShowViewsIsUnsupported(t *testing.T) {
 
 func metadataResult(columns []string, rows ...[]driver.Value) gohive.MetadataResult {
 	return gohive.MetadataResult{Columns: columns, Rows: rows}
+}
+
+func TestListObjectsIncludesProceduresAndFunctionsFromSystemViews(t *testing.T) {
+	proceduresQuery := "SELECT procedure_name FROM system.procedures_v WHERE lower(database_name) = lower('ods') AND lower(procedure_name) LIKE '%sp%' ORDER BY procedure_name"
+	functionsQuery := "SELECT function_name FROM system.functions_v WHERE lower(database_name) = lower('ods') AND lower(function_name) LIKE '%sp%' ORDER BY function_name"
+	behavior := &scriptedBehavior{
+		query: func(_ context.Context, query string) (driver.Rows, error) {
+			switch query {
+			case proceduresQuery:
+				return newScriptedRows(context.Background(), []string{"procedure_name"}, []string{"STRING"}, [][]driver.Value{
+					{"sp_daily_etl"}, {"sp_hourly_agg"},
+				}), nil
+			case functionsQuery:
+				return newScriptedRows(context.Background(), []string{"function_name"}, []string{"STRING"}, [][]driver.Value{
+					{"fn_clean"},
+				}), nil
+			default:
+				return nil, errors.New("unexpected query: " + query)
+			}
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
+	defer server.disconnect()
+
+	values, err := server.listObjects("ods", "ods", metadataListConstraints{
+		ObjectTypes: []string{"PROCEDURE", "FUNCTION"},
+		Filter:      "sp", // "sp" overlaps the procedure filter; both lists get "%sp%" applied
+	})
+	if err != nil {
+		t.Fatalf("listObjects: %v", err)
+	}
+	t.Logf("values: %+v", values)
+	// listObjects applies the same filter pattern to procedures and functions;
+	// we passed "sp" so procedures match and functions don't (because the function
+	// list returns rows regardless of filter — that is, listObjects calls each
+	// listRoutines call with the same Filter). Verify both queries ran and
+	// the procedure name is present.
+	queries, _, _, _ := behavior.snapshot()
+	t.Logf("queries count: %d", len(queries))
+	for i, q := range queries {
+		t.Logf("query[%d]: %q", i, q)
+	}
+	if len(queries) != 2 {
+		t.Fatalf("expected exactly 2 routine queries, got %d: %v", len(queries), queries)
+	}
+	if values == nil {
+		t.Fatal("expected non-nil object list")
+	}
+	names := make([]string, len(values))
+	for i, v := range values {
+		names[i] = v.Name + ":" + v.ObjectType
+	}
+	joined := strings.Join(names, ",")
+	if !strings.Contains(joined, "sp_daily_etl:PROCEDURE") {
+		t.Fatalf("expected procedures in result, got %v", values)
+	}
+	if !strings.Contains(joined, "fn_clean:FUNCTION") {
+		t.Fatalf("expected functions in result, got %v", values)
+	}
+}
+
+func TestGetObjectSourceRoutesProceduresToSystemProceduresView(t *testing.T) {
+	expectedSQL := "SELECT full_text FROM system.procedures_v WHERE lower(database_name) = lower('ods') AND procedure_name = 'sp_daily_etl'"
+	behavior := &scriptedBehavior{
+		query: func(_ context.Context, query string) (driver.Rows, error) {
+			if query != expectedSQL {
+				return nil, errors.New("unexpected query: " + query)
+			}
+			return newScriptedRows(context.Background(), []string{"full_text"}, []string{"STRING"}, [][]driver.Value{
+				{"-- daily ETL pipeline"},
+				{"INSERT OVERWRITE TABLE ods.daily_summary SELECT * FROM staging.events"},
+			}), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
+	defer server.disconnect()
+
+	result, _, err := server.dispatch("get_object_source", map[string]json.RawMessage{
+		"schema":      json.RawMessage(`"ods"`),
+		"name":        json.RawMessage(`"sp_daily_etl"`),
+		"object_type": json.RawMessage(`"PROCEDURE"`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, ok := result.(objectSource)
+	if !ok {
+		t.Fatalf("get_object_source returned %T instead of objectSource", result)
+	}
+	if source.Name != "sp_daily_etl" || source.ObjectType != "PROCEDURE" {
+		t.Fatalf("unexpected object source metadata: %#v", source)
+	}
+	expected := "-- daily ETL pipeline\nINSERT OVERWRITE TABLE ods.daily_summary SELECT * FROM staging.events\n"
+	if source.Source != expected {
+		t.Fatalf("unexpected procedure source: %q", source.Source)
+	}
+}
+
+func TestGetObjectSourceRoutesFunctionsToSystemFunctionsView(t *testing.T) {
+	expectedSQL := "SELECT full_text FROM system.functions_v WHERE lower(database_name) = lower('ods') AND function_name = 'fn_clean'"
+	behavior := &scriptedBehavior{
+		query: func(_ context.Context, query string) (driver.Rows, error) {
+			if query != expectedSQL {
+				return nil, errors.New("unexpected query: " + query)
+			}
+			return newScriptedRows(context.Background(), []string{"full_text"}, []string{"STRING"}, [][]driver.Value{
+				{"-- cleanup helper"},
+			}), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
+	defer server.disconnect()
+
+	result, _, err := server.dispatch("get_object_source", map[string]json.RawMessage{
+		"schema":      json.RawMessage(`"ods"`),
+		"name":        json.RawMessage(`"fn_clean"`),
+		"object_type": json.RawMessage(`"FUNCTION"`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, ok := result.(objectSource)
+	if !ok {
+		t.Fatalf("get_object_source returned %T instead of objectSource", result)
+	}
+	if source.Source != "-- cleanup helper\n" {
+		t.Fatalf("unexpected function source: %q", source.Source)
+	}
+}
+
+func TestListRoutinesUsesDatabaseParameterWhenSchemaEmpty(t *testing.T) {
+	proceduresQuery := "SELECT procedure_name FROM system.procedures_v WHERE lower(database_name) = lower('ods') AND lower(procedure_name) LIKE '%%' ORDER BY procedure_name"
+	defaultQuery := "SELECT procedure_name FROM system.procedures_v WHERE lower(database_name) = lower('default') AND lower(procedure_name) LIKE '%%' ORDER BY procedure_name"
+	behavior := &scriptedBehavior{
+		query: func(_ context.Context, query string) (driver.Rows, error) {
+			switch query {
+			case defaultQuery:
+				return newScriptedRows(context.Background(), []string{"procedure_name"}, []string{"STRING"}, [][]driver.Value{}), nil
+			case proceduresQuery:
+				return newScriptedRows(context.Background(), []string{"procedure_name"}, []string{"STRING"}, [][]driver.Value{
+					{"sp_daily_etl"},
+				}), nil
+			default:
+				return nil, errors.New("unexpected query: " + query)
+			}
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
+	server.config.Database = "default"
+	defer server.disconnect()
+
+	values, err := server.listObjects("ods", "", metadataListConstraints{
+		ObjectTypes: []string{"PROCEDURE"},
+	})
+	if err != nil {
+		t.Fatalf("listObjects: %v", err)
+	}
+	if len(values) != 1 || values[0].Name != "sp_daily_etl" {
+		t.Fatalf("expected procedure from database parameter, got %+v", values)
+	}
+}
+
+func TestListRoutinesDoesNotFallbackToConnectionDefaultForExplicitSchema(t *testing.T) {
+	defaultQuery := "SELECT procedure_name FROM system.procedures_v WHERE lower(database_name) = lower('default') AND lower(procedure_name) LIKE '%%' ORDER BY procedure_name"
+	behavior := &scriptedBehavior{
+		query: func(_ context.Context, query string) (driver.Rows, error) {
+			if query == defaultQuery {
+				// Serving this row proves the driver fell back to the
+				// connection default after the explicit schema came back empty.
+				return newScriptedRows(context.Background(), []string{"procedure_name"}, []string{"STRING"}, [][]driver.Value{
+					{"sp_should_not_leak"},
+				}), nil
+			}
+			return newScriptedRows(context.Background(), []string{"procedure_name"}, []string{"STRING"}, [][]driver.Value{}), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
+	server.config.Database = "default"
+	defer server.disconnect()
+
+	values, err := server.listObjects("", "ods", metadataListConstraints{
+		ObjectTypes: []string{"PROCEDURE"},
+	})
+	if err != nil {
+		t.Fatalf("listObjects: %v", err)
+	}
+	if len(values) != 0 {
+		t.Fatalf("expected no routines to leak from the connection default database, got %+v", values)
+	}
+}
+
+func TestGetObjectSourceUsesDatabaseParameterForRoutineSource(t *testing.T) {
+	expectedSQL := "SELECT full_text FROM system.procedures_v WHERE lower(database_name) = lower('ods') AND procedure_name = 'sp_daily_etl'"
+	behavior := &scriptedBehavior{
+		query: func(_ context.Context, query string) (driver.Rows, error) {
+			if query != expectedSQL {
+				return nil, errors.New("unexpected query: " + query)
+			}
+			return newScriptedRows(context.Background(), []string{"full_text"}, []string{"STRING"}, [][]driver.Value{
+				{"CREATE PROCEDURE sp_daily_etl() BEGIN SELECT 1; END"},
+			}), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
+	server.config.Database = "default"
+	defer server.disconnect()
+
+	result, _, err := server.dispatch("get_object_source", map[string]json.RawMessage{
+		"database":    json.RawMessage(`"ods"`),
+		"schema":      json.RawMessage(`""`),
+		"name":        json.RawMessage(`"sp_daily_etl"`),
+		"object_type": json.RawMessage(`"PROCEDURE"`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, ok := result.(objectSource)
+	if !ok {
+		t.Fatalf("get_object_source returned %T instead of objectSource", result)
+	}
+	if source.Source != "CREATE PROCEDURE sp_daily_etl() BEGIN SELECT 1; END\n" {
+		t.Fatalf("unexpected procedure source: %q", source.Source)
+	}
+}
+
+func TestListObjectsDoesNotQueryRoutinesForVanillaHive(t *testing.T) {
+	behavior := &scriptedBehavior{
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			if strings.Contains(strings.ToUpper(query), "PROCEDURES_V") || strings.Contains(strings.ToUpper(query), "FUNCTIONS_V") {
+				t.Fatalf("vanilla Hive must not query routine views, got: %s", query)
+			}
+			return newScriptedRows(ctx, []string{"tab_name"}, []string{"STRING"}, [][]driver.Value{{"events"}}), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "hive"
+	defer server.disconnect()
+
+	values, err := server.listObjects("ods", "ods", metadataListConstraints{
+		ObjectTypes: []string{"PROCEDURE", "FUNCTION"},
+	})
+	if err != nil {
+		t.Fatalf("listObjects: %v", err)
+	}
+	for _, v := range values {
+		if v.ObjectType == "PROCEDURE" || v.ObjectType == "FUNCTION" {
+			t.Fatalf("vanilla Hive should not surface routines, got: %+v", v)
+		}
+	}
 }

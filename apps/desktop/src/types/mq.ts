@@ -3,6 +3,12 @@
 export type MqSystemKind = "pulsar" | "kafka" | "rocketmq" | "rabbitmq";
 
 export interface MqCapabilities {
+  supportsListTopics?: boolean;
+  supportsCreateTopic?: boolean;
+  supportsDeleteTopic?: boolean;
+  supportsTopicStats?: boolean;
+  supportsBrokerAdmin?: boolean;
+  supportsProducerListing?: boolean;
   supportsTenants: boolean;
   supportsNamespaces: boolean;
   supportsPartitionedTopics: boolean;
@@ -186,6 +192,26 @@ export interface ListTopicsOpts {
   includeNonPersistent?: boolean;
 }
 
+export type MqListSort = "name" | "messagesReady";
+
+export interface MqListPageRequest {
+  /** One-based page number. */
+  page: number;
+  pageSize: number;
+  search?: string;
+  sort?: MqListSort;
+  sortDescending?: boolean;
+}
+
+export interface MqListPage<T> {
+  items: T[];
+  page: number;
+  pageSize: number;
+  /** Number of items matching the current search across all pages. */
+  totalCount: number;
+  hasMore: boolean;
+}
+
 export interface TopicStats {
   msgRateIn: number;
   msgRateOut: number;
@@ -212,7 +238,7 @@ export interface SubscriptionInfo {
   consumers: ConsumerInfo[];
   /** RocketMQ subscribed topics (cluster-wide listing). */
   topics?: string[];
-  /** RocketMQ online consumer client count. */
+  /** Online clients for RocketMQ groups or Kafka topic subscriptions; absent when unavailable. */
   onlineMembers?: number;
   /** RocketMQ consumer group delivery type: NORMAL / FIFO / SYSTEM. */
   consumerGroupType?: string;
@@ -339,7 +365,9 @@ export interface PeekMessagesResult {
 
 export interface PeekMessagesOptions {
   /** Kafka only. Omitted starts at earliest unless a legacy caller supplies offset. */
-  startPosition?: "latest" | "earliest" | "offset";
+  startPosition?: "latest" | "earliest" | "offset" | "timestamp";
+  /** Epoch milliseconds; Kafka resolves the first record batch at or after this time per partition. */
+  timestamp?: number;
   partition?: number;
   offset?: number;
 }
@@ -553,6 +581,8 @@ export interface SendMessageRequest {
   payloadText?: string;
   headers: Record<string, string>;
   partition?: number;
+  /** RabbitMQ: AMQP BasicProperties, separate from custom headers. */
+  properties?: Record<string, string>;
   /** RabbitMQ: target exchange; empty means the default exchange. */
   exchange?: string;
   /** RabbitMQ: routing key used when publishing to an exchange. */
@@ -563,7 +593,8 @@ export interface SendMessageRequest {
 
 export interface SendMessageResponse {
   topic: string;
-  partition: number;
+  /** Absent when the transport does not report the actual physical queue. */
+  partition?: number | null;
   offset: number;
   timestamp?: string;
 }

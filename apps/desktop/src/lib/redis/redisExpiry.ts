@@ -1,5 +1,7 @@
 import type { CalendarDateTime } from "@internationalized/date";
 import { calendarDateTimeToUnixSeconds } from "@/components/ui/date-time-picker/dateTimePicker";
+import type { RedisKeysExpiryResult } from "@/lib/backend/api";
+import { REDIS_KEY_MUTATION_BATCH_SIZE, chunkRedisKeyRaws } from "@/lib/redis/redisKeyBatch";
 
 export type RedisExpiryMode = "none" | "ttl" | "at";
 
@@ -10,6 +12,25 @@ export type RedisExpiryValidation = { valid: true; policy: RedisExpiryPolicy } |
 export interface RedisExpiryTransport {
   setTtl: (connectionId: string, db: number, keyRaw: string, ttl: number) => Promise<void>;
   setExpireAt: (connectionId: string, db: number, keyRaw: string, expireAt: number) => Promise<void>;
+}
+
+/**
+ * Batch counterpart of {@link RedisExpiryTransport}. One call covers a bounded
+ * chunk of keys, so a large selection never becomes one request per key.
+ */
+export interface RedisBatchExpiryTransport {
+  setKeysTtl: (connectionId: string, db: number, keyRaws: string[], ttl: number) => Promise<RedisKeysExpiryResult>;
+  setKeysExpireAt: (connectionId: string, db: number, keyRaws: string[], expireAt: number) => Promise<RedisKeysExpiryResult>;
+}
+
+/** Per-key outcome of a batch expiration, aggregated across every chunk. */
+export interface RedisBatchExpirySummary {
+  /** Keys the server confirmed as updated. */
+  applied: number;
+  /** Keys that were not updated, so the caller can keep them selected for a retry. */
+  failedKeyRaws: string[];
+  /** Transport failures, one per chunk that never returned per-key results. */
+  errors: string[];
 }
 
 /** Parse the EXPIRE argument without accepting partial, negative, or unsafe values. */
@@ -54,4 +75,30 @@ export async function applyRedisExpiryPolicy(transport: RedisExpiryTransport, co
     return;
   }
   await transport.setExpireAt(connectionId, db, keyRaw, policy.expireAt);
+}
+
+/**
+ * Applies one validated policy to every selected key through the batch transport.
+ *
+ * Chunking keeps a 1000-key selection to a bounded number of requests, and a
+ * chunk that fails outright keeps the keys an earlier chunk already updated
+ * instead of discarding the whole result. Each chunk uses the same PERSIST /
+ * EXPIRE / EXPIREAT shape as {@link applyRedisExpiryPolicy}.
+ */
+export async function applyRedisBatchExpiryPolicy(transport: RedisBatchExpiryTransport, connectionId: string, db: number, keyRaws: readonly string[], policy: RedisExpiryPolicy, batchSize = REDIS_KEY_MUTATION_BATCH_SIZE): Promise<RedisBatchExpirySummary> {
+  const summary: RedisBatchExpirySummary = { applied: 0, failedKeyRaws: [], errors: [] };
+  const uniqueKeyRaws = [...new Set(keyRaws)];
+  if (uniqueKeyRaws.length === 0) return summary;
+
+  for (const batch of chunkRedisKeyRaws(uniqueKeyRaws, batchSize)) {
+    try {
+      const result = policy.mode === "at" ? await transport.setKeysExpireAt(connectionId, db, batch, policy.expireAt) : await transport.setKeysTtl(connectionId, db, batch, policy.mode === "ttl" ? policy.ttl : -1);
+      summary.applied += result.applied;
+      summary.failedKeyRaws.push(...result.missing_key_raws);
+    } catch (error) {
+      summary.failedKeyRaws.push(...batch);
+      summary.errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  return summary;
 }

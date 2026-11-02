@@ -401,6 +401,38 @@ describe("aiGenerationStatus", () => {
     it("falls back to the raw snake_case name for unknown tools", () => {
       expect(toolLabel("mystery_tool", t)).toBe("mystery_tool");
     });
+
+    it("shows plugin tools with their plugin prefix as provenance", () => {
+      expect(toolLabel("ssh__ssh_exec", t)).toBe("ssh › ssh_exec");
+    });
+  });
+
+  describe("plugin tool approvals", () => {
+    it("keep the approving tool active without changing the phase", () => {
+      let status = applyStatusEvent(createGenerationStatus(T0), { type: "tool_call_start", tool_call_id: "c1", tool_name: "ssh__ssh_exec", args: {} }, T0 + 1);
+      status = applyStatusEvent(
+        status,
+        {
+          type: "tool_approval_required",
+          approval_id: "a1",
+          tool_call_id: "c1",
+          tool_name: "ssh__ssh_exec",
+          plugin_id: "io.dbx.ssh",
+          plugin_name: "SSH",
+          plugin_tool: "ssh_exec",
+          connection_id: "s1",
+          connection_name: "prod",
+          args: { command: "uptime" },
+          timeout_secs: 300,
+        },
+        T0 + 2,
+      );
+      expect(status.phase).toBe("running_tool");
+      expect(status.activeTool?.name).toBe("ssh__ssh_exec");
+      status = applyStatusEvent(status, { type: "tool_approval_resolved", approval_id: "a1", tool_call_id: "c1", outcome: "approved" }, T0 + 3);
+      expect(status.phase).toBe("running_tool");
+      expect(status.lastEventAt).toBe(T0 + 3);
+    });
   });
 
   describe("status ticker (createStatusTicker / nextStatusTickDelay)", () => {

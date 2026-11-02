@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TransferProgress, TransferRequest } from "@/lib/backend/api";
+import type { SqlFileProgress, TransferProgress, TransferRequest } from "@/lib/backend/api";
+import { reactive } from "vue";
+import { createOracleRoutineDeployment, disposeOracleRoutineDeployment } from "@/lib/schema/oracleRoutineDeploy";
 
 vi.mock("@/lib/backend/api", () => ({
   startTransfer: vi.fn(),
@@ -7,10 +9,28 @@ vi.mock("@/lib/backend/api", () => ({
   cancelDatabaseExport: vi.fn(),
   cancelSqlFileExecution: vi.fn(),
   cancelTableExport: vi.fn(),
+  updateOracleRoutineOperationReferences: vi.fn().mockResolvedValue(undefined),
 }));
 
+const mockAutoRevealExportedPathIfConfigured = vi.fn();
+vi.mock("@/lib/export/exportPath", () => ({
+  autoRevealExportedPathIfConfigured: (...args: unknown[]) => mockAutoRevealExportedPathIfConfigured(...args),
+}));
+vi.mock("@/lib/metadata/objectDdlCache", () => ({ invalidateObjectDdlCache: vi.fn() }));
+vi.mock("@/lib/table/objectBrowserRowsCache", () => ({ invalidateObjectBrowserRowsCache: vi.fn() }));
+
 import * as api from "@/lib/backend/api";
-import { formatDataTransferDuration, MAX_TRANSFER_FAILURE_DETAIL_BYTES, MAX_TRANSFER_FAILURE_DETAILS, MAX_TRANSFER_FAILURE_ERROR_BYTES, useExportTracker } from "@/composables/useExportTracker";
+import {
+  formatDataTransferDuration,
+  MAX_SQL_FILE_FAILURE_DETAIL_BYTES,
+  MAX_SQL_FILE_FAILURE_DETAILS,
+  MAX_SQL_FILE_FAILURE_ERROR_BYTES,
+  MAX_SQL_FILE_FAILURE_SUMMARY_BYTES,
+  MAX_TRANSFER_FAILURE_DETAIL_BYTES,
+  MAX_TRANSFER_FAILURE_DETAILS,
+  MAX_TRANSFER_FAILURE_ERROR_BYTES,
+  useExportTracker,
+} from "@/composables/useExportTracker";
 
 let now = 0;
 
@@ -25,9 +45,14 @@ function transferRequest(transferId: string, tables = ["users"]): TransferReques
     targetSchema: "public",
     tables,
     createTable: true,
+    content: "structureAndData",
+    objects: [],
     mode: "append",
     targetTableNameCase: "preserve",
+    quoteTargetColumnNames: true,
     batchSize: 1000,
+    dropTargetBeforeCreate: false,
+    dropTargetConfirmed: false,
   };
 }
 
@@ -42,6 +67,21 @@ function transferProgress(transferId: string, status: TransferProgress["status"]
     status,
     error: status === "error" ? "transfer failed" : null,
     terminal,
+  };
+}
+
+function sqlFileProgress(executionId: string, statementIndex: number, overrides: Partial<SqlFileProgress> = {}): SqlFileProgress {
+  return {
+    executionId,
+    status: "statementFailed",
+    statementIndex,
+    successCount: 0,
+    failureCount: statementIndex,
+    affectedRows: 0,
+    elapsedMs: statementIndex,
+    statementSummary: `SELECT missing_${statementIndex}`,
+    error: `failure ${statementIndex}`,
+    ...overrides,
   };
 }
 
@@ -63,6 +103,87 @@ afterEach(() => {
 });
 
 describe("data transfer task duration", () => {
+  it("ignores a progress packet from another transfer before changing task state", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("bound-transfer", "users", 1);
+    tracker.updateDataTransferTask(task.exportId, transferProgress(task.exportId, "running", false));
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress("different-transfer", "done"), rowsTransferred: 99 });
+    expect(task.status).toBe("Running");
+    expect(task.rowsExported).toBe(10);
+    expect(task.finishedAt).toBeUndefined();
+  });
+
+  it.each(["oraclePackageApproval", "oraclePackagePreflight"] as const)("keeps completed table rows when receiving %s", (field) => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask(`rows-${field}`, "users and packages", 1);
+    tracker.updateDataTransferTask(task.exportId, transferProgress(task.exportId, "tableDone", false));
+    const endpoint = { connectionId: "target", database: "tenant", schema: "T", databaseType: "oceanbase-oracle" as const, generation: 1 };
+    const snapshot = { endpoint, state: "complete" as const, enumerationComplete: true, objects: [], issues: [] };
+    tracker.updateDataTransferTask(task.exportId, {
+      ...transferProgress(task.exportId, field === "oraclePackagePreflight" ? "error" : "running", false),
+      table: "package objects",
+      rowsTransferred: 0,
+      totalRows: null,
+      [field]: { input: { source: snapshot, target: snapshot, drafts: [] }, skipped: [], plan: { target: endpoint, ready: false, steps: [] } },
+    });
+    expect(task.rowsExported).toBe(10);
+    expect(task.totalRows).toBe(10);
+    expect(task.finishedAt).toBeUndefined();
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress(task.exportId, "error"), table: "" });
+    expect(task.rowsExported).toBe(10);
+    expect(task.status).toBe("Error");
+  });
+
+  it("keeps the original package approvals owned by the background task until its result is removed", async () => {
+    const endpoint = { connectionId: "target", database: "tenant", schema: "T", databaseType: "oceanbase-oracle" as const, generation: 1 };
+    const snapshot = { endpoint, state: "complete" as const, enumerationComplete: true, objects: [], issues: [] };
+    const deployment = reactive(createOracleRoutineDeployment(snapshot, snapshot));
+    deployment.retainedOperationIds = ["original-package-operation"];
+    const identity = { owner: "T", name: "P", kind: "PACKAGE_BODY" as const };
+    const prepared = { operationId: "original-package-operation", target: endpoint, identity, lifecycle: "prepared" as const, dispatched: false, acknowledged: false, readback: null, error: null };
+    deployment.records = [prepared];
+    deployment.drafts = [{ identity, action: "create", objectId: "body", included: true, operation: prepared }];
+    let finish!: () => void;
+    let publish!: (progress: TransferProgress) => void;
+    vi.mocked(api.startTransfer).mockImplementationOnce(
+      (request, progress) =>
+        new Promise<void>((resolve) => {
+          publish = progress;
+          finish = () => {
+            progress(transferProgress(request.transferId, "error"));
+            resolve();
+          };
+        }),
+    );
+    const tracker = useExportTracker();
+    const cleanup = vi.fn(() => {
+      void disposeOracleRoutineDeployment(deployment);
+    });
+    const task = tracker.startDataTransferTask(transferRequest("package-reference-owner", []), "package", { oracleRoutineDeployment: deployment, onRemove: cleanup });
+    expect(task.oracleRoutineDeployment).toBe(deployment);
+    expect(deployment.executing).toBe(true);
+    expect(api.updateOracleRoutineOperationReferences).not.toHaveBeenCalled();
+    const bodyResult = {
+      ...prepared,
+      lifecycle: "terminal" as const,
+      dispatched: true,
+      acknowledged: true,
+      readback: { identity, state: "invalid" as const, exists: true, version: null, source: "full original body 中文😀", definitionMatches: true, issues: [], compilerMessages: [{ attribute: "ERROR" as const, line: 2, position: 3, text: "PLS-00323" }] },
+    };
+    publish({ ...transferProgress(task.exportId, "error", false), oracleRoutineOperation: bodyResult });
+    expect(task.status).toBe("Running");
+    expect(deployment.drafts[0].operation).toEqual(bodyResult);
+    expect(deployment.records[0].operationId).toBe("original-package-operation");
+    finish();
+    await vi.waitFor(() => expect(deployment.executing).toBe(false));
+    expect(task.status).toBe("Error");
+    expect(deployment.retainedOperationIds).toEqual(["original-package-operation"]);
+    expect(cleanup).not.toHaveBeenCalled();
+    tracker.removeTask(task.exportId);
+    await vi.waitFor(() => expect(api.updateOracleRoutineOperationReferences).toHaveBeenCalledWith([], ["original-package-operation"]));
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
   it("freezes the first successful terminal duration", () => {
     const tracker = useExportTracker();
     now = 1_000;
@@ -93,6 +214,31 @@ describe("data transfer task duration", () => {
     expect(task.status).toBe(expectedStatus);
   });
 
+  it("shows cancelling immediately and keeps it until the backend reports the terminal state", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("cancel-pending", "many tables", 1693);
+
+    await tracker.cancelTask(task.exportId);
+    expect(api.cancelTransfer).toHaveBeenCalledWith("cancel-pending");
+    expect(task.status).toBe("Cancelling");
+
+    tracker.updateDataTransferTask(task.exportId, transferProgress(task.exportId, "running", false));
+    expect(task.status).toBe("Cancelling");
+
+    tracker.updateDataTransferTask(task.exportId, transferProgress(task.exportId, "cancelled"));
+    expect(task.status).toBe("Cancelled");
+  });
+
+  it("returns to running when the cancel request itself fails", async () => {
+    vi.mocked(api.cancelTransfer).mockRejectedValueOnce(new Error("unreachable"));
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("cancel-failed", "users", 1);
+
+    await tracker.cancelTask(task.exportId);
+
+    expect(task.status).toBe("Running");
+  });
+
   it("tracks concurrent transfer durations independently", () => {
     const tracker = useExportTracker();
     now = 1_000;
@@ -112,14 +258,47 @@ describe("data transfer task duration", () => {
   it("records an immediate start failure as a terminal duration", async () => {
     vi.mocked(api.startTransfer).mockRejectedValueOnce(new Error("start failed"));
     const tracker = useExportTracker();
+    const onStarted = vi.fn();
     now = 10_000;
-    const task = tracker.startDataTransferTask(transferRequest("start-failure"), "users");
+    const task = tracker.startDataTransferTask(transferRequest("start-failure"), "users", { onStarted });
     now = 10_025;
 
     await vi.waitFor(() => expect(task.status).toBe("Error"));
 
+    expect(onStarted).not.toHaveBeenCalled();
     expect(task.finishedAt! - task.startedAt!).toBe(25);
     expect(task.errorMessage).toBe("start failed");
+  });
+
+  it.each([
+    ["append", { content: "structureAndData", mode: "append", createTable: true, dropTargetBeforeCreate: false }],
+    ["rebuild", { content: "structureAndData", mode: "append", createTable: true, dropTargetBeforeCreate: true }],
+    ["data-only", { content: "dataOnly", mode: "append", createTable: false, dropTargetBeforeCreate: false }],
+  ] as const)("launches one %s task and acknowledges its accepted submission once", async (_flow, overrides) => {
+    let finishTransfer!: () => void;
+    vi.mocked(api.startTransfer).mockImplementationOnce((_request, _onProgress, onStarted) => {
+      onStarted?.();
+      onStarted?.();
+      return new Promise<void>((resolve) => {
+        finishTransfer = resolve;
+      });
+    });
+    const tracker = useExportTracker();
+    const onStarted = vi.fn();
+    const onOpen = vi.fn();
+    const request = { ...transferRequest(`start-${_flow}`), ...overrides };
+
+    const task = tracker.startDataTransferTask(request, _flow, { onStarted, onOpen });
+
+    expect(task.status).toBe("Running");
+    expect(api.startTransfer).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.startTransfer).mock.calls[0]?.[0]).toMatchObject(overrides);
+    expect(onStarted).toHaveBeenCalledTimes(1);
+    task.onOpen?.();
+    expect(onOpen).toHaveBeenCalledTimes(1);
+
+    finishTransfer();
+    await Promise.resolve();
   });
 
   it("freezes an overlapping transfer failure without starting another request", async () => {
@@ -129,11 +308,13 @@ describe("data transfer task duration", () => {
     now = 100;
     tracker.startDataTransferTask(transferRequest("active"), "active");
     now = 130;
-    const overlapping = tracker.startDataTransferTask(transferRequest("overlap"), "overlap");
+    const onStarted = vi.fn();
+    const overlapping = tracker.startDataTransferTask(transferRequest("overlap"), "overlap", { onStarted });
 
     expect(overlapping.status).toBe("Error");
     expect(overlapping.finishedAt! - overlapping.startedAt!).toBe(0);
     expect(api.startTransfer).toHaveBeenCalledTimes(1);
+    expect(onStarted).not.toHaveBeenCalled();
 
     resolveFirst();
     await Promise.resolve();
@@ -329,6 +510,85 @@ describe("data transfer failure details", () => {
   });
 });
 
+describe("SQL-file failure details", () => {
+  it("preserves failures in event order through terminal completion and updates duplicate statements", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("sql-failures", "migration.sql", "/tmp/migration.sql");
+
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 3));
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 7));
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 3, { error: "updated failure 3" }));
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 8, { status: "done", successCount: 5, failureCount: 2, error: null }));
+
+    expect(task.status).toBe("Done");
+    expect(task.sqlFileFailures).toEqual([
+      { statementIndex: 3, statementSummary: "SELECT missing_3", error: "updated failure 3" },
+      { statementIndex: 7, statementSummary: "SELECT missing_7", error: "failure 7" },
+    ]);
+    expect(task.failureCount).toBe(2);
+  });
+
+  it("retains reliable multi-file context for equal per-file statement indexes", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("multi-file-failures", "first.sql (+1)", "/tmp/first.sql; /tmp/second.sql");
+
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 1), { fileIndex: 0, fileName: "first.sql" });
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 1), { fileIndex: 1, fileName: "second.sql" });
+
+    expect(task.sqlFileFailures).toEqual([
+      { statementIndex: 1, statementSummary: "SELECT missing_1", error: "failure 1", fileIndex: 0, fileName: "first.sql" },
+      { statementIndex: 1, statementSummary: "SELECT missing_1", error: "failure 1", fileIndex: 1, fileName: "second.sql" },
+    ]);
+  });
+
+  it("bounds retained count and reports omitted failures without double-counting replays", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("many-sql-failures", "migration.sql", "/tmp/migration.sql");
+
+    for (let index = 1; index <= MAX_SQL_FILE_FAILURE_DETAILS + 2; index += 1) {
+      tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, index));
+    }
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, MAX_SQL_FILE_FAILURE_DETAILS + 1));
+
+    expect(task.sqlFileFailures).toHaveLength(MAX_SQL_FILE_FAILURE_DETAILS);
+    expect(task.sqlFileFailuresOmitted).toBe(2);
+  });
+
+  it("bounds UTF-8 summaries, errors, and total retained bytes", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("long-sql-failures", "migration.sql", "/tmp/migration.sql");
+    const longText = "错误🙂".repeat(4_000);
+
+    for (let index = 1; index <= 300; index += 1) {
+      tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, index, { statementSummary: longText, error: longText }));
+    }
+
+    const encoder = new TextEncoder();
+    const retainedBytes = task.sqlFileFailures!.reduce((total, failure) => {
+      expect(encoder.encode(failure.statementSummary).length).toBeLessThanOrEqual(MAX_SQL_FILE_FAILURE_SUMMARY_BYTES);
+      expect(encoder.encode(failure.error).length).toBeLessThanOrEqual(MAX_SQL_FILE_FAILURE_ERROR_BYTES);
+      expect(failure.statementSummary.endsWith("\ud83d")).toBe(false);
+      expect(failure.error.endsWith("\ud83d")).toBe(false);
+      expect(failure.truncated).toBe(true);
+      return total + encoder.encode(failure.statementSummary).length + encoder.encode(failure.error).length + encoder.encode(failure.fileName ?? "").length;
+    }, 0);
+
+    expect(retainedBytes).toBeLessThanOrEqual(MAX_SQL_FILE_FAILURE_DETAIL_BYTES);
+    expect(task.sqlFileFailuresOmitted).toBeGreaterThan(0);
+  });
+
+  it("starts a replacement execution with an empty failure list", () => {
+    const tracker = useExportTracker();
+    const first = tracker.addSqlFileTask("reused-id", "first.sql", "/tmp/first.sql");
+    tracker.updateSqlFileTask(first.exportId, sqlFileProgress(first.exportId, 1));
+
+    const replacement = tracker.addSqlFileTask("reused-id", "second.sql", "/tmp/second.sql");
+
+    expect(replacement.sqlFileFailures).toEqual([]);
+    expect(replacement.sqlFileFailuresOmitted).toBe(0);
+  });
+});
+
 describe("formatDataTransferDuration", () => {
   it("formats millisecond, second, minute, and hour boundaries", () => {
     expect(formatDataTransferDuration(Number.NaN)).toBe("0 ms");
@@ -341,5 +601,46 @@ describe("formatDataTransferDuration", () => {
     expect(formatDataTransferDuration(3_599_999)).toBe("59m 59s");
     expect(formatDataTransferDuration(3_600_000)).toBe("1h 0m 0s");
     expect(formatDataTransferDuration(3_661_000)).toBe("1h 1m 1s");
+  });
+});
+
+describe("auto-revealing export directory on completion", () => {
+  it("triggers auto-reveal when manual export task succeeds with a file path", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("db-export-1", "mydb", "/tmp/backup.sql", "manual");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      status: "Done",
+      rowsExported: 100,
+      totalRows: 100,
+    } as any);
+
+    expect(mockAutoRevealExportedPathIfConfigured).toHaveBeenCalledTimes(1);
+    expect(mockAutoRevealExportedPathIfConfigured).toHaveBeenCalledWith("/tmp/backup.sql");
+  });
+
+  it("does not trigger auto-reveal for scheduled exports", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("db-export-sched", "mydb", "/tmp/backup.sql", "scheduled");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      status: "Done",
+      rowsExported: 100,
+      totalRows: 100,
+    } as any);
+
+    expect(mockAutoRevealExportedPathIfConfigured).not.toHaveBeenCalled();
+  });
+
+  it("does not trigger auto-reveal when export ends with error or cancellation", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("db-export-err", "mydb", "/tmp/backup.sql", "manual");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      status: "Error",
+      errorMessage: "disk full",
+    } as any);
+
+    expect(mockAutoRevealExportedPathIfConfigured).not.toHaveBeenCalled();
   });
 });

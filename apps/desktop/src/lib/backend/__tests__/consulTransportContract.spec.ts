@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 const tauri = readFileSync(new URL("../tauri.ts", import.meta.url), "utf8");
 const http = readFileSync(new URL("../http.ts", import.meta.url), "utf8");
 const api = readFileSync(new URL("../api.ts", import.meta.url), "utf8");
-const tauriRegistry = readFileSync(new URL("../../../../../../src-tauri/src/lib.rs", import.meta.url), "utf8");
+const tauriRegistry = readFileSync(new URL("../../../../../../crates/dbx-tauri-consul/src/lib.rs", import.meta.url), "utf8");
 const webRegistry = readFileSync(new URL("../../../../../../crates/dbx-web/src/main.rs", import.meta.url), "utf8");
 const operations = [...api.matchAll(/export const (consul\w+) = forward/g)].map((match) => match[1]);
 const expectedOperations = [
@@ -141,7 +141,7 @@ describe("Consul dual transport contract", () => {
     const route = httpBody.match(/post\("([^"]+)"/)?.[1] ?? (operation === "consulWatchStart" && httpBody.includes("consulBlockingQuery") ? "/api/consul/blocking-query" : undefined);
     expect(command, `${operation} invoke command`).toBe(snakeCase(operation));
     expect(route, `${operation} HTTP route`).toMatch(/^\/api\/consul\//);
-    expect(tauriRegistry).toContain(`commands::consul_cmd::${command},`);
+    expect(tauriRegistry).toContain(`commands::${command},`);
     expect(webRegistry).toContain(`.route("${route?.replace(/^\/api/, "")}", post(`);
   });
 

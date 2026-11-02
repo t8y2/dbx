@@ -1,0 +1,16 @@
+appname               = dbx
+version               = __DBX_VERSION__
+display_name          = DBX
+desc                  = 现代化的开源数据库管理工具，支持多种数据库和数据服务。
+platform              = all
+source                = thirdparty
+maintainer            = t8y2
+maintainer_url        = https://dbxio.com
+distributor           = t8y2
+distributor_url       = https://dbxio.com
+desktop_uidir         = ui
+desktop_applaunchname = dbx.Application
+service_port          = 4224
+checkport             = true
+ctl_stop              = true
+changelog             = __DBX_CHANGELOG__

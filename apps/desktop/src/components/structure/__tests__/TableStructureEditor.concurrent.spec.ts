@@ -76,6 +76,27 @@ describe("concurrentIndexNamesInStatements", () => {
     expect(concurrentIndexNamesInStatements([])).toEqual([]);
     expect(concurrentIndexNamesInStatements(['CREATE INDEX "idx" ON "public"."t" ("c");'])).toEqual([]);
   });
+
+  it("extracts names from dequoted statements when the identifier-quote preference is off", () => {
+    expect(
+      concurrentIndexNamesInStatements([
+        "CREATE INDEX CONCURRENTLY idx_users_email ON public.users (email);",
+        "CREATE UNIQUE INDEX CONCURRENTLY uniq_users_name ON public.users (name);",
+        'CREATE INDEX CONCURRENTLY "MixedCase".idx_orders_id ON orders.orders (id);',
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ifne ON public.users (id);",
+      ]),
+    ).toEqual(["idx_users_email", "uniq_users_name", "idx_orders_id", "idx_ifne"]);
+  });
+
+  it("still detects a same-name INVALID index after dequoting (quote preference off)", () => {
+    // Regression for the pre-apply guard at TableStructureEditor applyChanges:
+    // with generateSqlQuoteIdentifiers disabled, pendingStatements are dequoted
+    // before the guard runs, so the extracted name must still match the
+    // listInvalidIndexes result and block the save.
+    const invalidIndexes = ["idx_users_email"];
+    const concurrentIndexNames = concurrentIndexNamesInStatements(["CREATE INDEX CONCURRENTLY idx_users_email ON public.users (email);"]);
+    expect(concurrentIndexNames.filter((name) => invalidIndexes.includes(name))).toEqual(["idx_users_email"]);
+  });
 });
 
 describe("normalizeUnsupportedConcurrentIndexes", () => {

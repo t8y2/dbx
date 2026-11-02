@@ -100,9 +100,10 @@ public final class DdlBuilder {
             if (!column.getIs_nullable()) {
                 line.append(" NOT NULL");
             }
-            if (notBlank(column.getColumn_default())) {
+            String columnDefault = sanitizeDefault(column.getColumn_default());
+            if (notBlank(columnDefault)) {
                 line.append(" DEFAULT ");
-                line.append(column.getColumn_default());
+                line.append(columnDefault);
             }
             columnLines.add(line.toString());
         }
@@ -112,8 +113,13 @@ public final class DdlBuilder {
             if (!index.getIs_primary() || index.getColumns().isEmpty()) {
                 continue;
             }
-            for (String column : index.getColumns()) {
-                primaryKeys.add(quoteIdent(column, useBacktick));
+            List<String> directions = index.getKey_directions();
+            for (int columnIndex = 0; columnIndex < index.getColumns().size(); columnIndex++) {
+                String renderedColumn = quoteIdent(index.getColumns().get(columnIndex), useBacktick);
+                if (isDescendingKey(directions, columnIndex)) {
+                    renderedColumn += " DESC";
+                }
+                primaryKeys.add(renderedColumn);
             }
             break;
         }
@@ -184,14 +190,40 @@ public final class DdlBuilder {
             if (index.getIs_primary()) {
                 continue;
             }
-            String unique = index.getIs_unique() ? "UNIQUE " : "";
-            String using = notBlank(index.getIndex_type()) ? " USING " + index.getIndex_type() : "";
+            // Spanner renders full-text indexes as `CREATE SEARCH INDEX name ON table (cols)`.
+            // Its grammar has neither `CREATE UNIQUE SEARCH INDEX` nor `CREATE INDEX ... USING`,
+            // so both the uniqueness prefix and the USING clause must stay out of the
+            // statement (#13881); the keyword sits where UNIQUE would.
+            boolean searchIndex = "SEARCH".equalsIgnoreCase(index.getIndex_type());
+            String search = searchIndex ? "SEARCH " : "";
+            String unique = !searchIndex && index.getIs_unique() ? "UNIQUE " : "";
+            String using = !searchIndex && notBlank(index.getIndex_type()) ? " USING " + index.getIndex_type() : "";
             List<String> quotedColumns = new ArrayList<>();
-            for (String column : index.getColumns()) {
-                quotedColumns.add(quoteIdent(column, useBacktick));
+            List<String> directions = index.getKey_directions();
+            for (int columnIndex = 0; columnIndex < index.getColumns().size(); columnIndex++) {
+                String column = index.getColumns().get(columnIndex);
+                String renderedColumn = quoteIdent(column, useBacktick);
+                List<Integer> keyOptions = index.getKey_options();
+                if (!useBacktick
+                    && "btree".equalsIgnoreCase(index.getIndex_type())
+                    && keyOptions != null
+                    && columnIndex < keyOptions.size()) {
+                    int options = keyOptions.get(columnIndex);
+                    renderedColumn += (options & 1) != 0 ? " DESC" : " ASC";
+                    renderedColumn += (options & 2) != 0 ? " NULLS FIRST" : " NULLS LAST";
+                } else if (isDescendingKey(directions, columnIndex)) {
+                    // Explicit key directions (e.g. Spanner's ASC_OR_DESC) must
+                    // survive into the DDL: DESC key parts change query plans
+                    // and their absence misrepresents the schema (#13484).
+                    // ASC is the default and stays implicit, matching the
+                    // engine's own DDL output and the index panels.
+                    renderedColumn += " DESC";
+                }
+                quotedColumns.add(renderedColumn);
             }
             String filter = notBlank(index.getFilter()) ? " WHERE " + index.getFilter() : "";
             ddl.append("\nCREATE ");
+            ddl.append(search);
             ddl.append(unique);
             ddl.append("INDEX ");
             ddl.append(quoteIdent(index.getName(), useBacktick));
@@ -217,6 +249,118 @@ public final class DdlBuilder {
         }
 
         return ddl.toString();
+    }
+
+    /**
+     * Appends trailing SQL (e.g. GRANT statements) after a CREATE TABLE DDL script.
+     * Returns the original DDL unchanged when {@code trailingSql} is blank.
+     */
+    public static String appendTrailingSql(String ddl, String trailingSql) {
+        if (!notBlank(trailingSql)) {
+            return ddl == null ? "" : ddl;
+        }
+        String base = ddl == null ? "" : ddl.trim();
+        if (base.isEmpty()) {
+            return trailingSql.trim();
+        }
+        if (!base.endsWith(";")) {
+            base = base + ";";
+        }
+        String grants = trailingSql.trim();
+        return base + "\n\n" + grants + (grants.endsWith(";") ? "" : ";");
+    }
+
+    /**
+     * Builds Oracle-style object GRANT statements for table and column privileges.
+     * Privileges are grouped by grantee / grantable / privilege(+columns).
+     */
+    public static String buildOracleObjectGrantSql(
+        String schema,
+        String table,
+        List<OracleObjectPrivilege> privileges
+    ) {
+        if (privileges == null || privileges.isEmpty() || !notBlank(table)) {
+            return "";
+        }
+        String tableRef = qualifiedName(schema, table, false);
+
+        Map<String, List<String>> tablePrivileges = new LinkedHashMap<>();
+        Map<String, List<String>> columnPrivileges = new LinkedHashMap<>();
+        for (OracleObjectPrivilege privilege : privileges) {
+            if (privilege == null || !notBlank(privilege.grantee()) || !notBlank(privilege.privilege())) {
+                continue;
+            }
+            String privilegeName = privilege.privilege().trim().toUpperCase(Locale.ROOT);
+            String grantableKey = privilege.grantable() ? "1" : "0";
+            if (notBlank(privilege.columnName())) {
+                String key = privilege.grantee() + "\u0000" + privilegeName + "\u0000" + grantableKey;
+                columnPrivileges
+                    .computeIfAbsent(key, ignored -> new ArrayList<>())
+                    .add(privilege.columnName().trim());
+            } else {
+                String key = privilege.grantee() + "\u0000" + grantableKey;
+                List<String> names = tablePrivileges.computeIfAbsent(key, ignored -> new ArrayList<>());
+                if (!names.contains(privilegeName)) {
+                    names.add(privilegeName);
+                }
+            }
+        }
+
+        List<String> statements = new ArrayList<>();
+        for (Map.Entry<String, List<String>> entry : tablePrivileges.entrySet()) {
+            String[] parts = entry.getKey().split("\u0000", -1);
+            String grantee = parts[0];
+            boolean grantable = "1".equals(parts[1]);
+            statements.add(formatOracleGrant(
+                join(entry.getValue(), ", "),
+                null,
+                tableRef,
+                grantee,
+                grantable
+            ));
+        }
+        for (Map.Entry<String, List<String>> entry : columnPrivileges.entrySet()) {
+            String[] parts = entry.getKey().split("\u0000", -1);
+            String grantee = parts[0];
+            String privilegeName = parts[1];
+            boolean grantable = "1".equals(parts[2]);
+            List<String> columns = new ArrayList<>();
+            for (String column : entry.getValue()) {
+                String quoted = quoteIdent(column, false);
+                if (!columns.contains(quoted)) {
+                    columns.add(quoted);
+                }
+            }
+            statements.add(formatOracleGrant(
+                privilegeName,
+                join(columns, ", "),
+                tableRef,
+                grantee,
+                grantable
+            ));
+        }
+        return join(statements, "\n");
+    }
+
+    private static String formatOracleGrant(
+        String privilegeList,
+        String columnList,
+        String tableRef,
+        String grantee,
+        boolean grantable
+    ) {
+        StringBuilder statement = new StringBuilder("GRANT ");
+        statement.append(privilegeList);
+        if (notBlank(columnList)) {
+            statement.append(" (").append(columnList).append(")");
+        }
+        statement.append(" ON ").append(tableRef);
+        statement.append(" TO ").append(quoteIdent(grantee, false));
+        if (grantable) {
+            statement.append(" WITH GRANT OPTION");
+        }
+        statement.append(";");
+        return statement.toString();
     }
 
     private static List<ForeignKeyGroup> groupForeignKeys(List<ForeignKeyInfo> foreignKeys) {
@@ -264,9 +408,10 @@ public final class DdlBuilder {
     }
 
     private static String quoteIdent(String identifier, boolean useBacktick) {
+        String clean = sanitizeString(identifier);
         return useBacktick
-            ? JdbcIdentifiers.INSTANCE.backtick(identifier)
-            : JdbcIdentifiers.INSTANCE.doubleQuote(identifier);
+            ? JdbcIdentifiers.INSTANCE.backtick(clean)
+            : JdbcIdentifiers.INSTANCE.doubleQuote(clean);
     }
 
     private static String qualifiedName(String schema, String name, boolean useBacktick) {
@@ -295,7 +440,11 @@ public final class DdlBuilder {
     private static boolean isCharacterType(String normalized) {
         return "character varying".equals(normalized)
             || "varchar".equals(normalized)
+            || "varchar2".equals(normalized)
+            || "nvarchar".equals(normalized)
+            || "nvarchar2".equals(normalized)
             || "char".equals(normalized)
+            || "nchar".equals(normalized)
             || "character".equals(normalized);
     }
 
@@ -311,11 +460,53 @@ public final class DdlBuilder {
         return matcher.matches() ? "IDENTITY(" + matcher.group(1) + "," + matcher.group(2) + ")" : null;
     }
 
+    private static String sanitizeString(String value) {
+        if (value == null) {
+            return "";
+        }
+        int nullIdx = value.indexOf('\0');
+        return nullIdx >= 0 ? value.substring(0, nullIdx) : value;
+    }
+
+    private static String sanitizeDefault(String defaultValue) {
+        if (defaultValue == null) {
+            return null;
+        }
+        int nullIdx = defaultValue.indexOf('\0');
+        if (nullIdx < 0) {
+            return defaultValue;
+        }
+        String truncated = defaultValue.substring(0, nullIdx).trim();
+        return truncated.isEmpty() ? null : truncated;
+    }
+
+    private static boolean isDescendingKey(List<String> directions, int columnIndex) {
+        if (directions == null || columnIndex >= directions.size()) {
+            return false;
+        }
+        String direction = directions.get(columnIndex);
+        return direction != null && "DESC".equalsIgnoreCase(direction.trim());
+    }
+
     private static boolean notBlank(String value) {
-        return value != null && !value.trim().isEmpty();
+        if (value == null) {
+            return false;
+        }
+        int nullIdx = value.indexOf('\0');
+        if (nullIdx >= 0) {
+            value = value.substring(0, nullIdx);
+        }
+        return !value.trim().isEmpty();
     }
 
     private static String sqlStringBody(String value) {
+        if (value == null) {
+            return "";
+        }
+        int nullIdx = value.indexOf('\0');
+        if (nullIdx >= 0) {
+            value = value.substring(0, nullIdx);
+        }
         return value.replace("'", "''");
     }
 

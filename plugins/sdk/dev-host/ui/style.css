@@ -1,0 +1,39 @@
+@import "tailwindcss";
+@plugin "daisyui" {
+  themes:
+    light --default,
+    dark;
+}
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+:root {
+  font:
+    14px -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  letter-spacing: 0;
+  --radius-box: 0.5rem;
+  --radius-field: 0.25rem;
+}
+* {
+  letter-spacing: 0;
+}
+button:not(:disabled) {
+  cursor: pointer;
+}
+button:focus-visible {
+  outline: 2px solid var(--color-info);
+  outline-offset: -2px;
+}
+iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: var(--color-base-100);
+}

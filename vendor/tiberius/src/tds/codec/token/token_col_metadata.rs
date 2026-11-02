@@ -326,7 +326,11 @@ impl BaseMetaDataColumn {
     {
         use VarLenType::*;
 
-        let _user_ty = src.read_u32_le().await?;
+        let _user_ty = if src.context().version() < crate::FeatureLevel::SqlServer2005 {
+            src.read_u16_le().await? as u32
+        } else {
+            src.read_u32_le().await?
+        };
 
         let flags = BitFlags::from_bits(src.read_u16_le().await?)
             .map_err(|_| Error::Protocol("column metadata: invalid flags".into()))?;
@@ -335,11 +339,13 @@ impl BaseMetaDataColumn {
 
         if let TypeInfo::VarLenSized(cx) = ty {
             if let Text | NText | Image = cx.r#type() {
-                let num_of_parts = src.read_u8().await?;
-
-                // table name
-                for _ in 0..num_of_parts {
+                if src.context().version() < crate::FeatureLevel::SqlServer2005 {
                     src.read_us_varchar().await?;
+                } else {
+                    let num_of_parts = src.read_u8().await?;
+                    for _ in 0..num_of_parts {
+                        src.read_us_varchar().await?;
+                    }
                 }
             };
         };

@@ -15,11 +15,15 @@ export interface SidebarTreeRuntimeGeneration {
 
 export interface SidebarTreeRuntimeHost {
   buildContextMenu(node: TreeNode): ContextMenuItem[];
+  resolveContextMenu(node: TreeNode, staticItems: ContextMenuItem[]): Promise<ContextMenuItem[]> | ContextMenuItem[];
   handleRowClick(node: TreeNode, clickDetail: number): void;
   handleRowDoubleClick(node: TreeNode, event: MouseEvent): void;
   handleRowKeydown(node: TreeNode, event: KeyboardEvent): void;
   openPrimaryVisibleFilter(node: TreeNode): void;
   openDataInNewTab(node: TreeNode): void;
+  openDdlForSelection(node: TreeNode, selectedNodeIds: readonly string[]): Promise<boolean>;
+  openStructureEditorForSelection?(node: TreeNode): boolean;
+  refreshNode?(node?: TreeNode): boolean;
   requestPaste(node: TreeNode): boolean;
   toggleNode(node: TreeNode): void;
 }
@@ -36,6 +40,7 @@ export interface SidebarTreeRuntime {
   beginAction(): SidebarTreeRuntimeGeneration;
   isCurrent(token: SidebarTreeRuntimeGeneration): boolean;
   buildContextMenu(node: TreeNode): ContextMenuItem[];
+  resolveContextMenu(node: TreeNode, staticItems: ContextMenuItem[]): Promise<ContextMenuItem[]> | ContextMenuItem[];
   handleRowClick(node: TreeNode, clickDetail: number): void;
   handleRowDoubleClick(node: TreeNode, event: MouseEvent): void;
   handleRowKeydown(node: TreeNode, event: KeyboardEvent): void;
@@ -89,6 +94,9 @@ export function createSidebarTreeRuntime(): SidebarTreeRuntime {
     buildContextMenu(node) {
       menuBuilds += 1;
       return currentHost()?.buildContextMenu(node) ?? [];
+    },
+    resolveContextMenu(node, staticItems) {
+      return currentHost()?.resolveContextMenu(node, staticItems) ?? staticItems;
     },
     handleRowClick(node, clickDetail) {
       currentHost()?.handleRowClick(node, clickDetail);

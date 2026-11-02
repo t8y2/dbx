@@ -15,7 +15,7 @@ import { computed, onBeforeUnmount, ref, watch, type CSSProperties, type Ref } f
  * when its content grows (e.g. async-loaded rows/charts) — only `contentRef`,
  * an in-flow element, reports that growth via ResizeObserver.
  */
-export function useVerticalOverlayScrollbar(scrollerRef: Ref<HTMLElement | null>, contentRef: Ref<HTMLElement | null>, trackRef: Ref<HTMLElement | null>) {
+export function useVerticalOverlayScrollbar(scrollerRef: Ref<HTMLElement | null>, contentRef: Ref<HTMLElement | null>, trackRef: Ref<HTMLElement | null>, thumbRef?: Ref<HTMLElement | null>) {
   const hasOverflow = ref(false);
   const isScrolling = ref(false);
   const isDragging = ref(false);
@@ -25,7 +25,15 @@ export function useVerticalOverlayScrollbar(scrollerRef: Ref<HTMLElement | null>
   let scrollerResizeObserver: ResizeObserver | null = null;
   let contentResizeObserver: ResizeObserver | null = null;
   let scrollHideTimer: ReturnType<typeof setTimeout> | null = null;
+  let scrollMetricsAnimationFrame: number | null = null;
   let dragOffsetPx = 0;
+
+  function applyThumbStyle() {
+    const thumb = thumbRef?.value;
+    if (!thumb) return;
+    thumb.style.top = `${thumbTopPercent.value}%`;
+    thumb.style.height = `${thumbHeightPercent.value}%`;
+  }
 
   function updateMetrics() {
     const el = scrollerRef.value;
@@ -40,10 +48,23 @@ export function useVerticalOverlayScrollbar(scrollerRef: Ref<HTMLElement | null>
     const thumbTravel = Math.max(0, 100 - thumbHeight);
     thumbHeightPercent.value = thumbHeight;
     thumbTopPercent.value = maxScrollTop > 0 ? (el.scrollTop / maxScrollTop) * thumbTravel : 0;
+    applyThumbStyle();
+  }
+
+  function scheduleMetricsUpdate() {
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+      updateMetrics();
+      return;
+    }
+    if (scrollMetricsAnimationFrame !== null) return;
+    scrollMetricsAnimationFrame = window.requestAnimationFrame(() => {
+      scrollMetricsAnimationFrame = null;
+      updateMetrics();
+    });
   }
 
   function onScroll() {
-    updateMetrics();
+    scheduleMetricsUpdate();
     isScrolling.value = true;
     if (scrollHideTimer) clearTimeout(scrollHideTimer);
     scrollHideTimer = setTimeout(() => {
@@ -135,11 +156,16 @@ export function useVerticalOverlayScrollbar(scrollerRef: Ref<HTMLElement | null>
     { flush: "post", immediate: true },
   );
 
+  if (thumbRef) {
+    watch(thumbRef, applyThumbStyle, { flush: "post" });
+  }
+
   onBeforeUnmount(() => {
     scrollerResizeObserver?.disconnect();
     contentResizeObserver?.disconnect();
     stopDrag();
     if (scrollHideTimer) clearTimeout(scrollHideTimer);
+    if (scrollMetricsAnimationFrame !== null) window.cancelAnimationFrame(scrollMetricsAnimationFrame);
   });
 
   const thumbStyle = computed<CSSProperties>(() => ({

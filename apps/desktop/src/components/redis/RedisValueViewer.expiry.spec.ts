@@ -32,6 +32,30 @@ vi.mock("@/lib/common/shikiJsonHighlighter", () => ({
   createShikiJsonHighlighter: vi.fn().mockResolvedValue(() => ""),
 }));
 
+// Exercise the viewer's draft binding without mounting CodeMirror and its stores.
+vi.mock("@/components/redis/RedisJsonEditor.vue", async () => {
+  const { defineComponent, h, onMounted, ref } = await import("vue");
+  return {
+    default: defineComponent({
+      props: { modelValue: String, readOnly: Boolean, autofocus: Boolean },
+      emits: ["update:modelValue"],
+      setup(props, { emit }) {
+        const input = ref<HTMLTextAreaElement>();
+        onMounted(() => {
+          if (props.autofocus) input.value?.focus();
+        });
+        return () =>
+          h("textarea", {
+            ref: input,
+            value: props.modelValue,
+            readonly: props.readOnly,
+            onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLTextAreaElement).value),
+          });
+      },
+    }),
+  };
+});
+
 import RedisValueViewer from "./RedisValueViewer.vue";
 
 const mountedApps: Array<{ unmount: () => void; host: HTMLElement }> = [];
@@ -94,6 +118,18 @@ function stringValue(rawBase64 = "dmFsdWU=", ttl = 60) {
   };
 }
 
+function largeStringValue() {
+  return {
+    ...stringValue("cHJldmlldw=="),
+    data: {
+      kind: "string" as const,
+      content: { raw_base64: "cHJldmlldw==", encoding: "utf8" as const },
+      total_bytes: 45 * 1024 * 1024,
+      truncated: true,
+    },
+  };
+}
+
 function listValue(ttl = 60) {
   return {
     key_display: "key",
@@ -118,7 +154,7 @@ function missingValue() {
     key_raw: "key",
     ttl: -2,
     redis_type: "none",
-    data: { kind: "unknown" as const },
+    data: { kind: "unknown" as const, redis_type: "none" },
   };
 }
 
@@ -137,11 +173,13 @@ const testI18nMessages = {
       ttlHour: "{count}h",
       ttlMinute: "{count}m",
       ttlSecond: "{count}s",
+      largeStringPreviewHint: "Only {loaded} of {total} is loaded. Preview is read-only.",
+      largeStringPreviewActionUnavailable: "Unavailable for large-value previews",
     },
   },
 };
 
-function mountViewer(onDeleted: (keyRaw: string) => void, onLoaded = vi.fn()) {
+function mountViewer(onDeleted: (keyRaw: string) => void, onLoaded = vi.fn(), previewLimitKiB = ref(64)) {
   const host = document.createElement("div");
   document.body.append(host);
   const app = createApp(
@@ -155,6 +193,7 @@ function mountViewer(onDeleted: (keyRaw: string) => void, onLoaded = vi.fn()) {
             keyRaw: "key",
             onDeleted,
             onLoaded,
+            previewLimitKiB: previewLimitKiB.value,
           });
       },
     }),
@@ -250,6 +289,45 @@ async function setStringDraft(value: string) {
 }
 
 describe("RedisValueViewer expiry saving", () => {
+  it("loads the configured preview size and refreshes when the limit changes", async () => {
+    const limit = ref(256);
+    mocks.redisGetValue.mockResolvedValue(stringValue());
+    mountViewer(vi.fn(), vi.fn(), limit);
+    await settle();
+    expect(mocks.redisGetValue).toHaveBeenLastCalledWith("connection", 0, "key", 256 * 1024);
+    limit.value = 1024;
+    await settle();
+    expect(mocks.redisGetValue).toHaveBeenLastCalledWith("connection", 0, "key", 1024 * 1024);
+    expect(document.querySelector("textarea")?.readOnly).toBe(false);
+  });
+
+  it("preserves unsaved edits when the preview limit changes", async () => {
+    const limit = ref(64);
+    mocks.redisGetValue.mockResolvedValue(stringValue());
+    mountViewer(vi.fn(), vi.fn(), limit);
+    await settle();
+    await setStringDraft("unsaved draft");
+    const calls = mocks.redisGetValue.mock.calls.length;
+    limit.value = 256;
+    await settle();
+    expect(mocks.redisGetValue).toHaveBeenCalledTimes(calls);
+    expect(document.querySelector("textarea")?.value).toBe("unsaved draft");
+  });
+
+  it("renders a large String as a bounded read-only preview", async () => {
+    mocks.redisGetValue.mockResolvedValueOnce(largeStringValue());
+
+    mountViewer(vi.fn());
+    await settle();
+
+    expect(document.querySelector("textarea")).toBeNull();
+    expect(document.querySelector<HTMLElement>("[data-redis-large-string-preview]")?.textContent).toContain("Only 7 B of 45.0 MB is loaded");
+    expect(document.querySelector<HTMLButtonElement>("[aria-label='grid.copyValue']")?.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>("[aria-label='redis.copyInsertStatement']")?.disabled).toBe(true);
+    const gzip = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "GZip");
+    expect(gzip?.disabled).toBe(true);
+  });
+
   it("opens member UTF-8 editing from blank space without hijacking text double-clicks", async () => {
     mocks.redisGetValue.mockResolvedValueOnce(listValue());
 
@@ -286,7 +364,7 @@ describe("RedisValueViewer expiry saving", () => {
     expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("50s");
   });
 
-  it("polls the full value at the configured interval without refreshing the parent key tree", async () => {
+  it("polls the full value at the configured interval and reports it to the parent", async () => {
     vi.useFakeTimers();
     localStorage.setItem("dbx-redis-auto-refresh-enabled-v2", "true");
     localStorage.setItem("dbx-redis-auto-refresh-interval-seconds-v2", "5");
@@ -300,7 +378,10 @@ describe("RedisValueViewer expiry saving", () => {
 
     expect(mocks.redisGetValue).toHaveBeenCalledTimes(2);
     expect(mocks.redisGetTtl).not.toHaveBeenCalled();
-    expect(loaded).toHaveBeenCalledOnce();
+    // The parent holds the key record the detail header's size badge reads, so
+    // a poll has to report the refreshed value for the badge to follow it.
+    expect(loaded).toHaveBeenCalledTimes(2);
+    expect(loaded.mock.calls[1][0]).toMatchObject({ ttl: 45 });
     expect(document.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("refreshed");
     expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("45s");
   });

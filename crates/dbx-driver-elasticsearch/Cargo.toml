@@ -1,0 +1,19 @@
+[package]
+name = "dbx-driver-elasticsearch"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+dbx-driver-support = { path = "../dbx-driver-support" }
+dbx-types = { path = "../dbx-types", default-features = false }
+percent-encoding = "2"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4"] }

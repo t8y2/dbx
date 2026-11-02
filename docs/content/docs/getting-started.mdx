@@ -59,6 +59,12 @@ This guide gets you through three things:
     flatpak update com.dbxio.dbx
     ```
 
+    On Kylin V10, UnionTech UOS, and similar Chinese desktop distributions, install from the [Spark App Store](https://spk-resolv.spark-app.store/?spk=spk://store/development/dbx) and choose the **APM build**. AmberPM provides a compatible runtime that reduces install/startup failures caused by distro dependency drift; updates are also available from the Spark App Store client.
+
+    <Callout type="warn">
+      The APM build runs DBX inside that compatibility runtime. If you select the host Java for Agent/JDBC drivers, prefix the path with `/host` — enter `/host/usr/bin/java` instead of `/usr/bin/java`.
+    </Callout>
+
     You can also download a package from [GitHub Releases](https://github.com/t8y2/dbx/releases):
 
     | Format | Use Case |
@@ -96,9 +102,12 @@ This guide gets you through three things:
     | --- | --- | --- |
     | `DBX_PASSWORD` | Not set | Web login password; recommended for production |
     | `DBX_DISABLE_PASSWORD` | `false` | Set to `true` or `1` to disable login protection |
+    | `DBX_DISABLE_PASSWORD_VIEWER` | `false` | Set to `true` or `1` to keep saved connection credentials on the server and disable password viewing, password-inclusive copying, and secret sync exports |
     | `DBX_DATA_DIR` | `/app/data` | Persistent data directory |
     | `DBX_PORT` | `4224` | Container listen port |
     | `DBX_PUBLIC_BASE_PATH` | `/` | Deploy below a subpath, such as `/dbx` |
+
+    With password viewing disabled, existing connections continue to use credentials stored on the server. Password fields show a fixed placeholder; leaving them unchanged preserves the saved value, and entering a new value replaces it. Changing a connection target while reusing hidden credentials is rejected; enter replacement credentials instead. Restart the server and reload the browser after changing this variable.
 
     Then open `http://localhost:4224`.
 
@@ -163,7 +172,7 @@ Desktop and Web share most database workflows and the Rust core, but their local
   <Step>
     ### Paste A URL When Available
 
-    DBX can parse common connection URLs for engines such as MySQL, PostgreSQL, Redis, MongoDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, Meilisearch, DM, GaussDB, openGauss, TDengine, and Access. Review the parsed fields before saving.
+    DBX can parse common connection URLs for engines such as MySQL, PostgreSQL, Redis, MongoDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, Meilisearch, CouchDB, DM, GaussDB, openGauss, TDengine, and Access. Review the parsed fields before saving.
 
   </Step>
   <Step>
@@ -228,7 +237,7 @@ Use source mode when contributing or debugging DBX locally.
 ### Requirements
 
 - [Node.js](https://nodejs.org/) >= 22.13.0
-- [pnpm](https://pnpm.io/) 10.27.0
+- [pnpm](https://pnpm.io/) 10.34.7
 - Make (required on macOS and Linux; optional on Windows)
 - [Rust](https://www.rust-lang.org/tools/install) >= 1.88
 

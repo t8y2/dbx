@@ -17,6 +17,11 @@ describe("buildDatabaseTreeNodes", () => {
     expect(node.id).toBe("conn-1:analytics");
   });
 
+  it("carries database compatibility mode into database nodes", () => {
+    const [node] = buildDatabaseTreeNodes("conn-1", [{ name: "oracle_mode", compatibility_mode: "A" }]);
+    expect(node.compatibilityMode).toBe("A");
+  });
+
   it("shortens the Cloud Spanner label but keeps the resource path as the node identity", () => {
     const [node] = buildDatabaseTreeNodes("conn-1", databases(SPANNER_PATH), { displayLabel: spannerDisplayDatabase });
 

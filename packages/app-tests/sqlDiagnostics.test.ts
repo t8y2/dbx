@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { parseSqlErrorLocation, sqlErrorDecorationRange } from "../../apps/desktop/src/lib/sql/sqlDiagnostics.ts";
+import { parseSqlErrorLocation, sqlErrorDecorationRange, sqlErrorMessagePosition, sqlErrorSqlMatchesEditor } from "../../apps/desktop/src/lib/sql/sqlDiagnostics.ts";
 
 test("locates the Oracle invalid identifier reported by the Agent", () => {
   const sql = "select x.* from si_price_adjust_task t;";
@@ -44,6 +44,77 @@ test("rejects malformed or out-of-range Oracle Agent positions", () => {
 
 test("keeps existing line-column and PostgreSQL caret parsing", () => {
   assert.deepEqual(parseSqlErrorLocation("syntax error at line 2, column 4"), { line: 1, column: 3 });
+  assert.deepEqual(parseSqlErrorLocation("ERROR 1064: syntax error near 'LIMIT 100' at line 3"), { line: 2, column: 0 });
   assert.deepEqual(parseSqlErrorLocation('ERROR: column "bad" does not exist\nLINE 3: SELECT bad\n               ^'), { line: 2, column: 15 });
   assert.deepEqual(sqlErrorDecorationRange("SELECT 1\nFROM bad", "syntax error at line 2, column 2"), { from: 10, to: 11 });
+});
+
+test("parses the Oracle Agent offset without needing the SQL it refers to", () => {
+  assert.deepEqual(sqlErrorMessagePosition('ORA-00904: "NOPE_COL": invalid identifier error occur at position: 2270'), { kind: "offset", offset: 2270 });
+  assert.deepEqual(sqlErrorMessagePosition("error occurred at position: 0"), { kind: "offset", offset: 0 });
+});
+
+test("prefers a textual location over the Oracle Agent offset", () => {
+  assert.deepEqual(sqlErrorMessagePosition("syntax error at line 2, column 4 error occur at position: 9"), { kind: "location", location: { line: 1, column: 3 } });
+  assert.deepEqual(sqlErrorMessagePosition('ERROR: column "bad" does not exist\nLINE 3: SELECT bad\n               ^'), { kind: "location", location: { line: 2, column: 15 } });
+});
+
+test("returns null when the message carries no usable position", () => {
+  assert.equal(sqlErrorMessagePosition("ERROR 1054 (42S22): Unknown column 'nope_col' in 'field list'"), null);
+  assert.equal(sqlErrorMessagePosition("error occur at position: nope"), null);
+  assert.equal(sqlErrorMessagePosition('ORA-00904: "X": invalid identifier'), null);
+});
+
+test("matches DBX pagination rewrites without accepting unrelated stale SQL", () => {
+  const editorSql = "SELECT *\nFROM projects\nWHERE ;";
+  const executedSql = "SELECT *\nFROM projects\nWHERE LIMIT 100;";
+
+  assert.equal(sqlErrorSqlMatchesEditor(editorSql, executedSql), true);
+  assert.equal(sqlErrorSqlMatchesEditor(editorSql, "SELECT *\nFROM other_table\nWHERE LIMIT 100;"), false);
+});
+
+test("matches the user's own LIMIT when the SQL differs only by a semicolon", () => {
+  const editorSql = "SELECT *\nFROM projects\nLIMIT 10";
+  const executedSql = "SELECT *\nFROM projects\nLIMIT 10;";
+
+  assert.equal(sqlErrorSqlMatchesEditor(editorSql, executedSql), true);
+});
+
+test("strips the generated OFFSET ROWS FETCH FIRST suffix fully", () => {
+  const editorSql = "SELECT *\nFROM projects";
+  const executedSql = "SELECT *\nFROM projects OFFSET 10 ROWS FETCH FIRST 5 ROWS ONLY;";
+
+  assert.equal(sqlErrorSqlMatchesEditor(editorSql, executedSql), true);
+});
+
+test("underlines only the missing schema.table object, not a following column access", () => {
+  const sql = "SELECT hr.emp.empno FROM hr.emp";
+  const message = (offset: number) => `ORA-00942: table or view does not exist error occur at position: ${offset}`;
+  const objectFrom = sql.indexOf("hr.emp");
+  const objectTo = objectFrom + "hr.emp".length;
+
+  assert.deepEqual(sqlErrorDecorationRange(sql, message(objectFrom), "oracle"), { from: objectFrom, to: objectTo });
+  // A position inside `emp` still belongs to `hr.emp`, not to `emp.empno`.
+  assert.deepEqual(sqlErrorDecorationRange(sql, message(objectFrom + 4), "oracle"), { from: objectFrom, to: objectTo });
+
+  const tableFrom = sql.lastIndexOf("hr.emp");
+  assert.deepEqual(sqlErrorDecorationRange(sql, message(tableFrom), "oracle"), { from: tableFrom, to: tableFrom + "hr.emp".length });
+});
+
+test("keeps a reported keyword position tight to the keyword", () => {
+  const sql = "SELECT hr.emp.empno FROM hr.emp";
+  const keywordFrom = sql.indexOf("FROM");
+
+  // The walk must not extend a keyword position into the object that follows it.
+  assert.deepEqual(sqlErrorDecorationRange(sql, `ORA-00942 error occur at position: ${keywordFrom}`, "oracle"), { from: keywordFrom, to: keywordFrom + "FROM".length });
+});
+
+test("does not apply Oracle object expansion to other database types", () => {
+  const sql = "SELECT /* 中文 */ * FROM missing";
+  const utf16Offset = sql.indexOf("missing");
+  const byteOffset = new TextEncoder().encode(sql.slice(0, utf16Offset)).length;
+  const message = `ORA-00942: table or view does not exist error occur at position: ${byteOffset}`;
+
+  assert.deepEqual(sqlErrorDecorationRange(sql, message, "oracle"), { from: utf16Offset, to: utf16Offset + "missing".length });
+  assert.deepEqual(sqlErrorDecorationRange(sql, message, "postgres"), { from: byteOffset, to: byteOffset + 1 });
 });

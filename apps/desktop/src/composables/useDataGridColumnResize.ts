@@ -1,7 +1,7 @@
-import { ref, computed, watch, type ComputedRef, type Ref } from "vue";
+import { ref, shallowRef, computed, watch, type ComputedRef, type Ref } from "vue";
 import { calculateDataGridColumnWidth, DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT, DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH, COLUMN_WIDTH_DENSITY_PRESETS, sampleDataGridColumnValues } from "@/lib/dataGrid/dataGridColumnWidth";
 import { createDataGridColumnMeasurementSignature, loadDataGridColumnWidthState, removeDataGridColumnWidthState, saveDataGridColumnWidthState } from "@/lib/dataGrid/dataGridColumnWidthState";
-import type { ColumnWidthDensity } from "@/stores/settingsStore";
+import type { ColumnWidthDensity, DataGridColumnWidthMode } from "@/stores/settingsStore";
 
 type CellValue = string | number | boolean | null;
 
@@ -35,6 +35,7 @@ export interface UseDataGridColumnResizeOptions {
   sourceRows: ComputedRef<CellValue[][]>;
   columnIndexes: ComputedRef<number[]>;
   density: Ref<ColumnWidthDensity>;
+  widthMode: Ref<DataGridColumnWidthMode>;
   compactColumnHeaderActions: ComputedRef<boolean>;
   columnIndexIndicators?: ComputedRef<readonly boolean[]>;
   cacheKey?: ComputedRef<string | undefined>;
@@ -42,6 +43,7 @@ export interface UseDataGridColumnResizeOptions {
   measureHeaderText?: (text: string) => number | undefined;
   headerMeasurementKey?: Ref<unknown>;
   rowNumberWidth?: Ref<number> | ComputedRef<number>;
+  viewportWidth?: Ref<number> | ComputedRef<number>;
   displayValue?: (value: CellValue, columnIndex: number) => CellValue;
 }
 
@@ -51,7 +53,11 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
   const columnWidths = ref<number[]>([]);
   let isResizing = false;
   let previousColumnIndexes: number[] = [];
-  let userSizedColumnIndexes = new Set<number>();
+  // User manual drag/input vs auto-calculated (default or auto-fit).
+  // Only manual widths survive font metrics/density changes and persist across sessions.
+  const manualColumnIndexes = shallowRef<Set<number>>(new Set());
+  const autoFittedColumnIndexes = shallowRef<Set<number>>(new Set());
+  const hasUserSizedColumns = computed(() => manualColumnIndexes.value.size > 0 || autoFittedColumnIndexes.value.size > 0);
 
   function columnWidthStateIdentity() {
     return {
@@ -62,7 +68,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
   }
 
   function persistColumnWidths() {
-    saveDataGridColumnWidthState(columnWidthStateIdentity(), previousColumnIndexes, columnWidths.value, userSizedColumnIndexes);
+    saveDataGridColumnWidthState(columnWidthStateIdentity(), previousColumnIndexes, columnWidths.value, manualColumnIndexes.value, autoFittedColumnIndexes.value);
   }
 
   function sampleColumnValues(visibleColIdx: number): CellValue[] {
@@ -86,7 +92,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     });
   }
 
-  const neededColumnWidths = computed(() => columns.value.map((_, colIdx) => neededColumnWidth(colIdx)));
+  const neededColumnWidths = computed(() => (columns.value ?? []).map((_, colIdx) => neededColumnWidth(colIdx)));
   const neededColumnWidthSignature = computed(() => neededColumnWidths.value.join("|"));
 
   /** Grow-only: late pages with larger keys must not stay stuck at a short-header / early-page width. */
@@ -96,7 +102,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     const next = columnWidths.value.slice();
     for (let colIdx = 0; colIdx < columns.value.length; colIdx++) {
       const actualColIdx = columnIndexes.value[colIdx];
-      if (actualColIdx === undefined || userSizedColumnIndexes.has(actualColIdx)) continue;
+      if (actualColIdx === undefined || manualColumnIndexes.value.has(actualColIdx) || autoFittedColumnIndexes.value.has(actualColIdx)) continue;
       const needed = neededWidths[colIdx] ?? DATA_GRID_COL_MIN_WIDTH;
       if (needed > (next[colIdx] ?? 0)) {
         next[colIdx] = needed;
@@ -108,13 +114,41 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     persistColumnWidths();
   }
 
-  function markColumnUserSized(visibleColIdx: number) {
+  function markColumnManualSized(visibleColIdx: number) {
     const actualColIdx = columnIndexes.value[visibleColIdx];
-    if (actualColIdx !== undefined) userSizedColumnIndexes.add(actualColIdx);
+    if (actualColIdx === undefined) return;
+    if (autoFittedColumnIndexes.value.has(actualColIdx)) {
+      const nextAuto = new Set(autoFittedColumnIndexes.value);
+      nextAuto.delete(actualColIdx);
+      autoFittedColumnIndexes.value = nextAuto;
+    }
+    if (!manualColumnIndexes.value.has(actualColIdx)) {
+      const nextManual = new Set(manualColumnIndexes.value);
+      nextManual.add(actualColIdx);
+      manualColumnIndexes.value = nextManual;
+    }
+  }
+
+  function markColumnAutoFitted(visibleColIdx: number) {
+    const actualColIdx = columnIndexes.value[visibleColIdx];
+    if (actualColIdx === undefined) return;
+    if (manualColumnIndexes.value.has(actualColIdx)) {
+      const nextManual = new Set(manualColumnIndexes.value);
+      nextManual.delete(actualColIdx);
+      manualColumnIndexes.value = nextManual;
+    }
+    if (!autoFittedColumnIndexes.value.has(actualColIdx)) {
+      const nextAuto = new Set(autoFittedColumnIndexes.value);
+      nextAuto.add(actualColIdx);
+      autoFittedColumnIndexes.value = nextAuto;
+    }
   }
 
   function initColumnWidths(force = false) {
-    if (force) userSizedColumnIndexes.clear();
+    if (force) {
+      manualColumnIndexes.value = new Set();
+      autoFittedColumnIndexes.value = new Set();
+    }
     const previousWidthsByColumnIndex = new Map<number, number>();
     previousColumnIndexes.forEach((columnIndex, visibleIndex) => {
       const width = columnWidths.value[visibleIndex];
@@ -122,10 +156,14 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     });
     const nextColumnIndexes = [...columnIndexes.value];
     const cachedState = !force && previousColumnIndexes.length === 0 ? loadDataGridColumnWidthState(columnWidthStateIdentity(), nextColumnIndexes) : undefined;
-    if (cachedState) userSizedColumnIndexes = new Set(cachedState.userSizedColumnIndexes);
-    const currentNeededWidths = neededColumnWidths.value;
-    if (force || columnWidths.value.length !== columns.value.length || previousColumnIndexes.join("\0") !== nextColumnIndexes.join("\0")) {
-      columnWidths.value = columns.value.map((_, colIdx) => {
+    if (cachedState) {
+      manualColumnIndexes.value = new Set(cachedState.userSizedColumnIndexes);
+      autoFittedColumnIndexes.value = new Set(cachedState.autoFittedColumnIndexes ?? []);
+    }
+    const currentNeededWidths = neededColumnWidths.value ?? [];
+    const columnCount = columns.value?.length ?? 0;
+    if (force || columnWidths.value.length !== columnCount || previousColumnIndexes.join("\0") !== nextColumnIndexes.join("\0")) {
+      columnWidths.value = (columns.value ?? []).map((_, colIdx) => {
         if (!force) {
           const existingWidth = previousWidthsByColumnIndex.get(nextColumnIndexes[colIdx]);
           if (existingWidth !== undefined) return existingWidth;
@@ -143,7 +181,15 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     event.preventDefault();
     isResizing = true;
     const startX = event.clientX;
-    const startWidth = columnWidths.value[colIdx] ?? DATA_GRID_COL_MIN_WIDTH;
+    // The drag base is the width the user grabbed, which may include spare width
+    // distributed at render time. Freezing that snapshot as the stored width and
+    // marking the column user-sized right away keeps the column out of the
+    // flexible set for the whole drag, so every frame renders startWidth + delta
+    // as-is instead of re-stretching it with the remaining surplus, and the
+    // stored (persisted) width matches what the cursor moved.
+    const startWidth = renderedColumnWidths.value[colIdx] ?? DATA_GRID_COL_MIN_WIDTH;
+    markColumnManualSized(colIdx);
+    columnWidths.value[colIdx] = startWidth;
     let pendingClientX = startX;
     let resizeFrame = 0;
 
@@ -173,7 +219,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
       cancelPendingFrame();
       pendingClientX = e.clientX;
       applyPendingWidth();
-      markColumnUserSized(colIdx);
+      markColumnManualSized(colIdx);
       persistColumnWidths();
       requestAnimationFrame(() => {
         isResizing = false;
@@ -183,10 +229,13 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     document.addEventListener("mouseup", onUp);
   }
 
-  function autoFitColumn(colIdx: number) {
+  /** Full-content width of one visible column: unlike the default grow-only
+   *  sizing this ignores the density value truncation, so long text columns are
+   *  sized for what the cell actually shows. */
+  function autoFitColumnWidth(colIdx: number): number | undefined {
     const colName = columns.value[colIdx];
-    if (!colName) return;
-    columnWidths.value[colIdx] = calculateDataGridColumnWidth({
+    if (!colName) return undefined;
+    return calculateDataGridColumnWidth({
       columnName: colName,
       sampleValues: sampleColumnValues(colIdx),
       maxWidth: DATA_GRID_COL_AUTO_FIT_MAX_WIDTH,
@@ -197,13 +246,62 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
       headerTextWidth: measureHeaderText?.(colName),
       hasIndexIndicator: options.columnIndexIndicators?.value[colIdx] ?? false,
     });
-    markColumnUserSized(colIdx);
+  }
+
+  function autoFitColumn(colIdx: number) {
+    const width = autoFitColumnWidth(colIdx);
+    if (width === undefined) return;
+    columnWidths.value[colIdx] = width;
+    markColumnAutoFitted(colIdx);
     persistColumnWidths();
   }
 
-  const renderedColumnWidths = computed(() => columnWidths.value.slice());
+  /** Fit every visible column to its content in one action (issue #9813), so a
+   *  wide table does not need one double-click per column. Manual drag keeps
+   *  working afterwards: the fitted columns are recorded as user-sized, which is
+   *  exactly the state a drag leaves behind. */
+  function autoFitAllColumns() {
+    if (columnWidths.value.length !== columns.value.length || columns.value.length === 0) return;
+    const next = columnWidths.value.slice();
+    let changed = false;
+    for (let colIdx = 0; colIdx < columns.value.length; colIdx++) {
+      const width = autoFitColumnWidth(colIdx);
+      if (width === undefined) continue;
+      markColumnAutoFitted(colIdx);
+      if (next[colIdx] !== width) {
+        next[colIdx] = width;
+        changed = true;
+      }
+    }
+    if (changed) columnWidths.value = next;
+    persistColumnWidths();
+  }
+
+  function resetColumnWidths() {
+    removeDataGridColumnWidthState(options.cacheKey?.value);
+    initColumnWidths(true);
+  }
 
   const resolvedRowNumberWidth = computed(() => options.rowNumberWidth?.value ?? DATA_GRID_ROW_NUM_WIDTH);
+
+  const renderedColumnWidths = computed(() => {
+    const widths = columnWidths.value.slice();
+    if (options.widthMode.value === "content") return widths;
+    const viewportWidth = options.viewportWidth?.value ?? 0;
+    const surplus = viewportWidth - resolvedRowNumberWidth.value - widths.reduce((sum, width) => sum + width, 0);
+    if (surplus <= 0) return widths;
+    const flexibleIndexes = widths.flatMap((_, visibleIndex) => {
+      const actualIndex = columnIndexes.value[visibleIndex];
+      return actualIndex !== undefined && !manualColumnIndexes.value.has(actualIndex) && !autoFittedColumnIndexes.value.has(actualIndex) ? [visibleIndex] : [];
+    });
+    if (flexibleIndexes.length === 0) return widths;
+    const base = Math.floor(surplus / flexibleIndexes.length);
+    let remainder = surplus - base * flexibleIndexes.length;
+    flexibleIndexes.forEach((index) => {
+      widths[index] += base + (remainder-- > 0 ? 1 : 0);
+    });
+    return widths;
+  });
 
   const totalWidth = computed(() => renderedColumnWidths.value.reduce((a, b) => a + b, 0) + resolvedRowNumberWidth.value);
 
@@ -228,13 +326,39 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
   watch([() => options.cacheKey?.value, options.columnStructureSignature], () => {
     columnWidths.value = [];
     previousColumnIndexes = [];
-    userSizedColumnIndexes.clear();
+    manualColumnIndexes.value = new Set();
+    autoFittedColumnIndexes.value = new Set();
     initColumnWidths();
   });
+  function recomputeAutoColumnWidths() {
+    if (columnWidths.value.length === 0) {
+      initColumnWidths();
+      return;
+    }
+    const nextColumnIndexes = [...columnIndexes.value];
+    const currentNeededWidths = neededColumnWidths.value ?? [];
+    autoFittedColumnIndexes.value = new Set();
+    columnWidths.value = (columns.value ?? []).map((_, colIdx) => {
+      const actualColIdx = nextColumnIndexes[colIdx];
+      if (actualColIdx !== undefined && manualColumnIndexes.value.has(actualColIdx)) {
+        const existingWidth = columnWidths.value[colIdx];
+        if (existingWidth !== undefined) return existingWidth;
+      }
+      return currentNeededWidths[colIdx] ?? DATA_GRID_COL_MIN_WIDTH;
+    });
+    previousColumnIndexes = nextColumnIndexes;
+    growColumnWidthsToFitSamples(currentNeededWidths);
+    if (manualColumnIndexes.value.size > 0) {
+      persistColumnWidths();
+    } else {
+      removeDataGridColumnWidthState(options.cacheKey?.value);
+    }
+  }
+
   watch([density, compactColumnHeaderActions, () => options.headerMeasurementKey?.value], () => {
-    // Widths measured with different density or font metrics are unsafe to reuse.
-    removeDataGridColumnWidthState(options.cacheKey?.value);
-    initColumnWidths(true);
+    // Font metrics and density changes invalidate only auto-calculated column widths.
+    // User-sized column widths represent explicit pixel choices and must be preserved.
+    recomputeAutoColumnWidths();
   });
   watch(neededColumnWidthSignature, () => growColumnWidthsToFitSamples(neededColumnWidths.value));
 
@@ -244,6 +368,9 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     growColumnWidthsToFitSamples,
     onResizeStart,
     autoFitColumn,
+    autoFitAllColumns,
+    resetColumnWidths,
+    hasUserSizedColumns,
     renderedColumnWidths,
     totalWidth,
     columnVars,

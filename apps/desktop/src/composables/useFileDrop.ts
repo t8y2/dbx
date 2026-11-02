@@ -3,16 +3,14 @@ import { uuid } from "@/lib/common/utils";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
+import { useLargeSqlFileStreamingFallback } from "@/composables/useLargeSqlFileFallback";
 import * as api from "@/lib/backend/api";
 import type { ConnectionConfig, ExternalSqlFileVersion } from "@/types/database";
 import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
-import { externalSqlFileOpenErrorMessage, readBrowserSqlFile } from "@/lib/sql/sqlFileOpen";
-import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
-
-function isSqlFilePath(path: string): boolean {
-  return /\.sql$/i.test(path);
-}
+import { externalSqlEditorMaxBytes, externalSqlFileOpenErrorMessage, isScriptFilePath, isSqlFilePath, readBrowserSqlFile } from "@/lib/sql/sqlFileOpen";
+import { activeTabExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab } from "@/lib/sql/externalSqlFileTarget";
 
 function getDataFileQuery(path: string): Promise<string | undefined> {
   return api.buildDroppedFilePreviewSql({ path });
@@ -22,17 +20,22 @@ export function useFileDrop() {
   const { t } = useI18n();
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
+  const settingsStore = useSettingsStore();
   const { toast } = useToast();
+  const { openInStreamingExecutorOnTooLarge } = useLargeSqlFileStreamingFallback();
 
-  async function openDroppedSqlFile(name: string, content: string, path?: string, version?: ExternalSqlFileVersion) {
+  async function openDroppedSqlFile(name: string, content: string, path?: string, version?: ExternalSqlFileVersion, encoding?: import("@/types/database").QueryTab["externalSqlEncoding"]) {
+    const options = { allowMongoScripts: !isSqlFilePath(name) };
+    const target = path
+      ? resolveExternalSqlFileTargetForActiveTab(path, queryStore.tabs, queryStore.activeTabId, (connectionId) => connectionStore.getConfig(connectionId), options)
+      : activeTabExternalSqlFileTarget(queryStore.tabs, queryStore.activeTabId, (connectionId) => connectionStore.getConfig(connectionId), options);
+    // Dropped .js files only open when they resolve to a MongoDB target so they
+    // never bind to a relational SQL tab.
+    if (!isSqlFilePath(name) && connectionStore.getConfig(target.connectionId)?.db_type !== "mongodb") return;
     if (path) {
-      const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
-      queryStore.openExternalSqlFile(target.connectionId, target.database, path, content, version, target.catalog);
+      queryStore.openExternalSqlFile(target.connectionId, target.database, path, content, version, target.catalog, target.schema, undefined, encoding);
     } else {
-      const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
-      const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
-      const database = connection?.database || "";
-      const tabId = queryStore.createTab(connectionId, database, name, "query");
+      const tabId = queryStore.createTab(target.connectionId, target.database, name, "query", target.schema, undefined, target.catalog);
       queryStore.updateSql(tabId, content);
     }
     toast(t("welcome.fileOpened", { name }));
@@ -83,12 +86,14 @@ export function useFileDrop() {
             continue;
           }
 
-          if (isSqlFilePath(path)) {
+          if (isScriptFilePath(path)) {
             try {
-              const snapshot = await api.readExternalSqlFileSnapshot(path);
-              await openDroppedSqlFile(name, snapshot.content, path, snapshot.version);
+              const snapshot = await api.readExternalSqlFileSnapshot(path, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb));
+              await openDroppedSqlFile(name, snapshot.content, path, snapshot.version, snapshot.encoding);
             } catch (e: any) {
-              toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
+              if (!openInStreamingExecutorOnTooLarge(path, e)) {
+                toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
+              }
             }
             continue;
           }
@@ -123,8 +128,8 @@ export function useFileDrop() {
         event.preventDefault();
         for (let i = 0; i < files.length; i++) {
           const file = files[i];
-          if (!isSqlFilePath(file.name)) continue;
-          void readBrowserSqlFile(file)
+          if (!isScriptFilePath(file.name)) continue;
+          void readBrowserSqlFile(file, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb))
             .then((content) => openDroppedSqlFile(file.name, content))
             .catch((e: any) => {
               toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
@@ -135,7 +140,7 @@ export function useFileDrop() {
         const files = event.dataTransfer?.files;
         if (!files || files.length === 0) return;
         for (let i = 0; i < files.length; i++) {
-          if (isSqlFilePath(files[i].name)) {
+          if (isScriptFilePath(files[i].name)) {
             event.preventDefault();
             return;
           }

@@ -150,6 +150,12 @@ export function visibleDatabaseFilterIsEnabled(visibleDatabases: string[] | unde
   return Array.isArray(visibleDatabases);
 }
 
+/**
+ * 匹配全部库名的通配符。用于把“显示全部（含系统库）”持久化成动态过滤条件：
+ * 未配置筛选时系统库默认隐藏，而显式库名快照又会让之后新建的库无法自动出现。
+ */
+export const MATCH_ALL_VISIBLE_DATABASE_PATTERN = "%";
+
 const visibleDatabasePatternRegExpCache = new Map<string, RegExp>();
 
 /** SQL LIKE 语义：`%` 匹配任意字符序列、`_` 匹配单个字符，其余按字面匹配（区分大小写）。 */
@@ -238,7 +244,7 @@ export function filterDatabaseNamesForConnection(databaseNames: string[], connec
 }
 
 export function filterDatabaseNamesForVisiblePicker(databaseNames: string[], connection: VisibleDatabaseConnection | undefined): string[] {
-  if (connection?.db_type === "gbase" && connection.driver_profile === "gbase8s") {
+  if (connection?.db_type === "gbase8s") {
     return databaseNames;
   }
   return databaseNames.filter((name) => !isSystemDatabaseName(effectiveDatabaseTypeForConnection(connection), name));
@@ -247,8 +253,15 @@ export function filterDatabaseNamesForVisiblePicker(databaseNames: string[], con
 export function filterSchemaNamesForVisiblePicker(schemaNames: string[], connection: VisibleDatabaseConnection | undefined, options?: SchemaFilterOptions): string[] {
   if (schemaFilterShowSystemSchemas(connection, options)) return schemaNames;
   const currentSchema = connection?.username?.trim().toLowerCase();
+  // OceanBase Oracle logins embed the tenant in the username ("user@tenant");
+  // the schema equals the user part, so keep the login schema visible in both
+  // forms instead of hiding it behind a system-schema name (#8145).
+  const currentUserPart = currentSchema?.split("@")[0];
   const databaseType = effectiveDatabaseTypeForConnection(connection);
-  return schemaNames.filter((name) => name.toLowerCase() === currentSchema || !isSystemSchemaName(databaseType, name));
+  return schemaNames.filter((name) => {
+    const normalized = name.toLowerCase();
+    return normalized === currentSchema || normalized === currentUserPart || !isSystemSchemaName(databaseType, name);
+  });
 }
 
 export function connectionUsesVisibleSchemaFilter(connection: VisibleDatabaseConnection | undefined): boolean {
@@ -261,7 +274,12 @@ export function visibleSchemaFilterIsEnabled(visibleSchemas: Record<string, stri
 
 export function filterSchemaNamesForConnection(schemaNames: string[], connection: VisibleDatabaseConnection | undefined, database: string, options?: SchemaFilterOptions): string[] {
   const visibleSchemas = connection?.visible_schemas;
-  if (!visibleSchemaFilterIsEnabled(visibleSchemas, database)) {
+  // Single-database connections persist their schema filter under the empty
+  // database key while the editor toolbar addresses the same bucket with its
+  // "_" single-db sentinel; normalize so the strict checkbox filter still
+  // applies to the schema picker (#8145).
+  const filterDatabase = database === "_" ? "" : database;
+  if (!visibleSchemaFilterIsEnabled(visibleSchemas, filterDatabase)) {
     const visibleDatabases = connection?.visible_databases;
     const visibleDatabasePatterns = connection?.visible_database_patterns;
     if (connectionUsesVisibleSchemaFilter(connection) && (visibleDatabaseFilterIsEnabled(visibleDatabases) || visibleDatabasePatternsAreEnabled(visibleDatabasePatterns))) {
@@ -269,7 +287,7 @@ export function filterSchemaNamesForConnection(schemaNames: string[], connection
     }
     return filterSchemaNamesForVisiblePicker(schemaNames, connection, options);
   }
-  const visible = new Set(visibleSchemas![database]);
+  const visible = new Set(visibleSchemas![filterDatabase]);
   return schemaNames.filter((name) => visible.has(name));
 }
 
@@ -287,4 +305,9 @@ const DRAFT_VISIBLE_SCHEMAS_PREFIX = "__visible_schema_draft_";
 
 export function buildDraftVisibleSchemasConnectionId(seed: string): string {
   return `${DRAFT_VISIBLE_SCHEMAS_PREFIX}${seed}`;
+}
+
+/** 可见 schema 选择器用的临时连接：只存在于弹窗交互期间，不是用户保存的连接。 */
+export function isDraftVisibleSchemasConnectionId(connectionId: string): boolean {
+  return connectionId.startsWith(DRAFT_VISIBLE_SCHEMAS_PREFIX);
 }

@@ -5,23 +5,38 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "../../../i18n";
 import ScheduledDatabaseBackupSettings from "../ScheduledDatabaseBackupSettings.vue";
 import type { DatabaseBackupRun, DatabaseBackupSchedule } from "../../../lib/backup/scheduledDatabaseBackup";
+import { LAST_BACKUP_DIRECTORY_STORAGE_KEY } from "../../../lib/export/exportPath";
 
 const mocks = vi.hoisted(() => ({
+  desktop: true,
+  preferredExportPath: "",
+  sqlFileSource: null as any,
+  prepareDatabaseBackupRestore: vi.fn(),
   connections: [] as Array<{ id: string; name: string; db_type: string }>,
   schedules: [] as DatabaseBackupSchedule[],
   runs: [] as DatabaseBackupRun[],
   activeRunIds: new Set<string>(),
+  cancellingRunIds: new Set<string>(),
   activeRuns: [] as DatabaseBackupRun[],
   ensureConnected: vi.fn(async () => {}),
+  recordConnectionLostError: vi.fn(() => false),
   listDatabases: vi.fn(async (_connectionId: string) => [{ name: "app" }]),
+  listSchemas: vi.fn(async () => ["public"]),
+  listTables: vi.fn(async () => [{ name: "odd*,name.with.dot" }, { name: "unselected" }]),
+  databaseExportDestinationNeedsConfirmation: vi.fn(async (_directory: string) => false),
   recordDatabaseExportDestination: vi.fn(async (_directory: string) => {}),
+  openDirectory: vi.fn(async (): Promise<string | null> => "/backups"),
   toast: vi.fn(),
   saveSchedule: vi.fn(),
   setScheduleEnabled: vi.fn(),
   deleteSchedule: vi.fn(),
   deleteRun: vi.fn(),
+  deleteRuns: vi.fn(),
+  importBackupFiles: vi.fn(),
+  renameRun: vi.fn(),
   runSchedule: vi.fn(),
   runOneShot: vi.fn(),
+  runOneShotBatch: vi.fn(),
   cancelRun: vi.fn(),
 }));
 
@@ -29,9 +44,20 @@ vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     connections: mocks.connections,
     ensureConnected: mocks.ensureConnected,
+    recordConnectionLostError: mocks.recordConnectionLostError,
     getConfig: (connectionId: string) => mocks.connections.find((connection) => connection.id === connectionId),
-    sqlFileSource: null,
+    get sqlFileSource() {
+      return mocks.sqlFileSource;
+    },
+    set sqlFileSource(value) {
+      mocks.sqlFileSource = value;
+    },
   }),
+}));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => mocks.desktop }));
+
+vi.mock("@/stores/settingsStore", () => ({
+  useSettingsStore: () => ({ editorSettings: { preferredExportPath: mocks.preferredExportPath } }),
 }));
 
 vi.mock("@/composables/useScheduledDatabaseBackups", () => ({
@@ -40,13 +66,21 @@ vi.mock("@/composables/useScheduledDatabaseBackups", () => ({
     runs: { __v_isRef: true, value: mocks.runs },
     activeScheduleIds: new Set<string>(),
     activeRunIds: mocks.activeRunIds,
+    cancellingRunIds: mocks.cancellingRunIds,
     activeRuns: { __v_isRef: true, value: mocks.activeRuns },
+    heartbeat: { __v_isRef: true, value: null },
+    destinationRoot: { __v_isRef: true, value: null },
+    error: { __v_isRef: true, value: "" },
     saveSchedule: mocks.saveSchedule,
     setScheduleEnabled: mocks.setScheduleEnabled,
     deleteSchedule: mocks.deleteSchedule,
     deleteRun: mocks.deleteRun,
+    deleteRuns: mocks.deleteRuns,
+    importBackupFiles: mocks.importBackupFiles,
+    renameRun: mocks.renameRun,
     runSchedule: mocks.runSchedule,
     runOneShot: mocks.runOneShot,
+    runOneShotBatch: mocks.runOneShotBatch,
     cancelRun: mocks.cancelRun,
   }),
 }));
@@ -55,14 +89,30 @@ vi.mock("@/composables/useToast", () => ({
   useToast: () => ({ toast: mocks.toast }),
 }));
 
+vi.mock("@/components/connection/ConnectionGroupBadge.vue", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    default: defineComponent({
+      props: { connectionId: { type: String, required: true } },
+      setup: (props) => () => h("span", { "data-connection-group-badge": "", "data-connection-id": props.connectionId }),
+    }),
+  };
+});
+
 vi.mock("@tauri-apps/plugin-dialog", () => ({
-  open: vi.fn(async () => "/backups"),
+  open: mocks.openDirectory,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
+  prepareDatabaseBackupRestore: mocks.prepareDatabaseBackupRestore,
+  databaseBackupBackground: vi.fn(async () => ({ enabled: false, platform: "windows" })),
+  databaseBackupCommand: vi.fn(async () => "2026-09-13T02:00:00Z"),
   listDatabases: mocks.listDatabases,
+  listSchemas: mocks.listSchemas,
+  listTables: mocks.listTables,
   deleteDatabaseBackupFiles: vi.fn(),
   revealPathInFileManager: vi.fn(),
+  databaseExportDestinationNeedsConfirmation: mocks.databaseExportDestinationNeedsConfirmation,
   recordDatabaseExportDestination: mocks.recordDatabaseExportDestination,
 }));
 
@@ -100,6 +150,15 @@ function currentDialog(): HTMLElement {
   return dialog;
 }
 
+function destinationInput(): HTMLInputElement {
+  const input = currentDialog().querySelector<HTMLInputElement>(".backup-destination-field input");
+  if (!input) throw new Error("Backup destination input not found");
+  return input;
+}
+
+// The backup format select precedes the table scope select in the config fields.
+const TABLE_SCOPE_SELECT = 1;
+
 async function selectDialogOption(triggerIndex: number, optionText: string) {
   const trigger = currentDialog().querySelectorAll<HTMLButtonElement>('[data-slot="select-trigger"]')[triggerIndex];
   if (!trigger) throw new Error(`Select trigger not found: ${triggerIndex}`);
@@ -112,12 +171,100 @@ async function selectDialogOption(triggerIndex: number, optionText: string) {
   await flush();
 }
 
+async function openDialogSelect(triggerIndex: number): Promise<HTMLElement[]> {
+  const trigger = currentDialog().querySelectorAll<HTMLButtonElement>('[data-slot="select-trigger"]')[triggerIndex];
+  if (!trigger) throw new Error(`Select trigger not found: ${triggerIndex}`);
+  trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+  await flush();
+  return Array.from(document.body.querySelectorAll<HTMLElement>('[role="option"]'));
+}
+
+function navicatFormatOption(options: HTMLElement[]): HTMLElement {
+  const label = String(i18n.global.t("databaseBackup.formatNb3"));
+  const option = options.find((item) => item.textContent?.trim() === label);
+  if (!option) throw new Error(`Format option not found: ${label}`);
+  return option;
+}
+
+async function chooseOpenSelectOption(option: HTMLElement) {
+  option.focus();
+  option.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await flush();
+}
+
 async function setTablePattern(pattern: string) {
-  await selectDialogOption(1, String(i18n.global.t("databaseBackup.includeTables")));
+  await selectDialogOption(TABLE_SCOPE_SELECT, String(i18n.global.t("databaseBackup.includeTables")));
   const input = currentDialog().querySelector<HTMLInputElement>(`input[placeholder="${String(i18n.global.t("databaseBackup.tablePatternsPlaceholder"))}"]`);
   if (!input) throw new Error("Table pattern input not found");
   input.value = pattern;
   input.dispatchEvent(new Event("input", { bubbles: true }));
+  await flush();
+}
+
+async function selectBackupConnection(connectionName: string) {
+  const trigger = currentDialog().querySelector<HTMLButtonElement>("[data-backup-connection-picker]");
+  if (!trigger) throw new Error("Backup connection picker not found");
+  trigger.click();
+  await flush();
+  const search = document.body.querySelector<HTMLInputElement>("[data-backup-connection-search]");
+  if (!search) throw new Error("Backup connection search not found");
+  search.value = connectionName;
+  search.dispatchEvent(new Event("input", { bubbles: true }));
+  await flush();
+  const option = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((item) => item.textContent?.trim() === connectionName);
+  if (!option) throw new Error(`Backup connection option not found: ${connectionName}`);
+  option.click();
+  await flush();
+}
+
+/** Toggles connections in the one-shot multi-select picker; the popover stays open between clicks. */
+async function toggleBackupConnections(...connectionNames: string[]) {
+  const trigger = currentDialog().querySelector<HTMLButtonElement>("[data-backup-connection-picker]");
+  if (!trigger) throw new Error("Backup connection picker not found");
+  trigger.click();
+  await flush();
+  for (const connectionName of connectionNames) {
+    const option = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button[role="checkbox"]')).find((item) => item.textContent?.trim() === connectionName);
+    if (!option) throw new Error(`Backup connection option not found: ${connectionName}`);
+    option.click();
+    await flush();
+  }
+  trigger.click();
+  await flush();
+}
+
+function startBackupButton(): HTMLButtonElement {
+  const label = String(i18n.global.t("databaseBackup.startBackup"));
+  const button = Array.from(currentDialog().querySelectorAll<HTMLButtonElement>("button")).find((item) => item.textContent?.trim() === label);
+  if (!button) throw new Error("Start backup button not found");
+  return button;
+}
+
+async function selectHistoryConnection(connectionName: string) {
+  const trigger = document.body.querySelector<HTMLButtonElement>("[data-backup-history-connection-picker]");
+  if (!trigger) throw new Error("History connection picker not found");
+  trigger.click();
+  await flush();
+  const search = document.body.querySelector<HTMLInputElement>("[data-backup-history-connection-search]");
+  if (!search) throw new Error("History connection search not found");
+  search.value = connectionName;
+  search.dispatchEvent(new Event("input", { bubbles: true }));
+  await flush();
+  const option = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((item) => item.textContent?.trim() === connectionName);
+  if (!option) throw new Error(`History connection option not found: ${connectionName}`);
+  option.click();
+  await flush();
+}
+
+async function selectHistoryFilter(triggerIndex: number, optionText: string) {
+  const trigger = document.body.querySelectorAll<HTMLButtonElement>('[data-slot="select-trigger"]')[triggerIndex];
+  if (!trigger) throw new Error(`History filter trigger not found: ${triggerIndex}`);
+  trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+  await flush();
+  const option = Array.from(document.body.querySelectorAll<HTMLElement>('[role="option"]')).find((item) => item.textContent?.trim() === optionText);
+  if (!option) throw new Error(`History filter option not found: ${optionText}`);
+  option.focus();
+  option.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
   await flush();
 }
 
@@ -131,7 +278,9 @@ async function showDatabaseOptions() {
 }
 
 function buttonWithText(text: string): HTMLButtonElement {
-  const button = Array.from(document.body.querySelectorAll("button")).find((item) => item.textContent?.includes(text));
+  // Prefer an exact label so "Restore" does not match "Restore from file".
+  const buttons = Array.from(document.body.querySelectorAll("button"));
+  const button = buttons.find((item) => item.textContent?.trim() === text) ?? buttons.find((item) => item.textContent?.includes(text));
   if (!button) throw new Error(`Button not found: ${text}`);
   return button;
 }
@@ -161,6 +310,7 @@ function schedule(overrides: Partial<DatabaseBackupSchedule> = {}): DatabaseBack
     includeData: true,
     includeObjects: true,
     dropTableIfExists: false,
+    outputCompression: "none",
     retentionCount: 10,
     createdAt: "2026-08-12T00:00:00.000Z",
     updatedAt: "2026-08-12T00:00:00.000Z",
@@ -183,28 +333,310 @@ function saveScheduleButton(): HTMLButtonElement {
   return button;
 }
 
+function scheduleRunNowButton(): HTMLButtonElement {
+  const title = String(i18n.global.t("databaseBackup.runNow"));
+  const button = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((item) => item.title === title && !item.textContent?.trim());
+  if (!button) throw new Error("Schedule run-now button not found");
+  return button;
+}
+
 afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount();
   document.body.innerHTML = "";
+  mocks.desktop = true;
+  mocks.preferredExportPath = "";
+  // 上次备份目录存于 localStorage，需在用例间清理，避免互相污染
+  window.localStorage.clear();
+  mocks.sqlFileSource = null;
+  mocks.prepareDatabaseBackupRestore.mockReset();
   mocks.connections.splice(0);
   mocks.schedules.splice(0);
   mocks.runs.splice(0);
   mocks.activeRuns.splice(0);
   mocks.activeRunIds.clear();
+  mocks.cancellingRunIds.clear();
   mocks.ensureConnected.mockClear();
+  mocks.recordConnectionLostError.mockReset();
+  mocks.recordConnectionLostError.mockReturnValue(false);
   mocks.listDatabases.mockReset();
   mocks.listDatabases.mockResolvedValue([{ name: "app" }]);
+  mocks.listSchemas.mockReset();
+  mocks.listSchemas.mockResolvedValue(["public"]);
+  mocks.listTables.mockReset();
+  mocks.listTables.mockResolvedValue([{ name: "odd*,name.with.dot" }, { name: "unselected" }]);
+  mocks.databaseExportDestinationNeedsConfirmation.mockReset();
+  mocks.databaseExportDestinationNeedsConfirmation.mockResolvedValue(false);
   mocks.recordDatabaseExportDestination.mockReset();
   mocks.recordDatabaseExportDestination.mockResolvedValue(undefined);
+  mocks.openDirectory.mockReset();
+  mocks.openDirectory.mockResolvedValue("/backups");
   mocks.toast.mockClear();
   mocks.saveSchedule.mockClear();
+  mocks.deleteRun.mockClear();
+  mocks.deleteRuns.mockClear();
+  mocks.importBackupFiles.mockReset();
+  mocks.renameRun.mockReset();
   mocks.cancelRun.mockClear();
+  mocks.runSchedule.mockReset();
+  mocks.runSchedule.mockResolvedValue(null);
   mocks.runOneShot.mockReset();
   mocks.runOneShot.mockResolvedValue(null);
+  mocks.runOneShotBatch.mockReset();
+  mocks.runOneShotBatch.mockResolvedValue({ runs: [], enqueueErrors: [] });
 });
 
 describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
-  it("opens the create schedule dialog for supported SQL connections", async () => {
+  it.each([true, false])("restores with the correct desktop=%s source", async (desktop) => {
+    mocks.desktop = desktop;
+    const preview = { fileName: "backup.sql", filePath: "/server/tmp/sql_file/restore-token/backup.sql", preview: "SELECT 1;", sizeBytes: 9, canExecuteWithoutSelectedDatabase: true, cleanupToken: "restore-token" };
+    mocks.prepareDatabaseBackupRestore.mockResolvedValue(preview);
+    mocks.runs.push({
+      id: "restore-run",
+      scheduleName: "Nightly",
+      connectionId: "mysql-1",
+      trigger: "manual",
+      source: "scheduled",
+      status: "success",
+      startedAt: "2026-08-18T00:00:00.000Z",
+      files: [{ displayName: "backup.sql", filePath: "/backups/backup.sql", database: "app" }],
+    });
+    await mountSettings();
+    buttonWithTitle(String(i18n.global.t("databaseBackup.showFiles"))).click();
+    await flush();
+    buttonWithText(String(i18n.global.t("databaseBackup.restore"))).click();
+    await flush();
+    expect(mocks.sqlFileSource).toEqual({ connectionId: "mysql-1", database: "app", ...(desktop ? { filePath: "/backups/backup.sql" } : { preview }) });
+    if (desktop) expect(mocks.prepareDatabaseBackupRestore).not.toHaveBeenCalled();
+    else expect(mocks.prepareDatabaseBackupRestore).toHaveBeenCalledWith("restore-run", 0);
+  });
+
+  it("imports outside backup files into the history and restores any file without importing it", async () => {
+    mocks.openDirectory.mockResolvedValueOnce(["/downloads/shop.nb3", "/downloads/old.sql.gz"]);
+    mocks.importBackupFiles.mockResolvedValue([{ id: "imported-1" }, { id: "imported-2" }]);
+    await mountSettings();
+
+    document.body.querySelector<HTMLButtonElement>("[data-backup-import]")!.click();
+    await flush();
+    expect(mocks.openDirectory).toHaveBeenCalledWith(expect.objectContaining({ multiple: true }));
+    expect(mocks.importBackupFiles).toHaveBeenCalledWith(["/downloads/shop.nb3", "/downloads/old.sql.gz"]);
+    expect(mocks.toast).toHaveBeenCalledWith(String(i18n.global.t("databaseBackup.backupsImported", { count: 2 })), 2500);
+
+    mocks.openDirectory.mockResolvedValueOnce("/downloads/navicat.nb3");
+    document.body.querySelector<HTMLButtonElement>("[data-backup-restore-from-file]")!.click();
+    await flush();
+    expect(mocks.sqlFileSource).toEqual({ connectionId: "", database: "", filePath: "/downloads/navicat.nb3" });
+    expect(mocks.importBackupFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the uploading SQL file dialog to restore from a file on the web, where import is unavailable", async () => {
+    mocks.desktop = false;
+    await mountSettings();
+
+    expect(document.body.querySelector("[data-backup-import]")).toBeNull();
+    document.body.querySelector<HTMLButtonElement>("[data-backup-restore-from-file]")!.click();
+    await flush();
+    expect(mocks.openDirectory).not.toHaveBeenCalled();
+    expect(mocks.sqlFileSource).toEqual({ connectionId: "", database: "" });
+  });
+
+  it("labels imported backups and says deleting them keeps the files", async () => {
+    mocks.runs.push({
+      id: "imported-run",
+      scheduleName: "shop.nb3",
+      connectionId: "",
+      connectionName: "",
+      trigger: "manual",
+      source: "imported",
+      status: "success",
+      startedAt: "2026-09-08T02:00:00.000Z",
+      files: [{ database: "shop", schema: "sales", displayName: "shop.sales", filePath: "/downloads/shop.nb3" }],
+    });
+    await mountSettings();
+
+    expect(document.body.textContent).toContain(String(i18n.global.t("databaseBackup.importedTrigger")));
+    expect(document.body.textContent).toContain(String(i18n.global.t("databaseBackup.externalFile")));
+    expect(document.body.textContent).not.toContain(String(i18n.global.t("databaseBackup.missingConnection")));
+    buttonWithTitle(String(i18n.global.t("databaseBackup.deleteBackup"))).click();
+    await flush();
+    expect(currentDialog().querySelector("[data-backup-delete-message]")?.textContent).toBe(String(i18n.global.t("databaseBackup.deleteImportedConfirm", { count: 1 })));
+  });
+
+  it("shows a backup display name and saves edits through the rename dialog", async () => {
+    mocks.runs.push({
+      id: "renamed-run",
+      scheduleName: "Nightly backup",
+      displayName: "Before migration",
+      connectionId: "mysql-1",
+      connectionName: "Local MySQL",
+      trigger: "manual",
+      source: "scheduled",
+      status: "success",
+      startedAt: "2026-08-18T00:00:00.000Z",
+      files: [],
+    });
+    mocks.renameRun.mockResolvedValue(true);
+    await mountSettings();
+
+    expect(document.body.textContent).toContain("Before migration");
+    buttonWithTitle(String(i18n.global.t("databaseBackup.renameBackup"))).click();
+    await flush();
+    const input = currentDialog().querySelector<HTMLInputElement>("input")!;
+    expect(input.value).toBe("Before migration");
+    input.value = "After migration";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+    saveScheduleButton().click();
+    await flush();
+
+    expect(mocks.renameRun).toHaveBeenCalledWith("renamed-run", "After migration");
+    expect(document.body.querySelector('[data-slot="dialog-content"]')).toBeNull();
+  });
+
+  it("reconnects once when loading databases finds a closed connection", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.listDatabases.mockRejectedValueOnce(new Error("MySQL connection failed: Input/output error: connection closed")).mockResolvedValueOnce([{ name: "app" }]);
+    mocks.recordConnectionLostError.mockReturnValue(true);
+    await mountSettings();
+
+    addScheduleButton().click();
+    await flush();
+    await showDatabaseOptions();
+    await vi.waitFor(() => expect(mocks.listDatabases).toHaveBeenCalledTimes(2));
+
+    expect(mocks.recordConnectionLostError).toHaveBeenCalledWith("mysql-1", expect.any(Error));
+    expect(mocks.ensureConnected).toHaveBeenCalledTimes(2);
+    expect(mocks.toast).not.toHaveBeenCalled();
+  });
+
+  it("shows connection guidance inline when explicitly loading databases fails", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.listDatabases.mockRejectedValueOnce(new Error("MySQL connection failed: Input/output error: connection closed"));
+    await mountSettings();
+
+    addScheduleButton().click();
+    await flush();
+    await showDatabaseOptions();
+    await vi.waitFor(() => expect(currentDialog().querySelector("[data-backup-database-load-error]")?.textContent).toContain("Local MySQL"));
+
+    expect(mocks.toast).not.toHaveBeenCalled();
+  });
+
+  it("selects filtered backup history and deletes the selected runs together", async () => {
+    mocks.runs.push(
+      {
+        id: "run-batch-one",
+        scheduleName: "First backup",
+        connectionId: "mysql-1",
+        connectionName: "Local MySQL",
+        trigger: "scheduled",
+        source: "scheduled",
+        status: "success",
+        startedAt: "2026-09-08T02:00:00.000Z",
+        files: [{ displayName: "first.sql", filePath: "/backups/first.sql" }],
+      },
+      {
+        id: "run-batch-two",
+        scheduleName: "Second backup",
+        connectionId: "mysql-1",
+        connectionName: "Local MySQL",
+        trigger: "scheduled",
+        source: "scheduled",
+        status: "success",
+        startedAt: "2026-09-08T01:00:00.000Z",
+        files: [{ displayName: "second.sql", filePath: "/backups/second.sql" }],
+      },
+    );
+    await mountSettings();
+
+    const selectAll = document.body.querySelector<HTMLInputElement>("[data-backup-history-select-all]");
+    if (!selectAll) throw new Error("Select-all checkbox not found");
+    selectAll.checked = true;
+    selectAll.dispatchEvent(new Event("change", { bubbles: true }));
+    await flush();
+
+    expect(document.body.querySelectorAll<HTMLInputElement>("[data-backup-history-select]")).toHaveLength(2);
+    const deleteSelected = document.body.querySelector<HTMLButtonElement>("[data-backup-delete-selected]");
+    if (!deleteSelected) throw new Error("Delete selected button not found");
+    deleteSelected.click();
+    await flush();
+
+    expect(currentDialog().textContent).toContain(String(i18n.global.t("databaseBackup.deleteBackupsConfirm", { count: 2, files: 2 })));
+    const confirm = Array.from(currentDialog().querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === String(i18n.global.t("databaseBackup.delete")));
+    if (!confirm) throw new Error("Delete confirmation button not found");
+    confirm.click();
+    await flush();
+
+    expect(mocks.deleteRuns).toHaveBeenCalledWith(["run-batch-one", "run-batch-two"]);
+  });
+
+  it("filters backup history by a searched connection", async () => {
+    mocks.runs.push(
+      {
+        id: "run-primary",
+        scheduleName: "Primary backup",
+        connectionId: "mysql-primary",
+        connectionName: "Primary MySQL",
+        trigger: "manual",
+        source: "schedule",
+        status: "success",
+        startedAt: "2026-08-18T00:00:00.000Z",
+        files: [],
+      },
+      {
+        id: "run-archive",
+        scheduleName: "Archive backup",
+        connectionId: "mysql-archive",
+        connectionName: "Archive MySQL",
+        trigger: "manual",
+        source: "schedule",
+        status: "success",
+        startedAt: "2026-08-19T00:00:00.000Z",
+        files: [],
+      },
+    );
+    await mountSettings();
+
+    await selectHistoryConnection("Archive MySQL");
+
+    expect(document.body.textContent).toContain("Archive backup");
+    expect(document.body.textContent).not.toContain("Primary backup");
+  });
+
+  it("combines backup method and status filters for history", async () => {
+    mocks.runs.push(
+      {
+        id: "run-manual-success",
+        scheduleName: "Manual success backup",
+        connectionId: "mysql-1",
+        connectionName: "Local MySQL",
+        trigger: "manual",
+        source: "scheduled",
+        status: "success",
+        startedAt: "2026-08-18T00:00:00.000Z",
+        files: [],
+      },
+      {
+        id: "run-scheduled-failed",
+        scheduleName: "Scheduled failed backup",
+        connectionId: "mysql-1",
+        connectionName: "Local MySQL",
+        trigger: "scheduled",
+        source: "scheduled",
+        status: "failed",
+        startedAt: "2026-08-19T00:00:00.000Z",
+        files: [],
+      },
+    );
+    await mountSettings();
+
+    await selectHistoryFilter(0, String(i18n.global.t("databaseBackup.scheduledTrigger")));
+    await selectHistoryFilter(1, String(i18n.global.t("databaseBackup.status.failed")));
+
+    expect(document.body.textContent).toContain("Scheduled failed backup");
+    expect(document.body.textContent).not.toContain("Manual success backup");
+  });
+
+  it("opens the create schedule dialog without probing its default connection", async () => {
     mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
     await mountSettings();
 
@@ -217,8 +649,44 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     const dialog = document.body.querySelector('[data-slot="dialog-content"]');
     expect(dialog?.textContent).toContain(String(i18n.global.t("databaseBackup.addSchedule")));
     expect(dialog?.textContent).toContain(String(i18n.global.t("databaseBackup.scheduleName")));
-    expect(mocks.ensureConnected).toHaveBeenCalledWith("mysql-1");
-    expect(mocks.listDatabases).toHaveBeenCalledWith("mysql-1");
+    expect(mocks.ensureConnected).not.toHaveBeenCalled();
+    expect(mocks.listDatabases).not.toHaveBeenCalled();
+  });
+
+  it("previews the rendered output path and updates it when the directory template changes", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    await mountSettings();
+
+    addScheduleButton().click();
+    await flush();
+    buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
+    await flush();
+
+    const preview = currentDialog().querySelector<HTMLElement>("[data-backup-output-path-preview]");
+    expect(preview?.textContent).toContain("/backups/dbx-backup__");
+    expect(preview?.textContent).toContain("preview0");
+
+    const input = currentDialog().querySelector<HTMLInputElement>("[data-backup-run-directory-pattern]");
+    if (!input) throw new Error("Run directory template input not found");
+    input.value = "archive/{date}/{timestamp}";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+
+    expect(currentDialog().textContent).toContain("{timestamp}");
+    expect(currentDialog().querySelector<HTMLElement>("[data-backup-output-path-preview]")?.textContent).toContain("/backups/archive/");
+  });
+
+  it("shows connection group badges in the backup connection picker", async () => {
+    mocks.connections.push({ id: "mysql-primary", name: "Shared name", db_type: "mysql" }, { id: "mysql-archive", name: "Shared name", db_type: "mysql" });
+    await mountSettings();
+
+    addScheduleButton().click();
+    await flush();
+    currentDialog().querySelector<HTMLButtonElement>("[data-backup-connection-picker]")?.click();
+    await flush();
+
+    const connectionIds = Array.from(document.body.querySelectorAll<HTMLElement>("[data-connection-group-badge]")).map((badge) => badge.dataset.connectionId);
+    expect(connectionIds).toEqual(["mysql-primary", "mysql-archive"]);
   });
 
   it("opens an independent one-shot dialog without schedule fields", async () => {
@@ -261,6 +729,89 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     expect(mocks.runOneShot).toHaveBeenCalledWith(expect.objectContaining({ connectionId: "mysql-1", destinationDirectory: "/backups", databases: [] }), String(i18n.global.t("databaseBackup.oneShotName")));
   });
 
+  it("defaults a new backup directory to the last used backup directory", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    window.localStorage.setItem(LAST_BACKUP_DIRECTORY_STORAGE_KEY, "/previous/backups");
+    await mountSettings();
+
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+
+    expect(destinationInput().value).toBe("/previous/backups");
+  });
+
+  it("falls back to the preferred export path when no backup directory was used yet", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.preferredExportPath = "/preferred/exports";
+    await mountSettings();
+
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+
+    expect(destinationInput().value).toBe("/preferred/exports");
+  });
+
+  it("opens the picker at the current directory and remembers the choice", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    window.localStorage.setItem(LAST_BACKUP_DIRECTORY_STORAGE_KEY, "/previous/backups");
+    await mountSettings();
+
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
+    await flush();
+
+    expect(mocks.openDirectory).toHaveBeenCalledWith(expect.objectContaining({ directory: true, defaultPath: "/previous/backups" }));
+    expect(window.localStorage.getItem(LAST_BACKUP_DIRECTORY_STORAGE_KEY)).toBe("/backups");
+
+    // 重新挂载后再次打开「立即备份」，默认目录应为上次选择的 /backups
+    for (const app of mountedApps.splice(0)) app.unmount();
+    document.body.innerHTML = "";
+    await mountSettings();
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    expect(destinationInput().value).toBe("/backups");
+  });
+
+  it("sends an exact one-shot table whitelist and prevents an empty selection from starting", async () => {
+    mocks.connections.push({ id: "pg-1", name: "Local PostgreSQL", db_type: "postgres" });
+    await mountSettings();
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
+    await flush();
+    await showDatabaseOptions();
+    const database = Array.from(currentDialog().querySelectorAll<HTMLInputElement>('input[type="checkbox"]')).find((item) => item.parentElement?.textContent?.trim() === "app")!;
+    database.checked = true;
+    database.dispatchEvent(new Event("change", { bubbles: true }));
+    await flush();
+    await selectDialogOption(TABLE_SCOPE_SELECT, String(i18n.global.t("databaseBackup.exactTables")));
+    await flush();
+    const start = Array.from(currentDialog().querySelectorAll<HTMLButtonElement>("button")).find((item) => item.textContent?.trim() === String(i18n.global.t("databaseBackup.startBackup")))!;
+    expect(start.disabled).toBe(true);
+    const row = currentDialog().querySelector<HTMLButtonElement>("[data-backup-table-selector] [data-table-name]")!;
+    row.click();
+    await flush();
+    expect(start.disabled).toBe(false);
+    buttonWithText(String(i18n.global.t("common.clear"))).click();
+    await flush();
+    expect(start.disabled).toBe(true);
+    row.click();
+    await flush();
+    start.click();
+    await flush();
+    expect(mocks.runOneShot).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionId: "pg-1",
+        databases: ["app"],
+        tableFilterMode: "selected",
+        tablePatterns: [],
+        selectedTables: [{ database: "app", schema: "public", table: "odd*,name.with.dot" }],
+      }),
+      String(i18n.global.t("databaseBackup.oneShotName")),
+    );
+  });
+
   it("keeps the newer connection database list when an older response finishes last", async () => {
     mocks.connections.push({ id: "mysql-a", name: "MySQL A", db_type: "mysql" }, { id: "mysql-b", name: "MySQL B", db_type: "mysql" });
     const firstLoad = deferred<Array<{ name: string }>>();
@@ -269,8 +820,12 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     await mountSettings();
 
     buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    await showDatabaseOptions();
     await vi.waitFor(() => expect(mocks.listDatabases).toHaveBeenCalledWith("mysql-a"));
-    await selectDialogOption(0, "MySQL B");
+    // The one-shot picker is a multi-select: add B, then drop A to end up with B only.
+    await toggleBackupConnections("MySQL B", "MySQL A");
+    await showDatabaseOptions();
     await vi.waitFor(() => expect(mocks.listDatabases).toHaveBeenCalledWith("mysql-b"));
 
     secondLoad.resolve([{ name: "new_database" }]);
@@ -284,30 +839,183 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     expect(currentDialog().textContent).not.toContain("stale_database");
   });
 
-  it("does not let a closed one-shot request clear a schedule draft", async () => {
+  it("filters database choices locally without changing the loaded options", async () => {
     mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
-    const oneShotLoad = deferred<Array<{ name: string }>>();
-    const scheduleLoad = deferred<Array<{ name: string }>>();
-    mocks.listDatabases.mockImplementationOnce(() => oneShotLoad.promise).mockImplementationOnce(() => scheduleLoad.promise);
+    mocks.listDatabases.mockResolvedValue([{ name: "analytics" }, { name: "application" }, { name: "billing" }]);
     await mountSettings();
 
     buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    await showDatabaseOptions();
+    await flush();
+    await showDatabaseOptions();
+
+    const search = currentDialog().querySelector<HTMLInputElement>("[data-backup-database-search]");
+    if (!search) throw new Error("Backup database search not found");
+    search.value = "bill";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+
+    expect(currentDialog().textContent).toContain("billing");
+    expect(currentDialog().textContent).not.toContain("analytics");
+    expect(currentDialog().textContent).not.toContain("application");
+  });
+
+  it("queues one backup per selected connection, always for all databases", async () => {
+    mocks.connections.push({ id: "mysql-a", name: "MySQL A", db_type: "mysql" }, { id: "mysql-b", name: "MySQL B", db_type: "mysql" }, { id: "pg-c", name: "PostgreSQL C", db_type: "postgres" });
+    mocks.runOneShotBatch.mockResolvedValueOnce({
+      runs: [
+        { id: "run-a", status: "success", files: [] },
+        { id: "run-b", status: "failed", files: [], error: "boom" },
+      ],
+      enqueueErrors: [],
+    });
+    await mountSettings();
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
+    await flush();
+
+    await toggleBackupConnections("PostgreSQL C");
+    expect(currentDialog().querySelector("[data-backup-connection-picker]")?.textContent).toContain(String(i18n.global.t("databaseBackup.connectionsSelected", { count: 2 })));
+    expect(startBackupButton().disabled).toBe(false);
+    startBackupButton().click();
+    await flush();
+
+    expect(mocks.runOneShot).not.toHaveBeenCalled();
+    expect(mocks.runOneShotBatch).toHaveBeenCalledTimes(1);
+    const [configs, displayName] = mocks.runOneShotBatch.mock.calls[0]!;
+    expect(displayName).toBe(String(i18n.global.t("databaseBackup.oneShotName")));
+    expect(configs).toHaveLength(2);
+    expect(configs.map((config: { connectionId: string }) => config.connectionId)).toEqual(["mysql-a", "pg-c"]);
+    expect(configs).toEqual([expect.objectContaining({ databases: [], destinationDirectory: "/backups" }), expect.objectContaining({ databases: [], destinationDirectory: "/backups" })]);
+    expect(mocks.toast).toHaveBeenLastCalledWith(String(i18n.global.t("databaseBackup.batchRunSummary", { success: 1, failed: 1, cancelled: 0 })), 5000);
+    expect(document.body.querySelector('[data-slot="dialog-content"]')).toBeNull();
+  });
+
+  it("limits several connections to all databases and run-id file names", async () => {
+    mocks.connections.push({ id: "pg-a", name: "PostgreSQL A", db_type: "postgres" }, { id: "pg-b", name: "PostgreSQL B", db_type: "postgres" });
+    await mountSettings();
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
+    await flush();
+    await showDatabaseOptions();
+    const database = Array.from(currentDialog().querySelectorAll<HTMLInputElement>('input[type="checkbox"]')).find((item) => item.parentElement?.textContent?.trim() === "app")!;
+    database.checked = true;
+    database.dispatchEvent(new Event("change", { bubbles: true }));
+    await selectDialogOption(TABLE_SCOPE_SELECT, String(i18n.global.t("databaseBackup.exactTables")));
+    await flush();
+    expect(currentDialog().querySelector("[data-backup-table-selector]")).not.toBeNull();
+
+    await toggleBackupConnections("PostgreSQL B");
+
+    // Per-connection scope is dropped and can no longer be chosen.
+    expect(currentDialog().querySelector("[data-backup-multi-connection-hint]")?.textContent).toContain(String(i18n.global.t("databaseBackup.multiConnectionScopeHint")));
+    expect(currentDialog().querySelector("[data-backup-database-search]")).toBeNull();
+    expect(currentDialog().querySelector("[data-backup-table-selector]")).toBeNull();
+    expect(startBackupButton().disabled).toBe(false);
+    const trigger = currentDialog().querySelectorAll<HTMLButtonElement>('[data-slot="select-trigger"]')[TABLE_SCOPE_SELECT]!;
+    trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    await flush();
+    const options = Array.from(document.body.querySelectorAll<HTMLElement>('[role="option"]')).map((item) => item.textContent?.trim());
+    expect(options).not.toContain(String(i18n.global.t("databaseBackup.exactTables")));
+    expect(options).toContain(String(i18n.global.t("databaseBackup.includeTables")));
+    document.body.querySelector<HTMLElement>('[role="option"]')?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await flush();
+
+    // Backups started together share a timestamp, so the file name must stay unique per run.
+    const pattern = currentDialog().querySelector<HTMLInputElement>("[data-backup-file-name-pattern]")!;
+    pattern.value = "{database}";
+    pattern.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+    expect(currentDialog().querySelector("[data-backup-file-name-run-id-required]")).not.toBeNull();
+    expect(startBackupButton().disabled).toBe(true);
+    pattern.value = "{database}-{runId}";
+    pattern.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+    expect(currentDialog().querySelector("[data-backup-file-name-run-id-required]")).toBeNull();
+    expect(startBackupButton().disabled).toBe(false);
+
+    // Back to one connection restores the per-connection options, and a missing {runId} is fine again.
+    pattern.value = "{database}";
+    pattern.dispatchEvent(new Event("input", { bubbles: true }));
+    await toggleBackupConnections("PostgreSQL A");
+    expect(currentDialog().querySelector("[data-backup-multi-connection-hint]")).toBeNull();
+    expect(currentDialog().querySelector("[data-backup-database-search]")).toBeNull(); // still "all databases"
+    expect(currentDialog().textContent).toContain(String(i18n.global.t("databaseBackup.allDatabases")));
+    expect(startBackupButton().disabled).toBe(false);
+  });
+
+  it("cancels every run of a multi-connection backup", async () => {
+    mocks.connections.push({ id: "mysql-a", name: "MySQL A", db_type: "mysql" }, { id: "mysql-b", name: "MySQL B", db_type: "mysql" });
+    const runs = ["run-a", "run-b"].map((id, index) => ({ id, scheduleName: "One-time backup", connectionId: index ? "mysql-b" : "mysql-a", connectionName: "", trigger: "manual", source: "one-shot", status: "running", startedAt: "2026-08-18T00:00:00.000Z", files: [] }) satisfies DatabaseBackupRun);
+    const pendingBatch = deferred<{ runs: DatabaseBackupRun[]; enqueueErrors: unknown[] }>();
+    mocks.runOneShotBatch.mockImplementationOnce((_configs: unknown, _name: string, onQueued: (run: DatabaseBackupRun) => void) => {
+      runs.forEach(onQueued);
+      return pendingBatch.promise;
+    });
+    mocks.cancelRun.mockResolvedValue(true);
+    await mountSettings();
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
+    await flush();
+    await toggleBackupConnections("MySQL B");
+    // The mocked activeRuns ref is not reactive, so the runs must be active before the batch starts.
+    mocks.activeRuns.push(...runs);
+    mocks.runs.push(...runs);
+    startBackupButton().click();
+    await flush();
+
+    const cancelButton = Array.from(currentDialog().querySelectorAll<HTMLButtonElement>("button")).find((item) => item.title === String(i18n.global.t("databaseBackup.cancel")));
+    expect(cancelButton?.disabled).toBe(false);
+    cancelButton?.click();
+    await flush();
+
+    expect(mocks.cancelRun.mock.calls.map(([id]) => id).sort()).toEqual(["run-a", "run-b"]);
+    pendingBatch.resolve({ runs: runs.map((run) => ({ ...run, status: "cancelled" as const })), enqueueErrors: [] });
+    await flush();
+    expect(mocks.toast).toHaveBeenLastCalledWith(String(i18n.global.t("databaseBackup.batchRunSummary", { success: 0, failed: 0, cancelled: 2 })), 5000);
+  });
+
+  it("keeps the schedule connection picker single-select", async () => {
+    mocks.connections.push({ id: "mysql-a", name: "MySQL A", db_type: "mysql" }, { id: "mysql-b", name: "MySQL B", db_type: "mysql" });
+    await mountSettings();
+    addScheduleButton().click();
+    await flush();
+
+    await selectBackupConnection("MySQL B");
+
+    const trigger = currentDialog().querySelector("[data-backup-connection-picker]");
+    expect(trigger?.textContent).toContain("MySQL B");
+    expect(document.body.querySelector("[data-backup-connection-search]")).toBeNull(); // picker closed after one pick
+    expect(document.body.querySelector('button[role="checkbox"]')).toBeNull();
+  });
+
+  it("does not let a closed one-shot request clear a schedule draft", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    const oneShotLoad = deferred<Array<{ name: string }>>();
+    mocks.listDatabases.mockImplementationOnce(() => oneShotLoad.promise);
+    await mountSettings();
+
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    await showDatabaseOptions();
     await vi.waitFor(() => expect(mocks.listDatabases).toHaveBeenCalledTimes(1));
     const closeOneShot = Array.from(currentDialog().querySelectorAll("button")).find((item) => item.textContent?.trim() === String(i18n.global.t("common.cancel")));
     closeOneShot?.click();
     await flush();
 
     addScheduleButton().click();
-    await vi.waitFor(() => expect(mocks.listDatabases).toHaveBeenCalledTimes(2));
+    await flush();
     await setTablePattern("schedule_*");
 
     oneShotLoad.resolve([{ name: "one_shot_database" }]);
     await flush();
     expect(currentDialog().querySelector<HTMLInputElement>(`input[placeholder="${String(i18n.global.t("databaseBackup.tablePatternsPlaceholder"))}"]`)?.value).toBe("schedule_*");
 
-    scheduleLoad.resolve([{ name: "schedule_database" }]);
-    await flush();
-    expect(currentDialog().querySelector<HTMLInputElement>(`input[placeholder="${String(i18n.global.t("databaseBackup.tablePatternsPlaceholder"))}"]`)?.value).toBe("schedule_*");
+    expect(mocks.listDatabases).toHaveBeenCalledTimes(1);
   });
 
   it("keeps closing the one-shot dialog separate from cancelling the active run", async () => {
@@ -330,6 +1038,11 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     const pendingRun = deferred<DatabaseBackupRun>();
     mocks.runOneShot.mockReturnValueOnce(pendingRun.promise);
     await mountSettings();
+
+    const progress = document.body.querySelector('[role="progressbar"]');
+    expect(progress?.getAttribute("aria-valuenow")).toBe("25");
+    expect(document.body.textContent).toContain("25%");
+    expect(buttonWithTitle(String(i18n.global.t("databaseBackup.renameBackup"))).disabled).toBe(true);
 
     buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
     await flush();
@@ -363,6 +1076,106 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
 
     expect(addScheduleButton().disabled).toBe(true);
     expect(document.body.textContent).toContain(String(i18n.global.t("databaseBackup.noSupportedConnections")));
+  });
+
+  it("enables create schedule when openGauss connection is available", async () => {
+    mocks.connections.push({ id: "og-1", name: "Local openGauss", db_type: "opengauss" });
+    await mountSettings();
+
+    expect(addScheduleButton().disabled).toBe(false);
+  });
+
+  it.each(["mysql", "postgres"] as const)("offers the Navicat backup format for %s connections", async (dbType) => {
+    mocks.connections.push({ id: `${dbType}-1`, name: `Local ${dbType}`, db_type: dbType });
+    await mountSettings();
+
+    addScheduleButton().click();
+    await flush();
+    const option = navicatFormatOption(await openDialogSelect(0));
+    expect(option.getAttribute("aria-disabled")).not.toBe("true");
+    expect(option.hasAttribute("data-disabled")).toBe(false);
+
+    await chooseOpenSelectOption(option);
+    expect(currentDialog().querySelector("[data-backup-nb3-hint]")).not.toBeNull();
+    expect(currentDialog().querySelector("[data-backup-nb3-unsupported]")).toBeNull();
+  });
+
+  it("disables the Navicat backup format for openGauss connections", async () => {
+    mocks.connections.push({ id: "og-1", name: "Local openGauss", db_type: "opengauss" });
+    await mountSettings();
+
+    addScheduleButton().click();
+    await flush();
+    const option = navicatFormatOption(await openDialogSelect(0));
+    expect(option.getAttribute("aria-disabled")).toBe("true");
+    expect(option.hasAttribute("data-disabled")).toBe(true);
+
+    await chooseOpenSelectOption(option);
+    const formatTrigger = currentDialog().querySelector("[data-backup-output-format]");
+    expect(formatTrigger?.textContent).toContain(String(i18n.global.t("databaseBackup.formatSql")));
+    expect(formatTrigger?.textContent).not.toContain(String(i18n.global.t("databaseBackup.formatNb3")));
+  });
+
+  it.each([
+    ["none", false],
+    ["nb3", true],
+  ] as const)("validates a saved openGauss schedule using the %s format", async (outputCompression, unsupported) => {
+    mocks.connections.push({ id: "og-1", name: "Local openGauss", db_type: "opengauss" });
+    mocks.schedules.push(schedule({ connectionId: "og-1", databases: [], outputCompression }));
+    await mountSettings();
+
+    buttonWithTitle(String(i18n.global.t("databaseBackup.edit"))).click();
+    await flush();
+
+    const hint = currentDialog().querySelector("[data-backup-nb3-unsupported]");
+    expect(saveScheduleButton().disabled).toBe(unsupported);
+    if (unsupported) {
+      expect(hint?.textContent).toContain(String(i18n.global.t("databaseBackup.formatNb3Unsupported")));
+      expect(currentDialog().querySelector("[data-backup-output-format]")?.getAttribute("aria-invalid")).toBe("true");
+      expect(currentDialog().querySelector("[data-backup-output-format]")?.textContent).toContain(String(i18n.global.t("databaseBackup.formatNb3")));
+    } else {
+      expect(hint).toBeNull();
+    }
+  });
+
+  it("reconfirms a legacy destination before manually running its schedule", async () => {
+    mocks.schedules.push(schedule());
+    mocks.databaseExportDestinationNeedsConfirmation.mockResolvedValueOnce(true);
+    mocks.runSchedule.mockResolvedValueOnce({
+      id: "run-1",
+      scheduleId: "schedule-1",
+      scheduleName: "Nightly backup",
+      connectionId: "mysql-1",
+      connectionName: "Local MySQL",
+      trigger: "manual",
+      source: "scheduled",
+      status: "success",
+      startedAt: "2026-08-18T00:00:00.000Z",
+      completedAt: "2026-08-18T00:01:00.000Z",
+      files: [],
+    });
+    await mountSettings();
+
+    scheduleRunNowButton().click();
+    await flush();
+
+    expect(mocks.databaseExportDestinationNeedsConfirmation).toHaveBeenCalledWith("/backups");
+    expect(mocks.openDirectory).toHaveBeenCalledWith(expect.objectContaining({ directory: true, defaultPath: "/backups" }));
+    expect(mocks.recordDatabaseExportDestination).toHaveBeenCalledWith("/backups");
+    expect(mocks.runSchedule).toHaveBeenCalledWith("schedule-1");
+  });
+
+  it("does not run a legacy schedule when destination confirmation is cancelled", async () => {
+    mocks.schedules.push(schedule());
+    mocks.databaseExportDestinationNeedsConfirmation.mockResolvedValueOnce(true);
+    mocks.openDirectory.mockResolvedValueOnce(null);
+    await mountSettings();
+
+    scheduleRunNowButton().click();
+    await flush();
+
+    expect(mocks.recordDatabaseExportDestination).not.toHaveBeenCalled();
+    expect(mocks.runSchedule).not.toHaveBeenCalled();
   });
 
   it("removes unavailable databases from an edited schedule before saving", async () => {
@@ -420,5 +1233,289 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     expect(mocks.recordDatabaseExportDestination).toHaveBeenCalledWith("/backups");
     expect(mocks.saveSchedule).not.toHaveBeenCalled();
     expect(mocks.toast).toHaveBeenCalledWith("backup destination unavailable", 5000);
+  });
+
+  it("closes the backup connection picker on outside scroll but preserves it when scrolling inside the popover", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    await mountSettings();
+
+    addScheduleButton().click();
+    await flush();
+
+    const trigger = currentDialog().querySelector<HTMLButtonElement>("[data-backup-connection-picker]");
+    if (!trigger) throw new Error("Connection picker trigger not found");
+
+    trigger.click();
+    await flush();
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+
+    const popoverContent = document.body.querySelector<HTMLElement>('[data-slot="popover-content"]');
+    expect(popoverContent).not.toBeNull();
+
+    // Scroll inside the popover list should not close the picker
+    const internalList = popoverContent?.querySelector<HTMLElement>(".overflow-y-auto");
+    if (!internalList) throw new Error("Internal popover scrollable list not found");
+    internalList.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await flush();
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+
+    // Scroll outside the popover (e.g. dialog content or window) should close the picker
+    window.dispatchEvent(new Event("scroll"));
+    await flush();
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("closes the history connection picker on outside scroll", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.runs.push({
+      id: "run-1",
+      scheduleName: "Run 1",
+      connectionId: "mysql-1",
+      connectionName: "Local MySQL",
+      trigger: "scheduled",
+      source: "scheduled",
+      status: "success",
+      startedAt: "2026-09-08T02:00:00.000Z",
+      files: [],
+    });
+    await mountSettings();
+
+    const trigger = document.body.querySelector<HTMLButtonElement>("[data-backup-history-connection-picker]");
+    if (!trigger) throw new Error("History connection picker trigger not found");
+
+    trigger.click();
+    await flush();
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+
+    window.dispatchEvent(new Event("scroll"));
+    await flush();
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("supports setting permanent retention for scheduled backup", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    await mountSettings();
+
+    addScheduleButton().click();
+    await flush();
+    buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
+    await flush();
+
+    const checkbox = currentDialog().querySelector<HTMLInputElement>("[data-backup-retention-forever]");
+    if (!checkbox) throw new Error("Permanent retention checkbox not found");
+
+    expect(checkbox.checked).toBe(false);
+
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event("change"));
+    await flush();
+
+    expect(currentDialog().textContent).toContain(String(i18n.global.t("databaseBackup.keepForever")));
+
+    saveScheduleButton().click();
+    await flush();
+
+    expect(mocks.saveSchedule).toHaveBeenCalledWith(
+      expect.objectContaining({
+        retentionCount: 0,
+      }),
+    );
+  });
+
+  it("displays keep forever in schedule list for schedules with retentionCount 0 and preserves or updates it on edit", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.schedules.push(schedule({ id: "schedule-perm", retentionCount: 0 }));
+    await mountSettings();
+
+    expect(document.body.textContent).toContain(String(i18n.global.t("databaseBackup.keepForever")));
+
+    buttonWithTitle(String(i18n.global.t("databaseBackup.edit"))).click();
+    await flush();
+
+    const checkbox = currentDialog().querySelector<HTMLInputElement>("[data-backup-retention-forever]");
+    if (!checkbox) throw new Error("Permanent retention checkbox not found");
+
+    expect(checkbox.checked).toBe(true);
+
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new Event("change"));
+    await flush();
+
+    saveScheduleButton().click();
+    await flush();
+
+    expect(mocks.saveSchedule).toHaveBeenCalledWith(
+      expect.objectContaining({
+        retentionCount: 10,
+      }),
+    );
+  });
+
+  it("visually displays selected databases as chips with a count badge and allows removing individual databases", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.listDatabases.mockResolvedValue([{ name: "analytics" }, { name: "application" }, { name: "billing" }]);
+    await mountSettings();
+
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    await showDatabaseOptions();
+
+    const checkboxes = Array.from(currentDialog().querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+    const appCb = checkboxes.find((item) => item.parentElement?.textContent?.trim() === "application");
+    const billCb = checkboxes.find((item) => item.parentElement?.textContent?.trim() === "billing");
+    if (!appCb || !billCb) throw new Error("Database checkboxes not found");
+
+    appCb.checked = true;
+    appCb.dispatchEvent(new Event("change", { bubbles: true }));
+    await flush();
+
+    billCb.checked = true;
+    billCb.dispatchEvent(new Event("change", { bubbles: true }));
+    await flush();
+
+    const badge = currentDialog().querySelector<HTMLElement>("[data-backup-selected-databases-badge]");
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent).toContain("2/3");
+
+    const chips = Array.from(currentDialog().querySelectorAll<HTMLElement>("[data-backup-selected-database-chip]"));
+    expect(chips).toHaveLength(2);
+    expect(chips[0].textContent).toContain("application");
+    expect(chips[1].textContent).toContain("billing");
+
+    // Remove application by clicking its chip remove button
+    const removeAppBtn = chips[0].querySelector<HTMLButtonElement>("[data-backup-remove-selected-database]");
+    if (!removeAppBtn) throw new Error("Remove button on chip not found");
+    removeAppBtn.click();
+    await flush();
+
+    const remainingChips = Array.from(currentDialog().querySelectorAll<HTMLElement>("[data-backup-selected-database-chip]"));
+    expect(remainingChips).toHaveLength(1);
+    expect(remainingChips[0].textContent).toContain("billing");
+    expect(badge!.textContent).toContain("1/3");
+  });
+
+  it("allows clearing all selected databases via clearSelection button", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.listDatabases.mockResolvedValue([{ name: "analytics" }, { name: "application" }, { name: "billing" }]);
+    await mountSettings();
+
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    await showDatabaseOptions();
+
+    const checkboxes = Array.from(currentDialog().querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+    const appCb = checkboxes.find((item) => item.parentElement?.textContent?.trim() === "application");
+    if (!appCb) throw new Error("Application checkbox not found");
+
+    appCb.checked = true;
+    appCb.dispatchEvent(new Event("change", { bubbles: true }));
+    await flush();
+
+    expect(currentDialog().querySelectorAll("[data-backup-selected-database-chip]")).toHaveLength(1);
+
+    const clearBtn = currentDialog().querySelector<HTMLButtonElement>("[data-backup-clear-selected-databases]");
+    if (!clearBtn) throw new Error("Clear selected databases button not found");
+    clearBtn.click();
+    await flush();
+
+    expect(currentDialog().querySelector("[data-backup-selected-databases-preview]")).toBeNull();
+    const badge = currentDialog().querySelector<HTMLElement>("[data-backup-selected-databases-badge]");
+    expect(badge!.textContent).toContain("0/3");
+  });
+
+  it("supports filtering database checklist to show only selected databases and batch selecting/deselecting", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.listDatabases.mockResolvedValue([{ name: "analytics" }, { name: "application" }, { name: "billing" }]);
+    await mountSettings();
+
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    await showDatabaseOptions();
+
+    // Select all filtered databases
+    const selectAllBtn = currentDialog().querySelector<HTMLButtonElement>("[data-backup-select-all-filtered]");
+    if (!selectAllBtn) throw new Error("Select all filtered button not found");
+    selectAllBtn.click();
+    await flush();
+
+    expect(currentDialog().querySelectorAll("[data-backup-selected-database-chip]")).toHaveLength(3);
+    const badge = currentDialog().querySelector<HTMLElement>("[data-backup-selected-databases-badge]");
+    expect(badge!.textContent).toContain("3/3");
+
+    // Toggle show only selected
+    const filterToggle = currentDialog().querySelector<HTMLButtonElement>("[data-backup-filter-selected-toggle]");
+    if (!filterToggle) throw new Error("Filter selected toggle not found");
+    filterToggle.click();
+    await flush();
+
+    // Deselect all filtered
+    const deselectBtn = currentDialog().querySelector<HTMLButtonElement>("[data-backup-deselect-all-filtered]");
+    if (!deselectBtn) throw new Error("Deselect all filtered button not found");
+    deselectBtn.click();
+    await flush();
+
+    expect(currentDialog().querySelector("[data-backup-selected-databases-preview]")).toBeNull();
+    expect(badge!.textContent).toContain("0/3");
+  });
+
+  it("displays visual chips and count badge immediately when editing an existing schedule with configured databases", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.listDatabases.mockResolvedValue([{ name: "analytics" }, { name: "application" }, { name: "billing" }]);
+    mocks.schedules.push(schedule({ id: "schedule-dbs", databases: ["analytics", "billing"] }));
+    await mountSettings();
+
+    buttonWithTitle(String(i18n.global.t("databaseBackup.edit"))).click();
+    await flush();
+
+    const badge = currentDialog().querySelector<HTMLElement>("[data-backup-selected-databases-badge]");
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent).toContain("2/3");
+
+    const chips = Array.from(currentDialog().querySelectorAll<HTMLElement>("[data-backup-selected-database-chip]"));
+    expect(chips).toHaveLength(2);
+    expect(chips[0].textContent).toContain("analytics");
+    expect(chips[1].textContent).toContain("billing");
+  });
+
+  it("keeps the seeded selection intact while the database list is still loading when editing a schedule", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    const databasesLoad = deferred<Array<{ name: string }>>();
+    mocks.listDatabases.mockReturnValueOnce(databasesLoad.promise);
+    mocks.schedules.push(schedule({ id: "schedule-loading", databases: ["analytics", "billing"] }));
+    await mountSettings();
+
+    buttonWithTitle(String(i18n.global.t("databaseBackup.edit"))).click();
+    await flush();
+
+    // While options are loading (options cleared) the chips area must not offer destructive removal.
+    expect(currentDialog().querySelector("[data-backup-selected-databases-preview]")).toBeNull();
+    expect(currentDialog().querySelectorAll("[data-backup-remove-selected-database]")).toHaveLength(0);
+    const badgeWhileLoading = currentDialog().querySelector<HTMLElement>("[data-backup-selected-databases-badge]");
+    expect(badgeWhileLoading?.textContent ?? "").not.toContain("/0");
+
+    databasesLoad.resolve([{ name: "analytics" }, { name: "application" }, { name: "billing" }]);
+    await flush();
+
+    const chips = Array.from(currentDialog().querySelectorAll<HTMLElement>("[data-backup-selected-database-chip]"));
+    expect(chips).toHaveLength(2);
+    expect(chips[0].textContent).toContain("analytics");
+    expect(chips[1].textContent).toContain("billing");
+    expect(currentDialog().querySelector<HTMLElement>("[data-backup-selected-databases-badge]")!.textContent).toContain("2/3");
+  });
+
+  it("does not offer chip removal or a stale count badge after loading the database list fails", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.listDatabases.mockRejectedValueOnce(new Error("database list unavailable"));
+    mocks.schedules.push(schedule({ id: "schedule-failed", databases: ["analytics", "billing"] }));
+    await mountSettings();
+
+    buttonWithTitle(String(i18n.global.t("databaseBackup.edit"))).click();
+    await flush();
+
+    expect(currentDialog().querySelector("[data-backup-database-load-error]")).not.toBeNull();
+    expect(currentDialog().querySelector("[data-backup-selected-databases-preview]")).toBeNull();
+    expect(currentDialog().querySelectorAll("[data-backup-selected-database-chip]")).toHaveLength(0);
+    expect(currentDialog().querySelectorAll("[data-backup-remove-selected-database]")).toHaveLength(0);
+    expect(currentDialog().querySelector("[data-backup-selected-databases-badge]")).toBeNull();
   });
 });

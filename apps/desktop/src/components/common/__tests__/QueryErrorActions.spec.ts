@@ -7,17 +7,26 @@ import i18n from "@/i18n";
 
 const mountedApps: App[] = [];
 
-async function mountActions(errorMessage: string, onChangeConnectionTimeout = vi.fn()) {
+async function mountActions(errorMessage: string, options: { onChangeConnectionTimeout?: () => void; errorPosition?: { line: number; column: number }; onLocateError?: () => void } = {}) {
+  const onChangeConnectionTimeout = options.onChangeConnectionTimeout ?? vi.fn();
+  const onLocateError = options.onLocateError ?? vi.fn();
   const host = document.createElement("div");
   document.body.appendChild(host);
   const app = createApp({
-    setup: () => () => h(QueryErrorActions, { errorMessage, connectionId: "postgres-1", onChangeConnectionTimeout }),
+    setup: () => () =>
+      h(QueryErrorActions, {
+        errorMessage,
+        connectionId: "postgres-1",
+        errorPosition: options.errorPosition,
+        onChangeConnectionTimeout,
+        onLocateError,
+      }),
   });
   mountedApps.push(app);
   app.use(i18n);
   app.mount(host);
   await nextTick();
-  return { host, onChangeConnectionTimeout };
+  return { host, onChangeConnectionTimeout, onLocateError };
 }
 
 afterEach(() => {
@@ -33,6 +42,23 @@ describe("QueryErrorActions", () => {
     expect(timeoutButton).toBeTruthy();
     timeoutButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(onChangeConnectionTimeout).toHaveBeenCalledOnce();
+  });
+
+  it("offers a locate-error action when the backend reports a position", async () => {
+    const { host, onLocateError } = await mountActions("ERROR: relation does not exist", {
+      errorPosition: { line: 2, column: 6 },
+    });
+    const locateButton = Array.from(host.querySelectorAll("button")).find((button) => button.textContent?.includes("Locate error"));
+
+    expect(locateButton?.textContent).toContain("line 2, col 6");
+    locateButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(onLocateError).toHaveBeenCalledOnce();
+  });
+
+  it("hides the locate-error action without a position", async () => {
+    const { host } = await mountActions("ERROR: relation does not exist");
+
+    expect(host.textContent).not.toContain("Locate error");
   });
 
   it("does not offer connection timeout settings for query timeouts", async () => {

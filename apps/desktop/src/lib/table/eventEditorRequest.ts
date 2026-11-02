@@ -30,6 +30,17 @@ export interface InitialEventEditorRequestInput {
   loadingObjects?: boolean;
 }
 
+export interface EventEditorInstanceKeyInput {
+  createRequestId?: number;
+  openRequestId?: number;
+  rowId?: string;
+}
+
+export function eventEditorInstanceKey({ createRequestId, openRequestId, rowId }: EventEditorInstanceKeyInput): string {
+  const requestKey = createRequestId !== undefined ? `create:${createRequestId}` : `open:${openRequestId ?? 0}`;
+  return `${requestKey}:${rowId ?? "new"}`;
+}
+
 export function resolveInitialEventEditorRequest(input: InitialEventEditorRequestInput): InitialEventEditorDecision {
   const { eventCreateRequestId, eventName, eventOpenRequestId, openedRequestKey, hasEventRow = false, loadingObjects = false } = input;
 

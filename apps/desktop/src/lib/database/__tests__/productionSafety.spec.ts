@@ -66,6 +66,26 @@ describe("production SQL safety", () => {
     }
   });
 
+  it("keeps production DDL visible after PostgreSQL E'...' escape strings", () => {
+    const pg = connection({ db_type: "postgres" });
+    expect(assessProductionSql("SELECT E'a\\''; DROP DATABASE prod_app;", pg, "staging")).toMatchObject({ active: true, reason: "sql_target", isMutation: true, databases: ["prod_app"] });
+  });
+
+  it("keeps production DDL visible after Oracle alternative-quoted strings", () => {
+    const oracle = connection({ db_type: "oracle" });
+
+    // The quote inside q'...' is literal, so the DDL after the literal is real.
+    expect(assessProductionSql("SELECT q'[it's]' FROM dual; DROP DATABASE prod_app;", oracle, "staging")).toMatchObject({
+      active: true,
+      reason: "sql_target",
+      isMutation: true,
+      databases: ["prod_app"],
+    });
+
+    // ...and DDL-looking text inside the literal stays literal data.
+    expect(assessProductionSql("SELECT q'[it's; DROP DATABASE prod_app;]' FROM dual;", oracle, "staging")).toMatchObject({ active: false });
+  });
+
   it("matches the shared SQL target safety corpus", () => {
     for (const corpusCase of productionSafetyCorpus) {
       const assessment = assessProductionSql(
@@ -131,5 +151,17 @@ describe("production SQL safety", () => {
 
   it("does not require a production confirmation for reads", () => {
     expect(assessProductionSql("SELECT * FROM prod_app.orders", connection(), "staging")).toMatchObject({ active: false, isMutation: false });
+  });
+
+  it("does not classify Mongo shell reads as production mutations", () => {
+    const mongo = connection({ db_type: "mongodb", production_databases: ["app"] });
+    expect(assessProductionSql('db.getCollection("demo").find({}).skip(0).limit(100)', mongo, "app")).toMatchObject({ active: true, isMutation: false });
+    expect(assessProductionSql('db.getCollection("demo").find({}).skip(0).limit(100)', mongo, "scratch")).toMatchObject({ active: false, isMutation: false });
+  });
+
+  it("keeps Mongo shell writes and aggregate output stages protected", () => {
+    const mongo = connection({ db_type: "mongodb", production_databases: ["app"] });
+    expect(assessProductionSql('db.getCollection("demo").updateOne({"_id": 1}, {$set: {"active": true}})', mongo, "app")).toMatchObject({ active: true, isMutation: true });
+    expect(assessProductionSql('db.getCollection("demo").aggregate([{$out: "archive"}])', mongo, "app")).toMatchObject({ active: true, isMutation: true });
   });
 });

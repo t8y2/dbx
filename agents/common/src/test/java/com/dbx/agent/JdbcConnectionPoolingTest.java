@@ -38,6 +38,155 @@ class JdbcConnectionPoolingTest {
     private static final Gson GSON = new Gson();
 
     @Test
+    void unconfirmedRollbackCannotReturnItsTransactionToAnotherSession() throws Exception {
+        for (String sqlState : List.of("HY000", "HYT00", "08006")) {
+            AtomicInteger physicalOpens = new AtomicInteger();
+            CountDownLatch transactionFinished = new CountDownLatch(1);
+            CountDownLatch finishRequest = new CountDownLatch(1);
+            ExecutorService worker = Executors.newSingleThreadExecutor();
+            String url = h2Url("unconfirmed_rollback");
+            try (Connection setup = DriverManager.getConnection(url, "sa", "");
+                 Statement statement = setup.createStatement();
+                 JdbcConnectionPoolRegistry registry = new JdbcConnectionPoolRegistry(poolSettings(2))) {
+                statement.execute("CREATE TABLE rollback_probe (id INT)");
+                List<JsonRpcServer> sessions = new java.util.ArrayList<>();
+                for (int index = 0; index < 2; index++) {
+                    H2TestAgent agent = new H2TestAgent(url, physicalOpens) {
+                        @Override
+                        protected Connection openConnection(ConnectParams params) throws Exception {
+                            Connection physical = openH2(url, physicalOpens);
+                            if (physicalOpens.get() != 1) return physical;
+                            return (Connection) Proxy.newProxyInstance(getClass().getClassLoader(),
+                                new Class<?>[]{Connection.class}, (proxy, method, args) -> {
+                                    if (method.getName().equals("rollback")) {
+                                        throw new SQLException("Rollback was not acknowledged", sqlState);
+                                    }
+                                    try {
+                                        return method.invoke(physical, args);
+                                    } catch (InvocationTargetException error) {
+                                        throw error.getCause();
+                                    }
+                                });
+                        }
+
+                        @Override
+                        public QueryResult executeTransaction(List<String> statements, String schema) {
+                            try {
+                                return super.executeTransaction(statements, schema);
+                            } finally {
+                                // Allow another session to borrow before the RPC's outer cleanup.
+                                transactionFinished.countDown();
+                                awaitUninterruptibly(finishRequest);
+                            }
+                        }
+                    };
+                    agent.attachConnectionPoolRegistry(registry);
+                    JsonRpcServer server = new JsonRpcServer(agent);
+                    server.dispatchForRuntime(AgentProtocol.METHOD_CONNECT,
+                        JsonParser.parseString("{\"database\":\"pooling\",\"username\":\"sa\",\"password\":\"\"}").getAsJsonObject());
+                    sessions.add(server);
+                }
+                Future<Exception> failure = worker.submit(() -> assertThrows(Exception.class,
+                    () -> sessions.get(0).dispatchForRuntime(AgentProtocol.METHOD_EXECUTE_TRANSACTION,
+                        JsonParser.parseString("{\"statements\":[\"INSERT INTO rollback_probe VALUES (1)\",\"INVALID SQL\"]}").getAsJsonObject())));
+                try {
+                    assertTrue(transactionFinished.await(3, TimeUnit.SECONDS));
+                    JsonObject query = JsonParser.parseString("{\"sql\":\"SELECT COUNT(*) FROM rollback_probe\"}").getAsJsonObject();
+                    QueryResult result = (QueryResult) sessions.get(1).dispatchForRuntime(AgentProtocol.METHOD_EXECUTE_QUERY, query);
+                    assertEquals(0L, ((Number) result.getRows().get(0).get(0)).longValue(), sqlState);
+                    assertEquals(2, physicalOpens.get(), sqlState);
+                } finally {
+                    finishRequest.countDown();
+                }
+                assertTrue(failure.get(3, TimeUnit.SECONDS).toString().contains("rollback was not confirmed"));
+            } finally {
+                finishRequest.countDown();
+                worker.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    void blobRollbackFailureCannotReturnDirtyConnectionToAnotherSession() throws Exception {
+        for (boolean manual : List.of(false, true)) {
+            AtomicInteger physicalOpens = new AtomicInteger();
+            CountDownLatch batchFinished = new CountDownLatch(1);
+            CountDownLatch finishRequest = new CountDownLatch(1);
+            ExecutorService worker = Executors.newSingleThreadExecutor();
+            String url = h2Url("blob_rollback");
+            try (Connection setup = DriverManager.getConnection(url, "sa", "");
+                 Statement statement = setup.createStatement();
+                 JdbcConnectionPoolRegistry registry = new JdbcConnectionPoolRegistry(poolSettings(2))) {
+                statement.execute("CREATE TABLE rollback_probe (id INT)");
+                List<JsonRpcServer> sessions = new java.util.ArrayList<>();
+                for (int index = 0; index < 2; index++) {
+                    H2TestAgent agent = new H2TestAgent(url, physicalOpens) {
+                        @Override public boolean supportsBlobBindStatements() { return true; }
+
+                        @Override protected Connection openConnection(ConnectParams params) throws Exception {
+                            Connection physical = openH2(url, physicalOpens);
+                            if (physicalOpens.get() != 1) return physical;
+                            return (Connection) Proxy.newProxyInstance(getClass().getClassLoader(),
+                                new Class<?>[]{Connection.class}, (proxy, method, args) -> {
+                                    if (method.getName().equals("rollback")) {
+                                        throw new SQLException("Rollback was not acknowledged", "HY000");
+                                    }
+                                    try { return method.invoke(physical, args); }
+                                    catch (InvocationTargetException error) { throw error.getCause(); }
+                                });
+                        }
+
+                        @Override public QueryResult executeBlobBoundStatements(List<String> previews,
+                            List<BlobBoundStatement> statements, String schema, int timeoutSecs, boolean transaction) {
+                            try {
+                                return BlobBoundExecutor.execute(requireConnected(), previews, statements,
+                                    schema, value -> null, () -> null, timeoutSecs, transaction,
+                                    new BlobBoundExecutor.PreparedStatementConfigurer() {
+                                        @Override public void configure(java.sql.PreparedStatement statement) { }
+                                        @Override public void discardConnection(Connection connection) throws SQLException {
+                                            agentDiscard(connection);
+                                        }
+                                    });
+                            } finally {
+                                batchFinished.countDown();
+                                awaitUninterruptibly(finishRequest);
+                            }
+                        }
+
+                        private void agentDiscard(Connection connection) throws SQLException {
+                            discardConnection(connection);
+                        }
+                    };
+                    agent.attachConnectionPoolRegistry(registry);
+                    JsonRpcServer server = new JsonRpcServer(agent);
+                    server.dispatchForRuntime(AgentProtocol.METHOD_CONNECT,
+                        JsonParser.parseString("{\"database\":\"pooling\",\"username\":\"sa\",\"password\":\"\"}").getAsJsonObject());
+                    sessions.add(server);
+                }
+                if (manual) sessions.get(0).dispatchForRuntime(AgentProtocol.METHOD_BEGIN_MANUAL_TRANSACTION, new JsonObject());
+                List<String> sql = List.of("INSERT INTO rollback_probe VALUES (1)", "INSERT INTO missing_table VALUES (2)");
+                JsonObject request = new JsonObject();
+                request.add("statements", GSON.toJsonTree(sql));
+                request.add("boundStatements", GSON.toJsonTree(sql.stream()
+                    .map(value -> new BlobBoundStatement(value, value, List.of())).toList()));
+                Future<Exception> failure = worker.submit(() -> assertThrows(Exception.class,
+                    () -> sessions.get(0).dispatchForRuntime(AgentProtocol.METHOD_EXECUTE_BATCH, request)));
+                try {
+                    assertTrue(batchFinished.await(3, TimeUnit.SECONDS));
+                    QueryResult result = (QueryResult) sessions.get(1).dispatchForRuntime(AgentProtocol.METHOD_EXECUTE_QUERY,
+                        JsonParser.parseString("{\"sql\":\"SELECT COUNT(*) FROM rollback_probe\"}").getAsJsonObject());
+                    assertEquals(0L, ((Number) result.getRows().get(0).get(0)).longValue(), "manual=" + manual);
+                    assertEquals(2, physicalOpens.get());
+                } finally { finishRequest.countDown(); }
+                assertTrue(failure.get(3, TimeUnit.SECONDS).toString().contains("rollback was not confirmed"));
+            } finally {
+                finishRequest.countDown();
+                worker.shutdownNow();
+            }
+        }
+    }
+
+    @Test
     void registryReusesOnePhysicalConnectionAcrossSequentialLeases() throws Exception {
         AtomicInteger physicalOpens = new AtomicInteger();
         String url = h2Url("registry_reuse");
@@ -1112,6 +1261,12 @@ class JdbcConnectionPoolingTest {
                 pageParams
             ));
             assertTrue(firstPage.get("has_more").getAsBoolean());
+            JsonObject timings = firstPage.getAsJsonObject("query_timings_ms");
+            assertNotNull(timings, "all JDBC agents expose timings through JSON RPC");
+            assertTrue(timings.get("pool_acquire").getAsDouble() >= 0);
+            assertTrue(timings.get("jdbc_execute").getAsDouble() >= 0);
+            assertTrue(timings.get("fetch").getAsDouble() >= 0);
+            assertTrue(timings.get("pool_release").getAsDouble() >= 0);
             String querySessionId = firstPage.get("session_id").getAsString();
 
             Future<JsonObject> waiting = worker.submit(
@@ -1866,6 +2021,65 @@ class JdbcConnectionPoolingTest {
             JsonObject fresh = query(server, requestIds, "fresh-after-stateful", "SELECT CURRENT_SCHEMA", null);
             assertEquals("PUBLIC", fresh.getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsString());
             assertEquals(2, physicalOpens.get());
+        }
+    }
+
+    @Test
+    void interactiveTransactionPinsConnectionUntilCommit() {
+        AtomicInteger physicalOpens = new AtomicInteger();
+        AtomicInteger requestIds = new AtomicInteger();
+        String url = h2Url("manual_transaction");
+        try (MultiSessionJsonRpcServer server = server(url, physicalOpens, 2)) {
+            openSession(server, requestIds, "transaction");
+            query(server, requestIds, "transaction", "CREATE TABLE ITEMS (ID INT)", null);
+
+            result(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_BEGIN_MANUAL_TRANSACTION,
+                sessionParams("transaction")
+            ));
+            query(server, requestIds, "transaction", "INSERT INTO ITEMS VALUES (1)", null);
+
+            openSession(server, requestIds, "observer");
+            JsonObject beforeCommit = query(server, requestIds, "observer", "SELECT COUNT(*) FROM ITEMS", null);
+            assertEquals(0, beforeCommit.getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsInt());
+
+            result(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_COMMIT_MANUAL_TRANSACTION,
+                sessionParams("transaction")
+            ));
+            JsonObject afterCommit = query(server, requestIds, "observer", "SELECT COUNT(*) FROM ITEMS", null);
+            assertEquals(1, afterCommit.getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsInt());
+        }
+    }
+
+    @Test
+    void interactiveTransactionRestoresSchemaBeforeReturningConnection() {
+        AtomicInteger physicalOpens = new AtomicInteger();
+        AtomicInteger requestIds = new AtomicInteger();
+        String url = h2Url("manual_transaction_schema");
+        try (MultiSessionJsonRpcServer server = server(url, physicalOpens, 2)) {
+            openSession(server, requestIds, "transaction-schema");
+            query(server, requestIds, "transaction-schema", "CREATE SCHEMA IF NOT EXISTS APP", null);
+
+            JsonObject beginParams = sessionParams("transaction-schema");
+            beginParams.addProperty("schema", "APP");
+            result(request(server, requestIds, AgentProtocol.METHOD_BEGIN_MANUAL_TRANSACTION, beginParams));
+            JsonObject inTransaction = query(server, requestIds, "transaction-schema", "SELECT CURRENT_SCHEMA", null);
+            assertEquals("APP", inTransaction.getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsString());
+
+            result(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_COMMIT_MANUAL_TRANSACTION,
+                sessionParams("transaction-schema")
+            ));
+            openSession(server, requestIds, "schema-observer");
+            JsonObject afterCommit = query(server, requestIds, "schema-observer", "SELECT CURRENT_SCHEMA", null);
+            assertEquals("PUBLIC", afterCommit.getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsString());
         }
     }
 

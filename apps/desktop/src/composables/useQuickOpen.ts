@@ -1,4 +1,4 @@
-import { computed, ref, watch } from "vue";
+import { computed, ref, watch, type Ref } from "vue";
 import type { ConnectionConfig } from "@/types/database";
 import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
@@ -6,8 +6,12 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
-import { getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
-import i18n from "@/i18n";
+import { getSqlFileFilter, getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
+import { composeGlobalSearchRoots, getGlobalSearchExtensions, globalSearchSettingsVersion } from "@/lib/globalSearch/globalSearchSettings";
+import { isQuickOpenScopeActive, pruneQuickOpenScope, quickOpenScopeIds, quickOpenScopeIncludes, setQuickOpenScopeIds } from "@/lib/quickOpen/quickOpenScope";
+import { containsHan, pinyinFirstLetters } from "@/lib/common/pinyin";
+import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
+import i18n, { currentLocale } from "@/i18n";
 
 const REMOTE_SEARCH_DEBOUNCE_MS = 180;
 const REMOTE_SEARCH_MIN_QUERY_LENGTH = 2;
@@ -19,11 +23,35 @@ const QUICK_OPEN_MAX_RESULTS = 200;
 const INITIAL_SQL_LIBRARY_LIMIT = 20;
 const INITIAL_SQL_FILE_LIMIT = 20;
 
-const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>(["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "neo4j", "influxdb", "victoriametrics", "etcd", "zookeeper", "mq", "nacos", "consul"]);
+const CONTENT_SEARCH_DEBOUNCE_MS = 200;
+const CONTENT_SEARCH_MAX_RESULTS = 500;
+
+const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>([
+  "redis",
+  "mongodb",
+  "elasticsearch",
+  "easysearch",
+  "meilisearch",
+  "solr",
+  "couchdb",
+  "qdrant",
+  "milvus",
+  "weaviate",
+  "chromadb",
+  "neo4j",
+  "influxdb",
+  "victoriametrics",
+  "etcd",
+  "zookeeper",
+  "mq",
+  "nacos",
+  "consul",
+  "salesforce",
+]);
 
 export interface QuickOpenItem {
   id: string;
-  type: "connection" | "database" | "schema" | "table" | "view" | "materialized_view" | "procedure" | "function" | "sequence" | "package" | "package-body" | "sql_file" | "sql_library_file";
+  type: "connection" | "plugin_workbench" | "database" | "schema" | "table" | "view" | "materialized_view" | "procedure" | "function" | "sequence" | "package" | "package-body" | "sql_file" | "sql_library_file" | "content_match" | "plugin_command";
   label: string;
   description?: string;
   connectionId: string;
@@ -35,6 +63,25 @@ export interface QuickOpenItem {
   searchText: string; // Lowercase text for searching
   filePath?: string; // For external SQL files
   sqlFileId?: string; // For saved SQL library files
+  fileName?: string; // For content matches: file name shown in the group header
+  line?: number; // For content matches: 1-based line
+  column?: number; // For content matches: 1-based char column
+  matchText?: string; // For content matches: matched slice
+  lineText?: string; // For content matches: full matching line
+  highlightIndices?: [number, number]; // For content matches: [start, end) chars into lineText to highlight
+  pluginId?: string; // For plugin commands and plugin workbenches: source plugin manifest id
+  commandId?: string; // For plugin commands: short id of the command contribution
+  pluginName?: string; // For plugin commands: source plugin display name (provenance hint)
+  contributionId?: string; // For plugin workbenches: workbench contribution id
+  pluginIcon?: string; // For plugin workbenches: contribution icon path, falling back to the manifest icon
+}
+
+export interface UseQuickOpenOptions {
+  /**
+   * External extra items (e.g. plugin commandPalette commands): merged into the initial list and the search result pool,
+   * refreshed by the caller; with no query they are appended after the built-in entries in injection order.
+   */
+  extraItems?: Ref<QuickOpenItem[]>;
 }
 
 export type QuickOpenMatchKind = "exact" | "initials" | "prefix" | "word-prefix" | "substring" | "fuzzy";
@@ -84,6 +131,23 @@ function identifierWords(text: string): IdentifierWord[] {
 
 function rangeIndices(start: number, length: number): number[] {
   return Array.from({ length }, (_, index) => start + index);
+}
+
+const PINYIN_QUERY_RE = /^[a-z0-9]+$/;
+
+/**
+ * Original-text indices of the characters that feed `pinyinFirstLetters(text)`, in order.
+ * Iterates by Unicode code point (like `pinyinFirstLetters`), not UTF-16 code unit, so
+ * supplementary-plane Han characters (surrogate pairs) stay aligned with the letters they produce.
+ */
+function pinyinLetterPositions(text: string): number[] {
+  const positions: number[] = [];
+  let index = 0;
+  for (const char of text) {
+    if (/[\p{Script=Han}a-z0-9]/iu.test(char)) positions.push(index);
+    index += char.length;
+  }
+  return positions;
 }
 
 function matchWordPrefixes(words: IdentifierWord[], query: string): number[] | null {
@@ -150,6 +214,20 @@ export function matchQuickOpenText(query: string, text: string): QuickOpenMatch 
     return { kind: "prefix", score: 200 + Math.min(text.length - lowerQuery.length, 99), indices: rangeIndices(0, lowerQuery.length) };
   }
 
+  // DataGrip-style pinyin-initials matching for Chinese identifiers, e.g. "总租金" via "zzj".
+  // Only tried after literal matches fail, so a mixed Han+Latin name that literally prefix-matches
+  // (e.g. "abc表" via "abc") keeps its better literal-prefix score instead of being intercepted here.
+  const isPinyinQuery = PINYIN_QUERY_RE.test(lowerQuery) && containsHan(text);
+  if (isPinyinQuery) {
+    const pinyinLetters = pinyinFirstLetters(text);
+    if (pinyinLetters === lowerQuery) {
+      return { kind: "initials", score: 150 + Math.min(text.length, 99), indices: pinyinLetterPositions(text) };
+    }
+    if (pinyinLetters.startsWith(lowerQuery)) {
+      return { kind: "prefix", score: 250 + Math.min(text.length - lowerQuery.length, 99), indices: pinyinLetterPositions(text).slice(0, lowerQuery.length) };
+    }
+  }
+
   const wordPrefixIndices = matchWordPrefixes(words, lowerQuery);
   if (wordPrefixIndices) {
     return { kind: "word-prefix", score: 300 + Math.min(text.length - lowerQuery.length, 99), indices: wordPrefixIndices };
@@ -168,10 +246,48 @@ export function matchQuickOpenText(query: string, text: string): QuickOpenMatch 
     indices.push(index);
     queryIndex++;
   }
-  if (queryIndex !== lowerQuery.length) return null;
+  if (queryIndex === lowerQuery.length) {
+    const span = indices[indices.length - 1] - indices[0] + 1;
+    return { kind: "fuzzy", score: 500 + Math.min(span - lowerQuery.length, 99), indices };
+  }
 
-  const span = indices[indices.length - 1] - indices[0] + 1;
-  return { kind: "fuzzy", score: 500 + Math.min(span - lowerQuery.length, 99), indices };
+  // Non-contiguous pinyin-initials fallback, e.g. "zj" matching "总租金" (pinyin initials "zzj"),
+  // matching the ordered-subsequence behavior every other pinyin call site in the app already has.
+  if (isPinyinQuery) {
+    const pinyinLetters = pinyinFirstLetters(text);
+    const positions = pinyinLetterPositions(text);
+    const letterIndices: number[] = [];
+    let letterQueryIndex = 0;
+    let letterCount = 0;
+    // Iterate the initials by code point, keeping letterCount aligned with
+    // positions: unmapped supplementary-plane Han characters occupy two code
+    // units in pinyinLetters but still correspond to exactly one position.
+    for (const letter of pinyinLetters) {
+      if (letterQueryIndex >= lowerQuery.length) break;
+      if (letter === lowerQuery[letterQueryIndex]) {
+        letterIndices.push(positions[letterCount] ?? letterCount);
+        letterQueryIndex += 1;
+      }
+      letterCount += 1;
+    }
+    if (letterQueryIndex === lowerQuery.length) {
+      const pinyinSpan = letterIndices[letterIndices.length - 1] - letterIndices[0] + 1;
+      return { kind: "fuzzy", score: 500 + Math.min(pinyinSpan - lowerQuery.length, 99), indices: letterIndices };
+    }
+  }
+
+  return null;
+}
+
+/** Search concatenated metadata literally so matches cannot stitch unrelated fields together. */
+function matchQuickOpenMetadata(query: string, text: string): QuickOpenMatch | null {
+  const lowerQuery = query.trim().toLowerCase();
+  const lowerText = text.toLowerCase();
+  const index = lowerText.indexOf(lowerQuery);
+  if (index < 0) return null;
+  if (lowerText === lowerQuery) return { kind: "exact", score: 1, indices: [] };
+  if (index === 0) return { kind: "prefix", score: 200 + Math.min(text.length - lowerQuery.length, 99), indices: [] };
+  return { kind: "substring", score: 400 + Math.min(index, 99), indices: [] };
 }
 
 interface MatchedItem extends QuickOpenItem {
@@ -199,9 +315,10 @@ function collectSqlFileEntries(entries: SqlFileEntry[], results: SqlFileEntry[])
   }
 }
 
-export function useQuickOpen() {
+export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   const connectionStore = useConnectionStore();
   const savedSqlStore = useSavedSqlStore();
+  const extraItems = options.extraItems;
   const searchQuery = ref("");
   const selectedIndex = ref(0);
   const remoteItems = ref<QuickOpenItem[]>([]);
@@ -213,6 +330,108 @@ export function useQuickOpen() {
   let sqlFilesLoaded = false;
   let sqlFilesLoadingPromise: Promise<void> | null = null;
   let sqlFilesLoadGeneration = 0;
+  const pluginWorkbenchItems = ref<QuickOpenItem[]>([]);
+  let pluginWorkbenchesLoading = false;
+
+  // --- Content search mode (global search of local SQL/text file contents) ---
+  const contentMode = ref(false);
+  const contentSearching = ref(false);
+  const contentItems = ref<MatchedItem[]>([]);
+  let contentSearchGeneration = 0;
+  let contentSearchTimer: ReturnType<typeof setTimeout> | undefined;
+
+  interface ContentGroup {
+    header: string;
+    filePath: string;
+    matches: MatchedItem[];
+  }
+
+  const contentGroups = computed<ContentGroup[]>(() => {
+    const groups: ContentGroup[] = [];
+    const indexByPath = new Map<string, ContentGroup>();
+    for (const item of contentItems.value) {
+      const path = item.filePath;
+      if (!path) continue;
+      let group = indexByPath.get(path);
+      if (!group) {
+        group = { header: item.fileName || item.label, filePath: path, matches: [] };
+        indexByPath.set(path, group);
+        groups.push(group);
+      }
+      group.matches.push(item);
+    }
+    for (const group of groups) {
+      group.matches.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
+    }
+    return groups;
+  });
+
+  const selectableContentItems = computed<MatchedItem[]>(() => contentGroups.value.flatMap((group) => group.matches));
+
+  function clearContentResults(): void {
+    contentItems.value = [];
+    contentSearching.value = false;
+  }
+
+  async function runContentSearch(query: string, generation: number): Promise<void> {
+    const roots = composeGlobalSearchRoots();
+    if (roots.length === 0) {
+      if (generation === contentSearchGeneration) clearContentResults();
+      return;
+    }
+    contentSearching.value = true;
+    try {
+      const matches = await api.globalSearch({
+        roots,
+        query,
+        extensions: getGlobalSearchExtensions(),
+        limit: CONTENT_SEARCH_MAX_RESULTS,
+      });
+      if (generation !== contentSearchGeneration) return;
+      contentItems.value = matches.map((match) => {
+        const isFileName = match.line === 0;
+        const highlightIndices: [number, number] = [Math.max(0, match.column - 1), Math.max(match.column - 1, match.column - 1 + match.matchText.length)];
+        return {
+          id: `content-${match.path}-${match.line}-${match.column}`,
+          type: "content_match" as const,
+          label: match.fileName,
+          description: match.fileName,
+          connectionId: "",
+          filePath: match.path,
+          fileName: match.fileName,
+          line: match.line,
+          column: match.column,
+          matchText: match.matchText,
+          lineText: isFileName ? match.fileName : match.lineText,
+          highlightIndices,
+          searchText: match.lineText,
+          matchScore: 0,
+          matchIndices: [],
+        };
+      });
+    } catch {
+      if (generation === contentSearchGeneration) contentItems.value = [];
+    } finally {
+      if (generation === contentSearchGeneration) contentSearching.value = false;
+    }
+  }
+
+  function setContentMode(enabled: boolean): void {
+    if (contentMode.value === enabled) return;
+    contentMode.value = enabled;
+    selectedIndex.value = 0;
+    if (enabled) {
+      const query = searchQuery.value.trim();
+      if (query) {
+        const generation = ++contentSearchGeneration;
+        void runContentSearch(query, generation);
+      } else {
+        clearContentResults();
+      }
+    } else {
+      clearContentResults();
+    }
+  }
 
   function getConnectionLabel(connectionId: string): string {
     if (!connectionId) return i18n.global.t("sqlLibrary.unassociated");
@@ -221,16 +440,19 @@ export function useQuickOpen() {
   }
 
   const sqlLibraryAllItems = computed<QuickOpenItem[]>(() => {
-    return savedSqlStore.allFiles.map((file) => ({
-      id: `sqllib-${file.id}`,
-      type: "sql_library_file" as const,
-      label: file.name,
-      description: getConnectionLabel(file.connectionId),
-      connectionId: file.connectionId,
-      connectionName: getConnectionLabel(file.connectionId),
-      sqlFileId: file.id,
-      searchText: `${file.name} ${getConnectionLabel(file.connectionId)}`,
-    }));
+    // Files bound to a connection outside the scope are hidden with it; unbound files stay visible.
+    return savedSqlStore.allFiles
+      .filter((file) => !file.connectionId || quickOpenScopeIncludes(file.connectionId))
+      .map((file) => ({
+        id: `sqllib-${file.id}`,
+        type: "sql_library_file" as const,
+        label: file.name,
+        description: getConnectionLabel(file.connectionId),
+        connectionId: file.connectionId,
+        connectionName: getConnectionLabel(file.connectionId),
+        sqlFileId: file.id,
+        searchText: `${file.name} ${getConnectionLabel(file.connectionId)}`,
+      }));
   });
 
   const sqlLibraryRecentItems = computed<QuickOpenItem[]>(() => {
@@ -258,7 +480,7 @@ export function useQuickOpen() {
         const allEntries: Array<{ entry: SqlFileEntry; rootFolder: string }> = [];
         for (const folderPath of folderPaths) {
           try {
-            const entries = await api.listSqlFilesInFolder(folderPath);
+            const entries = await api.listSqlFilesInFolder(folderPath, getSqlFileFilter());
             const collected: SqlFileEntry[] = [];
             collectSqlFileEntries(entries, collected);
             const rootName = folderNameFromPath(folderPath);
@@ -308,9 +530,52 @@ export function useQuickOpen() {
     return sqlFileItems.value.slice(0, INITIAL_SQL_FILE_LIMIT);
   });
 
+  /**
+   * Refresh quick-open entries for plugin workbenches that no connection
+   * provider claims. A workbench bound via a provider's `workbench` pointer is
+   * opened through its connection (which quick open already lists as a
+   * connection item with full context), so listing it here would only offer a
+   * contextless dead end. Unclaimed workbenches otherwise have no entry point
+   * outside the Plugin Center's Installed tab.
+   * Re-runs on every dialog open so installs/uninstalls show up without a restart.
+   */
+  async function loadPluginWorkbenches(): Promise<void> {
+    if (pluginWorkbenchesLoading) return;
+    pluginWorkbenchesLoading = true;
+    try {
+      const registry = createFrontendPluginRegistry(await api.listPlugins(), currentLocale());
+      const connectionBound = new Set(
+        registry
+          .listConnectionProviders()
+          .filter((entry) => entry.contribution.workbench)
+          .map((entry) => `${entry.plugin.manifest.id}/${entry.contribution.workbench}`),
+      );
+      pluginWorkbenchItems.value = registry
+        .listWorkbenches()
+        .filter((entry) => !connectionBound.has(`${entry.plugin.manifest.id}/${entry.contribution.id}`))
+        .map((entry) => ({
+          id: `pluginwb-${entry.plugin.manifest.id}-${entry.contribution.id}`,
+          type: "plugin_workbench" as const,
+          label: entry.contribution.label,
+          description: entry.plugin.manifest.name,
+          connectionId: "",
+          pluginId: entry.plugin.manifest.id,
+          contributionId: entry.contribution.id,
+          pluginIcon: entry.contribution.icon || entry.plugin.manifest.icon,
+          searchText: `${entry.plugin.manifest.name} ${entry.contribution.label} ${entry.contribution.id}`,
+        }));
+    } catch {
+      // Plugin listings are best-effort; quick open keeps working without them.
+    } finally {
+      pluginWorkbenchesLoading = false;
+    }
+  }
+
   const allItems = computed((): QuickOpenItem[] => {
     const items: QuickOpenItem[] = [];
-    const connections = connectionStore.connections;
+    // A narrowed scope hides unselected connections and everything beneath them,
+    // keeping local tree entries in sync with the remote search pool.
+    const connections = connectionStore.connections.filter((conn) => quickOpenScopeIncludes(conn.id));
     const treeNodes = connectionStore.treeNodes;
 
     // Add connections
@@ -324,6 +589,10 @@ export function useQuickOpen() {
         searchText: `${conn.name}`,
       });
     }
+
+    // Standalone plugin workbenches sit right after connections so they stay
+    // reachable in the no-query list before the (much longer) tree items.
+    items.push(...pluginWorkbenchItems.value);
 
     // Add databases and tables from tree nodes
     // Filter tree nodes by connection
@@ -574,6 +843,8 @@ export function useQuickOpen() {
       return priority(left) - priority(right);
     });
     for (const conn of orderedConnections) {
+      // Connection scope: unselected connections contribute neither results nor on-demand connects.
+      if (!quickOpenScopeIncludes(conn.id)) continue;
       // listCompletionTables connects on demand. Keeping disconnected connections
       // out here makes quick-open blind to unloaded tables after a cold start.
       if (REMOTE_SEARCH_UNSUPPORTED_TYPES.has(conn.db_type)) continue;
@@ -667,38 +938,63 @@ export function useQuickOpen() {
     void loadExternalSqlFiles();
   });
 
+  /**
+   * Invalidate in-flight remote work and schedule a fresh search for `rawQuery`.
+   * Both the query watcher and the scope watcher funnel through here: bumping the
+   * generation keeps stale responses from landing, and the debounce coalesces bursts.
+   */
+  function scheduleRemoteSearch(rawQuery: string): void {
+    selectedIndex.value = 0;
+    const generation = ++remoteSearchGeneration;
+    cancelStaleRemoteRequestWaiters(generation);
+    if (remoteSearchTimer) clearTimeout(remoteSearchTimer);
+    remoteSearchTimer = undefined;
+    remoteItems.value = [];
+
+    const normalizedQuery = rawQuery.trim();
+    if (normalizedQuery.length < REMOTE_SEARCH_MIN_QUERY_LENGTH) return;
+    const contexts = remoteSearchContexts();
+    if (contexts.length === 0) return;
+
+    remoteSearchTimer = setTimeout(() => {
+      remoteSearchTimer = undefined;
+      void runRemoteSearch(normalizedQuery, generation, contexts);
+    }, REMOTE_SEARCH_DEBOUNCE_MS);
+  }
+
   watch(
     searchQuery,
     (query) => {
-      selectedIndex.value = 0;
-      const generation = ++remoteSearchGeneration;
-      cancelStaleRemoteRequestWaiters(generation);
-      if (remoteSearchTimer) clearTimeout(remoteSearchTimer);
-      remoteItems.value = [];
-
       const normalizedQuery = query.trim();
 
       // Ensure external SQL files are loaded when the user starts searching
       if (normalizedQuery.length > 0 && !sqlFilesLoaded && !sqlFilesLoadingPromise) {
         void loadExternalSqlFiles();
       }
+      if (normalizedQuery.length > 0) {
+        void loadPluginWorkbenches();
+      }
 
-      if (normalizedQuery.length < REMOTE_SEARCH_MIN_QUERY_LENGTH) return;
-      const contexts = remoteSearchContexts();
-      if (contexts.length === 0) return;
-
-      remoteSearchTimer = setTimeout(() => {
-        remoteSearchTimer = undefined;
-        void runRemoteSearch(normalizedQuery, generation, contexts);
-      }, REMOTE_SEARCH_DEBOUNCE_MS);
+      scheduleRemoteSearch(query);
     },
     { flush: "sync" },
+  );
+
+  // Changing the connection scope re-runs the current query immediately, without retyping.
+  watch(quickOpenScopeIds, () => {
+    scheduleRemoteSearch(searchQuery.value);
+  });
+
+  // Drop a selected connection that no longer exists, so the picker never points at it.
+  watch(
+    () => connectionStore.connections.map((conn) => conn.id).join("\n"),
+    () => pruneQuickOpenScope(connectionStore.connections.map((conn) => conn.id)),
   );
 
   const filteredItems = computed((): MatchedItem[] => {
     if (!searchQuery.value.trim()) {
       // Show all tree items plus a limited set of recent SQL library files and external SQL files
-      return [...allItems.value, ...sqlLibraryRecentItems.value, ...sqlFileRecentItems.value].map((item) => ({
+      return [...allItems.value, ...sqlLibraryRecentItems.value, ...sqlFileRecentItems.value, ...(extraItems?.value ?? [])].map((item) => ({
         ...item,
         matchScore: Infinity,
         matchIndices: [],
@@ -709,12 +1005,12 @@ export function useQuickOpen() {
 
     const seen = new Set<string>();
     // When searching, include ALL SQL library files and external SQL files
-    for (const item of [...allItems.value, ...sqlLibraryAllItems.value, ...sqlFileItems.value, ...remoteItems.value]) {
+    for (const item of [...allItems.value, ...sqlLibraryAllItems.value, ...sqlFileItems.value, ...remoteItems.value, ...(extraItems?.value ?? [])]) {
       const key = quickOpenItemKey(item);
       if (seen.has(key)) continue;
       seen.add(key);
       const labelMatch = matchQuickOpenText(searchQuery.value, item.label);
-      const metadataMatch = labelMatch ? null : matchQuickOpenText(searchQuery.value, item.searchText);
+      const metadataMatch = labelMatch ? null : matchQuickOpenMetadata(searchQuery.value, item.searchText);
       const result = labelMatch ?? metadataMatch;
       if (result) {
         matched.push({
@@ -733,18 +1029,21 @@ export function useQuickOpen() {
 
       const typeOrder = {
         connection: 0,
-        database: 1,
-        schema: 2,
-        table: 3,
-        view: 4,
-        materialized_view: 5,
-        procedure: 6,
-        function: 7,
-        sequence: 8,
-        package: 9,
-        "package-body": 10,
-        sql_library_file: 11,
-        sql_file: 12,
+        plugin_workbench: 1,
+        database: 2,
+        schema: 3,
+        table: 4,
+        view: 5,
+        materialized_view: 6,
+        procedure: 7,
+        function: 8,
+        sequence: 9,
+        package: 10,
+        "package-body": 11,
+        sql_library_file: 12,
+        sql_file: 13,
+        content_match: 14,
+        plugin_command: 15,
       };
       const typeDifference = typeOrder[a.type] - typeOrder[b.type];
       if (typeDifference !== 0) return typeDifference;
@@ -763,8 +1062,15 @@ export function useQuickOpen() {
     return filteredItems.value[selectedIndex.value];
   });
 
+  const contentSelectedItem = computed((): MatchedItem | null => {
+    if (!contentMode.value) return null;
+    if (selectedIndex.value < 0 || selectedIndex.value >= selectableContentItems.value.length) return null;
+    return selectableContentItems.value[selectedIndex.value];
+  });
+
   function selectNext(): void {
-    if (selectedIndex.value < filteredItems.value.length - 1) {
+    const length = contentMode.value ? selectableContentItems.value.length : filteredItems.value.length;
+    if (selectedIndex.value < length - 1) {
       selectedIndex.value++;
     }
   }
@@ -784,15 +1090,65 @@ export function useQuickOpen() {
     resetSelection();
   }
 
+  // Content search: debounced full-text search fired from the shared query.
+  watch(
+    searchQuery,
+    (query) => {
+      selectedIndex.value = 0;
+      const generation = ++contentSearchGeneration;
+      if (contentSearchTimer) clearTimeout(contentSearchTimer);
+      contentSearchTimer = undefined;
+      if (!contentMode.value) {
+        clearContentResults();
+        return;
+      }
+      const normalizedQuery = query.trim();
+      if (!normalizedQuery) {
+        clearContentResults();
+        return;
+      }
+      contentSearchTimer = setTimeout(() => {
+        contentSearchTimer = undefined;
+        void runContentSearch(normalizedQuery, generation);
+      }, CONTENT_SEARCH_DEBOUNCE_MS);
+    },
+    { flush: "sync" },
+  );
+
+  // Re-run the current content search when search roots or extensions change.
+  watch(globalSearchSettingsVersion, () => {
+    if (contentMode.value && searchQuery.value.trim()) {
+      const generation = ++contentSearchGeneration;
+      void runContentSearch(searchQuery.value.trim(), generation);
+    }
+  });
+
+  watch(sqlFileFoldersVersion, () => {
+    if (contentMode.value && searchQuery.value.trim()) {
+      const generation = ++contentSearchGeneration;
+      void runContentSearch(searchQuery.value.trim(), generation);
+    }
+  });
+
   return {
     searchQuery,
     filteredItems,
     selectedIndex,
     selectedItem,
+    contentMode,
+    contentSearching,
+    contentGroups,
+    contentSelectedItem,
+    setContentMode,
     selectNext,
     selectPrevious,
     resetSelection,
     setQuery,
     loadExternalSqlFiles,
+    loadPluginWorkbenches,
+    // Connection scope: empty = all connections.
+    scopeConnectionIds: quickOpenScopeIds,
+    scopeActive: computed(() => isQuickOpenScopeActive()),
+    setScopeConnectionIds: setQuickOpenScopeIds,
   };
 }

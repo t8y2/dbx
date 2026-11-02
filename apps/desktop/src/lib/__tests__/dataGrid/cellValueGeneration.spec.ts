@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSnowflakeIdGenerator, generateCellValues } from "@/lib/dataGrid/cellValueGeneration";
 
 describe("generateCellValues", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("generates empty strings and nulls", () => {
     expect(generateCellValues("empty", 2)).toEqual(["", ""]);
     expect(generateCellValues("null", 2)).toEqual([null, null]);
@@ -13,13 +17,123 @@ describe("generateCellValues", () => {
     expect(generateCellValues("date", 2, { now })).toEqual(["2026-07-16", "2026-07-16"]);
   });
 
+  it("appends three-digit milliseconds when requested", () => {
+    const now = new Date(2026, 6, 16, 9, 8, 7, 123);
+    expect(generateCellValues("datetime-ms", 2, { now })).toEqual(["2026-07-16 09:08:07.123", "2026-07-16 09:08:07.123"]);
+    expect(generateCellValues("datetime-ms", 1, { now: new Date(2026, 6, 16, 9, 8, 7) })).toEqual(["2026-07-16 09:08:07.000"]);
+  });
+
+  it("generates Unix timestamps in seconds and milliseconds", () => {
+    const now = new Date(1_645_557_742_123);
+    expect(generateCellValues("timestamp-seconds", 2, { now })).toEqual(["1645557742", "1645557742"]);
+    expect(generateCellValues("timestamp-ms", 2, { now })).toEqual(["1645557742123", "1645557742123"]);
+  });
+
+  it("generates Unix timestamps in seconds and milliseconds without explicit now option", () => {
+    const beforeSeconds = Math.floor(Date.now() / 1000);
+    const [seconds] = generateCellValues("timestamp-seconds", 1);
+    const afterSeconds = Math.floor(Date.now() / 1000);
+    expect(Number(seconds)).toBeGreaterThanOrEqual(beforeSeconds);
+    expect(Number(seconds)).toBeLessThanOrEqual(afterSeconds);
+
+    const beforeMs = Date.now();
+    const [ms] = generateCellValues("timestamp-ms", 1);
+    const afterMs = Date.now();
+    expect(Number(ms)).toBeGreaterThanOrEqual(beforeMs);
+    expect(Number(ms)).toBeLessThanOrEqual(afterMs);
+  });
+
   it("generates one UUID per cell", () => {
     let index = 0;
     expect(generateCellValues("uuid", 3, { uuidFactory: () => `uuid-${++index}` })).toEqual(["uuid-1", "uuid-2", "uuid-3"]);
   });
 
+  it.each([
+    ["uuid", /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/],
+    ["uuid-v7", /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/],
+  ] as const)("generates distinct %s values for cells in the same millisecond", (kind, pattern) => {
+    const values = generateCellValues(kind, 5000, { now: new Date(1_645_557_742_000) });
+
+    expect(values).toHaveLength(5000);
+    expect(values.every((value) => typeof value === "string" && pattern.test(value))).toBe(true);
+    expect(new Set(values).size).toBe(values.length);
+  });
+
+  it("encodes the UUID v7 timestamp and random fields from the RFC 9562 test vector", () => {
+    const values = generateCellValues("uuid-v7", 1, {
+      now: new Date(1_645_557_742_000),
+      uuidFactory: () => "11111111-2222-4cc3-98c4-dc0c0c07398f",
+    });
+
+    expect(values).toEqual(["017f22e2-79b0-7cc3-98c4-dc0c0c07398f"]);
+  });
+
+  it("pads early UUID v7 timestamps to 48 bits", () => {
+    expect(
+      generateCellValues("uuid-v7", 1, {
+        now: new Date(1),
+        uuidFactory: () => "11111111-2222-4cc3-98c4-dc0c0c07398f",
+      }),
+    ).toEqual(["00000000-0001-7cc3-98c4-dc0c0c07398f"]);
+  });
+
+  it("orders UUID v7 values by millisecond across a timestamp field boundary", () => {
+    const [earlier] = generateCellValues("uuid-v7", 1, {
+      now: new Date(0xffff_ffff),
+      uuidFactory: () => "ffffffff-ffff-4fff-bfff-ffffffffffff",
+    });
+    const [later] = generateCellValues("uuid-v7", 1, {
+      now: new Date(0x1_0000_0000),
+      uuidFactory: () => "00000000-0000-4000-8000-000000000000",
+    });
+
+    expect(earlier).toBe("0000ffff-ffff-7fff-bfff-ffffffffffff");
+    expect(later).toBe("00010000-0000-7000-8000-000000000000");
+    expect(earlier! < later!).toBe(true);
+  });
+
+  it("generates UUID v7 values when crypto.randomUUID is unavailable", () => {
+    vi.stubGlobal("crypto", {});
+    const values = generateCellValues("uuid-v7", 20, { now: new Date(1_645_557_742_000) });
+
+    expect(values.every((value) => /^017f22e2-79b0-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value!))).toBe(true);
+    expect(new Set(values).size).toBe(20);
+  });
+
   it("increments values without losing bigint precision", () => {
     expect(generateCellValues("increment", 3, { startValue: 9_007_199_254_740_993n })).toEqual(["9007199254740993", "9007199254740994", "9007199254740995"]);
+  });
+
+  it("pads increment values with leading zeros", () => {
+    expect(generateCellValues("increment", 3, { startValue: 1n, padLength: 4 })).toEqual(["0001", "0002", "0003"]);
+    expect(generateCellValues("increment", 2, { startValue: 99n, padLength: 4 })).toEqual(["0099", "0100"]);
+    expect(generateCellValues("increment", 2, { startValue: 1000n, padLength: 3 })).toEqual(["1000", "1001"]);
+    expect(generateCellValues("increment", 2, { startValue: 1n, padLength: 0 })).toEqual(["1", "2"]);
+    expect(generateCellValues("increment", 2, { startValue: 1n, padLength: -1 })).toEqual(["1", "2"]);
+  });
+
+  it("applies prefix and suffix to increment values", () => {
+    expect(generateCellValues("increment", 2, { startValue: 1n, prefix: "USER_" })).toEqual(["USER_1", "USER_2"]);
+    expect(generateCellValues("increment", 2, { startValue: 1n, suffix: "_TEST" })).toEqual(["1_TEST", "2_TEST"]);
+    expect(
+      generateCellValues("increment", 3, {
+        startValue: 1n,
+        padLength: 4,
+        prefix: "USER_",
+        suffix: "_TEST",
+      }),
+    ).toEqual(["USER_0001_TEST", "USER_0002_TEST", "USER_0003_TEST"]);
+  });
+
+  it("formats negative increment values with padding and affixes", () => {
+    expect(
+      generateCellValues("increment", 4, {
+        startValue: -2n,
+        padLength: 3,
+        prefix: "ID:",
+        suffix: "!",
+      }),
+    ).toEqual(["ID:-002!", "ID:-001!", "ID:000!", "ID:001!"]);
   });
 
   it("keeps snowflake IDs unique and ordered beyond one sequence window", () => {

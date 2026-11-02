@@ -59,8 +59,8 @@ async fn postgres_constraints_reports_pk_fk_unique_check_and_not_valid() {
     let pk = find_constraint(&child, "child_pkey");
     assert_eq!(pk.constraint_type, "PRIMARY KEY");
     assert_eq!(pk.columns, vec!["id"]);
-    assert!(pk.valid);
-    assert!(pk.enabled);
+    assert_eq!(pk.valid, Some(true));
+    assert_eq!(pk.enabled, Some(true));
     assert_eq!(pk.ref_table, None);
 
     // FOREIGN KEY: composite referencing columns must keep order (a, b)
@@ -73,7 +73,7 @@ async fn postgres_constraints_reports_pk_fk_unique_check_and_not_valid() {
     assert_eq!(fk.on_update.as_deref(), Some("NO ACTION"));
     assert_eq!(fk.on_delete.as_deref(), Some("NO ACTION"));
     assert_eq!(fk.match_type.as_deref(), Some("SIMPLE"));
-    assert!(fk.valid);
+    assert_eq!(fk.valid, Some(true));
 
     // UNIQUE
     let unique = find_constraint(&child, "child_code_unique");
@@ -89,8 +89,8 @@ async fn postgres_constraints_reports_pk_fk_unique_check_and_not_valid() {
     // NOT VALID CHECK surfaces valid=false
     let not_valid = find_constraint(&child, "child_amount_check_not_valid");
     assert_eq!(not_valid.constraint_type, "CHECK");
-    assert!(!not_valid.valid, "NOT VALID constraint must report valid=false");
-    assert!(not_valid.enabled);
+    assert_eq!(not_valid.valid, Some(false), "NOT VALID constraint must report valid=false");
+    assert_eq!(not_valid.enabled, Some(true));
 
     // Composite primary key keeps declared column order (a, b), not b, a
     let parent = postgres::list_constraints(&pool, &schema, "parent").await.expect("list parent constraints");
@@ -127,7 +127,7 @@ async fn postgres_constraints_reports_exclude_constraints() {
     assert_eq!(exclude.constraint_type, "EXCLUDE");
     assert_eq!(exclude.columns, vec!["during"]);
     assert!(exclude.definition.contains("EXCLUDE"));
-    assert!(exclude.valid);
+    assert_eq!(exclude.valid, Some(true));
 
     let _ = postgres::execute_query(&pool, &format!("DROP SCHEMA IF EXISTS {schema_ident} CASCADE")).await;
 }

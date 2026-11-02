@@ -127,7 +127,7 @@ public final class GoldendbAgent extends AbstractJdbcAgent {
         return unchecked(() -> {
             List<ObjectInfo> result = new ArrayList<>();
             for (TableInfo table : listTables(schema)) {
-                result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
+                result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment(), table.getValid()));
             }
 
             try (java.sql.PreparedStatement stmt = requireConnected().prepareStatement(
@@ -199,6 +199,26 @@ public final class GoldendbAgent extends AbstractJdbcAgent {
     }
 
     @Override
+    public String getTableDdl(String schema, String table) {
+        return unchecked(() -> {
+            String qualifiedTable = JdbcIdentifiers.INSTANCE.backtick(table);
+            if (schema != null && !schema.isBlank()) {
+                qualifiedTable = JdbcIdentifiers.INSTANCE.backtick(schema) + "." + qualifiedTable;
+            }
+            try (java.sql.Statement statement = requireConnected().createStatement();
+                 ResultSet result = statement.executeQuery("SHOW CREATE TABLE " + qualifiedTable)) {
+                if (result.next()) {
+                    String ddl = result.getString(2);
+                    if (ddl != null && !ddl.isBlank()) {
+                        return ddl;
+                    }
+                }
+                throw new IllegalStateException("DDL not found for " + qualifiedTable);
+            }
+        });
+    }
+
+    @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
         return unchecked(() -> {
             String quotedName = JdbcIdentifiers.INSTANCE.backtick(name);
@@ -248,7 +268,8 @@ public final class GoldendbAgent extends AbstractJdbcAgent {
             try (java.sql.PreparedStatement stmt = requireConnected().prepareStatement(
                 """
                 SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT,
-                       NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH
+                       NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH,
+                       CHARACTER_SET_NAME, COLLATION_NAME
                 FROM information_schema.COLUMNS
                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
                 ORDER BY ORDINAL_POSITION
@@ -269,7 +290,9 @@ public final class GoldendbAgent extends AbstractJdbcAgent {
                             emptyToNull(rs.getString("COLUMN_COMMENT")),
                             integerOrNull(rs, "NUMERIC_PRECISION"),
                             integerOrNull(rs, "NUMERIC_SCALE"),
-                            numberToIntOrNull(rs, "CHARACTER_MAXIMUM_LENGTH")
+                            numberToIntOrNull(rs, "CHARACTER_MAXIMUM_LENGTH"),
+                            emptyToNull(rs.getString("CHARACTER_SET_NAME")),
+                            emptyToNull(rs.getString("COLLATION_NAME"))
                         ));
                     }
                 }
@@ -433,6 +456,12 @@ public final class GoldendbAgent extends AbstractJdbcAgent {
                 case Types.BOOLEAN:
                 case Types.BIT:
                     value = rs.getBoolean(index);
+                    break;
+                case Types.BINARY:
+                case Types.VARBINARY:
+                case Types.LONGVARBINARY:
+                case Types.BLOB:
+                    value = JdbcExecutor.bytesToHex(rs.getBytes(index));
                     break;
                 default:
                     value = rs.getString(index);

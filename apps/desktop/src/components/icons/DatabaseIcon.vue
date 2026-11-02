@@ -16,6 +16,7 @@ const assetIcons: Record<string, string> = {
   cloudberry: "cloudberry",
   opentenbase: "opentenbase",
   sqlite: "sqlite",
+  "sqlite-worker": "sqlite",
   rqlite: "rqlite.png",
   turso: "turso.png",
   cloudflare_d1: "cloudflare-d1",
@@ -30,6 +31,8 @@ const assetIcons: Record<string, string> = {
   elasticsearch: "elasticsearch",
   easysearch: "easysearch",
   meilisearch: "meilisearch",
+  solr: "solr",
+  couchdb: "couchdb",
   oracle: "oracle",
   "oracle-10g": "oracle",
   "oracle-legacy": "oracle",
@@ -57,6 +60,9 @@ const assetIcons: Record<string, string> = {
   presto: "presto",
   prestosql: "presto",
   hive: "hive",
+  argo: "hive",
+  transwarp: "transwarp-inceptor.png",
+  transwarp_inceptor: "transwarp-inceptor.png",
   kyuubi: "kyuubi.png",
   impala: "impala",
   hbase: "hbase",
@@ -82,6 +88,7 @@ const assetIcons: Record<string, string> = {
   starrocks: "starrocks",
   redshift: "redshift",
   neo4j: "neo4j",
+  nebula: "nebula.png",
   informix: "informix",
   databricks: "databricks",
   saphana: "saphana",
@@ -91,6 +98,7 @@ const assetIcons: Record<string, string> = {
   exasol: "exasol",
   gbase: "gbase.png",
   gbase8a: "gbase.png",
+  gbase8c: "gbase.png",
   gbase8s: "gbase.png",
   tdsql: "tdsql",
   polardb: "polardb.webp",
@@ -98,6 +106,7 @@ const assetIcons: Record<string, string> = {
   xugu: "xugu.png",
   iotdb: "iotdb",
   etcd: "etcd",
+  etcd2: "etcd",
   qdrant: "qdrant",
   milvus: "milvus.png",
   weaviate: "weaviate",
@@ -110,18 +119,22 @@ const assetIcons: Record<string, string> = {
   nacos: "nacos.png",
   consul: "consul",
   iris: "iris",
+  cache: "iris",
   influxdb: "influxdb",
+  influxdb3: "influxdb",
   victoriametrics: "victoriametrics.png",
   zookeeper: "zookeeper",
   oscar: "oscar.png",
   jdbcx: "jdbcx",
   mqtt: "mqtt",
   dolt: "dolt",
+  salesforce: "salesforce",
 };
 
 const normalizedType = computed(() => (props.dbType || "").toLowerCase().replace(/[\s-]+/g, "_"));
 const assetName = computed(() => assetIcons[normalizedType.value]);
 const useLightIconInDarkMode = computed(() => normalizedType.value === "easysearch" && isDark.value);
+const brightenInceptorInDarkMode = computed(() => isDark.value && (normalizedType.value === "transwarp" || normalizedType.value === "transwarp_inceptor"));
 const assetSrc = computed(() => {
   if (!assetName.value) return "";
   if (normalizedType.value === "uxdb" && isDark.value) return webPath("/icons/database/uxdb-dark.svg");
@@ -130,7 +143,14 @@ const assetSrc = computed(() => {
 </script>
 
 <template>
-  <img v-if="assetName" :src="assetSrc" alt="" class="database-logo object-contain" :class="{ 'database-logo-light': useLightIconInDarkMode, 'database-logo-impala': normalizedType === 'impala' }" aria-hidden="true" />
+  <img
+    v-if="assetName"
+    :src="assetSrc"
+    alt=""
+    class="database-logo object-contain"
+    :class="{ 'database-logo-light': useLightIconInDarkMode, 'database-logo-inceptor-dark': brightenInceptorInDarkMode, 'database-logo-impala': normalizedType === 'impala', 'database-logo-solr': normalizedType === 'solr' }"
+    aria-hidden="true"
+  />
   <Database v-else class="text-blue-400" />
 </template>
 
@@ -144,7 +164,17 @@ const assetSrc = computed(() => {
   filter: brightness(0) invert(82%);
 }
 
+.database-logo-inceptor-dark {
+  filter: brightness(1.6);
+}
+
 .database-logo-impala {
   transform: scale(1.55);
+}
+
+/* solr.svg 的图形撑满整个 viewBox（无内边距），其他 logo 留白约 20-25%，
+   统一 scale(1.35) 下视觉偏大，单独收敛到与多数 logo 一致的占幅。 */
+.database-logo-solr {
+  transform: scale(1.02);
 }
 </style>

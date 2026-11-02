@@ -57,6 +57,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -64,6 +65,8 @@ public final class DbxJdbcPlugin {
     private static final ObjectMapper MAPPER =
         new ObjectMapper().configure(SerializationFeature.WRITE_BIGDECIMAL_AS_PLAIN, true);
     private static final int MAX_ROWS = 10_000;
+    static final String CANCEL_STATEMENT_METHOD = "cancelStatement";
+    static final String CANCEL_TOKEN_PARAM = "cancelToken";
     private static final String JDBCX_URL_PREFIX = "jdbcx:";
     private static final String JDBCX_EXTENSION_WHITELIST_PROPERTY = "jdbcx.extension.whitelist";
     private static final String JDBCX_HIGH_PRIVILEGE_EXTENSIONS_OPT_IN = "-Ddbx.jdbcx.allowHighPrivilegeExtensions=";
@@ -74,6 +77,18 @@ public final class DbxJdbcPlugin {
         "^SELECT\\s+\\*\\s+FROM\\s+(?:SYSTEM|\\\"SYSTEM\\\")\\s*\\.\\s*(?:CATALOG|\\\"CATALOG\\\")$",
         Pattern.CASE_INSENSITIVE
     );
+    // Mirrors `trimStatementSQL` in the native oracle-go agent: a PL/SQL unit must keep the
+    // `;` after its final END, while a plain Oracle SQL statement must not end with one.
+    private static final Pattern ORACLE_PLSQL_BLOCK_START = Pattern.compile(
+        "^\\s*(?:DECLARE|BEGIN|CREATE\\s+(?:OR\\s+REPLACE\\s+)?(?:(?:EDITIONABLE|NONEDITIONABLE)\\s+)?"
+            + "(?:FUNCTION|PROCEDURE|TRIGGER|PACKAGE(?:\\s+BODY)?|TYPE(?:\\s+BODY)?))\\b",
+        Pattern.CASE_INSENSITIVE | Pattern.DOTALL
+    );
+    private static final Pattern ORACLE_PLSQL_BLOCK_END = Pattern.compile("\\bEND\\s*;\\s*$", Pattern.CASE_INSENSITIVE);
+    private static final Pattern ORACLE_NAMED_PLSQL_BLOCK_END = Pattern.compile(
+        "\\bEND\\s+([A-Z0-9_$#]+)\\s*;\\s*$",
+        Pattern.CASE_INSENSITIVE
+    );
     private static final String[] DEFAULT_TABLE_TYPES = new String[] {
         "TABLE",
         "VIEW",
@@ -82,7 +97,26 @@ public final class DbxJdbcPlugin {
         "SYSTEM TABLE",
         "SYSTEM VIEW"
     };
+    /**
+     * MySQL/PostgreSQL 家族（含金仓、瀚高、优炫、海量这类 PG 衍生库）里 BIT 是位字段/位串：数据库自带
+     * 工具和 DBX 的内置驱动都按 `0`/`1`/`10101010` 展示。JDBC 驱动把这些列暴露成裸字节或强制转布尔，
+     * 走通用分支就成了 `0x00`/`true`。这类连接由 readBitStringColumnValue 按位串读取。
+     * SQL Server 这类把 BIT 当布尔类型的库不在名单内，保持驱动返回的布尔值。
+     */
+    private static final String[] BIT_STRING_JDBC_URL_PREFIXES = new String[] {
+        "jdbc:mysql:",
+        "jdbc:mariadb:",
+        "jdbc:starrocks:",
+        "jdbc:doris:",
+        "jdbc:postgresql:",
+        "jdbc:kingbase",
+        "jdbc:highgo:",
+        "jdbc:uxdb:",
+        "jdbc:vastbase:"
+    };
+
     private static final JdbcDriverQuirks DEFAULT_QUIRKS = new JdbcDriverQuirks(
+        false,
         false,
         false,
         false,
@@ -96,12 +130,14 @@ public final class DbxJdbcPlugin {
     private static final JdbcDriverQuirks USE_CATALOG_QUIRKS = DEFAULT_QUIRKS.withUseCatalogFallbackSql(true);
     private static final JdbcDriverQuirks HIVE_QUIRKS = USE_CATALOG_QUIRKS.withSchemasAsDatabasesFallback(true);
     private static final JdbcDriverQuirks KINGBASE_QUIRKS = DEFAULT_QUIRKS.withIgnoreCatalogForSchemaMetadata(true);
+    private static final JdbcDriverQuirks SQLSERVER_QUIRKS = DEFAULT_QUIRKS.withMergeEmptyCatalogSchemas(true);
     private static final JdbcDriverQuirks TAOS_QUIRKS = DEFAULT_QUIRKS
         .withPreferExecuteQueryForResultSetSql(true)
         .withDatabaseClientInfoProperty("dbname");
     private static final JdbcDriverQuirks YASHAN_QUIRKS = new JdbcDriverQuirks(
         true,
         true,
+        false,
         false,
         false,
         false,
@@ -118,12 +154,14 @@ public final class DbxJdbcPlugin {
         false,
         false,
         false,
+        false,
         null,
         StatementMaxRowsMode.READ_LOOP_ONLY
     );
     private static final JdbcDriverQuirks ORACLE_QUIRKS = new JdbcDriverQuirks(
         false,
         true,
+        false,
         false,
         false,
         false,
@@ -139,20 +177,64 @@ public final class DbxJdbcPlugin {
         new JdbcDriverQuirkRule("jdbc:doris:", USE_CATALOG_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:hive2:", HIVE_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:kingbase", KINGBASE_QUIRKS),
+        new JdbcDriverQuirkRule("jdbc:sqlserver:", SQLSERVER_QUIRKS),
+        new JdbcDriverQuirkRule("jdbc:jtds:sqlserver:", SQLSERVER_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:yasdb:", YASHAN_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:iris:", IRIS_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:oracle:", ORACLE_QUIRKS),
+        new JdbcDriverQuirkRule("jdbc:oceanbase:oracle://", ORACLE_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:dm:", ORACLE_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:taos:", TAOS_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:taos-ws:", TAOS_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:taos-rs:", TAOS_QUIRKS)
     );
     private static String registeredDriverKey = "";
+    private static String logicalDriverKey;
     private static Driver registeredDriver;
-    private static String sharedConnectionKey = "";
-    private static Connection sharedConnection;
-    private static boolean manualTransactionActive;
-    private static final Map<String, QuerySession> QUERY_SESSIONS = new HashMap<>();
+    private static ClassLoader registeredDriverClassLoader;
+    private static final JdbcConnectionState DEFAULT_CONNECTION_STATE = new JdbcConnectionState();
+    private static final ThreadLocal<JdbcConnectionState> CONNECTION_STATE =
+        ThreadLocal.withInitial(() -> DEFAULT_CONNECTION_STATE);
+    private static final Map<String, JdbcConnectionState> LOGICAL_SESSIONS = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final ThreadLocal<CancellationRequest> CANCELLATION_REQUEST = new ThreadLocal<>();
+    private static volatile boolean shuttingDown;
+
+    private static final class JdbcConnectionState {
+        String sharedConnectionKey = "";
+        Connection sharedConnection;
+        boolean manualTransactionActive;
+        NativeLegacyJobSession nativeLegacyJob;
+        String nativeLegacyJobConnectionKey = "";
+        NativeJobSession nativeJobSession;
+        boolean deferLobs;
+        final Map<String, QuerySession> querySessions = new HashMap<>();
+        final Map<String, CancellationRequest> cancellationRequests = new HashMap<>();
+        volatile Statement activeStatement;
+        volatile boolean closing;
+        final java.util.concurrent.locks.ReentrantLock operation = new java.util.concurrent.locks.ReentrantLock();
+        final DeferredLobValues largeValues = new DeferredLobValues(call -> {
+            Statement previous = activeStatement;
+            trackActiveStatement(call);
+            try { call.execute(); }
+            finally { trackActiveStatement(previous); }
+        }, () -> closing || isCancellationRequested(CANCELLATION_REQUEST.get()));
+    }
+
+    static final class CancellationRequest {
+        final String token;
+        boolean cancelled;
+        Statement statement;
+
+        CancellationRequest(String token) {
+            this.token = token;
+        }
+    }
+
+    record StatementCancellation(boolean matched, Statement statement) {}
+
+    private static JdbcConnectionState connectionState() {
+        return CONNECTION_STATE.get();
+    }
 
     record JdbcDriverQuirks(
         boolean skipExecutionContext,
@@ -162,6 +244,7 @@ public final class DbxJdbcPlugin {
         boolean ignoreCatalogForSchemaMetadata,
         boolean preferExecuteQueryForResultSetSql,
         boolean schemasAsDatabasesFallback,
+        boolean mergeEmptyCatalogSchemas,
         String databaseClientInfoProperty,
         StatementMaxRowsMode statementMaxRowsMode
     ) {
@@ -174,6 +257,7 @@ public final class DbxJdbcPlugin {
                 ignoreCatalogForSchemaMetadata,
                 preferExecuteQueryForResultSetSql,
                 schemasAsDatabasesFallback,
+                mergeEmptyCatalogSchemas,
                 databaseClientInfoProperty,
                 statementMaxRowsMode
             );
@@ -188,6 +272,7 @@ public final class DbxJdbcPlugin {
                 value,
                 preferExecuteQueryForResultSetSql,
                 schemasAsDatabasesFallback,
+                mergeEmptyCatalogSchemas,
                 databaseClientInfoProperty,
                 statementMaxRowsMode
             );
@@ -202,6 +287,7 @@ public final class DbxJdbcPlugin {
                 ignoreCatalogForSchemaMetadata,
                 value,
                 schemasAsDatabasesFallback,
+                mergeEmptyCatalogSchemas,
                 databaseClientInfoProperty,
                 statementMaxRowsMode
             );
@@ -215,6 +301,22 @@ public final class DbxJdbcPlugin {
                 useCatalogFallbackSql,
                 ignoreCatalogForSchemaMetadata,
                 preferExecuteQueryForResultSetSql,
+                value,
+                mergeEmptyCatalogSchemas,
+                databaseClientInfoProperty,
+                statementMaxRowsMode
+            );
+        }
+
+        JdbcDriverQuirks withMergeEmptyCatalogSchemas(boolean value) {
+            return new JdbcDriverQuirks(
+                skipExecutionContext,
+                useOracleMetadata,
+                caseInsensitiveSchemaMetadata,
+                useCatalogFallbackSql,
+                ignoreCatalogForSchemaMetadata,
+                preferExecuteQueryForResultSetSql,
+                schemasAsDatabasesFallback,
                 value,
                 databaseClientInfoProperty,
                 statementMaxRowsMode
@@ -230,6 +332,7 @@ public final class DbxJdbcPlugin {
                 ignoreCatalogForSchemaMetadata,
                 preferExecuteQueryForResultSetSql,
                 schemasAsDatabasesFallback,
+                mergeEmptyCatalogSchemas,
                 value,
                 statementMaxRowsMode
             );
@@ -252,46 +355,412 @@ public final class DbxJdbcPlugin {
             BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
             BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8))
         ) {
+            serve(reader, writer);
+        }
+    }
+
+    static void serve(BufferedReader reader, BufferedWriter writer) throws Exception {
+        // Requests without a logical session run in order on one worker so the reader stays free to
+        // handle `cancelStatement` while a statement is still executing on the shared connection.
+        java.util.concurrent.ExecutorService defaultRequests = java.util.concurrent.Executors.newSingleThreadExecutor();
+        serve(reader, writer, defaultRequests);
+    }
+
+    static void serve(BufferedReader reader, BufferedWriter writer,
+                      java.util.concurrent.ExecutorService defaultRequests) throws Exception {
+        java.util.concurrent.ExecutorService requests = java.util.concurrent.Executors.newCachedThreadPool();
+        try {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.isBlank()) {
                     continue;
                 }
-                ObjectNode response = handleLine(line);
-                writer.write(MAPPER.writeValueAsString(response));
-                writer.newLine();
-                writer.flush();
-                if (response.path("_dbx_close").asBoolean(false)) {
-                    break;
+                JsonNode incoming = MAPPER.readTree(line);
+                if (CANCEL_STATEMENT_METHOD.equals(incoming.path("method").asText())) {
+                    writeResponse(writer, cancelStatement(incoming));
+                    continue;
                 }
+                if (incoming.path("params").hasNonNull("jdbcSessionId")) {
+                    JdbcConnectionState retainedState = retainLogicalState(incoming);
+                    requests.execute(() -> {
+                        try {
+                            writeResponse(writer, handleRequest(incoming, retainedState));
+                        } catch (Exception error) {
+                            System.err.println("JDBC session response failed: " + error.getClass().getSimpleName());
+                        }
+                    });
+                    continue;
+                }
+                CancellationRequest cancellationRequest = registerCancellationRequest(incoming);
+                if ("close".equals(incoming.path("method").asText())) {
+                    shuttingDown = true;
+                    String closeLine = line;
+                    ObjectNode response = defaultRequests.submit(
+                        () -> handleDefaultRequest(closeLine, incoming, cancellationRequest)
+                    ).get();
+                    writeResponse(writer, response);
+                    if (response.path("_dbx_close").asBoolean(false)) {
+                        break;
+                    }
+                    continue;
+                }
+                String requestLine = line;
+                defaultRequests.execute(() -> {
+                    try {
+                        writeResponse(writer, handleDefaultRequest(requestLine, incoming, cancellationRequest));
+                    } catch (Exception error) {
+                        System.err.println("JDBC response failed: " + error.getClass().getSimpleName());
+                    }
+                });
             }
         } finally {
+            shuttingDown = true;
+            defaultRequests.shutdown();
+            for (JdbcConnectionState state : LOGICAL_SESSIONS.values()) {
+                closeLogicalSession(state);
+            }
+            LOGICAL_SESSIONS.clear();
+            requests.shutdown();
+            if (!defaultRequests.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                cancelActiveStatement(DEFAULT_CONNECTION_STATE);
+                defaultRequests.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+            }
             closeSharedConnection();
+        }
+    }
+
+    private static ObjectNode handleDefaultRequest(String line, JsonNode request,
+                                                   CancellationRequest cancellationRequest) throws Exception {
+        CANCELLATION_REQUEST.set(cancellationRequest);
+        try {
+            if (isCancellationRequested(cancellationRequest)) return cancelledResponse(request);
+            return handleLine(line);
+        } finally {
+            finishCancellationRequest(cancellationRequest);
+            CANCELLATION_REQUEST.remove();
+        }
+    }
+
+    static CancellationRequest registerCancellationRequest(JsonNode request) {
+        String token = optionalText(request.path("params"), CANCEL_TOKEN_PARAM);
+        if (token == null) return null;
+        CancellationRequest cancellationRequest = new CancellationRequest(token);
+        JdbcConnectionState state = DEFAULT_CONNECTION_STATE;
+        synchronized (state) {
+            state.cancellationRequests.put(token, cancellationRequest);
+        }
+        return cancellationRequest;
+    }
+
+    private static boolean isCancellationRequested(CancellationRequest cancellationRequest) {
+        if (cancellationRequest == null) return false;
+        synchronized (DEFAULT_CONNECTION_STATE) {
+            return cancellationRequest.cancelled;
+        }
+    }
+
+    private static ObjectNode cancelledResponse(JsonNode request) {
+        JsonNode id = request.path("id");
+        ObjectNode response = MAPPER.createObjectNode();
+        response.set("id", id.isMissingNode() ? MAPPER.getNodeFactory().numberNode(1) : id);
+        response.set("error", MAPPER.createObjectNode().put("message", "JDBC request cancelled"));
+        return response;
+    }
+
+    static void finishCancellationRequest(CancellationRequest cancellationRequest) {
+        JdbcConnectionState state = DEFAULT_CONNECTION_STATE;
+        synchronized (state) {
+            Statement statement = cancellationRequest == null ? null : cancellationRequest.statement;
+            if (cancellationRequest != null) {
+                state.cancellationRequests.remove(cancellationRequest.token, cancellationRequest);
+                cancellationRequest.statement = null;
+            }
+            if (cancellationRequest == null || state.activeStatement == statement) {
+                state.activeStatement = null;
+            }
+        }
+    }
+
+    /**
+     * Cancels the statement of the request that carried the same cancel token. The host sends this
+     * when it abandons a request (the user pressed stop); a token that no longer matches belongs to a
+     * request that already finished, so a later request on the same connection is never cancelled.
+     */
+    private static ObjectNode cancelStatement(JsonNode request) {
+        JsonNode id = request.path("id");
+        ObjectNode response = MAPPER.createObjectNode();
+        response.set("id", id.isMissingNode() ? MAPPER.getNodeFactory().numberNode(1) : id);
+        String token = optionalText(request.path("params"), CANCEL_TOKEN_PARAM);
+        StatementCancellation cancellation = markCancellationRequested(token);
+        cancelCapturedStatement(cancellation.statement());
+        ObjectNode result = MAPPER.createObjectNode();
+        result.put("cancelled", cancellation.matched());
+        response.set("result", result);
+        return response;
+    }
+
+    static StatementCancellation markCancellationRequested(String token) {
+        JdbcConnectionState state = DEFAULT_CONNECTION_STATE;
+        synchronized (state) {
+            CancellationRequest cancellationRequest = token == null ? null : state.cancellationRequests.get(token);
+            if (cancellationRequest == null) return new StatementCancellation(false, null);
+            cancellationRequest.cancelled = true;
+            return new StatementCancellation(true, cancellationRequest.statement);
+        }
+    }
+
+    static void cancelCapturedStatement(Statement statement) {
+        if (statement == null) return;
+        try {
+            statement.cancel();
+        } catch (SQLException ignored) {
+            // The statement finished or was closed while the cancel was in flight.
+        }
+    }
+
+    private static void cancelActiveStatement(JdbcConnectionState state) {
+        cancelCapturedStatement(state.activeStatement);
+    }
+
+    private static void trackActiveStatement(Statement statement) {
+        trackActiveStatement(statement, CANCELLATION_REQUEST.get());
+    }
+
+    static void trackActiveStatement(Statement statement, CancellationRequest cancellationRequest) {
+        JdbcConnectionState state = connectionState();
+        boolean cancelRequested;
+        synchronized (state) {
+            state.activeStatement = statement;
+            if (cancellationRequest != null) cancellationRequest.statement = statement;
+            cancelRequested = cancellationRequest != null && cancellationRequest.cancelled;
+        }
+        // A cancel can arrive before the request created its statement.
+        if (cancelRequested) cancelCapturedStatement(statement);
+    }
+
+    private static void writeResponse(BufferedWriter writer, ObjectNode response) throws IOException {
+        if (response.has("error") && !responseFitsBudget(response, 64 * 1024 * 1024)) {
+            ObjectNode bounded = MAPPER.createObjectNode();
+            bounded.set("id", response.path("id"));
+            bounded.set("error", MAPPER.createObjectNode().put("message", RESPONSE_LIMIT_MESSAGE));
+            response = bounded;
+        }
+        synchronized (writer) {
+            writer.write(MAPPER.writeValueAsString(response));
+            writer.write('\n');
+            writer.flush();
+        }
+    }
+
+    private static final String RESPONSE_LIMIT_MESSAGE = "JDBC response exceeds the 64 MiB transport limit. The statement was not retried; changes may already have taken effect. Reduce the selected data and verify any writes before retrying.";
+
+    static void checkResponseBudget(JsonNode id, JsonNode result, JsonNode params, int maximum) throws SQLException {
+        ObjectNode response = MAPPER.createObjectNode();
+        response.set("id", id);
+        response.set("result", result);
+        try {
+            if (responseFitsBudget(response, maximum)) return;
+        } catch (IOException error) {
+            throw new SQLException("Failed to encode JDBC response", error);
+        }
+        String sessionId = optionalText(result, "session_id");
+        for (JsonNode cell : result.path("large_value_cells")) connectionState().largeValues.release(cell.path("value_ref").asText());
+        if (sessionId == null) sessionId = optionalText(params, "sessionId");
+        if (sessionId != null) discardQuerySession(sessionId);
+        throw new SQLException(RESPONSE_LIMIT_MESSAGE);
+    }
+
+    private static boolean responseFitsBudget(JsonNode response, int maximum) throws IOException {
+        try {
+            MAPPER.writeValue(new java.io.OutputStream() {
+                private int remaining = maximum - 1;
+                @Override public void write(int value) throws IOException {
+                    if (remaining-- <= 0) throw new ResponseLimitException();
+                }
+                @Override public void write(byte[] bytes, int offset, int count) throws IOException {
+                    if (count > remaining) throw new ResponseLimitException();
+                    remaining -= count;
+                }
+            }, response);
+            return true;
+        } catch (IOException error) {
+            Throwable cause = error;
+            while (cause != null && !(cause instanceof ResponseLimitException)) cause = cause.getCause();
+            if (cause == null) throw error;
+            return false;
+        }
+    }
+
+    private static final class ResponseLimitException extends IOException {}
+
+    private static void closeLogicalSession(JdbcConnectionState state) {
+        state.closing = true;
+        boolean locked = false;
+        while (!locked) {
+            Statement statement = state.activeStatement;
+            if (statement != null) {
+                try {
+                    statement.cancel();
+                } catch (SQLException ignored) {
+                }
+            }
+            try {
+                locked = state.operation.tryLock(50, java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (InterruptedException ignored) {
+            }
+        }
+        try {
+            JdbcConnectionState previous = connectionState();
+            CONNECTION_STATE.set(state);
+            try {
+                closeSharedConnection();
+            } finally {
+                CONNECTION_STATE.set(previous);
+            }
+        } finally {
+            state.operation.unlock();
+        }
+    }
+
+    private static JdbcConnectionState retainLogicalState(JsonNode request) {
+        JsonNode params = request.path("params");
+        if (!params.hasNonNull("jdbcSessionId") || shuttingDown) return null;
+        String sessionId = params.path("jdbcSessionId").asText();
+        String method = request.path("method").asText();
+        if ("openJdbcSession".equals(method)) {
+            return LOGICAL_SESSIONS.computeIfAbsent(sessionId, ignored -> new JdbcConnectionState());
+        }
+        if ("closeJdbcSession".equals(method)) {
+            JdbcConnectionState state = LOGICAL_SESSIONS.remove(sessionId);
+            if (state != null) state.closing = true;
+            return state;
+        }
+        return LOGICAL_SESSIONS.get(sessionId);
+    }
+
+    private static JsonNode handleLogicalSession(JsonNode requestId, String method, JsonNode params, JsonNode connection,
+                                                  JdbcConnectionState state) throws Exception {
+        String id = requireText(params, "jdbcSessionId");
+        if ("closeJdbcSession".equals(method)) {
+            if (state != null) {
+                closeLogicalSession(state);
+                if (!nativeDisposalConfirmed(state)) {
+                    throw new SQLException("native_job_session_dispose_unknown");
+                }
+            }
+            return okResult();
+        }
+        if (state == null) throw new SQLException("Unknown JDBC logical session");
+        state.operation.lock();
+        try {
+            if (shuttingDown || state.closing) throw new SQLException("JDBC logical session is closed");
+            if ("openJdbcSession".equals(method)) return okResult();
+            authorizeNativeJobRequest(state, method, params, connection);
+            if (state.nativeLegacyJob != null && !NativeLegacyJobSession.isMethod(method)) {
+                throw new SQLException("native_job_session_reserved");
+            }
+            CONNECTION_STATE.set(state);
+            Set<String> checkpoint = state.largeValues.checkpoint();
+            try {
+                if (state.nativeJobSession == null && !NativeJobSession.isClose(method)
+                    && (state.nativeLegacyJob == null || !NativeLegacyJobSession.isMethod(method))) registerDrivers(connection);
+                JsonNode result = handle(method, params, connection);
+                checkResponseBudget(requestId, result, params, 64 * 1024 * 1024);
+                return result;
+            } catch (Exception | LinkageError error) {
+                state.largeValues.releaseSince(checkpoint);
+                if ("connect".equals(method)
+                    && (state.sharedConnection == null || !isPostgresJdbcUrl(optionalText(connection, "connection_string")))) {
+                    closeSharedConnection();
+                    state.closing = true;
+                    LOGICAL_SESSIONS.remove(id, state);
+                }
+                throw error;
+            } finally {
+                state.activeStatement = null;
+                CONNECTION_STATE.remove();
+            }
+        } finally {
+            state.operation.unlock();
         }
     }
 
     private static ObjectNode handleLine(String line) throws Exception {
         JsonNode request = MAPPER.readTree(line);
+        return handleRequest(request, retainLogicalState(request));
+    }
+
+    private static ObjectNode handleRequest(JsonNode request, JdbcConnectionState retainedState) throws Exception {
         JsonNode id = request.path("id");
         ObjectNode response = MAPPER.createObjectNode();
         response.set("id", id.isMissingNode() ? MAPPER.getNodeFactory().numberNode(1) : id);
 
         JsonNode connection = MAPPER.createObjectNode();
+        Set<String> checkpoint = request.path("params").hasNonNull("jdbcSessionId") ? null : connectionState().largeValues.checkpoint();
         try {
             String method = requireText(request, "method");
             JsonNode params = request.path("params");
             connection = params.path("connection");
+            if ("jdbcSessionProtocol".equals(method)) {
+                ObjectNode protocol = MAPPER.createObjectNode().put("version", 2);
+                protocol.putArray("capabilities").add("native_job_legacy_v1").add("native_job_session_v1").add("native_job_legacy_ob_v1").add("exact_metadata_identity_v1");
+                response.set("result", protocol);
+                return response;
+            }
+            if (params.hasNonNull("jdbcSessionId")) {
+                response.set("result", handleLogicalSession(response.path("id"), method, params, connection, retainedState));
+                return response;
+            }
             if ("close".equals(method)) {
+                boolean nativeDisposed = true;
+                for (JdbcConnectionState state : LOGICAL_SESSIONS.values()) {
+                    closeLogicalSession(state);
+                    nativeDisposed &= nativeDisposalConfirmed(state);
+                }
+                LOGICAL_SESSIONS.clear();
                 closeSharedConnection();
+                nativeDisposed &= nativeDisposalConfirmed(DEFAULT_CONNECTION_STATE);
+                DEFAULT_CONNECTION_STATE.nativeLegacyJob = null;
+                DEFAULT_CONNECTION_STATE.nativeLegacyJobConnectionKey = "";
+                DEFAULT_CONNECTION_STATE.nativeJobSession = null;
+                response.put("_dbx_close", true);
+                if (!nativeDisposed) throw new SQLException("native_job_session_dispose_unknown");
                 ObjectNode result = MAPPER.createObjectNode();
                 result.put("ok", true);
                 response.set("result", result);
-                response.put("_dbx_close", true);
                 return response;
             }
-            registerDrivers(connection);
-            response.set("result", handle(method, params, connection));
+            // Native Job callers own a Core metadata process; serve() serializes default requests.
+            authorizeNativeJobRequest(connectionState(), method, params, connection);
+            if (connectionState().nativeLegacyJob != null && !NativeLegacyJobSession.isMethod(method)) {
+                throw new SQLException("native_job_session_reserved");
+            }
+            if (connectionState().nativeLegacyJob == null && connectionState().nativeJobSession == null
+                && !NativeJobSession.isClose(method)) registerDrivers(connection);
+            JsonNode result = handle(method, params, connection);
+            checkResponseBudget(response.path("id"), result, params, 64 * 1024 * 1024);
+            response.set("result", result);
         } catch (Throwable error) {
+            if (checkpoint != null) connectionState().largeValues.releaseSince(checkpoint);
+            if (NativeJobSession.isControl(request.path("method").asText())) {
+                boolean notStarted = error instanceof NativeJobSession.ProtocolFailure failure && failure.notStarted;
+                String reason = error instanceof NativeJobSession.ProtocolFailure failure
+                    ? failure.reason : "native_job_protocol_failed";
+                String operation = request.path("params").path("operationId").asText("");
+                if (operation.length() > 128 || operation.indexOf('\0') >= 0) operation = "";
+                response.set("result", NativeJobSession.failure(operation, notStarted ? "not_started" : "unknown", reason, error));
+                return response;
+            }
+            if ("executeQuery".equals(request.path("method").asText())
+                && request.path("params").path("nativeDiagnostics").asBoolean(false)) {
+                response.set("result", JdbcErrorDiagnostics.queryFailure(error));
+                return response;
+            }
+            if (NativeLegacyJobSession.isMethod(request.path("method").asText())) {
+                response.set("result", NativeLegacyJobSession.failure(request.path("params").path("operationId").asText(),
+                    "unknown", "native_job_protocol_failed", error));
+                return response;
+            }
             // The plugin protocol boundary must report linkage errors from vendor drivers instead of exiting silently.
             ObjectNode errorNode = MAPPER.createObjectNode();
             errorNode.put("message", enrichDriverHint(connection, throwableMessage(error)));
@@ -373,7 +842,33 @@ public final class DbxJdbcPlugin {
     }
 
     private static JsonNode handle(String method, JsonNode params, JsonNode connection) throws Exception {
+        connectionState().deferLobs = params.path("deferLobs").asBoolean(false)
+            && Set.of("executeQuery", "executeQueryPage", "execute_query_page", "executeInManualTransaction", "execute_in_manual_transaction").contains(method);
+        String database = optionalText(params, "database");
+        boolean exactIdentity = params.path("exact_identity").asBoolean(false);
+        if (exactIdentity && !driverQuirks(connection).useOracleMetadata()) {
+            throw new SQLException("Exact metadata identity is not supported for this JDBC dialect");
+        }
+        if (isPostgresJdbcUrl(optionalText(connection, "connection_string"))) {
+            database = postgresDatabase(params);
+            if (database != null) {
+                ObjectNode targeted = connection.deepCopy();
+                targeted.put("database", database);
+                connection = targeted;
+            }
+        }
         return switch (method) {
+            case "openNativeJobSession", "open_native_job_session", "closeNativeJobSession", "close_native_job_session" ->
+                nativeJobSession(method, params, connection);
+            case "prepareLegacyJob", "prepare_legacy_job", "commitLegacyJob", "commit_legacy_job",
+                "rollbackLegacyJob", "rollback_legacy_job", "legacyJobStatus", "legacy_job_status" ->
+                nativeLegacyJob(method, params, connection);
+            case "read_large_value_chunk" -> MAPPER.valueToTree(connectionState().largeValues.fetch(
+                connectionState().sharedConnection, requireText(params, "valueRef"),
+                params.path("offset").asLong(-1), params.path("limit").asInt(0)));
+            case "release_large_value" -> MAPPER.valueToTree(Map.of("released",
+                connectionState().largeValues.release(requireText(params, "valueRef"))));
+            case "connectionParameters" -> MAPPER.valueToTree(connectionParameters(connection));
             case "testConnection" -> connectionTestResult(openConnection(connection));
             case "connect" -> {
                 openConnection(connection);
@@ -381,11 +876,12 @@ public final class DbxJdbcPlugin {
                 result.put("ok", true);
                 yield result;
             }
-            case "connectionInfo" -> databaseInfoResult(openConnection(connection));
+            case "connectionInfo" -> databaseInfoResult(connectionState().nativeJobSession == null
+                ? openConnection(connection) : connectionState().nativeJobSession.connection());
             case "executeQuery" -> executeQuery(
                 connection,
-                requireText(params, "sql"),
-                optionalText(params, "database"),
+                connectionState().nativeJobSession == null ? requireText(params, "sql") : NativeJobSession.sql(params),
+                database,
                 optionalText(params, "schema"),
                 positiveInt(params, "maxRows", MAX_ROWS),
                 nonNegativeInt(params, "fetchSize", 0),
@@ -394,13 +890,13 @@ public final class DbxJdbcPlugin {
             );
             case "beginManualTransaction", "begin_manual_transaction" -> beginManualTransaction(
                 connection,
-                optionalText(params, "database"),
+                database,
                 optionalText(params, "schema")
             );
             case "executeInManualTransaction", "execute_in_manual_transaction" -> executeInManualTransaction(
                 connection,
                 requireText(params, "sql"),
-                optionalText(params, "database"),
+                database,
                 optionalText(params, "schema"),
                 positiveInt(params, "maxRows", MAX_ROWS),
                 nonNegativeInt(params, "fetchSize", 0),
@@ -412,7 +908,7 @@ public final class DbxJdbcPlugin {
             case "executeQueryPage", "execute_query_page" -> executeQueryPage(
                 connection,
                 requireText(params, "sql"),
-                optionalText(params, "database"),
+                database,
                 optionalText(params, "schema"),
                 positiveInt(params, "pageSize", 100),
                 positiveInt(params, "maxRows", MAX_ROWS),
@@ -425,49 +921,68 @@ public final class DbxJdbcPlugin {
             );
             case "closeQuerySession", "close_query_session" -> closeQuerySessionResult(requireText(params, "sessionId"));
             case "listDatabases" -> listDatabases(connection);
-            case "listSchemas" -> listSchemas(connection, optionalText(params, "database"));
+            case "listSchemas" -> listSchemas(connection, database);
             case "listTables" -> listTables(
                 connection,
-                optionalText(params, "database"),
-                optionalText(params, "schema"),
+                database,
+                metadataText(params, "schema", exactIdentity),
                 optionalText(params, "filter"),
                 nonNegativeInt(params, "limit", 0),
                 nonNegativeInt(params, "offset", 0),
-                optionalStringList(params, "object_types")
+                optionalStringList(params, "object_types"), exactIdentity
             );
-            case "listObjects", "list_objects" -> listObjects(
+            case "listObjects", "list_objects" -> exactMetadataRead(params) ? listTriggerObjects(
                 connection,
-                optionalText(params, "database"),
-                optionalText(params, "schema"),
+                database,
+                triggerMetadataText(params, "schema", false),
                 optionalText(params, "filter"),
                 nonNegativeInt(params, "limit", 0),
                 nonNegativeInt(params, "offset", 0),
-                optionalStringList(params, "object_types")
+                optionalStringList(params, "object_types"),
+                true
+            ) : listObjects(
+                connection,
+                database,
+                metadataText(params, "schema", exactIdentity),
+                optionalText(params, "filter"),
+                nonNegativeInt(params, "limit", 0),
+                nonNegativeInt(params, "offset", 0),
+                optionalStringList(params, "object_types"), exactIdentity
             );
+            case "listTriggers", "list_triggers" -> listTriggers(connection,
+                triggerMetadataText(params, "schema", false), triggerMetadataText(params, "table", true), exactMetadataRead(params));
             case "listIndexes", "list_indexes" -> listIndexes(
                 connection,
-                optionalText(params, "database"),
-                optionalText(params, "schema"),
-                requireText(params, "table")
+                database,
+                metadataText(params, "schema", exactIdentity),
+                metadataText(params, "table", exactIdentity), exactIdentity
             );
-            case "listDataTypes", "list_data_types" -> listDataTypes(connection, optionalText(params, "database"));
-            case "getObjectSource", "get_object_source" -> getObjectSource(
+            case "listDataTypes", "list_data_types" -> listDataTypes(connection, database);
+            case "getObjectSource", "get_object_source" -> exactMetadataRead(params) ? getTriggerObjectSource(
                 connection,
-                optionalText(params, "database"),
-                optionalText(params, "schema"),
-                requireText(params, "name"),
-                requireText(params, "object_type")
+                database,
+                triggerMetadataText(params, "schema", false),
+                triggerMetadataText(params, "name", true),
+                requireText(params, "object_type"),
+                true
+            ) : getObjectSource(
+                connection,
+                database,
+                metadataText(params, "schema", exactIdentity),
+                exactIdentity ? metadataText(params, "name", true) : requireText(params, "name"),
+                requireText(params, "object_type"), exactIdentity,
+                params.path("include_source_origin").asBoolean(false)
             );
             case "getColumns" -> getColumns(
                 connection,
-                optionalText(params, "database"),
-                optionalText(params, "schema"),
-                requireText(params, "table")
+                database,
+                metadataText(params, "schema", exactIdentity),
+                metadataText(params, "table", exactIdentity), exactIdentity
             );
             case "getExplainInfo" -> getExplainInfo(
                 connection,
                 requireText(params, "sql"),
-                optionalText(params, "database"),
+                database,
                 optionalText(params, "schema"),
                 nonNegativeInt(params, "timeoutSecs", -1),
                 optionalText(params, "mode")
@@ -498,7 +1013,23 @@ public final class DbxJdbcPlugin {
     private static ObjectNode databaseInfo(Connection connection) {
         try {
             DatabaseMetaData metadata = connection.getMetaData();
-            return metadata == null ? MAPPER.createObjectNode() : databaseInfo(metadata);
+            ObjectNode info = metadata == null ? MAPPER.createObjectNode() : databaseInfo(metadata);
+            if ("OceanBase".equalsIgnoreCase(info.path("productName").asText())) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.setQueryTimeout(5);
+                    try (ResultSet rows = statement.executeQuery("SHOW VARIABLES LIKE 'ob_compatibility_mode'")) {
+                        if (rows.next() && "ob_compatibility_mode".equalsIgnoreCase(rows.getString(1))) {
+                            String mode = rows.getString(2);
+                            if (mode != null && (mode.equalsIgnoreCase("oracle") || mode.equalsIgnoreCase("mysql")) && !rows.next()) {
+                                info.put("compatibilityMode", mode.toLowerCase(Locale.ROOT));
+                            }
+                        }
+                    }
+                } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+                    // Optional mode facts must not make ordinary JDBC metadata unavailable.
+                }
+            }
+            return info;
         } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
             return MAPPER.createObjectNode();
         }
@@ -572,9 +1103,26 @@ public final class DbxJdbcPlugin {
         T get() throws SQLException;
     }
 
-    private static void registerDrivers(JsonNode connection) throws Exception {
+    private static synchronized void registerDrivers(JsonNode connection) throws Exception {
         String driverKey = driverKey(connection);
+        if (logicalDriverKey != null && !logicalDriverKey.equals(driverKey)) {
+            throw new SQLException("JDBC logical sessions require the same selected driver");
+        }
+        if (connectionState() != DEFAULT_CONNECTION_STATE) logicalDriverKey = driverKey;
+        String driverClass = optionalText(connection, "jdbc_driver_class");
         if (driverKey.equals(registeredDriverKey) && registeredDriver != null) {
+            if (driverClass != null && LegacyJdbcDriverClass.isLegacyAlias(driverClass)) {
+                LegacyJdbcDriverClass.load(
+                    driverClass,
+                    optionalText(connection, "connection_string"),
+                    registeredDriverClassLoader != null
+                        ? registeredDriverClassLoader
+                        : Thread.currentThread().getContextClassLoader()
+                );
+            }
+            if (registeredDriverClassLoader != null) {
+                Thread.currentThread().setContextClassLoader(registeredDriverClassLoader);
+            }
             return;
         }
         closeSharedConnection();
@@ -594,10 +1142,12 @@ public final class DbxJdbcPlugin {
             ? Thread.currentThread().getContextClassLoader()
             : new URLClassLoader(urls.toArray(URL[]::new), DbxJdbcPlugin.class.getClassLoader());
         Thread.currentThread().setContextClassLoader(loader);
+        registeredDriverClassLoader = loader;
 
-        String driverClass = optionalText(connection, "jdbc_driver_class");
         if (driverClass != null) {
-            Constructor<?> constructor = Class.forName(driverClass, true, loader).getDeclaredConstructor();
+            Constructor<?> constructor = LegacyJdbcDriverClass.load(
+                driverClass, optionalText(connection, "connection_string"), loader
+            ).getDeclaredConstructor();
             constructor.setAccessible(true);
             Driver driver = (Driver) constructor.newInstance();
             registeredDriver = new DriverShim(driver);
@@ -629,11 +1179,17 @@ public final class DbxJdbcPlugin {
             throw new IllegalArgumentException("JDBC URL is required.");
         }
         String key = connectionKey(connection);
-        if (sharedConnection != null && key.equals(sharedConnectionKey) && !isConnectionClosed(sharedConnection)) {
-            configureOrdinaryAutoCommit(sharedConnection);
-            return sharedConnection;
+        JdbcConnectionState state = connectionState();
+        if (state.sharedConnection != null && key.equals(state.sharedConnectionKey) && !isConnectionClosed(state.sharedConnection)) {
+            configureOrdinaryAutoCommit(state.sharedConnection);
+            return state.sharedConnection;
         }
-        closeSharedConnection();
+        boolean postgres = isPostgresJdbcUrl(url);
+        if (postgres && state.sharedConnection != null
+            && (state.manualTransactionActive || hasActiveQuerySession(state.sharedConnection))) {
+            throw new SQLException("Cannot change PostgreSQL database while a transaction or query session is active");
+        }
+        if (!postgres) closeSharedConnection();
 
         JdbcUrlCredentials urlCredentials = extractJdbcUrlCredentials(url);
         url = urlCredentials.url;
@@ -661,10 +1217,24 @@ public final class DbxJdbcPlugin {
         // Prefer the explicitly registered driver. DriverManager.getConnection only catches
         // SQLException; Hive/Inceptor drivers may throw UnsupportedOperationException for optional
         // methods, which aborts connect before the intended driver is reached.
-        sharedConnection = connectWithRegisteredDriver(url, properties);
-        sharedConnectionKey = key;
-        configureOrdinaryAutoCommit(sharedConnection);
-        return sharedConnection;
+        Connection opened = connectWithRegisteredDriver(url, properties);
+        if (postgres) {
+            try {
+                configureOrdinaryAutoCommit(opened);
+            } catch (SQLException | RuntimeException | Error error) {
+                try {
+                    opened.close();
+                } catch (SQLException closeError) {
+                    error.addSuppressed(closeError);
+                }
+                throw error;
+            }
+            closeSharedConnection();
+        }
+        state.sharedConnection = opened;
+        state.sharedConnectionKey = key;
+        configureOrdinaryAutoCommit(state.sharedConnection);
+        return state.sharedConnection;
     }
 
     private static Connection connectWithRegisteredDriver(String url, Properties properties) throws SQLException {
@@ -714,14 +1284,14 @@ public final class DbxJdbcPlugin {
     }
 
     private static void configureOrdinaryAutoCommit(Connection jdbcConnection) throws SQLException {
-        if (manualTransactionActive || hasActiveQuerySession(jdbcConnection) || jdbcConnection.getAutoCommit()) {
+        if (connectionState().manualTransactionActive || hasActiveQuerySession(jdbcConnection) || jdbcConnection.getAutoCommit()) {
             return;
         }
         jdbcConnection.setAutoCommit(true);
     }
 
     private static boolean hasActiveQuerySession(Connection jdbcConnection) {
-        return QUERY_SESSIONS.values().stream().anyMatch(session -> session.connection == jdbcConnection);
+        return connectionState().querySessions.values().stream().anyMatch(session -> session.connection == jdbcConnection);
     }
 
     private static boolean isPhoenixConnection(JsonNode connection, String url) {
@@ -793,9 +1363,10 @@ public final class DbxJdbcPlugin {
     private static void applyConnectTimeout(JsonNode connection, Properties properties) {
         int connectTimeoutSecs = positiveInt(connection, "connect_timeout_secs", 30);
         DriverManager.setLoginTimeout(connectTimeoutSecs);
-        if (isPrestoOrTrinoConnection(connection) || isHive2Connection(connection)) {
-            // Hive/Inceptor treat unknown timeout properties inconsistently; keep only
-            // DriverManager login timeout and avoid injecting vendor-specific keys.
+        if (isPrestoOrTrinoConnection(connection) || isHive2Connection(connection)
+            || urlMatchesPrefix(jdbcUrl(connection), "jdbc:duckdb:")) {
+            // These drivers reject or inconsistently handle unknown timeout properties.
+            // Keep DriverManager login timeout without injecting vendor-specific keys.
             return;
         }
         String value = Integer.toString(connectTimeoutSecs);
@@ -853,6 +1424,26 @@ public final class DbxJdbcPlugin {
         return driverClass != null && driverClass.equalsIgnoreCase("org.postgresql.Driver");
     }
 
+    private static boolean usesBitStringColumns(JsonNode connection) {
+        String url = jdbcUrl(connection);
+        for (String prefix : BIT_STRING_JDBC_URL_PREFIXES) {
+            if (urlMatchesPrefix(url, prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean usesFullPrecisionIntegers(JsonNode connection) {
+        String url = jdbcUrl(connection);
+        if (urlMatchesPrefix(url, "jdbc:cache:") || urlMatchesPrefix(url, "jdbc:iris:")) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        return "com.intersys.jdbc.CacheDriver".equals(driverClass)
+            || "com.intersystems.jdbc.IRISDriver".equals(driverClass);
+    }
+
     private static boolean isPrestoOrTrinoConnection(JsonNode connection) {
         String url = jdbcUrl(connection);
         if (urlMatchesPrefix(url, "jdbc:presto:") || urlMatchesPrefix(url, "jdbc:trino:")) {
@@ -869,6 +1460,7 @@ public final class DbxJdbcPlugin {
     }
 
     private static void applyOracleProperties(JsonNode connection, Properties properties) {
+        properties.putIfAbsent("oracle.net.disableOob", "true");
         properties.putIfAbsent("remarksReporting", "false");
         properties.putIfAbsent("restrictGetTables", "true");
         properties.putIfAbsent("includeSynonyms", "false");
@@ -919,7 +1511,8 @@ public final class DbxJdbcPlugin {
         int rowOffset,
         int timeoutSecs
     ) throws Exception {
-        Connection conn = openConnection(connection);
+        Connection conn = connectionState().nativeJobSession == null
+            ? openConnection(connection) : connectionState().nativeJobSession.connection();
         return executeQueryOnConnection(connection, conn, sql, database, schema, maxRows, fetchSize, rowOffset, timeoutSecs);
     }
 
@@ -993,14 +1586,28 @@ public final class DbxJdbcPlugin {
         JdbcDriverQuirks quirks = driverQuirks(connection);
         boolean preserveOracleDateTime = isOracleUrl(jdbcUrl(connection));
         ZoneId timestampZone = tdengineTimestampZone(connection, conn);
+        boolean bitStringColumns = usesBitStringColumns(connection);
+        boolean fullPrecisionIntegers = usesFullPrecisionIntegers(connection);
+        Boolean deferredOceanbase = deferredLobMode(connection, conn);
         try (Statement statement = conn.createStatement()) {
+            trackActiveStatement(statement);
+            if (connectionState().closing) throw new SQLException("JDBC logical session is closed");
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
-            String trimmedSql = trimStatementSql(sql);
-            String effectiveSql = rewritePhoenixSystemCatalogQuery(connection, conn, trimmedSql);
-            ExecutedStatement executed = executeStatementForResultWithAdhocRetry(connection, statement, effectiveSql, quirks);
+            boolean nativeJob = connectionState().nativeJobSession != null;
+            String trimmedSql = nativeJob ? sql : trimStatementSql(sql, isOracleUrl(jdbcUrl(connection)));
+            String effectiveSql = nativeJob ? trimmedSql : rewritePhoenixSystemCatalogQuery(connection, conn, trimmedSql);
+            ExecutedStatement executed;
+            if (nativeJob) {
+                boolean hasResult = statement.execute(effectiveSql);
+                executed = new ExecutedStatement(hasResult ? statement.getResultSet() : null,
+                    hasResult ? -1 : statement.getUpdateCount());
+            } else {
+                executed = executeStatementForResultWithAdhocRetry(connection, statement, effectiveSql, quirks);
+            }
             ObjectNode result = MAPPER.createObjectNode();
             ArrayNode columns = MAPPER.createArrayNode();
             ArrayNode rows = MAPPER.createArrayNode();
+            ArrayNode largeCells = MAPPER.createArrayNode();
             boolean truncated = false;
 
             try (ResultSet rs = executed.resultSet()) {
@@ -1020,17 +1627,16 @@ public final class DbxJdbcPlugin {
                             truncated = true;
                             break;
                         }
-                        ArrayNode row = MAPPER.createArrayNode();
-                        for (int i = 1; i <= columnCount; i++) {
-                            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone)));
-                        }
-                        rows.add(row);
+                        ResultRow row = readResultRow(rs, meta, preserveOracleDateTime, timestampZone, bitStringColumns, fullPrecisionIntegers, deferredOceanbase);
+                        appendLargeCells(largeCells, row, rows.size());
+                        rows.add(row.values());
                     }
                 }
             }
 
             result.set("columns", columns);
             result.set("rows", rows);
+            result.set("large_value_cells", largeCells);
             result.put("affected_rows", columns.isEmpty() ? Math.max(executed.updateCount(), 0) : 0);
             result.put("execution_time_ms", (System.nanoTime() - start) / 1_000_000);
             result.put("truncated", truncated);
@@ -1038,9 +1644,111 @@ public final class DbxJdbcPlugin {
         }
     }
 
+    private static void authorizeNativeJobRequest(JdbcConnectionState state, String method, JsonNode params,
+                                                   JsonNode connection) throws SQLException {
+        if (state.nativeJobSession != null) {
+            state.nativeJobSession.authorize(method, params, nativeJobConnectionKey(connection));
+        } else if (params.has("nativeJobOperationId") || params.has("nativeJobSessionToken")) {
+            throw new NativeJobSession.ProtocolFailure("native_job_session_unavailable", true);
+        } else if (NativeJobSession.isOpen(method)) {
+            NativeJobSession.operationId(params);
+            if (state.nativeLegacyJob != null || state.manualTransactionActive || !state.querySessions.isEmpty()
+                || (state.sharedConnection != null && !isConnectionClosed(state.sharedConnection)
+                    && !state.sharedConnection.getAutoCommit())) {
+                throw new NativeJobSession.ProtocolFailure("native_job_session_busy", true);
+            }
+            if (state.sharedConnection != null && (!connectionKey(connection).equals(state.sharedConnectionKey)
+                || !driverKey(connection).equals(registeredDriverKey))) {
+                throw new NativeJobSession.ProtocolFailure("native_job_connection_changed", true);
+            }
+        }
+    }
+
+    private static String nativeJobConnectionKey(JsonNode connection) {
+        return driverKey(connection) + "\n" + connectionKey(connection);
+    }
+
+    private static ObjectNode nativeJobSession(String method, JsonNode params, JsonNode connection) throws SQLException {
+        JdbcConnectionState state = connectionState();
+        if (NativeJobSession.isClose(method)) {
+            if (state.nativeJobSession == null) {
+                return NativeJobSession.failure(NativeJobSession.operationId(params), "unknown", "native_job_session_unavailable", null);
+            }
+            return state.nativeJobSession.close(params);
+        }
+        String operationId = NativeJobSession.operationId(params);
+        if (state.nativeJobSession != null) return state.nativeJobSession.openedFor(operationId);
+        NativeJobSession candidate = new NativeJobSession(params, nativeJobConnectionKey(connection));
+        try {
+            Connection owned = openConnection(connection);
+            state.sharedConnection = null;
+            state.sharedConnectionKey = "";
+            state.nativeJobSession = candidate;
+            candidate.open(owned);
+        } catch (SQLException | RuntimeException | LinkageError error) {
+            Connection owned = state.sharedConnection;
+            state.sharedConnection = null;
+            state.sharedConnectionKey = "";
+            state.nativeJobSession = candidate;
+            candidate.openFailed(owned, error);
+        }
+        return candidate.openedFor(operationId);
+    }
+
+    private static boolean nativeDisposalConfirmed(JdbcConnectionState state) {
+        return (state.nativeLegacyJob == null || state.nativeLegacyJob.disposalConfirmed())
+            && (state.nativeJobSession == null || state.nativeJobSession.disposalConfirmed());
+    }
+
+    private static ObjectNode nativeLegacyJob(String method, JsonNode params, JsonNode connection) throws SQLException {
+        JdbcConnectionState state = connectionState();
+        String operationId = params.path("operationId").asText();
+        String key = connectionKey(connection);
+        if (state.nativeLegacyJob != null && !key.equals(state.nativeLegacyJobConnectionKey)) {
+            return NativeLegacyJobSession.failure(operationId, "unknown", "native_job_connection_changed", null);
+        }
+        if (NativeLegacyJobSession.isPrepare(method)) {
+            NativeLegacyJobSession candidate;
+            try {
+                candidate = new NativeLegacyJobSession(params);
+            } catch (NativeLegacyJobSession.InvalidRequest error) {
+                return NativeLegacyJobSession.failure(operationId, "not_started", error.reason, null);
+            }
+            if (state.nativeLegacyJob != null) {
+                return state.nativeLegacyJob.sameRequest(candidate) ? state.nativeLegacyJob.status(operationId)
+                    : NativeLegacyJobSession.failure(operationId, "unknown", "native_job_operation_mismatch", null);
+            }
+            if (state.manualTransactionActive || !state.querySessions.isEmpty()
+                || (state.sharedConnection != null && !isConnectionClosed(state.sharedConnection)
+                    && !state.sharedConnection.getAutoCommit())) {
+                return NativeLegacyJobSession.failure(operationId, "not_started", "native_job_session_busy", null);
+            }
+            try {
+                Connection owned = openConnection(connection);
+                // This dedicated logical session now owns the physical connection exclusively.
+                state.sharedConnection = null;
+                state.sharedConnectionKey = "";
+                state.nativeLegacyJob = candidate;
+                state.nativeLegacyJobConnectionKey = key;
+                candidate.prepare(owned);
+            } catch (SQLException | RuntimeException | LinkageError error) {
+                state.nativeLegacyJob = candidate;
+                state.nativeLegacyJobConnectionKey = key;
+                candidate.openFailed(error);
+            }
+            return candidate.status(operationId);
+        }
+        if (state.nativeLegacyJob == null) {
+            return NativeLegacyJobSession.failure(operationId, "unknown", "native_job_session_unavailable", null);
+        }
+        if ("legacyJobStatus".equals(method) || "legacy_job_status".equals(method)) return state.nativeLegacyJob.status(operationId);
+        return state.nativeLegacyJob.finish(operationId, params.path("jobId").asText(),
+            "commitLegacyJob".equals(method) || "commit_legacy_job".equals(method));
+    }
+
     private static ObjectNode beginManualTransaction(JsonNode connection, String database, String schema)
         throws SQLException {
-        if (manualTransactionActive) {
+        if (connectionState().manualTransactionActive) {
             throw new SQLException("A manual transaction is already active");
         }
         Connection conn = openConnection(connection);
@@ -1051,7 +1759,7 @@ public final class DbxJdbcPlugin {
         }
         applyExecutionContext(connection, conn, database, schema);
         conn.setAutoCommit(false);
-        manualTransactionActive = true;
+        connectionState().manualTransactionActive = true;
         return okResult();
     }
 
@@ -1073,7 +1781,7 @@ public final class DbxJdbcPlugin {
         Connection conn = activeManualTransactionConnection(null);
         conn.commit();
         conn.setAutoCommit(true);
-        manualTransactionActive = false;
+        connectionState().manualTransactionActive = false;
         return okResult();
     }
 
@@ -1081,18 +1789,19 @@ public final class DbxJdbcPlugin {
         Connection conn = activeManualTransactionConnection(null);
         conn.rollback();
         conn.setAutoCommit(true);
-        manualTransactionActive = false;
+        connectionState().manualTransactionActive = false;
         return okResult();
     }
 
     private static Connection activeManualTransactionConnection(JsonNode connection) throws SQLException {
-        if (!manualTransactionActive || sharedConnection == null || sharedConnection.isClosed()) {
+        JdbcConnectionState state = connectionState();
+        if (!state.manualTransactionActive || state.sharedConnection == null || state.sharedConnection.isClosed()) {
             throw new SQLException("No manual transaction is active");
         }
-        if (connection != null && !connectionKey(connection).equals(sharedConnectionKey)) {
+        if (connection != null && !connectionKey(connection).equals(state.sharedConnectionKey)) {
             throw new SQLException("The manual transaction belongs to a different JDBC connection");
         }
-        return sharedConnection;
+        return state.sharedConnection;
     }
 
     private static ObjectNode okResult() {
@@ -1116,8 +1825,11 @@ public final class DbxJdbcPlugin {
         private final boolean restoreAutoCommit;
         private final boolean preserveOracleDateTime;
         private final ZoneId timestampZone;
+        private final boolean bitStringColumns;
+        private final boolean fullPrecisionIntegers;
+        private final Boolean deferredOceanbase;
         private int rowsReturned;
-        private ArrayNode pendingRow;
+        private ResultRow pendingRow;
 
         private QuerySession(
             String id,
@@ -1130,7 +1842,10 @@ public final class DbxJdbcPlugin {
             Connection connection,
             boolean restoreAutoCommit,
             boolean preserveOracleDateTime,
-            ZoneId timestampZone
+            ZoneId timestampZone,
+            boolean bitStringColumns,
+            boolean fullPrecisionIntegers,
+            Boolean deferredOceanbase
         ) {
             this.id = id;
             this.statement = statement;
@@ -1143,6 +1858,9 @@ public final class DbxJdbcPlugin {
             this.restoreAutoCommit = restoreAutoCommit;
             this.preserveOracleDateTime = preserveOracleDateTime;
             this.timestampZone = timestampZone;
+            this.bitStringColumns = bitStringColumns;
+            this.fullPrecisionIntegers = fullPrecisionIntegers;
+            this.deferredOceanbase = deferredOceanbase;
         }
     }
 
@@ -1162,17 +1880,20 @@ public final class DbxJdbcPlugin {
         JdbcDriverQuirks quirks = driverQuirks(connection);
         boolean preserveOracleDateTime = isOracleUrl(jdbcUrl(connection));
         ZoneId timestampZone = tdengineTimestampZone(connection, conn);
+        boolean bitStringColumns = usesBitStringColumns(connection);
         boolean restoreAutoCommit = beginPagedQueryTransaction(connection, conn);
         Statement statement;
         try {
             statement = createPagedQueryStatement(conn);
+            trackActiveStatement(statement);
         } catch (Exception | LinkageError error) {
             restorePagedQueryTransaction(conn, restoreAutoCommit);
             throw error;
         }
         try {
+            if (connectionState().closing) throw new SQLException("JDBC logical session is closed");
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
-            String trimmedSql = trimStatementSql(sql);
+            String trimmedSql = trimStatementSql(sql, isOracleUrl(jdbcUrl(connection)));
             String effectiveSql = rewritePhoenixSystemCatalogQuery(connection, conn, trimmedSql);
             ExecutedStatement executed = executeStatementForResultWithAdhocRetry(connection, statement, effectiveSql, quirks);
             ResultSet rs = executed.resultSet();
@@ -1186,7 +1907,10 @@ public final class DbxJdbcPlugin {
                 result.putNull("session_id");
                 result.put("has_more", false);
                 statement.close();
-                restorePagedQueryTransaction(conn, restoreAutoCommit);
+                // No cursor survives this statement, so end the transaction by
+                // committing: rollback here silently undid DDL/DML such as
+                // DROP TABLE or CREATE TABLE AS while reporting success (#13644).
+                commitPagedQueryTransaction(conn, restoreAutoCommit);
                 return result;
             }
 
@@ -1209,13 +1933,16 @@ public final class DbxJdbcPlugin {
                 conn,
                 restoreAutoCommit,
                 preserveOracleDateTime,
-                timestampZone
+                timestampZone,
+                bitStringColumns,
+                usesFullPrecisionIntegers(connection),
+                deferredLobMode(connection, conn)
             );
-            QUERY_SESSIONS.put(sessionId, session);
+            connectionState().querySessions.put(sessionId, session);
             try {
                 return readQuerySessionPage(session, pageSize);
             } catch (Exception | LinkageError error) {
-                QUERY_SESSIONS.remove(sessionId);
+                connectionState().querySessions.remove(sessionId);
                 throw error;
             }
         } catch (Exception | LinkageError error) {
@@ -1259,8 +1986,40 @@ public final class DbxJdbcPlugin {
         }
     }
 
+    /**
+     * Ends the transaction begun by {@link #beginPagedQueryTransaction} after a
+     * statement completed without leaving a cursor behind, or after a paged
+     * cursor was fully drained. The statement's effects are the user's intent,
+     * so the transaction is committed, not rolled back: a rolled-back DROP
+     * TABLE or CREATE TABLE AS silently vanished while DBX reported success
+     * (#13644). Only the caller that flipped auto-commit off owns the
+     * transaction; manual transactions end through their own commit/rollback
+     * entry points.
+     *
+     * <p>A failed commit is rethrown after a best-effort connection restore:
+     * a deferred constraint failure or a connection dropped during commit must
+     * reach the caller as an error, not as a success whose effects vanish.
+     * Secondary failures while clearing the broken transaction are ignored so
+     * the original commit error is what surfaces.
+     */
+    private static void commitPagedQueryTransaction(Connection connection, boolean ownedTransaction) throws SQLException {
+        if (!ownedTransaction) {
+            return;
+        }
+        try {
+            connection.commit();
+        } catch (SQLException | RuntimeException | Error error) {
+            restorePagedQueryTransaction(connection, true);
+            throw error;
+        }
+        try {
+            connection.setAutoCommit(true);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+        }
+    }
+
     private static JsonNode fetchQueryPage(String sessionId, int pageSize) throws SQLException {
-        QuerySession session = QUERY_SESSIONS.get(sessionId);
+        QuerySession session = connectionState().querySessions.get(sessionId);
         if (session == null) {
             throw new IllegalArgumentException("Unknown query session: " + sessionId);
         }
@@ -1268,46 +2027,57 @@ public final class DbxJdbcPlugin {
     }
 
     private static JsonNode readQuerySessionPage(QuerySession session, int pageSize) throws SQLException {
+        trackActiveStatement(session.statement);
+        if (connectionState().closing) throw new SQLException("JDBC logical session is closed");
         int effectivePageSize = Math.max(1, pageSize);
         ArrayNode rows = MAPPER.createArrayNode();
+        ArrayNode largeCells = MAPPER.createArrayNode();
         boolean truncated = false;
 
+        try {
         while (rows.size() < effectivePageSize && session.rowsReturned < session.maxRows) {
-            ArrayNode row;
+            ResultRow row;
             if (session.pendingRow != null) {
                 row = session.pendingRow;
                 session.pendingRow = null;
             } else {
                 if (!session.resultSet.next()) {
                     closeQuerySession(session.id);
-                    return queryPageResult(session, rows, false, false);
+                    return queryPageResult(session, rows, largeCells, false, false);
                 }
-                row = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone);
+                row = readResultRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone, session.bitStringColumns, session.fullPrecisionIntegers, session.deferredOceanbase);
             }
-            rows.add(row);
+            appendLargeCells(largeCells, row, rows.size());
+            rows.add(row.values());
             session.rowsReturned++;
         }
 
         if (session.rowsReturned >= session.maxRows) {
             truncated = session.pendingRow != null || session.resultSet.next();
             closeQuerySession(session.id);
-            return queryPageResult(session, rows, truncated, false);
+            return queryPageResult(session, rows, largeCells, truncated, false);
         }
 
         boolean hasMore = session.resultSet.next();
         if (!hasMore) {
             closeQuerySession(session.id);
-            return queryPageResult(session, rows, false, false);
+            return queryPageResult(session, rows, largeCells, false, false);
         }
 
-        session.pendingRow = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone);
-        return queryPageResult(session, rows, false, true);
+        session.pendingRow = readResultRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone, session.bitStringColumns, session.fullPrecisionIntegers, session.deferredOceanbase);
+        return queryPageResult(session, rows, largeCells, false, true);
+        } catch (SQLException | RuntimeException | LinkageError error) {
+            for (JsonNode cell : largeCells) connectionState().largeValues.release(cell.path("value_ref").asText());
+            discardQuerySession(session.id);
+            throw error;
+        }
     }
 
-    private static ObjectNode queryPageResult(QuerySession session, ArrayNode rows, boolean truncated, boolean hasMore) {
+    private static ObjectNode queryPageResult(QuerySession session, ArrayNode rows, ArrayNode largeCells, boolean truncated, boolean hasMore) {
         ObjectNode result = MAPPER.createObjectNode();
         result.set("columns", session.columns.deepCopy());
         result.set("rows", rows);
+        result.set("large_value_cells", largeCells);
         result.put("affected_rows", 0);
         result.put("execution_time_ms", (System.nanoTime() - session.startNanos) / 1_000_000);
         result.put("truncated", truncated);
@@ -1320,17 +2090,50 @@ public final class DbxJdbcPlugin {
         return result;
     }
 
-    private static ObjectNode closeQuerySessionResult(String sessionId) {
+    private static ObjectNode closeQuerySessionResult(String sessionId) throws SQLException {
         ObjectNode result = MAPPER.createObjectNode();
         result.put("ok", closeQuerySession(sessionId));
         return result;
     }
 
-    private static boolean closeQuerySession(String sessionId) {
-        QuerySession session = QUERY_SESSIONS.remove(sessionId);
+    /**
+     * Success-path close: the cursor completed or the caller explicitly closed
+     * it, so the paging transaction ends by committing. JDBC reports -1 as the
+     * update count whenever the current result is a result set -- including
+     * INSERT ... RETURNING -- so effects cannot be classified from the driver;
+     * committing every completed statement is what keeps returned rows durable
+     * (#13644). A commit failure propagates ({@link #commitPagedQueryTransaction})
+     * instead of reporting the session as closed-ok.
+     */
+    private static boolean closeQuerySession(String sessionId) throws SQLException {
+        QuerySession session = connectionState().querySessions.remove(sessionId);
         if (session == null) {
             return false;
         }
+        if (session.pendingRow != null) releaseRowValues(session.pendingRow);
+        try {
+            session.resultSet.close();
+        } catch (Exception ignored) {
+        }
+        try {
+            session.statement.close();
+        } catch (Exception ignored) {
+        }
+        commitPagedQueryTransaction(session.connection, session.restoreAutoCommit);
+        return true;
+    }
+
+    /**
+     * Error-path cleanup: a page failed or was cancelled, so an owned paging
+     * transaction ends with a rollback and never commits, and the cleanup does
+     * not mask the original error with a commit failure.
+     */
+    private static void discardQuerySession(String sessionId) {
+        QuerySession session = connectionState().querySessions.remove(sessionId);
+        if (session == null) {
+            return;
+        }
+        if (session.pendingRow != null) releaseRowValues(session.pendingRow);
         try {
             session.resultSet.close();
         } catch (Exception ignored) {
@@ -1340,25 +2143,85 @@ public final class DbxJdbcPlugin {
         } catch (Exception ignored) {
         }
         restorePagedQueryTransaction(session.connection, session.restoreAutoCommit);
-        return true;
     }
 
     private static void closeAllQuerySessions() {
-        List<String> sessionIds = new ArrayList<>(QUERY_SESSIONS.keySet());
+        List<String> sessionIds = new ArrayList<>(connectionState().querySessions.keySet());
         for (String sessionId : sessionIds) {
-            closeQuerySession(sessionId);
+            try {
+                closeQuerySession(sessionId);
+            } catch (SQLException ignored) {
+            }
         }
+    }
+
+    private static Boolean deferredLobMode(JsonNode config, Connection connection) throws SQLException {
+        if (!connectionState().deferLobs) return null;
+        String url = jdbcUrl(config);
+        if (isOracleUrl(url)) return false;
+        if (!urlMatchesPrefix(url, "jdbc:oceanbase:")) return null;
+        try {
+            var protocolMethod = connection.getClass().getMethod("getProtocol");
+            Object protocol = protocolMethod.invoke(connection);
+            boolean oracle = (boolean) protocolMethod.getReturnType().getMethod("isOracleMode").invoke(protocol);
+            return oracle ? Boolean.TRUE : null;
+        } catch (ReflectiveOperationException error) {
+            throw new SQLException("Cannot verify OceanBase LOB mode", error);
+        }
+    }
+
+    private record ResultRow(ArrayNode values, ArrayNode largeCells) {}
+
+    private static ResultRow readResultRow(ResultSet rs, ResultSetMetaData meta, boolean preserveOracleDateTime,
+        ZoneId timestampZone, boolean bitStringColumns, boolean fullPrecisionIntegers, Boolean oceanbase) throws SQLException {
+        if (oceanbase == null) return new ResultRow(readRow(rs, meta, preserveOracleDateTime, timestampZone, bitStringColumns, fullPrecisionIntegers), MAPPER.createArrayNode());
+        ArrayNode row = MAPPER.createArrayNode();
+        ArrayNode cells = MAPPER.createArrayNode();
+        DeferredLobValues values = connectionState().largeValues;
+        Set<String> checkpoint = values.checkpoint();
+        try {
+            for (int i = 1; i <= meta.getColumnCount(); i++) {
+                int type = meta.getColumnType(i);
+                if (type == Types.CLOB || type == Types.BLOB) {
+                    Object locator = type == Types.BLOB ? rs.getBlob(i) : rs.getClob(i);
+                    DeferredLobValues.Preview preview = values.capture(connectionState().sharedConnection, locator, oceanbase);
+                    row.add(preview.text());
+                    if (preview.ref() != null) cells.add(MAPPER.createObjectNode()
+                        .put("column_index", i - 1).put("original_bytes", preview.originalBytes()).put("value_ref", preview.ref()));
+                } else {
+                    row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone, bitStringColumns, fullPrecisionIntegers)));
+                }
+            }
+            return new ResultRow(row, cells);
+        } catch (SQLException error) {
+            values.releaseSince(checkpoint);
+            throw error;
+        }
+    }
+
+    private static void appendLargeCells(ArrayNode cells, ResultRow row, int rowIndex) {
+        for (JsonNode cell : row.largeCells()) {
+            ObjectNode target = cell.deepCopy();
+            target.put("row_index", rowIndex);
+            cells.add(target);
+        }
+    }
+
+    private static void releaseRowValues(ResultRow row) {
+        for (JsonNode cell : row.largeCells()) connectionState().largeValues.release(cell.path("value_ref").asText());
     }
 
     private static ArrayNode readRow(
         ResultSet rs,
         ResultSetMetaData meta,
         boolean preserveOracleDateTime,
-        ZoneId timestampZone
+        ZoneId timestampZone,
+        boolean bitStringColumns,
+        boolean fullPrecisionIntegers
     ) throws SQLException {
         ArrayNode row = MAPPER.createArrayNode();
         for (int i = 1; i <= meta.getColumnCount(); i++) {
-            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone)));
+            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone, bitStringColumns, fullPrecisionIntegers)));
         }
         return row;
     }
@@ -1543,6 +2406,21 @@ public final class DbxJdbcPlugin {
         String statementId = "DBX_" + UUID.randomUUID().toString().replace("-", "").substring(0, 26);
         String statementSql = trimStatementSql(sql);
         StringBuilder plan = new StringBuilder();
+        // EXPLAIN PLAN and DBMS_XPLAN.DISPLAY are two separately autocommitted statements. A
+        // schema that ships its own PLAN_TABLE as GLOBAL TEMPORARY TABLE ... ON COMMIT DELETE
+        // ROWS loses the plan rows at the commit in between, so DISPLAY answers with
+        // "cannot fetch plan for statement_id '...'". Run both inside one transaction to keep
+        // the rows written by EXPLAIN PLAN visible for the read.
+        //
+        // The read must also name the same table Oracle wrote to. EXPLAIN PLAN resolves its plan
+        // table in the session user's schema, while a bare 'PLAN_TABLE' inside DBMS_XPLAN.DISPLAY
+        // resolves in CURRENT_SCHEMA — and DBX switches CURRENT_SCHEMA whenever a connection
+        // browses another schema. Without the explicit name the write and the read can land on
+        // two different objects, which is the other way "cannot fetch plan for statement_id"
+        // shows up.
+        String planTable = oracleExplainPlanTable(connection);
+        String displayTable = planTable == null ? "PLAN_TABLE" : planTable;
+        boolean explainTransaction = beginOracleExplainTransaction(connection);
         try {
             try (PreparedStatement explain = connection.prepareStatement(
                 "EXPLAIN PLAN SET STATEMENT_ID = '" + statementId + "' FOR " + statementSql
@@ -1552,7 +2430,7 @@ public final class DbxJdbcPlugin {
                 explain.execute();
             }
             try (PreparedStatement read = connection.prepareStatement(
-                "SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', ?, 'TYPICAL +PREDICATE'))"
+                "SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('" + displayTable + "', ?, 'TYPICAL +PREDICATE'))"
             )) {
                 applyExplainTimeout(read, timeoutSecs);
                 read.setString(1, statementId);
@@ -1566,12 +2444,85 @@ public final class DbxJdbcPlugin {
             return plan.toString();
         } finally {
             try (PreparedStatement cleanup = connection.prepareStatement(
-                "DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = ?"
+                "DELETE FROM " + displayTable + " WHERE STATEMENT_ID = ?"
             )) {
                 applyExplainTimeout(cleanup, timeoutSecs);
                 cleanup.setString(1, statementId);
                 cleanup.executeUpdate();
             } catch (SQLException ignored) {}
+            endOracleExplainTransaction(connection, explainTransaction);
+        }
+    }
+
+    /**
+     * Explicitly qualified name of the plan table that EXPLAIN PLAN resolves for this session:
+     * the session user's own object named PLAN_TABLE when it exists, otherwise the table behind the
+     * PUBLIC synonym (usually SYS.PLAN_TABLE$). Passing that name to DBMS_XPLAN.DISPLAY keeps the
+     * read on the table Oracle wrote to even when CURRENT_SCHEMA points at another schema. Returns
+     * null when neither can be resolved, so callers fall back to the unqualified name.
+     */
+    private static String oracleExplainPlanTable(Connection connection) {
+        String sql = "SELECT"
+            + " (SELECT OWNER || '.' || OBJECT_NAME FROM ALL_OBJECTS"
+            + " WHERE OWNER = USER AND OBJECT_NAME = 'PLAN_TABLE' AND ROWNUM = 1),"
+            + " (SELECT TABLE_OWNER || '.' || TABLE_NAME FROM ALL_SYNONYMS"
+            + " WHERE OWNER = 'PUBLIC' AND SYNONYM_NAME = 'PLAN_TABLE' AND ROWNUM = 1)"
+            + " FROM DUAL";
+        try (PreparedStatement probe = connection.prepareStatement(sql);
+             ResultSet rows = probe.executeQuery()) {
+            if (!rows.next()) {
+                return null;
+            }
+            String sessionPlanTable = rows.getString(1);
+            if (sessionPlanTable != null && !sessionPlanTable.isBlank()) {
+                return sessionPlanTable;
+            }
+            String publicPlanTable = rows.getString(2);
+            if (publicPlanTable != null && !publicPlanTable.isBlank()) {
+                return publicPlanTable;
+            }
+            return null;
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Oracle JDBC commits each statement in auto-commit mode, which is exactly what discards
+     * plan rows held by a session plan table created as ON COMMIT DELETE ROWS. Switch the
+     * connection into a short-lived transaction so EXPLAIN PLAN and the DBMS_XPLAN read share
+     * one commit point. Skipped when the shared connection is already inside a manual
+     * transaction or holds an open query session, and when the driver cannot toggle
+     * auto-commit at all.
+     */
+    private static boolean beginOracleExplainTransaction(Connection connection) {
+        try {
+            if (
+                !connection.getAutoCommit()
+                    || connectionState().manualTransactionActive
+                    || hasActiveQuerySession(connection)
+            ) {
+                return false;
+            }
+            connection.setAutoCommit(false);
+            return true;
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return false;
+        }
+    }
+
+    private static void endOracleExplainTransaction(Connection connection, boolean explainTransaction) {
+        if (!explainTransaction) {
+            return;
+        }
+        try {
+            // Commit instead of rollback so the plan-row cleanup above is not undone.
+            connection.commit();
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+        }
+        try {
+            connection.setAutoCommit(true);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
         }
     }
 
@@ -1763,6 +2714,44 @@ public final class DbxJdbcPlugin {
         return sql == null ? "" : sql.trim().replaceFirst(";\\s*$", "");
     }
 
+    static String trimStatementSql(String sql, boolean oracle) {
+        if (!oracle) {
+            return trimStatementSql(sql);
+        }
+        String trimmed = stripTrailingOracleSlashDelimiter(sql == null ? "" : sql.trim());
+        return isOraclePlSqlBlock(trimmed) ? trimmed : trimStatementSql(trimmed);
+    }
+
+    private static String stripTrailingOracleSlashDelimiter(String sql) {
+        if (!sql.endsWith("/")) {
+            return sql;
+        }
+        int slash = sql.length() - 1;
+        int lineStart = sql.lastIndexOf('\n', slash - 1) + 1;
+        if (!sql.substring(lineStart, slash).isBlank()) {
+            return sql;
+        }
+        String beforeSlash = sql.substring(0, lineStart).trim();
+        // A standalone `/` line is the SQL*Plus command that runs a PL/SQL unit; the
+        // driver needs only the unit itself.
+        return isOraclePlSqlBlock(beforeSlash) ? beforeSlash : sql;
+    }
+
+    private static boolean isOraclePlSqlBlock(String sql) {
+        if (!ORACLE_PLSQL_BLOCK_START.matcher(stripLeadingSqlComments(sql)).find()) {
+            return false;
+        }
+        if (ORACLE_PLSQL_BLOCK_END.matcher(sql).find()) {
+            return true;
+        }
+        Matcher named = ORACLE_NAMED_PLSQL_BLOCK_END.matcher(sql);
+        if (!named.find()) {
+            return false;
+        }
+        String label = named.group(1).toUpperCase(Locale.ROOT);
+        return !label.equals("IF") && !label.equals("LOOP") && !label.equals("CASE");
+    }
+
     private static boolean isSafeAutotraceSql(String sql) {
         String stripped = stripCommentsAndLiterals(trimStatementSql(sql));
         if (stripped.isBlank()) {
@@ -1940,10 +2929,26 @@ public final class DbxJdbcPlugin {
                 return rule.quirks();
             }
         }
+        if (isSqlServerConnection(connection)) {
+            return SQLSERVER_QUIRKS;
+        }
         if (isKyuubiDriver(connection)) {
             return HIVE_QUIRKS;
         }
         return DEFAULT_QUIRKS;
+    }
+
+    private static boolean isSqlServerConnection(JsonNode connection) {
+        String url = optionalText(connection, "connection_string");
+        if (urlMatchesPrefix(url, "jdbc:sqlserver:") || urlMatchesPrefix(url, "jdbc:jtds:sqlserver:")) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        if (driverClass == null) {
+            return false;
+        }
+        String normalized = driverClass.toLowerCase(Locale.ROOT);
+        return normalized.contains("sqlserver") || normalized.contains("jtds");
     }
 
     private static boolean isKyuubiDriver(JsonNode connection) {
@@ -1971,7 +2976,7 @@ public final class DbxJdbcPlugin {
         ArrayNode result = MAPPER.createArrayNode();
         Connection conn = openConnection(connection);
         JdbcDriverQuirks quirks = driverQuirks(connection);
-        if (quirks.useOracleMetadata()) {
+        if (quirks.useOracleMetadata() || isZenithConnection(connection, conn)) {
             return result;
         }
         DatabaseMetaData metadata = conn.getMetaData();
@@ -2050,31 +3055,47 @@ public final class DbxJdbcPlugin {
         if (quirks.useOracleMetadata()) {
             return oracleListSchemas(conn);
         }
+        if (isZenithConnection(connection, conn)) {
+            return zenithListSchemas(conn);
+        }
         DatabaseMetaData meta = conn.getMetaData();
         if (quirks.caseInsensitiveSchemaMetadata()) {
             try (ResultSet rs = meta.getSchemas(catalog, null)) {
                 appendSchemas(result, rs, true);
-            } catch (SQLException ignored) {
+            } catch (SQLException | AbstractMethodError ignored) {
+                // Legacy/incomplete JDBC drivers reject the two-arg overload: jTDS against
+                // SQL Server 2000 throws AbstractMethodError (#11127); Informix/GBase 8s
+                // (IfxDatabaseMetaData) throws a plain SQLException("不支持方法") (#12213).
                 try (ResultSet rs = meta.getSchemas()) {
                     appendSchemas(result, rs, true);
+                } catch (SQLException | AbstractMethodError ignored2) {
                 }
             }
             try (ResultSet rs = meta.getSchemas(null, null)) {
                 appendSchemas(result, rs, true);
-            } catch (SQLException ignored) {
+            } catch (SQLException | AbstractMethodError ignored) {
             }
         } else {
             try (ResultSet rs = meta.getSchemas(catalog, null)) {
                 appendSchemas(result, rs, false);
-            } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {
+            } catch (SQLException | UnsupportedOperationException | AbstractMethodError ignored) {
+                // See the SQLException/AbstractMethodError note above: same legacy-driver
+                // fallback (SQLFeatureNotSupportedException is a SQLException subclass).
                 try (ResultSet rs = meta.getSchemas()) {
                     appendSchemas(result, rs, false);
+                } catch (SQLException | AbstractMethodError ignored2) {
+                }
+            }
+            if (quirks.mergeEmptyCatalogSchemas() && catalog != null && !catalog.isEmpty()) {
+                try (ResultSet rs = meta.getSchemas("", null)) {
+                    appendSchemas(result, rs, false);
+                } catch (SQLException | UnsupportedOperationException | AbstractMethodError ignored) {
                 }
             }
             if (result.isEmpty() && catalog != null) {
                 try (ResultSet rs = meta.getSchemas(null, null)) {
                     appendSchemas(result, rs, false);
-                } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {
+                } catch (SQLException | UnsupportedOperationException | AbstractMethodError ignored) {
                 }
             }
         }
@@ -2097,14 +3118,15 @@ public final class DbxJdbcPlugin {
         String filter,
         int limit,
         int offset,
-        List<String> objectTypes
+        List<String> objectTypes,
+        boolean exactIdentity
     ) throws SQLException {
         ArrayNode result = MAPPER.createArrayNode();
         Connection conn = openConnection(connection);
         JdbcDriverQuirks quirks = driverQuirks(connection);
         if (quirks.useOracleMetadata()) {
             return filterMetadataNodes(
-                (ArrayNode) oracleListTables(conn, oracleEffectiveSchema(conn, schema)),
+                (ArrayNode) oracleListTables(conn, exactIdentity ? schema : oracleEffectiveSchema(conn, schema), exactIdentity),
                 filter,
                 limit,
                 offset,
@@ -2115,6 +3137,17 @@ public final class DbxJdbcPlugin {
         }
         if (usePrestoInformationSchemaTables(connection)) {
             return prestoListTables(conn, database, schema, filter, limit, offset, objectTypes);
+        }
+        if (isZenithConnection(connection, conn)) {
+            return filterMetadataNodes(
+                (ArrayNode) zenithListTables(conn, zenithEffectiveSchema(conn, schema), false, null),
+                filter,
+                limit,
+                offset,
+                objectTypes,
+                "table_type",
+                true
+            );
         }
         if (isKingbaseUrl(optionalText(connection, "connection_string"))) {
             return filterMetadataNodes(
@@ -2141,6 +3174,27 @@ public final class DbxJdbcPlugin {
         return result;
     }
 
+    private static JsonNode listTriggerObjects(JsonNode connection, String database, String schema, String filter,
+                                        int limit, int offset, List<String> objectTypes, boolean exact) throws SQLException {
+        if (!exact) return listObjects(connection, database, schema, filter, limit, offset, objectTypes, false);
+        Connection conn = openConnection(connection);
+        OracleTriggerMetadataReader.Profile profile = OracleTriggerMetadataReader.profile(conn);
+        if (profile == null) throw new SQLFeatureNotSupportedException("Exact Oracle-family trigger metadata is unavailable for the connected product");
+        return new OracleTriggerMetadataReader(conn, profile).listObjects(schema, filter, limit, offset, objectTypes);
+    }
+
+    private static JsonNode listTriggers(JsonNode connection, String schema, String table, boolean exact) throws SQLException {
+        Connection conn = openConnection(connection);
+        OracleTriggerMetadataReader.Profile profile = OracleTriggerMetadataReader.profile(conn);
+        if (profile == null) {
+            if (exact) throw new SQLFeatureNotSupportedException("Exact Oracle-family trigger metadata is unavailable for the connected product");
+            return MAPPER.createArrayNode();
+        }
+        ArrayNode triggers = new OracleTriggerMetadataReader(conn, profile).listTriggers(exact ? schema : oracleEffectiveSchema(conn, schema), table);
+        if (!exact) triggers.forEach(trigger -> ((ObjectNode) trigger).remove("oracle_metadata"));
+        return triggers;
+    }
+
     private static JsonNode listObjects(
         JsonNode connection,
         String database,
@@ -2148,13 +3202,31 @@ public final class DbxJdbcPlugin {
         String filter,
         int limit,
         int offset,
-        List<String> objectTypes
+        List<String> objectTypes,
+        boolean exactIdentity
     ) throws SQLException {
         ArrayNode result = MAPPER.createArrayNode();
         Connection conn = openConnection(connection);
         if (driverQuirks(connection).useOracleMetadata()) {
+            String owner = exactIdentity ? schema : oracleEffectiveSchema(conn, schema);
+            Set<String> types = normalizedObjectTypes(objectTypes);
+            boolean indexes = types.contains("INDEX") || (exactIdentity && types.isEmpty());
+            ArrayNode objects = types.size() == 1 && indexes ? MAPPER.createArrayNode() : (ArrayNode) oracleListObjects(conn, owner, schema);
+            if (indexes) {
+                appendOracleSchemaIndexes(conn, owner, objects);
+            }
+            if (types.isEmpty() || types.contains("TYPE") || types.contains("TYPE_BODY")) {
+                String typeOwner = schema != null ? schema : conn.getMetaData().getUserName();
+                try {
+                    oracleAppendTypeObjects(conn, typeOwner, objects);
+                } catch (SQLException error) {
+                    // Preserve the existing best-effort broad catalog/JDBC fallback.
+                    // Explicit type-group requests must report an unreadable catalog.
+                    if (!types.isEmpty()) throw error;
+                }
+            }
             return filterMetadataNodes(
-                (ArrayNode) oracleListObjects(conn, oracleEffectiveSchema(conn, schema), schema),
+                objects,
                 filter,
                 limit,
                 offset,
@@ -2165,6 +3237,17 @@ public final class DbxJdbcPlugin {
         }
         if (usePrestoInformationSchemaTables(connection)) {
             return prestoListObjects(conn, database, schema, filter, limit, offset, objectTypes);
+        }
+        if (isZenithConnection(connection, conn)) {
+            return filterMetadataNodes(
+                (ArrayNode) zenithListObjects(conn, zenithEffectiveSchema(conn, schema), schema),
+                filter,
+                limit,
+                offset,
+                objectTypes,
+                "object_type",
+                false
+            );
         }
         boolean kingbase = isKingbaseUrl(optionalText(connection, "connection_string"));
         if (kingbase) {
@@ -2409,14 +3492,22 @@ public final class DbxJdbcPlugin {
         return result;
     }
 
-    private static JsonNode listIndexes(JsonNode connection, String database, String schema, String table)
+    private static JsonNode listIndexes(JsonNode connection, String database, String schema, String table) throws SQLException {
+        return listIndexes(connection, database, schema, table, false);
+    }
+
+    private static JsonNode listIndexes(JsonNode connection, String database, String schema, String table, boolean exactIdentity)
         throws SQLException {
         Connection conn = openConnection(connection);
         JdbcDriverQuirks quirks = driverQuirks(connection);
         if (quirks.useOracleMetadata()) {
-            String owner = oracleEffectiveSchema(conn, schema);
-            String resolvedTable = oracleResolveTable(conn, owner, table);
-            return oracleListIndexes(conn, owner, resolvedTable == null ? table : resolvedTable);
+            String owner = exactIdentity ? schema : oracleEffectiveSchema(conn, schema);
+            String resolvedTable = exactIdentity ? table : oracleResolveTable(conn, owner, table);
+            return oracleListIndexes(conn, owner, resolvedTable == null ? table : resolvedTable, exactIdentity);
+        }
+        if (isZenithConnection(connection, conn)) {
+            String owner = zenithEffectiveSchema(conn, schema);
+            return zenithListIndexes(conn, owner, zenithResolveTable(conn, owner, table));
         }
 
         DatabaseMetaData meta = conn.getMetaData();
@@ -2437,6 +3528,21 @@ public final class DbxJdbcPlugin {
             }
         } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
         }
+        if (primaryColumnsBySequence.isEmpty() && isSybaseConnection(connection) && schemaPattern != null) {
+            try (ResultSet rs = meta.getPrimaryKeys(catalog, null, table)) {
+                while (rs != null && rs.next()) {
+                    String name = rs.getString("PK_NAME");
+                    if (name != null && !name.isBlank()) {
+                        primaryIndexNames.add(name);
+                    }
+                    String column = rs.getString("COLUMN_NAME");
+                    if (column != null && !column.isBlank()) {
+                        primaryColumnsBySequence.put((int) rs.getShort("KEY_SEQ"), column);
+                    }
+                }
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            }
+        }
 
         // Presto/Trino JDBC throws SQLFeatureNotSupportedException from getIndexInfo, and
         // drivers compiled before JDBC 4 surface unimplemented DatabaseMetaData methods as
@@ -2447,8 +3553,20 @@ public final class DbxJdbcPlugin {
             appendJdbcIndexes(indexes, primaryIndexNames, rs);
         } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
         }
+        if (indexes.isEmpty() && isSybaseConnection(connection) && schemaPattern != null) {
+            try (ResultSet rs = meta.getIndexInfo(catalog, null, table, false, false)) {
+                appendJdbcIndexes(indexes, primaryIndexNames, rs);
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            }
+        }
         if (indexes.isEmpty() && catalog != null) {
             try (ResultSet rs = meta.getIndexInfo(null, schemaPattern, table, false, false)) {
+                appendJdbcIndexes(indexes, primaryIndexNames, rs);
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            }
+        }
+        if (indexes.isEmpty() && isSybaseConnection(connection) && schemaPattern != null && catalog != null) {
+            try (ResultSet rs = meta.getIndexInfo(null, null, table, false, false)) {
                 appendJdbcIndexes(indexes, primaryIndexNames, rs);
             } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
             }
@@ -2535,10 +3653,17 @@ public final class DbxJdbcPlugin {
     }
 
     private static JsonNode getColumns(JsonNode connection, String database, String schema, String table) throws SQLException {
+        return getColumns(connection, database, schema, table, false);
+    }
+
+    private static JsonNode getColumns(JsonNode connection, String database, String schema, String table, boolean exactIdentity) throws SQLException {
         ArrayNode result = MAPPER.createArrayNode();
         Connection conn = openConnection(connection);
         if (driverQuirks(connection).useOracleMetadata()) {
-            return oracleGetColumns(conn, oracleEffectiveSchema(conn, schema), table);
+            return oracleGetColumns(conn, exactIdentity ? schema : oracleEffectiveSchema(conn, schema), table, exactIdentity);
+        }
+        if (isZenithConnection(connection, conn)) {
+            return zenithGetColumns(conn, zenithEffectiveSchema(conn, schema), table);
         }
         if (isKingbaseUrl(optionalText(connection, "connection_string"))) {
             return kingbaseGetColumns(conn, schema, table);
@@ -2551,10 +3676,19 @@ public final class DbxJdbcPlugin {
         String catalog = metadataCatalog(database, quirks);
         String schemaPattern = resolveSchemaPattern(meta, database, schema, quirks);
         JdbcMetadataIdentity identity = appendColumns(result, meta, catalog, schemaPattern, table);
+        if (result.isEmpty() && isSybaseConnection(connection) && schemaPattern != null) {
+            identity = appendColumns(result, meta, catalog, null, table);
+        }
         if (result.isEmpty() && catalog != null) {
             identity = appendColumns(result, meta, null, schemaPattern, table);
+            if (result.isEmpty() && isSybaseConnection(connection) && schemaPattern != null) {
+                identity = appendColumns(result, meta, null, null, table);
+            }
         }
         Set<String> primaryKeys = safePrimaryKeys(meta, identity.catalog(), identity.schema(), identity.table());
+        if (primaryKeys.isEmpty() && isSybaseConnection(connection) && identity.schema() != null) {
+            primaryKeys = safePrimaryKeys(meta, identity.catalog(), null, identity.table());
+        }
         markPrimaryKeyColumns(result, primaryKeys);
         if (quirks.useCatalogFallbackSql()) {
             mergeShowFullColumnMetadata(conn, result, schemaPattern, table);
@@ -2666,7 +3800,8 @@ public final class DbxJdbcPlugin {
             while (rs.next()) {
                 found = true;
                 String name = rs.getString("TABLE_NAME");
-                if (!metadataNameMatches(name, normalizedFilter)) {
+                String comment = rs.getString("REMARKS");
+                if (!metadataNameOrCommentMatches(name, comment, normalizedFilter)) {
                     continue;
                 }
                 if (skipped++ < Math.max(0, offset)) {
@@ -2736,7 +3871,9 @@ public final class DbxJdbcPlugin {
         int max = limit <= 0 ? Integer.MAX_VALUE : limit;
         int skipped = 0;
         for (JsonNode item : source) {
-            if (!metadataNameMatches(item.path("name").asText(""), normalizedFilter)) {
+            String name = item.path("name").asText("");
+            String comment = item.hasNonNull("comment") ? item.path("comment").asText("") : null;
+            if (!metadataNameOrCommentMatches(name, comment, normalizedFilter)) {
                 continue;
             }
             String type = item.path(typeField).asText("");
@@ -2753,6 +3890,16 @@ public final class DbxJdbcPlugin {
             result.add(item);
         }
         return result;
+    }
+
+    private static boolean metadataNameOrCommentMatches(String name, String comment, String filter) {
+        if (filter == null || filter.isEmpty()) {
+            return true;
+        }
+        if (metadataNameMatches(name, filter)) {
+            return true;
+        }
+        return comment != null && !comment.isEmpty() && metadataNameMatches(comment, filter);
     }
 
     private static boolean metadataNameMatches(String name, String filter) {
@@ -3187,7 +4334,7 @@ public final class DbxJdbcPlugin {
         String effectiveSchema = kingbaseEffectiveSchema(conn, schema);
         Set<String> primaryKeys = kingbasePrimaryKeys(conn, effectiveSchema, table);
         String sql = "SELECT a.attname AS column_name, " +
-            "format_type(a.atttypid, a.atttypmod) AS data_type, " +
+            "CASE WHEN t.typname = 'json' THEN 'json' WHEN t.typname = '_json' THEN 'json[]' ELSE format_type(a.atttypid, a.atttypmod) END AS data_type, " +
             "NOT a.attnotnull AS is_nullable, " +
             "sys_get_expr(ad.adbin, ad.adrelid) AS column_default, " +
             "d.description AS column_comment, " +
@@ -3253,6 +4400,385 @@ public final class DbxJdbcPlugin {
 
     private static boolean isKingbaseUrl(String url) {
         return urlMatchesPrefix(url, "jdbc:kingbase");
+    }
+
+    // --- Zenith (GaussDB 100) metadata methods ---
+    //
+    // The Zenith driver's DatabaseMetaData queries Oracle's ALL_* views, which
+    // Zenith does not have (its dictionary is DB_*/ADM_*/MY_*), so getSchemas(),
+    // getTables(), getColumns() and getIndexInfo() all fail with GS-00843, and
+    // getSchemas(String, String) / Connection.getSchema() are unimplemented.
+    // Zenith has no catalogs: schema = user. Read the DB_* views directly.
+
+    private static final String ZENITH_DRIVER_CLASS = "com.huawei.gauss.jdbc.ZenithDriver";
+
+    static boolean isZenithConnection(JsonNode connection) {
+        if (urlMatchesPrefix(optionalText(connection, "connection_string"), "jdbc:zenith:")) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        return driverClass != null && ZENITH_DRIVER_CLASS.equals(driverClass.trim());
+    }
+
+    private static boolean isZenithConnection(JsonNode connection, Connection conn) {
+        if (isZenithConnection(connection)) {
+            return true;
+        }
+        try {
+            DatabaseMetaData meta = conn.getMetaData();
+            String product = meta == null ? null : meta.getDatabaseProductName();
+            return product != null && product.regionMatches(true, 0, "Zenith", 0, 6);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return false;
+        }
+    }
+
+    private static String zenithEffectiveSchema(Connection conn, String schema) throws SQLException {
+        if (schema != null && !schema.isBlank()) {
+            return zenithResolveOwner(conn, schema);
+        }
+        try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery("SELECT USER FROM DUAL")) {
+            String current = rs.next() ? rs.getString(1) : null;
+            if (current != null && !current.isBlank()) {
+                return current;
+            }
+        } catch (SQLException ignored) {
+        }
+        String username = conn.getMetaData().getUserName();
+        if (username == null || username.isBlank()) {
+            // An empty owner would make every dictionary query silently return nothing.
+            throw new SQLException("Unable to determine the current Zenith user; specify a schema explicitly");
+        }
+        return zenithResolveOwner(conn, username);
+    }
+
+    private static String zenithResolveOwner(Connection conn, String owner) throws SQLException {
+        String sql = "SELECT USERNAME FROM DB_USERS WHERE USERNAME = ?";
+        String exact = oracleFindIdentifier(conn, sql, owner);
+        if (exact != null) {
+            return exact;
+        }
+        exact = oracleFindIdentifier(conn, sql, owner.toUpperCase(Locale.ROOT));
+        return exact == null ? owner : exact;
+    }
+
+    private static String zenithResolveTable(Connection conn, String owner, String table) throws SQLException {
+        String sql = "SELECT OBJECT_NAME FROM DB_OBJECTS WHERE OWNER = ? AND OBJECT_NAME = ?";
+        String exact = oracleFindIdentifier(conn, sql, owner, table);
+        if (exact != null) {
+            return exact;
+        }
+        exact = oracleFindIdentifier(conn, sql, owner, table.toUpperCase(Locale.ROOT));
+        return exact == null ? table : exact;
+    }
+
+    private static JsonNode zenithListSchemas(Connection conn) throws SQLException {
+        ArrayNode result = MAPPER.createArrayNode();
+        try (Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT USERNAME FROM DB_USERS ORDER BY USERNAME")) {
+            while (rs.next()) {
+                String name = rs.getString(1);
+                if (name != null && !name.isBlank()) {
+                    result.add(name);
+                }
+            }
+        } catch (SQLException e) {
+            // Without DB_USERS access the login user's own schema is still browsable.
+            // If that fallback fails too, report the original DB_USERS error.
+            try {
+                result.add(zenithEffectiveSchema(conn, null));
+            } catch (SQLException fallback) {
+                e.addSuppressed(fallback);
+                throw e;
+            }
+        }
+        return result;
+    }
+
+    private static JsonNode zenithListTables(Connection conn, String owner, boolean objectNodes, String schemaLabel)
+        throws SQLException {
+        ArrayNode result = MAPPER.createArrayNode();
+        String tableSql =
+            "SELECT t.TABLE_NAME AS NAME, c.COMMENTS AS COMMENTS FROM DB_TABLES t " +
+            "LEFT JOIN DB_TAB_COMMENTS c ON c.OWNER = t.OWNER AND c.TABLE_NAME = t.TABLE_NAME " +
+            "WHERE t.OWNER = ? ORDER BY t.TABLE_NAME";
+        String viewSql =
+            "SELECT v.VIEW_NAME AS NAME, c.COMMENTS AS COMMENTS FROM DB_VIEWS v " +
+            "LEFT JOIN DB_TAB_COMMENTS c ON c.OWNER = v.OWNER AND c.TABLE_NAME = v.VIEW_NAME " +
+            "WHERE v.OWNER = ? ORDER BY v.VIEW_NAME";
+        appendZenithTables(result, conn, tableSql, owner, "TABLE", objectNodes, schemaLabel);
+        appendZenithTables(result, conn, viewSql, owner, "VIEW", objectNodes, schemaLabel);
+        return result;
+    }
+
+    private static void appendZenithTables(
+        ArrayNode result,
+        Connection conn,
+        String sql,
+        String owner,
+        String type,
+        boolean objectNodes,
+        String schemaLabel
+    ) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, owner);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    ObjectNode item = MAPPER.createObjectNode();
+                    item.put("name", rs.getString("NAME"));
+                    item.put(objectNodes ? "object_type" : "table_type", type);
+                    if (objectNodes) {
+                        putNullable(item, "schema", schemaLabel);
+                    }
+                    putNullable(item, "comment", emptyToNull(rs.getString("COMMENTS")));
+                    result.add(item);
+                }
+            }
+        }
+    }
+
+    private static JsonNode zenithListObjects(Connection conn, String owner, String schemaLabel) throws SQLException {
+        ArrayNode result = (ArrayNode) zenithListTables(conn, owner, true, schemaLabel);
+        // Procedures and functions live only in DB_PROCEDURES, not in DB_OBJECTS.
+        appendZenithObjects(
+            result,
+            conn,
+            "SELECT DISTINCT OBJECT_NAME, OBJECT_TYPE FROM DB_PROCEDURES " +
+                "WHERE OWNER = ? AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION') ORDER BY OBJECT_TYPE, OBJECT_NAME",
+            owner,
+            null,
+            schemaLabel
+        );
+        appendZenithObjects(
+            result,
+            conn,
+            "SELECT SEQUENCE_NAME FROM DB_SEQUENCES WHERE SEQUENCE_OWNER = ? ORDER BY SEQUENCE_NAME",
+            owner,
+            "SEQUENCE",
+            schemaLabel
+        );
+        appendZenithObjects(
+            result,
+            conn,
+            "SELECT SYNONYM_NAME FROM DB_SYNONYMS WHERE OWNER = ? ORDER BY SYNONYM_NAME",
+            owner,
+            "SYNONYM",
+            schemaLabel
+        );
+        return result;
+    }
+
+    private static void appendZenithObjects(
+        ArrayNode result,
+        Connection conn,
+        String sql,
+        String owner,
+        String objectType,
+        String schemaLabel
+    ) {
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, owner);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    ObjectNode item = MAPPER.createObjectNode();
+                    item.put("name", rs.getString(1));
+                    item.put("object_type", objectType == null ? rs.getString(2) : objectType);
+                    putNullable(item, "schema", schemaLabel);
+                    item.putNull("comment");
+                    result.add(item);
+                }
+            }
+        } catch (SQLException ignored) {
+            // Routines, sequences and synonyms are optional; they must not hide tables.
+        }
+    }
+
+    private static JsonNode zenithGetColumns(Connection conn, String owner, String table) throws SQLException {
+        ArrayNode result = MAPPER.createArrayNode();
+        String resolvedTable = zenithResolveTable(conn, owner, table);
+        Set<String> pks = zenithPrimaryKeys(conn, owner, resolvedTable);
+        // The driver's getColumns() reports DATA_TYPE=0, shifts precision/scale and
+        // drops comments and defaults, so the dictionary view is the only reliable source.
+        String sql =
+            "SELECT c.DATA_DEFAULT, c.COLUMN_NAME, c.DATA_TYPE, c.DATA_LENGTH, c.DATA_PRECISION, c.DATA_SCALE, " +
+            "c.CHAR_LENGTH, c.NULLABLE, c.AUTO_INCREMENT, m.COMMENTS " +
+            "FROM DB_TAB_COLUMNS c " +
+            "LEFT JOIN DB_COL_COMMENTS m ON m.OWNER = c.OWNER AND m.TABLE_NAME = c.TABLE_NAME AND m.COLUMN_NAME = c.COLUMN_NAME " +
+            "WHERE c.OWNER = ? AND c.TABLE_NAME = ? ORDER BY c.COLUMN_ID";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, owner);
+            ps.setString(2, resolvedTable);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String dataDefault = rs.getString("DATA_DEFAULT");
+                    String name = rs.getString("COLUMN_NAME");
+                    String dataType = rs.getString("DATA_TYPE");
+                    ObjectNode item = columnNode(result, name);
+                    item.put("data_type", dataType);
+                    item.put("is_nullable", !"N".equalsIgnoreCase(rs.getString("NULLABLE")));
+                    putNullablePreferValue(item, "column_default", dataDefault == null ? null : dataDefault.trim());
+                    item.put("is_primary_key", pks.contains(name));
+                    if ("Y".equalsIgnoreCase(rs.getString("AUTO_INCREMENT"))) {
+                        item.put("extra", "auto_increment");
+                    } else {
+                        item.putNull("extra");
+                    }
+                    putNullablePreferValue(item, "comment", rs.getString("COMMENTS"));
+                    putNullableInt(item, "numeric_precision", rs.getObject("DATA_PRECISION"));
+                    putNullableInt(item, "numeric_scale", rs.getObject("DATA_SCALE"));
+                    putNullableInt(
+                        item,
+                        "character_maximum_length",
+                        zenithCharacterLength(dataType, rs.getObject("CHAR_LENGTH"), rs.getObject("DATA_LENGTH"))
+                    );
+                }
+            }
+        }
+        return result;
+    }
+
+    private static final Set<String> ZENITH_LENGTH_TYPES = Set.of(
+        "CHAR", "NCHAR", "VARCHAR", "VARCHAR2", "NVARCHAR", "NVARCHAR2", "BINARY", "VARBINARY", "RAW"
+    );
+
+    static Object zenithCharacterLength(String dataType, Object charLength, Object dataLength) {
+        if (charLength instanceof Number number && number.intValue() > 0) {
+            return number;
+        }
+        // DATA_LENGTH is the storage size in bytes, which only means "length" for string/binary types.
+        String type = dataType == null ? "" : dataType.trim().toUpperCase(Locale.ROOT);
+        return ZENITH_LENGTH_TYPES.contains(type) ? dataLength : null;
+    }
+
+    private static Set<String> zenithPrimaryKeys(Connection conn, String owner, String table) {
+        String sql = "SELECT COLUMNS FROM DB_INDEXES WHERE OWNER = ? AND TABLE_NAME = ? AND IS_PRIMARY = 'Y'";
+        Set<String> keys = new LinkedHashSet<>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, owner);
+            ps.setString(2, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    keys.addAll(splitZenithIndexColumns(rs.getString(1)));
+                }
+            }
+        } catch (SQLException ignored) {
+            // Primary-key flags are optional detail; the column list must still load.
+        }
+        return keys;
+    }
+
+    /** DB_INDEXES.COLUMNS is a ", "-separated column list, e.g. "ORDER_ID, REGION_ID, STATUS". */
+    static List<String> splitZenithIndexColumns(String columns) {
+        List<String> result = new ArrayList<>();
+        if (columns == null) {
+            return result;
+        }
+        for (String column : columns.split(",")) {
+            String trimmed = column.trim();
+            if (!trimmed.isEmpty()) {
+                result.add(trimmed);
+            }
+        }
+        return result;
+    }
+
+    private static JsonNode zenithListIndexes(Connection conn, String owner, String table) {
+        // DB_IND_COLUMNS has no OWNER column; it joins on INDEX_OWNER.
+        String sql =
+            "SELECT i.INDEX_NAME, i.IS_PRIMARY, i.IS_UNIQUE, ic.COLUMN_NAME FROM DB_INDEXES i " +
+            "JOIN DB_IND_COLUMNS ic ON ic.INDEX_OWNER = i.OWNER AND ic.INDEX_NAME = i.INDEX_NAME " +
+            "WHERE i.OWNER = ? AND i.TABLE_NAME = ? ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION";
+        LinkedHashMap<String, ObjectNode> indexes = new LinkedHashMap<>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, owner);
+            ps.setString(2, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String name = rs.getString("INDEX_NAME");
+                    ObjectNode item = indexes.get(name);
+                    if (item == null) {
+                        item = indexNode(
+                            name,
+                            "Y".equalsIgnoreCase(rs.getString("IS_UNIQUE")),
+                            "Y".equalsIgnoreCase(rs.getString("IS_PRIMARY")),
+                            null
+                        );
+                        indexes.put(name, item);
+                    }
+                    String column = rs.getString("COLUMN_NAME");
+                    if (column != null && !column.isBlank()) {
+                        ((ArrayNode) item.path("columns")).add(column);
+                    }
+                }
+            }
+        } catch (SQLException ignored) {
+            // Index metadata is optional detail, matching the other index readers.
+            indexes.clear();
+        }
+        ArrayNode result = MAPPER.createArrayNode();
+        indexes.values().forEach(result::add);
+        return result;
+    }
+
+    private static JsonNode zenithObjectSource(Connection conn, String owner, String name, String objectType)
+        throws SQLException {
+        String normalizedType = normalizeObjectType(objectType);
+        String source;
+        if ("VIEW".equals(normalizedType)) {
+            String text = zenithSingleText(conn, "SELECT TEXT FROM DB_VIEWS WHERE OWNER = ? AND VIEW_NAME = ?", owner, name);
+            source = "CREATE OR REPLACE VIEW " + zenithQuoteIdentifier(owner) + "." + zenithQuoteIdentifier(name) + " AS\n" + text;
+        } else if ("PROCEDURE".equals(normalizedType) || "FUNCTION".equals(normalizedType)) {
+            // DB_SOURCE.LINE is NULL on Zenith, so the routine body must come from DB_PROCEDURES.SOURCE.
+            source = zenithSingleText(
+                conn,
+                "SELECT SOURCE FROM DB_PROCEDURES WHERE OWNER = ? AND OBJECT_NAME = ? AND OBJECT_TYPE = ?",
+                owner,
+                stripRoutineSignature(name),
+                normalizedType
+            );
+        } else {
+            throw new SQLException("Object source is not supported by this JDBC driver");
+        }
+        ObjectNode item = MAPPER.createObjectNode();
+        item.put("name", name);
+        item.put("object_type", objectType);
+        putNullable(item, "schema", owner);
+        item.put("source", source);
+        // Read-only until the generated DDL has been verified against a live Zenith server.
+        item.put("editable", false);
+        return item;
+    }
+
+    private static String zenithSingleText(Connection conn, String sql, String... params) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            for (int i = 0; i < params.length; i++) {
+                ps.setString(i + 1, params[i]);
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    throw new SQLException("Object source not found");
+                }
+                String text = rs.getString(1);
+                return text == null ? "" : text;
+            }
+        }
+    }
+
+    private static String zenithQuoteIdentifier(String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    private static boolean isSybaseConnection(JsonNode connection) {
+        String url = optionalText(connection, "connection_string");
+        if (urlMatchesPrefix(url, "jdbc:sybase:") || urlMatchesPrefix(url, "jdbc:jtds:sybase:")) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        if (driverClass == null) {
+            return false;
+        }
+        String normalized = driverClass.toLowerCase(Locale.ROOT);
+        return normalized.contains("sybdriver") || normalized.contains("sybase");
     }
 
     private static String quoteAnsiIdentifier(String identifier) {
@@ -3404,22 +4930,26 @@ public final class DbxJdbcPlugin {
     }
 
     private static void closeSharedConnection() {
+        JdbcConnectionState state = connectionState();
         closeAllQuerySessions();
-        if (sharedConnection != null) {
-            if (manualTransactionActive) {
+        if (state.nativeLegacyJob != null) state.nativeLegacyJob.dispose();
+        if (state.nativeJobSession != null) state.nativeJobSession.dispose();
+        state.largeValues.clear();
+        if (state.sharedConnection != null) {
+            if (state.manualTransactionActive) {
                 try {
-                    sharedConnection.rollback();
+                    state.sharedConnection.rollback();
                 } catch (SQLException ignored) {
                 }
             }
             try {
-                sharedConnection.close();
+                state.sharedConnection.close();
             } catch (SQLException ignored) {
             }
-            sharedConnection = null;
-            sharedConnectionKey = "";
+            state.sharedConnection = null;
+            state.sharedConnectionKey = "";
         }
-        manualTransactionActive = false;
+        state.manualTransactionActive = false;
     }
 
     private static String driverKey(JsonNode connection) {
@@ -3428,6 +4958,7 @@ public final class DbxJdbcPlugin {
 
     private static String connectionKey(JsonNode connection) {
         String connectionString = optionalText(connection, "connection_string");
+        if (isPostgresJdbcUrl(connectionString)) connectionString = jdbcUrl(connection);
         String jdbcxSecurityKey = isJdbcxUrl(connectionString)
             ? "|jdbcxHighPrivilegeExtensions=" + jdbcxHighPrivilegeExtensionsEnabled(connection)
             : "";
@@ -3473,9 +5004,65 @@ public final class DbxJdbcPlugin {
         return appendJdbcUrlParam(url, "key", password);
     }
 
+    static List<Map<String, Object>> connectionParameters(JsonNode connection) throws SQLException {
+        String url = jdbcUrl(connection);
+        if (url == null || url.isBlank()) return List.of();
+        Properties properties = new Properties();
+        String username = optionalText(connection, "username");
+        String password = optionalText(connection, "password");
+        if (username != null) properties.setProperty("user", username);
+        if (password != null) properties.setProperty("password", password);
+        Driver driver = registeredDriver == null ? DriverManager.getDriver(url) : registeredDriver;
+        return JdbcConnectionParameters.describe(driver, url, properties);
+    }
+
     static String jdbcUrl(JsonNode connection) {
         String url = appendJdbcUrlParams(optionalText(connection, "connection_string"), optionalText(connection, "url_params"));
+        url = postgresDatabaseUrl(url, postgresDatabase(connection));
         return jdbcUrlWithPasswordKey(url, optionalText(connection, "password"));
+    }
+
+    private static boolean isPostgresJdbcUrl(String url) {
+        return url != null && url.startsWith("jdbc:postgresql:");
+    }
+
+    private static String postgresDatabase(JsonNode node) {
+        String database = node.path("database").asText(null);
+        return database == null || database.isBlank() ? null : database;
+    }
+
+    private static String postgresDatabaseUrl(String url, String database) {
+        if (!isPostgresJdbcUrl(url) || database == null) return url;
+        String prefix = "jdbc:postgresql:";
+        int queryStart = url.indexOf('?');
+        String location = url.substring(prefix.length(), queryStart < 0 ? url.length() : queryStart);
+        String authority = "";
+        String originalDatabase = location;
+        if (location.equals("//") || location.equals("///")) {
+            originalDatabase = "";
+        } else if (location.startsWith("//")) {
+            int slash = location.indexOf('/', 2);
+            if (slash < 0 || location.indexOf('/', slash + 1) >= 0) {
+                throw new IllegalArgumentException("Invalid PostgreSQL JDBC URL database path");
+            }
+            authority = location.substring(0, slash + 1);
+            originalDatabase = location.substring(slash + 1);
+        } else if (location.startsWith("/")) {
+            throw new IllegalArgumentException("Invalid PostgreSQL JDBC URL database path");
+        }
+        try {
+            URLDecoder.decode(originalDatabase, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException error) {
+            throw new IllegalArgumentException("Invalid PostgreSQL JDBC URL database encoding");
+        }
+        String targeted = prefix + authority + URLEncoder.encode(database, StandardCharsets.UTF_8);
+        if (queryStart < 0) return targeted;
+        List<String> parameters = new ArrayList<>();
+        for (String part : url.substring(queryStart + 1).split("&", -1)) {
+            String name = partName(part);
+            if (!name.equals("PGDBNAME") && !name.equals("dbname")) parameters.add(part);
+        }
+        return targeted + "?" + String.join("&", parameters);
     }
 
     private record JdbcUrlCredentials(String url, String username, String password) {}
@@ -3745,6 +5332,10 @@ public final class DbxJdbcPlugin {
     }
 
     private static JsonNode oracleListTables(Connection conn, String owner) throws SQLException {
+        return oracleListTables(conn, owner, false);
+    }
+
+    private static JsonNode oracleListTables(Connection conn, String owner, boolean exactIdentity) throws SQLException {
         ArrayNode result = MAPPER.createArrayNode();
         String sql =
             "SELECT table_name AS name, 'TABLE' AS table_type, comments " +
@@ -3767,6 +5358,7 @@ public final class DbxJdbcPlugin {
                 return result;
             }
         } catch (SQLException e) {
+            if (exactIdentity) throw e;
             result.removeAll();
             try {
                 appendTables(result, conn.getMetaData(), null, owner, new String[]{"TABLE", "VIEW"}, null, 0, 0);
@@ -3886,25 +5478,74 @@ public final class DbxJdbcPlugin {
         return result;
     }
 
-    private static JsonNode oracleListIndexes(Connection conn, String owner, String table) throws SQLException {
+    private static void oracleAppendTypeObjects(Connection conn, String owner, ArrayNode result) throws SQLException {
         String sql =
-            "SELECT i.index_name, i.uniqueness, i.index_type, ic.column_name, " +
-            "CASE WHEN pk.index_name IS NULL THEN 0 ELSE 1 END AS is_primary " +
+            "SELECT object_name AS name, CASE object_type WHEN 'TYPE BODY' THEN 'TYPE_BODY' ELSE object_type END AS object_type " +
+            "FROM all_objects WHERE owner = ? AND object_type IN ('TYPE', 'TYPE BODY') ORDER BY object_type, object_name";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, owner);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    ObjectNode item = MAPPER.createObjectNode();
+                    item.put("name", rs.getString("name"));
+                    item.put("object_type", rs.getString("object_type"));
+                    putNullable(item, "schema", owner);
+                    item.putNull("comment");
+                    result.add(item);
+                }
+            }
+        }
+    }
+
+    private static JsonNode oracleListIndexes(Connection conn, String owner, String table) throws SQLException {
+        return oracleListIndexes(conn, owner, table, false);
+    }
+
+    private static void appendOracleSchemaIndexes(Connection conn, String owner, ArrayNode result) throws SQLException {
+        String sql = "SELECT owner, index_name, table_owner, table_name FROM all_indexes WHERE owner = ? ORDER BY index_name";
+        try (PreparedStatement statement = conn.prepareStatement(sql)) {
+            statement.setString(1, owner);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    ObjectNode index = MAPPER.createObjectNode();
+                    index.put("name", rows.getString("index_name"));
+                    index.put("object_type", "INDEX");
+                    putNullable(index, "schema", rows.getString("owner"));
+                    putNullable(index, "parent_schema", rows.getString("table_owner"));
+                    putNullable(index, "parent_name", rows.getString("table_name"));
+                    index.putNull("comment");
+                    result.add(index);
+                }
+            }
+        }
+    }
+
+    private static JsonNode oracleListIndexes(Connection conn, String owner, String table, boolean exactIdentity) throws SQLException {
+        String sql =
+            "SELECT ie.column_expression, i.index_name, i.uniqueness, i.index_type, ic.column_name, " +
+            "ic.column_position, i.partitioned, i.visibility, ic.descend, " +
+            "CASE WHEN pk.index_name IS NULL THEN 0 ELSE 1 END AS is_primary, i.owner AS index_owner " +
             "FROM all_indexes i " +
             "JOIN all_ind_columns ic ON ic.index_owner = i.owner AND ic.index_name = i.index_name " +
             "AND ic.table_owner = i.table_owner AND ic.table_name = i.table_name " +
-            "LEFT JOIN (SELECT owner, index_name, table_name FROM all_constraints WHERE constraint_type = 'P') pk " +
-            "ON pk.owner = i.owner AND pk.index_name = i.index_name AND pk.table_name = i.table_name " +
+            "LEFT JOIN all_ind_expressions ie ON ie.index_owner = ic.index_owner AND ie.index_name = ic.index_name " +
+            "AND ie.table_owner = ic.table_owner AND ie.table_name = ic.table_name AND ie.column_position = ic.column_position " +
+            "LEFT JOIN (SELECT owner, index_owner, index_name, table_name FROM all_constraints WHERE constraint_type = 'P') pk " +
+            "ON pk.owner = i.table_owner AND pk.index_owner = i.owner AND pk.index_name = i.index_name AND pk.table_name = i.table_name " +
             "WHERE i.table_owner = ? AND i.table_name = ? " +
-            "ORDER BY i.index_name, ic.column_position";
+            "ORDER BY i.owner, i.index_name, ic.column_position";
         LinkedHashMap<String, ObjectNode> indexes = new LinkedHashMap<>();
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, owner);
             ps.setString(2, table);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
+                    // COLUMN_EXPRESSION is LONG on Oracle; read it before the other fields.
+                    String expression = rs.getString("column_expression");
                     String name = rs.getString("index_name");
-                    ObjectNode item = indexes.get(name);
+                    String indexOwner = rs.getString("index_owner");
+                    String identity = MAPPER.createArrayNode().add(indexOwner).add(name).toString();
+                    ObjectNode item = indexes.get(identity);
                     if (item == null) {
                         item = indexNode(
                             name,
@@ -3912,15 +5553,34 @@ public final class DbxJdbcPlugin {
                             rs.getInt("is_primary") != 0,
                             rs.getString("index_type")
                         );
-                        indexes.put(name, item);
+                        item.set("key_is_expression", MAPPER.createArrayNode());
+                        putNullable(item, "owner", indexOwner);
+                        item.set("key_directions", MAPPER.createArrayNode());
+                        putNullable(item, "visibility", rs.getString("visibility"));
+                        item.put("key_metadata_complete", true);
+                        indexes.put(identity, item);
                     }
                     String column = rs.getString("column_name");
-                    if (column != null && !column.isBlank()) {
-                        ((ArrayNode) item.path("columns")).add(column);
+                    boolean isExpression = expression != null && !expression.isBlank();
+                    String direction = rs.getString("descend");
+                    String visibility = rs.getString("visibility");
+                    String indexType = rs.getString("index_type");
+                    if (rs.getInt("column_position") != item.path("columns").size() + 1
+                        || !("ASC".equals(direction) || "DESC".equals(direction))
+                        || !("VISIBLE".equals(visibility) || "INVISIBLE".equals(visibility))
+                        || !java.util.Objects.equals(item.path("visibility").asText(null), visibility)
+                        || !"NO".equals(rs.getString("partitioned"))
+                        || !("NORMAL".equals(indexType) || "FUNCTION-BASED NORMAL".equals(indexType))
+                        || (!isExpression && (column == null || column.isEmpty() || (column.startsWith("SYS_NC") && column.endsWith("$"))))) {
+                        item.put("key_metadata_complete", false);
                     }
+                    ((ArrayNode) item.path("columns")).add(isExpression ? expression : column == null ? "" : column);
+                    ((ArrayNode) item.path("key_is_expression")).add(isExpression);
+                    ((ArrayNode) item.path("key_directions")).add(direction == null ? "" : direction);
                 }
             }
         } catch (SQLException e) {
+            if (exactIdentity) throw e;
             indexes.clear();
             try {
                 DatabaseMetaData meta = conn.getMetaData();
@@ -3951,12 +5611,38 @@ public final class DbxJdbcPlugin {
         return result;
     }
 
+    private static JsonNode getTriggerObjectSource(JsonNode connection, String database, String schema, String name, String objectType, boolean exact)
+        throws SQLException {
+        if (!exact || !"TRIGGER".equalsIgnoreCase(objectType)) return getObjectSource(connection, database, schema, name, objectType, false);
+        Connection conn = openConnection(connection);
+        OracleTriggerMetadataReader.Profile profile = OracleTriggerMetadataReader.profile(conn);
+        if (profile == null) throw new SQLFeatureNotSupportedException("Exact Oracle-family trigger metadata is unavailable for the connected product");
+        return new OracleTriggerMetadataReader(conn, profile).source(schema, name);
+    }
+
     private static JsonNode getObjectSource(JsonNode connection, String database, String schema, String name, String objectType)
+        throws SQLException {
+        return getObjectSource(connection, database, schema, name, objectType, false);
+    }
+
+    private static JsonNode getObjectSource(JsonNode connection, String database, String schema, String name, String objectType, boolean exactIdentity)
+        throws SQLException {
+        return getObjectSource(connection, database, schema, name, objectType, exactIdentity, false);
+    }
+
+    private static JsonNode getObjectSource(JsonNode connection, String database, String schema, String name, String objectType, boolean exactIdentity, boolean includeOrigin)
         throws SQLException {
         Connection conn = openConnection(connection);
         if (driverQuirks(connection).useOracleMetadata()) {
-            String owner = oracleEffectiveSchema(conn, schema);
             String metadataType = oracleMetadataObjectType(objectType);
+            if ("TYPE".equals(metadataType) || "TYPE_BODY".equals(metadataType)) {
+                String owner = schema != null ? schema : conn.getMetaData().getUserName();
+                return oracleTypeSource(conn, owner, name, metadataType);
+            }
+            String owner = exactIdentity ? schema : oracleEffectiveSchema(conn, schema);
+            if (includeOrigin && "PACKAGE".equals(metadataType)) {
+                metadataType = "PACKAGE_SPEC";
+            }
             String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, metadataType);
@@ -3971,6 +5657,9 @@ public final class DbxJdbcPlugin {
                     item.put("object_type", objectType);
                     putNullable(item, "schema", owner);
                     putNullable(item, "source", rs.getString(1));
+                    if (includeOrigin) {
+                        item.put("source_origin", "oracle-metadata");
+                    }
                     return item;
                 }
             }
@@ -3979,6 +5668,9 @@ public final class DbxJdbcPlugin {
         if (isHive2RoutinesConnection(connection)) {
             String routineName = stripRoutineSignature(name);
             String normalizedType = normalizeObjectType(objectType);
+            if ("VIEW".equals(normalizedType) || "TABLE".equals(normalizedType) || "MATERIALIZED_VIEW".equals(normalizedType)) {
+                return hive2ShowCreateObjectSource(conn, database, schema, name, objectType);
+            }
 
             LinkedHashSet<String> candidates = new LinkedHashSet<>();
             String db = emptyToNull(database);
@@ -4025,7 +5717,393 @@ public final class DbxJdbcPlugin {
             throw new SQLException("Object source not found");
         }
 
+        if (isSybaseConnection(connection) && "VIEW".equals(normalizeObjectType(objectType))) {
+            return sybaseViewObjectSource(connection, conn, database, schema, name, objectType);
+        }
+
+        if (isZenithConnection(connection, conn) && !"TABLE".equals(normalizeObjectType(objectType))) {
+            return zenithObjectSource(conn, zenithEffectiveSchema(conn, schema), name, objectType);
+        }
+
+        if ("TABLE".equals(normalizeObjectType(objectType))) {
+            return genericTableObjectSource(connection, database, schema, name);
+        }
+
+        String normalizedType = normalizeObjectType(objectType);
+        if (!isSybaseConnection(connection) && ("PROCEDURE".equals(normalizedType) || "FUNCTION".equals(normalizedType))) {
+            return genericRoutineObjectSource(connection, conn, database, schema, name, normalizedType);
+        }
+
         throw new SQLException("Object source is not supported by this JDBC driver");
+    }
+
+    private static JsonNode oracleTypeSource(Connection conn, String owner, String name, String objectType) throws SQLException {
+        String source = null;
+        SQLException ddlError = null;
+        try (PreparedStatement ps = conn.prepareStatement("SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL")) {
+            ps.setString(1, objectType);
+            ps.setString(2, name);
+            ps.setString(3, owner);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) source = rs.getString(1);
+            }
+        } catch (SQLException error) {
+            ddlError = error;
+        }
+        if (source == null || source.isBlank()) {
+            StringBuilder text = new StringBuilder();
+            try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT text FROM all_source WHERE owner = ? AND name = ? AND type = ? ORDER BY line"
+            )) {
+                ps.setString(1, owner);
+                ps.setString(2, name);
+                ps.setString(3, objectType.replace('_', ' '));
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String line = rs.getString(1);
+                        if (line == null) continue;
+                        if (!text.isEmpty() && text.charAt(text.length() - 1) != '\n' && text.charAt(text.length() - 1) != '\r') text.append('\n');
+                        text.append(line);
+                    }
+                }
+            } catch (SQLException error) {
+                if (ddlError != null) error.addSuppressed(ddlError);
+                throw error;
+            }
+            source = text.toString();
+        }
+        if (source.isBlank()) throw new SQLException("Complete type source is unavailable", ddlError);
+        ObjectNode item = MAPPER.createObjectNode();
+        item.put("name", name);
+        item.put("object_type", objectType);
+        putNullable(item, "schema", owner);
+        item.put("source", source);
+        item.put("editable", false);
+        return item;
+    }
+
+    /**
+     * Generic JDBC does not define a routine DDL API. Return the structured
+     * parameter metadata that it does define and leave source empty/read-only.
+     * Drivers are allowed to omit or reject this optional metadata; that must
+     * not turn opening an already-listed routine into a fatal error.
+     */
+    private static JsonNode genericRoutineObjectSource(
+        JsonNode connection,
+        Connection conn,
+        String database,
+        String schema,
+        String name,
+        String objectType
+    ) {
+        ObjectNode item = MAPPER.createObjectNode();
+        item.put("name", name);
+        item.put("object_type", objectType);
+        putNullable(item, "schema", emptyToNull(schema));
+        item.put("source", "");
+        item.put("editable", false);
+
+        try {
+            DatabaseMetaData meta = conn.getMetaData();
+            JdbcDriverQuirks quirks = driverQuirks(connection);
+            String catalog = metadataCatalog(database, quirks);
+            String schemaPattern = escapeJdbcMetadataPattern(meta, resolveSchemaPattern(meta, database, schema, quirks));
+            String routineName = escapeJdbcMetadataPattern(meta, stripRoutineSignature(name));
+            ResultSet columns = "PROCEDURE".equals(objectType)
+                ? meta.getProcedureColumns(catalog, schemaPattern, routineName, "%")
+                : meta.getFunctionColumns(catalog, schemaPattern, routineName, "%");
+            if (columns == null) {
+                return item;
+            }
+            try (columns) {
+                List<ObjectNode> parameters = new ArrayList<>();
+                while (columns.next()) {
+                    parameters.add(genericRoutineParameter(columns, "PROCEDURE".equals(objectType)));
+                }
+                parameters.sort((left, right) -> {
+                    JsonNode leftOrdinal = left.get("ordinal");
+                    JsonNode rightOrdinal = right.get("ordinal");
+                    int leftValue = leftOrdinal == null ? Integer.MAX_VALUE : leftOrdinal.asInt();
+                    int rightValue = rightOrdinal == null ? Integer.MAX_VALUE : rightOrdinal.asInt();
+                    return Integer.compare(leftValue, rightValue);
+                });
+                ArrayNode result = MAPPER.createArrayNode();
+                result.addAll(parameters);
+                item.set("routine_parameters", result);
+            }
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            // Parameter metadata is optional. The empty read-only source still
+            // lets the details dialog open when a driver does not implement it.
+        }
+        return item;
+    }
+
+    private static ObjectNode genericRoutineParameter(ResultSet columns, boolean procedure) {
+        ObjectNode parameter = MAPPER.createObjectNode();
+        Integer columnType = metadataInteger(columns, "COLUMN_TYPE");
+        String mode = routineParameterMode(columnType, procedure);
+        String name = metadataString(columns, "COLUMN_NAME");
+        if ((name == null || name.isBlank()) && "RETURN".equals(mode)) {
+            name = "RETURN";
+        }
+        putNullable(parameter, "name", name);
+        parameter.put("mode", mode);
+        putOptionalInt(parameter, "jdbc_type", metadataInteger(columns, "DATA_TYPE"));
+        putNullable(parameter, "type_name", metadataString(columns, "TYPE_NAME"));
+        putOptionalInt(parameter, "precision", metadataInteger(columns, "PRECISION"));
+        putOptionalInt(parameter, "length", metadataInteger(columns, "LENGTH"));
+        putOptionalInt(parameter, "scale", metadataInteger(columns, "SCALE"));
+        Integer nullable = metadataInteger(columns, "NULLABLE");
+        if (nullable != null && nullable != DatabaseMetaData.procedureNullableUnknown) {
+            parameter.put("nullable", nullable != DatabaseMetaData.procedureNoNulls);
+        }
+        putOptionalInt(parameter, "ordinal", metadataInteger(columns, "ORDINAL_POSITION"));
+        return parameter;
+    }
+
+    private static String routineParameterMode(Integer columnType, boolean procedure) {
+        if (columnType == null) {
+            return "UNKNOWN";
+        }
+        if (procedure) {
+            return switch (columnType) {
+                case DatabaseMetaData.procedureColumnIn -> "IN";
+                case DatabaseMetaData.procedureColumnInOut -> "INOUT";
+                case DatabaseMetaData.procedureColumnOut -> "OUT";
+                case DatabaseMetaData.procedureColumnReturn -> "RETURN";
+                default -> "UNKNOWN";
+            };
+        }
+        return switch (columnType) {
+            case DatabaseMetaData.functionColumnIn -> "IN";
+            case DatabaseMetaData.functionColumnInOut -> "INOUT";
+            case DatabaseMetaData.functionColumnOut -> "OUT";
+            case DatabaseMetaData.functionReturn -> "RETURN";
+            default -> "UNKNOWN";
+        };
+    }
+
+    private static String metadataString(ResultSet result, String column) {
+        try {
+            return result.getString(column);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return null;
+        }
+    }
+
+    private static Integer metadataInteger(ResultSet result, String column) {
+        try {
+            Object value = result.getObject(column);
+            if (value instanceof Number number) {
+                return number.intValue();
+            }
+            if (value instanceof String text && !text.isBlank()) {
+                return Integer.valueOf(text.trim());
+            }
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException | NumberFormatException ignored) {
+        }
+        return null;
+    }
+
+    private static String escapeJdbcMetadataPattern(DatabaseMetaData meta, String value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            String escape = meta.getSearchStringEscape();
+            if (escape == null || escape.isEmpty()) {
+                return value;
+            }
+            return value.replace(escape, escape + escape).replace("%", escape + "%").replace("_", escape + "_");
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return value;
+        }
+    }
+
+    private static void putOptionalInt(ObjectNode node, String field, Integer value) {
+        if (value != null) {
+            node.put(field, value);
+        }
+    }
+
+    private static JsonNode sybaseViewObjectSource(
+        JsonNode connection,
+        Connection conn,
+        String database,
+        String schema,
+        String name,
+        String objectType
+    ) throws SQLException {
+        applyExecutionContext(connection, conn, database, schema);
+        String sql = "SELECT sc.text FROM sysobjects so, syscomments sc "
+            + "WHERE user_name(so.uid) = ? AND so.name = ? AND sc.id = so.id ORDER BY sc.colid";
+        StringBuilder source = new StringBuilder();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, schema);
+            ps.setString(2, name);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String fragment = rs.getString(1);
+                    if (fragment != null) {
+                        source.append(fragment);
+                    }
+                }
+            }
+        }
+        String ddl = source.toString();
+        if (ddl.isBlank()) {
+            throw new SQLException("Object source not found");
+        }
+
+        ObjectNode item = MAPPER.createObjectNode();
+        item.put("name", name);
+        item.put("object_type", objectType);
+        putNullable(item, "schema", emptyToNull(schema));
+        item.put("source", ddl);
+        return item;
+    }
+
+    /**
+     * Table source for generic external JDBC drivers (JDBCX wrappers, custom
+     * protocol drivers) that expose no vendor DDL statement: assemble CREATE
+     * TABLE from {@code DatabaseMetaData} via the same readers the browse RPCs
+     * use, so driver quirks (catalog fallback, PK marking, tolerance of
+     * unimplemented metadata methods) apply identically.
+     */
+    private static JsonNode genericTableObjectSource(JsonNode connection, String database, String schema, String table)
+        throws SQLException {
+        JsonNode columns = getColumns(connection, database, schema, table);
+        if (!columns.isArray() || columns.isEmpty()) {
+            throw new SQLException("Object source not found");
+        }
+        JsonNode indexes = listIndexes(connection, database, schema, table);
+
+        JsonNode foreignKeys;
+        try (Connection conn = openConnection(connection)) {
+            DatabaseMetaData meta = conn.getMetaData();
+            JdbcDriverQuirks quirks = driverQuirks(connection);
+            String catalog = metadataCatalog(database, quirks);
+            String schemaPattern = resolveSchemaPattern(meta, database, schema, quirks);
+            foreignKeys = listGenericForeignKeys(meta, catalog, schemaPattern, table);
+            if (foreignKeys.isEmpty() && isSybaseConnection(connection) && schemaPattern != null) {
+                foreignKeys = listGenericForeignKeys(meta, catalog, null, table);
+            }
+        }
+
+        String source = GenericJdbcDdlBuilder.buildTableDdl(
+            emptyToNull(schema) != null ? schema : emptyToNull(database),
+            table,
+            columns,
+            indexes,
+            foreignKeys
+        );
+        ObjectNode item = MAPPER.createObjectNode();
+        item.put("name", table);
+        item.put("object_type", "TABLE");
+        putNullable(item, "schema", emptyToNull(schema));
+        item.put("source", source);
+        return item;
+    }
+
+    private static JsonNode listGenericForeignKeys(DatabaseMetaData meta, String catalog, String schemaPattern, String table) {
+        ArrayNode result = MAPPER.createArrayNode();
+        try (ResultSet rs = meta.getImportedKeys(catalog, schemaPattern, table)) {
+            while (rs != null && rs.next()) {
+                String column = rs.getString("FKCOLUMN_NAME");
+                String refTable = rs.getString("PKTABLE_NAME");
+                String refColumn = rs.getString("PKCOLUMN_NAME");
+                if (column == null || column.isBlank() || refTable == null || refTable.isBlank()
+                    || refColumn == null || refColumn.isBlank()) {
+                    continue;
+                }
+                ObjectNode item = MAPPER.createObjectNode();
+                item.put("name", rs.getString("FK_NAME"));
+                item.put("column", column);
+                item.put("ref_table", refTable);
+                item.put("ref_column", refColumn);
+                result.add(item);
+            }
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            // Foreign keys are optional detail; generic DDL must still succeed.
+        }
+        return result;
+    }
+
+    private static JsonNode hive2ShowCreateObjectSource(
+        Connection conn,
+        String database,
+        String schema,
+        String name,
+        String objectType
+    ) throws SQLException {
+        LinkedHashSet<String> candidates = hive2DatabaseCandidates(database, schema);
+        if (candidates.isEmpty()) {
+            throw new SQLException("Object source requires database context for Hive/Inceptor objects");
+        }
+
+        SQLException lastError = null;
+        for (String candidateSchema : candidates) {
+            String sql = "SHOW CREATE TABLE " + qualifiedHiveName(candidateSchema, name);
+            try (Statement statement = conn.createStatement();
+                 ResultSet rs = statement.executeQuery(sql)) {
+                StringBuilder source = new StringBuilder();
+                while (rs.next()) {
+                    String line = rs.getString(1);
+                    if (line == null || line.isBlank()) {
+                        continue;
+                    }
+                    if (!source.isEmpty()) {
+                        source.append('\n');
+                    }
+                    source.append(line);
+                }
+                if (source.isEmpty()) {
+                    continue;
+                }
+                if (source.charAt(source.length() - 1) != '\n') {
+                    source.append('\n');
+                }
+                ObjectNode item = MAPPER.createObjectNode();
+                item.put("name", name);
+                item.put("object_type", objectType);
+                putNullable(item, "schema", emptyToNull(schema) != null ? schema : candidateSchema);
+                putNullable(item, "source", source.toString());
+                return item;
+            } catch (SQLException error) {
+                lastError = error;
+            }
+        }
+
+        if (lastError != null) {
+            throw lastError;
+        }
+        throw new SQLException("Object source not found");
+    }
+
+    private static LinkedHashSet<String> hive2DatabaseCandidates(String database, String schema) {
+        LinkedHashSet<String> candidates = new LinkedHashSet<>();
+        String db = emptyToNull(database);
+        if (db != null) {
+            candidates.add(db);
+        }
+        String sc = emptyToNull(schema);
+        if (sc != null) {
+            candidates.add(sc);
+        }
+        return candidates;
+    }
+
+    private static String qualifiedHiveName(String schema, String table) {
+        String trimmedSchema = schema == null ? "" : schema.trim();
+        String trimmedTable = table == null ? "" : table.trim();
+        if (trimmedSchema.isEmpty()) {
+            return quoteHiveBacktickIdentifier(trimmedTable);
+        }
+        return quoteHiveBacktickIdentifier(trimmedSchema) + "." + quoteHiveBacktickIdentifier(trimmedTable);
+    }
+
+    private static String quoteHiveBacktickIdentifier(String identifier) {
+        return "`" + identifier.replace("`", "``") + "`";
     }
 
     private static String oracleMetadataObjectType(String objectType) {
@@ -4041,14 +6119,18 @@ public final class DbxJdbcPlugin {
     }
 
     private static JsonNode oracleGetColumns(Connection conn, String owner, String table) throws SQLException {
+        return oracleGetColumns(conn, owner, table, false);
+    }
+
+    private static JsonNode oracleGetColumns(Connection conn, String owner, String table, boolean exactIdentity) throws SQLException {
         ArrayNode result = MAPPER.createArrayNode();
-        String resolvedTable = oracleResolveTable(conn, owner, table);
-        Set<String> pks = oraclePrimaryKeys(conn, owner, resolvedTable);
+        String resolvedTable = exactIdentity ? table : oracleResolveTable(conn, owner, table);
+        Set<String> pks = oraclePrimaryKeys(conn, owner, resolvedTable, exactIdentity);
         // data_default is a LONG column — it must be read first in JDBC, before any other
         // column, otherwise the data is truncated. We put it at position 1 for this reason.
         String sql =
             "SELECT c.data_default, c.column_name, c.data_type, c.nullable, " +
-            "c.data_precision, c.data_scale, c.char_length, cc.comments " +
+            "c.data_precision, c.data_scale, c.char_length, c.data_length, c.char_used, cc.comments " +
             "FROM all_tab_columns c " +
             "LEFT JOIN all_col_comments cc ON cc.owner = c.owner AND cc.table_name = c.table_name AND cc.column_name = c.column_name " +
             "WHERE c.owner = ? AND c.table_name = ? ORDER BY c.column_id";
@@ -4061,7 +6143,7 @@ public final class DbxJdbcPlugin {
                     String dataDefault = rs.getString("data_default");
                     String name = rs.getString("column_name");
                     ObjectNode item = columnNode(result, name);
-                    item.put("data_type", rs.getString("data_type"));
+                    item.put("data_type", oracleColumnDataType(rs));
                     item.put("is_nullable", !"N".equals(rs.getString("nullable")));
                     putNullablePreferValue(item, "column_default", dataDefault);
                     item.put("is_primary_key", pks.contains(name));
@@ -4074,6 +6156,7 @@ public final class DbxJdbcPlugin {
                 return result;
             }
         } catch (SQLException e) {
+            if (exactIdentity) throw e;
             result.removeAll();
             try {
                 DatabaseMetaData meta = conn.getMetaData();
@@ -4085,7 +6168,47 @@ public final class DbxJdbcPlugin {
         }
     }
 
+    private static String oracleColumnDataType(ResultSet rows) throws SQLException {
+        String base = rows.getString("data_type");
+        if (base == null || base.isBlank()) return "";
+        Integer precision = oracleMetadataInteger(rows, "data_precision");
+        Integer scale = oracleMetadataInteger(rows, "data_scale");
+        Integer bytes = oracleMetadataInteger(rows, "data_length");
+        Integer characters = oracleMetadataInteger(rows, "char_length");
+        String unit = rows.getString("char_used");
+        return switch (base.toUpperCase(Locale.ROOT)) {
+            case "VARCHAR2", "CHAR" -> {
+                if ("B".equalsIgnoreCase(unit) && bytes != null) yield base + "(" + bytes + " BYTE)";
+                if ("C".equalsIgnoreCase(unit) && characters != null) yield base + "(" + characters + " CHAR)";
+                Integer length = characters == null ? bytes : characters;
+                yield length == null ? base : base + "(" + length + ")";
+            }
+            case "NVARCHAR2", "NCHAR" -> {
+                Integer length = characters == null ? bytes : characters;
+                yield length == null ? base : base + "(" + length + ")";
+            }
+            case "NUMBER" -> {
+                if (precision == null && scale != null) yield base + "(*," + scale + ")";
+                if (precision != null && scale != null && scale != 0) yield base + "(" + precision + "," + scale + ")";
+                if (precision != null && precision > 0) yield base + "(" + precision + ")";
+                yield base;
+            }
+            case "FLOAT" -> precision != null && precision > 0 ? base + "(" + precision + ")" : base;
+            case "RAW" -> bytes == null ? base : base + "(" + bytes + ")";
+            default -> base;
+        };
+    }
+
+    private static Integer oracleMetadataInteger(ResultSet rows, String column) throws SQLException {
+        Object value = rows.getObject(column);
+        return value instanceof Number number ? number.intValue() : null;
+    }
+
     private static Set<String> oraclePrimaryKeys(Connection conn, String owner, String table) throws SQLException {
+        return oraclePrimaryKeys(conn, owner, table, false);
+    }
+
+    private static Set<String> oraclePrimaryKeys(Connection conn, String owner, String table, boolean exactIdentity) throws SQLException {
         String sql =
             "SELECT cols.column_name FROM all_constraints cons " +
             "JOIN all_cons_columns cols ON cons.constraint_name = cols.constraint_name AND cons.owner = cols.owner " +
@@ -4101,6 +6224,7 @@ public final class DbxJdbcPlugin {
                 return keys;
             }
         } catch (SQLException e) {
+            if (exactIdentity) throw e;
             return safePrimaryKeys(conn.getMetaData(), null, owner, table);
         }
     }
@@ -4111,7 +6235,7 @@ public final class DbxJdbcPlugin {
         int index,
         boolean preserveOracleDateTime
     ) throws SQLException {
-        return readValue(rs, meta, index, preserveOracleDateTime, null);
+        return readValue(rs, meta, index, preserveOracleDateTime, null, false);
     }
 
     private static Object readValue(
@@ -4119,9 +6243,27 @@ public final class DbxJdbcPlugin {
         ResultSetMetaData meta,
         int index,
         boolean preserveOracleDateTime,
-        ZoneId timestampZone
+        ZoneId timestampZone,
+        boolean bitStringColumns
+    ) throws SQLException {
+        return readValue(rs, meta, index, preserveOracleDateTime, timestampZone, bitStringColumns, false);
+    }
+
+    private static Object readValue(
+        ResultSet rs,
+        ResultSetMetaData meta,
+        int index,
+        boolean preserveOracleDateTime,
+        ZoneId timestampZone,
+        boolean bitStringColumns,
+        boolean fullPrecisionIntegers
     ) throws SQLException {
         int columnType = meta.getColumnType(index);
+
+        if (fullPrecisionIntegers && (columnType == Types.TINYINT || columnType == Types.SMALLINT
+            || columnType == Types.INTEGER || columnType == Types.BIGINT)) {
+            return rs.getBigDecimal(index);
+        }
 
         if (columnType == Types.BOOLEAN) {
             boolean boolValue = rs.getBoolean(index);
@@ -4131,12 +6273,39 @@ public final class DbxJdbcPlugin {
             return null;
         }
 
+        if (columnType == Types.CHAR
+            || columnType == Types.VARCHAR
+            || columnType == Types.LONGVARCHAR
+            || columnType == Types.NCHAR
+            || columnType == Types.NVARCHAR
+            || columnType == Types.LONGNVARCHAR) {
+            return rs.getString(index);
+        }
+
         // Phoenix exposes VARBINARY_ENCODED as a private type id (9000). Read it through the
         // binary JDBC accessor before a generic getObject() path can ask the driver for an
         // unsupported Java representation.
         if (isPhoenixEncodedBinaryColumn(meta, index, columnType)) {
             byte[] bytes = rs.getBytes(index);
             return bytes == null ? null : binaryToHex(bytes);
+        }
+
+        if (bitStringColumns && isBitStringColumn(meta, index, columnType)) {
+            Object bitValue = readBitStringColumnValue(rs, meta, index);
+            if (bitValue != BIT_COLUMN_UNSUPPORTED) {
+                return bitValue;
+            }
+        }
+
+        if (columnType == -101 || columnType == -102) {
+            String typeName = meta.getColumnTypeName(index);
+            if (typeName != null) {
+                String normalizedType = typeName.trim().toUpperCase(Locale.ROOT);
+                if ((columnType == -101 && normalizedType.equals("TIMESTAMP WITH TIME ZONE"))
+                    || (columnType == -102 && normalizedType.equals("TIMESTAMP WITH LOCAL TIME ZONE"))) {
+                    return rs.getString(index);
+                }
+            }
         }
 
         Object value = rs.getObject(index);
@@ -4298,6 +6467,116 @@ public final class DbxJdbcPlugin {
         return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 
+    /**
+     * readBitStringColumnValue 的哨兵：驱动读不出位串（例如 mssql-jdbc 不允许把 BIT 读成 byte[]），
+     * 调用方据此回落到原来的取值路径。SQL NULL 用 null 表示，两者必须分开。
+     */
+    private static final Object BIT_COLUMN_UNSUPPORTED = new Object();
+
+    private static boolean isBitStringColumn(ResultSetMetaData meta, int index, int columnType) {
+        String typeName = columnTypeName(meta, index);
+        String normalized = typeName.trim().toLowerCase(Locale.ROOT);
+        if (normalized.equals("bool") || normalized.equals("boolean")) {
+            // 金仓/PostgreSQL 的布尔列走 Types.BIT 上报，它们继续保持布尔值。
+            return false;
+        }
+        if (normalized.equals("bit") || normalized.equals("varbit") || normalized.startsWith("bit ")
+            || normalized.startsWith("bit(") || normalized.startsWith("bit varying")) {
+            return true;
+        }
+        return columnType == Types.BIT;
+    }
+
+    private static String columnTypeName(ResultSetMetaData meta, int index) {
+        try {
+            String typeName = meta.getColumnTypeName(index);
+            return typeName == null ? "" : typeName;
+        } catch (SQLException | RuntimeException error) {
+            return "";
+        }
+    }
+
+    private static Object readBitStringColumnValue(ResultSet rs, ResultSetMetaData meta, int index) throws SQLException {
+        byte[] payload;
+        try {
+            payload = rs.getBytes(index);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException error) {
+            return BIT_COLUMN_UNSUPPORTED;
+        }
+        if (payload == null) {
+            // wasNull() 区分 SQL NULL 与「驱动不支持按字节读取」。
+            return rs.wasNull() ? null : BIT_COLUMN_UNSUPPORTED;
+        }
+        int precision = bitColumnPrecision(meta, index);
+        if (payload.length == 1 && precision <= 1 && (payload[0] == 't' || payload[0] == 'f')) {
+            // GaussDB/金仓的布尔位串按 't'/'f' 返回，保持布尔语义；位宽大于 1 的列是位字段而不是布尔。
+            return payload[0] == 't';
+        }
+        if (payload.length == 1 && precision == 1 && payload[0] != 0x00 && payload[0] != 0x01
+            && payload[0] != '0' && payload[0] != '1') {
+            // Connector/J 默认把 tinyint(1) 上报成 Types.BIT 且位宽为 1，载荷超出 0/1 说明是数值列：
+            // 截成单个比特会静默丢数据，按有符号字节十进制展示（`'0'`/`'1'` 文本是驱动的位串形式，除外）。
+            return payload[0];
+        }
+        String bitString = bitStringFromPayload(payload, precision);
+        // 位宽不可信时 bitStringFromPayload 返回 null（不是 SQL NULL），交给通用分支保持 `0x..` 展示。
+        return bitString == null ? BIT_COLUMN_UNSUPPORTED : bitString;
+    }
+
+    private static int bitColumnPrecision(ResultSetMetaData meta, int index) {
+        try {
+            return meta.getPrecision(index);
+        } catch (SQLException | RuntimeException error) {
+            return 0;
+        }
+    }
+
+    /**
+     * 把 BIT 列的字节载荷还原成位串：
+     *
+     * - `0x30`/`0x31`（`'0'`/`'1'` 文本）是 PG 家族驱动的文本形式，位串长度等于声明位宽；
+     * - 其余载荷是裸位字段（MySQL 的 `bit(n)`、驱动不返回文本的 PG 列），按声明位宽展开；
+     * - 声明位宽超出载荷容量时返回 null，交给调用方保持原有的 `0x..` 展示。
+     */
+    private static String bitStringFromPayload(byte[] payload, int precision) {
+        if (payload.length == 0) {
+            return "";
+        }
+        if (isAsciiBitStringPayload(payload) && (precision <= 0 || payload.length == precision)) {
+            return new String(payload, StandardCharsets.US_ASCII);
+        }
+        int width = precision > 0 ? precision : significantBitWidth(payload);
+        if (width > payload.length * 8) {
+            return null;
+        }
+        StringBuilder bits = new StringBuilder(width);
+        for (int bit = width - 1; bit >= 0; bit--) {
+            int value = payload[payload.length - 1 - bit / 8];
+            bits.append(((value >> bit % 8) & 1) == 1 ? '1' : '0');
+        }
+        return bits.toString();
+    }
+
+    private static boolean isAsciiBitStringPayload(byte[] payload) {
+        for (byte value : payload) {
+            if (value != '0' && value != '1') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 没有声明位宽时，用能表达该数值的最短位宽（`0x00` -> 1 位，`0xaa` -> 8 位）。 */
+    private static int significantBitWidth(byte[] payload) {
+        for (int index = 0; index < payload.length; index++) {
+            int value = payload[index] & 0xff;
+            if (value != 0) {
+                return (payload.length - index - 1) * 8 + (32 - Integer.numberOfLeadingZeros(value));
+            }
+        }
+        return 1;
+    }
+
     private static String binaryToHex(byte[] bytes) {
         StringBuilder out = new StringBuilder(2 + bytes.length * 2);
         out.append("0x");
@@ -4346,12 +6625,40 @@ public final class DbxJdbcPlugin {
         }
     }
 
+    private static boolean exactMetadataRead(JsonNode params) {
+        JsonNode mode = params.get("identity_mode"), alias = params.get("identityMode");
+        if (mode == null || mode.isNull()) mode = alias;
+        if (mode == null || mode.isNull()) return false;
+        if (!mode.isTextual() || !mode.asText().equals("exact") || alias != null && !alias.isNull() && !mode.equals(alias)) {
+            throw new IllegalArgumentException("Unsupported or conflicting metadata identity mode");
+        }
+        return true;
+    }
+
+    private static String triggerMetadataText(JsonNode params, String field, boolean required) {
+        if (!exactMetadataRead(params)) return required ? requireText(params, field) : optionalText(params, field);
+        JsonNode value = params.get(field);
+        if (value == null || value.isNull()) {
+            if (required) throw new IllegalArgumentException(field + " is required.");
+            return null;
+        }
+        if (!value.isTextual() || required && value.asText().isEmpty()) throw new IllegalArgumentException(field + " must be a non-empty string.");
+        return value.asText();
+    }
+
     private static String requireText(JsonNode node, String field) {
         String value = optionalText(node, field);
         if (value == null) {
             throw new IllegalArgumentException(field + " is required.");
         }
         return value;
+    }
+
+    private static String metadataText(JsonNode node, String field, boolean exactIdentity) {
+        if (!exactIdentity) return "table".equals(field) ? requireText(node, field) : optionalText(node, field);
+        JsonNode value = node.path(field);
+        if (!value.isTextual() || value.asText().isEmpty()) throw new IllegalArgumentException(field + " is required for exact metadata identity");
+        return value.asText();
     }
 
     private static String optionalText(JsonNode node, String field) {

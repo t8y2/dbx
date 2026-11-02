@@ -53,7 +53,9 @@ Set **Notes file** in the connection's **Advanced** settings (stored as `docs_no
 
 Keys are `schema.table` and `schema.table.column`, folded to match how the engine treats identifier case. Writes are atomic — the file is written beside its target and renamed — so an interrupted save cannot leave a half-written file where your prose used to be.
 
-<Callout type="warn">A missing notes file is fine and starts empty. A malformed one is a hard error, deliberately: proceeding would render apparently-complete documentation while silently discarding writing.</Callout>
+The AI assistant reads the same notes file when it builds its schema context. A table or column note becomes that object's description and takes precedence over the database comment, so business meanings written here reach the model without issuing `COMMENT ON`.
+
+<Callout type="warn">A missing notes file is fine and starts empty. A malformed one is a hard error in the documentation viewer, deliberately: proceeding would render apparently-complete documentation while silently discarding writing. The AI assistant stays usable instead: it falls back to database comments and tells the model that local notes are unavailable.</Callout>
 
 ## Warnings
 

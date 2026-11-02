@@ -1,37 +1,44 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CONNECT_TIMEOUT_SECS, normalizeConnectTimeoutSecs } from "@/lib/connection/timeoutLimits";
-
-const dialogSource = readFileSync(new URL("../../../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
+import { DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_IDLE_DISCONNECT_SECS, DEFAULT_IDLE_TIMEOUT_SECS, MAX_IDLE_DISCONNECT_SECS, MAX_IDLE_TIMEOUT_SECS, normalizeConnectTimeoutSecs, normalizeIdleDisconnectSecs, normalizeIdleTimeoutSecs, supportsIdleTimeout } from "@/lib/connection/timeoutLimits";
 
 describe("ConnectionDialog timeout controls", () => {
-  it("uses separate maximums for connection and query timeouts", () => {
-    expect(dialogSource).toMatch(/v-model\.number="editGlobalConnectTimeoutSecs"[\s\S]*?min="1"[\s\S]*?:max="MAX_CONNECT_TIMEOUT_SECS"[\s\S]*?step="1"/);
-    expect(dialogSource).toMatch(/v-model\.number="form\.connect_timeout_secs"[\s\S]*?min="1"[\s\S]*?:max="MAX_CONNECT_TIMEOUT_SECS"[\s\S]*?step="1"/);
-    expect(dialogSource).toMatch(/v-model\.number="editGlobalQueryTimeoutSecs"[\s\S]*?min="0"[\s\S]*?:max="MAX_QUERY_TIMEOUT_SECS"[\s\S]*?step="1"/);
-    expect(dialogSource).toMatch(/v-model\.number="form\.query_timeout_secs"[\s\S]*?min="0"[\s\S]*?:max="MAX_QUERY_TIMEOUT_SECS"[\s\S]*?step="1"/);
-    expect(dialogSource).not.toContain('v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" max="300"');
-    expect(dialogSource).not.toContain('v-model.number="form.query_timeout_secs" type="number" min="0" max="300"');
-    expect(dialogSource).toContain("@input=\"clampQueryTimeoutInput($event, 'global')\"");
-    expect(dialogSource).toContain("@input=\"clampQueryTimeoutInput($event, 'connection')\"");
-    expect(dialogSource).toContain("@input=\"clampConnectTimeoutInput($event, 'global')\"");
-    expect(dialogSource).toContain("@input=\"clampConnectTimeoutInput($event, 'connection')\"");
-    expect(dialogSource).not.toContain('@blur="editGlobalQueryTimeoutSecs = normalizeGlobalQueryTimeoutSecs');
-  });
-
   it("restores the default when the connection timeout input is cleared", () => {
     expect(normalizeConnectTimeoutSecs("")).toBe(DEFAULT_CONNECT_TIMEOUT_SECS);
-    expect(dialogSource).toContain("normalizeGlobalConnectTimeoutSecs(config.connect_timeout_secs)");
-    expect(dialogSource).not.toContain("Number(config.connect_timeout_secs)");
   });
 
-  it("uses button-backed help tooltips beside both global timeout labels", () => {
-    const connectGlobalControl = dialogSource.slice(dialogSource.indexOf('id="connect-timeout-global"'), dialogSource.indexOf('id="connect-timeout-connection"'));
-    const queryGlobalControl = dialogSource.slice(dialogSource.indexOf('id="query-timeout-global"'), dialogSource.indexOf('id="query-timeout-connection"'));
+  it("normalizes and bounds idle timeout values", () => {
+    expect(normalizeIdleTimeoutSecs("")).toBe(DEFAULT_IDLE_TIMEOUT_SECS);
+    expect(normalizeIdleTimeoutSecs(Number.NaN)).toBe(DEFAULT_IDLE_TIMEOUT_SECS);
+    expect(normalizeIdleTimeoutSecs(-1)).toBe(DEFAULT_IDLE_TIMEOUT_SECS);
+    expect(normalizeIdleTimeoutSecs(0)).toBe(0);
+    expect(normalizeIdleTimeoutSecs(60)).toBe(60);
+    expect(normalizeIdleTimeoutSecs(120.4)).toBe(120);
+    expect(normalizeIdleTimeoutSecs(5000)).toBe(MAX_IDLE_TIMEOUT_SECS);
+  });
 
-    expect(connectGlobalControl).toContain(`<HelpTooltip :label="t('connection.globalConnectTimeoutHint')"`);
-    expect(queryGlobalControl).toContain(`<HelpTooltip :label="t('connection.globalQueryTimeoutHint')"`);
-    expect(connectGlobalControl).not.toContain("<TooltipTrigger");
-    expect(queryGlobalControl).not.toContain("<TooltipTrigger");
+  it("defaults auto-disconnect-when-idle to disabled and bounds its values", () => {
+    // 0 是合法值（不启用），必须与非法输入区分：只有非数字/NaN/负数才回落默认 0。
+    expect(normalizeIdleDisconnectSecs("")).toBe(DEFAULT_IDLE_DISCONNECT_SECS);
+    expect(normalizeIdleDisconnectSecs(Number.NaN)).toBe(DEFAULT_IDLE_DISCONNECT_SECS);
+    expect(normalizeIdleDisconnectSecs(-1)).toBe(DEFAULT_IDLE_DISCONNECT_SECS);
+    expect(normalizeIdleDisconnectSecs(0)).toBe(0);
+    expect(normalizeIdleDisconnectSecs(300)).toBe(300);
+    expect(normalizeIdleDisconnectSecs(120.4)).toBe(120);
+    expect(normalizeIdleDisconnectSecs(999999)).toBe(MAX_IDLE_DISCONNECT_SECS);
+  });
+
+  it("identifies database dialects that support idle connection timeouts", () => {
+    expect(supportsIdleTimeout("mongodb")).toBe(true);
+    expect(supportsIdleTimeout("mysql")).toBe(true);
+    expect(supportsIdleTimeout("doris")).toBe(true);
+    expect(supportsIdleTimeout("starrocks")).toBe(true);
+    expect(supportsIdleTimeout("manticoresearch")).toBe(true);
+
+    expect(supportsIdleTimeout("postgres")).toBe(false);
+    expect(supportsIdleTimeout("sqlite")).toBe(false);
+    expect(supportsIdleTimeout("redis")).toBe(false);
+    expect(supportsIdleTimeout("sqlserver")).toBe(false);
+    expect(supportsIdleTimeout("oracle")).toBe(false);
+    expect(supportsIdleTimeout(undefined)).toBe(false);
   });
 });

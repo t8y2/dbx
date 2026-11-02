@@ -1,9 +1,20 @@
 import type { DatabaseType } from "@/types/database";
 
+/** Native Oracle and OceanBase Oracle share multi-schema completion semantics. */
+export function isOracleCompletionDatabase(databaseType?: DatabaseType): boolean {
+  return databaseType === "oracle" || databaseType === "oceanbase-oracle";
+}
+
+/** Engines whose sequences are addressed like Oracle's (SEQ.NEXTVAL / SEQ.CURRVAL). */
+export function isSequenceCompletionDatabase(databaseType?: DatabaseType): boolean {
+  return isOracleCompletionDatabase(databaseType) || databaseType === "dameng";
+}
+
 export function usesOracleCurrentSchemaCompletion(databaseType?: DatabaseType, schema?: string | null): boolean {
-  return (databaseType === "oracle" || databaseType === "oceanbase-oracle") && !schema;
+  return isOracleCompletionDatabase(databaseType) && !schema;
 }
 
 export function usesOracleSessionCompletionColumns(options: { databaseType?: DatabaseType; selectedSchema?: string; referenceSchema?: string | null; clientSessionId?: string }): boolean {
-  return usesOracleCurrentSchemaCompletion(options.databaseType, options.referenceSchema || options.selectedSchema) && !!options.clientSessionId;
+  const schema = options.databaseType === "oceanbase-oracle" ? options.referenceSchema : options.referenceSchema || options.selectedSchema;
+  return usesOracleCurrentSchemaCompletion(options.databaseType, schema) && !!options.clientSessionId;
 }

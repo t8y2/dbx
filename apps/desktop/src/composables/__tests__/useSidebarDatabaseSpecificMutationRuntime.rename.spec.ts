@@ -177,6 +177,33 @@ function milvusCollectionNode(): TreeNode {
   };
 }
 
+describe("MongoDB collection rename availability", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  it("offers rename on both the native driver and the Legacy Agent", () => {
+    // The Agent has renameCollection (capability-gated in the backend), so the menu no longer
+    // hides the action on legacy connections; a read-only connection still gets nothing.
+    for (const driver_profile of [undefined, "mongodb-native", "mongodb-legacy"]) {
+      mocks.getConfig.mockReturnValue({ id: "conn-1", name: "Mongo", db_type: "mongodb", host: "localhost", port: 27017, username: "op", password: "", driver_profile });
+      const activeNode = shallowRef(collectionNode());
+      const { canRenameMongoCollection } = useSidebarDatabaseSpecificMutationRuntime({
+        activeNode,
+        connectionStore: { getConfig: mocks.getConfig, ensureConnected: mocks.ensureConnected, loadMongoCollections: mocks.loadMongoCollections, treeNodes: [] } as any,
+      });
+      expect(canRenameMongoCollection.value, `driver_profile=${driver_profile}`).toBe(true);
+    }
+    mocks.getConfig.mockReturnValue({ id: "conn-1", name: "Mongo", db_type: "mongodb", host: "localhost", port: 27017, username: "op", password: "", driver_profile: "mongodb-legacy", read_only: true });
+    const { canRenameMongoCollection } = useSidebarDatabaseSpecificMutationRuntime({
+      activeNode: shallowRef(collectionNode()),
+      connectionStore: { getConfig: mocks.getConfig, ensureConnected: mocks.ensureConnected, loadMongoCollections: mocks.loadMongoCollections, treeNodes: [] } as any,
+    });
+    expect(canRenameMongoCollection.value).toBe(false);
+  });
+});
+
 describe("Milvus collection rename", () => {
   beforeEach(() => {
     setActivePinia(createPinia());

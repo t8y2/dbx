@@ -1,9 +1,12 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
 };
 
-use dbx_core::storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState};
+use dbx_core::storage::{
+    AppAppearanceSettings, AppAppearanceSettingsPatch, DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState,
+};
 use tauri::{AppHandle, Manager, State, Window};
 
 use super::connection::AppState;
@@ -13,6 +16,30 @@ use crate::{
 };
 
 const DEVELOPMENT_OPEN_TABS_STATE_KEY: &str = "development_open_tabs";
+const DETACHED_TABS_STATE_KEY: &str = "detached_tabs";
+static DETACHED_TABS_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static APPROVED_DETACHED_CLOSES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn detached_tabs_lock() -> &'static tokio::sync::Mutex<()> {
+    DETACHED_TABS_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn approved_detached_closes() -> &'static Mutex<HashSet<String>> {
+    APPROVED_DETACHED_CLOSES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+pub(crate) fn take_approved_detached_window_close(label: &str) -> bool {
+    approved_detached_closes().lock().map(|mut labels| labels.remove(label)).unwrap_or(false)
+}
+
+async fn load_detached_tabs_map(state: &AppState) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    Ok(state
+        .storage
+        .load_open_tabs_state_with_key(DETACHED_TABS_STATE_KEY)
+        .await?
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default())
+}
 
 fn open_tabs_state_key(debug_build: bool) -> &'static str {
     if debug_build {
@@ -59,14 +86,61 @@ pub async fn load_max_agent_turns(state: State<'_, Arc<AppState>>) -> Result<u32
 }
 
 #[tauri::command]
-pub fn set_app_locale(app: AppHandle, locale_state: State<'_, AppLocaleState>, locale: String) -> Result<(), String> {
+pub async fn load_app_appearance_settings(state: State<'_, Arc<AppState>>) -> Result<AppAppearanceSettings, String> {
+    state.storage.load_app_appearance_settings().await
+}
+
+#[tauri::command]
+pub async fn update_app_appearance_settings(
+    state: State<'_, Arc<AppState>>,
+    patch: AppAppearanceSettingsPatch,
+) -> Result<(), String> {
+    state.storage.update_app_appearance_settings(&patch).await
+}
+
+#[tauri::command]
+pub async fn set_app_locale(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    locale_state: State<'_, AppLocaleState>,
+    locale: String,
+) -> Result<(), String> {
     locale_state.set(locale);
-    refresh_native_menus(&app).map_err(|err| format!("failed to refresh native menus: {err}"))
+    let persistence = state
+        .storage
+        .update_app_appearance_settings(&AppAppearanceSettingsPatch {
+            locale: Some(locale_state.get()),
+            ..Default::default()
+        })
+        .await;
+    let refresh = refresh_native_menus(&app).map_err(|err| format!("failed to refresh native menus: {err}"));
+    persistence?;
+    refresh
 }
 
 #[tauri::command]
 pub async fn save_max_agent_turns(state: State<'_, Arc<AppState>>, max_agent_turns: u32) -> Result<(), String> {
     state.storage.save_max_agent_turns(max_agent_turns).await
+}
+
+#[tauri::command]
+pub async fn load_history_retention_limit(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
+    state.storage.load_history_retention_limit().await
+}
+
+#[tauri::command]
+pub async fn save_history_retention_limit(state: State<'_, Arc<AppState>>, limit: u32) -> Result<(), String> {
+    state.storage.save_history_retention_limit(limit).await
+}
+
+#[tauri::command]
+pub async fn load_mcp_history_retention_limit(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
+    state.storage.load_mcp_history_retention_limit().await
+}
+
+#[tauri::command]
+pub async fn save_mcp_history_retention_limit(state: State<'_, Arc<AppState>>, limit: u32) -> Result<(), String> {
+    state.storage.save_mcp_history_retention_limit(limit).await
 }
 
 #[tauri::command]
@@ -85,6 +159,19 @@ pub async fn complete_app_close(app: AppHandle, window: Window, action: String) 
         "quit" => {
             if let Some(state) = app.try_state::<CloseBehaviorState>() {
                 state.allow_next_exit();
+            }
+            #[cfg(target_os = "macos")]
+            {
+                // Take the whole app off-screen first so WKWebView teardown during
+                // process exit cannot flash the window red on macOS 12. `AppHandle::hide`
+                // is macOS-only, so this block is compiled per-platform.
+                // Hiding can blank the frame, and the window-state plugin saves
+                // at exit; keep the geometry `request_app_close` captured while
+                // the window was still visible (issue #13168).
+                crate::window_state_guard::remember_main_window_geometry(&app);
+                let _ = window.hide();
+                let _ = app.hide();
+                tokio::time::sleep(std::time::Duration::from_millis(crate::EXIT_HIDE_GRACE_MS)).await;
             }
             app.exit(0);
         }
@@ -128,8 +215,127 @@ pub async fn load_mcp_global_policy(state: State<'_, Arc<AppState>>) -> Result<M
 }
 
 #[tauri::command]
+pub fn load_mcp_tool_catalog() -> dbx_core::mcp_catalog::McpToolCatalog {
+    dbx_mcp::DbxMcpServer::tool_catalog()
+}
+
+/// Plugin cards of the MCP capability tab (probes plugin sidecars).
+#[tauri::command]
+pub async fn list_plugin_mcp_views(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<dbx_core::plugin_mcp::PluginMcpView>, String> {
+    dbx_core::plugin_mcp::list_plugin_views(state.inner()).await
+}
+
+#[tauri::command]
+pub async fn load_plugin_mcp_view(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+) -> Result<dbx_core::plugin_mcp::PluginMcpView, String> {
+    dbx_core::plugin_mcp::plugin_view_for(state.inner(), &plugin_id).await
+}
+
+#[tauri::command]
+pub async fn list_mcp_plugin_scopes(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+    connection_id: String,
+) -> Result<serde_json::Value, String> {
+    let manifest = state
+        .plugins
+        .list_installed()?
+        .into_iter()
+        .find(|plugin| plugin.manifest.id == plugin_id)
+        .ok_or_else(|| format!("Plugin `{plugin_id}` is not installed."))?
+        .manifest;
+    let method = manifest
+        .mcp_contribution()
+        .and_then(|mcp| mcp.scope.as_ref())
+        .and_then(|scope| scope.list_method.as_deref())
+        .ok_or_else(|| "This plugin does not declare a scope list method.".to_string())?;
+    let policy = state.storage.load_enforced_mcp_policy().await?.policy();
+    let group_paths = match state.storage.load_sidebar_layout().await? {
+        Some(layout) => dbx_core::mcp_policy::connection_group_paths(&layout)
+            .map_err(|error| format!("MCP_POLICY_UNAVAILABLE: {error}"))?,
+        None => std::collections::HashMap::new(),
+    };
+    let connection = state
+        .storage
+        .load_connections()
+        .await?
+        .into_iter()
+        .find(|connection| connection.id == connection_id)
+        .ok_or_else(|| "CONNECTION_NOT_FOUND: connection is not available.".to_string())?;
+    if connection.plugin_id.as_deref() != Some(plugin_id.as_str()) {
+        return Err("CONNECTION_OUT_OF_SCOPE: connection is not owned by this plugin.".to_string());
+    }
+    if !dbx_core::mcp_policy::policy_allows_connection(&policy, group_paths.get(&connection.id), &connection.id) {
+        return Err("CONNECTION_OUT_OF_SCOPE: connection is not allowed by DBX MCP settings.".to_string());
+    }
+    let value = state
+        .plugin_host
+        .invoke::<serde_json::Value>(
+            &plugin_id,
+            method,
+            serde_json::json!({ "connectionId": connection.id }),
+            None,
+            Some(std::time::Duration::from_secs(8)),
+        )
+        .await?;
+    let values: Vec<String> = serde_json::from_value(
+        value
+            .get("values")
+            .cloned()
+            .ok_or_else(|| "Plugin scope list must return { values: string[] }.".to_string())?,
+    )
+    .map_err(|_| "Plugin scope list must return { values: string[] }.".to_string())?;
+    Ok(serde_json::json!({ "values": values }))
+}
+
+#[tauri::command]
+pub async fn save_plugin_mcp_grant(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+    grant: dbx_core::storage::PluginMcpGrant,
+    approve_current: bool,
+) -> Result<dbx_core::plugin_mcp::PluginMcpView, String> {
+    dbx_core::plugin_mcp::save_plugin_grant(state.inner(), &plugin_id, grant, approve_current).await
+}
+
+#[tauri::command]
+pub async fn load_mcp_access_policy(
+    state: State<'_, Arc<AppState>>,
+) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+    state.storage.load_mcp_access_policy().await
+}
+
+#[tauri::command]
+pub async fn set_mcp_plugin_scope_rule(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    kind: String,
+    value: Option<String>,
+    rule: Option<dbx_core::mcp_access::McpAccessRule>,
+    sub_scope: Option<dbx_core::mcp_access::McpSubScopeMode>,
+) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+    let access =
+        dbx_core::plugin_mcp::set_scope_rule(&state, &connection_id, &kind, value.as_deref(), rule, sub_scope).await?;
+    super::mcp_bridge::clear_mcp_sql_approvals();
+    Ok(access)
+}
+
+#[tauri::command]
+pub async fn reset_invalid_mcp_access_policy(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.storage.reset_invalid_mcp_access_policy().await?;
+    super::mcp_bridge::clear_mcp_sql_approvals();
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn save_mcp_global_policy(state: State<'_, Arc<AppState>>, policy: McpGlobalPolicy) -> Result<(), String> {
-    state.storage.save_mcp_global_policy(&policy).await
+    state.storage.save_mcp_global_policy(&policy).await?;
+    super::mcp_bridge::clear_mcp_sql_approvals();
+    Ok(())
 }
 
 #[tauri::command]
@@ -142,6 +348,30 @@ pub async fn save_editor_settings(state: State<'_, Arc<AppState>>, settings: ser
     state.storage.save_editor_settings(&settings).await
 }
 
+const GLOBAL_SEARCH_SETTINGS_FILE: &str = "global-search-settings.json";
+
+#[tauri::command]
+pub async fn load_global_search_settings(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+    let default_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = crate::data_dir::resolve_data_dir_with_mode(default_data_dir).data_dir;
+    let path = data_dir.join(GLOBAL_SEARCH_SETTINGS_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    serde_json::from_slice(&bytes).map(Some).map_err(|e| format!("Failed to parse {}: {e}", path.display()))
+}
+
+#[tauri::command]
+pub async fn save_global_search_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
+    let default_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = crate::data_dir::resolve_data_dir_with_mode(default_data_dir).data_dir;
+    std::fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create {}: {e}", data_dir.display()))?;
+    let path = data_dir.join(GLOBAL_SEARCH_SETTINGS_FILE);
+    let bytes = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(&path, bytes).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+}
+
 #[tauri::command]
 pub async fn load_open_tabs_state(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
     state.storage.load_open_tabs_state_with_key(open_tabs_state_key(cfg!(debug_assertions))).await
@@ -150,6 +380,53 @@ pub async fn load_open_tabs_state(state: State<'_, Arc<AppState>>) -> Result<Opt
 #[tauri::command]
 pub async fn save_open_tabs_state(state: State<'_, Arc<AppState>>, payload: serde_json::Value) -> Result<(), String> {
     state.storage.save_open_tabs_state_with_key(open_tabs_state_key(cfg!(debug_assertions)), &payload).await
+}
+
+#[tauri::command]
+pub async fn save_detached_tab_handoff(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    handoff: serde_json::Value,
+) -> Result<(), String> {
+    let _guard = detached_tabs_lock().lock().await;
+    let mut tabs = load_detached_tabs_map(state.inner()).await?;
+    tabs.insert(tab_id, handoff);
+    state.storage.save_open_tabs_state_with_key(DETACHED_TABS_STATE_KEY, &serde_json::Value::Object(tabs)).await
+}
+
+#[tauri::command]
+pub async fn load_detached_tab_handoff(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+) -> Result<Option<serde_json::Value>, String> {
+    let _guard = detached_tabs_lock().lock().await;
+    Ok(load_detached_tabs_map(state.inner()).await?.remove(&tab_id))
+}
+
+#[tauri::command]
+pub async fn list_detached_tab_handoffs(state: State<'_, Arc<AppState>>) -> Result<Vec<serde_json::Value>, String> {
+    let _guard = detached_tabs_lock().lock().await;
+    Ok(load_detached_tabs_map(state.inner()).await?.into_values().collect())
+}
+
+#[tauri::command]
+pub async fn delete_detached_tab_handoff(state: State<'_, Arc<AppState>>, tab_id: String) -> Result<(), String> {
+    let _guard = detached_tabs_lock().lock().await;
+    let mut tabs = load_detached_tabs_map(state.inner()).await?;
+    tabs.remove(&tab_id);
+    state.storage.save_open_tabs_state_with_key(DETACHED_TABS_STATE_KEY, &serde_json::Value::Object(tabs)).await
+}
+
+#[tauri::command]
+pub fn approve_detached_window_close(window: Window) -> Result<(), String> {
+    if !window.label().starts_with("detached-tab-") {
+        return Err("current window is not a detached tab window".to_string());
+    }
+    approved_detached_closes()
+        .lock()
+        .map_err(|_| "detached window close state is unavailable".to_string())?
+        .insert(window.label().to_string());
+    Ok(())
 }
 
 #[tauri::command]

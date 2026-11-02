@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 
 	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
@@ -78,6 +81,192 @@ func TestConfiguredDatabaseUsesConnectionString(t *testing.T) {
 	}
 }
 
+// #11947: Memgraph has a single database named `memgraph`, so the Neo4j default
+// `neo4j` must not be sent — Memgraph fails the session with "Tried to retrieve
+// an unknown database" rather than falling back to its own default.
+func TestMemgraphOmitsTheNeo4jDefaultDatabase(t *testing.T) {
+	memgraph := &connectionRuntime{memgraph: true}
+	if got := (&server{runtime: memgraph}).databaseName(""); got != "" {
+		t.Fatalf("Memgraph without a configured database must send no name, got %q", got)
+	}
+	// A user who did configure one keeps it: Memgraph may grow multi-database
+	// support, and silently ignoring an explicit choice would be worse.
+	if got := (&server{runtime: memgraph}).databaseName("analytics"); got != "analytics" {
+		t.Fatalf("explicit override must win, got %q", got)
+	}
+	if got := (&server{runtime: memgraph, params: connectParams{Database: "mydb"}}).databaseName(""); got != "mydb" {
+		t.Fatalf("configured database must win, got %q", got)
+	}
+	if got := (&server{runtime: memgraph, params: connectParams{ConnectionString: "neo4j://db:7687/archive"}}).databaseName(""); got != "archive" {
+		t.Fatalf("connection-string database must win, got %q", got)
+	}
+
+	// Neo4j itself keeps the default: only Memgraph is special-cased.
+	neo4j := &connectionRuntime{}
+	if got := (&server{runtime: neo4j}).databaseName(""); got != defaultDatabase {
+		t.Fatalf("Neo4j must keep the %q default, got %q", defaultDatabase, got)
+	}
+}
+
+func TestHasConfiguredDatabase(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		params connectParams
+		want   bool
+	}{
+		{name: "nothing configured", params: connectParams{}, want: false},
+		{name: "form field", params: connectParams{Database: "mydb"}, want: true},
+		{name: "connection string query", params: connectParams{ConnectionString: "neo4j://db:7687?database=movies"}, want: true},
+		{name: "connection string path", params: connectParams{ConnectionString: "neo4j://db:7687/archive"}, want: true},
+		{name: "connection string without database", params: connectParams{ConnectionString: "bolt://db:7687"}, want: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := hasConfiguredDatabase(testCase.params); got != testCase.want {
+				t.Fatalf("hasConfiguredDatabase(%+v) = %t, want %t", testCase.params, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveNeo4jSchemeMatchesBuiltURI(t *testing.T) {
+	for _, params := range []connectParams{
+		{Host: "127.0.0.1", Port: 7687},
+		{Host: "db.example.com", Port: 7687, SSL: true},
+		{Host: "db.example.com", Port: 7687, URLParams: "encrypted=true"},
+		{Host: "db", Port: 7687, URLParams: "scheme=bolt"},
+		{Host: "db", Port: 7687, URLParams: "scheme=neo4j+ssc"},
+		{ConnectionString: "jdbc:neo4j://user:secret@db:7687?database=movies"},
+		{ConnectionString: "bolt://db:7687"},
+	} {
+		uri, err := buildNeo4jURI(params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := url.Parse(uri)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := effectiveNeo4jScheme(params); got != parsed.Scheme {
+			t.Fatalf("effectiveNeo4jScheme(%#v) = %q, want %q", params, got, parsed.Scheme)
+		}
+	}
+}
+
+func TestDirectConnectionParamsRewritesRoutingSchemes(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		params      connectParams
+		want        connectParams
+		wantChanged bool
+	}{
+		{
+			name:        "default routing scheme becomes direct",
+			params:      connectParams{Host: "db", Port: 7687},
+			want:        connectParams{Host: "db", Port: 7687, URLParams: "scheme=bolt"},
+			wantChanged: true,
+		},
+		{
+			name:        "tls keeps encryption",
+			params:      connectParams{Host: "db", Port: 7687, SSL: true, URLParams: "connection_timeout=5s"},
+			want:        connectParams{Host: "db", Port: 7687, SSL: true, URLParams: "connection_timeout=5s&scheme=bolt+s"},
+			wantChanged: true,
+		},
+		{
+			name:        "explicit routing scheme is rewritten in place",
+			params:      connectParams{Host: "db", Port: 7687, URLParams: "scheme=neo4j&database=movies"},
+			want:        connectParams{Host: "db", Port: 7687, URLParams: "database=movies&scheme=bolt"},
+			wantChanged: true,
+		},
+		{
+			name:        "direct connection is kept",
+			params:      connectParams{Host: "db", Port: 7687, URLParams: "scheme=bolt"},
+			want:        connectParams{Host: "db", Port: 7687, URLParams: "scheme=bolt"},
+			wantChanged: false,
+		},
+		{
+			name:        "routing connection string becomes direct",
+			params:      connectParams{ConnectionString: "jdbc:neo4j://user:secret@db:7687?database=movies"},
+			want:        connectParams{ConnectionString: "bolt://db:7687"},
+			wantChanged: true,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, changed := directConnectionParams(testCase.params)
+			if changed != testCase.wantChanged {
+				t.Fatalf("directConnectionParams() changed = %t, want %t", changed, testCase.wantChanged)
+			}
+			if !changed {
+				return
+			}
+			uri, err := buildNeo4jURI(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantURI, err := buildNeo4jURI(testCase.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if uri != wantURI {
+				t.Fatalf("directConnectionParams() built %q, want %q", uri, wantURI)
+			}
+		})
+	}
+}
+
+func TestIsRoutingUnsupported(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "driver usage error wording",
+			err:  errors.New("feature not supported: Server 127.0.0.1:17690 does not support: routing (requires cluster setup)"),
+			want: true,
+		},
+		{name: "typed feature error", err: &neo4jdb.FeatureNotSupportedError{Server: "db:7687", Feature: "routing", Reason: "requires cluster setup"}, want: true},
+		// #11947: Memgraph speaks Bolt and accepts `neo4j://`, but refuses the
+		// routing-table procedure with its own wording, so the direct fallback
+		// has to recognise it too.
+		{
+			name: "memgraph single-instance routing refusal",
+			err:  errors.New("Neo4jError: Memgraph.TransientError.MemgraphError.MemgraphError (You cannot fetch routing table from an instance which is not part of a cluster.)"),
+			want: true,
+		},
+		{
+			name: "memgraph routing table wording without neo4j error prefix",
+			err:  errors.New("You cannot fetch routing table from an instance which is not part of a cluster."),
+			want: true,
+		},
+		{name: "typed route-to-database error", err: &neo4jdb.FeatureNotSupportedError{Server: "db:7687", Feature: "route to database", Reason: "requires at least server v4"}, want: false},
+		{name: "unrelated error", err: errors.New("connection refused"), want: false},
+		{name: "nil error", err: nil, want: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := isRoutingUnsupported(testCase.err); got != testCase.want {
+				t.Fatalf("isRoutingUnsupported(%v) = %t, want %t", testCase.err, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestWithURLParamKeepsOtherEntries(t *testing.T) {
+	cases := []struct {
+		urlParams string
+		want      string
+	}{
+		{urlParams: "", want: "scheme=bolt+s"},
+		{urlParams: "scheme=neo4j", want: "scheme=bolt+s"},
+		{urlParams: "max_connection_pool_size=10;scheme=neo4j", want: "max_connection_pool_size=10&scheme=bolt+s"},
+		{urlParams: "a=1&b=2", want: "a=1&b=2&scheme=bolt+s"},
+	}
+	for _, testCase := range cases {
+		if got := withURLParam(testCase.urlParams, "scheme", "bolt+s"); got != testCase.want {
+			t.Fatalf("withURLParam(%q) = %q, want %q", testCase.urlParams, got, testCase.want)
+		}
+	}
+}
+
 func TestMetadataWindowAndFiltering(t *testing.T) {
 	values := []string{"alpha", "beta", "gamma"}
 	if got := applyMetadataWindow(values, 1, 1); !reflect.DeepEqual(got, []string{"beta"}) {
@@ -102,8 +291,20 @@ func TestClassifyNeo4jErrors(t *testing.T) {
 	syntax := classifyRPCError("execute_query", "session-1", &neo4jdb.Neo4jError{
 		Code: "Neo.ClientError.Statement.SyntaxError", Msg: "invalid input",
 	})
-	if syntax.Data.Category != "sql" || syntax.Data.SQLState == "" {
+	if syntax.Data.Category != "sql" || syntax.Data.SQLState != "" || syntax.Data.AgentSessionID != "session-1" {
 		t.Fatalf("unexpected syntax classification: %#v", syntax)
+	}
+	if syntax.Data.ContractVersion != 1 || syntax.Data.Stage != "execute" || syntax.Data.OperationOutcome != "unknown" {
+		t.Fatalf("invalid structured error contract: %#v", syntax.Data)
+	}
+	if syntax.Message == "" || !strings.Contains(syntax.Message, "Neo.ClientError.Statement.SyntaxError") {
+		t.Fatalf("Neo4j error code was lost: %q", syntax.Message)
+	}
+	resource := classifyRPCError("execute_query", "session-1", &neo4jdb.Neo4jError{
+		Code: "Neo.TransientError.General.DatabaseUnavailable", Msg: "database unavailable",
+	})
+	if resource.Data.Category != "resource" || resource.Data.SessionDisposition != "replace_runtime" {
+		t.Fatalf("invalid resource error contract: %#v", resource.Data)
 	}
 	canceled := classifyRPCError("execute_query", "session-1", context.Canceled)
 	if canceled.Data.Category != "canceled" || canceled.Data.SessionDisposition != "quarantine" {
@@ -123,6 +324,26 @@ func TestDecodeQueryOptions(t *testing.T) {
 	}
 	if options.SQL != "RETURN 1" || options.MaxRows != 100 || options.TimeoutSecs != 5 {
 		t.Fatalf("unexpected query options: %#v", options)
+	}
+}
+
+func TestPropertyColumnsUseCypherTypesAndMergeLabelCombinations(t *testing.T) {
+	record := func(name string, types []any, mandatory bool) *neo4j.Record {
+		return &neo4j.Record{Keys: []string{"propertyName", "propertyTypes", "mandatory"}, Values: []any{name, types, mandatory}}
+	}
+	got := propertyColumns([]*neo4j.Record{
+		record("score", []any{"Long"}, true),
+		record("ratio", []any{"Double"}, true),
+		record("score", []any{"String", "Long"}, false),
+		record("values", []any{"LongArray", "DoubleArray"}, false),
+	})
+	want := []columnInfo{
+		{Name: "ratio", DataType: "Float", IsNullable: false},
+		{Name: "score", DataType: "Integer | String", IsNullable: true},
+		{Name: "values", DataType: "FloatArray | IntegerArray", IsNullable: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("propertyColumns() = %#v, want %#v", got, want)
 	}
 }
 

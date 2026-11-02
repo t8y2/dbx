@@ -4,8 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Award, Download, ExternalLink, Github, LogOut, Search, ShieldCheck } from "lucide-react";
 import type { ContributorActivity, ContributorActivityData } from "@/lib/contributorActivity";
 import styles from "./ContributorsExperience.module.css";
+import type { DocsLang } from "@/lib/i18n";
 
-type Language = "en" | "cn";
+type Language = DocsLang;
 type AuthUser = { login: string; avatarUrl: string; profileUrl: string };
 type AuthState = { status: "loading" } | { status: "signed-out" } | { status: "signed-in"; user: AuthUser };
 
@@ -68,8 +69,10 @@ const copy = {
   },
 } as const;
 
+const NUMBER_LOCALE: Record<Language, string> = { en: "en-US", cn: "zh-CN" };
+
 function formatNumber(value: number, lang: Language) {
-  return new Intl.NumberFormat(lang === "cn" ? "zh-CN" : "en-US").format(value);
+  return new Intl.NumberFormat(NUMBER_LOCALE[lang]).format(value);
 }
 
 function initials(login: string) {

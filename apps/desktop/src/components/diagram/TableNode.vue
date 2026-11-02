@@ -4,10 +4,10 @@ import { Handle, Position } from "@vue-flow/core";
 import { Table2, KeyRound, Link2 } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import type { DiagramTable, DiagramRelationship } from "@/lib/diagram/erDiagram";
-import { isDraftTable, isDroppedColumn } from "@/lib/diagram/erDiagram";
+import { isDraftTable } from "@/lib/diagram/erDiagram";
 import type { InferredRelationship } from "@/types/diagram";
 import { useLayerStore } from "@/lib/diagram/layer-store";
-import { CARD_WIDTH, COLUMN_TYPE_WIDTH, COLUMN_NAME_MAX_CHARS, COLUMN_TYPE_MAX_CHARS, TABLE_NAME_MAX_CHARS, EDGE_HANDLE_OUTSET } from "@/lib/diagram/diagram-constants";
+import { CARD_WIDTH, COLUMN_TYPE_WIDTH, COLUMN_NAME_MAX_CHARS, COLUMN_TYPE_MAX_CHARS, TABLE_NAME_MAX_CHARS, EDGE_HANDLE_OUTSET, diagramVisibleColumns } from "@/lib/diagram/diagram-constants";
 
 const layerStore = useLayerStore();
 
@@ -15,6 +15,7 @@ const props = defineProps<{
   data: {
     table: DiagramTable;
     relationships?: (DiagramRelationship | InferredRelationship)[];
+    isMultiSchema?: boolean;
   };
   selected?: boolean;
 }>();
@@ -25,7 +26,12 @@ const emit = defineEmits<{
 const isDraft = computed(() => isDraftTable(props.data.table));
 
 function visibleColumns(table: DiagramTable) {
-  return table.columns.filter((column) => !isDroppedColumn(table, column.name));
+  return diagramVisibleColumns(table);
+}
+
+/** Comments are optional metadata; blank/whitespace-only values render nothing. */
+function commentText(value: string | null | undefined): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function isForeignKeyColumn(table: DiagramTable, columnName: string): boolean {
@@ -34,7 +40,10 @@ function isForeignKeyColumn(table: DiagramTable, columnName: string): boolean {
 
 function isRelationshipColumn(table: DiagramTable, columnName: string): boolean {
   if (!props.data.relationships) return false;
-  return props.data.relationships.some((relationship) => (relationship.sourceTable === table.name && relationship.sourceColumn === columnName) || (relationship.targetTable === table.name && relationship.targetColumn === columnName));
+  const tableId = props.data.isMultiSchema && table.schema ? `${table.schema}.${table.name}` : table.name;
+  return props.data.relationships.some(
+    (relationship) => ((relationship.sourceTable === tableId || relationship.sourceTable === table.name) && relationship.sourceColumn === columnName) || ((relationship.targetTable === tableId || relationship.targetTable === table.name) && relationship.targetColumn === columnName),
+  );
 }
 
 function truncateLabel(value: string, maxChars: number): string {
@@ -42,7 +51,9 @@ function truncateLabel(value: string, maxChars: number): string {
   return `${value.slice(0, Math.max(1, maxChars - 1))}…`;
 }
 
-const layerColor = computed(() => layerStore.getLayerColor(props.data.table.name));
+const tableIdentifier = computed(() => (props.data.isMultiSchema && props.data.table.schema ? `${props.data.table.schema}.${props.data.table.name}` : props.data.table.name));
+
+const layerColor = computed(() => layerStore.getLayerColor(tableIdentifier.value) || layerStore.getLayerColor(props.data.table.name));
 
 const handleOffsetStyle = computed(() =>
   EDGE_HANDLE_OUTSET > 0
@@ -69,24 +80,37 @@ const handleOffsetStyle = computed(() =>
     <div class="overflow-hidden rounded-[inherit]">
       <div class="flex h-11 cursor-grab items-center gap-2 border-b bg-muted/40 px-3 active:cursor-grabbing">
         <Table2 class="h-4 w-4 shrink-0 text-muted-foreground" />
-        <span class="min-w-0 flex-1 truncate text-sm font-medium" :title="data.table.name">
-          {{ truncateLabel(data.table.name, TABLE_NAME_MAX_CHARS) }}
-        </span>
+        <div class="min-w-0 flex-1 flex flex-col justify-center">
+          <span v-if="data.isMultiSchema && data.table.schema" class="truncate text-[10px] text-muted-foreground font-mono leading-none mb-0.5" :title="data.table.schema">
+            {{ data.table.schema }}
+          </span>
+          <span class="min-w-0 truncate text-sm font-medium leading-tight" :title="data.isMultiSchema && data.table.schema ? `${data.table.schema}.${data.table.name}` : data.table.name">
+            {{ truncateLabel(data.table.name, TABLE_NAME_MAX_CHARS) }}
+          </span>
+        </div>
         <Badge v-if="isDraft" variant="outline" class="h-5 shrink-0 px-1.5 text-[10px] border-amber-500/50 text-amber-700 dark:text-amber-400">Draft</Badge>
         <Badge variant="outline" class="h-5 px-1.5 text-[10px]">{{ visibleColumns(data.table).length }}</Badge>
       </div>
+      <div v-if="commentText(data.table.comment)" class="flex h-4 items-center gap-1.5 border-b border-border/40 bg-muted/20 px-3">
+        <span class="min-w-0 flex-1 truncate text-[10px] leading-none text-muted-foreground" :title="commentText(data.table.comment)">{{ commentText(data.table.comment) }}</span>
+      </div>
       <div>
-        <div v-for="column in visibleColumns(data.table)" :key="column.name" class="flex h-6 min-w-0 items-center gap-1.5 border-b border-border/40 px-3 text-xs last:border-b-0">
-          <KeyRound v-if="column.is_primary_key" class="h-3 w-3 shrink-0 text-amber-500" />
-          <Link2 v-else-if="isForeignKeyColumn(data.table, column.name)" class="h-3 w-3 shrink-0 text-primary" />
-          <Link2 v-else-if="isRelationshipColumn(data.table, column.name)" class="h-3 w-3 shrink-0 text-muted-foreground" />
-          <span v-else class="h-3 w-3 shrink-0" />
-          <span class="min-w-0 flex-1 truncate font-mono" :title="column.name">
-            {{ truncateLabel(column.name, COLUMN_NAME_MAX_CHARS) }}
-          </span>
-          <span class="shrink-0 truncate text-right text-[10px] text-muted-foreground" :style="{ width: `${COLUMN_TYPE_WIDTH}px` }" :title="column.data_type">
-            {{ truncateLabel(column.data_type, COLUMN_TYPE_MAX_CHARS) }}
-          </span>
+        <div v-for="column in visibleColumns(data.table)" :key="column.name" class="border-b border-border/40 last:border-b-0">
+          <div class="flex h-6 min-w-0 items-center gap-1.5 px-3 text-xs">
+            <KeyRound v-if="column.is_primary_key" class="h-3 w-3 shrink-0 text-amber-500" />
+            <Link2 v-else-if="isForeignKeyColumn(data.table, column.name)" class="h-3 w-3 shrink-0 text-primary" />
+            <Link2 v-else-if="isRelationshipColumn(data.table, column.name)" class="h-3 w-3 shrink-0 text-muted-foreground" />
+            <span v-else class="h-3 w-3 shrink-0" />
+            <span class="min-w-0 flex-1 truncate font-mono" :title="column.name">
+              {{ truncateLabel(column.name, COLUMN_NAME_MAX_CHARS) }}
+            </span>
+            <span class="shrink-0 truncate text-right text-[10px] text-muted-foreground" :style="{ width: `${COLUMN_TYPE_WIDTH}px` }" :title="column.data_type">
+              {{ truncateLabel(column.data_type, COLUMN_TYPE_MAX_CHARS) }}
+            </span>
+          </div>
+          <div v-if="commentText(column.comment)" class="flex h-4 items-center pb-0.5 pl-[18px] pr-3">
+            <span class="min-w-0 flex-1 truncate text-[10px] leading-none text-muted-foreground" :title="commentText(column.comment)">{{ commentText(column.comment) }}</span>
+          </div>
         </div>
       </div>
     </div>

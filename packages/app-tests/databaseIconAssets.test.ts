@@ -8,6 +8,7 @@ test("Kafka database icon includes a light contrast stroke for dark themes", () 
 
   assert.match(svg, /stroke="#(?:F8FAFC|E5E7EB|FFFFFF)"/i);
   assert.match(svg, /fill="#231F20"/i);
+  assert.match(svg, /Apache Kafka official logo/i);
 });
 
 test("RocketMQ database icon asset exists", () => {
@@ -21,4 +22,11 @@ test("Apache Phoenix database icon keeps its official source attribution", () =>
   assert.match(svg, /Apache Phoenix logo/);
   assert.match(svg, /#f7931d/i);
   assert.match(svg, /#ed1c24/i);
+});
+
+test("Inceptor connection icon matches the Waterdrop provider asset", () => {
+  const png = readFileSync(path.resolve("apps/desktop/public/icons/database/transwarp-inceptor.png"));
+  assert.equal(png.subarray(1, 4).toString("ascii"), "PNG");
+  assert.equal(png.readUInt32BE(16), 64);
+  assert.equal(png.readUInt32BE(20), 64);
 });

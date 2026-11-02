@@ -77,6 +77,10 @@ describe("queryStore MySQL Event create navigation", () => {
       expect(tab.objectBrowser?.eventCreateRequestId).toBeUndefined();
       expect(tab.objectBrowser?.initialObjectFilter).toBe("events");
 
+      store.updateObjectBrowserFilter(tabId, "tables");
+      expect(tab.objectBrowser?.filter).toBe("tables");
+      expect(tab.objectBrowser?.initialObjectFilter).toBe("events");
+
       // Re-opening the same existing event on the reused tab increments edit request id
       store.openObjectBrowser("mysql-1", "shop", undefined, undefined, "foo_event", true, "events");
       expect(tab.objectBrowser?.eventOpenRequestId).toBe(2);

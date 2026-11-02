@@ -9,6 +9,17 @@ use dbx_core::models::connection::DatabaseType;
 use dbx_core::query_cancel::RunningTaskMetadata;
 use dbx_core::sql::split_sql_statements;
 
+fn query_messages_callback(
+    app: &AppHandle,
+    execution_id: Option<&str>,
+) -> Option<dbx_core::query::query_messages::QueryMessagesCallback> {
+    let execution_id = execution_id?.to_string();
+    let app = app.clone();
+    Some(Arc::new(move |messages| {
+        let _ = app.emit("query-messages", serde_json::json!({ "executionId": execution_id, "messages": messages }));
+    }))
+}
+
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ExecuteMultiProgress {
@@ -30,9 +41,21 @@ pub enum ManualTransactionCommandError {
     Legacy(String),
 }
 
+fn manual_transaction_command_error(error: String) -> ManualTransactionCommandError {
+    if let Some(error) = dbx_core::query::sqlserver_manual_transaction::backend_error(&error) {
+        return ManualTransactionCommandError::Structured(Box::new(error));
+    }
+    if dbx_core::query::is_manual_transaction_session_expired_error(&error) {
+        ManualTransactionCommandError::Structured(Box::new(BackendError::from_manual_transaction_session_expired()))
+    } else {
+        ManualTransactionCommandError::Legacy(error)
+    }
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_query(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
@@ -58,26 +81,30 @@ pub async fn execute_query(
     });
     let cancel_token = registered_query.as_ref().map(|query| query.token());
 
-    let result = dbx_core::query::execute_sql_statement_with_options_typed(
-        &state,
-        &connection_id,
-        &database,
-        &sql,
-        schema.as_deref(),
-        cancel_token,
-        dbx_core::query::QueryExecutionOptions {
-            max_rows,
-            fetch_size,
-            page_size,
-            row_offset,
-            catalog,
-            result_session_id,
-            client_session_id,
-            timeout_secs,
-            execution_id,
-            execution_mode: execution_mode.unwrap_or_default(),
-            ..Default::default()
-        },
+    let messages = query_messages_callback(&app, execution_id.as_deref());
+    let result = dbx_core::query::query_messages::with_query_messages(
+        messages,
+        dbx_core::query::execute_sql_statement_with_options_typed(
+            &state,
+            &connection_id,
+            &database,
+            &sql,
+            schema.as_deref(),
+            cancel_token,
+            dbx_core::query::QueryExecutionOptions {
+                max_rows,
+                fetch_size,
+                page_size,
+                row_offset,
+                catalog,
+                result_session_id,
+                client_session_id,
+                timeout_secs,
+                execution_id,
+                execution_mode: execution_mode.unwrap_or_default(),
+                ..Default::default()
+            },
+        ),
     )
     .await;
 
@@ -106,9 +133,22 @@ pub async fn execute_conditional_update(
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
     execution_mode: Option<dbx_core::query::QueryExecutionMode>,
+    type_recovery: Option<dbx_core::storage::TypeRecoveryContext>,
 ) -> Result<db::QueryResult, BackendError> {
     let execution_id =
         execution_id.filter(|id| !id.trim().is_empty()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let recovery = type_recovery.map(|context| dbx_core::storage::TypeExecutionBinding {
+        execution_id: execution_id.clone(),
+        context,
+        connection_id: connection_id.clone(),
+        database: database.clone(),
+        schema: schema.clone(),
+        sql: sql.clone(),
+    });
+    if let Some(binding) = &recovery {
+        state.storage.claim_type_execution(binding).await.map_err(|error| BackendError::from_legacy_backend(&error))?;
+    }
+    let durable_recovery = recovery.is_some();
     let registered = state.running_queries.register_task_for_terminal_confirmation(
         execution_id.clone(),
         RunningTaskMetadata::query(connection_id.clone(), database.clone(), client_session_id.clone()),
@@ -142,31 +182,44 @@ pub async fn execute_conditional_update(
             },
         )
         .await;
+        let result = dbx_core::query_cancel::finish_conditional_update(
+            registered,
+            &app_state.storage,
+            recovery.as_ref(),
+            result,
+        )
+        .await;
         let _ = result_tx.send(result);
-        drop(registered);
     });
 
-    let result = match response_timeout {
+    match response_timeout {
         Some(timeout) => match tokio::time::timeout(timeout, result_rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => {
-                return Err(BackendError::from_sql_detail("Conditional update execution task stopped unexpectedly"));
+                let message = "Conditional update execution task stopped unexpectedly";
+                Err(if durable_recovery {
+                    BackendError::from_legacy_backend(message)
+                } else {
+                    BackendError::from_sql_detail(message)
+                })
             }
-            Err(_) => {
-                return Err(BackendError::from_timeout_detail(&format!(
-                    "Query timed out after {} seconds",
-                    timeout.as_secs().max(1)
-                )));
-            }
+            Err(_) => Err(BackendError::from_timeout_detail(&format!(
+                "Query timed out after {} seconds",
+                timeout.as_secs().max(1)
+            ))),
         },
         None => match result_rx.await {
             Ok(result) => result,
             Err(_) => {
-                return Err(BackendError::from_sql_detail("Conditional update execution task stopped unexpectedly"));
+                let message = "Conditional update execution task stopped unexpectedly";
+                Err(if durable_recovery {
+                    BackendError::from_legacy_backend(message)
+                } else {
+                    BackendError::from_sql_detail(message)
+                })
             }
         },
-    };
-    result.map_err(dbx_core::query::QueryExecutionError::into_backend_error)
+    }
 }
 
 #[tauri::command]
@@ -193,6 +246,9 @@ pub async fn execute_multi(
     use_transaction: Option<bool>,
     continue_on_error: Option<bool>,
     execution_mode: Option<dbx_core::query::QueryExecutionMode>,
+    preserve_explicit_transaction: Option<bool>,
+    defer_lobs: Option<bool>,
+    report_compilation_errors: Option<bool>,
 ) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, BackendError> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
@@ -232,32 +288,41 @@ pub async fn execute_multi(
         schema
     );
 
-    let result = dbx_core::query::execute_multi_core_with_options_for_client_and_progress_typed(
-        &state,
-        &connection_id,
-        &database,
-        &sql,
-        schema.as_deref(),
-        cancel_token,
-        dbx_core::query::QueryExecutionOptions {
-            max_rows,
-            fetch_size,
-            page_size,
-            row_offset,
-            max_result_bytes,
-            result_key_columns: result_key_columns.unwrap_or_default(),
-            table_data_preview: table_data_preview.unwrap_or(false),
-            catalog,
-            result_session_id,
-            client_session_id,
-            timeout_secs,
-            await_cancel_completion: false,
-            execution_id,
-            use_transaction,
-            continue_on_error: continue_on_error.unwrap_or(false),
-            execution_mode: execution_mode.unwrap_or_default(),
-        },
-        progress,
+    let messages = query_messages_callback(&app, execution_id.as_deref());
+    let result = dbx_core::query::query_messages::with_query_messages(
+        messages,
+        dbx_core::query::batch_progress::with_coalesced_execute_multi_progress(progress, |progress| {
+            dbx_core::query::execute_multi_core_with_options_for_client_and_progress_typed(
+                &state,
+                &connection_id,
+                &database,
+                &sql,
+                schema.as_deref(),
+                cancel_token,
+                dbx_core::query::QueryExecutionOptions {
+                    max_rows,
+                    fetch_size,
+                    page_size,
+                    row_offset,
+                    max_result_bytes,
+                    result_key_columns: result_key_columns.unwrap_or_default(),
+                    table_data_preview: table_data_preview.unwrap_or(false),
+                    catalog,
+                    result_session_id,
+                    client_session_id,
+                    timeout_secs,
+                    await_cancel_completion: false,
+                    execution_id,
+                    use_transaction,
+                    continue_on_error: continue_on_error.unwrap_or(false),
+                    execution_mode: execution_mode.unwrap_or_default(),
+                    preserve_explicit_transaction: preserve_explicit_transaction.unwrap_or(false),
+                    defer_lobs: defer_lobs.unwrap_or(false),
+                    report_compilation_errors: report_compilation_errors.unwrap_or(false),
+                },
+                progress,
+            )
+        }),
     )
     .await;
     match &result {
@@ -293,8 +358,26 @@ pub async fn cancel_query(state: State<'_, Arc<AppState>>, execution_id: String)
 pub async fn cancel_conditional_update(
     state: State<'_, Arc<AppState>>,
     execution_id: String,
+    cancel: Option<bool>,
+    type_recovery: Option<dbx_core::storage::TypeExecutionBinding>,
 ) -> Result<dbx_core::query_cancel::CancellationWaitResult, String> {
-    Ok(state.running_queries.cancel_and_wait(&execution_id, Duration::from_secs(10)).await)
+    if let Some(binding) = type_recovery {
+        if cancel != Some(false) || binding.execution_id != execution_id {
+            return Err("TYPE recovery observation requires the original execution ID and cancel=false".into());
+        }
+        return dbx_core::query_cancel::observe_type_execution(
+            &state.storage,
+            &state.running_queries,
+            &binding,
+            Duration::from_secs(10),
+        )
+        .await;
+    }
+    Ok(if cancel == Some(false) {
+        state.running_queries.wait_for_completion(&execution_id, Duration::from_secs(10)).await
+    } else {
+        state.running_queries.cancel_and_wait(&execution_id, Duration::from_secs(10)).await
+    })
 }
 
 #[tauri::command]
@@ -305,7 +388,17 @@ pub async fn close_query_session(
     session_id: String,
     client_session_id: Option<String>,
     catalog: Option<String>,
+    txn_session_id: Option<String>,
 ) -> Result<bool, String> {
+    if let Some(txn_session_id) = txn_session_id {
+        return dbx_core::query::close_manual_transaction_query_session(
+            &state,
+            &connection_id,
+            &txn_session_id,
+            &session_id,
+        )
+        .await;
+    }
     dbx_core::query::close_query_session(
         &state,
         &connection_id,
@@ -318,15 +411,116 @@ pub async fn close_query_session(
 }
 
 #[tauri::command]
+pub async fn read_large_value_chunk(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::query::LargeValueRequest,
+    report_outcome: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    if report_outcome == Some(true) {
+        Ok(snapshot_outcome(dbx_core::query::request_large_value_reported(&state, request).await))
+    } else {
+        dbx_core::query::request_large_value(&state, request, false).await
+    }
+}
+
+fn snapshot_outcome<T: serde::Serialize>(
+    result: Result<T, dbx_core::query::LargeValueOperationError>,
+) -> serde_json::Value {
+    match result {
+        Ok(value) => serde_json::json!({"status": "succeeded", "value": value}),
+        Err(error) => serde_json::json!({"status": error.status, "message": error.message}),
+    }
+}
+
+#[tauri::command]
+pub async fn release_large_value(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::query::LargeValueRequest,
+) -> Result<serde_json::Value, String> {
+    dbx_core::query::request_large_value(&state, request, true).await
+}
+
+#[tauri::command]
+pub async fn download_large_value(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::query::LargeValueRequest,
+    file_path: String,
+) -> Result<u64, String> {
+    let path = std::path::Path::new(&file_path);
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    let written = dbx_core::query::write_large_value_snapshot(&state, request, temporary.as_file_mut()).await?;
+    temporary.persist(path).map_err(|error| error.to_string())?;
+    Ok(written)
+}
+
+#[tauri::command]
 pub async fn close_client_connection_session(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
     client_session_id: String,
     catalog: Option<String>,
+    report_completion: Option<bool>,
 ) -> Result<bool, String> {
     let database = query_session_database(&database, catalog.as_deref());
+    if report_completion == Some(true) {
+        return state.close_client_session_pool_with_completion(&connection_id, database, &client_session_id).await;
+    }
     state.close_client_session_pool(&connection_id, database, &client_session_id).await
+}
+
+#[tauri::command]
+pub async fn export_snapshot_result(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::query::snapshot_export::SnapshotExportRequest,
+    file_path: String,
+    report_outcome: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    if report_outcome == Some(true) {
+        return Ok(snapshot_outcome(write_reported_snapshot(&state, request, &file_path).await));
+    }
+    let path = std::path::Path::new(&file_path);
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    dbx_core::query::snapshot_export::write_snapshot_export(&state, request, temporary.as_file_mut()).await?;
+    temporary.persist(path).map_err(|error| error.to_string())?;
+    Ok(serde_json::Value::Null)
+}
+
+async fn write_reported_snapshot(
+    state: &AppState,
+    request: dbx_core::query::snapshot_export::SnapshotExportRequest,
+    file_path: &str,
+) -> Result<(), dbx_core::query::LargeValueOperationError> {
+    use dbx_core::query::{LargeValueCompletion, LargeValueOperationError};
+    let path = std::path::Path::new(file_path);
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    if let Err(error) =
+        dbx_core::query::snapshot_export::write_snapshot_export_reported(state, request, temporary.as_file_mut()).await
+    {
+        return match temporary.close() {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(LargeValueOperationError {
+                status: LargeValueCompletion::Unknown,
+                message: format!("{}; snapshot cleanup failed: {cleanup}", error.message),
+            }),
+        };
+    }
+    match temporary.persist(path) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let message = error.error.to_string();
+            match error.file.close() {
+                Ok(()) => Err(message.into()),
+                Err(cleanup) => Err(LargeValueOperationError {
+                    status: LargeValueCompletion::Unknown,
+                    message: format!("{message}; snapshot cleanup failed: {cleanup}"),
+                }),
+            }
+        }
+    }
 }
 
 fn query_session_database<'a>(database: &'a str, catalog: Option<&str>) -> Option<&'a str> {
@@ -345,9 +539,32 @@ pub async fn execute_batch(
     statements: Vec<String>,
     schema: Option<String>,
     timeout_secs: Option<u64>,
+    use_transaction: Option<bool>,
+    bound_statements: Option<Vec<db::BlobBoundStatement>>,
 ) -> Result<db::QueryResult, String> {
-    dbx_core::query::execute_statements(&state, &connection_id, &database, &statements, schema.as_deref(), timeout_secs)
-        .await
+    if let Some(bound) = bound_statements.as_ref() {
+        return dbx_core::query::execute_blob_bound_statements(
+            &state,
+            &connection_id,
+            &database,
+            &statements,
+            bound,
+            schema.as_deref(),
+            use_transaction == Some(true),
+            timeout_secs,
+        )
+        .await;
+    }
+    dbx_core::query::execute_statements_with_transaction_option(
+        &state,
+        &connection_id,
+        &database,
+        &statements,
+        schema.as_deref(),
+        use_transaction == Some(true),
+        timeout_secs,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -385,7 +602,21 @@ pub async fn execute_in_transaction(
     statements: Vec<String>,
     schema: Option<String>,
     catalog: Option<String>,
+    bound_statements: Option<Vec<db::BlobBoundStatement>>,
 ) -> Result<db::QueryResult, String> {
+    if let Some(bound) = bound_statements.as_ref() {
+        return dbx_core::query::execute_blob_bound_statements(
+            &state,
+            &connection_id,
+            &database,
+            &statements,
+            bound,
+            schema.as_deref(),
+            true,
+            None,
+        )
+        .await;
+    }
     dbx_core::query::execute_statements_in_transaction(
         &state,
         &connection_id,
@@ -449,13 +680,16 @@ pub async fn begin_manual_transaction(
     database: String,
     schema: Option<String>,
     catalog: Option<String>,
-) -> Result<String, String> {
+) -> Result<String, ManualTransactionCommandError> {
     dbx_core::query::begin_manual_transaction(&state, &connection_id, &database, schema.as_deref(), catalog.as_deref())
         .await
+        .map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_in_manual_transaction(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     txn_session_id: String,
     sql: String,
@@ -466,47 +700,55 @@ pub async fn execute_in_manual_transaction(
     page_size: Option<usize>,
     result_session_id: Option<String>,
     classification_sql: Option<String>,
+    execution_id: Option<String>,
+    timeout_secs: Option<u64>,
+    bound_statements: Option<Vec<db::BlobBoundStatement>>,
+    defer_lobs: Option<bool>,
+    report_compilation_errors: Option<bool>,
 ) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, ManualTransactionCommandError> {
-    dbx_core::query::execute_in_manual_transaction_with_options(
-        &state,
-        &txn_session_id,
-        &sql,
-        &database,
-        schema.as_deref(),
-        dbx_core::query::ManualTransactionExecutionOptions {
-            max_rows,
-            table_data_preview: table_data_preview.unwrap_or(false),
-            page_size,
-            result_session_id,
-            classification_sql,
-        },
+    let messages = query_messages_callback(&app, execution_id.as_deref());
+    dbx_core::query::query_messages::with_query_messages(
+        messages,
+        dbx_core::query::execute_in_manual_transaction_with_options(
+            &state,
+            &txn_session_id,
+            &sql,
+            &database,
+            schema.as_deref(),
+            dbx_core::query::ManualTransactionExecutionOptions {
+                defer_lobs: defer_lobs.unwrap_or(false),
+                bound_statements,
+                max_rows,
+                table_data_preview: table_data_preview.unwrap_or(false),
+                page_size,
+                result_session_id,
+                classification_sql,
+                execution_id,
+                timeout_secs,
+                report_compilation_errors: report_compilation_errors.unwrap_or(false),
+            },
+        ),
     )
     .await
-    .map_err(|error| {
-        if dbx_core::query::is_manual_transaction_session_expired_error(&error) {
-            ManualTransactionCommandError::Structured(Box::new(BackendError::from_manual_transaction_session_expired(
-                dbx_core::query::MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS,
-            )))
-        } else {
-            ManualTransactionCommandError::Legacy(error)
-        }
-    })
+    .map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
 pub async fn commit_manual_transaction(
     state: State<'_, Arc<AppState>>,
     txn_session_id: String,
-) -> Result<db::QueryResult, String> {
-    dbx_core::query::commit_manual_transaction(&state, &txn_session_id).await
+) -> Result<db::QueryResult, ManualTransactionCommandError> {
+    dbx_core::query::commit_manual_transaction(&state, &txn_session_id).await.map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
 pub async fn rollback_manual_transaction(
     state: State<'_, Arc<AppState>>,
     txn_session_id: String,
-) -> Result<db::QueryResult, String> {
-    dbx_core::query::rollback_manual_transaction(&state, &txn_session_id).await
+) -> Result<db::QueryResult, ManualTransactionCommandError> {
+    dbx_core::query::rollback_manual_transaction(&state, &txn_session_id)
+        .await
+        .map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
@@ -572,6 +814,38 @@ pub fn build_database_search_sql(
     options: dbx_core::database_search_sql::DatabaseSearchSqlOptions,
 ) -> Result<Option<dbx_core::database_search_sql::DatabaseSearchSql>, String> {
     Ok(dbx_core::database_search_sql::build_database_search_sql(options))
+}
+
+#[tauri::command]
+pub fn build_database_structure_search_sql(
+    options: dbx_core::database_structure_search_sql::DatabaseStructureSearchSqlOptions,
+) -> Result<Option<dbx_core::database_structure_search_sql::DatabaseStructureSearchSql>, String> {
+    Ok(dbx_core::database_structure_search_sql::build_database_structure_search_sql(options))
+}
+
+#[tauri::command]
+pub fn build_database_search_columns_sql(
+    options: dbx_core::database_search_columns_sql::DatabaseSearchColumnsSqlOptions,
+) -> Result<Option<dbx_core::database_search_columns_sql::DatabaseSearchColumnsSql>, String> {
+    Ok(dbx_core::database_search_columns_sql::build_database_search_columns_sql(options))
+}
+
+#[tauri::command]
+pub fn build_database_search_probe_sql(
+    options: dbx_core::database_search_probe_sql::DatabaseSearchProbeSqlOptions,
+) -> Result<Option<dbx_core::database_search_probe_sql::DatabaseSearchProbeSql>, String> {
+    Ok(dbx_core::database_search_probe_sql::build_database_search_probe_sql(options))
+}
+
+#[tauri::command]
+pub fn supports_database_structure_search(
+    database_type: Option<dbx_core::models::connection::DatabaseType>,
+    driver_profile: Option<String>,
+) -> Result<bool, String> {
+    Ok(dbx_core::database_structure_search_sql::supports_database_structure_search(
+        database_type,
+        driver_profile.as_deref(),
+    ))
 }
 
 #[tauri::command]
@@ -705,6 +979,27 @@ pub fn build_executable_object_source_statements(
 }
 
 #[tauri::command]
+pub fn validate_oracle_executable_object_source(
+    input: dbx_core::object_source_sql::OracleObjectSourceValidationInput,
+) -> Result<(), String> {
+    dbx_core::object_source_sql::validate_oracle_executable_object_source(input)
+}
+
+#[tauri::command]
+pub fn prepare_oracle_trigger_sql(
+    input: dbx_core::object_source_sql::OracleTriggerSqlInput,
+) -> Result<dbx_core::object_source_sql::PreparedOracleTriggerSql, String> {
+    dbx_core::object_source_sql::prepare_oracle_trigger_sql(input)
+}
+
+#[tauri::command]
+pub fn fingerprint_oracle_routine_object_source(
+    input: dbx_core::object_source_sql::EditableObjectSourceSqlInput,
+) -> Result<String, String> {
+    dbx_core::object_source_sql::fingerprint_oracle_routine_object_source(input)
+}
+
+#[tauri::command]
 pub fn build_executable_object_source_sql(
     input: dbx_core::object_source_sql::EditableObjectSourceSqlInput,
 ) -> Result<String, String> {
@@ -726,15 +1021,57 @@ pub fn build_routine_rename_object_source_statements(
 }
 
 #[tauri::command]
+pub fn rewrite_oracle_routine_references(
+    input: dbx_core::object_source_sql::OracleRoutineReferenceRewriteInput,
+) -> Result<String, String> {
+    dbx_core::object_source_sql::rewrite_oracle_routine_references(input)
+}
+
+#[tauri::command]
+pub fn rewrite_oracle_table_references(
+    input: dbx_core::object_source_sql::OracleTableReferenceRewriteInput,
+) -> Result<String, String> {
+    dbx_core::object_source_sql::rewrite_oracle_table_references(input)
+}
+
+#[tauri::command]
 pub fn build_view_ddl_sql(input: dbx_core::object_source_sql::BuildViewDdlInput) -> Result<String, String> {
     Ok(dbx_core::object_source_sql::build_view_ddl_sql(input))
 }
 
 #[tauri::command]
+pub fn parse_oracle_object_name(input: String) -> Result<String, String> {
+    dbx_core::oracle_view_rename::parse_oracle_object_name(&input)
+}
+
+#[tauri::command]
+pub fn build_oracle_view_rename_source(
+    input: dbx_core::oracle_view_rename::OracleViewRenameSourceInput,
+) -> Result<dbx_core::oracle_view_rename::OracleViewRenameSource, String> {
+    dbx_core::oracle_view_rename::build_oracle_view_rename_source(input)
+}
+
+#[tauri::command]
+pub fn review_oracle_view_rename_source(
+    input: dbx_core::oracle_view_rename::OracleViewRenameSourceInput,
+) -> dbx_core::oracle_view_rename::OracleViewRenameSourceReview {
+    dbx_core::oracle_view_rename::review_oracle_view_rename_source(input)
+}
+
+#[tauri::command]
 pub fn build_table_structure_change_sql(
     options: dbx_core::table_structure_sql::TableStructureSqlOptions,
-) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
-    Ok(dbx_core::table_structure_sql::build_table_structure_change_sql(options))
+    starrocks: Option<dbx_core::table_structure_sql::StarRocksAlterOptions>,
+    mysql_table_charset: Option<dbx_core::table_structure_sql::MysqlTableCharsetChange>,
+) -> Result<dbx_core::table_structure_sql::TableStructureSqlPlan, String> {
+    let table_charset = mysql_table_charset
+        .map(|change| dbx_core::table_structure_sql::build_mysql_table_charset_change_sql(&options, change));
+    let mut result = dbx_core::table_structure_sql::build_table_structure_change_sql_plan(options, starrocks);
+    if let Some(extra) = table_charset {
+        result.sql.statements.extend(extra.statements);
+        result.sql.warnings.extend(extra.warnings);
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -776,8 +1113,29 @@ pub async fn apply_sqlite_table_structure_change(
 #[tauri::command]
 pub fn build_create_table_sql(
     options: dbx_core::table_structure_sql::TableStructureSqlOptions,
+    server_version: Option<String>,
+    dialect_options: Option<dbx_core::table_structure_sql::CreateTableDialectOptions>,
+) -> Result<dbx_core::table_structure_sql::TableStructureSqlPlan, String> {
+    Ok(dbx_core::table_structure_sql::build_create_table_sql_plan_with_dialect_options(
+        options,
+        server_version.as_deref(),
+        dialect_options.unwrap_or_default(),
+    ))
+}
+
+#[tauri::command]
+pub fn build_create_partitioned_table_sql(
+    options: dbx_core::table_structure_sql::TableStructureSqlOptions,
+    partitioning: dbx_core::table_structure_sql::TablePartitionDefinition,
 ) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
-    Ok(dbx_core::table_structure_sql::build_create_table_sql(options))
+    Ok(dbx_core::table_structure_sql::build_create_partitioned_table_sql(options, partitioning))
+}
+
+#[tauri::command]
+pub fn build_table_partition_operation_sql(
+    options: dbx_core::table_structure_sql::TablePartitionSqlOptions,
+) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
+    Ok(dbx_core::table_structure_sql::build_table_partition_operation_sql(options))
 }
 
 #[tauri::command]
@@ -805,14 +1163,19 @@ pub async fn extract_data_grid_selection(
     request: dbx_core::data_grid_extractors::DataGridExtractRequest,
 ) -> Result<dbx_core::data_grid_extractors::DataGridExtractResult, dbx_core::data_grid_extractors::DataGridExtractError>
 {
-    tauri::async_runtime::spawn_blocking(move || dbx_core::data_grid_extractors::extract_data_grid_selection(request))
-        .await
-        .map_err(|error| {
-            dbx_core::data_grid_extractors::DataGridExtractError::new(
-                dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
-                format!("Data grid extractor worker failed: {error}"),
-            )
-        })?
+    tauri::async_runtime::spawn_blocking(move || {
+        // Cells pasted from the grid land in a spreadsheet, so formula-triggering text
+        // is neutralized before the extractor renders it (see dbx_core::data::grid_clipboard_guard).
+        let request = dbx_core::data::grid_clipboard_guard::neutralize_spreadsheet_formulas(request);
+        dbx_core::data_grid_extractors::extract_data_grid_selection(request)
+    })
+    .await
+    .map_err(|error| {
+        dbx_core::data_grid_extractors::DataGridExtractError::new(
+            dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
+            format!("Data grid extractor worker failed: {error}"),
+        )
+    })?
 }
 
 #[tauri::command]
@@ -827,6 +1190,13 @@ pub fn build_data_grid_copy_insert_statement(
     options: dbx_core::data_grid_sql::DataGridCopyInsertStatementOptions,
 ) -> Result<Option<String>, String> {
     Ok(dbx_core::data_grid_sql::build_data_grid_copy_insert_statement(options))
+}
+
+#[tauri::command]
+pub fn build_dml_change_preview_sql(
+    options: dbx_core::dml_preview_sql::DmlChangePreviewSqlOptions,
+) -> Result<dbx_core::dml_preview_sql::DmlChangePreviewSqlResult, String> {
+    dbx_core::dml_preview_sql::build_dml_change_preview_sql(options)
 }
 
 #[tauri::command]
@@ -933,16 +1303,68 @@ pub async fn get_explain_info(
     schema: Option<String>,
     sql: String,
     mode: Option<String>,
+    execution_id: Option<String>,
+    timeout_secs: Option<u64>,
 ) -> Result<String, String> {
-    dbx_core::agent_explain::get_agent_explain_info_core(
+    dbx_core::agent_explain::get_agent_explain_info_core_with_execution_id(
         &state,
         &connection_id,
         database.as_deref(),
         schema.as_deref(),
         &sql,
         mode.as_deref(),
+        timeout_secs,
+        execution_id.as_deref(),
     )
     .await
+}
+
+#[tauri::command]
+pub async fn get_plugin_plan_capabilities(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    connection_id: String,
+) -> Result<dbx_core::query::plugin_plan::PluginPlanCapabilities, String> {
+    dbx_core::query::plugin_plan::plugin_plan_capabilities(&state, &connection_id).await
+}
+
+/// Read-only estimated plan acquisition for the plugin Host API. The request
+/// carries the original SQL only; the host generates and owns the EXPLAIN.
+#[tauri::command]
+pub async fn get_plugin_estimated_plan(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    request: dbx_core::query::plugin_plan::PluginPlanRequest,
+) -> Result<dbx_core::query::plugin_plan::PluginPlanResult, String> {
+    dbx_core::query::plugin_plan::explain_estimated_plan(&state, request).await
+}
+
+/// Read-only data query for the plugin Host API (`host.data:read`). The
+/// plugin id is bound by the host bridge; the core enforces the manifest
+/// permission, the user's grant, and the read-only statement gate.
+#[tauri::command]
+pub async fn query_plugin_data(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    plugin_id: String,
+    request: dbx_core::query::plugin_data::PluginDataQueryRequest,
+) -> Result<dbx_core::query::plugin_data::PluginDataQueryResult, String> {
+    dbx_core::query::plugin_data::query_plugin_data(&state, &plugin_id, request).await
+}
+
+#[tauri::command]
+pub async fn get_plugin_data_grants(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    plugin_id: String,
+) -> Result<Vec<dbx_core::query::plugin_data::PluginDataGrant>, String> {
+    dbx_core::query::plugin_data::list_plugin_data_grants(&state, &plugin_id).await
+}
+
+#[tauri::command]
+pub async fn set_plugin_data_grant(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    plugin_id: String,
+    connection_id: String,
+    granted: bool,
+) -> Result<Vec<dbx_core::query::plugin_data::PluginDataGrant>, String> {
+    dbx_core::query::plugin_data::set_plugin_data_grant(&state, &plugin_id, &connection_id, granted).await
 }
 
 #[tauri::command]
@@ -953,14 +1375,64 @@ pub fn build_create_user_sql(username: String, password: String, tablespace: Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dbx_core::storage::Storage;
     use std::sync::Arc;
 
     async fn test_app_state() -> Arc<AppState> {
         let dir = std::env::temp_dir().join(format!("dbx-query-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")))
+    }
+
+    fn snapshot_request(format: &str) -> dbx_core::query::snapshot_export::SnapshotExportRequest {
+        serde_json::from_value(serde_json::json!({
+            "context": {"connectionId":"original", "database":"APP", "valueRef":""},
+            "format": format, "columns":["C"], "rows":[["complete"]], "cells":[]
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn reported_snapshot_publishes_success_and_cleans_failed_staging_before_reply() {
+        let state = test_app_state().await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("result.json");
+        let result = write_reported_snapshot(&state, snapshot_request("json"), path.to_str().unwrap()).await;
+        assert_eq!(snapshot_outcome(result), serde_json::json!({"status":"succeeded","value":null}));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap(),
+            serde_json::json!([{"C":"complete"}])
+        );
+        let result = write_reported_snapshot(&state, snapshot_request("unsupported"), path.to_str().unwrap()).await;
+        assert_eq!(snapshot_outcome(result)["status"], "failed");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap(),
+            serde_json::json!([{"C":"complete"}])
+        );
+        // A following operation owns this path only after the failed staged file is gone.
+        write_reported_snapshot(&state, snapshot_request("csv"), path.to_str().unwrap()).await.unwrap();
+        assert!(std::fs::read_to_string(path).unwrap().contains("complete"));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn reported_snapshot_preserves_existing_target_on_persist_failure() {
+        let state = test_app_state().await;
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("existing-directory");
+        std::fs::create_dir(&target).unwrap();
+        let result = write_reported_snapshot(&state, snapshot_request("json"), target.to_str().unwrap()).await;
+        assert_eq!(snapshot_outcome(result)["status"], "failed");
+        assert!(target.is_dir());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        let result = write_reported_snapshot(
+            &state,
+            snapshot_request("json"),
+            target.join("missing/result.json").to_str().unwrap(),
+        )
+        .await;
+        assert_eq!(snapshot_outcome(result)["status"], "failed");
     }
 
     #[tokio::test]

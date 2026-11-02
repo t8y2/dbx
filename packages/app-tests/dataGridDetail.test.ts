@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { buildDataGridCellDetail, buildDataGridColumnDetail, dataGridColumnDetailJson, dataGridColumnDetailTsv, buildDataGridRowDetail, dataGridRowDetailJson, dataGridRowDetailTsv, filterDataGridDetailFields, jsonDetailDisplayValue, type DataGridCellDetail } from "../../apps/desktop/src/lib/dataGrid/dataGridDetail.ts";
+import {
+  buildDataGridCellDetail,
+  buildDataGridColumnDetail,
+  dataGridColumnDetailJson,
+  dataGridColumnDetailTsv,
+  buildDataGridRowDetail,
+  dataGridRowDetailJson,
+  dataGridRowDetailTsv,
+  filterDataGridDetailFields,
+  jsonDetailDisplayValue,
+  type DataGridCellDetail,
+} from "../../apps/desktop/src/lib/dataGrid/dataGridDetail.ts";
 import type { CellValue } from "../../apps/desktop/src/lib/dataGrid/cellValue.ts";
 
 test("buildDataGridCellDetail returns null for an invalid column", () => {
@@ -45,9 +56,11 @@ test("buildDataGridCellDetail preserves full value metadata", () => {
     rawValuePreview: '{"ok":true,"items":[1,2]}',
     displayValue: 'formatted:{"ok":tr',
     displayValuePreview: 'formatted:{"ok":tr',
+    isSourceTruncated: false,
     isValuePreviewTruncated: false,
     imagePreviewUrl: null,
     length: 25,
+    isNull: false,
     formattedJson: '{\n  "ok": true,\n  "items": [\n    1,\n    2\n  ]\n}',
     isEditable: true,
   });
@@ -142,7 +155,7 @@ test("aggregate details defer binary image preview generation", () => {
 });
 
 test("buildDataGridCellDetail limits rendered previews for huge text values", () => {
-  const hugeJson = `{"body":"${"x".repeat(120_000)}"}`;
+  const hugeJson = `{"body":"${"x".repeat(600_000)}"}`;
   const detail = buildDataGridCellDetail({
     rowIndex: 0,
     rowId: 1,
@@ -160,6 +173,24 @@ test("buildDataGridCellDetail limits rendered previews for huge text values", ()
   assert.equal(detail.displayValuePreview.length, 12_000);
   assert.equal(detail.isValuePreviewTruncated, true);
   assert.equal(detail.formattedJson, "");
+});
+
+test("buildDataGridCellDetail formats large JSON values within the format limit", () => {
+  const largeJson = `{"body":"${"x".repeat(120_000)}"}`;
+  const detail = buildDataGridCellDetail({
+    rowIndex: 0,
+    rowId: 1,
+    row: [largeJson],
+    columns: ["payload"],
+    columnIndex: 0,
+    typeByColumn: new Map([["payload", "nvarchar(max)"]]),
+    displayValue: (value) => String(value),
+    isEditable: false,
+  });
+
+  assert.ok(detail);
+  assert.notEqual(detail.formattedJson, "");
+  assert.ok(detail.formattedJson.startsWith('{\n  "body":'));
 });
 
 test("buildDataGridRowDetail maps requested column indexes in order", () => {
@@ -222,7 +253,34 @@ test("dataGridRowDetailJson and dataGridRowDetailTsv format copy payloads", () =
 
   assert.equal(dataGridRowDetailJson(detail), '{\n  "id": 1,\n  "name": "Ada",\n  "nickname": null\n}');
   assert.equal(dataGridRowDetailJson(detail, { id: 1, profile: { city: "Shanghai" } }), '{\n  "id": 1,\n  "profile": {\n    "city": "Shanghai"\n  }\n}');
-  assert.equal(dataGridRowDetailTsv(detail), "1\tAda\tNULL");
+  assert.equal(dataGridRowDetailTsv(detail), "1\tAda\t");
+});
+
+test("data grid detail copy renders textual and GBK-decodable MySQL VARBINARY as text", () => {
+  const rowDetail = buildDataGridRowDetail({
+    rowIndex: 0,
+    rowId: 1,
+    row: ["0x616263", "0xdeadbeef"],
+    columns: ["name", "payload"],
+    columnIndexes: [0, 1],
+    resultColumnTypes: ["varbinary(128)", "varbinary(4)"],
+    displayValue: (value) => String(value),
+  });
+  const columnDetail = buildDataGridColumnDetail({
+    rows: [{ rowIndex: 0, rowId: 1, row: ["0x616263"] }],
+    columns: ["name"],
+    columnIndex: 0,
+    resultColumnTypes: ["varbinary(128)"],
+    displayValue: (value) => String(value),
+  });
+
+  // 0xdeadbeef 恰好全部组成合法 GBK 序列：MySQL 连接按 GBK 解码复制（与网格显示一致），见 binaryCellDownload.test.ts。
+  assert.equal(dataGridRowDetailJson(rowDetail, undefined, "mysql"), '{\n  "name": "abc",\n  "payload": "蕲撅"\n}');
+  assert.equal(dataGridRowDetailTsv(rowDetail, "mysql"), "abc\t蕲撅");
+  assert.equal(dataGridColumnDetailJson(columnDetail!, "mysql"), '[\n  {\n    "row": 1,\n    "value": "abc"\n  }\n]');
+  assert.equal(dataGridColumnDetailTsv(columnDetail!, "mysql"), "abc");
+  // 非 MySQL binary 及非文本 VARBINARY 不应被误转成字符串或 replacement character。
+  assert.equal(dataGridRowDetailJson(rowDetail), '{\n  "name": "0x616263",\n  "payload": "0xdeadbeef"\n}');
 });
 
 test("dataGridRowDetailJson uses the original MongoDB document for nested values", () => {
@@ -244,10 +302,7 @@ test("dataGridRowDetailJson uses the original MongoDB document for nested values
 });
 
 test("jsonDetailDisplayValue expands JSON stored in MongoDB string fields", () => {
-  assert.deepEqual(
-    jsonDetailDisplayValue({ imparts: '{"insImpart":[{"impartId":"40-936","impartAnswer":"N,,"}]}' }),
-    { imparts: { insImpart: [{ impartId: "40-936", impartAnswer: "N,," }] } },
-  );
+  assert.deepEqual(jsonDetailDisplayValue({ imparts: '{"insImpart":[{"impartId":"40-936","impartAnswer":"N,,"}]}' }), { imparts: { insImpart: [{ impartId: "40-936", impartAnswer: "N,," }] } });
 });
 test("buildDataGridColumnDetail maps a whole column across rows", () => {
   const typeByColumn = new Map([["name", "varchar"]]);
@@ -305,7 +360,7 @@ test("dataGridColumnDetailJson and dataGridColumnDetailTsv format copy payloads"
 
   assert.ok(detail);
   assert.equal(dataGridColumnDetailJson(detail), '[\n  {\n    "row": 1,\n    "value": "Ada"\n  },\n  {\n    "row": 2,\n    "value": null\n  }\n]');
-  assert.equal(dataGridColumnDetailTsv(detail), "Ada\nNULL");
+  assert.equal(dataGridColumnDetailTsv(detail), "Ada\n");
 });
 
 const detailFields: DataGridCellDetail[] = [

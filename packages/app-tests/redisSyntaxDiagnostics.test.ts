@@ -71,8 +71,8 @@ test("highlights destructive commands as warning", () => {
   assert.match(diags[0].message, /Dangerous command 'DEL'/);
 });
 
-test("highlights flushall as blocked error but flushdb as confirm warning", () => {
-  // Aligned with the execution safety classification: FLUSHALL=blocked, FLUSHDB=confirm.
+test("highlights flushall and flushdb as blocked errors", () => {
+  // Aligned with the execution safety classification: FLUSHALL/FLUSHDB=blocked.
   const all = buildRedisSyntaxDiagnostics("FLUSHALL");
   assert.equal(all.length, 1);
   assert.equal(all[0].severity, "error");
@@ -80,8 +80,8 @@ test("highlights flushall as blocked error but flushdb as confirm warning", () =
 
   const db = buildRedisSyntaxDiagnostics("FLUSHDB");
   assert.equal(db.length, 1);
-  assert.equal(db[0].severity, "warning");
-  assert.match(db[0].message, /Dangerous command 'FLUSHDB'/);
+  assert.equal(db[0].severity, "error");
+  assert.match(db[0].message, /Blocked command 'FLUSHDB'/);
 });
 
 test("subcommands resolve via MAIN SUB key", () => {

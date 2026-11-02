@@ -1,0 +1,16 @@
+version: "3.8"
+
+services:
+  dbx:
+    image: __DBX_IMAGE__
+    container_name: dbx-fnos
+    restart: unless-stopped
+    ports:
+      - "${TRIM_SERVICE_PORT}:4224"
+    volumes:
+      - "${TRIM_PKGVAR}:/app/data"
+      - "${TRIM_PKGVAR}/backups:/app/backups"
+    environment:
+      DBX_DATA_DIR: /app/data
+      DBX_BACKUP_ROOT: /app/backups
+    stop_grace_period: 90s

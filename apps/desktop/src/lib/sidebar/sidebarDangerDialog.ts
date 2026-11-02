@@ -12,6 +12,7 @@ export interface SidebarDangerDialogOption {
 export interface SidebarDangerDialogProgress {
   completed: number;
   total: number;
+  phase?: "preparing" | "executing";
 }
 
 export interface SidebarDangerDialogTextInput {
@@ -28,9 +29,12 @@ export interface SidebarDangerDialogRequest {
   message: string;
   confirmLabel: string;
   sql?: string;
+  copySql?: string | (() => string);
   details?: string;
   detailsText?: string;
   loading?: boolean;
+  /** Keeps the confirm button held back until the request's own precondition is met (e.g. a typed target name). */
+  confirmDisabled?: boolean;
   closeOnConfirm?: boolean;
   progress?: SidebarDangerDialogProgress;
   option?: SidebarDangerDialogOption;
@@ -38,4 +42,18 @@ export interface SidebarDangerDialogRequest {
   textInput?: SidebarDangerDialogTextInput;
   cancelRunning?: () => void | Promise<void>;
   confirm: () => void | boolean | Promise<void | boolean>;
+}
+
+// One application-level host keeps requests alive when their originating tab closes.
+let dialogHost: ((request: SidebarDangerDialogRequest) => void) | undefined;
+
+export function registerSidebarDangerDialogHost(host: (request: SidebarDangerDialogRequest) => void): () => void {
+  dialogHost = host;
+  return () => {
+    if (dialogHost === host) dialogHost = undefined;
+  };
+}
+
+export function openSidebarDangerDialog(request: SidebarDangerDialogRequest): void {
+  dialogHost?.(request);
 }

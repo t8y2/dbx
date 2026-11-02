@@ -1,6 +1,43 @@
 import { describe, expect, it } from "vitest";
 
-import { databaseRenameMaintenanceDatabase, supportsDatabaseRename } from "@/lib/table/objectRenameSql";
+import { databaseRenameMaintenanceDatabase, supportsDatabaseRename, supportsObjectRename } from "@/lib/table/objectRenameSql";
+
+describe("Inceptor object rename", () => {
+  it("exposes table rename without enabling unsupported object or database renames", () => {
+    expect(supportsObjectRename("transwarp", "TABLE")).toBe(true);
+    expect(supportsObjectRename("transwarp", "VIEW")).toBe(false);
+    expect(supportsObjectRename("transwarp", "PROCEDURE")).toBe(false);
+    expect(supportsObjectRename("transwarp", "FUNCTION")).toBe(false);
+    expect(supportsDatabaseRename("transwarp")).toBe(false);
+  });
+});
+
+describe("StarRocks object rename", () => {
+  it("enables table rename only", () => {
+    expect(supportsObjectRename("starrocks", "TABLE")).toBe(true);
+    for (const objectType of ["VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "EVENT"] as const) {
+      expect(supportsObjectRename("starrocks", objectType)).toBe(false);
+    }
+    expect(supportsDatabaseRename("starrocks")).toBe(false);
+  });
+});
+
+describe("OceanBase Oracle object rename", () => {
+  it("offers table and ordinary view rename while keeping materialized views deferred", () => {
+    expect(supportsObjectRename("oceanbase-oracle", "TABLE")).toBe(true);
+    expect(supportsObjectRename("oceanbase-oracle", "VIEW")).toBe(true);
+    expect(supportsObjectRename("oceanbase-oracle", "MATERIALIZED_VIEW")).toBe(false);
+  });
+});
+
+describe("SAP HANA object rename", () => {
+  it("offers table rename without enabling other object renames", () => {
+    expect(supportsObjectRename("saphana", "TABLE")).toBe(true);
+    expect(supportsObjectRename("saphana", "VIEW")).toBe(false);
+    expect(supportsObjectRename("saphana", "PROCEDURE")).toBe(false);
+    expect(supportsObjectRename("saphana", "FUNCTION")).toBe(false);
+  });
+});
 
 describe("database rename", () => {
   it("chooses a maintenance database outside the rename target", () => {

@@ -1,7 +1,7 @@
 import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 
-export type SyntheticEditKey = "oracle-rowid" | "neo4j-element-id";
+export type SyntheticEditKey = "oracle-rowid" | "xugu-rowid" | "postgres-ctid" | "neo4j-element-id";
 
 export interface TableDataCapability {
   insert: boolean;
@@ -78,6 +78,7 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "questdb",
   "oceanbase-oracle",
   "gbase",
+  "gbase8s",
   "access",
   "h2",
   "snowflake",
@@ -88,9 +89,24 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "sundb",
   "oscar",
   "databend",
+  "iris",
 ]);
 
 const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<DatabaseCapability>>> = {
+  postgres: {
+    // CTID is injected only by base-table data previews; it is not a schema key.
+    syntheticKey: "postgres-ctid",
+  },
+  duckdb: {
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
+      requiresTransactionalTableForExistingRows: false,
+      transaction: false,
+    },
+  },
   kyuubi: {
     tableData: {
       insert: false,
@@ -123,6 +139,26 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       transaction: false,
     },
   },
+  argo: {
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
+      requiresTransactionalTableForExistingRows: true,
+      transaction: false,
+    },
+  },
+  transwarp: {
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
+      requiresTransactionalTableForExistingRows: true,
+      transaction: true,
+    },
+  },
   jdbc: {
     tableData: {
       insert: false,
@@ -148,6 +184,20 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
   oracle: {
     syntheticKey: "oracle-rowid",
   },
+  xugu: {
+    // Xugu exposes a stable ROWID pseudo-column for base, partitioned and
+    // temporary tables. Keep this capability scoped to Xugu instead of
+    // broadening Oracle-compatible behavior for other drivers.
+    syntheticKey: "xugu-rowid",
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
+      requiresTransactionalTableForExistingRows: false,
+      transaction: true,
+    },
+  },
   "oceanbase-oracle": {
     syntheticKey: "oracle-rowid",
   },
@@ -156,6 +206,23 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       insert: true,
       updateRequiresPrimaryKey: true,
       deleteRequiresPrimaryKey: true,
+      requiresTransactionalTableForExistingRows: false,
+      transaction: false,
+    },
+  },
+  databend: {
+    // Databend's JDBC driver reports supportsTransactions() == false, and the
+    // agent refuses an explicit transaction for exactly that reason
+    // ("Transactions are not supported by this JDBC driver"). Grid saves must
+    // therefore go through executeBatch, not executeInTransaction, or every
+    // edit fails with that error (issue #12003). The capability override must
+    // repeat the Navicat-style defaults, since an override replaces the whole
+    // tableData object rather than merging field by field.
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
       requiresTransactionalTableForExistingRows: false,
       transaction: false,
     },
@@ -209,6 +276,25 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       existingRowsReadonly: true,
       transaction: false,
       readonly: true,
+    },
+  },
+  salesforce: {
+    // SOQL has no DML. A grid save becomes one `DBX SALESFORCE DML` pseudo-command
+    // per record (built by dbx-sql) which the driver turns into a REST call:
+    // PATCH /sobjects/{object}/{id}, POST /sobjects/{object}, DELETE /sobjects/{object}/{id}.
+    // Row identity is the `Id` column (the driver marks it is_primary_key), so both
+    // update and delete require it. REST has no transactions: records are written
+    // one by one, a failure leaves the earlier records applied, and nothing can be
+    // rolled back — the grid therefore asks for confirmation before saving.
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: true,
+      deleteRequiresPrimaryKey: true,
+      keylessRowPredicate: false,
+      requiresTransactionalTableForExistingRows: false,
+      existingRowsReadonly: false,
+      transaction: false,
+      readonly: false,
     },
   },
 };

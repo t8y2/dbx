@@ -12,9 +12,39 @@ import {
   sqlServerLeadingUseScript,
   sqlServerUseCompletionDatabaseNames,
   sqlServerUseDatabaseFromStatement,
+  switchesDatabaseWithUseStatement,
+  useDatabaseFromStatement,
 } from "@/lib/sql/sqlCompletionLookupTarget";
 
 describe("sqlCompletionLookupTarget", () => {
+  it.each([
+    ["Adventureworks2025.Public", "ADVENTUREWORKS2025", "PUBLIC"],
+    ['"Adventureworks2025".public', "Adventureworks2025", "PUBLIC"],
+    ['"My.DB"."Sales Area"', "My.DB", "Sales Area"],
+    ['"My.DB"."A""B"', "My.DB", 'A"B'],
+    ['"adventureworks2025".PUBLIC', "adventureworks2025", "PUBLIC"],
+  ])("resolves Snowflake %s using unquoted uppercase and quoted exact names", (qualifier, database, schema) => {
+    const sql = `SELECT * FROM ${qualifier}.Di`;
+    const completionContext = getSqlCompletionContext(sql, sql.length, { databaseType: "snowflake" });
+    expect(completionContext.qualifierParts).toEqual([database, schema]);
+    expect(
+      resolveSqlCompletionTableLookupTarget({
+        databaseType: "snowflake",
+        currentDatabase: "DEFAULT_DB",
+        currentSchema: "PUBLIC",
+        supportsDatabaseQualifier: false,
+        supportsDatabaseSchemaQualifier: true,
+        knownDatabases: ["Adventureworks2025", "ADVENTUREWORKS2025", "My.DB"],
+        completionContext,
+      }),
+    ).toEqual({ database, schema, filter: "Di", qualifierDatabase: database });
+  });
+
+  it.each(["postgres", "sqlserver", "trino", "mysql"] as const)("preserves %s qualifier casing", (databaseType) => {
+    const sql = "SELECT * FROM Adventureworks2025.Public.";
+    expect(getSqlCompletionContext(sql, sql.length, { databaseType }).qualifierParts).toEqual(["Adventureworks2025", "Public"]);
+  });
+
   it("treats qualified table completion as a database lookup for MySQL-compatible engines", () => {
     const target = resolveSqlCompletionTableLookupTarget({
       currentDatabase: "default_db",
@@ -288,6 +318,35 @@ describe("sqlCompletionLookupTarget", () => {
   it("does not isolate ordinary SQL Server multi-statement scripts", () => {
     expect(sqlServerLeadingUseScript("SELECT 1; SELECT 2;")).toBeUndefined();
     expect(sqlServerLeadingUseScript("USE FooDB; INSERT INTO audit_log VALUES (1); SELECT * FROM Users;")).toBeUndefined();
+  });
+
+  it("parses the USE target of MySQL-family dialects in all three identifier forms", () => {
+    expect(useDatabaseFromStatement("USE hd_ods", "mysql")).toBe("hd_ods");
+    expect(useDatabaseFromStatement("use hd_ods;", "mysql")).toBe("hd_ods");
+    expect(useDatabaseFromStatement("  USE `hd-ods`;  ", "doris")).toBe("hd-ods");
+    expect(useDatabaseFromStatement('USE "报告库";', "starrocks")).toBe("报告库");
+    expect(useDatabaseFromStatement("-- switch\n/* c */ USE goldendb_db;", "goldendb")).toBe("goldendb_db");
+    expect(useDatabaseFromStatement("USE `a``b`;", "gbase")).toBe("a`b");
+  });
+
+  it("does not turn other statements or dialects into a database switch", () => {
+    expect(useDatabaseFromStatement("SELECT 1 FROM dual;", "mysql")).toBeUndefined();
+    expect(useDatabaseFromStatement("USE hd_ods; SELECT 1;", "mysql")).toBeUndefined();
+    expect(useDatabaseFromStatement("USE hd_ods;", "postgres")).toBeUndefined();
+    expect(useDatabaseFromStatement("USE other_ods;", "oracle")).toBeUndefined();
+    // SQL Server keeps its own bracket-aware parser.
+    expect(useDatabaseFromStatement("USE [Bar]]DB];", "sqlserver")).toBe("Bar]DB");
+    expect(useDatabaseFromStatement("USE hd_ods;", undefined)).toBeUndefined();
+  });
+
+  it("reports which dialects treat USE as a database switch", () => {
+    for (const databaseType of ["mysql", "doris", "starrocks", "goldendb", "gbase"] as const) {
+      expect(switchesDatabaseWithUseStatement(databaseType)).toBe(true);
+    }
+    for (const databaseType of ["postgres", "oracle", "clickhouse", "hive"] as const) {
+      expect(switchesDatabaseWithUseStatement(databaseType)).toBe(false);
+    }
+    expect(switchesDatabaseWithUseStatement(undefined)).toBe(false);
   });
 
   it("ignores commented, quoted, current, later, and non-SQL Server USE text", () => {

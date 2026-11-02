@@ -1,15 +1,17 @@
 package com.dbx.agent;
 
 import com.google.gson.JsonArray;
+import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
 import java.io.PrintStream;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -30,10 +32,37 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CommonJavaCompatibilityTest {
+    @Test
+    void connectionParameterMetadataDoesNotRequireOrValidateAConnection() {
+        MinimalAgent agent = new MinimalAgent() {
+            public Connection getConnection() { throw new AssertionError("Metadata must not use a physical connection"); }
+            public List<Map<String, Object>> describeConnectionParameters(ConnectParams params) {
+                return List.of(Map.of("name", "example", "type", "string", "source", "driver"));
+            }
+        };
+        JsonObject response = JsonParser.parseString(new JsonRpcServer(agent).handleRequest(
+            "{\"id\":1,\"method\":\"connection_parameters\",\"params\":{}}"
+        )).getAsJsonObject();
+        assertFalse(response.has("error"), response.toString());
+        assertEquals("example", response.getAsJsonArray("result").get(0).getAsJsonObject().get("name").getAsString());
+    }
+
+    @Test
+    void emitsOptionalServerAuditTimeWithoutLeakingCursorBookkeeping() {
+        Gson gson = new Gson();
+        QueryPageResult page = new QueryPageResult();
+        assertFalse(gson.toJsonTree(page).getAsJsonObject().has("server_execute_time_us"));
+        page.setServer_execute_time_us(370L);
+        page.setCursor_rows_read(500);
+        assertEquals(370L, gson.toJsonTree(page).getAsJsonObject().get("server_execute_time_us").getAsLong());
+        assertFalse(gson.toJsonTree(page).getAsJsonObject().has("cursor_rows_read"));
+    }
+
     @Test
     void definesSharedAgentProtocolContract() {
         assertEquals("handshake", AgentProtocol.METHOD_HANDSHAKE);
@@ -41,6 +70,23 @@ class CommonJavaCompatibilityTest {
         assertTrue(AgentProtocol.CAPABILITIES.contains(AgentProtocol.CAPABILITY_CONNECT));
         assertTrue(AgentProtocol.CAPABILITIES.contains(AgentProtocol.CAPABILITY_QUERY));
         assertTrue(AgentProtocol.CAPABILITIES.contains(AgentProtocol.CAPABILITY_METADATA));
+        assertFalse(AgentProtocol.CAPABILITIES.contains(AgentProtocol.CAPABILITY_EXACT_METADATA_IDENTITY_V1));
+    }
+
+    @Test
+    void objectInfoRetainsIndependentOwnersWithoutChangingLegacyConstructors() {
+        Gson gson = new Gson();
+        ObjectInfo legacy = gson.fromJson("{\"name\":\"T\",\"object_type\":\"TABLE\"}", ObjectInfo.class);
+        assertNull(legacy.getParent_schema());
+        ObjectInfo index = new ObjectInfo(" Ix(a) ", "INDEX", "Index Owner", null);
+        index.setParent_schema(" Table Owner ");
+        index.setParent_name(" T(a) ");
+        ObjectInfo restored = gson.fromJson(gson.toJson(index), ObjectInfo.class);
+        assertEquals(index, restored);
+        assertEquals(index.hashCode(), restored.hashCode());
+        assertEquals(" Table Owner ", restored.getParent_schema());
+        restored.setParent_schema("Other Owner");
+        assertFalse(index.equals(restored));
     }
 
     @Test
@@ -57,6 +103,8 @@ class CommonJavaCompatibilityTest {
         assertEquals(AgentProtocol.CAPABILITIES, strings(contract.getAsJsonArray("capabilities")));
         assertEquals(AgentProtocol.CAPABILITIES, strings(contract.getAsJsonArray("defaultSqlCapabilities")));
         assertEquals(AgentProtocol.COMMON_METHODS, strings(contract.getAsJsonArray("commonMethods")));
+        assertEquals(AgentProtocol.NATIVE_JOB_LEGACY_METHODS, strings(contract.getAsJsonArray("nativeJobLegacyMethods")));
+        assertEquals(AgentProtocol.NATIVE_JOB_SESSION_METHODS, strings(contract.getAsJsonArray("nativeJobSessionMethods")));
         assertEquals(AgentProtocol.MONGO_LEGACY_METHODS, strings(contract.getAsJsonArray("mongoLegacyMethods")));
         assertEquals(AgentProtocol.KV_METHODS, strings(contract.getAsJsonArray("kvMethods")));
     }
@@ -84,6 +132,8 @@ class CommonJavaCompatibilityTest {
             strings(contract.getAsJsonArray("defaultSqlCapabilities"))
         );
         assertEquals(AgentProtocol.MULTI_SESSION_METHODS, strings(contract.getAsJsonArray("commonMethods")));
+        assertEquals(AgentProtocol.NATIVE_JOB_LEGACY_METHODS, strings(contract.getAsJsonArray("nativeJobLegacyMethods")));
+        assertEquals(AgentProtocol.NATIVE_JOB_SESSION_METHODS, strings(contract.getAsJsonArray("nativeJobSessionMethods")));
         assertEquals(AgentProtocol.MONGO_LEGACY_METHODS, strings(contract.getAsJsonArray("mongoLegacyMethods")));
         assertEquals(AgentProtocol.KV_METHODS, strings(contract.getAsJsonArray("kvMethods")));
     }
@@ -105,6 +155,58 @@ class CommonJavaCompatibilityTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), "connect"));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), "query"));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), "metadata"));
+    }
+
+    @Test
+    void exactMetadataRequiresExplicitAgentSupportBeforeReading() {
+        JsonRpcServer server = new JsonRpcServer(new MinimalAgent());
+        JsonObject old = JsonParser.parseString(server.handleRequest("{\"id\":1,\"method\":\"get_columns\",\"params\":{\"schema\":\"APP\",\"table\":\"T\"}}")).getAsJsonObject();
+        assertTrue(old.has("result"));
+        JsonObject exact = JsonParser.parseString(server.handleRequest("{\"id\":2,\"method\":\"get_columns\",\"params\":{\"schema\":\"APP\",\"table\":\"T\",\"exact_identity\":true}}")).getAsJsonObject();
+        assertTrue(exact.has("error"), exact.toString());
+        assertTrue(exact.getAsJsonObject("error").get("message").getAsString().contains("exact_metadata_identity_v1"));
+    }
+
+    @Test
+    void explicitExactIdentityAgentAdvertisesTheCapability() {
+        MinimalAgent agent = new MinimalAgent() {
+            public boolean supportsExactMetadataIdentity() { return true; }
+        };
+        JsonObject handshake = JsonParser.parseString(new JsonRpcServer(agent).handleRequest("{\"id\":1,\"method\":\"handshake\",\"params\":{}}")).getAsJsonObject();
+        assertTrue(containsCapability(handshake.getAsJsonObject("result").getAsJsonArray("capabilities"), "exact_metadata_identity_v1"));
+    }
+
+    @Test
+    void connectedSessionReportsItsOwnExactIdentitySupport() {
+        try (MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(() -> new MinimalAgent() {
+            private boolean exactIdentity = true;
+            @Override
+            public void connect(ConnectParams params) { exactIdentity = !"legacy".equals(params.getDatabase()); }
+            @Override
+            public boolean supportsExactMetadataIdentity() { return exactIdentity; }
+        }).withExactMetadataIdentity()) {
+            JsonObject legacy = JsonParser.parseString(server.handleRequest("{\"id\":1,\"method\":\"open_session\",\"params\":{\"agentSessionId\":\"legacy\",\"database\":\"legacy\"}} ")).getAsJsonObject();
+            JsonObject current = JsonParser.parseString(server.handleRequest("{\"id\":2,\"method\":\"open_session\",\"params\":{\"agentSessionId\":\"current\",\"database\":\"current\"}} ")).getAsJsonObject();
+            assertTrue(legacy.getAsJsonObject("result").get("ok").getAsBoolean());
+            assertTrue(legacy.getAsJsonObject("result").has("exactMetadataIdentity"));
+            assertFalse(legacy.getAsJsonObject("result").get("exactMetadataIdentity").getAsBoolean());
+            assertTrue(current.getAsJsonObject("result").get("exactMetadataIdentity").getAsBoolean());
+            JsonObject ordinary = JsonParser.parseString(server.handleRequest("{\"id\":3,\"method\":\"get_columns\",\"params\":{\"agentSessionId\":\"legacy\",\"schema\":\"APP\",\"table\":\"T\"}} ")).getAsJsonObject();
+            assertTrue(ordinary.has("result"), ordinary.toString());
+            JsonObject exact = JsonParser.parseString(server.handleRequest("{\"id\":4,\"method\":\"get_columns\",\"params\":{\"agentSessionId\":\"legacy\",\"schema\":\"APP\",\"table\":\"T\",\"exact_identity\":true}} ")).getAsJsonObject();
+            assertTrue(exact.has("error"), exact.toString());
+        }
+    }
+
+    @Test
+    void constraintMetadataUnsupportedIsNotAnEmptySuccess() {
+        JsonRpcServer server = new JsonRpcServer(new MinimalAgent());
+        JsonObject response = JsonParser.parseString(server.handleRequest(
+            "{\"id\":1,\"method\":\"list_constraints\",\"params\":{\"schema\":\"APP\",\"table\":\"T\"}}"
+        )).getAsJsonObject();
+
+        assertFalse(response.has("result"));
+        assertTrue(response.getAsJsonObject("error").get("message").getAsString().contains("not supported"));
     }
 
     @Test
@@ -148,6 +250,42 @@ class CommonJavaCompatibilityTest {
         )).getAsJsonObject().getAsJsonObject("result");
 
         assertEquals("Example JDBC", result.getAsJsonObject("databaseInfo").get("driverName").getAsString());
+    }
+
+    @Test
+    void jsonRpcServerDispatchesInteractiveTransactionMethods() {
+        List<String> calls = new ArrayList<>();
+        MinimalAgent agent = new MinimalAgent() {
+            @Override
+            public Map<String, Object> beginManualTransaction(String schema) {
+                calls.add("begin:" + schema);
+                return Collections.singletonMap("ok", (Object) true);
+            }
+
+            @Override
+            public Map<String, Object> commitManualTransaction() {
+                calls.add("commit");
+                return Collections.singletonMap("ok", (Object) true);
+            }
+
+            @Override
+            public Map<String, Object> rollbackManualTransaction() {
+                calls.add("rollback");
+                return Collections.singletonMap("ok", (Object) true);
+            }
+        };
+        JsonRpcServer server = new JsonRpcServer(agent);
+
+        assertTrue(JsonParser.parseString(server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"begin_manual_transaction\",\"params\":{\"schema\":\"APP\"}}"
+        )).getAsJsonObject().has("result"));
+        assertTrue(JsonParser.parseString(server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"commit_manual_transaction\",\"params\":{}}"
+        )).getAsJsonObject().has("result"));
+        assertTrue(JsonParser.parseString(server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"rollback_manual_transaction\",\"params\":{}}"
+        )).getAsJsonObject().has("result"));
+        assertEquals(List.of("begin:APP", "commit", "rollback"), calls);
     }
 
     @Test
@@ -241,27 +379,55 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
-    void multiSessionServerKeepsProtocolOutputWhenGlobalStdoutChanges() {
+    void multiSessionServerUsesUtf8ProtocolWhenGlobalStdoutChanges() throws Exception {
         synchronized (System.class) {
             InputStream originalInput = System.in;
             PrintStream originalOutput = System.out;
             ByteArrayOutputStream protocolBytes = new ByteArrayOutputStream();
             ByteArrayOutputStream redirectedBytes = new ByteArrayOutputStream();
-            try (PrintStream protocolOutput = new PrintStream(protocolBytes, true, StandardCharsets.UTF_8);
-                 PrintStream redirectedOutput = new PrintStream(redirectedBytes, true, StandardCharsets.UTF_8)) {
+            try (PrintStream protocolOutput = new PrintStream(protocolBytes, true, java.nio.charset.Charset.forName("GBK"));
+                 PrintStream redirectedOutput = new PrintStream(redirectedBytes, true, StandardCharsets.UTF_8);
+                 PipedInputStream requestInput = new PipedInputStream();
+                 PipedOutputStream requestWriter = new PipedOutputStream(requestInput)) {
                 System.setOut(protocolOutput);
-                MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(MinimalAgent::new);
-                System.setIn(new ByteArrayInputStream(
-                    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"shutdown\",\"params\":{}}\n"
-                        .getBytes(StandardCharsets.UTF_8)
-                ));
+                MultiSessionJsonRpcServer server = MultiSessionJsonRpcServer.forSessionHandlers(() -> new SessionRpcHandler() {
+                    @Override
+                    public Object connect(JsonObject params) {
+                        return Collections.singletonMap("label", "dbx\u4e2d\u6587");
+                    }
+
+                    @Override
+                    public Object handle(String method, JsonObject params) {
+                        return Collections.singletonMap("ok", true);
+                    }
+
+                    @Override
+                    public void close() {
+                    }
+                });
+                System.setIn(requestInput);
                 System.setOut(redirectedOutput);
-
-                server.run();
-
-                String protocol = protocolBytes.toString(StandardCharsets.UTF_8);
-                assertTrue(protocol.contains("{\"ready\":true}"), protocol);
-                assertTrue(protocol.contains("\"id\":1"), protocol);
+                Thread runner = new Thread(server::run, "dbx-utf8-protocol-test");
+                runner.setDaemon(true);
+                runner.start();
+                try {
+                    requestWriter.write("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"test_connection\",\"params\":{}}\n"
+                        .getBytes(StandardCharsets.UTF_8));
+                    requestWriter.flush();
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (!protocolBytes.toString(StandardCharsets.UTF_8).contains("dbx\u4e2d\u6587")
+                        && runner.isAlive() && System.nanoTime() < deadline) {
+                        Thread.sleep(10);
+                    }
+                    String protocol = protocolBytes.toString(StandardCharsets.UTF_8);
+                    assertTrue(protocol.contains("{\"ready\":true}"), protocol);
+                    assertTrue(protocol.contains("\"id\":1"), protocol);
+                    assertTrue(protocol.contains("dbx\u4e2d\u6587"), protocol);
+                } finally {
+                    requestWriter.close();
+                    runner.join(TimeUnit.SECONDS.toMillis(5));
+                }
+                assertFalse(runner.isAlive(), "Protocol server did not stop after input closed");
                 assertEquals("", redirectedBytes.toString(StandardCharsets.UTF_8));
             } finally {
                 System.setIn(originalInput);
@@ -304,6 +470,66 @@ class CommonJavaCompatibilityTest {
         assertFalse(queryB.isAlive());
     }
 
+    @Test
+    void nativeSessionCancellationOnlyCancelsTargetSession() throws Exception {
+        nativeCancellationProof("cancel_session");
+    }
+
+    @Test
+    void nativeSessionCloseCancelsTargetBeforeWaitingForItsRequestLock() throws Exception {
+        nativeCancellationProof("close_session");
+    }
+
+    private void nativeCancellationProof(String action) throws Exception {
+        List<NativeCancelAgent> created = Collections.synchronizedList(new ArrayList<>());
+        MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(() -> {
+            NativeCancelAgent agent = new NativeCancelAgent();
+            created.add(agent);
+            return agent;
+        });
+        nativeRequest(server, "open_session", "a", 1);
+        nativeRequest(server, "open_session", "b", 2);
+        try (var workers = java.util.concurrent.Executors.newFixedThreadPool(2)) {
+            var target = workers.submit(() -> nativeRequest(server, "get_explain_info", "a", 3));
+            var sibling = workers.submit(() -> nativeRequest(server, "get_explain_info", "b", 4));
+            try {
+                assertTrue(created.get(0).started.await(3, TimeUnit.SECONDS));
+                assertTrue(created.get(1).started.await(3, TimeUnit.SECONDS));
+                nativeRequest(server, action, "a", 5);
+                String targetResponse = target.get(2, TimeUnit.SECONDS);
+                assertTrue(JsonParser.parseString(targetResponse).getAsJsonObject().has("error"), targetResponse);
+                assertTrue(created.get(0).cancelled.get());
+                assertTrue(created.get(0).cleaned.get());
+                assertFalse(created.get(0).executor.hasActiveStatements());
+                assertFalse(created.get(1).cancelled.get(), "Sibling native Statement remains active");
+                assertFalse(sibling.isDone(), "Sibling request remains blocked until its own release");
+                if ("close_session".equals(action)) {
+                    assertTrue(created.get(0).closed.await(2, TimeUnit.SECONDS), "Close acquired request lock after cancellation");
+                }
+                created.get(1).release.countDown();
+                String siblingResponse = sibling.get(2, TimeUnit.SECONDS);
+                assertTrue(JsonParser.parseString(siblingResponse).getAsJsonObject().has("result"), siblingResponse);
+            } finally {
+                created.forEach(agent -> agent.release.countDown());
+                nativeRequest(server, "close_session", "a", 6);
+                nativeRequest(server, "close_session", "b", 7);
+            }
+        }
+    }
+
+    private static String nativeRequest(MultiSessionJsonRpcServer server, String method, String session, int id) {
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", "2.0");
+        request.addProperty("id", id);
+        request.addProperty("method", method);
+        JsonObject params = new JsonObject();
+        params.addProperty("agentSessionId", session);
+        params.addProperty("sql", "SELECT 1");
+        params.addProperty("timeoutSecs", 0);
+        params.addProperty("mode", "explain");
+        request.add("params", params);
+        return server.handleRequest(request.toString());
+    }
     @Test
     void cancelActiveStatementsClosesOnlyThatExecutorPagedSessions() {
         JdbcExecutor target = new JdbcExecutor();
@@ -357,6 +583,19 @@ class CommonJavaCompatibilityTest {
         assertTrue(row.get(1).getAsJsonPrimitive().isString());
         assertEquals(42, row.get(2).getAsInt());
         assertTrue(row.get(2).getAsJsonPrimitive().isNumber());
+    }
+
+    @Test
+    void jsonRpcServerDispatchesDeferredLobOption() {
+        MinimalAgent agent = new MinimalAgent();
+        JsonRpcServer server = new JsonRpcServer(agent);
+
+        String response = server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"" + AgentProtocol.METHOD_EXECUTE_QUERY + "\",\"params\":{\"sql\":\"select payload from documents\",\"deferLobs\":true}}"
+        );
+
+        assertTrue(JsonParser.parseString(response).getAsJsonObject().has("result"));
+        assertTrue(agent.lastExecuteOptions.getDeferLobs());
     }
 
     @Test
@@ -447,14 +686,14 @@ class CommonJavaCompatibilityTest {
         JsonRpcServer server = new JsonRpcServer(agent);
 
         String startResponse = server.handleRequest(
-            "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"" + AgentProtocol.METHOD_START_TABLE_READ + "\",\"params\":{\"sql\":\"select * from orders\",\"schema\":\"public\",\"pageSize\":2,\"fetchSize\":8,\"maxRows\":20,\"timeoutSecs\":3}}"
+            "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"" + AgentProtocol.METHOD_START_TABLE_READ + "\",\"params\":{\"sql\":\"select * from orders\",\"schema\":\"public\",\"pageSize\":2,\"fetchSize\":8,\"maxRows\":20,\"timeoutSecs\":3,\"deferLobs\":true}}"
         );
         JsonObject startJson = JsonParser.parseString(startResponse).getAsJsonObject();
 
         assertTrue(startJson.has("result"));
         assertEquals("select * from orders", agent.lastSql);
         assertEquals("public", agent.lastSchema);
-        assertEquals(new QueryPageOptions(2, 8, 20, 3), agent.lastOptions);
+        assertEquals(new QueryPageOptions(2, 8, 20, 3, true), agent.lastOptions);
         assertEquals("table-session", startJson.getAsJsonObject("result").get("session_id").getAsString());
 
         String fetchResponse = server.handleRequest(
@@ -509,7 +748,9 @@ class CommonJavaCompatibilityTest {
         assertEquals(true, page.getHas_more());
 
         assertEquals(JdbcExecutor.DEFAULT_MAX_ROWS, new ExecuteQueryOptions().getMaxRows());
+        assertFalse(new ExecuteQueryOptions().getDeferLobs());
         assertEquals(100, new QueryPageOptions().getPageSize());
+        assertFalse(new QueryPageOptions().getDeferLobs());
         assertNotNull(JdbcExecutor.INSTANCE);
     }
 
@@ -546,6 +787,33 @@ class CommonJavaCompatibilityTest {
                 "CREATE INDEX \"orders_name_idx\" ON \"public\".\"orders\" (\"name\");",
             ddl
         );
+    }
+
+    @Test
+    void buildsPostgresIndexDdlWithPerKeyOrderingOptions() {
+        IndexInfo index = new IndexInfo(
+            "orders_id_order_idx",
+            Arrays.asList("id", "created_at"),
+            false,
+            false,
+            null,
+            "btree",
+            null,
+            null
+        );
+        index.setKey_options(Arrays.asList(0, 3));
+
+        String ddl = DdlBuilder.buildTableDdl(
+            "public",
+            "orders",
+            Collections.singletonList(new ColumnInfo("id", "bigint", false, null, false)),
+            Collections.singletonList(index),
+            Collections.emptyList()
+        );
+
+        assertTrue(ddl.contains(
+            "USING btree (\"id\" ASC NULLS LAST, \"created_at\" DESC NULLS FIRST)"
+        ));
     }
 
     @Test
@@ -626,17 +894,19 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
-    void executesTransactionsOneByOneWhenJdbcDriverDoesNotSupportTransactions() {
+    void rejectsTransactionsWhenJdbcDriverDoesNotSupportTransactions() {
         List<String> calls = new ArrayList<>();
         DatabaseAgent agent = new TransactionAgent(nonTransactionalConnection(calls));
 
-        QueryResult result = agent.executeTransaction(Arrays.asList("UPDATE A SET ID = 1", "UPDATE B SET ID = 2"), "APP");
-
-        assertEquals(2L, result.getAffected_rows());
-        assertEquals(
-            Arrays.asList("supportsTransactions", "execute:SET SCHEMA \"APP\"", "executeUpdate:UPDATE A SET ID = 1", "executeUpdate:UPDATE B SET ID = 2"),
-            calls
+        UnsupportedOperationException error = assertThrows(
+            UnsupportedOperationException.class,
+            () -> agent.executeTransaction(Arrays.asList("UPDATE A SET ID = 1", "UPDATE B SET ID = 2"), "APP")
         );
+
+        assertEquals("Transactions are not supported by this JDBC driver", error.getMessage());
+        // Capability is checked before schema switching or statements, so a
+        // failed transaction request cannot leave a partially applied batch.
+        assertEquals(Collections.singletonList("supportsTransactions"), calls);
     }
 
     @Test
@@ -724,7 +994,92 @@ class CommonJavaCompatibilityTest {
         );
     }
 
+    @Test
+    void buildsTableDdlWithNationalCharacterLength() {
+        String ddl = DdlBuilder.buildTableDdl(
+            "DBX_DEMO",
+            "CUSTOMERS",
+            Collections.singletonList(new ColumnInfo(
+                "NAME",
+                "NVARCHAR",
+                false,
+                null,
+                false,
+                null,
+                null,
+                null,
+                null,
+                100
+            )),
+            Collections.emptyList(),
+            Collections.emptyList()
+        );
+
+        assertTrue(ddl.contains("\"NAME\" NVARCHAR(100) NOT NULL"));
+    }
+
+    @Test
+    void appendsOracleObjectGrantSqlAfterTableDdl() {
+        String ddl = DdlBuilder.buildTableDdl(
+            "APP",
+            "USERS",
+            Collections.singletonList(new ColumnInfo("ID", "NUMBER", false, null, true)),
+            Collections.emptyList(),
+            Collections.emptyList()
+        );
+        String grants = DdlBuilder.buildOracleObjectGrantSql(
+            "APP",
+            "USERS",
+            Arrays.asList(
+                new OracleObjectPrivilege("READER", "SELECT", false),
+                new OracleObjectPrivilege("READER", "INSERT", false),
+                new OracleObjectPrivilege("ADMIN", "SELECT", true),
+                new OracleObjectPrivilege("ANALYST", "UPDATE", false, "NAME")
+            )
+        );
+
+        String combined = DdlBuilder.appendTrailingSql(ddl, grants);
+
+        assertTrue(combined.contains("CREATE TABLE \"APP\".\"USERS\""));
+        assertTrue(combined.contains("GRANT SELECT, INSERT ON \"APP\".\"USERS\" TO \"READER\";"));
+        assertTrue(combined.contains("GRANT SELECT ON \"APP\".\"USERS\" TO \"ADMIN\" WITH GRANT OPTION;"));
+        assertTrue(combined.contains("GRANT UPDATE (\"NAME\") ON \"APP\".\"USERS\" TO \"ANALYST\";"));
+        assertEquals("", DdlBuilder.buildOracleObjectGrantSql("APP", "USERS", Collections.emptyList()));
+        assertEquals(ddl, DdlBuilder.appendTrailingSql(ddl, "   "));
+    }
+
+    @Test
+    void ddlBuilderStripsNulCharactersFromDefaultsAndComments() {
+        ColumnInfo col1 = new ColumnInfo("status\0ignored", "int", false, "'2'\0\0\0", false);
+        col1.setComment("status comment\0ignored");
+        ColumnInfo col2 = new ColumnInfo("name", "varchar", true, "''\0\0\0", false);
+        ColumnInfo col3 = new ColumnInfo("blank_default", "int", true, "\0\0\0", false);
+
+        String ddl = DdlBuilder.buildTableDdl(
+            "app\0ignored",
+            "users\0ignored",
+            Arrays.asList(col1, col2, col3),
+            Collections.emptyList(),
+            Collections.emptyList(),
+            Collections.emptyList(),
+            false,
+            true,
+            "table comment\0ignored"
+        );
+
+        assertFalse(ddl.contains("\0"), "DDL must not contain NUL bytes");
+        assertTrue(ddl.contains("CREATE TABLE \"app\".\"users\""));
+        assertTrue(ddl.contains("\"status\" int NOT NULL DEFAULT '2'"));
+        assertTrue(ddl.contains("\"name\" varchar DEFAULT ''"));
+        assertTrue(ddl.contains("\"blank_default\" int"));
+        assertFalse(ddl.contains("\"blank_default\" int DEFAULT"));
+        assertTrue(ddl.contains("COMMENT ON TABLE \"app\".\"users\" IS 'table comment';"));
+        assertTrue(ddl.contains("COMMENT ON COLUMN \"app\".\"users\".\"status\" IS 'status comment';"));
+    }
+
     private static class MinimalAgent implements DatabaseAgent {
+        private ExecuteQueryOptions lastExecuteOptions;
+
         @Override
         public void connect(ConnectParams params) {
         }
@@ -774,6 +1129,7 @@ class CommonJavaCompatibilityTest {
 
         @Override
         public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+            lastExecuteOptions = options;
             return new QueryResult(Collections.emptyList(), Collections.emptyList(), 0L, 0L);
         }
 
@@ -802,6 +1158,41 @@ class CommonJavaCompatibilityTest {
         }
     }
 
+    private static final class NativeCancelAgent extends MinimalAgent {
+        private final CountDownLatch started = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+        private final CountDownLatch closed = new CountDownLatch(1);
+        private final AtomicBoolean cancelled = new AtomicBoolean();
+        private final AtomicBoolean cleaned = new AtomicBoolean();
+        private volatile JdbcExecutor executor;
+        private final java.sql.Statement statement = proxy(java.sql.Statement.class, (method, args) -> {
+            if ("cancel".equals(method.getName())) {
+                cancelled.set(true);
+                release.countDown();
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        @Override
+        public String getExplainInfo(String sql, String database, String schema, int timeout, String mode) {
+            executor = JdbcExecutor.current();
+            try (var operation = executor.beginNativeOperation(); var tracked = executor.trackStatement(statement)) {
+                started.countDown();
+                if (!release.await(5, TimeUnit.SECONDS)) throw new AssertionError("Native Statement was not cancelled");
+                operation.checkCancelled();
+                return "{}";
+            } catch (InterruptedException | java.sql.SQLException error) {
+                throw new RuntimeException(error);
+            } finally {
+                cleaned.set(true);
+            }
+        }
+
+        @Override
+        public void disconnect() {
+            closed.countDown();
+        }
+    }
     private static final class CancelTrackingAgent extends MinimalAgent {
         private final CountDownLatch statementStarted = new CountDownLatch(1);
         private final CountDownLatch release = new CountDownLatch(1);

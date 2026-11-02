@@ -26,5 +26,8 @@ Security-sensitive areas include:
 - AI provider keys and OpenAI-compatible endpoint configuration.
 - MCP and CLI access to local DBX connections.
 - Docker web service authentication and data directory handling.
+- Plugin package verification, native sidecar execution, sandboxed plugin UI, host bridge permissions, and plugin connection secrets.
+
+Plugin connection secrets are stored outside ordinary connection JSON. Unencrypted sync snapshots are always redacted. If encrypted secret sync is enabled with a user-provided passphrase, plugin secrets are included only in the encrypted payload and are restored through the normal secret-store path.
 
 Please avoid testing against systems you do not own or have explicit permission to assess.

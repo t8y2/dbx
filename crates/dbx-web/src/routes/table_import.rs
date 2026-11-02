@@ -38,6 +38,9 @@ fn initial_import_progress(import_id: &str, started_at: Instant) -> TableImportP
         total_bytes: 0,
         elapsed_ms: started_at.elapsed().as_millis(),
         error: None,
+        rows_failed: 0,
+        failures: Vec::new(),
+        failures_truncated: false,
     }
 }
 
@@ -53,6 +56,9 @@ fn failed_import_progress(import_id: &str, started_at: Instant, error: String) -
         total_bytes: 0,
         elapsed_ms: started_at.elapsed().as_millis(),
         error: Some(error),
+        rows_failed: 0,
+        failures: Vec::new(),
+        failures_truncated: false,
     }
 }
 
@@ -88,6 +94,10 @@ pub struct CancelImportRequest {
 pub struct PreviewUploadedImportRequest {
     pub source_ref: String,
     #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub database: Option<String>,
+    #[serde(default)]
     pub source_format: Option<TableImportSourceFormat>,
     #[serde(default)]
     pub parse_options: TableImportParseOptions,
@@ -110,6 +120,8 @@ pub async fn preview_import(
     cleanup_expired_import_uploads(&tmp_dir, Duration::from_secs(24 * 60 * 60));
 
     let mut uploaded_file: Option<(String, PathBuf)> = None;
+    let mut connection_id: Option<String> = None;
+    let mut database: Option<String> = None;
     let mut source_format: Option<TableImportSourceFormat> = None;
     let mut parse_options = TableImportParseOptions::default();
     let mut preview_limit: Option<usize> = None;
@@ -146,6 +158,8 @@ pub async fn preview_import(
                 }
             };
             match name.as_str() {
+                "connectionId" => connection_id = Some(value),
+                "database" => database = Some(value),
                 "sourceFormat" => {
                     source_format = match serde_json::from_value(serde_json::Value::String(value)) {
                         Ok(source_format) => Some(source_format),
@@ -174,13 +188,18 @@ pub async fn preview_import(
 
     if let Some((source_ref, file_path)) = uploaded_file {
         let file_path_str = file_path.to_string_lossy().to_string();
-        let preview = table_import::preview_table_import_file_with_request(TableImportPreviewRequest {
-            file_path: file_path_str,
-            source_ref: Some(source_ref),
-            source_format,
-            parse_options,
-            preview_limit,
-        })
+        let preview = table_import::preview_table_import_file_with_state(
+            &state.app,
+            TableImportPreviewRequest {
+                file_path: file_path_str,
+                connection_id,
+                database,
+                source_ref: Some(source_ref),
+                source_format,
+                parse_options,
+                preview_limit,
+            },
+        )
         .await;
         let preview = match preview {
             Ok(preview) => preview,
@@ -207,13 +226,18 @@ pub async fn preview_uploaded_import(
     Json(request): Json<PreviewUploadedImportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let file_path = uploaded_import_path_for_source_ref(&state.data_dir, &request.source_ref)?;
-    let preview = table_import::preview_table_import_file_with_request(TableImportPreviewRequest {
-        file_path: file_path.to_string_lossy().to_string(),
-        source_ref: Some(request.source_ref),
-        source_format: request.source_format,
-        parse_options: request.parse_options,
-        preview_limit: request.preview_limit,
-    })
+    let preview = table_import::preview_table_import_file_with_state(
+        &state.app,
+        TableImportPreviewRequest {
+            file_path: file_path.to_string_lossy().to_string(),
+            connection_id: request.connection_id,
+            database: request.database,
+            source_ref: Some(request.source_ref),
+            source_format: request.source_format,
+            parse_options: request.parse_options,
+            preview_limit: request.preview_limit,
+        },
+    )
     .await
     .map_err(AppError::from)?;
     serde_json::to_value(preview).map(Json).map_err(|error| AppError::from(error.to_string()))
@@ -540,6 +564,9 @@ mod tests {
             total_bytes: 20,
             elapsed_ms: 10,
             error: None,
+            rows_failed: 0,
+            failures: Vec::new(),
+            failures_truncated: false,
         };
         send_import_progress(&tx, &terminal);
 

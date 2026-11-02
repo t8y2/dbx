@@ -7,9 +7,13 @@ pub(in crate::schema) async fn list_databases(
     config: Option<&ConnectionConfig>,
 ) -> Result<Vec<db::DatabaseInfo>, String> {
     match pool {
-        PoolKind::Mysql(p, _) if config.is_some_and(db::mysql_compatible::uses_show_metadata) => db::mysql::list_databases_show(p)
-            .await
-            .map(|databases| filter_mysql_system_databases_for_config(databases, config)),
+        PoolKind::Mysql(p, _)
+            if config.is_some_and(|c| db::mysql_compatible::uses_show_metadata(c) || super::super::is_mycat_config(c)) =>
+        {
+            db::mysql::list_databases_show(p)
+                .await
+                .map(|databases| filter_mysql_system_databases_for_config(databases, config))
+        }
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => db::ob_oracle::list_databases(p).await,
         PoolKind::Mysql(p, _) => db::mysql::list_databases(p).await,
         PoolKind::Postgres(p) => db::postgres::list_databases(p).await,
@@ -36,7 +40,9 @@ pub(in crate::schema) async fn list_tables(
     schema: &str,
 ) -> Result<Vec<db::TableInfo>, String> {
     match pool {
-        PoolKind::Mysql(p, _) if config.is_some_and(db::mysql_compatible::uses_show_metadata) => {
+        PoolKind::Mysql(p, _)
+            if config.is_some_and(|c| db::mysql_compatible::uses_show_metadata(c) || super::super::is_mycat_config(c)) =>
+        {
             db::mysql::list_tables_show(p, database).await
         }
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => {
@@ -63,6 +69,12 @@ pub(in crate::schema) async fn list_tables(
         }
         PoolKind::Easysearch(client) => {
             db::easysearch_driver::list_indices(client).await.map(|names| collection_names_to_tables(names, "INDEX"))
+        }
+        PoolKind::Solr(client) => {
+            db::solr_driver::list_cores(client).await.map(|names| collection_names_to_tables(names, "CORE"))
+        }
+        PoolKind::CouchDb(client) => {
+            db::couchdb_driver::list_databases(client).await.map(|names| collection_names_to_tables(names, "DATABASE"))
         }
         PoolKind::Meilisearch(client) => {
             db::meilisearch_driver::list_indexes(client).await.map(|names| collection_names_to_tables(names, "INDEX"))
@@ -158,6 +170,8 @@ pub(in crate::schema) async fn get_columns(
         PoolKind::Turso(client) => db::turso_driver::get_columns(client, schema, table).await,
         PoolKind::Elasticsearch(client) => db::elasticsearch_driver::get_columns(client, table).await,
         PoolKind::Easysearch(client) => db::easysearch_driver::get_columns(client, table).await,
+        PoolKind::Solr(client) => db::solr_driver::get_columns(client, table).await,
+        PoolKind::CouchDb(client) => db::couchdb_driver::get_columns(client, table).await,
         PoolKind::Meilisearch(client) => db::meilisearch_driver::get_columns(client, table).await,
         PoolKind::HBase(client) => db::hbase_driver::get_columns(client, database, table).await,
         PoolKind::VectorDb(_) => Ok(vec![]),
@@ -279,6 +293,9 @@ pub(in crate::schema) async fn object_source(
     object_type: &db::ObjectSourceKind,
 ) -> Result<Option<String>, String> {
     match pool {
+        PoolKind::Mysql(pool, mode) if *mode == MysqlMode::OceanBaseOracle => {
+            super::super::db::ob_oracle::get_object_source(pool, schema, name, object_type).await.map(Some)
+        }
         PoolKind::Mysql(pool, _) => super::super::mysql_object_source(
             pool,
             super::super::mysql_table_metadata_catalog(database, schema),
@@ -322,6 +339,7 @@ fn collection_names_to_tables(names: Vec<String>, table_type: &str) -> Vec<db::T
         .map(|name| db::TableInfo {
             name,
             table_type: table_type.to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,

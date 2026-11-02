@@ -95,6 +95,12 @@ test("document pagination commits page index with fetched rows", () => {
 
 test("document query inputs apply on Enter and reserve Shift+Enter for newlines", () => {
   const source = documentBrowserSource();
-  assert.equal(source.match(/@keydown\.enter\.exact\.prevent="applyFilter"/g)?.length, 2);
+  // Both bars route every key through one handler, because Enter has to pick a
+  // pending completion before it may run the query.
+  assert.equal(source.match(/@keydown="onDocumentQueryKeydown\(\$event, '(?:filter|sort)'\)"/g)?.length, 2);
+  assert.match(source, /const plainEnter = !event\.ctrlKey && !event\.metaKey && !event\.altKey && !event\.shiftKey;/);
+  // Plain Enter and Ctrl/Cmd+Enter apply; Shift+Enter and Alt+Enter fall
+  // through to the textarea so they still insert a newline.
+  assert.match(source, /if \(!plainEnter && !\(\(event\.ctrlKey \|\| event\.metaKey\) && !event\.altKey && !event\.shiftKey\)\) return;/);
   assert.doesNotMatch(source, /@keydown\.shift\.enter\.prevent="applyFilter"/);
 });

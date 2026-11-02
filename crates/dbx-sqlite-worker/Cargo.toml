@@ -1,0 +1,25 @@
+[package]
+name = "dbx-sqlite-worker"
+version = "0.1.1"
+edition = "2021"
+license = "Apache-2.0"
+description = "Short-lived SQLite worker process for remote file-host access over SSH"
+publish = false
+
+[[bin]]
+name = "dbx-sqlite-worker"
+path = "src/main.rs"
+required-features = ["runtime"]
+
+[features]
+default = ["runtime"]
+runtime = ["dep:rusqlite", "dep:sqlparser"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision"] }
+rusqlite = { version = "0.32", optional = true, features = ["bundled", "backup", "column_decltype"] }
+sqlparser = { version = "0.62.0", optional = true }
+
+[dev-dependencies]
+serde_json = { version = "1.0", features = ["arbitrary_precision"] }

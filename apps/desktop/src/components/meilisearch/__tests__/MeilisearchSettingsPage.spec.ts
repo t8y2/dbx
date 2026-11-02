@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   deleteIndex: vi.fn(),
   getIndexSettings: vi.fn(),
   closeTab: vi.fn(),
+  refreshTree: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -51,6 +52,7 @@ vi.mock("@/components/common/QueryLoadingState.vue", () => ({ default: passthrou
 vi.mock("@/components/common/JsonTree.vue", () => ({ default: passthrough("div") }));
 vi.mock("@/components/redis/RedisJsonEditor.vue", () => ({ default: passthrough("div") }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
+vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ loadElasticsearchIndices: mocks.refreshTree }) }));
 vi.mock("@/lib/backend/api", () => ({
   meilisearchGetIndexSettings: mocks.getIndexSettings,
   meilisearchDeleteIndex: mocks.deleteIndex,

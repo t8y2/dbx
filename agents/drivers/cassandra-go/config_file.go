@@ -263,12 +263,24 @@ func applyHOCONSSL(config *cassandraConfig, parsed *hocon.Config) error {
 		config.hostVerification = value
 		config.ssl = true
 	}
-	for _, path := range []string{prefix + "truststore-path", prefix + "keystore-path"} {
-		if value, ok, err := hoconString(parsed, path); err != nil {
+	stringMappings := []struct {
+		path   string
+		target *string
+	}{
+		{prefix + "truststore-path", &config.truststorePath},
+		{prefix + "truststore-password", &config.truststorePassword},
+		{prefix + "keystore-path", &config.keystorePath},
+		{prefix + "keystore-password", &config.keystorePassword},
+	}
+	for _, mapping := range stringMappings {
+		if value, ok, err := hoconString(parsed, mapping.path); err != nil {
 			return err
-		} else if ok && value != "" {
-			return fmt.Errorf("Java truststore and keystore files are not supported; use dbx.cassandra.tls PEM paths")
+		} else if ok {
+			*mapping.target = value
 		}
+	}
+	if config.truststorePath != "" || config.keystorePath != "" {
+		config.ssl = true
 	}
 	return nil
 }

@@ -4,7 +4,8 @@ import { useI18n } from "vue-i18n";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import type { TransferObjectKind } from "@/lib/backend/api";
-import { Square, CheckSquare, MinusSquare, Search, ChevronRight } from "@lucide/vue";
+import { Square, CheckSquare, MinusSquare, Search, ChevronRight, X } from "@lucide/vue";
+import { matchBulkObjectNames } from "./transferSelections";
 
 const { t } = useI18n();
 
@@ -29,6 +30,11 @@ const props = defineProps<{
   modelValue: Record<string, string[]>;
   search?: string;
   loading?: boolean;
+  /**
+   * 「批量录入」可接受的名称前缀（当前源的 catalog / 库 / schema）。
+   * 用于识别粘贴内容里的 schema.table 前缀，留空时放宽为只按对象名匹配。
+   */
+  qualifiers?: string[];
 }>();
 
 const emit = defineEmits<{
@@ -215,6 +221,54 @@ function deselectAll() {
   emit("update:modelValue", next);
 }
 
+// 「批量录入」面板状态：showBulkInput 控制面板展开，bulkText 存放粘贴内容，
+// bulkFeedback 保存最近一次匹配结果，用于反馈「已勾选多少项 / 哪些名称未匹配」。
+const showBulkInput = ref(false);
+const bulkText = ref("");
+const bulkFeedback = ref<{ matchedCount: number; unmatchedNames: string[] } | null>(null);
+
+function toggleBulkInput() {
+  showBulkInput.value = !showBulkInput.value;
+  if (showBulkInput.value) {
+    // 每次重新打开都清空上一次的输入与结果，避免误用旧文本
+    bulkText.value = "";
+    bulkFeedback.value = null;
+  }
+}
+
+/**
+ * 执行批量勾选。匹配始终基于完整对象清单（不受当前搜索过滤影响），
+ * 结果与已有选择合并（只追加勾选，不清除手工勾选或被搜索隐藏的选项）。
+ */
+function applyBulkSelection() {
+  const result = matchBulkObjectNames(bulkText.value, props.groups, props.disabledGroups, props.qualifiers ?? []);
+  if (result.matchedCount > 0) {
+    const next: Record<string, string[]> = { ...props.modelValue };
+    for (const [kind, names] of Object.entries(result.matched)) {
+      if (names.length === 0) continue;
+      next[kind] = [...new Set([...(next[kind] ?? []), ...names])];
+    }
+    emit("update:modelValue", next);
+    revealMatchedGroups(result.matched);
+  }
+  bulkFeedback.value = { matchedCount: result.matchedCount, unmatchedNames: result.unmatchedNames };
+}
+
+// 批量勾选后展开命中的分组：大清单分组默认折叠，展开后用户才能看到勾选结果
+function revealMatchedGroups(matched: Record<string, string[]>) {
+  const next = new Set(expanded.value);
+  let changed = false;
+  for (const [kind, names] of Object.entries(matched)) {
+    if (names.length === 0 || next.has(kind)) continue;
+    next.add(kind);
+    changed = true;
+  }
+  if (changed) expanded.value = next;
+}
+
+// 未匹配名称拼成一行展示，并用 title 提供完整内容（列表可能被截断）
+const bulkUnmatchedNames = computed(() => bulkFeedback.value?.unmatchedNames.join(", ") ?? "");
+
 // The bulk button flips between “select all” and “deselect all”. It shows
 // “deselect all” only when every visible, enabled item is already selected
 // (selecting more is then a no-op); otherwise “select all” is shown so the
@@ -261,12 +315,51 @@ function groupSelectionState(kind: TransferObjectKind, items: string[]): "none" 
           class="pl-8 pr-2.5 h-8 w-full rounded-md border border-input bg-transparent text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring transition-colors placeholder:text-muted-foreground/70"
         />
       </div>
+      <Button data-test="bulk-open" variant="outline" size="sm" @click="toggleBulkInput">
+        {{ t("transfer.bulkSelectObjects") }}
+      </Button>
       <Button v-if="allVisibleEnabledSelected" variant="outline" size="sm" @click="deselectAll">
         {{ t("transfer.deselectAll") }}
       </Button>
       <Button v-else variant="outline" size="sm" @click="selectAllEnabled">
         {{ t("transfer.selectAll") }}
       </Button>
+    </div>
+
+    <!-- 批量录入面板：粘贴多个对象名，一键勾选清单里匹配到的项。
+         放在列表上方（而不是浮层）以避免与传输对话框的滚动/层级互相干扰。 -->
+    <div v-if="showBulkInput" data-test="bulk-panel" class="shrink-0 rounded-md border border-border/80 bg-muted/10 p-2">
+      <div class="mb-1 flex items-center gap-2">
+        <span class="flex-1 text-xs font-semibold text-foreground/90">{{ t("transfer.bulkSelectTitle") }}</span>
+        <button data-test="bulk-close" type="button" class="shrink-0 p-0.5 text-muted-foreground hover:text-foreground" @click="toggleBulkInput">
+          <X class="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <p class="mb-1.5 text-[11px] leading-snug text-muted-foreground">{{ t("transfer.bulkSelectHint") }}</p>
+      <textarea
+        data-test="bulk-input"
+        v-model="bulkText"
+        rows="4"
+        :placeholder="t('transfer.bulkSelectPlaceholder')"
+        autocapitalize="off"
+        autocomplete="off"
+        autocorrect="off"
+        spellcheck="false"
+        class="mb-1.5 min-h-16 w-full resize-y rounded-md border border-input bg-transparent px-2 py-1.5 font-mono text-xs outline-none transition-colors focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring placeholder:text-muted-foreground/70"
+      />
+      <div class="flex items-end gap-2">
+        <div data-test="bulk-feedback" class="min-w-0 flex-1 text-[11px] leading-snug">
+          <p v-if="bulkFeedback && bulkFeedback.matchedCount > 0" class="text-foreground/80">
+            {{ t("transfer.bulkSelectMatched", { count: bulkFeedback.matchedCount }) }}
+          </p>
+          <p v-if="bulkFeedback && bulkFeedback.unmatchedNames.length > 0" class="truncate text-amber-700" :title="bulkUnmatchedNames">
+            {{ t("transfer.bulkSelectUnmatched", { count: bulkFeedback.unmatchedNames.length, names: bulkUnmatchedNames }) }}
+          </p>
+        </div>
+        <Button data-test="bulk-confirm" variant="outline" size="sm" class="shrink-0" @click="applyBulkSelection">
+          {{ t("transfer.bulkSelectConfirm") }}
+        </Button>
+      </div>
     </div>
 
     <div v-if="loading" class="py-4 text-center text-sm text-muted-foreground">
@@ -306,7 +399,7 @@ function groupSelectionState(kind: TransferObjectKind, items: string[]): "none" 
               <input type="checkbox" class="h-3.5 w-3.5" :checked="selectedSet(group.kind).has(item)" :disabled="isGroupDisabled(group.kind)" @change="toggleItem(group.kind, item)" />
               <span class="truncate text-foreground/80">{{ item }}</span>
             </label>
-            <div v-if="group.items.length === 0" class="px-1 py-1 text-xs text-muted-foreground">无匹配</div>
+            <div v-if="group.items.length === 0" class="px-1 py-1 text-xs text-muted-foreground">{{ t("transfer.noMatchingObjects") }}</div>
           </div>
           <div v-else class="pl-6 pr-1 mt-1" :style="{ height: `${OBJECT_LIST_HEIGHT}px` }">
             <RecycleScroller v-slot="{ item }" class="h-full" :items="group.items" :item-size="OBJECT_ITEM_HEIGHT" :buffer="OBJECT_LIST_BUFFER">

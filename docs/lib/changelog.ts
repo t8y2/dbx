@@ -1,4 +1,5 @@
 import { requestJson } from "./httpJson";
+import type { DocsLang } from "@/lib/i18n";
 
 export type ChangelogItem = {
   title: string;
@@ -45,35 +46,46 @@ export type ChangelogBootstrap = {
 
 const DEFAULT_BASE_URL = "https://dl.dbxio.com/changelog";
 
+/**
+ * Release notes are published to R2 as `releases-en.json` / `releases-cn.json`
+ * only, so locales without their own feed read the English one while the page
+ * chrome around them stays localized.
+ */
+export type ChangelogLang = "en" | "cn";
+
+export function changelogDataLang(lang: DocsLang): ChangelogLang {
+  return lang === "cn" ? "cn" : "en";
+}
+
 function changelogBaseUrl() {
   return (typeof process !== "undefined" && (process.env.NEXT_PUBLIC_CHANGELOG_BASE_URL || process.env.CHANGELOG_BASE_URL)) || DEFAULT_BASE_URL;
 }
 
-export function changelogUrl(lang: "en" | "cn") {
+export function changelogUrl(lang: ChangelogLang) {
   return `${changelogBaseUrl()}/releases-${lang}.json`;
 }
 
-export function changelogIndexUrl(lang: "en" | "cn") {
+export function changelogIndexUrl(lang: ChangelogLang) {
   return `${changelogBaseUrl()}/index-${lang}.json`;
 }
 
-export function changelogReleaseUrl(lang: "en" | "cn", tag: string) {
+export function changelogReleaseUrl(lang: ChangelogLang, tag: string) {
   return `${changelogBaseUrl()}/releases-${lang}/${tag}.json`;
 }
 
-export async function fetchChangelog(lang: "en" | "cn"): Promise<ChangelogData> {
+export async function fetchChangelog(lang: ChangelogLang): Promise<ChangelogData> {
   return requestJson<ChangelogData>(changelogUrl(lang), { cache: "force-cache" });
 }
 
-export async function fetchChangelogIndex(lang: "en" | "cn"): Promise<ChangelogIndex> {
+export async function fetchChangelogIndex(lang: ChangelogLang): Promise<ChangelogIndex> {
   return requestJson<ChangelogIndex>(changelogIndexUrl(lang), { cache: "force-cache" });
 }
 
-export async function fetchChangelogRelease(lang: "en" | "cn", tag: string): Promise<ChangelogRelease> {
+export async function fetchChangelogRelease(lang: ChangelogLang, tag: string): Promise<ChangelogRelease> {
   return requestJson<ChangelogRelease>(changelogReleaseUrl(lang, tag), { cache: "force-cache" });
 }
 
-export async function loadChangelogBootstrap(lang: "en" | "cn"): Promise<ChangelogBootstrap> {
+export async function loadChangelogBootstrap(lang: ChangelogLang): Promise<ChangelogBootstrap> {
   try {
     const index = await fetchChangelogIndex(lang);
     if (index.releases.length > 0) {

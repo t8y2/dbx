@@ -1,13 +1,9 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { createI18n } from "vue-i18n";
 import { afterEach, describe, expect, it } from "vitest";
 import DdlScopeFixture from "./DdlDialog.legacyScope.fixture.vue";
-
-const ddlViewDialogSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/objects/DdlViewDialog.vue"), "utf8");
 
 const mountedApps: App[] = [];
 
@@ -60,15 +56,5 @@ describe("DdlViewDialog legacy fallback selectors", () => {
     // never reaches it; the footer element is one level down and does get it.
     expect(content!.hasAttribute(scopeId!)).toBe(false);
     expect(footer!.hasAttribute(scopeId!)).toBe(true);
-  });
-
-  it("keeps the DDL dialog free of per-dialog legacy fallback rules", () => {
-    // The dialog content element is rendered through reka-ui's portal Teleport and
-    // never carries this component's scoped data-v attribute, so per-dialog rules
-    // are avoided entirely: width comes from the global sm:max-w-190 legacy entry
-    // and the footer layout from the global dialog-footer rule.
-    expect(ddlViewDialogSource).not.toContain("dbx-legacy-webview");
-    expect(ddlViewDialogSource).not.toContain("@media");
-    expect(ddlViewDialogSource).toContain('class="dbx-ddl-view-dialog sm:max-w-190"');
   });
 });

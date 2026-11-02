@@ -1,5 +1,18 @@
+// @vitest-environment happy-dom
+
+import { snippetCompletion } from "@codemirror/autocomplete";
+import { EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { describe, expect, it } from "vitest";
-import { batchColumnSelectionColumnList, batchColumnSelectionReplaceTo, shouldResolveSqlColumnCompletion } from "@/lib/editor/batchColumnSelection";
+import { batchColumnSelectionColumnList, batchColumnSelectionInsertReplacement, batchColumnSelectionReplaceTo, completionReplacementTo, isBatchColumnSelectionCompletionActive, shouldResolveSqlColumnCompletion, shouldSwallowSelectStar } from "@/lib/editor/batchColumnSelection";
+import { getSqlCompletionContext, prepareSqlCompletionReplacement } from "@/lib/sql/sqlCompletion";
+
+const columnItem = { label: "price", type: "column" as const, apply: "price", boost: 0 };
+
+function replaceSelectWildcardFor(document: string, to: number): boolean {
+  const context = getSqlCompletionContext(document, to);
+  return prepareSqlCompletionReplacement(document, to, context, [columnItem]).items[0]?.replaceSelectWildcard === true;
+}
 
 describe("batchColumnSelectionColumnList", () => {
   it("keeps a typed qualifier on every projection after the first", () => {
@@ -9,19 +22,143 @@ describe("batchColumnSelectionColumnList", () => {
   it("does not add a qualifier to INSERT target columns", () => {
     expect(batchColumnSelectionColumnList(["id", "name"], "insert", "users")).toBe("id, name");
   });
+
+  it("formats candidates with column comments in SELECT mode (#11354)", () => {
+    const candidates = [{ apply: "order_start_time", comment: "医嘱开始时间" }, { apply: "order_end_time", comment: "医嘱结束时间" }, { apply: "patient_id" }];
+    expect(batchColumnSelectionColumnList(candidates, "select", "t", "  ")).toBe("order_start_time, -- 医嘱开始时间\n  t.order_end_time, -- 医嘱结束时间\n  t.patient_id");
+  });
+
+  it("normalizes newlines in column comments (#11354)", () => {
+    const candidates = [
+      { apply: "status", comment: "状态:\n0-停用\r\n1-启用" },
+      { apply: "created_at", comment: "创建时间" },
+    ];
+    expect(batchColumnSelectionColumnList(candidates, "select", undefined, "  ")).toBe("status, -- 状态: 0-停用 1-启用\n  created_at -- 创建时间");
+  });
+
+  it("adds trailing comma when trailingComma option is enabled (#11354)", () => {
+    const candidates = [{ apply: "id", comment: "主键ID" }];
+    expect(batchColumnSelectionColumnList(candidates, "select", undefined, "  ", { trailingComma: true })).toBe("id, -- 主键ID");
+  });
+
+  it("ignores candidate comments in INSERT mode (#11354)", () => {
+    const candidates = [
+      { apply: "id", comment: "主键ID" },
+      { apply: "name", comment: "名称" },
+    ];
+    expect(batchColumnSelectionColumnList(candidates, "insert", "users")).toBe("id, name");
+  });
 });
 
 describe("batchColumnSelectionReplaceTo", () => {
   it("consumes the auto-inserted INSERT closing parenthesis", () => {
-    expect(batchColumnSelectionReplaceTo({ to: 20, mode: "insert", nextCharacter: ")" })).toBe(21);
+    expect(batchColumnSelectionReplaceTo({ from: 20, to: 20, mode: "insert", nextCharacter: ")" })).toBe(21);
   });
 
   it("keeps the replacement boundary when INSERT has no closing parenthesis", () => {
-    expect(batchColumnSelectionReplaceTo({ to: 20, mode: "insert", nextCharacter: "" })).toBe(20);
+    expect(batchColumnSelectionReplaceTo({ from: 20, to: 20, mode: "insert", nextCharacter: "" })).toBe(20);
   });
 
   it("continues consuming a matching closing identifier quote", () => {
-    expect(batchColumnSelectionReplaceTo({ to: 20, mode: "select", nextCharacter: '"', replaceClosingQuote: '"' })).toBe(21);
+    expect(batchColumnSelectionReplaceTo({ from: 20, to: 20, mode: "select", nextCharacter: '"', replaceClosingQuote: '"' })).toBe(21);
+  });
+
+  it("consumes a lone SELECT * immediately after an empty-prefix completion (#9433-adjacent)", () => {
+    expect(batchColumnSelectionReplaceTo({ from: 7, to: 7, mode: "select", nextCharacter: "*", replaceSelectWildcard: true })).toBe(8);
+  });
+
+  it("does not consume a `*` that is a multiplication operator, not the wildcard", () => {
+    expect(batchColumnSelectionReplaceTo({ from: 7, to: 7, mode: "select", nextCharacter: "*", replaceSelectWildcard: false })).toBe(7);
+  });
+});
+
+describe("shouldSwallowSelectStar", () => {
+  it("swallows a bare `*` only with an explicit SELECT wildcard marker", () => {
+    expect(shouldSwallowSelectStar(7, 7, "*", true)).toBe(true);
+    expect(shouldSwallowSelectStar(7, 7, "*", false)).toBe(false);
+    expect(shouldSwallowSelectStar(7, 7, "*")).toBe(false);
+  });
+
+  it("leaves a `*` alone once a real prefix was replaced", () => {
+    expect(shouldSwallowSelectStar(7, 10, "*", true)).toBe(false);
+  });
+
+  it("leaves any other trailing character alone", () => {
+    expect(shouldSwallowSelectStar(7, 7, " ", true)).toBe(false);
+    expect(shouldSwallowSelectStar(7, 7, "", true)).toBe(false);
+  });
+});
+
+describe("completion wildcard acceptance", () => {
+  it.each([
+    ["SELECT * FROM users", "SELECT price FROM users"],
+    ["SELECT *qty FROM users", "SELECT price*qty FROM users"],
+  ])("applies ordinary completion without deleting multiplication in %s", (document, expected) => {
+    const from = document.indexOf("*");
+    const replaceTo = completionReplacementTo({ from, to: from, nextCharacter: "*", replaceSelectWildcard: replaceSelectWildcardFor(document, from) });
+    const transaction = EditorState.create({ doc: document }).update({ changes: { from, to: replaceTo, insert: "price" } });
+
+    expect(transaction.state.doc.toString()).toBe(expected);
+  });
+
+  it.each([
+    ["SELECT * FROM users", "SELECT price FROM users"],
+    ["SELECT *qty FROM users", "SELECT price*qty FROM users"],
+  ])("applies snippet completion without deleting multiplication in %s", (document, expected) => {
+    const from = document.indexOf("*");
+    const replaceTo = completionReplacementTo({ from, to: from, nextCharacter: "*", replaceSelectWildcard: replaceSelectWildcardFor(document, from) });
+    const view = new EditorView({ parent: window.document.createElement("div"), state: EditorState.create({ doc: document }) });
+    const snippet = snippetCompletion("price", { label: "price", type: "function" });
+
+    expect(typeof snippet.apply).toBe("function");
+    if (typeof snippet.apply === "function") snippet.apply(view, snippet, from, replaceTo);
+    expect(view.state.doc.toString()).toBe(expected);
+    view.destroy();
+  });
+
+  it.each([
+    ["SELECT * FROM users", "SELECT price, qty FROM users"],
+    ["SELECT *qty FROM users", "SELECT price, qty*qty FROM users"],
+  ])("applies batch completion without deleting multiplication in %s", (document, expected) => {
+    const from = document.indexOf("*");
+    const replaceTo = batchColumnSelectionReplaceTo({ from, to: from, mode: "select", nextCharacter: "*", replaceSelectWildcard: replaceSelectWildcardFor(document, from) });
+    const transaction = EditorState.create({ doc: document }).update({ changes: { from, to: replaceTo, insert: "price, qty" } });
+
+    expect(transaction.state.doc.toString()).toBe(expected);
+  });
+});
+
+describe("batchColumnSelectionInsertReplacement", () => {
+  it("consumes whitespace before an existing closing parenthesis", () => {
+    expect(
+      batchColumnSelectionInsertReplacement({
+        document: "INSERT INTO users (id   )",
+        to: "INSERT INTO users (id".length,
+        columns: "id, name",
+        valuesKeyword: "VALUES",
+        valueCount: 2,
+      }),
+    ).toEqual({ replaceTo: "INSERT INTO users (id   )".length, insert: "id, name) VALUES (${1:value}, ${2:value})" });
+  });
+
+  it("does not duplicate an existing VALUES clause", () => {
+    expect(
+      batchColumnSelectionInsertReplacement({
+        document: "INSERT INTO users (id)  VALUES (1)",
+        to: "INSERT INTO users (id".length,
+        columns: "id, name",
+        valuesKeyword: "VALUES",
+        valueCount: 2,
+      }),
+    ).toEqual({ replaceTo: "INSERT INTO users (id)".length, insert: "id, name)" });
+  });
+});
+
+describe("isBatchColumnSelectionCompletionActive", () => {
+  it("only accepts a currently active completion popup", () => {
+    expect(isBatchColumnSelectionCompletionActive("active")).toBe(true);
+    expect(isBatchColumnSelectionCompletionActive("pending")).toBe(false);
+    expect(isBatchColumnSelectionCompletionActive(null)).toBe(false);
   });
 });
 
@@ -32,5 +169,14 @@ describe("shouldResolveSqlColumnCompletion", () => {
 
   it("keeps empty non-SELECT column contexts from fetching metadata", () => {
     expect(shouldResolveSqlColumnCompletion({ suggestColumns: true, hasReferencedTables: true, prefix: "", typedActivation: false, selectListColumnContext: false })).toBe(false);
+  });
+
+  it("resolves a bare `alias.` position so cold metadata is fetched (#12227 #12692)", () => {
+    expect(shouldResolveSqlColumnCompletion({ suggestColumns: true, hasReferencedTables: true, prefix: "", typedActivation: false, selectListColumnContext: false, qualifierDot: true })).toBe(true);
+  });
+
+  it("does not let qualifierDot override a disabled column context", () => {
+    expect(shouldResolveSqlColumnCompletion({ suggestColumns: false, hasReferencedTables: true, prefix: "", typedActivation: false, selectListColumnContext: false, qualifierDot: true })).toBe(false);
+    expect(shouldResolveSqlColumnCompletion({ suggestColumns: true, hasReferencedTables: false, prefix: "", typedActivation: false, selectListColumnContext: false, qualifierDot: true })).toBe(false);
   });
 });

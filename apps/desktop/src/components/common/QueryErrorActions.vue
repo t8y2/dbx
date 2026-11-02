@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Bot, Wrench } from "@lucide/vue";
+import { Bot, LocateFixed, Wrench } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import type { BackendError } from "@/lib/backend/errorUtils";
@@ -10,20 +10,28 @@ const props = defineProps<{
   errorMessage: string;
   backendError?: BackendError;
   connectionId?: string;
+  /** Driver-reported error position, when the backend provides one. */
+  errorPosition?: { line: number; column: number };
 }>();
 
 const emit = defineEmits<{
   changeConnectionTimeout: [];
   changeQueryTimeout: [];
   fixWithAi: [errorMessage: string];
+  locateError: [];
 }>();
 
 const { t } = useI18n();
 const showConnectionTimeout = computed(() => !!props.connectionId && isConnectionTimeoutErrorMessage(props.errorMessage, props.backendError));
 const showQueryTimeout = computed(() => !!props.connectionId && !showConnectionTimeout.value && isQueryTimeoutErrorMessage(props.errorMessage, props.backendError));
+const showLocateError = computed(() => !!props.errorPosition);
 </script>
 
 <template>
+  <Button v-if="showLocateError" variant="outline" size="sm" class="h-7 gap-1.5 px-2.5 text-xs" @click="emit('locateError')">
+    <LocateFixed class="h-3.5 w-3.5" />
+    {{ t("editor.locateError", { line: errorPosition!.line, column: errorPosition!.column }) }}
+  </Button>
   <Button v-if="showConnectionTimeout" variant="outline" size="sm" class="h-7 gap-1.5 px-2.5 text-xs" @click="emit('changeConnectionTimeout')">
     <Wrench class="h-3.5 w-3.5" />
     {{ t("editor.changeConnectionTimeout") }}

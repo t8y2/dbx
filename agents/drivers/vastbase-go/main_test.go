@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	pq "gitcode.com/opengauss/openGauss-connector-go-pq"
 )
@@ -265,6 +268,74 @@ func TestValidateConnectionRecoversAfterCanceledDriverConnection(t *testing.T) {
 	}
 }
 
+func TestPagedQueryTimeoutDoesNotExpireWhilePageIsIdle(t *testing.T) {
+	registerVastbasePaginationDriver.Do(func() {
+		sql.Register("vastbase-pagination-timeout-test", &paginationTimeoutDriver{})
+	})
+	db, err := sql.Open("vastbase-pagination-timeout-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	server := newServer()
+	server.db = db
+	first, err := server.executeQueryPage(queryOptions{SQL: "SELECT id FROM rows", MaxRows: 3, TimeoutSecs: 1}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SessionID == nil || !first.HasMore || len(first.Rows) != 1 {
+		t.Fatalf("unexpected first page: %#v", first)
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+	second, err := server.fetchQueryPage(*first.SessionID, 1)
+	if err != nil {
+		t.Fatalf("idle time must not consume the next page timeout: %v", err)
+	}
+	if !second.HasMore || len(second.Rows) != 1 || second.Rows[0][0] != int64(2) {
+		t.Fatalf("unexpected second page: %#v", second)
+	}
+	server.closeAllQuerySessions()
+}
+
+func TestPagedQueryTimeoutStillAppliesToEachFetch(t *testing.T) {
+	registerVastbasePaginationDriver.Do(func() {
+		sql.Register("vastbase-pagination-timeout-test", &paginationTimeoutDriver{})
+	})
+	db, err := sql.Open("vastbase-pagination-timeout-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	server := newServer()
+	server.db = db
+	first, err := server.executeQueryPage(queryOptions{SQL: "SELECT id FROM slow_rows", MaxRows: 3, TimeoutSecs: 1}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SessionID == nil {
+		t.Fatalf("expected a paged query session: %#v", first)
+	}
+
+	started := time.Now()
+	_, err = server.fetchQueryPage(*first.SessionID, 1)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected fetch timeout, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < time.Second || elapsed > 3*time.Second {
+		t.Fatalf("fetch timeout fired outside the expected window: %s", elapsed)
+	}
+	if len(server.sessions) != 0 {
+		t.Fatalf("timed-out query session was retained: %#v", server.sessions)
+	}
+}
+
 func TestDisconnectResetsInformationSchemaCapabilityCache(t *testing.T) {
 	server := newServer()
 	server.infoColumnTypeUnsupported = true
@@ -293,9 +364,58 @@ func TestDisconnectResetsConstraintCapabilityCache(t *testing.T) {
 var (
 	registerVastbaseSchemaRetryDriver sync.Once
 	registerVastbasePingRetryDriver   sync.Once
+	registerVastbasePaginationDriver  sync.Once
 	schemaRetryOpens                  atomic.Int32
 	pingRetryOpens                    atomic.Int32
 )
+
+type paginationTimeoutDriver struct{}
+
+func (*paginationTimeoutDriver) Open(string) (driver.Conn, error) {
+	return &paginationTimeoutConn{}, nil
+}
+
+type paginationTimeoutConn struct{}
+
+func (*paginationTimeoutConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+func (*paginationTimeoutConn) Close() error                        { return nil }
+func (*paginationTimeoutConn) Begin() (driver.Tx, error)           { return nil, driver.ErrSkip }
+
+func (*paginationTimeoutConn) QueryContext(ctx context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	rows := &paginationTimeoutRows{ctx: ctx, values: []int64{1, 2, 3}, blockAt: -1}
+	if strings.Contains(query, "slow_rows") {
+		rows.blockAt = 2
+	}
+	return rows, nil
+}
+
+type paginationTimeoutRows struct {
+	ctx     context.Context
+	values  []int64
+	index   int
+	blockAt int
+}
+
+func (*paginationTimeoutRows) Columns() []string { return []string{"id"} }
+func (*paginationTimeoutRows) Close() error      { return nil }
+
+func (rows *paginationTimeoutRows) Next(dest []driver.Value) error {
+	if rows.index == rows.blockAt {
+		<-rows.ctx.Done()
+		return rows.ctx.Err()
+	}
+	select {
+	case <-rows.ctx.Done():
+		return rows.ctx.Err()
+	default:
+	}
+	if rows.index >= len(rows.values) {
+		return io.EOF
+	}
+	dest[0] = rows.values[rows.index]
+	rows.index++
+	return nil
+}
 
 type schemaRetryDriver struct{}
 

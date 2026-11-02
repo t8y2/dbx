@@ -17,3 +17,30 @@ export function buildAppendedEditorSql(currentEditorSql: string, newSql: string)
 
   return `${currentEditorSql}${separator}${newSql}`;
 }
+
+/**
+ * Append AI-generated SQL unless the exact text already exists as a standalone
+ * editor block. AI appends use a blank line as their block separator, which
+ * avoids treating a matching fragment inside a larger statement as a duplicate.
+ */
+export function buildDeduplicatedAppendedEditorSql(currentEditorSql: string, newSql: string): string {
+  if (!newSql || containsStandaloneSqlBlock(currentEditorSql, newSql)) return currentEditorSql;
+  return buildAppendedEditorSql(currentEditorSql, newSql);
+}
+
+function containsStandaloneSqlBlock(editorSql: string, sql: string): boolean {
+  let from = 0;
+  while (from <= editorSql.length - sql.length) {
+    const index = editorSql.indexOf(sql, from);
+    if (index < 0) return false;
+
+    const before = editorSql.slice(0, index);
+    const after = editorSql.slice(index + sql.length);
+    const startsAtBlockBoundary = index === 0 || /(?:\r?\n){2}$/.test(before);
+    const endsAtBlockBoundary = after.length === 0 || /^(?:\r?\n){2}/.test(after);
+    if (startsAtBlockBoundary && endsAtBlockBoundary) return true;
+
+    from = index + 1;
+  }
+  return false;
+}

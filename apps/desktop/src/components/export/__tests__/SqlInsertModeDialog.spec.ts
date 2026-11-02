@@ -1,0 +1,154 @@
+// @vitest-environment happy-dom
+
+import { createApp, h, nextTick, type App, defineComponent } from "vue";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import i18n from "@/i18n";
+import { sqlExportColumnChoices } from "@/lib/export/sqlExportColumns";
+import type { SqlExportColumnSelection } from "@/lib/export/sqlInsertMode";
+
+vi.mock("@/components/ui/dialog", async () => {
+  const { defineComponent, h } = await import("vue");
+  const passthrough = defineComponent({
+    inheritAttrs: false,
+    setup(_props, { attrs, slots }) {
+      return () => h("div", attrs, slots.default?.());
+    },
+  });
+  return { Dialog: passthrough, DialogContent: passthrough, DialogHeader: passthrough, DialogTitle: passthrough, DialogFooter: passthrough };
+});
+
+vi.mock("@/components/ui/button", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    Button: defineComponent({
+      inheritAttrs: false,
+      setup(_props, { attrs, slots }) {
+        return () => h("button", attrs, slots.default?.());
+      },
+    }),
+  };
+});
+
+import SqlInsertModeDialog from "@/components/export/SqlInsertModeDialog.vue";
+
+const mountedApps: App[] = [];
+
+afterEach(() => {
+  for (const app of mountedApps.splice(0)) app.unmount();
+  document.body.innerHTML = "";
+  i18n.global.locale.value = "en";
+});
+
+async function mountDialog(onConfirm = () => {}, onCancel = () => {}, allowSplit = false, columns?: SqlExportColumnSelection[], showExecutionMode = false) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const app = createApp(
+    defineComponent({
+      setup() {
+        return () => h(SqlInsertModeDialog, { open: true, allowSplit, columns, showExecutionMode, onConfirm, onCancel });
+      },
+    }),
+  );
+  mountedApps.push(app);
+  app.use(i18n);
+  app.mount(container);
+  await nextTick();
+}
+
+describe("SqlInsertModeDialog", () => {
+  it("confirms the SQL mode and queued execution together without changing the immediate default", async () => {
+    const onConfirm = vi.fn();
+    await mountDialog(onConfirm, () => {}, false, undefined, true);
+    expect(document.querySelector<HTMLInputElement>('input[value="immediate"]')!.checked).toBe(true);
+    document.querySelector<HTMLInputElement>('input[value="queued"]')!.click();
+    document.querySelector<HTMLInputElement>('[data-sql-insert-mode="single"]')!.click();
+    await nextTick();
+    document.querySelector<HTMLButtonElement>("[data-sql-insert-mode-confirm]")!.click();
+    expect(onConfirm).toHaveBeenCalledWith({ insertMode: "single", splitMaxMb: undefined, executionMode: "queued" });
+  });
+  it("defaults to every column and allows deselecting one duplicate independently", async () => {
+    const onConfirm = vi.fn();
+    const choices = sqlExportColumnChoices(["id", "name", "id"]);
+    await mountDialog(onConfirm, () => {}, false, choices);
+    expect([...document.querySelectorAll<HTMLInputElement>("[data-sql-export-column]")].every((input) => input.checked)).toBe(true);
+    expect(document.body.textContent).toContain("#1");
+    expect(document.body.textContent).toContain("#2");
+    document.querySelector<HTMLInputElement>('[data-sql-export-column="0"]')?.click();
+    await nextTick();
+    document.querySelector<HTMLButtonElement>("[data-sql-insert-mode-confirm]")?.click();
+    expect(onConfirm).toHaveBeenCalledWith({ insertMode: "batch", splitMaxMb: undefined, selectedColumns: choices.slice(1) });
+  });
+
+  it("blocks an empty selection and restores every column with select all", async () => {
+    const onConfirm = vi.fn();
+    const choices = sqlExportColumnChoices(["id", "name"]);
+    await mountDialog(onConfirm, () => {}, true, choices);
+    document.querySelector<HTMLButtonElement>("[data-sql-export-clear]")?.click();
+    await nextTick();
+    const confirm = document.querySelector<HTMLButtonElement>("[data-sql-insert-mode-confirm]");
+    expect(confirm?.disabled).toBe(true);
+    expect(document.querySelector("[data-sql-export-column-error]")).not.toBeNull();
+    confirm?.click();
+    expect(onConfirm).not.toHaveBeenCalled();
+    document.querySelector<HTMLButtonElement>("[data-sql-export-select-all]")?.click();
+    await nextTick();
+    expect(confirm?.disabled).toBe(false);
+    confirm?.click();
+    expect(onConfirm).toHaveBeenCalledWith({ insertMode: "batch", splitMaxMb: undefined, selectedColumns: choices });
+  });
+
+  it("defaults to batch mode and emits the selected single-row mode", async () => {
+    const onConfirm = vi.fn();
+    await mountDialog(onConfirm);
+
+    const batch = document.querySelector<HTMLInputElement>('input[data-sql-insert-mode="batch"]');
+    const single = document.querySelector<HTMLInputElement>('input[data-sql-insert-mode="single"]');
+    expect(batch?.checked).toBe(true);
+    expect(single?.checked).toBe(false);
+
+    single?.click();
+    await nextTick();
+    document.querySelector<HTMLButtonElement>("[data-sql-insert-mode-confirm]")?.click();
+
+    expect(onConfirm).toHaveBeenCalledOnce();
+    expect(onConfirm).toHaveBeenCalledWith({ insertMode: "single", splitMaxMb: undefined });
+  });
+
+  it("enables split ZIP output only when the caller supports it", async () => {
+    const onConfirm = vi.fn();
+    await mountDialog(onConfirm, () => {}, true);
+
+    const split = document.querySelector<HTMLInputElement>("input[data-sql-split-output]");
+    expect(split).not.toBeNull();
+    split?.click();
+    await nextTick();
+    const size = document.querySelector<HTMLInputElement>("input[data-sql-split-max-mb]");
+    expect(size?.value).toBe("100");
+    if (size) size.value = "256";
+    size?.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>("[data-sql-insert-mode-confirm]")?.click();
+
+    expect(onConfirm).toHaveBeenCalledWith({ insertMode: "batch", splitMaxMb: 256 });
+  });
+
+  it("renders the batch and single-row explanations", async () => {
+    await mountDialog();
+
+    expect(document.body.textContent).toContain("Batch append");
+    expect(document.body.textContent).toContain("One row per statement");
+    expect(document.body.textContent).toContain("Combine multiple rows into each INSERT statement");
+    expect(document.body.textContent).toContain("Write one complete INSERT statement per row");
+  });
+
+  it("emits cancel without selecting a mode", async () => {
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    await mountDialog(onConfirm, onCancel);
+
+    const cancel = [...document.querySelectorAll("button")].find((button) => button.textContent?.includes("Cancel"));
+    cancel?.click();
+
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+});

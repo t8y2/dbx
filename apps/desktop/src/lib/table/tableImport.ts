@@ -3,10 +3,26 @@ import type { TableImportJsonShape, TableImportParseOptions, TableImportSourceFo
 
 export const IMPORT_SKIP_TARGET = "";
 
+export type TableImportGeneratorKey = "uuid" | "uuid_simple" | "current_timestamp" | "current_date" | "sequence";
+
+export interface TableImportGeneratorOption {
+  value: TableImportGeneratorKey;
+  labelKey: string;
+}
+
+export const TABLE_IMPORT_GENERATOR_OPTIONS: ReadonlyArray<TableImportGeneratorOption> = [
+  { value: "uuid", labelKey: "tableImport.generatorUuid" },
+  { value: "uuid_simple", labelKey: "tableImport.generatorUuidSimple" },
+  { value: "current_timestamp", labelKey: "tableImport.generatorCurrentTimestamp" },
+  { value: "current_date", labelKey: "tableImport.generatorCurrentDate" },
+  { value: "sequence", labelKey: "tableImport.generatorSequence" },
+];
+
 export interface ImportColumnMappingLike {
   sourceColumn: string;
   targetColumn: string;
   targetDataType?: string | null;
+  generator?: string | null;
 }
 
 export interface ImportMappingValidationResult {
@@ -35,6 +51,14 @@ export interface TableImportProgressLike {
 
 export type TableImportWizardStep = "source" | "options" | "mapping" | "review" | "execution";
 
+export const TABLE_IMPORT_ENCODING_OPTIONS: ReadonlyArray<{ value: TableImportTextEncoding; labelKey: string }> = [
+  { value: "auto", labelKey: "tableImport.encodingAuto" },
+  { value: "utf8", labelKey: "tableImport.encodingUtf8" },
+  { value: "gbk", labelKey: "tableImport.encodingGbk" },
+  { value: "utf16Le", labelKey: "tableImport.encodingUtf16Le" },
+  { value: "utf16Be", labelKey: "tableImport.encodingUtf16Be" },
+];
+
 export const TABLE_IMPORT_WIZARD_STEPS: TableImportWizardStep[] = ["source", "options", "mapping", "review", "execution"];
 
 export function formatTableImportElapsed(ms: number): string {
@@ -51,6 +75,45 @@ export function resolveTableImportElapsed(liveElapsedMs: number, backendElapsedM
   const backend = backendElapsedMs === undefined || !Number.isFinite(backendElapsedMs) ? undefined : Math.max(0, backendElapsedMs);
   if (terminal && backend !== undefined) return backend;
   return Math.max(live, backend ?? 0);
+}
+
+export function previewValueForGenerator(generator: string, sequence = 1): string {
+  const normalized = generator.toLowerCase().replace(/[-_]/g, "");
+  switch (normalized) {
+    case "uuid":
+    case "uuidv4":
+      return "<UUID>";
+    case "uuidsimple":
+    case "uuidnohyphens":
+    case "uuid32":
+      return "<UUID32>";
+    case "currenttimestamp":
+    case "now":
+    case "datetime":
+      return "<NOW>";
+    case "currentdate":
+    case "today":
+    case "date":
+      return "<TODAY>";
+    case "sequence":
+    case "autoincrement":
+      return `<SEQ:${sequence}>`;
+    default:
+      return `<${generator}>`;
+  }
+}
+
+export function formatTableImportPreviewCell(value: unknown, generator?: string | null, rowIndex = 0): string {
+  if (generator) {
+    return previewValueForGenerator(generator, rowIndex + 1);
+  }
+  if (value === null) return "NULL";
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const marker = value as Record<string, unknown>;
+    if (Object.keys(marker).length === 1 && marker.$dbxSqlImportExpression === "currentTimestamp") return "CURRENT_TIMESTAMP";
+  }
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
 
 export function tableImportProgressPercent(progress: TableImportProgressLike | null | undefined): number {
@@ -78,6 +141,7 @@ export function tableImportProgressPercent(progress: TableImportProgressLike | n
 export interface TableImportParseSettings {
   format: TableImportSourceFormat;
   delimiter: string;
+  decimalSeparator?: "." | ",";
   textEncoding: TableImportTextEncoding;
   titleRow: number;
   dataStartRow: number;
@@ -89,8 +153,15 @@ export interface TableImportParseSettings {
   databaseType?: DatabaseType | null;
 }
 
-export function defaultTableImportEmptyStringAsNull(format: TableImportSourceFormat): boolean {
-  return format !== "excel";
+/**
+ * 导入时分隔文本的「空字段即 NULL」默认值。
+ *
+ * 导出端默认把 NULL 写成 `\N` 字面量、空字符串才写成空字段，所以导入端默认必须
+ * 保留空字段（不当作 NULL），否则 DBX 自己导出的 CSV 在导入时会把空字符串还原成
+ * NULL，写回 `NOT NULL DEFAULT ''` 的列就会报「不允许为 null」。
+ */
+export function defaultTableImportEmptyStringAsNull(_format: TableImportSourceFormat): boolean {
+  return false;
 }
 
 export function buildTableImportParseOptions(settings: TableImportParseSettings): TableImportParseOptions {
@@ -99,12 +170,16 @@ export function buildTableImportParseOptions(settings: TableImportParseSettings)
   const isTextSource = isDelimited || settings.format === "sql";
   return {
     delimiter: settings.format === "tsv" ? "\\t" : settings.format === "csv" ? "," : settings.delimiter,
+    decimalSeparator: isDelimited ? (settings.decimalSeparator ?? ".") : null,
     encoding: isTextSource ? settings.textEncoding : null,
     titleRow: settings.titleRow,
     dataStartRow: settings.dataStartRow,
     lastDataRow: settings.lastDataRow,
     trimValues: settings.trimValues,
     emptyStringAsNull: settings.emptyStringAsNull,
+    // 勾选「空字符串作为 NULL」= 退回旧行为：关闭 NULL 字面量，空字段一律当 NULL。
+    // 不勾选时留空，由后端使用与导出端一致的默认字面量 `\N`。
+    nullLiteral: settings.emptyStringAsNull ? "" : undefined,
     sheetName: settings.format === "excel" ? settings.sheetName || null : null,
     jsonShape: settings.format === "json" ? settings.jsonShape : null,
     // SQL 脚本需要按源方言解析字符串转义与标识符大小写（取目标连接的数据库类型）
@@ -116,11 +191,22 @@ export function normalizeImportColumnName(name: string): string {
   return name.trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
 }
 
-export function autoMapImportColumns(sourceColumns: string[], targetColumns: string[]): Record<string, string> {
+export function autoMapImportColumns(sourceColumns: string[], targetColumns: string[], mode: "name" | "position" | "auto" = "auto"): Record<string, string> {
+  if (mode === "position") {
+    return Object.fromEntries(sourceColumns.map((source, index) => [source, targetColumns[index] ?? IMPORT_SKIP_TARGET]));
+  }
   const exactTargets = new Map(targetColumns.map((column) => [column, column]));
   const normalizedTargets = new Map(targetColumns.map((column) => [normalizeImportColumnName(column), column]));
 
-  return Object.fromEntries(sourceColumns.map((source) => [source, exactTargets.get(source) ?? normalizedTargets.get(normalizeImportColumnName(source)) ?? IMPORT_SKIP_TARGET]));
+  const byName = Object.fromEntries(sourceColumns.map((source) => [source, exactTargets.get(source) ?? normalizedTargets.get(normalizeImportColumnName(source)) ?? IMPORT_SKIP_TARGET]));
+  if (mode === "auto") {
+    const hasAnyMatched = Object.values(byName).some((target) => target !== IMPORT_SKIP_TARGET);
+    if (!hasAnyMatched && targetColumns.length > 0) {
+      return Object.fromEntries(sourceColumns.map((source, index) => [source, targetColumns[index] ?? IMPORT_SKIP_TARGET]));
+    }
+  }
+
+  return byName;
 }
 
 export function validateImportMappings(mappings: ImportColumnMappingLike[]): ImportMappingValidationResult {
@@ -272,11 +358,39 @@ export function importDataTypeForDatabase(inferredType: ImportInferredType, data
       if (databaseType === "sqlserver") return "NVARCHAR(MAX)";
       if (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "dameng") return "CLOB";
       if (databaseType === "clickhouse") return "String";
-      if (["hive", "trino", "prestosql", "databricks"].includes(databaseType || "")) return "STRING";
+      if (["hive", "argo", "trino", "prestosql", "databricks"].includes(databaseType || "")) return "STRING";
       return "TEXT";
   }
 }
 
 export function suggestImportTargetDataTypes(columns: string[], rows: unknown[][], databaseType?: DatabaseType): Record<string, string> {
   return Object.fromEntries(columns.map((column, index) => [column, importDataTypeForDatabase(inferColumnType(rows, index), databaseType)]));
+}
+
+export function suggestDataTypeForGenerator(generator: string, databaseType?: DatabaseType): string {
+  const normalized = generator.toLowerCase().replace(/[-_]/g, "");
+  switch (normalized) {
+    case "uuid":
+    case "uuidv4":
+      if (["postgres", "gaussdb", "opengauss", "kingbase", "highgo", "uxdb", "kwdb", "vastbase"].includes(databaseType || "")) return "UUID";
+      if (databaseType === "sqlserver") return "UNIQUEIDENTIFIER";
+      return "VARCHAR(36)";
+    case "uuidsimple":
+    case "uuidnohyphens":
+    case "uuid32":
+      return "VARCHAR(32)";
+    case "currenttimestamp":
+    case "now":
+    case "datetime":
+      return importDataTypeForDatabase("timestamp", databaseType);
+    case "currentdate":
+    case "today":
+    case "date":
+      return importDataTypeForDatabase("date", databaseType);
+    case "sequence":
+    case "autoincrement":
+      return importDataTypeForDatabase("integer", databaseType);
+    default:
+      return importDataTypeForDatabase("text", databaseType);
+  }
 }

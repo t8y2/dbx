@@ -35,7 +35,9 @@ The following URL parameters are supported:
 - `time_zone`
 - `connect_retry_max`
 - `connect_timeout_ms`
-- `enable_compression=true`
+- `enable_compression=true` (also accepts `rpc_compression` and the IoTDB JDBC
+  alias `rpc_compress`; when conflicting aliases are present, they take
+  precedence in that order)
 - `node_urls=host1:6667,host2:6667` for cluster sessions
 - `ssl=true` and `insecure_skip_verify=true`
 
@@ -51,6 +53,13 @@ for TLS or mTLS connections.
 - Query results annotate timestamp columns as `TIMESTAMP(ms|us|ns)` using the
   server-reported `TimestampPrecision`. Raw timestamp integers are transported
   as decimal strings so nanosecond values are not rounded by JavaScript.
+- Tree `max_time`/`min_time` aggregates also return epoch values; they are
+  annotated as `TIMESTAMP(ms|us|ns)` too so the grid renders standard times.
+- The pinned client is vendored under `agents/go-common/iotdb-client-go` with
+  one patch: upstream drops the 1.3.x `ColumnNameIndexMap` fallback, which
+  misaligned aggregate result values against the SELECT column order on 1.3.x
+  servers (the patched client maps value columns through the server-provided
+  name index when the ordered index list is absent).
 - The Agent keeps one physical IoTDB session per logical DBX session and
   invalidates that session after cancellation, timeout, or connection failure.
 

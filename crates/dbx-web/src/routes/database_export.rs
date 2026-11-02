@@ -9,7 +9,9 @@ use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::Response;
 use axum::Json;
-use dbx_core::database_export::{self, DatabaseExportRequest, ExportProgress, ExportStatus};
+use dbx_core::database_export::{
+    self, DatabaseExportOutputCompression, DatabaseExportRequest, ExportProgress, ExportStatus,
+};
 use futures::stream::Stream;
 use serde::Deserialize;
 
@@ -34,6 +36,13 @@ pub async fn start_database_export(
     Json(body): Json<StartExportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mut req = body.request;
+    dbx_core::query::mysql_data_charset_policy::reject_operation(
+        &state.app,
+        &req.connection_id,
+        dbx_core::query::mysql_data_charset_policy::EXPORT_UNSUPPORTED,
+    )
+    .await
+    .map_err(AppError::from)?;
     let export_id = req.export_id.clone();
 
     // Web mode: write to a server-side temp file instead of the client-supplied
@@ -42,16 +51,26 @@ pub async fn start_database_export(
     // endpoint after the export completes.
     let tmp_dir = state.data_dir.join("tmp");
     std::fs::create_dir_all(&tmp_dir).map_err(|e| AppError::from(e.to_string()))?;
-    let tmp_file = tmp_dir.join(format!("database_export_{export_id}.sql"));
+    let extension = if req.split_max_mb.is_some() {
+        "zip"
+    } else if req.output_compression == DatabaseExportOutputCompression::Gzip {
+        "sql.gz"
+    } else if req.output_compression == DatabaseExportOutputCompression::Nb3 {
+        "nb3"
+    } else {
+        "sql"
+    };
+    let tmp_file = tmp_dir.join(format!("database_export_{export_id}.{extension}"));
     let tmp_file_path = tmp_file.to_string_lossy().to_string();
     req.file_path = tmp_file_path.clone();
 
-    let download_filename = format!("{}.sql", sanitize_export_filename(&req.database));
+    let download_filename = format!("{}.{}", sanitize_export_filename(&req.database), extension);
+    let content_format = extension.to_string();
 
     // Store export file mapping for download
     state.export_files.write().await.insert(
         export_id.clone(),
-        WebExportFile { file_path: tmp_file_path.clone(), download_filename, format: "sql".to_string() },
+        WebExportFile { file_path: tmp_file_path.clone(), download_filename, format: content_format },
     );
 
     let (tx, _) = tokio::sync::broadcast::channel::<String>(256);
@@ -63,7 +82,9 @@ pub async fn start_database_export(
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancelled_progress = cancelled.clone();
 
-    tokio::spawn(async move {
+    // Exports interleave async fetches with synchronous row formatting and
+    // buffered disk writes; run them off the async workers (see spawn_export_task).
+    dbx_core::export_runtime::spawn_export_task(async move {
         let result = database_export::export_database_sql_core(&app, &req, |progress| {
             if matches!(progress.status, ExportStatus::Cancelled) {
                 cancelled_progress.store(true, Ordering::SeqCst);
@@ -99,6 +120,8 @@ pub async fn start_database_export(
                     status: ExportStatus::Error,
                     error: Some(e.clone()),
                     preparing: false,
+                    error_count: 0,
+                    error_summary: None,
                 };
                 if let Ok(json) = serde_json::to_string(&progress) {
                     let _ = tx.send(json);
@@ -162,9 +185,18 @@ pub async fn database_export_download(
     // Clean up temp file
     let _ = tokio::fs::remove_file(&export_file.file_path).await;
 
+    let content_type = if export_file.format == "zip" {
+        "application/zip"
+    } else if export_file.format == "sql.gz" {
+        "application/gzip"
+    } else if export_file.format == "nb3" {
+        "application/x-tar"
+    } else {
+        "application/sql; charset=utf-8"
+    };
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/sql; charset=utf-8")
+        .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_DISPOSITION, attachment_content_disposition(&export_file.download_filename))
         .body(Body::from(data))
         .map_err(|e| AppError::from(e.to_string()))

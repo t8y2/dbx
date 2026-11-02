@@ -9,12 +9,31 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/backend/api", () => mocks);
 
-import { cancelObjectMetadataLoadsForConnection, getObjectMetadataCacheDebugStateForTests, invalidateObjectMetadataCache, loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
+import { cancelObjectMetadataLoadsForConnection, getObjectMetadataCacheDebugStateForTests, invalidateObjectMetadataCache, invalidateObjectMetadataFacet, loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
+import { isObjectCacheInvalidationError } from "@/lib/metadata/objectCacheInvalidationError";
 import { clearMetadataRuntimeCache } from "@/lib/metadata/metadataRuntimeCache";
 
 const request = { connectionId: "c1", database: "app", schema: "public", tableName: "users", catalog: "analytics" } as const;
 
 describe("objectMetadataCache", () => {
+  it.each(["remote", "disk"])("settles local waiting when connection cancellation retires a never-returning %s read", async (phase) => {
+    if (phase === "disk") mocks.loadSchemaCache.mockReturnValueOnce(new Promise(() => undefined));
+    const loader = vi.fn(() => new Promise(() => undefined));
+    let settled = false;
+    const result = loadObjectMetadataFacet(request, "columns", loader).then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await vi.waitFor(() => expect(phase === "remote" ? loader.mock.calls.length : getObjectMetadataCacheDebugStateForTests().activeReads).toBe(1));
+    cancelObjectMetadataLoadsForConnection(request.connectionId);
+    await vi.waitFor(() => expect(settled).toBe(true));
+    await result;
+    expect(getObjectMetadataCacheDebugStateForTests().activeReads).toBe(0);
+  });
   beforeEach(() => {
     clearMetadataRuntimeCache();
     vi.clearAllMocks();
@@ -30,12 +49,49 @@ describe("objectMetadataCache", () => {
     });
   });
 
+  it("reports deletion failures only to strict callers sharing the same invalidation", async () => {
+    let reject!: (error: Error) => void;
+    mocks.deleteSchemaCachePrefix.mockReturnValueOnce(
+      new Promise<void>((_, fail) => {
+        reject = fail;
+      }),
+    );
+    const bestEffort = invalidateObjectMetadataCache(request);
+    const strict = invalidateObjectMetadataCache(request, { strict: true });
+    const failure = new Error("storage unavailable");
+    const rejected = expect(strict).rejects.toMatchObject({ name: "ObjectCacheInvalidationError", reason: failure });
+    await vi.waitFor(() => expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledTimes(1));
+    reject(failure);
+    await rejected;
+    await expect(bestEffort).resolves.toBeUndefined();
+    await expect(invalidateObjectMetadataCache(request, { strict: true })).resolves.toBeUndefined();
+    expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps forced facet reads best effort if deletion fails", async () => {
+    mocks.deleteSchemaCachePrefix.mockRejectedValueOnce(new Error("storage unavailable"));
+    await expect(loadObjectMetadataFacet(request, "columns", async () => ["fresh"], { force: true })).resolves.toEqual({ value: ["fresh"], cacheStatus: "remote" });
+  });
+
   it("reads a facet from disk without invoking the loader", async () => {
     mocks.loadSchemaCache.mockResolvedValue({ version: 1, cachedAt: new Date().toISOString(), value: [{ name: "id" }] });
     const loader = vi.fn().mockResolvedValue([{ name: "remote" }]);
 
     await expect(loadObjectMetadataFacet(request, "columns", loader)).resolves.toEqual({ value: [{ name: "id" }], cacheStatus: "disk" });
     expect(loader).not.toHaveBeenCalled();
+  });
+
+  it("does not grant an exact baseline from legacy memory or any persisted facet", async () => {
+    mocks.loadSchemaCache.mockResolvedValue({ version: 1, cachedAt: new Date().toISOString(), value: ["legacy"] });
+    const loader = vi.fn().mockResolvedValue(["exact"]);
+    await loadObjectMetadataFacet(request, "indexes", loader);
+    await expect(loadObjectMetadataFacet({ ...request, exactIdentity: true }, "indexes", loader)).resolves.toEqual({ value: ["exact"], cacheStatus: "remote" });
+    expect(loader).toHaveBeenCalledOnce();
+    expect(mocks.loadSchemaCache).toHaveBeenCalledOnce();
+    expect(mocks.saveSchemaCache).not.toHaveBeenCalled();
+    cancelObjectMetadataLoadsForConnection("c1");
+    loader.mockRejectedValueOnce(new Error("exact capability unavailable"));
+    await expect(loadObjectMetadataFacet({ ...request, exactIdentity: true }, "indexes", loader)).rejects.toThrow("exact capability unavailable");
   });
 
   it("backfills memory after a disk hit", async () => {
@@ -76,6 +132,55 @@ describe("objectMetadataCache", () => {
     await loadObjectMetadataFacet({ ...request, objectType: "VIEW" }, "columns", viewLoader);
     expect(tableLoader).toHaveBeenCalledTimes(1);
     expect(viewLoader).toHaveBeenCalledTimes(1);
+  });
+
+  it("separates exact trigger snapshots without changing other facet keys and invalidates both modes together", async () => {
+    const exactRequest = { ...request, oracleTriggerContract: 1 as const };
+    const oldLoader = vi.fn().mockResolvedValue(["legacy-body"]);
+    const exactLoader = vi.fn().mockResolvedValue(["exact-metadata"]);
+    expect((await loadObjectMetadataFacet(request, "triggers", oldLoader)).value).toEqual(["legacy-body"]);
+    expect((await loadObjectMetadataFacet(exactRequest, "triggers", exactLoader)).value).toEqual(["exact-metadata"]);
+    expect(exactLoader).toHaveBeenCalledTimes(1);
+    const columns = vi.fn().mockResolvedValue(["column"]);
+    await loadObjectMetadataFacet(request, "columns", columns);
+    await loadObjectMetadataFacet(exactRequest, "columns", columns);
+    expect(columns).toHaveBeenCalledTimes(1);
+    await invalidateObjectMetadataCache(request);
+    await loadObjectMetadataFacet(exactRequest, "triggers", exactLoader);
+    await loadObjectMetadataFacet(request, "triggers", oldLoader);
+    expect(exactLoader).toHaveBeenCalledTimes(2);
+    expect(oldLoader).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([false, true])("retires all trigger identity and contract variants from an exact=%s facet request", async (exactIdentity) => {
+    const variants = [request, { ...request, oracleTriggerContract: 1 as const }, { ...request, exactIdentity: true }, { ...request, exactIdentity: true, oracleTriggerContract: 1 as const }];
+    for (const variant of variants) await loadObjectMetadataFacet(variant, "triggers", async () => ["old"]);
+    await loadObjectMetadataFacet(request, "columns", async () => ["column"]);
+    await loadObjectMetadataFacet({ ...request, catalog: "other" }, "triggers", async () => ["other"]);
+    await invalidateObjectMetadataFacet({ ...request, exactIdentity }, "triggers", { strict: true });
+    for (const variant of variants) expect((await loadObjectMetadataFacet(variant, "triggers", async () => ["new"])).value).toEqual(["new"]);
+    expect((await loadObjectMetadataFacet(request, "columns", async () => ["wrong"])).value).toEqual(["column"]);
+    expect((await loadObjectMetadataFacet({ ...request, catalog: "other" }, "triggers", async () => ["wrong"])).value).toEqual(["other"]);
+  });
+
+  it("retires exact in-flight trigger loads even when persisted deletion fails", async () => {
+    const exact = { ...request, exactIdentity: true, oracleTriggerContract: 1 as const };
+    let resolve!: (value: string[]) => void;
+    const loader = vi.fn(
+      () =>
+        new Promise<string[]>((done) => {
+          resolve = done;
+        }),
+    );
+    const pending = loadObjectMetadataFacet(exact, "triggers", loader);
+    const retired = expect(pending).rejects.toThrow();
+    await vi.waitFor(() => expect(loader).toHaveBeenCalledOnce());
+    mocks.deleteSchemaCachePrefix.mockRejectedValueOnce(new Error("storage unavailable"));
+    await expect(invalidateObjectMetadataFacet(request, "triggers", { strict: true })).rejects.toMatchObject({ name: "ObjectCacheInvalidationError" });
+    await retired;
+    resolve(["late"]);
+    await Promise.resolve();
+    expect((await loadObjectMetadataFacet(exact, "triggers", async () => ["fresh"])).value).toEqual(["fresh"]);
   });
 
   it("persists a remote facet and force bypasses disk", async () => {
@@ -245,11 +350,39 @@ describe("objectMetadataCache", () => {
     await vi.waitFor(() => expect(loader).toHaveBeenCalledTimes(1));
     cancelObjectMetadataLoadsForConnection(request.connectionId);
     releaseOld(["old session"]);
-    await expect(oldLoad).resolves.toMatchObject({ value: ["old session"] });
+    await expect(oldLoad).rejects.toThrow("Metadata waiting cancelled locally.");
 
     loader.mockResolvedValueOnce(["new session"]);
     await expect(loadObjectMetadataFacet(request, "columns", loader)).resolves.toMatchObject({ value: ["new session"], cacheStatus: "remote" });
     expect(loader).toHaveBeenCalledTimes(2);
     expect(mocks.deleteSchemaCachePrefix).not.toHaveBeenCalledWith("object-meta:v1:c1:");
+  });
+
+  describe("strict invalidation", () => {
+    it("rejects with a marked object cache error in strict mode and stays best-effort by default", async () => {
+      mocks.deleteSchemaCachePrefix.mockRejectedValue(new Error("sqlite locked"));
+
+      const failure = await invalidateObjectMetadataCache({ connectionId: "c1" }, { strict: true }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(Error);
+      expect(isObjectCacheInvalidationError(failure)).toBe(true);
+      expect((failure as Error).message).toBe("sqlite locked");
+      expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledWith("object-meta:v1:c1:");
+
+      mocks.deleteSchemaCachePrefix.mockClear();
+      mocks.deleteSchemaCachePrefix.mockRejectedValue(new Error("sqlite locked"));
+      await expect(invalidateObjectMetadataCache({ connectionId: "c1" })).resolves.toBeUndefined();
+      expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledWith("object-meta:v1:c1:");
+    });
+
+    it("force facet loads tolerate a failed persisted deletion", async () => {
+      mocks.deleteSchemaCachePrefix.mockRejectedValue(new Error("locked"));
+      const loader = vi.fn().mockResolvedValue(["fresh"]);
+
+      await expect(loadObjectMetadataFacet(request, "columns", loader, { force: true })).resolves.toEqual({ value: ["fresh"], cacheStatus: "remote" });
+      expect(loader).toHaveBeenCalledTimes(1);
+    });
   });
 });

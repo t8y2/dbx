@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,6 +68,7 @@ type modeDetectionDriverState struct {
 	queries             []string
 	databaseMode        *string
 	backtickIdentifiers bool
+	nullCurrentSchema   bool
 	databaseErr         error
 }
 
@@ -184,8 +186,8 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 	}
 	if strings.Contains(query, "CASE c.relkind") && strings.Contains(query, "obj_description(c.oid)") {
 		return &valueRows{
-			columns: []string{"table_name", "table_type", "table_comment"},
-			rows:    [][]driver.Value{{"orders", "BASE TABLE", "orders table"}},
+			columns: []string{"table_name", "table_type", "table_comment", "parent_schema", "parent_name"},
+			rows:    [][]driver.Value{{"orders", "BASE TABLE", "orders table", nil, nil}},
 		}, nil
 	}
 	if strings.Contains(query, "SELECT obj_description(c.oid)") {
@@ -212,8 +214,8 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 	}
 	if strings.Contains(query, "FROM information_schema.columns c") {
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-			rows:    [][]driver.Value{{"id", "integer", "integer", "NO", nil, "primary key", int64(32), int64(0), nil}},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+			rows:    [][]driver.Value{{"id", "integer", "integer", "NO", nil, "primary key", int64(32), int64(0), nil, nil, nil, nil}},
 		}, nil
 	}
 	if connection.state.rejectAttidentity && strings.Contains(query, "a.attidentity") {
@@ -228,8 +230,8 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 			identity = nil
 		}
 		return &valueRows{
-			columns: []string{"resolved_schema", "column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity"},
-			rows:    [][]driver.Value{{"public", "id", "integer", false, nil, nil, int64(32), int64(0), nil, identity}},
+			columns: []string{"resolved_schema", "column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated"},
+			rows:    [][]driver.Value{{"public", "id", "integer", false, nil, nil, int64(32), int64(0), nil, identity, nil}},
 		}, nil
 	}
 	return nil, errors.New("unexpected query: " + query)
@@ -252,9 +254,13 @@ func (connection *modeDetectionConn) QueryContext(_ context.Context, query strin
 
 	switch {
 	case strings.Contains(query, "SELECT current_database()"):
+		var schema driver.Value = "public"
+		if connection.state.nullCurrentSchema {
+			schema = nil
+		}
 		return &valueRows{
 			columns: []string{"current_database", "current_user", "version", "current_schema"},
-			rows:    [][]driver.Value{{"test", "system", "KingbaseES", "public"}},
+			rows:    [][]driver.Value{{"test", "system", "KingbaseES", schema}},
 		}, nil
 	case strings.Contains(query, "LOWER(name) = 'database_mode'"):
 		if connection.state.databaseErr != nil {
@@ -347,6 +353,75 @@ func (state *connectionAttemptState) snapshot() ([]string, []time.Time) {
 }
 
 func (state *connectionAttemptState) connectionStrings() []string {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return append([]string(nil), state.dsns...)
+}
+
+// failoverState records every opener attempt (per endpoint host + sslmode)
+// and simulates ping failures keyed as "<sslMode>@<host>".
+type failoverState struct {
+	mu         sync.Mutex
+	opened     []string
+	dsns       []string
+	pingErrors map[string]error
+}
+
+type failoverOpener struct {
+	state *failoverState
+}
+
+type failoverConnector struct {
+	state   *failoverState
+	host    string
+	sslMode string
+}
+
+type failoverDriver struct{}
+
+type failoverConn struct {
+	state   *failoverState
+	host    string
+	sslMode string
+}
+
+func (o failoverOpener) open(cp connectParams, sslMode string) (*sql.DB, error) {
+	dsn := buildDSNWithSSLMode(cp, sslMode)
+	o.state.mu.Lock()
+	o.state.opened = append(o.state.opened, sslMode+"@"+cp.Host)
+	o.state.dsns = append(o.state.dsns, dsn)
+	o.state.mu.Unlock()
+	return sql.OpenDB(failoverConnector{state: o.state, host: cp.Host, sslMode: sslMode}), nil
+}
+
+func (connector failoverConnector) Connect(context.Context) (driver.Conn, error) {
+	conn := failoverConn{state: connector.state, host: connector.host, sslMode: connector.sslMode}
+	return &conn, nil
+}
+
+func (failoverConnector) Driver() driver.Driver { return failoverDriver{} }
+
+func (failoverDriver) Open(string) (driver.Conn, error) { return nil, driver.ErrSkip }
+
+func (*failoverConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+
+func (*failoverConn) Close() error { return nil }
+
+func (*failoverConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
+
+func (connection failoverConn) Ping(context.Context) error {
+	connection.state.mu.Lock()
+	defer connection.state.mu.Unlock()
+	return connection.state.pingErrors[connection.sslMode+"@"+connection.host]
+}
+
+func (state *failoverState) attempts() []string {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return append([]string(nil), state.opened...)
+}
+
+func (state *failoverState) connectionStrings() []string {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	return append([]string(nil), state.dsns...)
@@ -961,6 +1036,300 @@ func TestOpenAndPingDBSSLDefaultsToVerifyFull(t *testing.T) {
 	}
 }
 
+func TestSplitHostEndpoints(t *testing.T) {
+	tests := []struct {
+		name         string
+		host         string
+		fallbackPort int
+		expected     []kingbaseEndpoint
+	}{
+		{
+			name:         "single host stays whole",
+			host:         "172.22.232.10",
+			fallbackPort: 54321,
+			expected:     []kingbaseEndpoint{{host: "172.22.232.10", port: 54321}},
+		},
+		{
+			name:         "single host with custom fallback port",
+			host:         "db.example.com",
+			fallbackPort: 6000,
+			expected:     []kingbaseEndpoint{{host: "db.example.com", port: 6000}},
+		},
+		{
+			name:         "comma separated cluster",
+			host:         "172.22.232.10,172.22.232.11",
+			fallbackPort: 54321,
+			expected: []kingbaseEndpoint{
+				{host: "172.22.232.10", port: 54321},
+				{host: "172.22.232.11", port: 54321},
+			},
+		},
+		{
+			name:         "semicolon separated cluster",
+			host:         "172.22.232.10; 172.22.232.11",
+			fallbackPort: 54321,
+			expected: []kingbaseEndpoint{
+				{host: "172.22.232.10", port: 54321},
+				{host: "172.22.232.11", port: 54321},
+			},
+		},
+		{
+			name:         "per entry ports",
+			host:         "10.0.0.1:1000,10.0.0.2:2000",
+			fallbackPort: 54321,
+			expected: []kingbaseEndpoint{
+				{host: "10.0.0.1", port: 1000},
+				{host: "10.0.0.2", port: 2000},
+			},
+		},
+		{
+			name:         "mixed embedded and fallback ports",
+			host:         "10.0.0.1:1000,10.0.0.2",
+			fallbackPort: 54322,
+			expected: []kingbaseEndpoint{
+				{host: "10.0.0.1", port: 1000},
+				{host: "10.0.0.2", port: 54322},
+			},
+		},
+		{
+			name:         "bracketed ipv6 without port",
+			host:         "[2001:db8::1],[2001:db8::2]",
+			fallbackPort: 54321,
+			expected: []kingbaseEndpoint{
+				{host: "2001:db8::1", port: 54321},
+				{host: "2001:db8::2", port: 54321},
+			},
+		},
+		{
+			name:         "bracketed ipv6 with port",
+			host:         "[2001:db8::1]:6000,[2001:db8::2]:6001",
+			fallbackPort: 54321,
+			expected: []kingbaseEndpoint{
+				{host: "2001:db8::1", port: 6000},
+				{host: "2001:db8::2", port: 6001},
+			},
+		},
+		{
+			name:         "bare ipv6 literal",
+			host:         "::1",
+			fallbackPort: 54321,
+			expected:     []kingbaseEndpoint{{host: "::1", port: 54321}},
+		},
+		{
+			name:         "invalid port suffix stays part of the host",
+			host:         "db.example.com:notaport",
+			fallbackPort: 54321,
+			expected:     []kingbaseEndpoint{{host: "db.example.com:notaport", port: 54321}},
+		},
+		{
+			name:         "out of range port falls back",
+			host:         "10.0.0.1:70000",
+			fallbackPort: 54321,
+			expected:     []kingbaseEndpoint{{host: "10.0.0.1:70000", port: 54321}},
+		},
+		{
+			name:         "empty entries are dropped",
+			host:         "10.0.0.1,, ;10.0.0.2",
+			fallbackPort: 54321,
+			expected: []kingbaseEndpoint{
+				{host: "10.0.0.1", port: 54321},
+				{host: "10.0.0.2", port: 54321},
+			},
+		},
+		{
+			name:         "empty host yields no endpoints",
+			host:         "  ",
+			fallbackPort: 54321,
+			expected:     []kingbaseEndpoint{},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			endpoints := splitHostEndpoints(test.host, test.fallbackPort)
+			if len(endpoints) != len(test.expected) {
+				t.Fatalf("unexpected endpoint count: got %#v want %#v", endpoints, test.expected)
+			}
+			for index, endpoint := range endpoints {
+				if endpoint != test.expected[index] {
+					t.Fatalf("endpoint %d mismatch: got %#v want %#v", index, endpoint, test.expected[index])
+				}
+			}
+		})
+	}
+}
+
+func TestClusterConnectEndpointsIgnoresNativeConnectionString(t *testing.T) {
+	if endpoints := clusterConnectEndpoints(connectParams{
+		Host:             "10.0.0.1,10.0.0.2",
+		Port:             54321,
+		ConnectionString: "host=cluster.example.com port=54321",
+	}); endpoints != nil {
+		t.Fatalf("native connection string must not be split: %#v", endpoints)
+	}
+	// The JDBC URL the host app always passes is ignored by the DSN builder,
+	// so the host field must still be split for it.
+	endpoints := clusterConnectEndpoints(connectParams{
+		Host:             "10.0.0.1,10.0.0.2",
+		Port:             54321,
+		ConnectionString: "jdbc:kingbase8://10.0.0.1:54321/test",
+	})
+	if len(endpoints) != 2 {
+		t.Fatalf("jdbc url must not block cluster splitting: %#v", endpoints)
+	}
+}
+
+func TestOpenAndPingDBSingleHostDSNUnchanged(t *testing.T) {
+	state := &failoverState{pingErrors: map[string]error{
+		"require@172.22.232.10": gokb.ErrSSLNotSupported,
+	}}
+	opener := failoverOpener{state: state}
+	db, err := openAndPingDB(connectParams{Host: "172.22.232.10", Port: 54321, Username: "system", Database: "test"}, time.Second, opener.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	dsns := state.connectionStrings()
+	if len(dsns) != 2 {
+		t.Fatalf("single host must keep the prefer fallback sequence: %v", dsns)
+	}
+	for _, dsn := range dsns {
+		if !strings.Contains(dsn, "host='172.22.232.10' port=54321 ") {
+			t.Fatalf("single host DSN changed: %s", dsn)
+		}
+	}
+}
+
+func TestOpenAndPingDBMultiHostFailsOverToReachableEndpoint(t *testing.T) {
+	state := &failoverState{pingErrors: map[string]error{
+		"require@203.0.113.10": errors.New("dial tcp 203.0.113.10:54321: connect: connection refused"),
+	}}
+	opener := failoverOpener{state: state}
+	db, err := openAndPingDB(connectParams{Host: "203.0.113.10,198.51.100.20", Port: 54321}, time.Second, opener.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	attempts := state.attempts()
+	if strings.Join(attempts, " -> ") != "require@203.0.113.10 -> require@198.51.100.20" {
+		t.Fatalf("unexpected failover order: %v", attempts)
+	}
+	dsns := state.connectionStrings()
+	if len(dsns) != 2 {
+		t.Fatalf("unexpected DSN count: %v", dsns)
+	}
+	if !strings.Contains(dsns[0], "host='203.0.113.10' port=54321") {
+		t.Fatalf("first DSN must target the first endpoint: %s", dsns[0])
+	}
+	if !strings.Contains(dsns[1], "host='198.51.100.20' port=54321") {
+		t.Fatalf("second DSN must target the second endpoint: %s", dsns[1])
+	}
+}
+
+func TestOpenAndPingDBMultiHostAppliesConfiguredPortToEveryEndpoint(t *testing.T) {
+	// Regression for #7885: the whole comma-joined host string used to reach
+	// gokb as one hostname (`lookup ip1,ip2: no such host`) while the
+	// configured port was never applied per endpoint.
+	state := &failoverState{pingErrors: map[string]error{
+		"require@10.10.0.1": errors.New("dial tcp: connection refused"),
+		"disable@10.10.0.1": errors.New("dial tcp: connection refused"),
+	}}
+	opener := failoverOpener{state: state}
+	db, err := openAndPingDB(connectParams{Host: "10.10.0.1,10.10.0.2", Port: 54321}, time.Second, opener.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, dsn := range state.connectionStrings() {
+		if strings.Contains(dsn, "10.10.0.1,") || strings.Contains(dsn, ",10.10.0.2") {
+			t.Fatalf("comma-joined host leaked into DSN: %s", dsn)
+		}
+		if !strings.Contains(dsn, "port=54321") {
+			t.Fatalf("configured port missing from DSN: %s", dsn)
+		}
+	}
+}
+
+func TestOpenAndPingDBMultiHostPerEntryPorts(t *testing.T) {
+	state := &failoverState{pingErrors: map[string]error{
+		"require@10.0.0.1": errors.New("dial tcp: connection refused"),
+	}}
+	opener := failoverOpener{state: state}
+	db, err := openAndPingDB(connectParams{Host: "10.0.0.1:1000,10.0.0.2:2000", Port: 54321}, time.Second, opener.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	dsns := state.connectionStrings()
+	if !strings.Contains(dsns[0], "host='10.0.0.1' port=1000") {
+		t.Fatalf("first endpoint must use its embedded port: %s", dsns[0])
+	}
+	if !strings.Contains(dsns[1], "host='10.0.0.2' port=2000") {
+		t.Fatalf("second endpoint must use its embedded port: %s", dsns[1])
+	}
+}
+
+func TestOpenAndPingDBMultiHostSemicolonSeparatorFailsOver(t *testing.T) {
+	state := &failoverState{pingErrors: map[string]error{
+		"require@10.0.0.9": errors.New("dial tcp: connection refused"),
+	}}
+	opener := failoverOpener{state: state}
+	db, err := openAndPingDB(connectParams{Host: "10.0.0.9;10.0.0.10", Port: 54321}, time.Second, opener.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	attempts := state.attempts()
+	if len(attempts) != 2 || attempts[1] != "require@10.0.0.10" {
+		t.Fatalf("semicolon separated hosts must fail over in order: %v", attempts)
+	}
+}
+
+func TestOpenAndPingDBMultiHostAllEndpointsFail(t *testing.T) {
+	refused := errors.New("dial tcp: connection refused")
+	state := &failoverState{pingErrors: map[string]error{
+		"require@10.0.0.1": refused,
+		"require@10.0.0.2": refused,
+	}}
+	opener := failoverOpener{state: state}
+	db, err := openAndPingDB(connectParams{Host: "10.0.0.1,10.0.0.2", Port: 54321}, time.Second, opener.open)
+	if db != nil {
+		db.Close()
+	}
+	if err == nil {
+		t.Fatal("expected failure when every endpoint is down")
+	}
+	if !errors.Is(err, refused) {
+		t.Fatalf("aggregated error must wrap endpoint failures: %v", err)
+	}
+	for _, endpoint := range []string{"10.0.0.1:54321", "10.0.0.2:54321"} {
+		if !strings.Contains(err.Error(), endpoint) {
+			t.Fatalf("error must mention %s: %v", endpoint, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "trying 2 endpoints") {
+		t.Fatalf("error must report the endpoint count: %v", err)
+	}
+}
+
+func TestOpenAndPingDBMultiHostKeepsSSLFallbackPerEndpoint(t *testing.T) {
+	state := &failoverState{pingErrors: map[string]error{
+		"require@10.0.0.1": gokb.ErrSSLNotSupported,
+		"disable@10.0.0.1": errors.New("dial tcp: connection refused"),
+		"require@10.0.0.2": gokb.ErrSSLNotSupported,
+	}}
+	opener := failoverOpener{state: state}
+	db, err := openAndPingDB(connectParams{Host: "10.0.0.1,10.0.0.2", Port: 54321}, time.Second, opener.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	attempts := state.attempts()
+	expected := "require@10.0.0.1 -> disable@10.0.0.1 -> require@10.0.0.2 -> disable@10.0.0.2"
+	if strings.Join(attempts, " -> ") != expected {
+		t.Fatalf("unexpected attempt sequence: %v", attempts)
+	}
+}
+
 func TestConnectAndTestConnectionSharePreferFallback(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -987,7 +1356,7 @@ func TestConnectAndTestConnectionSharePreferFallback(t *testing.T) {
 }
 
 func TestKingbaseListIndexesQuerySupportsSQLServerMode(t *testing.T) {
-	query := kingbaseListIndexesQuery("sys_catalog", "sys", "public", "orders")
+	query := kingbaseListIndexesQuery("sys_catalog", "sys", "public", "orders", "ix.indnkeyatts", "sys_get_expr")
 	if !strings.Contains(query, "unnest(ix.indkey) WITH ORDINALITY") {
 		t.Fatalf("index query should preserve index column order without array subscripts: %s", query)
 	}
@@ -1067,10 +1436,10 @@ func TestListIndexesFallsBackWhenWithOrdinalityIsUnsupported(t *testing.T) {
 			return nil, &gokb.Error{Code: gokb.ErrorCode("42601"), Message: `syntax error at or near "WITH ORDINALITY"`}
 		case strings.Contains(query, "SELECT i.relname, am.amname") && strings.Contains(query, "ix.indkey"):
 			return &valueRows{
-				columns: []string{"relname", "amname", "indisunique", "indisprimary", "indkey"},
+				columns: []string{"relname", "amname", "indisunique", "indisprimary", "indkey", "indexrelid", "key_count", "filter", "indoption"},
 				rows: [][]driver.Value{
-					{"orders_customer_idx", "btree", false, false, "2 3"},
-					{"orders_pkey", "btree", true, true, []byte("1")},
+					{"orders_customer_idx", "btree", false, false, "2 3", int64(123), int64(2), nil, "0 0"},
+					{"orders_pkey", "btree", true, true, []byte("1"), int64(124), int64(1), nil, "0"},
 				},
 			}, nil
 		case strings.Contains(query, "SELECT a.attnum, a.attname"):
@@ -1085,7 +1454,7 @@ func TestListIndexesFallsBackWhenWithOrdinalityIsUnsupported(t *testing.T) {
 	server := newServer()
 	server.db = openMetadataDB(t, state)
 
-	for range 2 {
+	for i := 0; i < 2; i++ {
 		indexes, err := server.listIndexes("PUBLIC", "orders")
 		if err != nil {
 			t.Fatal(err)
@@ -1138,8 +1507,8 @@ func TestGetColumnsUsesResolvedSchemaAcrossCatalogMetadata(t *testing.T) {
 						return nil, fmt.Errorf("explicit-schema columns query changed resolution behavior: %s", query)
 					}
 					return &valueRows{
-						columns: []string{"nspname", "attname", "format_type", "nullable", "default", "comment", "precision", "scale", "length", "identity"},
-						rows:    [][]driver.Value{{test.resolvedSchema, "feearea", "character varying", false, nil, nil, nil, nil, nil, nil}},
+						columns: []string{"nspname", "attname", "format_type", "nullable", "default", "comment", "precision", "scale", "length", "identity", "generated"},
+						rows:    [][]driver.Value{{test.resolvedSchema, "feearea", "character varying", false, nil, nil, nil, nil, nil, nil, nil}},
 					}, nil
 				case strings.Contains(query, "FROM information_schema.table_constraints"):
 					if !strings.Contains(query, "tc.table_schema='"+test.resolvedSchema+"'") {
@@ -1185,6 +1554,115 @@ func TestListIndexesDoesNotFallbackForUnrelatedErrors(t *testing.T) {
 	}
 	if queries := state.snapshotQueries(); len(queries) != 1 || server.indexOrdinalityUnsupported {
 		t.Fatalf("unrelated error triggered fallback: %v", queries)
+	}
+}
+
+func TestPrimaryKeysFallsBackToCatalogWhenInformationSchemaIsEmpty(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM information_schema.table_constraints tc"):
+			return &valueRows{columns: []string{"column_name"}}, nil
+		case strings.Contains(query, "FROM sys_catalog.sys_index ix") && strings.Contains(query, "ix.indisprimary"):
+			return &valueRows{columns: []string{"attname"}, rows: [][]driver.Value{{"id"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	keys, err := server.primaryKeys("lhxzztb", "basestr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keys["id"] {
+		t.Fatalf("catalog fallback failed to discover primary key: %#v", keys)
+	}
+}
+
+func TestPrimaryKeysCatalogFallbackSkipsIncludedColumns(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM information_schema.table_constraints tc"):
+			return &valueRows{columns: []string{"column_name"}}, nil
+		case strings.Contains(query, "FROM sys_catalog.sys_index ix") && strings.Contains(query, "ix.indisprimary"):
+			if !strings.Contains(query, "unnest(ix.indkey) WITH ORDINALITY") ||
+				!strings.Contains(query, "k.pos <= ix.indnkeyatts") ||
+				!strings.Contains(query, "ORDER BY k.pos") {
+				return nil, fmt.Errorf("catalog fallback must scope primary keys to key positions in order: %s", query)
+			}
+			// A primary key declared (b, a) INCLUDE (c) has indkey = [2 1 3]
+			// with indnkeyatts = 2, so only attnums 2 and 1 are keys, in order.
+			return &valueRows{columns: []string{"attname"}, rows: [][]driver.Value{{"b"}, {"a"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	keys, err := server.primaryKeys("lhxzztb", "basestr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 2 || !keys["a"] || !keys["b"] || keys["c"] {
+		t.Fatalf("catalog fallback must not treat INCLUDE columns as primary keys: %#v", keys)
+	}
+}
+
+func TestPrimaryKeysCatalogFallbackRetriesWithoutIndnKeyAtts(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM information_schema.table_constraints tc"):
+			return &valueRows{columns: []string{"column_name"}}, nil
+		case strings.Contains(query, "FROM sys_catalog.sys_index ix") && strings.Contains(query, "indnkeyatts"):
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column ix.indnkeyatts does not exist"}
+		case strings.Contains(query, "FROM sys_catalog.sys_index ix") && strings.Contains(query, "k.pos <= ix.indnatts"):
+			return &valueRows{columns: []string{"attname"}, rows: [][]driver.Value{{"id"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	keys, err := server.primaryKeys("lhxzztb", "basestr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keys["id"] {
+		t.Fatalf("catalog fallback failed on servers without indnkeyatts: %#v", keys)
+	}
+	if !server.indexKeyCountUnsupported {
+		t.Fatal("catalog fallback must cache the missing indnkeyatts capability")
+	}
+}
+
+func TestPrimaryKeysCatalogFallbackWithoutOrdinality(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM information_schema.table_constraints tc"):
+			return &valueRows{columns: []string{"column_name"}}, nil
+		case strings.Contains(query, "WITH ORDINALITY"):
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42601"), Message: "syntax error at or near \"ORDINALITY\" ... WITH ORDINALITY"}
+		case strings.Contains(query, "FROM sys_catalog.sys_index ix") && strings.Contains(query, "a.attnum = ANY(ix.indkey)"):
+			return &valueRows{columns: []string{"attname"}, rows: [][]driver.Value{{"id"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	keys, err := server.primaryKeys("lhxzztb", "basestr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keys["id"] {
+		t.Fatalf("catalog fallback failed on servers without WITH ORDINALITY: %#v", keys)
+	}
+	if !server.indexOrdinalityUnsupported {
+		t.Fatal("catalog fallback must cache the missing WITH ORDINALITY capability")
 	}
 }
 
@@ -1500,7 +1978,9 @@ func TestKingbaseV7VersionPattern(t *testing.T) {
 		v7      bool
 	}{
 		{version: "Kingbase V007R001C002B0014", v7: true},
+		{version: "KingbaseES V008R003C002B0320"},
 		{version: "KingbaseES V008R006C008B0014"},
+		{version: "KingbaseES V009R001C010B0001"},
 		{version: "PostgreSQL 12.1"},
 	} {
 		match := kingbaseReleasePattern.FindStringSubmatch(test.version)
@@ -1576,7 +2056,7 @@ func TestListTriggerDefinitionsFallsBackToSingleArgument(t *testing.T) {
 	server := newServer()
 	server.db = openMetadataDB(t, state)
 
-	for range 2 {
+	for i := 0; i < 2; i++ {
 		definitions, err := server.listTriggerDefinitions("PUBLIC", "orders")
 		if err != nil {
 			t.Fatal(err)
@@ -1610,7 +2090,7 @@ func TestListTriggersFallsBackToV7InternalPredicate(t *testing.T) {
 	server := newServer()
 	server.db = openMetadataDB(t, state)
 
-	for range 2 {
+	for i := 0; i < 2; i++ {
 		triggers, err := server.listTriggers("PUBLIC", "orders")
 		if err != nil {
 			t.Fatal(err)
@@ -1756,24 +2236,25 @@ func TestListTablesPreservesKingbaseObjectTypesAndComments(t *testing.T) {
 		postgresCatalog bool
 		mysqlCompat     bool
 		wantCatalog     string
+		wantInherits    string
 	}{
-		{name: "modern system catalog", wantCatalog: "sys_catalog.sys_class c"},
-		{name: "PostgreSQL catalog", postgresCatalog: true, wantCatalog: "pg_catalog.pg_class c"},
-		{name: "MySQL compatibility mode", mysqlCompat: true, wantCatalog: "sys_catalog.sys_class c"},
+		{name: "modern system catalog", wantCatalog: "sys_catalog.sys_class c", wantInherits: "sys_catalog.sys_inherits i"},
+		{name: "PostgreSQL catalog", postgresCatalog: true, wantCatalog: "pg_catalog.pg_class c", wantInherits: "pg_catalog.pg_inherits i"},
+		{name: "MySQL compatibility mode", mysqlCompat: true, wantCatalog: "sys_catalog.sys_class c", wantInherits: "sys_catalog.sys_inherits i"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
-				if !strings.Contains(query, "FROM "+test.wantCatalog) || !strings.Contains(query, "c.relkind IN ('r','p','v','m','f')") || !strings.Contains(query, "obj_description(c.oid)") {
+				if !strings.Contains(query, "SELECT DISTINCT c.relname") || !strings.Contains(query, "FROM "+test.wantCatalog) || !strings.Contains(query, "LEFT JOIN "+test.wantInherits) || !strings.Contains(query, "c.relkind IN ('r','p','v','m','f')") || !strings.Contains(query, "obj_description(c.oid)") {
 					return nil, errors.New("unexpected query: " + query)
 				}
 				return &valueRows{
-					columns: []string{"relname", "relkind", "comment"},
+					columns: []string{"relname", "relkind", "comment", "parent_schema", "parent_name"},
 					rows: [][]driver.Value{
-						{"orders", "TABLE", "orders table"},
-						{"sales_view", "VIEW", nil},
-						{"sales_cache", "MATERIALIZED_VIEW", "cached sales"},
+						{"orders", "TABLE", "orders table", nil, nil},
+						{"sales_view", "VIEW", nil, nil, nil},
+						{"sales_cache", "MATERIALIZED_VIEW", "cached sales", nil, nil},
 					},
 				}, nil
 			}}
@@ -1799,6 +2280,311 @@ func TestListTablesPreservesKingbaseObjectTypesAndComments(t *testing.T) {
 	}
 }
 
+func TestListTablesAndObjectsPreservePartitionHierarchy(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		for _, fragment := range []string{
+			"LEFT JOIN sys_catalog.sys_inherits i ON i.inhrelid = c.oid",
+			"LEFT JOIN sys_catalog.sys_class pc ON pc.oid = i.inhparent",
+			"LEFT JOIN sys_catalog.sys_namespace pn ON pn.oid = pc.relnamespace",
+			"CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema",
+			"CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name",
+		} {
+			if !strings.Contains(query, fragment) {
+				return nil, errors.New("partition query missing " + fragment + ": " + query)
+			}
+		}
+		return &valueRows{
+			columns: []string{"relname", "relkind", "comment", "parent_schema", "parent_name"},
+			rows: [][]driver.Value{
+				{"catalog_nested", "TABLE", nil, nil, nil},
+				{"catalog_nested_2024", "TABLE", nil, "partition_demo", "catalog_nested"},
+				{"catalog_nested_2024_asia", "TABLE", nil, "partition_demo", "catalog_nested_2024"},
+			},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	tables, err := server.listTables("partition_demo", metadataListConstraints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != 3 || tables[0].ParentName != nil || tables[1].ParentSchema == nil || *tables[1].ParentSchema != "partition_demo" || tables[1].ParentName == nil || *tables[1].ParentName != "catalog_nested" || tables[2].ParentName == nil || *tables[2].ParentName != "catalog_nested_2024" {
+		t.Fatalf("unexpected partition table hierarchy: %#v", tables)
+	}
+
+	objects, err := server.listObjects("partition_demo", metadataListConstraints{ObjectTypes: []string{"TABLE"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 3 || objects[1].ParentSchema == nil || *objects[1].ParentSchema != "partition_demo" || objects[1].ParentName == nil || *objects[1].ParentName != "catalog_nested" || objects[2].ParentName == nil || *objects[2].ParentName != "catalog_nested_2024" {
+		t.Fatalf("object list lost partition hierarchy: %#v", objects)
+	}
+}
+
+func TestGetTablePartitioningBuildsKingbaseHierarchy(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		for _, fragment := range []string{
+			"WITH RECURSIVE tree AS",
+			"sys_catalog.sys_inherits",
+			"sys_catalog.sys_get_partkeydef",
+			"sys_catalog.sys_get_expr",
+		} {
+			if !strings.Contains(query, fragment) {
+				return nil, errors.New("partition query missing " + fragment + ": " + query)
+			}
+		}
+		return &valueRows{
+			columns: []string{"oid", "schema_name", "table_name", "parent_oid", "parent_schema", "parent_name", "relkind", "partition_bound", "partition_key"},
+			rows: [][]driver.Value{
+				{int64(2), "public", "sales_default", int64(1), "public", "sales", "r", "DEFAULT", nil},
+				{int64(1), "public", "sales", nil, nil, nil, "p", nil, "RANGE (id)"},
+				{int64(3), "public", "sales_2024", int64(1), "public", "sales", "r", "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')", nil},
+			},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	partitioning, err := server.getTablePartitioning("public", "sales")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !partitioning.IsPartitioned || partitioning.IsPartition || partitioning.Strategy != "range" || partitioning.DefaultPartition != "sales_default" {
+		t.Fatalf("unexpected parent partitioning: %#v", partitioning)
+	}
+	if len(partitioning.Partitions) != 2 || !partitioning.Partitions[0].IsLeaf || partitioning.Partitions[1].Name != "sales_default" || partitioning.Partitions[1].Bound == nil || partitioning.Partitions[1].Bound.Kind != "default" {
+		t.Fatalf("unexpected partition nodes: %#v", partitioning.Partitions)
+	}
+}
+
+func TestGetTablePartitioningGuardsInheritanceAndCycles(t *testing.T) {
+	var captured string
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		captured = query
+		return &valueRows{
+			columns: []string{"oid", "schema_name", "table_name", "parent_oid", "parent_schema", "parent_name", "relkind", "partition_bound", "partition_key"},
+			rows:    [][]driver.Value{},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	if _, err := server.getTablePartitioning("public", "sales"); err != nil {
+		t.Fatal(err)
+	}
+	// Both the anchor and the recursive edge must be scoped to declarative
+	// partitions so a legacy INHERITS child is never reported as a partition.
+	if strings.Count(captured, "AND c.relispartition") != 2 {
+		t.Fatalf("partition tree must scope both edges to declarative partitions: %s", captured)
+	}
+	if !strings.Contains(captured, "NOT c.oid = ANY(tree.path)") {
+		t.Fatalf("partition tree must carry a cycle guard: %s", captured)
+	}
+	if strings.Contains(captured, "c.relpartbound, c.oid, true") {
+		t.Fatalf("partition tree must use the two-argument deparser verified on sys_catalog: %s", captured)
+	}
+}
+
+func TestGetTablePartitioningFallsBackWithoutRelispartition(t *testing.T) {
+	var queries []string
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		queries = append(queries, query)
+		if strings.Contains(query, "c.relispartition") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "kb: column c.relispartition does not exist"}
+		}
+		return &valueRows{
+			columns: []string{"oid", "schema_name", "table_name", "parent_oid", "parent_schema", "parent_name", "relkind", "partition_bound", "partition_key"},
+			rows: [][]driver.Value{
+				{int64(1), "public", "sales", nil, nil, nil, "p", nil, "RANGE (id)"},
+				{int64(2), "public", "sales_2024", int64(1), "public", "sales", "r", "FOR VALUES FROM (MINVALUE) TO (MAXVALUE)", nil},
+			},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	partitioning, err := server.getTablePartitioning("public", "sales")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queries) != 2 {
+		t.Fatalf("expected exactly one retry after relispartition is rejected, got %d", len(queries))
+	}
+	fallback := queries[1]
+	if !strings.Contains(fallback, "CASE WHEN pc.relkind = 'p'") || strings.Contains(fallback, "relispartition") {
+		t.Fatalf("fallback query must key the parent edge on relkind: %s", fallback)
+	}
+	if !strings.Contains(fallback, "tree.relkind = 'p'") {
+		t.Fatalf("fallback recursion must key on the parent relkind: %s", fallback)
+	}
+	if !partitioning.IsPartitioned || len(partitioning.Partitions) != 1 || partitioning.Partitions[0].Name != "sales_2024" {
+		t.Fatalf("unexpected partitioning from fallback: %#v", partitioning)
+	}
+}
+
+func TestGetTablePartitioningFallsBackWithoutPartKeyFunction(t *testing.T) {
+	var queries []string
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		queries = append(queries, query)
+		if strings.Contains(query, "get_partkeydef") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42883"), Message: "kb: function sys_catalog.sys_get_partkeydef(bigint) does not exist"}
+		}
+		return &valueRows{
+			columns: []string{"oid", "schema_name", "table_name", "parent_oid", "parent_schema", "parent_name", "relkind", "partition_bound", "partition_key"},
+			rows: [][]driver.Value{
+				{int64(1), "public", "sales", nil, nil, nil, "p", nil, nil},
+				{int64(2), "public", "sales_default", int64(1), "public", "sales", "r", "DEFAULT", nil},
+			},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	partitioning, err := server.getTablePartitioning("public", "sales")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queries) != 3 {
+		t.Fatalf("expected the key function to be dropped last, got %d queries", len(queries))
+	}
+	if !partitioning.IsPartitioned || len(partitioning.Partitions) != 1 || partitioning.Partitions[0].Bound == nil || partitioning.Partitions[0].Bound.Kind != "default" {
+		t.Fatalf("partition parent status or children were lost without the key function: %#v", partitioning)
+	}
+}
+
+func TestParseKingbasePartitionBoundReadsEveryShape(t *testing.T) {
+	intP := func(value int) *int { return &value }
+	nullable := func(value string) sql.NullString { return sql.NullString{String: value, Valid: true} }
+	cases := []struct {
+		definition string
+		want       *pgPartitionBound
+	}{
+		{"DEFAULT", &pgPartitionBound{Kind: "default"}},
+		{"  default  ", &pgPartitionBound{Kind: "default"}},
+		{
+			"FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')",
+			&pgPartitionBound{Kind: "range", From: []string{"'2024-01-01'"}, To: []string{"'2025-01-01'"}},
+		},
+		{
+			"FOR VALUES FROM ('a', 'a') TO ('b', MAXVALUE)",
+			&pgPartitionBound{Kind: "range", From: []string{"'a'", "'a'"}, To: []string{"'b'", "MAXVALUE"}},
+		},
+		{"FOR VALUES IN ('a,b', 'c')", &pgPartitionBound{Kind: "list", Values: []string{"'a,b'", "'c'"}}},
+		{
+			"FOR VALUES WITH (modulus 2, remainder 1)",
+			&pgPartitionBound{Kind: "hash", Modulus: intP(2), Remainder: intP(1)},
+		},
+		{
+			// remainder 0 must survive even though it is the zero value.
+			"FOR VALUES WITH (MODULUS 4, REMAINDER 0)",
+			&pgPartitionBound{Kind: "hash", Modulus: intP(4), Remainder: intP(0)},
+		},
+	}
+	for _, test := range cases {
+		if got := parseKingbasePartitionBound(nullable(test.definition)); !reflect.DeepEqual(got, test.want) {
+			t.Fatalf("parseKingbasePartitionBound(%q) = %#v, want %#v", test.definition, got, test.want)
+		}
+	}
+	for _, definition := range []string{"", "NOT A BOUND", "FOR VALUES INTO (1)"} {
+		if got := parseKingbasePartitionBound(nullable(definition)); got != nil {
+			t.Fatalf("parseKingbasePartitionBound(%q) = %#v, want nil", definition, got)
+		}
+	}
+	if got := parseKingbasePartitionBound(sql.NullString{}); got != nil {
+		t.Fatalf("a NULL bound must stay nil, got %#v", got)
+	}
+}
+
+func TestGetTablePartitioningParsesNodeBounds(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		return &valueRows{
+			columns: []string{"oid", "schema_name", "table_name", "parent_oid", "parent_schema", "parent_name", "relkind", "partition_bound", "partition_key"},
+			rows: [][]driver.Value{
+				{int64(1), "public", "sales", nil, nil, nil, "p", nil, "RANGE (id)"},
+				{int64(2), "public", "sales_2024", int64(1), "public", "sales", "r", "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')", nil},
+			},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	partitioning, err := server.getTablePartitioning("public", "sales")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(partitioning.Partitions) != 1 || partitioning.Partitions[0].Bound == nil || partitioning.Partitions[0].Bound.Kind != "range" {
+		t.Fatalf("tree node bound was not parsed: %#v", partitioning.Partitions)
+	}
+	if partitioning.Partitions[0].BoundDefinition != "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')" {
+		t.Fatalf("raw bound definition must be retained: %#v", partitioning.Partitions[0])
+	}
+}
+
+func TestGetTablePartitionStatusUsesLightweightQuery(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		relkind         string
+		exists          bool
+		wantPartitioned bool
+		wantPartition   bool
+	}{
+		{name: "partitioned parent", relkind: "p", exists: false, wantPartitioned: true},
+		{name: "leaf partition", relkind: "r", exists: true, wantPartition: true},
+		{name: "plain table", relkind: "r", exists: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var captured string
+			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+				captured = query
+				return &valueRows{
+					columns: []string{"relkind", "is_partition"},
+					rows:    [][]driver.Value{{test.relkind, test.exists}},
+				}, nil
+			}}
+			server := newServer()
+			server.db = openMetadataDB(t, state)
+
+			result, shutdown, err := server.dispatch("get_table_partition_status", map[string]json.RawMessage{
+				"schema": json.RawMessage(`"public"`),
+				"table":  json.RawMessage(`"sales"`),
+			})
+			if err != nil || shutdown {
+				t.Fatalf("dispatch failed: shutdown=%v err=%v", shutdown, err)
+			}
+			if strings.Contains(captured, "WITH RECURSIVE") || !strings.Contains(captured, "EXISTS (") {
+				t.Fatalf("status probe must not walk the whole partition tree: %s", captured)
+			}
+			status, ok := result.(pgTablePartitionStatus)
+			if !ok {
+				t.Fatalf("unexpected result type: %#v", result)
+			}
+			if status.IsPartitionedParent != test.wantPartitioned || status.IsPartition != test.wantPartition {
+				t.Fatalf("unexpected status: %#v", status)
+			}
+		})
+	}
+}
+
+func TestPartitionKeyColumnsExtractsSimpleColumnsAndSkipsExpressions(t *testing.T) {
+	if got := partitionKeyColumns("RANGE (tenant_id, measured_at)"); !reflect.DeepEqual(got, []string{"tenant_id", "measured_at"}) {
+		t.Fatalf("unexpected simple partition columns: %#v", got)
+	}
+	if got := partitionKeyColumns(`LIST ("region", lower(code), "display""name")`); !reflect.DeepEqual(got, []string{"region", `display"name`}) {
+		t.Fatalf("unexpected mixed partition columns: %#v", got)
+	}
+}
+
+func TestEmptyPartitioningUsesJSONArrays(t *testing.T) {
+	encoded, err := json.Marshal(emptyPgTablePartitioning())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"keyColumns":null`) || strings.Contains(string(encoded), `"partitions":null`) {
+		t.Fatalf("empty partitioning must serialize arrays, got %s", encoded)
+	}
+}
+
 func TestListTablesCachesMissingCatalogOIDCapability(t *testing.T) {
 	for _, test := range []struct {
 		name            string
@@ -1820,8 +2606,8 @@ func TestListTablesCachesMissingCatalogOIDCapability(t *testing.T) {
 					return nil, errors.New("fallback must return a NULL comment: " + query)
 				}
 				return &valueRows{
-					columns: []string{"relname", "relkind", "table_comment"},
-					rows:    [][]driver.Value{{"orders", "TABLE", nil}},
+					columns: []string{"relname", "relkind", "table_comment", "parent_schema", "parent_name"},
+					rows:    [][]driver.Value{{"orders", "TABLE", nil, nil, nil}},
 				}, nil
 			}}
 			server := newServer()
@@ -1996,13 +2782,13 @@ func TestListObjectsIncludesCustomTypesWhenUnfiltered(t *testing.T) {
 			}, nil
 		case strings.Contains(query, "sys_proc p"):
 			return &valueRows{
-				columns: []string{"proname", "kind", "comment"},
-				rows:    [][]driver.Value{{"format_name", "FUNCTION", nil}},
+				columns: []string{"proname", "kind", "comment", "signature"},
+				rows:    [][]driver.Value{{"format_name", "FUNCTION", nil, ""}},
 			}, nil
 		case strings.Contains(query, "sys_class c"):
 			return &valueRows{
-				columns: []string{"relname", "relkind", "comment"},
-				rows:    [][]driver.Value{{"orders", "TABLE", nil}},
+				columns: []string{"relname", "relkind", "comment", "parent_schema", "parent_name"},
+				rows:    [][]driver.Value{{"orders", "TABLE", nil, nil, nil}},
 			}, nil
 		}
 		return nil, errors.New("unexpected query: " + query)
@@ -2031,15 +2817,15 @@ func TestListObjectsIncludesCustomTypesWhenUnfiltered(t *testing.T) {
 func TestListObjectsIncludesMySQLCompatRoutines(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
 		switch {
-		case strings.Contains(query, "FROM information_schema.routines"):
-			if !strings.Contains(query, "WHERE ROUTINE_SCHEMA = 'team''s'") {
+		case strings.Contains(query, "FROM sys_catalog.sys_proc p"):
+			if !strings.Contains(query, "n.nspname = 'team''s'") {
 				return nil, errors.New("routine query did not quote the schema: " + query)
 			}
 			return &valueRows{
-				columns: []string{"routine_name", "routine_type", "routine_comment"},
+				columns: []string{"routine_name", "routine_type", "comment", "signature"},
 				rows: [][]driver.Value{
-					{"format_name", "FUNCTION", "formats a name"},
-					{"refresh_cache", "PROCEDURE", nil},
+					{"format_name", "FUNCTION", "formats a name", "value text"},
+					{"refresh_cache", "PROCEDURE", nil, ""},
 				},
 			}, nil
 		default:
@@ -2064,7 +2850,7 @@ func TestListObjectsIncludesMySQLCompatRoutines(t *testing.T) {
 		t.Fatalf("unexpected function: %#v", objects[1])
 	}
 	queries := state.snapshotQueries()
-	if len(queries) != 1 || !strings.Contains(queries[0], "FROM information_schema.routines") {
+	if len(queries) != 1 || !strings.Contains(queries[0], "FROM sys_catalog.sys_proc p") {
 		t.Fatalf("expected exactly one routine query, got %v", queries)
 	}
 }
@@ -2074,17 +2860,17 @@ func TestListObjectsFiltersSortsAndPagesMySQLCompatObjects(t *testing.T) {
 		switch {
 		case strings.Contains(query, "FROM sys_catalog.sys_class c"):
 			return &valueRows{
-				columns: []string{"relname", "relkind", "comment"},
-				rows:    [][]driver.Value{{"match_table", "TABLE", nil}},
+				columns: []string{"relname", "relkind", "comment", "parent_schema", "parent_name"},
+				rows:    [][]driver.Value{{"match_table", "TABLE", nil, nil, nil}},
 			}, nil
-		case strings.Contains(query, "FROM information_schema.routines"):
+		case strings.Contains(query, "FROM sys_catalog.sys_proc p"):
 			return &valueRows{
-				columns: []string{"routine_name", "routine_type", "routine_comment"},
+				columns: []string{"routine_name", "routine_type", "comment", "signature"},
 				rows: [][]driver.Value{
-					{"z_match_fn", "FUNCTION", nil},
-					{"other_fn", "FUNCTION", nil},
-					{"match_proc", "PROCEDURE", nil},
-					{"a_match_fn", "FUNCTION", nil},
+					{"z_match_fn", "FUNCTION", nil, ""},
+					{"other_fn", "FUNCTION", nil, ""},
+					{"match_proc", "PROCEDURE", nil, ""},
+					{"a_match_fn", "FUNCTION", nil, ""},
 				},
 			}, nil
 		default:
@@ -2117,14 +2903,14 @@ func TestListObjectsFiltersMySQLCompatRoutineKindsWithoutTableScan(t *testing.T)
 	for _, objectType := range []string{"FUNCTION", "PROCEDURE"} {
 		t.Run(objectType, func(t *testing.T) {
 			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
-				if !strings.Contains(query, "FROM information_schema.routines") {
+				if !strings.Contains(query, "FROM sys_catalog.sys_proc p") {
 					return nil, errors.New("routine-only request must not scan tables: " + query)
 				}
 				return &valueRows{
-					columns: []string{"routine_name", "routine_type", "routine_comment"},
+					columns: []string{"routine_name", "routine_type", "comment", "signature"},
 					rows: [][]driver.Value{
-						{"format_name", "FUNCTION", nil},
-						{"refresh_cache", "PROCEDURE", nil},
+						{"format_name", "FUNCTION", nil, ""},
+						{"refresh_cache", "PROCEDURE", nil, ""},
 					},
 				}, nil
 			}}
@@ -2140,7 +2926,7 @@ func TestListObjectsFiltersMySQLCompatRoutineKindsWithoutTableScan(t *testing.T)
 				t.Fatalf("expected only %s, got %#v", objectType, objects)
 			}
 			queries := state.snapshotQueries()
-			if len(queries) != 1 || !strings.Contains(queries[0], "FROM information_schema.routines") {
+			if len(queries) != 1 || !strings.Contains(queries[0], "FROM sys_catalog.sys_proc p") {
 				t.Fatalf("expected one routine query, got %v", queries)
 			}
 		})
@@ -2151,11 +2937,11 @@ func TestListObjectsSkipsMySQLCompatRoutineQueryForNonRoutineConstraints(t *test
 	for _, objectType := range []string{"TABLE", "TYPE"} {
 		t.Run(objectType, func(t *testing.T) {
 			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
-				if strings.Contains(query, "information_schema.routines") {
+				if strings.Contains(query, "sys_proc p") || strings.Contains(query, "information_schema.routines") {
 					return nil, errors.New("non-routine request must not query routines: " + query)
 				}
 				if objectType == "TABLE" && strings.Contains(query, "FROM sys_catalog.sys_class c") {
-					return &valueRows{columns: []string{"relname", "relkind", "comment"}}, nil
+					return &valueRows{columns: []string{"relname", "relkind", "comment", "parent_schema", "parent_name"}}, nil
 				}
 				return nil, errors.New("unexpected query: " + query)
 			}}
@@ -2193,8 +2979,8 @@ func TestListObjectsUsesCatalogRoutinesOutsideMySQLCompat(t *testing.T) {
 					return nil, errors.New("unexpected query: " + query)
 				}
 				return &valueRows{
-					columns: []string{"proname", "kind", "comment"},
-					rows:    [][]driver.Value{{"format_name", "FUNCTION", nil}},
+					columns: []string{"proname", "kind", "comment", "signature"},
+					rows:    [][]driver.Value{{"format_name", "FUNCTION", nil, ""}},
 				}, nil
 			}}
 			server := newServer()
@@ -2295,16 +3081,17 @@ func TestListObjectsTriggerFallbackExcludesConstraintTriggers(t *testing.T) {
 	}
 }
 
-func TestListObjectsKeepsTablesWhenMySQLCompatRoutineQueryFails(t *testing.T) {
+func TestListObjectsPropagatesMySQLCompatRoutineQueryFailure(t *testing.T) {
+	routineErr := errors.New("routine catalog unavailable")
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
 		switch {
 		case strings.Contains(query, "FROM sys_catalog.sys_class c"):
 			return &valueRows{
-				columns: []string{"relname", "relkind", "comment"},
-				rows:    [][]driver.Value{{"orders", "TABLE", "orders table"}},
+				columns: []string{"relname", "relkind", "comment", "parent_schema", "parent_name"},
+				rows:    [][]driver.Value{{"orders", "TABLE", "orders table", nil, nil}},
 			}, nil
-		case strings.Contains(query, "FROM information_schema.routines"):
-			return nil, errors.New("routine catalog unavailable")
+		case strings.Contains(query, "FROM sys_catalog.sys_proc p"):
+			return nil, routineErr
 		default:
 			return nil, errors.New("unexpected query: " + query)
 		}
@@ -2314,15 +3101,12 @@ func TestListObjectsKeepsTablesWhenMySQLCompatRoutineQueryFails(t *testing.T) {
 	server.mode.mysqlCompat = true
 
 	objects, err := server.listObjects("public", metadataListConstraints{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(objects) != 1 || objects[0].Name != "orders" || objects[0].ObjectType != "TABLE" || objects[0].Comment == nil || *objects[0].Comment != "orders table" {
-		t.Fatalf("table must survive a best-effort routine query failure: %#v", objects)
+	if !errors.Is(err, routineErr) || len(objects) != 0 {
+		t.Fatalf("an incomplete list must not be returned as a success: objects=%#v err=%v", objects, err)
 	}
 	queries := state.snapshotQueries()
-	if len(queries) != 2 || !strings.Contains(queries[1], "FROM information_schema.routines") {
-		t.Fatalf("unexpected best-effort query sequence: %v", queries)
+	if len(queries) != 2 || !strings.Contains(queries[1], "FROM sys_catalog.sys_proc p") {
+		t.Fatalf("unexpected query sequence after routine failure: %v", queries)
 	}
 }
 
@@ -2377,8 +3161,8 @@ func TestListObjectsSkipsCustomTypesWhenTableRequested(t *testing.T) {
 			return nil, errors.New("unexpected query: " + query)
 		}
 		return &valueRows{
-			columns: []string{"relname", "relkind", "comment"},
-			rows:    [][]driver.Value{{"orders", "TABLE", nil}},
+			columns: []string{"relname", "relkind", "comment", "parent_schema", "parent_name"},
+			rows:    [][]driver.Value{{"orders", "TABLE", nil, nil, nil}},
 		}, nil
 	}}
 	server := newServer()
@@ -2422,13 +3206,13 @@ func TestListObjectsUnfilteredPropagatesCustomTypesError(t *testing.T) {
 		switch {
 		case strings.Contains(query, "sys_proc p"):
 			return &valueRows{
-				columns: []string{"proname", "kind", "comment"},
-				rows:    [][]driver.Value{{"format_name", "FUNCTION", nil}},
+				columns: []string{"proname", "kind", "comment", "signature"},
+				rows:    [][]driver.Value{{"format_name", "FUNCTION", nil, ""}},
 			}, nil
 		case strings.Contains(query, "sys_class c"):
 			return &valueRows{
-				columns: []string{"relname", "relkind", "comment"},
-				rows:    [][]driver.Value{{"orders", "TABLE", nil}},
+				columns: []string{"relname", "relkind", "comment", "parent_schema", "parent_name"},
+				rows:    [][]driver.Value{{"orders", "TABLE", nil, nil, nil}},
 			}, nil
 		}
 		return nil, errors.New("unexpected query: " + query)
@@ -3063,6 +3847,8 @@ func TestObjectSourceDoesNotFallbackOnUnrelatedErrors(t *testing.T) {
 func TestObjectSourceFallsBackToV7RoutineDDLAndCachesChoice(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
 		switch {
+		case strings.Contains(query, "COUNT(*)"):
+			return &valueRows{columns: []string{"count"}, rows: [][]driver.Value{{int64(1)}}}, nil
 		case strings.Contains(query, "sys_get_functiondef("):
 			return nil, &gokb.Error{Code: gokb.ErrorCode("42883"), Message: "function SYS_GET_FUNCTIONDEF(OID) does not exist"}
 		case strings.Contains(query, "pg_get_functiondef("):
@@ -3079,7 +3865,7 @@ func TestObjectSourceFallsBackToV7RoutineDDLAndCachesChoice(t *testing.T) {
 	server := newServer()
 	server.db = openMetadataDB(t, state)
 
-	for range 2 {
+	for i := 0; i < 2; i++ {
 		source, err := server.getObjectSource("PUBLIC", "format_name", "FUNCTION")
 		if err != nil {
 			t.Fatal(err)
@@ -3090,7 +3876,7 @@ func TestObjectSourceFallsBackToV7RoutineDDLAndCachesChoice(t *testing.T) {
 	}
 
 	queries := state.snapshotQueries()
-	if len(queries) != 4 || !strings.Contains(queries[2], "DBMS_METADATA.GET_FUNC_DDL") || !strings.Contains(queries[3], "DBMS_METADATA.GET_FUNC_DDL") || !server.useLegacyRoutineDefinition {
+	if len(queries) != 6 || !strings.Contains(queries[3], "DBMS_METADATA.GET_FUNC_DDL") || !strings.Contains(queries[5], "DBMS_METADATA.GET_FUNC_DDL") || !server.useLegacyRoutineDefinition {
 		t.Fatalf("V7 routine DDL choice was not cached: %v", queries)
 	}
 }
@@ -3247,6 +4033,14 @@ func TestTableDDLIncludesIdentityIndexesTriggersAndComments(t *testing.T) {
 			t.Fatalf("table DDL missing %q:\n%s", expected, ddl)
 		}
 	}
+
+	ddlUnqualified, err := server.getTableDDL("", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ddlUnqualified, `"id" integer GENERATED BY DEFAULT AS IDENTITY NOT NULL`) {
+		t.Fatalf("identity clause missing from unqualified table DDL: %s", ddlUnqualified)
+	}
 }
 
 func TestRenderTableDDLIncludesEscapedComments(t *testing.T) {
@@ -3291,6 +4085,9 @@ func TestColumnDDLDefinitionPreservesCompatibilityExtras(t *testing.T) {
 	}
 	if extra := kingbaseIdentityClause(""); extra != nil {
 		t.Fatalf("non-identity column must not expose an extra clause: %#v", extra)
+	}
+	if extra := kingbaseIdentityClause("i"); extra != nil {
+		t.Fatalf("unrecognised identity code must not expose an extra clause: %#v", extra)
 	}
 }
 
@@ -3345,12 +4142,12 @@ func TestInformationSchemaColumnsPreserveFullTypesInDDL(t *testing.T) {
 			return nil, errors.New("full column type was not requested")
 		}
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
 			rows: [][]driver.Value{
-				{"count", "integer", "integer unsigned", "YES", nil, nil, int64(32), int64(0), nil},
-				{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil},
-				{"created_at", "datetime", "datetime(6)", "YES", nil, nil, nil, nil, nil},
-				{"mask", "bit", "bit(8)", "YES", nil, nil, nil, nil, nil},
+				{"count", "integer", "integer unsigned", "YES", nil, nil, int64(32), int64(0), nil, nil, nil, nil},
+				{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil, nil, nil, nil},
+				{"created_at", "datetime", "datetime(6)", "YES", nil, nil, nil, nil, nil, nil, nil, nil},
+				{"mask", "bit", "bit(8)", "YES", nil, nil, nil, nil, nil, nil, nil, nil},
 			},
 		}, nil
 	}}
@@ -3386,8 +4183,8 @@ func TestInformationSchemaColumnsResolveUserDefinedTypeWithoutColumnType(t *test
 			return nil, errors.New("user-defined type name was not requested")
 		}
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-			rows:    [][]driver.Value{{"created_at", "USER-DEFINED", "datetime", "YES", nil, nil, nil, nil, nil}},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+			rows:    [][]driver.Value{{"created_at", "USER-DEFINED", "datetime", "YES", nil, nil, nil, nil, nil, nil, nil, nil}},
 		}, nil
 	}}
 	server := newServer()
@@ -3454,8 +4251,8 @@ func TestInformationSchemaColumnsPreserveColumnTypeWithoutUdtName(t *testing.T) 
 			return nil, errors.New("column type fallback was not requested")
 		}
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-			rows:    [][]driver.Value{{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil}},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+			rows:    [][]driver.Value{{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil, nil, nil, nil}},
 		}, nil
 	}}
 	server := newServer()
@@ -3493,8 +4290,8 @@ func TestInformationSchemaColumnsFallbackWithoutExtendedTypeColumns(t *testing.T
 			return nil, errors.New("base type fallback was not requested")
 		}
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-			rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64)}},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+			rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64), nil, nil, nil}},
 		}, nil
 	}}
 	server := newServer()
@@ -3538,8 +4335,8 @@ func TestInformationSchemaColumnsRetriesOnlyForMissingTypeMetadataColumns(t *tes
 					return nil, errors.New("unexpected fallback query: " + query)
 				}
 				return &valueRows{
-					columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-					rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64)}},
+					columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+					rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64), nil, nil, nil}},
 				}, nil
 			}}
 			server := newServer()
@@ -3670,7 +4467,8 @@ func TestMySQLCompatColumnsUsePostgresColumnComments(t *testing.T) {
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if len(state.queries) != 2 || !strings.Contains(state.queries[1], "col_description(a.attrelid, a.attnum)") {
+	if len(state.queries) != 3 || !strings.Contains(state.queries[1], "ix.indisprimary") ||
+		!strings.Contains(state.queries[2], "col_description(a.attrelid, a.attnum)") {
 		t.Fatalf("MySQL-compatible columns must use PostgreSQL column comments: %v", state.queries)
 	}
 }
@@ -3822,6 +4620,25 @@ func TestConnectionInfoReportsCompatibilityIdentifierQuote(t *testing.T) {
 	}
 }
 
+func TestConnectionInfoAllowsNullCurrentSchema(t *testing.T) {
+	db := openModeDetectionDB(t, &modeDetectionDriverState{nullCurrentSchema: true})
+	server := newServer()
+	server.db = db
+	server.mode.compatibilityMode = "mysql"
+	server.mode.mysqlCompat = true
+
+	info, err := server.connectionInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info["schema"] != "" {
+		t.Fatalf("unexpected schema: %#v", info["schema"])
+	}
+	if info["identifierQuote"] != "`" {
+		t.Fatalf("unexpected identifier quote: %#v", info["identifierQuote"])
+	}
+}
+
 func TestDetectMySQLCompatModeProbesBacktickSyntaxWhenDatabaseModeMissing(t *testing.T) {
 	state := &modeDetectionDriverState{backtickIdentifiers: true}
 	db := openModeDetectionDB(t, state)
@@ -3832,7 +4649,7 @@ func TestDetectMySQLCompatModeProbesBacktickSyntaxWhenDatabaseModeMissing(t *tes
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if len(state.queries) != 2 || !strings.Contains(state.queries[1], "dbx_identifier_probe") {
+	if len(state.queries) != 4 || !strings.Contains(state.queries[3], "dbx_identifier_probe") {
 		t.Fatalf("expected database_mode probe followed by backtick syntax probe, got: %v", state.queries)
 	}
 }
@@ -3911,7 +4728,7 @@ func TestSchemaConnSkipsInitialAndRepeatedEmptySchema(t *testing.T) {
 	server := newServer()
 	server.db = db
 
-	for range 2 {
+	for i := 0; i < 2; i++ {
 		conn, err := server.schemaConn(context.Background(), "")
 		if err != nil {
 			t.Fatal(err)
@@ -4037,7 +4854,7 @@ func TestExecuteQueryReappliesSchemaForRepeatedRequests(t *testing.T) {
 	server := newServer()
 	server.db = db
 
-	for range 2 {
+	for i := 0; i < 2; i++ {
 		if _, err := server.executeQuery(queryOptions{SQL: "SELECT 1", Schema: "sdy_smartsite", MaxRows: 10}); err != nil {
 			t.Fatal(err)
 		}
@@ -4255,4 +5072,109 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// Regression test for https://github.com/t8y2/dbx/issues/7681: a timezone-less
+// "timestamp"/"date" column must not be labeled as an absolute UTC
+// instant (RFC3339Nano with a "Z"/offset suffix), or clients that convert it
+// to a display timezone will double-apply the shift.
+func TestNormalizeValueKingbaseTimezoneLessDateTime(t *testing.T) {
+	// gokb decodes "timestamp"/"date" wall-clock values into a time.Time in
+	// the process-local zone, which is not a real UTC instant.
+	wallClock := time.Date(2026, time.January, 30, 10, 0, 3, 0, time.UTC)
+
+	for _, columnType := range []string{"TIMESTAMP", "timestamp", "DATE"} {
+		got := normalizeValue(wallClock, columnType)
+		want := "2026-01-30T10:00:03"
+		gotStr, ok := got.(string)
+		if !ok {
+			t.Fatalf("columnType=%s: expected a string, got %#v", columnType, got)
+		}
+		if gotStr != want {
+			t.Fatalf("columnType=%s: got %q, want %q", columnType, gotStr, want)
+		}
+		if strings.ContainsAny(gotStr, "Z+") {
+			t.Fatalf("columnType=%s: timezone-less value must not carry a Z/offset suffix, got %q", columnType, gotStr)
+		}
+	}
+
+	// A real timezone-aware column must keep its absolute-instant encoding.
+	tzAware := normalizeValue(wallClock, "TIMESTAMPTZ")
+	tzAwareStr, ok := tzAware.(string)
+	if !ok || tzAwareStr != "2026-01-30T10:00:03Z" {
+		t.Fatalf("TIMESTAMPTZ column: got %#v, want RFC3339Nano-encoded UTC instant", tzAware)
+	}
+}
+
+// Regression test for https://github.com/t8y2/dbx/issues/12188: gokb decodes a
+// "time" column into a time.Time on Go's zero date, so the date part must not
+// reach the client. Showing it rendered every time of day as 0000-01-01T17:19:34.
+func TestNormalizeValueKingbaseTimeColumnKeepsTimeOfDay(t *testing.T) {
+	timeOfDay := time.Date(0, time.January, 1, 17, 19, 34, 0, time.UTC)
+
+	for _, columnType := range []string{"TIME", "time", "time without time zone"} {
+		got := normalizeValue(timeOfDay, columnType)
+		gotStr, ok := got.(string)
+		if !ok {
+			t.Fatalf("columnType=%s: expected a string, got %#v", columnType, got)
+		}
+		if gotStr != "17:19:34" {
+			t.Fatalf("columnType=%s: got %q, want %q", columnType, gotStr, "17:19:34")
+		}
+	}
+}
+
+func TestCatalogColumnsPreservesJsonAndJsonbTypes(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "WHEN t.typname = 'json' THEN 'json'") ||
+			!strings.Contains(query, "WHEN t.typname = '_json' THEN 'json[]'") {
+			return nil, fmt.Errorf("columns query must distinguish json from jsonb: %s", query)
+		}
+		return &valueRows{
+			columns: []string{"nspname", "attname", "data_type", "nullable", "default", "comment", "precision", "scale", "length", "identity", "generated"},
+			rows: [][]driver.Value{
+				{"public", "data_json", "json", true, nil, nil, nil, nil, nil, nil, nil},
+				{"public", "data_jsonb", "jsonb", true, nil, nil, nil, nil, nil, nil, nil},
+				{"public", "data_json_arr", "json[]", true, nil, nil, nil, nil, nil, nil, nil},
+			},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	columns, err := server.getColumns("public", "test_json_table")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(columns) != 3 {
+		t.Fatalf("expected 3 columns, got %d", len(columns))
+	}
+	if columns[0].DataType != "json" {
+		t.Fatalf("expected DataType 'json', got %q", columns[0].DataType)
+	}
+	if columns[1].DataType != "jsonb" {
+		t.Fatalf("expected DataType 'jsonb', got %q", columns[1].DataType)
+	}
+	if columns[2].DataType != "json[]" {
+		t.Fatalf("expected DataType 'json[]', got %q", columns[2].DataType)
+	}
+
+	ddl := server.columnDDLDefinition(columns[0])
+	if ddl != `"data_json" json` {
+		t.Fatalf("expected column DDL '\"data_json\" json', got %q", ddl)
+	}
+	ddlB := server.columnDDLDefinition(columns[1])
+	if ddlB != `"data_jsonb" jsonb` {
+		t.Fatalf("expected column DDL '\"data_jsonb\" jsonb', got %q", ddlB)
+	}
+}
+
+func TestQualifiedCatalogTypeExpressionHandlesJsonTypes(t *testing.T) {
+	expr := qualifiedCatalogTypeExpression("t", "n", "elem", "elem_n", "t.oid", "t.typtypmod")
+	if !strings.Contains(expr, "WHEN t.typname = 'json'") ||
+		!strings.Contains(expr, "THEN 'json'") ||
+		!strings.Contains(expr, "WHEN t.typname = '_json'") ||
+		!strings.Contains(expr, "THEN 'json[]'") {
+		t.Fatalf("qualifiedCatalogTypeExpression missing json handling: %s", expr)
+	}
 }

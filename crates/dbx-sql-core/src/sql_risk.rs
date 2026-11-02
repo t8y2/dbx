@@ -1,0 +1,2337 @@
+use std::ops::ControlFlow;
+
+use serde::{Deserialize, Serialize};
+use sqlparser::ast::{
+    visit_expressions, BinaryOperator, Expr, FromTable, OnConflictAction, OnInsert, Query, SetExpr, SqliteOnConflict,
+    Statement, TableFactor, UnaryOperator, Value, Visit, Visitor,
+};
+use sqlparser::dialect::{
+    ClickHouseDialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect, OracleDialect, PostgreSqlDialect,
+    SQLiteDialect,
+};
+use sqlparser::parser::Parser;
+use sqlparser::tokenizer::{Token, Tokenizer};
+
+use crate::models::connection::DatabaseType;
+
+/// SQL risk level for agent tool safety classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SqlRisk {
+    /// SELECT, SHOW, DESCRIBE, EXPLAIN, WITH (pure read CTE)
+    ReadOnly,
+    /// INSERT, UPDATE, DELETE, MERGE, REPLACE, CALL/EXEC
+    Write,
+    /// CREATE, ALTER, DROP, TRUNCATE, GRANT, REVOKE
+    Ddl,
+    /// BEGIN, COMMIT, ROLLBACK should not be issued by agent
+    Transaction,
+}
+
+impl std::fmt::Display for SqlRisk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SqlRisk::ReadOnly => write!(f, "read-only"),
+            SqlRisk::Write => write!(f, "write"),
+            SqlRisk::Ddl => write!(f, "DDL"),
+            SqlRisk::Transaction => write!(f, "transaction"),
+        }
+    }
+}
+
+/// Normalize database dialect string to a canonical form for sqlparser.
+/// Mirrors the logic in `sql_analysis::normalize_dialect`.
+fn normalize_dialect(dialect: &str) -> &'static str {
+    match dialect.to_ascii_lowercase().as_str() {
+        "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "kingbase" | "highgo" | "uxdb"
+        | "vastbase" | "kwdb" => "postgres",
+        "mysql" | "mariadb" | "doris" | "starrocks" | "manticoresearch" | "oceanbase" => "mysql",
+        "sqlite" => "sqlite",
+        "sqlserver" | "mssql" => "sqlserver",
+        "clickhouse" => "clickhouse",
+        "duckdb" => "duckdb",
+        _ => "generic",
+    }
+}
+
+/// Resolve dialect string to a sqlparser Dialect trait object.
+fn resolve_dialect(dialect: &str) -> Box<dyn sqlparser::dialect::Dialect> {
+    match dialect {
+        "postgres" => Box::new(PostgreSqlDialect {}),
+        "mysql" => Box::new(MySqlDialect {}),
+        "sqlite" => Box::new(SQLiteDialect {}),
+        "sqlserver" => Box::new(MsSqlDialect {}),
+        "clickhouse" => Box::new(ClickHouseDialect {}),
+        "duckdb" => Box::new(DuckDbDialect {}),
+        _ => Box::new(GenericDialect {}),
+    }
+}
+
+/// Classify a single SQL statement into a risk level using AST analysis.
+fn classify_statement(stmt: &Statement, detect_select_into: bool) -> SqlRisk {
+    match stmt {
+        // Pure reads
+        Statement::Query(query) => {
+            if query_is_write_capable(query, detect_select_into) {
+                SqlRisk::Write
+            } else {
+                SqlRisk::ReadOnly
+            }
+        }
+        Statement::Explain { analyze, statement, .. } => {
+            if *analyze {
+                classify_statement(statement, detect_select_into)
+            } else {
+                SqlRisk::ReadOnly
+            }
+        }
+        Statement::ExplainTable { .. } => SqlRisk::ReadOnly,
+
+        // Show/Describe variants
+        stmt if is_show_read_only_statement(stmt) => SqlRisk::ReadOnly,
+
+        // Write operations
+        Statement::Insert { .. } | Statement::Update { .. } | Statement::Delete { .. } | Statement::Merge { .. } => {
+            SqlRisk::Write
+        }
+
+        // DDL operations
+        Statement::CreateTable { .. }
+        | Statement::CreateView { .. }
+        | Statement::CreateIndex { .. }
+        | Statement::CreateSchema { .. }
+        | Statement::CreateSequence { .. }
+        | Statement::CreateRole { .. }
+        | Statement::CreateType { .. }
+        | Statement::AlterTable { .. }
+        | Statement::AlterIndex { .. }
+        | Statement::AlterView { .. }
+        | Statement::Drop { .. }
+        | Statement::Truncate { .. } => SqlRisk::Ddl,
+
+        // Grant/Revoke
+        Statement::Grant { .. } | Statement::Revoke { .. } => SqlRisk::Ddl,
+
+        // Transaction control
+        Statement::StartTransaction { .. } | Statement::Commit { .. } | Statement::Rollback { .. } => {
+            SqlRisk::Transaction
+        }
+
+        // COPY FROM mutates data; keep COPY conservative because sqlparser does
+        // not expose enough dialect-specific direction detail here.
+        Statement::Copy { .. } => SqlRisk::Write,
+
+        // SQLite/DuckDB PRAGMA statements can mutate database/session state.
+        Statement::Pragma { .. } => SqlRisk::Write,
+
+        // Catch-all: conservative write classification
+        _ => SqlRisk::Write,
+    }
+}
+
+/// SHOW/DESCRIBE-style statement variants sqlparser models as reads. Shared by
+/// the risk classifier and the manual-transaction proof (#9018) so the two
+/// cannot drift; unparseable SHOW variants fail closed upstream in the proof
+/// (parse error) and to the keyword fallback in the risk classifier.
+fn is_show_read_only_statement(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::ShowTables { .. }
+            | Statement::ShowColumns { .. }
+            | Statement::ShowCatalogs { .. }
+            | Statement::ShowDatabases { .. }
+            | Statement::ShowSchemas { .. }
+            | Statement::ShowViews { .. }
+            | Statement::ShowFunctions { .. }
+            | Statement::ShowCreate { .. }
+            | Statement::ShowVariable { .. }
+            | Statement::ShowVariables { .. }
+            | Statement::ShowStatus { .. }
+            | Statement::ShowProcessList { .. }
+            | Statement::ShowCharset(_)
+            | Statement::ShowObjects(_)
+            | Statement::ShowCollation { .. }
+    )
+}
+
+fn statement_is_dangerous(stmt: &Statement, detect_select_into: bool) -> bool {
+    match stmt {
+        // `USE` only changes connection-local state. MCP separately requires
+        // a pinned session for it, so it does not need dangerous-SQL approval.
+        Statement::Use(_) => false,
+        Statement::Query(query) => query_is_dangerous(query, detect_select_into),
+        Statement::Insert(insert) => {
+            insert.replace_into
+                || insert.overwrite
+                || matches!(insert.or, Some(SqliteOnConflict::Replace))
+                || insert.on.as_ref().is_some_and(|on| match on {
+                    OnInsert::DuplicateKeyUpdate(_) => true,
+                    OnInsert::OnConflict(conflict) => matches!(conflict.action, OnConflictAction::DoUpdate(_)),
+                    _ => true,
+                })
+                || insert.source.as_ref().is_some_and(|query| !matches!(query.body.as_ref(), SetExpr::Values(_)))
+        }
+        Statement::Update(update) => {
+            !update.table.joins.is_empty()
+                || update.from.is_some()
+                || matches!(update.or, Some(SqliteOnConflict::Replace))
+                || update.selection.as_ref().is_none_or(predicate_is_obviously_unbounded)
+        }
+        Statement::Delete(delete) => {
+            let from = match &delete.from {
+                FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from) => from,
+            };
+            !delete.tables.is_empty()
+                || delete.using.is_some()
+                || from.len() != 1
+                || from.first().is_none_or(|table| !table.joins.is_empty())
+                || delete.selection.as_ref().is_none_or(predicate_is_obviously_unbounded)
+        }
+        Statement::Merge { .. } => true,
+        Statement::Explain { analyze: true, statement, .. } => statement_is_dangerous(statement, detect_select_into),
+        _ => !matches!(classify_statement(stmt, detect_select_into), SqlRisk::ReadOnly),
+    }
+}
+
+fn predicate_is_obviously_unbounded(expr: &Expr) -> bool {
+    if expr_contains_subquery(expr) {
+        return true;
+    }
+    if !expr_contains_column_reference(expr) {
+        return true;
+    }
+
+    match expr {
+        Expr::Nested(expr) => predicate_is_obviously_unbounded(expr),
+        Expr::Value(value) => value_is_truthy(&value.value),
+        Expr::UnaryOp { op: UnaryOperator::Not, expr } => predicate_is_obviously_false(expr),
+        Expr::BinaryOp { left, op: BinaryOperator::And, right } => {
+            predicate_is_obviously_unbounded(left) && predicate_is_obviously_unbounded(right)
+        }
+        Expr::BinaryOp { left, op: BinaryOperator::Or, right } => {
+            or_contains_conjunctive_branch(expr)
+                || or_contains_complementary_null_checks(expr)
+                || or_contains_complementary_comparisons(expr)
+                || or_contains_complementary_in_lists(expr)
+                || or_contains_complementary_between_checks(expr)
+                || predicate_is_obviously_unbounded(left)
+                || predicate_is_obviously_unbounded(right)
+        }
+        Expr::BinaryOp { left, op, right } if is_comparison_operator(op) => constant_comparison_truth(left, op, right)
+            .unwrap_or_else(|| {
+                left == right
+                    && matches!(
+                        op,
+                        BinaryOperator::Eq | BinaryOperator::GtEq | BinaryOperator::LtEq | BinaryOperator::Spaceship
+                    )
+            }),
+        Expr::IsNotDistinctFrom(left, right) => strip_nested_expr(left) == strip_nested_expr(right),
+        Expr::IsTrue(expr) | Expr::IsNotFalse(expr) => predicate_is_obviously_unbounded(expr),
+        Expr::Like { negated: false, any: false, expr, pattern, escape_char: None }
+        | Expr::ILike { negated: false, any: false, expr, pattern, escape_char: None } => {
+            expr_contains_column_reference(expr) && like_pattern_matches_all(pattern)
+        }
+        _ => false,
+    }
+}
+
+fn or_contains_conjunctive_branch(expr: &Expr) -> bool {
+    match strip_nested_expr(expr) {
+        Expr::BinaryOp { left, op: BinaryOperator::Or, right } => {
+            or_contains_conjunctive_branch(left) || or_contains_conjunctive_branch(right)
+        }
+        Expr::BinaryOp { op: BinaryOperator::And, .. } => true,
+        _ => false,
+    }
+}
+
+fn expr_contains_column_reference(expr: &Expr) -> bool {
+    visit_expressions(expr, |expr| {
+        let is_column = match expr {
+            Expr::Identifier(identifier) => !is_sql_value_keyword(&identifier.value),
+            Expr::CompoundIdentifier(_) => true,
+            _ => false,
+        };
+        if is_column {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
+}
+
+fn is_sql_value_keyword(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "current_catalog"
+            | "current_date"
+            | "current_role"
+            | "current_schema"
+            | "current_time"
+            | "current_timestamp"
+            | "current_user"
+            | "localtime"
+            | "localtimestamp"
+            | "session_user"
+            | "system_user"
+            | "user"
+    )
+}
+
+fn expr_contains_subquery(expr: &Expr) -> bool {
+    visit_expressions(expr, |expr| {
+        if matches!(expr, Expr::InSubquery { .. } | Expr::Exists { .. } | Expr::Subquery(_)) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
+}
+
+fn or_contains_complementary_null_checks(expr: &Expr) -> bool {
+    let mut checks = Vec::new();
+    collect_or_null_checks(expr, &mut checks);
+    checks.iter().enumerate().any(|(index, (candidate, negated))| {
+        checks[index + 1..].iter().any(|(other, other_negated)| candidate == other && negated != other_negated)
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PredicateComparisonOperator {
+    Eq,
+    NotEq,
+    Gt,
+    GtEq,
+    Lt,
+    LtEq,
+}
+
+struct PredicateComparisonCheck<'a> {
+    left: &'a Expr,
+    right: &'a Expr,
+    operator: PredicateComparisonOperator,
+}
+
+fn or_contains_complementary_comparisons(expr: &Expr) -> bool {
+    let mut checks = Vec::new();
+    collect_or_comparison_checks(expr, &mut checks);
+    checks.iter().enumerate().any(|(index, candidate)| {
+        checks[index + 1..].iter().any(|other| {
+            candidate.left == other.left
+                && candidate.right == other.right
+                && comparison_operators_are_complementary(candidate.operator, other.operator)
+        })
+    })
+}
+
+fn collect_or_comparison_checks<'a>(expr: &'a Expr, checks: &mut Vec<PredicateComparisonCheck<'a>>) {
+    let expr = strip_nested_expr(expr);
+    if let Expr::BinaryOp { left, op: BinaryOperator::Or, right } = expr {
+        collect_or_comparison_checks(left, checks);
+        collect_or_comparison_checks(right, checks);
+    } else if let Some(check) = comparison_check(expr, false) {
+        checks.push(check);
+    }
+}
+
+fn comparison_check(expr: &Expr, outer_negated: bool) -> Option<PredicateComparisonCheck<'_>> {
+    let expr = strip_nested_expr(expr);
+    if let Expr::UnaryOp { op: UnaryOperator::Not, expr } = expr {
+        return comparison_check(expr, !outer_negated);
+    }
+    let Expr::BinaryOp { left, op, right } = expr else {
+        return None;
+    };
+    if !expr_contains_column_reference(expr) {
+        return None;
+    }
+
+    let mut operator = predicate_comparison_operator(op)?;
+    if outer_negated {
+        operator = complementary_comparison_operator(operator);
+    }
+    let (left, right) = (strip_nested_expr(left), strip_nested_expr(right));
+    if left <= right {
+        Some(PredicateComparisonCheck { left, right, operator })
+    } else {
+        Some(PredicateComparisonCheck { left: right, right: left, operator: reverse_comparison_operator(operator) })
+    }
+}
+
+fn predicate_comparison_operator(operator: &BinaryOperator) -> Option<PredicateComparisonOperator> {
+    match operator {
+        BinaryOperator::Eq | BinaryOperator::Spaceship => Some(PredicateComparisonOperator::Eq),
+        BinaryOperator::NotEq => Some(PredicateComparisonOperator::NotEq),
+        BinaryOperator::Gt => Some(PredicateComparisonOperator::Gt),
+        BinaryOperator::GtEq => Some(PredicateComparisonOperator::GtEq),
+        BinaryOperator::Lt => Some(PredicateComparisonOperator::Lt),
+        BinaryOperator::LtEq => Some(PredicateComparisonOperator::LtEq),
+        _ => None,
+    }
+}
+
+fn complementary_comparison_operator(operator: PredicateComparisonOperator) -> PredicateComparisonOperator {
+    match operator {
+        PredicateComparisonOperator::Eq => PredicateComparisonOperator::NotEq,
+        PredicateComparisonOperator::NotEq => PredicateComparisonOperator::Eq,
+        PredicateComparisonOperator::Gt => PredicateComparisonOperator::LtEq,
+        PredicateComparisonOperator::GtEq => PredicateComparisonOperator::Lt,
+        PredicateComparisonOperator::Lt => PredicateComparisonOperator::GtEq,
+        PredicateComparisonOperator::LtEq => PredicateComparisonOperator::Gt,
+    }
+}
+
+fn reverse_comparison_operator(operator: PredicateComparisonOperator) -> PredicateComparisonOperator {
+    match operator {
+        PredicateComparisonOperator::Eq | PredicateComparisonOperator::NotEq => operator,
+        PredicateComparisonOperator::Gt => PredicateComparisonOperator::Lt,
+        PredicateComparisonOperator::GtEq => PredicateComparisonOperator::LtEq,
+        PredicateComparisonOperator::Lt => PredicateComparisonOperator::Gt,
+        PredicateComparisonOperator::LtEq => PredicateComparisonOperator::GtEq,
+    }
+}
+
+fn comparison_operators_are_complementary(
+    left: PredicateComparisonOperator,
+    right: PredicateComparisonOperator,
+) -> bool {
+    complementary_comparison_operator(left) == right
+}
+
+struct PredicateInListCheck<'a> {
+    expr: &'a Expr,
+    list: Vec<&'a Expr>,
+    negated: bool,
+}
+
+fn or_contains_complementary_in_lists(expr: &Expr) -> bool {
+    let mut checks = Vec::new();
+    collect_or_in_list_checks(expr, &mut checks);
+    checks.iter().enumerate().any(|(index, candidate)| {
+        checks[index + 1..].iter().any(|other| {
+            candidate.expr == other.expr && candidate.list == other.list && candidate.negated != other.negated
+        })
+    })
+}
+
+fn collect_or_in_list_checks<'a>(expr: &'a Expr, checks: &mut Vec<PredicateInListCheck<'a>>) {
+    let expr = strip_nested_expr(expr);
+    if let Expr::BinaryOp { left, op: BinaryOperator::Or, right } = expr {
+        collect_or_in_list_checks(left, checks);
+        collect_or_in_list_checks(right, checks);
+    } else if let Some(check) = in_list_check(expr, false) {
+        checks.push(check);
+    }
+}
+
+fn in_list_check(expr: &Expr, outer_negated: bool) -> Option<PredicateInListCheck<'_>> {
+    match strip_nested_expr(expr) {
+        Expr::UnaryOp { op: UnaryOperator::Not, expr } => in_list_check(expr, !outer_negated),
+        Expr::InList { expr, list, negated } if expr_contains_column_reference(expr) && !list.is_empty() => {
+            let mut normalized_list = list.iter().map(strip_nested_expr).collect::<Vec<_>>();
+            if normalized_list.iter().all(|item| matches!(strip_nested_expr(item), Expr::Value(_))) {
+                normalized_list.sort_unstable();
+                normalized_list.dedup();
+            }
+            Some(PredicateInListCheck {
+                expr: strip_nested_expr(expr),
+                list: normalized_list,
+                negated: *negated != outer_negated,
+            })
+        }
+        _ => None,
+    }
+}
+
+struct PredicateBetweenCheck<'a> {
+    expr: &'a Expr,
+    low: &'a Expr,
+    high: &'a Expr,
+    negated: bool,
+}
+
+fn or_contains_complementary_between_checks(expr: &Expr) -> bool {
+    let mut checks = Vec::new();
+    collect_or_between_checks(expr, &mut checks);
+    checks.iter().enumerate().any(|(index, candidate)| {
+        checks[index + 1..].iter().any(|other| {
+            candidate.expr == other.expr
+                && candidate.low == other.low
+                && candidate.high == other.high
+                && candidate.negated != other.negated
+        })
+    })
+}
+
+fn collect_or_between_checks<'a>(expr: &'a Expr, checks: &mut Vec<PredicateBetweenCheck<'a>>) {
+    let expr = strip_nested_expr(expr);
+    if let Expr::BinaryOp { left, op: BinaryOperator::Or, right } = expr {
+        collect_or_between_checks(left, checks);
+        collect_or_between_checks(right, checks);
+    } else if let Some(check) = between_check(expr, false) {
+        checks.push(check);
+    }
+}
+
+fn between_check(expr: &Expr, outer_negated: bool) -> Option<PredicateBetweenCheck<'_>> {
+    match strip_nested_expr(expr) {
+        Expr::UnaryOp { op: UnaryOperator::Not, expr } => between_check(expr, !outer_negated),
+        Expr::Between { expr, negated, low, high } if expr_contains_column_reference(expr) => {
+            Some(PredicateBetweenCheck {
+                expr: strip_nested_expr(expr),
+                low: strip_nested_expr(low),
+                high: strip_nested_expr(high),
+                negated: *negated != outer_negated,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn like_pattern_matches_all(expr: &Expr) -> bool {
+    matches!(strip_nested_expr(expr), Expr::Value(value) if matches!(&value.value, Value::SingleQuotedString(pattern) if !pattern.is_empty() && pattern.chars().all(|character| character == '%')))
+}
+
+fn collect_or_null_checks<'a>(expr: &'a Expr, checks: &mut Vec<(&'a Expr, bool)>) {
+    let expr = strip_nested_expr(expr);
+    if let Expr::BinaryOp { left, op: BinaryOperator::Or, right } = expr {
+        collect_or_null_checks(left, checks);
+        collect_or_null_checks(right, checks);
+    } else if let Some(check) = null_check(expr) {
+        checks.push(check);
+    }
+}
+
+fn null_check(expr: &Expr) -> Option<(&Expr, bool)> {
+    null_check_with_negation(expr, false)
+}
+
+fn null_check_with_negation(expr: &Expr, outer_negated: bool) -> Option<(&Expr, bool)> {
+    match strip_nested_expr(expr) {
+        Expr::UnaryOp { op: UnaryOperator::Not, expr } => null_check_with_negation(expr, !outer_negated),
+        Expr::IsNull(expr) => Some((strip_nested_expr(expr), outer_negated)),
+        Expr::IsNotNull(expr) => Some((strip_nested_expr(expr), !outer_negated)),
+        _ => None,
+    }
+}
+
+fn strip_nested_expr(mut expr: &Expr) -> &Expr {
+    while let Expr::Nested(inner) = expr {
+        expr = inner;
+    }
+    expr
+}
+
+fn predicate_is_obviously_false(expr: &Expr) -> bool {
+    match expr {
+        Expr::Nested(expr) => predicate_is_obviously_false(expr),
+        Expr::Value(value) => value_is_falsy(&value.value),
+        Expr::UnaryOp { op: UnaryOperator::Not, expr } => predicate_is_obviously_unbounded(expr),
+        Expr::BinaryOp { left, op: BinaryOperator::And, right } => {
+            predicate_is_obviously_false(left) || predicate_is_obviously_false(right)
+        }
+        Expr::BinaryOp { left, op: BinaryOperator::Or, right } => {
+            predicate_is_obviously_false(left) && predicate_is_obviously_false(right)
+        }
+        Expr::BinaryOp { left, op, right } if is_comparison_operator(op) => {
+            constant_comparison_truth(left, op, right).is_some_and(|result| !result)
+                || (left == right && matches!(op, BinaryOperator::NotEq | BinaryOperator::Gt | BinaryOperator::Lt))
+        }
+        Expr::IsDistinctFrom(left, right) => strip_nested_expr(left) == strip_nested_expr(right),
+        Expr::IsFalse(expr) | Expr::IsNotTrue(expr) => predicate_is_obviously_unbounded(expr),
+        _ => false,
+    }
+}
+
+fn is_comparison_operator(operator: &BinaryOperator) -> bool {
+    matches!(
+        operator,
+        BinaryOperator::Eq
+            | BinaryOperator::NotEq
+            | BinaryOperator::Gt
+            | BinaryOperator::Lt
+            | BinaryOperator::GtEq
+            | BinaryOperator::LtEq
+            | BinaryOperator::Spaceship
+    )
+}
+
+fn constant_comparison_truth(left: &Expr, operator: &BinaryOperator, right: &Expr) -> Option<bool> {
+    let (Expr::Value(left), Expr::Value(right)) = (left, right) else {
+        return None;
+    };
+    match operator {
+        BinaryOperator::Eq | BinaryOperator::Spaceship => Some(left.value == right.value),
+        BinaryOperator::NotEq => Some(left.value != right.value),
+        BinaryOperator::Gt | BinaryOperator::Lt | BinaryOperator::GtEq | BinaryOperator::LtEq => {
+            let (Value::Number(left, _), Value::Number(right, _)) = (&left.value, &right.value) else {
+                return None;
+            };
+            let left = left.parse::<f64>().ok()?;
+            let right = right.parse::<f64>().ok()?;
+            Some(match operator {
+                BinaryOperator::Gt => left > right,
+                BinaryOperator::Lt => left < right,
+                BinaryOperator::GtEq => left >= right,
+                BinaryOperator::LtEq => left <= right,
+                _ => unreachable!(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn value_is_truthy(value: &Value) -> bool {
+    match value {
+        Value::Boolean(value) => *value,
+        Value::Number(value, _) => value.parse::<f64>().is_ok_and(|number| number != 0.0),
+        _ => false,
+    }
+}
+
+fn value_is_falsy(value: &Value) -> bool {
+    match value {
+        Value::Boolean(value) => !*value,
+        Value::Number(value, _) => value.parse::<f64>().is_ok_and(|number| number == 0.0),
+        Value::Null => true,
+        _ => false,
+    }
+}
+
+const SIDE_EFFECT_SELECT_FUNCTIONS: &[&str] = &[
+    "lo_create",
+    "lo_import",
+    "lo_unlink",
+    "nextval",
+    "pg_advisory_lock",
+    "pg_advisory_unlock",
+    "pg_advisory_unlock_all",
+    "pg_advisory_xact_lock",
+    "pg_cancel_backend",
+    "pg_reload_conf",
+    "pg_terminate_backend",
+    "pg_try_advisory_lock",
+    "pg_try_advisory_xact_lock",
+    "setval",
+    "sys_cancel_backend",
+];
+
+fn query_is_write_capable(query: &Query, detect_select_into: bool) -> bool {
+    query
+        .with
+        .as_ref()
+        .is_some_and(|with| with.cte_tables.iter().any(|cte| query_is_write_capable(&cte.query, detect_select_into)))
+        || set_expr_is_write_capable(&query.body, detect_select_into)
+        || !query.locks.is_empty()
+        || query_calls_known_side_effect_function(query)
+}
+
+fn set_expr_is_write_capable(expr: &SetExpr, detect_select_into: bool) -> bool {
+    match expr {
+        SetExpr::Select(select) => detect_select_into && select.into.is_some(),
+        SetExpr::Query(query) => query_is_write_capable(query, detect_select_into),
+        SetExpr::SetOperation { left, right, .. } => {
+            set_expr_is_write_capable(left, detect_select_into) || set_expr_is_write_capable(right, detect_select_into)
+        }
+        SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Delete(_) | SetExpr::Merge(_) => true,
+        SetExpr::Values(_) | SetExpr::Table(_) => false,
+    }
+}
+
+fn query_is_dangerous(query: &Query, detect_select_into: bool) -> bool {
+    query
+        .with
+        .as_ref()
+        .is_some_and(|with| with.cte_tables.iter().any(|cte| query_is_dangerous(&cte.query, detect_select_into)))
+        || set_expr_is_dangerous(&query.body, detect_select_into)
+        || !query.locks.is_empty()
+        || query_calls_known_side_effect_function(query)
+}
+
+fn set_expr_is_dangerous(expr: &SetExpr, detect_select_into: bool) -> bool {
+    match expr {
+        SetExpr::Select(select) => detect_select_into && select.into.is_some(),
+        SetExpr::Query(query) => query_is_dangerous(query, detect_select_into),
+        SetExpr::SetOperation { left, right, .. } => {
+            set_expr_is_dangerous(left, detect_select_into) || set_expr_is_dangerous(right, detect_select_into)
+        }
+        SetExpr::Insert(statement)
+        | SetExpr::Update(statement)
+        | SetExpr::Delete(statement)
+        | SetExpr::Merge(statement) => statement_is_dangerous(statement, detect_select_into),
+        SetExpr::Values(_) | SetExpr::Table(_) => false,
+    }
+}
+
+fn query_calls_known_side_effect_function(query: &Query) -> bool {
+    visit_expressions(query, |expr| {
+        let is_side_effect = if let Expr::Function(function) = expr {
+            function.name.0.last().and_then(|part| part.as_ident()).is_some_and(|name| {
+                SIDE_EFFECT_SELECT_FUNCTIONS.iter().any(|candidate| name.value.eq_ignore_ascii_case(candidate))
+            })
+        } else {
+            false
+        };
+        if is_side_effect {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
+}
+
+/// Classify SQL risk using sqlparser AST analysis.
+///
+/// If parsing fails (non-standard SQL, non-SQL databases), falls back to
+/// keyword-based `query_execution_sql::is_write_sql()`.
+///
+/// Multi-statement input: returns the highest risk level across all statements.
+pub fn classify_sql_risk(sql: &str, dialect: &str) -> Result<SqlRisk, String> {
+    let normalized = normalize_dialect(dialect);
+    classify_sql_risk_with_database(sql, normalized, None)
+}
+
+/// Classify SQL risk using both the parser dialect and the concrete database
+/// type so dialect-specific write forms cannot be mistaken for read queries.
+pub fn classify_sql_risk_for_database(sql: &str, database_type: DatabaseType) -> Result<SqlRisk, String> {
+    if database_type == DatabaseType::Salesforce {
+        // SOQL is not SQL: sqlparser either misreads it or fails, and the
+        // keyword fallback would then judge a statement by the words inside its
+        // string literals. The Salesforce classifier knows the only two shapes
+        // the driver accepts.
+        return Ok(salesforce_risk_to_sql_risk(crate::query_execution_sql::classify_salesforce_statement_risk(sql)));
+    }
+    if let Some(risk) = crate::query_execution_sql::classify_search_engine_query_risk(sql, database_type) {
+        return Ok(match risk {
+            crate::query_execution_sql::SearchEngineQueryRisk::ReadOnly => SqlRisk::ReadOnly,
+            crate::query_execution_sql::SearchEngineQueryRisk::Write => SqlRisk::Write,
+            crate::query_execution_sql::SearchEngineQueryRisk::Dangerous => SqlRisk::Ddl,
+        });
+    }
+    let database_type_name = format!("{database_type:?}");
+    let normalized = normalize_dialect(&database_type_name);
+    classify_sql_risk_with_database(sql, normalized, Some(database_type))
+}
+
+/// Map the Salesforce classifier onto the shared risk tiers. A single-record DML
+/// that names its record is an ordinary write, so "safe write" permission is
+/// enough for it; an unscoped or unrecognized statement takes the high-risk tier
+/// and needs the central dangerous-operation permission.
+fn salesforce_risk_to_sql_risk(risk: crate::query_execution_sql::SalesforceStatementRisk) -> SqlRisk {
+    use crate::query_execution_sql::SalesforceStatementRisk;
+    match risk {
+        SalesforceStatementRisk::Read => SqlRisk::ReadOnly,
+        SalesforceStatementRisk::ScopedWrite => SqlRisk::Write,
+        SalesforceStatementRisk::OpaqueWrite => SqlRisk::Ddl,
+    }
+}
+
+/// Return whether MCP must require the central dangerous-operation permission.
+/// Parse failures fail closed for writes. Safe-write mode permits plain INSERT
+/// and single-table UPDATE/DELETE statements with an effective predicate;
+/// broader or opaque mutations require central high-risk permission.
+pub fn is_dangerous_sql_for_database(sql: &str, database_type: DatabaseType) -> bool {
+    if database_type == DatabaseType::Salesforce {
+        return crate::query_execution_sql::classify_salesforce_statement_risk(sql)
+            == crate::query_execution_sql::SalesforceStatementRisk::OpaqueWrite;
+    }
+    if let Some(risk) = crate::query_execution_sql::classify_search_engine_query_risk(sql, database_type) {
+        return risk == crate::query_execution_sql::SearchEngineQueryRisk::Dangerous;
+    }
+    let database_type_name = format!("{database_type:?}");
+    let normalized = normalize_dialect(&database_type_name);
+    let parser_dialect = resolve_dialect(normalized);
+    let detect_select_into = supports_select_into_table_creation(database_type);
+    let has_locking_clause = sql_contains_locking_clause(sql, parser_dialect.as_ref());
+    // PostgreSQL-family and SQL Server SELECT INTO forms are represented in
+    // the AST. Their text fallback also matches ordinary INSERT INTO, so only
+    // use it for dialect-specific writes that the selected AST cannot express
+    // (notably MySQL INTO OUTFILE/DUMPFILE and executable comments).
+    let has_unparsed_dialect_specific_write =
+        !detect_select_into && crate::query_execution_sql::has_dialect_specific_write(sql, database_type);
+
+    match Parser::parse_sql(parser_dialect.as_ref(), sql) {
+        Ok(statements) if !statements.is_empty() => {
+            has_locking_clause
+                || has_unparsed_dialect_specific_write
+                || statements.iter().any(|statement| statement_is_dangerous(statement, detect_select_into))
+        }
+        _ => has_locking_clause || crate::query_execution_sql::is_write_sql_for_database(sql, database_type),
+    }
+}
+
+/// MCP requests must select their database through the explicit request scope.
+/// A `USE` statement mutates pooled/session state and could redirect later SQL,
+/// so it is forbidden independently of read/write and high-risk permissions.
+pub fn mcp_sql_has_forbidden_database_switch(sql: &str, database_type: DatabaseType) -> bool {
+    if crate::query_execution_sql::classify_search_engine_query_risk(sql, database_type).is_some() {
+        return false;
+    }
+    if database_type == DatabaseType::Salesforce {
+        // SOQL has no USE, and the Salesforce pool is keyed per connection rather
+        // than per database, so no statement can redirect a later call. Returning
+        // early also keeps the SQL parser off the JSON body of a pseudo-command.
+        return false;
+    }
+    let database_type_name = format!("{database_type:?}");
+    let normalized = normalize_dialect(&database_type_name);
+    let dialect = resolve_dialect(normalized);
+    if sql_has_use_statement(sql, dialect.as_ref()) {
+        return true;
+    }
+
+    if matches!(
+        database_type,
+        DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::ManticoreSearch
+            | DatabaseType::Goldendb
+    ) {
+        let executable_comments_expanded = crate::query_execution_sql::strip_sql_comments(sql);
+        return sql_has_use_statement(&executable_comments_expanded, dialect.as_ref());
+    }
+    false
+}
+
+fn sql_has_use_statement(sql: &str, dialect: &dyn sqlparser::dialect::Dialect) -> bool {
+    if let Ok(statements) = Parser::parse_sql(dialect, sql) {
+        return statements.iter().any(|statement| matches!(statement, Statement::Use(_)));
+    }
+
+    let Ok(tokens) = Tokenizer::new(dialect, sql).tokenize() else {
+        return false;
+    };
+    let mut statement_start = true;
+    for token in tokens {
+        match token {
+            Token::Whitespace(_) => {}
+            Token::SemiColon => statement_start = true,
+            Token::Word(word) if statement_start => {
+                if word.value.eq_ignore_ascii_case("use") {
+                    return true;
+                }
+                statement_start = false;
+            }
+            Token::EOF => {}
+            _ if statement_start => statement_start = false,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn supports_select_into_table_creation(database_type: DatabaseType) -> bool {
+    matches!(
+        database_type,
+        DatabaseType::Postgres
+            | DatabaseType::Redshift
+            | DatabaseType::Gaussdb
+            | DatabaseType::OpenGauss
+            | DatabaseType::Kingbase
+            | DatabaseType::Highgo
+            | DatabaseType::Uxdb
+            | DatabaseType::Vastbase
+            | DatabaseType::Gbase8c
+            | DatabaseType::Kwdb
+            | DatabaseType::SqlServer
+    )
+}
+
+fn classify_sql_risk_with_database(
+    sql: &str,
+    normalized_dialect: &str,
+    database_type: Option<DatabaseType>,
+) -> Result<SqlRisk, String> {
+    let parser_dialect = resolve_dialect(normalized_dialect);
+    let detect_select_into = database_type.is_none();
+    let has_locking_clause = sql_contains_locking_clause(sql, parser_dialect.as_ref());
+    let has_dialect_specific_write = match database_type {
+        Some(database_type) => crate::query_execution_sql::has_dialect_specific_write(sql, database_type),
+        // Preserve MySQL executable-comment and file-output detection even
+        // when callers provide a dialect string instead of a database type.
+        None if normalized_dialect == "mysql" => {
+            crate::query_execution_sql::has_dialect_specific_write(sql, DatabaseType::Mysql)
+        }
+        None => false,
+    };
+
+    match Parser::parse_sql(parser_dialect.as_ref(), sql) {
+        Ok(stmts) if !stmts.is_empty() => {
+            let mut max_risk = SqlRisk::ReadOnly;
+            for stmt in &stmts {
+                let risk = classify_statement(stmt, detect_select_into);
+                if risk as u8 > max_risk as u8 {
+                    max_risk = risk;
+                }
+            }
+            if max_risk == SqlRisk::ReadOnly && (has_dialect_specific_write || has_locking_clause) {
+                Ok(SqlRisk::Write)
+            } else {
+                Ok(max_risk)
+            }
+        }
+        _ => {
+            // Fallback: keyword-based classification
+            let is_write = database_type.map_or_else(
+                || crate::query_execution_sql::is_write_sql(sql),
+                |database_type| crate::query_execution_sql::is_write_sql_for_database(sql, database_type),
+            );
+            if is_write || has_locking_clause {
+                Ok(SqlRisk::Write)
+            } else {
+                Ok(SqlRisk::ReadOnly)
+            }
+        }
+    }
+}
+
+fn sql_contains_locking_clause(sql: &str, dialect: &dyn sqlparser::dialect::Dialect) -> bool {
+    let Ok(tokens) = Tokenizer::new(dialect, sql).tokenize() else {
+        return false;
+    };
+    let mut words: Vec<String> = Vec::with_capacity(4);
+    for token in tokens {
+        match token {
+            Token::Word(word) if word.quote_style.is_none() => {
+                words.push(word.value.to_ascii_uppercase());
+                if words.len() > 4 {
+                    words.remove(0);
+                }
+                if words.windows(2).any(|window| {
+                    matches!(window, [r#for, lock] if r#for == "FOR" && matches!(lock.as_str(), "UPDATE" | "SHARE"))
+                }) || words.windows(3).any(|window| {
+                    matches!(window, [r#for, key, share] if r#for == "FOR" && key == "KEY" && share == "SHARE")
+                }) || words.windows(4).any(|window| {
+                    matches!(window, [r#for, no, key, update] if r#for == "FOR" && no == "NO" && key == "KEY" && update == "UPDATE")
+                }) || words.windows(4).any(|window| {
+                    matches!(window, [lock, r#in, share, mode] if lock == "LOCK" && r#in == "IN" && share == "SHARE" && mode == "MODE")
+                }) {
+                    return true;
+                }
+            }
+            Token::Whitespace(_) => {}
+            _ => words.clear(),
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Strict manual-transaction read-only proof (#9018)
+//
+// Unlike `classify_sql_risk*` (keyword fallback on parse failure may answer
+// ReadOnly), the proof below is fail-closed end to end: the parse must succeed
+// and yield exactly one statement, no write-capable construct may appear, and
+// every called function must be an allowlisted pure builtin. The outcome only
+// drives commit/rollback button visibility in manual transaction mode — it is
+// a heuristic, never a security boundary (PG custom operators/casts and MySQL
+// UDFs can hide arbitrary side effects static syntax cannot see).
+// ---------------------------------------------------------------------------
+
+/// Strict manual-transaction UX proof outcome. UI-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadProof {
+    /// DBX's strict heuristic is satisfied for this statement.
+    ProvenReadOnly,
+    /// Anything unprovable. Buttons stay visible; execution is unaffected.
+    Unproven,
+}
+
+/// Pure built-in functions accepted by the MySQL proof. Fail-closed: a call to
+/// anything not listed (UDFs, session-state setters like `LAST_INSERT_ID(expr)`,
+/// `SLEEP`/`GET_LOCK`, ...) is Unproven. Only ever grows by review.
+const MYSQL_PROOF_SAFE_FUNCTIONS: &[&str] = &[
+    "abs",
+    "ascii",
+    "avg",
+    "bin",
+    "ceiling",
+    "char_length",
+    "character_length",
+    "coalesce",
+    "concat",
+    "concat_ws",
+    "conv",
+    "count",
+    "crc32",
+    "curdate",
+    "curtime",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "date_format",
+    "datediff",
+    "dayname",
+    "dayofmonth",
+    "dayofweek",
+    "dayofyear",
+    "exp",
+    "floor",
+    "format",
+    "greatest",
+    "hex",
+    "hour",
+    "if",
+    "ifnull",
+    "inet_aton",
+    "inet_ntoa",
+    "instr",
+    "isnull",
+    "json_extract",
+    "json_length",
+    "json_unquote",
+    "json_valid",
+    "last_day",
+    "lcase",
+    "least",
+    "left",
+    "length",
+    "ln",
+    "locate",
+    "log",
+    "log10",
+    "log2",
+    "lower",
+    "lpad",
+    "ltrim",
+    "max",
+    "md5",
+    "microsecond",
+    "min",
+    "minute",
+    "mod",
+    "month",
+    "monthname",
+    "now",
+    "nullif",
+    "oct",
+    "ord",
+    "position",
+    "pow",
+    "power",
+    "quarter",
+    "rand",
+    "repeat",
+    "replace",
+    "reverse",
+    "right",
+    "round",
+    "rpad",
+    "rtrim",
+    "second",
+    "sha",
+    "sha1",
+    "sha2",
+    "sign",
+    "space",
+    "sqrt",
+    "str_to_date",
+    "substring",
+    "substr",
+    "time_format",
+    "timediff",
+    "timestampadd",
+    "timestampdiff",
+    "truncate",
+    "unhex",
+    "unix_timestamp",
+    "upper",
+    "ucase",
+    "utc_date",
+    "utc_time",
+    "utc_timestamp",
+    "uuid",
+    "week",
+    "weekday",
+    "year",
+];
+
+/// Pure built-in functions accepted by the PostgreSQL proof. Same contract as
+/// `MYSQL_PROOF_SAFE_FUNCTIONS`; sequence mutators/readers (`nextval`/`setval`),
+/// `pg_sleep`, advisory-lock and large-object functions are deliberately absent.
+const POSTGRES_PROOF_SAFE_FUNCTIONS: &[&str] = &[
+    "abs",
+    "age",
+    "array_agg",
+    "array_length",
+    "ascii",
+    "avg",
+    "btrim",
+    "cardinality",
+    "ceil",
+    "ceiling",
+    "char_length",
+    "character_length",
+    "chr",
+    "coalesce",
+    "concat",
+    "concat_ws",
+    "count",
+    "current_catalog",
+    "current_date",
+    "current_schema",
+    "current_setting",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "date_part",
+    "date_trunc",
+    "decode",
+    "div",
+    "encode",
+    "every",
+    "exp",
+    "floor",
+    "format",
+    "gen_random_uuid",
+    "greatest",
+    "left",
+    "length",
+    "localtime",
+    "localtimestamp",
+    "log",
+    "lower",
+    "lpad",
+    "ltrim",
+    "max",
+    "md5",
+    "min",
+    "mod",
+    "now",
+    "nullif",
+    "position",
+    "power",
+    "repeat",
+    "replace",
+    "reverse",
+    "right",
+    "round",
+    "rpad",
+    "rtrim",
+    "sha224",
+    "sha256",
+    "sha384",
+    "sha512",
+    "sign",
+    "split_part",
+    "sqrt",
+    "starts_with",
+    "strpos",
+    "string_agg",
+    "substr",
+    "substring",
+    "to_char",
+    "to_date",
+    "to_hex",
+    "to_number",
+    "to_timestamp",
+    "trunc",
+    "unnest",
+    "upper",
+    "version",
+];
+
+/// Pure built-in functions accepted by the Oracle proof. Same fail-closed
+/// contract as `MYSQL_PROOF_SAFE_FUNCTIONS`: a call to anything not listed is
+/// Unproven. Only ever grows by review.
+///
+/// `current_date`, `current_time`, `current_timestamp`, `localtime` and
+/// `localtimestamp` are listed even though Oracle writes them without
+/// parentheses: sqlparser routes exactly these five keywords through
+/// `parse_time_functions` (`parser/mod.rs`), so they arrive as function calls.
+/// Omitting one would reject statements the previous lexical classifier still
+/// proved (`SELECT CURRENT_TIME FROM dual`). `sysdate`/`systimestamp`/`rownum`/
+/// `level`/`user` parse as ordinary expressions and need no entry — as do
+/// `current_user`/`session_user`, which sqlparser only models as calls for
+/// PostgreSQL/Generic.
+///
+/// Deliberately absent: package or schema-qualified calls (`dbms_*`, `utl_*`,
+/// `pkg.fn`), sequence pseudocolumns, `sys_context`, `sys_guid`, `xmlagg` and
+/// ordered-set aggregates (`listagg ... WITHIN GROUP`) — each stays Unproven
+/// until reviewed.
+const ORACLE_PROOF_SAFE_FUNCTIONS: &[&str] = &[
+    "abs",
+    "add_months",
+    "ascii",
+    "avg",
+    "bitand",
+    "ceil",
+    "chr",
+    "coalesce",
+    "concat",
+    "count",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "decode",
+    "exp",
+    "floor",
+    "greatest",
+    "initcap",
+    "instr",
+    "last_day",
+    "least",
+    "length",
+    "lengthb",
+    "ln",
+    "localtime",
+    "localtimestamp",
+    "log",
+    "lower",
+    "lpad",
+    "ltrim",
+    "max",
+    "min",
+    "mod",
+    "months_between",
+    "next_day",
+    "nullif",
+    "nvl",
+    "nvl2",
+    "power",
+    "remainder",
+    "replace",
+    "round",
+    "rpad",
+    "rtrim",
+    "sign",
+    "sqrt",
+    "stddev",
+    "substr",
+    "substrb",
+    "sum",
+    "to_char",
+    "to_date",
+    "to_number",
+    "to_timestamp",
+    "translate",
+    "trim",
+    "trunc",
+    "upper",
+    "variance",
+];
+
+/// Prove that a single SQL statement is, by DBX's strict heuristic, an
+/// ordinary read. MySQL, the PostgreSQL family (PostgreSQL, GaussDB, openGauss)
+/// and Oracle/OceanBase-Oracle take part in this proof; every other database
+/// type is Unproven so its manual-transaction toolbar keeps the legacy behavior.
+///
+/// Oracle used to keep a purely lexical classifier in `query_execution_sql`
+/// that rejected *any* `(` after comment/literal stripping, which is why
+/// `SELECT LENGTH(1) FROM dual` showed commit/rollback buttons (#11788). It now
+/// shares this proof's mechanism, keeping the Oracle-specific lexical guard
+/// rails in `prove_oracle_read_only_statement` — see the comment there for why
+/// those guards are load-bearing and cannot be replaced by the AST walk.
+pub fn prove_read_only_for_database(sql: &str, database_type: DatabaseType) -> ReadProof {
+    match database_type {
+        DatabaseType::Mysql => prove_read_only_statement(sql, "mysql", MYSQL_PROOF_SAFE_FUNCTIONS),
+        DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::OpenGauss => {
+            prove_read_only_statement(sql, "postgres", POSTGRES_PROOF_SAFE_FUNCTIONS)
+        }
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => prove_oracle_read_only_statement(sql),
+        _ => ReadProof::Unproven,
+    }
+}
+
+/// Oracle keywords/reserved words that make a statement unprovable. These are
+/// Oracle keywords, so they cannot be legitimate unquoted identifiers inside a
+/// simple read; a quoted occurrence is already stripped to spaces first.
+///
+/// Most entries are redundant now that the statement is parsed (a write parses
+/// as a non-`Query` statement and `query_is_write_capable` sees locking clauses
+/// and `SELECT ... INTO`), but they are kept verbatim: dropping one would widen
+/// what DBX calls a proven read, which is a deliberate decision per keyword, not
+/// a side effect of moving to the AST.
+const ORACLE_PROOF_FORBIDDEN_WORDS: &[&str] = &[
+    // row locking
+    "for",
+    "update",
+    "lock",
+    // transaction control
+    "begin",
+    "commit",
+    "rollback",
+    "savepoint",
+    // DDL/DCL
+    "create",
+    "alter",
+    "drop",
+    "truncate",
+    "rename",
+    "grant",
+    "revoke",
+    "comment",
+    "purge",
+    "audit",
+    "noaudit",
+    "analyze",
+    "flashback",
+    "merge",
+    "insert",
+    "delete",
+    // set operators (a UNION is not a single top-level SELECT)
+    "union",
+    "minus",
+    "intersect",
+    // stored procedures / dynamic SQL / PL/SQL blocks
+    "call",
+    "exec",
+    "execute",
+    "declare",
+    // sequence pseudocolumns
+    "nextval",
+    "currval",
+    // SELECT ... INTO is PL/SQL-only in Oracle
+    "into",
+];
+
+/// Oracle has no keyword fallback either: the lexical guard rails below must
+/// hold *and* the statement must parse as exactly one `Statement::Query` under
+/// `OracleDialect`, with no disallowed function call. A statement that does not
+/// parse at all is judged by the guard rails alone (see the parse-failure branch).
+///
+/// The guard rails are load-bearing, not belt-and-braces: sqlparser happily
+/// parses `SELECT * FROM t@dblink` and `SELECT seq.NEXTVAL FROM dual` as plain
+/// queries, so without them a remote read and a sequence bump would be stamped
+/// as proven read-only.
+///
+/// The dialect is resolved here rather than through `resolve_dialect`: the
+/// shared resolver also feeds `classify_sql_risk_for_database`,
+/// `is_dangerous_sql_for_database` and the MCP `USE` check, and changing Oracle's
+/// dialect there would move Oracle's risk tiers — out of scope for a
+/// toolbar-metadata fix. `OracleDialect` (not `GenericDialect`, today's fallback)
+/// is what parses `(+)` outer joins and the rest of the Oracle corpus.
+fn prove_oracle_read_only_statement(sql: &str) -> ReadProof {
+    use crate::query_execution_sql::{
+        contains_word, starts_with_keyword, strip_sql_comments_and_literals_keeping_hash,
+    };
+
+    // Oracle's own comment rules: `#` is an identifier character, not a comment
+    // start (mysql-only). With the shared `#`-blind stripper,
+    // `SELECT a#b FROM t@dblink` lost everything after the `#` and was stamped
+    // proven — the AST cannot catch it, because `t@dblink` parses as an ordinary
+    // table reference.
+    let cleaned = strip_sql_comments_and_literals_keeping_hash(sql);
+    let trimmed = cleaned.trim_start();
+    if trimmed.is_empty() {
+        return ReadProof::Unproven;
+    }
+    // Single top-level SELECT only (WITH is excluded because data-modifying CTEs
+    // can hide writes in a row-returning path).
+    if !starts_with_keyword(&trimmed.to_uppercase(), "SELECT") {
+        return ReadProof::Unproven;
+    }
+    // Multi-statement text is Unproven on both paths below, so the parse-failure
+    // fallback cannot prove a whole script from its first statement. The count
+    // comes from the dialect-aware splitter, not from
+    // `has_extra_statement_after_semicolon`: the latter's lexer treats `#` as a
+    // line comment (the MySQL rule) while Oracle allows `#` inside identifiers,
+    // so a `#` would hide a following statement from it. The splitter models that
+    // per dialect (`sql::SqlDialectProfile::supports_hash_line_comments`).
+    if crate::sql::split_sql_statements_for_database(sql, DatabaseType::Oracle).len() != 1 {
+        return ReadProof::Unproven;
+    }
+    let lower = cleaned.to_lowercase();
+    // Database link: '@' cannot appear in an unquoted Oracle identifier, so any
+    // remaining '@' after literal stripping is a remote-object reference.
+    if lower.contains('@') {
+        return ReadProof::Unproven;
+    }
+    if ORACLE_PROOF_FORBIDDEN_WORDS.iter().any(|word| contains_word(&lower, word)) {
+        return ReadProof::Unproven;
+    }
+
+    let Ok(statements) = Parser::parse_sql(&OracleDialect {}, sql) else {
+        // Oracle-only syntax the parser cannot handle (`AS OF TIMESTAMP` /
+        // `AS OF SCN` flashback reads, `VERSIONS BETWEEN`) must not lose a
+        // capability it had before #11788. With no AST there is no function list
+        // to inspect, so fall back to the pre-#11788 rule: proven only while
+        // nothing call-shaped is visible at all. This never proves more than the
+        // old classifier did, and it is the only reason a statement without an
+        // AST can still be proven.
+        return if lower.contains('(') { ReadProof::Unproven } else { ReadProof::ProvenReadOnly };
+    };
+    let [statement] = statements.as_slice() else {
+        return ReadProof::Unproven;
+    };
+    prove_statement(statement, ORACLE_PROOF_SAFE_FUNCTIONS)
+}
+
+fn prove_read_only_statement(sql: &str, dialect: &str, allowed_functions: &[&str]) -> ReadProof {
+    let database_type = if dialect == "mysql" { DatabaseType::Mysql } else { DatabaseType::Postgres };
+    // Lexical rejections that must not depend on parser support: dialect-specific
+    // write syntax (executable comments, INTO OUTFILE/DUMPFILE, PostgreSQL
+    // SELECT INTO) and MySQL session writes the parser models inconsistently
+    // (SELECT @a := 1, SELECT ... INTO @var — INTO may sit in several positions).
+    // `supports_select_into_table_creation` is deliberately NOT reused here: it
+    // answers "SELECT INTO table creation" risk and excludes MySQL on purpose,
+    // while the proof must reject any INTO target as session state.
+    let cleaned = crate::query_execution_sql::strip_sql_comments_and_literals(sql);
+    if cleaned.trim().is_empty() || crate::query_execution_sql::has_dialect_specific_write(sql, database_type) {
+        return ReadProof::Unproven;
+    }
+    let parser_dialect = resolve_dialect(dialect);
+    if dialect == "mysql"
+        && (cleaned.contains(":=")
+            || crate::query_execution_sql::contains_unquoted_keyword(&cleaned, parser_dialect.as_ref(), "INTO"))
+    {
+        return ReadProof::Unproven;
+    }
+    // The strict proof has NO keyword fallback: parse failure is Unproven, and
+    // the API stays fail-closed even for callers that skipped pre-splitting.
+    let Ok(statements) = Parser::parse_sql(parser_dialect.as_ref(), sql) else {
+        return ReadProof::Unproven;
+    };
+    let [statement] = statements.as_slice() else {
+        return ReadProof::Unproven;
+    };
+    prove_statement(statement, allowed_functions)
+}
+
+fn prove_statement(statement: &Statement, allowed_functions: &[&str]) -> ReadProof {
+    match statement {
+        Statement::Query(query) => {
+            // Reuses the risk engine's structural walk: writable CTEs, DML set
+            // branches, locking clauses, SELECT INTO and denylisted side-effect
+            // functions. detect_select_into is always true — a proof is about a
+            // clean session, not table-creation risk.
+            if query_is_write_capable(query, true) {
+                return ReadProof::Unproven;
+            }
+            let mut visitor = ProofFunctionVisitor { allowed_functions, rejected: false };
+            let _ = query.visit(&mut visitor);
+            if visitor.rejected {
+                ReadProof::Unproven
+            } else {
+                ReadProof::ProvenReadOnly
+            }
+        }
+        // Plain EXPLAIN never executes the statement; EXPLAIN ANALYZE does.
+        Statement::Explain { analyze: false, statement, .. } => prove_statement(statement, allowed_functions),
+        Statement::Explain { .. } => ReadProof::Unproven,
+        // MySQL `DESC t` / `DESCRIBE t`.
+        Statement::ExplainTable { .. } => ReadProof::ProvenReadOnly,
+        statement if is_show_read_only_statement(statement) => ReadProof::ProvenReadOnly,
+        _ => ReadProof::Unproven,
+    }
+}
+
+/// Full-statement allowlist scan. Deliberately uses the `visitor`-feature walk
+/// (covers CTE bodies, FROM subqueries, LATERAL derived tables and ORDER BY
+/// expressions) instead of `visit_expressions`, which skips FROM subqueries.
+/// Window functions and table functions (`FROM generate_series(...)`) are
+/// rejected outright in v1 — fail-closed, relaxed only by review.
+struct ProofFunctionVisitor<'a> {
+    allowed_functions: &'a [&'a str],
+    rejected: bool,
+}
+
+impl Visitor for ProofFunctionVisitor<'_> {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+        if let Expr::Function(function) = expr {
+            if function.over.is_some() {
+                self.rejected = true;
+                return ControlFlow::Break(());
+            }
+            let parts = &function.name.0;
+            let allowed = parts.len() == 1
+                && parts.last().and_then(|part| part.as_ident()).is_some_and(|ident| {
+                    self.allowed_functions.iter().any(|candidate| ident.value.eq_ignore_ascii_case(candidate))
+                });
+            if !allowed {
+                self.rejected = true;
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_table_factor(&mut self, table_factor: &TableFactor) -> ControlFlow<()> {
+        if let TableFactor::Table { args: Some(_), .. } = table_factor {
+            self.rejected = true;
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query_execution_sql::is_write_sql_for_database;
+
+    #[test]
+    fn mysql_proof_accepts_plain_reads_and_allowlisted_functions() {
+        for sql in [
+            "SELECT * FROM users",
+            "SELECT COUNT(*) FROM orders",
+            "SELECT id, name FROM users WHERE id IN (1, 2, 3)",
+            "SELECT id, name FROM users WHERE id IN (SELECT user_id FROM roles) ORDER BY created_at LIMIT 10",
+            "SELECT 'update' FROM t",
+            "SELECT a FROM t UNION ALL SELECT b FROM u",
+            "WITH totals AS (SELECT COUNT(*) AS n FROM orders) SELECT n FROM totals",
+            "SELECT CONCAT(first_name, ' ', last_name) AS full_name FROM users",
+            "SELECT id FROM users ORDER BY rand() LIMIT 1",
+            "SHOW TABLES",
+            "SHOW CREATE TABLE users",
+            "EXPLAIN SELECT * FROM users",
+            "DESC users",
+            "DESCRIBE users",
+            "-- only a comment header\nSELECT id FROM users",
+            "SELECT 1",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Mysql),
+                ReadProof::ProvenReadOnly,
+                "expected proven: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_proof_rejects_session_writes_locking_and_unknown_functions() {
+        for sql in [
+            "SELECT @a := 1",
+            "SELECT 1 INTO @current_id",
+            "SELECT id FROM users INTO @current_id LIMIT 1",
+            "SELECT * FROM users INTO OUTFILE '/tmp/x'",
+            "SELECT * FROM users FOR UPDATE",
+            "SELECT * FROM users FOR SHARE",
+            "SELECT * FROM users LOCK IN SHARE MODE",
+            "SELECT SLEEP(10)",
+            "SELECT GET_LOCK('x', 1)",
+            "SELECT LAST_INSERT_ID()",
+            "SELECT my_custom_udf(1)",
+            "SELECT secret_schema.fn(1) FROM t",
+            "SELECT id FROM users WHERE EXISTS (SELECT SLEEP(1))",
+            "WITH x AS (SELECT SLEEP(1)) SELECT 1",
+            "SELECT ROW_NUMBER() OVER (ORDER BY id) FROM users",
+            "SELECT id FROM users; SELECT 1",
+            "EXPLAIN ANALYZE SELECT * FROM users",
+            "SELEC * FORM users",
+            "SET autocommit = 1",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Mysql),
+                ReadProof::Unproven,
+                "expected unproven: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_proof_accepts_plain_reads_and_rejects_side_effects() {
+        for sql in [
+            "SELECT * FROM users",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "SELECT * FROM t WHERE id IN (SELECT id FROM u)",
+            "SELECT coalesce(a, b) FROM t",
+            "SELECT split_part(email, '@', 2) FROM users",
+            "EXPLAIN SELECT 1",
+            "SELECT 1",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Postgres),
+                ReadProof::ProvenReadOnly,
+                "expected proven: {sql}"
+            );
+        }
+        for sql in [
+            "WITH w AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM w",
+            "SELECT * INTO new_t FROM t",
+            "SELECT * FROM t FOR UPDATE",
+            // FOR SHARE parses into query.locks like FOR UPDATE; the other two
+            // PG lock strengths (FOR NO KEY UPDATE / FOR KEY SHARE) fail the
+            // parse itself in sqlparser 0.62 and stay Unproven fail-closed.
+            "SELECT * FROM t FOR SHARE",
+            "SELECT * FROM t FOR NO KEY UPDATE",
+            "SELECT * FROM t FOR KEY SHARE",
+            "SELECT nextval('seq')",
+            "SELECT setval('seq', 1)",
+            "SELECT pg_sleep(1)",
+            "SELECT lo_import('/etc/passwd')",
+            "EXPLAIN ANALYZE SELECT 1",
+            "SELECT my_udf()",
+            "SELECT id, row_number() OVER () FROM t",
+            "SELECT 1; SELECT 2",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Postgres),
+                ReadProof::Unproven,
+                "expected unproven: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn proof_visitor_covers_from_subqueries_ctes_lateral_and_order_by() {
+        // visit_expressions skips FROM subqueries; the proof's visitor must not.
+        for sql in [
+            "SELECT * FROM (SELECT SLEEP(1)) AS x",
+            "SELECT * FROM t ORDER BY SLEEP(1)",
+            "SELECT a FROM t, LATERAL (SELECT my_udf() FROM u) d",
+            "SELECT * FROM generate_series(1, 10)",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Postgres),
+                ReadProof::Unproven,
+                "expected unproven: {sql}"
+            );
+        }
+        assert_eq!(
+            prove_read_only_for_database("SELECT * FROM (SELECT 1) AS x ORDER BY md5(id)", DatabaseType::Postgres),
+            ReadProof::ProvenReadOnly
+        );
+    }
+
+    #[test]
+    fn proof_maps_gaussdb_family_to_postgres_proof() {
+        // GaussDB/openGauss are PostgreSQL-family engines: they share the PG
+        // proof so their sticky manual-transaction toolbar behaves like PG.
+        for sql in ["SELECT 1", "SELECT * FROM users", "EXPLAIN SELECT * FROM t"] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Gaussdb),
+                ReadProof::ProvenReadOnly,
+                "expected proven for Gaussdb: {sql}"
+            );
+        }
+        assert_eq!(
+            prove_read_only_for_database("UPDATE users SET x = 1", DatabaseType::OpenGauss),
+            ReadProof::Unproven
+        );
+        assert_eq!(prove_read_only_for_database("SELECT nextval('seq')", DatabaseType::Gaussdb), ReadProof::Unproven);
+    }
+
+    #[test]
+    fn proof_only_applies_to_enabled_dialects() {
+        // Oracle/OceanBase-Oracle share this proof since #11788; their
+        // Oracle-specific guard rails live in `prove_oracle_read_only_statement`.
+        assert_eq!(prove_read_only_for_database("SELECT 1", DatabaseType::Oracle), ReadProof::ProvenReadOnly);
+        assert_eq!(
+            prove_read_only_for_database("SELECT LENGTH(1) FROM dual", DatabaseType::OceanbaseOracle),
+            ReadProof::ProvenReadOnly
+        );
+        assert_eq!(
+            prove_read_only_for_database("SELECT * FROM t@dblink", DatabaseType::OceanbaseOracle),
+            ReadProof::Unproven
+        );
+        // Family members without manual-transaction UI stay unproven in v1.
+        assert_eq!(prove_read_only_for_database("SELECT 1", DatabaseType::Doris), ReadProof::Unproven);
+    }
+
+    /// The Oracle guard rails are not belt-and-braces: each statement below
+    /// parses as a single ordinary `Query` under `OracleDialect`, so the AST
+    /// walk alone would call it ProvenReadOnly. Removing a guard rail (the `@`
+    /// scan, the word-boundary keyword scan) silently widens what DBX calls a
+    /// proven read, which is why they are asserted here rather than only through
+    /// the public classifier.
+    #[test]
+    fn oracle_proof_keeps_the_guard_rails_the_ast_cannot_see() {
+        for sql in [
+            // Remote objects: '@' cannot appear in an unquoted Oracle identifier.
+            "SELECT * FROM t@dblink",
+            "SELECT * FROM DUAL@dblink",
+            // Sequence pseudocolumns: parsed as a compound identifier, not a call.
+            "SELECT seq.NEXTVAL FROM dual",
+            "SELECT seq.CURRVAL FROM dual",
+            // Retained restrictions that the AST itself would accept.
+            "WITH cte AS (SELECT 1 AS a FROM dual) SELECT * FROM cte",
+            "SELECT 1 FROM dual UNION SELECT 2 FROM dual",
+            "SELECT 1 FROM dual MINUS SELECT 2 FROM dual",
+            // A write hidden behind a row-returning shape.
+            "SELECT * FROM t FOR UPDATE",
+            "SELECT COUNT(*) INTO v FROM t",
+            "SELECT 1; SELECT 2",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Oracle),
+                ReadProof::Unproven,
+                "expected unproven: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn oracle_proof_accepts_reviewed_builtins_only() {
+        for sql in [
+            "SELECT LENGTH(1) FROM dual",
+            "SELECT COUNT(*) FROM users",
+            "SELECT UPPER(name) FROM users",
+            "SELECT NVL(name, 'x') FROM users",
+            "SELECT TO_CHAR(SYSDATE, 'YYYY-MM-DD') FROM dual",
+            "SELECT * FROM t WHERE id IN (1, 2, 3)",
+            "SELECT * FROM t WHERE (a = 1 OR b = 2)",
+            "SELECT CAST(a AS VARCHAR2(10)) FROM t",
+            "SELECT * FROM (SELECT * FROM users)",
+            // No-paren forms that must not regress: SYSDATE/ROWNUM/LEVEL parse as
+            // ordinary expressions, while sqlparser models these five as calls.
+            "SELECT SYSDATE, ROWNUM, USER FROM dual",
+            "SELECT CURRENT_DATE FROM dual",
+            "SELECT CURRENT_TIME FROM dual",
+            "SELECT CURRENT_TIMESTAMP FROM dual",
+            "SELECT LOCALTIME FROM dual",
+            "SELECT LOCALTIMESTAMP FROM dual",
+            // Precision form: sqlparser models it as a call too.
+            "SELECT CURRENT_TIME(3) FROM dual",
+            // Parser-invisible Oracle syntax keeps the pre-#11788 verdict via the
+            // parse-failure fallback (it contains no call-shaped syntax).
+            "SELECT * FROM t AS OF TIMESTAMP SYSTIMESTAMP - INTERVAL '1' HOUR",
+            "SELECT * FROM t VERSIONS BETWEEN TIMESTAMP SYSTIMESTAMP - INTERVAL '1' HOUR AND SYSTIMESTAMP",
+        ] {
+            for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+                assert_eq!(
+                    prove_read_only_for_database(sql, database_type),
+                    ReadProof::ProvenReadOnly,
+                    "expected proven for {database_type:?}: {sql}"
+                );
+            }
+        }
+
+        for sql in [
+            "SELECT my_udf(a) FROM t",
+            "SELECT my_pkg.fn(a) FROM t",
+            "SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') FROM dual",
+            "SELECT SYS_GUID() FROM dual",
+            "SELECT LISTAGG(a, ',') WITHIN GROUP (ORDER BY a) FROM t",
+            "SELECT ROW_NUMBER() OVER (ORDER BY a) FROM t",
+            "SELECT * FROM TABLE(my_func())",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Oracle),
+                ReadProof::Unproven,
+                "expected unproven: {sql}"
+            );
+        }
+    }
+
+    /// `#` is inside Oracle identifiers, so a statement hidden behind one must not
+    /// become provable. Two rails are needed: the shared stripper used to treat
+    /// `#` as a line comment (mysql-only rule) and hide the rest of the line, so
+    /// the proof strips with `strip_sql_comments_and_literals_keeping_hash`, and
+    /// the multi-statement rail uses the dialect-aware splitter. Without the first
+    /// one `SELECT a#b FROM t@dblink` was proven (the AST cannot catch a database
+    /// link — `t@dblink` parses as an ordinary table reference); without the
+    /// second, `SELECT a#b; DELETE FROM t` was proven. The pre-#11788 classifier
+    /// proved all of these.
+    #[test]
+    fn oracle_proof_rejects_statements_hidden_behind_a_hash_identifier() {
+        for sql in [
+            // `@` database link hidden behind `#`
+            "SELECT a#b FROM t@link",
+            "SELECT a#b FROM dual@dblink",
+            // multi-statement, where the dialect-aware splitter is the rail
+            "SELECT a#b; EXECUTE IMMEDIATE 'DROP TABLE t'",
+            "SELECT a#b; DELETE FROM t",
+            "SELECT 1 #; COMMIT",
+            "SELECT 'x' # y; DELETE FROM t",
+            "SELECT a#b WHERE 1 = 1; BEGIN NULL; END;",
+            "SELECT a#b; BEGIN DELETE FROM t; END;",
+            // the AST covers these even with the `#` text visible
+            "SELECT a#b FROM t WHERE x = 1 FOR UPDATE",
+            "SELECT a#b INTO v FROM t",
+            // Deliberate conservative outcome: with `#` visible, an identifier
+            // whose `#`-suffix spells a forbidden word no longer matches as an
+            // identifier boundary, so the statement is Unproven rather than
+            // proven. Safe direction; the statement is unusual either way.
+            "SELECT x#for FROM t",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Oracle),
+                ReadProof::Unproven,
+                "expected unproven: {sql}"
+            );
+        }
+        // Single statements with `#` in an identifier stay readable, exactly as
+        // the splitter sees them.
+        assert_eq!(
+            prove_read_only_for_database("SELECT a#b FROM t WHERE c = 1", DatabaseType::Oracle),
+            ReadProof::ProvenReadOnly
+        );
+        assert_eq!(prove_read_only_for_database("SELECT * FROM t#1", DatabaseType::Oracle), ReadProof::ProvenReadOnly);
+        assert_eq!(
+            prove_read_only_for_database("SELECT COUNT(*) FROM emp#1", DatabaseType::Oracle),
+            ReadProof::ProvenReadOnly
+        );
+    }
+
+    #[test]
+    fn classify_select_statements() {
+        assert_eq!(classify_sql_risk("SELECT * FROM users", "postgres").unwrap(), SqlRisk::ReadOnly);
+        assert_eq!(
+            classify_sql_risk("SELECT id, name FROM users WHERE active = true", "mysql").unwrap(),
+            SqlRisk::ReadOnly
+        );
+        assert_eq!(classify_sql_risk("SHOW TABLES", "mysql").unwrap(), SqlRisk::ReadOnly);
+        assert_eq!(classify_sql_risk("DESCRIBE users", "mysql").unwrap(), SqlRisk::ReadOnly);
+        assert_eq!(classify_sql_risk("EXPLAIN SELECT * FROM users", "postgres").unwrap(), SqlRisk::ReadOnly);
+    }
+
+    #[test]
+    fn classify_mysql_show_triggers_as_read_only() {
+        for sql in [
+            "SHOW TRIGGERS;",
+            "SHOW TRIGGERS FROM `rs_main` LIKE 'trg_order_items_after_%';",
+            "show triggers in `rs_main` where `Event` = 'INSERT';",
+        ] {
+            assert_eq!(classify_sql_risk(sql, "mysql").unwrap(), SqlRisk::ReadOnly, "expected read-only: {sql}");
+            assert_eq!(
+                classify_sql_risk_for_database(sql, DatabaseType::Mysql).unwrap(),
+                SqlRisk::ReadOnly,
+                "expected read-only: {sql}"
+            );
+            assert!(!is_dangerous_sql_for_database(sql, DatabaseType::Mysql), "expected safe SQL: {sql}");
+        }
+    }
+
+    #[test]
+    fn classify_supported_show_statements_as_read_only() {
+        for (sql, database_type) in [
+            ("SHOW COLLATION", DatabaseType::Mysql),
+            ("SHOW CHARACTER SET", DatabaseType::Mysql),
+            ("SHOW search_path", DatabaseType::Postgres),
+        ] {
+            assert_eq!(
+                classify_sql_risk_for_database(sql, database_type).unwrap(),
+                SqlRisk::ReadOnly,
+                "expected read-only: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_show_triggers_preserves_write_detection() {
+        for (sql, expected_risk) in [
+            ("SHOW TRIGGERS; DELETE FROM order_items", SqlRisk::Write),
+            ("SHOW TRIGGERS; DROP TABLE order_items", SqlRisk::Ddl),
+            ("SHOW TRIGGERS; /*!50000 DELETE FROM order_items */", SqlRisk::Write),
+        ] {
+            assert_eq!(classify_sql_risk(sql, "mysql").unwrap(), expected_risk, "expected write detection: {sql}");
+            assert_eq!(
+                classify_sql_risk_for_database(sql, DatabaseType::Mysql).unwrap(),
+                expected_risk,
+                "expected write detection: {sql}"
+            );
+            assert!(is_dangerous_sql_for_database(sql, DatabaseType::Mysql), "expected dangerous SQL: {sql}");
+        }
+    }
+
+    #[test]
+    fn classify_mysql_legacy_shared_lock_reads_like_for_share() {
+        // MySQL's pre-8.0.1 spelling of `FOR SHARE` is still valid in 8.0.x and
+        // takes the same shared row locks, so it must not classify as a plain read.
+        for sql in [
+            "SELECT * FROM users LOCK IN SHARE MODE",
+            "SELECT * FROM users lock in share mode",
+            "SELECT id FROM users WHERE id = 1 LOCK IN SHARE MODE",
+            "WITH c AS (SELECT 1) SELECT * FROM users LOCK IN SHARE MODE",
+            "SELECT * FROM (SELECT * FROM users LOCK IN SHARE MODE) AS locked_users",
+            "WITH locked AS (SELECT * FROM users LOCK IN SHARE MODE) SELECT * FROM locked",
+            "SELECT (SELECT id FROM users LOCK IN SHARE MODE)",
+        ] {
+            assert_eq!(
+                classify_sql_risk_for_database(sql, DatabaseType::Mysql).unwrap(),
+                SqlRisk::Write,
+                "expected locking read to be write-capable: {sql}"
+            );
+            assert!(is_dangerous_sql_for_database(sql, DatabaseType::Mysql), "expected high-risk SQL: {sql}");
+        }
+
+        // A column or alias literally named "mode" must stay a plain read.
+        for sql in [
+            "SELECT lock_in_share_mode FROM settings",
+            "SELECT mode FROM share WHERE id = 1",
+            "SELECT 'LOCK IN SHARE MODE'",
+            "SELECT lock, `in`, share, mode FROM settings",
+        ] {
+            assert_eq!(
+                classify_sql_risk_for_database(sql, DatabaseType::Mysql).unwrap(),
+                SqlRisk::ReadOnly,
+                "expected plain read: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_cte_read() {
+        assert_eq!(
+            classify_sql_risk("WITH cte AS (SELECT 1) SELECT * FROM cte", "postgres").unwrap(),
+            SqlRisk::ReadOnly
+        );
+    }
+
+    #[test]
+    fn classify_writable_ctes_recursively() {
+        for sql in [
+            "WITH inserted AS (INSERT INTO users (id) VALUES (1) RETURNING id) SELECT * FROM inserted",
+            "WITH updated AS (UPDATE users SET active = true WHERE id = 1 RETURNING id) SELECT * FROM updated",
+            "WITH deleted AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM deleted",
+            "WITH merged AS (MERGE INTO users USING staged_users ON users.id = staged_users.id WHEN MATCHED THEN UPDATE SET active = true RETURNING users.id) SELECT * FROM merged",
+            "WITH outer_cte AS (WITH deleted AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM deleted) SELECT * FROM outer_cte",
+        ] {
+            assert_eq!(classify_sql_risk(sql, "postgres").unwrap(), SqlRisk::Write, "expected writable CTE: {sql}");
+            assert!(
+                crate::query_execution_sql::is_write_sql_for_database(sql, DatabaseType::Postgres),
+                "expected writable CTE to trip read-only enforcement: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn writable_cte_danger_tracks_the_nested_mutation() {
+        for sql in [
+            "WITH updated AS (UPDATE users SET active = true WHERE id = 1 RETURNING id) SELECT * FROM updated",
+            "WITH deleted AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM deleted",
+            "WITH outer_cte AS (WITH deleted AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM deleted) SELECT * FROM outer_cte",
+        ] {
+            assert!(!is_dangerous_sql_for_database(sql, DatabaseType::Postgres), "expected guarded write: {sql}");
+        }
+
+        for sql in [
+            "WITH updated AS (UPDATE users SET active = true RETURNING id) SELECT * FROM updated",
+            "WITH deleted AS (DELETE FROM users RETURNING id) SELECT * FROM deleted",
+            "WITH outer_cte AS (WITH deleted AS (DELETE FROM users RETURNING id) SELECT * FROM deleted) SELECT * FROM outer_cte",
+        ] {
+            assert!(is_dangerous_sql_for_database(sql, DatabaseType::Postgres), "expected dangerous write: {sql}");
+        }
+    }
+
+    #[test]
+    fn classify_write_statements() {
+        assert_eq!(classify_sql_risk("INSERT INTO users VALUES (1)", "postgres").unwrap(), SqlRisk::Write);
+        assert_eq!(classify_sql_risk("UPDATE users SET name = 'x'", "postgres").unwrap(), SqlRisk::Write);
+        assert_eq!(classify_sql_risk("DELETE FROM users", "postgres").unwrap(), SqlRisk::Write);
+        assert_eq!(classify_sql_risk("EXPLAIN ANALYZE DELETE FROM users", "postgres").unwrap(), SqlRisk::Write);
+        assert_eq!(classify_sql_risk("SELECT * INTO backup_users FROM users", "postgres").unwrap(), SqlRisk::Write);
+        assert_eq!(
+            classify_sql_risk("SELECT * FROM users INTO OUTFILE '/tmp/users.csv'", "mysql").unwrap(),
+            SqlRisk::Write
+        );
+        assert_eq!(classify_sql_risk("/*! DELETE FROM users */", "mysql").unwrap(), SqlRisk::Write);
+    }
+
+    #[test]
+    fn mcp_forbids_persistent_database_switching_in_every_permission_mode() {
+        for (sql, database_type) in [
+            ("USE reporting", DatabaseType::Mysql),
+            ("-- target database\nUSE reporting", DatabaseType::Mysql),
+            ("SELECT 1; USE reporting", DatabaseType::Mysql),
+            ("USE [reporting]", DatabaseType::SqlServer),
+            ("USE DATABASE reporting", DatabaseType::Snowflake),
+            ("/*!50000 USE reporting */", DatabaseType::Mysql),
+        ] {
+            assert!(mcp_sql_has_forbidden_database_switch(sql, database_type), "expected blocked SQL: {sql}");
+        }
+
+        for sql in ["SELECT use FROM feature_flags", "SELECT 'USE reporting'", "SELECT 1"] {
+            assert!(!mcp_sql_has_forbidden_database_switch(sql, DatabaseType::Mysql), "expected allowed SQL: {sql}");
+        }
+        assert!(!mcp_sql_has_forbidden_database_switch("/*!50000 USE reporting */", DatabaseType::Postgres));
+    }
+
+    #[test]
+    fn classify_known_side_effect_selects_and_copy_as_writes() {
+        for sql in [
+            "SELECT setval('user_id_seq', 42)",
+            "SELECT nextval('user_id_seq')",
+            "SELECT pg_terminate_backend(42)",
+            "SELECT * FROM users FOR UPDATE",
+            "SELECT * FROM users FOR KEY SHARE",
+            "COPY users TO '/tmp/users.csv'",
+            "COPY (SELECT * FROM users) TO PROGRAM 'cat > /tmp/users.csv'",
+        ] {
+            assert_eq!(
+                classify_sql_risk_for_database(sql, DatabaseType::Postgres).unwrap(),
+                SqlRisk::Write,
+                "expected write-capable SQL: {sql}"
+            );
+            assert!(is_dangerous_sql_for_database(sql, DatabaseType::Postgres), "expected high-risk SQL: {sql}");
+        }
+    }
+
+    #[test]
+    fn classify_backend_query_cancellation_as_a_side_effect() {
+        for (sql, database_type) in [
+            ("SELECT pg_cancel_backend(42)", DatabaseType::Postgres),
+            ("SELECT sys_cancel_backend(42)", DatabaseType::Kingbase),
+        ] {
+            assert_eq!(
+                classify_sql_risk_for_database(sql, database_type).unwrap(),
+                SqlRisk::Write,
+                "expected query cancellation to be write-capable: {sql}"
+            );
+            assert!(
+                is_dangerous_sql_for_database(sql, database_type),
+                "expected query cancellation to require production protection: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_dialect_specific_select_into_as_write() {
+        for sql in [
+            "SELECT 3156 INTO OUTFILE '/var/lib/mysql-files/dbx_ro_probe.txt'",
+            "SELECT 3156 INTO DUMPFILE '/var/lib/mysql-files/dbx_ro_probe.bin'",
+        ] {
+            assert_eq!(classify_sql_risk_for_database(sql, DatabaseType::Mysql).unwrap(), SqlRisk::Write);
+        }
+
+        for database_type in [
+            DatabaseType::Postgres,
+            DatabaseType::Redshift,
+            DatabaseType::Gaussdb,
+            DatabaseType::OpenGauss,
+            DatabaseType::Kingbase,
+            DatabaseType::Highgo,
+            DatabaseType::Vastbase,
+            DatabaseType::Kwdb,
+        ] {
+            assert_eq!(
+                classify_sql_risk_for_database("SELECT * INTO copied_users FROM users", database_type).unwrap(),
+                SqlRisk::Write,
+                "expected PostgreSQL-family SELECT INTO to be a write for {database_type:?}"
+            );
+        }
+        assert_eq!(
+            classify_sql_risk_for_database("SELECT * INTO #copied_users FROM users", DatabaseType::SqlServer).unwrap(),
+            SqlRisk::Write
+        );
+        assert_eq!(
+            classify_sql_risk_for_database(
+                "SELECT 3156 /*!50000 INTO OUTFILE '/var/lib/mysql-files/dbx_ro_probe.txt' */",
+                DatabaseType::Mysql,
+            )
+            .unwrap(),
+            SqlRisk::Write
+        );
+    }
+
+    #[test]
+    fn typed_classification_preserves_existing_risk_levels() {
+        assert_eq!(
+            classify_sql_risk_for_database("SELECT * FROM users", DatabaseType::Postgres).unwrap(),
+            SqlRisk::ReadOnly
+        );
+        assert_eq!(
+            classify_sql_risk_for_database("CREATE TABLE users (id INT)", DatabaseType::Postgres).unwrap(),
+            SqlRisk::Ddl
+        );
+        assert_eq!(
+            classify_sql_risk_for_database("SELECT 1 INTO unsupported", DatabaseType::Sqlite).unwrap(),
+            SqlRisk::ReadOnly
+        );
+    }
+
+    #[test]
+    fn classify_ddl_statements() {
+        assert_eq!(classify_sql_risk("CREATE TABLE users (id INT)", "postgres").unwrap(), SqlRisk::Ddl);
+        assert_eq!(classify_sql_risk("DROP TABLE users", "postgres").unwrap(), SqlRisk::Ddl);
+        assert_eq!(classify_sql_risk("ALTER TABLE users ADD COLUMN age INT", "postgres").unwrap(), SqlRisk::Ddl);
+        assert_eq!(classify_sql_risk("TRUNCATE TABLE users", "postgres").unwrap(), SqlRisk::Ddl);
+    }
+
+    #[test]
+    fn high_risk_sql_requires_central_permission_for_unbounded_changes() {
+        assert!(is_dangerous_sql_for_database("TRUNCATE TABLE users", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database("DELETE FROM users", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database("UPDATE users SET active = 0", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database("DELETE FROM users WHERE 1 = 1", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database("UPDATE users SET active = 0 WHERE TRUE", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database("DELETE FROM users WHERE id = id", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE lower(email) = lower(email)",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database("DELETE FROM users WHERE NOT (1 = 0)", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database("UPDATE users SET active = 0 WHERE 2 > 1", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE id IS NULL OR id IS NOT NULL",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE id IS NULL OR NOT (((id IS NULL)))",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE id IS NOT NULL OR NOT (((id IS NOT NULL)))",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database("DELETE FROM users WHERE id = 1 OR id <> 1", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database("DELETE FROM users WHERE id != 1 OR 1 = id", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE status = 'disabled' OR status != 'disabled'",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE (id = 1 OR status = 'disabled') OR 1 != id OR id IS NULL",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database("DELETE FROM users WHERE id > 1 OR id <= 1", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database("DELETE FROM users WHERE 1 >= id OR id > 1", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database("DELETE FROM users WHERE id >= 1 OR 1 > id", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE id IN (1) OR id NOT IN (1) OR id IS NULL",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE id IN (1, 2) OR id NOT IN (2, 1) OR id IS NULL",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE id BETWEEN 1 AND 2 OR id NOT BETWEEN 1 AND 2 OR id IS NULL",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE id = 1 OR (id <> 1 AND TRUE) OR id IS NULL",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE id IS NOT DISTINCT FROM id",
+            DatabaseType::Postgres
+        ));
+        assert!(is_dangerous_sql_for_database("DELETE FROM users WHERE id <=> id", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database(
+            "UPDATE users SET active = 0 WHERE name LIKE '%' OR name IS NULL",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "UPDATE users SET active = 0 WHERE name LIKE '%%' OR name IS NULL",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE (id IS NULL OR status = 'disabled') OR id IS NOT NULL",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database("UPDATE users SET active = 0 WHERE abs(1) = 1", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database("DELETE FROM users WHERE lower('A') = 'a'", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database("DELETE FROM users WHERE coalesce(NULL, 1) = 1", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database("DELETE FROM users WHERE LOWER(_utf8mb4'A') = 'a'", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE EXTRACT(YEAR FROM DATE '2026-01-01') = 2026",
+            DatabaseType::Postgres
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE DATE '2026-01-01' < CURRENT_DATE",
+            DatabaseType::Postgres
+        ));
+        assert!(is_dangerous_sql_for_database("DELETE FROM users WHERE USER = CURRENT_USER", DatabaseType::Postgres));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE id IN (SELECT id FROM archived_users)",
+            DatabaseType::Postgres
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE EXISTS (SELECT 1 FROM archived_users)",
+            DatabaseType::Postgres
+        ));
+        assert!(!is_dangerous_sql_for_database("DELETE FROM users WHERE id = 1", DatabaseType::Mysql));
+        assert!(!is_dangerous_sql_for_database("UPDATE users SET active = 0 WHERE id = 1", DatabaseType::Mysql));
+        assert!(!is_dangerous_sql_for_database("UPDATE users SET active = 0 WHERE abs(id) = 1", DatabaseType::Mysql));
+        assert!(!is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE lower(email) = 'disabled@example.com'",
+            DatabaseType::Mysql
+        ));
+        assert!(!is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE EXTRACT(YEAR FROM created_at) = 2026",
+            DatabaseType::Postgres
+        ));
+        assert!(!is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE id IS NULL OR status IS NOT NULL",
+            DatabaseType::Mysql
+        ));
+        assert!(!is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE (id IS NULL OR NOT (((id IS NULL)))) AND tenant_id = 1",
+            DatabaseType::Mysql
+        ));
+        assert!(!is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE (id = 1 OR id <> 1) AND tenant_id = 1",
+            DatabaseType::Mysql
+        ));
+        assert!(!is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE status = 'pending' OR status <> 'disabled'",
+            DatabaseType::Mysql
+        ));
+        assert!(!is_dangerous_sql_for_database("DELETE FROM users WHERE id IN (1) OR id IN (2)", DatabaseType::Mysql));
+        assert!(!is_dangerous_sql_for_database(
+            "DELETE FROM users WHERE id BETWEEN 1 AND 2 OR id BETWEEN 4 AND 5",
+            DatabaseType::Mysql
+        ));
+        assert!(!is_dangerous_sql_for_database(
+            "UPDATE users SET active = 0 WHERE name LIKE 'admin%'",
+            DatabaseType::Mysql
+        ));
+        assert!(!is_dangerous_sql_for_database(
+            "UPDATE users SET active = 0 WHERE status = 'inactive' AND tenant_id = 1",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "UPDATE users JOIN accounts ON accounts.id = users.account_id SET users.active = 0 WHERE users.id = 1",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "UPDATE users SET active = false FROM accounts WHERE users.account_id = accounts.id",
+            DatabaseType::Postgres
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "DELETE users FROM users JOIN accounts ON accounts.id = users.account_id WHERE users.id = 1",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database("REPLACE INTO users (id) VALUES (1)", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database(
+            "INSERT INTO users (id) VALUES (1) ON DUPLICATE KEY UPDATE active = 1",
+            DatabaseType::Mysql
+        ));
+        assert!(is_dangerous_sql_for_database(
+            "INSERT INTO users (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET active = true",
+            DatabaseType::Postgres
+        ));
+        assert!(!is_dangerous_sql_for_database("INSERT INTO users (id) VALUES (1)", DatabaseType::Mysql));
+        assert!(is_dangerous_sql_for_database(
+            "INSERT INTO users (id) SELECT id FROM staged_users",
+            DatabaseType::Mysql
+        ));
+        assert!(!is_dangerous_sql_for_database(
+            "INSERT INTO users (id) VALUES (1) ON CONFLICT (id) DO NOTHING",
+            DatabaseType::Postgres
+        ));
+    }
+
+    #[test]
+    fn select_into_requires_central_high_risk_permission_for_supported_databases() {
+        for database_type in [
+            DatabaseType::Postgres,
+            DatabaseType::Redshift,
+            DatabaseType::Gaussdb,
+            DatabaseType::OpenGauss,
+            DatabaseType::Kingbase,
+            DatabaseType::Highgo,
+            DatabaseType::Vastbase,
+            DatabaseType::Kwdb,
+        ] {
+            assert!(
+                is_dangerous_sql_for_database("SELECT * INTO copied_users FROM users", database_type),
+                "expected PostgreSQL-family SELECT INTO to require high-risk permission for {database_type:?}"
+            );
+        }
+        assert!(is_dangerous_sql_for_database("SELECT * INTO #copied_users FROM users", DatabaseType::SqlServer));
+        assert!(is_dangerous_sql_for_database("SELECT 1 INTO OUTFILE '/tmp/dbx-probe.txt'", DatabaseType::Mysql));
+        assert!(!is_dangerous_sql_for_database("SELECT 1", DatabaseType::Postgres));
+        assert!(!is_dangerous_sql_for_database("SELECT 1 INTO unsupported", DatabaseType::Sqlite));
+    }
+
+    #[test]
+    fn classify_transaction_statements() {
+        assert_eq!(classify_sql_risk("BEGIN", "postgres").unwrap(), SqlRisk::Transaction);
+        assert_eq!(classify_sql_risk("COMMIT", "postgres").unwrap(), SqlRisk::Transaction);
+        assert_eq!(classify_sql_risk("ROLLBACK", "postgres").unwrap(), SqlRisk::Transaction);
+    }
+
+    #[test]
+    fn classify_multi_statement_returns_highest_risk() {
+        // SELECT + INSERT = Write
+        assert_eq!(classify_sql_risk("SELECT 1; INSERT INTO users VALUES (1)", "postgres").unwrap(), SqlRisk::Write);
+    }
+
+    #[test]
+    fn classify_fallback_on_parse_error() {
+        // Non-standard SQL should fall back to keyword matching
+        assert_eq!(classify_sql_risk("SELECT * FROM users", "generic").unwrap(), SqlRisk::ReadOnly);
+    }
+
+    #[test]
+    fn classify_unknown_statement_is_write() {
+        // Statements not explicitly handled should be conservative (Write)
+        // This depends on sqlparser's coverage, but we can test the catch-all
+        assert_eq!(classify_sql_risk("GRANT SELECT ON users TO admin", "postgres").unwrap(), SqlRisk::Ddl);
+    }
+
+    #[test]
+    fn classifies_search_engine_rest_risk_by_method_and_path() {
+        for database_type in [DatabaseType::Elasticsearch, DatabaseType::Easysearch] {
+            assert_eq!(
+                classify_sql_risk_for_database("GET /_cluster/health", database_type).unwrap(),
+                SqlRisk::ReadOnly
+            );
+            assert_eq!(
+                classify_sql_risk_for_database("POST /products/_search\n{}", database_type).unwrap(),
+                SqlRisk::ReadOnly
+            );
+            assert_eq!(
+                classify_sql_risk_for_database("PUT /products/_doc/1\n{}", database_type).unwrap(),
+                SqlRisk::Write
+            );
+            assert!(!is_dangerous_sql_for_database("PUT /products/_doc/1\n{}", database_type));
+            assert_eq!(classify_sql_risk_for_database("DELETE /products", database_type).unwrap(), SqlRisk::Ddl);
+            assert!(is_dangerous_sql_for_database("DELETE /products", database_type));
+        }
+    }
+
+    #[test]
+    fn classifies_salesforce_soql_as_read_even_when_sqlparser_cannot() {
+        let database_type = DatabaseType::Salesforce;
+        for soql in [
+            "SELECT Id, Name FROM Account",
+            // SOQL-only forms: FIELDS(), date literals, relationship subqueries.
+            "SELECT FIELDS(ALL) FROM Account LIMIT 200",
+            "SELECT Id FROM Opportunity WHERE CloseDate = LAST_N_DAYS:7",
+            "SELECT Id, (SELECT Id FROM Contacts) FROM Account",
+            // A literal that names a write verb is still a read.
+            "SELECT Id FROM Case WHERE Subject = 'Delete request'",
+        ] {
+            assert_eq!(classify_sql_risk_for_database(soql, database_type).unwrap(), SqlRisk::ReadOnly, "{soql}");
+            assert!(!is_dangerous_sql_for_database(soql, database_type), "{soql}");
+            assert!(!is_write_sql_for_database(soql, database_type), "{soql}");
+            assert!(!mcp_sql_has_forbidden_database_switch(soql, database_type), "{soql}");
+        }
+    }
+
+    #[test]
+    fn classifies_scoped_salesforce_dml_as_a_safe_write() {
+        let database_type = DatabaseType::Salesforce;
+        let update = "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Opportunity\",\"id\":\"006x\",\"fields\":{\"StageName\":\"Closed Won\"}}";
+        let insert = "DBX SALESFORCE DML\n{\"op\":\"insert\",\"object\":\"Lead\",\"fields\":{\"Company\":\"Acme\"}}";
+        let delete = "DBX SALESFORCE DML\n{\"op\":\"delete\",\"object\":\"Lead\",\"id\":\"00Qx\"}";
+        for dml in [update, insert, delete] {
+            // A single identified record is a scoped write: "safe write" permission
+            // is enough, the central dangerous-operation permission is not.
+            assert_eq!(classify_sql_risk_for_database(dml, database_type).unwrap(), SqlRisk::Write, "{dml}");
+            assert!(!is_dangerous_sql_for_database(dml, database_type), "{dml}");
+            assert!(is_write_sql_for_database(dml, database_type), "{dml}");
+            // The JSON body is never parsed as SQL, so a `USE`-shaped value inside
+            // it cannot trip the database-switch guard.
+            assert!(!mcp_sql_has_forbidden_database_switch(dml, database_type), "{dml}");
+        }
+        assert!(!mcp_sql_has_forbidden_database_switch(
+            "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"id\":\"001x\",\"fields\":{\"Description\":\"USE prod\"}}",
+            database_type
+        ));
+        // The tokenizer fallback treats a `;` inside a JSON value as a statement
+        // boundary, so without the Salesforce branch this write would be refused
+        // as a database switch. SOQL cannot switch databases at all.
+        assert!(!mcp_sql_has_forbidden_database_switch(
+            "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"id\":\"001x\",\"fields\":{\"Description\":\"a; USE prod\"}}",
+            database_type
+        ));
+    }
+
+    #[test]
+    fn classifies_unscoped_salesforce_writes_as_high_risk() {
+        let database_type = DatabaseType::Salesforce;
+        for statement in [
+            // No Id: nothing bounds the write.
+            "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"fields\":{\"Name\":\"x\"}}",
+            // Unknown operation and unknown pseudo-command headers fail closed.
+            "DBX SALESFORCE DML\n{\"op\":\"upsert\",\"object\":\"Account\",\"externalId\":\"E-1\"}",
+            "DBX SALESFORCE BULK\n{}",
+            // Non-SOQL text the driver would reject anyway.
+            "DELETE FROM Account",
+        ] {
+            assert_eq!(classify_sql_risk_for_database(statement, database_type).unwrap(), SqlRisk::Ddl, "{statement}");
+            assert!(is_dangerous_sql_for_database(statement, database_type), "{statement}");
+            assert!(is_write_sql_for_database(statement, database_type), "{statement}");
+        }
+    }
+}

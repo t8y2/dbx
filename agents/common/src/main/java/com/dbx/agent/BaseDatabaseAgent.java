@@ -10,7 +10,7 @@ public abstract class BaseDatabaseAgent implements DatabaseAgent {
     public List<ObjectInfo> listObjects(String schema) {
         List<ObjectInfo> result = new ArrayList<>();
         for (TableInfo table : listTables(schema)) {
-            result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
+            result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment(), table.getValid()));
         }
         return result;
     }
@@ -48,7 +48,14 @@ public abstract class BaseDatabaseAgent implements DatabaseAgent {
             // Table comment is optional; DDL generation should still succeed without it.
         }
 
-        return DdlBuilder.buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys, Collections.emptyList(), false, false, tableComment);
+        return DdlBuilder.buildTableDdl(
+            schema, table, getColumns(schema, table), indexes, foreignKeys,
+            Collections.emptyList(), false, includeColumnCommentsInTableDdl(), tableComment
+        );
+    }
+
+    protected boolean includeColumnCommentsInTableDdl() {
+        return false;
     }
 
     @Override

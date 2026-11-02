@@ -1,6 +1,8 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConnectionConfig, TreeNode } from "@/types/database";
+import { isObjectCacheInvalidationError } from "@/lib/metadata/objectCacheInvalidationError";
+import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
+import type { ColumnInfo, ConnectionConfig, TreeNode } from "@/types/database";
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -66,7 +68,7 @@ function column(name: string) {
   };
 }
 
-function installApiMocks(options?: { getColumns?: ReturnType<typeof vi.fn>; listTables?: ReturnType<typeof vi.fn>; listObjects?: ReturnType<typeof vi.fn> }) {
+function installApiMocks(options?: { getColumns?: ReturnType<typeof vi.fn>; listTables?: ReturnType<typeof vi.fn>; listObjects?: ReturnType<typeof vi.fn>; listTriggers?: ReturnType<typeof vi.fn> }) {
   vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
   vi.doMock("@/lib/backend/api", () => ({
     checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
@@ -75,6 +77,7 @@ function installApiMocks(options?: { getColumns?: ReturnType<typeof vi.fn>; list
     listInstalledAgents: vi.fn().mockResolvedValue([]),
     listObjects: options?.listObjects ?? vi.fn().mockResolvedValue([]),
     listTables: options?.listTables ?? vi.fn().mockResolvedValue([]),
+    listTriggers: options?.listTriggers ?? vi.fn().mockResolvedValue([]),
     loadSchemaCache: vi.fn().mockResolvedValue(null),
     saveConnections: vi.fn().mockResolvedValue(undefined),
     saveSchemaCache: vi.fn().mockResolvedValue(undefined),
@@ -100,6 +103,84 @@ describe("connectionStore tree refresh state", () => {
     vi.unstubAllGlobals();
     installLocalStorage();
     setActivePinia(createPinia());
+  });
+
+  it.each([
+    [true, "old"],
+    [false, "old"],
+    [true, "renamed"],
+    [false, "renamed"],
+  ] as const)("refreshes saved table columns without changing expansion (%s, %s)", async (expanded, name) => {
+    const getColumns = vi.fn().mockResolvedValue([column("old"), column("removed")]);
+    installApiMocks({ getColumns });
+    const group: TreeNode = { id: "pg-1:app:public:users:__columns", label: "Columns", type: "group-columns", connectionId: "pg-1", database: "app", schema: "public", tableName: "users", children: [] };
+    const otherSchema = { ...group, id: "other-schema", schema: "other", isExpanded: true, children: [] };
+    const otherCatalog = { ...group, id: "other-catalog", catalog: "external", isExpanded: true, children: [] };
+    const store = await createStore(schemaNode([group, otherSchema, otherCatalog]));
+    await store.loadColumns("pg-1", "app", "users", "public", group.id);
+    group.isExpanded = expanded;
+    const updated = { ...column(name), data_type: "character varying", character_maximum_length: 512, comment: "updated comment", is_nullable: false };
+    getColumns.mockResolvedValue([updated]);
+
+    await store.refreshTableColumnsTree("pg-1", "app", "users", "public");
+
+    expect(getColumns).toHaveBeenCalledTimes(2);
+    expect(getColumns).toHaveBeenLastCalledWith("pg-1", "app", "public", "users", undefined);
+    expect(group.children).toHaveLength(1);
+    expect(group.children![0]).toMatchObject({ label: `${name} (character varying)`, meta: updated });
+    expect(createColumnDrafts([group.children![0]!.meta as ColumnInfo], "postgres")[0]).toMatchObject({ dataType: "character varying(512)", comment: "updated comment", isNullable: false });
+    expect(group.objectCount).toBe(1);
+    expect(group.isExpanded).toBe(expanded);
+    expect(otherSchema.children).toEqual([]);
+    expect(otherCatalog.children).toEqual([]);
+  });
+
+  it("preserves old columns on a failed reload and retries an empty loaded group", async () => {
+    const getColumns = vi.fn().mockResolvedValue([]);
+    installApiMocks({ getColumns });
+    const group: TreeNode = { id: "pg-1:app:public:users:__columns", label: "Columns", type: "group-columns", connectionId: "pg-1", database: "app", schema: "public", tableName: "users", children: [] };
+    const store = await createStore(schemaNode([group]));
+    await store.loadColumns("pg-1", "app", "users", "public", group.id);
+    group.isExpanded = false;
+    getColumns.mockResolvedValueOnce([column("added")]);
+    await store.refreshTableColumnsTree("pg-1", "app", "users", "public");
+    expect(group.children![0]!.meta).toEqual(column("added"));
+    getColumns.mockRejectedValueOnce(new Error("metadata denied"));
+    await expect(store.refreshTableColumnsTree("pg-1", "app", "users", "public")).rejects.toThrow("metadata denied");
+    expect(group.children![0]!.meta).toEqual(column("added"));
+    expect(group.isExpanded).toBe(false);
+    expect(group.isLoading).toBe(false);
+  });
+
+  it("ignores an older column request that finishes after the saved structure reload", async () => {
+    let finishOld!: (value: ReturnType<typeof column>[]) => void;
+    const getColumns = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishOld = resolve;
+          }),
+      )
+      .mockResolvedValue([column("fresh")]);
+    installApiMocks({ getColumns });
+    const group: TreeNode = { id: "pg-1:app:public:users:__columns", label: "Columns", type: "group-columns", connectionId: "pg-1", database: "app", schema: "public", tableName: "users", children: [] };
+    const store = await createStore(schemaNode([group]));
+    const oldLoad = store.loadColumns("pg-1", "app", "users", "public", group.id);
+    await store.refreshTableColumnsTree("pg-1", "app", "users", "public");
+    finishOld([column("stale")]);
+    await oldLoad;
+    expect(group.children![0]!.meta).toEqual(column("fresh"));
+  });
+
+  it("does not load unopened column groups after a structure save", async () => {
+    const getColumns = vi.fn();
+    installApiMocks({ getColumns });
+    const group: TreeNode = { id: "pg-1:app:public:users:__columns", label: "Columns", type: "group-columns", connectionId: "pg-1", database: "app", schema: "public", tableName: "users", children: [] };
+    const store = await createStore(schemaNode([group]));
+    await store.refreshTableColumnsTree("pg-1", "app", "users", "public");
+    expect(getColumns).not.toHaveBeenCalled();
+    expect(group.isExpanded).toBeUndefined();
   });
 
   it("preserves an object group count while rebuilding grouped placeholders", async () => {
@@ -165,5 +246,296 @@ describe("connectionStore tree refresh state", () => {
     await expect(store.listCompletionColumns("pg-1", "app", "users", "public")).resolves.toEqual([expect.objectContaining({ name: "id" }), expect.objectContaining({ name: "new_column" })]);
     expect(getColumns).toHaveBeenCalledTimes(2);
     expect(store.completionCacheRevision("pg-1", "app")).toBeGreaterThan(0);
+  });
+
+  it("refreshes a table-level trigger group using listTriggers without wiping triggers", async () => {
+    const listTriggers = vi.fn().mockResolvedValue([{ name: "trg_orders_audit", timing: "AFTER", event: "UPDATE", enabled: false }]);
+    const listObjects = vi.fn().mockResolvedValue([]);
+    installApiMocks({ listTriggers, listObjects });
+
+    const triggerGroup: TreeNode = {
+      id: "pg-1:app:public:orders:__triggers",
+      label: "tree.triggers",
+      type: "group-triggers",
+      connectionId: "pg-1",
+      database: "app",
+      schema: "public",
+      tableName: "orders",
+      isExpanded: true,
+      children: [],
+    };
+    const table: TreeNode = {
+      id: "pg-1:app:public:orders",
+      label: "orders",
+      type: "table",
+      connectionId: "pg-1",
+      database: "app",
+      schema: "public",
+      tableName: "orders",
+      isExpanded: true,
+      children: [triggerGroup],
+    };
+    const root = schemaNode([table]);
+    const store = await createStore(root);
+
+    await store.refreshTreeNode(triggerGroup);
+
+    expect(listTriggers).toHaveBeenCalledWith("pg-1", "app", "public", "orders", undefined);
+    expect(listObjects).not.toHaveBeenCalled();
+    expect(triggerGroup.objectCount).toBe(1);
+    expect(triggerGroup.children).toHaveLength(1);
+    expect(triggerGroup.children![0]).toMatchObject({
+      id: "pg-1:app:public:orders:__triggers:trg_orders_audit",
+      type: "trigger",
+      tableName: "orders",
+      meta: { name: "trg_orders_audit", enabled: false },
+    });
+  });
+
+  it("refreshes the parent table trigger group when refreshing a child trigger node", async () => {
+    const listTriggers = vi.fn().mockResolvedValue([{ name: "trg_orders_audit", timing: "AFTER", event: "UPDATE", enabled: true }]);
+    installApiMocks({ listTriggers });
+
+    const triggerChild: TreeNode = {
+      id: "pg-1:app:public:orders:__triggers:trg_orders_audit",
+      label: "trg_orders_audit (AFTER UPDATE)",
+      type: "trigger",
+      connectionId: "pg-1",
+      database: "app",
+      schema: "public",
+      tableName: "orders",
+      meta: { name: "trg_orders_audit", enabled: false },
+    };
+    const triggerGroup: TreeNode = {
+      id: "pg-1:app:public:orders:__triggers",
+      label: "tree.triggers",
+      type: "group-triggers",
+      connectionId: "pg-1",
+      database: "app",
+      schema: "public",
+      tableName: "orders",
+      isExpanded: true,
+      children: [triggerChild],
+    };
+    const table: TreeNode = {
+      id: "pg-1:app:public:orders",
+      label: "orders",
+      type: "table",
+      connectionId: "pg-1",
+      database: "app",
+      schema: "public",
+      tableName: "orders",
+      isExpanded: true,
+      children: [triggerGroup],
+    };
+    const root = schemaNode([table]);
+    const store = await createStore(root);
+
+    await store.refreshTreeNode(triggerChild);
+
+    expect(listTriggers).toHaveBeenCalledWith("pg-1", "app", "public", "orders", undefined);
+    expect(triggerGroup.children![0].meta).toMatchObject({
+      name: "trg_orders_audit",
+      enabled: true,
+    });
+  });
+});
+
+describe("connection node refresh awaits object cache invalidation", () => {
+  function installConnectionApiMocks(options?: { deleteSchemaCachePrefix?: ReturnType<typeof vi.fn>; getColumns?: ReturnType<typeof vi.fn>; getTableDisplayDdl?: ReturnType<typeof vi.fn>; listDatabases?: ReturnType<typeof vi.fn>; listSchemaInfos?: ReturnType<typeof vi.fn> }) {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: options?.deleteSchemaCachePrefix ?? vi.fn().mockResolvedValue(undefined),
+      getColumns: options?.getColumns ?? vi.fn().mockResolvedValue([]),
+      getTableDisplayDdl: options?.getTableDisplayDdl ?? vi.fn().mockResolvedValue("CREATE TABLE users (id int)"),
+      listDatabases: options?.listDatabases ?? vi.fn().mockResolvedValue([{ name: "app", comment: null }]),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      listObjects: vi.fn().mockResolvedValue([]),
+      listSchemaInfos: options?.listSchemaInfos ?? vi.fn().mockResolvedValue([{ name: "public", comment: null }]),
+      listTables: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+  }
+
+  /** A database node under the connection node: refresh reloads it via listSchemaInfos. */
+  function databaseNode(): TreeNode {
+    return { id: "pg-1:app", label: "app", type: "database", connectionId: "pg-1", database: "app", isExpanded: true, children: [] };
+  }
+
+  async function createStoreWithConnection(connectionId = "pg-1") {
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "grouped";
+    const connection: ConnectionConfig = {
+      ...postgresConnection(),
+      id: connectionId,
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    const connectionNode: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isExpanded: true,
+      children: [],
+    };
+    store.treeNodes = [connectionNode];
+    return { store, connectionNode };
+  }
+
+  function objectCacheDeletePrefixes(mock: ReturnType<typeof vi.fn>): string[] {
+    return mock.mock.calls.filter(([prefix]) => (prefix as string).startsWith("object-")).map(([prefix]) => prefix as string);
+  }
+
+  /** A prefix-deletion mock whose object-cache deletions share one deferred gate. */
+  function gatedObjectCacheDeletes() {
+    const deleteSchemaCachePrefix = vi.fn((prefix: string) => {
+      if (!prefix.startsWith("object-")) return Promise.resolve();
+      return gate.then(() => undefined);
+    });
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      resolveGate = resolve;
+    });
+    return { deleteSchemaCachePrefix, releaseObjectCacheDeletes: () => resolveGate() };
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.unstubAllGlobals();
+    installLocalStorage();
+    setActivePinia(createPinia());
+  });
+
+  it("blocks the tree reload until both object cache deletions settle", async () => {
+    const { deleteSchemaCachePrefix, releaseObjectCacheDeletes } = gatedObjectCacheDeletes();
+    const listDatabases = vi.fn().mockResolvedValue([{ name: "app", comment: null }]);
+    installConnectionApiMocks({ deleteSchemaCachePrefix, listDatabases });
+    const { store, connectionNode } = await createStoreWithConnection();
+
+    let settled = false;
+    const refresh = store.refreshConnectionTreeNode(connectionNode).finally(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(objectCacheDeletePrefixes(deleteSchemaCachePrefix).length).toBe(2));
+    expect(settled).toBe(false);
+    expect(listDatabases).not.toHaveBeenCalled();
+
+    releaseObjectCacheDeletes();
+    await refresh;
+    expect(listDatabases).toHaveBeenCalledTimes(1);
+    expect(listDatabases).toHaveBeenCalledWith("pg-1");
+  });
+
+  it("issues exactly one object-cache deletion per namespace on a connection refresh", async () => {
+    const deleteSchemaCachePrefix = vi.fn().mockResolvedValue(undefined);
+    installConnectionApiMocks({ deleteSchemaCachePrefix });
+    const { store, connectionNode } = await createStoreWithConnection();
+
+    await store.refreshConnectionTreeNode(connectionNode);
+
+    expect(objectCacheDeletePrefixes(deleteSchemaCachePrefix).sort()).toEqual(["object-ddl:v1:pg-1:", "object-meta:v1:pg-1:"]);
+  });
+
+  it("lets concurrent connection refreshes share the pending deletions", async () => {
+    const { deleteSchemaCachePrefix, releaseObjectCacheDeletes } = gatedObjectCacheDeletes();
+    installConnectionApiMocks({ deleteSchemaCachePrefix });
+    const { store, connectionNode } = await createStoreWithConnection();
+
+    const first = store.refreshConnectionTreeNode(connectionNode);
+    const second = store.refreshConnectionTreeNode(connectionNode);
+    await vi.waitFor(() => expect(objectCacheDeletePrefixes(deleteSchemaCachePrefix).length).toBe(2));
+
+    releaseObjectCacheDeletes();
+    await Promise.all([first, second]);
+    expect(objectCacheDeletePrefixes(deleteSchemaCachePrefix)).toHaveLength(2);
+  });
+
+  it("rejects with the object cache error and skips the tree reload when deletion fails", async () => {
+    const deleteSchemaCachePrefix = vi.fn((prefix: string) => (prefix.startsWith("object-") ? Promise.reject(new Error("sqlite locked")) : Promise.resolve()));
+    const listDatabases = vi.fn().mockResolvedValue([{ name: "app", comment: null }]);
+    installConnectionApiMocks({ deleteSchemaCachePrefix, listDatabases });
+    const { store, connectionNode } = await createStoreWithConnection();
+    const previousChildren = connectionNode.children;
+
+    const failure = await store.refreshConnectionTreeNode(connectionNode).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(isObjectCacheInvalidationError(failure)).toBe(true);
+    expect((failure as Error).message).toBe("sqlite locked");
+    expect(listDatabases).not.toHaveBeenCalled();
+    expect(connectionNode.children).toBe(previousChildren);
+  });
+
+  it("retries the deletion and completes the tree reload on a subsequent refresh", async () => {
+    let objectDeletionFailures = 2;
+    const deleteSchemaCachePrefix = vi.fn((prefix: string) => {
+      if (!prefix.startsWith("object-")) return Promise.resolve();
+      return objectDeletionFailures-- > 0 ? Promise.reject(new Error("locked")) : Promise.resolve();
+    });
+    const listDatabases = vi.fn().mockResolvedValue([{ name: "app", comment: null }]);
+    installConnectionApiMocks({ deleteSchemaCachePrefix, listDatabases });
+    const { store, connectionNode } = await createStoreWithConnection();
+
+    await expect(store.refreshConnectionTreeNode(connectionNode)).rejects.toThrow("locked");
+    expect(listDatabases).not.toHaveBeenCalled();
+
+    await expect(store.refreshConnectionTreeNode(connectionNode)).resolves.toBeUndefined();
+    expect(listDatabases).toHaveBeenCalledTimes(1);
+  });
+
+  it("encodes connection ids in the invalidated object cache prefixes", async () => {
+    const deleteSchemaCachePrefix = vi.fn().mockResolvedValue(undefined);
+    installConnectionApiMocks({ deleteSchemaCachePrefix });
+    const { store, connectionNode } = await createStoreWithConnection("pg:1");
+
+    await store.refreshConnectionTreeNode(connectionNode);
+
+    expect(objectCacheDeletePrefixes(deleteSchemaCachePrefix).sort()).toEqual(["object-ddl:v1:pg%3A1:", "object-meta:v1:pg%3A1:"]);
+  });
+
+  it("keeps non-connection node refresh best-effort when the object deletion fails", async () => {
+    const deleteSchemaCachePrefix = vi.fn((prefix: string) => (prefix.startsWith("object-") ? Promise.reject(new Error("locked")) : Promise.resolve()));
+    const listSchemaInfos = vi.fn().mockResolvedValue([{ name: "public", comment: null }]);
+    installConnectionApiMocks({ deleteSchemaCachePrefix, listSchemaInfos });
+    const { store } = await createStoreWithConnection();
+    const database = databaseNode();
+    store.treeNodes[0]!.children = [database];
+
+    await expect(store.refreshTreeNode(database)).resolves.toBeUndefined();
+    // The tree still reloads even though the object-cache deletion failed.
+    expect(listSchemaInfos).toHaveBeenCalledTimes(1);
+    expect(objectCacheDeletePrefixes(deleteSchemaCachePrefix).sort()).toEqual(["object-ddl:v1:pg-1:app:", "object-meta:v1:pg-1:app:"]);
+  });
+
+  it("does not fetch object DDL or column metadata during a connection refresh", async () => {
+    const deleteSchemaCachePrefix = vi.fn().mockResolvedValue(undefined);
+    const getTableDisplayDdl = vi.fn();
+    const getColumns = vi.fn();
+    installConnectionApiMocks({ deleteSchemaCachePrefix, getTableDisplayDdl, getColumns });
+    const { store, connectionNode } = await createStoreWithConnection();
+
+    await store.refreshConnectionTreeNode(connectionNode);
+
+    expect(getTableDisplayDdl).not.toHaveBeenCalled();
+    expect(getColumns).not.toHaveBeenCalled();
+  });
+
+  it("routes non-connection nodes to the regular refresh path", async () => {
+    const deleteSchemaCachePrefix = vi.fn().mockResolvedValue(undefined);
+    installConnectionApiMocks({ deleteSchemaCachePrefix });
+    const { store } = await createStoreWithConnection();
+    const database = databaseNode();
+    store.treeNodes[0]!.children = [database];
+
+    await expect(store.refreshConnectionTreeNode(database)).resolves.toBeUndefined();
+    expect(objectCacheDeletePrefixes(deleteSchemaCachePrefix).sort()).toEqual(["object-ddl:v1:pg-1:app:", "object-meta:v1:pg-1:app:"]);
   });
 });

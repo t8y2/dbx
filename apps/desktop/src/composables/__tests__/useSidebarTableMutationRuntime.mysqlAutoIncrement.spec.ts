@@ -96,12 +96,13 @@ describe("useSidebarTableMutationRuntime MySQL AUTO_INCREMENT action", () => {
     expect(mocks.refreshMutatedTableDataTabsForNode).toHaveBeenCalledWith(tableNode());
   });
 
-  it("excludes MySQL-compatible profiles", () => {
-    expect(runtime("mariadb").supportsMysqlAutoIncrement.value).toBe(false);
-    expect(runtime("tidb").supportsMysqlAutoIncrement.value).toBe(false);
-    expect(runtime("oceanbase").supportsMysqlAutoIncrement.value).toBe(false);
-    expect(runtime("dolt").supportsMysqlAutoIncrement.value).toBe(false);
-    expect(runtime("goldendb").supportsMysqlAutoIncrement.value).toBe(false);
+  it("includes supported MySQL-compatible profiles and excludes analytics profiles", () => {
+    for (const profile of ["mariadb", "tidb", "oceanbase", "tdsql", "polardb", "greatsql", "custom_mysql", "dolt", "goldendb"]) {
+      expect(runtime(profile).supportsMysqlAutoIncrement.value, profile).toBe(true);
+    }
+    for (const profile of ["doris", "selectdb", "starrocks", "manticoresearch"]) {
+      expect(runtime(profile).supportsMysqlAutoIncrement.value, profile).toBe(false);
+    }
   });
 
   it("ignores out-of-order preview responses", async () => {

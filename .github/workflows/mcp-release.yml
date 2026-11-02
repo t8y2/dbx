@@ -25,7 +25,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -35,7 +35,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.4
           registry-url: https://registry.npmjs.org
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
@@ -51,11 +51,13 @@ jobs:
 
       - name: Install native build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libfontconfig1-dev libsecret-1-dev
+          sudo python3 .github/scripts/ci-install-system-deps.py --group node-release
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Install dev-host dependencies for plugin-cli packing
+        run: npm ci --prefix plugins/sdk/dev-host
 
       - name: Set package versions
         id: version
@@ -155,6 +157,11 @@ jobs:
       - name: Update Rust lockfile
         run: cargo check -p dbx-mcp -p dbx-cli --no-default-features
 
+      - name: Install nextest
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-nextest@0.9.137
+
       - name: Verify workspace lockfile
         run: pnpm install --frozen-lockfile --lockfile-only --ignore-scripts
 
@@ -190,7 +197,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.MCP_RELEASE_TOKEN }}
@@ -311,7 +318,7 @@ jobs:
             binary: dbx.exe
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -320,9 +327,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -399,12 +406,11 @@ jobs:
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libfontconfig1-dev
+          sudo python3 .github/scripts/ci-install-system-deps.py --group fontconfig
 
       - name: Setup Python for cargo-zigbuild
         if: runner.os == 'Linux'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.x'
 
@@ -416,9 +422,11 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            cargo zigbuild --release -p dbx-cli --no-default-features --target "${{ matrix.target }}.2.31"
+            cargo zigbuild --release -p dbx-cli --no-default-features --features dbx-mcp/os-keyring --target "${{ matrix.target }}.2.31"
           else
-            cargo build --release -p dbx-cli --no-default-features --target "${{ matrix.target }}"
+            # Same keychain rationale as the MCP native legs; the feature is
+            # forwarded through the dbx-mcp dependency.
+            cargo build --release -p dbx-cli --no-default-features --features dbx-mcp/os-keyring --target "${{ matrix.target }}"
           fi
 
       - name: Stage platform package
@@ -430,7 +438,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.4
           registry-url: https://registry.npmjs.org
 
       - name: Publish platform package
@@ -443,7 +451,22 @@ jobs:
             echo "${{ matrix.package-name }}@${VERSION} already exists on npm; skipping."
             exit 0
           fi
-          npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance
+          # npm can accept a publish but leave the version stuck in a staged
+          # (invisible, blocks republication) state; the only recovery is
+          # to drop the staged version and publish again.
+          publish_log="${RUNNER_TEMP}/npm-publish.log"
+          if ! npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance 2>&1 | tee "$publish_log"; then
+            if ! grep -q "previously staged version" "$publish_log"; then
+              exit 1
+            fi
+            if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
+              echo "${{ matrix.package-name }}@${VERSION} became visible despite the error; continuing."
+              exit 0
+            fi
+            echo "::warning::npm holds ${{ matrix.package-name }}@${VERSION} in a staged (invisible) state; dropping it and retrying."
+            npm unpublish "${{ matrix.package-name }}@${VERSION}" --force
+            npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance
+          fi
 
   publish-cli:
     name: Publish @dbx-app/cli
@@ -451,7 +474,7 @@ jobs:
     needs: [prepare, publish-cli-platforms]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -461,7 +484,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.4
           registry-url: https://registry.npmjs.org
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
@@ -474,11 +497,13 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
+          # npm CDN visibility after publish has been observed to lag past
+          # three minutes; the window must exceed that by a wide margin.
           wait_for_package() {
             package="$1"
-            for attempt in $(seq 1 18); do
+            for attempt in $(seq 1 60); do
               if npm view "${package}@${VERSION}" version >/dev/null 2>&1; then return 0; fi
-              echo "Waiting for ${package}@${VERSION} to become visible on npm (${attempt}/18)."
+              echo "Waiting for ${package}@${VERSION} to become visible on npm (${attempt}/60)."
               sleep 10
             done
             return 1
@@ -545,7 +570,7 @@ jobs:
             binary: dbx-mcp.exe
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -554,9 +579,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -633,12 +658,11 @@ jobs:
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libfontconfig1-dev
+          sudo python3 .github/scripts/ci-install-system-deps.py --group fontconfig
 
       - name: Setup Python for cargo-zigbuild
         if: runner.os == 'Linux'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.x'
 
@@ -650,36 +674,98 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            cargo zigbuild --release -p dbx-mcp --target "${{ matrix.target }}.2.31"
+            # Pure-Rust (zbus) Secret Service backend: no C libdbus, so the
+            # zigbuild legs can read desktop-provisioned keys too.
+            cargo zigbuild --release -p dbx-mcp --features os-keyring --target "${{ matrix.target }}.2.31"
           else
-            cargo build --release -p dbx-mcp --target "${{ matrix.target }}"
+            # Native macOS/Windows builds read the OS keychain key that DBX
+            # Desktop provisions during the data security upgrade, so the MCP
+            # works against desktop-migrated profiles without env overrides.
+            cargo build --release -p dbx-mcp --features os-keyring --target "${{ matrix.target }}"
           fi
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.23.4
+          registry-url: https://registry.npmjs.org
+
+      - name: Sign macOS MCP binary
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: node .github/scripts/sign-mcp-macos.mjs sign "target/${{ matrix.target }}/release/${{ matrix.binary }}"
 
       - name: Stage platform package
         shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           mkdir -p "packages/${{ matrix.package-dir }}/bin"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
           if [[ "${{ runner.os }}" != "Windows" ]]; then
             chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
           fi
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22.13.0
-          registry-url: https://registry.npmjs.org
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            cmp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+            node .github/scripts/sign-mcp-macos.mjs verify "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+          fi
 
       - name: Publish platform package
         shell: bash
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          set -euo pipefail
+          # npm can accept a publish but leave the version stuck in a staged
+          # (invisible, blocks republication) state; the only recovery is
+          # to drop the staged version and publish again.
+          npm_publish_with_staged_recovery() {
+            local publish_log="${RUNNER_TEMP}/npm-publish.log"
+            if ! npm publish "$@" --access public --provenance 2>&1 | tee "$publish_log"; then
+              if ! grep -q "previously staged version" "$publish_log"; then
+                return 1
+              fi
+              if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
+                echo "${{ matrix.package-name }}@${VERSION} became visible despite the error; continuing."
+                return 0
+              fi
+              echo "::warning::npm holds ${{ matrix.package-name }}@${VERSION} in a staged (invisible) state; dropping it and retrying."
+              npm unpublish "${{ matrix.package-name }}@${VERSION}" --force
+              npm publish "$@" --access public --provenance
+              return
+            fi
+          }
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            work_dir="$(mktemp -d)"
+            trap 'rm -rf "$work_dir"' EXIT
+            package_ref="./packages/${{ matrix.package-dir }}"
+            exists=false
+            if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
+              package_ref="${{ matrix.package-name }}@${VERSION}"
+              exists=true
+            fi
+            npm pack "$package_ref" --ignore-scripts --pack-destination "$work_dir" --json > "$work_dir/pack.json"
+            tarball="$work_dir/$(node -p 'require(process.argv[1])[0].filename' "$work_dir/pack.json")"
+            tar -xzf "$tarball" -C "$work_dir"
+            node .github/scripts/sign-mcp-macos.mjs verify "$work_dir/package/bin/${{ matrix.binary }}"
+            if [ "$exists" = true ]; then
+              echo "${{ matrix.package-name }}@${VERSION} already exists with a verified MCP identity; skipping."
+              exit 0
+            fi
+            cmp "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}" "$work_dir/package/bin/${{ matrix.binary }}"
+            npm_publish_with_staged_recovery "$tarball" --ignore-scripts
+            exit 0
+          fi
           if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
             echo "${{ matrix.package-name }}@${VERSION} already exists on npm; skipping."
             exit 0
           fi
-          npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance
+          npm_publish_with_staged_recovery "./packages/${{ matrix.package-dir }}"
 
       - name: Show sccache stats
         if: always()
@@ -692,7 +778,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [prepare, publish-mcp-platforms]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -702,7 +788,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.4
           registry-url: https://registry.npmjs.org
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
@@ -717,11 +803,11 @@ jobs:
         run: |
           wait_for_package() {
             package="$1"
-            for attempt in $(seq 1 18); do
+            for attempt in $(seq 1 60); do
               if npm view "${package}@${VERSION}" version >/dev/null 2>&1; then
                 return 0
               fi
-              echo "Waiting for ${package}@${VERSION} to become visible on npm (${attempt}/18)."
+              echo "Waiting for ${package}@${VERSION} to become visible on npm (${attempt}/60)."
               sleep 10
             done
             return 1
@@ -747,22 +833,23 @@ jobs:
 
   publish-mcp-github-release:
     name: Publish MCP GitHub Release assets
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     needs: [prepare, publish-mcp-server]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.4
           registry-url: https://registry.npmjs.org
 
       - name: Build native release archives from npm packages
         shell: bash
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
@@ -777,7 +864,17 @@ jobs:
             mkdir -p "${work_dir}/archive"
             cp "${work_dir}/package/bin/dbx-mcp" "${work_dir}/archive/dbx-mcp"
             chmod +x "${work_dir}/archive/dbx-mcp"
+            if [[ "$package_name" == @dbx-app/mcp-darwin-* ]]; then
+              node .github/scripts/sign-mcp-macos.mjs verify "${work_dir}/archive/dbx-mcp"
+            fi
             tar -C "${work_dir}/archive" -czf "release-assets/${asset_name}.tar.gz" dbx-mcp
+            mkdir "${work_dir}/unpacked"
+            tar -xzf "release-assets/${asset_name}.tar.gz" -C "${work_dir}/unpacked"
+            cmp "${work_dir}/package/bin/dbx-mcp" "${work_dir}/unpacked/dbx-mcp"
+            if [[ "$package_name" == @dbx-app/mcp-darwin-* ]]; then
+              node .github/scripts/sign-mcp-macos.mjs verify "${work_dir}/unpacked/dbx-mcp"
+            fi
+            rm -rf "$work_dir"
           }
 
           pack_windows() {
@@ -799,11 +896,11 @@ jobs:
 
           (
             cd release-assets
-            sha256sum *.tar.gz *.zip > SHA256SUMS
+            shasum -a 256 *.tar.gz *.zip > SHA256SUMS
           )
 
       - name: Attest native release archives
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: release-assets/*
 
@@ -847,13 +944,13 @@ jobs:
     needs: [prepare, publish-cli, publish-mcp-github-release]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.4
           registry-url: https://registry.npmjs.org
 
       - name: Build native CLI release archives from npm packages
@@ -900,7 +997,7 @@ jobs:
           )
 
       - name: Attest native CLI release archives
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: release-assets/*
 
@@ -914,39 +1011,77 @@ jobs:
   publish-homebrew-formula:
     name: Publish Homebrew formula
     runs-on: ubuntu-latest
-    needs: [prepare, publish-cli, publish-mcp-server]
+    needs: [prepare, publish-cli-github-release, publish-mcp-github-release]
     steps:
-      - name: Download CLI npm tarball and compute SHA256
+      - uses: actions/checkout@v7
+
+      - name: Download MCP release checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          mkdir -p release-assets
+          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern SHA256SUMS --dir release-assets --clobber
+
+      - name: Download native CLI archives and compute SHA256
         id: cli-hash
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          VERSION="${VERSION}"
-          NPM_TARBALL="cli-${VERSION}.tgz"
-          NPM_URL="https://registry.npmjs.org/@dbx-app/cli/-/${NPM_TARBALL}"
-
-          # Poll npm until the package is available (CDN propagation delay)
-          for i in $(seq 1 12); do
-            if curl -fsSLI "${NPM_URL}" >/dev/null 2>&1; then
-              echo "Package found on attempt ${i}"
-              break
-            fi
-            echo "Waiting for npm CDN (attempt ${i}/12)..."
-            sleep 10
+          mkdir -p release-assets
+          ASSETS=(
+            "CLI-SHA256SUMS"
+            "dbx-cli-darwin-arm64.tar.gz"
+            "dbx-cli-darwin-x64.tar.gz"
+            "dbx-cli-linux-arm64-gnu.tar.gz"
+            "dbx-cli-linux-x64-gnu.tar.gz"
+          )
+          for ASSET in "${ASSETS[@]}"; do
+            gh release download "${TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern "${ASSET}" \
+              --dir release-assets \
+              --clobber
           done
 
-          curl -fsSL -o "${NPM_TARBALL}" "${NPM_URL}"
-          CLI_SHA256=$(sha256sum "${NPM_TARBALL}" | cut -d ' ' -f 1)
+          (
+            cd release-assets
+            sha256sum --check --ignore-missing CLI-SHA256SUMS
+          )
+
+          hash_for() {
+            awk -v f="$1" '$2 == f {print $1}' release-assets/CLI-SHA256SUMS
+          }
+
+          SHA_DARWIN_ARM64="$(hash_for dbx-cli-darwin-arm64.tar.gz)"
+          SHA_DARWIN_X64="$(hash_for dbx-cli-darwin-x64.tar.gz)"
+          SHA_LINUX_ARM64="$(hash_for dbx-cli-linux-arm64-gnu.tar.gz)"
+          SHA_LINUX_X64="$(hash_for dbx-cli-linux-x64-gnu.tar.gz)"
+
+          for HASH_NAME in SHA_DARWIN_ARM64 SHA_DARWIN_X64 SHA_LINUX_ARM64 SHA_LINUX_X64; do
+            if [ -z "${!HASH_NAME}" ]; then
+              echo "::error::Missing SHA256 entry for ${HASH_NAME} in CLI-SHA256SUMS"
+              exit 1
+            fi
+          done
+
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "sha256=${CLI_SHA256}" >> "$GITHUB_OUTPUT"
-          echo "  cli version: ${VERSION}"
-          echo "  sha256: ${CLI_SHA256}"
+          echo "sha_darwin_arm64=${SHA_DARWIN_ARM64}" >> "$GITHUB_OUTPUT"
+          echo "sha_darwin_x64=${SHA_DARWIN_X64}" >> "$GITHUB_OUTPUT"
+          echo "sha_linux_arm64=${SHA_LINUX_ARM64}" >> "$GITHUB_OUTPUT"
+          echo "sha_linux_x64=${SHA_LINUX_X64}" >> "$GITHUB_OUTPUT"
 
       - name: Push formula to homebrew-tap
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
           CLI_VERSION: ${{ steps.cli-hash.outputs.version }}
-          CLI_SHA256: ${{ steps.cli-hash.outputs.sha256 }}
+          SHA_DARWIN_ARM64: ${{ steps.cli-hash.outputs.sha_darwin_arm64 }}
+          SHA_DARWIN_X64: ${{ steps.cli-hash.outputs.sha_darwin_x64 }}
+          SHA_LINUX_ARM64: ${{ steps.cli-hash.outputs.sha_linux_arm64 }}
+          SHA_LINUX_X64: ${{ steps.cli-hash.outputs.sha_linux_x64 }}
         run: |
           git clone --depth 1 \
             "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/t8y2/homebrew-tap.git" \
@@ -954,41 +1089,64 @@ jobs:
           cd homebrew-tap
           mkdir -p Formula
 
+          # The formula installs the prebuilt native binary from the packages
+          # release. Installing the npm tarball instead breaks within the
+          # Homebrew --min-release-age cooldown: the platform binary is an npm
+          # optionalDependency, so during the cooldown npm silently skips it
+          # and brew ships a non-working CLI (t8y2/homebrew-tap#2).
           cat > Formula/dbx-cli.rb <<'RUBY_EOF'
           class DbxCli < Formula
             desc "Command-line interface for DBX database connections, schema, and safe queries"
             homepage "https://github.com/t8y2/dbx"
-            url "https://registry.npmjs.org/@dbx-app/cli/-/cli-__CLI_VERSION__.tgz"
-            sha256 "__CLI_SHA256__"
+            version "__CLI_VERSION__"
             license "Apache-2.0"
 
-              depends_on "node"
+            on_macos do
+              if Hardware::CPU.intel?
+                url "https://github.com/t8y2/dbx/releases/download/packages-v#{version}/dbx-cli-darwin-x64.tar.gz"
+                sha256 "__SHA_DARWIN_X64__"
+              else
+                url "https://github.com/t8y2/dbx/releases/download/packages-v#{version}/dbx-cli-darwin-arm64.tar.gz"
+                sha256 "__SHA_DARWIN_ARM64__"
+              end
+            end
+            on_linux do
+              if Hardware::CPU.intel?
+                url "https://github.com/t8y2/dbx/releases/download/packages-v#{version}/dbx-cli-linux-x64-gnu.tar.gz"
+                sha256 "__SHA_LINUX_X64__"
+              else
+                url "https://github.com/t8y2/dbx/releases/download/packages-v#{version}/dbx-cli-linux-arm64-gnu.tar.gz"
+                sha256 "__SHA_LINUX_ARM64__"
+              end
+            end
 
             def install
-              system "npm", "install", *std_npm_args
-              bin.install_symlink libexec.glob("bin/*")
-
+              bin.install "dbx"
             end
 
             test do
-              assert_path_exists bin/"dbx"
-              system bin/"dbx", "doctor"
+              assert_match version.to_s, shell_output("#{bin}/dbx --version")
             end
           end
           RUBY_EOF
 
-          sed -i 's/^          //' Formula/dbx-cli.rb
           sed -i "s/__CLI_VERSION__/${CLI_VERSION}/g" Formula/dbx-cli.rb
-          sed -i "s/__CLI_SHA256__/${CLI_SHA256}/g" Formula/dbx-cli.rb
+          sed -i "s/__SHA_DARWIN_ARM64__/${SHA_DARWIN_ARM64}/g" Formula/dbx-cli.rb
+          sed -i "s/__SHA_DARWIN_X64__/${SHA_DARWIN_X64}/g" Formula/dbx-cli.rb
+          sed -i "s/__SHA_LINUX_ARM64__/${SHA_LINUX_ARM64}/g" Formula/dbx-cli.rb
+          sed -i "s/__SHA_LINUX_X64__/${SHA_LINUX_X64}/g" Formula/dbx-cli.rb
+
+          node "$GITHUB_WORKSPACE/.github/scripts/render-mcp-formula.mjs" \
+            "${CLI_VERSION}" "$GITHUB_WORKSPACE/release-assets/SHA256SUMS" Formula/dbx-mcp.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/dbx-cli.rb
+          git add Formula/dbx-cli.rb Formula/dbx-mcp.rb
 
           if git diff --cached --quiet; then
             echo "CLI Homebrew formula is already up to date."
           else
-            git commit -m "dbx-cli ${CLI_VERSION}"
+            git commit -m "dbx-cli and dbx-mcp ${CLI_VERSION}"
             git push
             echo "::notice::CLI Homebrew formula updated to ${CLI_VERSION}"
           fi

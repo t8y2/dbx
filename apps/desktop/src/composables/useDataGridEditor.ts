@@ -1,23 +1,31 @@
+import { joinedSaveOptions } from "@/lib/dataGrid/joinedRowChanges";
+import { isAiPromptImeCompositionEvent } from "@/lib/ai/aiPromptKeyboard";
 import { ref, shallowRef, triggerRef, computed, nextTick, watch, getCurrentInstance, onActivated, onBeforeUnmount, onDeactivated, onMounted, toRaw, type ComputedRef, type Ref } from "vue";
 import * as api from "@/lib/backend/api";
+import type { DataGridSaveGuard } from "@/lib/backend/tauri";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
 import { focusDataGridEditorWithoutScrolling, preserveDataGridScrollPosition } from "@/lib/dataGrid/dataGridEditorFocus";
 import { normalizeDataGridSaveError } from "@/lib/dataGrid/dataGridSql";
+import { isOpaqueAggregateStateColumnType } from "@/lib/dataGrid/binaryCellDownload";
 import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
 import type { GridNewRowMeta, GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
+import { dataGridPendingRowLimit, dataGridPreparationBatchSize, finishDataGridRowPreparation, runDataGridRowPreparation, type DataGridRowPreparationOptions, type DataGridRowPreparationProgress } from "@/lib/dataGrid/dataGridRowPreparation";
 import { supportsDataGridTransaction } from "@/lib/table/tableEditing";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { assessProductionSql, productionContextForDatabase } from "@/lib/database/productionSafety";
 import { ensureReadOnlyWriteAccess, isWriteUnlockActive } from "@/lib/database/readOnlyWriteAccess";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import { DBX_NEO4J_ELEMENT_ID_COLUMN, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { normalizeBackendError } from "@/lib/backend/errorUtils";
 import { uuid } from "@/lib/common/utils";
 import i18n from "@/i18n";
+
+const KEYLESS_GUARD_UNVERIFIED_ERROR = "Cannot safely update or delete this row: the table has no primary key, and DBX could not check on the server whether the row can be targeted uniquely. Add a primary key or unique index before editing.";
 
 interface RowItem {
   id: number;
@@ -32,7 +40,6 @@ interface RowItem {
 }
 
 export const DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID = Number.MIN_SAFE_INTEGER;
-export const DATA_GRID_MAX_BATCH_INSERT_ROWS = 1000;
 
 type RowKind = "none" | "existing" | "new" | "draft";
 type ConditionalUpdateOutcome = "not-started" | "running" | "completed" | "failed" | "unknown";
@@ -46,7 +53,7 @@ interface ConditionalUpdateExecution {
   outcome: ConditionalUpdateOutcome;
 }
 
-export type DataGridAppendPastedRowsResult = { ok: true; rowCount: number } | { ok: false; reason: "not-editable" | "invalid-target" | "target-not-empty" | "empty-paste" | "readonly-column" };
+export type DataGridAppendPastedRowsResult = { ok: true; rowCount: number } | { ok: false; reason: "not-editable" | "invalid-target" | "target-not-empty" | "empty-paste" | "readonly-column" | "no-matching-columns" | "capacity-exceeded" | "cancelled" };
 
 type CommitEditResult =
   | {
@@ -76,15 +83,34 @@ export interface CustomSaveHandler {
   save: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; newRowMeta: GridNewRowMeta[]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<void>;
   applySavedChanges?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; columns: string[] }) => void;
   preview?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; newRowMeta: GridNewRowMeta[]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<string[]>;
+  /** Optional per-existing-row safety gate used before a deletion can be staged. */
+  canDeleteRow?: (sourceIndex: number, row: readonly CellValue[]) => boolean;
+  /** Selects an unconditional, statement-previewing confirmation before save. */
+  confirmation?: "influxdb-v1-delete";
+  /** Refresh after an execution error when a non-transactional batch may have partially succeeded. */
+  reloadOnFailure?: boolean;
   canInsert?: boolean;
+  canUpdate?: boolean;
   canDelete?: boolean;
   readonlyColumns?: string[];
   supportsInsert?: boolean;
   targetLabel?: string;
 }
 
+/** Summary handed to `confirmSaveRequest` for a final mutation review. */
+export interface DataGridSaveConfirmationRequest {
+  /** Rows with edited cells (one write per row). */
+  updates: number;
+  inserts: number;
+  deletes: number;
+  /** Save target name (table / sObject), when known. */
+  targetLabel?: string;
+  /** The SQL or pseudo-statements about to be executed. */
+  statements: string[];
+}
+
 export interface UseDataGridEditorOptions {
-  result: ComputedRef<{ columns: string[]; rows: CellValue[][] }>;
+  result: ComputedRef<{ columns: string[]; rows: CellValue[][]; column_types?: string[] }>;
   editable: ComputedRef<boolean | undefined>;
   databaseType: ComputedRef<DatabaseType | undefined>;
   connectionId: ComputedRef<string | undefined>;
@@ -99,10 +125,15 @@ export interface UseDataGridEditorOptions {
     | undefined
   >;
   sourceColumns?: ComputedRef<Array<string | undefined> | undefined>;
+  joinedWriteTargets?: ComputedRef<import("@/types/database").QueryTab["queryWriteTargets"]>;
   readonlyColumnIndexes?: ComputedRef<ReadonlySet<number> | undefined>;
   canEditExistingRows?: ComputedRef<boolean>;
   onExecuteSql: ComputedRef<((sql: string) => Promise<void>) | undefined>;
   customSaveHandler?: ComputedRef<CustomSaveHandler | undefined>;
+  manualTransactionSessionId?: ComputedRef<string | undefined>;
+  ensureManualTransactionSession?: ComputedRef<(() => Promise<string>) | undefined>;
+  onManualTransactionMutation?: () => void;
+  onSaveConflict?: (message: string) => void;
   sql: ComputedRef<string | undefined>;
   searchText: Ref<string>;
   whereFilterInput: Ref<string>;
@@ -111,20 +142,40 @@ export interface UseDataGridEditorOptions {
   rowStatusFilter: Ref<RowStatusFilter>;
   dataGridQuickEntryEnabled?: ComputedRef<boolean>;
   confirmDangerousRowDeletion?: ComputedRef<boolean>;
+  /** Optional operator review before a save is executed. Auto-save never bypasses it. */
+  confirmSaveRequest?: ComputedRef<((request: DataGridSaveConfirmationRequest) => Promise<boolean>) | undefined>;
+  /** `生成 SQL 时包含数据库名` — qualify saved tables with their database. */
+  includeDatabaseNameInSaveSql?: ComputedRef<boolean>;
   initialEditColumn?: ComputedRef<number>;
+  /** Converts a grid value to the text presented by the cell editor. */
+  cellEditorText?: (value: CellValue, columnIndex: number) => string;
+  /** Normalizes user-entered editor text before cell type coercion. */
+  normalizeEditorInput?: (value: string, columnIndex: number) => string;
   getRowItem: (rowId: number) => RowItem | undefined;
   pageSize: Ref<number>;
   currentPage: Ref<number>;
   cacheKey?: ComputedRef<string | undefined>;
+  /**
+   * Tab that owns the displayed result. A tab switch unmounts the grid while a
+   * save is still running, so the in-flight save must be tracked per tab
+   * (issue #13226).
+   */
+  tabId?: ComputedRef<string | undefined>;
+  /** Identity of the displayed result payload; a new payload never inherits a running save. */
+  resultViewGeneration?: ComputedRef<string | undefined>;
   /** 保存成功后结果负载被原地修改时通知宿主，使缓存的字节估算失效。 */
   onResultPayloadMutated?: () => void;
+  prepareSaveBaseline?: (changes: { dirtyRows: ReadonlyMap<number, ReadonlyMap<number, CellValue>>; deletedRows: ReadonlySet<number> }) => Promise<void>;
   refreshSavedRows?: (request: { dirtyRows: ReadonlyMap<number, ReadonlyMap<number, CellValue>>; columns: readonly string[]; rows: readonly (readonly CellValue[])[] }) => Promise<boolean>;
   onCellValueChanged?: (rowId: number, columnIndex: number) => void;
   prepareFullReload?: () => void;
+  /** The adopted save (started by a previous grid instance that is gone) finished and the host grid refreshed. */
+  onAdoptedSaveCompleted?: () => void;
   emit: (event: "reload", sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number) => void;
 }
 
 interface PendingChangesSnapshot {
+  manualSaveRequired?: boolean;
   newRows: CellValue[][];
   newRowMeta: GridNewRowMeta[];
   quickEntryDraftRow?: CellValue[];
@@ -134,6 +185,15 @@ interface PendingChangesSnapshot {
   editValue?: string;
   transactionActive?: boolean;
   scroll?: { top: number; left: number };
+  // True only when this snapshot was written because the user navigated away from
+  // this grid's own tab. A scroll-only snapshot may be replayed on remount only
+  // with that provenance (#8524); every other remount reason — refresh,
+  // re-execute, sort, paginate, eviction reload — still starts at the first row
+  // (#7341).
+  scrollFromTabSwitch?: boolean;
+  // Written while this instance's save was in flight. The save already owns
+  // those changes, so a remount must not restore them as pending (#13226).
+  saving?: boolean;
   columnCount: number;
   rowCount: number;
 }
@@ -156,12 +216,107 @@ interface QueuedAutoSaveChange {
   value: CellValue;
 }
 
-type PendingChangesHistorySnapshot = Pick<PendingChangesSnapshot, "newRows" | "newRowMeta" | "quickEntryDraftRow" | "dirtyRows" | "deletedRows" | "transactionActive">;
+type PendingChangesHistorySnapshot = Pick<PendingChangesSnapshot, "newRows" | "newRowMeta" | "quickEntryDraftRow" | "dirtyRows" | "deletedRows" | "transactionActive" | "manualSaveRequired"> & { cellCount?: number };
 
 const pendingChangesCache = new Map<string, PendingChangesSnapshot>();
 const closingPendingSnapshotTabs = new Set<string>();
+
+/**
+ * In-flight saves, keyed by tab and result payload.
+ *
+ * A save keeps running after the grid that started it is unmounted (tab switch,
+ * summary view), because the columns of a result key are the same for every
+ * instance of that grid. Its side effects — `isSaving`, clearing the saved
+ * pending changes, refreshing the viewer — all lived on the unmounted instance,
+ * so returning to the tab showed the stale "498" badge, kept the commit button
+ * enabled and never refreshed or reported the result (issue #13226).
+ *
+ * The next instance of the same tab and result adopts the save: it views
+ * `isSaving` from here and reloads its result once the save settles. A record
+ * outlives a save that settled while no grid was mounted, so that grid still
+ * gets the refresh it missed; it is released once a grid consumed it, when the
+ * tab closes, or when the tab's result is replaced.
+ */
+interface PendingSaveRecord {
+  /** Id of this record: a settling save only ever settles its own record. */
+  id: number;
+  key: string;
+  running: boolean;
+  /** The instance that started the save: only another instance reports it. */
+  owner: object;
+  /** A grid that was unmounted mid-save asked to reload its result afterwards. */
+  refreshAfter: boolean;
+  /** The completion was already reported, so a remount never repeats it. */
+  reported: boolean;
+  /** The grid currently showing this result, if any: it reloads and reports. */
+  live?: PendingSaveWatcher;
+}
+
+/** What a grid of the same tab and result can do for the save it adopted. */
+interface PendingSaveWatcher {
+  isMounted: () => boolean;
+  /** The save failed: show its changes again so the user can retry. */
+  restore: (snapshot: PendingSaveSnapshot) => void;
+  refresh: () => void;
+  reportSaved: () => void;
+  /** The save it adopted settled: stop showing it as running. */
+  settled: () => void;
+}
+
+/**
+ * Saves grouped by key. Several grids can show the same tab and result payload
+ * (split view); each save keeps its own record, and only a record that is still
+ * running is adoptable.
+ */
+const pendingSaves = new Map<string, PendingSaveRecord[]>();
+let saveInstanceSeq = 0;
+let saveRecordSeq = 0;
+/** Bumped on every registry change: grids read the non-reactive map through it. */
+const pendingSavesVersion = ref(0);
+
+function touchPendingSaves() {
+  pendingSavesVersion.value++;
+}
+
+/** Removes one record, keeping the other saves of the same grid alive. */
+function dropPendingSave(record: PendingSaveRecord) {
+  const list = pendingSaves.get(record.key);
+  if (!list) return;
+  const index = list.indexOf(record);
+  if (index < 0) return;
+  list.splice(index, 1);
+  if (!list.length) pendingSaves.delete(record.key);
+  touchPendingSaves();
+}
+
+/**
+ * Reads registry state through the reactive version: the registry itself is a
+ * module-level Map, so computeds must subscribe to the version to follow it.
+ */
+function readingPendingSaves<T>(value: T): T {
+  void pendingSavesVersion.value;
+  return value;
+}
+
+/** The save a returning grid adopts: the one still running for this grid. */
+function adoptablePendingSave(key: string | undefined): PendingSaveRecord | undefined {
+  if (!key) return undefined;
+  return pendingSaves.get(key)?.find((record) => record.running);
+}
+
+/** The save whose reload is still owed to a returning grid. */
+function owedPendingSave(key: string | undefined): PendingSaveRecord | undefined {
+  if (!key) return undefined;
+  return pendingSaves.get(key)?.find((record) => record.refreshAfter);
+}
+
+function saveRegistryKey(tabId: string, revision?: string) {
+  return revision ? `${tabId}\u0000${revision}` : tabId;
+}
+
 const BEFORE_TAB_SWITCH_EVENT = "dbx:before-tab-switch";
 const MAX_PENDING_CHANGES_HISTORY = 100;
+const MAX_PENDING_HISTORY_CELLS = 2_000_000;
 
 function dataGridRowsIdentityChanged(previousRows: CellValue[][] | undefined, nextRows: CellValue[][], appendedFromRowCount?: number): boolean {
   if (!previousRows) return true;
@@ -196,6 +351,21 @@ export function clearDataGridPendingSnapshotsForTab(tabId: string) {
   for (const key of pendingChangesCache.keys()) {
     if (cacheKeyBelongsToTab(key, tabId)) pendingChangesCache.delete(key);
   }
+  // Its saves cannot be adopted any more either (#13226). Save keys are
+  // `tabId\u0000revision` (or a cache key), so compare the part before it.
+  const staleSaveKeys: string[] = [];
+  for (const key of pendingSaves.keys()) {
+    if (cacheKeyBelongsToTab(key.split("\u0000")[0] ?? key, tabId)) staleSaveKeys.push(key);
+  }
+  staleSaveKeys.forEach((key) => pendingSaves.delete(key));
+  touchPendingSaves();
+}
+
+/** Exposed for tests: how many in-flight save records the registry holds. */
+export function pendingDataGridSaveCount(): number {
+  let count = 0;
+  for (const records of pendingSaves.values()) count += records.length;
+  return count;
 }
 
 export function clearDataGridPendingSnapshot(cacheKey: string) {
@@ -215,22 +385,30 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     database,
     tableMeta,
     sourceColumns = computed(() => undefined),
+    joinedWriteTargets = computed(() => undefined),
     readonlyColumnIndexes = computed(() => undefined),
     canEditExistingRows = computed(() => true),
     onExecuteSql,
     customSaveHandler,
+    manualTransactionSessionId = computed(() => undefined),
     sql,
     searchText,
     orderByInput,
     rowStatusFilter,
     dataGridQuickEntryEnabled = computed(() => false),
     confirmDangerousRowDeletion = computed(() => true),
+    includeDatabaseNameInSaveSql = computed(() => false),
     initialEditColumn,
+    cellEditorText,
+    normalizeEditorInput,
     getRowItem,
     pageSize,
     currentPage,
     cacheKey,
+    tabId,
+    resultViewGeneration,
     onCellValueChanged,
+    onAdoptedSaveCompleted,
   } = options;
 
   const editingCell = ref<{ rowId: number; col: number } | null>(null);
@@ -238,6 +416,21 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const scrollerRef = ref<GridScrollerRef | null>(null);
   const dirtyRows = shallowRef<Map<number, Map<number, CellValue>>>(new Map());
   const newRows = ref<CellValue[][]>([]);
+  const availableInsertRows = computed(() => Math.max(0, dataGridPendingRowLimit(result.value.columns.length) - newRows.value.length));
+
+  function canAllocateNewRows(count: number): boolean {
+    if (count <= availableInsertRows.value) return true;
+    saveError.value = i18n.global.t("grid.insertRowsCapacityExceeded", { max: availableInsertRows.value });
+    return false;
+  }
+
+  function rowPreparationIsCurrent(): () => boolean {
+    const version = pendingChangesVersion.value;
+    const rows = newRows.value;
+    const sourceRows = result.value.rows;
+    const columns = result.value.columns;
+    return () => !!editable.value && !isSaving.value && !isConditionalUpdateActive.value && pendingChangesVersion.value === version && newRows.value === rows && result.value.rows === sourceRows && result.value.columns === columns;
+  }
   // Parallel to newRows: one stable token + display placement per pending row.
   // Kept in lockstep with every structural mutation of newRows.
   const newRowMeta = ref<GridNewRowMeta[]>([]);
@@ -246,11 +439,17 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return { token: nextNewRowToken++, placement, sourceIndex, editedColumns: editedColumns?.length ? [...editedColumns] : undefined };
   }
   function cloneNewRowMeta(meta: readonly GridNewRowMeta[]): GridNewRowMeta[] {
-    return meta.map((item) => ({ token: item.token, placement: item.placement ? { ...item.placement } : null, sourceIndex: item.sourceIndex, editedColumns: item.editedColumns ? [...item.editedColumns] : undefined }));
+    return toRaw(meta).map((entry) => {
+      const item = toRaw(entry);
+      const cloned: GridNewRowMeta = { token: item.token, placement: item.placement ? { ...toRaw(item.placement) } : null, sourceIndex: item.sourceIndex, editedColumns: item.editedColumns ? [...toRaw(item.editedColumns)] : undefined };
+      if (item.untouched === true) cloned.untouched = true;
+      return cloned;
+    });
   }
 
-  function updateClonedRowEditedColumns(newIndex: number, col: number, value: CellValue) {
+  function updateNewRowEditedColumns(newIndex: number, col: number, value: CellValue) {
     const meta = newRowMeta.value[newIndex];
+    if (meta) delete meta.untouched;
     if (!meta || meta.sourceIndex === undefined) return;
     const baseline = result.value.rows[meta.sourceIndex]?.[col];
     const edited = new Set(meta.editedColumns);
@@ -272,7 +471,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         if (value !== baseline[column]) edited.add(column);
       });
     }
-    return allocateNewRowMeta(null, sourceIndex, [...edited]);
+    const placement = item.isNew && item.newIndex !== undefined ? (inherited ? { anchorId: -inherited.token, position: "below" as const } : null) : sourceIndex === undefined ? null : { anchorId: sourceIndex, position: "below" as const };
+    return allocateNewRowMeta(placement, sourceIndex, [...edited]);
   }
   // Restore a metadata snapshot and resume token allocation past its maximum so
   // newly created rows never collide with tokens held by restored rows (a fresh
@@ -290,6 +490,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const undoStack = ref<PendingChangesHistorySnapshot[]>([]);
   const redoStack = ref<PendingChangesHistorySnapshot[]>([]);
   const pendingChangesVersion = ref(0);
+  const manualSaveRequired = ref(false);
   let restoredEditingCell = false;
   let restoredTransactionActive = false;
   let suppressNextBlurCommit = false;
@@ -298,31 +499,62 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   let draftPromotionScheduled = false;
   const savingNewRows = new WeakSet<CellValue[]>();
   let pendingScrollRestore: PendingChangesSnapshot["scroll"] | undefined;
+  // Instance-scoped so it survives the second save: a tab switch saves once from
+  // onBeforeTabSwitch and again from onBeforeUnmount on this same instance.
+  let scrollSnapshotFromTabSwitch = false;
   let saveScrollSnapshotTimer = 0;
   let componentActive = true;
+  // Without a component instance (plain unit usage) there is no lifecycle to
+  // follow: the editor is the live grid from the start.
+  const componentInstance = getCurrentInstance();
+  let mounted = !componentInstance;
+
+  // A save belongs to the grid of a tab and result payload, so the grid that
+  // replaces it finds it and views its busy state until it settles (#13226).
+  // A grid without either identity can only be replaced by itself.
+  const instanceSaveKey = `instance-${++saveInstanceSeq}`;
+  const saveOwner = {};
+  const currentSaveKey = () => {
+    const tab = tabId?.value;
+    if (tab) return saveRegistryKey(tab, resultViewGeneration?.value);
+    const key = cacheKey?.value;
+    return key ? saveRegistryKey(key, resultViewGeneration?.value) : instanceSaveKey;
+  };
+  let pendingSaveKey = currentSaveKey();
+  // The save this instance shows: started here or adopted from the registry.
+  // Tracked per instance, so a grid never settles or consumes another grid's
+  // save on the same result (split view).
+  let currentRecord: PendingSaveRecord | undefined;
+  const isAdoptedRunning = () => readingPendingSaves(currentRecord?.running) === true;
 
   // Restore cached pending changes from a previous instance (e.g. after result eviction + reload)
   const key = cacheKey?.value;
   if (key) {
     const cached = pendingChangesCache.get(key);
-    if (cached && cached.columnCount === result.value.columns.length && cached.rowCount === result.value.rows.length) {
+    // A snapshot written while a save was in flight belongs to that save. Once
+    // the save is gone (and this instance did not adopt it) restoring it would
+    // resurrect changes the server already has (#13226).
+    const savedByGoneSave = cached?.saving === true && !isAdoptedRunning();
+    if (cached && !savedByGoneSave && cached.columnCount === result.value.columns.length && cached.rowCount === result.value.rows.length) {
       newRows.value = cached.newRows;
       restoreNewRowMeta(cached.newRowMeta ?? []);
       quickEntryDraftRow.value = cached.quickEntryDraftRow ? [...cached.quickEntryDraftRow] : [];
       dirtyRows.value = cached.dirtyRows;
       deletedRows.value = cached.deletedRows;
+      manualSaveRequired.value = cached.manualSaveRequired === true;
       editingCell.value = cached.editingCell ?? null;
       editValue.value = cached.editValue ?? "";
       restoredEditingCell = !!cached.editingCell;
       restoredTransactionActive = cached.transactionActive === true;
       // A scroll-only snapshot (no pending edits, draft row, or active cell editor)
-      // must not drag a remounted grid back to the previous viewport: the fresh
-      // result should start at the first row (#7341). Scroll is only replayed
-      // alongside edit state so the user lands back on their edited rows. The
-      // KeepAlive activate path keeps pure scroll restore via the in-instance
-      // pendingScrollRestore, which this gate does not touch.
+      // must not drag a remounted grid back to the previous viewport unless we know
+      // why the previous instance went away. Two reasons justify replaying it: the
+      // snapshot carries edit state the user must land back on, or the previous
+      // instance was torn down by a tab switch (#8524) — data tabs render a single
+      // active pane keyed by tab id, so returning to a tab remounts the grid. A
+      // fresh or reloaded result still starts at the first row (#7341).
       const snapshotHasEditState = cached.newRows.length > 0 || cached.dirtyRows.size > 0 || cached.deletedRows.size > 0 || !!cached.editingCell || !!cached.quickEntryDraftRow;
-      pendingScrollRestore = snapshotHasEditState ? cached.scroll : undefined;
+      pendingScrollRestore = snapshotHasEditState || cached.scrollFromTabSwitch === true ? cached.scroll : undefined;
       pendingChangesCache.delete(key);
     } else {
       pendingChangesCache.delete(key);
@@ -330,7 +562,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   const dirtyRowCount = computed(() => dirtyRows.value.size);
-  const newRowCount = computed(() => newRows.value.length);
+  // Untouched blank rows are layout placeholders. They remain available for
+  // editing, but do not represent a change that can be submitted.
+  const newRowCount = computed(() => newRows.value.reduce((count, row, index) => count + (isUntouchedNewRow(row, index) ? 0 : 1), 0));
   const deletedRowCount = computed(() => deletedRows.value.size);
   const pendingChangeCount = computed(() => dirtyRowCount.value + newRowCount.value + deletedRowCount.value);
   const hasPendingChanges = computed(() => pendingChangeCount.value > 0);
@@ -340,13 +574,29 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   // --- Transaction state ---
   const transactionActive = ref(false);
+  // True while this instance saves or while it adopted the save of a previous
+  // instance for the same tab and result. It stays a plain writable ref: the
+  // registry mirrors an adopted save into it, and hosts (and tests) may pin it.
   const isSaving = ref(false);
+  // Busy state this instance owns itself, so mirroring an adopted save never
+  // clears a save this instance is running.
+  let localSaveBusy = false;
+  const setLocalSaveBusy = (busy: boolean) => {
+    localSaveBusy = busy;
+    isSaving.value = busy || isAdoptedRunning();
+  };
+  const adoptedSave = computed(() => isAdoptedRunning());
   const saveError = ref("");
+  const previewValidationMessage = ref("");
   const conditionalUpdateExecution = shallowRef<ConditionalUpdateExecution>();
   const isConditionalUpdateActive = computed(() => conditionalUpdateExecution.value !== undefined);
 
   const hasBackendSaveTarget = computed(() => !!connectionId.value && !!tableMeta.value);
-  const useTransaction = computed(() => editable.value && supportsDataGridTransaction(resolvedDatabaseType.value) && (!!customSaveHandler?.value || hasBackendSaveTarget.value));
+  // External JDBC drivers have no batch-transaction path even when their dialect
+  // is inferred as a transactional engine (e.g. a driver reporting itself as H2),
+  // so the raw connection type decides whether saves run in a transaction (#12657).
+  const transactionDatabaseType = computed(() => (connectionStore.getConfig(connectionId.value ?? "")?.db_type === "jdbc" ? "jdbc" : resolvedDatabaseType.value));
+  const useTransaction = computed(() => editable.value && supportsDataGridTransaction(transactionDatabaseType.value) && (!!customSaveHandler?.value || hasBackendSaveTarget.value));
 
   if (hasPendingChanges.value && useTransaction.value) {
     transactionActive.value = true;
@@ -357,13 +607,20 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function focusEditInput(select = true) {
-    const focusInput = () => {
+    // `selectText` is tri-state: true selects the full value once when the
+    // editor opens, false places the caret at the end, and undefined only
+    // refocuses without touching the selection. The requestAnimationFrame
+    // retry below uses the undefined mode so a user who starts typing or
+    // moving the caret immediately after the editor opens is not clobbered by
+    // a second select-all on a later frame.
+    const focusInput = (selectText?: boolean) => {
       if (typeof document === "undefined") return;
       const scroller = getScrollerElement();
       const root = scroller?.closest("[data-grid-root]");
       const input = (root ?? document).querySelector(".cell-edit-input") as HTMLInputElement | HTMLTextAreaElement | null;
       if (input) focusDataGridEditorWithoutScrolling(input, scroller);
-      if (select && input) {
+      if (selectText === undefined) return;
+      if (selectText && input) {
         if (input instanceof HTMLTextAreaElement && input.dataset.expandedCellEditor === "true") {
           // Expanded editors must match single-line editors: a double-click selects the whole value.
           input.select();
@@ -378,11 +635,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
     };
     nextTick(() => {
-      focusInput();
+      focusInput(select);
       if (typeof requestAnimationFrame === "undefined") return;
       let attempts = 0;
       const focusNextFrame = () => {
-        focusInput();
+        focusInput(undefined);
         attempts += 1;
         if (attempts < 3) requestAnimationFrame(focusNextFrame);
       };
@@ -401,16 +658,40 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   function touchPendingChanges() {
     // Save errors describe the previous pending snapshot; edits, undo/redo, and rollback make them stale.
     saveError.value = "";
+    previewValidationMessage.value = "";
     pendingChangesVersion.value++;
   }
 
   function pendingChangesSnapshot(): PendingChangesHistorySnapshot {
+    return finishDataGridRowPreparation(preparePendingChangesSnapshot());
+  }
+
+  function* preparePendingChangesSnapshot(): Generator<DataGridRowPreparationProgress, PendingChangesHistorySnapshot> {
+    const sourceRows = toRaw(newRows.value);
+    const sourceMeta = toRaw(newRowMeta.value);
+    const rows: CellValue[][] = [];
+    const meta: GridNewRowMeta[] = [];
+    const batchSize = dataGridPreparationBatchSize(result.value.columns.length);
+    if (sourceRows.length > batchSize) yield { completed: 0, total: sourceRows.length };
+    let cellCount = 0;
+    for (let index = 0; index < sourceRows.length; index++) {
+      const row = toRaw(sourceRows[index]!);
+      rows.push([...row]);
+      cellCount += row.length;
+      if (sourceMeta[index]) meta.push(...cloneNewRowMeta([sourceMeta[index]!]));
+      if (sourceRows.length > batchSize && ((index + 1) % batchSize === 0 || index + 1 === sourceRows.length)) yield { completed: index + 1, total: sourceRows.length };
+    }
+    const changes = new Map([...toRaw(dirtyRows.value)].map(([rowIndex, values]) => [rowIndex, new Map(toRaw(values))]));
+    for (const values of changes.values()) cellCount += values.size;
+    cellCount += deletedRows.value.size + quickEntryDraftRow.value.length;
     return {
-      newRows: newRows.value.map((row) => [...row]),
-      newRowMeta: cloneNewRowMeta(newRowMeta.value),
-      quickEntryDraftRow: quickEntryDraftRow.value.length > 0 ? [...quickEntryDraftRow.value] : undefined,
-      dirtyRows: new Map([...dirtyRows.value].map(([rowIndex, changes]) => [rowIndex, new Map(changes)])),
-      deletedRows: new Set(deletedRows.value),
+      cellCount,
+      manualSaveRequired: manualSaveRequired.value,
+      newRows: rows,
+      newRowMeta: meta,
+      quickEntryDraftRow: quickEntryDraftRow.value.length > 0 ? [...toRaw(quickEntryDraftRow.value)] : undefined,
+      dirtyRows: changes,
+      deletedRows: new Set(toRaw(deletedRows.value)),
       transactionActive: transactionActive.value,
     };
   }
@@ -422,6 +703,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     restoreNewRowMeta(snapshot.newRowMeta ?? []);
     quickEntryDraftRow.value = snapshot.quickEntryDraftRow ? [...snapshot.quickEntryDraftRow] : emptyDraftRow();
     dirtyRows.value = restoredDirtyRows;
+    manualSaveRequired.value = snapshot.manualSaveRequired === true;
     deletedRows.value = new Set(snapshot.deletedRows);
     transactionActive.value = snapshot.transactionActive === true && useTransaction.value === true;
     queuedAutoSaveChanges.clear();
@@ -440,8 +722,21 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     touchPendingChanges();
   }
 
-  function pushUndoSnapshot() {
-    undoStack.value = [...undoStack.value.slice(-MAX_PENDING_CHANGES_HISTORY + 1), pendingChangesSnapshot()];
+  function boundedPendingHistory(history: readonly PendingChangesHistorySnapshot[], snapshot: PendingChangesHistorySnapshot): PendingChangesHistorySnapshot[] {
+    const retained = [snapshot];
+    let cells = snapshot.cellCount ?? 0;
+    for (let index = history.length - 1; index >= 0 && retained.length < MAX_PENDING_CHANGES_HISTORY; index--) {
+      const previous = history[index]!;
+      const previousCells = previous.cellCount ?? 0;
+      if (cells + previousCells > MAX_PENDING_HISTORY_CELLS) break;
+      cells += previousCells;
+      retained.push(previous);
+    }
+    return retained.reverse();
+  }
+
+  function pushUndoSnapshot(snapshot = pendingChangesSnapshot()) {
+    undoStack.value = boundedPendingHistory(undoStack.value, snapshot);
     redoStack.value = [];
   }
 
@@ -454,7 +749,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const snapshot = undoStack.value[undoStack.value.length - 1];
     if (!snapshot) return;
     undoStack.value = undoStack.value.slice(0, -1);
-    redoStack.value = [...redoStack.value, pendingChangesSnapshot()];
+    redoStack.value = boundedPendingHistory(redoStack.value, pendingChangesSnapshot());
     restorePendingChangesSnapshot(snapshot);
   }
 
@@ -462,7 +757,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const snapshot = redoStack.value[redoStack.value.length - 1];
     if (!snapshot) return;
     redoStack.value = redoStack.value.slice(0, -1);
-    undoStack.value = [...undoStack.value, pendingChangesSnapshot()];
+    undoStack.value = boundedPendingHistory(undoStack.value, pendingChangesSnapshot());
     restorePendingChangesSnapshot(snapshot);
   }
 
@@ -493,8 +788,22 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (el) el.scrollTop = 0;
   }
 
+  // Every caller below expresses an explicit "new viewport" intent (sort, filter,
+  // paginate, refresh, result identity change). Drop the tab-switch provenance so a
+  // snapshot written earlier cannot drag the next mount back to the old offset.
+  // The already-written cache entry is fixed up in place because a switch can be
+  // dispatched without completing, and with split groups the global activeTabId
+  // watcher can name a tab belonging to another still-mounted grid.
+  function clearTabSwitchScrollProvenance() {
+    scrollSnapshotFromTabSwitch = false;
+    const k = cacheKey?.value;
+    const cached = k ? pendingChangesCache.get(k) : undefined;
+    if (cached?.scrollFromTabSwitch) cached.scrollFromTabSwitch = false;
+  }
+
   function resetGridVerticalScroll(afterResult = false) {
     if (afterResult) resetScrollAfterResult = true;
+    clearTabSwitchScrollProvenance();
     if (resetScrollFrame) cancelAnimationFrame(resetScrollFrame);
     scrollGridToTop();
     nextTick(() => {
@@ -599,7 +908,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function coerceCellValue(value: string, oldValue: CellValue | undefined, columnIndex: number, options: ApplyCellValueOptions = {}): CellValue {
     return coerceDataGridCellValue({
-      value,
+      value: normalizeEditorInput?.(value, columnIndex) ?? value,
       oldValue,
       databaseType: resolvedDatabaseType.value,
       columnInfo: tableColumnForGridColumn(columnIndex),
@@ -609,11 +918,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function coerceCommittedCellValue(value: string, currentValue: CellValue | undefined, oldValue: CellValue | undefined, columnIndex: number): CellValue {
-    const editorText = dataGridCellEditorText({
-      value: currentValue,
-      databaseType: resolvedDatabaseType.value,
-      columnInfo: tableColumnForGridColumn(columnIndex),
-    });
+    const editorText =
+      cellEditorText?.(currentValue ?? null, columnIndex) ??
+      dataGridCellEditorText({
+        value: currentValue,
+        databaseType: resolvedDatabaseType.value,
+        columnInfo: tableColumnForGridColumn(columnIndex),
+      });
     // Keep the original CellValue when the editor text was not changed. This
     // avoids turning a displayed value such as number 1 into string "1" when
     // result and table metadata use different representations.
@@ -655,7 +966,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
     }
     const columnName = sourceColumns.value?.[columnIndex] ?? result.value.columns[columnIndex];
-    const info = columnName ? tableMeta.value?.columns.find((column) => column.name.toLowerCase() === columnName.toLowerCase()) : undefined;
+    const sourceTarget = joinedWriteTargets.value?.find((target) => target.sourceColumns[columnIndex] !== undefined);
+    const metadata = sourceTarget?.tableMeta ?? tableMeta.value;
+    const info = columnName ? metadata?.columns.find((column) => column.name.toLowerCase() === columnName.toLowerCase()) : undefined;
     if (isBatching && batchColumnInfoCache) {
       batchColumnInfoCache.set(columnIndex, info);
     }
@@ -746,6 +1059,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       quickEntryDraftRow.value = emptyDraftRow();
       return;
     }
+    if (!canAllocateNewRows(1)) return;
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value = [...newRows.value, [...quickEntryDraftRow.value]];
     newRowMeta.value = [...newRowMeta.value, allocateNewRowMeta(null)];
@@ -776,11 +1090,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     suppressNextBlurCommit = false;
     editingCell.value = { rowId, col: colIdx };
     const val = item?.data[colIdx] ?? null;
-    editValue.value = dataGridCellEditorText({
-      value: val,
-      databaseType: resolvedDatabaseType.value,
-      columnInfo: tableColumnForGridColumn(colIdx),
-    });
+    editValue.value =
+      cellEditorText?.(val, colIdx) ??
+      dataGridCellEditorText({
+        value: val,
+        databaseType: resolvedDatabaseType.value,
+        columnInfo: tableColumnForGridColumn(colIdx),
+      });
     focusEditInput(selectOnFocus);
   }
 
@@ -813,6 +1129,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (options.promoteDraft === false) {
         return { changed: false, rowKind: "draft" };
       }
+      if (!canAllocateNewRows(1)) return { changed: false, rowKind: "draft" };
       rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
       newRows.value = [...newRows.value, nextDraftRow];
       newRowMeta.value = [...newRowMeta.value, allocateNewRowMeta(null)];
@@ -831,7 +1148,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (changed) pushUndoSnapshot();
       if (newRows.value[item.newIndex]) {
         newRows.value[item.newIndex][col] = newVal;
-        updateClonedRowEditedColumns(item.newIndex, col, newVal);
+        if (changed) updateNewRowEditedColumns(item.newIndex, col, newVal);
       }
       newRows.value = [...newRows.value];
       newRowMeta.value = [...newRowMeta.value];
@@ -904,8 +1221,12 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function applyCellValue(rowId: number, col: number, value: string | null, options: ApplyCellValueOptions = {}) {
-    if (!canEditColumn(col)) return;
     const item = getRowItem(rowId);
+    applyCellValueToItem(item, rowId, col, value, options);
+  }
+
+  function applyCellValueToItem(item: RowItem | undefined, rowId: number, col: number, value: string | null, options: ApplyCellValueOptions = {}) {
+    if (!canEditColumn(col)) return;
     if (!item || item.isDeleted) return;
 
     if (item.isDraft) {
@@ -947,7 +1268,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         pushUndoSnapshot();
       }
       row[col] = newVal;
-      updateClonedRowEditedColumns(item.newIndex, col, newVal);
+      updateNewRowEditedColumns(item.newIndex, col, newVal);
       markBatchMutated();
       if (!isBatching) {
         newRows.value = [...newRows.value];
@@ -1003,45 +1324,88 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     onCellValueChanged?.(rowId, col);
   }
 
-  function restoreCellValue(rowId: number, col: number) {
-    if (!canEditColumn(col)) return;
+  function stageCellReplacements(changes: readonly import("@/lib/dataGrid/dataGridReplace").DataGridCellReplacement[]): number {
+    if (!editable.value || !canEditExistingRows.value || isSaving.value || isConditionalUpdateActive.value) return 0;
+    let changed = 0;
+    beginBatch();
+    try {
+      for (const change of changes) {
+        const { rowId, col, previousValue, sourceValue = previousValue, value } = change;
+        if (!Number.isInteger(rowId) || rowId < 0 || !Number.isInteger(col) || col < 0 || col >= result.value.columns.length || !canEditColumn(col) || deletedRows.value.has(rowId)) continue;
+        const row = result.value.rows[rowId];
+        if (!row) continue;
+        const data = rowDataWithChanges(row, rowId);
+        if (typeof data[col] !== "string" || data[col] !== sourceValue || value === previousValue) continue;
+        const item: RowItem = { id: rowId, sourceIndex: rowId, data, isNew: false, isDeleted: false, isDirtyCol: [], status: "clean" };
+        applyCellValueToItem(item, rowId, col, value, { preserveEmptyString: true });
+        const currentValue = rowDataWithChanges(row, rowId)[col];
+        if (currentValue !== previousValue) {
+          changed++;
+          // Set after the first undo snapshot, so undo restores the prior policy.
+          manualSaveRequired.value = true;
+        }
+      }
+      return changed;
+    } finally {
+      commitBatch();
+      if (!hasPendingChanges.value) manualSaveRequired.value = false;
+    }
+  }
+
+  // 返回「是否真的回退了内容」。网格焦点下的 Esc（#11634）只有在确有改动被回退时才消费按键。
+  function restoreCellValue(rowId: number, col: number): boolean {
+    if (!canEditColumn(col)) return false;
     const item = getRowItem(rowId);
-    if (!item || item.isDeleted) return;
+    if (!item || item.isDeleted) return false;
 
     if (item.isDraft) {
       ensureQuickEntryDraftRow();
-      if (quickEntryDraftRow.value[col] === null) return;
+      if (quickEntryDraftRow.value[col] === null) return false;
       pushUndoSnapshot();
       const nextDraftRow = [...quickEntryDraftRow.value];
       nextDraftRow[col] = null;
       quickEntryDraftRow.value = draftRowHasValue(nextDraftRow) ? nextDraftRow : emptyDraftRow();
       touchPendingChanges();
-      return;
+      return true;
     }
 
     if (item.isNew && item.newIndex !== undefined) {
-      if (isSavingNewRow(item)) return;
+      if (isSavingNewRow(item)) return false;
       const row = newRows.value[item.newIndex];
-      if (!row || row[col] === null) return;
+      if (!row || row[col] === null) return false;
       pushUndoSnapshot();
       row[col] = null;
-      updateClonedRowEditedColumns(item.newIndex, col, null);
+      updateNewRowEditedColumns(item.newIndex, col, null);
       newRows.value = [...newRows.value];
       newRowMeta.value = [...newRowMeta.value];
       touchPendingChanges();
-      return;
+      return true;
     }
 
-    if (item.sourceIndex === undefined) return;
-    if (!canEditExistingRows.value) return;
+    if (item.sourceIndex === undefined) return false;
+    if (!canEditExistingRows.value) return false;
     const rowChanges = dirtyRows.value.get(item.sourceIndex);
-    if (!rowChanges?.has(col)) return;
+    if (!rowChanges?.has(col)) return false;
     pushUndoSnapshot();
     rowChanges.delete(col);
     if (rowChanges.size === 0) dirtyRows.value.delete(item.sourceIndex);
     dirtyRows.value = new Map(dirtyRows.value);
     touchPendingChanges();
     onCellValueChanged?.(rowId, col);
+    return true;
+  }
+
+  // #11634：Esc 取消「刚新增且从未写入」的待插入行。这类行不进 INSERT 批次
+  // （snapshotPendingSaveChanges 会跳过 untouched 行），因此撤掉它等于整体取消这次新增。
+  // 「填写过再清空」的行在首次提交时就被 updateNewRowEditedColumns 摘掉了 untouched 标记，
+  // 不在取消之列——它们必须保留在保存预览里（useDataGridEditor.spec.ts 锁定了该语义）。
+  function cancelUntouchedPendingRow(rowId: number): boolean {
+    const item = getRowItem(rowId);
+    if (!item?.isNew || item.newIndex === undefined) return false;
+    if (isSavingNewRow(item) || !isUntouchedNewRow(item.data, item.newIndex)) return false;
+    // 走既有的未触碰行删除路径：免二次确认，且写入撤销栈
+    requestDeleteRows([rowId]);
+    return true;
   }
 
   function cancelEdit() {
@@ -1052,7 +1416,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     restoreScrollAcrossFrames(restoreScroll);
   }
 
-  function onEditKeydown(e: KeyboardEvent) {
+  function onEditKeydown(e: KeyboardEvent, compositionActive = false) {
+    // Enter/Escape can also be the key that commits an IME candidate. Never
+    // treat that key as the grid shortcut; otherwise a Chinese/Japanese input
+    // commits the cell before the composition is inserted (#12470).
+    if (isAiPromptImeCompositionEvent(e, compositionActive)) return;
     const isExpandedTextarea = typeof HTMLTextAreaElement !== "undefined" && e.target instanceof HTMLTextAreaElement && e.target.dataset.expandedCellEditor === "true";
     if (e.key === "Enter" && (!isExpandedTextarea || e.metaKey || e.ctrlKey)) {
       e.preventDefault();
@@ -1060,16 +1428,20 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     } else if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
+      // 只取消本次输入，绝不在这里顺手删掉刚新增的空行：新增行在网格里是「批量粘贴的目标」
+      // （batchAppendPaste 要求选中的是空白新增行），把「离开编辑器」和「取消新增」合并
+      // 会让习惯了 Esc 收尾的用户莫名丢掉那行。取消新增由网格焦点下的第二次 Esc 承担（#11634）。
       cancelEdit();
     }
   }
 
   function addRow() {
     if (isConditionalUpdateActive.value) return;
+    if (!canAllocateNewRows(1)) return;
     pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value.push(result.value.columns.map(() => null));
-    newRowMeta.value.push(allocateNewRowMeta(null));
+    newRowMeta.value.push({ ...allocateNewRowMeta(null), untouched: true });
     newRows.value = [...newRows.value];
     newRowMeta.value = [...newRowMeta.value];
     touchPendingChanges();
@@ -1094,19 +1466,37 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   // positions). Returns the first inserted row's id, or undefined when the
   // count was rejected.
   function addRows(count: number, placement: GridNewRowPlacement | null = null): number | undefined {
+    return finishDataGridRowPreparation(prepareAddedRows(count, placement));
+  }
+
+  function addRowsInBatches(count: number, placement: GridNewRowPlacement | null = null, preparation: DataGridRowPreparationOptions = {}): Promise<number | undefined> {
+    const isCurrent = rowPreparationIsCurrent();
+    return runDataGridRowPreparation(prepareAddedRows(count, placement), { ...preparation, isCurrent: () => isCurrent() && preparation.isCurrent?.() !== false }, undefined);
+  }
+
+  function* prepareAddedRows(count: number, placement: GridNewRowPlacement | null): Generator<DataGridRowPreparationProgress, number | undefined> {
     if (isConditionalUpdateActive.value) return undefined;
-    if (!Number.isInteger(count) || count <= 0) return undefined;
-    const clampedCount = Math.min(count, DATA_GRID_MAX_BATCH_INSERT_ROWS);
+    if (!Number.isSafeInteger(count) || count <= 0) return undefined;
+    if (!canAllocateNewRows(count)) return undefined;
     const firstNewIndex = newRows.value.length;
-    pushUndoSnapshot();
-    rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
+    const isCurrent = rowPreparationIsCurrent();
+    const batchSize = dataGridPreparationBatchSize(result.value.columns.length);
+    const preparedRows: CellValue[][] = [];
+    const preparedMeta: GridNewRowMeta[] = [];
     const blankRow = result.value.columns.map(() => null);
-    for (let i = 0; i < clampedCount; i++) {
-      newRows.value.push([...blankRow]);
-      newRowMeta.value.push(allocateNewRowMeta(placement));
+    if (count > batchSize) yield { completed: 0, total: count };
+    for (let i = 0; i < count; i++) {
+      preparedRows.push([...blankRow]);
+      preparedMeta.push({ ...allocateNewRowMeta(placement), untouched: true });
+      if (count > batchSize && ((i + 1) % batchSize === 0 || i + 1 === count)) yield { completed: i + 1, total: count };
     }
-    newRows.value = [...newRows.value];
-    newRowMeta.value = [...newRowMeta.value];
+    if (!isCurrent()) return undefined;
+    const snapshot = yield* preparePendingChangesSnapshot();
+    if (!isCurrent()) return undefined;
+    pushUndoSnapshot(snapshot);
+    rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
+    newRows.value = [...newRows.value, ...preparedRows];
+    newRowMeta.value = [...newRowMeta.value, ...preparedMeta];
     touchPendingChanges();
     if (useTransaction.value && !transactionActive.value) {
       enterTransaction();
@@ -1124,64 +1514,133 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return row.every((value) => value === null || (typeof value === "string" && value.trim() === ""));
   }
 
-  function appendPastedRowsToNewRow(targetRowId: number, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[]): DataGridAppendPastedRowsResult {
+  function appendPastedRowsAsNewRows(pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): DataGridAppendPastedRowsResult {
+    return finishDataGridRowPreparation(preparePastedRows(null, pastedRows, columnIndexes, columnNames));
+  }
+
+  function appendPastedRowsToNewRow(targetRowId: number, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): DataGridAppendPastedRowsResult {
+    return finishDataGridRowPreparation(preparePastedRows(targetRowId, pastedRows, columnIndexes, columnNames));
+  }
+
+  function appendPastedRowsAsNewRowsInBatches(pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null, preparation: DataGridRowPreparationOptions = {}): Promise<DataGridAppendPastedRowsResult> {
+    return appendPastedRowsInBatches(null, pastedRows, columnIndexes, columnNames, preparation);
+  }
+
+  function appendPastedRowsToNewRowInBatches(targetRowId: number, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null, preparation: DataGridRowPreparationOptions = {}): Promise<DataGridAppendPastedRowsResult> {
+    return appendPastedRowsInBatches(targetRowId, pastedRows, columnIndexes, columnNames, preparation);
+  }
+
+  function appendPastedRowsInBatches(targetRowId: number | null, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames: readonly string[] | null | undefined, preparation: DataGridRowPreparationOptions): Promise<DataGridAppendPastedRowsResult> {
+    const isCurrent = rowPreparationIsCurrent();
+    return runDataGridRowPreparation(preparePastedRows(targetRowId, pastedRows, columnIndexes, columnNames), { ...preparation, isCurrent: () => isCurrent() && preparation.isCurrent?.() !== false }, { ok: false, reason: "cancelled" });
+  }
+
+  // A null target appends populated rows directly, without a preparatory blank
+  // row or a second undo entry. Cell/row paste still validates its blank target.
+  function* preparePastedRows(targetRowId: number | null, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): Generator<DataGridRowPreparationProgress, DataGridAppendPastedRowsResult> {
     if (!editable.value) return { ok: false, reason: "not-editable" };
+    const batchSize = dataGridPreparationBatchSize(result.value.columns.length);
+    if (pastedRows.length > dataGridPendingRowLimit(result.value.columns.length)) {
+      canAllocateNewRows(pastedRows.length);
+      return { ok: false, reason: "capacity-exceeded" };
+    }
+    if (pastedRows.length > batchSize || newRows.value.length > batchSize) yield { completed: 0, total: pastedRows.length };
     if (pastedRows.every((row) => row.every((value) => value === ""))) {
       return { ok: false, reason: "empty-paste" };
     }
 
-    const target = getRowItem(targetRowId);
-    if ((!target?.isNew && !target?.isDraft) || target.isDeleted || isSavingNewRow(target)) {
+    const target = targetRowId === null ? undefined : getRowItem(targetRowId);
+    if (targetRowId !== null && ((!target?.isNew && !target?.isDraft) || target.isDeleted || isSavingNewRow(target))) {
       return { ok: false, reason: "invalid-target" };
     }
 
-    const targetIsDraft = target.isDraft === true;
+    const targetIsDraft = target?.isDraft === true;
     if (targetIsDraft) ensureQuickEntryDraftRow();
-    const targetNewIndex = target.newIndex;
+    const targetNewIndex = target?.newIndex;
     const targetRow = targetIsDraft ? quickEntryDraftRow.value : targetNewIndex === undefined ? undefined : newRows.value[targetNewIndex];
-    if (!targetRow || !isBlankNewRow(targetRow)) return { ok: false, reason: "target-not-empty" };
+    if (targetRowId !== null && (!targetRow || !isBlankNewRow(targetRow))) return { ok: false, reason: "target-not-empty" };
 
-    const pastedColumnCount = Math.max(...pastedRows.map((row) => row.length));
+    const pastedColumnCount = pastedRows.reduce((max, row) => Math.max(max, row.length), 0);
     if (pastedColumnCount <= 0) return { ok: false, reason: "empty-paste" };
 
-    const targetColumns = columnIndexes.slice(0, pastedColumnCount);
-    if (targetColumns.some((columnIndex) => !canEditColumn(columnIndex))) return { ok: false, reason: "readonly-column" };
+    // With explicit column names (SQL INSERT), align pasted values by column
+    // name instead of visible position. Unknown names are ignored together
+    // with their values; if none of the pasted names matches this result's
+    // columns, reject the paste.
+    const valueTargets: Array<{ columnIndex: number; valueIndex: number }> = [];
+    if (columnNames?.length) {
+      const nameToColumnIndex = new Map<string, number>();
+      columnIndexes.forEach((columnIndex) => {
+        const name = sourceColumns.value?.[columnIndex] ?? result.value.columns[columnIndex];
+        if (name !== undefined && !nameToColumnIndex.has(name.toLowerCase())) nameToColumnIndex.set(name.toLowerCase(), columnIndex);
+      });
+      columnNames.forEach((name, valueIndex) => {
+        const columnIndex = nameToColumnIndex.get(name.toLowerCase());
+        if (columnIndex !== undefined) valueTargets.push({ columnIndex, valueIndex });
+      });
+      if (valueTargets.length === 0) return { ok: false, reason: "no-matching-columns" };
+    } else {
+      columnIndexes.slice(0, pastedColumnCount).forEach((columnIndex, valueIndex) => valueTargets.push({ columnIndex, valueIndex }));
+    }
+    if (valueTargets.length === 0) return { ok: false, reason: "no-matching-columns" };
+    if (valueTargets.some(({ columnIndex }) => !canEditColumn(columnIndex))) return { ok: false, reason: "readonly-column" };
 
-    const nextRows = newRows.value.map((row) => [...row]);
-    const nextMeta = cloneNewRowMeta(newRowMeta.value);
+    const isCurrent = rowPreparationIsCurrent();
+    const sourceRows = toRaw(newRows.value);
+    const sourceMeta = toRaw(newRowMeta.value);
+    const targetPlacement = targetNewIndex === undefined ? null : (sourceMeta[targetNewIndex]?.placement ?? null);
     let reusableNewRowCount = 0;
-    if (!targetIsDraft) {
-      for (let rowIndex = targetNewIndex!; rowIndex < nextRows.length && reusableNewRowCount < pastedRows.length; rowIndex++) {
-        if (!isBlankNewRow(nextRows[rowIndex]!)) break;
+    if (targetNewIndex !== undefined) {
+      for (let rowIndex = targetNewIndex!; rowIndex < sourceRows.length && reusableNewRowCount < pastedRows.length; rowIndex++) {
+        if (!isBlankNewRow(sourceRows[rowIndex]!)) break;
+        const placement = sourceMeta[rowIndex]?.placement ?? null;
+        if (placement?.anchorId !== targetPlacement?.anchorId || placement?.position !== targetPlacement?.position) break;
         reusableNewRowCount++;
+        if (reusableNewRowCount % batchSize === 0) yield { completed: 0, total: pastedRows.length };
       }
     }
-    const mappedRows = pastedRows.map((pastedRow, rowIndex) => {
-      const nextRow = rowIndex < reusableNewRowCount ? nextRows[targetNewIndex! + rowIndex]! : emptyDraftRow();
-      for (let columnOffset = 0; columnOffset < Math.min(pastedRow.length, targetColumns.length); columnOffset++) {
-        const columnIndex = targetColumns[columnOffset]!;
-        const value = pastedRow[columnOffset];
-        nextRow[columnIndex] = value === null ? null : coerceCellValue(value, nextRow[columnIndex], columnIndex);
-      }
-      return nextRow;
-    });
-
-    pushUndoSnapshot();
-    if (targetIsDraft) {
-      nextRows.push(...mappedRows);
-      for (let i = 0; i < mappedRows.length; i++) nextMeta.push(allocateNewRowMeta(null));
-      quickEntryDraftRow.value = emptyDraftRow();
-    } else {
-      // Reused blank rows keep their original placement; rows added beyond the
-      // reusable count append at the end (preserving existing paste behavior).
-      const newMetas = mappedRows.map((_, rowOffset) => {
-        if (rowOffset < reusableNewRowCount) {
-          return nextMeta[targetNewIndex! + rowOffset] ?? allocateNewRowMeta(null);
+    if (!canAllocateNewRows(pastedRows.length - reusableNewRowCount)) return { ok: false, reason: "capacity-exceeded" };
+    let nextRows: CellValue[][];
+    let nextMeta: GridNewRowMeta[];
+    const shouldClearColumn = clonedColumnClearPredicate();
+    const mappedRows: CellValue[][] = [];
+    const mappedMeta: GridNewRowMeta[] = [];
+    for (let rowIndex = 0; rowIndex < pastedRows.length; rowIndex++) {
+      const pastedRow = pastedRows[rowIndex]!;
+      const nextRow = rowIndex < reusableNewRowCount ? [...toRaw(sourceRows[targetNewIndex! + rowIndex]!)] : emptyDraftRow();
+      for (const { columnIndex, valueIndex } of valueTargets) {
+        if (valueIndex >= pastedRow.length) continue;
+        // Pasting a copied row into a new row must not reuse its generated key.
+        if (shouldClearColumn(columnIndex)) {
+          nextRow[columnIndex] = null;
+          continue;
         }
-        return allocateNewRowMeta(null);
-      });
-      nextMeta.splice(targetNewIndex!, reusableNewRowCount, ...newMetas);
-      nextRows.splice(targetNewIndex!, reusableNewRowCount, ...mappedRows);
+        const value = pastedRow[valueIndex];
+        // A pasted cell is literal text, never a "clear this cell" gesture, so an
+        // empty field has to stay an empty string instead of collapsing to NULL
+        // (issue #12727). Without this the coercion below reads the blank draft
+        // row's `null` as the previous value and rewrites '' as NULL on save.
+        nextRow[columnIndex] = value === null ? null : coerceCellValue(value, nextRow[columnIndex], columnIndex, { preserveEmptyString: true });
+      }
+      mappedRows.push(nextRow);
+      mappedMeta.push(rowIndex < reusableNewRowCount && sourceMeta[targetNewIndex! + rowIndex] ? cloneNewRowMeta([sourceMeta[targetNewIndex! + rowIndex]!])[0]! : allocateNewRowMeta(targetPlacement));
+      delete mappedMeta[mappedMeta.length - 1]!.untouched;
+      if (pastedRows.length > batchSize && ((rowIndex + 1) % batchSize === 0 || rowIndex + 1 === pastedRows.length)) yield { completed: rowIndex + 1, total: pastedRows.length };
+    }
+
+    if (!isCurrent()) return { ok: false, reason: "cancelled" };
+    const snapshot = yield* preparePendingChangesSnapshot();
+    if (!isCurrent()) return { ok: false, reason: "cancelled" };
+    pushUndoSnapshot(snapshot);
+    if (targetIsDraft || targetRowId === null) {
+      nextRows = sourceRows.concat(mappedRows);
+      nextMeta = sourceMeta.concat(mappedMeta);
+      if (targetIsDraft) quickEntryDraftRow.value = emptyDraftRow();
+    } else {
+      // Keep the expanded batch at its insertion anchor, without consuming
+      // blank rows that were inserted elsewhere in the grid.
+      nextMeta = [...sourceMeta.slice(0, targetNewIndex), ...mappedMeta, ...sourceMeta.slice(targetNewIndex! + reusableNewRowCount)];
+      nextRows = [...sourceRows.slice(0, targetNewIndex), ...mappedRows, ...sourceRows.slice(targetNewIndex! + reusableNewRowCount)];
     }
     newRows.value = nextRows;
     newRowMeta.value = nextMeta;
@@ -1194,13 +1653,27 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function clonedRowData(item: RowItem, resolvedValues?: ReadonlyMap<number, CellValue>): CellValue[] {
-    const columnInfoByName = new Map((tableMeta.value?.columns ?? []).map((column) => [column.name.toLowerCase(), column]));
+    const shouldClearColumn = clonedColumnClearPredicate();
     return item.data.map((val, i) => {
-      const columnName = sourceColumns.value?.[i] ?? result.value.columns[i];
-      const columnInfo = columnInfoByName.get(columnName.toLowerCase());
-      if (shouldClearClonedColumn(columnName, columnInfo)) return null;
+      if (shouldClearColumn(i)) return null;
       return resolvedValues?.has(i) ? (resolvedValues.get(i) ?? null) : val;
     });
+  }
+
+  // Columns generated by the database (auto increment / identity / sequence
+  // defaults) must not be carried over when a row's values are copied into a
+  // new row, otherwise saving fails on a duplicate key. Both the clone-row and
+  // the clipboard-paste paths resolve the columns through this predicate.
+  function clonedColumnClearPredicate(): (columnIndex: number) => boolean {
+    const columnInfoByName = new Map((tableMeta.value?.columns ?? []).map((column) => [column.name.toLowerCase(), column]));
+    return (columnIndex: number) => {
+      const columnName = sourceColumns.value?.[columnIndex] ?? result.value.columns[columnIndex];
+      if (columnName === undefined) return false;
+      const columnInfo = columnInfoByName.get(columnName.toLowerCase());
+      const resultType = result.value.column_types?.[columnIndex]?.trim();
+      if (isOpaqueAggregateStateColumnType(resultType || columnInfo?.data_type)) return true;
+      return shouldClearClonedColumn(columnName, columnInfo);
+    };
   }
 
   function shouldClearClonedColumn(columnName: string, columnInfo: ColumnInfo | undefined): boolean {
@@ -1214,11 +1687,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   function cloneRow(rowId: number, resolvedValues?: ReadonlyMap<number, CellValue>) {
     const item = getRowItem(rowId);
     if (!item) return;
+    if (!canAllocateNewRows(1)) return;
     const clonedData = clonedRowData(item, resolvedValues);
     pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value.push(clonedData);
-    newRowMeta.value.push(clonedRowMeta(item, clonedData));
+    const clonedMeta = clonedRowMeta(item, clonedData);
+    newRowMeta.value.push(clonedMeta);
     newRows.value = [...newRows.value];
     newRowMeta.value = [...newRowMeta.value];
     touchPendingChanges();
@@ -1228,7 +1703,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const newRowId = -newRows.value.length;
     nextTick(() => {
       const el = getScrollerElement();
-      if (el) el.scrollTop = el.scrollHeight;
+      if (clonedMeta.placement === null && el) el.scrollTop = el.scrollHeight;
       startEdit(newRowId, initialEditColumn?.value ?? 0);
     });
   }
@@ -1237,6 +1712,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (isConditionalUpdateActive.value) return;
     const rowsToClone = rowIds.map((rowId) => getRowItem(rowId)).filter(Boolean) as RowItem[];
     if (rowsToClone.length === 0) return;
+    if (!canAllocateNewRows(rowsToClone.length)) return;
     pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     for (const item of rowsToClone) {
@@ -1314,7 +1790,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function requestDeleteRows(rowIds: number[]) {
-    if (!confirmDangerousRowDeletion.value) {
+    const onlyUntouchedRows = rowIds.every((rowId) => {
+      const item = getRowItem(rowId);
+      return item?.isNew && item.newIndex !== undefined && isUntouchedNewRow(item.data, item.newIndex);
+    });
+    if (!confirmDangerousRowDeletion.value || onlyUntouchedRows) {
       applyDeleteRows(rowIds);
       return;
     }
@@ -1367,13 +1847,20 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   // --- Save/Discard ---
+  function isUntouchedNewRow(row: readonly CellValue[], newIndex: number): boolean {
+    return newRowMeta.value[newIndex]?.untouched === true && row.every((value) => value === null);
+  }
+
   function snapshotPendingSaveChanges(): PendingSaveSnapshot {
     const currentNewRows = [...newRows.value];
+    const includedIndexes = currentNewRows.flatMap((row, index) => (isUntouchedNewRow(row, index) ? [] : [index]));
     return {
       dirtyRows: new Map([...dirtyRows.value.entries()].map(([rowIndex, changes]) => [rowIndex, new Map(changes)])),
-      newRows: currentNewRows.map((row) => [...row]),
+      newRows: includedIndexes.map((index) => [...currentNewRows[index]!]),
+      // Also consume unused blanks after success, and lock them while saving
+      // so an edit cannot be lost when this snapshot is cleared.
       newRowRefs: currentNewRows,
-      newRowMeta: cloneNewRowMeta(newRowMeta.value),
+      newRowMeta: includedIndexes.flatMap((index) => (newRowMeta.value[index] ? cloneNewRowMeta([newRowMeta.value[index]!]) : [])),
       deletedRows: new Set(deletedRows.value),
     };
   }
@@ -1408,7 +1895,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
     dirtyRows.value = new Map(dirtyRows.value);
 
-    if (snapshot.newRows.length > 0) {
+    if (snapshot.newRowRefs.length > 0) {
       const savedNewRows = new Set(snapshot.newRowRefs);
       const keptRows: CellValue[][] = [];
       const keptMeta: GridNewRowMeta[] = [];
@@ -1429,7 +1916,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   async function finishSaveChanges(savedSnapshot?: PendingSaveSnapshot) {
-    isSaving.value = false;
+    setLocalSaveBusy(false);
+    if (!hasPendingChanges.value) manualSaveRequired.value = false;
     if (pendingAutoSaveRequested && dataGridQuickEntryEnabled.value) {
       applyQueuedAutoSaveChanges(savedSnapshot);
     } else {
@@ -1445,8 +1933,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
   }
 
-  async function finishInterruptedSaveChanges(snapshot: PendingSaveSnapshot) {
+  async function finishInterruptedSaveChanges(snapshot: PendingSaveSnapshot, record?: PendingSaveRecord) {
     snapshot.newRowRefs.forEach((row) => savingNewRows.delete(row));
+    // Settle the registry record before finishing: the queued auto-save below
+    // must not see this instance as still busy (#13226 quick-entry regression).
+    onPendingSaveSettled(snapshot, false, record);
+    // The changes stay pending for a retry, and the grid that shows them stops
+    // waiting for this save (#13226).
     await finishSaveChanges();
   }
 
@@ -1454,6 +1947,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (!tableMeta.value) return null;
     return {
       databaseType: resolvedDatabaseType.value,
+      serverVersion: connectionStore.getConfig(connectionId.value ?? "")?.database_info?.productVersion,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId.value),
       tableMeta: tableMeta.value,
       columns: result.value.columns,
@@ -1462,7 +1956,60 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       dirtyRows: [...snapshot.dirtyRows.entries()].map(([rowIndex, changes]) => [rowIndex, [...changes.entries()]] as [number, Array<[number, CellValue]>]),
       deletedRows: [...snapshot.deletedRows],
       newRows: snapshot.newRows,
+      includeDatabaseName: includeDatabaseNameInSaveSql.value,
     };
+  }
+
+  async function prepareSaveStatements(stmtOptions: NonNullable<ReturnType<typeof saveStatementOptions>>) {
+    const targets = joinedWriteTargets.value;
+    if (!targets?.length) return api.prepareDataGridSave(stmtOptions, saveDriverProfile());
+    const groups = joinedSaveOptions(targets, {
+      ...stmtOptions,
+      dirtyRows: new Map(stmtOptions.dirtyRows.map(([index, changes]) => [index, new Map(changes)])),
+      deletedRows: new Set(stmtOptions.deletedRows),
+    });
+    const prepared: Awaited<ReturnType<typeof api.prepareDataGridSave>> = { statements: [], rollbackStatements: [], keylessGuards: [] };
+    for (const group of groups) {
+      const part = await api.prepareDataGridSave(group, saveDriverProfile());
+      if (part.validationError) return part;
+      if (part.boundStatements?.length || prepared.boundStatements) {
+        prepared.boundStatements ??= prepared.statements.map((sql) => ({ previewSql: sql, sql, blobParameters: [] }));
+        prepared.boundStatements.push(...(part.boundStatements ?? part.statements.map((sql) => ({ previewSql: sql, sql, blobParameters: [] }))));
+      }
+      prepared.statements.push(...part.statements);
+      prepared.rollbackStatements.unshift(...part.rollbackStatements);
+      prepared.keylessGuards!.push(...(part.keylessGuards ?? []));
+      if (prepared.executionSchema && part.executionSchema && prepared.executionSchema !== part.executionSchema) throw new Error("Joined source tables require incompatible execution schemas.");
+      prepared.executionSchema ??= part.executionSchema;
+    }
+    return prepared;
+  }
+
+  // A keyless save can only be trusted once the server confirms that each
+  // predicate it sends addresses a single physical row; the loaded page cannot
+  // see rows outside it. Returns the error to fail with, or undefined to allow.
+  async function verifyKeylessGuards(guards: DataGridSaveGuard[], executionSchema?: string, txnSessionId = manualTransactionSessionId.value) {
+    if (!guards.length) return undefined;
+    // Without a connection to count against there is no way to verify the
+    // predicate, and an unverified keyless write is exactly what must not run.
+    if (!hasBackendSaveTarget.value) return KEYLESS_GUARD_UNVERIFIED_ERROR;
+    for (const guard of guards) {
+      let matched: unknown;
+      if (txnSessionId) {
+        const results = await api.executeInManualTransaction(txnSessionId, guard.sql, database.value ?? "", executionSchema, 1);
+        matched = (results.find((result) => result.columns.length > 0) ?? results[results.length - 1])?.rows?.[0]?.[0];
+      } else {
+        const result = await api.executeQuery(connectionId.value!, database.value ?? "", guard.sql, executionSchema);
+        matched = result?.rows?.[0]?.[0];
+      }
+      const count = Number(matched);
+      if (!Number.isFinite(count)) return KEYLESS_GUARD_UNVERIFIED_ERROR;
+      if (count > guard.maxMatchedRows) return guard.message;
+      // A predicate built from a physical row locator must still address a row:
+      // zero means it moved under us, and the write would silently do nothing.
+      if (count < (guard.minMatchedRows ?? 0)) return guard.minMessage ?? guard.message;
+    }
+    return undefined;
   }
 
   function saveDriverProfile() {
@@ -1470,7 +2017,196 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return id ? connectionStore.getConfig(id)?.driver_profile : undefined;
   }
 
+  // --- In-flight save ownership across grid unmounts ---
+  // A save keeps running in its instance after the grid is unmounted (tab
+  // switch, summary view). The registry record above follows it, so whichever
+  // grid of the result is in the DOM reloads and reports in its place (#13226).
+  let persistenceKnown = false;
+  let lastPersistedNewRows: CellValue[][] = [];
+
+  function persistGridState() {
+    savePendingSnapshot(true, true);
+    persistenceKnown = true;
+    lastPersistedNewRows = [...newRows.value];
+  }
+
+  // Rows this instance left pending when it wrote its state: the only ones the
+  // persisted snapshot can still be holding after a save wrote them.
+  function keptNewRowsAfter(snapshot: PendingSaveSnapshot) {
+    if (!persistenceKnown) return [];
+    return lastPersistedNewRows.filter((row) => snapshot.newRowRefs.includes(row) && savingNewRows.has(row));
+  }
+
+  // Drops changes a save already wrote from the persisted grid state, so a grid
+  // that returns later never restores them as pending (#13226). On failure only
+  // the rows this save is still retrying go back; the rest were written by an
+  // earlier save that went through.
+  function clearPersistedPendingChangesForSave(snapshot?: PendingSaveSnapshot, completed = false) {
+    const k = cacheKey?.value;
+    const cached = k ? pendingChangesCache.get(k) : undefined;
+    if (!k || !cached) return;
+    if (!completed && !snapshot) return;
+    // Success: everything this save wrote leaves the snapshot (rows another grid
+    // added meanwhile stay). Failure: only rows the statement batch already
+    // wrote leave it, so the change being retried survives for the next mount.
+    const keptNewRows = completed ? [] : snapshot ? keptNewRowsAfter(snapshot) : [...cached.newRows];
+    const keptDirtyRows = completed || !snapshot ? new Map<number, Map<number, CellValue>>() : new Map([...cached.dirtyRows].filter(([rowIndex]) => snapshot.dirtyRows.has(rowIndex)));
+    const keptDeletedRows = completed || !snapshot ? new Set<number>() : new Set([...cached.deletedRows].filter((rowIndex) => snapshot.deletedRows.has(rowIndex)));
+    Object.assign(cached, {
+      newRows: keptNewRows,
+      newRowMeta: cached.newRowMeta.slice(cached.newRowMeta.length - keptNewRows.length),
+      dirtyRows: keptDirtyRows,
+      deletedRows: keptDeletedRows,
+      saving: false,
+      manualSaveRequired: !completed && snapshot ? true : cached.manualSaveRequired,
+    });
+    if (!keptNewRows.length && !keptDirtyRows.size && !keptDeletedRows.size && !cached.quickEntryDraftRow && !cached.editingCell && !cached.scroll) pendingChangesCache.delete(k);
+  }
+
+  // Called where a successful save would reload the grid. The grid in the DOM
+  // does it now, either this one or the one that replaced it while it was
+  // unmounted; with nothing in the DOM the reload waits for the grid that returns
+  // (a later new result replaces it anyway).
+  function reloadAfterSave(record?: PendingSaveRecord) {
+    if (!record) return;
+    const live = mounted ? undefined : record.live?.isMounted() ? record.live : undefined;
+    if (mounted) reloadCurrentData();
+    else if (live) live.refresh();
+    else record.refreshAfter = true;
+  }
+
+  function settlePendingSave(snapshot: PendingSaveSnapshot, completed: boolean, record: PendingSaveRecord | undefined) {
+    if (!record) return;
+    // Only ever settle this save, never another grid's save on the same result.
+    record.running = false;
+    const live = mounted ? undefined : record.live?.isMounted() ? record.live : undefined;
+    // The save is done: whatever it wrote must not come back from the snapshot
+    // the previous grid persisted, whether or not a grid is mounted now.
+    clearPersistedPendingChangesForSave(snapshot, completed);
+    if (live) {
+      // A grid replaced this one mid-save and owns the outcome: it shows the
+      // failure itself, and reloads and reports a save that went through.
+      if (!completed) live.restore(snapshot);
+      if (record.refreshAfter) {
+        record.refreshAfter = false;
+        live.refresh();
+      }
+      if (completed && !record.reported) {
+        record.reported = true;
+        live.reportSaved();
+      }
+      dropPendingSave(record);
+      // The adopting grid stopped viewing a running save: release its busy state.
+      live.settled();
+      return;
+    }
+    if (mounted) {
+      dropPendingSave(record);
+      isSaving.value = localSaveBusy || isAdoptedRunning();
+      // A grid that started the save reports it itself; an adopting grid reports
+      // the completion it would otherwise miss, once per record (#13226).
+      if (completed && !record.reported && record.owner !== saveOwner) {
+        record.reported = true;
+        onAdoptedSaveCompleted?.();
+      }
+      return;
+    }
+    // No grid is mounted. A successful save still owes the grid that returns its
+    // reload, so the record stays until that grid consumes it. A failed save
+    // keeps its pending changes in the persisted state instead, so its record
+    // (which could never be adopted again) goes.
+    if (!record.refreshAfter) dropPendingSave(record);
+    touchPendingSaves();
+  }
+
+  function beginPendingSave(): PendingSaveRecord | undefined {
+    const key = currentSaveKey();
+    if (!key) return undefined;
+    pendingSaveKey = key;
+    // Split view: another grid of the same result may be saving too. Its record
+    // stays, so both saves settle and report independently.
+    const record: PendingSaveRecord = { id: ++saveRecordSeq, key, running: true, owner: saveOwner, refreshAfter: false, reported: false, live: mounted ? saveWatcher : undefined };
+    pendingSaves.set(key, [...(pendingSaves.get(key) ?? []), record]);
+    currentRecord = record;
+    touchPendingSaves();
+    return record;
+  }
+
+  // The grid in the DOM is the one that reloads and reports for this save. It
+  // claims the record on mount and hands it back when it leaves, so the save
+  // started by an unmounted grid still reaches whoever shows the result.
+  const saveWatcher: PendingSaveWatcher = {
+    isMounted: () => mounted && pendingSaveKey === currentSaveKey(),
+    restore: (snapshot) => {
+      newRows.value = snapshot.newRows;
+      dirtyRows.value = snapshot.dirtyRows;
+      deletedRows.value = snapshot.deletedRows;
+      manualSaveRequired.value = true;
+    },
+    refresh: () => void refreshCurrentData(),
+    reportSaved: () => onAdoptedSaveCompleted?.(),
+    settled: () => {
+      if (currentRecord && !currentRecord.running) currentRecord = undefined;
+      isSaving.value = localSaveBusy || isAdoptedRunning();
+    },
+  };
+
+  // Resolves the save of this grid after the key is known (or changed) and makes
+  // this grid its live viewer: a cache-key grid has no tabId, so the record is
+  // looked up here rather than only when the key happens to match already.
+  function syncCurrentSave(syncKey: boolean) {
+    const key = currentSaveKey();
+    if (syncKey && key !== pendingSaveKey) {
+      // Another result payload: a save still running for the old one keeps
+      // running, but this grid will never show its outcome.
+      const previous = currentRecord;
+      if (previous) releasePendingSaveRecord(previous);
+      pendingSaveKey = key;
+      currentRecord = undefined;
+    }
+    if (currentRecord && currentRecord.running && !pendingSaves.get(currentRecord.key)?.includes(currentRecord)) currentRecord = undefined;
+    if (!currentRecord || !currentRecord.running) {
+      const adopted = adoptablePendingSave(key) ?? owedPendingSave(key);
+      if (adopted) currentRecord = adopted;
+    }
+    const record = currentRecord;
+    if (record?.running) record.live = saveWatcher;
+    if (record?.refreshAfter) {
+      record.refreshAfter = false;
+      void refreshCurrentData();
+    }
+    if (record && !record.running && !record.refreshAfter) dropPendingSave(record);
+    if (record?.running) isSaving.value = true;
+  }
+
+  function claimPendingSave() {
+    syncCurrentSave(true);
+  }
+
+  function adoptRunningSave() {
+    syncCurrentSave(true);
+  }
+
+  function releasePendingSaveRecord(record: PendingSaveRecord) {
+    if (record.live === saveWatcher) record.live = undefined;
+  }
+
+  // Mirrors an adopted save into `isSaving`, so a remounted grid shows the busy
+  // commit action without making `isSaving` a derived value (#13226).
+  watch(
+    adoptedSave,
+    (adopted) => {
+      isSaving.value = localSaveBusy || adopted;
+    },
+    { flush: "sync" },
+  );
+
+  function onPendingSaveSettled(snapshot: PendingSaveSnapshot, completed: boolean, record: PendingSaveRecord | undefined) {
+    settlePendingSave(snapshot, completed, record);
+  }
+
   function tableHistoryTarget() {
+    if (joinedWriteTargets.value?.length) return [...new Set(joinedWriteTargets.value.map(({ tableMeta: target }) => [target.database, target.schema, target.tableName].filter(Boolean).join(".")))].join(", ");
     if (!tableMeta.value) return "";
     return [tableMeta.value.schema, tableMeta.value.tableName].filter(Boolean).join(".");
   }
@@ -1561,11 +2297,25 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     options.emit("reload", sql.value, searchText.value, options.currentWhereInput.value, orderByInput.value.trim() || undefined, pageSize.value, (currentPage.value - 1) * pageSize.value);
   }
 
+  // Refreshes the result whose grid started a save, for a reload that was left
+  // over when that grid unmounted. The rows still belong to this result (only a
+  // new payload replaces the grid) and the current sort, page and filters are
+  // the view the user is returning to.
+  async function refreshCurrentData() {
+    options.prepareFullReload?.();
+    try {
+      await options.refreshSavedRows?.({ dirtyRows: new Map(), columns: result.value.columns, rows: result.value.rows });
+    } catch (error) {
+      console.warn("[DBX] failed to refresh saved data grid rows", error);
+    }
+    reloadCurrentData();
+  }
+
   function completeConditionalUpdate(execution: ConditionalUpdateExecution) {
     if (conditionalUpdateExecution.value !== execution) return false;
     execution.outcome = "completed";
     conditionalUpdateExecution.value = undefined;
-    isSaving.value = false;
+    setLocalSaveBusy(false);
     reloadCurrentData();
     return true;
   }
@@ -1621,7 +2371,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       outcome: "not-started",
     };
     conditionalUpdateExecution.value = execution;
-    isSaving.value = true;
+    setLocalSaveBusy(true);
     const startedAt = Date.now();
     try {
       if (execution.cancelRequested) return null;
@@ -1658,7 +2408,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     } finally {
       if (conditionalUpdateExecution.value === execution && execution.outcome !== "unknown") {
         conditionalUpdateExecution.value = undefined;
-        isSaving.value = false;
+        setLocalSaveBusy(false);
       }
     }
   }
@@ -1670,7 +2420,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (!execution.dispatched) {
       execution.outcome = "not-started";
       conditionalUpdateExecution.value = undefined;
-      isSaving.value = false;
+      setLocalSaveBusy(false);
       return true;
     }
     execution.cancelling = true;
@@ -1693,16 +2443,24 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   async function saveChanges(saveOptions: SaveChangesOptions = {}) {
+    if (!editable.value) return;
+    if (saveOptions.autoSave && manualSaveRequired.value) return;
     if (isSaving.value) {
       if (saveOptions.autoSave) pendingAutoSaveRequested = true;
       return;
     }
     const snapshot = snapshotPendingSaveChanges();
     if (!hasPendingSaveChanges(snapshot)) {
+      if (snapshot.newRowRefs.length > 0) {
+        clearSavedPendingChanges(snapshot);
+        if (!hasPendingChanges.value) exitTransaction();
+        clearPendingChangeHistory();
+      }
       return;
     }
     const customHandler = customSaveHandler?.value;
     const connection = connectionStore.getConfig(connectionId.value ?? "");
+    if (mysqlDataCharsetEnabled(connection)) return;
     if (connection?.read_only) {
       if (saveOptions.autoSave && !isWriteUnlockActive(connection.id)) return;
       if (!(await ensureReadOnlyWriteAccess({ connection, sql: describeDataGridChanges(snapshot), source: i18n.global.t("readOnlyUnlock.sourceDataEditor"), treatAsMutation: true }))) {
@@ -1724,12 +2482,15 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       });
       if (!confirmed) return;
     }
+    if (!editable.value) return;
     if (customHandler && snapshot.newRows.length > 0 && customHandler.supportsInsert !== true && customHandler.canInsert !== true) {
       saveError.value = i18n.global.t("grid.insertRowsNotSupported");
       return;
     }
     saveError.value = "";
-    isSaving.value = true;
+    previewValidationMessage.value = "";
+    setLocalSaveBusy(true);
+    const saveRecord = beginPendingSave();
     snapshot.newRowRefs.forEach((row) => savingNewRows.add(row));
     const shouldReloadAfterSave = snapshot.newRows.length > 0 || snapshot.deletedRows.size > 0;
     // SQL saves may update columns the client can't predict (e.g. an ON UPDATE CURRENT_TIMESTAMP
@@ -1738,18 +2499,48 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const shouldReloadAfterSqlSave = shouldReloadAfterSave || snapshot.dirtyRows.size > 0;
 
     if (customHandler) {
-      try {
-        await customHandler.save({
-          dirtyRows: snapshot.dirtyRows,
-          newRows: snapshot.newRows,
-          newRowMeta: snapshot.newRowMeta,
-          deletedRows: snapshot.deletedRows,
-          columns: result.value.columns,
-          rows: result.value.rows,
+      const customChanges = {
+        dirtyRows: snapshot.dirtyRows,
+        newRows: snapshot.newRows,
+        newRowMeta: snapshot.newRowMeta,
+        deletedRows: snapshot.deletedRows,
+        columns: result.value.columns,
+        rows: result.value.rows,
+      };
+      const confirmSaveRequest = options.confirmSaveRequest?.value;
+      if (confirmSaveRequest) {
+        if (saveOptions.autoSave) {
+          await finishInterruptedSaveChanges(snapshot, saveRecord);
+          return;
+        }
+        let statements: string[];
+        try {
+          if (!customHandler.preview) throw new Error("This data source cannot safely preview the pending changes.");
+          statements = await customHandler.preview(customChanges);
+          if (statements.length === 0) throw new Error("This data source did not produce a safe mutation preview.");
+        } catch (e: any) {
+          saveError.value = normalizeDataGridSaveError(databaseType.value, e);
+          await finishInterruptedSaveChanges(snapshot, saveRecord);
+          return;
+        }
+        const saveConfirmed = await confirmSaveRequest({
+          updates: snapshot.dirtyRows.size,
+          inserts: snapshot.newRows.length,
+          deletes: snapshot.deletedRows.size,
+          targetLabel: customHandler.targetLabel,
+          statements,
         });
+        if (!saveConfirmed) {
+          await finishInterruptedSaveChanges(snapshot, saveRecord);
+          return;
+        }
+      }
+      try {
+        await customHandler.save(customChanges);
       } catch (e: any) {
         saveError.value = normalizeDataGridSaveError(databaseType.value, e);
-        await finishInterruptedSaveChanges(snapshot);
+        if (customHandler.reloadOnFailure && shouldReloadAfterSave) reloadCurrentData();
+        await finishInterruptedSaveChanges(snapshot, saveRecord);
         return;
       }
       snapshot.newRowRefs.forEach((row) => savingNewRows.delete(row));
@@ -1762,38 +2553,79 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (shouldReloadAfterSave) {
         reloadCurrentData();
       }
+      // Custom saves must release the registry record before the queued
+      // quick-entry save below runs, exactly like the SQL success path (#13226).
+      onPendingSaveSettled(snapshot, true, saveRecord);
       await finishSaveChanges(snapshot);
       return;
     }
 
+    try {
+      if (options.prepareSaveBaseline) await options.prepareSaveBaseline(snapshot);
+    } catch (error) {
+      saveError.value = normalizeDataGridSaveError(databaseType.value, error);
+      await finishInterruptedSaveChanges(snapshot, saveRecord);
+      return;
+    }
     const stmtOptions = saveStatementOptions(snapshot);
     let preparedSave: Awaited<ReturnType<typeof api.prepareDataGridSave>> | undefined;
     if (stmtOptions) {
       try {
-        preparedSave = await api.prepareDataGridSave(stmtOptions, saveDriverProfile());
+        preparedSave = await prepareSaveStatements(stmtOptions);
       } catch (e: any) {
         saveError.value = normalizeDataGridSaveError(databaseType.value, e);
-        await finishInterruptedSaveChanges(snapshot);
+        await finishInterruptedSaveChanges(snapshot, saveRecord);
         return;
       }
     }
     if (preparedSave?.validationError) {
+      if (saveOptions.autoSave) {
+        // Autosave can run while a new row is still being filled. Keep the
+        // draft staged until it becomes valid instead of surfacing a save
+        // failure for an expected intermediate state.
+        previewValidationMessage.value = preparedSave.validationError;
+        await finishInterruptedSaveChanges(snapshot, saveRecord);
+        return;
+      }
       saveError.value = preparedSave.validationError;
-      await finishInterruptedSaveChanges(snapshot);
+      await finishInterruptedSaveChanges(snapshot, saveRecord);
       return;
     }
 
     const stmts = preparedSave?.statements ?? [];
     if (stmts.length === 0) {
-      await finishInterruptedSaveChanges(snapshot);
+      await finishInterruptedSaveChanges(snapshot, saveRecord);
       return;
     }
     const rollbackStmts = preparedSave?.rollbackStatements ?? [];
+    let txnSessionId = manualTransactionSessionId.value;
+    if (options.ensureManualTransactionSession?.value && hasBackendSaveTarget.value) {
+      try {
+        txnSessionId = await options.ensureManualTransactionSession.value();
+        if (!txnSessionId) throw new Error("Manual transaction session was not initialized");
+      } catch (error) {
+        saveError.value = normalizeDataGridSaveError(databaseType.value, error);
+        await finishInterruptedSaveChanges(snapshot, saveRecord);
+        return;
+      }
+    }
+    try {
+      const guardError = await verifyKeylessGuards(preparedSave?.keylessGuards ?? [], preparedSave?.executionSchema, txnSessionId);
+      if (guardError) {
+        saveError.value = guardError;
+        await finishInterruptedSaveChanges(snapshot, saveRecord);
+        return;
+      }
+    } catch (e: any) {
+      saveError.value = normalizeDataGridSaveError(databaseType.value, e);
+      await finishInterruptedSaveChanges(snapshot, saveRecord);
+      return;
+    }
     const productionAssessment = assessProductionSql(stmts.join(";\n"), connection, database.value);
     if (productionAssessment.active && productionAssessment.isMutation) {
       // Autosave must never write production data without an operator reviewing the generated statements.
       if (saveOptions.autoSave) {
-        await finishInterruptedSaveChanges(snapshot);
+        await finishInterruptedSaveChanges(snapshot, saveRecord);
         return;
       }
       const confirmed = await productionSafetyStore.requestConfirmation({
@@ -1804,33 +2636,79 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         source: i18n.global.t("readOnlyUnlock.sourceDataEditor"),
       });
       if (!confirmed) {
-        await finishInterruptedSaveChanges(snapshot);
+        await finishInterruptedSaveChanges(snapshot, saveRecord);
         return;
       }
     }
+    // Engines without transactional rollback (Salesforce: one REST call per record,
+    // a failure leaves earlier records applied) let the host review the operation
+    // list first. Auto-save never writes without that review, matching the
+    // production-database interlock above.
+    const confirmSaveRequest = options.confirmSaveRequest?.value;
+    if (confirmSaveRequest) {
+      if (saveOptions.autoSave) {
+        await finishInterruptedSaveChanges(snapshot, saveRecord);
+        return;
+      }
+      const saveConfirmed = await confirmSaveRequest({
+        updates: snapshot.dirtyRows.size,
+        inserts: snapshot.newRows.length,
+        deletes: snapshot.deletedRows.size,
+        targetLabel: tableMeta.value?.tableName,
+        statements: stmts,
+      });
+      if (!saveConfirmed) {
+        await finishInterruptedSaveChanges(snapshot, saveRecord);
+        return;
+      }
+    }
+    if (!editable.value || stmtOptions?.tableMeta !== tableMeta.value) {
+      await finishInterruptedSaveChanges(snapshot, saveRecord);
+      return;
+    }
     const start = Date.now();
     let apiResult: { affected_rows?: number } | undefined;
+    let singleStatementAffectedRows: number | undefined;
     console.info("[DBX][dataGrid:save-statements]", {
       databaseType: databaseType.value,
       table: tableMeta.value ? [tableMeta.value.schema, tableMeta.value.tableName].filter(Boolean).join(".") : undefined,
       statements: stmts,
       rollbackStatements: rollbackStmts,
     });
-
-    if (useTransaction.value && stmts.length > 1 && hasBackendSaveTarget.value) {
+    if (txnSessionId && hasBackendSaveTarget.value) {
+      options.onManualTransactionMutation?.();
       try {
-        apiResult = await api.executeInTransaction(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema);
+        const results = preparedSave?.boundStatements?.length
+          ? await api.executeInManualTransaction(txnSessionId, stmts.join(";\n"), database.value ?? "", preparedSave?.executionSchema, undefined, undefined, undefined, undefined, undefined, undefined, undefined, preparedSave.boundStatements)
+          : await api.executeInManualTransaction(txnSessionId, stmts.join(";\n"), database.value ?? "", preparedSave?.executionSchema);
+        apiResult = {
+          affected_rows: results.reduce((total, result) => total + (result.affected_rows ?? 0), 0),
+        };
+        if (stmts.length === 1 && results.length === 1) singleStatementAffectedRows = results[0]?.affected_rows;
       } catch (e: any) {
         saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, snapshot, e);
-        await finishInterruptedSaveChanges(snapshot);
+        await finishInterruptedSaveChanges(snapshot, saveRecord);
+        return;
+      }
+    } else if (useTransaction.value && stmts.length > 1 && hasBackendSaveTarget.value) {
+      try {
+        apiResult = preparedSave?.boundStatements?.length
+          ? await api.executeInTransaction(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema, undefined, preparedSave.boundStatements)
+          : await api.executeInTransaction(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema);
+      } catch (e: any) {
+        saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, snapshot, e);
+        await finishInterruptedSaveChanges(snapshot, saveRecord);
         return;
       }
     } else if (hasBackendSaveTarget.value) {
       try {
-        apiResult = await api.executeBatch(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema);
+        apiResult = preparedSave?.boundStatements?.length
+          ? await api.executeBatch(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema, undefined, undefined, preparedSave.boundStatements)
+          : await api.executeBatch(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema);
+        if (stmts.length === 1) singleStatementAffectedRows = apiResult?.affected_rows;
       } catch (e: any) {
         saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, snapshot, e);
-        await finishInterruptedSaveChanges(snapshot);
+        await finishInterruptedSaveChanges(snapshot, saveRecord);
         return;
       }
     } else if (onExecuteSql.value) {
@@ -1840,19 +2718,51 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         }
       } catch (e: any) {
         saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, snapshot, e);
-        await finishInterruptedSaveChanges(snapshot);
+        await finishInterruptedSaveChanges(snapshot, saveRecord);
         return;
       }
     }
+    const missedSingleRowIdUpdate =
+      (resolvedDatabaseType.value === "oracle" || resolvedDatabaseType.value === "oceanbase-oracle") &&
+      usesSyntheticRowIdKey(resolvedDatabaseType.value, stmtOptions?.tableMeta.primaryKeys ?? []) &&
+      !joinedWriteTargets.value?.length &&
+      snapshot.dirtyRows.size === 1 &&
+      snapshot.newRows.length === 0 &&
+      snapshot.deletedRows.size === 0 &&
+      stmts.length === 1 &&
+      /^\s*UPDATE\b/i.test(stmts[0]!) &&
+      singleStatementAffectedRows === 0;
+    if (missedSingleRowIdUpdate) {
+      manualSaveRequired.value = true;
+      saveError.value = await recordFailedDataGridHistory(stmts, rollbackStmts, start, snapshot, new Error(i18n.global.t("grid.rowIdUpdateConflict")));
+      await finishInterruptedSaveChanges(snapshot, saveRecord);
+      return;
+    }
+    // Anonymous PL/SQL reports zero for an unknown JDBC update count; its
+    // SQL%ROWCOUNT guard owns concurrency checks. Only compare plain DELETEs.
+    const rowIdDeleteCountKnown =
+      (resolvedDatabaseType.value === "oracle" || resolvedDatabaseType.value === "oceanbase-oracle") &&
+      usesSyntheticRowIdKey(resolvedDatabaseType.value, stmtOptions?.tableMeta.primaryKeys ?? []) &&
+      !joinedWriteTargets.value?.length &&
+      snapshot.dirtyRows.size === 0 &&
+      snapshot.newRows.length === 0 &&
+      snapshot.deletedRows.size > 0 &&
+      stmts.length === snapshot.deletedRows.size &&
+      stmts.every((statement) => /^\s*DELETE\s+FROM\b/i.test(statement));
+    const actualDeletedRows = apiResult?.affected_rows;
+    const deleteConflict =
+      rowIdDeleteCountKnown && typeof actualDeletedRows === "number" && Number.isInteger(actualDeletedRows) && actualDeletedRows >= 0 && actualDeletedRows < snapshot.deletedRows.size
+        ? i18n.global.t("grid.rowIdDeleteConflict", { actual: actualDeletedRows, expected: snapshot.deletedRows.size })
+        : undefined;
     try {
-      await recordDataGridHistory(stmts, rollbackStmts, Date.now() - start, snapshot, apiResult);
+      await recordDataGridHistory(stmts, rollbackStmts, Date.now() - start, snapshot, deleteConflict ? { ...apiResult, success: false, error: deleteConflict } : apiResult);
     } catch (e) {
       console.warn("[DBX] failed to record data grid history", e);
     }
     applyDirtyRowsToResult(snapshot);
     options.onResultPayloadMutated?.();
     let savedRowsRefreshed = false;
-    if (!shouldReloadAfterSave && snapshot.dirtyRows.size > 0 && options.refreshSavedRows) {
+    if (!joinedWriteTargets.value?.length && !txnSessionId && !shouldReloadAfterSave && snapshot.dirtyRows.size > 0 && options.refreshSavedRows) {
       try {
         savedRowsRefreshed = await options.refreshSavedRows({
           dirtyRows: snapshot.dirtyRows,
@@ -1867,14 +2777,23 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     clearSavedPendingChanges(snapshot);
     if (!hasPendingChanges.value) exitTransaction();
     clearPendingChangeHistory();
+    // Notify before reload can replace the rows and clear their error state.
+    if (deleteConflict) options.onSaveConflict?.(deleteConflict);
     if (shouldReloadAfterSqlSave && !savedRowsRefreshed) {
-      reloadCurrentData();
+      reloadAfterSave(saveRecord);
     }
+    // Settle first: a queued quick-entry auto-save must start after this save,
+    // not be swallowed by the still-running registry record (#13226).
+    onPendingSaveSettled(snapshot, true, saveRecord);
     await finishSaveChanges(snapshot);
+    // These deletes reached a terminal result. Refresh and report the mismatch
+    // instead of leaving a missing ROWID queued for an impossible retry.
+    if (deleteConflict) saveError.value = deleteConflict;
   }
 
   function discardChanges() {
     if (isConditionalUpdateActive.value) return;
+    manualSaveRequired.value = false;
     dirtyRows.value = new Map();
     newRows.value = [];
     newRowMeta.value = [];
@@ -1899,6 +2818,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
       previousResultRows = rows;
       pendingScrollRestore = undefined;
+      clearTabSwitchScrollProvenance();
       discardChanges();
     },
   );
@@ -1913,11 +2833,12 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const scroll = includeScroll ? (readScrollPosition() ?? pendingScrollRestore) : undefined;
     if (includeScroll) pendingScrollRestore = scroll;
     const quickEntryDraftRowSnapshot = draftRowHasValue() ? [...quickEntryDraftRow.value] : undefined;
-    if (!hasPendingChanges.value && !quickEntryDraftRowSnapshot && !(includeEditing && editingCell.value) && !scroll) {
+    if (!hasPendingChanges.value && newRows.value.length === 0 && !quickEntryDraftRowSnapshot && !(includeEditing && editingCell.value) && !scroll) {
       pendingChangesCache.delete(k);
       return;
     }
     pendingChangesCache.set(k, {
+      manualSaveRequired: manualSaveRequired.value,
       newRows: newRows.value.map((r) => [...r]),
       newRowMeta: cloneNewRowMeta(newRowMeta.value),
       quickEntryDraftRow: quickEntryDraftRowSnapshot,
@@ -1927,6 +2848,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       editValue: editValue.value,
       transactionActive: transactionActive.value,
       scroll,
+      scrollFromTabSwitch: scroll ? scrollSnapshotFromTabSwitch : false,
+      // Only a snapshot that still carries pending changes is owned by the save.
+      saving: isSaving.value && (newRows.value.length > 0 || dirtyRows.value.size > 0 || deletedRows.value.size > 0),
       columnCount: result.value.columns.length,
       rowCount: result.value.rows.length,
     });
@@ -1938,13 +2862,20 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     applyScrollPosition(pendingScrollRestore);
   }
 
-  function onBeforeTabSwitch() {
+  function onBeforeTabSwitch(event?: Event) {
     if (!componentActive) return;
-    savePendingSnapshot(true, true);
+    const detail = (event as CustomEvent<{ tabId?: string; fromTabId?: string }> | undefined)?.detail;
+    const key = cacheKey?.value;
+    // Split editor groups keep several grids mounted at once and every one of them
+    // receives this window event, so only the grid whose own tab is being left may
+    // claim the scroll restore. A missing fromTabId falls through to "start at top".
+    if (key && detail?.fromTabId && cacheKeyBelongsToTab(key, detail.fromTabId)) scrollSnapshotFromTabSwitch = true;
+    // A save in flight already owns the changes it is writing; persisting them
+    // here would bring them back after a remount (#13226).
+    if (!isSaving.value) persistGridState();
     if (editingCell.value) suppressNextBlurCommit = true;
   }
 
-  const componentInstance = getCurrentInstance();
   if (componentInstance && typeof window !== "undefined") {
     window.addEventListener(BEFORE_TAB_SWITCH_EVENT, onBeforeTabSwitch);
   }
@@ -1952,22 +2883,34 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   if (componentInstance) {
     onMounted(() => {
       componentActive = true;
+      mounted = true;
       applyScrollPosition(pendingScrollRestore);
+      claimPendingSave();
+      adoptRunningSave();
     });
     onActivated(() => {
       componentActive = true;
+      mounted = true;
       restorePendingSnapshotFocus();
+      claimPendingSave();
+      adoptRunningSave();
     });
     onDeactivated(() => {
-      savePendingSnapshot(true, true);
+      if (currentRecord) releasePendingSaveRecord(currentRecord);
+      if (!isSaving.value) persistGridState();
       componentActive = false;
+      mounted = false;
     });
 
     // Save pending changes before the component is destroyed so they can be
     // restored if a new DataGrid instance is created for the same tab
     // (e.g. after result eviction + reload).
     onBeforeUnmount(() => {
-      savePendingSnapshot(true, true);
+      if (currentRecord) releasePendingSaveRecord(currentRecord);
+      // Persist even mid-save: the snapshot is marked `saving`, so a grid that
+      // returns after a failure still restores changes it can retry.
+      persistGridState();
+      mounted = false;
       if (typeof window !== "undefined") {
         window.removeEventListener(BEFORE_TAB_SWITCH_EVENT, onBeforeTabSwitch);
       }
@@ -1981,17 +2924,21 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   async function previewChanges(): Promise<string[]> {
     isPreviewLoading.value = true;
     previewStatements.value = [];
+    previewValidationMessage.value = "";
     try {
+      const snapshot = snapshotPendingSaveChanges();
+      if (!hasPendingSaveChanges(snapshot)) return [];
       if (customSaveHandler?.value) {
         const preview = customSaveHandler.value.preview;
-        if (preview) return await preview({ dirtyRows: dirtyRows.value, newRows: newRows.value, newRowMeta: cloneNewRowMeta(newRowMeta.value), deletedRows: deletedRows.value, columns: result.value.columns, rows: result.value.rows });
+        if (preview) return await preview({ dirtyRows: snapshot.dirtyRows, newRows: snapshot.newRows, newRowMeta: snapshot.newRowMeta, deletedRows: snapshot.deletedRows, columns: result.value.columns, rows: result.value.rows });
         return [];
       }
-      const stmtOptions = saveStatementOptions();
+      if (options.prepareSaveBaseline) await options.prepareSaveBaseline(snapshot);
+      const stmtOptions = saveStatementOptions(snapshot);
       if (!stmtOptions) return [];
-      const prepared = await api.prepareDataGridSave(stmtOptions, saveDriverProfile());
+      const prepared = await prepareSaveStatements(stmtOptions);
       if (prepared?.validationError) {
-        saveError.value = prepared.validationError;
+        previewValidationMessage.value = prepared.validationError;
         return [];
       }
       const stmts = prepared?.statements ?? [];
@@ -2019,11 +2966,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     newRowCount,
     deletedRowCount,
     pendingChangesVersion,
+    manualSaveRequired,
+    stageCellReplacements,
     pendingChangeCount,
     hasPendingChanges,
     transactionActive,
     isSaving,
     saveError,
+    previewValidationMessage,
     isConditionalUpdateActive,
     conditionalUpdateExecution,
     useTransaction,
@@ -2037,11 +2987,17 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     commitEditFromBlur,
     applyCellValue,
     restoreCellValue,
+    cancelUntouchedPendingRow,
     cancelEdit,
     onEditKeydown,
     addRow,
     addRows,
+    addRowsInBatches,
+    availableInsertRows,
     appendPastedRowsToNewRow,
+    appendPastedRowsAsNewRows,
+    appendPastedRowsToNewRowInBatches,
+    appendPastedRowsAsNewRowsInBatches,
     cloneRow,
     cloneRows,
     applyDeleteRows,
@@ -2076,8 +3032,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     previewStatements,
     isPreviewLoading,
     previewChanges,
+    isUntouchedNewRow,
     savePendingSnapshot,
+    // Exposed for tests: the window listener is only registered inside a component
+    // instance, so specs drive the tab-switch path directly.
+    onBeforeTabSwitch,
     restorePendingSnapshotFocus,
+    adoptRunningSave,
+    adoptedSave,
     syncHeaderScroll: (headerRef: Ref<HTMLDivElement | undefined>) => (e: Event) => {
       if (headerRef.value) {
         headerRef.value.scrollLeft = (e.target as HTMLElement).scrollLeft;

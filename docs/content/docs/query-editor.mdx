@@ -5,6 +5,56 @@ description: Write, understand, parameterize, execute, analyze, and reuse SQL in
 
 The query editor is the SQL workspace in DBX. It combines dialect-aware highlighting and completion, semantic diagnostics, parameter input, execution progress, multiple results, execution plans, query history, the SQL library, and AI assistance in one tab.
 
+## Global file search preview
+
+In the desktop app, global file content search previews the selected file below the results. Use the up and down arrow keys or hover to select a result. The preview shows its path and line numbers and scrolls to the highlighted match. Use the toolbar copy button to copy selected text, or the whole file when nothing is selected. Click a result or press Enter to open the file. While focused in the read-only preview, the arrow keys still navigate results, Enter opens the selected result, and Escape closes the search dialog. Filename-only matches preview the beginning of the file. Empty files and read failures show an appropriate message.
+
+Use the preview toolbar edit button to change the file in place, including empty files. While editing, Enter and arrow keys edit text, and undo and redo are available. Click Save or press `Mod+S` to write the file; Cancel discards the current edits. The preview stays on the same file until you save or cancel, with searching, opening other results, and closing the dialog temporarily unavailable. Saving preserves the detected encoding and line endings. If another program has modified or deleted the file, or saving fails, DBX keeps your draft and shows an error without automatically overwriting external changes.
+
+## Vim configuration
+
+In the desktop app, enable Vim mode in **Editor Settings** to load commands from `~/.dbx/vimrc`. Create the file if needed, then restart DBX after editing it. Blank lines and lines beginning with `"` are ignored. Commands supported by CodeMirror Vim, such as these mappings, apply to every SQL editor tab:
+
+```vim
+" DBX Vim mappings
+imap jj <Esc>
+nmap Y y$
+set clipboard=unnamedplus
+```
+
+With `set clipboard=unnamedplus`, Vim yanks and deletes write to the system clipboard, and normal-mode `p` and `P` read from it. Unsupported commands do not prevent the editor from starting.
+
+### Run DBX actions from Vim
+
+Type `:dbx <action>` in the Vim command line to run a DBX action. Action names match the shortcut action IDs and are case-insensitive, so `:dbx formatsql` also works. An unknown name shows a notice instead of running anything.
+
+| Scope | Actions |
+| --- | --- |
+| Editor | `executeSql`, `executeSqlInNewResultTab`, `explainSql`, `formatSql`, `saveSql`, `expandSelectStar`, `toggleLineComment`, `toggleBlockComment`, `selectCurrentStatement`, `previousStatement`, `nextStatement`, `statementStart`, `uppercaseSelection`, `lowercaseSelection`, `sendSelectionToAi`, `sqlIntentionActions` |
+| App | `newQuery`, `closeTab`, `closeOtherTabs`, `closeAllTabs`, `reopenClosedTab`, `openSettings` |
+
+Editor actions behave like their keyboard shortcuts. For example, `executeSql` runs the selection when there is one, and the current statement otherwise. Running from Visual mode, which enters `:'<,'>dbx executeSql`, restores the visual selection first, so only the selected SQL is used. Linewise and blockwise selections are expanded to whole lines.
+
+Editing actions that Vim already provides, such as undo, indent, delete line, and join lines, are not exposed through `:dbx`; use the native Vim commands instead.
+
+Each action also has a space-free command, `:Dbx` followed by the action name with its first letter capitalized, for example `:DbxExecuteSql` or `:DbxFormatSql`. Use these in `vimrc` mappings, because CodeMirror Vim mappings stop at the first space and cannot map `:dbx executeSql` directly:
+
+```vim
+nnoremap Qr :DbxExecuteSql<CR>
+vnoremap Qr :DbxExecuteSql<CR>
+nnoremap Qf :DbxFormatSql<CR>
+nnoremap Qj :DbxNextStatement<CR>
+nnoremap Qk :DbxPreviousStatement<CR>
+```
+
+CodeMirror Vim runs a built-in command as soon as the typed keys match it, without waiting for more keys the way Vim's `timeoutlen` does. Use a prefix that is not already a single-key command, such as `Q`. Common leader keys like `<Space>` (move right) and `,` (repeat the last `f`/`t` search backward) are consumed by their built-in commands, so mappings like `<Space>r` or `,x` never fire. To use one of them as a prefix, unmap its built-in command first, which also removes that key's original behavior:
+
+```vim
+unmap <Space>
+nnoremap <Space>r :DbxExecuteSql<CR>
+vnoremap <Space>r :DbxExecuteSql<CR>
+```
+
 ## Basic Workflow
 
 <Steps>
@@ -40,6 +90,28 @@ The query editor is the SQL workspace in DBX. It combines dialect-aware highligh
   </Step>
 </Steps>
 
+## Double-Click String or Word Selection
+
+By default, double-clicking inside a SQL string selects its whole value. For example, double-clicking the year in `'2013-12-20 09:30:26.603'` selects the entire timestamp without the surrounding quotes.
+
+To select only the word or numeric segment under the pointer:
+
+1. Open **Settings → Editor**.
+2. Set **Double-click inside a string** to **Select single word**.
+3. Click **Apply** or **Apply and Close**.
+
+This mode uses the editor's default word boundaries. For example:
+
+| String content | Double-click target | Selected text |
+| --- | --- | --- |
+| `2013-12-20 09:30:26.603` | Year | `2013` |
+| `2013-12-20 09:30:26.603` | Milliseconds | `603` |
+| `123-456` | Second numeric segment | `456` |
+| `123.456` | Second numeric segment | `456` |
+| `abc123` | Digits | `abc123` |
+
+This is word selection, so adjacent letters and digits remain one word. Switch back to **Select whole value** to restore the default behavior. This option controls double-clicking strings in the SQL editor; it does not control text selection in the result grid.
+
 ## Execute SQL
 
 | Action | macOS | Windows / Linux |
@@ -55,6 +127,16 @@ Normal execution updates the active result. **Execute in a new result** preserve
 For multi-statement execution, the result area shows the current statement, total count, completion state, and errors. When the driver supports it, the active query or remaining statements can be cancelled.
 
 <Callout type="warn">Cancellation depends on the driver and database. After Stop is clicked, the server may still need time to interrupt the current statement.</Callout>
+
+### Preview DML changes before executing
+
+For an `UPDATE`, `INSERT`, or `DELETE` statement, the toolbar shows a **Preview changes** button (also available in the editor context menu). DBX rewrites the statement into an equivalent read-only `SELECT` and opens it in a new result tab. The preview re-evaluates the expressions being written, so expressions with side effects (advancing a sequence, volatile functions) still take effect during the preview, and values shown for non-deterministic functions (`uuid()`, `rand()`, `now()`) may differ from the actual execution:
+
+- `UPDATE` — the grid shows the affected rows plus one **`column (new)`** column per assigned column (expressions are evaluated, so `SET a = a + 1` shows the actual new value);
+- `INSERT` — the grid shows the rows that would be inserted (column names from the target columns, `VALUES` expanded);
+- `DELETE` — the grid shows the rows that would be removed.
+
+Statements DBX cannot rewrite safely (for example some dialect-specific forms, or `UPDATE ... FROM`) are reported as **Preview is not supported** and can still be executed normally.
 
 ## Execution Scope and Target Picker
 
@@ -118,6 +200,10 @@ Parameters can be entered as strings, numbers, booleans, `NULL`, or raw SQL valu
 
 Formatting and compacting only change editor text; they do not execute SQL.
 
+## PL/SQL Debugging
+
+For Oracle and OceanBase Oracle mode, use the debug entry points to step through procedures, functions, package members, and anonymous blocks. See [PL/SQL Debugging](/en/docs/plsql-debug) for startup, explicit debug compilation, recovery, and transaction boundaries.
+
 ## Explain Plan
 
 Explain Plan accepts query-like SQL that is safe to analyze, such as `SELECT`, `WITH`, `TABLE`, or `VALUES`. Supported databases can return:
@@ -129,7 +215,17 @@ Explain Plan accepts query-like SQL that is safe to analyze, such as `SELECT`, `
 
 `EXPLAIN` semantics vary by database, and some engines provide only table or text output. A plan reflects optimizer estimates rather than real production performance; evaluate it together with data volume, statistics, indexes, and measured runtime.
 
+### Inspect Existing Session Evidence
+
+For Oracle and OceanBase Oracle connections, open **Process List** from the connection context menu, then choose **Diagnostics** on a session row to inspect SQL, an existing plan, statistics and waits, and long operations. This reads evidence already retained by the database; it does not execute the target SQL or generate a new plan.
+
+Diagnostics freezes the session and SQL identity captured when opened. Refresh reads the same target. If the session moves to another SQL statement, the page marks the change instead of attaching the new statement's data to the original result. Select explicitly when several audit requests or cached plans match. SQL text shows its completeness. Plan rows are estimates; Oracle cursor counters, OB request statistics, and cached-plan cumulative statistics have separate scope labels.
+
+**Stop reading** ends the local wait and attempts to cancel diagnostic queries without terminating the target session. Permission errors, unavailable views, evicted cache entries, and uncollected data have distinct states. Failed refreshes retain earlier data with its sampling time. An empty long-operation result does not mean the SQL has finished. OB long operations show available timing information without inventing a work percentage.
+
 ## Query History
+
+In **Settings → Data → Query history retention**, choose **200**, **1000** (default), **5000**, **10000**, or **Unlimited**. The limit is shared by all connections and execution sources, including MCP. A lower limit takes effect the next time a history entry is recorded: older entries beyond the limit are deleted. Raising the limit does not recover deleted entries. History page sizes remain unchanged.
 
 Query history stores executed SQL per connection with time and context. You can:
 
@@ -150,6 +246,8 @@ Query history stores executed SQL per connection with time and context. You can:
 | Query tabs | Temporary analysis and unfinished drafts | Settings can restore all tabs, pinned tabs only, or none |
 
 The save dialog can search or create folders. Quick Open indexes both SQL Library entries and SQL Files.
+
+On Desktop, the **Locate current file** button in the SQL Files panel expands parent directories, selects the current file, and scrolls it into view. If its directory is not open yet, it is added to the file tree first. Unsaved queries cannot be located. File filters remain in effect; hidden or missing files show a notification.
 
 ## Safety and Boundaries
 

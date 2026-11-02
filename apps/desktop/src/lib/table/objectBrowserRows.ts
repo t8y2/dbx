@@ -1,17 +1,22 @@
-import type { MongoCollectionKind, ObjectInfo, TreeNode, TreeNodeType } from "@/types/database";
+import type { MongoCollectionKind, ObjectBrowserFilter, ObjectInfo, TreeNode, TreeNodeType, TriggerInfo } from "@/types/database";
+export type { ObjectBrowserFilter } from "@/types/database";
 import { pinnedTreeNodeIdentityMatches, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { toMongoCollectionKind } from "@/lib/sidebar/mongoCollectionMutation";
 import { buildGroupedObjectTreeNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, compareDatabaseObjectNames, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
 import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
+import { exactOracleTriggerMetadata, exactOracleTriggerObjectMetadata, oracleTriggerIdentityKey } from "@/lib/database/oracleTriggerIdentity";
 
 export type ObjectBrowserRow = {
   id: string;
   name: string;
   displayName: string;
   schema?: string;
-  type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+  type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "INDEX" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+  parentSchema?: string;
+  parentName?: string;
   collectionKind?: MongoCollectionKind;
   valid?: boolean | null;
+  trigger?: TriggerInfo | null;
   signature?: string | null;
   comment?: string | null;
   created_at?: string | null;
@@ -26,7 +31,6 @@ export type ObjectBrowserRow = {
 
 export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
 export type ObjectBrowserSortDirection = "asc" | "desc";
-export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "events" | "sequences" | "packages" | "types";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
 
 export type ObjectBrowserPinnedTreeNodeContext = {
@@ -46,6 +50,7 @@ export function objectBrowserRowTreeNodeType(type: ObjectBrowserRow["type"]): Tr
   if (type === "TRIGGER") return "trigger";
   if (type === "EVENT") return "event";
   if (type === "SEQUENCE") return "sequence";
+  if (type === "INDEX") return "index";
   if (type === "PACKAGE_BODY") return "package-body";
   if (type === "PACKAGE") return "package";
   if (type === "TYPE_BODY") return "type-body";
@@ -77,7 +82,7 @@ export function objectBrowserRowPinnedTreeNodeIdentity(row: ObjectBrowserRow, co
 }
 
 export function objectBrowserRowMatchesPinnedTreeNode(row: ObjectBrowserRow, identity: PinnedTreeNodeIdentity, context: ObjectBrowserPinnedTreeNodeContext): boolean {
-  return pinnedTreeNodeIdentityMatches(identity, objectBrowserRowPinnedTreeNodeIdentity(row, context), canonicalizeObjectBrowserPinnedTreeNodeIdentity(context));
+  return pinnedTreeNodeIdentityMatches(identity, objectBrowserRowPinnedTreeNodeIdentity(row, context), exactOracleTriggerMetadata(row.trigger) ? undefined : canonicalizeObjectBrowserPinnedTreeNodeIdentity(context));
 }
 
 function flattenTreeNodeIds(nodes: readonly TreeNode[]): string[] {
@@ -89,13 +94,17 @@ function objectBrowserRowObjectInfo(row: ObjectBrowserRow, schema?: string): Obj
     name: row.name,
     object_type: row.type,
     schema,
+    valid: row.valid,
     signature: row.signature || undefined,
-    parent_schema: row.partitionParentSchema,
-    parent_name: row.partitionParentName,
+    trigger: row.trigger,
+    parent_schema: row.type === "INDEX" ? row.parentSchema : row.partitionParentSchema,
+    parent_name: row.type === "INDEX" ? row.parentName : row.partitionParentName,
   };
 }
 
 function legacySchemaCandidates(row: ObjectBrowserRow, context: ObjectBrowserPinnedTreeNodeContext): Array<string | undefined> {
+  const trigger = exactOracleTriggerMetadata(row.trigger);
+  if (trigger) return [trigger.owner];
   const identity = objectBrowserRowPinnedTreeNodeIdentity(row, context);
   const canonicalIdentity = canonicalizeObjectBrowserPinnedTreeNodeIdentity(context)(identity);
   return [...new Set([row.schema, context.schema, canonicalIdentity.schema, undefined].map((schema) => schema?.trim() || undefined))];
@@ -121,6 +130,7 @@ export function objectBrowserRowLegacyPinnedTreeNodeIds(row: ObjectBrowserRow, c
               {
                 name: row.name,
                 table_type: row.type,
+                valid: row.valid,
                 comment: row.comment,
                 parent_schema: row.partitionParentSchema,
                 parent_name: row.partitionParentName,
@@ -141,6 +151,7 @@ export function objectBrowserRowLegacyPinnedTreeNodeIds(row: ObjectBrowserRow, c
 export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type"] {
   const value = type.toUpperCase();
   const normalized = value.replace(/[\s-]+/g, "_");
+  if (normalized === "INDEX") return "INDEX";
   if (normalized.includes("PACKAGE_BODY")) return "PACKAGE_BODY";
   if (normalized.includes("TYPE_BODY")) return "TYPE_BODY";
   if (normalized.includes("PACKAGE")) return "PACKAGE";
@@ -157,12 +168,32 @@ export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type
 
 export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; database: string; fallbackSchema: string; rowSchema?: string }): ObjectBrowserRow[] {
   const seen = new Map<string, number>();
-  const rows = options.objects.flatMap((object) => {
-    const name = normalizeDatabaseObjectName(object.name);
-    if (!name) return [];
-    const objectSchema = object.schema ? normalizeDatabaseObjectName(object.schema) : undefined;
-    const schema = objectSchema || options.rowSchema;
+  const rows = options.objects.flatMap<ObjectBrowserRow>((object) => {
+    const exactTrigger = exactOracleTriggerObjectMetadata(object);
+    if (exactTrigger) {
+      const baseId = oracleTriggerIdentityKey(exactTrigger);
+      const index = seen.get(baseId) ?? 0;
+      seen.set(baseId, index + 1);
+      return [
+        {
+          id: `${baseId}:${index}`,
+          name: exactTrigger.name,
+          displayName: exactTrigger.name,
+          schema: exactTrigger.owner,
+          type: "TRIGGER" as const,
+          valid: object.trigger?.valid ?? object.valid,
+          trigger: object.trigger,
+          comment: object.comment,
+          created_at: object.created_at,
+          updated_at: object.updated_at,
+        },
+      ];
+    }
     const type = normalizeObjectBrowserType(object.object_type);
+    const name = type === "INDEX" ? object.name : normalizeDatabaseObjectName(object.name);
+    if (!name) return [];
+    const objectSchema = type === "INDEX" ? object.schema : object.schema ? normalizeDatabaseObjectName(object.schema) : undefined;
+    const schema = objectSchema || options.rowSchema;
     const signature = routineSignatureForDisplay(type, object.signature);
     const displayName = signature === undefined ? name : `${name}(${signature})`;
     const signatureIdPart = signature === undefined ? "" : `:${signature}`;
@@ -181,8 +212,11 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
         comment: object.comment,
         created_at: object.created_at,
         updated_at: object.updated_at,
-        partitionParentSchema: object.parent_schema ? normalizeDatabaseObjectName(object.parent_schema) : undefined,
-        partitionParentName: object.parent_name ? normalizeDatabaseObjectName(object.parent_name) : undefined,
+        trigger: object.trigger,
+        parentSchema: type === "INDEX" ? (object.parent_schema ?? undefined) : undefined,
+        parentName: type === "INDEX" ? (object.parent_name ?? undefined) : undefined,
+        partitionParentSchema: type !== "INDEX" && object.parent_schema ? normalizeDatabaseObjectName(object.parent_schema) : undefined,
+        partitionParentName: type !== "INDEX" && object.parent_name ? normalizeDatabaseObjectName(object.parent_name) : undefined,
       },
     ];
   });
@@ -243,6 +277,78 @@ function markPartitionRows(rows: ObjectBrowserRow[], fallbackSchema: string) {
   }
 }
 
+export type ObjectBrowserRowSorter = (rows: ObjectBrowserRow[]) => ObjectBrowserRow[];
+
+/**
+ * Flattens the object rows into render order: roots first, each followed by its
+ * partition children — recursively, because a PostgreSQL partition can itself be
+ * a partitioned parent (a second-level sub-partitioned table).
+ *
+ * `depths` carries each partition row's nesting level so the caller can indent
+ * it; roots are 0.
+ *
+ * `rows`/`matchingRows` are expected to be pre-filtered by the caller's type
+ * filter. When `query` is non-empty the tree is force-expanded so a deep match
+ * and the ancestors leading to it stay visible even while collapsed.
+ */
+export function groupObjectBrowserRows(options: { rows: readonly ObjectBrowserRow[]; matchingRows: readonly ObjectBrowserRow[]; query: string; expandedPartitionParentIds: ReadonlySet<string>; sortRows: ObjectBrowserRowSorter }): { rows: ObjectBrowserRow[]; depths: Map<string, number> } {
+  const { rows, matchingRows, query, expandedPartitionParentIds, sortRows } = options;
+  const candidateIds = new Set(rows.map((row) => row.id));
+  const matchingIds = new Set(matchingRows.map((row) => row.id));
+  const rowById = new Map(rows.map((row) => [row.id, row]));
+
+  const partitionRowsByParentId = new Map<string, ObjectBrowserRow[]>();
+  for (const row of rows) {
+    if (!row.partitionParentId) continue;
+    const group = partitionRowsByParentId.get(row.partitionParentId) ?? [];
+    group.push(row);
+    partitionRowsByParentId.set(row.partitionParentId, group);
+  }
+
+  // A deep match must be reachable: pull in every ancestor that leads to it, or
+  // the match would be filtered out as an orphaned sub-partition.
+  const ancestorIdsWithMatchingPartitions = new Set<string>();
+  if (query) {
+    for (const row of matchingRows) {
+      let ancestorId = row.partitionParentId;
+      while (ancestorId && !ancestorIdsWithMatchingPartitions.has(ancestorId)) {
+        ancestorIdsWithMatchingPartitions.add(ancestorId);
+        ancestorId = rowById.get(ancestorId)?.partitionParentId;
+      }
+    }
+  }
+
+  const rootRows = rows.filter((row) => {
+    if (row.partitionParentId) return false;
+    if (!query) return true;
+    return matchingIds.has(row.id) || ancestorIdsWithMatchingPartitions.has(row.id);
+  });
+  const result: ObjectBrowserRow[] = [];
+  const depths = new Map<string, number>();
+
+  const appendPartitions = (parent: ObjectBrowserRow, depth: number) => {
+    const partitions = partitionRowsByParentId.get(parent.id)?.filter((partition) => candidateIds.has(partition.id));
+    if (!partitions?.length) return;
+    // Search force-expands the tree so every match (and its ancestor chain) is visible.
+    if (!query && !expandedPartitionParentIds.has(parent.id)) return;
+    const parentMatches = matchingIds.has(parent.id);
+    const visiblePartitions = query && !parentMatches ? partitions.filter((partition) => matchingIds.has(partition.id) || ancestorIdsWithMatchingPartitions.has(partition.id)) : partitions;
+    for (const partition of sortRows(visiblePartitions)) {
+      result.push(partition);
+      depths.set(partition.id, depth);
+      appendPartitions(partition, depth + 1);
+    }
+  };
+
+  for (const row of sortRows(rootRows)) {
+    result.push(row);
+    depths.set(row.id, 0);
+    appendPartitions(row, 1);
+  }
+
+  return { rows: result, depths };
+}
+
 function objectKey(row: Pick<ObjectBrowserRow, "schema" | "name" | "type">, fallbackSchema: string) {
   return `${row.type}\0${(row.schema || fallbackSchema).toLowerCase()}\0${row.name.toLowerCase()}`;
 }
@@ -264,7 +370,14 @@ export function filterObjectBrowserRows(rows: ObjectBrowserRow[], query: string)
     // matches names and comments only.
     return rows.filter((row) => [row.displayName, row.name, row.comment].filter(Boolean).some((value) => regex.test(String(value))));
   }
-  return rows.filter((row) => [row.displayName, row.name, row.comment].filter(Boolean).some((value) => String(value).toLowerCase().includes(q)));
+  return rows.filter((row) => {
+    // Let omitted underscores match object names without changing comment or explicit underscore searches.
+    const matchesName = [row.displayName, row.name].filter(Boolean).some((value) => {
+      const name = String(value).toLowerCase();
+      return name.includes(q) || name.replace(/_/g, "").includes(q);
+    });
+    return matchesName || !!row.comment?.toLowerCase().includes(q);
+  });
 }
 
 export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): ObjectBrowserFilterCounts {
@@ -278,6 +391,7 @@ export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): Object
     triggers: 0,
     events: 0,
     sequences: 0,
+    indexes: 0,
     packages: 0,
     types: 0,
   };
@@ -291,6 +405,7 @@ export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): Object
     else if (row.type === "TRIGGER") counts.triggers++;
     else if (row.type === "EVENT") counts.events++;
     else if (row.type === "SEQUENCE") counts.sequences++;
+    else if (row.type === "INDEX") counts.indexes++;
     else if (row.type === "PACKAGE" || row.type === "PACKAGE_BODY") counts.packages++;
     else if (row.type === "TYPE" || row.type === "TYPE_BODY") counts.types++;
   }

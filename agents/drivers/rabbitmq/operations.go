@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -30,7 +30,22 @@ func (s *server) listTopics(params jsonObject) (any, error) {
 		return nil, err
 	}
 	allVhosts := allVhostsRequested(params)
-	queues, err := managementGetAll(connection, managementListPath(params, connection, "queues"))
+	pageRequest, err := managementPageRequestFromParams(params, "name", "messages_ready")
+	if err != nil {
+		return nil, err
+	}
+	var queues []any
+	var pageResult *managementPageResult
+	if pageRequest == nil {
+		queues, err = managementGetAll(connection, managementListPath(params, connection, "queues"))
+	} else {
+		page, pageErr := managementGetPage(connection, managementListPath(params, connection, "queues"), *pageRequest)
+		if pageErr != nil {
+			return nil, pageErr
+		}
+		queues = page.Items
+		pageResult = &page
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -46,10 +61,12 @@ func (s *server) listTopics(params jsonObject) (any, error) {
 		}
 		topics = append(topics, info)
 	}
-	sort.SliceStable(topics, func(left, right int) bool {
-		return stringOrEmpty(topics[left], "name") < stringOrEmpty(topics[right], "name")
-	})
-	return jsonObject{"topics": topics}, nil
+	if pageRequest == nil {
+		sort.SliceStable(topics, func(left, right int) bool {
+			return stringOrEmpty(topics[left], "name") < stringOrEmpty(topics[right], "name")
+		})
+	}
+	return managementListResult("topics", topics, pageResult), nil
 }
 
 func topicInfoFromJSON(queue jsonObject) jsonObject {
@@ -382,7 +399,29 @@ func (s *server) listExchanges(params jsonObject) (any, error) {
 		return nil, err
 	}
 	allVhosts := allVhostsRequested(params)
-	exchanges, err := managementGetAll(connection, managementListPath(params, connection, "exchanges"))
+	pageRequest, err := managementPageRequestFromParams(params, "name")
+	if err != nil {
+		return nil, err
+	}
+	if pageRequest != nil && pageRequest.Search != "" && strings.Contains(strings.ToLower("(AMQP default)"), strings.ToLower(pageRequest.Search)) {
+		// The UI displays the empty-name default exchange as "(AMQP default)".
+		// Include it in the broker-side name search whenever that display label
+		// matches, while retaining ordinary substring matches.
+		pageRequest.Search = "(" + regexp.QuoteMeta(pageRequest.Search) + "|^$)"
+		pageRequest.UseRegex = true
+	}
+	var exchanges []any
+	var pageResult *managementPageResult
+	if pageRequest == nil {
+		exchanges, err = managementGetAll(connection, managementListPath(params, connection, "exchanges"))
+	} else {
+		page, pageErr := managementGetPage(connection, managementListPath(params, connection, "exchanges"), *pageRequest)
+		if pageErr != nil {
+			return nil, pageErr
+		}
+		exchanges = page.Items
+		pageResult = &page
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -398,10 +437,24 @@ func (s *server) listExchanges(params jsonObject) (any, error) {
 		}
 		result = append(result, info)
 	}
-	sort.SliceStable(result, func(left, right int) bool {
-		return stringOrEmpty(result[left], "name") < stringOrEmpty(result[right], "name")
-	})
-	return jsonObject{"exchanges": result}, nil
+	if pageRequest == nil {
+		sort.SliceStable(result, func(left, right int) bool {
+			return stringOrEmpty(result[left], "name") < stringOrEmpty(result[right], "name")
+		})
+	}
+	return managementListResult("exchanges", result, pageResult), nil
+}
+
+func managementListResult(key string, items []jsonObject, page *managementPageResult) jsonObject {
+	result := jsonObject{key: items}
+	if page == nil {
+		return result
+	}
+	result["page"] = page.Page
+	result["pageSize"] = page.PageSize
+	result["totalCount"] = page.TotalCount
+	result["hasMore"] = page.HasMore
+	return result
 }
 
 func exchangeInfoFromJSON(exchange jsonObject) jsonObject {
@@ -1214,6 +1267,7 @@ func peekedMessageFromDelivery(queue string, index int64, delivery amqp.Delivery
 		"deliveryTag":   delivery.DeliveryTag,
 		"timestamp":     int64(0),
 		"headers":       stringHeaders(delivery.Headers),
+		"properties":    deliveryProperties(delivery),
 		"payloadBase64": base64.StdEncoding.EncodeToString(delivery.Body),
 	}
 	if delivery.MessageId != "" {
@@ -1222,8 +1276,8 @@ func peekedMessageFromDelivery(queue string, index int64, delivery amqp.Delivery
 	if !delivery.Timestamp.IsZero() {
 		message["timestamp"] = delivery.Timestamp.UnixMilli()
 	}
-	if utf8.Valid(delivery.Body) {
-		message["payloadText"] = string(delivery.Body)
+	if text, ok := decodeDeliveryPayloadText(delivery.Body); ok {
+		message["payloadText"] = text
 	}
 	return message
 }
@@ -1268,6 +1322,9 @@ func (s *server) sendMessage(params jsonObject) (any, error) {
 				publishing.Headers[key] = converted
 			}
 		}
+	}
+	if err := applyMessageProperties(&publishing, params); err != nil {
+		return nil, err
 	}
 	if err := channel.PublishWithContext(context.Background(), exchange, routingKey, false, false, publishing); err != nil {
 		return nil, err

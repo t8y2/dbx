@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
-import { XUGU_PUBLIC_SYNONYM_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
+import { XUGU_PUBLIC_SYNONYM_SCOPE, XUGU_SCHEDULER_JOB_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -100,7 +100,7 @@ describe("connectionStore default schema", () => {
     expect(saveConnections).toHaveBeenLastCalledWith([expect.objectContaining({ id: connection.id, default_schema: undefined })]);
   });
 
-  it("does not persist the synthetic Xugu public-synonym scope as a default schema", async () => {
+  it("does not persist synthetic Xugu scopes as a default schema", async () => {
     const saveConnections = vi.fn().mockResolvedValue(undefined);
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
@@ -116,9 +116,10 @@ describe("connectionStore default schema", () => {
     const connection = xuguConnection();
     store.addEphemeralConnection(connection);
 
-    await store.setDefaultSchema(connection.id, XUGU_PUBLIC_SYNONYM_SCOPE);
-
-    expect(store.getConfig(connection.id)?.default_schema).toBeUndefined();
-    expect(saveConnections).not.toHaveBeenCalled();
+    for (const scope of [XUGU_PUBLIC_SYNONYM_SCOPE, XUGU_SCHEDULER_JOB_SCOPE]) {
+      await store.setDefaultSchema(connection.id, scope);
+      expect(store.getConfig(connection.id)?.default_schema).toBeUndefined();
+      expect(saveConnections).not.toHaveBeenCalled();
+    }
   });
 });

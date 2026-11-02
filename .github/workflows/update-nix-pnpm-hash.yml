@@ -24,7 +24,7 @@ jobs:
   update:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -41,7 +41,7 @@ jobs:
           fi
 
           cat "$build_log"
-          expected_hash=$(sed -n 's/.*got: \(sha256-[A-Za-z0-9+/=]*\).*/\1/p' "$build_log" | tail -1)
+          expected_hash=$(sed -n -e 's/.*got:[[:space:]]*\(sha256-[A-Za-z0-9+/=]*\).*/\1/p' -e 's/.*use[[:space:]]"\(sha256-[A-Za-z0-9+/=]*\)".*/\1/p' "$build_log" | tail -1)
           if [ -z "$expected_hash" ]; then
             echo "Nix build failed without reporting a replacement fixed-output hash."
             exit 1

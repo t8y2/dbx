@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isMongoLegacyDriverProfile, mongoCollectionSupportsIndexes, supportsMongoAllDriverMutations, supportsMongoIndexMutations, supportsNativeMongoDriverMutations } from "@/lib/mongo/mongoCapabilities";
+import { isMongoLegacyDriverProfile, mongoCollectionSupportsIndexes, supportsMongoAllDriverMutations, supportsMongoIndexMutations } from "@/lib/mongo/mongoCapabilities";
 
 describe("MongoDB driver mutation capabilities", () => {
   it("keeps index and drop mutations available through both native and Legacy drivers", () => {
@@ -12,7 +12,6 @@ describe("MongoDB driver mutation capabilities", () => {
 
     expect(supportsMongoAllDriverMutations(readOnly)).toBe(false);
     expect(supportsMongoIndexMutations(readOnly, "collection")).toBe(false);
-    expect(supportsNativeMongoDriverMutations({ ...readOnly, driver_profile: "mongodb" })).toBe(false);
   });
 
   it("keeps index metadata visible on read-only collections", () => {
@@ -32,14 +31,6 @@ describe("MongoDB driver mutation capabilities", () => {
     expect(supportsMongoIndexMutations(native, " VIEW ")).toBe(false);
   });
 
-  it("reserves native-only mutations for the native MongoDB driver", () => {
-    expect(supportsNativeMongoDriverMutations({ db_type: "mongodb", driver_profile: "mongodb" })).toBe(true);
-    expect(supportsNativeMongoDriverMutations({ db_type: "mongodb", driver_profile: undefined })).toBe(true);
-    expect(supportsNativeMongoDriverMutations({ db_type: "mongodb", driver_profile: "mongodb-legacy" })).toBe(false);
-    expect(supportsNativeMongoDriverMutations({ db_type: "mongodb", driver_profile: "legacy" })).toBe(false);
-    expect(supportsNativeMongoDriverMutations({ db_type: "mongodb", driver_profile: "MongoDB_Legacy" })).toBe(false);
-  });
-
   it("recognizes historical Legacy profile spellings", () => {
     expect(isMongoLegacyDriverProfile("mongodb-legacy")).toBe(true);
     expect(isMongoLegacyDriverProfile(" mongodb_legacy ")).toBe(true);
@@ -49,6 +40,6 @@ describe("MongoDB driver mutation capabilities", () => {
 
   it("does not grant MongoDB mutations to another connection type", () => {
     expect(supportsMongoAllDriverMutations({ db_type: "postgres", driver_profile: undefined })).toBe(false);
-    expect(supportsNativeMongoDriverMutations(undefined)).toBe(false);
+    expect(supportsMongoAllDriverMutations(undefined)).toBe(false);
   });
 });

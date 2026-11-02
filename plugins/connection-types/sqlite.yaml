@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 30
 dbType: sqlite
+compareModes: [schema, data]
+transferSupportLevel: verified
 rustVariant: Sqlite
 label: SQLite
 dialect: SQLite
@@ -10,6 +12,11 @@ singleConnectionPool: true
 metadataConnectionScoped: false
 skipTcpProbe: true
 localFile: true
+managedDrivers:
+  - key: sqlite-worker
+    label: SQLite SSH Worker
+    storeVisible: true
+    storeOrder: 48
 traits:
   diagramSql: true
 supportLevel: operate

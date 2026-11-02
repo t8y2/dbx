@@ -1,4 +1,9 @@
-import type { DatabaseType } from "@/types/database";
+import { classifyElasticsearchRequestRisk, classifyElasticsearchSourceRisk, type ElasticsearchRequestRisk } from "@/lib/elasticsearch/elasticsearchRequestRisk";
+import { classifySolrRequestRisk, classifySolrSourceRisk } from "@/lib/solr/solrRequestRisk";
+import { classifyCouchDbRequestRisk, classifyCouchDbSourceRisk, type CouchDbRequestRisk } from "@/lib/couchdb/couchdbRequestRisk";
+import { mongoAggregateWriteStage, splitMongoCommandRanges, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
+import { isCouchDbDatabaseType, isElasticsearchCompatibleDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
+import { isProvenReadOnlyCypher } from "./cypherReadOnly";
 
 export type SqlRiskLevel = "read" | "write" | "ddl" | "transaction" | "unknown";
 
@@ -28,6 +33,95 @@ const EXPLAIN_OPTION_KEYWORDS = new Set(["explain", "analyze", "analyse", "verbo
 const PRIMARY_STATEMENT_KEYWORDS = new Set([...READ_KEYWORDS, ...WRITE_KEYWORDS, ...DDL_KEYWORDS, ...TRANSACTION_KEYWORDS, "with", "copy", "pragma", "use", "set"]);
 const SAFE_READ_PRAGMA_NAMES = new Set(["table_info", "table_xinfo", "index_list", "index_info", "foreign_key_list", "database_list", "compile_options", "data_version"]);
 
+/**
+ * Engines whose lexer treats `#` as a line-comment opener and a backslash as a
+ * string escape. Both rules are MySQL family features: on SQL Server `#tmp` is a
+ * temporary table, and on PostgreSQL `standard_conforming_strings` is on by
+ * default, so `'dir\'` is a complete string. Assuming the MySQL rules everywhere
+ * hides SQL from the safety scans — `SELECT * FROM #tmp; DELETE FROM prod.users;`
+ * (SQL Server) and `SELECT 'dir\'; DELETE FROM users;` (PostgreSQL) would
+ * otherwise be read as one read-only statement and auto-execute.
+ *
+ * Mirrors `is_mysql_compatible_database` in `crates/dbx-sql-core/src/sql.rs`,
+ * which gates `supports_hash_line_comments` the same way, and
+ * `SqlScanLexerRules` in `crates/dbx-core/src/safety/production_safety.rs`.
+ * An unknown dialect is deliberately not treated as MySQL: keeping `#` and
+ * backslashes literal can only split more statements than before, which raises
+ * the assessed risk rather than lowering it.
+ */
+const MYSQL_LEXER_DATABASE_TYPES = new Set<string>(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
+
+export function usesMysqlLexerRules(dialect?: DatabaseType | string): boolean {
+  return typeof dialect === "string" && MYSQL_LEXER_DATABASE_TYPES.has(dialect.trim().toLowerCase());
+}
+
+/**
+ * PostgreSQL-family engines also read a backslash as an escape inside `E'...'`
+ * literals, even though `standard_conforming_strings` keeps ordinary `'...'`
+ * literals backslash-literal. The `E`/`e` must start its own token, so
+ * `DATE'2020-01-01'` and `x$e'...'` stay ordinary strings. Mirrors the
+ * `postgres_escape_strings` rule of `SqlScanLexerRules` in
+ * `crates/dbx-core/src/safety/production_safety.rs`.
+ */
+const POSTGRES_ESCAPE_STRING_DATABASE_TYPES = new Set<string>(["postgres", "opengauss", "gaussdb", "vastbase", "kingbase", "highgo", "uxdb", "kwdb"]);
+
+export function usesPostgresEscapeStrings(dialect?: DatabaseType | string): boolean {
+  return typeof dialect === "string" && POSTGRES_ESCAPE_STRING_DATABASE_TYPES.has(dialect.trim().toLowerCase());
+}
+
+/**
+ * True when the `E'`/`e'` introducer before `quoteIndex` starts its own token,
+ * so `DATE'2020-01-01'` and `x$e'...'` stay ordinary strings. Mirrors
+ * `ends_with_escape_string_prefix` in `crates/dbx-core/src/safety/production_safety.rs`.
+ */
+export function endsWithEscapeStringPrefix(sql: string, quoteIndex: number): boolean {
+  const introducer = sql[quoteIndex - 1];
+  if (introducer !== "E" && introducer !== "e") return false;
+  const before = sql[quoteIndex - 2];
+  return before === undefined || !/[\p{L}\p{N}_$]/u.test(before);
+}
+
+/**
+ * Oracle alternative quoting: `q'...'` / `nq'...'` literals delimited by
+ * `[`/`]`, `{`/`}`, `(`/`)`, `<`/`>` or a self-delimiting character, where the
+ * quote character may appear inside the literal unchanged. Mirrors
+ * `skipOracleAlternativeQuoted` in `apps/desktop/src/lib/sql/sqlParameters.ts`
+ * and the Oracle branch of `tokenizeSqlSemantic`.
+ */
+const ORACLE_ALTERNATIVE_QUOTE_DATABASE_TYPES = new Set<string>(["oracle", "oceanbase-oracle"]);
+
+export function usesOracleAlternativeQuotes(dialect?: DatabaseType | string): boolean {
+  return typeof dialect === "string" && ORACLE_ALTERNATIVE_QUOTE_DATABASE_TYPES.has(dialect.trim().toLowerCase());
+}
+
+/**
+ * Returns the index past the closing quote of the alternative-quoted literal
+ * starting at `index` (the `q`/`n` of `q'...'` / `nq'...'`), or `undefined`
+ * when this is not such a literal. The introducer must start its own token, so
+ * `aq'...'` and `q '...'` stay ordinary strings.
+ */
+export function readOracleAlternativeQuoteEnd(sql: string, index: number): number | undefined {
+  let quoteIndex = index;
+  const first = sql[quoteIndex]?.toLowerCase();
+  if (first === "n") {
+    if (sql[quoteIndex + 1]?.toLowerCase() !== "q") return undefined;
+    quoteIndex += 1;
+  } else if (first !== "q") {
+    return undefined;
+  }
+  if (sql[quoteIndex + 1] !== "'") return undefined;
+  const previous = sql[index - 1];
+  if (previous !== undefined && /[\p{L}\p{N}_$#]/u.test(previous)) return undefined;
+
+  const openerCodePoint = sql.codePointAt(quoteIndex + 2);
+  if (openerCodePoint === undefined) return undefined;
+  const opener = String.fromCodePoint(openerCodePoint);
+  if (/\s/.test(opener)) return undefined;
+  const closer = ({ "[": "]", "{": "}", "(": ")", "<": ">" } as Record<string, string>)[opener] ?? opener;
+  const end = sql.indexOf(closer + "'", quoteIndex + 2 + opener.length);
+  return end === -1 ? sql.length : end + closer.length + 1;
+}
+
 const RISK_ORDER: Record<SqlRiskLevel, number> = {
   read: 0,
   write: 1,
@@ -36,24 +130,102 @@ const RISK_ORDER: Record<SqlRiskLevel, number> = {
   unknown: 4,
 };
 
-export function splitSqlStatementsForSafety(sql: string): string[] {
-  return sqlSafetyText(sql)
+export function splitSqlStatementsForSafety(sql: string, dialect?: DatabaseType | string): string[] {
+  return sqlSafetyText(sql, dialect)
     .split(";")
     .map((statement) => statement.trim())
     .filter(Boolean);
 }
 
 export function classifySqlRisk(sql: string, options: SqlRiskOptions = {}): SqlRiskAssessment {
-  const statements = splitSqlStatementsForSafety(sql).map((statement) => classifySqlStatementRisk(statement, options));
+  if (options.dialect === "neo4j") {
+    const assessment: SqlRiskStatementAssessment = { risk: isProvenReadOnlyCypher(sql) ? "read" : "unknown", firstKeyword: "cypher" };
+    return { ...assessment, statements: [assessment] };
+  }
+  const mongoStatements = mongoShellStatements(sql, options.dialect);
+  if (mongoStatements) {
+    const highest = highestRiskStatement(mongoStatements);
+    return { ...highest, statements: mongoStatements };
+  }
+
+  // REST requests carry a JSON body that must not be split on semicolons, and
+  // every request in the text is classified so the highest risk wins.
+  const searchEngineRisk = searchEngineAssessment(sql, options.dialect, { elasticsearch: classifyElasticsearchSourceRisk, solr: classifySolrSourceRisk, couchdb: classifyCouchDbSourceRisk });
+  if (searchEngineRisk) return { ...searchEngineRisk, statements: [searchEngineRisk] };
+
+  const statements = splitSqlStatementsForSafety(sql, options.dialect).map((statement) => classifySqlStatementRisk(statement, options));
   if (!statements.length) return { risk: "unknown", statements: [] };
   const highest = statements.reduce<SqlRiskStatementAssessment>((current, statement) => (RISK_ORDER[statement.risk] > RISK_ORDER[current.risk] ? statement : current), { risk: "read" });
   return { ...highest, statements };
 }
 
 export function classifySqlStatementRisk(sql: string, options: SqlRiskOptions = {}): SqlRiskStatementAssessment {
+  if (options.dialect === "neo4j") return { risk: isProvenReadOnlyCypher(sql) ? "read" : "unknown", firstKeyword: "cypher" };
+  const mongoStatements = mongoShellStatements(sql, options.dialect);
+  if (mongoStatements) return highestRiskStatement(mongoStatements);
+
   const dynamodbRisk = classifyDynamoDbStatementRisk(sql, options.dialect);
   if (dynamodbRisk) return dynamodbRisk;
+  const searchEngineRisk = searchEngineAssessment(sql, options.dialect, { elasticsearch: classifyElasticsearchRequestRisk, solr: classifySolrRequestRisk, couchdb: classifyCouchDbRequestRisk });
+  if (searchEngineRisk) return searchEngineRisk;
   return classifyTokens(tokenizeSqlForRisk(sql));
+}
+
+/**
+ * Elasticsearch-compatible connections run REST requests whose method and path
+ * decide the risk; `GET`/`POST _search` reads must not be mistaken for writes.
+ * Text that is not a REST request (Elasticsearch SQL) falls through to the
+ * ordinary SQL classification.
+ *
+ * The HTTP method is deliberately not reported as the first keyword: callers
+ * map that keyword onto SQL semantics (`insert` is a low-risk write, `create`
+ * is a schema change, ...), which a request path does not carry. Reporting
+ * `rest` keeps REST mutations as opaque as they were before this branch existed.
+ */
+function searchEngineAssessment(
+  sql: string,
+  dialect: DatabaseType | string | undefined,
+  classify: { elasticsearch: (value: string) => ElasticsearchRequestRisk | null; solr: (value: string) => ElasticsearchRequestRisk | null; couchdb: (value: string) => CouchDbRequestRisk | null },
+): SqlRiskStatementAssessment | null {
+  const databaseType = dialect as DatabaseType | undefined;
+  const classifier = isSolrDatabaseType(databaseType) ? classify.solr : isCouchDbDatabaseType(databaseType) ? classify.couchdb : isElasticsearchCompatibleDatabaseType(databaseType) ? classify.elasticsearch : null;
+  if (!classifier) return null;
+  const risk = classifier(sql);
+  if (!risk) return null;
+  return { risk: risk === "read" ? "read" : risk === "write" ? "write" : "ddl", firstKeyword: "rest" };
+}
+
+const MONGO_READ_KINDS = new Set<MongoCommand["kind"]>(["find", "findExplain", "findOne", "countDocuments", "distinct", "getIndexes", "collectionStats", "version", "showDatabases", "use"]);
+const MONGO_DDL_KINDS = new Set<MongoCommand["kind"]>(["createIndex", "dropIndex", "dropIndexes", "dropCollection", "createUser"]);
+
+/**
+ * Mongo query tabs execute shell commands through the structured Mongo path,
+ * not the SQL tokenizer. Classify the same parsed command kinds here so
+ * production protection does not turn ordinary reads into write confirmations.
+ * Unknown or unparsed commands remain unsafe by falling through to the generic
+ * classifier.
+ */
+function mongoShellStatements(sql: string, dialect: DatabaseType | string | undefined): SqlRiskStatementAssessment[] | null {
+  if (dialect !== "mongodb") return null;
+  const commands = splitMongoCommandRanges(sql);
+  if (!commands.length) return null;
+
+  return commands.map(({ command }) => ({
+    risk: mongoCommandRisk(command),
+    firstKeyword: command.kind,
+  }));
+}
+
+function highestRiskStatement(statements: SqlRiskStatementAssessment[]): SqlRiskStatementAssessment {
+  return statements.reduce<SqlRiskStatementAssessment>((current, statement) => (RISK_ORDER[statement.risk] > RISK_ORDER[current.risk] ? statement : current), { risk: "read" });
+}
+
+function mongoCommandRisk(command: MongoCommand): SqlRiskLevel {
+  if (MONGO_READ_KINDS.has(command.kind)) return "read";
+  if (command.kind === "aggregate") return mongoAggregateWriteStage(command.pipeline) ? "write" : "read";
+  if (command.kind === "runCommand") return "unknown";
+  if (MONGO_DDL_KINDS.has(command.kind)) return "ddl";
+  return "write";
 }
 
 function classifyDynamoDbStatementRisk(sql: string, dialect?: DatabaseType | string): SqlRiskStatementAssessment | null {
@@ -77,7 +249,10 @@ export function isSqlRiskMutation(risk: SqlRiskLevel): boolean {
   return risk !== "read";
 }
 
-export function sqlSafetyText(sql: string): string {
+export function sqlSafetyText(sql: string, dialect?: DatabaseType | string): string {
+  const mysqlLexer = usesMysqlLexerRules(dialect);
+  const postgresEscapeStrings = usesPostgresEscapeStrings(dialect);
+  const oracleAlternativeQuotes = usesOracleAlternativeQuotes(dialect);
   let output = "";
   let index = 0;
 
@@ -92,7 +267,7 @@ export function sqlSafetyText(sql: string): string {
       continue;
     }
 
-    if (char === "#") {
+    if (char === "#" && mysqlLexer) {
       index += 1;
       while (index < sql.length && sql[index] !== "\n" && sql[index] !== "\r") index += 1;
       output += " ";
@@ -121,15 +296,25 @@ export function sqlSafetyText(sql: string): string {
       continue;
     }
 
+    if (oracleAlternativeQuotes && (char === "q" || char === "Q" || char === "n" || char === "N")) {
+      const alternativeQuoteEnd = readOracleAlternativeQuoteEnd(sql, index);
+      if (alternativeQuoteEnd !== undefined) {
+        index = alternativeQuoteEnd;
+        output += " ";
+        continue;
+      }
+    }
+
     if (char === "'") {
-      index = readQuotedEnd(sql, index, "'", "'");
+      const backslashEscapes = mysqlLexer || (postgresEscapeStrings && endsWithEscapeStringPrefix(sql, index));
+      index = readQuotedEnd(sql, index, "'", "'", backslashEscapes);
       output += " ";
       continue;
     }
 
     if (char === '"' || char === "`" || char === "[") {
       const close = char === "[" ? "]" : char;
-      const end = readQuotedEnd(sql, index, char, close);
+      const end = readQuotedEnd(sql, index, char, close, mysqlLexer);
       output += ` ${unquoteIdentifier(sql.slice(index, end), char, close).replace(/[;]/g, " ")} `;
       index = end;
       continue;
@@ -270,10 +455,10 @@ function dollarQuoteTagAt(sql: string, index: number): string | undefined {
   return match?.[0];
 }
 
-function readQuotedEnd(sql: string, start: number, open: string, close: string): number {
+function readQuotedEnd(sql: string, start: number, open: string, close: string, backslashEscapes: boolean): number {
   let index = start + open.length;
   while (index < sql.length) {
-    if (sql[index] === "\\" && (open === "'" || open === '"')) {
+    if (backslashEscapes && sql[index] === "\\" && (open === "'" || open === '"')) {
       index += 2;
       continue;
     }

@@ -26,6 +26,16 @@ func TestHandshakeAdvertisesNativeCapabilities(t *testing.T) {
 	}
 }
 
+func TestExecuteTransactionIsRejectedBeforeConnecting(t *testing.T) {
+	server := &server{}
+	_, err := server.executeStatements(map[string]json.RawMessage{
+		"statements": json.RawMessage(`["INSERT INTO metrics(device, time, value) VALUES ('d1', 1, 1)"]`),
+	}, true)
+	if err == nil || err.Error() != "IoTDB does not support transactions" {
+		t.Fatalf("expected unsupported transaction error, got %v", err)
+	}
+}
+
 func TestHandleLineClassifiesMissingSession(t *testing.T) {
 	response, _ := newRuntimeServer().handleLine(
 		`{"jsonrpc":"2.0","id":7,"method":"validate_session","params":{"agentSessionId":"missing"}}`,
@@ -57,6 +67,56 @@ func TestParseConnectionConfig(t *testing.T) {
 	}
 	if !reflect.DeepEqual(config.NodeURLs, []string{"node1:6667", "node2:6667"}) {
 		t.Fatalf("unexpected cluster nodes: %#v", config.NodeURLs)
+	}
+}
+
+func TestParseConnectionConfigCompressionAliases(t *testing.T) {
+	tests := []struct {
+		name             string
+		connectionString string
+		urlParams        string
+		want             bool
+	}{
+		{name: "default disabled"},
+		{name: "documented enabled", urlParams: "enable_compression=true", want: true},
+		{name: "documented disabled", urlParams: "enable_compression=false"},
+		{name: "existing alias enabled", urlParams: "rpc_compression=true", want: true},
+		{name: "existing alias disabled", urlParams: "rpc_compression=false"},
+		{name: "JDBC alias enabled in URL parameters", urlParams: "rpc_compress=true", want: true},
+		{name: "JDBC alias false", urlParams: "rpc_compress=false"},
+		{
+			name:             "JDBC alias enabled in connection string",
+			connectionString: "jdbc:iotdb://localhost:6667/?rpc_compress=true",
+			want:             true,
+		},
+		{
+			name:             "URL parameters override same connection string key",
+			connectionString: "jdbc:iotdb://localhost:6667/?rpc_compress=true",
+			urlParams:        "rpc_compress=false",
+		},
+		{
+			name:      "documented option takes precedence",
+			urlParams: "enable_compression=false&rpc_compression=true&rpc_compress=true",
+		},
+		{
+			name:      "existing alias takes precedence over JDBC alias",
+			urlParams: "rpc_compression=false&rpc_compress=true",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config, err := parseConnectionConfig(connectParams{
+				ConnectionString: test.connectionString,
+				URLParams:        test.urlParams,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if config.EnableCompression != test.want {
+				t.Fatalf("EnableCompression = %t, want %t", config.EnableCompression, test.want)
+			}
+		})
 	}
 }
 
@@ -178,6 +238,34 @@ func TestTreeTimeColumnPresentationDoesNotRewriteOrdinaryInt64(t *testing.T) {
 	}
 }
 
+func TestTreeTimeAggregationColumnsPresentAsTimestamps(t *testing.T) {
+	columns := []string{
+		"max_time(root.db.d1.s1)",
+		"MIN_TIME(root.db.d1.s1)",
+		" max_time(root.db.d1.s1) ",
+		"max_by(Time,root.db.d1.s1)",
+		"MIN_BY( time , root.db.d1.s1 )",
+		"avg(root.db.d1.s1)",
+		"count(root.db.d1.s1)",
+	}
+	got := normalizedColumnTypes([]string{"INT64", "INT64", "INT64", "INT64", "INT64", "DOUBLE", "INT64"}, columns, client.TreeSqlDialect, "ms")
+	want := []string{"TIMESTAMP(ms)", "TIMESTAMP(ms)", "TIMESTAMP(ms)", "TIMESTAMP(ms)", "TIMESTAMP(ms)", "DOUBLE", "INT64"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected tree aggregation types: %#v", got)
+	}
+	if name := normalizedColumnTypes([]string{"INT64"}, []string{"max_timer(root.db.d1.s1)"}, client.TreeSqlDialect, "ms"); !reflect.DeepEqual(name, []string{"INT64"}) {
+		t.Fatalf("unrelated prefix must stay INT64: %#v", name)
+	}
+	if table := normalizedColumnTypes([]string{"INT64"}, []string{"max_time(t1.s1)"}, client.TableSqlDialect, "ms"); !reflect.DeepEqual(table, []string{"INT64"}) {
+		t.Fatalf("table dialect must stay INT64: %#v", table)
+	}
+	for _, column := range []string{"max_by(s1,time)", "max_by(event_time,s1)", "max_bytes(time,s1)"} {
+		if got := normalizedColumnTypes([]string{"INT64"}, []string{column}, client.TreeSqlDialect, "ms"); !reflect.DeepEqual(got, []string{"INT64"}) {
+			t.Fatalf("non-time max_by result %q must stay INT64: %#v", column, got)
+		}
+	}
+}
+
 func TestClassifyIoTDBErrors(t *testing.T) {
 	canceled := classifyRPCError("execute_query", "session-1", context.Canceled)
 	if canceled.Data.Category != "canceled" || canceled.Data.SessionDisposition != "quarantine" {
@@ -199,6 +287,31 @@ func TestDecodeQueryOptions(t *testing.T) {
 	options := queryOptionsFromParams(params)
 	if options.SQL != "SHOW DATABASES" || options.MaxRows != 100 || options.FetchSize != 25 || options.TimeoutSecs != 5 {
 		t.Fatalf("unexpected query options: %#v", options)
+	}
+}
+
+func TestIsQueryStatementRecognizesListStatements(t *testing.T) {
+	tests := []struct {
+		sql  string
+		want bool
+	}{
+		{sql: "LIST USER", want: true},
+		{sql: "list role", want: true},
+		{sql: "  LiSt PRIVILEGES OF USER root;  ", want: true},
+		{sql: "\tLIST PRIVILEGES OF ROLE dbx7359_role\n", want: true},
+		{sql: "SHOW VERSION", want: true},
+		{sql: "SELECT * FROM root.dbx_7359.d", want: true},
+		{sql: ""},
+		{sql: "   ;   "},
+		{sql: "INSERT INTO root.dbx_7359.d(time,s) VALUES(1,1)"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.sql, func(t *testing.T) {
+			if got := isQueryStatement(trimStatementSQL(test.sql)); got != test.want {
+				t.Fatalf("isQueryStatement(%q) = %t, want %t", test.sql, got, test.want)
+			}
+		})
 	}
 }
 

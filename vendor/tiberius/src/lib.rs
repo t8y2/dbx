@@ -287,6 +287,7 @@ pub use uuid::Uuid;
 
 use sql_read_bytes::*;
 use tds::codec::*;
+pub use tds::codec::FeatureLevel;
 
 /// An alias for a result that holds crate's error type as the error.
 pub type Result<T> = std::result::Result<T, Error>;

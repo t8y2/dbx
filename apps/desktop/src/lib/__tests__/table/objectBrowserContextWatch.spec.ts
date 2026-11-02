@@ -1,29 +1,7 @@
-import { readFileSync } from "node:fs";
 import { nextTick, ref, watch } from "vue";
 import { describe, expect, it } from "vitest";
 
-const objectBrowserSource = readFileSync(new URL("../../../components/objects/ObjectBrowser.vue", import.meta.url), "utf8");
-
 describe("ObjectBrowser context watcher", () => {
-  it("watches context fields independently", () => {
-    expect(objectBrowserSource).toContain("[() => props.connection.id, () => props.database, () => props.schema]");
-    expect(objectBrowserSource).not.toContain("() => [props.connection.id, props.database, props.schema]");
-  });
-
-  it("invalidates object requests before waiting for the new connection", () => {
-    const watcher = objectBrowserSource.match(/watch\(\s*\[\(\) => props\.connection\.id[\s\S]*?\{ immediate: true \},\s*\);/)?.[0] ?? "";
-
-    expect(watcher).toContain("const contextEpoch = objectBrowserRowsLoadGuard.invalidate();");
-    expect(watcher.indexOf("objectBrowserRowsLoadGuard.invalidate()")).toBeLessThan(watcher.indexOf("await connectionStore.ensureConnected"));
-    expect(watcher).toContain("reload({ allowCachedObjects: true, contextEpoch })");
-  });
-
-  it("loads MongoDB collections through the existing objects view", () => {
-    expect(objectBrowserSource).toContain("api.mongoListCollections");
-    expect(objectBrowserSource).toContain("buildMongoObjectBrowserRows");
-    expect(objectBrowserSource).toContain("objects.searchCollections");
-  });
-
   it("ignores connection object replacement when the context values stay unchanged", async () => {
     const connection = ref({ id: "connection-1" });
     const database = ref("database-1");

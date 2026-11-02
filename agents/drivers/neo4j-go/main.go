@@ -92,8 +92,18 @@ type querySession struct {
 }
 
 type connectionRuntime struct {
-	driver     neo4j.Driver
-	params     connectParams
+	driver neo4j.Driver
+	params connectParams
+	// legacySingleDatabase is set for servers that negotiated Bolt 3 or older:
+	// they have a single default database and reject session database selection.
+	legacySingleDatabase bool
+	legacyGraphIDs       bool
+	// memgraph is set for Memgraph servers, which advertise themselves as
+	// "Neo4j/v5.11.0 compatible graph database server - Memgraph". They expose a
+	// single database named `memgraph`, and answer any other name with a fatal
+	// unknown-database error instead of falling back to their own default, so the
+	// Neo4j default must not be sent (#11947).
+	memgraph   bool
 	references int
 	closed     bool
 	mu         sync.Mutex

@@ -1,12 +1,24 @@
-export type InstallLang = "en" | "cn";
+import type { DocsLang } from "./i18n";
+
+export type InstallLang = DocsLang;
+export type BrowserStaticArch = "x64" | "arm64";
+
+export type BrowserStaticDownload = {
+  arch: BrowserStaticArch;
+  href: string;
+};
 
 export type InstallOption = {
   id: string;
   iconId: string;
   label: string;
   description?: string;
+  driverLinkLabel?: string;
+  descriptionSuffix?: string;
   badge?: string;
   href: string;
+  action?: "download" | "instructions";
+  browserStaticDownloads?: BrowserStaticDownload[];
 };
 
 type DownloadArtifact = {
@@ -14,8 +26,12 @@ type DownloadArtifact = {
   iconId: string;
   labels: Record<InstallLang, string>;
   descriptions?: Record<InstallLang, string>;
+  driverLinkLabels?: Record<InstallLang, string>;
+  descriptionSuffixes?: Record<InstallLang, string>;
   badges?: Record<InstallLang, string>;
   suffix: string;
+  action?: "download" | "instructions";
+  browserStaticSuffixes?: Record<BrowserStaticArch, string>;
 };
 
 const DOWNLOAD_BASE_URL = "https://dl.dbxio.com/releases";
@@ -25,7 +41,7 @@ const downloadArtifacts: DownloadArtifact[] = [
     id: "macos-arm",
     iconId: "macos-arm",
     labels: { en: "For macOS (Apple Silicon)", cn: "适用于 macOS (Apple Silicon)" },
-    suffix: "aarch64.dmg",
+    suffix: "arm64.dmg",
   },
   {
     id: "macos-intel",
@@ -44,18 +60,20 @@ const downloadArtifacts: DownloadArtifact[] = [
   {
     id: "windows-offline",
     iconId: "windows",
-    labels: { en: "Windows complete offline installer", cn: "Windows 完整离线安装包" },
-    descriptions: { en: "Includes WebView2 · For offline deployment or missing runtime", cn: "内置 WebView2 · 适用于内网部署或运行库缺失" },
-    badges: { en: "Offline", cn: "离线" },
-    suffix: "x64-webview2-offline-setup.exe",
+    labels: { en: "Windows 10 intranet environment installer", cn: "Windows10内网环境安装包" },
+    descriptions: { en: "Includes WebView2 offline runtime · Does not include", cn: "内置 WebView2 离线运行库 · 不含" },
+    driverLinkLabels: { en: "offline database drivers", cn: "数据库离线驱动" },
+    badges: { en: "Intranet", cn: "内网" },
+    suffix: "x64-offline-setup.exe",
   },
   {
     id: "windows-7-offline",
-    iconId: "windows",
-    labels: { en: "Windows 7 offline installer", cn: "Windows 7 离线安装包" },
-    descriptions: { en: "Includes WebView2 109 · x64 only", cn: "内置 WebView2 109 · 仅支持 x64" },
+    iconId: "windows-legacy",
+    labels: { en: "Windows 7 / Server\u00a02012\u00a0R2 package", cn: "Windows 7 / Server\u00a02012\u00a0R2 专用包" },
+    descriptions: { en: "Includes WebView2 offline runtime · Does not include", cn: "内置 WebView2 离线运行库 · 不含" },
+    driverLinkLabels: { en: "offline database drivers", cn: "数据库离线驱动" },
     badges: { en: "Legacy", cn: "旧系统" },
-    suffix: "x64-win7-webview2-109-offline-setup.exe",
+    suffix: "x64-win7-server2012r2-offline-setup.exe",
   },
   {
     id: "linux",
@@ -67,17 +85,51 @@ const downloadArtifacts: DownloadArtifact[] = [
     id: "linux-arm",
     iconId: "linux-arm",
     labels: { en: "For Linux ARM64", cn: "适用于 Linux ARM64" },
-    suffix: "aarch64.AppImage",
+    suffix: "arm64.AppImage",
+  },
+  {
+    id: "linux-browser",
+    iconId: "linux",
+    labels: { en: "Linux browser package", cn: "Linux 浏览器版" },
+    descriptions: { en: "For Kylin, UnionTech UOS, and other Linux distributions", cn: "适用于麒麟、统信 UOS 等 Linux 发行版" },
+    badges: { en: "Guide", cn: "安装说明" },
+    suffix: "x64-browser-static.tar.gz",
+    action: "instructions",
+    browserStaticSuffixes: {
+      x64: "x64-browser-static.tar.gz",
+      arm64: "arm64-browser-static.tar.gz",
+    },
   },
 ];
 
-export function createInstallOptions(lang: InstallLang, version: string): InstallOption[] {
+const RELEASE_TAG_PATTERN = /^v\d+\.\d+\.\d+(-beta\.\d{8}\.\d+)?$/;
+
+// Stable packages are published once under releases/stable/<release_tag>/. A
+// promoted beta is republished under its plain vX.Y.Z tag; releases promoted
+// earlier keep their beta tag there. Package files are always named by the plain
+// version. Releases from before channels have no release_tag and live in
+// releases/v<version>/.
+function releaseDirectory(version: string, releaseTag?: string) {
+  return releaseTag && RELEASE_TAG_PATTERN.test(releaseTag) ? `stable/${releaseTag}` : `v${version}`;
+}
+
+export function createInstallOptions(lang: InstallLang, version: string, releaseTag?: string): InstallOption[] {
+  const directory = releaseDirectory(version, releaseTag);
   return downloadArtifacts.map((artifact) => ({
     id: artifact.id,
     iconId: artifact.iconId,
     label: artifact.labels[lang],
     description: artifact.descriptions?.[lang],
+    driverLinkLabel: artifact.driverLinkLabels?.[lang],
+    descriptionSuffix: artifact.descriptionSuffixes?.[lang],
     badge: artifact.badges?.[lang],
-    href: `${DOWNLOAD_BASE_URL}/v${version}/DBX_${version}_${artifact.suffix}?v=${version}`,
+    href: `${DOWNLOAD_BASE_URL}/${directory}/DBX_${version}_${artifact.suffix}?v=${version}`,
+    action: artifact.action ?? "download",
+    browserStaticDownloads: artifact.browserStaticSuffixes
+      ? Object.entries(artifact.browserStaticSuffixes).map(([arch, suffix]) => ({
+          arch: arch as BrowserStaticArch,
+          href: `${DOWNLOAD_BASE_URL}/${directory}/DBX_${version}_${suffix}?v=${version}`,
+        }))
+      : undefined,
   }));
 }

@@ -1,0 +1,942 @@
+// @vitest-environment happy-dom
+import { createApp, defineComponent, h, nextTick, ref } from "vue";
+import { createPinia, setActivePinia } from "pinia";
+import { createI18n } from "vue-i18n";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/components/ui/CustomContextMenu.vue", () => ({
+  default: {
+    name: "CustomContextMenuStub",
+    props: ["items"],
+    mounted() {
+      (this.$el as any).__ctxMenuItems = this.items;
+    },
+    updated() {
+      (this.$el as any).__ctxMenuItems = this.items;
+    },
+    template: `<div class="ctx-menu-stub" :data-menu-items="JSON.stringify(items.flatMap((item) => item.children ?? [item]).map((item) => ({ label: item.label, disabled: item.disabled === true, visible: item.visible })))"><slot /></div>`,
+  },
+}));
+
+vi.mock("@/components/ui/tooltip", () => ({
+  Tooltip: {
+    name: "TooltipStub",
+    props: ["open"],
+    emits: ["update:open"],
+    template: `<div class="tooltip-stub" :data-open="open === true" @mouseover="$emit('update:open', true)"><slot /></div>`,
+  },
+  TooltipTrigger: { name: "TooltipTriggerStub", template: `<div><slot /></div>` },
+  TooltipContent: { name: "TooltipContentStub", template: `<div class="tooltip-content-stub"><slot /></div>` },
+}));
+
+vi.mock("@/components/ui/popover", () => ({
+  Popover: { name: "PopoverStub", props: ["open"], template: `<div v-if="open"><slot /></div>` },
+  PopoverContent: { name: "PopoverContentStub", template: `<div><slot /></div>` },
+  PopoverTrigger: { name: "PopoverTriggerStub", template: `<div><slot /></div>` },
+}));
+
+vi.mock("@/components/connection/ReadOnlySessionControl.vue", () => ({
+  default: { name: "ReadOnlySessionControlStub", template: `<span />` },
+}));
+
+vi.mock("@/components/layout/TabExecutionStatus.vue", () => ({
+  default: { name: "TabExecutionStatusStub", template: `<span><slot /></span>` },
+}));
+
+vi.mock("@/components/icons/DatabaseIcon.vue", () => ({
+  default: { name: "DatabaseIconStub", template: `<span />` },
+}));
+
+import EditorGroupTabBar from "../EditorGroupTabBar.vue";
+import { createNoopEditorToolbarActions, EDITOR_TOOLBAR_ACTIONS, type EditorToolbarActions } from "../editorToolbarActions";
+import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import type { ConnectionConfig } from "@/types/database";
+
+function createHost(): HTMLDivElement {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  return host;
+}
+
+interface Mounted {
+  app: ReturnType<typeof createApp>;
+  host: HTMLDivElement;
+}
+
+function mountBar(
+  groupId: string,
+  tabs: string[],
+  activeTabId: string | null,
+  activePinia: ReturnType<typeof createPinia>,
+  onActivateTab?: (tabId: string) => void,
+  specialPageTabs?: { settingsOpen: boolean; settingsActive: boolean; driverStoreOpen: boolean; driverStoreActive: boolean; pluginCenterOpen: boolean; pluginCenterActive: boolean; driverUpdateCount: number },
+  toolbarActions?: EditorToolbarActions,
+  onSaveAllTabs?: () => void,
+  extraProps: Record<string, unknown> = {},
+): Mounted {
+  const store = useQueryStore();
+  const host = createHost();
+  const app = createApp(EditorGroupTabBar, {
+    groupId,
+    ...extraProps,
+    tabs: tabs.map((id) => store.tabs.find((candidate) => candidate.id === id)!),
+    activeTabId,
+    "onActivate-tab": onActivateTab,
+    "onSave-all-tabs": onSaveAllTabs,
+    specialPageTabs,
+  });
+  // Reuse the active pinia so the component's internal store is the same
+  // instance the test drives — otherwise drag validation runs against an
+  // empty store and silently early-returns.
+  app.use(activePinia);
+  if (toolbarActions) app.provide(EDITOR_TOOLBAR_ACTIONS, toolbarActions);
+  app.use(
+    createI18n({
+      legacy: false,
+      locale: "en",
+      messages: {
+        en: {
+          toolbar: { pluginCenter: "Plugin Center" },
+          common: { close: "Close" },
+          connectionGroup: { ungroupedLabel: "Ungrouped" },
+          tabs: {
+            tooltipConnection: "Connection:",
+            tooltipGroup: "Group:",
+            tooltipDatabase: "Database:",
+          },
+          contextMenu: {
+            splitTab: "Split",
+            batchCloseTabs: "Close multiple tabs",
+            copyTabName: "Copy tab name",
+            splitRight: "Split right",
+            splitDown: "Split down",
+            changeOrientation: "Change orientation",
+            unsplit: "Unsplit",
+            renameTab: "Rename",
+            duplicateTab: "Duplicate",
+            copyName: "Copy name",
+            closeTab: "Close",
+            reopenClosedTab: "Reopen closed tab",
+            closeOtherTabs: "Close other tabs",
+            closeLeftTabs: "Close left tabs",
+            closeRightTabs: "Close right tabs",
+            closeAllTabs: "Close all tabs",
+            saveAllTabs: "Save all tabs",
+            pinTab: "Pin",
+            unpinTab: "Unpin",
+            fullTabTitle: "Full title",
+            compactTabTitle: "Compact title",
+          },
+          sidebar: { locateActiveTab: "Locate", locateSqlFile: "Locate in SQL file list" },
+          sqlFileTree: { locateActiveFile: "Locate current file" },
+        },
+      },
+    }),
+  );
+  app.mount(host);
+  return { app, host };
+}
+
+async function settle() {
+  await nextTick();
+  await nextTick();
+}
+
+function tabPill(host: HTMLElement, tabId: string): HTMLElement {
+  return host.querySelector<HTMLElement>(`[data-tab-id="${tabId}"]`)!;
+}
+
+function pointerDownOn(element: HTMLElement) {
+  element.dispatchEvent(
+    new PointerEvent("pointerdown", {
+      bubbles: true,
+      button: 0,
+      buttons: 1,
+      clientX: 10,
+      clientY: 10,
+      pointerId: 1,
+    }),
+  );
+}
+
+function pointerMoveTo(x: number, y: number) {
+  window.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, buttons: 1, clientX: x, clientY: y, pointerId: 1 }));
+}
+
+function pointerUpAt(x: number, y: number) {
+  window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, buttons: 1, clientX: x, clientY: y, pointerId: 1 }));
+}
+
+function fakeDropTarget(tabId: string, groupId: string): HTMLElement {
+  const element = document.createElement("div");
+  element.dataset.tabId = tabId;
+  element.dataset.groupId = groupId;
+  vi.spyOn(element, "getBoundingClientRect").mockReturnValue({ left: 0, right: 100, width: 100, top: 0, height: 30 } as DOMRect);
+  return element;
+}
+
+describe("EditorGroupTabBar behavior", () => {
+  let pinia: ReturnType<typeof createPinia>;
+
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
+    pinia = createPinia();
+    setActivePinia(pinia);
+  });
+
+  it("opens a new query through the app action for this editor group", async () => {
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "users", "data", "public");
+    const actions = createNoopEditorToolbarActions();
+    actions.canNewQuery = ref(true);
+    actions.newQuery = vi.fn();
+    const { app, host } = mountBar(store.groups[0].id, [id], id, pinia, undefined, undefined, actions);
+    await settle();
+    const buttons = host.querySelectorAll<HTMLButtonElement>("[data-new-query-tab]");
+    expect(buttons).toHaveLength(1);
+    buttons[0].click();
+    expect(actions.newQuery).toHaveBeenCalledExactlyOnceWith(store.groups[0].id);
+    actions.canNewQuery.value = false;
+    await settle();
+    expect(host.querySelector("[data-new-query-tab]")).toBeNull();
+    app.unmount();
+    host.remove();
+  });
+
+  it("offers duplicate without rename on a data tab", async () => {
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "users", "data", "public");
+    const { app, host } = mountBar(store.groups[0].id, [id], id, pinia);
+    await settle();
+
+    const menu = JSON.parse(host.querySelector<HTMLElement>("[data-menu-items]")!.dataset.menuItems!);
+    expect(menu).toContainEqual(expect.objectContaining({ label: "Duplicate", visible: true }));
+    expect(menu).not.toContainEqual(expect.objectContaining({ label: "Rename" }));
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("activates a tab on plain click", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const activated: string[] = [];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia, (tabId) => activated.push(tabId));
+    await settle();
+
+    tabPill(host, secondId).click();
+    await settle();
+
+    expect(activated).toEqual([secondId]);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("keeps a focus-return click on tab-strip whitespace out of native window dragging", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const activated: string[] = [];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia, (tabId) => activated.push(tabId));
+    await settle();
+
+    const tabTail = host.querySelector<HTMLElement>('[data-tauri-drag-region="false"]');
+    expect(tabTail).not.toBeNull();
+
+    window.dispatchEvent(new Event("blur"));
+    window.dispatchEvent(new Event("focus"));
+    tabTail!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, detail: 1 }));
+    tabTail!.click();
+    await settle();
+    expect(activated).toEqual([]);
+
+    tabPill(host, secondId).click();
+    await settle();
+    expect(activated).toEqual([secondId]);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("closes a tab tooltip when the pointer leaves the tab", async () => {
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Plugin", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [tabId], tabId, pinia);
+    await settle();
+
+    const pill = tabPill(host, tabId);
+    pill.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    await settle();
+    expect(host.querySelector<HTMLElement>(".tooltip-stub")?.dataset.open).toBe("true");
+
+    pill.dispatchEvent(new MouseEvent("mouseleave"));
+    await settle();
+    expect(host.querySelector<HTMLElement>(".tooltip-stub")?.dataset.open).toBe("false");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("shows a concise DBX tooltip for a connectionless plugin tab", async () => {
+    const store = useQueryStore();
+    const tabId = store.openPluginWorkbench("com.example.toolbox", "toolbox");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [tabId], tabId, pinia);
+    await settle();
+
+    const tooltip = host.querySelector<HTMLElement>(".tooltip-stub")!;
+    tabPill(host, tabId).dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    await settle();
+
+    expect(tooltip.dataset.open).toBe("true");
+    expect(host.querySelector<HTMLElement>("[data-plugin-title-tooltip]")?.textContent?.trim()).toBe("toolbox");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("keeps the tooltip for a connection-bound plugin tab", async () => {
+    const store = useQueryStore();
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "plugin-1", name: "SSH server", db_type: "plugin" } as ConnectionConfig];
+    connectionStore.sidebarLayout = { groups: [], order: [{ type: "connection", id: "plugin-1" }] };
+    const tabId = store.openPluginWorkbench("com.example.toolbox", "toolbox", { connectionId: "plugin-1" });
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [tabId], tabId, pinia);
+    await settle();
+
+    const tooltip = host.querySelector<HTMLElement>(".tooltip-stub")!;
+    tabPill(host, tabId).dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    await settle();
+
+    expect(tooltip.dataset.open).toBe("true");
+    expect(host.querySelector("[data-plugin-title-tooltip]")).toBeNull();
+    expect(host.querySelector<HTMLElement>(".tooltip-content-stub")?.textContent).toContain("SSH server");
+    expect(host.querySelector<HTMLElement>(".tooltip-content-stub")?.textContent).not.toContain("Database:");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("uses the DBX tooltip for the Plugin Center tab", async () => {
+    const store = useQueryStore();
+    const mainGroup = store.groups[0];
+    const specialPageTabs = { settingsOpen: false, settingsActive: false, driverStoreOpen: false, driverStoreActive: false, pluginCenterOpen: true, pluginCenterActive: true, driverUpdateCount: 0 };
+    const { app, host } = mountBar(mainGroup.id, [], null, pinia, undefined, specialPageTabs);
+    await settle();
+
+    const tab = host.querySelector<HTMLElement>("[data-plugin-center-tab]")!;
+    expect(tab.getAttribute("title")).toBeNull();
+
+    tab.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    await settle();
+    expect(host.querySelector<HTMLElement>(".tooltip-stub")?.dataset.open).toBe("true");
+    expect(host.querySelector<HTMLElement>(".tooltip-content-stub")?.textContent?.trim()).toBe("Plugin Center");
+
+    tab.dispatchEvent(new MouseEvent("mouseleave"));
+    await settle();
+    expect(host.querySelector<HTMLElement>(".tooltip-stub")?.dataset.open).toBe("false");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("suppresses the click that follows a drag, and only that click", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const activated: string[] = [];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia, (tabId) => activated.push(tabId));
+    await settle();
+
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(null);
+    const pill = tabPill(host, secondId);
+    pointerDownOn(pill);
+    pointerMoveTo(80, 60);
+    pointerUpAt(80, 60);
+    pill.click();
+    await settle();
+
+    // The drag consumed its own click; the tab must not be activated…
+    expect(activated).toEqual([]);
+
+    // …but a fresh, ordinary click still activates.
+    pill.click();
+    await settle();
+    expect(activated).toEqual([secondId]);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("does not arm a drag when the primary button is not held", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia);
+    await settle();
+
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(null);
+    // macOS reports a trackpad tap as a mouse pointer with button=0 but buttons=0.
+    tabPill(host, secondId).dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, buttons: 0, clientX: 10, clientY: 10, pointerId: 1 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, buttons: 0, clientX: 80, clientY: 60, pointerId: 1 }));
+    window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: 80, clientY: 60, pointerId: 1 }));
+    await settle();
+
+    expect(store.groups.find((group) => group.id === mainGroup.id)?.tabIds).toContain(secondId);
+    expect(document.body.style.cursor).toBe("");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("cancels a pending drag when the primary button is released before movement", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia);
+    await settle();
+
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(null);
+    const pill = tabPill(host, secondId);
+    pointerDownOn(pill);
+    window.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, buttons: 0, clientX: 80, clientY: 10, pointerId: 1 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, buttons: 1, clientX: 90, clientY: 10, pointerId: 1 }));
+    window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: 90, clientY: 10, pointerId: 1 }));
+    await settle();
+
+    expect(store.groups.find((group) => group.id === mainGroup.id)?.tabIds).toContain(secondId);
+    expect(document.body.style.cursor).toBe("");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("cancels an active drag when the primary button is no longer held", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia);
+    await settle();
+
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(null);
+    const pill = tabPill(host, secondId);
+    pointerDownOn(pill);
+    pointerMoveTo(80, 60);
+    expect(document.body.style.cursor).toBe("grabbing");
+    window.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, buttons: 0, clientX: 90, clientY: 60, pointerId: 1 }));
+    await settle();
+
+    expect(document.body.style.cursor).toBe("");
+    expect(document.body.style.userSelect).toBe("");
+    expect(store.groups.find((group) => group.id === mainGroup.id)?.tabIds).toContain(secondId);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("ignores movement from a different pointer", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia);
+    await settle();
+
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(null);
+    const pill = tabPill(host, secondId);
+    pill.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, buttons: 1, clientX: 10, clientY: 10, pointerId: 7 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, buttons: 1, clientX: 90, clientY: 10, pointerId: 8 }));
+    await settle();
+
+    expect(document.body.style.cursor).toBe("");
+    expect(store.groups.find((group) => group.id === mainGroup.id)?.tabIds).toContain(secondId);
+    window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: 90, clientY: 10, pointerId: 7 }));
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("clears completed-drag click suppression on a later trackpad tap", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const activated: string[] = [];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia, (tabId) => activated.push(tabId));
+    await settle();
+
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(null);
+    const pill = tabPill(host, secondId);
+    pointerDownOn(pill);
+    pointerMoveTo(80, 60);
+    pointerUpAt(80, 60);
+
+    // The completed drag left click suppression armed; a trackpad tap
+    // (pointerdown with buttons=0) must consume it without arming a drag.
+    pill.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, buttons: 0, clientX: 10, clientY: 10, pointerId: 1 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, buttons: 0, clientX: 10, clientY: 12, pointerId: 1 }));
+    pill.click();
+    await settle();
+
+    expect(activated).toEqual([secondId]);
+    expect(document.body.style.cursor).toBe("");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("moves a dragged tab to the target group under the payload's source group", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia);
+    await settle();
+
+    // Drag the second tab over the (virtual) right group's strip.
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(fakeDropTarget(firstId, "target-group"));
+
+    // Seed a second group to receive the drop.
+    store.groups = [mainGroup, { id: "target-group", tabIds: [], activeTabId: null }];
+    const pill = tabPill(host, secondId);
+    pointerDownOn(pill);
+    pointerMoveTo(300, 10);
+    pointerUpAt(300, 10);
+    await settle();
+
+    expect(store.groups.find((group) => group.id === "target-group")?.tabIds).toContain(secondId);
+    expect(store.groups.find((group) => group.id === mainGroup.id)?.tabIds).not.toContain(secondId);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("ignores a drop when the tab's current owner no longer matches the payload", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia);
+    await settle();
+
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(fakeDropTarget(firstId, "target-group"));
+    store.groups = [mainGroup, { id: "target-group", tabIds: [], activeTabId: null }];
+
+    const pill = tabPill(host, secondId);
+    pointerDownOn(pill);
+    // While the button is held, the tab is relocated behind the drag's back —
+    // the stale payload no longer matches the current owner.
+    store.moveTabToGroup(secondId, "target-group");
+    pointerMoveTo(300, 10);
+    pointerUpAt(300, 10);
+    await settle();
+
+    // Only the intervening store move happened; the drop itself was rejected.
+    expect(store.groups.find((group) => group.id === "target-group")?.tabIds).toEqual([secondId]);
+    expect(store.groups.find((group) => group.id === mainGroup.id)?.tabIds).toEqual([firstId]);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("groups tab actions without dropping split and bulk close commands", async () => {
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "Query 1", "query");
+    const { app, host } = mountBar(store.groups[0].id, [id], id, pinia);
+    await settle();
+    const items = (tabPill(host, id).closest(".ctx-menu-stub") as any).__ctxMenuItems.filter((item: any) => item.visible !== false);
+    expect(items.map((item: any) => item.label)).toEqual(["Rename", "Duplicate", "Copy tab name", "Split", "", "Pin", "Save all tabs", "Reopen closed tab", "Close", "Close multiple tabs", "", "Full title", "Locate"]);
+    expect(items.find((item: any) => item.label === "Split").children.map((item: any) => item.label)).toEqual(["Split right", "Split down"]);
+    expect(
+      items
+        .find((item: any) => item.label === "Close multiple tabs")
+        .children.filter((item: any) => item.visible !== false)
+        .map((item: any) => item.label),
+    ).toEqual(["Close other tabs", "Close left tabs", "Close right tabs", "Close all tabs"]);
+    app.unmount();
+    host.remove();
+  });
+
+  it("disables the split actions while only one tab exists, enabling them once a second tab joins", async () => {
+    const store = useQueryStore();
+    const onlyId = store.createTab("pg-1", "app", "Query 1", "query");
+
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [onlyId], onlyId, pinia);
+    await settle();
+
+    // Splitting the only tab would return to the same single-group layout, so
+    // the actions render disabled instead of doing nothing.
+    const splitItems = (host: HTMLElement) => JSON.parse(host.querySelector<HTMLElement>(".ctx-menu-stub")!.dataset.menuItems ?? "[]").filter((item: { label: string }) => item.label === "Split right" || item.label === "Split down");
+    expect(splitItems(host)).toHaveLength(2);
+    for (const item of splitItems(host)) {
+      expect(item).toMatchObject({ disabled: true });
+    }
+
+    store.createTab("pg-1", "app", "Query 2", "query");
+    await settle();
+
+    for (const item of splitItems(host)) {
+      expect(item).toMatchObject({ disabled: false });
+    }
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("offers the split actions for non-query tabs, enabled like query tabs", async () => {
+    const store = useQueryStore();
+    const queryId = store.createTab("pg-1", "app", "Query 1", "query");
+    const dataId = store.createTab("pg-1", "app", "users", "data", "public");
+
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [queryId, dataId], dataId, pinia);
+    await settle();
+
+    const pill = tabPill(host, dataId);
+    const stub = pill.closest<HTMLElement>(".ctx-menu-stub")!;
+    const items = JSON.parse(stub.dataset.menuItems ?? "[]");
+    const splitItems = items.filter((item: { label: string }) => item.label === "Split right" || item.label === "Split down");
+    expect(splitItems).toHaveLength(2);
+    for (const item of splitItems) {
+      expect(item).toMatchObject({ disabled: false });
+    }
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("keeps split actions visible but disabled once four groups exist", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const thirdId = store.createTab("pg-1", "app", "Query 3", "query");
+    const fourthId = store.createTab("pg-1", "app", "Query 4", "query");
+    const fifthId = store.createTab("pg-1", "app", "Query 5", "query");
+
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId, thirdId, fourthId, fifthId], firstId, pinia);
+    await settle();
+
+    // Two tabs, two groups.
+    store.splitTabRight(secondId);
+    await settle();
+
+    const menus = host.querySelectorAll<HTMLElement>(".ctx-menu-stub");
+    const splitItem = (menu: HTMLElement) => JSON.parse(menu.dataset.menuItems ?? "[]").find((item: { label: string }) => item.label === "Split right");
+    expect(splitItem(menus[0]!)).toMatchObject({ disabled: false });
+
+    store.splitTabDown(thirdId);
+    store.splitTabDown(fourthId);
+    await settle();
+    expect(store.groups.length).toBe(4);
+
+    const disabledSplit = splitItem(menus[0]!);
+    expect(disabledSplit).toMatchObject({ disabled: true });
+    // The store rejects a fifth split with the same capacity rule.
+    expect(store.splitTabRight(fifthId)).toBe(false);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("offers close-left between close-other and close-right, disabled when nothing is to the left", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia);
+    await settle();
+
+    // One stub per tab; the stub wraps the tab pill, so scope by ancestor.
+    // The stub only serializes label/disabled/visible — the closing behavior
+    // itself is covered by queryStore.groups.spec.
+    const menuFor = (tabId: string) => {
+      const pill = tabPill(host, tabId);
+      const stub = pill.closest<HTMLElement>(".ctx-menu-stub");
+      return JSON.parse(stub!.dataset.menuItems ?? "[]");
+    };
+    const labels = (tabId: string) => menuFor(tabId).map((item: { label: string }) => item.label);
+
+    // First tab: nothing to its left — the action exists but is disabled.
+    expect(menuFor(firstId).find((item: { label: string }) => item.label === "Close left tabs")).toMatchObject({ disabled: true });
+    const order = labels(firstId);
+    expect(order.indexOf("Close left tabs")).toBeGreaterThan(order.indexOf("Close other tabs"));
+    expect(order.indexOf("Close left tabs")).toBeLessThan(order.indexOf("Close right tabs"));
+
+    // Second tab: a tab exists to its left — the action becomes enabled.
+    expect(menuFor(secondId).find((item: { label: string }) => item.label === "Close left tabs")).toMatchObject({ disabled: false });
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("offers save all tabs in tab context menu, disabled when clean and enabled when dirty", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const mainGroup = store.groups[0];
+    const actions = createNoopEditorToolbarActions();
+    actions.saveAllTabs = vi.fn();
+    const onSaveAllTabs = vi.fn(() => actions.saveAllTabs());
+    const { app, host } = mountBar(mainGroup.id, [firstId], firstId, pinia, undefined, undefined, actions, onSaveAllTabs);
+    await settle();
+
+    const menuFor = (tabId: string) => {
+      const pill = tabPill(host, tabId);
+      const stub = pill.closest<HTMLElement>(".ctx-menu-stub");
+      return JSON.parse(stub!.dataset.menuItems ?? "[]");
+    };
+
+    const rawMenuFor = (tabId: string) => {
+      const pill = tabPill(host, tabId);
+      const stub = pill.closest<HTMLElement>(".ctx-menu-stub") as any;
+      return (stub?.__ctxMenuItems ?? []) as Array<{ label: string; action?: () => void; disabled?: boolean }>;
+    };
+
+    // Clean tab -> save all tabs is disabled
+    expect(menuFor(firstId).find((item: { label: string }) => item.label === "Save all tabs")).toMatchObject({ disabled: true });
+
+    // Mark tab dirty -> save all tabs is enabled
+    store.tabs[0].sql = "SELECT 1;";
+    await settle();
+    expect(menuFor(firstId).find((item: { label: string }) => item.label === "Save all tabs")).toMatchObject({ disabled: false });
+
+    // Clicking save all tabs menu item emits save-all-tabs once and forwards to toolbar.saveAllTabs once
+    const saveAllItem = rawMenuFor(firstId).find((item) => item.label === "Save all tabs");
+    expect(saveAllItem).toBeDefined();
+    saveAllItem?.action?.();
+
+    expect(onSaveAllTabs).toHaveBeenCalledTimes(1);
+    expect(actions.saveAllTabs).toHaveBeenCalledTimes(1);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("flushes pending grid edits via before-tab-switch before activating another tab", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia);
+    await settle();
+
+    const events: Array<CustomEvent | Event> = [];
+    const listener = (event: Event) => events.push(event as CustomEvent);
+    window.addEventListener("dbx:before-tab-switch", listener);
+    // The legacy bar flushed pending edits on pointerdown, before activation.
+    pointerDownOn(tabPill(host, secondId));
+    tabPill(host, secondId).click();
+    await settle();
+    window.removeEventListener("dbx:before-tab-switch", listener);
+
+    expect(events).toHaveLength(1);
+    expect((events[0] as CustomEvent).detail).toEqual({ tabId: secondId, fromTabId: firstId });
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("dims the dragged pill and shows the insertion indicator on the hovered pill", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia);
+    await settle();
+
+    const fake = fakeDropTarget(secondId, mainGroup.id);
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(fake);
+
+    const sourcePill = tabPill(host, firstId);
+    const targetPill = tabPill(host, secondId);
+    pointerDownOn(sourcePill);
+    pointerMoveTo(300, 10);
+    await settle();
+
+    // Dragged pill dims; hovered pill shows the after-insertion ring line.
+    expect(sourcePill.style.opacity).toBe("0.4");
+    expect(targetPill.style.boxShadow).toBe("inset -3px 0 0 0 var(--ring)");
+
+    // Crossing the pill's midpoint flips the indicator to "before".
+    vi.spyOn(fake, "getBoundingClientRect").mockReturnValue({ left: 0, right: 600, width: 600, top: 0, height: 30 } as DOMRect);
+    pointerMoveTo(20, 10);
+    await settle();
+    expect(targetPill.style.boxShadow).toBe("inset 3px 0 0 0 var(--ring)");
+
+    // Dropping clears every drag visual.
+    pointerUpAt(20, 10);
+    await settle();
+    expect(sourcePill.style.opacity).toBe("");
+    expect(targetPill.style.boxShadow).toBe("");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("does not arm the drag for touch input", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [firstId, secondId], firstId, pinia);
+    await settle();
+
+    const sourcePill = tabPill(host, firstId);
+    sourcePill.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 10, clientY: 10, pointerType: "touch" }));
+    pointerMoveTo(300, 10);
+    await settle();
+
+    expect(sourcePill.style.opacity).toBe("");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("applies --tab-max-width and data-has-max-tab-width when tabMaxWidth is configured", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabMaxWidth = 240;
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [firstId], firstId, pinia);
+    await settle();
+
+    const bar = host.querySelector<HTMLElement>(".app-tab-bar")!;
+    expect(bar.dataset.hasMaxTabWidth).toBe("true");
+    expect(bar.style.getPropertyValue("--tab-max-width")).toBe("240px");
+
+    // Setting tabMaxWidth to 0 removes the limit
+    settings.editorSettings.tabMaxWidth = 0;
+    await settle();
+    expect(bar.dataset.hasMaxTabWidth).toBe("false");
+    expect(bar.style.getPropertyValue("--tab-max-width")).toBe("");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("offers a close button on every tab in the collapsed vertical rail", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabPlacement = "left";
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const { app, host } = mountBar(store.groups[0].id, [firstId, secondId], firstId, pinia, undefined, undefined, undefined, undefined, { tabBarCollapsed: true });
+    await settle();
+
+    // The rail is icon-only, so both a background tab and the active tab must
+    // expose a close affordance without the user switching to it first (#12942).
+    for (const tabId of [firstId, secondId]) {
+      const closeButtons = tabPill(host, tabId).querySelectorAll<HTMLButtonElement>("button[aria-label='Close']");
+      expect(closeButtons, tabId).toHaveLength(1);
+    }
+
+    tabPill(host, secondId).querySelector<HTMLButtonElement>("button[aria-label='Close']")!.click();
+    await settle();
+    expect(store.tabs.some((tab) => tab.id === secondId)).toBe(false);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("shows locate current file menu item for saved sql tab and emits locate-sql-library-file", async () => {
+    const store = useQueryStore();
+    const queryTabId = store.createTab("pg-1", "app", "Query 1", "query");
+    const savedSqlTabId = store.createTab("pg-1", "app", "Saved Query", "query");
+    store.tabs.find((tab) => tab.id === savedSqlTabId)!.savedSqlId = "saved-sql-1";
+    const mainGroup = store.groups[0];
+
+    const onLocateSqlLibraryFile = vi.fn();
+    const { app, host } = mountBar(mainGroup.id, [queryTabId, savedSqlTabId], queryTabId, pinia, undefined, undefined, undefined, undefined, { "onLocate-sql-library-file": onLocateSqlLibraryFile });
+    await settle();
+
+    const rawMenuFor = (tabId: string) => {
+      const pill = tabPill(host, tabId);
+      const stub = pill.closest<HTMLElement>(".ctx-menu-stub") as any;
+      return (stub?.__ctxMenuItems ?? []) as Array<{ label: string; action?: () => void; visible?: boolean }>;
+    };
+
+    const regularLocateItem = rawMenuFor(queryTabId).find((item) => item.label === "Locate current file");
+    expect(regularLocateItem?.visible).toBe(false);
+
+    const savedSqlLocateItem = rawMenuFor(savedSqlTabId).find((item) => item.label === "Locate current file");
+    expect(savedSqlLocateItem?.visible).toBe(true);
+
+    savedSqlLocateItem?.action?.();
+    expect(onLocateSqlLibraryFile).toHaveBeenCalledTimes(1);
+    expect(onLocateSqlLibraryFile).toHaveBeenCalledWith(expect.objectContaining({ id: savedSqlTabId, savedSqlId: "saved-sql-1" }));
+
+    app.unmount();
+    host.remove();
+  });
+});
+
+describe("active tab reveal scrolling (issue #12010)", () => {
+  // The Settings / Driver Manager / Plugin Center tabs live in the same
+  // scrollable row as regular query tabs. Centering every newly activated tab
+  // re-centered tabs that were already fully visible, which shoved those
+  // trailing special tabs out of the viewport as soon as the user switched back
+  // to the tab before Settings.
+  it("reveals an activated tab without recentering it", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "none";
+    const tabIds = Array.from({ length: 8 }, (_, index) => store.createTab("pg-1", "app", `Query ${index}`, "query"));
+    const mainGroup = store.groups[0]!;
+    const activeTabId = ref(tabIds[0]!);
+    const host = createHost();
+
+    const scrollIntoView = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+    try {
+      const Root = defineComponent({
+        setup() {
+          return () =>
+            h(EditorGroupTabBar, {
+              groupId: mainGroup.id,
+              tabs: store.tabs.slice(),
+              activeTabId: activeTabId.value,
+            });
+        },
+      });
+      const app = createApp(Root);
+      app.use(pinia);
+      app.use(
+        createI18n({
+          legacy: false,
+          locale: "en",
+          messages: { en: { common: { close: "Close" }, contextMenu: { closeTab: "Close" }, sidebar: { locateActiveTab: "Locate" } } },
+        }),
+      );
+      app.mount(host);
+      await settle();
+
+      scrollIntoView.mockClear();
+      activeTabId.value = tabIds[tabIds.length - 2]!;
+      await settle();
+
+      expect(scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ inline: "nearest" }));
+
+      app.unmount();
+    } finally {
+      scrollIntoView.mockRestore();
+      host.remove();
+    }
+  });
+});

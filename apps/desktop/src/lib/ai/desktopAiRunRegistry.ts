@@ -128,6 +128,11 @@ export function hasActiveDesktopAiRun(conversationId: string): boolean {
   return run.status === "preparing" || run.status === "queued" || run.status === "running" || run.status === "awaiting_write_confirmation" || run.status === "pending_recoverable";
 }
 
+/** Restart has no opportunity to recover an in-memory AI run after process exit. */
+export function blockingDesktopAiRunsForUpdate(): DesktopAiRunRuntime[] {
+  return [...runsByConversation.values()].filter((run) => !isTerminalDesktopAiRunStatus(run.status));
+}
+
 export function blockingDesktopAiRunsForQuit(): DesktopAiRunRuntime[] {
   return [...runsByConversation.values()].filter((run) => run.status === "preparing" || run.status === "queued" || run.status === "running");
 }

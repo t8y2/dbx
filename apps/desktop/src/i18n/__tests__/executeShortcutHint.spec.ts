@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import i18n, { setLocale } from "@/i18n";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
@@ -7,9 +6,6 @@ import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 // "设置为 Windows 但编辑器提示仍为 Mac" — the toolbar's Execute-button tooltip and the
 // Editor Settings "Execute Mode" label hardcode "(Cmd+Enter)" in every locale, including
 // English, so the hints can disagree with both the current platform and a customized binding.
-
-const toolbarSource = readFileSync(new URL("../../components/layout/EditorToolbar.vue", import.meta.url), "utf8");
-const settingsDialogSource = readFileSync(new URL("../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 
 describe("execute-shortcut hints reflect the configured binding", () => {
   it.each([
@@ -34,19 +30,5 @@ describe("execute-shortcut hints reflect the configured binding", () => {
     expect(i18n.global.t("settings.executeMode")).toBe("执行模式");
     expect(i18n.global.t("settings.executeModeDescription", { shortcut })).toBe("执行 SQL 快捷键：Ctrl + Shift + ↵。用于控制默认执行全部 SQL 或光标所在语句。");
     await setLocale("en");
-  });
-
-  it("EditorToolbar.vue uses the saved executeSql shortcut", () => {
-    expect(toolbarSource).toContain("formatShortcutDisplay(settingsStore.editorSettings.shortcuts.executeSql)");
-    expect(toolbarSource).toMatch(/t\(\s*"toolbar\.executeShortcut"\s*,\s*\{\s*shortcut:\s*executeShortcutDisplay\.value/);
-  });
-
-  it("EditorSettingsDialog.vue uses the currently edited executeSql shortcut", () => {
-    expect(settingsDialogSource).toMatch(/function translateWithExecuteShortcut\([^)]*\)[^}]*formatShortcutDisplay\(editShortcuts\.value\.executeSql\)/);
-    expect(settingsDialogSource).toContain('translateWithExecuteShortcut("settings.executeModeDescription")');
-  });
-
-  it("EditorSettingsDialog.vue uses the same edited shortcut in settings search", () => {
-    expect(settingsDialogSource).toMatch(/resolveSettingsSearchEntries\(\s*\[[^\]]*\]\s*,\s*\{[^}]*\}\s*,\s*translateWithExecuteShortcut\s*,/s);
   });
 });

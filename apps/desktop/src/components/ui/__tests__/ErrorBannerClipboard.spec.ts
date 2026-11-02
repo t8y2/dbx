@@ -14,6 +14,14 @@ function findNativeClipboardRegion(container: HTMLElement, text: string): HTMLEl
   return region;
 }
 
+// The centered variant's clipboard region wraps title + message in one node,
+// so match by containment instead of exact text.
+function findClipboardRegionContaining(container: HTMLElement, text: string): HTMLElement {
+  const region = Array.from(container.querySelectorAll<HTMLElement>("[data-native-clipboard]")).find((element) => element.textContent?.includes(text));
+  if (!region) throw new Error(`Native clipboard region not found containing: ${text}`);
+  return region;
+}
+
 function selectRegion(region: HTMLElement) {
   const selection = window.getSelection();
   const range = document.createRange();
@@ -22,15 +30,15 @@ function selectRegion(region: HTMLElement) {
   selection?.addRange(range);
 }
 
-async function mountCardBanner() {
+async function mountBanner(variant: "card" | "centered", message: string) {
   const container = document.createElement("div");
   mountedContainers.push(container);
   document.body.append(container);
 
   const app = createApp(ErrorBanner, {
-    variant: "card",
+    variant,
     title: "Save failed",
-    message: "Conditional request failed",
+    message,
   });
   app.use(
     createI18n({
@@ -53,7 +61,7 @@ afterEach(() => {
 
 describe("ErrorBanner native clipboard selection", () => {
   it.each(["Save failed", "Conditional request failed"])("preserves native copy for selected %s text", async (text) => {
-    const container = await mountCardBanner();
+    const container = await mountBanner("card", "Conditional request failed");
     selectRegion(findNativeClipboardRegion(container, text));
 
     expect(
@@ -65,8 +73,21 @@ describe("ErrorBanner native clipboard selection", () => {
     ).toBe(true);
   });
 
+  it("preserves native copy for selected centered error message", async () => {
+    const container = await mountBanner("centered", "fatal error\n\nlong detail line");
+    selectRegion(findClipboardRegionContaining(container, "long detail line"));
+
+    expect(
+      eventTargetAllowsNativeClipboard({
+        key: "c",
+        metaKey: true,
+        target: container,
+      }),
+    ).toBe(true);
+  });
+
   it("leaves grid copy shortcuts active without a text selection", async () => {
-    const container = await mountCardBanner();
+    const container = await mountBanner("card", "Conditional request failed");
 
     expect(
       eventTargetAllowsNativeClipboard({

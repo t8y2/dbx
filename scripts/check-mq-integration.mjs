@@ -25,9 +25,15 @@ assertIncludes("apps/desktop/src/stores/queryStore.ts", "openMqAdmin", "Query st
 
 const manifest = JSON.parse(read("crates/dbx-core/assets/database-drivers.manifest.json"));
 const drivers = Array.isArray(manifest) ? manifest : manifest.drivers;
-assert.ok(drivers?.some((driver) => driver.dbType === "mq"), "Driver manifest must include dbType=mq.");
+assert.ok(
+  drivers?.some((driver) => driver.dbType === "mq"),
+  "Driver manifest must include dbType=mq.",
+);
 const mqDriver = drivers.find((driver) => driver.dbType === "mq");
-assert.ok(mqDriver.driverProfiles?.some((profile) => profile.profile === "rabbitmq"), "MQ driver manifest entry must include a rabbitmq driver profile.");
+assert.ok(
+  mqDriver.driverProfiles?.some((profile) => profile.profile === "rabbitmq"),
+  "MQ driver manifest entry must include a rabbitmq driver profile.",
+);
 
 const mqHttp = read("apps/desktop/src/lib/backend/mq-http.ts");
 assert.ok(!mqHttp.includes('post("/mq/'), "MQ HTTP client must not call unprefixed /mq paths.");
@@ -37,11 +43,11 @@ assertIncludes("apps/desktop/src/lib/backend/mq-tauri.ts", 'invoke("mq_get_consu
 assertIncludes("crates/dbx-web/src/main.rs", '"/mq/consumers/group-config/get"', "dbx-web must register consumer group config get route.");
 assertIncludes("src-tauri/src/lib.rs", "mq_get_consumer_group_config", "Tauri must register consumer group config command.");
 
-for (const route of ["exchanges/list", "exchanges/create", "exchanges/delete", "bindings/list", "bindings/bind", "bindings/unbind", "client-connections/list", "client-connections/close", "channels/list"]) {
+for (const route of ["topics/list-page", "exchanges/list", "exchanges/list-page", "exchanges/create", "exchanges/delete", "bindings/list", "bindings/bind", "bindings/unbind", "client-connections/list", "client-connections/close", "channels/list"]) {
   assertIncludes("apps/desktop/src/lib/backend/mq-http.ts", `post("/api/mq/${route}"`, `MQ HTTP client must call /api/mq/${route} route.`);
   assertIncludes("crates/dbx-web/src/main.rs", `"/mq/${route}"`, `dbx-web must register /mq/${route} route.`);
 }
-for (const command of ["mq_list_exchanges", "mq_create_exchange", "mq_delete_exchange", "mq_list_bindings", "mq_bind", "mq_unbind", "mq_list_client_connections", "mq_list_client_channels", "mq_close_client_connection"]) {
+for (const command of ["mq_list_topics_page", "mq_list_exchanges", "mq_list_exchanges_page", "mq_create_exchange", "mq_delete_exchange", "mq_list_bindings", "mq_bind", "mq_unbind", "mq_list_client_connections", "mq_list_client_channels", "mq_close_client_connection"]) {
   assertIncludes("apps/desktop/src/lib/backend/mq-tauri.ts", `invoke("${command}"`, `MQ Tauri client must invoke ${command} command.`);
   assertIncludes("src-tauri/src/lib.rs", command, `Tauri must register ${command} command.`);
 }
@@ -80,16 +86,8 @@ for (const panel of ["PoliciesPanel.vue", "PermissionsPanel.vue", "RawApiPanel.v
 for (const panel of ["TenantsPanel.vue", "NamespacesPanel.vue", "TopicsPanel.vue", "SubscriptionsPanel.vue"]) {
   assertIncludes(`apps/desktop/src/components/mq/${panel}`, "readOnly", `${panel} must disable mutating actions in read-only mode.`);
 }
-assertIncludes(
-  "apps/desktop/src/components/mq/TopicsPanel.vue",
-  "topics-table-hscroll",
-  "TopicsPanel must keep a shared horizontal scroller so wide RocketMQ action columns stay reachable.",
-);
-assertIncludes(
-  "apps/desktop/src/components/mq/TopicsPanel.vue",
-  "overflow-x: auto",
-  "TopicsPanel horizontal scroller must allow overflow-x.",
-);
+assertIncludes("apps/desktop/src/components/mq/TopicsPanel.vue", "topics-table-hscroll", "TopicsPanel must keep a shared horizontal scroller so wide RocketMQ action columns stay reachable.");
+assertIncludes("apps/desktop/src/components/mq/TopicsPanel.vue", "overflow-x: auto", "TopicsPanel horizontal scroller must allow overflow-x.");
 for (const panel of ["ExchangesPanel.vue", "SendMessagePanel.vue", "rabbitmq/RabbitMqClientsPanel.vue", "ProducerConsumerPanel.vue"]) {
   assertIncludes(`apps/desktop/src/components/mq/${panel}`, "readOnly", `${panel} must disable mutating actions in read-only mode.`);
 }

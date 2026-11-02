@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 630
 dbType: sundb
+compareModes: [schema, data]
 rustVariant: Sundb
 label: 科蓝 SUNDB
 dialect: SunDB
@@ -13,6 +14,9 @@ singleConnectionPool: false
 metadataConnectionScoped: false
 skipTcpProbe: true
 defaultPort: 22581
+traits:
+  schemaAware: true
+  treeSchema: true
 supportLevel: operate
 capabilities:
   queryExecution: true

@@ -1,19 +1,25 @@
 package com.dbx.agent;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -41,6 +47,90 @@ class StandardJdbcMetadataTest {
         );
 
         assertEquals(Arrays.asList("APP", "PUBLIC"), StandardJdbcMetadata.INSTANCE.listSchemas(conn, profile));
+    }
+
+    @Test
+    void scopesSchemasToTheConnectionCatalog() {
+        AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        AtomicInteger schemaCalls = new AtomicInteger();
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getSchemas".equals(method.getName())) {
+                    schemaCalls.incrementAndGet();
+                    capturedArgs.set(args);
+                    return rows(row("TABLE_SCHEM", "APP"));
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    return meta;
+                }
+                if ("getCatalog".equals(method.getName())) {
+                    return "regular_catalog";
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+
+        assertEquals(List.of("APP"), StandardJdbcMetadata.INSTANCE.listSchemas(conn, profile, "initial_catalog"));
+        assertEquals("regular_catalog", capturedArgs.get()[0]);
+        assertEquals(null, capturedArgs.get()[1]);
+        assertEquals(1, schemaCalls.get());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false, false, true", "true, false, true", "false, true, true", "false, false, false"})
+    void retriesEmptyCatalogSchemasBeforeAddingCurrentSchema(boolean fallbackFails, boolean currentCatalog, boolean fallbackEnabled) {
+        List<String> catalogs = new ArrayList<>();
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getSchemas".equals(method.getName())) {
+                    String catalog = (String) args[0];
+                    catalogs.add(catalog);
+                    if (catalog != null) {
+                        return rows();
+                    }
+                    if (fallbackFails) {
+                        throw new UnsupportedOperationException("Unscoped schemas unavailable");
+                    }
+                    return rows(row("TABLE_SCHEM", "DBX_USER"), row("TABLE_SCHEM", "DBX_DEMO"), row("TABLE_SCHEM", "SYS"));
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    return meta;
+                }
+                if ("getCatalog".equals(method.getName())) {
+                    return currentCatalog ? "HXE" : null;
+                }
+                if ("getSchema".equals(method.getName())) {
+                    return "DBX_USER";
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+
+        JdbcAgentProfile effectiveProfile = fallbackEnabled ? profile : new JdbcAgentProfile("example.Driver", "jdbc:example:") {
+            @Override
+            public boolean getCatalogFallbackEnabled() {
+                return false;
+            }
+        };
+        assertEquals(
+            fallbackFails || !fallbackEnabled ? List.of("DBX_USER") : List.of("DBX_DEMO", "DBX_USER"),
+            StandardJdbcMetadata.INSTANCE.listSchemas(conn, effectiveProfile, currentCatalog ? "initial_catalog" : "HXE")
+        );
+        assertEquals(fallbackEnabled ? Arrays.asList("HXE", null) : List.of("HXE"), catalogs);
     }
 
     @Test
@@ -130,6 +220,42 @@ class StandardJdbcMetadataTest {
         assertEquals("PROCEDURE", objects.get(0).getObject_type());
         assertEquals("SHARED_ROUTINE", objects.get(1).getName());
         assertEquals("PROCEDURE", objects.get(1).getObject_type());
+    }
+
+    @Test
+    void stripsSqlServerProcedureGroupSuffix() {
+        Connection conn = routineConnection(
+            "Microsoft SQL Server",
+            rows(
+                row("PROCEDURE_NAME", "dt_addtosourcecontrol;1", "REMARKS", null),
+                row("PROCEDURE_NAME", "dt_addtosourcecontrol_u;1", "REMARKS", null)
+            ),
+            rows()
+        );
+        MetadataListConstraints constraints =
+            new MetadataListConstraints(null, null, null, Collections.singletonList("PROCEDURE"));
+
+        List<ObjectInfo> objects = StandardJdbcMetadata.INSTANCE.listObjects(conn, profile, "", "APP", constraints);
+
+        assertEquals(2, objects.size());
+        assertEquals("dt_addtosourcecontrol", objects.get(0).getName());
+        assertEquals("dt_addtosourcecontrol_u", objects.get(1).getName());
+    }
+
+    @Test
+    void keepsRoutineSuffixesForNonSqlServerDrivers() {
+        Connection conn = routineConnection(
+            "PostgreSQL",
+            rows(row("PROCEDURE_NAME", "proc;1", "REMARKS", null)),
+            rows()
+        );
+        MetadataListConstraints constraints =
+            new MetadataListConstraints(null, null, null, Collections.singletonList("PROCEDURE"));
+
+        List<ObjectInfo> objects = StandardJdbcMetadata.INSTANCE.listObjects(conn, profile, "", "APP", constraints);
+
+        assertEquals(1, objects.size());
+        assertEquals("proc;1", objects.get(0).getName());
     }
 
     @Test
@@ -279,6 +405,38 @@ class StandardJdbcMetadataTest {
         assertEquals("SALES", capturedArgs.get()[1]);
     }
 
+    @Test
+    void listTablesSkipsEscapeWhenProfileDisablesWildcards() {
+        // databend 等驱动的 getSearchStringEscape() 返回 "\\"，但 getTables 把 _ 当字面量且忽略转义，
+        // 转义含 _ 的库名（如 my_db）会返回 0 行（#8114）。profile.escapeSchemaWildcards=false 时应原样传入。
+        JdbcAgentProfile noEscapeProfile = new JdbcAgentProfile(
+            "example.Driver",
+            "jdbc:example://{host}:{port}/{database}",
+            0,
+            false,
+            Collections.emptySet(),
+            Arrays.asList("TABLE", "VIEW", "BASE TABLE"),
+            "\"",
+            "USE",
+            true,
+            false,
+            false,
+            false,
+            false
+        );
+        AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        Connection conn = schemaEscapeConnection("\\", rows(
+            row("TABLE_NAME", "A", "TABLE_TYPE", "TABLE", "REMARKS", null)
+        ), capturedArgs);
+
+        List<TableInfo> tables = StandardJdbcMetadata.INSTANCE.listTables(conn, noEscapeProfile, "", "my_db");
+
+        assertEquals(1, tables.size());
+        assertEquals("A", tables.get(0).getName());
+        // 关闭转义：schemaPattern 应为原始 "my_db"，而非 "my\\_db"
+        assertEquals("my_db", capturedArgs.get()[1]);
+    }
+
     private static Connection schemaEscapeConnection(String searchEscape, ResultSet tables, AtomicReference<Object[]> capturedArgs) {
         DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
             @Override
@@ -347,6 +505,80 @@ class StandardJdbcMetadataTest {
         assertFalse(columns.get(0).getIs_nullable());
         assertEquals("NAME", columns.get(1).getName());
         assertEquals(Integer.valueOf(64), columns.get(1).getCharacter_maximum_length());
+    }
+
+    @Test
+    void retriesCaseInsensitiveTableMetadataWithTheCanonicalTableName() {
+        JdbcAgentProfile caseInsensitiveProfile = new JdbcAgentProfile(
+            "example.Driver",
+            "jdbc:example://{host}:{port}/{database}",
+            0,
+            false,
+            Collections.emptySet(),
+            Collections.singletonList("TABLE")
+        ) {
+            @Override
+            public boolean getCaseInsensitiveTableMetadata() {
+                return true;
+            }
+        };
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                String name = method.getName();
+                if ("getTables".equals(name)) {
+                    return rows(row("TABLE_NAME", "ORDERS"));
+                }
+                if ("getPrimaryKeys".equals(name)) {
+                    return "ORDERS".equals(args[2]) ? rows(row("COLUMN_NAME", "ID")) : rows();
+                }
+                if ("getColumns".equals(name)) {
+                    return "ORDERS".equals(args[2]) ? rows(row(
+                        "COLUMN_NAME", "ID",
+                        "TYPE_NAME", "INTEGER",
+                        "NULLABLE", DatabaseMetaData.columnNoNulls,
+                        "COLUMN_SIZE", 10,
+                        "DECIMAL_DIGITS", 0
+                    )) : rows();
+                }
+                if ("getIndexInfo".equals(name)) {
+                    return "ORDERS".equals(args[2]) ? rows(row(
+                        "INDEX_NAME", "PK_ORDERS",
+                        "COLUMN_NAME", "ID",
+                        "ORDINAL_POSITION", (short) 1,
+                        "NON_UNIQUE", false
+                    )) : rows();
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                return "getMetaData".equals(method.getName()) ? meta : defaultValue(method.getReturnType());
+            }
+        });
+
+        List<ColumnInfo> columns = StandardJdbcMetadata.INSTANCE.getColumns(
+            conn,
+            caseInsensitiveProfile,
+            null,
+            "APP",
+            "orders"
+        );
+        List<IndexInfo> indexes = StandardJdbcMetadata.INSTANCE.listIndexes(
+            conn,
+            caseInsensitiveProfile,
+            null,
+            "APP",
+            "orders"
+        );
+
+        assertEquals(1, columns.size());
+        assertEquals("ID", columns.get(0).getName());
+        assertTrue(columns.get(0).getIs_primary_key());
+        assertEquals(1, indexes.size());
+        assertEquals(Collections.singletonList("ID"), indexes.get(0).getColumns());
     }
 
     @Test
@@ -494,6 +726,50 @@ class StandardJdbcMetadataTest {
     }
 
     @Test
+    void unscopedCompletionPreservesSchemasForSubsequentColumnLookup() throws Exception {
+        try (Connection conn = DriverManager.getConnection("jdbc:h2:mem:completion_schemas");
+             Statement sql = conn.createStatement()) {
+            sql.execute("CREATE SCHEMA APP");
+            sql.execute("CREATE SCHEMA \"SalesApp\"");
+            sql.execute("CREATE TABLE APP.CT_CITYAREA (APP_ID INT)");
+            sql.execute("CREATE TABLE \"SalesApp\".CT_CITYAREA (SALES_ID INT)");
+
+            CompletionAssistantResponse tables = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(
+                conn, profile, null,
+                request(null, null, "CT_CITYAREA", List.of(CompletionAssistantObjectKind.TABLE), null)
+            );
+
+            assertEquals(List.of("APP", "SalesApp"), tables.getCandidates().stream()
+                .map(CompletionAssistantCandidate::getSchema).sorted().toList());
+            for (CompletionAssistantCandidate table : tables.getCandidates()) {
+                CompletionAssistantResponse columns = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(
+                    conn, profile, null,
+                    request(null, table.getSchema(), "", List.of(CompletionAssistantObjectKind.COLUMN), table.getName())
+                );
+                assertEquals(List.of("APP".equals(table.getSchema()) ? "APP_ID" : "SALES_ID"),
+                    columns.getCandidates().stream().map(CompletionAssistantCandidate::getName).toList());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({",APP", "'',APP", "'   ',APP", "ActualOwner,ActualOwner"})
+    void completionUsesRowSchemaWithRequestedSchemaFallback(String rowSchema, String expectedSchema) {
+        Connection conn = connection(
+            rows(),
+            rows(row("TABLE_NAME", "ACCOUNTS", "TABLE_TYPE", "TABLE", "TABLE_SCHEM", rowSchema)),
+            rows(), rows(), rows(), rows()
+        );
+
+        CompletionAssistantResponse tables = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(
+            conn, profile, "sales",
+            request("sales", "APP", "ACC", List.of(CompletionAssistantObjectKind.TABLE), null)
+        );
+
+        assertEquals(expectedSchema, tables.getCandidates().get(0).getSchema());
+    }
+
+    @Test
     void completionAssistantSearchesTablesAndColumnsWithServerSideMasks() {
         AtomicReference<Object[]> capturedTableArgs = new AtomicReference<>();
         AtomicReference<Object[]> capturedColumnArgs = new AtomicReference<>();
@@ -529,6 +805,77 @@ class StandardJdbcMetadataTest {
         assertEquals("VARCHAR", columns.getCandidates().get(0).getData_type());
         assertEquals("ACCOUNTS", capturedColumnArgs.get()[2]);
         assertEquals("DISPLAY%", capturedColumnArgs.get()[3]);
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {
+        "/|DBX_I7539_1001|DBX/_I7539/_1001%",
+        "/|A/B_%|A//B/_/%%",
+        "\\|A\\B_%|A\\\\B\\_\\%%",
+        "''|A_%|A_%%",
+        "|A_%|A_%%",
+        "/|''|%"
+    }, delimiter = '|')
+    void completionUsesDriverEscapeForTableAndColumnMasks(String escape, String mask, String prefixPattern) {
+        for (CompletionAssistantMatchMode mode : Arrays.asList(CompletionAssistantMatchMode.PREFIX, CompletionAssistantMatchMode.CONTAINS)) {
+            for (CompletionAssistantObjectKind kind : Arrays.asList(CompletionAssistantObjectKind.TABLE, CompletionAssistantObjectKind.COLUMN)) {
+                AtomicReference<String> capturedPattern = new AtomicReference<>();
+                DatabaseMetaData meta = proxy(DatabaseMetaData.class, (method, args) -> {
+                    switch (method.getName()) {
+                        case "getSearchStringEscape": return escape;
+                        case "getTableTypes": return rows(row("TABLE_TYPE", "TABLE"));
+                        case "getTables":
+                            capturedPattern.set((String) args[2]);
+                            return rows(row("TABLE_NAME", mask + "MATCH", "TABLE_TYPE", "TABLE"));
+                        case "getColumns":
+                            capturedPattern.set((String) args[3]);
+                            return rows(row("COLUMN_NAME", mask + "MATCH", "TYPE_NAME", "VARCHAR"));
+                        default: return defaultValue(method.getReturnType());
+                    }
+                });
+                Connection conn = proxy(Connection.class, (method, args) ->
+                    "getMetaData".equals(method.getName()) ? meta : defaultValue(method.getReturnType()));
+                CompletionAssistantRequest request = request("sales", "APP", mask, Collections.singletonList(kind), "ACCOUNTS");
+                setField(request, "match_mode", mode);
+
+                CompletionAssistantResponse result = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(conn, profile, "sales", request);
+
+                String expected = mode == CompletionAssistantMatchMode.CONTAINS && !mask.isEmpty() ? "%" + prefixPattern : prefixPattern;
+                assertEquals(expected, capturedPattern.get(), kind + " " + mode);
+                assertEquals(mask + "MATCH", result.getCandidates().get(0).getName());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {
+        "/|A_B|A/_B",
+        "/|A%B|A/%B",
+        "/|A/B_%|A//B/_/%",
+        "\\|A\\B_%|A\\\\B\\_\\%",
+        "/|ACCOUNTS|ACCOUNTS",
+        "''|A_B|A_B"
+    }, delimiter = '|')
+    void completionEscapesExactParentTable(String escape, String table, String expectedPattern) {
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, (method, args) -> {
+            switch (method.getName()) {
+                case "getSearchStringEscape": return escape;
+                case "getColumns":
+                    assertEquals(expectedPattern, args[2]);
+                    assertEquals("ID%", args[3]);
+                    return rows(row("TABLE_NAME", table, "COLUMN_NAME", "ID", "TYPE_NAME", "INTEGER"));
+                default: return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = proxy(Connection.class, (method, args) ->
+            "getMetaData".equals(method.getName()) ? meta : defaultValue(method.getReturnType()));
+        CompletionAssistantRequest request = request("sales", "APP", "ID", Collections.singletonList(CompletionAssistantObjectKind.COLUMN), table);
+
+        CompletionAssistantResponse result = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(conn, profile, "sales", request);
+
+        assertEquals(1, result.getCandidates().size());
+        assertEquals("ID", result.getCandidates().get(0).getName());
+        assertEquals(table, result.getCandidates().get(0).getParent_name());
     }
 
     private static Connection connection(
@@ -775,10 +1122,17 @@ class StandardJdbcMetadataTest {
     }
 
     private static Connection routineConnection(ResultSet procedures, ResultSet functions) {
+        return routineConnection(null, procedures, functions);
+    }
+
+    private static Connection routineConnection(String productName, ResultSet procedures, ResultSet functions) {
         DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
             @Override
             public Object handle(Method method, Object[] args) {
                 String name = method.getName();
+                if ("getDatabaseProductName".equals(name)) {
+                    return productName;
+                }
                 if ("getTables".equals(name) || "getTableTypes".equals(name)) {
                     return rows();
                 }

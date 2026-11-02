@@ -3,6 +3,9 @@ import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Eye, EyeOff } from "@lucide/vue";
 import { Input } from "@/components/ui/input";
+import { isSavedCredential, passwordViewerEnabled } from "@/lib/security/passwordViewer";
+
+defineOptions({ inheritAttrs: false });
 
 const model = defineModel<string>();
 
@@ -22,16 +25,24 @@ const props = withDefaults(
   },
 );
 
+const savedCredential = computed(() => isSavedCredential(model.value));
+const inputValue = computed({
+  get: () => (savedCredential.value ? "" : model.value),
+  set: (value: string | undefined) => {
+    model.value = value;
+  },
+});
 const visible = ref(false);
 const { t } = useI18n();
+const showToggle = computed(() => props.showToggle && passwordViewerEnabled.value && !savedCredential.value);
 const toggleLabel = computed(() => (visible.value ? props.hideLabel || t("common.hidePassword") : props.showLabel || t("common.showPassword")));
 </script>
 
 <template>
   <div :class="props.class" class="relative">
-    <Input v-model="model" :type="visible ? 'text' : 'password'" :placeholder="placeholder" :disabled="disabled" :class="[props.inputClass, props.showToggle ? 'pr-8' : undefined]" v-bind="$attrs" />
+    <Input v-model="inputValue" data-password-input :type="visible && showToggle ? 'text' : 'password'" :placeholder="savedCredential ? '••••••••' : placeholder" :disabled="disabled" :class="[props.inputClass, showToggle ? 'pr-8' : undefined]" v-bind="$attrs" />
     <button
-      v-if="props.showToggle"
+      v-if="showToggle"
       type="button"
       :disabled="disabled"
       :tabindex="toggleTabIndex"

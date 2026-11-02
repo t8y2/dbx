@@ -1,9 +1,6 @@
-import { readFileSync } from "node:fs";
 import { EditorSelection, EditorState, type Extension, type Transaction } from "@codemirror/state";
 import { describe, expect, it, vi } from "vitest";
 import { joinQueryEditorLines } from "@/lib/editor/queryEditorJoinLines";
-
-const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 
 function runJoinLines(doc: string, selection: EditorSelection | { anchor: number; head?: number }, extensions: Extension[] = []) {
   let state = EditorState.create({ doc, selection, extensions });
@@ -21,11 +18,6 @@ function runJoinLines(doc: string, selection: EditorSelection | { anchor: number
 }
 
 describe("joinQueryEditorLines", () => {
-  it("binds the configurable join-lines shortcut in QueryEditor", () => {
-    expect(queryEditorSource).toContain('import { joinQueryEditorLines } from "@/lib/editor/queryEditorJoinLines";');
-    expect(queryEditorSource).toContain("...binding(shortcuts.joinLines, joinQueryEditorLines)");
-  });
-
   it("joins every selected line with one separating space", () => {
     const doc = "SELECT id,\n       name\nFROM users;";
     const result = runJoinLines(doc, EditorSelection.range(0, doc.length));

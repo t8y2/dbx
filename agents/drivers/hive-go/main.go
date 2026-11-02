@@ -407,7 +407,11 @@ func (server *server) dispatch(method string, params map[string]json.RawMessage)
 		result, err := server.getTableComment(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
 	case "list_objects":
-		result, err := server.listObjects(stringParam(params, "schema"), metadataListConstraintsFromParams(params))
+		result, err := server.listObjects(
+			stringParam(params, "database"),
+			stringParam(params, "schema"),
+			metadataListConstraintsFromParams(params),
+		)
 		return result, false, err
 	case "list_data_types":
 		result, err := server.listDataTypes()
@@ -432,6 +436,7 @@ func (server *server) dispatch(method string, params map[string]json.RawMessage)
 		return []any{}, false, nil
 	case "get_object_source":
 		result, err := server.getObjectSource(
+			stringParam(params, "database"),
 			stringParam(params, "schema"),
 			firstNonEmpty(stringParam(params, "name"), stringParam(params, "table")),
 			stringParam(params, "object_type"),

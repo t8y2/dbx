@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { convertToSchemaDiffObjects, selectSchemaDiffInput, selectSchemaDiffInputForObject, setSchemaDiffObjectSelected, type SchemaDiffPreparation } from "../../schema/schemaDiff";
+import { convertToSchemaDiffObjects, normalizeSchemaDiffDependencyGraph, schemaDiffObjectSelectionState, selectSchemaDiffInput, selectSchemaDiffInputForObject, setSchemaDiffObjectSelected, setSchemaDiffObjectSelectedWithDependencies, type SchemaDiffPreparation } from "../../schema/schemaDiff";
 
 function createPreparation(): SchemaDiffPreparation {
   return {
@@ -24,7 +24,146 @@ function createPreparation(): SchemaDiffPreparation {
   };
 }
 
+function createDuplicateForeignKeyPreparation(): SchemaDiffPreparation {
+  return {
+    diffs: [
+      {
+        type: "modified",
+        objectType: "table",
+        name: "orders",
+        foreignKeys: [
+          {
+            type: "removed",
+            name: "fk_customer",
+            target: { name: "fk_customer", column: "legacy_customer_id", ref_table: "customers", ref_column: "id" },
+          },
+          {
+            type: "added",
+            name: "fk_customer",
+            source: { name: "fk_customer", column: "customer_id", ref_table: "customers", ref_column: "id" },
+          },
+        ],
+      },
+    ],
+    syncSql: "-- orders",
+  };
+}
+
 describe("schema diff SQL selection projections", () => {
+  it("keeps explicit same-name package specification and body identities separate through projection", () => {
+    const functionDiffs = (["PACKAGE", "PACKAGE_BODY"] as const).map((programKind) => ({
+      type: "modified" as const,
+      name: 'Pkg.With.Dot,"中文😀',
+      programKind,
+      source: { name: 'Pkg.With.Dot,"中文😀', function_type: programKind, data_type: "", arguments: "", definition: `${programKind} original` },
+    }));
+    const result: SchemaDiffPreparation = { diffs: [], functionDiffs, syncSql: "" };
+    const objects = convertToSchemaDiffObjects([], functionDiffs);
+    expect(new Set(objects.map((object) => object.id)).size).toBe(2);
+    expect(objects.map((object) => object.routineType)).toEqual(["PACKAGE", "PACKAGE_BODY"]);
+    setSchemaDiffObjectSelected(objects, objects[0]!.id, false);
+    expect(selectSchemaDiffInput(result, objects).functionDiffs).toEqual([functionDiffs[1]]);
+    expect(selectSchemaDiffInputForObject(result, objects, objects[1]!.id).functionDiffs).toEqual([functionDiffs[1]]);
+  });
+
+  it("does not guess a package identity from an arbitrary source or target definition", () => {
+    const source = { name: "P", function_type: "PACKAGE_BODY", data_type: "", arguments: "", definition: "retained body" };
+    expect(() => convertToSchemaDiffObjects([], [{ type: "added", name: "P", source }])).toThrow("explicit program kind");
+    expect(() => convertToSchemaDiffObjects([], [{ type: "removed", name: "P", target: source }])).toThrow("explicit program kind");
+    expect(() => convertToSchemaDiffObjects([], [{ type: "conflict", name: "P", source: { ...source, function_type: "FUNCTION" }, target: source }])).toThrow("explicit program kind");
+  });
+
+  it("preserves legacy PostgreSQL overload IDs and selection", () => {
+    const functionDiffs = ["integer", "text"].map((arguments_) => ({ type: "added" as const, name: "f", source: { name: "f", function_type: "FUNCTION", data_type: "", arguments: arguments_, definition: "original" } }));
+    const objects = convertToSchemaDiffObjects([], functionDiffs);
+    expect(objects.map((object) => object.id)).toEqual(["func-f-integer", "func-f-text"]);
+    setSchemaDiffObjectSelected(objects, "func-f-text", false);
+    expect(selectSchemaDiffInput({ diffs: [], functionDiffs, syncSql: "" }, objects).functionDiffs).toEqual([functionDiffs[0]]);
+  });
+
+  it("retains equal and unreadable Oracle originals without selecting executable steps", () => {
+    const functionDiffs = (["equal", "unreadable", "conflict"] as const).map((type) => ({
+      type,
+      name: `${type}.Proc`,
+      source: { name: `${type}.Proc`, function_type: "PROCEDURE", data_type: "", arguments: "", definition: "retained source" },
+      target: { name: `${type}.Proc`, function_type: "PROCEDURE", data_type: "", arguments: "", definition: "retained target" },
+      changes: type === "equal" ? [] : ["read or kind issue"],
+    }));
+    const result: SchemaDiffPreparation = { diffs: [], functionDiffs, syncSql: "" };
+    const objects = convertToSchemaDiffObjects([], functionDiffs);
+    expect(objects.map((object) => [object.operationType, object.selected, object.routineType])).toEqual([
+      ["none", false, "PROCEDURE"],
+      ["none", false, "PROCEDURE"],
+      ["none", false, "PROCEDURE"],
+    ]);
+    expect(objects[1]!.sourceDdl).toBe("retained source");
+    expect(objects[1]!.targetDdl).toBe("retained target");
+    objects.forEach((object) => setSchemaDiffObjectSelected(objects, object.id, true));
+    expect(selectSchemaDiffInput(result, objects).functionDiffs).toEqual([]);
+  });
+
+  it("keeps every composite foreign key column in the selection dependency closure", () => {
+    const result = createPreparation();
+    result.diffs[0]!.foreignKeys = [
+      {
+        type: "added",
+        name: "fk_pair",
+        source: {
+          name: "fk_pair",
+          column: "a_col, a_other_col",
+          ref_table: "parent",
+          ref_column: "id, code",
+          column_pairs: [
+            ["a_col", "id"],
+            ["a_other_col", "code"],
+          ],
+        },
+      },
+    ];
+    const objects = convertToSchemaDiffObjects(result.diffs);
+    const foreignKey = objects[0]!.children!.find((child) => child.objectKind === "foreignKey")!;
+    for (const column of ["a_col", "a_other_col"]) {
+      setSchemaDiffObjectSelectedWithDependencies(objects, result, `col-table_a-${column}`, false);
+      expect(foreignKey.selected).toBe(false);
+      setSchemaDiffObjectSelectedWithDependencies(objects, result, foreignKey.id, true);
+      expect(objects[0]!.children!.filter((child) => child.objectKind === "column").every((child) => child.selected)).toBe(true);
+      expect(selectSchemaDiffInput(result, objects).diffs[0]!.foreignKeys![0]!.source!.column_pairs).toEqual([
+        ["a_col", "id"],
+        ["a_other_col", "code"],
+      ]);
+    }
+  });
+
+  it("selects a composite foreign key drop before removing either local column", () => {
+    const result = createPreparation();
+    result.diffs[0]!.columns!.forEach((column) => {
+      column.type = "removed";
+    });
+    result.diffs[0]!.foreignKeys = [
+      {
+        type: "removed",
+        name: "fk_pair",
+        target: {
+          name: "fk_pair",
+          column: "a_col, a_other_col",
+          ref_table: "parent",
+          ref_column: "id, code",
+          column_pairs: [
+            ["a_col", "id"],
+            ["a_other_col", "code"],
+          ],
+        },
+      },
+    ];
+    const objects = convertToSchemaDiffObjects(result.diffs);
+    const foreignKey = objects[0]!.children!.find((child) => child.objectKind === "foreignKey")!;
+    for (const column of ["a_col", "a_other_col"]) {
+      setSchemaDiffObjectSelected(objects, foreignKey.id, false);
+      setSchemaDiffObjectSelectedWithDependencies(objects, result, `col-table_a-${column}`, true);
+      expect(foreignKey.selected).toBe(true);
+    }
+  });
+
   it("keeps the focused table SQL separate from the full selected SQL", () => {
     const result = createPreparation();
     const objects = convertToSchemaDiffObjects(result.diffs);
@@ -62,6 +201,34 @@ describe("schema diff SQL selection projections", () => {
     expect(focusedInput.diffs[0]?.columns?.map((column) => column.name)).toEqual(["a_col", "a_other_col"]);
   });
 
+  it("selects duplicate-name foreign keys independently and projects only the selected one", () => {
+    const result = createDuplicateForeignKeyPreparation();
+    const objects = convertToSchemaDiffObjects(result.diffs);
+    const tableObject = objects[0]!;
+    const [legacyForeignKey, currentForeignKey] = tableObject.children ?? [];
+    const foreignKeyIds = tableObject.children?.map((child) => child.id) ?? [];
+
+    expect(foreignKeyIds).toHaveLength(2);
+    expect(new Set(foreignKeyIds).size).toBe(2);
+    expect(schemaDiffObjectSelectionState(tableObject)).toEqual({ checked: true, indeterminate: false });
+
+    expect(legacyForeignKey && setSchemaDiffObjectSelected(objects, legacyForeignKey.id, false)).toBe(true);
+    expect(legacyForeignKey?.selected).toBe(false);
+    expect(currentForeignKey?.selected).toBe(true);
+    expect(tableObject.selected).toBe(false);
+    expect(schemaDiffObjectSelectionState(tableObject)).toEqual({ checked: false, indeterminate: true });
+
+    const selectedInput = selectSchemaDiffInput(result, objects);
+    expect(selectedInput.diffs[0]?.foreignKeys?.map((foreignKey) => foreignKey.source?.column)).toEqual(["customer_id"]);
+
+    expect(currentForeignKey && setSchemaDiffObjectSelected(objects, currentForeignKey.id, false)).toBe(true);
+    expect(schemaDiffObjectSelectionState(tableObject)).toEqual({ checked: false, indeterminate: false });
+    expect(selectSchemaDiffInput(result, objects).diffs).toEqual([]);
+
+    const rebuiltObjects = convertToSchemaDiffObjects(result.diffs);
+    expect(rebuiltObjects[0]?.children?.map((child) => child.id)).toEqual(foreignKeyIds);
+  });
+
   it("returns an empty input for an object that is no longer present", () => {
     const result = createPreparation();
     const objects = convertToSchemaDiffObjects(result.diffs);
@@ -72,6 +239,39 @@ describe("schema diff SQL selection projections", () => {
       sequenceDiffs: [],
       ruleDiffs: [],
       ownerDiffs: [],
+    });
+  });
+
+  it("includes the complete predecessor closure in focused table SQL", () => {
+    const result = createPreparation();
+    result.diffs.push({
+      type: "added",
+      objectType: "table",
+      name: "table_c",
+    });
+    result.dependencyGraph = {
+      nodes: [
+        { tableName: "table_a", dependsOn: ["table_b"], dependedBy: [] },
+        { tableName: "table_b", dependsOn: ["table_c"], dependedBy: ["table_a"] },
+        { tableName: "table_c", dependsOn: [], dependedBy: ["table_b"] },
+      ],
+    };
+    const objects = convertToSchemaDiffObjects(result.diffs);
+
+    const focusedInput = selectSchemaDiffInputForObject(result, objects, "table-table_a");
+
+    expect(focusedInput.diffs.map((diff) => diff.name)).toEqual(["table_a", "table_b", "table_c"]);
+  });
+
+  it("normalizes the Rust dependency graph map and snake-case fields", () => {
+    expect(
+      normalizeSchemaDiffDependencyGraph({
+        nodes: {
+          table_a: { table_name: "table_a", depends_on: ["table_b"], depended_by: [] },
+        },
+      }),
+    ).toEqual({
+      nodes: [{ tableName: "table_a", dependsOn: ["table_b"], dependedBy: [] }],
     });
   });
 });

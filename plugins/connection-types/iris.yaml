@@ -1,12 +1,20 @@
 schemaVersion: 1
 order: 740
 dbType: iris
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Iris
 label: InterSystems IRIS
 dialect: Iris
 runtimeMode: agent
 mcpMode: bridge
 agentKey: iris
+driverProfiles:
+  - profile: cache
+    agentKey: cache
+    label: InterSystems Caché
+    storeVisible: true
+    storeOrder: 51
 driverStoreVisible: true
 driverStoreOrder: 42
 singleConnectionPool: true
@@ -24,10 +32,10 @@ capabilities:
   objectSource: true
   schemaSearch: true
   diagram: true
-  tableDataEdit: false
+  tableDataEdit: true
   tableStructureEdit: true
   tableImport: false
-  dataTransfer: false
+  dataTransfer: true
   sqlFileExecution: true
   databaseCreate: false
   fieldLineage: false

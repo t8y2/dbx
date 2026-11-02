@@ -1,22 +1,26 @@
 <script setup lang="ts">
-import { reactive, ref, computed, onMounted, watch, type ComponentPublicInstance } from "vue";
+import { reactive, ref, computed, watch, type ComponentPublicInstance } from "vue";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
-import type { GenerateResult, TableGenerateConfig } from "@/lib/dataGrid/dataGenerate";
-import { displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, defaultGeneratorParams, supportsGeneratedMultiRowValues, UniqueValueGenerationError } from "@/lib/dataGrid/dataGenerate";
+import { BackendErrorException } from "@/lib/backend/errorUtils";
+import type { ColumnGenerateConfig, TableGenerateConfig } from "@/lib/dataGrid/dataGenerate";
+import { defaultGeneratorParams, displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, supportsGeneratedMultiRowValues, UniqueValueGenerationError } from "@/lib/dataGrid/dataGenerate";
 import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { constrainMysqlGenerateColumns, mysqlGeneratePartitionQuery, MysqlGeneratePartitionError, type MysqlGeneratePartition } from "@/lib/dataGrid/mysqlGeneratePartitions";
+import { uniqueConstraintColumns } from "@/lib/table/uniqueConstraintColumns";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import GeneratorParamsPanel from "./params/GeneratorParamsPanel.vue";
 import type { ColumnInfo, TableInfo } from "@/types/database";
+import { cancelDataGenerateSession, getDataGenerateSession, startDataGenerateSession, type DataGenerateTarget } from "@/composables/useDataGenerateSession";
 
 import { Dialog, DialogHeader, DialogTitle, DialogScrollContent, DialogContent, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Database, Table, Columns, Loader2, Save, Upload, Settings, ChevronRight, X, AlertCircle, ArrowUp, ArrowDown } from "@lucide/vue";
+import { Database, Table, Columns, Loader2, Save, Upload, Settings, ChevronRight, X, AlertCircle, ArrowUp, ArrowDown, Minimize2 } from "@lucide/vue";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 const { t } = useI18n();
@@ -29,6 +33,7 @@ const props = defineProps<{
   prefillDatabase?: string;
   prefillSchema?: string;
   prefillTable?: string;
+  sessionId?: string | null;
 }>();
 
 // Left tree state
@@ -56,12 +61,24 @@ const panelColumnName = ref<string | null>(null);
 
 // Step state: config -> preview
 const currentStep = ref<"config" | "preview" | "result">("config");
-interface GeneratedTableResult extends GenerateResult {
-  tableName: string;
-  schema: string;
-}
+type GeneratedTableResult = DataGenerateTarget;
 const generatedResults = ref<GeneratedTableResult[]>([]);
 const generationError = ref("");
+
+/**
+ * Preview only materializes a small sample. Generating the full row set up
+ * front froze the UI for hundreds of thousands of rows and exhausted memory
+ * at millions of rows.
+ */
+const PREVIEW_SAMPLE_ROWS = 50;
+const MAX_ROW_COUNT = 100_000_000;
+const DEFAULT_BATCH_ROWS = 1000;
+const LARGE_ROW_COUNT_HINT = 100_000;
+
+function normalizeRowCount(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(MAX_ROW_COUNT, Math.floor(value)));
+}
 
 const connectionName = computed(() => (props.prefillConnectionId ? store.getConfig(props.prefillConnectionId)?.name : ""));
 
@@ -121,6 +138,7 @@ async function loadSchemas() {
           const prefillTableInfo = tables.find((table) => table.name === props.prefillTable);
           if (prefillTableInfo) {
             const cols = await api.getColumns(cid, db, targetSchema, props.prefillTable);
+            const uniqueColumns = await singleColumnUniqueConstraints(cid, db, targetSchema, props.prefillTable);
             const key = tableKey(targetSchema, props.prefillTable);
             configs[key] = {
               tableName: props.prefillTable,
@@ -145,6 +163,7 @@ async function loadSchemas() {
                       numericPrecision: c.numeric_precision,
                       numericScale: c.numeric_scale,
                       characterMaximumLength: c.character_maximum_length,
+                      uniqueConstraint: uniqueColumns.has(c.name),
                     },
                     gKey,
                   ),
@@ -172,6 +191,21 @@ async function loadSchemas() {
     // silently fail
   } finally {
     loading.value = false;
+  }
+}
+
+/**
+ * Columns covered by a single-column unique constraint (PRIMARY KEY or UNIQUE
+ * index). The generator switches per-column uniqueness on for them so an
+ * INSERT batch never repeats a value the server will reject (#5958).
+ */
+async function singleColumnUniqueConstraints(cid: string, db: string, schema: string, table: string): Promise<Set<string>> {
+  try {
+    return uniqueConstraintColumns(await api.listIndexes(cid, db, schema, table));
+  } catch {
+    // Index metadata is a best-effort hint: without it the generator keeps the
+    // previous behaviour instead of failing to open the dialog.
+    return new Set<string>();
   }
 }
 
@@ -220,6 +254,7 @@ async function loadColumns(schema: string, table: string) {
   if (configs[key]) return configs[key];
   if (!props.prefillConnectionId || !props.prefillDatabase) return null;
   const cols = await api.getColumns(props.prefillConnectionId, props.prefillDatabase, schema, table);
+  const uniqueColumns = await singleColumnUniqueConstraints(props.prefillConnectionId, props.prefillDatabase, schema, table);
   const cfg: TableGenerateConfig = {
     tableName: table,
     tableType: tableInfo(schema, table)?.table_type,
@@ -243,6 +278,7 @@ async function loadColumns(schema: string, table: string) {
             numericPrecision: c.numeric_precision,
             numericScale: c.numeric_scale,
             characterMaximumLength: c.character_maximum_length,
+            uniqueConstraint: uniqueColumns.has(c.name),
           },
           gKey,
         ),
@@ -366,7 +402,21 @@ function onPreviewColResizeStart(ci: number, event: MouseEvent) {
   document.addEventListener("pointerup", onUp);
   document.body.classList.add("select-none", "cursor-col-resize");
 }
-const currentPreview = computed<GeneratedTableResult>(() => generatedResults.value[previewTableIndex.value] ?? { tableName: "", schema: "", columns: [], rows: [], sql: "", statements: [] });
+const currentPreview = computed<GeneratedTableResult>(
+  () =>
+    generatedResults.value[previewTableIndex.value] ?? {
+      tableName: "",
+      schema: "",
+      database: "",
+      columns: [],
+      rows: [],
+      sql: "",
+      statements: [],
+      targetRowCount: 0,
+      isSample: false,
+      resolvedColumns: [],
+    },
+);
 
 function displayPreviewCell(cell: unknown): string {
   return displayGeneratedValue(cell);
@@ -395,6 +445,32 @@ async function fetchMaxValues(cfg: TableGenerateConfig): Promise<Record<string, 
   return starts;
 }
 
+async function constrainPartitionColumns(cfg: TableGenerateConfig, columns: ColumnGenerateConfig[]): Promise<ColumnGenerateConfig[]> {
+  if (dbType.value !== "mysql") return columns;
+  // Native MySQL listPartitions currently returns no metadata. Use the catalog
+  // directly, and propagate read failures rather than inserting unconstrained rows.
+  const result = await api.executeQuery(props.prefillConnectionId!, props.prefillDatabase!, mysqlGeneratePartitionQuery(cfg.schema || cfg.database, cfg.tableName), cfg.schema, undefined, { maxRows: 8192 });
+  if (result.execution_error || result.error) throw new BackendErrorException(result.error || "Partition metadata query failed.");
+  if (result.truncated || result.has_more) throw new MysqlGeneratePartitionError(cfg.tableName, "incomplete partition metadata");
+  const partitions: MysqlGeneratePartition[] = result.rows.map((row) => ({ method: String(row[0] ?? ""), expression: String(row[1] ?? ""), description: String(row[2] ?? "") }));
+  return constrainMysqlGenerateColumns({ ...cfg, columns, rowCount: normalizeRowCount(cfg.rowCount) }, partitions);
+}
+
+function buildSampleResult(cfg: TableGenerateConfig, columns: ColumnGenerateConfig[], targetRowCount: number): GeneratedTableResult {
+  const sampleCount = Math.min(targetRowCount, PREVIEW_SAMPLE_ROWS);
+  const result = generateTableData({ ...cfg, columns, rowCount: sampleCount }, dbType.value);
+  return {
+    tableName: cfg.tableName,
+    schema: cfg.schema,
+    database: cfg.database,
+    tableType: cfg.tableType,
+    targetRowCount,
+    isSample: targetRowCount > sampleCount,
+    resolvedColumns: columns,
+    ...result,
+  };
+}
+
 async function doGenerate() {
   if (!Object.values(checkedTables).some(Boolean)) return;
   generationError.value = "";
@@ -416,8 +492,8 @@ async function doGenerate() {
           return col;
         });
       }
-      const result = generateTableData({ ...cfg, columns }, dbType.value);
-      results.push({ tableName: cfg.tableName, schema: cfg.schema, ...result });
+      columns = await constrainPartitionColumns(cfg, columns);
+      results.push(buildSampleResult(cfg, columns, normalizeRowCount(cfg.rowCount)));
     }
   } catch (error) {
     generationError.value = generationErrorMessage(error);
@@ -447,41 +523,47 @@ async function regenerate() {
   }
   generationError.value = "";
   try {
-    const result = generateTableData({ ...cfg, columns }, dbType.value);
-    generatedResults.value[previewTableIndex.value] = { tableName: cfg.tableName, schema: cfg.schema, ...result };
+    columns = await constrainPartitionColumns(cfg, columns);
+    generatedResults.value[previewTableIndex.value] = buildSampleResult(cfg, columns, normalizeRowCount(cfg.rowCount));
   } catch (error) {
     generationError.value = generationErrorMessage(error);
   }
 }
 
 function generationErrorMessage(error: unknown): string {
+  if (error instanceof MysqlGeneratePartitionError) {
+    return t("dataGenerate.partitionValuesUnsupported", { table: error.table, expression: error.expression });
+  }
   if (error instanceof UniqueValueGenerationError) {
     return t("dataGenerate.uniqueExhausted", { table: error.tableName, column: error.columnName, attempts: error.attempts });
   }
   return error instanceof Error ? error.message : String(error);
 }
 
-function copyAllSql() {
+/**
+ * Copies the script behind the preview. The preview only materializes a
+ * `PREVIEW_SAMPLE_ROWS` sample, so this is the sample script rather than the
+ * full batch — the label says so, and the insert step generates the remaining
+ * rows incrementally instead of holding them in memory.
+ */
+function copySampleSql() {
   const allSql = allSqlStatements().join("\n\n");
   void navigator.clipboard.writeText(allSql);
 }
 
-const executing = ref(false);
-
-interface TableResult {
-  table: string;
-  total: number;
-  ok: number;
-  err: number;
-  error?: string;
-}
-const executeResults = ref<TableResult[]>([]);
+const activeSessionId = ref<string | null>(props.sessionId ?? null);
+const activeSession = computed(() => getDataGenerateSession(activeSessionId.value));
+const executing = computed(() => activeSession.value?.status === "running" || activeSession.value?.status === "cancelling");
+const executeResults = computed(() => activeSession.value?.results ?? []);
 
 const generateOptions = reactive({
   continueOnError: false,
   truncate: false,
   useTransaction: true,
   extendedInsert: true,
+  /** 0 means "no timeout" — the backend maps 0 to an unbounded wait. */
+  timeoutSecs: 0,
+  batchRows: DEFAULT_BATCH_ROWS,
 });
 const supportsExtendedInsert = computed(() => supportsGeneratedMultiRowValues(dbType.value));
 watch(
@@ -494,6 +576,24 @@ watch(
 
 const optionsDialogOpen = ref(false);
 
+const insertProgress = computed(() => activeSession.value?.progress ?? null);
+
+const insertPercent = computed(() => {
+  const p = insertProgress.value;
+  if (!p || p.totalRows <= 0) return 0;
+  return Math.min(100, Math.round((p.insertedRows / p.totalRows) * 100));
+});
+
+function cancelInsert() {
+  if (!executing.value || !activeSessionId.value) return;
+  void cancelDataGenerateSession(activeSessionId.value);
+}
+
+function normalizeTimeoutSecs(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return 0;
+  return Math.min(86_400, Math.floor(value));
+}
+
 function sqlStatementsForTable(r: GeneratedTableResult): string[] {
   const stmts: string[] = [];
   const targetTable = qualifiedTableName({ databaseType: dbType.value, schema: r.schema, tableName: r.tableName, database: props.prefillDatabase });
@@ -504,8 +604,11 @@ function sqlStatementsForTable(r: GeneratedTableResult): string[] {
     stmts.push(...r.statements);
   } else {
     const colList = r.columns.map((c) => quoteTableIdentifier(dbType.value, c)).join(", ");
+    // Match by column name: rows may carry a leading tbname (TDengine stable),
+    // so positional indexes into resolvedColumns would drift.
+    const dataTypeByName = new Map(r.resolvedColumns.map((c) => [c.columnName.toLowerCase(), c.dataType]));
     for (const row of r.rows) {
-      const vals = row.map((value) => formatGeneratedValue(value)).join(", ");
+      const vals = row.map((value, index) => formatGeneratedValue(value, dbType.value, dataTypeByName.get(r.columns[index]?.toLowerCase() ?? ""))).join(", ");
       stmts.push(`INSERT INTO ${targetTable} (${colList}) VALUES (${vals});`);
     }
   }
@@ -521,75 +624,54 @@ async function startInsert() {
   const cid = props.prefillConnectionId;
   const db = props.prefillDatabase;
   if (!cid || !db) return;
-  const sql = allSqlStatements().join("\n");
-  if (!sql.trim()) return;
+  const targets = generatedResults.value.filter((r) => r.targetRowCount > 0 && r.resolvedColumns.length > 0);
+  if (targets.length === 0) return;
+  const guardSql = allSqlStatements().join("\n") || `INSERT INTO ${targets[0].tableName}`;
   try {
     await executeWithProductionSqlGuard({
       connection: store.getConfig(cid),
       database: db,
-      sql,
+      sql: guardSql,
       source: t("production.sourceDataGenerate"),
       execute: async () => {
-        executing.value = true;
-        const perTable: TableResult[] = [];
-        let stopAfterTable = false;
-        for (const r of generatedResults.value) {
-          const stmts = sqlStatementsForTable(r);
-          const rowCount = r.rows.length;
-          let ok = 0;
-          let lastError = "";
-
-          const executeAsStatementGroup = generateOptions.useTransaction && !supportsGeneratedMultiRowValues(dbType.value);
-          if (executeAsStatementGroup) {
-            try {
-              await api.executeInTransaction(cid, db, stmts, r.schema || props.prefillSchema);
-              ok = rowCount;
-            } catch (e: unknown) {
-              const msg = e instanceof Error ? e.message : String(e);
-              console.error("[startInsert] SQL error:", msg);
-              lastError = msg;
-              stopAfterTable = !generateOptions.continueOnError;
-            }
-          } else {
-            const usesMultiRowStatement = generateOptions.extendedInsert && supportsGeneratedMultiRowValues(dbType.value);
-            for (let si = 0; si < stmts.length; si++) {
-              try {
-                if (generateOptions.useTransaction) {
-                  await api.executeInTransaction(cid, db, [stmts[si]], r.schema || props.prefillSchema);
-                } else {
-                  await api.executeQuery(cid, db, stmts[si], r.schema || props.prefillSchema);
-                }
-                if (usesMultiRowStatement) {
-                  ok = rowCount;
-                } else if (!(generateOptions.truncate && si === 0)) {
-                  ok++;
-                }
-              } catch (e: unknown) {
-                const msg = e instanceof Error ? e.message : String(e);
-                console.error("[startInsert] SQL error:", msg);
-                if (!lastError) lastError = msg;
-                if (usesMultiRowStatement) ok = 0;
-                if (!generateOptions.continueOnError) {
-                  stopAfterTable = true;
-                  break;
-                }
-              }
-            }
-          }
-          perTable.push({ table: r.tableName, total: rowCount, ok, err: rowCount - ok, error: lastError || undefined });
-          if (ok > 0) {
-            store.invalidateMetadataCache(cid, db, r.schema || props.prefillSchema || undefined, r.tableName);
-          }
-          if (stopAfterTable) break;
-        }
-        executeResults.value = perTable;
-        currentStep.value = "result";
+        const session = startDataGenerateSession(
+          {
+            connectionId: cid,
+            database: db,
+            prefillSchema: props.prefillSchema,
+            databaseType: dbType.value,
+            label: targets.length === 1 ? `${db}.${targets[0].tableName}` : `${db} (${targets.length})`,
+            targets,
+            options: {
+              continueOnError: generateOptions.continueOnError,
+              truncate: generateOptions.truncate,
+              useTransaction: generateOptions.useTransaction,
+              extendedInsert: generateOptions.extendedInsert,
+              timeoutSecs: normalizeTimeoutSecs(generateOptions.timeoutSecs),
+              batchRows: Math.max(1, Math.floor(generateOptions.batchRows) || DEFAULT_BATCH_ROWS),
+            },
+          },
+          {
+            invalidateMetadataCache: (connectionId, database, schema, table) => store.invalidateMetadataCache(connectionId, database, schema, table),
+            formatGenerationError: generationErrorMessage,
+          },
+        );
+        activeSessionId.value = session.id;
+        applyDataGenerateSession(session);
         return true;
       },
     });
-  } finally {
-    executing.value = false;
+  } catch (error) {
+    generationError.value = generationErrorMessage(error);
   }
+}
+
+function applyDataGenerateSession(session = activeSession.value) {
+  if (!session) return;
+  generatedResults.value = session.config.targets;
+  generationError.value = session.error ?? "";
+  previewTableIndex.value = Math.min(previewTableIndex.value, Math.max(0, generatedResults.value.length - 1));
+  currentStep.value = session.status === "running" || session.status === "cancelling" ? "preview" : "result";
 }
 
 const orderDialogOpen = ref(false);
@@ -652,15 +734,29 @@ watch(
   { deep: true, flush: "post" },
 );
 
-onMounted(() => {
-  void loadSchemas();
-});
-
-watch(open, (val) => {
-  if (val) {
+watch(
+  [() => open.value, () => props.sessionId],
+  ([isOpen, sessionId]) => {
+    if (!isOpen) return;
+    const session = getDataGenerateSession(sessionId);
+    if (session) {
+      activeSessionId.value = session.id;
+      applyDataGenerateSession(session);
+      return;
+    }
+    activeSessionId.value = null;
     void loadSchemas();
-  }
-});
+  },
+  { immediate: true },
+);
+
+watch(
+  () => {
+    const session = getDataGenerateSession(activeSessionId.value);
+    return session ? `${session.id}:${session.version}` : "";
+  },
+  () => applyDataGenerateSession(),
+);
 
 interface GenerateProfileJson {
   version: 1;
@@ -919,8 +1015,11 @@ async function onFileSelected(event: Event) {
                   </div>
                   <div class="flex items-center gap-3 rounded-md bg-muted/20 px-3 py-2">
                     <Label class="text-xs shrink-0">{{ t("dataGenerate.rowCount") }}:</Label>
-                    <Input v-model.number="activeCfg.rowCount" class="h-7 w-24 text-xs" />
+                    <Input v-model.number="activeCfg.rowCount" type="number" min="0" :max="MAX_ROW_COUNT" class="h-7 w-28 text-xs" @blur="activeCfg.rowCount = normalizeRowCount(activeCfg.rowCount)" />
                   </div>
+                  <p v-if="activeCfg.rowCount > LARGE_ROW_COUNT_HINT" class="px-1 text-[11px] leading-relaxed text-muted-foreground">
+                    {{ t("dataGenerate.largeRowCountHint", { count: activeCfg.rowCount.toLocaleString() }) }}
+                  </p>
                 </div>
               </template>
             </div>
@@ -951,9 +1050,24 @@ async function onFileSelected(event: Event) {
                   <option v-for="(r, i) in generatedResults" :key="i" :value="i">{{ r.tableName }}</option>
                 </select>
                 <span v-else class="text-sm font-medium">{{ generatedResults[0].tableName }}</span>
-                <span class="text-xs text-muted-foreground">{{ t("dataGenerate.previewRowCount", { count: currentPreview.rows.length }) }}</span>
+                <span class="text-xs text-muted-foreground">{{ t("dataGenerate.previewRowCount", { count: currentPreview.targetRowCount }) }}</span>
               </div>
-              <Button variant="outline" size="sm" class="h-7 text-xs" @click="regenerate">{{ t("dataGenerate.regenerate") }}</Button>
+              <Button variant="outline" size="sm" class="h-7 text-xs" :disabled="executing" @click="regenerate">{{ t("dataGenerate.regenerate") }}</Button>
+            </div>
+            <div v-if="executing && insertProgress" class="space-y-1.5 border-b bg-muted/10 px-3 py-2">
+              <div class="flex items-center justify-between gap-2 text-xs">
+                <span class="truncate text-muted-foreground">
+                  {{ t("dataGenerate.insertingTable", { table: insertProgress.tableName, index: insertProgress.tableIndex, count: insertProgress.tableCount }) }}
+                </span>
+                <span class="shrink-0 font-medium tabular-nums">{{ insertProgress.insertedRows.toLocaleString() }} / {{ insertProgress.totalRows.toLocaleString() }}</span>
+              </div>
+              <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                <div class="h-full bg-primary transition-[width] duration-150" :style="{ width: insertPercent + '%' }" />
+              </div>
+              <div class="flex items-center justify-between text-[11px] text-muted-foreground">
+                <span>{{ insertPercent }}%</span>
+                <span>{{ t("dataGenerate.elapsed", { seconds: Math.round(insertProgress.elapsedMs / 1000) }) }}</span>
+              </div>
             </div>
             <div class="flex flex-col h-[380px]">
               <div class="flex-1 overflow-auto overscroll-none bg-background">
@@ -982,7 +1096,9 @@ async function onFileSelected(event: Event) {
                     </tr>
                   </tbody>
                 </table>
-                <div v-if="currentPreview.rows.length > 50" class="sticky left-0 text-xs text-muted-foreground px-3 py-1.5 border-t border-border bg-background">{{ t("dataGenerate.first50Rows", { count: currentPreview.rows.length }) }}</div>
+                <div v-if="currentPreview.isSample" class="sticky left-0 text-xs text-muted-foreground px-3 py-1.5 border-t border-border bg-background">
+                  {{ t("dataGenerate.samplePreviewNotice", { shown: currentPreview.rows.length, count: currentPreview.targetRowCount }) }}
+                </div>
               </div>
             </div>
           </template>
@@ -1003,6 +1119,7 @@ async function onFileSelected(event: Event) {
                 </span>
               </div>
               <div v-if="r.error" class="mt-1 text-destructive/80 break-all leading-relaxed">{{ r.error }}</div>
+              <div v-else-if="r.cancelled" class="mt-1 text-muted-foreground">{{ t("dataGenerate.cancelledLabel") }}</div>
             </div>
           </div>
           <div v-if="executeResults.length === 0" class="flex h-24 items-center justify-center text-xs text-muted-foreground">{{ t("dataGenerate.noResult") }}</div>
@@ -1030,13 +1147,14 @@ async function onFileSelected(event: Event) {
             </Button>
           </template>
           <template v-else-if="currentStep === 'preview' && generatedResults.length > 0">
-            <Button variant="outline" size="sm" class="h-7 text-xs" @click="copyAllSql">{{ t("dataGenerate.copyAllSql") }}</Button>
+            <Button variant="outline" size="sm" class="h-7 text-xs" @click="copySampleSql">{{ t("dataGenerate.copySampleSql") }}</Button>
           </template>
         </div>
         <div class="flex items-center gap-2">
           <Button variant="outline" size="sm" class="h-7 text-xs" @click="open = false">
-            <X class="mr-1 h-3 w-3" />
-            {{ t("dangerDialog.cancel") }}
+            <Minimize2 v-if="executing" class="mr-1 h-3 w-3" />
+            <X v-else class="mr-1 h-3 w-3" />
+            {{ executing ? t("exportProgress.minimize") : t("dangerDialog.cancel") }}
           </Button>
           <template v-if="currentStep === 'config'">
             <Button variant="default" size="sm" class="h-7 text-xs" :disabled="!hasSelectedTables" @click="doGenerate">
@@ -1044,7 +1162,8 @@ async function onFileSelected(event: Event) {
             </Button>
           </template>
           <template v-else-if="currentStep === 'preview'">
-            <Button variant="outline" size="sm" class="h-7 text-xs" @click="currentStep = 'config'">{{ t("dataGenerate.prevStep") }}</Button>
+            <Button variant="outline" size="sm" class="h-7 text-xs" :disabled="!executing" @click="cancelInsert">{{ t("dataGenerate.cancelInsert") }}</Button>
+            <Button variant="outline" size="sm" class="h-7 text-xs" :disabled="executing" @click="currentStep = 'config'">{{ t("dataGenerate.prevStep") }}</Button>
             <Button variant="default" size="sm" class="h-7 text-xs" :disabled="executing || !!generationError" @click="startInsert">
               <Loader2 v-if="executing" class="mr-1 h-3 w-3 animate-spin" />
               {{ t("dataGenerate.startInsert") }}
@@ -1081,6 +1200,16 @@ async function onFileSelected(event: Event) {
             <input type="checkbox" v-model="generateOptions.extendedInsert" class="h-4 w-4 accent-primary" :disabled="!supportsExtendedInsert" />
             <span class="text-xs">{{ t("dataGenerate.extendedInsert") }}</span>
           </label>
+          <div class="flex items-center gap-3">
+            <Label class="text-xs shrink-0">{{ t("dataGenerate.timeoutSecs") }}:</Label>
+            <Input v-model.number="generateOptions.timeoutSecs" type="number" min="0" max="86400" class="h-7 w-24 text-xs" @blur="generateOptions.timeoutSecs = normalizeTimeoutSecs(generateOptions.timeoutSecs)" />
+          </div>
+          <p class="text-[11px] leading-relaxed text-muted-foreground">{{ t("dataGenerate.timeoutHint") }}</p>
+          <div class="flex items-center gap-3">
+            <Label class="text-xs shrink-0">{{ t("dataGenerate.batchRows") }}:</Label>
+            <Input v-model.number="generateOptions.batchRows" type="number" min="1" max="100000" class="h-7 w-24 text-xs" />
+          </div>
+          <p class="text-[11px] leading-relaxed text-muted-foreground">{{ t("dataGenerate.batchRowsHint") }}</p>
         </div>
         <DialogFooter>
           <Button size="sm" class="h-7 text-xs" @click="optionsDialogOpen = false">{{ t("dataGenerate.ok") }}</Button>

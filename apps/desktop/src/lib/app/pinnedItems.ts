@@ -35,13 +35,14 @@ export function inheritNaturalTreeNodeOrder(source: TreeNode, target: TreeNode):
 }
 
 export function treeNodePinIdentity(node: TreeNode): PinnedTreeNodeIdentity {
+  const name = node.type === "redis-db" ? node.objectName || (node.database != null && node.database !== "" ? `db${node.database}` : node.label) : node.objectName || node.tableName || node.label;
   return {
     connectionId: node.connectionId || "",
     database: node.database || "",
     schema: node.schema || "",
     catalog: node.catalog || "",
     type: node.type,
-    name: node.objectName || node.tableName || node.label,
+    name,
     signature: node.signature || "",
     id: node.id,
   };
@@ -83,18 +84,25 @@ export function normalizePinnedTreeNodeOrder(ids: readonly string[]): string[] {
 export function pinnedTreeNodeIdentityMatches(left: PinnedTreeNodeIdentity, right: PinnedTreeNodeIdentity, canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity): boolean {
   const canonicalLeft = canonicalize(left);
   const canonicalRight = canonicalize(right);
-  return (
-    canonicalLeft.connectionId === canonicalRight.connectionId &&
-    canonicalLeft.database === canonicalRight.database &&
-    canonicalLeft.schema === canonicalRight.schema &&
-    canonicalLeft.catalog === canonicalRight.catalog &&
-    canonicalLeft.type === canonicalRight.type &&
-    canonicalLeft.name === canonicalRight.name &&
-    canonicalLeft.signature === canonicalRight.signature
-  );
+  if (
+    canonicalLeft.connectionId !== canonicalRight.connectionId ||
+    canonicalLeft.database !== canonicalRight.database ||
+    canonicalLeft.schema !== canonicalRight.schema ||
+    canonicalLeft.catalog !== canonicalRight.catalog ||
+    canonicalLeft.type !== canonicalRight.type ||
+    canonicalLeft.signature !== canonicalRight.signature
+  ) {
+    return false;
+  }
+  if (canonicalLeft.type === "redis-db") {
+    // In Redis, databases are identified by connectionId and numeric index.
+    // Display labels change when key counts or aliases update.
+    return true;
+  }
+  return canonicalLeft.name === canonicalRight.name;
 }
 
-function pinnedTreeNodeOrderKeyMatchesNode(key: string, node: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer, legacyKeys: ReadonlySet<string> = new Set()): boolean {
+export function pinnedTreeNodeOrderKeyMatchesNode(key: string, node: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity, legacyKeys: ReadonlySet<string> = new Set()): boolean {
   if (key === treeNodePinKey(node) || key === node.id || legacyKeys.has(key)) return true;
   const identity = parseTreeNodePinKey(key);
   return !!identity && pinnedTreeNodeIdentityMatches(identity, treeNodePinIdentity(node), canonicalize);
@@ -143,10 +151,12 @@ export function replacePinnedTreeNodeInOrder(order: readonly string[], oldNode: 
 export function migrateLegacyPinnedTreeNodeOrder(nodes: readonly TreeNode[], pinnedOrder: readonly string[]): { order: string[]; ids: Set<string>; changed: boolean } {
   const next = normalizePinnedTreeNodeOrder(pinnedOrder);
   let changed = next.length !== pinnedOrder.length;
+  // With nothing pinned there is no legacy key to upgrade; skip the per-node key derivation.
+  if (next.length === 0) return { order: next, ids: new Set(), changed };
   const visit = (items: readonly TreeNode[]) => {
     for (const node of items) {
       const pinKey = treeNodePinKey(node);
-      const legacyIndex = pinKey === node.id ? -1 : next.indexOf(node.id);
+      const legacyIndex = pinKey === node.id ? -1 : next.findIndex((key) => key !== pinKey && pinnedTreeNodeOrderKeyMatchesNode(key, node, (id) => id));
       if (legacyIndex >= 0) {
         const scopedIndex = next.indexOf(pinKey);
         if (scopedIndex < 0) {
@@ -258,13 +268,15 @@ function rememberNaturalTreeNodeOrder(nodes: readonly TreeNode[]): void {
 
 export function orderPinnedTreeNodes(nodes: TreeNode[], pinnedOrder: readonly string[] = [], isFixedPriority: FixedTreeNodePriority = () => false): TreeNode[] {
   rememberNaturalTreeNodeOrder(nodes);
+  const virtualGroups: TreeNode[] = [];
   const fixed: TreeNode[] = [];
   const pinned: TreeNode[] = [];
   const unpinned: TreeNode[] = [];
   const orderByKey = new Map(normalizePinnedTreeNodeOrder(pinnedOrder).map((key, index) => [key, index] as const));
 
   for (const node of nodes) {
-    if (isFixedPriority(node)) fixed.push(node);
+    if (node.type === "table-vgroup") virtualGroups.push(node);
+    else if (isFixedPriority(node)) fixed.push(node);
     else if (node.pinned) pinned.push(node);
     else unpinned.push(node);
   }
@@ -272,15 +284,67 @@ export function orderPinnedTreeNodes(nodes: TreeNode[], pinnedOrder: readonly st
   const naturalOrder = (left: TreeNode, right: TreeNode) => naturalTreeNodeOrder(left)! - naturalTreeNodeOrder(right)!;
   fixed.sort(naturalOrder);
   pinned.sort((left, right) => {
-    const leftRank = orderByKey.get(treeNodePinKey(left));
-    const rightRank = orderByKey.get(treeNodePinKey(right));
+    const leftRank = pinnedRankForNode(left, orderByKey);
+    const rightRank = pinnedRankForNode(right, orderByKey);
     if (leftRank !== undefined && rightRank !== undefined) return leftRank - rightRank;
     if (leftRank !== undefined) return -1;
     if (rightRank !== undefined) return 1;
     return naturalOrder(left, right);
   });
   unpinned.sort(naturalOrder);
-  return [...fixed, ...pinned, ...unpinned];
+  return [...virtualGroups, ...fixed, ...pinned, ...unpinned];
+}
+
+function pinnedRankForNode(node: TreeNode, orderByKey: Map<string, number>): number | undefined {
+  const directKey = treeNodePinKey(node);
+  const directRank = orderByKey.get(directKey);
+  if (directRank !== undefined) return directRank;
+  const legacyRank = orderByKey.get(node.id);
+  if (legacyRank !== undefined) return legacyRank;
+  for (const [key, rank] of orderByKey) {
+    if (pinnedTreeNodeOrderKeyMatchesNode(key, node, (id) => id)) return rank;
+  }
+  return undefined;
+}
+
+type PinnedIdentityIndex = { size: number; groups: Map<string, { anyName: boolean; names: Set<string> }> };
+
+// Pinned id sets are replaced rather than edited, so an index built once per set turns the
+// per-node scan over every pinned key into a single map lookup. The size check rebuilds it
+// if a caller does add or remove entries in place.
+const pinnedIdentityIndexes = new WeakMap<Set<string>, PinnedIdentityIndex>();
+
+function pinnedIdentityGroupKey(identity: PinnedTreeNodeIdentity): string {
+  return [identity.connectionId, identity.database, identity.schema, identity.catalog, identity.type, identity.signature].join("\u0000");
+}
+
+function pinnedIdentityIndexFor(pinnedIds: Set<string>): PinnedIdentityIndex {
+  const cached = pinnedIdentityIndexes.get(pinnedIds);
+  if (cached && cached.size === pinnedIds.size) return cached;
+  const index: PinnedIdentityIndex = { size: pinnedIds.size, groups: new Map() };
+  for (const key of pinnedIds) {
+    const identity = parseTreeNodePinKey(key);
+    if (!identity) continue;
+    const groupKey = pinnedIdentityGroupKey(identity);
+    let group = index.groups.get(groupKey);
+    if (!group) {
+      group = { anyName: false, names: new Set() };
+      index.groups.set(groupKey, group);
+    }
+    // Redis databases are matched by index; their display name is not part of the identity.
+    if (identity.type === "redis-db") group.anyName = true;
+    else group.names.add(identity.name);
+  }
+  pinnedIdentityIndexes.set(pinnedIds, index);
+  return index;
+}
+
+export function isPinnedKeyPresent(node: TreeNode, pinnedIds: Set<string>): boolean {
+  if (pinnedIds.size === 0) return false;
+  if (pinnedIds.has(node.id)) return true;
+  const identity = treeNodePinIdentity(node);
+  const group = pinnedIdentityIndexFor(pinnedIds).groups.get(pinnedIdentityGroupKey(identity));
+  return !!group && (group.anyName || group.names.has(identity.name));
 }
 
 function findTreeNodeLocation(nodes: TreeNode[], target: TreeNode, parent: TreeNode | null = null): { node: TreeNode; parent: TreeNode | null } | null {
@@ -300,6 +364,7 @@ export function updatePinnedTreeNodeInPlace(nodes: TreeNode[], target: TreeNode,
   if (!location) return "missing";
 
   location.node.pinned = pinned;
+  if (location.parent?.type === "table-vgroup") return "siblings";
   const siblings = location.parent?.children ?? nodes;
   const ordered = orderPinnedTreeNodes(siblings);
 
@@ -317,43 +382,38 @@ function clonePinnedTreeNode(node: TreeNode, pinnedIds: Set<string>, pinnedOrder
   if (existing) return existing;
   const clone: TreeNode = {
     ...node,
-    pinned: pinnedIds.has(treeNodePinKey(node)) || pinnedIds.has(node.id),
+    pinned: isPinnedKeyPresent(node, pinnedIds),
   };
   clones.set(node, clone);
   inheritNaturalTreeNodeOrder(node, clone);
-  if (node.children) clone.children = applyPinnedTreeNodeStateInternal(node.children, pinnedIds, pinnedOrder, isFixedPriority, clones);
-  if (node.hiddenChildren) clone.hiddenChildren = applyPinnedTreeNodeStateInternal(node.hiddenChildren, pinnedIds, pinnedOrder, isFixedPriority, clones);
+  if (node.children) clone.children = applyPinnedTreeNodeStateInternal(node.children, pinnedIds, pinnedOrder, isFixedPriority, clones, node.type === "table-vgroup");
+  if (node.hiddenChildren) clone.hiddenChildren = applyPinnedTreeNodeStateInternal(node.hiddenChildren, pinnedIds, pinnedOrder, isFixedPriority, clones, node.type === "table-vgroup");
   return clone;
 }
 
-function applyPinnedTreeNodeStateInternal(nodes: TreeNode[], pinnedIds: Set<string>, pinnedOrder: readonly string[], isFixedPriority: FixedTreeNodePriority, clones: WeakMap<TreeNode, TreeNode>): TreeNode[] {
-  rememberNaturalTreeNodeOrder(nodes);
-  return orderPinnedTreeNodes(
-    nodes.map((node) => clonePinnedTreeNode(node, pinnedIds, pinnedOrder, isFixedPriority, clones)),
-    pinnedOrder,
-    isFixedPriority,
-  );
+function applyPinnedTreeNodeStateInternal(nodes: TreeNode[], pinnedIds: Set<string>, pinnedOrder: readonly string[], isFixedPriority: FixedTreeNodePriority, clones: WeakMap<TreeNode, TreeNode>, preserveLayoutOrder = false): TreeNode[] {
+  if (!preserveLayoutOrder) rememberNaturalTreeNodeOrder(nodes);
+  const clonedNodes = nodes.map((node) => clonePinnedTreeNode(node, pinnedIds, pinnedOrder, isFixedPriority, clones));
+  return preserveLayoutOrder ? clonedNodes : orderPinnedTreeNodes(clonedNodes, pinnedOrder, isFixedPriority);
 }
 
 export function applyPinnedTreeNodeState(nodes: TreeNode[], pinnedIds: Set<string>, pinnedOrder: readonly string[] = [...pinnedIds], isFixedPriority: FixedTreeNodePriority = () => false): TreeNode[] {
   return applyPinnedTreeNodeStateInternal(nodes, pinnedIds, pinnedOrder, isFixedPriority, new WeakMap());
 }
 
-function syncPinnedTreeNodeStateInPlaceInternal(nodes: TreeNode[], pinnedIds: Set<string>, pinnedOrder: readonly string[], isFixedPriority: FixedTreeNodePriority, visited: WeakSet<TreeNode>): void {
+function syncPinnedTreeNodeStateInPlaceInternal(nodes: TreeNode[], pinnedIds: Set<string>, pinnedOrder: readonly string[], isFixedPriority: FixedTreeNodePriority, visited: WeakSet<TreeNode>, preserveLayoutOrder = false): void {
   for (const node of nodes) {
     if (visited.has(node)) continue;
     visited.add(node);
-    node.pinned = pinnedIds.has(treeNodePinKey(node)) || pinnedIds.has(node.id);
-    if (node.children) {
-      syncPinnedTreeNodeStateInPlaceInternal(node.children, pinnedIds, pinnedOrder, isFixedPriority, visited);
-      node.children = orderPinnedTreeNodes(node.children, pinnedOrder, isFixedPriority);
+    node.pinned = isPinnedKeyPresent(node, pinnedIds);
+    if (node.children?.length) {
+      syncPinnedTreeNodeStateInPlaceInternal(node.children, pinnedIds, pinnedOrder, isFixedPriority, visited, node.type === "table-vgroup");
     }
-    if (node.hiddenChildren) {
-      syncPinnedTreeNodeStateInPlaceInternal(node.hiddenChildren, pinnedIds, pinnedOrder, isFixedPriority, visited);
-      node.hiddenChildren = orderPinnedTreeNodes(node.hiddenChildren, pinnedOrder, isFixedPriority);
+    if (node.hiddenChildren?.length) {
+      syncPinnedTreeNodeStateInPlaceInternal(node.hiddenChildren, pinnedIds, pinnedOrder, isFixedPriority, visited, node.type === "table-vgroup");
     }
   }
-  nodes.splice(0, nodes.length, ...orderPinnedTreeNodes(nodes, pinnedOrder, isFixedPriority));
+  if (!preserveLayoutOrder) nodes.splice(0, nodes.length, ...orderPinnedTreeNodes(nodes, pinnedOrder, isFixedPriority));
 }
 
 export function syncPinnedTreeNodeStateInPlace(nodes: TreeNode[], pinnedIds: Set<string>, pinnedOrder: readonly string[] = [...pinnedIds], isFixedPriority: FixedTreeNodePriority = () => false): void {

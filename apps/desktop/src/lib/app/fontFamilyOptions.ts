@@ -1,11 +1,17 @@
-import { cssFontFamilyForName, FONT_FAMILIES, readableFontFamily } from "@/lib/app/appFonts";
+import { cssFontFamilyForName, FONT_FAMILIES, LEGACY_PRESET_FONT_MAP, readableFontFamily } from "@/lib/app/appFonts";
 import { listSystemFonts } from "@/lib/backend/api";
 
 let cachedSystemFontNames: string[] | null = null;
 let pendingSystemFontNames: Promise<string[]> | null = null;
 
-const presetFontLabels = new Map(FONT_FAMILIES.map((font) => [font.value, font.label]));
-const presetFontValues = new Set(FONT_FAMILIES.map((font) => font.value));
+const presetFontLabels = new Map<string, string>([
+  ...FONT_FAMILIES.map((font) => [font.value, font.label] as const),
+  ...Object.entries(LEGACY_PRESET_FONT_MAP).map(([legacyVal, newVal]) => {
+    const label = FONT_FAMILIES.find((f) => f.value === newVal)?.label ?? "System Monospace";
+    return [legacyVal, label] as const;
+  }),
+]);
+const presetFontValues = new Set<string>([...FONT_FAMILIES.map((font) => font.value), ...Object.keys(LEGACY_PRESET_FONT_MAP)]);
 
 export function buildFontFamilyOptions(systemFontNames: readonly string[], selectedValues: readonly string[] = [], leadingValues: readonly string[] = []): string[] {
   return [...new Set([...leadingValues, ...FONT_FAMILIES.map((font) => font.value), ...systemFontNames.map(cssFontFamilyForName), ...selectedValues.filter(Boolean)])];

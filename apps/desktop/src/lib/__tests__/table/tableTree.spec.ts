@@ -1,6 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { appendTableTreeLoadMoreNode, buildGroupedObjectTreeNodes, buildObjectGroupPlaceholderNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, mergeTableInfosIntoObjects, mergeTableTreePageChildren, tablePartitionGroups, withoutTableTreeLoadMoreNodes } from "@/lib/table/tableTree";
+import {
+  appendTableTreeLoadMoreNode,
+  buildGroupedObjectTreeNodes,
+  buildObjectGroupPlaceholderNodes,
+  buildSimpleObjectTreeNodes,
+  buildTableTreeNodes,
+  mergeTableInfosIntoObjects,
+  mergeTableTreePageChildren,
+  partitionPageTables,
+  tablePageRowAnchorKey,
+  tablePartitionGroups,
+  syncTablePartitionGroups,
+  withoutTableTreeLoadMoreNodes,
+} from "@/lib/table/tableTree";
 import type { ObjectInfo, TableInfo, TreeNode } from "@/types/database";
+import { decorateDatabaseSavedSqlTreeNodes } from "@/lib/savedSql/savedSqlDatabaseTree";
+import { objectSourceTargetForTreeNode } from "@/lib/sidebar/treeNodeClick";
 
 const context = {
   nodeId: "connection:db",
@@ -9,6 +24,71 @@ const context = {
 };
 
 describe("case-sensitive database objects", () => {
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("preserves schema index identities in both %s layouts", (databaseType) => {
+    const objects: ObjectInfo[] = [{ name: " Ix (a) ", object_type: "INDEX", schema: " Index Owner ", parent_schema: "Table Owner", parent_name: " T(a) " }];
+    const simple = buildSimpleObjectTreeNodes({ ...context, databaseType, objects });
+    const grouped = buildGroupedObjectTreeNodes({ ...context, databaseType, objects }).find((group) => group.type === "group-database-indexes")?.children;
+    for (const nodes of [simple, grouped]) {
+      expect(nodes).toHaveLength(1);
+      expect(nodes?.[0]).toMatchObject({ type: "index", objectScope: "schema", objectName: " Ix (a) ", schema: " Index Owner ", parentSchema: "Table Owner", parentName: " T(a) " });
+    }
+  });
+
+  it("publishes each changed partition group once per page while retaining exact identities", () => {
+    const current = buildTableTreeNodes({
+      ...context,
+      tables: [
+        { name: "stable", table_type: "STABLE" },
+        { name: "child_0", table_type: "TABLE", parent_name: "stable" },
+      ],
+    });
+    const group = tablePartitionGroups(current[0])[0];
+    let children = group.children;
+    let publications = 0;
+    Object.defineProperty(group, "children", {
+      configurable: true,
+      get: () => children,
+      set: (value: TreeNode[]) => {
+        publications++;
+        children = value;
+      },
+    });
+    const names = [...Array.from({ length: 200 }, (_, i) => `child_${200 - i}`), "Foo", "foo", "child_0"];
+    const page = buildTableTreeNodes({ ...context, tables: names.map((name) => ({ name, table_type: "TABLE", parent_name: "stable" })) });
+    mergeTableTreePageChildren(current, page, context.connectionId, context.database);
+    expect(publications).toBe(1);
+    expect(group.objectCount).toBe(203);
+    expect(new Set(children?.map((child) => child.label))).toEqual(new Set(["child_0", ...names]));
+    expect(children?.slice(0, 3).map((child) => child.label)).toEqual(["child_0", "child_1", "child_2"]);
+    expect(children?.slice(-2).map((child) => child.label)).toEqual(["Foo", "foo"]);
+  });
+
+  it("retains all 12722 child identities across decorated thousand-row TDengine pages", () => {
+    const expected = new Map<string, string[]>();
+    const rows: TableInfo[] = [];
+    for (const [parent, count] of [
+      ["stable_a", 5476],
+      ["stable_b", 7246],
+    ] as const) {
+      const names = Array.from({ length: count }, (_, index) => `${parent}_${String(index).padStart(5, "0")}`);
+      expected.set(parent, names);
+      rows.push({ name: parent, table_type: "STABLE" }, ...names.map((name) => ({ name, table_type: "TABLE", parent_name: parent })));
+    }
+    let current: TreeNode[] = [];
+    for (let offset = 0; offset < rows.length; offset += 1000) {
+      const page = buildTableTreeNodes({ ...context, tables: rows.slice(offset, offset + 1000) });
+      current = mergeTableTreePageChildren(current, page, context.connectionId, context.database);
+      current = decorateDatabaseSavedSqlTreeNodes(current, new Map(), current);
+    }
+    expect(current.map((node) => node.label)).toEqual([...expected.keys()]);
+    for (const node of current) {
+      const group = tablePartitionGroups(node)[0];
+      expect(group.children?.map((child) => child.label)).toEqual(expected.get(node.label));
+      expect(new Set(group.children?.map((child) => child.id)).size).toBe(expected.get(node.label)!.length);
+      expect(group.objectCount).toBe(expected.get(node.label)!.length);
+    }
+  });
+
   const views: ObjectInfo[] = [
     { name: "dbx_issue4529_case_V1", object_type: "VIEW", schema: "dbx_test" },
     { name: "dbx_issue4529_case_v1", object_type: "VIEW", schema: "dbx_test" },
@@ -36,6 +116,57 @@ describe("case-sensitive database objects", () => {
     expect(viewGroup?.objectCount).toBe(2);
     expect(viewGroup?.children?.map((node) => node.label)).toEqual(["dbx_issue4529_case_V1", "dbx_issue4529_case_v1"]);
     expect(new Set(viewGroup?.children?.map((node) => node.id) ?? []).size).toBe(2);
+  });
+
+  it("preserves view validity in simple and grouped trees", () => {
+    const objects: ObjectInfo[] = [
+      { name: "VALID_VIEW", object_type: "VIEW", schema: "dbx_test", valid: true },
+      { name: "INVALID_VIEW", object_type: "VIEW", schema: "dbx_test", valid: false },
+    ];
+
+    const simple = buildSimpleObjectTreeNodes({ ...context, schema: "dbx_test", objects });
+    expect(simple.map((node) => node.valid)).toEqual([false, true]);
+
+    const grouped = buildGroupedObjectTreeNodes({ ...context, schema: "dbx_test", objects });
+    expect(grouped.find((node) => node.type === "group-views")?.children?.map((node) => node.valid)).toEqual([false, true]);
+  });
+
+  it("preserves view validity when building the table-like tree path", () => {
+    const tables: TableInfo[] = [
+      { name: "VALID_VIEW", table_type: "VIEW", valid: true },
+      { name: "INVALID_VIEW", table_type: "VIEW", valid: false },
+    ];
+    const nodes = buildTableTreeNodes({
+      ...context,
+      schema: "dbx_test",
+      tables,
+    });
+
+    expect(nodes.map((node) => node.valid)).toEqual([false, true]);
+
+    const grouped = buildGroupedObjectTreeNodes({
+      ...context,
+      schema: "dbx_test",
+      objects: mergeTableInfosIntoObjects([], tables, "dbx_test"),
+    });
+    expect(grouped.find((node) => node.type === "group-views")?.children?.map((node) => node.valid)).toEqual([false, true]);
+  });
+
+  it("stores the canonical table name separately from the display label", () => {
+    const nodes = buildTableTreeNodes({
+      ...context,
+      schema: "public",
+      tables: [
+        { name: "users", table_type: "BASE TABLE" },
+        { name: "active_users", table_type: "VIEW" },
+      ],
+    });
+    const table = nodes.find((node) => node.type === "table");
+    const view = nodes.find((node) => node.type === "view");
+
+    expect(table).toMatchObject({ type: "table", label: "users", tableName: "users" });
+    expect(view).toMatchObject({ type: "view", label: "active_users" });
+    expect(view?.tableName).toBeUndefined();
   });
 
   it("keeps table nodes whose names differ only by case across pages", () => {
@@ -92,6 +223,42 @@ describe("PostgreSQL overloaded routines", () => {
       { label: "calc(numeric)", objectName: "calc", signature: "numeric" },
     ]);
     expect(new Set(functionGroup?.children?.map((node) => node.id) ?? []).size).toBe(3);
+  });
+});
+
+describe("Kingbase overloaded procedures", () => {
+  it.each(["simple", "grouped"] as const)("keeps missing routine signatures and empty non-routine signatures absent in the %s tree", (layout) => {
+    const objects: ObjectInfo[] = [
+      { name: "unknown", object_type: "PROCEDURE", schema: "app", signature: null },
+      { name: "orders_view", object_type: "VIEW", schema: "app", signature: "" },
+      { name: "orders_seq", object_type: "SEQUENCE", schema: "app", signature: "" },
+    ];
+    const options = { ...context, schema: "app", objects, databaseType: "kingbase" as const };
+    const nodes = layout === "simple" ? buildSimpleObjectTreeNodes(options) : buildGroupedObjectTreeNodes(options).flatMap((group) => group.children ?? []);
+
+    expect(nodes).toHaveLength(3);
+    expect(nodes.every((node) => node.signature === undefined)).toBe(true);
+  });
+
+  it.each(["simple", "grouped"] as const)("preserves overloads and the zero-argument signature in the %s tree", (layout) => {
+    const objects: ObjectInfo[] = [
+      { name: "run", object_type: "PROCEDURE", schema: "app", signature: "" },
+      { name: "run", object_type: "PROCEDURE", schema: "app", signature: "v integer" },
+      { name: "run", object_type: "PROCEDURE", schema: "app", signature: "v text" },
+      { name: "run", object_type: "PROCEDURE", schema: "app", signature: "v text" },
+    ];
+    const options = { ...context, schema: "app", objects, databaseType: "kingbase" as const };
+    const nodes = layout === "simple" ? buildSimpleObjectTreeNodes(options) : buildGroupedObjectTreeNodes(options).find((node) => node.type === "group-procedures")!.children!;
+
+    expect(nodes).toHaveLength(3);
+    expect(new Set(nodes.map((node) => node.id)).size).toBe(3);
+    expect(nodes.map(objectSourceTargetForTreeNode)).toEqual(
+      expect.arrayContaining([
+        { name: "run", schema: "app", objectType: "PROCEDURE", signature: "" },
+        { name: "run", schema: "app", objectType: "PROCEDURE", signature: "v integer" },
+        { name: "run", schema: "app", objectType: "PROCEDURE", signature: "v text" },
+      ]),
+    );
   });
 });
 
@@ -391,7 +558,106 @@ describe("PostgreSQL table hierarchy", () => {
   });
 });
 
+describe("PostgreSQL root-paged table windows", () => {
+  const table = (name: string, parentName?: string): TableInfo => ({
+    name,
+    table_type: "BASE TABLE",
+    comment: null,
+    ...(parentName ? { parent_schema: "public", parent_name: parentName } : {}),
+  });
+
+  it("keeps every partition below the roots that fit the page", () => {
+    const tables = [table("orders"), table("orders_2025", "orders"), table("orders_2026", "orders"), table("orders_2026_01", "orders_2026"), table("users"), table("users_2026", "users")];
+
+    expect(partitionPageTables(tables, 2)).toEqual(tables);
+  });
+
+  it("drops the probe root with its complete multi-level subtree", () => {
+    const tables = [table("orders"), table("orders_2026", "orders"), table("orders_2026_01", "orders_2026"), table("users"), table("users_2026", "users"), table("z_probe"), table("z_probe_2026", "z_probe"), table("z_probe_2026_01", "z_probe_2026")];
+
+    expect(partitionPageTables(tables, 2).map((row) => row.name)).toEqual(["orders", "orders_2026", "orders_2026_01", "users", "users_2026"]);
+  });
+
+  it("matches roots by name when the backend resolves a blank schema", () => {
+    const tables = [table("orders"), table("orders_2026", "orders"), table("z_probe"), table("z_probe_2026", "z_probe")];
+
+    expect(partitionPageTables(tables, 1)).toEqual([tables[0], tables[1]]);
+  });
+
+  it("keeps roots whose names differ only by case distinct", () => {
+    const tables = [table("Orders"), table("orders"), table("z_probe")];
+
+    expect(partitionPageTables(tables, 2)).toEqual([tables[0], tables[1]]);
+  });
+});
+
 describe("TDengine table hierarchy", () => {
+  it("synchronizes only partition groups and keeps hidden-only loaded children usable", () => {
+    const nodes = decorateDatabaseSavedSqlTreeNodes(
+      buildTableTreeNodes({
+        ...context,
+        tables: [
+          { name: "meters", table_type: "STABLE" },
+          { name: "meter_0", table_type: "TABLE", parent_name: "meters" },
+        ],
+      }),
+      [],
+    );
+    const table = nodes[0];
+    const columns: TreeNode = { id: "columns", label: "Columns", type: "group-columns", children: [] };
+    table.hiddenChildren!.push(columns);
+    const cursor: TreeNode = { id: "more", label: "More", type: "load-more", loadMore: { parentId: context.nodeId, offset: 2, pageSize: 2 } };
+    appendTableTreeLoadMoreNode(nodes, cursor, { name: "meters" });
+    expect(table.hiddenChildren).toContain(columns);
+    expect(table.hiddenChildren!.find((node) => node.type === "group-partitions")).toBe(table.children![0]);
+    expect(table.children![0].children).toContain(cursor);
+    table.children = [];
+    const hidden = table.hiddenChildren;
+    syncTablePartitionGroups(table);
+    expect(table.hiddenChildren).toBe(hidden);
+    const merged = mergeTableTreePageChildren(withoutTableTreeLoadMoreNodes(nodes), buildTableTreeNodes({ ...context, tables: [{ name: "meter_1", table_type: "TABLE", parent_name: "meters" }] }), context.connectionId, context.database);
+    expect(merged[0].children).toEqual([]);
+    expect(tablePartitionGroups(merged[0])[0].children!.map((node) => node.label)).toEqual(["meter_0", "meter_1"]);
+    expect(tablePartitionGroups(merged[0])[0].objectCount).toBe(2);
+  });
+
+  it("merges into the visible multi-level partition parent after saved-SQL decoration", () => {
+    const first = decorateDatabaseSavedSqlTreeNodes(
+      buildTableTreeNodes({
+        ...context,
+        schema: "public",
+        tables: [
+          { name: "events", table_type: "TABLE" },
+          { name: "events_2026", table_type: "TABLE", parent_name: "events" },
+          { name: "events_jan", table_type: "TABLE", parent_name: "events_2026" },
+        ],
+      }),
+      [],
+    );
+    const page = () =>
+      buildTableTreeNodes({
+        ...context,
+        schema: "public",
+        tables: [
+          { name: "events_feb", table_type: "TABLE", parent_name: "events_2026" },
+          { name: "orphan", table_type: "TABLE", parent_name: "absent" },
+        ],
+      });
+    const merged = mergeTableTreePageChildren(first, page(), context.connectionId, context.database);
+    const parent = merged[0].children![0].children![0];
+    expect(parent.label).toBe("events_2026");
+    expect(parent.partitionParentName).toBe("events");
+    expect(parent.children![0].children!.map((node) => [node.label, node.partitionParentName])).toEqual([
+      ["events_feb", "events_2026"],
+      ["events_jan", "events_2026"],
+    ]);
+    expect(parent.hiddenChildren![0]).toBe(parent.children![0]);
+    expect(merged.map((node) => node.label)).toEqual(["events", "orphan"]);
+    const repeated = mergeTableTreePageChildren(decorateDatabaseSavedSqlTreeNodes(merged, []), page(), context.connectionId, context.database);
+    expect(repeated[0].children![0].children![0].children![0].objectCount).toBe(2);
+    expect(repeated).toHaveLength(2);
+  });
+
   it("groups child tables under their supertable and keeps ordinary tables flat", () => {
     const tables: TableInfo[] = [
       { name: "meters", table_type: "STABLE", comment: null },
@@ -411,6 +677,25 @@ describe("TDengine table hierarchy", () => {
       isExpanded: true,
     });
     expect(nodes[0].children?.[0].children?.map((node) => node.label)).toEqual(["device_a", "device_b"]);
+  });
+
+  it("keeps all supertables visible at the root when a supertable has many child tables (#13728)", () => {
+    const childTables = Array.from({ length: 998 }, (_, i) => ({
+      name: `sub_${String(i).padStart(4, "0")}`,
+      table_type: "TABLE",
+      comment: null,
+      parent_name: "stable_b",
+    }));
+    const tables: TableInfo[] = [{ name: "stable_a", table_type: "STABLE", comment: null }, { name: "stable_b", table_type: "STABLE", comment: null }, { name: "stable_c", table_type: "STABLE", comment: null }, ...childTables.slice(0, 997)];
+
+    const nodes = buildTableTreeNodes({ ...context, tables });
+
+    expect(nodes.map((node) => node.label)).toEqual(["stable_a", "stable_b", "stable_c"]);
+    expect(nodes[1].children?.[0]).toMatchObject({
+      type: "group-partitions",
+      label: "tree.childTables",
+      objectCount: 997,
+    });
   });
 
   it("attaches child tables loaded on later pages to the existing supertable", () => {
@@ -483,5 +768,91 @@ describe("TDengine table hierarchy", () => {
     });
 
     expect(nodes[0].children?.[0]).toMatchObject({ label: "tree.partitions", isExpanded: false });
+  });
+
+  it("nests second-level partitions under Kingbase-style lowercase parent names", () => {
+    // KingbaseES returns lowercase relation names and a direct `parent_name`;
+    // a partition that is itself a partitioned parent must nest recursively.
+    const nodes = buildTableTreeNodes({
+      ...context,
+      schema: "partition_demo",
+      tables: [
+        { name: "catalog_nested", table_type: "BASE TABLE", comment: null },
+        { name: "catalog_nested_2024", table_type: "BASE TABLE", comment: null, parent_schema: "partition_demo", parent_name: "catalog_nested" },
+        { name: "catalog_nested_2024_asia", table_type: "BASE TABLE", comment: null, parent_schema: "partition_demo", parent_name: "catalog_nested_2024" },
+        { name: "catalog_nested_2024_eu", table_type: "BASE TABLE", comment: null, parent_schema: "partition_demo", parent_name: "catalog_nested_2024" },
+        { name: "catalog_nested_2025", table_type: "BASE TABLE", comment: null, parent_schema: "partition_demo", parent_name: "catalog_nested" },
+      ],
+    });
+
+    expect(nodes.map((node) => node.label)).toEqual(["catalog_nested"]);
+    const level1 = tablePartitionGroups(nodes[0])[0].children ?? [];
+    expect(level1.map((node) => node.label)).toEqual(["catalog_nested_2024", "catalog_nested_2025"]);
+    const yearPartition = level1.find((node) => node.label === "catalog_nested_2024");
+    expect(tablePartitionGroups(yearPartition!)[0].children?.map((node) => node.label)).toEqual(["catalog_nested_2024_asia", "catalog_nested_2024_eu"]);
+  });
+});
+
+describe("tablePageRowAnchorKey", () => {
+  it("identifies a paged row without depending on the server's casing", () => {
+    expect(tablePageRowAnchorKey("Orders", "App", "Orders_2024")).toBe(tablePageRowAnchorKey("orders", "app", "orders_2024"));
+  });
+
+  it("keeps a partition's parent in the key so same-named child tables stay distinct", () => {
+    expect(tablePageRowAnchorKey("p_2024", "app", "orders")).not.toBe(tablePageRowAnchorKey("p_2024", "app", "customers"));
+    expect(tablePageRowAnchorKey("p_2024", "app")).not.toBe(tablePageRowAnchorKey("p_2024", "app", "orders"));
+  });
+});
+
+describe("package and package body groups (#13239)", () => {
+  function pkg(type: string, name: string): ObjectInfo {
+    return { name, object_type: type, schema: "app" } as ObjectInfo;
+  }
+
+  it("splits packages and package bodies into separate groups", () => {
+    const nodes = buildGroupedObjectTreeNodes({
+      ...context,
+      objects: [pkg("PACKAGE", "ledger"), pkg("PACKAGE_BODY", "ledger"), pkg("PACKAGE", "reports")],
+      databaseType: "oracle",
+    });
+    const packagesGroup = nodes.find((node) => node.type === "group-packages");
+    const bodiesGroup = nodes.find((node) => node.type === "group-package-bodies");
+    expect(bodiesGroup).toBeDefined();
+    const packageChildren = packagesGroup!.children!.map((node) => node.label);
+    expect(packageChildren).toEqual(["ledger", "reports"]);
+    expect(bodiesGroup!.children!.map((node) => node.label)).toEqual(["ledger"]);
+  });
+
+  it("keeps the body-only package visible inside the bodies group", () => {
+    const nodes = buildGroupedObjectTreeNodes({
+      ...context,
+      objects: [pkg("PACKAGE_BODY", "orphan")],
+      databaseType: "oracle",
+    });
+    const bodiesGroup = nodes.find((node) => node.type === "group-package-bodies");
+    expect(bodiesGroup!.children!.map((node) => node.label)).toEqual(["orphan"]);
+    // Empty groups may be omitted entirely rather than rendered with zero children.
+    const packagesGroup = nodes.find((node) => node.type === "group-packages");
+    expect(!packagesGroup || (packagesGroup.children ?? []).length === 0).toBe(true);
+  });
+});
+
+describe("withoutTableTreeLoadMoreNodes", () => {
+  const loadMore = (id: string, objectType?: "INDEX"): TreeNode => ({ id, label: "More", type: "load-more", loadMore: { parentId: "p", offset: 1, pageSize: 1, ...(objectType ? { objectType } : {}) } });
+
+  it("drops nested table load-more cursors, keeps index cursors and always returns a fresh list", () => {
+    const untouchedChildren: TreeNode[] = [{ id: "c", label: "c", type: "column" }];
+    const untouched: TreeNode = { id: "t0", label: "t0", type: "table", children: untouchedChildren };
+    const partitions: TreeNode = { id: "g", label: "g", type: "group-partitions", children: [{ id: "t1", label: "t1", type: "table" }, loadMore("nested")] };
+    const indexCursor = loadMore("idx", "INDEX");
+    const input = [untouched, partitions, loadMore("top"), indexCursor];
+
+    const result = withoutTableTreeLoadMoreNodes(input);
+
+    expect(result.map((node) => node.id)).toEqual(["t0", "g", "idx"]);
+    expect(partitions.children!.map((node) => node.id)).toEqual(["t1"]);
+    expect(untouched.children).toBe(untouchedChildren);
+    expect(withoutTableTreeLoadMoreNodes(result)).not.toBe(result);
+    expect(withoutTableTreeLoadMoreNodes(undefined)).toEqual([]);
   });
 });

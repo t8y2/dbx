@@ -16,6 +16,27 @@ use tokio_util::sync::CancellationToken;
 
 static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[path = "../../../../crates/dbx-core/tests/support/duckdb_export.rs"]
+mod export_regressions;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_query_pages_preserve_one_execution() {
+    let _guard = duckdb_worker_process_test_guard().await;
+    export_regressions::run_query_pages(PathBuf::from(env!("CARGO_BIN_EXE_dbx-duckdb-driver")));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_parquet_exports_preserve_rows_and_project_totals() {
+    let _guard = duckdb_worker_process_test_guard().await;
+    export_regressions::run_parquet_exports(PathBuf::from(env!("CARGO_BIN_EXE_dbx-duckdb-driver")));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_export_snapshots_preserve_values_and_cleanup() {
+    let _guard = duckdb_worker_process_test_guard().await;
+    export_regressions::run_snapshot_cleanup(PathBuf::from(env!("CARGO_BIN_EXE_dbx-duckdb-driver")));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_process_reads_view_source() {
     let _guard = duckdb_worker_process_test_guard().await;
@@ -351,6 +372,7 @@ async fn worker_process_exits_when_stdin_closes_during_active_query() {
                 sql: "SELECT sum(sin(i::DOUBLE) * cos(i::DOUBLE / 3.0)) FROM range(100000000000) AS t(i)".to_string(),
                 database: None,
                 max_rows: Some(10),
+                preserve_insertion_order: false,
             },
         )
         .expect("execute request"),
@@ -508,10 +530,14 @@ async fn worker_shutdown_checkpoints_and_removes_wal() {
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(&wal_path);
 
-    let client =
-        DuckDbWorkerClient::open_with_executable(executable.clone(), db_path.to_string_lossy().to_string(), Vec::new(), None)
-            .await
-            .expect("worker process connects");
+    let client = DuckDbWorkerClient::open_with_executable(
+        executable.clone(),
+        db_path.to_string_lossy().to_string(),
+        Vec::new(),
+        None,
+    )
+    .await
+    .expect("worker process connects");
     client
         .execute(
             None,

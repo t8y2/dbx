@@ -3,14 +3,17 @@ import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Gauge, KeyRound, ListChecks } from "@lucide/vue";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 import MeilisearchOverviewPage from "./MeilisearchOverviewPage.vue";
 import MeilisearchKeysPage from "./MeilisearchKeysPage.vue";
 import MeilisearchTasksPage from "./MeilisearchTasksPage.vue";
 
 defineProps<{ connectionId: string }>();
 type Section = "overview" | "keys" | "tasks";
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ active?: Section }>({}, "MeilisearchSystemWorkspace");
 const { t } = useI18n();
-const active = ref<Section>("overview");
+const active = ref<Section>(restoredUiState.active ?? "overview");
+trackUiState(() => ({ active: active.value }));
 const sections = computed(() => [
   { value: "overview" as const, label: t("meilisearch.overview"), icon: Gauge },
   { value: "keys" as const, label: t("meilisearch.apiKeys"), icon: KeyRound },

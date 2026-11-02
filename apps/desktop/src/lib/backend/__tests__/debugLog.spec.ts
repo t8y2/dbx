@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { appendDebugLog, formatLocalTimestamp, formatLocalTimestampForFilename, formatLocalTimezoneOffset, getDebugLogText, padNumber } from "@/lib/backend/debugLog";
+import { appendDebugLog, clearDebugLogs, formatLocalTimestamp, formatLocalTimestampForFilename, formatLocalTimezoneOffset, getDebugLogText, padNumber } from "@/lib/backend/debugLog";
 
 class MemoryStorage implements Storage {
   private data = new Map<string, string>();
@@ -46,12 +46,59 @@ beforeEach(() => {
     configurable: true,
     value: new MemoryStorage(),
   });
+  clearDebugLogs();
 });
 
 afterEach(() => {
   vi.useRealTimers();
   if (originalLocalStorage) Object.defineProperty(globalThis, "localStorage", originalLocalStorage);
   else Reflect.deleteProperty(globalThis, "localStorage");
+});
+
+describe("debug log write batching", () => {
+  it("does not rewrite the stored buffer on every appended entry", () => {
+    vi.useFakeTimers();
+    localStorage.setItem(DEBUG_LOG_ENABLED_KEY, "1");
+    const setItem = vi.spyOn(localStorage, "setItem");
+
+    for (let index = 0; index < 200; index += 1) appendDebugLog("info", `entry-${index}`);
+
+    const entryWrites = () => setItem.mock.calls.filter(([key]) => key === "dbx-debug-log-entries");
+    expect(entryWrites().length).toBe(0);
+    // Pending entries are readable before they are persisted.
+    expect(getDebugLogText()).toContain("entry-199");
+
+    vi.advanceTimersByTime(250);
+
+    const writes = entryWrites();
+    expect(writes.length).toBe(1);
+    const stored = JSON.parse(String(writes[0][1])) as { message: string }[];
+    expect(stored.length).toBe(200);
+    expect(stored[199].message).toContain("entry-199");
+  });
+
+  it("persists error entries without waiting for the flush delay", () => {
+    vi.useFakeTimers();
+    localStorage.setItem(DEBUG_LOG_ENABLED_KEY, "1");
+    const setItem = vi.spyOn(localStorage, "setItem");
+
+    appendDebugLog("error", "boom");
+
+    const writes = setItem.mock.calls.filter(([key]) => key === "dbx-debug-log-entries");
+    expect(writes.length).toBe(1);
+    expect(String(writes[0][1])).toContain("boom");
+  });
+
+  it("re-reads the stored buffer when it changes underneath the cache", () => {
+    localStorage.setItem(DEBUG_LOG_ENABLED_KEY, "1");
+    localStorage.setItem("dbx-debug-log-entries", JSON.stringify([{ timestamp: "t", level: "info", message: "external" }]));
+
+    appendDebugLog("info", "local");
+
+    const text = getDebugLogText();
+    expect(text).toContain("external");
+    expect(text).toContain("local");
+  });
 });
 
 describe("debug log local timestamps", () => {

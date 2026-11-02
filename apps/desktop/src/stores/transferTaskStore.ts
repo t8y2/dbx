@@ -2,7 +2,9 @@ import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
 import * as api from "@/lib/backend/api";
-import type { TransferTask, TransferTaskConfig, TransferTaskFolder, TransferTaskLibrary } from "@/types/database";
+import type { TransferPackageDraft, TransferTask, TransferTaskConfig, TransferTaskFolder, TransferTaskLibrary } from "@/types/database";
+import { resolveTransferStrategy, transferStrategyOptions } from "@/components/transfer/transferStrategy";
+import { MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 
 export class TransferTaskNameConflictError extends Error {
   readonly code = "TRANSFER_TASK_NAME_CONFLICT";
@@ -59,6 +61,40 @@ function normalizeFolder(raw: unknown): TransferTaskFolder | null {
   };
 }
 
+/** Keeps only non-empty string entries so a cleared filter never survives a save/load round trip. */
+function normalizeTransferTableFilters(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const result: Record<string, string> = {};
+  for (const [table, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === "string" && value.trim().length > 0) result[table] = value;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function normalizeTransferOperationTimeoutSecs(raw: unknown): number | undefined {
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0 || raw > MAX_QUERY_TIMEOUT_SECS) return undefined;
+  return raw;
+}
+
+function normalizePackageDrafts(raw: unknown): TransferPackageDraft[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const drafts: TransferPackageDraft[] = [];
+  for (const value of raw) {
+    const identity = value?.identity;
+    if (!identity || typeof identity.owner !== "string" || typeof identity.name !== "string" || (identity.kind !== "PACKAGE" && identity.kind !== "PACKAGE_BODY")) continue;
+    drafts.push({
+      identity: { owner: identity.owner, name: identity.name, kind: identity.kind },
+      sourceName: typeof value.sourceName === "string" ? value.sourceName : undefined,
+      sql: typeof value.sql === "string" ? value.sql : undefined,
+      packageBodySource: value.packageBodySource === "source" || value.packageBodySource === "target" ? value.packageBodySource : undefined,
+      packageContract: value.packageContract === "source" || value.packageContract === "target" ? value.packageContract : undefined,
+      confirmPackagePair: value.confirmPackagePair === true,
+      reviewedTargetDraft: value.reviewedTargetDraft === true,
+    });
+  }
+  return drafts.length ? drafts : undefined;
+}
+
 function normalizeTask(raw: unknown): TransferTask | null {
   if (!raw || typeof raw !== "object") return null;
   const candidate = raw as Partial<TransferTask>;
@@ -86,10 +122,16 @@ function normalizeTask(raw: unknown): TransferTask | null {
       targetDatabase: String(config.targetDatabase),
       targetSchema: config.targetSchema || undefined,
       objects,
+      oraclePackageDrafts: normalizePackageDrafts(config.oraclePackageDrafts),
       content: config.content ?? "structureAndData",
-      mode: config.mode ?? "append",
+      ...transferStrategyOptions(resolveTransferStrategy(config)),
       targetTableNameCase: config.targetTableNameCase ?? "preserve",
+      targetColumnNameCase: config.targetColumnNameCase ?? "preserve",
+      quoteTargetColumnNames: config.quoteTargetColumnNames ?? true,
       batchSize: typeof config.batchSize === "number" && config.batchSize > 0 ? config.batchSize : 1000,
+      operationTimeoutSecs: normalizeTransferOperationTimeoutSecs(config.operationTimeoutSecs),
+      tableFilters: normalizeTransferTableFilters(config.tableFilters),
+      dropTargetConfirmed: false,
     },
     createdAt: candidate.createdAt || nowIso(),
     updatedAt: candidate.updatedAt || nowIso(),
@@ -280,14 +322,21 @@ export const useTransferTaskStore = defineStore("transferTasks", () => {
     const folderId = Object.prototype.hasOwnProperty.call(input, "folderId") ? input.folderId || undefined : existing?.folderId;
     ensureTaskNameAvailable(trimmed, folderId, input.id);
     const timestamp = nowIso();
+    const config: TransferTaskConfig = {
+      ...input.config,
+      ...transferStrategyOptions(resolveTransferStrategy(input.config)),
+      operationTimeoutSecs: normalizeTransferOperationTimeoutSecs(input.config.operationTimeoutSecs),
+      oraclePackageDrafts: normalizePackageDrafts(input.config.oraclePackageDrafts),
+      dropTargetConfirmed: false,
+    };
     const task: TransferTask = existing
-      ? { ...existing, folderId, name: trimmed, config: input.config, updatedAt: timestamp }
+      ? { ...existing, folderId, name: trimmed, config, updatedAt: timestamp }
       : {
           id: uuid(),
           folderId,
           name: trimmed,
           orderIndex: maxOrderIndex(tasks.value.filter((item) => (item.folderId || "") === (folderId || ""))) + 1,
-          config: input.config,
+          config,
           createdAt: timestamp,
           updatedAt: timestamp,
         };

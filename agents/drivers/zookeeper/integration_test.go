@@ -171,3 +171,32 @@ func BenchmarkZooKeeperOperations(b *testing.B) {
 		}
 	})
 }
+
+func TestZooKeeperTLSIntegration(t *testing.T) {
+	connectString := os.Getenv("DBX_ZOOKEEPER_TLS_TEST_CONNECT_STRING")
+	if connectString == "" {
+		t.Skip("DBX_ZOOKEEPER_TLS_TEST_CONNECT_STRING is not set")
+	}
+	caCertPath := os.Getenv("DBX_ZOOKEEPER_TLS_TEST_CA_CERT_PATH")
+	if caCertPath == "" {
+		t.Skip("DBX_ZOOKEEPER_TLS_TEST_CA_CERT_PATH is not set")
+	}
+	service := &server{statLookupConcurrency: 4}
+	connection := map[string]any{
+		"zookeeper_connect_string": connectString,
+		"ssl":                      true,
+		"ca_cert_path":             caCertPath,
+	}
+	if _, err := service.connect(mustJSON(map[string]any{"connection": connection})); err != nil {
+		t.Fatalf("connect over TLS: %v", err)
+	}
+	t.Cleanup(service.closeClient)
+	root := fmt.Sprintf("/dbx-go-tls-integration-%d", time.Now().UnixNano())
+	if _, err := service.put(mustJSON(map[string]any{"key": root + "/value", "value": map[string]string{"encoding": "utf8", "data": "secret"}})); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.get(mustJSON(map[string]any{"key": root + "/value"}))
+	if err != nil || result["found"] != true {
+		t.Fatalf("get=%#v err=%v", result, err)
+	}
+}

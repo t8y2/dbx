@@ -53,6 +53,7 @@ pub struct AgentUpdateBlockersRequest {
 pub struct AgentUpdateBlocker {
     pub db_type: String,
     pub label: String,
+    pub connections: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -104,17 +105,41 @@ pub struct DriverRuntimeRequest {
 
 pub async fn stop_driver_runtime(
     State(state): State<Arc<WebState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<DriverRuntimeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    dbx_core::driver_runtime::stop_driver_runtime(&state.app, &req.runtime_id).await.map_err(AppError::from)?;
+    let key = dbx_core::driver_runtime::runtime_agent_key(&req.runtime_id)
+        .ok_or_else(|| AppError::from("Only agent runtimes can be stopped".to_owned()))?;
+    let permit = super::pl_debug::claim_mutation(
+        &state,
+        &headers,
+        dbx_core::query::pl_debug::PlDebugMutationScope::Driver(key.to_owned()),
+    )
+    .await?;
+    permit.after_debug_cleanup(dbx_core::driver_runtime::stop_driver_runtime(&state.app, &req.runtime_id)).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 pub async fn restart_driver_runtime(
     State(state): State<Arc<WebState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<DriverRuntimeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    dbx_core::driver_runtime::restart_driver_runtime(&state.app, &req.runtime_id).await.map_err(AppError::from)?;
+    if req.runtime_id.starts_with("agent-runtime:") {
+        let key = dbx_core::driver_runtime::runtime_agent_key(&req.runtime_id)
+            .ok_or_else(|| AppError::from("Only agent runtimes can be restarted".to_owned()))?;
+        let permit = super::pl_debug::claim_mutation(
+            &state,
+            &headers,
+            dbx_core::query::pl_debug::PlDebugMutationScope::Driver(key.to_owned()),
+        )
+        .await?;
+        permit
+            .after_debug_cleanup(dbx_core::driver_runtime::restart_driver_runtime(&state.app, &req.runtime_id))
+            .await?;
+    } else {
+        dbx_core::driver_runtime::restart_driver_runtime(&state.app, &req.runtime_id).await?;
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -228,6 +253,7 @@ pub async fn get_agent_java_runtime_config(
 
 pub async fn set_agent_java_runtime_config(
     State(state): State<Arc<WebState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<JavaRuntimeRequest>,
 ) -> Result<Json<JavaRuntimeConfig>, AppError> {
     let am = &state.app.agent_manager;
@@ -243,8 +269,16 @@ pub async fn set_agent_java_runtime_config(
         config.custom_java_path = None;
     }
 
-    am.mutate_state(|local_state| local_state.java_runtime = config.clone()).map_err(AppError::from)?;
-    am.stop_daemons().await;
+    let permit =
+        super::pl_debug::claim_mutation(&state, &headers, dbx_core::query::pl_debug::PlDebugMutationScope::AllRuntimes)
+            .await?;
+    permit
+        .after_debug_cleanup(async {
+            am.mutate_state(|local_state| local_state.java_runtime = config.clone())?;
+            am.stop_daemons().await;
+            Ok(())
+        })
+        .await?;
     Ok(Json(config))
 }
 
@@ -295,8 +329,17 @@ pub async fn import_agents_from_zip(
             })
             .await
             .map_err(AppError::from)?;
-            dbx_core::jdbc::import_offline_jdbc_payload(state.app.plugins.root_dir(), &package_path)
-                .map_err(AppError::from)?;
+            let plugins_root = state.app.plugins.root_dir().to_path_buf();
+            // Blocking on purpose: the embedded plugin install scans and waits
+            // for processes holding the JDBC plugin directory (#12004); the
+            // blocking pool absorbs it.
+            let package_path = package_path.clone();
+            let import = tokio::task::spawn_blocking(move || {
+                dbx_core::jdbc::import_offline_jdbc_payload(&plugins_root, &package_path)
+            })
+            .await
+            .map_err(|err| AppError::internal(err.to_string()))?;
+            import.map_err(AppError::from)?;
             Ok::<_, AppError>(import_result)
         }
         .await;
@@ -304,7 +347,11 @@ pub async fn import_agents_from_zip(
 
         let result = result?;
         send_progress_event(&tx, AgentProgressEvent::step("done").with_operation_id(&operation_id));
-        return Ok(Json(serde_json::json!({ "count": result.drivers_installed.len() as u32 })));
+        return Ok(Json(serde_json::json!({
+            "count": result.drivers_installed.len() as u32,
+            "jreCount": result.jre_installed.len(),
+            "failures": result.failures,
+        })));
     }
 
     Err(AppError::from("No file uploaded".to_string()))
@@ -403,32 +450,37 @@ async fn ensure_no_agent_update_blockers(
     state: &dbx_core::connection::AppState,
     db_types: &[String],
 ) -> Result<(), String> {
-    let blockers = update_blockers_from_keys(state.prepare_agent_driver_updates(db_types).await, db_types);
+    let blockers = update_blockers_from_connections(state.prepare_agent_driver_updates(db_types).await, db_types);
     if blockers.is_empty() {
         return Ok(());
     }
-    let labels = blockers.into_iter().map(|blocker| blocker.label).collect::<Vec<_>>().join(", ");
+    let labels = blockers
+        .into_iter()
+        .flat_map(|blocker| if blocker.connections.is_empty() { vec![blocker.label] } else { blocker.connections })
+        .collect::<Vec<_>>()
+        .join(", ");
     Err(format!("Close these database connections before updating drivers: {labels}"))
 }
 
 async fn agent_update_blockers(state: &dbx_core::connection::AppState, db_types: &[String]) -> Vec<AgentUpdateBlocker> {
-    update_blockers_from_keys(state.active_agent_connection_driver_keys().await, db_types)
+    update_blockers_from_connections(state.active_agent_connection_driver_connections().await, db_types)
 }
 
-fn update_blockers_from_keys(
-    active_keys: std::collections::HashSet<String>,
+fn update_blockers_from_connections(
+    active_connections: std::collections::HashMap<String, Vec<String>>,
     db_types: &[String],
 ) -> Vec<AgentUpdateBlocker> {
     let candidate_keys: std::collections::HashSet<&str> = db_types.iter().map(String::as_str).collect();
     if candidate_keys.is_empty() {
         return Vec::new();
     }
-    let mut blockers = active_keys
+    let mut blockers = active_connections
         .into_iter()
-        .filter(|key| candidate_keys.contains(key.as_str()))
-        .map(|db_type| AgentUpdateBlocker {
+        .filter(|(key, _)| candidate_keys.contains(key.as_str()))
+        .map(|(db_type, connections)| AgentUpdateBlocker {
             label: dbx_core::agent_catalog::label_for_key(&db_type).unwrap_or(&db_type).to_string(),
             db_type,
+            connections,
         })
         .collect::<Vec<_>>();
     blockers.sort_by(|left, right| left.label.cmp(&right.label));
@@ -468,12 +520,16 @@ mod tests {
 
     #[test]
     fn update_blockers_include_active_duckdb_connections() {
-        let active_keys = ["duckdb".to_string(), "oracle".to_string()].into_iter().collect();
-        let blockers = update_blockers_from_keys(active_keys, &["duckdb".to_string()]);
+        let active_connections = std::collections::HashMap::from([
+            ("duckdb".to_string(), vec!["本地分析".to_string()]),
+            ("oracle".to_string(), vec!["生产 Oracle".to_string()]),
+        ]);
+        let blockers = update_blockers_from_connections(active_connections, &["duckdb".to_string()]);
 
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].db_type, "duckdb");
         assert_eq!(blockers[0].label, "DuckDB");
+        assert_eq!(blockers[0].connections, vec!["本地分析"]);
     }
 
     #[test]

@@ -15,7 +15,6 @@ export const sqlServerTraceMessages = {
   highCost: "Higher overhead",
   elapsed: "{seconds}s",
   eventCount: "Showing {visible} / {total} events",
-  cleanedStaleSessions: "Cleaned {count} expired DBX trace session(s).",
   permissionHint: "Requires ALTER ANY EVENT SESSION and server-state viewing permissions",
   filterSql: "Filter procedure or SQL text",
   filterLogin: "Login",
@@ -32,11 +31,7 @@ export const sqlServerTraceMessages = {
     stopped: "Stopped",
     error: "Error",
   },
-  eventTypes: {
-    rpc_completed: "RPC completed",
-    sql_batch_completed: "Batch completed",
-    sp_statement_completed: "Procedure statement",
-  },
+  eventTypes: {},
   columns: {
     time: "Time",
     event: "Event",
@@ -64,4 +59,21 @@ export const sqlServerTraceMessages = {
     "view-permission": "The current login lacks the server-state permission required to read trace events.",
     "missing-capability": "This SQL Server instance is missing required Extended Events capabilities: {capabilities}.",
   },
+};
+
+// Polish interface overrides; retains all keys from the canonical English object.
+export const sqlServerTraceMessagesPl = {
+  ...sqlServerTraceMessages,
+  title: "Śledzenie aktywności SQL Server",
+  start: "Uruchom",
+  pause: "Wstrzymaj odpytywanie",
+  resume: "Wznów",
+  stop: "Zatrzymaj",
+  clear: "Wyczyść zdarzenia",
+  export: "Eksportuj przefiltrowane zdarzenia do CSV",
+  database: "Baza danych",
+  selectDatabase: "Wybierz bazę danych",
+  maxEvents: "Limit zdarzeń",
+  duration: "Czas trwania (min)",
+  statements: "Instrukcje",
 };

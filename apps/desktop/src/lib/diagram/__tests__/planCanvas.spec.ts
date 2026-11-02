@@ -58,6 +58,8 @@ describe("parsePlanNumber", () => {
     expect(parsePlanNumber("12.34")).toBe(12.34);
     expect(parsePlanNumber("1,234")).toBe(1234);
     expect(parsePlanNumber("42000")).toBe(42000);
+    expect(parsePlanNumber("1.25e+6")).toBe(1_250_000);
+    expect(parsePlanNumber("2.5E-3 timerons")).toBe(0.0025);
     expect(parsePlanNumber("0.29..1830.12")).toBe(1830.12);
   });
 

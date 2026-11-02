@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { resolveInitialEventEditorRequest } from "./eventEditorRequest";
+import { eventEditorInstanceKey, resolveInitialEventEditorRequest } from "./eventEditorRequest";
 
 const base = { openedRequestKey: "" };
+
+describe("eventEditorInstanceKey", () => {
+  it("separates repeated CREATE requests", () => {
+    expect(eventEditorInstanceKey({ createRequestId: 1 })).not.toBe(eventEditorInstanceKey({ createRequestId: 2 }));
+  });
+
+  it("separates ALTER rows from CREATE mode", () => {
+    expect(eventEditorInstanceKey({ openRequestId: 1, rowId: "event:old_event" })).not.toBe(eventEditorInstanceKey({ createRequestId: 3 }));
+    expect(eventEditorInstanceKey({ openRequestId: 1, rowId: "event:old_event" })).not.toBe(eventEditorInstanceKey({ openRequestId: 1, rowId: "event:other_event" }));
+  });
+});
 
 describe("resolveInitialEventEditorRequest", () => {
   describe("create request (New Event)", () => {

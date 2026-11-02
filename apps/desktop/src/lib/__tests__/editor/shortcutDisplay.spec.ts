@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatShortcutDisplay, shortcutDisplayKeys } from "@/lib/editor/shortcutDisplay";
+import { formatShortcutDisplay, formatShortcutTooltip, normalizeShortcutSearch, shortcutDisplayKeys } from "@/lib/editor/shortcutDisplay";
 
 describe("shortcut display", () => {
   it("shows the default mouse modifier as Option on macOS and Alt elsewhere", () => {
@@ -52,5 +52,53 @@ describe("shortcut display", () => {
 
   it("displays multi-stroke shortcuts", () => {
     expect(formatShortcutDisplay("Ctrl+K Ctrl+C", "Win32")).toBe("Ctrl + K, Ctrl + C");
+  });
+
+  it("formats button tooltips with shortcut hints", () => {
+    expect(formatShortcutTooltip("Execute", "Mod+Enter", "Win32")).toBe("Execute (Ctrl + ↵)");
+    expect(formatShortcutTooltip("Execute", "Mod+Enter", "MacIntel")).toBe("Execute (⌘ ↵)");
+    expect(formatShortcutTooltip("Format SQL", "Shift+Mod+F", "Win32")).toBe("Format SQL (Ctrl + Shift + F)");
+    expect(formatShortcutTooltip("New Query", "")).toBe("New Query");
+    expect(formatShortcutTooltip("New Query", undefined)).toBe("New Query");
+    expect(formatShortcutTooltip("New Query", "   ")).toBe("New Query");
+  });
+});
+
+// #11632: the shortcut search must not care how the user spaces the separators.
+describe("shortcut search normalization", () => {
+  it("folds separator spaces and case on the Windows pill form", () => {
+    const displayed = formatShortcutDisplay("Mod+T", "Win32");
+    expect(displayed).toBe("Ctrl + T");
+    expect(normalizeShortcutSearch("Ctrl+T")).toBe(normalizeShortcutSearch(displayed));
+    expect(normalizeShortcutSearch("ctrl+t")).toBe(normalizeShortcutSearch(displayed));
+    expect(normalizeShortcutSearch("  CTRL  +  T  ")).toBe(normalizeShortcutSearch(displayed));
+  });
+
+  it("folds the space-separated macOS pill form, which has no + at all", () => {
+    const displayed = formatShortcutDisplay("Mod+T", "MacIntel");
+    expect(displayed).toBe("⌘ T");
+    expect(normalizeShortcutSearch("⌘T")).toBe(normalizeShortcutSearch(displayed));
+    expect(normalizeShortcutSearch("⌘ T")).toBe(normalizeShortcutSearch(displayed));
+  });
+
+  it("normalizes the full-width plus and spaces a CJK IME produces", () => {
+    expect(normalizeShortcutSearch("Ctrl＋T")).toBe("ctrl+t");
+    expect(normalizeShortcutSearch("Ctrl　+　T")).toBe("ctrl+t");
+  });
+
+  it("keeps the plus key distinguishable from its separators", () => {
+    expect(normalizeShortcutSearch(formatShortcutDisplay("Mod+Plus", "Win32"))).toBe("ctrl++");
+    expect(normalizeShortcutSearch("Ctrl++")).toBe("ctrl++");
+  });
+
+  it("keeps words separated, which is why it must stay off the label fields", () => {
+    // The call-site guard lives in the component spec ("…however the user spaces
+    // or cases the separators"), where a two-word label must still match.
+    expect(normalizeShortcutSearch("New Query")).toBe("newquery");
+  });
+
+  it("folds full-width letters, for CJK IME full-width mode", () => {
+    expect(normalizeShortcutSearch("ｃｔｒｌ＋ｔ")).toBe("ctrl+t");
+    expect(normalizeShortcutSearch("ＣＴＲＬ＋Ｔ")).toBe("ctrl+t");
   });
 });

@@ -7,7 +7,9 @@ import { mqPeekMessages } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { buildKafkaMessageSearchText, kafkaMessageSearchTextMatches, normalizeKafkaMessageSearchQuery } from "@/lib/mq/kafkaMessageSearch";
+import { sortKafkaMessagesByPublishTime, type KafkaMessageDisplayOrder } from "@/lib/mq/kafkaMessageSort";
 import { parseNonNegativeSafeInteger } from "@/lib/mq/mqPeekFilters";
+import { formatMqMessagePayload } from "@/lib/mq/thriftBinary";
 import { useToast } from "@/composables/useToast";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -40,10 +42,13 @@ const advancedExpanded = ref(false);
 const messageSearchQuery = ref("");
 type KafkaPeekStartPosition = NonNullable<PeekMessagesOptions["startPosition"]>;
 const kafkaStartPosition = ref<KafkaPeekStartPosition>("latest");
+const kafkaStartTimestamp = ref("");
+const kafkaMessageDisplayOrder = ref<KafkaMessageDisplayOrder>("newest");
 let messageRequestVersion = 0;
 
 const isKafka = computed(() => props.mqSystemKind === "kafka");
 const isKafkaOffsetMode = computed(() => kafkaStartPosition.value === "offset");
+const isKafkaTimestampMode = computed(() => kafkaStartPosition.value === "timestamp");
 const isMonitoring = computed(() => props.appearance === "monitoring");
 const normalizedMessageSearchQuery = computed(() => normalizeKafkaMessageSearchQuery(messageSearchQuery.value));
 const searchableMessages = computed(() =>
@@ -57,6 +62,7 @@ const filteredMessages = computed(() => {
   if (!query) return messages.value;
   return searchableMessages.value.filter(({ searchText }) => kafkaMessageSearchTextMatches(searchText, query)).map(({ message }) => message);
 });
+const displayedMessages = computed(() => (isKafka.value ? sortKafkaMessagesByPublishTime(filteredMessages.value, kafkaMessageDisplayOrder.value) : filteredMessages.value));
 
 function peekGroupName(): string {
   if (props.mqSystemKind === "rocketmq") return "__dbx_rocketmq_viewer__";
@@ -91,6 +97,11 @@ async function loadMessages() {
         if (parsedOffset == null) throw new Error(t("mqMessages.offsetMustBeNonNegativeIntRequired"));
         options.offset = parsedOffset;
         offset.value = String(parsedOffset);
+      }
+      if (isKafkaTimestampMode.value) {
+        const parsedTime = Date.parse(String(kafkaStartTimestamp.value));
+        if (!Number.isFinite(parsedTime)) throw new Error(t("mqMessages.timestampRequired"));
+        options.timestamp = parsedTime;
       }
     } else {
       if (partitionText !== "") {
@@ -132,7 +143,9 @@ function invalidateMessageRequest() {
 }
 
 function messagePayload(message: PeekedMessage): string {
-  return message.payloadText ?? message.payloadBase64;
+  // Raw-struct thrift sniffing is opt-in per MQ kind: only RabbitMQ's payload
+  // contract is thrift, so Kafka/RocketMQ keep the base64/text fallback.
+  return formatMqMessagePayload(message, { allowRawStructSniff: props.mqSystemKind === "rabbitmq" });
 }
 
 async function copyMessagePayload(message: PeekedMessage) {
@@ -141,6 +154,10 @@ async function copyMessagePayload(message: PeekedMessage) {
 
 async function copyMessageHeaders(message: PeekedMessage) {
   await copyMessageText(JSON.stringify(message.headers, null, 2));
+}
+
+async function copyMessageProperties(message: PeekedMessage) {
+  await copyMessageText(JSON.stringify(message.properties, null, 2));
 }
 
 async function copyMessageText(text: string) {
@@ -220,6 +237,23 @@ watch(kafkaStartPosition, () => {
             <SelectItem value="latest">{{ t("mqMessages.kafkaLatest") }}</SelectItem>
             <SelectItem value="earliest">{{ t("mqMessages.kafkaEarliest") }}</SelectItem>
             <SelectItem value="offset">{{ t("mqMessages.kafkaOffset") }}</SelectItem>
+            <SelectItem value="timestamp">{{ t("mqMessages.kafkaTimestamp") }}</SelectItem>
+          </SelectContent>
+        </Select>
+      </label>
+      <label v-if="isKafka && isKafkaTimestampMode && !isMonitoring">
+        <span>{{ t("mqMessages.startTimestamp") }}</span>
+        <input v-model="kafkaStartTimestamp" data-testid="kafka-peek-start-timestamp" type="datetime-local" step="1" :disabled="loading" />
+      </label>
+      <label v-if="isKafka">
+        <span>{{ t("mqMessages.timeOrder") }}</span>
+        <Select v-model="kafkaMessageDisplayOrder">
+          <SelectTrigger data-testid="kafka-message-display-order" class="message-browser-start-position">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent position="popper" class="message-browser-start-position-content">
+            <SelectItem value="newest">{{ t("mqMessages.newestFirst") }}</SelectItem>
+            <SelectItem value="oldest">{{ t("mqMessages.oldestFirst") }}</SelectItem>
           </SelectContent>
         </Select>
       </label>
@@ -263,7 +297,7 @@ watch(kafkaStartPosition, () => {
     <div v-else-if="!messages.length" class="message-empty">{{ t("mqMessages.noMessages") }}</div>
     <div v-else-if="!filteredMessages.length" class="message-empty" data-testid="kafka-message-filter-empty">{{ t("mqMessages.noMatchingMessages") }}</div>
     <div v-else class="message-list">
-      <article v-for="message in filteredMessages" :key="`${message.properties?.partition ?? 'p'}-${message.messageId || message.position}`" class="message-row">
+      <article v-for="message in displayedMessages" :key="`${message.properties?.partition ?? 'p'}-${message.messageId || message.position}`" class="message-row">
         <div class="message-meta">
           <span>#{{ message.position }}</span>
           <span v-if="message.properties?.partition != null">{{ t("mqMessages.metaPartition", { partition: message.properties.partition }) }}</span>
@@ -291,6 +325,18 @@ watch(kafkaStartPosition, () => {
           </div>
           <div class="message-headers-values">
             <span v-for="(value, key) in message.headers" :key="key">{{ key }}: {{ value }}</span>
+          </div>
+        </div>
+        <div v-if="mqSystemKind === 'rabbitmq' && Object.keys(message.properties || {}).length" class="message-headers" data-testid="message-properties">
+          <div class="message-headers-heading">
+            <span>{{ t("mqMessages.messageProperties") }}</span>
+            <Button type="button" variant="outline" size="sm" class="message-copy-action h-7 gap-1.5 px-2 text-xs" :aria-label="`${t('grid.copy')} ${t('mqMessages.messageProperties')}`" data-testid="copy-message-properties" @click="copyMessageProperties(message)">
+              <Copy :size="14" aria-hidden="true" />
+              {{ t("grid.copy") }}
+            </Button>
+          </div>
+          <div class="message-headers-values">
+            <span v-for="(value, key) in message.properties" :key="key">{{ key }}: {{ value }}</span>
           </div>
         </div>
       </article>

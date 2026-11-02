@@ -1,7 +1,7 @@
 import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
 import { parseShortcutParts } from "@/lib/editor/shortcutDisplay";
-import { enabledSqlShortcutActions } from "@/lib/sql/sqlShortcutActions";
-import type { SqlShortcutAction } from "@/types/database";
+import { resolveSqlShortcutForDatabase, uniqueSqlShortcutBindings } from "@/lib/sql/sqlShortcutActions";
+import type { DatabaseType, SqlShortcutAction } from "@/types/database";
 // pi-lens-ignore: typescript:2307
 import type { EditorView } from "@codemirror/view";
 
@@ -16,11 +16,19 @@ export function isCharacterProducingShortcut(shortcut: string): boolean {
   return !modifiers.has("Mod") && !modifiers.has("Meta") && !modifiers.has("Ctrl") && !modifiers.has("Alt");
 }
 
-export function createQueryEditorSqlShortcutDomHandler(getActions: () => readonly SqlShortcutAction[], runAction: (action: SqlShortcutAction, view: EditorView, event: KeyboardEvent) => boolean, platform = globalThis.navigator?.platform || ""): (event: KeyboardEvent, view: EditorView) => boolean {
+export function createQueryEditorSqlShortcutDomHandler(
+  getActions: () => readonly SqlShortcutAction[],
+  runAction: (action: SqlShortcutAction, view: EditorView, event: KeyboardEvent) => boolean,
+  getDatabaseType?: () => DatabaseType | undefined,
+  platform = globalThis.navigator?.platform || "",
+): (event: KeyboardEvent, view: EditorView) => boolean {
   return (event, view) => {
-    for (const action of enabledSqlShortcutActions(getActions())) {
-      if (!isCharacterProducingShortcut(action.shortcut)) continue;
-      if (!matchesShortcut(event, action.shortcut, platform)) continue;
+    const actions = getActions();
+    for (const shortcut of uniqueSqlShortcutBindings(actions, platform)) {
+      if (!isCharacterProducingShortcut(shortcut)) continue;
+      if (!matchesShortcut(event, shortcut, platform)) continue;
+      const action = resolveSqlShortcutForDatabase(actions, shortcut, getDatabaseType?.(), platform);
+      if (!action) return false;
       if (!runAction(action, view, event)) return false;
       event.preventDefault();
       return true;

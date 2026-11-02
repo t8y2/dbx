@@ -60,7 +60,7 @@ function profileSwitchHarness(selectedProfile: string, editing = false) {
   const javascript = ts.transpileModule(functionSource("onDbTypeChange"), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  const selectProfile = new Function("editingId", "selectedType", "resetForm", "dbCategoryForOption", "selectedDbCategory", "customDriverName", "applyProfile", "resetTestState", "resetVisibleSchemasState", `${javascript}\nreturn onDbTypeChange;`)(
+  const selectProfile = new Function("editingId", "selectedType", "resetForm", "dbCategoryForOption", "selectedDbCategory", "customDriverName", "applyProfile", "resetTestState", "resetVisibleSchemasState", "parsePluginConnectionProviderOptionValue", `${javascript}\nreturn onDbTypeChange;`)(
     editingId,
     selectedType,
     resetForm,
@@ -70,6 +70,7 @@ function profileSwitchHarness(selectedProfile: string, editing = false) {
     applyProfile,
     () => events.push("reset-test"),
     () => events.push("reset-schemas"),
+    () => null,
   ) as (profile: string) => void;
 
   return { customDriverName, events, form, selectProfile, selectedType };

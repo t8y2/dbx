@@ -1,6 +1,9 @@
 schemaVersion: 1
 order: 100
 dbType: sqlserver
+compareModes: [schema, data]
+transferSupportLevel: verified
+transferObjectFamily: sqlserver
 rustVariant: SqlServer
 label: SQL Server
 dialect: SQL Server

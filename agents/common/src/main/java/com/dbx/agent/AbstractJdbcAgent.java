@@ -24,6 +24,8 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     private String configuredDatabase = "";
     private String identifierQuote = "";
     private JdbcConnectionPoolRegistry poolRegistry;
+    private JdbcConnectionPoolRegistry physicalRegistry;
+    private boolean ownsPhysicalRegistry;
     private JdbcConnectionPoolRegistry.Lease pooledLease;
     private ConnectParams connectParams;
     private String poolIdentity;
@@ -31,6 +33,29 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     private boolean leasePinnedAtRequestStart;
     private boolean sessionAffinity;
     private boolean pooledConnectionPoisoned;
+    private boolean nativeJobConnection;
+    private final Object dedicatedAdmission = new Object();
+    private java.util.function.BooleanSupplier nativeJobReservation;
+
+    protected final Object dedicatedAdmission() { return dedicatedAdmission; }
+
+    final void bindNativeJobReservation(java.util.function.BooleanSupplier reservation) {
+        synchronized (dedicatedAdmission) {
+            if (nativeJobReservation != null) throw new IllegalStateException("Native job reservation is already bound");
+            nativeJobReservation = reservation;
+        }
+    }
+
+    protected final boolean hasNativeJobReservation() {
+        synchronized (dedicatedAdmission) {
+            return nativeJobReservation != null && nativeJobReservation.getAsBoolean();
+        }
+    }
+
+    protected boolean hasDedicatedDebugReservation() { return false; }
+
+    @Override
+    public boolean supportsQueryTiming() { return true; }
 
     @Override
     public final Connection getConnection() {
@@ -50,6 +75,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             requestActive = false;
             leasePinnedAtRequestStart = false;
             pooledConnectionPoisoned = false;
+            nativeJobConnection = false;
             loadDriver(params);
             configuredDatabase = params.getDatabase();
             connectParams = params;
@@ -90,14 +116,26 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return unchecked(() -> {
             loadDriver(params);
             try (Connection conn = openTestConnection(params)) {
+                String validationQuery = connectionValidationQuery();
                 boolean valid = isConnectionValid(conn, 5);
                 Map<String, Object> result = new LinkedHashMap<>();
                 result.put("ok", valid);
+                result.put(
+                    "validation",
+                    validationQuery == null || validationQuery.isBlank() ? "jdbc_connection_isValid" : validationQuery
+                );
                 if (valid) {
                     Map<String, String> databaseInfo = JdbcDatabaseInfo.from(conn);
                     if (!databaseInfo.isEmpty()) {
                         result.put("databaseInfo", databaseInfo);
                     }
+                } else {
+                    result.put(
+                        "error",
+                        "Connection opened, but validation failed (method: "
+                            + (validationQuery == null || validationQuery.isBlank() ? "Connection.isValid" : validationQuery)
+                            + ")"
+                    );
                 }
                 return result;
             }
@@ -173,8 +211,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+        long prepareStarted = System.nanoTime();
         Connection conn = requireConnected();
         uncheckedVoid(() -> beforeQueryExecution(conn, options.getTimeoutSecs()));
+        QueryTiming.record("session_prepare", prepareStarted);
         return JdbcExecutor.current().execute(
             conn,
             sql,
@@ -184,14 +224,18 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            resultValueReader()
+            resultValueReader(),
+            statementMessageReader(),
+            advancePastUpdateCounts()
         );
     }
 
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
+        long prepareStarted = System.nanoTime();
         Connection conn = requireConnected();
         uncheckedVoid(() -> beforeQueryExecution(conn, options.getTimeoutSecs()));
+        QueryTiming.record("session_prepare", prepareStarted);
         return JdbcExecutor.current().executePage(
             conn,
             sql,
@@ -199,7 +243,9 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             this::setSchemaSQL,
             this::resetSchemaSQL,
             options,
-            resultValueReader()
+            resultValueReader(),
+            statementMessageReader(),
+            advancePastUpdateCounts()
         );
     }
 
@@ -240,13 +286,19 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeTransaction(List<String> statements, String schema) {
-        return TransactionExecutor.executeUpdateStatements(
-            requireConnected(),
-            statements,
-            schema,
-            this::setSchemaSQL,
-            this::resetSchemaSQL
-        );
+        Connection conn = requireConnected();
+        return unchecked(() -> {
+            if (!conn.getAutoCommit()) {
+                throw new IllegalStateException("Cannot start a one-shot transaction while a manual transaction is open");
+            }
+            return TransactionExecutor.executeUpdateStatements(
+                conn,
+                statements,
+                schema,
+                this::setSchemaSQL,
+                this::resetSchemaSQL
+            );
+        });
     }
 
     @Override
@@ -254,12 +306,18 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         uncheckedVoid(() -> {
             closeCurrentConnection();
             afterDisconnect();
+            if (ownsPhysicalRegistry && physicalRegistry != null) {
+                physicalRegistry.close();
+                physicalRegistry = null;
+                ownsPhysicalRegistry = false;
+            }
             connectParams = null;
             poolIdentity = null;
             sessionAffinity = false;
             requestActive = false;
             leasePinnedAtRequestStart = false;
             pooledConnectionPoisoned = false;
+            nativeJobConnection = false;
             identifierQuote = "";
         });
     }
@@ -268,7 +326,8 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         if (connectParams != null || connection != null || pooledLease != null) {
             throw new IllegalStateException("JDBC pool registry must be attached before connecting");
         }
-        poolRegistry = registry;
+        physicalRegistry = registry;
+        poolRegistry = registry.isEnabled() && supportsConnectionPooling() ? registry : null;
     }
 
     public boolean supportsConnectionPooling() {
@@ -318,6 +377,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         String identity;
         JdbcConnectionPoolRegistry registry;
         synchronized (this) {
+            if (nativeJobConnection) return;
             if (poolRegistry == null) {
                 return;
             }
@@ -362,8 +422,11 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         JdbcExecutor executor,
         boolean succeeded,
         boolean requiresSessionAffinity,
-        boolean evictAfterRequest
+        boolean evictAfterRequest,
+        boolean endsSessionAffinity,
+        boolean preservesSchemaContext
     ) {
+        if (nativeJobConnection) return;
         if (poolRegistry == null) {
             return;
         }
@@ -374,7 +437,12 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         }
         if (succeeded && requiresSessionAffinity) {
             sessionAffinity = true;
-            JdbcSchemaSwitcher.forget(connection);
+            if (!preservesSchemaContext) {
+                JdbcSchemaSwitcher.forget(connection);
+            }
+        }
+        if (succeeded && endsSessionAffinity) {
+            sessionAffinity = false;
         }
         if (pooledLease == null) {
             connection = null;
@@ -386,7 +454,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             releasePooledConnection(true);
             return;
         }
-        if (sessionAffinity || executor.hasOpenSessions() || executor.hasActiveStatements()) {
+        if (sessionAffinity || executor.hasOpenSessions() || executor.hasActiveStatements() || hasRetainedResultResources()) {
             return;
         }
         releasePooledConnection(!preparePooledConnectionForReturn());
@@ -403,10 +471,57 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         if (sessionAffinity) {
             return;
         }
-        if (executor.hasOpenSessions() || executor.hasActiveStatements()) {
+        if (executor.hasOpenSessions() || executor.hasActiveStatements() || hasRetainedResultResources()) {
             return;
         }
         releasePooledConnection(!preparePooledConnectionForReturn());
+    }
+
+    final synchronized void requireIdleNativeJobSession(JdbcExecutor executor) throws Exception {
+        if (connectParams == null) throw new IllegalStateException("Not connected");
+        if (JdbcSessionRole.from(connectParams.getSessionRole()) != JdbcSessionRole.METADATA) {
+            throw new IllegalStateException("native_job_metadata_session_required");
+        }
+        if (nativeJobConnection || requestActive || pooledLease != null || sessionAffinity
+            || executor.hasOpenSessions() || executor.hasActiveStatements() || hasRetainedResultResources()
+            || (connection != null && !connection.getAutoCommit())) {
+            throw new IllegalStateException("native_job_session_busy");
+        }
+    }
+
+    final synchronized Connection openNativeJobConnection() throws Exception {
+        nativeJobConnection = true;
+        try {
+            ConnectParams params = connectParams;
+            if (connection == null) {
+                connection = poolRegistry == null ? openInitializedConnection(params)
+                    : poolRegistry.openDedicatedConnection(() -> openInitializedConnection(params));
+                afterConnect(params, connection);
+            }
+            connection.setAutoCommit(false);
+            return connection;
+        } catch (Exception | LinkageError error) {
+            try {
+                closeNativeJobConnection();
+            } catch (Exception | LinkageError closeError) {
+                error.addSuppressed(closeError);
+                throw AgentRpcError.resource("close",
+                    new JdbcConnectionPoolRegistry.PhysicalConnectionStateUnknownException(error));
+            }
+            if (!JdbcConnectionPoolRegistry.requiresRuntimeReplacement(error)) nativeJobConnection = false;
+            throw error;
+        }
+    }
+
+    final synchronized void closeNativeJobConnection() throws Exception {
+        if (!nativeJobConnection) return;
+        Connection owned = connection;
+        connection = null;
+        if (owned != null) owned.close();
+    }
+
+    final synchronized boolean hasNativeJobConnection() {
+        return nativeJobConnection;
     }
 
     private static String resolveIdentifierQuote(ConnectParams params, Connection connection) {
@@ -426,7 +541,57 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         }
         try {
             String quote = connection.getMetaData().getIdentifierQuoteString();
-            return quote == null || quote.trim().isEmpty() ? "" : quote.trim();
+            if (quote == null || quote.trim().isEmpty()) {
+                return "";
+            }
+            return sanitizeInformixFamilyBacktickQuote(params, connection, quote.trim());
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    // GBase 8s and other Informix-family JDBC drivers report "`" from
+    // getIdentifierQuoteString() even though their servers reject backtick-quoted
+    // identifiers with "illegal character in statement" outside MySQL compatibility
+    // mode (SQLMODE=mysql). An empty quote makes clients emit unquoted identifiers,
+    // which both SQL modes accept.
+    private static String sanitizeInformixFamilyBacktickQuote(ConnectParams params, Connection connection, String quote) {
+        if (!"`".equals(quote) || !isInformixFamilyJdbc(params, connection) || isInformixFamilyMysqlCompat(params, connection)) {
+            return quote;
+        }
+        return "";
+    }
+
+    private static boolean isInformixFamilyJdbc(ConnectParams params, Connection connection) {
+        StringBuilder identity = new StringBuilder();
+        appendJdbcIdentity(identity, params.getConnection_string());
+        appendJdbcIdentity(identity, params.getJdbc_driver_class());
+        List<String> driverPaths = params.getJdbc_driver_paths();
+        if (driverPaths != null) {
+            for (String path : driverPaths) {
+                appendJdbcIdentity(identity, path);
+            }
+        }
+        appendJdbcIdentity(identity, connectionUrl(connection));
+        String normalized = identity.toString().toLowerCase(Locale.ROOT);
+        return normalized.contains("jdbc:gbasedbt")
+            || normalized.contains("jdbc:informix")
+            || normalized.contains("com.gbasedbt")
+            || normalized.contains("com.informix");
+    }
+
+    private static boolean isInformixFamilyMysqlCompat(ConnectParams params, Connection connection) {
+        if (params.isMysql_compat_mode()) {
+            return true;
+        }
+        String identity = (params.getConnection_string() + "\n" + connectionUrl(connection)).toLowerCase(Locale.ROOT);
+        return identity.contains("sqlmode=mysql");
+    }
+
+    private static String connectionUrl(Connection connection) {
+        try {
+            String url = connection.getMetaData().getURL();
+            return url == null ? "" : url;
         } catch (Exception ignored) {
             return "";
         }
@@ -483,7 +648,11 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     protected abstract String buildJdbcUrl(ConnectParams params);
 
     protected Connection openConnection(ConnectParams params) throws Exception {
-        return DriverManager.getConnection(buildJdbcUrl(params), buildConnectionProperties(params));
+        return openConnection(params, buildJdbcUrl(params));
+    }
+
+    protected final Connection openConnection(ConnectParams params, String jdbcUrl) throws Exception {
+        return DriverManager.getConnection(jdbcUrl, buildConnectionProperties(params));
     }
 
     protected Properties buildConnectionProperties(ConnectParams params) {
@@ -495,6 +664,19 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             properties.setProperty("password", params.getPassword());
         }
         return properties;
+    }
+
+    @Override
+    public final List<Map<String, Object>> describeConnectionParameters(ConnectParams params) {
+        return unchecked(() -> {
+            loadDriver(params);
+            String url = buildJdbcUrl(params);
+            return JdbcConnectionParameters.describe(connectionMetadataDriver(url), url, buildConnectionProperties(params));
+        });
+    }
+
+    protected Driver connectionMetadataDriver(String jdbcUrl) throws Exception {
+        return DriverManager.getDriver(jdbcUrl);
     }
 
     protected Connection openTestConnection(ConnectParams params) throws Exception {
@@ -515,6 +697,18 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     }
 
     protected void beforeQueryExecution(Connection connection, int timeoutSecs) throws Exception {
+    }
+
+    protected JdbcExecutor.StatementMessageReader statementMessageReader() {
+        return JdbcExecutor.StatementMessageReader.NONE;
+    }
+
+    /** Called for each session RPC before its SQL can replace the connection's last trace ID. */
+    protected void beforeAgentMethod(String method, String querySessionId) {
+    }
+
+    protected boolean advancePastUpdateCounts() {
+        return false;
     }
 
     protected void beforePooledConnectionReturn(Connection connection) throws Exception {
@@ -599,6 +793,53 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         }
     }
 
+    /** Ownership outlives an RPC wait, including a driver that returns a connection late. */
+    public interface DedicatedConnectionOwner extends AutoCloseable {
+        Connection open() throws Exception;
+        default Connection openUntil(long deadlineNanos) throws Exception {
+            throw new UnsupportedOperationException("Absolute-deadline dedicated open is not supported; no connection was opened");
+        }
+        default boolean closeConnectionUntil(Connection connection, long deadlineNanos) throws java.sql.SQLException {
+            throw new UnsupportedOperationException("Absolute-deadline dedicated close is not supported; no close was submitted");
+        }
+        default boolean closeUnreturnedConnectionsUntil(long deadlineNanos) throws java.sql.SQLException {
+            throw new UnsupportedOperationException("Absolute-deadline unreturned cleanup is not supported; no close was submitted");
+        }
+        boolean resourcesReleased();
+        /** Retry cleanup of failed allocations only; never close a delivered business connection. */
+        default void closeUnreturnedConnections() throws Exception { }
+        /** Release the owner only after its connections and cleanup continuations have finished. */
+        @Override void close();
+    }
+
+    protected final DedicatedConnectionOwner registerDedicatedConnections(Runnable onRetire, Runnable onCompletion) {
+        return registerDedicatedConnections(onRetire, onCompletion, this::openConnection);
+    }
+
+    @FunctionalInterface
+    protected interface DedicatedConnectionOpener {
+        Connection open(ConnectParams params) throws Exception;
+    }
+
+    protected final DedicatedConnectionOwner registerDedicatedConnections(
+        Runnable onRetire, Runnable onCompletion, DedicatedConnectionOpener opener
+    ) {
+        synchronized (this) {
+            ConnectParams params = connectParams;
+            if (params == null) throw new IllegalStateException("Not connected");
+            if (physicalRegistry == null) {
+                physicalRegistry = new JdbcConnectionPoolRegistry();
+                ownsPhysicalRegistry = true;
+            }
+            return physicalRegistry.registerDedicatedOwner(
+                () -> opener.open(params),
+                opened -> afterPhysicalConnect(params, opened),
+                onRetire,
+                onCompletion
+            );
+        }
+    }
+
     private JdbcConnectionPoolRegistry.Lease borrowPooledConnection() throws Exception {
         ConnectParams params = connectParams;
         if (params == null || poolIdentity == null || poolRegistry == null) {
@@ -620,7 +861,12 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         );
     }
 
+    protected boolean hasRetainedResultResources() { return false; }
+
+    protected void releaseRetainedResultResources() { }
+
     private void closeCurrentConnection() throws Exception {
+        releaseRetainedResultResources();
         if (pooledLease != null) {
             boolean evict = pooledConnectionPoisoned || sessionAffinity || !preparePooledConnectionForReturn();
             releasePooledConnection(evict);
@@ -639,7 +885,17 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return JdbcSchemaSwitcher.resetBeforeReturn(connection);
     }
 
+    protected final synchronized void discardConnection(Connection failedConnection) throws java.sql.SQLException {
+        if (pooledLease != null && connection == failedConnection) {
+            // Evict the checked-out lease before closing its proxy; close alone returns it to the pool.
+            releasePooledConnection(true);
+        } else {
+            failedConnection.close();
+        }
+    }
+
     private void releasePooledConnection(boolean evict) {
+        releaseRetainedResultResources();
         JdbcConnectionPoolRegistry.Lease lease = pooledLease;
         pooledLease = null;
         connection = null;

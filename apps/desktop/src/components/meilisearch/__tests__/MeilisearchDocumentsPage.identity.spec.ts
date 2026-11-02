@@ -48,6 +48,7 @@ vi.mock("@lucide/vue", () => ({
   ArrowDown: passthrough("span"),
   ArrowUp: passthrough("span"),
   Braces: passthrough("span"),
+  ChevronDown: passthrough("span"),
   ChevronLeft: passthrough("span"),
   ChevronRight: passthrough("span"),
   Copy: passthrough("span"),
@@ -59,6 +60,7 @@ vi.mock("@lucide/vue", () => ({
   Search: passthrough("span"),
   Table2: passthrough("span"),
   Trash2: passthrough("span"),
+  Upload: passthrough("span"),
 }));
 vi.mock("@/components/ui/button", () => ({ Button: passthrough("button") }));
 vi.mock("@/components/ui/badge", () => ({ Badge: passthrough("span") }));

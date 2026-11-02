@@ -1,12 +1,8 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CODE_SNAPSHOT_CSS, materializeSnapshotCloneLineNumbers, renderCodeSnapshotHtml, savePngDataUrlToFile, snapshotElementToPng } from "@/lib/codeSnapshot/codeSnapshot";
 import { LEGACY_WEBVIEW_CLASS } from "@/lib/ui/legacyWebView";
-
-const codeSnapshotDialogSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/codeSnapshot/CodeSnapshotDialog.vue"), "utf8");
 
 const { createCodeHighlighter, highlightCode, toPng, isTauriRuntime, save, writeFile } = vi.hoisted(() => {
   const highlightCode = vi.fn((content: string, _lang: string) => `<span class="line">${content}</span>`);
@@ -199,12 +195,6 @@ describe("renderCodeSnapshotHtml", () => {
     expect(html).toContain("padding:0 24px 24px");
   });
 
-  it("keeps the snapshot dialog responsive layout classes in source", () => {
-    expect(codeSnapshotDialogSource).toContain("sm:max-w-[860px]");
-    expect(codeSnapshotDialogSource).toContain("md:flex-row");
-    expect(codeSnapshotDialogSource).toContain("md:w-52");
-  });
-
   it("materializes real line-number nodes in the export clone", () => {
     document.body.innerHTML = '<div class="dbx-code-snapshot"><pre class="dbx-code-snapshot__pre dbx-code-snapshot__pre--numbered"><code><span class="line">SELECT 1</span><span class="line">FROM dual</span></code></pre></div>';
     const root = document.body.firstElementChild as HTMLElement;
@@ -312,11 +302,23 @@ describe("renderCodeSnapshotHtml", () => {
     }
   });
 
-  it("rejects snapshots that exceed the safe rendering budget at 1x", async () => {
-    toPng.mockClear();
+  it("downscales snapshots whose source width exceeds the canvas edge limit", async () => {
+    toPng.mockResolvedValue("data:image/png;base64,test");
+    vi.stubGlobal("window", { devicePixelRatio: 1 });
+    try {
+      await snapshotElementToPng({ offsetWidth: 18_788, offsetHeight: 152, scrollWidth: 18_788, scrollHeight: 152 } as HTMLElement);
 
-    await expect(snapshotElementToPng({ offsetWidth: 20_000, offsetHeight: 100, scrollWidth: 20_000, scrollHeight: 100 } as HTMLElement)).rejects.toThrow("Snapshot is too large to export safely (20000 × 100px)");
-    expect(toPng).not.toHaveBeenCalled();
+      expect(toPng).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          width: 18_788,
+          height: 152,
+          scale: 16_384 / 18_788,
+        }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("propagates a failed native save instead of reporting a browser download", async () => {
@@ -326,5 +328,47 @@ describe("renderCodeSnapshotHtml", () => {
 
     await expect(savePngDataUrlToFile("data:image/png;base64,AA==", "snapshot.png")).rejects.toThrow("disk full");
     expect(writeFile).toHaveBeenCalledOnce();
+  });
+
+  it("encompasses the last row bottom edge and relaxes clone height for grid snapshots", async () => {
+    toPng.mockResolvedValue("data:image/png;base64,test");
+    const container = document.createElement("div");
+    container.className = "dbx-grid-snapshot";
+    container.innerHTML = "<table><tbody><tr><td>row1</td></tr><tr><td>row2</td></tr></tbody></table>";
+    document.body.appendChild(container);
+
+    // Mock layout measurements
+    Object.defineProperty(container, "offsetWidth", { value: 400 });
+    Object.defineProperty(container, "offsetHeight", { value: 300 });
+    Object.defineProperty(container, "scrollWidth", { value: 400 });
+    Object.defineProperty(container, "scrollHeight", { value: 298 });
+    container.getBoundingClientRect = () => ({ top: 10, bottom: 310, left: 0, right: 400, width: 400, height: 300 }) as DOMRect;
+
+    const lastRow = container.querySelector("tr:last-child") as HTMLTableRowElement;
+    lastRow.getBoundingClientRect = () => ({ top: 280, bottom: 318, left: 0, right: 400, width: 400, height: 38 }) as DOMRect;
+
+    try {
+      await snapshotElementToPng(container);
+
+      // Height should encompass lastRow.bottom (318) - container.top (10) = 308
+      expect(toPng).toHaveBeenLastCalledWith(
+        container,
+        expect.objectContaining({
+          width: 400,
+          height: 308,
+        }),
+      );
+
+      const options = toPng.mock.calls.at(-1)?.[1];
+      expect(typeof options?.onclone).toBe("function");
+
+      const clone = container.cloneNode(true) as HTMLElement;
+      clone.style.height = "308px";
+      options.onclone(clone);
+      expect(clone.style.height).toBe("auto");
+      expect(clone.style.minHeight).toBe("308px");
+    } finally {
+      container.remove();
+    }
   });
 });

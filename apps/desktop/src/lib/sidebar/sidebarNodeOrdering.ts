@@ -17,7 +17,67 @@ function sortRecursive(node: TreeNode, databaseType?: DatabaseType): TreeNode {
   };
 }
 
+/**
+ * Virtual table groups are a display-level projection (see
+ * `applyTableVGroupsToChildren`) whose order comes from the stored layout, not
+ * from the alphabet. Every ordering pass therefore has to leave them ahead of
+ * the flat rows: a name-sorted metadata merge would otherwise drop a group back
+ * to its alphabetical slot, and the row would visibly jump from the top of the
+ * list to the bottom until the next projection ran (issues #9644 / #9653).
+ */
+function hoistTableVGroupChildren(nodes: TreeNode[]): TreeNode[] {
+  if (!nodes.some((node) => node.type === "table-vgroup")) return nodes;
+  return [...nodes.filter((node) => node.type === "table-vgroup"), ...nodes.filter((node) => node.type !== "table-vgroup")];
+}
+
 export function sortSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">, children: readonly TreeNode[], databaseType?: DatabaseType): TreeNode[] {
+  return hoistTableVGroupChildren(orderSidebarTreeChildrenForParent(parent, children, databaseType));
+}
+
+/**
+ * Orders a container whose rows are merged from paged metadata: only the flat
+ * rows are sorted by label, while projected virtual table groups keep the
+ * position (and relative order) the layout projection gave them. Sorting the
+ * groups by name would move them out of the top slot they were projected into
+ * (issues #9644 / #9653).
+ */
+export function sortSidebarTreeChildrenByNameKeepingTableVGroups(parent: Pick<TreeNode, "type">, children: readonly TreeNode[], databaseType?: DatabaseType): TreeNode[] {
+  const groups = children.filter((node) => node.type === "table-vgroup");
+  const flat = children.filter((node) => node.type !== "table-vgroup");
+  const orderedFlat = [...flat].sort((left, right) => sidebarTreeCollator.compare(left.label, right.label));
+  return sortSidebarTreeChildrenForParent(parent, [...groups, ...orderedFlat], databaseType);
+}
+
+function isBottomConnectionUtilityNode(child: TreeNode): boolean {
+  return child.type === "oracle-db-links" || child.type === "database-job-admin" || child.type === "user-admin" || child.type === "xugu-user-admin" || child.type === "dameng-users" || child.type === "dameng-roles" || child.type === "dameng-job-admin" || child.type === "group-tablespaces";
+}
+
+function connectionChildSections(children: readonly TreeNode[]) {
+  const savedSqlNodes = children.filter((child) => child.type === "saved-sql-root");
+  const bottomUtilityNodes = children.filter(isBottomConnectionUtilityNode);
+  const utilityOrder = ["oracle-db-links", "database-job-admin", "user-admin", "xugu-user-admin"];
+  const utilityRank = (child: TreeNode) => (utilityOrder.includes(child.type) ? utilityOrder.indexOf(child.type) : utilityOrder.length);
+  bottomUtilityNodes.sort((left, right) => utilityRank(left) - utilityRank(right));
+  const regularChildren = children.filter((child) => child.type !== "saved-sql-root" && !isBottomConnectionUtilityNode(child));
+  return { savedSqlNodes, bottomUtilityNodes, regularChildren };
+}
+
+export function orderSidebarConnectionUtilitiesForDisplay(nodes: TreeNode[]): TreeNode[] {
+  const ordered = nodes.map((node) => {
+    if (!node.children) return node;
+    let children = node.children;
+    if (node.type === "connection-group") children = orderSidebarConnectionUtilitiesForDisplay(children);
+    else if (node.type === "connection") {
+      const { savedSqlNodes, regularChildren, bottomUtilityNodes } = connectionChildSections(children);
+      const next = [...savedSqlNodes, ...regularChildren, ...bottomUtilityNodes];
+      if (!next.every((child, index) => child === children[index])) children = next;
+    }
+    return children === node.children ? node : { ...node, children };
+  });
+  return ordered.every((node, index) => node === nodes[index]) ? nodes : ordered;
+}
+
+function orderSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">, children: readonly TreeNode[], databaseType?: DatabaseType): TreeNode[] {
   const normalized = children.map((child) => sortRecursive(child, databaseType));
 
   if (parent.type === "mongo-db") {
@@ -35,12 +95,22 @@ export function sortSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">,
   }
 
   if (parent.type === "connection") {
-    const savedSqlNodes = normalized.filter((child) => child.type === "saved-sql-root");
-    const userAdminNodes = normalized.filter((child) => child.type === "user-admin" || child.type === "dameng-users" || child.type === "dameng-roles");
-    const regularChildren = normalized.filter((child) => child.type !== "user-admin" && child.type !== "dameng-users" && child.type !== "dameng-roles" && child.type !== "saved-sql-root");
-    const withConnectionUtilityOrder = (children: TreeNode[]) => [...savedSqlNodes, ...children, ...userAdminNodes];
+    const { savedSqlNodes, bottomUtilityNodes, regularChildren } = connectionChildSections(normalized);
+    const withConnectionUtilityOrder = (children: TreeNode[]) => [...savedSqlNodes, ...children, ...bottomUtilityNodes];
 
-    if (databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "qdrant" || databaseType === "milvus" || databaseType === "weaviate" || databaseType === "chromadb") {
+    if (
+      databaseType === "mongodb" ||
+      databaseType === "elasticsearch" ||
+      databaseType === "easysearch" ||
+      databaseType === "meilisearch" ||
+      databaseType === "solr" ||
+      databaseType === "couchdb" ||
+      databaseType === "qdrant" ||
+      databaseType === "milvus" ||
+      databaseType === "weaviate" ||
+      databaseType === "chromadb" ||
+      databaseType === "salesforce"
+    ) {
       const meilisearchSystem = regularChildren.filter((child) => child.type === "meilisearch-system");
       const databaseObjects = regularChildren.filter((child) => child.type !== "meilisearch-system");
       return withConnectionUtilityOrder([...sortByLabel(databaseObjects), ...meilisearchSystem]);

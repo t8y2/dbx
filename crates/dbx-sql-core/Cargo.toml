@@ -1,0 +1,18 @@
+[package]
+name = "dbx-sql-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+dbx-types = { path = "../dbx-types", default-features = false }
+chrono = { version = "0.4", features = ["serde"] }
+encoding_rs = "0.8"
+log = "0.4"
+regex = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+sqlparser = { version = "0.62.0", features = ["visitor"] }
+unicode-ident = "1"
+winnow = "1.0"

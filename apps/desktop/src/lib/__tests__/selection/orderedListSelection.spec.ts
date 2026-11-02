@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { orderedListRangeAnchorIndex, orderedListSelectionIntent } from "@/lib/selection/orderedListSelection";
+import { orderedListRangeAnchorIndex, orderedListRangeIndices, orderedListSelectionIntent } from "@/lib/selection/orderedListSelection";
 
 describe("orderedListSelectionIntent", () => {
   it("uses Shift for range selection even when another modifier is also reported", () => {
@@ -36,5 +36,23 @@ describe("orderedListRangeAnchorIndex", () => {
   it("does not fall back to the first item without an anchor", () => {
     expect(orderedListRangeAnchorIndex(items, null, null)).toBeNull();
     expect(orderedListRangeAnchorIndex(items, null, { type: "file", id: "missing" })).toBeNull();
+  });
+});
+
+describe("orderedListRangeIndices", () => {
+  it("covers both directions inclusively", () => {
+    expect(orderedListRangeIndices(5, 1, 3)).toEqual([1, 2, 3]);
+    expect(orderedListRangeIndices(5, 3, 1)).toEqual([1, 2, 3]);
+    expect(orderedListRangeIndices(5, 2, 2)).toEqual([2]);
+  });
+
+  it("clamps to the list bounds", () => {
+    expect(orderedListRangeIndices(3, 0, 2)).toEqual([0, 1, 2]);
+  });
+
+  it("returns nothing for an empty list or an out-of-range position", () => {
+    expect(orderedListRangeIndices(0, 0, 0)).toEqual([]);
+    expect(orderedListRangeIndices(3, -1, 1)).toEqual([]);
+    expect(orderedListRangeIndices(3, 1, 3)).toEqual([]);
   });
 });

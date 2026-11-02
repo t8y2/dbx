@@ -1,0 +1,10 @@
+import { build as viteBuild } from "vite";
+import { build } from "esbuild";
+import vue from "@vitejs/plugin-vue";
+import tailwind from "@tailwindcss/vite";
+import { viteSingleFile } from "vite-plugin-singlefile";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+const root = dirname(fileURLToPath(import.meta.url));
+await viteBuild({ configFile: false, root: resolve(root, "ui"), plugins: [vue(), tailwind(), viteSingleFile()], build: { outDir: resolve(root, "dist/ui"), emptyOutDir: true, target: "es2022" } });
+await build({ entryPoints: [resolve(root, "runtime.mjs")], outfile: resolve(root, "dist/runtime.mjs"), bundle: true, platform: "node", format: "esm", target: "node22", banner: { js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);" } });

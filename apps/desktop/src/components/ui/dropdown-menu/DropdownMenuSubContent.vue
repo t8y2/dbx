@@ -4,6 +4,7 @@ import type { HTMLAttributes } from "vue";
 import { reactiveOmit } from "@vueuse/core";
 import { DropdownMenuSubContent, useForwardPropsEmits } from "reka-ui";
 import { cn } from "@/lib/common/utils";
+import { useFloatingLayerOrder } from "@/components/ui/dialog/useDialogLayerOrder";
 
 const props = defineProps<DropdownMenuSubContentProps & { class?: HTMLAttributes["class"] }>();
 const emits = defineEmits<DropdownMenuSubContentEmits>();
@@ -11,15 +12,17 @@ const emits = defineEmits<DropdownMenuSubContentEmits>();
 const delegatedProps = reactiveOmit(props, "class");
 
 const forwarded = useForwardPropsEmits(delegatedProps, emits);
+const { forwardRef } = useFloatingLayerOrder();
 </script>
 
 <template>
   <DropdownMenuSubContent
+    :ref="forwardRef"
     data-slot="dropdown-menu-sub-content"
     v-bind="forwarded"
     :class="
       cn(
-        'data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 ring-foreground/10 text-popover-foreground min-w-[96px] rounded-md p-1 ring-1 duration-100 cn-menu-translucent z-50 origin-(--reka-dropdown-menu-content-transform-origin) overflow-hidden',
+        'data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 ring-foreground/10 text-popover-foreground min-w-[96px] rounded-md p-1 ring-1 duration-100 cn-menu-translucent z-(--dbx-floating-layer-z-index) origin-(--reka-dropdown-menu-content-transform-origin) overflow-hidden',
         props.class,
       )
     "

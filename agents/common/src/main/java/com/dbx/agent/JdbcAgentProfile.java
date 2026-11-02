@@ -18,6 +18,7 @@ public class JdbcAgentProfile {
     private final boolean nativeTableDdlSupported;
     private final boolean objectSourceSupported;
     private final boolean triggersSupported;
+    private final boolean escapeSchemaWildcards;
 
     public JdbcAgentProfile(String driverClass, String urlTemplate) {
         this(driverClass, urlTemplate, 0);
@@ -76,6 +77,40 @@ public class JdbcAgentProfile {
         boolean objectSourceSupported,
         boolean triggersSupported
     ) {
+        this(
+            driverClass,
+            urlTemplate,
+            defaultPort,
+            skipExecutionContext,
+            excludedSchemas,
+            tableTypes,
+            identifierQuote,
+            schemaSwitchPrefix,
+            catalogFallbackEnabled,
+            nativeTableDdlSupported,
+            objectSourceSupported,
+            triggersSupported,
+            // 默认对 schema pattern 里的 _ / % 通配符转义（getSearchStringEscape()），
+            // HANA 的 _SYS_RT 等含下划线 schema 依赖它避免误匹配。
+            true
+        );
+    }
+
+    public JdbcAgentProfile(
+        String driverClass,
+        String urlTemplate,
+        int defaultPort,
+        boolean skipExecutionContext,
+        Set<String> excludedSchemas,
+        List<String> tableTypes,
+        String identifierQuote,
+        String schemaSwitchPrefix,
+        boolean catalogFallbackEnabled,
+        boolean nativeTableDdlSupported,
+        boolean objectSourceSupported,
+        boolean triggersSupported,
+        boolean escapeSchemaWildcards
+    ) {
         this.driverClass = driverClass;
         this.urlTemplate = urlTemplate;
         this.defaultPort = defaultPort;
@@ -88,6 +123,7 @@ public class JdbcAgentProfile {
         this.nativeTableDdlSupported = nativeTableDdlSupported;
         this.objectSourceSupported = objectSourceSupported;
         this.triggersSupported = triggersSupported;
+        this.escapeSchemaWildcards = escapeSchemaWildcards;
     }
 
     public String getDriverClass() {
@@ -126,6 +162,17 @@ public class JdbcAgentProfile {
         return catalogFallbackEnabled;
     }
 
+    /**
+     * Whether table metadata lookups should retry with a unique case-insensitive table name match.
+     *
+     * <p>Most JDBC drivers treat the table pattern passed to {@code DatabaseMetaData} as a
+     * pattern with driver-defined case rules. Drivers that expose case-insensitive SQL name
+     * resolution but case-sensitive metadata patterns can opt into this fallback.</p>
+     */
+    public boolean getCaseInsensitiveTableMetadata() {
+        return false;
+    }
+
     public boolean getNativeTableDdlSupported() {
         return nativeTableDdlSupported;
     }
@@ -136,6 +183,10 @@ public class JdbcAgentProfile {
 
     public boolean getTriggersSupported() {
         return triggersSupported;
+    }
+
+    public boolean getEscapeSchemaWildcards() {
+        return escapeSchemaWildcards;
     }
 
     public String buildUrl(ConnectParams params) {

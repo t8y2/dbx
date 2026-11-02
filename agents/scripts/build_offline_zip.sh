@@ -60,6 +60,15 @@ for platform in "${PLATFORMS[@]}"; do
     cp "$native_file" "$WORK/drivers/"
   done
 
+  # The SQLite SSH worker executes on the remote SSH host, so its Linux binaries
+  # must ship in every bundle: the desktop platform never matches them, which
+  # otherwise leaves the worker missing from offline packages (#8987).
+  for worker_file in "$RELEASE_DIR"/dbx-agent-sqlite-worker-*-linux-x64 \
+      "$RELEASE_DIR"/dbx-agent-sqlite-worker-*-linux-aarch64; do
+    [ -f "$worker_file" ] || continue
+    cp "$worker_file" "$WORK/drivers/"
+  done
+
   ZIP_NAME="dbx-agents-offline-${platform}.zip"
   ZIP_ENTRIES=(agent-registry.json jre/ drivers/)
   [ -d "$WORK/jdbc" ] && ZIP_ENTRIES+=(jdbc/)

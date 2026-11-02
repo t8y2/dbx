@@ -86,6 +86,10 @@ function clearActionButton(): HTMLButtonElement | null {
   return document.body.querySelector('[data-testid="sql-parameters-clear-values"]');
 }
 
+function ignoreActionButton(): HTMLButtonElement | null {
+  return document.body.querySelector('[data-testid="sql-parameters-ignore"]');
+}
+
 function clickRawAction() {
   const button = actionButton();
   expect(button).not.toBeNull();
@@ -94,6 +98,12 @@ function clickRawAction() {
 
 function clickClearAction() {
   const button = clearActionButton();
+  expect(button).not.toBeNull();
+  button!.click();
+}
+
+function clickIgnoreAction() {
+  const button = ignoreActionButton();
   expect(button).not.toBeNull();
   button!.click();
 }
@@ -180,6 +190,49 @@ describe("SqlParameterDialog raw parameter action", () => {
     expect(onExecute).toHaveBeenCalledOnce();
     expect(onExecute).toHaveBeenCalledWith(RAW_SQL);
     expect(state.open).toBe(false);
+  });
+});
+
+describe("SqlParameterDialog surface", () => {
+  it("keeps the dialog background opaque while a wallpaper is active", async () => {
+    await mountDialog();
+    const content = document.body.querySelector('[data-slot="dialog-content"]');
+    expect(content).not.toBeNull();
+    const classes = content!.className;
+    expect(classes).toContain("bg-background-solid");
+    expect(classes).not.toMatch(/(^|\s)!bg-background(\s|$)/);
+  });
+});
+
+describe("SqlParameterDialog ignore parameter action", () => {
+  it("closes the dialog and emits the original SQL without remembering or mutating values", async () => {
+    const { state, onExecute } = await mountDialog();
+
+    clickIgnoreAction();
+    await nextTick();
+
+    expect(state.open).toBe(false);
+    expect(onExecute).toHaveBeenCalledOnce();
+    expect(onExecute).toHaveBeenCalledWith(SQL);
+    expect(historyMocks.remember).not.toHaveBeenCalled();
+    expect(parameterInputs().map((input) => input.value)).toEqual(PARAMETERS.map((parameter) => MIXED_VALUES[parameter.key]?.value ?? ""));
+  });
+
+  it("does not apply current parameter edits when ignoring", async () => {
+    const { state, onExecute } = await mountDialog();
+
+    const firstInput = parameterInputs()[0];
+    expect(firstInput).not.toBeUndefined();
+    firstInput!.value = "changed";
+    firstInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    clickIgnoreAction();
+    await nextTick();
+
+    expect(state.open).toBe(false);
+    expect(onExecute).toHaveBeenCalledWith(SQL);
+    expect(historyMocks.remember).not.toHaveBeenCalled();
   });
 });
 

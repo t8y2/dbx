@@ -1,7 +1,7 @@
-import type { Text } from "@codemirror/state";
+import { RangeSet, RangeValue, type ChangeSet, type Text } from "@codemirror/state";
 import type { DatabaseType } from "@/types/database";
-import { readSqlBracedParameterAt, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
-import { executableStatementRanges, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
+import { executableStatementRanges, startsHashLineComment, statementParsingDatabaseType, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { cursorBelongsToTrailingStatementDelimiter } from "@/lib/sql/statementDelimiter";
 
 export interface ExecutableStatementRangeCache {
@@ -12,6 +12,52 @@ export interface ExecutableStatementRangeCache {
   byStart: Map<number, SqlTextRange>;
   byExecutableLineStart: Map<number, SqlTextRange>;
   ranges: SqlTextRange[];
+}
+
+/**
+ * Membership-only view of the statement-start positions a run-statement gutter
+ * needs (`byStart` keys plus `byExecutableLineStart` keys). Kept separate from
+ * the full cache so it can be cheaply shifted through a ChangeSet on every
+ * keystroke and fully rebuilt only after typing pauses, instead of re-parsing
+ * the whole document synchronously per keystroke.
+ */
+export interface StatementGutterStartIndex {
+  starts: RangeSet<StatementGutterStartMarker>;
+  executableLineStarts: RangeSet<StatementGutterStartMarker>;
+}
+
+class StatementGutterStartMarker extends RangeValue {
+  startSide = 1;
+  endSide = 1;
+}
+
+const statementGutterStartMarker = new StatementGutterStartMarker();
+
+function statementGutterStartRangeSet(positions: Iterable<number>): RangeSet<StatementGutterStartMarker> {
+  return RangeSet.of(
+    Array.from(new Set(positions), (position) => statementGutterStartMarker.range(position)),
+    true,
+  );
+}
+
+export function statementGutterStartIndexForCache(cache: ExecutableStatementRangeCache): StatementGutterStartIndex {
+  return {
+    starts: statementGutterStartRangeSet(cache.byStart.keys()),
+    executableLineStarts: statementGutterStartRangeSet(cache.byExecutableLineStart.keys()),
+  };
+}
+
+export function mapStatementGutterStartIndex(index: StatementGutterStartIndex, changes: ChangeSet): StatementGutterStartIndex {
+  return { starts: index.starts.map(changes), executableLineStarts: index.executableLineStarts.map(changes) };
+}
+
+export function statementGutterStartIndexHasStartAt(index: StatementGutterStartIndex, lineFrom: number): boolean {
+  return rangeSetHasPointAt(index.starts, lineFrom) || rangeSetHasPointAt(index.executableLineStarts, lineFrom);
+}
+
+function rangeSetHasPointAt(ranges: RangeSet<StatementGutterStartMarker>, position: number): boolean {
+  const cursor = ranges.iter(position);
+  return cursor.value !== null && cursor.from === position;
 }
 
 export type ExecutableStatementRangeParser = (sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions) => SqlTextRange[];
@@ -25,7 +71,7 @@ export function executableStatementRangeCacheForDoc(
 ): ExecutableStatementRangeCache {
   const parameterOptions = typeof parameterOptionsOrParse === "function" ? undefined : parameterOptionsOrParse;
   const parse = typeof parameterOptionsOrParse === "function" ? parameterOptionsOrParse : customParse;
-  const parameterSyntaxKey = parameterOptions?.enabledSyntaxes ? parameterOptions.enabledSyntaxes.join(",") : "*";
+  const parameterSyntaxKey = `${parameterOptions?.enabledSyntaxes ? parameterOptions.enabledSyntaxes.join(",") : "*"}|compat=${parameterOptions?.compatibilityMode?.trim().toUpperCase() ?? ""}`;
   if (cache?.doc === doc && cache.databaseType === databaseType && cache.parameterSyntaxKey === parameterSyntaxKey) return cache;
 
   const byStart = new Map<number, SqlTextRange>();
@@ -47,6 +93,7 @@ export function executableStatementRangeCacheForDoc(
 }
 
 function executableStartAfterLeadingDirective(sql: string, range: SqlTextRange, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number | null {
+  databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   const text = range.sql;
   const hasExecutableDirective = text.startsWith("/*+") || text.startsWith("/*@") || text.startsWith("/*&") || (databaseType === "mysql" && text.startsWith("/*proxy*/"));
   if (!hasExecutableDirective) return null;
@@ -69,7 +116,7 @@ function executableStartAfterLeadingDirective(sql: string, range: SqlTextRange, 
       continue;
     }
 
-    if (databaseType !== "sqlserver" && text[offset] === "#" && readSqlBracedParameterAt(sql, range.from + offset, parameterOptions)?.syntax !== "mybatis") {
+    if (startsHashLineComment(sql, range.from + offset, databaseType, parameterOptions)) {
       const newline = text.indexOf("\n", offset + 1);
       if (newline < 0) return null;
       offset = newline + 1;
@@ -91,7 +138,7 @@ export function executableStatementRangeAtCursor(cache: ExecutableStatementRange
   const line = cache.doc.lineAt(pos);
   const lineText = line.text.trim();
   const lineContentStart = line.from + line.text.search(/\S|$/);
-  const startsHashComment = lineText.startsWith("#") && readSqlBracedParameterAt(cache.doc.toString(), lineContentStart, cache.parameterOptions)?.syntax !== "mybatis";
+  const startsHashComment = lineText.startsWith("#") && startsHashLineComment(cache.doc.toString(), lineContentStart, statementParsingDatabaseType(cache.databaseType, cache.parameterOptions), cache.parameterOptions);
   if (!lineText || lineText.startsWith("--") || startsHashComment || isCursorOnLeadingBlockComment(line.text, pos - line.from)) return null;
 
   for (let index = 0; index < cache.ranges.length; index += 1) {

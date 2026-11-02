@@ -14,7 +14,38 @@ AI 助手 → DBX MCP → 你的数据库 → 返回结果
                     ↘ DBX 桌面端（打开或展示结果）
 ```
 
-## 快速开始
+## 原生安装（推荐）
+
+无需 Node.js。macOS 或 Linux 执行：
+
+```bash
+curl -fsSL https://dbxio.com/install-mcp | sh
+```
+
+Windows 在 PowerShell 中执行：
+
+```powershell
+irm https://dbxio.com/install-mcp.ps1 | iex
+```
+
+脚本校验下载内容，将 `dbx-mcp` 安装到 `~/.dbx/bin`，并打印 Claude Code、Cursor、Codex、ZCode 和通用 MCP 配置。请使用输出中**展开后的可执行文件绝对路径**，不要填写 `~` 或裸命令 `dbx-mcp`：GUI 客户端不一定继承 shell 的 PATH。已有的 `DBX_DATA_DIR` 等环境配置继续有效。DBX 桌面设置优先使用发现的原生二进制，找不到时保留原有 npm 启动方式。
+
+重跑同一安装命令即可升级；版本相同时提示 `already up to date`。版本优先读取 `dbx-mcp --version`，旧版二进制不支持时回退读取 `~/.dbx/bin/.dbx-mcp-version`。断网时安装失败但不会替换现有二进制。下载源依次为 npmjs、npmmirror、GitHub Releases；内容校验不匹配时立即拒绝安装。
+
+macOS 和 Linux 也可以使用 Homebrew：
+
+```bash
+brew install t8y2/tap/dbx-mcp
+brew upgrade t8y2/tap/dbx-mcp
+```
+
+Homebrew 安装后，客户端配置使用 `echo "$(brew --prefix)/bin/dbx-mcp"` 输出的绝对路径。此通道只安装 MCP 服务器，不安装独立的 `dbx` CLI。
+
+npm/npx 通道保持兼容。DBX 桌面端现在默认安装独立原生服务，并为已有 npm 用户显示推荐的原生迁移入口。迁移会保留 npm 包作为兜底，也不会自动改写外部客户端文件：请将启动命令替换为页面生成的原生绝对路径，删除 Node/npx 参数并保留 `env`。仍可选择执行 `npm rm -g @dbx-app/mcp-server` 清理旧包。桌面端可以更新和卸载当前的独立原生或 Homebrew 安装；卸载独立原生版本后，保留的 npm 安装会重新成为兜底。
+
+macOS 上，Shell 安装器还会在替换二进制前验证官方 Developer ID 签名及稳定的 `com.dbx.app.mcp` designated requirement。未签名、临时签名、签名身份不符或绑定单次构建哈希的安装包会被拒绝，已安装的程序和版本标记保持不变。此校验针对 Shell 安装器，Homebrew 和 npm 保持各自的安装流程。
+
+## npm 快速开始
 
 <Steps>
   <Step>
@@ -87,39 +118,224 @@ DeepSeek Harness 通过 Cordis 插件条目加载 MCP Server，不读取 `mcpSer
 
 ## 工具列表
 
-DBX MCP 当前提供 12 个工具：
+DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权限设置）：
 
 | 工具 | 说明 |
 | --- | --- |
-| `dbx_list_connections` | 列出当前 MCP 会话可见的连接 |
+| `dbx_list_connections` | 列出当前 MCP 会话可见的连接，包括已保存的备注 |
+| `dbx_list_databases` | 列出连接中可通过 MCP 访问的数据库，并遵守该连接的数据库范围 |
 | `dbx_add_connection` | 添加连接到 DBX 存储 |
+| `dbx_duplicate_connection` | 复制一个连接及其完整配置 |
 | `dbx_remove_connection` | 从 DBX 存储删除连接 |
 | `dbx_list_tables` | 列出表、视图或集合 |
 | `dbx_describe_table` | 返回列定义和表元数据 |
+| `dbx_list_routines` | 列出 Schema 中的存储过程和函数，支持可选的 `routine_type` 过滤（PROCEDURE 或 FUNCTION） |
+| `dbx_get_routine_source` | 按名称返回存储过程或函数的源码，重载场景可用可选的 `signature` 区分 |
 | `dbx_get_schema_context` | 返回适合 AI 使用的紧凑 Schema 上下文 |
-| `dbx_execute_query` | 执行 SQL 或支持的 MongoDB shell 命令，最多返回 100 行 |
+| `dbx_execute_query` | 执行 SQL 或支持的 MongoDB shell 命令，默认返回 100 行，可用 `max_rows` 参数提高到最多 1000 行 |
+| `dbx_execute_batch` | 一次执行包含多条语句的 SQL 脚本，按语句返回结果（多语句脚本搭配 `use_transaction` 时返回单个合并结果） |
 | `dbx_open_session` | 为 SQL 连接打开固定后端连接的有状态查询会话 |
+| `dbx_begin_transaction` | 在已启用事务的原生 MySQL 会话上开始事务 |
+| `dbx_commit_transaction` | 在 MySQL 确认 `COMMIT` 后提交当前会话事务 |
+| `dbx_rollback_transaction` | 回滚当前会话事务 |
 | `dbx_close_session` | 关闭会话并释放固定连接资源 |
 | `dbx_execute_redis_command` | 执行 Redis 命令 |
+| `dbx_salesforce_current_user` | 显示连接背后的 Salesforce 用户与组织，包括简档是否具有 “Modify All Data” |
+| `dbx_salesforce_prepare_write` | 准备一条 Salesforce 记录写入，返回摘要和一次性确认令牌 |
+| `dbx_salesforce_apply_write` | 使用确认令牌应用已准备的 Salesforce 写入 |
+| `dbx_peek_messages` | 读取 Kafka 消息，不提交消费位点 |
+| `dbx_send_message` | 向支持的消息队列 Topic 或队列发送消息 |
 | `dbx_open_table` | 在运行中的 DBX 桌面端打开表 |
 | `dbx_execute_and_show` | 执行查询并在 DBX 中展示结果 |
 
+
+### Nacos 与 Consul 工具级别
+
+Nacos 和 Consul 按产品提供工具集。客户端工具列表会按连接类型覆盖、工具开关和权限筛选；每次调用仍会根据目标连接及其子范围重新校验可见范围和生效权限，工具出现在列表中不代表任意目标都可调用。
+
+| 工具 | 级别 | 说明 |
+| --- | --- | --- |
+| `dbx_nacos_list_namespaces` | 只读 | 列出当前连接可见的 Nacos 命名空间 |
+| `dbx_nacos_list_configs` | 只读 | 按命名空间列出配置，可按 dataId、group、文本和分页筛选 |
+| `dbx_nacos_get_config` | 只读 | 读取配置内容及元数据 |
+| `dbx_nacos_config_history` | 只读 | 查看配置发布历史 |
+| `dbx_nacos_publish_config` | 读写 | 创建或覆盖一条配置，可用 CAS MD5 防止覆盖并发修改 |
+| `dbx_nacos_delete_config` | 高危 | 删除一条配置 |
+| `dbx_nacos_list_services` | 只读 | 列出命名空间中的服务 |
+| `dbx_nacos_list_instances` | 只读 | 查看服务实例的健康、权重和启用状态 |
+| `dbx_nacos_update_instance` | 读写 | 调整实例上下线状态或权重 |
+| `dbx_nacos_search_configs` | 只读 | 在当前或全部允许的命名空间中搜索配置内容 |
+| `dbx_nacos_rollback_config` | 读写 | 从发布历史恢复一条配置 |
+| `dbx_nacos_get_service` | 只读 | 读取服务详情 |
+| `dbx_nacos_register_instance` | 读写 | 注册一个服务实例 |
+| `dbx_nacos_deregister_instance` | 高危 | 注销一个服务实例 |
+| `dbx_consul_kv_list` | 只读 | 按前缀分页列出 Consul KV |
+| `dbx_consul_kv_get` | 只读 | 读取一个 KV 及其 ModifyIndex |
+| `dbx_consul_kv_put` | 读写 | 写入一个 KV，可用 CAS 防止覆盖并发修改 |
+| `dbx_consul_kv_delete` | 高危 | 删除一个 KV |
+| `dbx_consul_list_services` | 只读 | 列出 Consul 目录中的服务和标签 |
+| `dbx_consul_list_nodes` | 只读 | 列出目录节点 |
+| `dbx_consul_service_health` | 只读 | 查看服务实例及健康检查 |
+| `dbx_consul_set_maintenance` | 读写 | 设置或取消 Consul Agent 服务维护模式 |
+
+Nacos 的子范围是 **命名空间**。在 **权限管理** 的访问控制树展开 Nacos 连接，选择“全部命名空间”“指定命名空间”或“不开放任何命名空间”；`dbx_nacos_list_namespaces` 也只返回可见命名空间。Consul 连接本身已经绑定一个 datacenter，当前不再在树中拆分 datacenter，也没有 KV 前缀子范围设置。
+
+Nacos 公共命名空间在权限规则中使用 `public`；连接默认命名空间为空时，省略参数或传入空字符串都会按同一个公共命名空间判断权限。
+
+Nacos 的用户、角色、命名空间增删改等管理工具，以及 Consul 的 ACL、Intentions 等管理工具默认不开放。快照恢复、Raft/集群成员变更、License 写入和其他无法可靠判定风险的集群操作不会作为 MCP 工具提供。
+
+`dbx_list_connections` 和 `dbx://connections` 会返回已保存的连接备注，不受侧边栏显示开关影响。可访问该连接的 MCP 客户端也能看到备注，请勿在备注中保存密码或其他敏感信息。
+
+`dbx_execute_query` 返回行数：
+
+- `max_rows`：取值 1–1000，默认 100。越界值会被夹取到范围内，而不是报错。仅对 SQL 连接生效——MongoDB shell 命令始终最多返回 100 行，路由到批量执行器的多语句脚本每条语句最多返回 100 行。
+
 启用连接作用域后，修改连接和桌面 UI 工具会被隐藏。
+
+## 插件工具
+
+实现了 `mcp/tools` 桥接协议的 DBX 插件 sidecar，其工具可由 `dbx` MCP 服务器合并进 `tools/list`，无需在客户端逐个配置插件的 `--mcp` 进程。该机制按作者声明加入：只有 manifest 中声明了 `mcp` 贡献且 `external_tools: true` 的插件（SSH、Files、Kafka、LDAP 等均可）才会暴露工具：
+
+- 工具名为 `dbx_<插件前缀>__<工具名>`，前缀取插件 id 的最后一段：`io.dbx.ssh` → `dbx_ssh__sftp_list_dir`，`io.dbx.kafka` → `dbx_kafka__kafka_topics_list`；
+- 连接由宿主绑定：工具 schema 中的 `connectionId` / `connectionName` 会被移除，改由可选的 `dbx_connection` 参数选择该插件**已保存且被 MCP 设置放行**的连接；只有一个可用连接时省略该参数即可自动绑定；凭据由宿主从保存的连接生成 lifecycle 注入，永不经过模型或客户端；
+- 作用域会话（`DBX_MCP_SCOPE_*`）与全局 MCP 设置（工具 allowlist、连接 allowlist）同样约束插件工具；
+- 工具白名单支持精确名称和插件通配符：`dbx_<前缀>__<工具名>` 放行单个工具，`dbx_<前缀>__*` 放行一个插件，`dbx_*__*` 放行所有插件；
+- Web / Docker 后端不提供插件工具。
+
+### 懒发现（`DBX_MCP_PLUGIN_TOOLS`）
+
+插件较多时，平铺的 `tools/list` 会在参数 schema 上消耗大量上下文。设置 `DBX_MCP_PLUGIN_TOOLS=lazy` 只暴露三个元工具——`dbx_plugin_list`（可过滤的插件目录）、`dbx_plugin_tools`（按**插件 id** 查看某插件的工具与 schema）、`dbx_plugin_call`（按插件 id + 工具名调用）——schema 在需要时才进入上下文。`both` 同时平铺与元工具。未设置环境变量时，新配置默认直接列出；已保存的模式保持不变。“自动（兼容模式）”保留插件工具总数不超过 40 个时直接列出、更多时按需发现的行为。
+
+## Resources
+
+支持 MCP Resources 的客户端可以读取连接目录，并通过模板获取数据库元数据：
+
+| Resource URI | 说明 |
+| --- | --- |
+| `dbx://connections` | 当前 MCP 范围内可见的连接 |
+| `dbx://connections/{connection_id}/databases` | 指定连接中可见的数据库 |
+| `dbx://connections/{connection_id}/tables{?database,schema}` | 可选数据库或 Schema 中的表和视图 |
+| `dbx://connections/{connection_id}/table-schema{?database,schema,table}` | 指定表的字段定义；`table` 为必填参数 |
+
+Resource 的发现和读取会复用对应 Tool 的白名单，以及连接、分组、数据库和运行时范围限制。查询参数值必须进行 URI 编码。SQL 执行和所有可写操作仍只通过 Tool 提供。
+
+## 读取 Kafka 消息
+
+包含 `mq-admin` 的构建在本地和 Web 模式下均提供 `dbx_peek_messages`。通过 `connection_id` 或 `connection_name` 选择已保存的 Kafka 连接，并指定 `topic`。工具遵守 MCP 连接范围及工具白名单，允许读取只读连接和生产连接，不提交消费位点。
+
+```json
+{
+  "connection_name": "Kafka",
+  "topic": "events",
+  "count": 20,
+  "start_position": "offset",
+  "partition": 0,
+  "offset": 120
+}
+```
+
+- `count`：1–100，默认 20。
+- `start_position`：`latest`（默认）、`earliest` 或 `offset`。仅 `offset` 模式必须且允许传入非负 `offset`。
+- `partition`：可选的非负分区号。不传时跨分区读取；offset 模式下从各分区的该位点开始读取。
+- JSON 结果包含 `messages`，保留 base64 消息体、可无损解码时的 UTF-8 预览、消息 ID 和元数据。`incomplete` 表示读取达到超时或扫描上限；`outputTruncated` 表示为满足 256 KiB 消息输出预算而省略了整条消息。如果首条消息过大，可能返回空列表并标记 `outputTruncated: true`，不会静默截断消息体。
+
+该工具读取有限条消息快照，不提供持续订阅或全 Topic 文本搜索。其他消息队列类型会被拒绝。
+
+## 批量 SQL 执行
+
+`dbx_execute_batch` 在单次调用内执行包含多条语句的 SQL 脚本。默认（自动提交）模式下按语句返回结果，因此调用方可以清楚看到哪条失败、每条影响多少行、各自返回什么；使用 `use_transaction` 且脚本包含多条语句时，只返回一个合并的事务结果。
+
+- 脚本通过方言感知的解析器拆分成独立语句，字符串、注释、存储过程中出现分号也不会破坏批次。
+- 默认遇到第一条失败语句即停止；传入 `continue_on_error` 可让批内在单条语句出错后继续执行（连接级错误仍会终止）。
+- 传入 `use_transaction` 可把多条语句放入同一个 `BEGIN … COMMIT`，使整批要么全部成功要么回滚；这要求脚本包含多条语句（单语句脚本会忽略该选项，按普通自动提交执行）。此模式下调用只返回一个合并结果（而非逐语句结果），且 `use_transaction` 不能与 `session_id` 同时使用——事务批处理运行在池连接上，会丢弃会话状态；也不能与 `continue_on_error` 同时使用——事务批处理在第一条失败时即回滚并停止。当当前后端无法提供可回滚事务时，DBX 会拒绝该选项。MySQL 系连接对含 DDL 的脚本会拒绝 `use_transaction`，因为 MySQL 的 DDL 会隐式提交、无法回滚。
+- SQL 策略（只读、危险 SQL、生产保护、切换数据库）作为整体在匹配前重新检查，与 `dbx_execute_query` 一致；只要批内含一条写入或 DDL，在只读策略下整次调用都会被拒绝。
+- 每个批次在其完整执行期间都会使用独占连接，因此临时表和 `SET` 状态可在批内语句之间保留。若要跨多次 MCP 调用保留这些状态，先用 `dbx_open_session` 打开会话，再传入其 `session_id`。
+- Redis 和 MongoDB 连接不支持 `dbx_execute_batch`。
 
 ## 有状态查询会话
 
-普通 `dbx_execute_query` 调用彼此独立。需要保持数据库 Session 状态时，先调用 `dbx_open_session`，再把返回的 `sessionId` 传给后续 `dbx_execute_query`：
+普通 `dbx_execute_query` 调用彼此独立。需要保持数据库 Session 状态时，先调用 `dbx_open_session`，再把返回的 `sessionId` 传给后续 `dbx_execute_query` 或 `dbx_execute_batch`：
 
 - `USE` 或数据库上下文切换
 - 临时表
 - Session 变量和设置
 - 需要固定连接的显式事务或多步诊断
 
-会话只支持 SQL 连接，并固定到一个连接和数据库。未知、已关闭或过期的 `sessionId` 会失败，不会静默退化为普通查询。完成后应调用 `dbx_close_session`；空闲 30 分钟的会话会被回收，同时最多允许 32 个并发会话。
+会话只支持 SQL 连接，并固定到一个连接和数据库。未知、已关闭或过期的 `sessionId` 会失败，不会静默退化为普通查询。完成后应调用 `dbx_close_session`；会话默认空闲 30 分钟后回收，同时最多允许 32 个并发会话。在 MCP 宿主进程设置 `DBX_SESSION_IDLE_TTL_SECS=43200` 可将空闲时间延长为 12 小时，事务专属连接也使用此配置。值必须为正整数秒；未设置、非法值、零、负数或无法表示的时长均保留默认 1800 秒。修改后需重启宿主。使用嵌入式 DBX Web MCP 时，在 Web 服务端设置；使用独立启动器时，在启动器环境中设置。
 
 <Callout type="warn">有状态会话不会放宽 SQL 策略。`USE` 只有在会话中才有意义，但写入、DDL、生产保护、连接只读和数据库权限仍按每次请求重新检查。</Callout>
 
+### 原生 MySQL 显式事务
+
+调用 `dbx_open_session` 时传入 `enable_transactions: true`，DBX 会立即保留一条物理原生 MySQL 连接。随后依次调用 `dbx_begin_transaction`、带该 `session_id` 的一个或多个 `dbx_execute_query`/`dbx_execute_batch`，最后调用 `dbx_commit_transaction` 或 `dbx_rollback_transaction`。事务前后的查询仍使用同一条受管连接。`use_transaction` 仍不能与 `session_id` 同时使用；它是前文所述的独立原子批处理功能。
+
+该 opt-in 模式仅支持本地原生 MySQL 连接。DBX Web/`DBX_WEB_URL`、外部驱动 profile、兼容引擎及其他数据库类型会返回 `TRANSACTION_UNSUPPORTED`，不会静默退化为自动提交。事务会话每次操作只接受一条经过解析的 `SELECT`（含锁定读）、`INSERT`、`UPDATE`、`DELETE` 或 `REPLACE`；原始事务控制、DDL/临时 DDL、`CALL`、`LOAD`、表锁、`SET`、`USE`、XA、文件/输出子句、可执行注释、优化器 hint 及多语句均会被拒绝。完整批次持有同一个操作槽位，并为每条语句返回执行后的事务状态。
+
+响应包含 `transaction_state`（`idle`、`active` 或 `unknown`），并在适用时包含 `transaction_outcome`（`committed`、`rolled_back` 或 `unknown`）。普通 MySQL 语句错误可能仍让事务保持 active；DBX 会在同一连接上重新探测服务器状态后再返回。超时、取消、传输故障或丢失 `COMMIT` 确认会把结果永久标为 `unknown`，禁止该会话继续执行 SQL，并在不重放语句或 `COMMIT` 的前提下销毁连接。显式正值的连接查询超时同样用于事务操作；当连接配置为“无限制”（`0`）时，事务 owner 仍使用默认 300 秒操作上限，确保 busy 操作保持有界。关闭、过期和服务退出会对状态已知的 active 事务执行有界回滚，然后销毁连接。会话的回收途径是 `dbx_close_session`、空闲超时或 MCP 服务退出。HTTP 传输层不持有任何会话，因此没有传输会话可供 `DELETE` 结束、也不会因空闲而丢失；承载状态的只有 `session_id` 句柄本身。
+
+<Callout type="warn">回滚保证依赖 InnoDB 等事务型存储。触发器、存储函数、非事务表及外部副作用可能产生 MySQL 无法回滚的效果。DBX 会在排队完成后重新检查当前连接/数据库范围、工具 allowlist、只读与生产保护以及已确认 SQL。即使写权限被撤销，仍允许原会话执行回滚和关闭以完成清理。</Callout>
+
+## Salesforce SOQL 与 DML
+
+Salesforce 连接使用 SOQL 而非 SQL，DBX 据此调整了 MCP 的行为：
+
+- `dbx_list_tables` 列出组织中的对象，`dbx_describe_table` 列出对象字段，`dbx_execute_query` 执行 SOQL（例如 `SELECT Id, Name FROM Account LIMIT 10`）。
+- `dbx_list_databases` 会说明一个 Salesforce 组织就是一个作用域，而不会虚构数据库。
+- `dbx_execute_batch` 与 `dbx_open_session` 会被拒绝：SOQL 只读，不存在需要批处理的多语句脚本；每次调用都是无状态 REST 请求，没有可固定的会话，也没有可开启的事务。
+- 写入记录永远不会走查询通道。`dbx_execute_query` 会以 `SALESFORCE_DML_REQUIRES_CONFIRMATION` 拒绝写入尝试，因此下面的确认流程无法被绕过。
+
+### 写入确认
+
+写入分为两次调用，且只有当人看到第一步的摘要后第二步才可能执行：
+
+1. 调用 `dbx_salesforce_prepare_write`，传入 `connection_id`（或 `connection_name`）、`op`（`insert`、`update` 或 `delete`）、`object`（API 名称，如 `Account` 或 `Invoice__c`）；`update`/`delete` 需要记录 `id`，`insert`/`update` 需要 `fields`。此时不会向 Salesforce 发送任何请求。
+2. 把返回的摘要展示给用户：操作、对象、记录 Id、每个字段值、连接，以及该变更所归属的身份。
+3. 调用 `dbx_salesforce_apply_write`，传入第 1 步返回的 `confirm_token`。
+
+令牌只能使用一次，签发 5 分钟后过期，并与那一条语句绑定——写入内容变了就必须重新准备。重放、过期或从未签发的令牌会以 `CONFIRM_TOKEN_INVALID` 失败。DBX 在应用阶段会重新检查连接范围、工具白名单、只读与生产保护以及 DML 开关，因此两次调用之间撤销权限会立即生效。
+
+<Callout type="warn">Salesforce 写入不是事务性的。`dbx_salesforce_apply_write` 返回后，组织中的记录已经改变，DBX 无法回滚。每次调用只影响一条记录：`upsert`、批量与 composite 写入会在准备阶段以 `SALESFORCE_DML_INVALID` 拒绝。准备写入需要 **设置 → MCP** 中该连接的 **允许 DML** 开关，它默认关闭，未开启时返回 `SALESFORCE_DML_DISABLED`；执行模式为只读时该开关一律无效。</Callout>
+
+### 写入归属的身份
+
+`dbx_salesforce_current_user` 返回当前连接用户、简档、组织显示名，以及该简档是否具有 **Modify All Data**——这个标志决定字段级安全和记录共享规则是否生效。准备写入前先调用它，也可以用它区分权限失败与记录 Id 错误。`dbx_salesforce_prepare_write` 的摘要中包含同样的身份信息；若查询失败，摘要会写明身份未知并仍然完成准备，把是否应用的决定权留给用户。
+
 ## 数据库访问
+
+### DBX Desktop 原生 Streamable HTTP
+
+Desktop 可以选择直接托管 Streamable HTTP MCP 服务。该服务**默认关闭**；在 **设置 → MCP → HTTP 服务**启用后，默认仅监听 `127.0.0.1:5225/mcp`。监听服务由 Desktop 进程管理，会生成本地 Bearer Token，页面提供可复制的客户端配置；服务异常退出时会由 Desktop 自动重新拉起。
+
+本机 MCP 客户端的接入步骤：
+
+1. 打开 **设置 → MCP → HTTP 服务**，开启 **Streamable HTTP 服务**。除非确实需要让其他设备访问，否则保持默认本机回环地址。
+2. 点击 **保存并应用**。该按钮会保存配置，并根据开关状态启动、重启或停止服务；修改地址、端口或路径时会自动重启服务。
+3. 将页面展示的服务地址和 Bearer Token 复制到 MCP 客户端。
+
+不同客户端的字段名称可能不同，但核心配置如下：
+
+```json
+{
+  "type": "http",
+  "url": "http://127.0.0.1:5225/mcp",
+  "headers": {
+    "Authorization": "Bearer <DBX Desktop 页面展示的 Token>"
+  }
+}
+```
+
+本机客户端建议保留默认回环监听。绑定到局域网地址时，必须开启 **允许远程访问**，并填写精确的允许 `Host`；浏览器客户端还必须填写精确的 `Origin`。客户端通过非默认端口访问时，允许的 Host 应写成 `host:port`。轮换 Token 会立即使旧凭证失效。
+
+同一个端点同时响应两代 MCP 协议，任何版本的 Agent 都无需特殊配置即可连接：
+
+| Agent | 握手方式 | 传输状态 |
+| --- | --- | --- |
+| 旧版客户端 | `initialize`（协议 `2025-11-25` 及更早） | 无状态：响应不返回 `Mcp-Session-Id`，每个请求独立处理 |
+| 新版客户端 | `server/discover`（协议 `2026-07-28`） | 无状态：每个请求在 `_meta` 中自带协议版本与能力 |
+
+两代客户端都以无状态方式服务，因此端点只接受 `POST`：`GET` 与 `DELETE` 返回 `405 Method Not Allowed`。DBX 不依赖任何 HTTP 层会话，所以客户端无论空闲多久再连接都能正常工作，不会撞上已被服务端回收的会话。
+
+DBX 的有状态会话在两种情况下都可用，因为它是**显式句柄**：`dbx_open_session` 返回的 `session_id` 由 Agent 在后续调用中作为普通工具参数回传。该句柄独立于传输层、有自己的空闲 TTL，负责让固定连接、`USE`/`SET` 状态、临时表或已开启的事务跨请求保持。
 
 ### 本地连接
 
@@ -151,6 +367,24 @@ DBX Web 请求遵循标准系统代理环境变量：https 地址读取 `HTTPS_P
 
 DBX Web 和 Docker 同样需要独立 DuckDB 驱动。首次启动后可通过 Driver Manager 安装；Docker 会把驱动保存到 `/app/data/agents`，挂载 `/app/data` 数据卷后升级容器不会丢失。
 
+### DBX Web 原生 Streamable HTTP
+
+DBX Web 可以直接托管 MCP，复用现有 Web 监听器和 `/mcp` 路径，因此 Docker 和反向代理部署不需要额外暴露第二个端口。单实例、已启用 Web 登录密码的部署可在 **设置 → MCP → HTTP 服务**填写允许的 Host 并启用服务；DBX 自动生成 Bearer Token，使用现有加密 Secret 存储，可在页面复制、轮换或禁用，修改立即对新请求生效。未启用时页面不会把 `/mcp` 显示为可连接地址。无 Web 登录密码时，页面管理的 MCP 不会生效；演示部署禁用 MCP。
+
+部署环境变量仍然优先：配置 `DBX_WEB_MCP_TOKEN` 或 `DBX_WEB_MCP_TOKEN_FILE` 后，页面只读显示状态，不会覆盖部署 Secret。此前启用的页面 Token 仍会保留；移除部署 Token 并重启 Web 后，它会重新生效。将 `DBX_WEB_MCP_ALLOWED_HOSTS` 配置为客户端在 `Host` 请求头中发送的公网访问地址；如有端口映射，必须包含映射后的端口。多实例部署应使用一致的部署 Secret 与白名单，而不是页面管理模式。生产环境请使用 `DBX_WEB_MCP_TOKEN_FILE` 或部署平台的 Secret 管理能力，不要把真实 Token 提交到 Compose 文件中。
+
+例如容器映射为 `4225:4224` 时，MCP 地址为 `http://localhost:4225/mcp`：
+
+```yaml
+environment:
+  DBX_WEB_MCP_TOKEN: replace-with-a-long-random-secret
+  DBX_WEB_MCP_ALLOWED_HOSTS: localhost:4225
+ports:
+  - "4225:4224"
+```
+
+客户端必须携带 `Authorization: Bearer <DBX_WEB_MCP_TOKEN>`。浏览器客户端还需要在 `DBX_WEB_MCP_ALLOWED_ORIGINS` 中填写精确 Origin，例如 `https://mcp.example.com`；原生客户端通常不会发送 `Origin` 请求头。若反向代理添加了公网路径前缀，请设置 `DBX_PUBLIC_BASE_PATH=/dbx`，此时原生端点为 `/dbx/mcp`。原生 HTTP 与现有的 `DBX_WEB_URL` stdio 适配方式可以同时使用：两者共享 DBX 连接和 MCP 策略，后者仍适合只支持 stdio 的客户端。
+
 ### 桌面 UI 工具
 
 `dbx_open_table` 和 `dbx_execute_and_show` 要求 DBX 桌面端正在运行，并且在 Web 模式或连接作用域隐藏 UI 工具时不可用。其他工具是否需要 Desktop 取决于该连接是原生执行还是 bridge/Agent 路径。
@@ -167,11 +401,80 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 
 `WHERE TRUE`、`WHERE 1 = 1`、`_id: {$exists: true}` 或不透明 MongoDB 过滤器仍按高风险处理。连接自身只读、生产库保护、数据库账号权限和 MCP 连接 allowlist 在任何模式下都是权限上限。
 
-新版 Server 不允许 `DBX_MCP_ALLOW_WRITES` 或 `DBX_MCP_ALLOW_DANGEROUS_SQL` 放宽 DBX 中央策略。为兼容升级，在中央策略首次保存前，旧配置中的 `DBX_MCP_ALLOW_WRITES=0`（或 `false`）仍会保持 MCP 只读；策略保存后仅以中央策略为准，并忽略旧权限变量。旧连接 scope 变量只能进一步收窄 DBX allowlist。
+对于已暴露给 MCP 的连接，**设置 → MCP** 可以设置连接默认执行权限：继承全局、只读、安全写入或高风险写入。选择指定数据库后，还可为单个数据库设置执行权限。执行权限按范围由小到大回退：**单库设置 → 连接默认 → 全局默认**；例如全局和连接默认均为“数据读写”时，可为单个数据库设置“完全访问”。连接自身只读、生产库保护、数据库范围和数据库账号权限仍是独立的硬性限制，不能被单库设置绕过。
+
+同一页面还可只暴露选定的 MCP 工具。这项限制在服务端的每一次调用中都会强制执行，不只是客户端的展示偏好；即使客户端缓存了旧工具列表，也会在服务端 allowlist 更新后被拒绝。
+
+### MCP 设置页签
+
+MCP 设置页的三个页签使用界面中的名称：**接入方式**、**能力**和**权限管理**。它们共用一份策略，修改会对所有 MCP 客户端生效。
+
+#### 接入方式
+
+**接入方式**负责安装、升级和卸载 MCP Server，生成 stdio/HTTP 客户端配置，并提供运行参数。这里可以设置查询超时。插件工具对外提供方式位于**能力 → 高级配置**。客户端配置只包含启动 MCP Server 所需的运行信息，不包含权限或连接范围变量。
+
+#### 能力
+
+**能力**页默认使用**分类管理**：左侧选择数据库、Nacos、Consul、消息队列、Salesforce 或 DBX 通用，右侧配置工具集；切换到**全局总览**可以同时查看全部分类。插件使用带来源标识的独立入口。搜索覆盖分类、工具集、工具名称/ID 和插件；**仅显示已开启**按配置筛选，不会改变当前分类。分类批量操作包括被筛选隐藏的工具，点击**应用**后生效。共享连接发现属于 DBX 通用，关闭数据库分类不会关闭其他产品的连接发现。
+
+工具集显示开启数量、**读 / 写 / 高危**徽标和按连接类型统计的覆盖摘要。徽标描述工具风险，不等于授予权限；暂无适用连接时仍可提前配置。内置配置使用底部**应用 / 取消**，插件授权立即保存。自定义工具白名单位于**高级配置**。
+
+点击卡片可查看工具详情。详情包括工具 ID、给模型的说明、权限级别、适用的数据库类型，以及每个参数的名称、类型、是否必填、说明和默认值；逐次判定的工具会标明每次调用会按语句判为读、写或高危。工具详情中的开关可以单独关闭某个内置工具。弹窗底部的**应用本工具集**只保存当前工具集的开关，其他工具集、权限和运行参数的未保存修改继续保留为草稿；保存成功后弹窗保持打开。关闭详情也会保留草稿，仍可在设置页统一应用或放弃；已在详情中应用的修改不会随其他草稿一起放弃。保存失败会在弹窗内显示原因并允许重试。
+
+插件卡片显示插件名称、版本、插件 ID、工具级别徽标和 **MCP 工具**标识。卡片会明确显示插件作者是否开放外部 MCP、外部 MCP 总开关、**授权上限**（只读 / 读写 / 完全）和已暴露数量。第一次开启插件会弹出授权窗口；只会接受 manifest 已声明的工具和级别。插件新增的只读工具可自动使用；新增读写或高危工具，以及已有工具的声明级别升高时，需再次确认，即使级别未超过现有授权上限。超过授权上限的工具保持隐藏，提高上限也不能代替新工具确认。插件详情可以按工具集查看工具、参数、声明级别并单独关闭某个工具；manifest 未声明权限级别的工具始终不开放，即使 sidecar 的 MCP 标注声称它是只读。
+
+插件工具条目是全局 MCP 工具白名单的另一层过滤：`dbx_<前缀>__<工具名>` 精确放行一个工具，`dbx_<前缀>__*` 放行一个插件的全部工具，`dbx_*__*` 放行所有插件工具。使用显式白名单时，没有匹配条目的插件工具不会出现；选择全部工具时无需逐个添加条目。插件卡片开关、授权上限和单工具开关始终生效。
+
+在**能力 → 高级配置**展开**插件工具对外提供方式**，设置 DBX 如何向 MCP 客户端提供已授权的插件工具，点击底部**应用**后生效。新配置默认**直接列出**（`flat`），把已授权工具逐个放进 `tools/list`；**按需发现**（`lazy`）提供 `dbx_plugin_list`、`dbx_plugin_tools` 和 `dbx_plugin_call` 三个统一入口，需要开启 **DBX 通用 → 插件发现与调用**。两种方式都执行原有授权与资源权限检查。已有配置原样保留，旧配置缺少该字段时继续使用原有自动行为；**自动（兼容模式）**在插件工具总数不超过 40 个时直接列出，更多时按需发现。环境变量 `DBX_MCP_PLUGIN_TOOLS` 优先于页面设置，可设为 `flat`、`lazy` 或 `both`；`both` 同时提供平铺工具和发现工具。
+
+#### 权限管理
+
+**权限管理**提供**全局默认权限**、**访问控制**，以及独立的**调用安全**。不再提供快速预设或“自定义”模式；调整权限不会修改“能力”页的工具开关。
+
+**全局默认权限**用于没有更具体权限设置的资源，可选只读、数据读写和完全访问。修改默认值后，继承它的资源同步更新生效预览；单独设置的分组、连接和数据库保留自己的权限。权限对照表默认收起在“权限说明”中，表格描述的是权限级别，工具仍需在“能力”页启用。
+
+调用安全独立于权限继承和工具启停；切换默认权限不会修改确认策略。将默认、分组、连接或库设为完全访问时，仍先在应用内确认权限变更，取消则保留原设置。这与实际工具调用时的人工确认分别生效。
+
+全局默认权限与分组、连接、数据库权限先写入草稿，点击底部**应用**后保存生效；切换页签保留草稿，关闭并放弃修改会恢复已保存的配置。
+
+访问控制树把分组、连接和子范围放在同一张表中。可以选择**全部连接**（自动包含以后新增的连接）或**仅选中的**，并在树中为分组和连接设置可见性。连接下方显示库范围摘要，点击**配置库权限**打开穿梭框弹窗，选择**全部库**、**指定库**或**不开放任何库**。指定库时从左侧选择库并移入右侧，在右侧为每个库设置继承、只读、数据读写或完全访问；移除库也会移除该库的独立权限。
+
+分组内已有单独授权的连接或子分组时，外层分组显示半选，并汇总完整分组中可见连接的数量，折叠或筛选不会改变统计。即使当前连接全部可见，只要没有整组授权，仍保留半选，避免把未来新增连接误认为已授权。点击半选框将开放整个分组；分组默认权限可供未单独设置权限的子项继承，不改变可见范围。
+
+在右侧勾选多个库后，可通过**批量设置权限**统一修改，未勾选的库不受影响；选择完全访问时统一确认一次。**选择当前搜索结果**包含尚未展开显示的匹配库，改变搜索条件会清空勾选。批量修改仍需点击**应用本连接库权限**才会保存。每行的提示图标可查看权限来源及未发现库的说明。
+
+列表完整获取当前数据库账号可见的库，支持搜索、刷新和手动添加精确库名；超过 100 项时分批展示，搜索和“选择当前搜索结果”仍覆盖完整列表。未在本次发现的已选库不会被自动移除。**全部库**包含未来新增库，把当前库全部选入**指定库**则不会自动包含新库。未选中的库和跨库请求会被拒绝。
+
+**应用本连接库权限**只保存该连接的库范围及单库权限，其他连接、上级权限、工具和运行参数草稿保持不变。保存成功后弹窗保持打开，失败可直接重试；关闭弹窗保留草稿，放弃其他草稿不会撤销已应用的库权限。若上级权限仍有未应用修改，弹窗同时提示当前已保存的继承权限。
+
+权限按最具体的范围继承：**库 → 连接 → 最近的分组 → 上级分组 → 全局默认**。表格的“权限”列是当前行的设置，“生效”列显示最终级别和来源。搜索框可搜索分组、连接和库；勾选**仅显示单独设置**可隐藏只继承默认值的行。旧版本保存的行会标为**旧规则**，它只能收紧连接继承的权限；重新选择一次权限后才会成为普通设置。Salesforce 连接额外提供**允许 DML**开关；它默认关闭，只读级别下不可开启，连接和生产保护仍是硬上限。
+
+插件连接可以在同一棵树中展开插件声明的子范围（例如 namespace 或目录），从插件读取可选值，再选择全部、指定或不开放。Nacos 连接使用同样的子范围编辑器管理命名空间；Consul 的 datacenter 已由连接固定。命名空间等子范围的修改会立即保存，编辑器会明确提示；它们不受底部“应用 / 取消”影响。保存失败时显示错误并保留原配置。
+
+#### 调用安全
+
+开启“高危工具调用执行前，请求人工确认”后，先校验资源权限，权限不足直接拒绝；已获得完全访问权限的高危调用也须逐次确认。适用于高危 SQL、MongoDB 高危命令或无有效条件的修改、危险 Redis 命令、声明为 `full` 的插件工具、Nacos/Consul 删除及连接删除。普通读取和范围可验证的普通写入不额外询问。工具仍须开启，插件授权上限、连接可见范围、连接只读和生产保护始终有效。
+
+确认在 DBX 桌面端显示工具、目标和操作内容；仅批准当前调用，不提升权限、不生成限时放行。拒绝、超时或无法使用桌面确认时不执行。批准后重新检查权限，确认期间撤权会阻止执行。该策略同时适用于 stdio 和 HTTP，Web 后端不提供桌面确认。
+
+**旧配置兼容：** 原 `promptHighRiskSql=true` 或 v2 `confirm="full"` 保留为“旧版临时授权”：数据读写权限可确认执行部分高危操作，完全访问不询问；原有 SQL 一次、1 小时、1 天授权仍属于这个旧模式。界面明确显示其含义，只有主动选择“改用新的确认策略”或“关闭旧版临时授权”并点击“应用”才会转换。新策略使用 `callConfirmation="high_risk"` / v2 `confirm="high_risk"`；不会复用旧布尔值改变含义。没有旧授权的新配置默认不额外确认，可自行开启。旧版 MCP 程序不理解新策略，测试和使用时须让桌面与独立 MCP 程序保持配套版本。
+
+#### MCP 调用记录
+
+**接入方式**页的接入类型切换行右侧提供**查看 MCP 调用记录**，窄窗口下显示为历史图标。点击后关闭设置页并打开历史面板的 MCP 视图；有未保存修改时先询问是否放弃，选择继续编辑不会打开历史面板。记录包括时间、接入方式（stdio 或 HTTP）、MCP 客户端名称和版本、工具、目标连接/库或其他资源、判定级别、是否经过确认、耗时、请求/响应摘要和成功或失败原因；客户端名称只用于记录，不参与权限判定。调用历史有独立的保留和清理设置。
+
+最具体的执行设置优先，但已允许的工具仍不能绕过隐藏连接、数据库范围、连接只读、生产库保护或数据库账号本身的权限。请求未被选中的数据库时，服务会返回 `DATABASE_OUT_OF_SCOPE`；配置单库执行权限时，跨库 SQL 和 MongoDB 聚合写入会被拒绝，避免绕过数据库级限制。
+
+
+升级时，未带执行策略版本的已保存连接规则继续使用旧的权限上限语义，不会放大全局权限。只有当前设置页面保存的规则会标记为范围覆盖语义；编辑旧规则时，系统会先固化其实际生效的权限上限，再启用新的覆盖行为。
+
+新版 Server 不允许 `DBX_MCP_ALLOW_WRITES` 或 `DBX_MCP_ALLOW_DANGEROUS_SQL` 放宽 DBX 中央策略。`DBX_MCP_ALLOW_WRITES=0`（或 `false`）是本次运行的只读限制：即使中央策略已经保存，或分组、连接、单库配置了完全访问，也只能读取。此限制同时适用于本地和 Web 后端，不修改已保存的配置。设为 `1`、`true` 或不设置时，仍以中央策略授权为准。旧连接 scope 变量只能进一步收窄 DBX allowlist。
 
 | 变量 | 用途 |
 | --- | --- |
 | `DBX_DATA_DIR` | 覆盖本地 DBX 数据目录 |
+| `DBX_SESSION_IDLE_TTL_SECS` | 有状态会话空闲超时，单位为正整数秒，默认 `1800`。非法值、零、负数或无法表示的时长回退默认值；同样适用于事务专属连接。修改后需重启 MCP 宿主进程。 |
+| `DBX_MCP_PLUGIN_TOOLS` | 覆盖高级配置中的插件工具对外提供方式：`flat`、`lazy` 或 `both`；环境变量优先。 |
 | `DBX_WEB_URL` | 使用 DBX Web/Docker 后端 |
 | `DBX_WEB_PASSWORD` | 登录 DBX Web |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | DBX Web 请求的标准系统代理变量；空值表示不走代理。认证格式 `http://user:pass@host:port` |
@@ -179,7 +482,11 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 | `DBX_WEB_HEADERS` | DBX Web 请求附加的请求头 JSON 对象，例如 `{"Authorization":"Bearer token"}` |
 | `DBX_WEB_INSECURE_SKIP_VERIFY` | `1`/`true` 时跳过 TLS 证书验证（用于自签名 DBX Web 后端；默认验证） |
 | `DBX_WEB_CA_CERT` | DBX Web TLS 验证时信任的 PEM/DER CA 文件 |
-| `DBX_MCP_ALLOW_WRITES` | 仅用于升级兼容：`0`/`false` 使尚未配置的策略保持只读 |
+| `DBX_WEB_MCP_TOKEN` | 使用该 Bearer Token 启用原生 Web Streamable HTTP MCP |
+| `DBX_WEB_MCP_TOKEN_FILE` | 从文件读取原生 Web MCP Token；不能与 `DBX_WEB_MCP_TOKEN` 同时设置 |
+| `DBX_WEB_MCP_ALLOWED_HOSTS` | 原生 Web MCP 必填：允许的公网 Host authority，逗号分隔 |
+| `DBX_WEB_MCP_ALLOWED_ORIGINS` | 原生 Web MCP 的浏览器 Origin allowlist，逗号分隔 |
+| `DBX_MCP_ALLOW_WRITES` | `0`/`false` 强制本次运行只读，包括已配置的分组、连接和单库权限；`1`/`true` 不会扩大中央策略授权。适用于本地和 Web 后端。 |
 | `DBX_MCP_SCOPE_CONNECTION_ID` | 兼容旧配置：限制为一个连接 ID |
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | 兼容旧配置：限制为多个连接 ID |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | 限制为一个连接名称 |
@@ -188,10 +495,27 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 
 ## 常见问题
 
+### 升级后的凭据访问
+
+独立 macOS MCP 在后台运行时不弹出钥匙串对话框。已有加密密钥被锁定或拒绝访问时，启动会保留 `KEYRING_ACCESS_FAILED`（可能包含在 `SECRET_KEY_UNAVAILABLE` 中），而不是反复要求输入密码。先解锁登录钥匙串；对于旧版绑定构建哈希的授权，在终端对 **MCP 客户端实际使用的同一个官方程序**执行一次：
+
+```bash
+"$HOME/.dbx/bin/dbx-mcp" --authorize-keychain
+```
+
+Homebrew 或 npm 安装需要替换为对应的二进制路径。该命令先验证运行程序的官方签名和稳定 designated requirement，再读取已有 DBX 钥匙串条目；不会打开数据库、启动 MCP 传输、创建或替换密钥、导出密钥，也不会自行改写 ACL。macOS 首次迁移时可能要求确认一次，对已验证的 DBX 程序选择 **始终允许**（不要选 **允许**）。随后命令会用一个全新的非交互进程再读取一次密钥；若授权未被保留，会以 `KEYRING_ACCESS_FAILED` 报错，因此看到成功提示即表示后台启动可用。最后重启 MCP 客户端。已获授权的程序应直接成功。稳定签名使普通正式升级继续沿用授权，但不能绕过签名团队变更或用户撤销权限。
+
+不要将 `--authorize-keychain` 添加到 MCP 客户端的启动参数，它是执行后立即退出的一次性恢复命令。缺失的密钥仍需通过 Desktop 数据安全设置处理，该命令不能恢复丢失的密钥。Windows 和 Linux 不使用此 macOS 命令；应恢复同一系统用户的凭据库访问（或配置的无界面密钥文件），再重启 MCP。凭据库拒绝访问或密钥损坏时，不应自动生成替代加密密钥。
+
 <Accordions>
   <Accordion title="npm 没有安装当前平台包">不要使用 `--no-optional`，重新安装 `@dbx-app/mcp-server`，并用 `node -p 'process.platform + "-" + process.arch'` 检查平台。Alpine Linux 默认使用 musl，目前不在 Linux 发布包支持范围内。</Accordion>
   <Accordion title="找不到 dbx.db">将 `DBX_DATA_DIR` 设置为包含 `dbx.db` 的目录。Windows 便携版通常是 `DBX.exe` 旁边的 `data` 目录。</Accordion>
   <Accordion title="提示 DBX 未运行">只有 `dbx_open_table` 和 `dbx_execute_and_show` 需要桌面端运行；本地查询工具可以在 DBX 关闭时执行。</Accordion>
+  <Accordion title="Desktop HTTP 客户端提示 ERR_CONNECTION_REFUSED">进入 **设置 → MCP → HTTP 服务**，确认服务已开启并点击 **保存并应用**。客户端应使用页面展示的地址、路径和当前 Bearer Token。默认的 `127.0.0.1` 只接受同一台电脑上的连接。</Accordion>
+  <Accordion title="Desktop 提示 HTTP 地址已被占用">已有其他进程监听了所选地址和端口。请在 **设置 → MCP → HTTP 服务** 中改用未被占用的端口，再保存配置以重启服务。不要让两个 DBX Desktop 实例使用相同 HTTP 端点。</Accordion>
+  <Accordion title="请求返回 DATABASE_OUT_OF_SCOPE">该连接虽然已暴露给 MCP，但请求的数据库不在它的 MCP 数据库范围内。请在 **设置 → MCP** 中添加精确的数据库名称，或在合适时将该连接设为全部数据库。指定范围时，应先调用 `dbx_list_databases`，再使用返回的名称。</Accordion>
+  <Accordion title="之前可见的工具现在被拒绝">该工具已不在 **设置 → MCP** 的选中范围内，或当前权限策略不允许它。修改工具 allowlist 后请刷新 MCP 客户端的工具列表；服务端同样会拒绝缓存的旧工具调用。</Accordion>
+  <Accordion title="Docker 或反向代理下 MCP 请求失败">请使用公网访问地址，包括映射后的端口和 `DBX_PUBLIC_BASE_PATH` 前缀。`DBX_WEB_MCP_ALLOWED_HOSTS` 必须与实际 `Host` authority 精确一致；浏览器客户端还必须在 `DBX_WEB_MCP_ALLOWED_ORIGINS` 中配置精确 Origin。</Accordion>
   <Accordion title="Agent/JDBC 数据库无法启动">在 DBX Driver Manager 中安装或更新匹配的 Agent、JDBC 驱动和 JRE。厂商专有驱动不会随 MCP 原生包发布。</Accordion>
   <Accordion title="DuckDB 连接无法启动">在 DBX Driver Manager 中安装或更新 DuckDB 驱动。本地 MCP、DBX Web 和 Docker 都通过独立驱动运行 DuckDB，不会内置 DuckDB 引擎。</Accordion>
   <Accordion title="出现 better-sqlite3 或 Node ABI 错误">MCP 不需要 `better-sqlite3`。请先升级 `@dbx-app/mcp-server`；如果错误来自 `@dbx-app/cli`，请按照 CLI 的安装要求处理，因为它们是两个独立的包。</Accordion>

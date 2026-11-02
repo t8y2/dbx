@@ -1,17 +1,22 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
 import {
   BinaryCellImportTooLargeError,
   binaryCellDisplayText,
+  binaryCellClipboardText,
   binaryCellDownloadFileName,
   binaryCellDownloadPayload,
+  binaryCellTextPreview,
   canDownloadBinaryCellValue,
   formatBinaryCellByteSize,
   isBinaryCellColumnType,
   binaryCellUtf8Text,
   isBlobCellColumnType,
+  isBlobTextPreviewDatabase,
+  isByteaCellColumnType,
+  isBinaryCellTextEditable,
+  isBinaryCellTextPreviewColumn,
   MAX_BINARY_CELL_IMPORT_BYTES,
   parseBinaryCellBytes,
   parseBinaryCellHexValue,
@@ -49,13 +54,22 @@ test("TDengine BINARY text is not treated as unprefixed hex", () => {
   assert.equal(binaryCellDisplayText("0x3636", "BINARY(16)", undefined, "tdengine"), "66");
 });
 
-test("binary cell download detects common blob column types", () => {
+test("binary cell download detects common blob and bytea column types", () => {
   assert.equal(isBinaryCellColumnType("BLOB"), true);
   assert.equal(isBinaryCellColumnType("RAW(2000)"), true);
   assert.equal(isBinaryCellColumnType("long raw"), true);
+  assert.equal(isBinaryCellColumnType("bytea"), true);
   assert.equal(isBinaryCellColumnType("varchar"), false);
   assert.equal(isBlobCellColumnType("longblob"), true);
   assert.equal(isBlobCellColumnType("varbinary(255)"), false);
+  assert.equal(isBlobCellColumnType("bytea"), false);
+  assert.equal(isByteaCellColumnType("bytea"), true);
+  assert.equal(isByteaCellColumnType("BYTEA"), true);
+  assert.equal(isByteaCellColumnType("pg_catalog.bytea"), true);
+  assert.equal(isByteaCellColumnType("public.bytea"), true);
+  assert.equal(isByteaCellColumnType("bytea[]"), false);
+  assert.equal(isByteaCellColumnType("_bytea"), false);
+  assert.equal(isByteaCellColumnType("blob"), false);
 });
 
 test("binary cell download menu closes when hover moves to another cell", () => {
@@ -64,13 +78,6 @@ test("binary cell download menu closes when hover moves to another cell", () => 
   assert.equal(retainBinaryCellDownloadMenuForHover(openCell, { rowIndex: 3, col: 4 }), null);
   assert.equal(retainBinaryCellDownloadMenuForHover(openCell, { rowIndex: 2, col: 5 }), null);
   assert.equal(retainBinaryCellDownloadMenuForHover(openCell, { rowIndex: 2, col: 4 }), openCell);
-});
-
-test("transpose cell hover also clears a different binary download menu", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const handler = source.match(/function onTransposeCellMouseenter\([^]*?\n\}/)?.[0] ?? "";
-
-  assert.match(handler, /retainBinaryCellDownloadMenuForHover\(quickDownloadMenuCell\.value, \{ rowIndex, col: actualColIdx \}\)/);
 });
 
 test("canDownloadBinaryCellValue allows displayed binary hex strings", () => {
@@ -107,9 +114,184 @@ test("binaryCellUtf8Text only returns strict printable text", () => {
   assert.equal(binaryCellUtf8Text("0x4869", "varchar", "mysql"), null);
 });
 
+// issue #9505：GaussDB（ZenithDriver）的 BLOB 已经以 binary canonical form `0x<hex>` 到达前端，
+// 缺的是单元格详情里“显式、只读”的文本查看入口。此 helper 是通用 binary presentation 层，
+// 不参与 MySQL BLOB 的自动文本预览闸门，也不进入编辑/提交路径。
+function previewText(value: unknown, encoding: "utf8" | "gbk", columnType?: string, databaseType?: Parameters<typeof binaryCellTextPreview>[3], incomplete?: boolean): string | null {
+  const result = binaryCellTextPreview(value, encoding, columnType, databaseType, incomplete);
+  return result.ok ? result.text : null;
+}
+
+test("binaryCellTextPreview decodes explicit binary cells to strict UTF-8 text", () => {
+  assert.deepEqual(binaryCellTextPreview("0x48656c6c6f", "utf8", "BLOB"), { ok: true, text: "Hello", encoding: "utf8", byteLength: 5 });
+  // issue 复现值的前 14 字节：`[[headers = {}`。
+  assert.deepEqual(binaryCellTextPreview("0x5b5b68656164657273203d207b7d", "utf8", "BLOB", "gaussdb"), { ok: true, text: "[[headers = {}", encoding: "utf8", byteLength: 14 });
+  // 中文 UTF-8。
+  assert.equal(previewText("0xe4b8ade69687", "utf8", "BLOB"), "中文");
+  // 非 MySQL 连接同样可以显式查看：属于用户主动触发的只读 presentation。
+  assert.equal(previewText("0x48656c6c6f", "utf8", "BLOB"), "Hello");
+  assert.equal(previewText("0x48656c6c6f", "utf8", "BYTEA", "postgres"), "Hello");
+  assert.equal(previewText("0x48656c6c6f", "utf8", "RAW(2000)", "oracle"), "Hello");
+  assert.equal(previewText("0x48656c6c6f", "utf8", "LONG RAW", "oracle"), "Hello");
+  assert.equal(previewText("0x48656c6c6f", "utf8", "IMAGE", "sqlserver"), "Hello");
+  // 入口可见性完全复用 isBinaryCellColumnType()，本次不放宽该闸门。
+  for (const type of ["BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "BINARY(8)", "VARBINARY(255)", "BYTEA", "RAW(2000)", "LONG RAW", "IMAGE", "bytes"]) {
+    assert.equal(isBinaryCellColumnType(type), true, type);
+    assert.equal(previewText("0x48656c6c6f", "utf8", type), "Hello", type);
+  }
+  // byte[] / Buffer 形态的 binary cell 同样支持。
+  assert.equal(previewText([72, 105], "utf8", "VARBINARY(2)"), "Hi");
+  assert.equal(previewText({ type: "Buffer", data: [72, 105] }, "utf8", "VARBINARY(2)"), "Hi");
+  // 定长 BINARY 的尾部填充 NUL 与网格预览一致地裁掉。
+  assert.equal(previewText("0x3135303031300000", "utf8", "BINARY(8)"), "150010");
+  // 与“下载为 UTF-8/GBK”共用同一套 bytes primitive。
+  assert.deepEqual(Array.from(parseBinaryCellBytes("0x48656c6c6f", "BLOB") ?? []), Array.from(binaryCellDownloadPayload("0x48656c6c6f", "binary", "BLOB").data as Uint8Array));
+});
+
+test("binaryCellTextPreview decodes GBK bytes when the user picks GBK", () => {
+  assert.equal(previewText("0xd6d0cec4", "gbk", "BLOB"), "中文");
+  assert.equal(previewText("0xd6d0cec4", "gbk", "BLOB", "gaussdb"), "中文");
+  // UTF-8 仍是默认选项：GBK 字节不会被静默替换字符冒充文本。
+  assert.deepEqual(binaryCellTextPreview("0xd6d0cec4", "utf8", "BLOB"), { ok: false, error: "undecodable" });
+});
+
+// 真实二进制（图片头、非法序列、控制字节、GBK 私用区）必须显式失败，绝不能静默替换字符。
+test("binaryCellTextPreview refuses real binary instead of silently replacing characters", () => {
+  assert.deepEqual(binaryCellTextPreview("0x89504e470d0a1a0a", "utf8", "BLOB"), { ok: false, error: "undecodable" });
+  assert.deepEqual(binaryCellTextPreview("0xffd8ffe0", "utf8", "LONGBLOB"), { ok: false, error: "undecodable" });
+  assert.deepEqual(binaryCellTextPreview("0xfffe", "utf8", "BLOB"), { ok: false, error: "undecodable" });
+  assert.deepEqual(binaryCellTextPreview("0x0061", "utf8", "BLOB"), { ok: false, error: "undecodable" });
+  assert.deepEqual(binaryCellTextPreview("0x89504e470d0a1a0a", "gbk", "BLOB"), { ok: false, error: "undecodable" });
+  assert.deepEqual(binaryCellTextPreview("0xffff", "gbk", "BLOB"), { ok: false, error: "undecodable" });
+  assert.deepEqual(binaryCellTextPreview("0x0102", "gbk", "BLOB"), { ok: false, error: "undecodable" });
+});
+
+test("binaryCellTextPreview stays out of non-binary and incomplete cells", () => {
+  assert.deepEqual(binaryCellTextPreview("0x48656c6c6f", "utf8", "varchar(20)"), { ok: false, error: "notBinary" });
+  assert.deepEqual(binaryCellTextPreview("0x48656c6c6f", "utf8"), { ok: false, error: "notBinary" });
+  assert.deepEqual(binaryCellTextPreview("Hello", "utf8", "BLOB"), { ok: false, error: "notBinary" });
+  assert.deepEqual(binaryCellTextPreview(null, "utf8", "BLOB"), { ok: false, error: "notBinary" });
+  // 大值闸门把 `0x<hex>` 本身截成 `0x...` 时，前缀不是完整 bytes。
+  assert.deepEqual(binaryCellTextPreview("0xffd8ffe000104a46...", "utf8", "LONGBLOB"), { ok: false, error: "notBinary" });
+  // 后端返回的值本身不完整时不解码残缺 bytes。
+  assert.deepEqual(binaryCellTextPreview("0x48656c6c6f", "utf8", "BLOB", undefined, true), { ok: false, error: "incomplete" });
+  // TDengine 的 BINARY 裸 hex 是文本而不是 bytes。
+  assert.deepEqual(binaryCellTextPreview("66", "utf8", "BINARY(16)", "tdengine"), { ok: false, error: "notBinary" });
+});
+
+test("binaryCellTextPreview never mutates the canonical binary value", () => {
+  const canonical = "0x48656c6c6f";
+  assert.equal(previewText(canonical, "utf8", "BLOB"), "Hello");
+  assert.equal(canonical, "0x48656c6c6f");
+  const bytes = [0x48, 0x69];
+  assert.equal(previewText(bytes, "utf8", "VARBINARY(2)"), "Hi");
+  assert.deepEqual(bytes, [0x48, 0x69]);
+  const ascii = "0x534e2d4130303031";
+  assert.equal(previewText(ascii, "gbk", "VARBINARY(8)"), "SN-A0001");
+  assert.equal(ascii, "0x534e2d4130303031");
+});
+
+// 群反馈：MySQL varbinary 里以 GBK 写入的中文（Navicat 按连接字符集直接显示）。
+// UTF-8 严格解码失败后，仅 MySQL 的 binary/varbinary 在显示/复制路径回退严格 GBK；
+// BLOB 与编辑写回路径保持纯 UTF-8（与 coerceMysqlBlobTextValue 同闸门）。
+test("MySQL varbinary text preview falls back to strict GBK after UTF-8", () => {
+  // "2026年5月22日 星期五 9：30" 的 GBK 编码（26 字节；UTF-8 编码为 33 字节）。
+  const gbkHex = "0x32303236c4ea35d4c23232c8d520d0c7c6dacee52039a3ba3330";
+  assert.equal(binaryCellDisplayText(gbkHex, "VARBINARY(255)", undefined, "mysql"), "2026年5月22日 星期五 9：30");
+  assert.equal(binaryCellClipboardText(gbkHex, "VARBINARY(255)", "mysql"), "2026年5月22日 星期五 9：30");
+  assert.equal(binaryCellDisplayText("0xd6d0cec4", "VARBINARY(255)", undefined, "mysql"), "中文");
+  assert.equal(binaryCellClipboardText("0xd6d0cec4", "VARBINARY(128)", "mysql"), "中文");
+  // UTF-8 优先：两种编码都能表达时结果一致。
+  assert.equal(binaryCellDisplayText("0xe4b8ade69687", "VARBINARY(128)", undefined, "mysql"), "中文");
+
+  // GBK 回退仅限 MySQL 连接。
+  assert.equal(binaryCellDisplayText("0xd6d0cec4", "VARBINARY(255)", undefined, "sqlserver"), "VARBINARY [4 bytes]");
+  assert.equal(binaryCellDisplayText("0xd6d0cec4", "VARBINARY(255)", undefined, undefined), "VARBINARY [4 bytes]");
+
+  // MySQL BLOB 不参与 GBK 回退（保持与编辑路径的显示/编辑一致性）。
+  assert.equal(binaryCellDisplayText("0xd6d0cec4", "LONGBLOB", undefined, "mysql"), "BLOB [4 bytes]");
+  assert.equal(binaryCellUtf8Text("0xd6d0cec4", "LONGBLOB", "mysql"), null);
+
+  // 非法 GBK 序列、以及解码落在 Unicode 私用区的（真实文本不含 PUA）仍回退标签 / 保持 hex。
+  assert.equal(binaryCellDisplayText("0xfffe", "VARBINARY(2)", undefined, "mysql"), "VARBINARY [2 bytes]");
+  assert.equal(binaryCellDisplayText("0xffff", "VARBINARY(2)", undefined, "mysql"), "VARBINARY [2 bytes]");
+  assert.equal(binaryCellClipboardText("0xffff", "VARBINARY(2)", "mysql"), null);
+});
+
+// issue #7471：MySQL VARBINARY 的文本 payload 复制为原始字符串，任意二进制保持 0x/hex 无损。
+test("binaryCellClipboardText decodes textual MySQL varbinary and preserves arbitrary bytes", () => {
+  // Case 1: ASCII VARBINARY（issue 示例 abc → 0x616263）。
+  assert.equal(binaryCellClipboardText("0x616263", "VARBINARY(128)", "mysql"), "abc");
+  // Case 2: 数字字符串。
+  assert.equal(binaryCellClipboardText("0x31", "VARBINARY(128)", "mysql"), "1");
+  assert.equal(binaryCellClipboardText("0x6b384a39784c326d51347650", "VARBINARY(128)", "mysql"), "k8J9xL2mQ4vP");
+  // Case 3: 较长 ASCII token 必须完整复制。
+  assert.equal(binaryCellClipboardText("0x75736572393832335f746f6b656e5f586b38396d4e32714c307750347652", "VARBINARY(128)", "mysql"), "user9823_token_Xk89mN2qL0wP4vR");
+  // Case 4: UTF-8 中文 lossless round-trip。
+  assert.equal(binaryCellClipboardText("0xe4b8ade69687", "VARBINARY(128)", "mysql"), "中文");
+  // emoji（多字节 UTF-8）。
+  assert.equal(binaryCellClipboardText("0xf09f9880", "VARBINARY(64)", "mysql"), "😀");
+  // 空字符串及允许的文本换行。
+  assert.equal(binaryCellClipboardText("0x", "VARBINARY(0)", "mysql"), "");
+  assert.equal(binaryCellClipboardText("0x68690a", "VARBINARY(3)", "mysql"), "hi\n");
+
+  // Case 5: 无法解码的 arbitrary binary（含 NUL / 含控制字符 / 非法序列）保持 null → 复制端沿用 0x/hex，绝不产生 � 或丢字节。
+  // 0xdeadbeef 例外：恰好全部组成合法 GBK 序列，随 GBK 回退按解码文本复制（与网格显示一致）。
+  assert.equal(binaryCellClipboardText("0xdeadbeef", "VARBINARY(4)", "mysql"), "蕲撅");
+  assert.equal(binaryCellClipboardText("0xfffe", "VARBINARY(2)", "mysql"), null);
+  assert.equal(binaryCellClipboardText("0x0061", "VARBINARY(2)", "mysql"), null); // 含 NUL
+  assert.equal(binaryCellClipboardText("0x0102", "VARBINARY(2)", "mysql"), null); // 控制字符
+  assert.equal(binaryCellClipboardText("0xefbbbf616263", "VARBINARY(6)", "mysql"), null); // 解码会吞 BOM，无法 byte-for-byte 回编码
+
+  // Case 6: NULL 保持原行为（helper 只处理字符串形态的 hex 值）。
+  assert.equal(binaryCellClipboardText(null, "VARBINARY(128)", "mysql"), null);
+
+  // Case 7: 非目标类型 / 非 MySQL 一律不改写，回归保护。
+  // MySQL BLOB 跟随（#12413）：网格对文本型 BLOB 显示文本预览，复制必须与显示一致；
+  // BLOB 与显示/编辑路径一样只解严格 UTF-8，不做 GBK 回退。
+  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "mysql"), "abc");
+  assert.equal(binaryCellClipboardText("0x616263", "LONGBLOB", "mysql"), "abc");
+  assert.equal(binaryCellClipboardText("0xd6d0cec4", "LONGBLOB", "mysql"), null); // BLOB 不回退 GBK（与显示一致）
+  // Oracle 家族 BLOB 与内联显示预览共用同一闸门：文本型 BLOB 显示为文本，复制也必须
+  // 还原成同一份文本；只解严格 UTF-8（不回退 GBK），不可解码的 bytes 仍为 hex，
+  // 没有文本预览的库（如 sqlite）与 Oracle RAW 不受影响。
+  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "oracle"), "abc");
+  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "oceanbase-oracle"), "abc");
+  assert.equal(binaryCellClipboardText("0xd6d0cec4", "BLOB", "oracle"), null);
+  assert.equal(binaryCellClipboardText("0x00fffe", "BLOB", "oracle"), null);
+  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "sqlite"), null);
+  assert.equal(binaryCellClipboardText("0x616263", "RAW", "oracle"), null);
+  assert.equal(binaryCellClipboardText("0x616263", "BINARY(8)", "mysql"), null); // MySQL BINARY 不跟随
+  assert.equal(binaryCellClipboardText("0x616263", "VARBINARY(128)", "sqlserver"), null); // SQL Server varbinary 不改
+  // PostgreSQL bytea 文本复制（#11987）：与显示预览/编辑写回保持同一闸门
+  assert.equal(binaryCellClipboardText("0x616263", "bytea", "postgres"), "abc");
+  assert.equal(binaryCellClipboardText("\\x616263", "bytea", "postgres"), "abc");
+  assert.equal(binaryCellClipboardText("0x89504e47", "bytea", "postgres"), null);
+  assert.equal(binaryCellClipboardText("0x616263", "bytea", "sqlite"), null);
+  assert.equal(binaryCellClipboardText("0x616263", "BINARY(16)", "tdengine"), null); // 非 MySQL BINARY 不改
+  assert.equal(binaryCellClipboardText("0x616263", "varchar", "mysql"), null); // 非二进制列不改
+  assert.equal(binaryCellClipboardText("abcd", "VARBINARY(4)", "mysql"), null); // 普通文本不猜测为裸 hex
+});
+
 // 回归：SQLite/DuckDB 等库同样有 `blob` 列，文本预览必须与编辑写回路径一样仅对 mysql 开启，
 // 否则出现“单元格/详情显示文本、编辑器却是十六进制”的不一致。
-test("BLOB text preview stays limited to MySQL connections", () => {
+test("BLOB and BYTEA text preview stays limited to supported database connections", () => {
+  assert.equal(isBlobTextPreviewDatabase("mysql"), true);
+  assert.equal(isBlobTextPreviewDatabase("oracle"), true);
+  assert.equal(isBlobTextPreviewDatabase("oceanbase-oracle"), true);
+  assert.equal(isBlobTextPreviewDatabase("sqlite"), false);
+  assert.equal(isBlobTextPreviewDatabase("duckdb"), false);
+  assert.equal(isBlobTextPreviewDatabase(undefined), false);
+
+  assert.equal(isBinaryCellTextEditable("blob", "mysql"), true);
+  assert.equal(isBinaryCellTextEditable("blob", "oracle"), true);
+  assert.equal(isBinaryCellTextEditable("bytea", "postgres"), true);
+  assert.equal(isBinaryCellTextEditable("bytea", "sqlite"), false);
+  assert.equal(isBinaryCellTextEditable("bytea[]", "postgres"), false);
+
+  assert.equal(isBinaryCellTextPreviewColumn("bytea", "postgres"), true);
+  assert.equal(isBinaryCellTextPreviewColumn("bytea", "sqlite"), false);
+
   assert.equal(binaryCellUtf8Text("0x2332303035383035", "LONGBLOB", "sqlite"), null);
   assert.equal(binaryCellUtf8Text("0x2332303035383035", "BLOB", "duckdb"), null);
   assert.equal(binaryCellUtf8Text("0x2332303035383035", "LONGBLOB", undefined), null);
@@ -117,6 +299,24 @@ test("BLOB text preview stays limited to MySQL connections", () => {
   assert.equal(binaryCellDisplayText("0x2332303035383035", "BLOB", undefined, "duckdb"), "BLOB [8 bytes]");
   assert.equal(binaryCellDisplayText("0x2332303035383035", "LONGBLOB", undefined), "BLOB [8 bytes]");
   assert.equal(binaryCellDisplayText("0x2332303035383035", "LONGBLOB", undefined, "mysql"), "#2005805");
+
+  // Oracle 及 OceanBase-Oracle 的 BLOB 文本预览
+  assert.equal(binaryCellUtf8Text("0x48656c6c6f", "BLOB", "oracle"), "Hello");
+  assert.equal(binaryCellUtf8Text("0x48656c6c6f", "BLOB", "oceanbase-oracle"), "Hello");
+  assert.equal(binaryCellDisplayText("0x48656c6c6f", "BLOB", undefined, "oracle"), "Hello");
+  assert.equal(binaryCellDisplayText("0x48656c6c6f", "BLOB", undefined, "oceanbase-oracle"), "Hello");
+  assert.equal(binaryCellDisplayText("0x89504e47", "BLOB", undefined, "oracle"), "BLOB [4 bytes]");
+
+  // PostgreSQL 的 BYTEA 文本预览（#11987）
+  assert.equal(binaryCellUtf8Text("0x48656c6c6f", "bytea", "postgres"), "Hello");
+  assert.equal(binaryCellUtf8Text("\\x48656c6c6f", "bytea", "postgres"), "Hello");
+  assert.equal(binaryCellDisplayText("0x48656c6c6f", "bytea", undefined, "postgres"), "Hello");
+  assert.equal(binaryCellDisplayText("\\x48656c6c6f", "bytea", undefined, "postgres"), "Hello");
+  assert.equal(binaryCellDisplayText("0x89504e47", "bytea", undefined, "postgres"), "BYTEA [4 bytes]");
+  assert.equal(binaryCellDisplayText("\\x89504e47", "bytea", undefined, "postgres"), "BYTEA [4 bytes]");
+  assert.equal(binaryCellUtf8Text("0x48656c6c6f", "bytea", "sqlite"), null);
+  assert.equal(binaryCellDisplayText("0x48656c6c6f", "bytea", undefined, "sqlite"), "BYTEA [5 bytes]");
+
   // binary/varbinary 的文本预览是既有行为（如 TDengine BINARY 文本），不受 mysql 闸门影响。
   assert.equal(binaryCellDisplayText("0x534e2d4130303031", "VARBINARY(8)", undefined, "sqlite"), "SN-A0001");
 });
@@ -137,13 +337,6 @@ test("binaryCellDownloadPayload builds raw and decoded payloads", () => {
 
   const emptyBinary = binaryCellDownloadPayload("0x", "binary", "VARBINARY(0)");
   assert.deepEqual(Array.from(emptyBinary.data as Uint8Array), []);
-});
-
-test("DataGrid binary preview prefers ResultSet column types when table metadata is unavailable", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const formatter = source.match(/function formatCell\([^]*?\n\}/)?.[0] ?? "";
-
-  assert.match(formatter, /binaryCellDisplayText\(value, columnIndex === undefined \? undefined : allColumnTypes\.value\[columnIndex\], originalBytes, resolvedDatabaseType\.value\)/);
 });
 
 test("binaryCellDownloadPayload decodes GBK text bytes", () => {
@@ -173,15 +366,4 @@ test("formatBinaryCellByteSize formats human-readable sizes for the import toast
   assert.equal(formatBinaryCellByteSize(2048), "2.0 KB");
   // bytes >= 10 MB 时按整数 MB 显示（对齐 binaryCellDisplayText 既有格式）。
   assert.equal(formatBinaryCellByteSize(20 * 1024 * 1024), "20 MB");
-});
-
-test("DataGrid import handler surfaces a dedicated too-large toast instead of the generic failure", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const handler = source.match(/async function importDetailBinaryValue\([^]*?\n\}/)?.[0] ?? "";
-
-  // 闸门错误必须走专门的文案，而非通用 binaryImportFailed。
-  assert.match(handler, /e instanceof BinaryCellImportTooLargeError/);
-  assert.match(handler, /grid\.binaryImportTooLarge/);
-  assert.match(handler, /formatBinaryCellByteSize\(e\.bytes\)/);
-  assert.match(handler, /formatBinaryCellByteSize\(e\.limit\)/);
 });

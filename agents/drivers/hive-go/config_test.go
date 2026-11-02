@@ -296,6 +296,50 @@ func TestImpalaDefaultsToNoSASL(t *testing.T) {
 	}
 }
 
+func TestArgoDefaultsToNoSASL(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		DatabaseType: "argo",
+		Host:         "argo.example.com",
+		Port:         10000,
+		Database:     "analytics",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Auth != "NOSASL" {
+		t.Fatalf("unexpected ArgoDB auth mode: %q", config.Auth)
+	}
+}
+
+func TestArgoExplicitAuthenticationOverridesDefault(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		DatabaseType: "argo",
+		Host:         "argo.example.com",
+		Port:         10000,
+		URLParams:    "auth=NONE",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Auth != "NONE" || !config.AuthExplicit {
+		t.Fatalf("explicit ArgoDB authentication was not preserved: %#v", config)
+	}
+}
+
+func TestHiveDefaultAuthenticationRemainsSASL(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		DatabaseType: "hive",
+		Host:         "hive.example.com",
+		Port:         10000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Auth != "NONE" {
+		t.Fatalf("unexpected Hive auth mode: %q", config.Auth)
+	}
+}
+
 func TestImpalaExplicitAuthenticationOverridesDefaults(t *testing.T) {
 	config, err := parseConnectionConfig(connectParams{
 		DatabaseType: "impala",
@@ -359,6 +403,100 @@ func TestParseStandardJDBCURLSectionsAndCredentials(t *testing.T) {
 	}
 	if !reflect.DeepEqual(config.HiveConfiguration, want) {
 		t.Fatalf("unexpected OpenSession configuration: %#v", config.HiveConfiguration)
+	}
+}
+
+func TestKyuubiIdentifierQuoteFollowsPreservedEngineType(t *testing.T) {
+	tests := []struct {
+		name            string
+		params          connectParams
+		configuration   string
+		identifierQuote string
+	}{
+		{
+			name: "URL fragment selects Trino",
+			params: connectParams{
+				Host:         "kyuubi.example.com",
+				DatabaseType: "kyuubi",
+				URLParams:    "#kyuubi.engine.type=TRINO",
+			},
+			configuration:   "set:hivevar:kyuubi.engine.type",
+			identifierQuote: trinoIdentifierQuote,
+		},
+		{
+			name: "JDBC hive conf selects Trino",
+			params: connectParams{
+				DatabaseType:     "kyuubi",
+				ConnectionString: "jdbc:hive2://kyuubi.example.com:10009/default?kyuubi.engine.type=trino",
+			},
+			configuration:   "set:hiveconf:kyuubi.engine.type",
+			identifierQuote: trinoIdentifierQuote,
+		},
+		{
+			name: "URL param without hash selects Trino",
+			params: connectParams{
+				Host:         "kyuubi.example.com",
+				DatabaseType: "kyuubi",
+				URLParams:    "kyuubi.engine.type=TRINO",
+			},
+			configuration:   "set:hivevar:kyuubi.engine.type",
+			identifierQuote: trinoIdentifierQuote,
+		},
+		{
+			name: "Semicolon with hash selects Trino",
+			params: connectParams{
+				Host:         "kyuubi.example.com",
+				DatabaseType: "kyuubi",
+				URLParams:    ";#kyuubi.engine.type=trino",
+			},
+			configuration:   "set:hivevar:kyuubi.engine.type",
+			identifierQuote: trinoIdentifierQuote,
+		},
+		{
+			name: "Session params with auth selects Trino",
+			params: connectParams{
+				Host:         "kyuubi.example.com",
+				DatabaseType: "kyuubi",
+				URLParams:    "auth=NOSASL;kyuubi.engine.type=TRINO",
+			},
+			configuration:   "set:hivevar:kyuubi.engine.type",
+			identifierQuote: trinoIdentifierQuote,
+		},
+		{
+			name: "Kyuubi Spark keeps Hive quote",
+			params: connectParams{
+				Host:         "kyuubi.example.com",
+				DatabaseType: "kyuubi",
+				URLParams:    "#kyuubi.engine.type=SPARK_SQL",
+			},
+			configuration:   "set:hivevar:kyuubi.engine.type",
+			identifierQuote: defaultHiveIdentifierQuote,
+		},
+		{
+			name: "Hive ignores Kyuubi engine setting",
+			params: connectParams{
+				Host:         "hive.example.com",
+				DatabaseType: "hive",
+				URLParams:    "#kyuubi.engine.type=TRINO",
+			},
+			configuration:   "set:hivevar:kyuubi.engine.type",
+			identifierQuote: defaultHiveIdentifierQuote,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config, err := parseConnectionConfig(test.params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := config.HiveConfiguration[test.configuration]; got == "" {
+				t.Fatalf("engine type was not preserved in %q: %#v", test.configuration, config.HiveConfiguration)
+			}
+			if got := config.identifierQuote(); got != test.identifierQuote {
+				t.Fatalf("identifier quote = %q, want %q", got, test.identifierQuote)
+			}
+		})
 	}
 }
 

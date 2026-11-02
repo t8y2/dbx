@@ -3,6 +3,12 @@
   "drivers": [
     {
       "dbType": "mysql",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "verified",
+      "transferObjectFamily": "mysql",
       "label": "MySQL",
       "dialect": "MySQL",
       "runtimeMode": "native",
@@ -36,6 +42,12 @@
     },
     {
       "dbType": "postgres",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "verified",
+      "transferObjectFamily": "postgres",
       "label": "PostgreSQL",
       "dialect": "PostgreSQL",
       "runtimeMode": "native",
@@ -73,6 +85,11 @@
     },
     {
       "dbType": "sqlite",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "verified",
       "label": "SQLite",
       "dialect": "SQLite",
       "runtimeMode": "file",
@@ -81,6 +98,14 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "localFile": true,
+      "managedDrivers": [
+        {
+          "key": "sqlite-worker",
+          "label": "SQLite SSH Worker",
+          "storeVisible": true,
+          "storeOrder": 48
+        }
+      ],
       "traits": {
         "diagramSql": true
       },
@@ -106,6 +131,11 @@
     },
     {
       "dbType": "rqlite",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "RQLite",
       "dialect": "Rqlite",
       "runtimeMode": "native",
@@ -139,6 +169,11 @@
     },
     {
       "dbType": "turso",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "Turso",
       "dialect": "Turso",
       "runtimeMode": "native",
@@ -172,6 +207,11 @@
     },
     {
       "dbType": "cloudflare-d1",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "Cloudflare D1",
       "dialect": "SQLite",
       "runtimeMode": "native",
@@ -234,6 +274,11 @@
     },
     {
       "dbType": "duckdb",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "DuckDB",
       "dialect": "DuckDB",
       "runtimeMode": "file",
@@ -276,6 +321,11 @@
     },
     {
       "dbType": "clickhouse",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "ClickHouse",
       "dialect": "ClickHouse",
       "runtimeMode": "native",
@@ -306,6 +356,12 @@
     },
     {
       "dbType": "sqlserver",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "verified",
+      "transferObjectFamily": "sqlserver",
       "label": "SQL Server",
       "dialect": "SQL Server",
       "runtimeMode": "native",
@@ -351,6 +407,7 @@
     },
     {
       "dbType": "mongodb",
+      "transferSupportLevel": "best-effort",
       "label": "MongoDB (Legacy)",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -400,7 +457,7 @@
       "defaultPort": 8000,
       "supportLevel": "operate",
       "capabilities": {
-        "queryExecution": false,
+        "queryExecution": true,
         "metadataBrowse": true,
         "objectBrowser": false,
         "objectSource": false,
@@ -420,6 +477,12 @@
     },
     {
       "dbType": "oracle",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "verified",
+      "transferObjectFamily": "oracle",
       "label": "Oracle",
       "dialect": "Oracle",
       "runtimeMode": "agent",
@@ -439,6 +502,13 @@
           "agentKey": "oracle",
           "label": "Oracle",
           "storeVisible": false
+        },
+        {
+          "profile": "oci",
+          "agentKey": "oracle-oci",
+          "label": "Oracle (OCI)",
+          "storeVisible": true,
+          "storeOrder": 54
         }
       ],
       "singleConnectionPool": true,
@@ -539,6 +609,64 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": false,
       "defaultPort": 7700,
+      "supportLevel": "browse",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": false,
+        "objectSource": false,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
+      "dbType": "solr",
+      "label": "Apache Solr",
+      "runtimeMode": "native",
+      "mcpMode": "bridge",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 8983,
+      "supportLevel": "browse",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": false,
+        "objectSource": false,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
+      "dbType": "couchdb",
+      "label": "Apache CouchDB",
+      "runtimeMode": "native",
+      "mcpMode": "bridge",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 5984,
       "supportLevel": "browse",
       "capabilities": {
         "queryExecution": true,
@@ -706,6 +834,10 @@
     },
     {
       "dbType": "doris",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Doris",
       "dialect": "Doris",
       "runtimeMode": "native",
@@ -729,13 +861,17 @@
         "sqlFileExecution": true,
         "databaseCreate": true,
         "fieldLineage": false,
-        "sqlExplain": false,
+        "sqlExplain": true,
         "userAdmin": true,
         "driverManagement": false
       }
     },
     {
       "dbType": "starrocks",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "StarRocks",
       "dialect": "StarRocks",
       "runtimeMode": "native",
@@ -766,6 +902,10 @@
     },
     {
       "dbType": "manticoresearch",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Manticore Search",
       "dialect": "ManticoreSearch",
       "runtimeMode": "native",
@@ -796,6 +936,10 @@
     },
     {
       "dbType": "redshift",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Redshift",
       "dialect": "Redshift",
       "runtimeMode": "native",
@@ -832,6 +976,12 @@
     },
     {
       "dbType": "dameng",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "family-compatible",
+      "transferObjectFamily": "oracle",
       "label": "达梦 DM8",
       "dialect": "Dameng",
       "runtimeMode": "agent",
@@ -872,6 +1022,12 @@
     },
     {
       "dbType": "kingbase",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "family-compatible",
+      "transferObjectFamily": "postgres",
       "label": "金仓KingbaseES",
       "dialect": "Kingbase",
       "runtimeMode": "agent",
@@ -910,6 +1066,11 @@
     },
     {
       "dbType": "highgo",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "瀚高 HighGo",
       "dialect": "HighGo",
       "runtimeMode": "agent",
@@ -937,7 +1098,7 @@
         "tableDataEdit": true,
         "tableStructureEdit": true,
         "tableImport": true,
-        "dataTransfer": false,
+        "dataTransfer": true,
         "sqlFileExecution": true,
         "databaseCreate": true,
         "fieldLineage": false,
@@ -948,6 +1109,10 @@
     },
     {
       "dbType": "uxdb",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "优炫 UXDB",
       "dialect": "PostgreSQL",
       "runtimeMode": "agent",
@@ -986,6 +1151,11 @@
     },
     {
       "dbType": "vastbase",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "海量 Vastbase",
       "dialect": "Vastbase",
       "runtimeMode": "agent",
@@ -1013,7 +1183,7 @@
         "tableDataEdit": true,
         "tableStructureEdit": true,
         "tableImport": true,
-        "dataTransfer": false,
+        "dataTransfer": true,
         "sqlFileExecution": true,
         "databaseCreate": true,
         "fieldLineage": false,
@@ -1024,6 +1194,11 @@
     },
     {
       "dbType": "goldendb",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "金篆 GoldenDB",
       "dialect": "GoldenDB",
       "runtimeMode": "agent",
@@ -1057,6 +1232,10 @@
     },
     {
       "dbType": "databend",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Databend",
       "dialect": "Databend",
       "runtimeMode": "agent",
@@ -1093,6 +1272,12 @@
     },
     {
       "dbType": "gaussdb",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "family-compatible",
+      "transferObjectFamily": "postgres",
       "label": "GaussDB",
       "dialect": "GaussDB",
       "runtimeMode": "native",
@@ -1131,6 +1316,12 @@
     },
     {
       "dbType": "kwdb",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "family-compatible",
+      "transferObjectFamily": "postgres",
       "label": "KWDB",
       "dialect": "KwDB",
       "runtimeMode": "native",
@@ -1168,6 +1359,11 @@
     },
     {
       "dbType": "yashandb",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "崖山 YashanDB",
       "dialect": "YashanDB",
       "runtimeMode": "agent",
@@ -1194,7 +1390,7 @@
         "tableDataEdit": true,
         "tableStructureEdit": true,
         "tableImport": true,
-        "dataTransfer": false,
+        "dataTransfer": true,
         "sqlFileExecution": true,
         "databaseCreate": true,
         "fieldLineage": false,
@@ -1205,6 +1401,10 @@
     },
     {
       "dbType": "databricks",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Databricks SQL",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -1241,6 +1441,10 @@
     },
     {
       "dbType": "saphana",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "SAP HANA",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -1264,8 +1468,8 @@
         "schemaSearch": true,
         "diagram": true,
         "tableDataEdit": true,
-        "tableStructureEdit": false,
-        "tableImport": false,
+        "tableStructureEdit": true,
+        "tableImport": true,
         "dataTransfer": false,
         "sqlFileExecution": true,
         "databaseCreate": false,
@@ -1277,6 +1481,10 @@
     },
     {
       "dbType": "teradata",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Teradata",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -1313,6 +1521,10 @@
     },
     {
       "dbType": "vertica",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Vertica",
       "dialect": "Vertica",
       "runtimeMode": "agent",
@@ -1350,6 +1562,10 @@
     },
     {
       "dbType": "firebird",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Firebird",
       "dialect": "Firebird",
       "runtimeMode": "agent",
@@ -1369,7 +1585,7 @@
         "queryExecution": true,
         "metadataBrowse": true,
         "objectBrowser": true,
-        "objectSource": false,
+        "objectSource": true,
         "schemaSearch": true,
         "diagram": true,
         "tableDataEdit": true,
@@ -1386,6 +1602,10 @@
     },
     {
       "dbType": "exasol",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Exasol",
       "dialect": "Exasol",
       "runtimeMode": "agent",
@@ -1423,6 +1643,12 @@
     },
     {
       "dbType": "opengauss",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "family-compatible",
+      "transferObjectFamily": "postgres",
       "label": "openGauss",
       "dialect": "openGauss",
       "runtimeMode": "native",
@@ -1448,18 +1674,23 @@
         "diagram": true,
         "tableDataEdit": true,
         "tableStructureEdit": true,
-        "tableImport": false,
+        "tableImport": true,
         "dataTransfer": true,
         "sqlFileExecution": true,
         "databaseCreate": true,
         "fieldLineage": true,
-        "sqlExplain": false,
+        "sqlExplain": true,
         "userAdmin": true,
         "driverManagement": false
       }
     },
     {
       "dbType": "questdb",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "QuestDB",
       "dialect": "QuestDB",
       "runtimeMode": "native",
@@ -1495,6 +1726,12 @@
     },
     {
       "dbType": "oceanbase-oracle",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "family-compatible",
+      "transferObjectFamily": "oracle",
       "label": "OceanBase Oracle Mode",
       "dialect": "OceanBase",
       "runtimeMode": "agent",
@@ -1528,13 +1765,18 @@
         "sqlFileExecution": true,
         "databaseCreate": false,
         "fieldLineage": true,
-        "sqlExplain": false,
+        "sqlExplain": true,
         "userAdmin": false,
         "driverManagement": true
       }
     },
     {
       "dbType": "gbase",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferObjectFamily": "mysql",
       "label": "南大通用 GBase 8a",
       "dialect": "GBase",
       "runtimeMode": "agent",
@@ -1543,13 +1785,6 @@
       "driverStoreVisible": true,
       "driverStoreOrder": 15,
       "driverProfiles": [
-        {
-          "profile": "gbase8s",
-          "agentKey": "gbase8s",
-          "label": "南大通用 GBase 8s",
-          "storeVisible": true,
-          "storeOrder": 16
-        },
         {
           "profile": "gbase8a",
           "agentKey": "gbase8a",
@@ -1587,7 +1822,94 @@
       }
     },
     {
+      "dbType": "gbase8s",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "label": "南大通用 GBase 8s",
+      "dialect": "Informix",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "gbase8s",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 16,
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 9088,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": true,
+        "diagram": true,
+        "tableDataEdit": true,
+        "tableStructureEdit": true,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
+      "dbType": "gbase8c",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "label": "南大通用 GBase 8c",
+      "dialect": "PostgreSQL",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "gbase8c",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 55,
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 5432,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true,
+        "pgVacuum": true
+      },
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": false,
+        "schemaSearch": true,
+        "diagram": true,
+        "tableDataEdit": true,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
       "dbType": "access",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Microsoft Access",
       "dialect": "Access",
       "runtimeMode": "agent",
@@ -1624,6 +1946,11 @@
     },
     {
       "dbType": "h2",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "H2",
       "dialect": "H2",
       "runtimeMode": "agent",
@@ -1684,7 +2011,7 @@
         "tableDataEdit": true,
         "tableStructureEdit": true,
         "tableImport": false,
-        "dataTransfer": false,
+        "dataTransfer": true,
         "sqlFileExecution": true,
         "databaseCreate": false,
         "fieldLineage": false,
@@ -1695,6 +2022,10 @@
     },
     {
       "dbType": "snowflake",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Snowflake",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -1706,7 +2037,9 @@
       "skipTcpProbe": true,
       "defaultPort": 443,
       "traits": {
-        "schemaAware": true
+        "schemaAware": true,
+        "databaseSchemaQualified": true,
+        "treeSchema": true
       },
       "supportLevel": "operate",
       "capabilities": {
@@ -1730,6 +2063,10 @@
     },
     {
       "dbType": "trino",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Trino",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -1767,6 +2104,10 @@
     },
     {
       "dbType": "prestosql",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "PrestoSQL",
       "runtimeMode": "external",
       "mcpMode": "bridge",
@@ -1801,6 +2142,11 @@
     },
     {
       "dbType": "hive",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "Apache Hive",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -1835,7 +2181,101 @@
       }
     },
     {
+      "dbType": "argo",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
+      "label": "星环Argo",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "argo",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 50,
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 10000,
+      "traits": {
+        "schemaAware": true
+      },
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": true,
+        "diagram": false,
+        "tableDataEdit": true,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": true,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
+      "dbType": "transwarp",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
+      "label": "星环Inceptor",
+      "dialect": "Transwarp",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "transwarp",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 52,
+      "driverProfiles": [
+        {
+          "profile": "transwarp-inceptor",
+          "agentKey": "transwarp",
+          "label": "星环Inceptor",
+          "storeVisible": false
+        }
+      ],
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 10000,
+      "traits": {
+        "schemaAware": true
+      },
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": true,
+        "diagram": false,
+        "tableDataEdit": true,
+        "tableStructureEdit": true,
+        "tableImport": true,
+        "dataTransfer": true,
+        "sqlFileExecution": true,
+        "databaseCreate": true,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
       "dbType": "kyuubi",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "Apache Kyuubi",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -1870,6 +2310,11 @@
     },
     {
       "dbType": "impala",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "Apache Impala",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -1904,6 +2349,11 @@
     },
     {
       "dbType": "db2",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "IBM DB2",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -1928,18 +2378,22 @@
         "diagram": true,
         "tableDataEdit": true,
         "tableStructureEdit": false,
-        "tableImport": false,
-        "dataTransfer": false,
+        "tableImport": true,
+        "dataTransfer": true,
         "sqlFileExecution": true,
         "databaseCreate": false,
-        "fieldLineage": false,
-        "sqlExplain": false,
+        "fieldLineage": true,
+        "sqlExplain": true,
         "userAdmin": false,
         "driverManagement": true
       }
     },
     {
       "dbType": "informix",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "IBM Informix",
       "dialect": "Informix",
       "runtimeMode": "agent",
@@ -2008,6 +2462,46 @@
       }
     },
     {
+      "dbType": "nebula",
+      "label": "NebulaGraph",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "nebula",
+      "driverProfiles": [
+        {
+          "profile": "nebula-v3",
+          "agentKey": "nebula",
+          "label": "NebulaGraph 3.x",
+          "storeVisible": false
+        }
+      ],
+      "driverStoreVisible": true,
+      "driverStoreOrder": 53,
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 9669,
+      "supportLevel": "browse",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
       "dbType": "cassandra",
       "label": "Apache Cassandra",
       "runtimeMode": "agent",
@@ -2041,6 +2535,10 @@
     },
     {
       "dbType": "bigquery",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Google BigQuery",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -2072,6 +2570,10 @@
     },
     {
       "dbType": "spanner",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Google Cloud Spanner",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -2108,6 +2610,10 @@
     },
     {
       "dbType": "kylin",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Apache Kylin",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -2140,6 +2646,10 @@
     },
     {
       "dbType": "ignite",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Apache Ignite",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -2176,6 +2686,10 @@
     },
     {
       "dbType": "ignite3",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Apache Ignite 3",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -2212,6 +2726,10 @@
     },
     {
       "dbType": "sundb",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "科蓝 SUNDB",
       "dialect": "SunDB",
       "runtimeMode": "agent",
@@ -2223,6 +2741,10 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 22581,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -2245,6 +2767,10 @@
     },
     {
       "dbType": "oscar",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "神通 OSCAR",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -2281,6 +2807,10 @@
     },
     {
       "dbType": "tdengine",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "TDengine",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -2313,6 +2843,11 @@
     },
     {
       "dbType": "xugu",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "虚谷 XuguDB",
       "dialect": "Xugu",
       "runtimeMode": "agent",
@@ -2333,18 +2868,18 @@
         "queryExecution": true,
         "metadataBrowse": true,
         "objectBrowser": true,
-        "objectSource": false,
+        "objectSource": true,
         "schemaSearch": true,
         "diagram": true,
-        "tableDataEdit": false,
+        "tableDataEdit": true,
         "tableStructureEdit": true,
-        "tableImport": false,
-        "dataTransfer": false,
+        "tableImport": true,
+        "dataTransfer": true,
         "sqlFileExecution": true,
         "databaseCreate": false,
-        "fieldLineage": false,
-        "sqlExplain": false,
-        "userAdmin": false,
+        "fieldLineage": true,
+        "sqlExplain": true,
+        "userAdmin": true,
         "driverManagement": true
       }
     },
@@ -2354,6 +2889,15 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "etcd",
+      "driverProfiles": [
+        {
+          "profile": "etcd-v2",
+          "agentKey": "etcd2",
+          "label": "etcd 2.x (v2 API)",
+          "storeVisible": true,
+          "storeOrder": 49
+        }
+      ],
       "driverStoreVisible": true,
       "driverStoreOrder": 39,
       "singleConnectionPool": false,
@@ -2394,11 +2938,11 @@
       "defaultPort": 2181,
       "supportLevel": "connect",
       "capabilities": {
-        "queryExecution": true,
+        "queryExecution": false,
         "metadataBrowse": false,
         "objectBrowser": false,
         "objectSource": false,
-        "schemaSearch": true,
+        "schemaSearch": false,
         "diagram": false,
         "tableDataEdit": false,
         "tableStructureEdit": false,
@@ -2559,6 +3103,10 @@
     },
     {
       "dbType": "iotdb",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
       "label": "Apache IoTDB",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -2594,11 +3142,25 @@
     },
     {
       "dbType": "iris",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "InterSystems IRIS",
       "dialect": "Iris",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "iris",
+      "driverProfiles": [
+        {
+          "profile": "cache",
+          "agentKey": "cache",
+          "label": "InterSystems Caché",
+          "storeVisible": true,
+          "storeOrder": 51
+        }
+      ],
       "driverStoreVisible": true,
       "driverStoreOrder": 42,
       "singleConnectionPool": true,
@@ -2617,10 +3179,10 @@
         "objectSource": true,
         "schemaSearch": true,
         "diagram": true,
-        "tableDataEdit": false,
+        "tableDataEdit": true,
         "tableStructureEdit": true,
         "tableImport": false,
-        "dataTransfer": false,
+        "dataTransfer": true,
         "sqlFileExecution": true,
         "databaseCreate": false,
         "fieldLineage": false,
@@ -2654,6 +3216,39 @@
         "dataTransfer": false,
         "sqlFileExecution": true,
         "databaseCreate": true,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
+      "dbType": "influxdb3",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "label": "InfluxDB 3.x",
+      "runtimeMode": "native",
+      "mcpMode": "bridge",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 8181,
+      "supportLevel": "connect",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": false,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
         "fieldLineage": false,
         "sqlExplain": false,
         "userAdmin": false,
@@ -2728,6 +3323,11 @@
     },
     {
       "dbType": "spark",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "transferSupportLevel": "best-effort",
       "label": "Apache Spark",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
@@ -2759,6 +3359,68 @@
         "sqlExplain": false,
         "userAdmin": false,
         "driverManagement": true
+      }
+    },
+    {
+      "dbType": "plugin",
+      "label": "Plugin",
+      "runtimeMode": "external",
+      "mcpMode": "unsupported",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "supportLevel": "connect",
+      "specializedSurface": true,
+      "capabilities": {
+        "queryExecution": false,
+        "metadataBrowse": false,
+        "objectBrowser": false,
+        "objectSource": false,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
+      "dbType": "salesforce",
+      "label": "Salesforce",
+      "dialect": "SOQL",
+      "runtimeMode": "native",
+      "mcpMode": "bridge",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 443,
+      "traits": {
+        "singleDatabase": true
+      },
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": false,
+        "schemaSearch": true,
+        "diagram": false,
+        "tableDataEdit": true,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
       }
     }
   ]

@@ -35,12 +35,21 @@ pub(super) fn ensure_portable_version_is_newer(
     current_version: &str,
 ) -> Result<(), String> {
     let current = parse_portable_version(current_version, "current app")?;
-    if requested_version <= &current {
+    if !is_portable_upgrade(requested_version, &current) {
         return Err(format!(
             "Portable update version {requested_version} must be newer than the current version {current}."
         ));
     }
     Ok(())
+}
+
+fn is_portable_upgrade(requested: &Version, current: &Version) -> bool {
+    let channel = if requested.pre.is_empty() {
+        dbx_core::update::UpdateChannel::Stable
+    } else {
+        dbx_core::update::UpdateChannel::Beta
+    };
+    dbx_core::update::is_channel_update_available(channel, &requested.to_string(), &current.to_string())
 }
 
 fn parse_portable_version(value: &str, label: &str) -> Result<Version, String> {
@@ -60,7 +69,10 @@ fn portable_arch_label(arch: &str) -> Result<&'static str, String> {
 pub(super) fn portable_asset_name(version: &str, arch: &str) -> Result<String, String> {
     let version = parse_portable_version(version, "requested")?;
     let arch = portable_arch_label(arch)?;
-    Ok(format!("DBX_{version}_{arch}-portable.zip"))
+    // Release workflows keep asset filenames at the stable base version even
+    // when the signed executable carries a beta prerelease version.
+    let base_version = format!("{}.{}.{}", version.major, version.minor, version.patch);
+    Ok(format!("DBX_{base_version}_{arch}-portable.zip"))
 }
 
 pub(super) fn verify_portable_archive(
@@ -126,7 +138,7 @@ fn validated_portable_executable(
         return Err(format!("Unsupported portable update manifest schema version {}.", manifest.schema_version));
     }
     let manifest_version = parse_portable_version(&manifest.version, "manifest")?;
-    if &manifest_version != expected_version {
+    if !portable_versions_match(&manifest_version, expected_version) {
         return Err(format!(
             "Portable update manifest version {manifest_version} does not match requested version {expected_version}."
         ));
@@ -166,8 +178,34 @@ fn validated_portable_executable(
     Ok(executable)
 }
 
+fn portable_versions_match(manifest_version: &Version, expected_version: &Version) -> bool {
+    manifest_version == expected_version
+        || (expected_version.pre.is_empty()
+            && manifest_version.major == expected_version.major
+            && manifest_version.minor == expected_version.minor
+            && manifest_version.patch == expected_version.patch)
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn portable_update_staging_dir(executable_dir: &std::path::Path, update_id: &str) -> std::path::PathBuf {
+    executable_dir.join(format!(".dbx-portable-update-{update_id}"))
+}
+
+/// Windows PowerShell lives in a versioned directory that Rust's executable
+/// search order never visits (it only probes the `System32` root), so a machine
+/// whose `PATH` lost that entry fails with "program not found" even though
+/// PowerShell is installed. Resolve the absolute path first and keep the bare
+/// name as a fallback for non-standard installs.
+#[cfg(target_os = "windows")]
+fn resolve_powershell_program() -> Option<std::path::PathBuf> {
+    let root = std::env::var_os("SystemRoot").filter(|value| !value.is_empty())?;
+    let candidate =
+        std::path::Path::new(&root).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe");
+    candidate.is_file().then_some(candidate)
 }
 
 #[cfg(target_os = "windows")]
@@ -202,7 +240,10 @@ pub(super) fn launch_portable_update_helper(archive: &[u8], version: &Version) -
     fs::remove_file(&write_probe)
         .map_err(|error| format!("Failed to finish portable directory write check: {error}"))?;
 
-    let staging_dir = std::env::temp_dir().join(format!("dbx-portable-update-{update_id}"));
+    // Keep the replacement and helper on the target volume. Windows
+    // PowerShell cannot reliably Move-Item an executable across volumes after
+    // the running target has already been renamed to its backup.
+    let staging_dir = portable_update_staging_dir(exe_dir, &update_id);
     fs::create_dir(&staging_dir)
         .map_err(|error| format!("Failed to create portable update staging directory: {error}"))?;
     let staged_exe = staging_dir.join("DBX.exe.new");
@@ -223,7 +264,9 @@ pub(super) fn launch_portable_update_helper(archive: &[u8], version: &Version) -
         fs::write(&script_path, PORTABLE_UPDATE_SCRIPT)
             .map_err(|error| format!("Failed to create portable update helper: {error}"))?;
 
-        Command::new("powershell.exe")
+        let resolved_powershell = resolve_powershell_program();
+        let program = resolved_powershell.clone().unwrap_or_else(|| std::path::PathBuf::from("powershell.exe"));
+        Command::new(&program)
             .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
             .arg(&script_path)
             .arg("-ParentProcessId")
@@ -238,7 +281,12 @@ pub(super) fn launch_portable_update_helper(archive: &[u8], version: &Version) -
             .arg(&staging_dir)
             .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
             .spawn()
-            .map_err(|error| format!("Failed to start portable update helper: {error}"))?;
+            .map_err(|error| match resolved_powershell.as_deref() {
+                Some(resolved) => format!("Failed to start portable update helper ({}): {error}", resolved.display()),
+                None => format!(
+                    "Failed to start portable update helper: {error}. Portable updates replace DBX.exe with Windows PowerShell, which was not found at %SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe or on PATH; install it or download the portable ZIP from the release page to update manually."
+                ),
+            })?;
         Ok(())
     })();
 
@@ -253,7 +301,7 @@ pub(super) fn launch_portable_update_helper(_archive: &[u8], _version: &Version)
     Err("Portable updates are only supported on Windows.".to_string())
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 const PORTABLE_UPDATE_SCRIPT: &str = r#"param(
     [Parameter(Mandatory = $true)][int]$ParentProcessId,
     [Parameter(Mandatory = $true)][string]$SourceExe,
@@ -317,9 +365,9 @@ exit 0
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_tauri_text, portable_asset_name, sha256_hex, validate_requested_portable_version,
-        validated_portable_executable, PORTABLE_EXECUTABLE_NAME, PORTABLE_UPDATE_MANIFEST_NAME,
-        PORTABLE_UPDATE_MANIFEST_SCHEMA_VERSION,
+        decode_tauri_text, portable_asset_name, portable_update_staging_dir, sha256_hex,
+        validate_requested_portable_version, validated_portable_executable, PORTABLE_EXECUTABLE_NAME,
+        PORTABLE_UPDATE_MANIFEST_NAME, PORTABLE_UPDATE_MANIFEST_SCHEMA_VERSION, PORTABLE_UPDATE_SCRIPT,
     };
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use semver::Version;
@@ -346,9 +394,41 @@ mod tests {
     #[test]
     fn builds_portable_asset_names_for_windows_architectures() {
         assert_eq!(portable_asset_name("0.5.64", "x86_64").unwrap(), "DBX_0.5.64_x64-portable.zip");
-        assert_eq!(portable_asset_name("v0.5.64-beta.1", "aarch64").unwrap(), "DBX_0.5.64-beta.1_arm64-portable.zip");
+        assert_eq!(portable_asset_name("v0.5.64-beta.1", "aarch64").unwrap(), "DBX_0.5.64_arm64-portable.zip");
         assert!(portable_asset_name("0.5.64", "x86").is_err());
         assert!(portable_asset_name("../../0.5.64", "x86_64").is_err());
+    }
+
+    #[test]
+    fn stages_portable_replacement_beside_the_target() {
+        let executable_dir = std::path::Path::new("portable-install");
+        let staging_dir = portable_update_staging_dir(executable_dir, "123-456");
+
+        assert_eq!(staging_dir.parent(), Some(executable_dir));
+        assert_eq!(staging_dir.file_name().and_then(|name| name.to_str()), Some(".dbx-portable-update-123-456"));
+        assert_eq!(staging_dir.join("DBX.exe.new").parent(), Some(staging_dir.as_path()));
+        assert_eq!(staging_dir.join("apply-update.ps1").parent(), Some(staging_dir.as_path()));
+    }
+
+    #[test]
+    fn portable_update_script_preserves_replacement_and_rollback_order() {
+        let backup = PORTABLE_UPDATE_SCRIPT
+            .find("Move-Item -LiteralPath $TargetExe -Destination $BackupExe -Force")
+            .expect("script must back up the running executable");
+        let replacement = PORTABLE_UPDATE_SCRIPT
+            .find("Move-Item -LiteralPath $SourceExe -Destination $TargetExe -Force")
+            .expect("script must install the staged executable");
+        let relaunch = PORTABLE_UPDATE_SCRIPT
+            .find("Start-Process -FilePath $TargetExe")
+            .expect("script must relaunch the portable executable");
+        let cleanup = PORTABLE_UPDATE_SCRIPT
+            .find("Remove-Item -LiteralPath $StagingDir -Recurse -Force")
+            .expect("script must clean the staging directory after relaunch");
+
+        assert!(backup < replacement);
+        assert!(replacement < relaunch);
+        assert!(relaunch < cleanup);
+        assert!(PORTABLE_UPDATE_SCRIPT.contains("Copy-Item -LiteralPath $BackupExe -Destination $TargetExe -Force"));
     }
 
     #[test]
@@ -366,6 +446,16 @@ mod tests {
     fn rejects_downgrade_requests() {
         let error = validate_requested_portable_version("0.5.62", "0.5.63").unwrap_err();
         assert!(error.contains("must be newer"));
+    }
+
+    #[test]
+    fn accepts_same_base_beta_from_stable_portable_build() {
+        assert!(validate_requested_portable_version("0.5.64-beta.20261029.1", "0.5.64").is_ok());
+        assert!(validate_requested_portable_version("0.5.64", "0.5.64-beta.20261029.1").is_err());
+        assert!(validate_requested_portable_version("0.5.65", "0.5.64-beta.20261029.1").is_ok());
+        assert!(validate_requested_portable_version("0.5.63", "0.5.64-beta.20261029.1").is_err());
+        assert!(validate_requested_portable_version("0.5.64-beta.20261029.2", "0.5.64-beta.20261029.1").is_ok());
+        assert!(validate_requested_portable_version("0.5.64-beta.20261029.1", "0.5.64-beta.20261029.2").is_err());
     }
 
     #[test]
@@ -394,6 +484,15 @@ mod tests {
         let archive = portable_zip("0.5.62", "x64", b"MZolder executable", None);
         let error = validated_portable_executable(&archive, &Version::parse("0.5.64").unwrap(), "x86_64").unwrap_err();
         assert!(error.contains("does not match requested version"));
+    }
+
+    #[test]
+    fn accepts_beta_binary_manifest_for_promoted_stable_base_version() {
+        let archive = portable_zip("0.5.64-beta.20261029.1", "x64", b"MZbeta executable", None);
+        assert_eq!(
+            validated_portable_executable(&archive, &Version::parse("0.5.64").unwrap(), "x86_64").unwrap(),
+            b"MZbeta executable"
+        );
     }
 
     #[test]

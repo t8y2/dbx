@@ -1,7 +1,6 @@
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type * as TauriModule from "@/lib/backend/tauri";
 import { appendDebugLog } from "@/lib/backend/debugLog";
-import { useSettingsStore } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 
 // ---------------------------------------------------------------------------
@@ -22,7 +21,11 @@ async function getBackend(): Promise<Backend> {
 // Helper: create a forwarding function that lazily resolves the backend
 // ---------------------------------------------------------------------------
 
-function forward<K extends keyof Backend>(name: K): Backend[K] {
+function forward<K extends keyof Backend>(name: K, logErrorDetails = true): Backend[K] {
+  // SAFETY: the resolved module is one of exactly two implementations of the same
+  // surface — `http.ts` imports its request/response types from `tauri.ts` on
+  // purpose, so both transports are kept signature-compatible by construction.
+  // TypeScript cannot express that cross-module equivalence, hence the cast.
   return (async (...args: unknown[]) => {
     const startedAt = performance.now();
     const operation = String(name);
@@ -39,7 +42,7 @@ function forward<K extends keyof Backend>(name: K): Backend[K] {
       appendDebugLog("error", "[DBX][api:error]", {
         operation,
         elapsedMs: Math.round(performance.now() - startedAt),
-        error,
+        ...(logErrorDetails ? { error } : {}),
       });
       throw error;
     }
@@ -50,9 +53,30 @@ function forward<K extends keyof Backend>(name: K): Backend[K] {
 // Re-export all functions via lazy forwarding
 // ---------------------------------------------------------------------------
 
+// PL/SQL debugger
+export const plDebugBootstrap = forward("plDebugBootstrap", false);
+export const plDebugInspect = forward("plDebugInspect", false);
+export const plDebugCompile = forward("plDebugCompile", false);
+export const plDebugCompileStatus = forward("plDebugCompileStatus", false);
+export const plDebugList = forward("plDebugList", false);
+export const plDebugStart = forward("plDebugStart", false);
+export const plDebugStatus = forward("plDebugStatus", false);
+export const plDebugHeartbeat = forward("plDebugHeartbeat", false);
+export const plDebugOperation = forward("plDebugOperation", false);
+export const plDebugOperate = forward("plDebugOperate", false);
+export const plDebugRead = forward("plDebugRead", false);
+
 // Connection
 export const testConnection = forward("testConnection");
+export const connectionParameters = forward("connectionParameters", false);
+export const testSshTunnel = forward("testSshTunnel");
 export const testConnectionWithInfo = forward("testConnectionWithInfo");
+export const salesforceOauthBrowserAuthorize = forward("salesforceOauthBrowserAuthorize");
+export const salesforceOauthDeviceStart = forward("salesforceOauthDeviceStart");
+export const salesforceOauthDevicePoll = forward("salesforceOauthDevicePoll");
+export const salesforceOauthRefresh = forward("salesforceOauthRefresh");
+export const salesforceOauthPasswordLogin = forward("salesforceOauthPasswordLogin");
+export const salesforceCurrentUser = forward("salesforceCurrentUser");
 export const connectDb = forward("connectDb");
 export const connectionDatabaseInfo = forward("connectionDatabaseInfo");
 export const saveConnectionDatabaseInfo = forward("saveConnectionDatabaseInfo");
@@ -65,6 +89,10 @@ export const sessionCredentialStatus = forward("sessionCredentialStatus");
 export const forgetSessionCredential = forward("forgetSessionCredential");
 export const replaceNacosSessionCredential = forward("replaceNacosSessionCredential");
 export const checkConnectionHealth = forward("checkConnectionHealth");
+export const connectionIsOpen = forward("connectionIsOpen");
+export const subscribeConnectionLiveness = forward("subscribeConnectionLiveness");
+export const subscribeConnectionIdleClosed = forward("subscribeConnectionIdleClosed");
+export const prewarmConnection = forward("prewarmConnection");
 export const connectionIdentifierQuote = forward("connectionIdentifierQuote");
 export const closeDatabaseConnection = forward("closeDatabaseConnection");
 export const refreshConnections = forward("refreshConnections");
@@ -73,11 +101,41 @@ export const loadConnections = forward("loadConnections");
 export const loadTunnelProfiles = forward("loadTunnelProfiles");
 export const saveTunnelProfiles = forward("saveTunnelProfiles");
 export const testTunnelProfile = forward("testTunnelProfile");
+export const listSshAgentIdentities = forward("listSshAgentIdentities");
 export const resolveSshPrompt = forward("resolveSshPrompt");
 export const readKeychainPassword = forward("readKeychainPassword");
 export const readKeychainPasswords = forward("readKeychainPasswords");
 export const decryptConfig = forward("decryptConfig");
 export const listPlugins = forward("listPlugins");
+export const listPluginTrustedKeys = forward("listPluginTrustedKeys");
+export const savePluginTrustedKey = forward("savePluginTrustedKey");
+export const removePluginTrustedKey = forward("removePluginTrustedKey");
+export const listPluginRepositories = forward("listPluginRepositories");
+export const savePluginRepository = forward("savePluginRepository");
+export const removePluginRepository = forward("removePluginRepository");
+export const fetchPluginMarketplaceCatalogs = forward("fetchPluginMarketplaceCatalogs");
+export const installMarketplacePlugin = forward("installMarketplacePlugin");
+export const installPluginPackage = forward("installPluginPackage");
+export const installPluginPackageFromUrl = forward("installPluginPackageFromUrl");
+export const rollbackPlugin = forward("rollbackPlugin");
+export const uninstallPlugin = forward("uninstallPlugin");
+export const activatePlugin = forward("activatePlugin");
+export const listActivePlugins = forward("listActivePlugins");
+export const stopPlugin = forward("stopPlugin");
+export const invokePlugin = forward("invokePlugin");
+export const invokePluginConnectionAction = forward("invokePluginConnectionAction");
+export const notifyPlugin = forward("notifyPlugin");
+export const sendPluginBinary = forward("sendPluginBinary");
+export const listPluginFilesystemEntries = forward("listPluginFilesystemEntries");
+export const readPluginFilesystemFile = forward("readPluginFilesystemFile");
+export const writePluginFilesystemFile = forward("writePluginFilesystemFile");
+export const createPluginFilesystemDirectory = forward("createPluginFilesystemDirectory");
+export const deletePluginFilesystemEntry = forward("deletePluginFilesystemEntry");
+export const renamePluginFilesystemEntry = forward("renamePluginFilesystemEntry");
+export const readPluginAsset = forward("readPluginAsset");
+export const readPluginUiEntry = forward("readPluginUiEntry");
+export const readPluginUiAsset = forward("readPluginUiAsset");
+export const subscribePluginEvents = forward("subscribePluginEvents");
 export const listJdbcDrivers = forward("listJdbcDrivers");
 export const listJdbcMavenBundles = forward("listJdbcMavenBundles");
 export const listJdbcLocalBundles = forward("listJdbcLocalBundles");
@@ -94,6 +152,7 @@ export const uninstallJdbcPlugin = forward("uninstallJdbcPlugin");
 export const listInstalledAgentsLocal = forward("listInstalledAgentsLocal");
 export async function listInstalledAgents() {
   const backend = await getBackend();
+  const { useSettingsStore } = await import("@/stores/settingsStore");
   return backend.listInstalledAgents(useSettingsStore().editorSettings.updateDownloadSource);
 }
 export const isAgentInstalled = forward("isAgentInstalled");
@@ -104,10 +163,12 @@ export const stopDriverRuntime = forward("stopDriverRuntime");
 export const restartDriverRuntime = forward("restartDriverRuntime");
 export async function installAgent(dbType: string, operationId?: string) {
   const backend = await getBackend();
+  const { useSettingsStore } = await import("@/stores/settingsStore");
   return backend.installAgent(dbType, useSettingsStore().editorSettings.updateDownloadSource, operationId);
 }
 export async function upgradeAllAgents(operationId?: string) {
   const backend = await getBackend();
+  const { useSettingsStore } = await import("@/stores/settingsStore");
   return backend.upgradeAllAgents(useSettingsStore().editorSettings.updateDownloadSource, operationId);
 }
 export const cancelAgentInstall = forward("cancelAgentInstall");
@@ -127,6 +188,7 @@ export const importAgentDriver = forward("importAgentDriver");
 export const importAgentJar = importAgentDriver;
 export async function reinstallJre(jreKey?: string, operationId?: string) {
   const backend = await getBackend();
+  const { useSettingsStore } = await import("@/stores/settingsStore");
   return backend.reinstallJre(jreKey, useSettingsStore().editorSettings.updateDownloadSource, operationId);
 }
 export const uninstallJre = forward("uninstallJre");
@@ -137,19 +199,26 @@ export const loadSavedSqlFile = forward("loadSavedSqlFile");
 export const saveSavedSqlFolder = forward("saveSavedSqlFolder");
 export const deleteSavedSqlFolder = forward("deleteSavedSqlFolder");
 export const saveSavedSqlFile = forward("saveSavedSqlFile");
+export const saveDefaultQueryContent = forward("saveDefaultQueryContent");
 export const deleteSavedSqlFile = forward("deleteSavedSqlFile");
 export const savedSqlStorageDir = forward("savedSqlStorageDir");
 export const openSavedSqlStorageDir = forward("openSavedSqlStorageDir");
 export const revealPathInFileManager = forward("revealPathInFileManager");
 export const deleteDatabaseBackupFiles = forward("deleteDatabaseBackupFiles");
+export const databaseBackupCommand = forward("databaseBackupCommand");
+export const databaseBackupBackground = forward("databaseBackupBackground");
+export const downloadDatabaseBackupFile = forward("downloadDatabaseBackupFile");
+export const prepareDatabaseBackupRestore = forward("prepareDatabaseBackupRestore");
 export const isSqliteDatabaseFile = forward("isSqliteDatabaseFile");
 export const backupSqliteDatabase = forward("backupSqliteDatabase");
+export const restoreSqliteDatabase = forward("restoreSqliteDatabase");
 export const syncSavedSqlDirectory = forward("syncSavedSqlDirectory");
 
 // Schema
 export const listDatabases = forward("listDatabases");
 export const listDatabaseMetadata = forward("listDatabaseMetadata");
 export const listDatabaseStorage = forward("listDatabaseStorage");
+export const listXuguTablespaces = forward("listXuguTablespaces");
 export const getSqlServerCompletionContext = forward("getSqlServerCompletionContext");
 export const listDorisCatalogs = forward("listDorisCatalogs");
 export const listDorisCatalogDatabases = forward("listDorisCatalogDatabases");
@@ -172,7 +241,20 @@ export const completionAssistantSearch = forward("completionAssistantSearch");
 export const getObjectSource = forward("getObjectSource");
 export const getEventInfo = forward("getEventInfo");
 export const getCustomTypeDetails = forward("getCustomTypeDetails");
+export const nativeJobOpenContext = forward("nativeJobOpenContext");
+export const nativeJobList = forward("nativeJobList");
+export const nativeJobReferences = forward("nativeJobReferences");
+export const nativeJobRead = forward("nativeJobRead");
+export const nativeJobPrepare = forward("nativeJobPrepare");
+export const nativeJobApply = forward("nativeJobApply");
+export const nativeJobStatus = forward("nativeJobStatus");
+export const nativeJobCancel = forward("nativeJobCancel");
+export const getOracleTypeManagementSnapshot = forward("getOracleTypeManagementSnapshot");
+export const buildOracleTypeManagementSql = forward("buildOracleTypeManagementSql");
+export const verifyOracleTypeData = forward("verifyOracleTypeData");
+export const prepareOracleTypeEvolution = forward("prepareOracleTypeEvolution");
 export const getColumns = forward("getColumns");
+export const getPluginTableMetadata = forward("getPluginTableMetadata");
 export const getAllColumns = forward("getAllColumns");
 export const getSqlServerColumnMetadata = forward("getSqlServerColumnMetadata");
 export const listDataTypes = forward("listDataTypes");
@@ -180,21 +262,31 @@ export const listIndexes = forward("listIndexes");
 export const listReferenceKeyColumns = forward("listReferenceKeyColumns");
 export const listReferenceKeys = forward("listReferenceKeys");
 export const listForeignKeys = forward("listForeignKeys");
+export const listForeignKeysForDatabase = forward("listForeignKeysForDatabase");
 export const listTriggers = forward("listTriggers");
 export const listConstraints = forward("listConstraints");
 export const listPartitions = forward("listPartitions");
 export const getTablePartitionStatus = forward("getTablePartitionStatus");
+export const getTablePartitioning = forward("getTablePartitioning");
 export const listInvalidIndexes = forward("listInvalidIndexes");
 export const listSubpartitions = forward("listSubpartitions");
 export const getTableDdl = forward("getTableDdl");
 export const getTableDisplayDdl = forward("getTableDisplayDdl");
 export const listFunctions = forward("listFunctions");
+export const loadSchemaDiffRoutines = forward("loadSchemaDiffRoutines");
+export const updateOracleRoutineOperationReferences = forward("updateOracleRoutineOperationReferences");
+export const prepareOracleRoutineSave = forward("prepareOracleRoutineSave");
+export const prepareOracleRoutinePlan = forward("prepareOracleRoutinePlan");
+export const prepareOracleRoutineRecovery = forward("prepareOracleRoutineRecovery");
+export const executeOracleRoutineOperation = forward("executeOracleRoutineOperation");
+export const observeOracleRoutineOperation = forward("observeOracleRoutineOperation");
 export const listSequences = forward("listSequences");
 export const listRules = forward("listRules");
 export const listOwners = forward("listOwners");
 export const getTableOwner = forward("getTableOwner");
 export const listExtensions = forward("listExtensions");
 export const listAvailableExtensions = forward("listAvailableExtensions");
+export const listEventTriggers = forward("listEventTriggers");
 export const prepareSchemaDiff = forward("prepareSchemaDiff");
 export const generateSchemaSyncSql = forward("generateSchemaSyncSql");
 export const generateSchemaSyncPlan = forward("generateSchemaSyncPlan");
@@ -202,6 +294,7 @@ export const listDialectDataTypes = forward("listDialectDataTypes");
 
 // Docs
 export const collectDocsSnapshot = forward("collectDocsSnapshot");
+export const collectDocsSnapshotForExport = forward("collectDocsSnapshotForExport");
 export const loadDocsAnnotations = forward("loadDocsAnnotations");
 export const applyDocsAnnotations = forward("applyDocsAnnotations");
 export const saveDocsAnnotations = forward("saveDocsAnnotations");
@@ -212,6 +305,7 @@ export const executeQuery = forward("executeQuery");
 export const executeConditionalUpdate = forward("executeConditionalUpdate");
 export const executeMulti = forward("executeMulti");
 export const executeMultiWithProgress = forward("executeMultiWithProgress");
+export const subscribeQueryMessages = forward("subscribeQueryMessages");
 export const executeBatch = forward("executeBatch");
 export const executeScript = forward("executeScript");
 export const executeScriptWith2pc = forward("executeScriptWith2pc");
@@ -221,8 +315,13 @@ export const executeInManualTransaction = forward("executeInManualTransaction");
 export const commitManualTransaction = forward("commitManualTransaction");
 export const rollbackManualTransaction = forward("rollbackManualTransaction");
 export const cancelQuery = forward("cancelQuery");
+export const cancelQueryAndWait = forward("cancelQueryAndWait");
 export const cancelConditionalUpdate = forward("cancelConditionalUpdate");
 export const closeQuerySession = forward("closeQuerySession");
+export const readLargeValueChunk = forward("readLargeValueChunk");
+export const releaseLargeValue = forward("releaseLargeValue");
+export const downloadLargeValue = forward("downloadLargeValue");
+export const exportSnapshotResult = forward("exportSnapshotResult");
 export const closeClientConnectionSession = forward("closeClientConnectionSession");
 export const analyzeSqlReferences = forward("analyzeSqlReferences");
 export const findStatementAtCursor = forward("findStatementAtCursor");
@@ -230,10 +329,19 @@ export const prepareQueryPaginationExecutionPlan = forward("prepareQueryPaginati
 export const buildSortedQuerySql = forward("buildSortedQuerySql");
 export const buildExplainSql = forward("buildExplainSql");
 export const getExplainInfo = forward("getExplainInfo");
+export const getPluginPlanCapabilities = forward("getPluginPlanCapabilities");
+export const getPluginEstimatedPlan = forward("getPluginEstimatedPlan");
+export const queryPluginData = forward("queryPluginData");
+export const getPluginDataGrants = forward("getPluginDataGrants");
+export const setPluginDataGrant = forward("setPluginDataGrant");
 export const buildCreateUserSql = forward("buildCreateUserSql");
 export const buildDroppedFilePreviewSql = forward("buildDroppedFilePreviewSql");
 export const buildTableSelectSql = forward("buildTableSelectSql");
 export const buildDatabaseSearchSql = forward("buildDatabaseSearchSql");
+export const buildDatabaseSearchColumnsSql = forward("buildDatabaseSearchColumnsSql");
+export const buildDatabaseSearchProbeSql = forward("buildDatabaseSearchProbeSql");
+export const buildDatabaseStructureSearchSql = forward("buildDatabaseStructureSearchSql");
+export const supportsDatabaseStructureSearch = forward("supportsDatabaseStructureSearch");
 export const buildSearchResultWhere = forward("buildSearchResultWhere");
 export const buildRenameObjectSql = forward("buildRenameObjectSql");
 export const buildRenameDatabaseSql = forward("buildRenameDatabaseSql");
@@ -255,12 +363,22 @@ export const buildDropSchemaSql = forward("buildDropSchemaSql");
 export const buildDuplicateTableStructureSql = forward("buildDuplicateTableStructureSql");
 export const buildCopyTableDataSql = forward("buildCopyTableDataSql");
 export const buildExecutableObjectSourceStatements = forward("buildExecutableObjectSourceStatements");
+export const validateOracleExecutableObjectSource = forward("validateOracleExecutableObjectSource");
+export const prepareOracleTriggerSql = forward("prepareOracleTriggerSql");
+export const fingerprintOracleRoutineObjectSource = forward("fingerprintOracleRoutineObjectSource");
 export const buildExecutableObjectSourceSql = forward("buildExecutableObjectSourceSql");
 export const buildEditableObjectSource = forward("buildEditableObjectSource");
 export const buildRoutineRenameObjectSourceStatements = forward("buildRoutineRenameObjectSourceStatements");
+export const rewriteOracleRoutineReferences = forward("rewriteOracleRoutineReferences");
+export const rewriteOracleTableReferences = forward("rewriteOracleTableReferences");
+export const parseOracleObjectName = forward("parseOracleObjectName");
+export const buildOracleViewRenameSource = forward("buildOracleViewRenameSource");
+export const reviewOracleViewRenameSource = forward("reviewOracleViewRenameSource");
 export const buildViewDdlSql = forward("buildViewDdlSql");
 export const buildTableStructureChangeSql = forward("buildTableStructureChangeSql");
 export const buildTableOwnerChangeSql = forward("buildTableOwnerChangeSql");
+export const buildTablePartitionOperationSql = forward("buildTablePartitionOperationSql");
+export const buildCreatePartitionedTableSql = forward("buildCreatePartitionedTableSql");
 export const previewSqliteTableStructureChange = forward("previewSqliteTableStructureChange");
 export const applySqliteTableStructureChange = forward("applySqliteTableStructureChange");
 export const buildCreateTableSql = forward("buildCreateTableSql");
@@ -270,6 +388,7 @@ export const prepareDataGridSave = forward("prepareDataGridSave");
 export const extractDataGridSelection = forward("extractDataGridSelection");
 export const buildDataGridCopyUpdateStatements = forward("buildDataGridCopyUpdateStatements");
 export const buildDataGridCopyInsertStatement = forward("buildDataGridCopyInsertStatement");
+export const buildDmlChangePreviewSql = forward("buildDmlChangePreviewSql");
 export const buildDataGridContextFilterCondition = forward("buildDataGridContextFilterCondition");
 export const buildDataGridColumnValueFilterCondition = forward("buildDataGridColumnValueFilterCondition");
 export const buildDataGridColumnValuesFilterCondition = forward("buildDataGridColumnValuesFilterCondition");
@@ -290,6 +409,10 @@ export const aiComplete = forward("aiComplete");
 export const aiStream = forward("aiStream");
 export const aiAgentStream = forward("aiAgentStream");
 export const aiCancelStream = forward("aiCancelStream");
+export const resolveAiToolApproval = forward("resolveAiToolApproval");
+export const getAiPluginToolPlugins = forward("getAiPluginToolPlugins");
+export const setAiPluginToolPluginEnabled = forward("setAiPluginToolPluginEnabled");
+export const previewPluginAiTools = forward("previewPluginAiTools");
 export const aiTestConnection = forward("aiTestConnection");
 export const aiListModels = forward("aiListModels");
 export const aiResolveModelEffort = forward("aiResolveModelEffort");
@@ -302,18 +425,35 @@ export const loadAiConfigs = forward("loadAiConfigs");
 export const setDefaultAiConfig = forward("setDefaultAiConfig");
 export const saveAiConfigItem = forward("saveAiConfigItem");
 export const deleteAiConfig = forward("deleteAiConfig");
+export const loadCcSwitchAiConfigs = forward("loadCcSwitchAiConfigs");
+export const loadMagpieAiConfigs = forward("loadMagpieAiConfigs");
 export const saveAiProviderConfig = forward("saveAiProviderConfig");
 export const loadAiProviderConfigs = forward("loadAiProviderConfigs");
 export const loadDesktopSettings = forward("loadDesktopSettings");
 export const saveDesktopSettings = forward("saveDesktopSettings");
 export const loadMcpGlobalPolicy = forward("loadMcpGlobalPolicy");
 export const saveMcpGlobalPolicy = forward("saveMcpGlobalPolicy");
+export const loadMcpToolCatalog = forward("loadMcpToolCatalog");
+export const listPluginMcpViews = forward("listPluginMcpViews");
+export const loadMcpAccessPolicy = forward("loadMcpAccessPolicy");
+export const resetInvalidMcpAccessPolicy = forward("resetInvalidMcpAccessPolicy");
+export const setMcpPluginScopeRule = forward("setMcpPluginScopeRule");
+export const loadPluginMcpView = forward("loadPluginMcpView");
+export const listMcpPluginScopes = forward("listMcpPluginScopes");
+export const savePluginMcpGrant = forward("savePluginMcpGrant");
 export const loadMaxAgentTurns = forward("loadMaxAgentTurns");
+export const loadSqlFileUploadMaxBytes = forward("loadSqlFileUploadMaxBytes");
+export const saveSqlFileUploadMaxMb = forward("saveSqlFileUploadMaxMb");
 export const saveMaxAgentTurns = forward("saveMaxAgentTurns");
+export const loadHistoryRetentionLimit = forward("loadHistoryRetentionLimit");
+export const saveHistoryRetentionLimit = forward("saveHistoryRetentionLimit");
+export const loadMcpHistoryRetentionLimit = forward("loadMcpHistoryRetentionLimit");
+export const saveMcpHistoryRetentionLimit = forward("saveMcpHistoryRetentionLimit");
 export const loadMaxRetries = forward("loadMaxRetries");
 export const saveMaxRetries = forward("saveMaxRetries");
 export const completeAppClose = forward("completeAppClose");
 export const requestAppClose = forward("requestAppClose");
+export const setShortcutRecording = forward("setShortcutRecording");
 export const setDriverStoreDir = forward("setDriverStoreDir");
 export const setPluginStoreDir = forward("setPluginStoreDir");
 export const setAgentStoreDir = forward("setAgentStoreDir");
@@ -322,26 +462,48 @@ export const loadPinnedTreeNodeIds = forward("loadPinnedTreeNodeIds");
 export const savePinnedTreeNodeIds = forward("savePinnedTreeNodeIds");
 export const loadEditorSettings = forward("loadEditorSettings");
 export const saveEditorSettings = forward("saveEditorSettings");
+export const saveBackgroundImage = forward("saveBackgroundImage");
+export const clearBackgroundImage = forward("clearBackgroundImage");
+export const readBackgroundImage = forward("readBackgroundImage");
+export const checkBackgroundImage = forward("checkBackgroundImage");
 export const loadOpenTabsState = forward("loadOpenTabsState");
 export const saveOpenTabsState = forward("saveOpenTabsState");
+export const saveDetachedTabHandoff = forward("saveDetachedTabHandoff");
+export const loadDetachedTabHandoff = forward("loadDetachedTabHandoff");
+export const listDetachedTabHandoffs = forward("listDetachedTabHandoffs");
+export const deleteDetachedTabHandoff = forward("deleteDetachedTabHandoff");
+export const approveDetachedWindowClose = forward("approveDetachedWindowClose");
 export const loadSavedSqlEditorPositions = forward("loadSavedSqlEditorPositions");
 export const saveSavedSqlEditorPositions = forward("saveSavedSqlEditorPositions");
 export const loadTransferTaskLibrary = forward("loadTransferTaskLibrary");
 export const saveTransferTaskLibrary = forward("saveTransferTaskLibrary");
 export const webdavSyncTest = forward("webdavSyncTest");
+export const migrationStatus = forward("migrationStatus");
+export const migrationStart = forward("migrationStart");
+export const migrationRetry = forward("migrationRetry");
+export const migrationCleanupBackups = forward("migrationCleanupBackups");
 export const webdavPasswordStatus = forward("webdavPasswordStatus");
 export const saveWebdavSavedPassword = forward("saveWebdavSavedPassword");
 export const forgetWebdavSavedPassword = forward("forgetWebdavSavedPassword");
 export const webdavSyncSecretsStatus = forward("webdavSyncSecretsStatus");
 export const saveWebdavSyncSecretsPreference = forward("saveWebdavSyncSecretsPreference");
 export const forgetWebdavSyncSecretsPassphrase = forward("forgetWebdavSyncSecretsPassphrase");
+export const cloudSyncLocalCatalog = forward("cloudSyncLocalCatalog");
+export const localBackupExport = forward("localBackupExport");
+export const localBackupInspect = forward("localBackupInspect");
+export const localBackupImport = forward("localBackupImport");
+export const webdavSyncInspect = forward("webdavSyncInspect");
 export const webdavSyncUpload = forward("webdavSyncUpload");
 export const webdavSyncDownload = forward("webdavSyncDownload");
 export const snippetSyncTest = forward("snippetSyncTest");
 export const snippetTokenStatus = forward("snippetTokenStatus");
 export const saveSnippetSavedToken = forward("saveSnippetSavedToken");
 export const forgetSnippetSavedToken = forward("forgetSnippetSavedToken");
+export const snippetPassphraseStatus = forward("snippetPassphraseStatus");
+export const saveSnippetSavedPassphrase = forward("saveSnippetSavedPassphrase");
+export const forgetSnippetSavedPassphrase = forward("forgetSnippetSavedPassphrase");
 export const snippetSyncSettings = forward("snippetSyncSettings");
+export const snippetSyncInspect = forward("snippetSyncInspect");
 export const saveSnippetSyncId = forward("saveSnippetSyncId");
 export const retrySnippetLegacyCleanup = forward("retrySnippetLegacyCleanup");
 export const snippetSyncUpload = forward("snippetSyncUpload");
@@ -360,26 +522,48 @@ export const deletePromptTemplate = forward("deletePromptTemplate");
 export const getAiGlobalCustomInstructions = forward("getAiGlobalCustomInstructions");
 export const setAiGlobalCustomInstructions = forward("setAiGlobalCustomInstructions");
 
+// User Skills (read-only Codex-compatible SKILL.md library)
+export const listUserSkills = forward("listUserSkills");
+export const readUserSkills = forward("readUserSkills");
+
 // System
 export const listSystemFonts = forward("listSystemFonts");
 export const listSshConfigHosts = forward("listSshConfigHosts");
+export const listLocalSshKeys = forward("listLocalSshKeys");
 
 // SQL File Execution
 export const previewSqlFile = forward("previewSqlFile");
+export const refreshSqlFilePreview = forward("refreshSqlFilePreview");
+export const releaseSqlFilePreview = forward("releaseSqlFilePreview");
 export const executeSqlFile = forward("executeSqlFile");
+export const sqlFileFailureLogInfo = forward("sqlFileFailureLogInfo");
+export const exportSqlFileFailureLog = forward("exportSqlFileFailureLog");
+export const readSqlFileFailureLogText = forward("readSqlFileFailureLogText");
 export const executeSqlFiles = forward("executeSqlFiles");
 export const cancelSqlFileExecution = forward("cancelSqlFileExecution");
+export const inspectSqlFileTables = forward("inspectSqlFileTables");
 export const listenSqlFileProgress = forward("listenSqlFileProgress");
 export const pendingOpenSqlFiles = forward("pendingOpenSqlFiles");
 export const pendingOpenDbFiles = forward("pendingOpenDbFiles");
 export const pendingOpenConnectionLinks = forward("pendingOpenConnectionLinks");
 export const pendingOpenAiConfigLinks = forward("pendingOpenAiConfigLinks");
+export const pendingOpenPluginInstallLinks = forward("pendingOpenPluginInstallLinks");
 export const readExternalSqlFile = forward("readExternalSqlFile");
 export const readExternalSqlFileSnapshot = forward("readExternalSqlFileSnapshot");
 export const inspectExternalSqlFile = forward("inspectExternalSqlFile");
 export const writeExternalSqlFile = forward("writeExternalSqlFile");
 export const saveExternalSqlFile = forward("saveExternalSqlFile");
 export const listSqlFilesInFolder = forward("listSqlFilesInFolder");
+export const searchSqlFileContents = forward("searchSqlFileContents");
+export const globalSearch = forward("globalSearch");
+export const loadGlobalSearchSettings = forward("loadGlobalSearchSettings");
+export const saveGlobalSearchSettings = forward("saveGlobalSearchSettings");
+export const createSqlFileInFolder = forward("createSqlFileInFolder");
+export const renameSqlFileInFolder = forward("renameSqlFileInFolder");
+export const deleteSqlFileInFolder = forward("deleteSqlFileInFolder");
+export const createSqlFolderInFolder = forward("createSqlFolderInFolder");
+export const renameSqlFolderInFolder = forward("renameSqlFolderInFolder");
+export const deleteSqlFolderInFolder = forward("deleteSqlFolderInFolder");
 
 // Nacos
 export const nacosTestConnection = forward("nacosTestConnection");
@@ -439,11 +623,26 @@ export const previewTableImportFile = forward("previewTableImportFile");
 export const importTableFile = forward("importTableFile");
 export const cancelTableImport = forward("cancelTableImport");
 export const releaseTableImportSource = forward("releaseTableImportSource");
+export const previewMongodbImportFile = forward("previewMongodbImportFile");
+export const importMongodbFile = forward("importMongodbFile");
+export const cancelMongodbImport = forward("cancelMongodbImport");
+export const releaseMongodbImportSource = forward("releaseMongodbImportSource");
+export const exportMongodbQuery = forward("exportMongodbQuery");
+export const cancelMongodbExport = forward("cancelMongodbExport");
+export const inspectMongodbDatabaseDump = forward("inspectMongodbDatabaseDump");
+export const prepareMongodbRestoreSource = forward("prepareMongodbRestoreSource");
+export const releaseMongodbRestoreSource = forward("releaseMongodbRestoreSource");
+export const dumpMongodbDatabase = forward("dumpMongodbDatabase");
+export const restoreMongodbDatabase = forward("restoreMongodbDatabase");
+export const cancelMongodbDatabaseDump = forward("cancelMongodbDatabaseDump");
+export type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoDumpCollection, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 
 // Database Export
 export const beginDatabaseBackupSnapshot = forward("beginDatabaseBackupSnapshot");
 export const exportDatabaseSql = forward("exportDatabaseSql");
 export const cancelDatabaseExport = forward("cancelDatabaseExport");
+export const clearDatabaseExportCancellation = forward("clearDatabaseExportCancellation");
+export const databaseExportDestinationNeedsConfirmation = forward("databaseExportDestinationNeedsConfirmation");
 export const recordDatabaseExportDestination = forward("recordDatabaseExportDestination");
 export const exportQueryResultCsv = forward("exportQueryResultCsv");
 export const exportTableDataCsv = forward("exportTableDataCsv");
@@ -451,17 +650,28 @@ export const exportQueryResultXlsx = forward("exportQueryResultXlsx");
 export const exportQueryResultsXlsx = forward("exportQueryResultsXlsx");
 export const exportQueryResultJson = forward("exportQueryResultJson");
 export const exportQueryResultMarkdown = forward("exportQueryResultMarkdown");
+export const exportQueryResultHtml = forward("exportQueryResultHtml");
 export const startTableExport = forward("startTableExport");
 export const cancelTableExport = forward("cancelTableExport");
 export const startQueryResultExport = forward("startQueryResultExport");
 export const cancelQueryResultExport = forward("cancelQueryResultExport");
+export const openQueryResultTempFile = forward("openQueryResultTempFile");
+export const createQueryResultTempFile = forward("createQueryResultTempFile");
+
+// Dameng native .dmp dump (dexp/dimp)
+export const startDamengDump = forward("startDamengDump");
+export const cancelDamengDump = forward("cancelDamengDump");
+export const resolveDamengDumpTool = forward("resolveDamengDumpTool");
+export type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./damengDumpTypes";
 
 // Redis
 export const redisListDatabases = forward("redisListDatabases");
 export const redisScanKeys = forward("redisScanKeys");
 export const redisScanKeysBatch = forward("redisScanKeysBatch");
+export const redisKeyMetadataBatch = forward("redisKeyMetadataBatch");
 export const redisScanValues = forward("redisScanValues");
 export const redisGetValue = forward("redisGetValue");
+export const redisGetRawValue = forward("redisGetRawValue");
 export const redisGetTtl = forward("redisGetTtl");
 export const redisGetStreamEntries = forward("redisGetStreamEntries");
 export const redisGetStreamGroups = forward("redisGetStreamGroups");
@@ -488,7 +698,10 @@ export const redisJsonSet = forward("redisJsonSet");
 export const redisCheckJsonModule = forward("redisCheckJsonModule");
 export const redisSetTtl = forward("redisSetTtl");
 export const redisSetExpireAt = forward("redisSetExpireAt");
+export const redisSetKeysTtl = forward("redisSetKeysTtl");
+export const redisSetKeysExpireAt = forward("redisSetKeysExpireAt");
 export const redisDeleteKeys = forward("redisDeleteKeys");
+export const redisDeleteKeysByPattern = forward("redisDeleteKeysByPattern");
 export const redisFlushDb = forward("redisFlushDb");
 export const redisExecuteCommand = forward("redisExecuteCommand");
 export const redisLoadMore = forward("redisLoadMore");
@@ -648,12 +861,14 @@ export const mqCreateNamespace = forward("mqCreateNamespace");
 export const mqDeleteNamespace = forward("mqDeleteNamespace");
 export const mqGetNamespacePolicies = forward("mqGetNamespacePolicies");
 export const mqListTopics = forward("mqListTopics");
+export const mqListTopicsPage = forward("mqListTopicsPage");
 export const mqCreateTopic = forward("mqCreateTopic");
 export const mqDeleteTopic = forward("mqDeleteTopic");
 export const mqUpdatePartitions = forward("mqUpdatePartitions");
 export const mqGetTopicStats = forward("mqGetTopicStats");
 export const mqGetTopicInternalStats = forward("mqGetTopicInternalStats");
 export const mqListExchanges = forward("mqListExchanges");
+export const mqListExchangesPage = forward("mqListExchangesPage");
 export const mqCreateExchange = forward("mqCreateExchange");
 export const mqDeleteExchange = forward("mqDeleteExchange");
 export const mqListBindings = forward("mqListBindings");
@@ -755,6 +970,9 @@ export const mongoInsertDocuments = forward("mongoInsertDocuments");
 export const documentUpdateDocument = forward("documentUpdateDocument");
 export const mongoUpdateDocument = forward("mongoUpdateDocument");
 export const mongoUpdateDocuments = forward("mongoUpdateDocuments");
+export const mongoReplaceDocument = forward("mongoReplaceDocument");
+export const mongoBulkWrite = forward("mongoBulkWrite");
+export const mongoExplainFind = forward("mongoExplainFind");
 export const documentDeleteDocument = forward("documentDeleteDocument");
 export const documentSaveMeilisearchBatch = forward("documentSaveMeilisearchBatch");
 export const meilisearchSearchDocuments = forward("meilisearchSearchDocuments");
@@ -764,6 +982,7 @@ export const meilisearchGetIndexSettings = forward("meilisearchGetIndexSettings"
 export const meilisearchUpdateIndexSettings = forward("meilisearchUpdateIndexSettings");
 export const meilisearchGetIndexStats = forward("meilisearchGetIndexStats");
 export const meilisearchGetIndexOverview = forward("meilisearchGetIndexOverview");
+export const meilisearchCreateIndex = forward("meilisearchCreateIndex");
 export const meilisearchDeleteIndex = forward("meilisearchDeleteIndex");
 export const meilisearchDeleteAllDocuments = forward("meilisearchDeleteAllDocuments");
 export const meilisearchGetSystemOverview = forward("meilisearchGetSystemOverview");
@@ -785,6 +1004,8 @@ export const mongoFindOneAndDelete = forward("mongoFindOneAndDelete");
 
 // Elasticsearch
 export const elasticsearchListIndices = forward("elasticsearchListIndices");
+export const elasticsearchGetIndexMetadata = forward("elasticsearchGetIndexMetadata");
+export const elasticsearchDeleteAllDocuments = forward("elasticsearchDeleteAllDocuments");
 export const vectorListCollections = forward("vectorListCollections");
 
 // History
@@ -792,27 +1013,52 @@ export const saveHistory = forward("saveHistory");
 export const loadHistory = forward("loadHistory");
 export const searchHistory = forward("searchHistory");
 export const loadHistoryConnectionOptions = forward("loadHistoryConnectionOptions");
+export const loadTaskRuns = forward("loadTaskRuns");
+export const loadTaskRun = forward("loadTaskRun");
+export const loadTaskRunItems = forward("loadTaskRunItems");
 export const loadRedisHistory = forward("loadRedisHistory");
 export const clearHistory = forward("clearHistory");
+export const clearHistoryBySource = forward("clearHistoryBySource");
+export const cleanupMcpHistoryRetention = forward("cleanupMcpHistoryRetention");
 export const clearRedisHistory = forward("clearRedisHistory");
 export const deleteHistoryEntry = forward("deleteHistoryEntry");
 
 // Updates
 export const checkMcpServerStatus = forward("checkMcpServerStatus");
+export const checkMcpKeychainAccess = forward("checkMcpKeychainAccess");
+export const authorizeMcpKeychain = forward("authorizeMcpKeychain");
 export const installMcpServer = forward("installMcpServer");
+export const installNativeMcpServer = forward("installNativeMcpServer");
 export const uninstallMcpServer = forward("uninstallMcpServer");
+export const uninstallNpmMcpServer = forward("uninstallNpmMcpServer");
+export const loadMcpHttpServerSettings = forward("loadMcpHttpServerSettings");
+export const saveMcpHttpServerSettings = forward("saveMcpHttpServerSettings");
+export const mcpHttpServerStatus = forward("mcpHttpServerStatus");
+export const rotateMcpHttpServerToken = forward("rotateMcpHttpServerToken");
+export const loadWebMcpHttpStatus = forward("loadWebMcpHttpStatus");
+export const saveWebMcpHttpSettings = forward("saveWebMcpHttpSettings");
+export const rotateWebMcpToken = forward("rotateWebMcpToken");
+export const loadWebCapabilities = forward("loadWebCapabilities");
 export const checkForUpdates = forward("checkForUpdates");
 export const fetchChangelog = forward("fetchChangelog");
+export const fetchChangelogIndex = forward("fetchChangelogIndex");
+export const fetchChangelogRelease = forward("fetchChangelogRelease");
 export const getSystemProxyUrl = forward("getSystemProxyUrl");
 export const downloadUpdate = forward("downloadUpdate");
 export const cancelUpdateDownload = forward("cancelUpdateDownload");
+export const getDownloadedUpdate = forward("getDownloadedUpdate");
+export const discardDownloadedUpdate = forward("discardDownloadedUpdate");
 export const installDownloadedUpdate = forward("installDownloadedUpdate");
+export const relaunchApp = forward("relaunchApp");
 export const getAppVersion = forward("getAppVersion");
 export const getAppSupportInfo = forward("getAppSupportInfo");
 
 // Layout
 export const saveSidebarLayout = forward("saveSidebarLayout");
 export const loadSidebarLayout = forward("loadSidebarLayout");
+export const saveTableVGroups = forward("saveTableVGroups");
+export const loadTableVGroups = forward("loadTableVGroups");
+export const deleteTableVGroupsForConnection = forward("deleteTableVGroupsForConnection");
 
 // ---------------------------------------------------------------------------
 // Re-export all types from tauri.ts (shared between both backends)
@@ -822,7 +1068,13 @@ export type { AiConfigItem };
 
 export type {
   AppSupportInfo,
+  SqlFileFailureLogExportPayload,
+  SqlFileFailureLogInfo,
+  SqlFileFailureLogKey,
+  SqlFileFailureLogStatus,
+  SqlFileFailureLogTextPayload,
   AiMessage,
+  AiToolCallRef,
   AiCompletionRequest,
   AiTaskContract,
   AiStreamChunk,
@@ -838,6 +1090,8 @@ export type {
   AgentOfflineExportCandidate,
   AgentOfflineExportPreview,
   AgentOfflineExportResult,
+  AgentOfflineImportFailure,
+  AgentOfflineImportResult,
   DriverStoreUsage,
   DriverStoreUsageItem,
   DriverRuntimeHealth,
@@ -852,6 +1106,10 @@ export type {
   WebDavConfig,
   WebDavPasswordStatus,
   WebDavSyncSummary,
+  SyncCatalogItem,
+  PluginUiStorageItemRef,
+  SyncSelection,
+  SyncSnapshotCatalog,
   WebDavDownloadResult,
   SnippetProvider,
   SnippetSyncConfig,
@@ -859,13 +1117,22 @@ export type {
   SnippetSyncSummary,
   SnippetDownloadResult,
   SnippetTokenStatus,
+  SnippetPassphraseStatus,
   McpServerStatus,
+  McpHttpServerSettings,
+  McpHttpServerStatus,
+  WebMcpHttpStatus,
+  WebMcpHttpSettings,
+  WebCapabilities,
   UpdateInfo,
+  DownloadedUpdate,
   RedisBlob,
   RedisCollectionPage,
   RedisDatabaseInfo,
   RedisHashItem,
   RedisKeyInfo,
+  RedisKeyMetadata,
+  RedisKeysExpiryResult,
   RedisListItem,
   RedisSetItem,
   RedisStreamConsumer,
@@ -934,17 +1201,25 @@ export type {
   SqlFileStatus,
   SqlFileRequest,
   SqlFilePreview,
+  SqlFileTable,
   SqlFileProgress,
   TransferRequest,
+  OraclePackageTransferRequest,
+  OraclePackageTransferPreview,
+  OraclePackagePendingTables,
   TransferProgress,
   TransferMode,
   TransferContent,
   TransferObjectKind,
   TransferObjectSelection,
   TransferTableNameCase,
+  TransferColumnNameCase,
   TransferOwnershipPolicy,
+  TransferStructureOperation,
+  TransferStructureOperationKind,
   TransferOwnershipPreview,
   TableImportMode,
+  TableImportConflictPolicy,
   TableImportStatus,
   TableImportSourceFormat,
   TableImportJsonShape,
@@ -957,6 +1232,22 @@ export type {
   TableImportRequest,
   TableImportSummary,
   TableImportProgress,
+  TableImportFailure,
+  MongoImportFormat,
+  MongoImportTypeMode,
+  MongoImportInferredType,
+  MongoImportColumn,
+  MongoImportIssue,
+  MongoImportParseOptions,
+  MongoImportPreviewRequest,
+  MongoImportPreview,
+  MongoImportRequest,
+  MongoImportProgress,
+  MongoImportSummary,
+  MongoExportFormat,
+  MongoExportRequest,
+  MongoExportProgress,
+  MongoExportSummary,
   DatabaseExportRequest,
   ExportProgress,
   TableExportProgress,
@@ -965,6 +1256,12 @@ export type {
   QueryResultExportRequest,
   AgentEvent,
   SqlFileEntry,
+  SqlFileContentMatch,
+  SqlFileContentSearchResult,
+  GlobalSearchRequest,
+  GlobalSearchMatch,
+  GlobalSearchSettings,
+  McpKeychainAccess,
 } from "@/lib/backend/tauri";
 
 // MQTT
@@ -979,3 +1276,4 @@ export const mqttListSavedTopicConfigs = forward("mqttListSavedTopicConfigs");
 export const mqttGetTopicTree = forward("mqttGetTopicTree");
 export const mqttGetMessages = forward("mqttGetMessages");
 export const mqttClearMessages = forward("mqttClearMessages");
+export const mqttDeleteMessage = forward("mqttDeleteMessage");

@@ -1,6 +1,8 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { h2JdbcUrlHasPasswordParam, h2JdbcUrlHasUserParam, parseH2JdbcUrl } from "@/lib/database/h2Connection";
 import { damengSslFormConfig } from "@/lib/database/damengSslOptions";
+import { normalizeRedisDatabaseValue } from "@/lib/redis/redisDatabaseIndex";
+import { parseJdbcProperties } from "@/lib/connection/jdbcProperties";
 
 export interface ParsedConnectionUrl {
   name?: string;
@@ -52,12 +54,15 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   "mongodb+srv": { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
   dynamodb: { type: "dynamodb", profile: "dynamodb", label: "Amazon DynamoDB", defaultPort: 443 },
   clickhouse: { type: "clickhouse", profile: "clickhouse", label: "ClickHouse", defaultPort: 8123 },
+  nebula: { type: "nebula", profile: "nebula", label: "NebulaGraph", defaultPort: 9669 },
   sqlserver: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   mssql: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   oracle: { type: "oracle", profile: "oracle", label: "Oracle", defaultPort: 1521 },
   elasticsearch: { type: "elasticsearch", profile: "elasticsearch", label: "Elasticsearch", defaultPort: 9200 },
   easysearch: { type: "easysearch", profile: "easysearch", label: "Easysearch", defaultPort: 9200 },
   meilisearch: { type: "meilisearch", profile: "meilisearch", label: "Meilisearch", defaultPort: 7700 },
+  solr: { type: "solr", profile: "solr", label: "Apache Solr", defaultPort: 8983 },
+  couchdb: { type: "couchdb", profile: "couchdb", label: "Apache CouchDB", defaultPort: 5984 },
   qdrant: { type: "qdrant", profile: "qdrant", label: "Qdrant", defaultPort: 6333 },
   milvus: { type: "milvus", profile: "milvus", label: "Milvus", defaultPort: 19530 },
   weaviate: { type: "weaviate", profile: "weaviate", label: "Weaviate", defaultPort: 8080 },
@@ -69,7 +74,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   gaussdb: { type: "gaussdb", profile: "gaussdb", label: "GaussDB", defaultPort: 5432 },
   kwdb: { type: "kwdb", profile: "kwdb", label: "KWDB", defaultPort: 26257 },
   gbase: { type: "gbase", profile: "gbase", label: "南大通用 GBase", defaultPort: 5258 },
-  "gbasedbt-sqli": { type: "gbase", profile: "gbase8s", label: "南大通用 GBase 8s", defaultPort: 9088 },
+  "gbasedbt-sqli": { type: "gbase8s", profile: "gbase8s", label: "南大通用 GBase 8s", defaultPort: 9088 },
   "informix-sqli": { type: "informix", profile: "informix", label: "Informix", defaultPort: 9088 },
   yashandb: { type: "yashandb", profile: "yashandb", label: "YashanDB", defaultPort: 1688 },
   opengauss: { type: "gaussdb", profile: "opengauss", label: "openGauss", defaultPort: 5432 },
@@ -81,6 +86,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   iotdb: { type: "iotdb", profile: "iotdb", label: "Apache IoTDB", defaultPort: 6667 },
   iris: { type: "iris", profile: "iris", label: "IRIS", defaultPort: 1972 },
   victoriametrics: { type: "victoriametrics", profile: "victoriametrics", label: "VictoriaMetrics", defaultPort: 8428 },
+  salesforce: { type: "salesforce", profile: "salesforce", label: "Salesforce", defaultPort: 443 },
 };
 
 const OCEANBASE_ORACLE_PROFILE: ConnectionProfile = {
@@ -96,11 +102,14 @@ const HTTP_SELECTED_PROFILES: Record<string, ConnectionProfile> = {
   elasticsearch: SCHEME_PROFILES.elasticsearch,
   easysearch: SCHEME_PROFILES.easysearch,
   meilisearch: SCHEME_PROFILES.meilisearch,
+  solr: SCHEME_PROFILES.solr,
+  couchdb: SCHEME_PROFILES.couchdb,
   qdrant: SCHEME_PROFILES.qdrant,
   milvus: SCHEME_PROFILES.milvus,
   weaviate: SCHEME_PROFILES.weaviate,
   chromadb: SCHEME_PROFILES.chromadb,
   victoriametrics: SCHEME_PROFILES.victoriametrics,
+  salesforce: SCHEME_PROFILES.salesforce,
   consul: SCHEME_PROFILES.consul,
   "nacos-v2": SCHEME_PROFILES["nacos-v2"],
   "nacos-v3": SCHEME_PROFILES["nacos-v3"],
@@ -198,6 +207,29 @@ function databaseFromPath(pathname: string): string | undefined {
   const value = pathname.replace(/^\/+/, "");
   if (!value) return undefined;
   return decodeUrlPart(value.split("/")[0]);
+}
+
+interface RedisUrlPathParts {
+  database: string | undefined;
+  tls: boolean;
+  insecure: boolean;
+}
+
+// Users paste redis-cli invocations into the URL field (e.g.
+// "redis://host:6379/0 --tls --insecure"); WHATWG URL folds the flags into the
+// path. Salvage them: the first non-flag token is the numeric db index, --tls
+// enables TLS (like the rediss:// scheme) and --insecure skips certificate
+// verification (like the #insecure fragment).
+function parseRedisUrlPath(rawPath: string): RedisUrlPathParts {
+  const parts: RedisUrlPathParts = { database: undefined, tls: false, insecure: false };
+  for (const token of rawPath.split(/\s+/)) {
+    if (!token) continue;
+    const flag = token.toLowerCase();
+    if (flag === "--tls") parts.tls = true;
+    else if (flag === "--insecure") parts.insecure = true;
+    else if (parts.database === undefined) parts.database = normalizeRedisDatabaseValue(token);
+  }
+  return parts;
 }
 
 function dynamodbRegionFromHost(hostname: string): string | undefined {
@@ -395,8 +427,8 @@ export function connectionProfileForScheme(scheme: string, preferredProfile?: st
   return SCHEME_PROFILES[normalizedScheme];
 }
 
-function parseJdbcHiveUrl(source: string): ParsedConnectionUrl | null {
-  const match = /^jdbc:hive2:\/\/(?<hosts>[^/?#;]+)(?:\/(?<path>[^?#]*))?(?<query>\?[^#]*)?(?<fragment>#.*)?$/i.exec(source);
+function parseJdbcHiveUrl(source: string, preferredProfile?: string): ParsedConnectionUrl | null {
+  const match = /^jdbc:(?<subprotocol>hive2|inceptor2|transwarp2):\/\/(?<hosts>[^/?#;]+)(?:\/(?<path>[^?#]*))?(?<query>\?[^#]*)?(?<fragment>#.*)?$/i.exec(source);
   if (!match?.groups) return null;
 
   const firstHost = match.groups.hosts.split(",")[0]?.trim();
@@ -413,11 +445,13 @@ function parseJdbcHiveUrl(source: string): ParsedConnectionUrl | null {
   const [rawDatabase = "", ...paramParts] = (match.groups.path || "").split(";");
   const structured = extractHiveStructuredParams(paramParts.join(";"));
   const urlParams = `${structured.urlParams}${match.groups.query || ""}${match.groups.fragment || ""}`;
+  const profile = preferredProfile === "transwarp-inceptor" ? preferredProfile : match.groups.subprotocol.toLowerCase() === "hive2" ? "hive" : "transwarp-inceptor";
+  const transwarp = profile !== "hive";
 
   return {
-    dbType: "hive",
-    driverProfile: "hive",
-    driverLabel: "Apache Hive",
+    dbType: transwarp ? "transwarp" : "hive",
+    driverProfile: profile,
+    driverLabel: profile === "transwarp-inceptor" ? "星环Inceptor" : "Apache Hive",
     host: endpoint.hostname.replace(/^\[(.*)]$/, "$1"),
     port: endpoint.port ? Number(endpoint.port) : 10000,
     username: structured.username ?? decodeUrlPart(endpoint.username),
@@ -436,16 +470,14 @@ function parseJdbcSqlServerUrl(source: string): ParsedConnectionUrl | null {
   const profile = SCHEME_PROFILES.sqlserver;
   const props = new Map<string, string>();
   const urlParams: string[] = [];
-  for (const part of (match[3] || "").split(";")) {
-    if (!part) continue;
-    const [rawKey, ...rest] = part.split("=");
-    const key = rawKey.trim();
-    const value = rest.join("=");
+  const properties = parseJdbcProperties(match[3] || "", "sqlserver");
+  if (!properties) throw new Error("Invalid SQL Server JDBC properties");
+  for (const { key, value, raw: part, quoted } of properties) {
     const normalizedKey = key.toLowerCase();
-    if (normalizedKey === "databasename" || normalizedKey === "database" || normalizedKey === "user") {
-      props.set(normalizedKey, value);
-    } else if (normalizedKey === "password") {
-      props.set(normalizedKey, value);
+    // Braces are literal JDBC values; unquoted %xx values retain DBX's old import behavior.
+    const importedValue = quoted ? value : decodeUrlPart(value);
+    if (normalizedKey === "databasename" || normalizedKey === "database" || normalizedKey === "user" || normalizedKey === "password") {
+      props.set(normalizedKey, importedValue);
     } else {
       urlParams.push(part);
     }
@@ -458,9 +490,9 @@ function parseJdbcSqlServerUrl(source: string): ParsedConnectionUrl | null {
     host: match[1],
     port: match[2] ? Number(match[2]) : profile.defaultPort,
     ...(match[2] ? { portExplicit: true } : {}),
-    username: decodeUrlPart(props.get("user") || ""),
-    password: decodeUrlPart(props.get("password") || ""),
-    database: decodeUrlPart(props.get("databasename") || props.get("database") || "") || undefined,
+    username: props.get("user") || "",
+    password: props.get("password") || "",
+    database: props.get("databasename") || props.get("database") || undefined,
     urlParams: urlParams.join(";"),
     ssl: false,
   };
@@ -567,7 +599,7 @@ function parseJdbcGbase8sUrl(source: string): ParsedConnectionUrl | null {
   const host = match.groups.host.replace(/^\[/, "").replace(/\]$/, "");
 
   return {
-    dbType: "gbase",
+    dbType: "gbase8s",
     driverProfile: "gbase8s",
     driverLabel: "南大通用 GBase 8s",
     host,
@@ -636,12 +668,44 @@ function parseJdbcDremioUrl(source: string): ParsedConnectionUrl | null {
   };
 }
 
+/** Schemes that address a web endpoint, where `#` really does start a fragment. */
+const WEB_URL_SCHEMES = new Set(["http", "https"]);
+
+/**
+ * Database connection URLs are DSNs, not web pages: the query is a parameter
+ * list that is read to the end (PgJDBC, and DBX's own Hive/Oracle JDBC
+ * importers), and a `#` inside a credential, database name or parameter value
+ * is literal text. WHATWG `URL` stops at the first `#` instead, which imported
+ * `…?password=Jxc#2026@n` as the password `Jxc` and dropped the rest without a
+ * warning, and rejected `user:p#ss@host` as an invalid URL.
+ *
+ * Escaping the literal `#` before parsing fixes both: `decodeUrlPart` restores
+ * the original character for credentials, and DBX re-encodes credentials when it
+ * builds the driver URL, so the value reaches the driver unchanged. Only Redis
+ * documents a fragment of its own (`#insecure`), so that suffix stays an alias;
+ * `http`/`https` endpoints keep standard fragment behaviour.
+ */
+function normalizeConnectionUrlFragment(source: string): { source: string; redisInsecure: boolean } {
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(source)?.[1]?.toLowerCase() ?? "";
+  if (WEB_URL_SCHEMES.has(scheme)) return { source, redisInsecure: false };
+
+  const fragmentStart = source.indexOf("#");
+  if (fragmentStart < 0) return { source, redisInsecure: false };
+
+  const fragment = source.slice(fragmentStart + 1);
+  if ((scheme === "redis" || scheme === "rediss") && decodeUrlPart(fragment).trim().toLowerCase() === "insecure") {
+    return { source: source.slice(0, fragmentStart), redisInsecure: true };
+  }
+
+  return { source: source.replace(/#/g, "%23"), redisInsecure: false };
+}
+
 function parseJdbcDremioArrowFlightSqlUrl(source: string): ParsedConnectionUrl | null {
   if (!/^jdbc:arrow-flight-sql:\/\//i.test(source)) return null;
 
   let parsed: URL;
   try {
-    parsed = new URL(source.replace(/^jdbc:/i, ""));
+    parsed = new URL(normalizeConnectionUrlFragment(source.replace(/^jdbc:/i, "")).source);
   } catch {
     return null;
   }
@@ -671,7 +735,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   if (/^jdbc:oceanbase:(?:oracle:)?loadbalance:\/\//i.test(input)) {
     throw new Error("Unsupported OceanBase JDBC URL variant: loadbalance");
   }
-  const jdbcHive = parseJdbcHiveUrl(input);
+  const jdbcHive = parseJdbcHiveUrl(input, preferredProfile);
   if (jdbcHive) return jdbcHive;
   const jdbcH2 = parseH2JdbcUrl(input);
   if (jdbcH2) return jdbcH2;
@@ -699,9 +763,10 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   const zooKeeperResult = parseZooKeeperUrl(source);
   if (zooKeeperResult) return zooKeeperResult;
 
+  const normalizedSource = normalizeConnectionUrlFragment(source);
   let parsed: URL;
   try {
-    parsed = new URL(source);
+    parsed = new URL(normalizedSource.source);
   } catch {
     throw new Error("Invalid connection URL");
   }
@@ -715,8 +780,11 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   const urlParams = parsed.search.replace(/^\?/, "");
   const name = connectionNameParam(parsed);
   const urlParamsWithoutName = stripConnectionNameParam(urlParams);
-  const normalizedFragment = decodeUrlPart(parsed.hash.replace(/^#/, "")).trim().toLowerCase();
-  const parsedUrlParams = profile.type === "redis" && normalizedFragment === "insecure" ? [urlParamsWithoutName, "insecure=true"].filter(Boolean).join("&") : urlParamsWithoutName;
+  // A Redis path can carry pasted redis-cli flags ("…/0 --tls --insecure");
+  // salvage the db index plus the TLS/insecure intent before they are dropped.
+  const redisPath = profile.type === "redis" ? parseRedisUrlPath(databaseFromPath(parsed.pathname) || "") : null;
+  const redisInsecure = redisPath?.insecure || normalizedSource.redisInsecure;
+  const parsedUrlParams = profile.type === "redis" && redisInsecure && !/(^|&)insecure=/i.test(urlParamsWithoutName) ? [urlParamsWithoutName, "insecure=true"].filter(Boolean).join("&") : urlParamsWithoutName;
   const jdbcCredentials = isJdbcUrl && (profile.type === "mysql" || profile.profile === "oceanbase-oracle") ? extractMysqlCredentialParams(parsedUrlParams) : undefined;
   const effectiveUrlParams = jdbcCredentials?.urlParams ?? parsedUrlParams;
   if (profile.type === "mongodb") {
@@ -754,6 +822,8 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
 
   const isMeilisearch = profile.type === "meilisearch";
   const defaultPort = isJdbcUrl && scheme === "oceanbase" ? 3306 : isMeilisearch && scheme === "http" ? 80 : isMeilisearch && scheme === "https" ? 443 : profile.defaultPort;
+  // A Redis URL path is a numeric db index; redis-cli flags salvaged above.
+  const pathDatabase = redisPath ? redisPath.database : databaseFromPath(parsed.pathname);
 
   return {
     ...(name ? { name } : {}),
@@ -765,9 +835,9 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     ...(profile.type === "sqlserver" && parsed.port ? { portExplicit: true } : {}),
     username: jdbcCredentials?.username ?? decodeUrlPart(parsed.username),
     password: jdbcCredentials?.password ?? decodeUrlPart(parsed.password),
-    database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch ? undefined : databaseFromPath(parsed.pathname),
+    database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch || profile.type === "solr" ? undefined : pathDatabase,
     urlParams: effectiveUrlParams,
-    ssl: scheme === "rediss" || scheme === "https" || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname)),
+    ssl: scheme === "rediss" || scheme === "https" || (redisPath?.tls ?? false) || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname)),
     ...(profile.type === "victoriametrics" ? { apiPath: parsed.pathname.replace(/\/+$/, "") } : {}),
     ...(isMeilisearch ? { basePath: parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "") } : {}),
   };

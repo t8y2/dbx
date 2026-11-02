@@ -1,5 +1,4 @@
 import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
-import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 
 export type DatabaseNamespaceCreationTarget = "database" | "schema" | "attach" | "special";
@@ -33,6 +32,9 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   elasticsearch: { deferred: "index creation is not modeled as database creation" },
   easysearch: { deferred: "index creation is not modeled as database creation" },
   meilisearch: { deferred: "index creation is not modeled as database creation" },
+  salesforce: { deferred: "Salesforce orgs do not expose database creation through SOQL" },
+  solr: { deferred: "core creation is not modeled as database creation" },
+  couchdb: { deferred: "database creation is not modeled as SQL database creation" },
   hbase: { deferred: "namespace creation needs dedicated HBase namespace options" },
   qdrant: { deferred: "collection creation is separate from database creation" },
   milvus: { deferred: "collection/database lifecycle needs a dedicated vector workflow" },
@@ -62,18 +64,26 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   "oceanbase-oracle": { deferred: "Oracle-mode schemas are users; use a dedicated user workflow" },
   questdb: { deferred: "single database model in DBX" },
   gbase: { database: "schema" },
+  // Informix-derived: no `CREATE SCHEMA <name>` (a schema is the table owner), but `CREATE DATABASE` works.
+  gbase8s: { connection: "database" },
+  // GBase 8c creates databases with an explicit DBCOMPATIBILITY mode that is fixed at
+  // creation time, so the generic PostgreSQL-shaped create path cannot pick a correct mode.
+  gbase8c: { deferred: "database creation needs an explicit DBCOMPATIBILITY mode fixed at creation time" },
   access: { deferred: "file-backed; create a new connection/file instead" },
   h2: { database: "schema" },
   snowflake: { connection: "database", database: "schema" },
   trino: { database: "schema" },
   prestosql: { database: "schema" },
   hive: { deferred: "Hive database creation needs agent metadata validation first" },
+  argo: { deferred: "ArgoDB database creation needs agent metadata validation first" },
+  transwarp: { connection: "database" },
   kyuubi: { deferred: "Kyuubi database creation needs dedicated metadata validation first" },
   impala: { deferred: "Impala database creation needs dedicated metadata validation first" },
   spark: { deferred: "Spark database creation needs agent metadata validation first" },
   db2: { database: "schema" },
-  informix: { database: "schema" },
+  informix: { connection: "database" },
   neo4j: { deferred: "database creation depends on edition/admin privileges" },
+  nebula: { deferred: "space creation requires partition, replica and VID type options" },
   cassandra: { deferred: "keyspace creation requires replication options" },
   bigquery: { deferred: "dataset creation needs project/location options" },
   spanner: { deferred: "database creation requires the Cloud Spanner Admin API" },
@@ -89,27 +99,32 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   zookeeper: { deferred: "key-value namespaces are not databases" },
   iris: { database: "schema" },
   influxdb: { connection: "database" },
+  influxdb3: { deferred: "database creation on InfluxDB 3.x goes through the /api/v3/configure/database admin endpoint, which is not part of the SQL execution path" },
   victoriametrics: { deferred: "metric namespaces are managed by VictoriaMetrics deployment configuration" },
   jdbc: { deferred: "generic JDBC does not expose a reliable dialect-specific create target" },
+  plugin: { deferred: "plugin-owned namespaces are managed by the provider workbench" },
   mq: { deferred: "message queue namespaces are handled by MQ admin panels" },
   nacos: { deferred: "Nacos namespace creation already uses the Nacos admin flow" },
   consul: { deferred: "Consul namespaces and partitions are connection scopes, not KV resources" },
   mqtt: { deferred: "MQTT topics are managed via the MQTT console" },
 } satisfies Record<DatabaseType, DatabaseNamespaceCreationMatrixEntry>;
 
+function namespaceCreationMatrixEntry(connection: NonNullable<CreationConnection>): DatabaseNamespaceCreationMatrixEntry {
+  return DATABASE_NAMESPACE_CREATION_MATRIX[connection.db_type];
+}
+
 export function connectionNamespaceCreationTarget(connection: CreationConnection): ConnectionCreationTarget | null {
   if (!connection || connectionIsEffectivelyReadOnly(connection)) return null;
-  if (connection.db_type === "mongodb" && isMongoLegacyDriverProfile(connection.driver_profile)) return null;
   if (connection.db_type === "sqlite" && (connection.host?.trim().toLowerCase() === ":memory:" || Boolean(connection.password))) {
     return null;
   }
-  const entry: DatabaseNamespaceCreationMatrixEntry = DATABASE_NAMESPACE_CREATION_MATRIX[connection.db_type];
+  const entry: DatabaseNamespaceCreationMatrixEntry = namespaceCreationMatrixEntry(connection);
   return entry.connection ?? null;
 }
 
 export function databaseNodeNamespaceCreationTarget(connection: CreationConnection, node: Pick<{ type: TreeNodeType; database?: string | null }, "type" | "database">): DatabaseNodeCreationTarget | null {
   if (!connection || connectionIsEffectivelyReadOnly(connection) || node.type !== "database" || !node.database) return null;
-  const entry: DatabaseNamespaceCreationMatrixEntry = DATABASE_NAMESPACE_CREATION_MATRIX[connection.db_type];
+  const entry: DatabaseNamespaceCreationMatrixEntry = namespaceCreationMatrixEntry(connection);
   return entry.database ?? null;
 }
 

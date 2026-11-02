@@ -101,7 +101,7 @@ describe("isNumericColumnType", () => {
 
   it("covers the full cross-database numeric whitelist used by the alignment classifier", () => {
     // Cross-database coverage matrix. Every entry here MUST stay in sync with
-    // the Rust classifier in crates/dbx-core/src/xlsx_export.rs so that the
+    // the Rust classifier in crates/dbx-formats/src/xlsx_export.rs so that the
     // grid, the front-end XLSX exporter and the Rust XLSX exporter agree.
     const numericTypesByDatabase: Record<string, string[]> = {
       mysql: ["tinyint", "smallint", "mediumint", "int", "integer", "bigint", "float", "double", "decimal", "dec", "fixed"],

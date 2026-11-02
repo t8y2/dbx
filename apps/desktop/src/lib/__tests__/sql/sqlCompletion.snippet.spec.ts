@@ -76,7 +76,7 @@ describe("buildSnippetItems", () => {
     ["oscar", "SELECT *\nFROM table\nWHERE ROWNUM <= 100;", "SELECT *\nFROM ${table}\nWHERE ROWNUM <= 100;"],
     ["xugu", "SELECT *\nFROM table\nLIMIT 100;", "SELECT *\nFROM ${table}\nLIMIT 100;"],
     ["yashandb", "SELECT *\nFROM table\nLIMIT 100;", "SELECT *\nFROM ${table}\nLIMIT 100;"],
-    ["dameng", "SELECT *\nFROM table\nFETCH FIRST 100 ROWS ONLY;", "SELECT *\nFROM ${table}\nFETCH FIRST 100 ROWS ONLY;"],
+    ["dameng", "SELECT *\nFROM table\nWHERE ROWNUM <= 100;", "SELECT *\nFROM ${table}\nWHERE ROWNUM <= 100;"],
     ["db2", "SELECT *\nFROM table\nFETCH FIRST 100 ROWS ONLY;", "SELECT *\nFROM ${table}\nFETCH FIRST 100 ROWS ONLY;"],
     ["sqlserver", "SELECT TOP 100 *\nFROM table;", "SELECT TOP 100 *\nFROM ${table};"],
     ["access", "SELECT TOP 100 *\nFROM table;", "SELECT TOP 100 *\nFROM ${table};"],
@@ -128,6 +128,62 @@ describe("buildSnippetItems", () => {
     expect(items.findIndex((item) => item.label === "SELECT" && item.type === "keyword")).toBeGreaterThan(0);
   });
 
+  it("keeps an exact custom snippet first when matching columns are preferred", () => {
+    const sql = "SELECT * FROM users WHERE cc";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      snippets: [{ id: "custom-count", label: "count zero", prefix: "cc", body: "count(0)" }],
+      tables: [{ name: "users", type: "table" }],
+      columnsByTable: new Map([["users", [{ name: "country_code", table: "users" }]]]),
+      databaseType: "mysql",
+    });
+
+    expect(items[0]).toEqual(
+      expect.objectContaining({
+        label: "count zero",
+        filterText: "cc",
+        type: "snippet",
+        apply: "count(0)",
+        exactMatch: true,
+      }),
+    );
+  });
+
+  it("keeps an exact custom snippet ahead of an exact table alias", () => {
+    const sql = "SELECT * FROM country_codes cc WHERE cc";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      snippets: [{ id: "custom-count", label: "count zero", prefix: "cc", body: "count(0)" }],
+      tables: [{ name: "country_codes", type: "table" }],
+      columnsByTable: new Map(),
+      databaseType: "mysql",
+    });
+
+    expect(items[0]).toEqual(expect.objectContaining({ label: "count zero", type: "snippet", exactMatch: true }));
+  });
+
+  it("offers custom snippets in preferred SQL value contexts", () => {
+    const sql = "SELECT DATEADD(cc";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      snippets: [{ id: "custom-count", label: "count zero", prefix: "cc", body: "count(0)" }],
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "sqlserver",
+    });
+
+    expect(items[0]).toEqual(expect.objectContaining({ label: "count zero", type: "snippet", apply: "count(0)", exactMatch: true }));
+  });
+
+  it("keeps an exact database routine ahead of its generic function", () => {
+    const sql = "SELECT COUNT";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      objects: [{ name: "COUNT", type: "function", signature: "value" }],
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "mysql",
+    });
+
+    expect(items.find((item) => item.label === "COUNT")?.apply).toBe("`COUNT`(${1:value})");
+  });
+
   it("keeps the real keyword first after typing past a snippet prefix", () => {
     const items = buildSqlCompletionItems("sele", 4, {
       snippets: [{ id: "custom-sel", label: "select all rows", prefix: "sel", body: "SELECT *\nFROM table;" }],
@@ -145,6 +201,26 @@ describe("buildSnippetItems", () => {
 
     expect(items[0].detail).toBe("SELECT *\nFROM table\nLIMIT 7;");
     expect(items[0].apply).toBe("SELECT *\nFROM ${table}\nLIMIT 7;");
+  });
+
+  it.each([
+    ["single-line select for SQL Server", { ...BUILTIN_SELECT, body: "SELECT * FROM table LIMIT 100;" }, "sqlserver", "SELECT TOP 100 * FROM table;", "SELECT TOP 100 * FROM ${table};"],
+    ["single-line select for MySQL", { ...BUILTIN_SELECT, body: "SELECT * FROM table LIMIT 100;" }, "mysql", "SELECT * FROM table LIMIT 100;", "SELECT * FROM ${table} LIMIT 100;"],
+    ["re-wrapped select for Oracle", { ...BUILTIN_SELECT, body: "SELECT * FROM table\n  LIMIT 100;" }, "oracle", "SELECT *\nFROM table\nWHERE ROWNUM <= 100;", "SELECT *\nFROM ${table}\nWHERE ROWNUM <= 100;"],
+    ["CRLF select for Oracle", { ...BUILTIN_SELECT, body: "SELECT *\r\nFROM table\r\nLIMIT 100;" }, "oracle", "SELECT *\nFROM table\nWHERE ROWNUM <= 100;", "SELECT *\nFROM ${table}\nWHERE ROWNUM <= 100;"],
+    ["single-line update for ClickHouse", { ...BUILTIN_UPDATE, body: "UPDATE table SET column = value WHERE condition;" }, "clickhouse", "ALTER TABLE table UPDATE column = value WHERE condition;", "ALTER TABLE ${table} UPDATE ${column} = ${value} WHERE ${condition};"],
+    [
+      "re-indented CTE",
+      { ...BUILTIN_CTE, body: "WITH name AS (\n    SELECT columns\n    FROM table\n)\nSELECT *\nFROM name;" },
+      "oracle",
+      "WITH name AS (\n    SELECT columns\n    FROM table\n)\nSELECT *\nFROM name;",
+      "WITH ${name} AS (\n    SELECT ${columns}\n    FROM ${table}\n)\nSELECT *\nFROM ${name};",
+    ],
+  ] as const)("adapts a layout-only edit of a built-in snippet: %s", (_case, snippet, databaseType, detail, apply) => {
+    const items = buildSnippetItemsForTest(snippet.prefix, [snippet], undefined, databaseType);
+
+    expect(items[0].detail).toBe(detail);
+    expect(items[0].apply).toBe(apply);
   });
 
   it("replaces placeholder words but preserves uppercase SQL keywords", () => {
@@ -248,5 +324,42 @@ describe("buildSnippetItems", () => {
   it("returns empty for empty prefix", () => {
     const items = buildSnippetItemsForTest("", TEST_SNIPPETS);
     expect(items).toEqual([]);
+  });
+});
+
+describe("snippet ranking", () => {
+  const SEQUENCE_OBJECTS = [
+    { name: "SEQ_SEL_A", type: "sequence" as const },
+    { name: "SEQ_SEL_B", type: "sequence" as const },
+  ];
+
+  // Regression for #13115: sequences pin themselves to the top of the list while
+  // no columns are expected, so on an Oracle-family connection (Dameng here)
+  // typing the `sel` trigger listed every `SEL*` sequence above `select *` and
+  // Tab expanded a sequence instead of the snippet.
+  it("ranks an exactly matched snippet above sequences without a column context", () => {
+    const items = buildSqlCompletionItems("sel", 3, {
+      databaseType: "dameng",
+      tables: [],
+      columnsByTable: new Map(),
+      objects: SEQUENCE_OBJECTS,
+    });
+
+    expect(items[0]).toMatchObject({ type: "snippet", label: "select *", filterText: "sel" });
+    expect(items.filter((item) => item.type === "sequence").map((item) => item.label)).toEqual(["SEQ_SEL_A", "SEQ_SEL_B"]);
+  });
+
+  it("keeps sequences ahead of ordinary candidates when the prefix is only a partial match", () => {
+    const items = buildSqlCompletionItems("se", 2, {
+      databaseType: "dameng",
+      tables: [],
+      columnsByTable: new Map(),
+      objects: SEQUENCE_OBJECTS,
+    });
+
+    const firstSequence = items.findIndex((item) => item.type === "sequence");
+    const firstNonSequence = items.findIndex((item) => item.type !== "sequence");
+    expect(firstSequence).toBeGreaterThanOrEqual(0);
+    expect(firstSequence).toBeLessThan(firstNonSequence);
   });
 });

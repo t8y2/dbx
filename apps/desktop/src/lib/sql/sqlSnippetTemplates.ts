@@ -1,6 +1,5 @@
+import { buildSelectSnippetBody, DEFAULT_SELECT_ROW_LIMIT } from "@/lib/sql/sqlDialectSelectLimit";
 import type { DatabaseType, SqlSnippet } from "@/types/database";
-
-const DEFAULT_SELECT_ROW_LIMIT = 100;
 
 /**
  * Built-in SQL snippets shared by database types.
@@ -125,51 +124,17 @@ export const MANTICORESEARCH_SQL_SNIPPETS: SqlSnippet[] = [
 type BuiltinSqlSnippetBodyBuilder = (databaseType?: DatabaseType) => string;
 
 interface BuiltinSqlSnippetRule {
-  defaultBody: string;
+  /** Default body with whitespace collapsed, so layout-only edits still count as the default. */
+  defaultShape: string;
   buildBody: BuiltinSqlSnippetBodyBuilder;
 }
 
-type SelectSnippetLimitStyle = "limit" | "top" | "first" | "fetch-first" | "rows" | "rownum" | "unbounded";
-
-const SELECT_SNIPPET_LIMIT_STYLE_BY_DATABASE: Partial<Record<DatabaseType, SelectSnippetLimitStyle>> = {
-  oracle: "rownum",
-  "oceanbase-oracle": "rownum",
-  oscar: "rownum",
-  dameng: "fetch-first",
-  db2: "fetch-first",
-  sqlserver: "top",
-  access: "top",
-  iris: "top",
-  teradata: "top",
-  informix: "first",
-  firebird: "rows",
-  // An unknown JDBC driver may expose any SQL dialect. Known JDBC profiles are
-  // converted to their effective database type before reaching the editor.
-  jdbc: "unbounded",
-};
+function collapseSqlWhitespace(sql: string): string {
+  return sql.replace(/\s+/g, " ").trim();
+}
 
 const PARENTHESIZED_ADD_COLUMN_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "yashandb", "xugu", "dameng", "iris", "informix"]);
 const ADD_COLUMN_WITHOUT_COLUMN_KEYWORD_DATABASES = new Set<DatabaseType>(["sqlserver", "kingbase", "cassandra", "teradata"]);
-
-function buildSelectSnippetBody(databaseType?: DatabaseType): string {
-  const style = databaseType ? (SELECT_SNIPPET_LIMIT_STYLE_BY_DATABASE[databaseType] ?? "limit") : "limit";
-  switch (style) {
-    case "top":
-      return `SELECT TOP ${DEFAULT_SELECT_ROW_LIMIT} *\nFROM table;`;
-    case "first":
-      return `SELECT FIRST ${DEFAULT_SELECT_ROW_LIMIT} *\nFROM table;`;
-    case "fetch-first":
-      return `SELECT *\nFROM table\nFETCH FIRST ${DEFAULT_SELECT_ROW_LIMIT} ROWS ONLY;`;
-    case "rows":
-      return `SELECT *\nFROM table\nROWS ${DEFAULT_SELECT_ROW_LIMIT};`;
-    case "rownum":
-      return `SELECT *\nFROM table\nWHERE ROWNUM <= ${DEFAULT_SELECT_ROW_LIMIT};`;
-    case "unbounded":
-      return "SELECT *\nFROM table;";
-    case "limit":
-      return `SELECT *\nFROM table\nLIMIT ${DEFAULT_SELECT_ROW_LIMIT};`;
-  }
-}
 
 function buildUpdateSnippetBody(databaseType?: DatabaseType): string {
   if (databaseType === "clickhouse") {
@@ -192,7 +157,7 @@ const BUILTIN_SQL_SNIPPET_RULES = new Map<string, BuiltinSqlSnippetRule>(
   DEFAULT_SQL_SNIPPETS.map((snippet) => [
     snippet.id,
     {
-      defaultBody: snippet.body,
+      defaultShape: collapseSqlWhitespace(snippet.body),
       buildBody: () => snippet.body,
     },
   ]),
@@ -201,15 +166,27 @@ const BUILTIN_SQL_SNIPPET_RULES = new Map<string, BuiltinSqlSnippetRule>(
 function registerBuiltinSqlSnippetRule(id: string, buildBody: BuiltinSqlSnippetBodyBuilder): void {
   const rule = BUILTIN_SQL_SNIPPET_RULES.get(id);
   if (!rule) throw new Error(`Unknown built-in SQL snippet: ${id}`);
-  BUILTIN_SQL_SNIPPET_RULES.set(id, { defaultBody: rule.defaultBody, buildBody });
+  BUILTIN_SQL_SNIPPET_RULES.set(id, { defaultShape: rule.defaultShape, buildBody });
 }
 
 registerBuiltinSqlSnippetRule("builtin-sel", buildSelectSnippetBody);
 registerBuiltinSqlSnippetRule("builtin-upd", buildUpdateSnippetBody);
 registerBuiltinSqlSnippetRule("builtin-at", buildAlterTableAddColumnSnippetBody);
 
+/**
+ * Resolve a built-in snippet body for the active database.
+ *
+ * Bodies whose content differs from the default (e.g. `LIMIT 7`) are kept
+ * verbatim. Layout-only edits are still converted; the user's text is kept
+ * when the dialect body matches it, and single-line bodies stay single-line.
+ */
 export function resolveSqlSnippetBodyForDatabase(snippet: SqlSnippet, databaseType?: DatabaseType): string {
   const rule = BUILTIN_SQL_SNIPPET_RULES.get(snippet.id);
-  if (!rule || snippet.body !== rule.defaultBody) return snippet.body;
-  return rule.buildBody(databaseType);
+  if (!rule) return snippet.body;
+  const bodyShape = collapseSqlWhitespace(snippet.body);
+  if (bodyShape !== rule.defaultShape) return snippet.body;
+  const dialectBody = rule.buildBody(databaseType);
+  const dialectShape = collapseSqlWhitespace(dialectBody);
+  if (dialectShape === bodyShape) return snippet.body;
+  return snippet.body.includes("\n") ? dialectBody : dialectShape;
 }

@@ -1,8 +1,8 @@
 import { EditorSelection, EditorState } from "@codemirror/state";
-import type { EditorView, ViewUpdate } from "@codemirror/view";
+import type { EditorView } from "@codemirror/view";
 import { describe, expect, it } from "vitest";
 import { createQueryEditorStringMouseSelection } from "@/lib/editor/queryEditorStringMouseSelection";
-import { sqlStringContentRangeAt, type SqlSemanticSelectionOptions } from "@/lib/editor/sqlSemanticSelectionRanges";
+import { sqlStringContentRangeAt, trimSqlStringWildcardBoundaries, type SqlSemanticSelectionOptions } from "@/lib/editor/sqlSemanticSelectionRanges";
 
 function eventAt(position: number, assoc: -1 | 1 = 1, overrides: Partial<MouseEvent> = {}): MouseEvent {
   return {
@@ -136,17 +136,99 @@ describe("query editor SQL string mouse selection", () => {
     expect(reverse?.anchor).toBeGreaterThan(reverse?.head ?? Number.POSITIVE_INFINITY);
   });
 
-  it("maps the start selection and semantic analysis across document changes", () => {
-    const doc = "select 'alpha-beta'";
-    const state = EditorState.create({ doc, selection: EditorSelection.cursor(doc.length) });
-    const fixture = fakeView(state);
-    const start = eventAt(doc.indexOf("alpha"));
-    const style = createQueryEditorStringMouseSelection(fixture.view, start);
-    const transaction = state.update({ changes: { from: 0, insert: "-- " } });
-    fixture.setState(transaction.state);
-    style?.update({ docChanged: true, changes: transaction.changes, startState: state, state: transaction.state, view: fixture.view } as ViewUpdate);
+  it("skips leading and trailing LIKE wildcards when double-clicking a string", () => {
+    const cases: Array<{ doc: string; needle: string; expected: string }> = [
+      { doc: "select '%识别通配符%'", needle: "识别通配符", expected: "识别通配符" },
+      { doc: "select 'name' like '%foo%'", needle: "foo", expected: "foo" },
+      { doc: "select '%leading'", needle: "leading", expected: "leading" },
+      { doc: "select 'trailing_'", needle: "trailing", expected: "trailing" },
+      { doc: "select '__both__'", needle: "both", expected: "both" },
+      { doc: "select '%%multi%%'", needle: "multi", expected: "multi" },
+    ];
 
-    const selection = style?.get(eventAt(doc.indexOf("alpha") + 3), false, false);
-    expect(selection && transaction.state.sliceDoc(selection.main.from, selection.main.to)).toBe("alpha-beta");
+    for (const value of cases) {
+      const state = EditorState.create({ doc: value.doc });
+      const start = eventAt(value.doc.indexOf(value.needle));
+      const selection = createQueryEditorStringMouseSelection(fakeView(state).view, start)?.get(start, false, false);
+      expect(selection && value.doc.slice(selection.main.from, selection.main.to)).toBe(value.expected);
+    }
+  });
+
+  it("keeps a wildcard-only string intact so the double click still selects something", () => {
+    const doc = "select '%%'";
+    const state = EditorState.create({ doc });
+    const start = eventAt(doc.indexOf("%%") + 1);
+    const selection = createQueryEditorStringMouseSelection(fakeView(state).view, start)?.get(start, false, false);
+    expect(selection && doc.slice(selection.main.from, selection.main.to)).toBe("%%");
+  });
+
+  it("returns null when the caller opted into plain word selection", () => {
+    const doc = "EXEC sp_executesql N'SELECT * FROM my_table WHERE a = 1';";
+    const state = EditorState.create({ doc });
+    const view = fakeView(state).view;
+    const insideString = eventAt(doc.indexOf("my_table"));
+    const outsideString = eventAt(doc.indexOf("sp_executesql"));
+
+    expect(createQueryEditorStringMouseSelection(view, insideString)).not.toBeNull();
+    expect(createQueryEditorStringMouseSelection(view, insideString, { selectStringContent: false })).toBeNull();
+    expect(createQueryEditorStringMouseSelection(view, outsideString, { selectStringContent: false })).toBeNull();
+    // Explicitly asking for the historical behaviour keeps working.
+    expect(createQueryEditorStringMouseSelection(view, insideString, { selectStringContent: true })).not.toBeNull();
+  });
+
+  it("trimSqlStringWildcardBoundaries shrinks past boundary wildcards only", () => {
+    const doc = "%a_b%";
+    expect(trimSqlStringWildcardBoundaries(doc, { from: 0, to: doc.length })).toEqual({ from: 1, to: 4 });
+    // Inner underscore/percent are preserved; only the boundaries are trimmed.
+    expect(doc.slice(1, 4)).toBe("a_b");
+    // A range with no boundary wildcards is returned unchanged.
+    expect(trimSqlStringWildcardBoundaries("abc", { from: 0, to: 3 })).toEqual({ from: 0, to: 3 });
+  });
+
+  it("does not treat PostgreSQL stored procedure or function bodies as string literal selections (#12966)", () => {
+    const procedure = ["CREATE OR REPLACE PROCEDURE public.process_orders(p_status text)", " LANGUAGE plpgsql", "AS $procedure$", "BEGIN", "    UPDATE orders SET status = p_status WHERE active = true;", "    SELECT * FROM my_table;", "END;", "$procedure$;"].join("\n");
+
+    const state = EditorState.create({ doc: procedure });
+    const view = fakeView(state).view;
+
+    // Double clicking on table name, variable, or statement inside the procedure body should not select the entire body.
+    for (const needle of ["my_table", "orders", "p_status", "UPDATE", "SELECT"]) {
+      const pos = procedure.indexOf(needle);
+      expect(contentAt(procedure, pos, 1, { dialect: "postgres" })).toBeNull();
+      expect(createQueryEditorStringMouseSelection(view, eventAt(pos), { dialect: "postgres" })).toBeNull();
+    }
+  });
+
+  it("does not select procedural bodies in single-line procedures, functions, DO blocks, or multi-line strings (#12966)", () => {
+    const cases: Array<{ doc: string; needle: string; options?: SqlSemanticSelectionOptions }> = [
+      {
+        doc: "CREATE PROCEDURE clear_logs() LANGUAGE sql AS $$ DELETE FROM app_logs; $$;",
+        needle: "app_logs",
+        options: { dialect: "postgres" },
+      },
+      {
+        doc: "CREATE OR REPLACE FUNCTION get_user_count() RETURNS int LANGUAGE sql AS $$ SELECT count(*) FROM users; $$;",
+        needle: "users",
+        options: { dialect: "postgres" },
+      },
+      {
+        doc: "DO $$\nBEGIN\n    PERFORM cleanup_temp_tables();\nEND;\n$$;",
+        needle: "cleanup_temp_tables",
+        options: { dialect: "postgres" },
+      },
+      {
+        doc: "SELECT 'first line\nsecond line with my_table\nthird line';",
+        needle: "my_table",
+        options: { dialect: "postgres" },
+      },
+    ];
+
+    for (const { doc, needle, options } of cases) {
+      const pos = doc.indexOf(needle);
+      const state = EditorState.create({ doc });
+      const view = fakeView(state).view;
+      expect(contentAt(doc, pos, 1, options)).toBeNull();
+      expect(createQueryEditorStringMouseSelection(view, eventAt(pos), options)).toBeNull();
+    }
   });
 });

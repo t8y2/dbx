@@ -1,6 +1,6 @@
 ---
 title: Specialized Workspaces
-description: Manage Redis, MongoDB, search and vector databases, HBase, message queues, etcd, ZooKeeper, Nacos, and Consul KV in DBX.
+description: Manage Redis, MongoDB, Apache CouchDB, search and vector databases, HBase, message queues, etcd, ZooKeeper, Nacos, and Consul KV in DBX.
 ---
 
 In addition to the SQL editor and data grid, DBX opens specialized workspaces for specific connection types. These interfaces use each system's native object model and management APIs, including Redis keys, MongoDB documents, vector collections, message queue topics, etcd keys, ZooKeeper ZNodes, Nacos configurations, and Consul KV entries.
@@ -11,7 +11,7 @@ In addition to the SQL editor and data grid, DBX opens specialized workspaces fo
 
 | Category | Connection types | Main entry points |
 | --- | --- | --- |
-| Key/value and document | Redis, MongoDB | Key or document browsing, filtering, editing, commands, and aggregation workflows |
+| Key/value and document | Redis, MongoDB, CouchDB | Key or document browsing, filtering, editing, commands, and aggregation workflows |
 | Search and document indexes | Elasticsearch, Easysearch, Meilisearch, Manticore Search | Index/document browsing and engine-specific requests |
 | Vector databases | Qdrant, Milvus, Weaviate, ChromaDB | Collection browsing, vector search, upsert, delete, and request preview |
 | Wide-column and column family | HBase | Namespaces, table structure, column families, and row data |
@@ -34,6 +34,25 @@ Redis and MongoDB have dedicated guides:
 
 When a connection is read-only, DBX disables or rejects mutations in Redis, MongoDB, and GridFS. Dangerous Redis commands also pass through a separate command-safety classifier.
 
+## DynamoDB PartiQL
+
+DynamoDB connections support native PartiQL in the query editor:
+
+```sql
+SELECT "pk", "status" FROM "orders" WHERE "pk" = 'order-1001';
+INSERT INTO "orders" VALUE {'pk': 'order-1002', 'status': 'NEW'};
+UPDATE "orders" SET "status" = 'PAID' WHERE "pk" = 'order-1002';
+DELETE FROM "orders" WHERE "pk" = 'order-1002';
+```
+
+DBX calls the AWS SDK's [ExecuteStatement](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_ExecuteStatement.html) rather than translating PartiQL into another SQL dialect. DynamoDB determines supported syntax, IAM permissions, and errors. This is not full relational SQL: JOIN, SQL-file execution, DDL, and cross-statement transactions are not enabled. Existing `DBX DYNAMODB SCAN` / Item commands remain supported.
+
+SELECT follows service `NextToken` values, including intermediate pages with no filter matches. Results respect the editor's row cap and a 1,000-page safety bound. A reached limit or a service response without a usable continuation token marks the result truncated and emits a warning instead of presenting partial data as complete. Use the editor row cap or narrower conditions, not SQL `LIMIT`. SELECT without a partition-key condition may scan substantial data and incur charges.
+
+Query results paginate the returned data locally, without injecting SQL `LIMIT` / `OFFSET` or derived-table `COUNT` queries. Document-browser cursor pagination is unchanged.
+
+Projections preserve DynamoDB representations for large numbers, binary, and nested values without adding synthetic document-editing `_id` fields. Singleton writes never enter the client pagination loop; their affected count acknowledges one successful operation, not an exact changed-row count supplied by the service. Existing read-only, production-confirmation, timeout, and cancellation paths remain in effect.
+
 ## Search and Document Indexes
 
 Elasticsearch, Easysearch, Meilisearch, and Manticore Search use index- and document-oriented browsing. DBX displays indexes or collections from driver metadata and provides entry points for browsing, querying, and inspecting documents.
@@ -45,6 +64,18 @@ Keep these boundaries in mind:
 - TLS, proxying, and authentication depend on the connection type and server configuration
 - Document queries and mutations vary by driver, server version, and account privileges
 - SQL workflows such as schema diff or SQL file execution only appear when the engine reliably supports them
+
+## Apache CouchDB
+
+Apache CouchDB uses DBX's built-in Rust HTTP driver. Each CouchDB database appears as a document collection that opens in the document browser.
+
+- Connect to the CouchDB HTTP/HTTPS endpoint, default port `5984`. Enable TLS for `https://`; `couchdb://host:5984` URLs can be pasted directly
+- Credentials use HTTP Basic authentication from the connection username and password fields
+- Without a filter, documents are paged through `_all_docs`. A filter is sent as a Mango `selector` to `_find`, and pagination follows CouchDB's `bookmark`
+- Documents can be inserted, edited, and deleted; if an update omits `_rev`, DBX fetches the current revision first, and deletes always use the current revision
+- The query editor accepts REST requests in the form `METHOD /path` followed by an optional JSON body, for example `GET /_all_dbs` or `POST /mydb/_find`
+
+DBX classifies every request before it runs. `GET`, `HEAD`, `OPTIONS`, and read-only `POST` endpoints (`_find`, `_explain`, `_all_docs`, `_bulk_get`, and view queries under `_design/*/_view/*`) are reads. Other `POST`, `PUT`, and document-level `DELETE` requests are writes, while `PUT /{db}` and `DELETE /{db}` are treated as dangerous. These levels drive the same confirmation and read-only safeguards used for other engines.
 
 ## Vector Databases
 

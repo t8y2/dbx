@@ -19,4 +19,14 @@ describe("uuid", () => {
 
     expect(uuid()).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
+
+  it("keeps working without crypto.randomUUID, the state of plain-HTTP deployments", () => {
+    // Issue #9306: the Docker build served over HTTP has crypto.getRandomValues but no
+    // crypto.randomUUID, and every bare crypto.randomUUID() call threw there.
+    const getRandomValues = vi.fn((buffer: Uint8Array) => buffer.fill(0xab));
+    vi.stubGlobal("crypto", { getRandomValues });
+
+    expect(uuid()).toBe("abababab-abab-4bab-abab-abababababab");
+    expect(getRandomValues).toHaveBeenCalledOnce();
+  });
 });

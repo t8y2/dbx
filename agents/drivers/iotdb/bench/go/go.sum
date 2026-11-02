@@ -1,7 +1,11 @@
 github.com/apache/iotdb-client-go/v2 v2.0.8 h1:4Z2bmnoeH9gPNz0cDSfqbvwfyY0Ocbo18vtPfjKo34k=
 github.com/apache/iotdb-client-go/v2 v2.0.8/go.mod h1:keIG+1Xfw8n2NukUbrEcYnnyN9VxP8OJLYvnHsg1k2s=
+github.com/apache/iotdb-client-go/v2 v2.0.10 h1:SC3ZFENEGfcbXl5hGBfLizk/s8Ba4r3/mNb0o4IH5PY=
+github.com/apache/iotdb-client-go/v2 v2.0.10/go.mod h1:Ef61z8w2tRnuAcQKESFfiH03kDvfQniVPUgOXCxWnNw=
 github.com/apache/thrift v0.15.0 h1:aGvdaR0v1t9XLgjtBYwxcBvBOTMqClzwE26CHOgjW1Y=
 github.com/apache/thrift v0.15.0/go.mod h1:PHK3hniurgQaNMZYaCLEqXKsYK8upmhPbmdP2FXSqgU=
+github.com/apache/thrift v0.24.0 h1:zy31L1a49QTNB2bG1BBfMXol3yJrTH975G3pPubQVLQ=
+github.com/apache/thrift v0.24.0/go.mod h1:zPt6WxgvTOM6hF92y8C+MkEM5LMxZuk4JcQOiU4Esvs=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/golang/mock v1.5.0/go.mod h1:CWnOUgYIOo4TcNZ0wHX3YZCqsaM1I1Jvs6v3mP3KVu8=

@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
-use dbx_core::storage::Storage;
 use dbx_core::table_import::parse_xlsx_file;
 
 fn live_clickhouse_config(
@@ -66,7 +65,7 @@ async fn live_clickhouse_query_result_export_xlsx_streams_random_order_query_onc
     let config = live_clickhouse_config(&connection_id, &host, port, &user, &password, &database);
     let dir = std::env::temp_dir().join(format!("dbx-live-clickhouse-query-export-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     state.configs.write().await.insert(config.id.clone(), config);
 
@@ -92,6 +91,7 @@ async fn live_clickhouse_query_result_export_xlsx_streams_random_order_query_onc
         use_agent_cursor: false,
         file_path: file_path.to_string_lossy().to_string(),
         format: "xlsx".to_string(),
+        insert_mode: Default::default(),
         include_sql_sheet: false,
         page_size: 100,
         row_limit: None,
@@ -99,14 +99,23 @@ async fn live_clickhouse_query_result_export_xlsx_streams_random_order_query_onc
         timeout_secs: Some(30),
         keyset_optimization_enabled: false,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-clickhouse-query-export-{suffix}")),
         date_time_format: None,
+        csv_quote_mode: Default::default(),
+        null_literal: String::new(),
         export_table_name: None,
+        export_schema: None,
         export_column_types: None,
+        selected_columns: None,
+        export_column_extras: None,
         column_comments: None,
+        header_comment_rows: false,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
+        primary_keys: Vec::new(),
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {

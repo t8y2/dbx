@@ -1,0 +1,487 @@
+// @vitest-environment happy-dom
+
+import { createApp, defineComponent, h, nextTick, type App } from "vue";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createPinia } from "pinia";
+import { DEFAULT_EDITOR_SETTINGS } from "@/stores/settingsStore";
+import { SHORTCUT_DEFINITIONS } from "@/lib/editor/shortcutRegistry";
+
+// Behaviour proof for the scope-grouping / two-tier conflict work. The
+// load-bearing claim is the tier split:
+//   · L1 same-scope duplicate -> blocking (red pill, footer reason, Apply gate)
+//   · L2 cross-scope overlap  -> informational only (amber pill, never blocking)
+// This drives the real rendered controls so a wrong tier can't hide behind a
+// passing string assertion.
+
+const hoisted = vi.hoisted(() => ({ shortcuts: {} as Record<string, string> }));
+
+vi.mock("vue-i18n", async () => {
+  const { ref } = await import("vue");
+  const locale = ref("en");
+  // Interpolate params into the returned string so count assertions can read
+  // them (real vue-i18n would fold them into the message text).
+  const t = (key: string, params?: Record<string, unknown>) => {
+    // #11632: one label carries a space AND a word its action id does not ("tab"),
+    // so the shortcut-search spec can tell a label match apart from an id match.
+    // A whitespace-stripped query would strip the label too and lose this row.
+    if (key === "settings.shortcutNewQuery") return "New Query Tab";
+    if (!params) return key;
+    const suffix = Object.keys(params)
+      .sort()
+      .map((name) => `${name}=${String(params[name])}`)
+      .join(" ");
+    return suffix ? `${key} ${suffix}` : key;
+  };
+  return {
+    createI18n: () => ({ global: { t, locale }, install: () => undefined }),
+    useI18n: () => ({ t, locale }),
+  };
+});
+
+vi.mock("@/components/ui/dialog", async () => {
+  const { defineComponent, h } = await import("vue");
+  const passthrough = defineComponent({
+    setup(_props, { slots }) {
+      return () => h("div", slots.default?.());
+    },
+  });
+  return {
+    Dialog: passthrough,
+    DialogContent: passthrough,
+    DialogFooter: passthrough,
+    DialogHeader: passthrough,
+    DialogTitle: passthrough,
+  };
+});
+
+vi.mock("@/components/ui/button", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    Button: defineComponent({
+      inheritAttrs: false,
+      setup(props, { attrs, slots }) {
+        return () => h("button", { ...attrs, disabled: (props as { disabled?: boolean }).disabled ? true : undefined }, slots.default?.());
+      },
+      props: { disabled: { type: Boolean, default: false } },
+    }),
+  };
+});
+
+// ChangelogPanel fires a network fetch on mount (About tab); irrelevant here.
+vi.mock("@/components/settings/ChangelogPanel.vue", async () => {
+  const { defineComponent } = await import("vue");
+  return { default: defineComponent({ setup: () => () => null }) };
+});
+
+// Back the store composable with a stub so the dialog boots without the Tauri
+// backend, but read `shortcuts` through the hoisted object so each test can seed
+// the configuration it wants before mounting.
+vi.mock("@/stores/settingsStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/stores/settingsStore")>();
+  const store = {
+    settingsPageActive: false,
+    editorSettings: {
+      ...actual.DEFAULT_EDITOR_SETTINGS,
+      get shortcuts() {
+        return hoisted.shortcuts;
+      },
+    },
+    desktopSettings: actual.DEFAULT_DESKTOP_SETTINGS,
+    mcpGlobalPolicy: { configured: false, readOnly: false },
+    aiConfigs: [],
+    aiDefaultTemplatesByDbType: {},
+    defaultAiMode: "ask",
+    restoreLastConversation: false,
+    initMcpGlobalPolicy: vi.fn(async () => undefined),
+    updateMcpGlobalPolicy: vi.fn(async () => undefined),
+    initAiConfigs: vi.fn(async () => undefined),
+    initDesktopSettings: vi.fn(async () => undefined),
+    updateEditorSettingsAndPersist: vi.fn(async () => undefined),
+    updateEditorSettings: vi.fn(),
+    persistEditorSettings: vi.fn(async () => undefined),
+    updateDesktopSettings: vi.fn(async () => undefined),
+    reloadAiConfigs: vi.fn(async () => undefined),
+    removeTemplateFromDefaultAndLastUsed: vi.fn(),
+    setDefaultTemplatesForDbType: vi.fn(),
+    updateAiConfigItem: vi.fn(),
+    createAiConfig: vi.fn(),
+    deleteAiConfig: vi.fn(),
+    setDefaultAiConfig: vi.fn(),
+    setDefaultAiMode: vi.fn(),
+    setRestoreLastConversation: vi.fn(),
+  };
+  return { ...actual, useSettingsStore: () => store };
+});
+
+import EditorSettingsDialog from "../EditorSettingsDialog.vue";
+
+if (!("ResizeObserver" in globalThis)) {
+  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+
+const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
+
+afterEach(() => {
+  for (const { app, host } of mountedApps.splice(0)) {
+    app.unmount();
+    host.remove();
+  }
+});
+
+async function flushAsyncUpdates() {
+  await nextTick();
+  await Promise.resolve();
+  await nextTick();
+}
+
+function defaults() {
+  return { ...DEFAULT_EDITOR_SETTINGS.shortcuts };
+}
+
+async function mountShortcutsTab() {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const app = createApp(defineComponent({ setup: () => () => h(EditorSettingsDialog, { variant: "page", initialTab: "shortcuts" }) }));
+  app.use(createPinia());
+  app.mount(host);
+  mountedApps.push({ app, host });
+  await flushAsyncUpdates();
+  return host;
+}
+
+const shortcutsPane = (host: HTMLElement) => host.querySelector<HTMLElement>('[data-settings-search-id="shortcuts"]')!;
+
+// Scope groups are the only sections whose own header carries an h3 title; the
+// pane also hosts the SQL-shortcuts block, which must not join the group list.
+const groupSections = (host: HTMLElement) => [...shortcutsPane(host).querySelectorAll<HTMLElement>("section")].filter((section) => [...section.children].some((child) => child.tagName === "HEADER"));
+
+const groupLabels = (host: HTMLElement) => groupSections(host).map((section) => section.querySelector("h3")!.textContent!.trim());
+
+const rows = (host: HTMLElement) => [...shortcutsPane(host).querySelectorAll<HTMLElement>(".settings-shortcut-row")];
+
+const inputFor = (host: HTMLElement, id: string) => shortcutsPane(host).querySelector<HTMLInputElement>(`input[data-shortcut-input="${id}"]`)!;
+
+const rowFor = (host: HTMLElement, id: string) => inputFor(host, id).closest<HTMLElement>(".settings-shortcut-row")!;
+
+const headerFor = (host: HTMLElement, scope: string) =>
+  groupSections(host)
+    .find((section) => section.querySelector("h3")?.textContent?.trim() === `settings.shortcutScope${scope[0].toUpperCase()}${scope.slice(1)}`)!
+    .querySelector<HTMLElement>("header")!;
+
+const contentFor = (host: HTMLElement, scope: string) => shortcutsPane(host).querySelector<HTMLElement>(`#shortcut-scope-content-${scope}`)!;
+
+function button(host: HTMLElement, text: string) {
+  return [...host.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent?.trim() === text) ?? null;
+}
+
+const applyButton = (host: HTMLElement) => button(host, "settings.apply")!;
+
+// Turn a stored shortcut string ("Ctrl+Shift+F" / "Shift+Mod+F") into the keydown
+// a real capture input would receive, resolving `Mod` for the host platform.
+function shortcutKeyEvent(shortcut: string): KeyboardEvent {
+  const parts = shortcut
+    .split("+")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const key = parts.pop() ?? "";
+  const isMac = /mac/i.test(globalThis.navigator?.platform ?? "");
+  const init: KeyboardEventInit = { key: key.length === 1 ? key.toLowerCase() : key, bubbles: true };
+  for (const part of parts) {
+    if (/^(ctrl|control)$/i.test(part)) init.ctrlKey = true;
+    else if (/^shift$/i.test(part)) init.shiftKey = true;
+    else if (/^(alt|option)$/i.test(part)) init.altKey = true;
+    else if (/^meta$/i.test(part)) init.metaKey = true;
+    else if (/^mod$/i.test(part)) {
+      if (isMac) init.metaKey = true;
+      else init.ctrlKey = true;
+    }
+  }
+  return new KeyboardEvent("keydown", init);
+}
+
+// The footer keeps a standing explanation of a blocked Apply now that the row
+// no longer carries inline conflict text.
+const hasFooterBlockerReason = (host: HTMLElement) => (host.textContent ?? "").includes("settings.shortcutConflictBlocksApply");
+
+describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
+  it("renders one group per scope in runtime dispatch order, without repeating the scope on rows", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+
+    expect(groupLabels(host)).toEqual(["settings.shortcutScopeGlobal", "plDebug.start.title", "settings.shortcutScopeEditor", "settings.shortcutScopeGrid", "settings.shortcutScopeSearch", "settings.shortcutScopeSidebar"]);
+
+    // Scope moved into the group header — rows must not repeat it.
+    const rendered = rows(host);
+    expect(rendered.length).toBeGreaterThan(0);
+    for (const row of rendered) {
+      expect(row.textContent).not.toContain("settings.shortcutScope");
+    }
+  });
+
+  it("collapses and expands a group from its accessible header", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+    const header = headerFor(host, "editor");
+
+    expect(header.getAttribute("role")).toBe("button");
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(header.getAttribute("aria-controls")).toBe("shortcut-scope-content-editor");
+    expect(rowFor(host, "formatSql")).toBeTruthy();
+
+    header.click();
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    expect(contentFor(host, "editor").getAttribute("aria-hidden")).toBe("true");
+    expect(contentFor(host, "editor").hasAttribute("inert")).toBe(true);
+
+    header.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(contentFor(host, "editor").getAttribute("aria-hidden")).toBe("false");
+    expect(contentFor(host, "editor").hasAttribute("inert")).toBe(false);
+    expect(rowFor(host, "formatSql")).toBeTruthy();
+
+    header.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("auto-expands a collapsed group while searching and restores it afterward", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+    const header = headerFor(host, "editor");
+    header.click();
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+
+    const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
+    search.value = "shortcutFormatSql";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(rows(host).length).toBe(1);
+    expect(rowFor(host, "formatSql")).toBeTruthy();
+
+    search.value = "";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    expect(contentFor(host, "editor").getAttribute("aria-hidden")).toBe("true");
+    expect(contentFor(host, "editor").hasAttribute("inert")).toBe(true);
+  });
+
+  // #11632: the search box used to compare the raw query against the rendered
+  // pill, so only the exact "Ctrl + T" spelling matched — "Ctrl+T" fell through.
+  it("matches a shortcut however the user spaces or cases the separators", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+    const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
+
+    const searchIds = async (value: string) => {
+      search.value = value;
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+      await flushAsyncUpdates();
+      return rows(host).map((row) => row.querySelector<HTMLInputElement>("input[data-shortcut-input]")!.dataset.shortcutInput!);
+    };
+
+    // The pill is platform-dependent ("Ctrl + T" vs "⌘ T"), so read it off the
+    // rendered row instead of hardcoding a spelling.
+    const displayed = inputFor(host, "newQuery").value;
+    expect(displayed).not.toBe("");
+    const compact = displayed.replace(/\s+/g, "");
+
+    const matched = await searchIds(displayed);
+    expect(matched).toContain("newQuery");
+    if (!/mac/i.test(globalThis.navigator?.platform ?? "")) {
+      // The issue's own example: Ctrl+T is a prefix of Ctrl+Tab, so both rows
+      // must survive. (On macOS the modifiers differ: ⌘ T vs ⌃ Tab.)
+      expect(matched).toContain("tabSwitcher");
+    }
+
+    expect(await searchIds(compact)).toEqual(matched);
+    expect(await searchIds(compact.toUpperCase())).toEqual(matched);
+    expect(await searchIds(displayed.replace(/\s+/g, "   "))).toEqual(matched);
+
+    // Still a substring match, not an equality match: dropping the key leaves a
+    // bare modifier prefix, which several actions share.
+    const prefixMatched = await searchIds(compact.slice(0, -1));
+    expect(prefixMatched.length).toBeGreaterThan(1);
+    expect(prefixMatched).toContain("newQuery");
+
+    // The untouched dimensions keep matching on their own terms: a two-word label
+    // still matches with its space, so only the shortcut field may be normalised.
+    // "tab" appears in the label but not in the id, so an id match cannot mask this.
+    expect(await searchIds("new query tab")).toContain("newQuery");
+    expect(await searchIds("NEW QUERY TAB")).toContain("newQuery");
+
+    // Whitespace-only input behaves as no search (the early return), not as
+    // "matches nothing".
+    const all = await searchIds("");
+    expect(all.length).toBeGreaterThan(matched.length);
+    expect(await searchIds("   ")).toEqual(all);
+  });
+
+  it("treats a same-scope duplicate as blocking: red pills, footer reason and a disabled Apply", async () => {
+    const base = defaults();
+    hoisted.shortcuts = base;
+    const host = await mountShortcutsTab();
+
+    // Pristine draft: nothing to block yet.
+    expect(hasFooterBlockerReason(host)).toBe(false);
+
+    // explainSql and formatSql both live in the editor scope. Capture the chord
+    // formatSql already owns through the real capture input.
+    rowFor(host, "explainSql").querySelector<HTMLButtonElement>("button")!.click();
+    await flushAsyncUpdates();
+    inputFor(host, "explainSql").dispatchEvent(shortcutKeyEvent(base.formatSql));
+    await flushAsyncUpdates();
+
+    expect(inputFor(host, "explainSql").getAttribute("aria-invalid")).toBe("true");
+    expect(inputFor(host, "formatSql").getAttribute("aria-invalid")).toBe("true");
+    expect(rowFor(host, "formatSql").dataset.conflict).toBe("true");
+    expect(rowFor(host, "explainSql").dataset.conflict).toBe("true");
+    // The row no longer carries inline text, so the footer has to explain why
+    // Apply is unavailable.
+    expect(hasFooterBlockerReason(host)).toBe(true);
+    expect(applyButton(host).disabled).toBe(true);
+  });
+
+  it("keeps a cross-scope overlap informational: amber tier renders, Apply stays reachable", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+
+    // `find` (editor) and `focusSearch` (global) share Mod+F by design.
+    const crossScopeRows = shortcutsPane(host).querySelectorAll('.settings-shortcut-row[data-cross-scope="true"]');
+    expect(crossScopeRows.length).toBeGreaterThan(0);
+    expect(shortcutsPane(host).querySelectorAll('.settings-shortcut-row[data-conflict="true"]').length).toBe(0);
+    expect(hasFooterBlockerReason(host)).toBe(false);
+
+    // Drive a real rebind through the rendered controls (capture state + keydown):
+    // any change makes Apply reachable, and a chord that collides with no other
+    // action in the same scope must NOT be blocked by the cross-scope tier.
+    const taken = new Set(Object.values(defaults()));
+    const candidate = ["Ctrl+Alt+Shift+1", "Ctrl+Alt+Shift+2", "Ctrl+Alt+Shift+3"].find((key) => !taken.has(key))!;
+
+    const row = rowFor(host, "executeSql");
+    row.querySelector<HTMLButtonElement>("button")!.click();
+    await flushAsyncUpdates();
+
+    const capture = inputFor(host, "executeSql");
+    expect(capture.value).toBe("");
+    capture.dispatchEvent(new KeyboardEvent("keydown", { key: candidate.slice(-1), ctrlKey: true, altKey: true, shiftKey: true, bubbles: true }));
+    await flushAsyncUpdates();
+
+    expect(inputFor(host, "executeSql").value).not.toBe("");
+    expect(shortcutsPane(host).querySelectorAll('.settings-shortcut-row[data-conflict="true"]').length).toBe(0);
+    expect(hasFooterBlockerReason(host)).toBe(false);
+    expect(applyButton(host).disabled).toBe(false);
+  });
+
+  it("drops groups that have no row left after a search, so header counts cannot disagree", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+
+    const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
+    search.value = "shortcutFormatSql";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+
+    const sections = groupSections(host);
+    expect(sections.length).toBe(1);
+    expect(sections[0].querySelectorAll(".settings-shortcut-row").length).toBe(1);
+    expect(groupLabels(host)).toEqual(["settings.shortcutScopeEditor"]);
+  });
+
+  it("keeps the scope order aligned with the registry scopes", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+
+    const scopes = new Set(SHORTCUT_DEFINITIONS.map((definition) => definition.scope));
+    const rendered = groupLabels(host).map((label) => {
+      if (label === "plDebug.start.title") return "debug";
+      const raw = label.replace("settings.shortcutScope", "");
+      return raw.charAt(0).toLowerCase() + raw.slice(1);
+    });
+
+    // Only scopes that actually have actions render, but whatever renders must be
+    // a sub-sequence of the dispatch order (global -> editor -> grid -> search -> sidebar).
+    const dispatchOrder = ["global", "debug", "editor", "grid", "search", "sidebar"];
+    for (const scope of rendered) expect(scopes).toContain(scope);
+    const positions = rendered.map((scope) => dispatchOrder.indexOf(scope));
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(positions.every((index) => index >= 0)).toBe(true);
+  });
+
+  it("scopes the amber cross-scope badge to the search results and restores the global count on clear", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+
+    const crossBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-warning/30"]');
+    const conflictBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-destructive/25"]');
+
+    // 调试 stepOver 与 quickOpen 共用 Mod+P，增加一组跨域提示，不阻断应用。
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=7");
+    expect(conflictBadge()).toBeNull();
+
+    const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
+
+    // 搜索只留下 editTableStructure 一行：对方 viewTableDdl 被过滤掉，但冲突
+    // 判定仍基于全局绑定，这组重叠必须继续计入（恰好 1 组）。
+    search.value = "shortcutEditTableStructure";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    expect(rows(host).length).toBe(1);
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=1");
+
+    // 无搜索结果：徽章随空结果隐藏。
+    search.value = "noSuchShortcutZZZ";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    expect(crossBadge()).toBeNull();
+
+    // 清空搜索：恢复全局口径。
+    search.value = "";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=7");
+  });
+
+  it("scopes the red same-scope badge to the search results while the footer gate stays global", async () => {
+    const base = defaults();
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+
+    const conflictBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-destructive/25"]');
+    const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
+
+    // explainSql 与 formatSql 同属 editor 作用域：走真实捕获输入重绑成同键，
+    // 制造一组阻断冲突（草稿被改动后页脚门禁才会出现，与产品语义一致）。
+    rowFor(host, "explainSql").querySelector<HTMLButtonElement>("button")!.click();
+    await flushAsyncUpdates();
+    inputFor(host, "explainSql").dispatchEvent(shortcutKeyEvent(base.formatSql));
+    await flushAsyncUpdates();
+
+    // 全局：冲突映射双向各记一行，2 项冲突（1 组重复）。
+    expect(conflictBadge()!.textContent!.trim()).toBe("settings.shortcutConflictBadge count=2");
+    expect(hasFooterBlockerReason(host)).toBe(true);
+
+    // 搜索只留 formatSql：对方 explainSql 不可见，但冲突真实存在，仍计入。
+    search.value = "shortcutFormatSql";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    expect(conflictBadge()!.textContent!.trim()).toBe("settings.shortcutConflictBadge count=2");
+    expect(hasFooterBlockerReason(host)).toBe(true);
+
+    // 当前结果无冲突：徽章隐藏，但页脚全局门禁不随搜索消失。
+    search.value = "shortcutUndo";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    expect(conflictBadge()).toBeNull();
+    expect(hasFooterBlockerReason(host)).toBe(true);
+  });
+});

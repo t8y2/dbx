@@ -27,7 +27,7 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", async (original) => ({ ...(await original<typeof import("vue-i18n")>()), useI18n: () => ({ t: (key: string) => key }) }));
 
 vi.mock("@lucide/vue", async () => {
   const { defineComponent, h } = await import("vue");
@@ -37,6 +37,7 @@ vi.mock("@lucide/vue", async () => {
     Check: Icon,
     ChevronDown: Icon,
     ChevronUp: Icon,
+    ClipboardList: Icon,
     Copy: Icon,
     Database: Icon,
     Info: Icon,
@@ -47,6 +48,7 @@ vi.mock("@lucide/vue", async () => {
     Maximize2: Icon,
     Plus: Icon,
     RefreshCw: Icon,
+    Rows3: Icon,
     Save: Icon,
     Search: Icon,
     Settings: Icon,
@@ -219,6 +221,8 @@ vi.mock("@/components/ui/select", async () => {
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: mocks.ensureConnected,
+    connectionStateRevision: () => 0,
+    isCurrentConnectionStateRevision: () => true,
     getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? mocks.connection : undefined),
   }),
 }));
@@ -227,7 +231,7 @@ vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ tableStructureRe
 vi.mock("@/stores/historyStore", () => ({ useHistoryStore: () => ({ add: vi.fn() }) }));
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
-    editorSettings: { structureEditorDensity: "compact", sqlFormatter: {}, tableColumnTemplateFields: [] },
+    editorSettings: { structureEditorDensity: "compact", sqlFormatter: {}, tableColumnTemplateFields: [], generateSqlQuoteIdentifiers: true },
     updateEditorSettings: mocks.updateEditorSettings,
   }),
 }));
@@ -261,7 +265,7 @@ async function mountIndexesEditor() {
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.executeQuery.mockResolvedValue({ columns: ["user", "host", "plugin"], rows: [["app_user", "LOGIN", ""]] });
   mocks.listDataTypes.mockResolvedValue([]);
-  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
+  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
   mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint)", cacheStatus: "remote" });
   mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({
     value: facet === "comment" ? "" : facet === "owner" ? "app_user" : [],
@@ -309,7 +313,7 @@ function concurrentCheckboxInRow(row: HTMLElement): HTMLInputElement {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
+  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
   mocks.getTableOwner.mockResolvedValue("app_user");
   mocks.buildTableOwnerChangeSql.mockResolvedValue({ statements: [], warnings: [] });
 });
@@ -374,7 +378,7 @@ describe("TableStructureEditor concurrent availability transition", () => {
 
     // Recovery: a later successful probe must lift the blocker and regenerate
     // the preview with the original Concurrent intent, never a blocking CREATE.
-    mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
+    mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
     buttonWithText(root, "structureEditor.refresh").click();
     await vi.waitFor(() => expect(mocks.getTablePartitionStatus).toHaveBeenCalledTimes(3), { timeout: 3000 });
     await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql.mock.calls.length).toBeGreaterThan(callsAtEnabledPhase), { timeout: 3000 });

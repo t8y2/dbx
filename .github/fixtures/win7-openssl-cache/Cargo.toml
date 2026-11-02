@@ -1,0 +1,10 @@
+[package]
+name = "win7-openssl-cache"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+openssl-sys = { version = "=0.9.117", features = ["vendored"] }
+
+[workspace]

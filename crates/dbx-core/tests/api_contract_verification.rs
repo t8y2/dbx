@@ -23,6 +23,7 @@ fn prepare_schema_diff_function_signature() {
         source_tables: vec![TableInfo {
             name: "t".to_string(),
             table_type: "TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,
@@ -30,6 +31,7 @@ fn prepare_schema_diff_function_signature() {
         target_tables: vec![TableInfo {
             name: "t".to_string(),
             table_type: "TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,
@@ -38,6 +40,7 @@ fn prepare_schema_diff_function_signature() {
         target_details: vec![],
         source_functions: vec![],
         target_functions: vec![],
+        oracle_routines: None,
         source_sequences: vec![],
         target_sequences: vec![],
         source_rules: vec![],
@@ -49,6 +52,9 @@ fn prepare_schema_diff_function_signature() {
         ignore_comments: false,
         cascade_delete: false,
         compare_column_order: false,
+        compare_charset: true,
+        ignore_table_name_case: false,
+        ignore_column_name_case: false,
         detect_renames: false,
         detect_table_renames: false,
         rename_threshold: 0.5,
@@ -62,8 +68,30 @@ fn prepare_schema_diff_function_signature() {
         shard_strategy: None,
         resource_constraint: None,
         field_mappings: vec![],
+        table_mappings: vec![],
     };
     let _result: SchemaDiffPreparation = prepare_schema_diff(options);
+}
+
+#[test]
+fn schema_diff_case_options_are_backward_compatible_and_use_camel_case() {
+    let legacy: SchemaDiffPreparationOptions = serde_json::from_value(serde_json::json!({
+        "databaseType": "postgres"
+    }))
+    .unwrap();
+    assert!(!legacy.ignore_table_name_case);
+    assert!(!legacy.ignore_column_name_case);
+    assert!(legacy.oracle_routines.is_none());
+
+    let mut options = legacy;
+    options.ignore_table_name_case = true;
+    options.ignore_column_name_case = true;
+    let json = serde_json::to_value(options).unwrap();
+    assert_eq!(json["ignoreTableNameCase"], true);
+    assert_eq!(json["ignoreColumnNameCase"], true);
+    assert!(json.get("ignore_table_name_case").is_none());
+    assert!(json.get("ignore_column_name_case").is_none());
+    assert!(json.get("oracleRoutines").is_none());
 }
 
 /// Verify generate_schema_sync_sql accepts all arg types
@@ -100,6 +128,7 @@ fn schema_diff_preparation_field_names() {
         source_tables: vec![TableInfo {
             name: "t".to_string(),
             table_type: "TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,
@@ -107,6 +136,7 @@ fn schema_diff_preparation_field_names() {
         target_tables: vec![TableInfo {
             name: "t".to_string(),
             table_type: "TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,
@@ -115,6 +145,7 @@ fn schema_diff_preparation_field_names() {
         target_details: vec![],
         source_functions: vec![],
         target_functions: vec![],
+        oracle_routines: None,
         source_sequences: vec![],
         target_sequences: vec![],
         source_rules: vec![],
@@ -126,6 +157,9 @@ fn schema_diff_preparation_field_names() {
         ignore_comments: false,
         cascade_delete: false,
         compare_column_order: false,
+        compare_charset: true,
+        ignore_table_name_case: false,
+        ignore_column_name_case: false,
         detect_renames: false,
         detect_table_renames: false,
         rename_threshold: 0.5,
@@ -139,6 +173,7 @@ fn schema_diff_preparation_field_names() {
         shard_strategy: None,
         resource_constraint: None,
         field_mappings: vec![],
+        table_mappings: vec![],
     });
 
     let json = serde_json::to_value(&result).unwrap();
@@ -212,6 +247,7 @@ fn core_types_serialization_roundtrip() {
     let table = TableInfo {
         name: "users".to_string(),
         table_type: "BASE TABLE".to_string(),
+        valid: None,
         comment: Some("user table".to_string()),
         parent_schema: Some("public".to_string()),
         parent_name: None,
@@ -220,6 +256,28 @@ fn core_types_serialization_roundtrip() {
     let deserialized: TableInfo = serde_json::from_value(json).unwrap();
     assert_eq!(table.name, deserialized.name);
     assert_eq!(table.comment, deserialized.comment);
+    assert_eq!(deserialized.valid, None);
+
+    let valid_view: TableInfo = serde_json::from_value(serde_json::json!({
+        "name": "valid_view",
+        "table_type": "VIEW",
+        "valid": true,
+        "comment": null,
+        "parent_schema": null,
+        "parent_name": null
+    }))
+    .unwrap();
+    assert_eq!(valid_view.valid, Some(true));
+
+    let legacy_view: TableInfo = serde_json::from_value(serde_json::json!({
+        "name": "legacy_view",
+        "table_type": "VIEW",
+        "comment": null,
+        "parent_schema": null,
+        "parent_name": null
+    }))
+    .unwrap();
+    assert_eq!(legacy_view.valid, None);
 }
 
 /// ColumnInfo must serialize/deserialize consistently
@@ -229,6 +287,8 @@ fn column_info_serialization_roundtrip() {
         name: "id".to_string(),
         data_type: "int".to_string(),
         resolved_schema: None,
+        resolved_table: None,
+        resolved_object_type: None,
         is_nullable: false,
         column_default: None,
         is_primary_key: true,
@@ -241,6 +301,7 @@ fn column_info_serialization_roundtrip() {
         enum_values: None,
         character_set: None,
         collation: None,
+        metadata_capabilities: None,
     };
     let json = serde_json::to_value(&col).unwrap();
     assert_eq!(json.get("is_unique"), Some(&serde_json::json!(true)));
@@ -276,6 +337,8 @@ fn table_columns_result_serialization_contract() {
             name: "id".to_string(),
             data_type: "int".to_string(),
             resolved_schema: None,
+            resolved_table: None,
+            resolved_object_type: None,
             is_nullable: false,
             column_default: None,
             is_primary_key: true,
@@ -288,6 +351,7 @@ fn table_columns_result_serialization_contract() {
             enum_values: None,
             character_set: None,
             collation: None,
+            metadata_capabilities: None,
         }],
         error: Some("partial".to_string()),
     };

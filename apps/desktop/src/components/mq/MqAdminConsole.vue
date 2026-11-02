@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { MqAdminConfig, MqClusterInfo, MqSystemKind, NamespaceRef, TopicInfo } from "@/types/mq";
 import { mqCreateNamespace, mqListNamespaces, mqTestConnection } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
+import { resolveRocketMqChannels } from "@/lib/mq/rocketmqChannels";
+import { hydrateRocketMqConfig } from "@/lib/connection/rocketmqConfig";
 import { mqClusterOptionsFromExtra } from "@/lib/mq/mqTenantForm";
 import {
   defaultMqCapabilitiesForSystemKind,
@@ -23,6 +25,7 @@ import {
 } from "@/lib/mq/mqConsoleDefaults";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { AcceptableValue } from "reka-ui";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 import TenantsPanel from "./TenantsPanel.vue";
 import NamespacesPanel from "./NamespacesPanel.vue";
 import TopicsPanel from "./TopicsPanel.vue";
@@ -53,11 +56,27 @@ interface Props {
 
 const props = defineProps<Props>();
 const { t } = useI18n();
+
+interface MqTabUiState {
+  activeTab?: MqTab;
+  selectedTenant?: string;
+  selectedNamespace?: string;
+  selectedTopic?: Pick<TopicInfo, "name" | "shortName" | "partitioned" | "persistent" | "namespace">;
+  selectedSubscriptionName?: string;
+  preferDlqTopic?: boolean;
+  showCreateNamespaceDialog?: boolean;
+  createNamespaceName?: string;
+}
+
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<MqTabUiState>({}, "MqAdminConsole");
 const connectionStore = useConnectionStore();
 const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 const isProductionConnection = computed(() => !!connectionStore.getConfig(props.connectionId)?.is_production);
 const configuredSystemKind = computed(() => resolveMqSystemKindFromConnection(connectionStore.getConfig(props.connectionId)));
 const FLAT_MQ_CONTEXT = "_flat_mq";
+const connectionFingerprint = computed(() => JSON.stringify([props.connectionId, connectionStore.getConfig(props.connectionId), connectionStore.metadataGenerationFor?.(props.connectionId)]));
+let handshakeGeneration = 0;
+let mounted = false;
 
 function normalizeFlatMqTenant(tenant: string | undefined, systemKind: MqSystemKind | undefined): string | undefined {
   // RabbitMQ has no tenant concept: the console pins a synthetic tenant and
@@ -77,29 +96,49 @@ function initialMqNamespace(systemKind: MqSystemKind | undefined): string | unde
 
 // State
 const activeTab = ref<MqTab>(
-  resolveInitialMqTab({
-    initialTab: props.initialTab,
-    initialTenant: props.initialTenant,
-    systemKind: configuredSystemKind.value,
-  }),
+  restoredUiState.activeTab ??
+    resolveInitialMqTab({
+      initialTab: props.initialTab,
+      initialTenant: props.initialTenant,
+      systemKind: configuredSystemKind.value,
+    }),
 );
-const selectedTenant = ref<string | undefined>(normalizeFlatMqTenant(props.initialTenant, configuredSystemKind.value));
-const selectedNamespace = ref<string | undefined>(initialMqNamespace(configuredSystemKind.value));
-const selectedTopic = ref<TopicInfo>();
-const selectedSubscriptionName = ref<string>();
+const selectedTenant = ref<string | undefined>(restoredUiState.selectedTenant ?? normalizeFlatMqTenant(props.initialTenant, configuredSystemKind.value));
+const selectedNamespace = ref<string | undefined>(restoredUiState.selectedNamespace ?? initialMqNamespace(configuredSystemKind.value));
+const selectedTopic = ref<TopicInfo | undefined>(restoredUiState.selectedTopic);
+const selectedSubscriptionName = ref<string | undefined>(restoredUiState.selectedSubscriptionName);
 const capabilities = ref<MqClusterInfo["capabilities"]>();
 const clusterInfo = ref<MqClusterInfo>();
 const loading = ref(false);
 const error = ref<string>();
-const preferDlqTopic = ref(props.initialTab === "dlq");
+const preferDlqTopic = ref(restoredUiState.preferDlqTopic ?? props.initialTab === "dlq");
 
 // RabbitMQ vhost switcher (tab-bar namespace dropdown).
 const CREATE_NAMESPACE_VALUE = "__create_namespace__";
 const rabbitMqVhosts = ref<string[]>([]);
-const showCreateNamespaceDialog = ref(false);
-const createNamespaceName = ref("");
+const showCreateNamespaceDialog = ref(restoredUiState.showCreateNamespaceDialog ?? false);
+const createNamespaceName = ref(restoredUiState.createNamespaceName ?? "");
 const createNamespaceError = ref<string>();
 const creatingNamespace = ref(false);
+
+trackUiState(() => ({
+  activeTab: activeTab.value,
+  selectedTenant: selectedTenant.value,
+  selectedNamespace: selectedNamespace.value,
+  selectedTopic: selectedTopic.value
+    ? {
+        name: selectedTopic.value.name,
+        shortName: selectedTopic.value.shortName,
+        partitioned: selectedTopic.value.partitioned,
+        persistent: selectedTopic.value.persistent,
+        namespace: selectedTopic.value.namespace,
+      }
+    : undefined,
+  selectedSubscriptionName: selectedSubscriptionName.value,
+  preferDlqTopic: preferDlqTopic.value,
+  showCreateNamespaceDialog: showCreateNamespaceDialog.value,
+  createNamespaceName: createNamespaceName.value,
+}));
 
 // Computed
 const mqSystemKind = computed<MqSystemKind | undefined>(() => clusterInfo.value?.systemKind ?? configuredSystemKind.value);
@@ -129,7 +168,22 @@ const effectiveNamespace = computed(() => {
 const breadcrumbTenant = computed(() => (isFlatMqCluster.value ? undefined : selectedTenant.value));
 const breadcrumbNamespace = computed(() => (isFlatMqCluster.value && !isRabbitMqCluster.value ? undefined : selectedNamespace.value));
 const breadcrumbNamespaceLabel = computed(() => (isAllVhostsNamespace(breadcrumbNamespace.value) ? t("mqAdmin.allNamespaces") : breadcrumbNamespace.value));
-const effectiveCapabilities = computed(() => capabilities.value ?? defaultMqCapabilitiesForSystemKind(configuredSystemKind.value));
+const isRocketMqProxy = computed(() => isRocketMqCluster.value && hydrateRocketMqConfig(connectionStore.getConfig(props.connectionId)?.external_config as Partial<MqAdminConfig>).connectionMode === "proxy");
+const effectiveCapabilities = computed(() => {
+  const defaults = defaultMqCapabilitiesForSystemKind(configuredSystemKind.value, connectionStore.getConfig(props.connectionId));
+  const resolved = { ...defaults, ...capabilities.value };
+  if (isRocketMqProxy.value && !hydrateRocketMqConfig(connectionStore.getConfig(props.connectionId)?.external_config as Partial<MqAdminConfig>).managementEnabled) {
+    return { ...defaults, supportsSendMessage: capabilities.value?.supportsSendMessage ?? defaults.supportsSendMessage };
+  }
+  // The Proxy transport supports ordinary sending; administration does not imply receive/query support.
+  if (isRocketMqProxy.value) {
+    resolved.supportsPeekMessages = false;
+    resolved.supportsMessageQuery = false;
+    resolved.supportsMessageTrace = false;
+    resolved.supportsPartitionedTopics = false;
+  }
+  return resolved;
+});
 const canManageTenants = computed(() => effectiveCapabilities.value.supportsTenants);
 const canManageNamespaces = computed(() => effectiveCapabilities.value.supportsNamespaces);
 const canManagePartitionedTopics = computed(() => effectiveCapabilities.value.supportsPartitionedTopics);
@@ -156,6 +210,7 @@ const canManageClientConnections = computed(() => effectiveCapabilities.value.su
 const canMessageQuery = computed(() => effectiveCapabilities.value.supportsMessageQuery ?? false);
 const canMessageTrace = computed(() => effectiveCapabilities.value.supportsMessageTrace ?? false);
 const canUseRawApi = computed(() => effectiveCapabilities.value.supportsRawAdminApi);
+const rocketMqChannels = computed(() => (isRocketMqCluster.value ? resolveRocketMqChannels(clusterInfo.value?.extra) : []));
 const clusterOptions = computed(() => mqClusterOptionsFromExtra(clusterInfo.value?.extra));
 const availableTabs = computed<MqTab[]>(() =>
   resolveAvailableMqTabs({
@@ -191,18 +246,36 @@ function tabLabelKey(tab: MqTab): string {
 }
 
 // Methods
-async function loadClusterInfo() {
+async function loadClusterInfo(generation: number, fingerprint: string) {
+  const current = () => mounted && generation === handshakeGeneration && fingerprint === connectionFingerprint.value;
+  if (!current()) return;
   loading.value = true;
   error.value = undefined;
   try {
-    clusterInfo.value = await mqTestConnection(props.connectionId);
-    capabilities.value = clusterInfo.value.capabilities;
+    const result = await mqTestConnection(props.connectionId);
+    if (!current()) return;
+    clusterInfo.value = result;
+    capabilities.value = result.capabilities;
     reconcileActiveTab();
   } catch (e: unknown) {
-    error.value = formatError(e);
+    if (current()) error.value = formatError(e);
   } finally {
-    loading.value = false;
+    if (current()) loading.value = false;
   }
+}
+
+async function refreshConnectionCapabilities(generation: number) {
+  // Coalesce synchronous config edits before reconnecting or starting a handshake.
+  await Promise.resolve();
+  if (!mounted || generation !== handshakeGeneration) return;
+  const fingerprint = connectionFingerprint.value;
+  try {
+    await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
+  } catch (e) {
+    if (generation !== handshakeGeneration) return;
+    console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
+  }
+  await loadClusterInfo(generation, fingerprint);
 }
 
 async function loadRabbitMqVhosts() {
@@ -342,7 +415,7 @@ function goToNamespaceLevel() {
 
 function goToTopicLevel() {
   selectedSubscriptionName.value = undefined;
-  activeTab.value = "topics";
+  setActiveTab("topics");
 }
 
 function setActiveTab(tab: MqTab) {
@@ -351,7 +424,7 @@ function setActiveTab(tab: MqTab) {
 }
 
 function firstAvailableTab(): MqTab {
-  return availableTabs.value[0] ?? "topics";
+  return availableTabs.value[0] ?? (isRocketMqProxy.value ? "messages" : "topics");
 }
 
 function reconcileActiveTab() {
@@ -360,7 +433,7 @@ function reconcileActiveTab() {
   }
 }
 
-watch(availableTabs, reconcileActiveTab);
+watch(availableTabs, reconcileActiveTab, { immediate: true });
 watch(
   isRabbitMqCluster,
   (isRabbitMq) => {
@@ -387,14 +460,31 @@ watch(
   },
 );
 
+// A same-id edit or reconnect must never reuse capabilities from the previous transport.
+watch(
+  connectionFingerprint,
+  () => {
+    const generation = ++handshakeGeneration;
+    capabilities.value = undefined;
+    clusterInfo.value = undefined;
+    loading.value = false;
+    error.value = undefined;
+    selectedTopic.value = undefined;
+    selectedSubscriptionName.value = undefined;
+    reconcileActiveTab();
+    if (mounted) void refreshConnectionCapabilities(generation);
+  },
+  { flush: "sync" },
+);
+
 // Lifecycle
-onMounted(async () => {
-  try {
-    await connectionStore.ensureConnected(props.connectionId);
-  } catch (e) {
-    console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
-  }
-  loadClusterInfo();
+onMounted(() => {
+  mounted = true;
+  void refreshConnectionCapabilities(++handshakeGeneration);
+});
+onUnmounted(() => {
+  mounted = false;
+  handshakeGeneration++;
 });
 </script>
 
@@ -415,6 +505,9 @@ onMounted(async () => {
         <button v-if="selectedTopic" class="breadcrumb-button" @click="goToTopicLevel" :title="t('mqAdmin.viewTopic')">{{ selectedTopic.shortName }}</button>
       </div>
       <div class="toolbar-status">
+        <span v-for="channel in rocketMqChannels" :key="channel.channel" :class="{ 'toolbar-error': channel.status === 'degraded' }" :title="channel.error">
+          {{ t(`connection.rocketmqChannel${channel.channel === "messaging" ? "Messaging" : "Management"}`) }}: {{ t(`connection.rocketmqChannel${channel.status}`) }}
+        </span>
         <span v-if="isProductionConnection" class="prod-badge">PROD</span>
         <span v-if="readOnly" class="readonly-badge">{{ t("mqAdmin.readOnly") }}</span>
         <span v-if="error" class="toolbar-error">{{ error }}</span>
@@ -444,6 +537,7 @@ onMounted(async () => {
 
     <!-- Main Content Area -->
     <div class="mq-content">
+      <div v-if="isRocketMqProxy && !availableTabs.length" class="panel-placeholder">{{ t("connection.rocketmqProxyUnavailable") }}</div>
       <TenantsPanel v-if="activeTab === 'tenants'" :connection-id="connectionId" :supports-tenants="canManageTenants" :read-only="readOnly" :cluster-options="clusterOptions" @tenant-selected="handleTenantSelected" />
       <NamespacesPanel
         v-else-if="activeTab === 'namespaces'"
@@ -465,6 +559,11 @@ onMounted(async () => {
         :is-flat-mq-cluster="isFlatMqCluster"
         :mq-system-kind="mqSystemKind"
         :supports-exchanges="canManageExchanges"
+        :supports-create-topic="effectiveCapabilities.supportsCreateTopic"
+        :supports-delete-topic="effectiveCapabilities.supportsDeleteTopic"
+        :supports-topic-stats="effectiveCapabilities.supportsTopicStats"
+        :supports-broker-admin="effectiveCapabilities.supportsBrokerAdmin"
+        :supports-message-query="canMessageQuery"
         @topic-selected="handleTopicSelected"
         @navigate-tab="handleNavigateTab"
       />
@@ -512,6 +611,16 @@ onMounted(async () => {
         :is-flat-mq-cluster="isFlatMqCluster"
         :mq-system-kind="mqSystemKind"
         @topic-selected="handleProducerTopicSelected"
+      />
+      <SendMessagePanel
+        v-else-if="activeTab === 'messages' && isRocketMqProxy && canSendMessage"
+        :connection-id="connectionId"
+        :tenant="effectiveTenant"
+        :namespace="effectiveNamespace"
+        :read-only="readOnly"
+        :mq-system-kind="mqSystemKind"
+        :supports-list-topics="false"
+        :supports-peek-messages="false"
       />
       <RocketMqMessagesPanel
         v-else-if="activeTab === 'messages' && isRocketMqCluster && (canMessageQuery || canSendMessage)"

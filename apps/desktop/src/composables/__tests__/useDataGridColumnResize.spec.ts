@@ -1,11 +1,12 @@
 // @vitest-environment happy-dom
 
-import { computed, isRef, nextTick, ref } from "vue";
+import { computed, isRef, nextTick, ref, type Ref } from "vue";
 import { beforeEach, describe, expect, it } from "vitest";
 import { DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH, sampleDataGridColumnValues } from "@/lib/dataGrid/dataGridColumnWidth";
 import { clearDataGridColumnWidthStates, createDataGridColumnMeasurementSignature, createDataGridColumnStructureSignature, DATA_GRID_COLUMN_WIDTH_STATE_LIMIT, dataGridColumnWidthStateCount, loadDataGridColumnWidthState, saveDataGridColumnWidthState } from "@/lib/dataGrid/dataGridColumnWidthState";
 import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resizeDataGridColumnWidth, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { resultGridColumnWidthCacheKey } from "@/lib/tabs/tabPresentation";
+import type { DataGridColumnWidthMode } from "@/stores/settingsStore";
 
 function createResizeState(options: {
   columns: string[];
@@ -17,6 +18,8 @@ function createResizeState(options: {
   compactColumnHeaderActions?: boolean;
   indexIndicatorColumnIndexes?: number[] | ReturnType<typeof ref<number[]>>;
   headerTextWidth?: number;
+  viewportWidth?: number | ReturnType<typeof ref<number>>;
+  widthMode?: DataGridColumnWidthMode | Ref<DataGridColumnWidthMode>;
   displayValue?: (value: string | number | boolean | null, columnIndex: number) => string | number | boolean | null;
 }) {
   const compact = ref(options.compactColumnHeaderActions ?? true);
@@ -25,17 +28,21 @@ function createResizeState(options: {
   const density = ref(options.density ?? "standard");
   const rows = isRef(options.rows) ? options.rows : ref(options.rows);
   const indexIndicatorColumnIndexes = isRef(options.indexIndicatorColumnIndexes) ? options.indexIndicatorColumnIndexes : ref(options.indexIndicatorColumnIndexes ?? []);
+  const viewportWidth = isRef(options.viewportWidth) ? options.viewportWidth : ref(options.viewportWidth ?? 0);
+  const widthMode = isRef(options.widthMode) ? options.widthMode : ref(options.widthMode ?? "fill");
   const state = useDataGridColumnResize({
     columns: computed(() => options.columns),
     sourceRows: computed(() => rows.value),
     columnIndexes: computed(() => options.columnIndexes ?? options.columns.map((_, index) => index)),
     density,
+    widthMode,
     compactColumnHeaderActions: computed(() => compact.value),
     columnIndexIndicators: computed(() => options.columns.map((_, index) => indexIndicatorColumnIndexes.value.includes(index))),
     cacheKey: computed(() => options.cacheKey),
     columnStructureSignature: computed(() => createDataGridColumnStructureSignature(options.columns, options.columnTypes)),
     measureHeaderText: () => headerTextWidth.value,
     headerMeasurementKey,
+    viewportWidth,
     displayValue: options.displayValue,
   });
   return {
@@ -46,6 +53,9 @@ function createResizeState(options: {
     },
     setDensity(value: "compact" | "standard" | "comfortable") {
       density.value = value;
+    },
+    setWidthMode(value: DataGridColumnWidthMode) {
+      widthMode.value = value;
     },
     setHeaderTextWidth(width: number) {
       headerTextWidth.value = width;
@@ -62,13 +72,146 @@ describe("useDataGridColumnResize", () => {
     clearDataGridColumnWidthStates();
   });
 
-  it("keeps compact query result columns at content width instead of filling the viewport", () => {
+  it("fits every visible column to its content when auto fitting the whole grid", () => {
+    const longText = "x".repeat(300);
+    const state = createResizeState({
+      columns: ["id", "note"],
+      rows: [
+        [1, longText],
+        [2, longText],
+      ],
+    });
+
+    state.initColumnWidths();
+    const before = state.renderedColumnWidths.value.slice();
+    expect(Math.max(...before)).toBeLessThan(DATA_GRID_COL_AUTO_FIT_MAX_WIDTH);
+
+    state.autoFitAllColumns();
+
+    const after = state.renderedColumnWidths.value;
+    // The long text column now uses the full auto-fit allowance instead of the
+    // density value limit that bounds the default grow-only sizing.
+    expect(after[1]).toBeGreaterThan(before[1]!);
+    expect(after[1]).toBeLessThanOrEqual(DATA_GRID_COL_AUTO_FIT_MAX_WIDTH);
+    expect(after[0]).toBeGreaterThanOrEqual(DATA_GRID_COL_MIN_WIDTH);
+    expect(after.length).toBe(before.length);
+  });
+
+  it("distributes spare viewport width across non-user-sized columns", () => {
+    const state = createResizeState({
+      columns: ["id", "name"],
+      rows: [[1, "a"]],
+      viewportWidth: 400,
+    });
+    state.initColumnWidths();
+    const intrinsic = state.columnWidths.value.slice();
+    expect(state.renderedColumnWidths.value.reduce((sum, width) => sum + width, 0) + DATA_GRID_ROW_NUM_WIDTH).toBe(400);
+    expect(state.renderedColumnWidths.value[0]).toBeGreaterThan(intrinsic[0]);
+    expect(state.renderedColumnWidths.value[1]).toBeGreaterThan(intrinsic[1]);
+
+    state.onResizeStart(0, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 100 }));
+    expect(state.renderedColumnWidths.value[0]).toBeGreaterThan(intrinsic[0]);
+    expect(state.renderedColumnWidths.value[1]).toBeGreaterThan(intrinsic[1]);
+  });
+
+  it("keeps measured content widths without distributing spare viewport space", () => {
+    const state = createResizeState({
+      columns: ["id", "name"],
+      rows: [[1, "a"]],
+      viewportWidth: 400,
+      widthMode: "content",
+    });
+    state.initColumnWidths();
+
+    expect(state.renderedColumnWidths.value).toEqual(state.columnWidths.value);
+    expect(state.totalWidth.value).toBeLessThan(400);
+  });
+
+  it("switches the open grid layout immediately without changing a manual width", () => {
+    const state = createResizeState({
+      columns: ["id", "name"],
+      rows: [[1, "a"]],
+      viewportWidth: 600,
+    });
+    state.initColumnWidths();
+    state.onResizeStart(0, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 140 }));
+    const manualWidth = state.columnWidths.value[0];
+
+    state.setWidthMode("content");
+    expect(state.renderedColumnWidths.value).toEqual(state.columnWidths.value);
+    expect(state.renderedColumnWidths.value[0]).toBe(manualWidth);
+
+    state.setWidthMode("fill");
+    expect(state.renderedColumnWidths.value[0]).toBe(manualWidth);
+    expect(state.totalWidth.value).toBe(600);
+  });
+
+  it("tracks the cursor while dragging under spare width and stores the final width without stale rendering", async () => {
+    const state = createResizeState({
+      columns: ["id", "name"],
+      rows: [[1, "a"]],
+      viewportWidth: 1000,
+    });
+    state.initColumnWidths();
+    const intrinsic = state.columnWidths.value.slice();
+    const startWidth = state.renderedColumnWidths.value[0] ?? 0;
+    // The grabbed column initially renders wider than its stored intrinsic width.
+    expect(startWidth).toBeGreaterThan(intrinsic[0] ?? 0);
+
+    state.onResizeStart(0, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    // Grabbing the handle must not shift the rendered edge.
+    expect(state.renderedColumnWidths.value[0]).toBe(startWidth);
+
+    document.dispatchEvent(new MouseEvent("mousemove", { clientX: 150 }));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    // Mid-drag the rendered width is exactly startWidth + delta: the resizing
+    // column is not re-stretched with the remaining surplus.
+    expect(state.renderedColumnWidths.value[0]).toBe(startWidth + 50);
+
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 150 }));
+    // After mouseup the rendered width equals the stored user width (no stale render).
+    expect(state.columnWidths.value[0]).toBe(startWidth + 50);
+    expect(state.renderedColumnWidths.value[0]).toBe(state.columnWidths.value[0]);
+  });
+
+  it("keeps auto fitted widths when the grid re-initialises for the same columns", () => {
+    const longText = "y".repeat(220);
+    const state = createResizeState({
+      columns: ["id", "note", "extra"],
+      rows: [[1, longText, "short"]],
+    });
+
+    state.initColumnWidths();
+    state.autoFitAllColumns();
+    const fitted = state.renderedColumnWidths.value.slice();
+
+    state.initColumnWidths();
+
+    expect(state.renderedColumnWidths.value).toEqual(fitted);
+  });
+
+  it("does not change any width when the grid has no columns yet", () => {
+    const state = createResizeState({ columns: [], rows: [] });
+
+    state.initColumnWidths();
+    state.autoFitAllColumns();
+
+    expect(state.renderedColumnWidths.value).toEqual([]);
+  });
+
+  it("keeps compact query result columns at content width when no viewport width is reported", () => {
+    // viewportWidth unset (0) means no spare width is distributed, so compact
+    // columns keep their content width; with a real viewport they fill it — see
+    // "distributes spare viewport width across non-user-sized columns" above.
     const state = createResizeState({
       columns: ["id", "user_id"],
       rows: [
         [1, 10],
         [2, 20],
       ],
+      viewportWidth: 0,
     });
 
     state.initColumnWidths();
@@ -205,6 +348,33 @@ describe("useDataGridColumnResize", () => {
     expect(remounted.columnWidths.value).toEqual(first.columnWidths.value);
   });
 
+  it("restores adjusted column widths for external SQL file executions across tab reopens", () => {
+    const firstTab = { id: "tab-instance-1", externalSqlPath: "/queries/monthly_report.sql", activeResultIndex: 0 };
+    const secondTab = { id: "tab-instance-2", externalSqlPath: "/queries/monthly_report.sql", activeResultIndex: 0 };
+    const firstKey = resultGridColumnWidthCacheKey(firstTab);
+    const secondKey = resultGridColumnWidthCacheKey(secondTab);
+
+    expect(secondKey).toBe(firstKey);
+
+    const firstGrid = createResizeState({
+      columns: ["id", "report_data"],
+      rows: [[1, "summary"]],
+      cacheKey: firstKey,
+    });
+    firstGrid.initColumnWidths();
+    firstGrid.onResizeStart(1, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 350 }));
+
+    const secondGrid = createResizeState({
+      columns: ["id", "report_data"],
+      rows: [[2, "another summary"]],
+      cacheKey: secondKey,
+    });
+    secondGrid.initColumnWidths();
+
+    expect(secondGrid.columnWidths.value[1]).toBe(firstGrid.columnWidths.value[1]);
+  });
+
   it("isolates widths by result cache key", () => {
     const first = createResizeState({ columns: ["id"], rows: [["x".repeat(120)]], cacheKey: "result-a" });
     first.initColumnWidths();
@@ -243,6 +413,49 @@ describe("useDataGridColumnResize", () => {
     const remounted = createResizeState({ columns: ["description"], rows: [[1]], cacheKey: "result-a", density: "compact", headerTextWidth: 200 });
     remounted.initColumnWidths();
     expect(remounted.columnWidths.value[0]).not.toBe(fittedWidth);
+  });
+
+  it("preserves manually resized column widths while invalidating auto columns when density or font metrics change", async () => {
+    const state = createResizeState({
+      columns: ["id", "description"],
+      rows: [[1, "x".repeat(120)]],
+      cacheKey: "result-manual-preservation",
+    });
+    state.initColumnWidths();
+
+    const initialAutoWidth = state.columnWidths.value[1];
+
+    // User manually resizes column 0
+    state.onResizeStart(0, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 260 }));
+    const manualWidth = state.columnWidths.value[0];
+    expect(manualWidth).toBeGreaterThan(160);
+
+    // Change density from standard to compact
+    state.setDensity("compact");
+    await nextTick();
+
+    // Manually resized column 0 preserves its exact width
+    expect(state.columnWidths.value[0]).toBe(manualWidth);
+    // Auto calculated column 1 recalculates with compact density
+    expect(state.columnWidths.value[1]).not.toBe(initialAutoWidth);
+
+    // Remount with compact density and new font metric
+    state.setHeaderTextWidth(220);
+    await nextTick();
+    const remounted = createResizeState({
+      columns: ["id", "description"],
+      rows: [[2, "short"]],
+      cacheKey: "result-manual-preservation",
+      density: "compact",
+      headerTextWidth: 220,
+    });
+    remounted.initColumnWidths();
+
+    // Manually resized column 0 is restored from cache
+    expect(remounted.columnWidths.value[0]).toBe(manualWidth);
+    // Auto column 1 is recalculated from the new rows and font metrics
+    expect(remounted.columnWidths.value[1]).not.toBe(initialAutoWidth);
   });
 
   it("evicts the least recently used width states at the cache limit", () => {
@@ -508,6 +721,51 @@ describe("useDataGridColumnResize", () => {
     comf.initColumnWidths();
 
     expect(comf.columnWidths.value[0]).toBeGreaterThanOrEqual(std.columnWidths.value[0]);
+  });
+
+  it("clears remembered column widths and restores automatic calculation", () => {
+    const cacheKey = "test-reset-column-widths";
+    const state = createResizeState({
+      columns: ["id", "name"],
+      rows: [[1, "Alice"]],
+      cacheKey,
+      widthMode: "content",
+    });
+    state.initColumnWidths();
+    const autoWidth = state.columnWidths.value[0]!;
+    expect(state.hasUserSizedColumns.value).toBe(false);
+
+    // Resize column 0 manually
+    state.onResizeStart(0, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 250 }));
+    expect(state.columnWidths.value[0]).toBeGreaterThan(autoWidth);
+    expect(state.hasUserSizedColumns.value).toBe(true);
+    expect(localStorage.getItem(`dbx-data-grid-column-widths:${cacheKey}`)).toBeTruthy();
+
+    // Reset column widths
+    state.resetColumnWidths();
+    expect(state.hasUserSizedColumns.value).toBe(false);
+    expect(state.columnWidths.value[0]).toBe(autoWidth);
+    expect(localStorage.getItem(`dbx-data-grid-column-widths:${cacheKey}`)).toBeNull();
+  });
+
+  it("clears auto-fitted widths after manual and automatic width states are split", () => {
+    const cacheKey = "test-reset-auto-fitted-column-widths";
+    const state = createResizeState({
+      columns: ["description"],
+      rows: [["A long description that has been explicitly fitted"]],
+      cacheKey,
+      widthMode: "content",
+    });
+    state.initColumnWidths();
+    const autoWidth = state.columnWidths.value[0]!;
+    state.autoFitAllColumns();
+    expect(state.hasUserSizedColumns.value).toBe(true);
+
+    state.resetColumnWidths();
+    expect(state.hasUserSizedColumns.value).toBe(false);
+    expect(state.columnWidths.value[0]).toBe(autoWidth);
+    expect(localStorage.getItem(`dbx-data-grid-column-widths:${cacheKey}`)).toBeNull();
   });
 });
 

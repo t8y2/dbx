@@ -1,5 +1,73 @@
 import type { ColumnInfo, DatabaseConnectionInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
+import { getStarRocksCapabilities, STARROCKS_DATA_TYPES } from "@/lib/table/starrocksCapabilities";
+import { exactOracleTriggerMetadata, oracleTriggerIdentityKey } from "@/lib/database/oracleTriggerIdentity";
+
+export interface CopySourceColumnDetails {
+  /** Column default as shown in the copy-fields dialog, or null when there is none. */
+  defaultValue: string | null;
+  /** Column comment as shown in the copy-fields dialog, or null when there is none. */
+  comment: string | null;
+}
+
+/**
+ * Read-only summary rendered under a column name in the "copy fields from another
+ * table" dialog. The source table is not open while copying, so the comment and
+ * default value are the only hint about what an unfamiliar field means.
+ */
+export function copySourceColumnDetails(column: Pick<ColumnInfo, "column_default" | "comment" | "data_type">, databaseType?: DatabaseType): CopySourceColumnDetails {
+  // Match the main grid and the editor drafts so the dialog, the grid, and the
+  // copied result render the same normalized default for every database.
+  const defaultValue = column.column_default == null ? "" : columnDefaultForEditor(column, databaseType);
+  const rawComment = column.comment ?? "";
+  return {
+    defaultValue: defaultValue.trim() ? defaultValue.trim() : null,
+    comment: rawComment.trim() ? rawComment.trim() : null,
+  };
+}
+
+/** Copy-dialog search matches comments and default values on top of name and type. */
+export function matchesCopySourceColumnSearch(column: Pick<ColumnInfo, "name" | "data_type" | "column_default" | "comment">, search: string, databaseType?: DatabaseType): boolean {
+  const query = search.trim().toLowerCase();
+  if (!query) return true;
+  const details = copySourceColumnDetails(column, databaseType);
+  return [column.name, column.data_type, details.defaultValue ?? "", details.comment ?? ""].some((value) => value.toLowerCase().includes(query));
+}
+
+/**
+ * Column names offered by the structure editor's "copy all column names" action.
+ * Fields marked for drop disappear on save, so they are not offered.
+ */
+export function structureColumnNamesForCopy(columns: readonly Pick<EditableStructureColumn, "name" | "markedForDrop">[]): string[] {
+  return columns.filter((column) => !column.markedForDrop && column.name.trim()).map((column) => column.name.trim());
+}
+
+/** Comment lookup for the same action, keyed by the trimmed column name. */
+export function structureColumnCommentsForCopy(columns: readonly Pick<EditableStructureColumn, "name" | "comment" | "markedForDrop">[]): Map<string, string> {
+  const comments = new Map<string, string>();
+  for (const column of columns) {
+    if (column.markedForDrop) continue;
+    const name = column.name.trim();
+    const comment = column.comment?.trim();
+    if (name && comment) comments.set(name, comment);
+  }
+  return comments;
+}
+
+/**
+ * Column name handed to the DDL builder for a draft column.
+ *
+ * MySQL rejects identifiers that end with a space (ERROR 1166 "Incorrect column
+ * name"), so a pasted name carrying a stray trailing space produced an
+ * unexecutable `ALTER TABLE ... CHANGE COLUMN ...` statement that the editor
+ * still previewed as executable. Only the trailing whitespace is dropped:
+ * leading spaces are legal in a backtick-quoted identifier and are kept, both
+ * for a name the user typed (`#9654`) and for a metadata name, which is passed
+ * through byte-exact so that an unrelated edit never turns into a bogus rename.
+ */
+export function draftColumnNameForSql(name: string, originalName?: string | null): string {
+  return originalName === name ? name : name.trimEnd();
+}
 
 export function hasExistingColumnTypeChange(columns: readonly EditableStructureColumn[]): boolean {
   return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
@@ -54,6 +122,44 @@ export function tableStructureIdentifierComparisonKey(name: string, databaseType
   return `unquoted:${normalizedUnquoted}`;
 }
 
+/** Plain-identifier rule for newly created Oracle names: an ASCII letter first,
+ * then letters/digits/`_`/`$`/`#`. Anything else is emitted quoted by the DDL
+ * generator and keeps its exact spelling. */
+function isPlainOracleCreateIdentifier(name: string): boolean {
+  if (!/^[A-Za-z]/.test(name)) return false;
+  return /^[A-Za-z0-9_$#]*$/.test(name.slice(1));
+}
+
+/** Plain-identifier rule for newly created Informix-family names: an ASCII
+ * letter or `_` first, then letters/digits/`_`/`$`. */
+function isPlainInformixCreateIdentifier(name: string): boolean {
+  if (!/^[A-Za-z_]/.test(name)) return false;
+  return /^[A-Za-z0-9_$]*$/.test(name.slice(1));
+}
+
+/**
+ * Storage name of a newly created table, mirroring how the CREATE DDL
+ * generator quotes new identifiers. Plain (unquoted) Oracle names fold to
+ * upper case on the server; plain Informix-family names fold to lower case.
+ * Every other dialect quotes new names — or does not fold them — so the
+ * as-typed spelling is preserved exactly. Names the DDL would have to quote
+ * (leading digit, special characters, spaces) keep their exact spelling on
+ * the folding dialects too. Boundary: a reserved-word name typed in mixed
+ * case is quoted by the generator and keeps its spelling, while this helper
+ * still folds it — accepted because the reserved-word vocabulary lives with
+ * the SQL builder, not the frontend.
+ */
+export function foldCreatedTableName(name: string, databaseType?: DatabaseType): string {
+  const value = name.trim();
+  if (databaseType === "oracle") {
+    return isPlainOracleCreateIdentifier(value) ? value.toUpperCase() : value;
+  }
+  if (databaseType === "informix") {
+    return isPlainInformixCreateIdentifier(value) ? value.toLowerCase() : value;
+  }
+  return value;
+}
+
 const POSTGRES_SERIAL_PSEUDO_TYPES = new Set(["smallserial", "serial", "bigserial"]);
 
 function withPostgresArrayTypes(types: readonly string[]): string[] {
@@ -61,6 +167,8 @@ function withPostgresArrayTypes(types: readonly string[]): string[] {
 }
 
 export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
+  // Use complete nested declarations so selecting a complex type produces valid SQL.
+  starrocks: STARROCKS_DATA_TYPES,
   mysql: [
     "tinyint",
     "tinyint unsigned",
@@ -243,6 +351,31 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "boolean",
     "json",
     "vector",
+    "rowid",
+    "urowid",
+    "xmltype",
+    "sdo_geometry",
+  ],
+  "oceanbase-oracle": [
+    "number",
+    "integer",
+    "float",
+    "binary_float",
+    "binary_double",
+    "char",
+    "nchar",
+    "varchar2",
+    "nvarchar2",
+    "clob",
+    "date",
+    "timestamp",
+    "timestamp with time zone",
+    "timestamp with local time zone",
+    "interval year to month",
+    "interval day to second",
+    "raw",
+    "blob",
+    "json",
     "rowid",
     "urowid",
     "xmltype",
@@ -447,7 +580,6 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
 
 const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   doris: "mysql",
-  starrocks: "mysql",
   goldendb: "mysql",
   sundb: "mysql",
   oscar: "oracle",
@@ -463,7 +595,6 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   vastbase: "postgres",
   kingbase: "postgres",
   firebird: "postgres",
-  "oceanbase-oracle": "oracle",
   iris: "oracle",
   yashandb: "oracle",
   rqlite: "sqlite",
@@ -472,9 +603,22 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   access: "h2",
 };
 
-export function getDataTypeOptions(dbType: DatabaseType | undefined): string[] {
+export function getDataTypeOptions(dbType: DatabaseType | undefined, dynamicOptions: readonly string[] = [], productVersion?: string): string[] {
   const key = dbType ? (DATA_TYPE_OPTION_ALIASES[dbType] ?? dbType) : "";
-  return DATA_TYPE_OPTIONS[key] ?? [];
+  const fallback = DATA_TYPE_OPTIONS[key] ?? [];
+  // MySQL-protocol/JDBC metadata may advertise MySQL types for StarRocks.
+  // Keep its editor choices native instead of reintroducing UNSIGNED/TIMESTAMP.
+  if (dbType === "starrocks") return getStarRocksCapabilities(productVersion).dataTypes;
+  if (dynamicOptions.length === 0) return fallback;
+  const seen = new Set<string>();
+  return [...dynamicOptions, ...fallback]
+    .map((type) => type.trim())
+    .filter((type) => {
+      const normalized = type.toLowerCase();
+      if (!type || seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
 }
 
 export function isMysqlEnumDataType(dbType: DatabaseType | undefined, dataType: string): boolean {
@@ -579,6 +723,68 @@ export const SQLSERVER_TYPE_LENGTHS: Record<string, string> = {
 
 export const DEFAULT_TYPE_LENGTH_DISABLES: string[] = [];
 
+const DUCKDB_TYPE_LENGTH_DISABLES = new Set([
+  "tinyint",
+  "int1",
+  "smallint",
+  "int2",
+  "short",
+  "int16",
+  "integer",
+  "int",
+  "int4",
+  "signed",
+  "integral",
+  "int32",
+  "bigint",
+  "int8",
+  "long",
+  "oid",
+  "int64",
+  "hugeint",
+  "int128",
+  "utinyint",
+  "uint8",
+  "usmallint",
+  "uint16",
+  "uinteger",
+  "uint32",
+  "ubigint",
+  "uint64",
+  "uhugeint",
+  "uint128",
+  "real",
+  "float4",
+  "double",
+  "double precision",
+  "float8",
+  "boolean",
+  "bool",
+  "logical",
+  "blob",
+  "bytea",
+  "binary",
+  "varbinary",
+  "bit",
+  "bitstring",
+  "varint",
+  "bignum",
+  "date",
+  "time",
+  "time without time zone",
+  "time with time zone",
+  "timetz",
+  "timestamptz",
+  "timestamp with time zone",
+  "timestamp_s",
+  "timestamp_ms",
+  "timestamp_ns",
+  "uuid",
+  "guid",
+  "json",
+  "interval",
+]);
+
 export const POSTGRES_TYPE_LENGTH_DISABLES: string[] = [
   "bigint",
   "int8",
@@ -632,20 +838,67 @@ const XUGU_TYPE_LENGTH_DISABLES = new Set([...ORACLE_LIKE_TYPE_LENGTH_DISABLES, 
 
 export const SQLSERVER_TYPE_LENGTH_DISABLES: string[] = ["bigint", "bit", "date", "datetime", "image", "int", "integer", "money", "ntext", "real", "smalldatetime", "smallint", "smallmoney", "sql_variant", "text", "timestamp", "tinyint", "uniqueidentifier", "xml"];
 
+export function supportsTableStructureExtendedProperties(databaseType?: DatabaseType): boolean {
+  return (
+    databaseType === "mysql" ||
+    databaseType === "sqlite" ||
+    databaseType === "dameng" ||
+    databaseType === "manticoresearch" ||
+    databaseType === "sqlserver" ||
+    databaseType === "postgres" ||
+    databaseType === "gaussdb" ||
+    databaseType === "kwdb" ||
+    databaseType === "highgo" ||
+    databaseType === "uxdb" ||
+    databaseType === "vastbase" ||
+    databaseType === "kingbase"
+  );
+}
+
+/**
+ * Extracts a MySQL generated-column definition from a raw `extra` string such
+ * as `GENERATED ALWAYS AS (`price` * `quantity`) STORED`. Returns undefined
+ * for plain columns and identity columns (`GENERATED ... AS IDENTITY`, no
+ * parenthesized expression). MariaDB `PERSISTENT` is normalized to `STORED`,
+ * matching the MySQL driver's introspection output.
+ */
+export function parseMysqlGeneratedColumnExtra(extra: string): { expression: string; storage: "VIRTUAL" | "STORED" } | undefined {
+  const marker = "generated always as";
+  const lower = extra.toLowerCase();
+  const index = lower.indexOf(marker);
+  if (index < 0) return undefined;
+  const rest = extra.slice(index + marker.length).trimStart();
+  if (!rest.startsWith("(")) return undefined;
+  const close = rest.lastIndexOf(")");
+  if (close <= 0) return undefined;
+  const expression = rest.slice(1, close).trim();
+  if (!expression) return undefined;
+  const tail = rest
+    .slice(close + 1)
+    .trim()
+    .toUpperCase();
+  const storage = tail.startsWith("STORED") || tail.startsWith("PERSISTENT") ? "STORED" : "VIRTUAL";
+  return { expression, storage };
+}
+
 export function parseExtraToColumnExtra(extra: string | null | undefined, databaseType?: DatabaseType): ColumnExtra {
   const result: ColumnExtra = {};
   if (!extra) return result;
   const lower = extra.toLowerCase().trim();
   if (!lower) return result;
 
-  if (databaseType === "mysql") {
-    if (lower.includes("auto_increment")) {
+  if (databaseType === "mysql" || databaseType === "sqlite") {
+    if (lower.includes("auto_increment") || lower.includes("autoincrement")) {
       result.autoIncrement = true;
     }
-    if (lower.includes("on update current_timestamp")) {
+    if (databaseType === "mysql" && lower.includes("on update current_timestamp")) {
       result.onUpdateCurrentTimestamp = true;
     }
-  } else if (databaseType === "postgres" || databaseType === "gaussdb" || databaseType === "kwdb" || databaseType === "opengauss" || databaseType === "questdb" || databaseType === "highgo" || databaseType === "uxdb" || databaseType === "vastbase" || databaseType === "kingbase") {
+    if (databaseType === "mysql") {
+      const generated = parseMysqlGeneratedColumnExtra(extra);
+      if (generated) result.generated = generated;
+    }
+  } else if (databaseType === "postgres" || databaseType === "gaussdb" || databaseType === "kwdb" || databaseType === "questdb" || databaseType === "highgo" || databaseType === "uxdb" || databaseType === "vastbase" || databaseType === "kingbase") {
     const identityMatch = lower.match(/generated\s+(by\s+default|always)\s+as\s+identity/i);
     if (identityMatch) {
       const sequenceMatch = lower.match(/start\s+with\s*(-?\d+)\s+increment\s+by\s*(-?\d+)/i);
@@ -810,7 +1063,7 @@ function stripSqlServerDefaultOuterParens(defaultValue: string): string {
   return value;
 }
 
-function columnDefaultForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
+function columnDefaultForEditor(column: Pick<ColumnInfo, "column_default" | "data_type">, databaseType?: DatabaseType): string {
   if (column.column_default === null) return "";
   const defaultValue = column.column_default;
   if (databaseType === "mysql" && defaultValue === "" && isMysqlCharacterDataType(column.data_type)) {
@@ -827,11 +1080,24 @@ const NUMERIC_PRECISION_METADATA_TYPES = new Set(["decimal", "number", "numeric"
 const XUGU_SINGLE_PRECISION_METADATA_TYPES = new Set(["bit", "time", "time with time zone", "timestamp", "timestamp with time zone", "varbit"]);
 
 function columnDataTypeForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
+  if (databaseType === "duckdb") {
+    const normalized = normalizeDuckdbDataType(column.data_type);
+    if (normalized !== column.data_type) return normalized;
+  }
   const parsed = splitDataTypeForDatabase(databaseType, column.data_type);
   if (parsed.params) return column.data_type;
 
   const baseType = parsed.baseType.trim().replace(/\s+/g, " ");
   const normalized = baseType.toLowerCase();
+  if (databaseType === "oracle" || databaseType === "oceanbase-oracle") {
+    const precision = Number.isInteger(column.numeric_precision) && Number(column.numeric_precision) > 0 ? String(column.numeric_precision) : undefined;
+    if (normalized === "float" && precision) return combineDataTypeForDatabase(databaseType, baseType, precision);
+    if (normalized === "number") {
+      const scale = Number.isInteger(column.numeric_scale) ? String(column.numeric_scale) : undefined;
+      if (scale !== undefined && (precision || column.numeric_precision == null)) return combineDataTypeForDatabase(databaseType, baseType, `${precision ?? "*"},${scale}`);
+      if (precision) return combineDataTypeForDatabase(databaseType, baseType, precision);
+    }
+  }
   if (CHARACTER_LENGTH_METADATA_TYPES.has(normalized) && Number.isInteger(column.character_maximum_length) && Number(column.character_maximum_length) > 0) {
     return combineDataTypeForDatabase(databaseType, baseType, String(column.character_maximum_length));
   }
@@ -839,6 +1105,13 @@ function columnDataTypeForEditor(column: ColumnInfo, databaseType?: DatabaseType
     const precision = Number(column.numeric_precision);
     const minimum = normalized === "bit" || normalized === "varbit" ? 1 : 0;
     if (precision >= minimum) return combineDataTypeForDatabase(databaseType, baseType, String(precision));
+  }
+  // Dameng reports TIMESTAMP(6)/TIME(6) precision in DATA_SCALE while keeping
+  // DATA_PRECISION null. Without this the structure editor opens a column
+  // declared as TIMESTAMP(6) as a bare TIMESTAMP and a later save loses the
+  // fractional-second precision (#12444).
+  if (databaseType === "dameng" && (normalized === "timestamp" || normalized === "time") && Number.isInteger(column.numeric_scale)) {
+    return combineDataTypeForDatabase(databaseType, baseType, String(column.numeric_scale));
   }
   if (NUMERIC_PRECISION_METADATA_TYPES.has(normalized) && Number.isInteger(column.numeric_precision) && Number(column.numeric_precision) > 0) {
     const scale = Number.isInteger(column.numeric_scale) && Number(column.numeric_scale) >= 0 ? `,${column.numeric_scale}` : "";
@@ -1000,9 +1273,32 @@ export function filterStructureIndexColumnOptions(availableColumns: readonly str
   return query ? options.filter((column) => column.toLowerCase().includes(query)) : options;
 }
 
+const indexColumnNameCollator = typeof Intl !== "undefined" && typeof Intl.Collator === "function" ? new Intl.Collator(undefined, { sensitivity: "base", numeric: true }) : null;
+
+/**
+ * Order index-column picker rows: picked columns first in their index order,
+ * then unpicked columns alphabetically (case-insensitive, numeric-aware) so a
+ * long field list is scannable (#11747).
+ */
+export function sortStructureIndexColumnOptions<T extends { name: string }>(options: readonly T[], selectedPositions: ReadonlyMap<string, number>): T[] {
+  if (options.length <= 1) return [...options];
+  const picked: T[] = [];
+  const unpicked: T[] = [];
+  for (const option of options) {
+    if (selectedPositions.has(option.name)) {
+      picked.push(option);
+    } else {
+      unpicked.push(option);
+    }
+  }
+  picked.sort((left, right) => (selectedPositions.get(left.name) ?? 0) - (selectedPositions.get(right.name) ?? 0));
+  unpicked.sort((left, right) => (indexColumnNameCollator ? indexColumnNameCollator.compare(left.name, right.name) : left.name.localeCompare(right.name, undefined, { sensitivity: "base", numeric: true })));
+  return [...picked, ...unpicked];
+}
+
 export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[] {
   return indexes.map((index) => ({
-    id: `existing:${index.name}`,
+    id: index.owner == null ? `existing:${index.name}` : `existing-owned-index:${JSON.stringify([index.owner, index.name])}`,
     name: index.name,
     columns: [...index.columns],
     nameEdited: true,
@@ -1013,12 +1309,24 @@ export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[
     indexType: normalizeStructureIndexType(index.index_type),
     includedColumns: index.included_columns ? [...index.included_columns] : [],
     comment: index.comment ?? "",
+    columnOpclasses: index.column_opclasses ? [...index.column_opclasses] : [],
     original: index,
     markedForDrop: false,
   }));
 }
 
-export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[]): EditableStructureForeignKey[] {
+export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[], databaseType?: DatabaseType): EditableStructureForeignKey[] {
+  const oracle = databaseType === "oracle" || databaseType === "oceanbase-oracle";
+  if (oracle) {
+    const definitions = new Map<string, ForeignKeyInfo>();
+    for (const row of foreignKeys) {
+      const previous = definitions.get(row.name);
+      if (previous && (previous.ref_schema !== row.ref_schema || previous.ref_table !== row.ref_table || previous.on_delete !== row.on_delete || previous.on_update !== row.on_update)) {
+        throw new Error("Inconsistent foreign key metadata. Refresh the table definition.");
+      }
+      definitions.set(row.name, row);
+    }
+  }
   const groups = new Map<string, ForeignKeyInfo[]>();
   for (const foreignKey of foreignKeys) {
     const key = [foreignKey.name, foreignKey.ref_schema ?? "", foreignKey.ref_table, foreignKey.on_update ?? "", foreignKey.on_delete ?? ""].join("\u0000");
@@ -1039,6 +1347,7 @@ export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[]): EditableS
       refSchema: first.ref_schema ?? "",
       refTable: first.ref_table,
       refColumn: original.ref_column,
+      ...(oracle ? { columns: group.map((row) => row.column), refColumns: group.map((row) => row.ref_column) } : {}),
       onUpdate: first.on_update ?? "",
       onDelete: first.on_delete ?? "",
       original,
@@ -1049,18 +1358,32 @@ export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[]): EditableS
 
 export function createTriggerDrafts(triggers: TriggerInfo[]): EditableStructureTrigger[] {
   return triggers.map((trigger) => ({
-    id: `existing:${trigger.name}`,
+    id: exactOracleTriggerMetadata(trigger) ? `existing:exact:${oracleTriggerIdentityKey(exactOracleTriggerMetadata(trigger)!)}` : `existing:${trigger.name}`,
     name: trigger.name,
     timing: trigger.timing,
     event: trigger.event,
     statement: trigger.statement ?? "",
+    enabled: trigger.enabled ?? undefined,
     original: trigger,
     markedForDrop: false,
   }));
 }
 
 export function canEditStructuredTriggerDraft(databaseType: DatabaseType | undefined, trigger: EditableStructureTrigger): boolean {
-  return !trigger.original || (databaseType !== undefined && databaseType !== "oracle");
+  if (!trigger.original) return true;
+  if (databaseType === undefined) return false;
+  // The Oracle driver keeps the `TRIGGER ...` declaration when the source has clauses (WHEN,
+  // REFERENCING, FOLLOWS, ...) that the timing/event/body form would drop on CREATE OR REPLACE.
+  // Dameng reports a plain body plus a separate `WHEN` clause, so the same guard applies: the
+  // structured form can only rebuild triggers that have neither of those extra clauses.
+  if (databaseType !== "oracle" && databaseType !== "oceanbase-oracle" && databaseType !== "dameng") return true;
+  if (exactOracleTriggerMetadata(trigger.original) && trigger.loadedOracleStructured !== true) return false;
+  return isStructuredOracleTriggerSource(trigger.original.statement) && !trigger.original.condition?.trim();
+}
+
+function isStructuredOracleTriggerSource(statement: string | null | undefined): boolean {
+  const source = statement?.trim() ?? "";
+  return source !== "" && !/^(?:CREATE\s+(?:OR\s+REPLACE\s+)?)?(?:(?:EDITIONABLE|NONEDITIONABLE)\s+)?TRIGGER\b/i.test(source);
 }
 
 export function toColumnNames(columns: string[]): string {
@@ -1068,6 +1391,41 @@ export function toColumnNames(columns: string[]): string {
 }
 
 const AUTO_INDEX_NAME_MAX_LENGTH = 63;
+
+export type StructureIndexKind = "primary" | "unique" | "index" | "fulltext" | "spatial";
+type IndexNamingOptions = Partial<Pick<EditableStructureIndex, "isPrimary" | "isUnique" | "indexType">> & { maxLength?: number };
+
+export function structureIndexKind(index: IndexNamingOptions): StructureIndexKind {
+  if (index.isPrimary) return "primary";
+  if (index.indexType?.trim().toUpperCase() === "FULLTEXT") return "fulltext";
+  if (index.indexType?.trim().toUpperCase() === "SPATIAL") return "spatial";
+  return index.isUnique ? "unique" : "index";
+}
+
+export type SpecialIndexColumnIssue = "specialIndexUnique" | "fulltextIndexColumns" | "spatialIndexColumn" | "spatialIndexNullable";
+
+export function canIndexTypeHaveSpecialIssue(dialect: string, indexType?: string | null): boolean {
+  if (!indexType) return false;
+  const type = indexType.trim().toUpperCase();
+  return (dialect === "mysql" && type === "FULLTEXT") || ((dialect === "mysql" || dialect === "sqlserver") && type === "SPATIAL");
+}
+
+export function specialIndexColumnIssue(dialect: string, indexType: string, columns: readonly Pick<EditableStructureColumn, "dataType" | "isNullable">[], isUnique = false): SpecialIndexColumnIssue | null {
+  const type = indexType.trim().toUpperCase();
+  const fulltext = dialect === "mysql" && type === "FULLTEXT";
+  const spatial = (dialect === "mysql" || dialect === "sqlserver") && type === "SPATIAL";
+  if (!fulltext && !spatial) return null;
+  if (isUnique) return "specialIndexUnique";
+  if (!columns.length) return null;
+  const types = columns.map((column) => splitDataType(column.dataType).baseType.toLowerCase());
+  if (fulltext && types.some((value) => !/^(?:char|varchar|tinytext|text|mediumtext|longtext)$/.test(value))) return "fulltextIndexColumns";
+  if (spatial) {
+    const validType = dialect === "mysql" ? /^(?:geometry|point|linestring|polygon|multipoint|multilinestring|multipolygon|geometrycollection|geomcollection)$/ : /^(?:geometry|geography)$/;
+    if (columns.length !== 1 || !validType.test(types[0])) return "spatialIndexColumn";
+    if (dialect === "mysql" && columns[0].isNullable) return "spatialIndexNullable";
+  }
+  return null;
+}
 
 function normalizeIndexNamePart(value: string): string {
   const trimmed = value.trim();
@@ -1087,6 +1445,7 @@ function truncateIndexName(value: string, maxLength = AUTO_INDEX_NAME_MAX_LENGTH
   return `${value.slice(0, maxLength - suffix.length).replace(/_+$/g, "")}${suffix}`;
 }
 
+// Keep the original API and table-qualified naming for existing callers and dialects.
 export function generateIndexName(tableName: string, columns: string[], maxLength = AUTO_INDEX_NAME_MAX_LENGTH): string {
   const parts = [tableName, ...columns].map(normalizeIndexNamePart).filter(Boolean);
   if (parts.length === 0) return "";
@@ -1109,6 +1468,53 @@ export function generateUniqueIndexName(tableName: string, columns: string[], ex
   return base;
 }
 
+function indexNameHash(value: string): string {
+  // Keep long names deterministic and distinguish columns beyond the cutoff.
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) hash = Math.imul(hash ^ value.charCodeAt(i), 16777619);
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function truncateShortIndexName(value: string, maxLength = AUTO_INDEX_NAME_MAX_LENGTH): string {
+  if (value.length <= maxLength) return value;
+  const suffix = `_${indexNameHash(value)}`;
+  if (maxLength <= suffix.length) return value.slice(0, maxLength);
+  return `${value.slice(0, maxLength - suffix.length).replace(/_+$/g, "")}${suffix}`;
+}
+
+export function generateShortIndexName(columnName: string, options: IndexNamingOptions = {}): string {
+  if (options.isPrimary) return "PRIMARY";
+  if (!columnName.trim()) return "";
+  // MySQL permits BMP Unicode identifiers, but not supplementary characters.
+  const normalized = columnName
+    .trim()
+    .replace(/[^\p{L}\p{N}]+/gu, "_")
+    .replace(/[\uD800-\uDFFF]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+  const name = normalized || `column_${indexNameHash(columnName)}`;
+  const prefix = { primary: "pk", unique: "uk", index: "idx", fulltext: "ft", spatial: "sp" }[structureIndexKind(options)];
+  return truncateShortIndexName(`${prefix}_${name}`, options.maxLength);
+}
+
+export function generateUniqueShortIndexName(columnName: string, existingNames: Iterable<string>, options: IndexNamingOptions = {}): string {
+  const maxLength = options.maxLength ?? AUTO_INDEX_NAME_MAX_LENGTH;
+  const base = generateShortIndexName(columnName, options);
+  if (!base) return "";
+  if (options.isPrimary) return base;
+
+  const taken = new Set([...existingNames].map((name) => name.trim().toLowerCase()).filter(Boolean));
+  if (!taken.has(base.toLowerCase())) return base;
+
+  for (let counter = 2; ; counter++) {
+    const suffix = `_${counter}`;
+    const stem = generateShortIndexName(columnName, { ...options, maxLength: Math.max(1, maxLength - suffix.length) });
+    const candidate = `${stem}${suffix}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+}
+
 export function splitDataType(raw: string): { baseType: string; params: string } {
   const trimmed = raw.trim();
   const parenIdx = trimmed.indexOf("(");
@@ -1124,7 +1530,36 @@ export function splitDataType(raw: string): { baseType: string; params: string }
   return { baseType, params };
 }
 
+function splitPostgresTemporalDataType(raw: string): { baseType: string; params: string } | null {
+  // format_type() places the precision before the time-zone qualifier. Keep
+  // that qualifier in the base selector so editing only the precision cannot
+  // silently turn timestamptz into timestamp. The anchored built-in names
+  // deliberately exclude domains and schema-qualified custom types.
+  const match = raw.trim().match(/^(TIME|TIMESTAMP|TIMETZ|TIMESTAMPTZ)\s*\(([^()]*)\)(?:\s+((?:WITH|WITHOUT)\s+TIME\s+ZONE))?((?:\s*\[\])*)$/i);
+  if (!match) return null;
+  const typeName = match[1]!;
+  const qualifier = match[3]?.replace(/\s+/g, " ");
+  if (qualifier && !/^(?:TIME|TIMESTAMP)$/i.test(typeName)) return null;
+  const arraySuffix = (match[4] ?? "").replace(/\s+/g, "");
+  return {
+    baseType: `${typeName}${qualifier ? ` ${qualifier}` : ""}${arraySuffix}`,
+    params: match[2]!.trim(),
+  };
+}
+
 function splitDataTypeForDatabase(dbType: DatabaseType | undefined, raw: string): { baseType: string; params: string } {
+  // Parentheses inside nested types belong to the element/field, not the column.
+  if (dbType === "starrocks" && /^(array|map|struct)\s*</i.test(raw.trim())) {
+    return { baseType: raw.trim(), params: "" };
+  }
+  if (dbType === "duckdb") {
+    const parsed = splitDuckdbScalarDataType(raw);
+    if (parsed) return parsed;
+  }
+  if (dbType === "postgres") {
+    const parsed = splitPostgresTemporalDataType(raw);
+    if (parsed) return parsed;
+  }
   if (dbType === "xugu") {
     const match = raw.trim().match(/^(TIME|TIMESTAMP)\s*\(([^()]*)\)\s+WITH\s+TIME\s+ZONE$/i);
     if (match) {
@@ -1151,7 +1586,7 @@ function normalizedDataTypeName(rawDataType: string): string {
 }
 
 export function getDataTypeLengthUnitOptions(dbType: DatabaseType | undefined, rawDataType: string): readonly DataTypeLengthUnit[] {
-  if (dbType !== "dameng" && dbType !== "oracle") return [];
+  if (dbType !== "dameng" && dbType !== "oracle" && dbType !== "oceanbase-oracle") return [];
   return CHARACTER_LENGTH_UNIT_TYPES.has(normalizedDataTypeName(rawDataType)) ? CHARACTER_LENGTH_UNITS : [];
 }
 
@@ -1246,23 +1681,53 @@ export function combineDataType(baseType: string, params: string): string {
 }
 
 export function combineDataTypeForDatabase(dbType: DatabaseType | undefined, baseType: string, params: string): string {
+  if (dbType === "duckdb") baseType = normalizeDuckdbDataType(baseType);
   if (isDataTypeLengthDisabled(dbType, baseType)) {
     return baseType;
   }
   const normalizedParams = normalizeDataTypeParams(dbType, baseType, params);
   const mysqlType = combineMysqlNumericAttributeType(dbType, baseType, normalizedParams);
   if (mysqlType) return mysqlType;
-  const xuguTemporalType = combineXuguTemporalType(baseType, normalizedParams, dbType);
-  if (xuguTemporalType) return xuguTemporalType;
+  const qualifiedTemporalType = combineQualifiedTemporalType(baseType, normalizedParams, dbType);
+  if (qualifiedTemporalType) return qualifiedTemporalType;
   return combineDataType(baseType, normalizedParams);
 }
 
 export function dataTypeLengthInputValue(dbType: DatabaseType | undefined, rawDataType: string): string {
   const parsed = splitDataTypeForDatabase(dbType, rawDataType);
+  if (dbType === "duckdb") {
+    return isDataTypeLengthDisabled(dbType, parsed.baseType) ? "" : normalizeDataTypeParams(dbType, parsed.baseType, parsed.params);
+  }
   return isDataTypeLengthDisabled(dbType, parsed.baseType) ? "" : splitDataTypeLengthParams(dbType, rawDataType).length;
 }
 
-function combineXuguTemporalType(baseType: string, params: string, dbType: DatabaseType | undefined): string | null {
+function splitDuckdbScalarDataType(raw: string): { baseType: string; params: string } | null {
+  const match = raw.trim().match(/^([a-z][a-z0-9_\s]*?)\s*\(([^()]*)\)(?:\s+(WITH(?:OUT)?\s+TIME\s+ZONE))?$/i);
+  if (!match) return null;
+  const baseType = match[1]!.trim();
+  if (match[3] && !/^(time|timestamp)$/i.test(baseType)) return null;
+  return { baseType: match[3] ? `${baseType} ${match[3]}` : baseType, params: match[2]!.trim() };
+}
+
+function normalizeDuckdbDataType(raw: string): string {
+  const parsed = splitDuckdbScalarDataType(raw);
+  if (!parsed?.params) return raw;
+  if (isDataTypeLengthDisabled("duckdb", parsed.baseType)) return parsed.baseType;
+  if (parsed.baseType.toLowerCase() === "float") {
+    return combineDataType(parsed.baseType, normalizeDataTypeParams("duckdb", parsed.baseType, parsed.params));
+  }
+  return raw;
+}
+
+function combineQualifiedTemporalType(baseType: string, params: string, dbType: DatabaseType | undefined): string | null {
+  if (dbType === "duckdb") {
+    const match = baseType.trim().match(/^(TIMESTAMP)\s+WITHOUT\s+TIME\s+ZONE$/i);
+    return match ? (params ? `${match[1]}(${params}) WITHOUT TIME ZONE` : baseType.trim()) : null;
+  }
+  if (dbType === "postgres") {
+    const match = baseType.trim().match(/^(TIME|TIMESTAMP)\s+((?:WITH|WITHOUT)\s+TIME\s+ZONE)$/i);
+    return match ? (params ? `${match[1]}(${params}) ${match[2]!.replace(/\s+/g, " ")}` : baseType.trim()) : null;
+  }
   if (dbType !== "xugu") return null;
   const match = baseType.trim().match(/^(TIME|TIMESTAMP)\s+WITH\s+TIME\s+ZONE$/i);
   if (!match) return null;
@@ -1272,6 +1737,9 @@ function combineXuguTemporalType(baseType: string, params: string, dbType: Datab
 export function normalizeDataTypeParams(dbType: DatabaseType | undefined, baseType: string, params: string): string {
   const p = params.trim();
   if (!p) return "";
+  if (dbType === "duckdb" && baseType.trim().toLowerCase() === "float") {
+    return /^\d+$/.test(p) && Number(p) >= 1 && Number(p) <= 53 ? p : "";
+  }
   if (!isTemporalPrecisionType(dbType, baseType)) return p;
   return isValidTemporalPrecision(dbType, baseType, p) ? p : "";
 }
@@ -1347,6 +1815,9 @@ export interface DataTypeDefaultOptions {
 
 export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseType: string, options: DataTypeDefaultOptions = {}): string {
   const key = baseType.trim().toLowerCase();
+  if (_dbType === "starrocks" && isDataTypeLengthDisabled(_dbType, baseType)) return "";
+  if ((_dbType === "oracle" || _dbType === "oceanbase-oracle") && key === "float") return "";
+  if (_dbType === "duckdb" && (key === "float" || isDataTypeLengthDisabled(_dbType, baseType))) return "";
   if (_dbType === "mysql" && options.omitMysqlDeprecatedDefaults && isMysqlDeprecatedDefaultParameterType(key)) return "";
   if (_dbType === "sqlite" || _dbType === "rqlite" || _dbType === "turso") {
     return "";
@@ -1424,7 +1895,12 @@ function isMysqlDeprecatedDefaultParameterType(baseType: string): boolean {
 
 export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, baseType: string): boolean {
   const key = baseType.trim().toLowerCase();
-  if (_dbType === "questdb") {
+  if (_dbType === "starrocks") {
+    return !["tinyint", "smallint", "int", "integer", "bigint", "largeint", "char", "varchar", "binary", "varbinary", "decimal", "decimal32", "decimal64", "decimal128", "decimal256"].includes(key);
+  }
+  if (_dbType === "duckdb") {
+    return DUCKDB_TYPE_LENGTH_DISABLES.has(key.replace(/\s+/g, " "));
+  } else if (_dbType === "questdb") {
     return key !== "geohash" && key !== "decimal";
   } else if (_dbType === "manticoresearch") {
     return key !== "bit" && key !== "float_vector";
@@ -1435,6 +1911,7 @@ export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, base
     // placement; a generic TYPE(length) editor would emit invalid DDL for them.
     return key.endsWith("[]") || key.startsWith("interval ") || XUGU_TYPE_LENGTH_DISABLES.has(key);
   } else if (isOracleLikeStructureType(_dbType)) {
+    if ((_dbType === "oracle" || _dbType === "oceanbase-oracle") && key === "float") return false;
     // Dameng/Oracle integer aliases have fixed precision; MySQL-style display widths generate invalid DDL.
     return ORACLE_LIKE_TYPE_LENGTH_DISABLES.includes(key);
   } else if (_dbType === "sqlserver") {
@@ -1452,4 +1929,64 @@ export function buildStructureTargetLabel(connectionName: string | undefined, da
   if (schema && schema !== database) parts.push(schema);
   if (tableName) parts.push(tableName);
   return parts.filter(Boolean).join(" / ");
+}
+
+/** PostGIS `geometry(...)`/`geography(...)` typmod accepts these geometry sub-type
+ * names (case-insensitive). An empty value means "no sub-type constraint". */
+export const POSTGRES_GEOMETRY_TYPES: readonly string[] = ["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon", "GeometryCollection", "CircularString", "CompoundCurve", "CurvePolygon", "MultiCurve", "MultiSurface", "PolyhedralSurface", "TIN", "Triangle"];
+
+const POSTGRES_SPATIAL_TYPES = new Set(["geometry", "geography"]);
+const POSTGRES_LIKE_DATABASES = new Set<DatabaseType | undefined>(["postgres", "gaussdb", "kwdb", "opengauss", "highgo", "uxdb", "vastbase", "kingbase"]);
+
+/** Whether a column is a PostGIS `geometry`/`geography` on a PostgreSQL-family
+ * database — the case where the structure editor shows dedicated geometry-type
+ * and SRID controls instead of the generic length input. */
+export function isPostgresGeometryDataType(dbType: DatabaseType | undefined, rawDataType: string): boolean {
+  if (!POSTGRES_LIKE_DATABASES.has(dbType)) return false;
+  const { baseType } = splitDataType(rawDataType);
+  return POSTGRES_SPATIAL_TYPES.has(baseType.trim().toLowerCase());
+}
+
+/** Geometry sub-type parsed from `geometry(Point,4326)` → `"Point"`. Returns empty
+ * for bare `geometry` (no typmod) and for `geometry(GEOMETRY,srid)` — the latter is
+ * PostGIS's storage form of "any sub-type" (what a blank sub-type + SRID compiles to),
+ * normalized back to empty to match the user-facing "leave blank" intent. This keeps
+ * the clear (X) button visually emptying the field instead of showing "GEOMETRY".
+ * `geometry(,4326)` is invalid and never produced. */
+export function postgresGeometryTypeValue(rawDataType: string): string {
+  const { params } = splitDataType(rawDataType);
+  const geomType = splitPostgresGeometryParams(params).geomType;
+  return geomType.toLowerCase() === "geometry" ? "" : geomType;
+}
+
+/** SRID parsed from `geometry(Point,4326)` → `"4326"`. Empty when unspecified. */
+export function postgresGeometrySridValue(rawDataType: string): string {
+  const { params } = splitDataType(rawDataType);
+  return splitPostgresGeometryParams(params).srid;
+}
+
+function splitPostgresGeometryParams(params: string): { geomType: string; srid: string } {
+  const trimmed = params.trim();
+  if (!trimmed) return { geomType: "", srid: "" };
+  const commaIndex = trimmed.indexOf(",");
+  if (commaIndex === -1) return { geomType: trimmed, srid: "" };
+  return { geomType: trimmed.slice(0, commaIndex).trim(), srid: trimmed.slice(commaIndex + 1).trim() };
+}
+
+/** Reassemble a PostGIS spatial type string from its parts.
+ *
+ * - both empty → bare `geometry` (no typmod)
+ * - sub-type only → `geometry(Point)`
+ * - SRID only   → `geometry(GEOMETRY,4326)` (PostGIS rejects `geometry(,4326)` (syntax error at `,`) and `geometry(4326)` ("Invalid geometry type modifier"); `GEOMETRY` is a valid sub-type token meaning any geometry, so it is the canonical way to constrain SRID only)
+ * - both        → `geometry(Point,4326)`
+ */
+export function combinePostgresGeometryType(baseType: string, geomType: string, srid: string): string {
+  const type = baseType.trim();
+  const geom = geomType.trim();
+  const sridValue = srid.trim();
+  if (!type) return "";
+  if (!geom && !sridValue) return type;
+  if (!geom) return `${type}(GEOMETRY,${sridValue})`; // PostGIS rejects geometry(,4326) and geometry(4326); GEOMETRY = any sub-type, constrains SRID only
+  if (!sridValue) return `${type}(${geom})`;
+  return `${type}(${geom},${sridValue})`;
 }

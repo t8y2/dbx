@@ -44,6 +44,7 @@ describe("isQueryTimeoutErrorMessage", () => {
     expect(isQueryTimeoutErrorMessage("Query timed out after 30 seconds")).toBe(true);
     expect(isQueryTimeoutErrorMessage("查询超时 (60s)，请检查数据库连接是否正常")).toBe(true);
     expect(isQueryTimeoutErrorMessage("查詢逾時 (60s)，請檢查資料庫連線是否正常")).toBe(true);
+    expect(isQueryTimeoutErrorMessage("Agent RPC error (-1): dm.jdbc.driver.DMException: 请求执行超时")).toBe(true);
   });
 
   it("detects statement timeout messages", () => {

@@ -19,3 +19,20 @@ LIBSQLITE3_FLAGS = "SQLITE_ENABLE_MATH_FUNCTIONS"
 
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"
+# Increase main-thread stack from the Windows default of 1 MiB to 8 MiB.
+# Large Rust projects in debug mode overflow the 1 MiB stack when DB query
+# paths pull in deep serde/driver call stacks. This embeds the size in the PE.
+rustflags = ["-C", "link-arg=/STACK:8388608"]
+
+# Native ARM64 builds need the same main-thread stack as x64. Without this,
+# opening a query can exhaust the linker's 1 MiB default stack (#13917).
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]
+
+# The legacy Windows 7 / Server 2012 R2 target keeps the same 8 MiB main-thread
+# stack. CI builds it with an explicit RUSTFLAGS env (static CRT), which
+# replaces this table, so the same link arg is repeated in those workflows and
+# audited by .github/scripts/assert-win7-pe-compat.ps1. Without it the legacy PE
+# keeps the 1 MiB default and the app aborts with 0xC00000FD ("DBX 已停止工作").
+[target.x86_64-win7-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]

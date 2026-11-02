@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 780
 dbType: spark
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Spark
 label: Apache Spark
 runtimeMode: agent

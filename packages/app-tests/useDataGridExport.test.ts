@@ -4,6 +4,7 @@ import { beforeEach, test, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
 import type { DataGridTableMeta } from "../../apps/desktop/src/lib/dataGrid/dataGridSql.ts";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, type DataGridExtractorOptions } from "../../apps/desktop/src/lib/dataGrid/dataGridCopyExtractor.ts";
 import type { DatabaseType, QueryResult } from "../../apps/desktop/src/types/database.ts";
 
 const apiMock = vi.hoisted(() => ({
@@ -24,6 +25,7 @@ const clipboardMock = vi.hoisted(() => ({
   copyToClipboard: vi.fn(),
 }));
 const runtimeMock = vi.hoisted(() => ({ isTauri: false }));
+const sqlInsertModeMock = vi.hoisted(() => ({ showSqlInsertModeDialog: vi.fn() }));
 const dialogMock = vi.hoisted(() => ({ save: vi.fn() }));
 const toastMock = vi.hoisted(() => vi.fn());
 const translateMock = vi.hoisted(() =>
@@ -35,6 +37,7 @@ const translateMock = vi.hoisted(() =>
 );
 
 vi.mock("@/lib/backend/api", () => apiMock);
+vi.mock("@/lib/export/sqlInsertMode", () => sqlInsertModeMock);
 vi.mock("@/lib/common/clipboard", () => clipboardMock);
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => runtimeMock.isTauri }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: dialogMock.save }));
@@ -107,6 +110,14 @@ function buildExportHarness(
     sourceColumns?: Array<string | undefined>;
     databaseType?: DatabaseType;
     context?: "results" | "table-data";
+    extractorOptions?: DataGridExtractorOptions;
+    sql?: string;
+    exportSql?: string;
+    pageSql?: string;
+    displayValue?: (value: any, columnIndex: number) => string;
+    hasColumnFormatter?: (columnIndex: number) => boolean;
+    applyColumnFormattersOnExport?: any;
+    contextCell?: any;
   } = {},
 ) {
   const exportColumns = options.columns ?? ["id", "name"];
@@ -115,6 +126,7 @@ function buildExportHarness(
     [2, "Lin"],
   ];
   const rowItems = exportRows.map((data, index) => ({ id: index + 1, data, isNew: false, isDeleted: false, isDirtyCol: data.map(() => false), status: "" }));
+  const contextCell = options.contextCell ?? ref(null);
   const exportProgressDialog = ref(false);
   const exportProgressState = ref({
     title: "",
@@ -130,7 +142,7 @@ function buildExportHarness(
   const fullExportResult = vi.fn(async () => {
     throw new Error("fullExportResult should not be called for streaming CSV/XLSX query exports");
   });
-  const queryResultExportRequest = vi.fn(async (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt" | "sql"; includeSqlSheet?: boolean; exportTableName?: string; exportColumnTypes?: Array<string | null | undefined> }) => ({
+  const queryResultExportRequest = vi.fn(async (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt" | "sql"; includeSqlSheet?: boolean; exportTableName?: string; exportColumnTypes?: Array<string | null | undefined>; insertMode?: "batch" | "single" }) => ({
     exportId: options.exportId,
     connectionId: "conn-1",
     database: "db",
@@ -144,6 +156,7 @@ function buildExportHarness(
     includeSqlSheet: options.includeSqlSheet,
     exportTableName: options.exportTableName,
     exportColumnTypes: options.exportColumnTypes,
+    ...(options.insertMode ? { insertMode: options.insertMode } : {}),
     pageSize: 1000,
     rowLimit: 100000,
     totalRows: 2,
@@ -156,13 +169,15 @@ function buildExportHarness(
   const composable = useDataGridExport({
     columns: computed(() => exportColumns),
     displayItems: computed(() => rowItems),
-    sql: computed(() => "SELECT * FROM users"),
-    exportSql: computed(() => "SELECT * FROM users ORDER BY id DESC"),
+    sql: computed(() => options.sql ?? "SELECT * FROM users"),
+    exportSql: computed(() => options.exportSql ?? "SELECT * FROM users ORDER BY id DESC"),
+    pageSql: computed(() => options.pageSql),
     tableMeta: computed(() => options.tableMeta),
     databaseType: computed(() => options.databaseType ?? "postgres"),
     connectionId: computed(() => "conn-1"),
     database: computed(() => "db"),
     context: computed(() => options.context ?? "results"),
+    extractorOptions: computed(() => options.extractorOptions),
     sourceColumns: computed(() => options.sourceColumns),
     columnTypes: computed(() => options.columnTypes),
     allColumnTypes: computed(() => options.allColumnTypes),
@@ -172,7 +187,7 @@ function buildExportHarness(
     hasCellSelection: computed(() => false),
     selectedCells: computed(() => ({ columns: [], rows: [] })),
     selectedRange: computed(() => null),
-    contextCell: ref(null),
+    contextCell,
     getRowItem: (rowId: number) => rowItems.find((item) => item.id === rowId),
     selectedRowIds: ref(new Set<number>()),
     hasRowSelection: computed(() => false),
@@ -183,6 +198,9 @@ function buildExportHarness(
     allExportResults: computed(() => options.allExportResults),
     currentResultLabel: computed(() => options.currentResultLabel),
     exportFileBaseName: computed(() => options.exportFileBaseName),
+    displayValue: options.displayValue,
+    hasColumnFormatter: options.hasColumnFormatter,
+    applyColumnFormattersOnExport: options.applyColumnFormattersOnExport,
     exportProgressDialog,
     exportProgressState,
     exportCancelHandler,
@@ -195,10 +213,18 @@ function buildExportHarness(
     exportProgressDialog,
     exportProgressState,
     exportCancelHandler,
+    contextCell,
   };
 }
 
-function buildTableDataExportHarness() {
+function buildTableDataExportHarness(
+  options: {
+    displayValue?: (value: any, columnIndex: number) => string;
+    hasColumnFormatter?: (columnIndex: number) => boolean;
+    applyColumnFormattersOnExport?: any;
+    fullExportResult?: any;
+  } = {},
+) {
   const exportProgressDialog = ref(false);
   const exportProgressState = ref({
     title: "",
@@ -244,6 +270,10 @@ function buildTableDataExportHarness() {
     getRowItem: () => undefined,
     selectedRowIds: ref(new Set<number>()),
     hasRowSelection: computed(() => false),
+    fullExportResult: options.fullExportResult,
+    displayValue: options.displayValue,
+    hasColumnFormatter: options.hasColumnFormatter,
+    applyColumnFormattersOnExport: options.applyColumnFormattersOnExport,
     exportProgressDialog,
     exportProgressState,
     exportCancelHandler,
@@ -262,6 +292,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   runtimeMock.isTauri = false;
   dialogMock.save.mockResolvedValue(null);
+  sqlInsertModeMock.showSqlInsertModeDialog.mockResolvedValue("batch");
   clipboardMock.copyToClipboard.mockResolvedValue(undefined);
   apiMock.startQueryResultExport.mockImplementation(async (_request, onProgress) => {
     onProgress({ exportId: _request.exportId, tableName: "", rowsExported: 2, totalRows: 2, status: "Done" });
@@ -382,7 +413,7 @@ test("default data grid export file names use sanitized base names and compact l
 });
 
 test("full query result CSV export streams through the backend without loading all rows", async () => {
-  useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY/M/D HH:mm:ss" });
+  useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY/M/D HH:mm:ss", csvQuoteMode: "necessary" });
   const { composable, fullExportResult, queryResultExportRequest, exportProgressDialog, exportProgressState } = buildExportHarness();
 
   await composable.exportCsv();
@@ -391,6 +422,7 @@ test("full query result CSV export streams through the backend without loading a
   assert.equal(queryResultExportRequest.mock.calls.length, 1);
   assert.equal(apiMock.startQueryResultExport.mock.calls.length, 1);
   assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].dateTimeFormat, "YYYY/M/D HH:mm:ss");
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].csvQuoteMode, "necessary");
   assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 0);
   assert.equal(exportProgressDialog.value, true);
   assert.equal(exportProgressState.value.status, "Done");
@@ -398,7 +430,7 @@ test("full query result CSV export streams through the backend without loading a
 });
 
 test("MongoDB full query result CSV export uses the full-result fallback", async () => {
-  const { composable, fullExportResult, queryResultExportRequest } = buildExportHarness({ databaseType: "mongodb" });
+  const { composable, fullExportResult, queryResultExportRequest } = buildExportHarness({ databaseType: "mongodb", columns: ["_id", "name"] });
   fullExportResult.mockResolvedValueOnce({
     columns: ["_id", "name"],
     rows: [["1", "Ada"]],
@@ -488,6 +520,139 @@ test("MySQL joined query SQL export keeps result aliases instead of source colum
   }
 });
 
+test("non-SQL query exports do not forward the INSERT mode", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/query-result.csv");
+  const { composable, queryResultExportRequest } = buildExportHarness();
+
+  await composable.exportCsv();
+
+  assert.equal("insertMode" in queryResultExportRequest.mock.calls[0][0], false);
+  assert.equal("insertMode" in apiMock.startQueryResultExport.mock.calls[0][0], false);
+});
+
+test("SQL export uses batch mode by default for query-result streaming", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/query-result.sql");
+  const { composable, queryResultExportRequest } = buildExportHarness();
+
+  await composable.exportSql();
+
+  assert.equal(sqlInsertModeMock.showSqlInsertModeDialog.mock.calls.length, 1);
+  assert.equal(queryResultExportRequest.mock.calls[0][0].insertMode, "batch");
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].insertMode, "batch");
+});
+
+test("SQL export forwards the selected single-row mode to query-result streaming", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/query-result.sql");
+  sqlInsertModeMock.showSqlInsertModeDialog.mockResolvedValueOnce("single");
+  const { composable, queryResultExportRequest } = buildExportHarness();
+
+  await composable.exportSql();
+
+  assert.equal(queryResultExportRequest.mock.calls[0][0].insertMode, "single");
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].insertMode, "single");
+});
+
+test("table data SQL export forwards the selected mode to the table backend", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/users.sql");
+  sqlInsertModeMock.showSqlInsertModeDialog.mockResolvedValueOnce("single");
+  const { composable } = buildTableDataExportHarness();
+
+  await composable.exportSql();
+
+  assert.equal(apiMock.startTableExport.mock.calls[0][0].format, "sql");
+  assert.equal(apiMock.startTableExport.mock.calls[0][0].insertMode, "single");
+});
+
+test("local SQL export maps the selected mode to the shared formatter", async () => {
+  const download = installTextDownloadCapture();
+  sqlInsertModeMock.showSqlInsertModeDialog.mockResolvedValueOnce("single");
+  apiMock.buildExportSqlInsert.mockResolvedValueOnce("INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');");
+
+  try {
+    const completeLocalResult: QueryResult = {
+      columns: ["id", "name"],
+      column_types: ["int", "text"],
+      rows: [[1, "Ada"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      truncated: false,
+      has_more: false,
+    };
+    const { composable } = buildExportHarness({ completeLocalResult });
+
+    await composable.exportSql();
+
+    assert.equal(apiMock.buildExportSqlInsert.mock.calls[0][0].batchSize, 1);
+  } finally {
+    download.restore();
+  }
+});
+
+test.each([
+  ["oracle", "all"],
+  ["oracle", "page"],
+  ["oceanbase-oracle", "all"],
+  ["oceanbase-oracle", "page"],
+] as const)("local %s %s SQL export preserves temporal precision and timezone", async (databaseType, scope) => {
+  const download = installTextDownloadCapture();
+  apiMock.buildExportSqlInsert.mockResolvedValueOnce("INSERT INTO fixture VALUES (1);");
+  const timestamp = "2026-10-13T12:34:56.123456789+08:00";
+  try {
+    const completeLocalResult: QueryResult = {
+      columns: ["id", "created_at"],
+      column_types: ["NUMBER", "TIMESTAMP WITH TIME ZONE"],
+      rows: [[1, timestamp]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      truncated: false,
+      has_more: false,
+    };
+    const { composable } = buildExportHarness({
+      databaseType,
+      columns: completeLocalResult.columns,
+      columnTypes: completeLocalResult.column_types,
+      rows: completeLocalResult.rows,
+      completeLocalResult,
+      displayValue: () => "2026-10-13 12:34:56",
+    });
+    await (scope === "all" ? composable.exportSql() : composable.exportCurrentPageSql());
+    assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].rows, [[1, timestamp]]);
+  } finally {
+    download.restore();
+  }
+});
+
+test("local SQL export defaults to the shared batch formatter", async () => {
+  const download = installTextDownloadCapture();
+  apiMock.buildExportSqlInsert.mockResolvedValueOnce("INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada'), (2, 'Lin');");
+
+  try {
+    const completeLocalResult: QueryResult = {
+      columns: ["id", "name"],
+      column_types: ["int", "text"],
+      rows: [
+        [1, "Ada"],
+        [2, "Lin"],
+      ],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      truncated: false,
+      has_more: false,
+    };
+    const { composable } = buildExportHarness({ completeLocalResult });
+
+    await composable.exportSql();
+
+    assert.equal(apiMock.buildExportSqlInsert.mock.calls[0][0].batchSize, undefined);
+  } finally {
+    download.restore();
+  }
+});
+
 test("background SQL export keeps full result column types when visible columns are reordered", async () => {
   runtimeMock.isTauri = true;
   dialogMock.save.mockResolvedValue("/tmp/query-result.sql");
@@ -525,6 +690,133 @@ test("table data SQL export keeps source column names", async () => {
 
     assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].columns, ["id", "name"]);
     assert.match((await download.content()) ?? "", /`id`, `name`/);
+  } finally {
+    download.restore();
+  }
+});
+
+function sqlExclusionOptions(primaryKeyMode: DataGridExtractorOptions["sql"]["primaryKeyMode"] = "exclude-generated"): DataGridExtractorOptions {
+  return {
+    ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+    sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode },
+  };
+}
+
+test("table data SQL export passes primary key exclusion to the backend", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/users.sql");
+  const { composable } = buildExportHarness({
+    context: "table-data",
+    tableMeta: {
+      tableName: "users",
+      primaryKeys: ["id"],
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, extra: "auto_increment" },
+        { name: "name", data_type: "text", is_nullable: true },
+      ],
+    },
+    extractorOptions: sqlExclusionOptions(),
+  });
+
+  await composable.exportSql();
+
+  assert.equal(apiMock.startTableExport.mock.calls[0][0].primaryKeyMode, "exclude-generated");
+  assert.deepEqual(apiMock.startTableExport.mock.calls[0][0].primaryKeys, ["id"]);
+});
+
+test("query result SQL export passes primary key exclusion and keys to the backend", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/query-result.sql");
+  const { composable } = buildExportHarness({
+    context: "results",
+    tableMeta: {
+      tableName: "users",
+      primaryKeys: ["id"],
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, extra: "auto_increment" },
+        { name: "name", data_type: "text", is_nullable: true },
+      ],
+    },
+    extractorOptions: sqlExclusionOptions(),
+  });
+
+  await composable.exportSql();
+
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].primaryKeyMode, "exclude-generated");
+  assert.deepEqual(apiMock.startQueryResultExport.mock.calls[0][0].primaryKeys, ["id"]);
+});
+
+test("table data SQL export keeps manually-assigned primary keys", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/users-manual-pk.sql");
+  const { composable } = buildExportHarness({
+    context: "table-data",
+    tableMeta: {
+      tableName: "users",
+      primaryKeys: ["user_code"],
+      columns: [{ name: "user_code", data_type: "varchar", is_nullable: false, is_primary_key: true }],
+    },
+    extractorOptions: sqlExclusionOptions(),
+  });
+
+  await composable.exportSql();
+
+  assert.equal(apiMock.startTableExport.mock.calls[0][0].primaryKeyMode, "exclude-generated");
+  assert.deepEqual(apiMock.startTableExport.mock.calls[0][0].primaryKeys, ["user_code"]);
+});
+
+test("table data SQL export passes all-primary-key mode including manual keys", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/users-all-keys.sql");
+  const { composable } = buildExportHarness({
+    context: "table-data",
+    tableMeta: {
+      tableName: "users",
+      primaryKeys: ["user_code"],
+      columns: [{ name: "user_code", data_type: "varchar", is_nullable: false, is_primary_key: true }],
+    },
+    extractorOptions: sqlExclusionOptions("exclude-all"),
+  });
+
+  await composable.exportSql();
+
+  assert.equal(apiMock.startTableExport.mock.calls[0][0].primaryKeyMode, "exclude-all");
+  assert.deepEqual(apiMock.startTableExport.mock.calls[0][0].primaryKeys, ["user_code"]);
+});
+
+test("local SQL export asks the backend to drop primary key columns", async () => {
+  const download = installTextDownloadCapture();
+  const completeLocalResult: QueryResult = {
+    columns: ["user_code", "name"],
+    column_types: ["varchar", "text"],
+    rows: [["A-1", "Ada"]],
+    affected_rows: 0,
+    execution_time_ms: 1,
+    truncated: false,
+    has_more: false,
+  };
+  apiMock.buildExportSqlInsert.mockResolvedValueOnce('INSERT INTO "users" ("name") VALUES (\'Ada\');');
+
+  try {
+    const { composable } = buildExportHarness({
+      columns: completeLocalResult.columns,
+      rows: completeLocalResult.rows,
+      completeLocalResult,
+      tableMeta: {
+        tableName: "users",
+        primaryKeys: ["user_code"],
+        columns: [
+          { name: "user_code", data_type: "varchar", is_nullable: false, is_primary_key: true },
+          { name: "name", data_type: "text", is_nullable: true },
+        ],
+      },
+      extractorOptions: sqlExclusionOptions("exclude-all"),
+    });
+
+    await composable.exportSql();
+
+    assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].excludeColumns, ["user_code"]);
+    assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].columns, ["user_code", "name"]);
   } finally {
     download.restore();
   }
@@ -687,6 +979,7 @@ test("missing query result export request does not fall back to the in-memory pa
 });
 
 test("selected query result CSV export keeps the existing in-memory path", async () => {
+  useSettingsStore().updateEditorSettings({ csvQuoteMode: "necessary" });
   const { composable, queryResultExportRequest } = buildExportHarness();
 
   await composable.exportCsv([1]);
@@ -696,9 +989,10 @@ test("selected query result CSV export keeps the existing in-memory path", async
   assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 1);
   assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][1], ["id", "name"]);
   assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [[1, "Ada"]]);
+  assert.equal(apiMock.exportQueryResultCsv.mock.calls[0][3], "necessary");
 });
 
-test("selected query result CSV export formats only typed temporal columns", async () => {
+test("selected query result CSV export formats typed temporal columns without a formula wrapper", async () => {
   useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY/M/D HH:mm:ss" });
   const rawDateTime = "2024-02-25 13:02:15";
   const { composable } = buildExportHarness({
@@ -709,6 +1003,7 @@ test("selected query result CSV export formats only typed temporal columns", asy
 
   await composable.exportCsv([1]);
 
+  // Temporal columns use the configured export format; plain columns are untouched.
   assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [["2024/2/25 13:02:15", rawDateTime]]);
 });
 
@@ -742,6 +1037,32 @@ test("selected query result XLSX export forwards the numericColumnRightAlign set
   settingsStore.updateEditorSettings({ numericColumnRightAlign: true });
   await composable.exportXlsx([1]);
   assert.equal(apiMock.exportQueryResultXlsx.mock.calls[1][6], true);
+});
+
+test("selected query result XLSX export forwards the global export pattern so numFmt keeps milliseconds", async () => {
+  useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY-MM-DD HH:mm:ss.SSS" });
+  const { composable } = buildExportHarness({
+    columns: ["id", "ts", "note"],
+    columnTypes: ["int", "datetime(3)", "varchar(32)"],
+    rows: [[1, "2026-07-25 13:02:15.456", "with-ms"]],
+  });
+
+  await composable.exportXlsx([1]);
+
+  // The rows already carry the formatted value, but without argument 8 the
+  // workbook falls back to a `yyyy-mm-dd hh:mm:ss` numFmt and hides the
+  // milliseconds it just wrote.
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][5], [[1, "2026-07-25 13:02:15.456", "with-ms"]]);
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][8], "YYYY-MM-DD HH:mm:ss.SSS");
+});
+
+test("selected query result XLSX export omits the export pattern when none is configured", async () => {
+  useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "" });
+  const { composable } = buildExportHarness({ columnTypes: ["bigint(20)", "varchar(64)"] });
+
+  await composable.exportXlsx([1]);
+
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][8], undefined);
 });
 
 test("streaming query result XLSX export carries numericColumnRightAlign in the backend request", async () => {
@@ -792,6 +1113,45 @@ test("selected XLSX with SQL uses the effective result SQL in a second worksheet
   assert.deepEqual(worksheets[0].rows, [[1, "Ada"]]);
   assert.equal(worksheets[1].sheetName, "SQL");
   assert.deepEqual(worksheets[1].rows, [["SELECT * FROM users ORDER BY id DESC"]]);
+  assert.equal(worksheets[1].autoFilter, false);
+});
+
+test("exportCurrentPageXlsxWithSql prioritizes pageSql over base query and disables autoFilter on SQL worksheet", async () => {
+  apiMock.exportQueryResultsXlsx.mockClear();
+  const { composable } = buildExportHarness({
+    currentResultLabel: "public.users",
+    sql: "SELECT * FROM users",
+    exportSql: "SELECT * FROM users ORDER BY id DESC",
+    pageSql: "SELECT * FROM users ORDER BY id DESC LIMIT 50 OFFSET 0",
+  });
+
+  await composable.exportCurrentPageXlsxWithSql();
+
+  assert.equal(apiMock.exportQueryResultsXlsx.mock.calls.length, 1);
+  const worksheets = apiMock.exportQueryResultsXlsx.mock.calls[0][1];
+  assert.equal(worksheets.length, 2);
+  assert.equal(worksheets[0].sheetName, "public.users");
+  assert.equal(worksheets[1].sheetName, "SQL");
+  assert.deepEqual(worksheets[1].rows, [["SELECT * FROM users ORDER BY id DESC LIMIT 50 OFFSET 0"]]);
+  assert.equal(worksheets[1].autoFilter, false);
+});
+
+test("exportCurrentPageXlsxWithSql falls back to exportSql when pageSql is unset", async () => {
+  apiMock.exportQueryResultsXlsx.mockClear();
+  const { composable } = buildExportHarness({
+    currentResultLabel: "public.users",
+    sql: "SELECT * FROM users",
+    exportSql: "SELECT * FROM users ORDER BY id DESC",
+  });
+
+  await composable.exportCurrentPageXlsxWithSql();
+
+  assert.equal(apiMock.exportQueryResultsXlsx.mock.calls.length, 1);
+  const worksheets = apiMock.exportQueryResultsXlsx.mock.calls[0][1];
+  assert.equal(worksheets.length, 2);
+  assert.equal(worksheets[1].sheetName, "SQL");
+  assert.deepEqual(worksheets[1].rows, [["SELECT * FROM users ORDER BY id DESC"]]);
+  assert.equal(worksheets[1].autoFilter, false);
 });
 
 test("all-results XLSX with SQL maps each result set to its source statement", async () => {
@@ -852,6 +1212,7 @@ test("table data export leaves row limit unset by default", async () => {
 
     assert.equal(apiMock.startTableExport.mock.calls.length, 1);
     assert.equal(apiMock.startTableExport.mock.calls[0][0].rowLimit, null);
+    assert.equal(apiMock.startTableExport.mock.calls[0][0].csvQuoteMode, "all");
   } finally {
     restoreStorage();
   }
@@ -897,6 +1258,126 @@ test("table data export passes row limit when enabled", async () => {
 
     assert.equal(apiMock.startTableExport.mock.calls.length, 1);
     assert.equal(apiMock.startTableExport.mock.calls[0][0].rowLimit, 12_345);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("selected query result CSV export formats column values when column formatter is active", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    const { composable } = buildExportHarness({
+      columns: ["id", "amount", "name"],
+      columnTypes: ["integer", "numeric", "text"],
+      rows: [
+        [1, 100, "Ada"],
+        [2, null, "Lin"],
+      ],
+      hasColumnFormatter: (idx) => idx === 1,
+      displayValue: (val, idx) => (idx === 1 ? `$${val}.00` : String(val)),
+    });
+
+    await composable.exportCsv([1, 2]);
+
+    assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 1);
+    assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][1], ["id", "amount", "name"]);
+    assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [
+      [1, "$100.00", "Ada"],
+      [2, null, "Lin"],
+    ]);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("selected query result CSV export preserves raw values when applyColumnFormattersOnExport is false", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    useSettingsStore().updateEditorSettings({ applyColumnFormattersOnExport: false });
+    const { composable } = buildExportHarness({
+      columns: ["id", "amount"],
+      columnTypes: ["integer", "numeric"],
+      rows: [[1, 100]],
+      hasColumnFormatter: (idx) => idx === 1,
+      displayValue: (val, idx) => (idx === 1 ? `$${val}.00` : String(val)),
+    });
+
+    await composable.exportCsv([1]);
+
+    assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 1);
+    assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [[1, 100]]);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("table data CSV export bypasses backend streaming when column formatters are active", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    const fullExportResult = vi.fn(async () => ({
+      columns: ["id", "name"],
+      rows: [
+        [1, "Alice"],
+        [2, "Bob"],
+      ],
+      column_types: ["integer", "text"],
+    }));
+    const { composable } = buildTableDataExportHarness({
+      hasColumnFormatter: (idx) => idx === 1,
+      displayValue: (val, idx) => (idx === 1 ? String(val).toUpperCase() : String(val)),
+      fullExportResult,
+    });
+
+    await composable.exportCsv();
+
+    assert.equal(apiMock.startTableExport.mock.calls.length, 0);
+    assert.equal(fullExportResult.mock.calls.length, 1);
+    assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 1);
+    assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [
+      [1, "ALICE"],
+      [2, "BOB"],
+    ]);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("table data SQL export does not bypass backend streaming even when column formatters are active", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    const { composable } = buildTableDataExportHarness({
+      hasColumnFormatter: (idx) => idx === 1,
+      displayValue: (val, idx) => (idx === 1 ? String(val).toUpperCase() : String(val)),
+    });
+
+    await composable.exportSql();
+
+    assert.equal(apiMock.startTableExport.mock.calls.length, 1);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("copyCell applies column formatter when active and preserves raw values when disabled", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    const { composable, contextCell } = buildExportHarness({
+      columns: ["id", "price"],
+      rows: [[1, 42]],
+      hasColumnFormatter: (idx) => idx === 1,
+      displayValue: (val, idx) => (idx === 1 ? `$${val}` : String(val)),
+    });
+    contextCell.value = { rowId: 1, rowIndex: 0, col: 1 };
+
+    await composable.copyCell();
+    assert.equal(clipboardMock.copyToClipboard.mock.calls.length, 1);
+    assert.equal(clipboardMock.copyToClipboard.mock.calls[0][0], "$42");
+
+    clipboardMock.copyToClipboard.mockClear();
+    useSettingsStore().updateEditorSettings({ applyColumnFormattersOnExport: false });
+    await composable.copyCell();
+    assert.equal(clipboardMock.copyToClipboard.mock.calls.length, 1);
+    assert.equal(clipboardMock.copyToClipboard.mock.calls[0][0], "42");
   } finally {
     restoreStorage();
   }

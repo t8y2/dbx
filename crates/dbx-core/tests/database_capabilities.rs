@@ -101,6 +101,7 @@ fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Hive, None), Some("hive"));
     assert_eq!(agent_key(&DatabaseType::Kyuubi, None), Some("hive"));
     assert_eq!(agent_key(&DatabaseType::Impala, None), Some("hive"));
+    assert_eq!(agent_key(&DatabaseType::Argo, None), Some("argo"));
     assert_eq!(agent_key(&DatabaseType::Tdengine, None), Some("tdengine"));
     assert_eq!(agent_key(&DatabaseType::Iotdb, None), Some("iotdb"));
     assert_eq!(agent_key(&DatabaseType::Yashandb, None), Some("yashandb"));
@@ -112,11 +113,13 @@ fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Exasol, None), Some("exasol"));
     assert_eq!(agent_key(&DatabaseType::OceanbaseOracle, None), Some("oceanbase-oracle"));
     assert_eq!(agent_key(&DatabaseType::Gbase, None), Some("gbase8a"));
+    assert_eq!(agent_key(&DatabaseType::Gbase8s, None), Some("gbase8s"));
     assert_eq!(agent_key(&DatabaseType::Access, None), Some("access"));
     assert_eq!(agent_key(&DatabaseType::Oracle, None), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Databend, None), Some("databend"));
     assert_eq!(agent_key(&DatabaseType::InfluxDb, None), Some("influxdb"));
     assert_eq!(agent_key(&DatabaseType::Uxdb, None), Some("uxdb"));
+    assert_eq!(agent_key(&DatabaseType::Gbase8c, None), Some("gbase8c"));
     assert_eq!(agent_key(&DatabaseType::ZooKeeper, None), Some("zookeeper"));
     assert_eq!(agent_key(&DatabaseType::Spanner, None), Some("spanner"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-legacy")), Some("oracle"));
@@ -146,6 +149,7 @@ fn classifies_agent_database_types() {
     assert!(is_agent_type(&DatabaseType::Hive));
     assert!(is_agent_type(&DatabaseType::Kyuubi));
     assert!(is_agent_type(&DatabaseType::Impala));
+    assert!(is_agent_type(&DatabaseType::Argo));
     assert!(is_agent_type(&DatabaseType::Tdengine));
     assert!(is_agent_type(&DatabaseType::Iotdb));
     assert!(is_agent_type(&DatabaseType::Yashandb));
@@ -157,6 +161,7 @@ fn classifies_agent_database_types() {
     assert!(is_agent_type(&DatabaseType::Exasol));
     assert!(is_agent_type(&DatabaseType::OceanbaseOracle));
     assert!(is_agent_type(&DatabaseType::Gbase));
+    assert!(is_agent_type(&DatabaseType::Gbase8c));
     assert!(is_agent_type(&DatabaseType::Access));
     assert!(is_agent_type(&DatabaseType::Databend));
     assert!(is_agent_type(&DatabaseType::InfluxDb));
@@ -334,7 +339,11 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert_eq!(zookeeper.runtime_mode, "agent");
     assert_eq!(zookeeper.agent_key.as_deref(), Some("zookeeper"));
     assert_eq!(zookeeper.support_level, "connect");
-    assert!(zookeeper.capabilities.query_execution);
+    // ZooKeeper has no SQL engine and its agent implements only kv_* operations;
+    // claiming query execution or schema search made "new query" call
+    // list-databases on an agent that does not support it (issue #8215).
+    assert!(!zookeeper.capabilities.query_execution);
+    assert!(!zookeeper.capabilities.schema_search);
     assert!(zookeeper.capabilities.driver_management);
     assert!(!zookeeper.capabilities.metadata_browse);
 
@@ -357,6 +366,38 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert!(uxdb.capabilities.table_structure_edit);
     assert!(!uxdb.capabilities.data_transfer);
     assert!(!uxdb.capabilities.user_admin);
+
+    let gbase8c = find_driver(DatabaseType::Gbase8c);
+    assert_eq!(gbase8c.label, "南大通用 GBase 8c");
+    assert_eq!(gbase8c.runtime_mode, "agent");
+    assert_eq!(gbase8c.agent_key.as_deref(), Some("gbase8c"));
+    assert_eq!(gbase8c.support_level, "operate");
+    assert!(gbase8c.capabilities.query_execution);
+    assert!(gbase8c.capabilities.metadata_browse);
+    assert!(gbase8c.capabilities.table_data_edit);
+    assert!(gbase8c.capabilities.driver_management);
+    // Generated DDL has to follow DBCOMPATIBILITY (A/B/C/PG), which is fixed at database
+    // creation and cannot be changed by SQL, so the same DDL can be right on one GBase 8c
+    // instance and wrong on another. Structure editing, table import and data transfer stay
+    // off until the DDL generator can honour the connected database's mode.
+    assert!(!gbase8c.capabilities.table_structure_edit);
+    assert!(!gbase8c.capabilities.table_import);
+    assert!(!gbase8c.capabilities.data_transfer);
+    // ConfiguredJdbcAgent (the base this agent uses) throws for object source.
+    assert!(!gbase8c.capabilities.object_source);
+    assert!(!gbase8c.capabilities.user_admin);
+
+    let salesforce = find_driver(DatabaseType::Salesforce);
+    assert_eq!(salesforce.label, "Salesforce");
+    assert_eq!(salesforce.support_level, "operate");
+    assert!(salesforce.capabilities.query_execution);
+    assert!(salesforce.capabilities.metadata_browse);
+    assert!(salesforce.capabilities.object_browser);
+    assert!(salesforce.capabilities.schema_search);
+    assert!(salesforce.capabilities.table_data_edit);
+    assert!(!salesforce.capabilities.table_structure_edit);
+    assert!(!salesforce.capabilities.object_source);
+    assert!(!salesforce.capabilities.diagram);
 
     let spanner = find_driver(DatabaseType::Spanner);
     assert_eq!(spanner.label, "Google Cloud Spanner");
@@ -448,4 +489,89 @@ fn goldendb_declares_data_transfer_support() {
 
     assert!(goldendb.capabilities.table_import);
     assert!(goldendb.capabilities.data_transfer);
+}
+
+#[test]
+fn highgo_declares_data_transfer_support() {
+    let manifest = driver_manifest();
+    let highgo =
+        manifest.drivers.iter().find(|driver| driver.db_type == DatabaseType::Highgo).expect("HighGo manifest entry");
+
+    assert!(highgo.capabilities.table_import);
+    assert!(highgo.capabilities.data_transfer);
+}
+
+#[test]
+fn vastbase_declares_data_transfer_support() {
+    let manifest = driver_manifest();
+    let vastbase = manifest
+        .drivers
+        .iter()
+        .find(|driver| driver.db_type == DatabaseType::Vastbase)
+        .expect("Vastbase manifest entry");
+
+    assert!(vastbase.capabilities.table_import);
+    assert!(vastbase.capabilities.data_transfer);
+}
+
+#[test]
+fn yashandb_declares_data_transfer_support() {
+    let manifest = driver_manifest();
+    let yashandb = manifest
+        .drivers
+        .iter()
+        .find(|driver| driver.db_type == DatabaseType::Yashandb)
+        .expect("YashanDB manifest entry");
+
+    assert!(yashandb.capabilities.table_import);
+    assert!(yashandb.capabilities.data_transfer);
+}
+
+#[test]
+fn xugu_declares_table_import_support() {
+    let manifest = driver_manifest();
+    let xugu =
+        manifest.drivers.iter().find(|driver| driver.db_type == DatabaseType::Xugu).expect("Xugu manifest entry");
+
+    assert!(xugu.capabilities.table_import);
+}
+
+#[test]
+fn db2_declares_table_import_support() {
+    let manifest = driver_manifest();
+    let db2 = manifest.drivers.iter().find(|driver| driver.db_type == DatabaseType::Db2).expect("DB2 manifest entry");
+
+    assert!(db2.capabilities.table_import);
+}
+
+#[test]
+fn opengauss_declares_table_import_support() {
+    let manifest = driver_manifest();
+    let opengauss = manifest
+        .drivers
+        .iter()
+        .find(|driver| driver.db_type == DatabaseType::OpenGauss)
+        .expect("openGauss manifest entry");
+
+    assert!(opengauss.capabilities.table_import);
+    // The import wizard relies on these neighbouring capabilities; keep the
+    // openGauss block coherent so the entry surfaces stay reachable.
+    assert!(opengauss.capabilities.table_data_edit);
+    assert!(opengauss.capabilities.sql_file_execution);
+    assert!(opengauss.capabilities.data_transfer);
+}
+
+#[test]
+fn saphana_declares_table_import_support() {
+    let manifest = driver_manifest();
+    let hana = manifest
+        .drivers
+        .iter()
+        .find(|driver| driver.db_type == DatabaseType::SapHana)
+        .expect("SAP HANA manifest entry");
+
+    assert!(hana.capabilities.table_import);
+    // Import into an existing table needs table editing and SQL execution.
+    assert!(hana.capabilities.table_data_edit);
+    assert!(hana.capabilities.sql_file_execution);
 }

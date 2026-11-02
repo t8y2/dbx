@@ -11,6 +11,7 @@ import MetricLineChart from "@/components/chart/MetricLineChart.vue";
 import * as api from "@/lib/backend/api";
 import { computePgTps, computeRate, formatBytesPerSec, formatNumber, formatRate, formatUptime, MAX_SAMPLES, parsePgStatusRow, pgCacheHitRatio, resolveServerDashboardDriverForConnection, statusNumber, type StatusSample } from "@/lib/database/postgresServerStatus";
 import { useVerticalOverlayScrollbar } from "@/composables/useVerticalOverlayScrollbar";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
   connectionId: string;
@@ -18,13 +19,14 @@ const props = defineProps<{
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ autoRefreshInterval?: number }>({}, "PostgresDashboard");
 
 const loading = ref(false);
 const fetching = ref(false);
 const error = ref("");
 const variables = ref<Record<string, string>>({});
 const samples = ref<StatusSample[]>([]);
-const autoRefreshInterval = ref(5);
+const autoRefreshInterval = ref([0, 1, 2, 5, 10].includes(restoredUiState.autoRefreshInterval ?? -1) ? restoredUiState.autoRefreshInterval! : 5);
 const scrollerRef = ref<HTMLElement | null>(null);
 const scrollerContentRef = ref<HTMLElement | null>(null);
 const scrollbarTrackRef = ref<HTMLElement | null>(null);
@@ -41,6 +43,8 @@ const {
 // polls go straight to the legacy query instead of erroring every time.
 const fallbackStatusSql = ref<string | null>(null);
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+trackUiState(() => ({ autoRefreshInterval: autoRefreshInterval.value }));
 
 const connection = computed(() => connectionStore.getConfig(props.connectionId));
 const statusDriver = computed(() => resolveServerDashboardDriverForConnection(connection.value));
@@ -142,7 +146,9 @@ async function fetchStatus(options: { silent?: boolean } = {}) {
   if (!options.silent) loading.value = true;
   error.value = "";
   try {
-    await connectionStore.ensureConnected(props.connectionId);
+    // 轮询/静默刷新走被动重连：失败后退避，避免后台每次 tick 都新建连接
+    // （企业安全/零信任客户端会为每次新连接弹一次授权框）。手动刷新不受影响。
+    await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true, ...(options.silent === true ? { passive: true } : {}) });
     const sql = fallbackStatusSql.value ?? activeDriver.statusSql;
     let result;
     try {

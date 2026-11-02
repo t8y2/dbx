@@ -1,7 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { buildEditorFontThemeRules, buildSqlCompletionThemeRules, editorDiagnosticColors, editorThemeAppearanceFor, resolveCustomThemeBackgrounds, resolveEditorTheme } from "@/lib/editor/editorThemes";
+import {
+  buildEditorFontThemeRules,
+  buildSqlCompletionThemeRules,
+  EDITOR_FONT_FAMILY_CSS_VAR,
+  editorDiagnosticColors,
+  editorThemeAppearanceFor,
+  IDE_EDITOR_THEMES,
+  loadEditorTheme,
+  resolveCustomThemeBackgrounds,
+  resolveEditorTheme,
+  SQL_BUILTIN_HIGHLIGHT_TAG,
+  SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG,
+} from "@/lib/editor/editorThemes";
 import { DEFAULT_APP_CUSTOM_UI_COLORS, wcagContrastRatio, type AppThemePalette } from "@/lib/app/appTheme";
-import type { EditorTheme } from "@/stores/settingsStore";
+import { DEFAULT_CUSTOM_THEME_COLORS, type CustomThemeColors, type EditorTheme } from "@/stores/settingsStore";
+import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
+import * as langSql from "@codemirror/lang-sql";
 
 describe("resolveEditorTheme", () => {
   it("maps only the follow-app editor theme to application IDE palettes", () => {
@@ -57,6 +71,31 @@ describe("custom editor theme backgrounds", () => {
       background: "#f5f3ee",
       gutterBackground: "#f5f3ee",
     });
+  });
+
+  it("uses an explicit gutter background when provided", () => {
+    expect(resolveCustomThemeBackgrounds({ background: "#10131a", gutterBackground: "#0b0c10" }, true)).toEqual({
+      background: "#10131a",
+      gutterBackground: "#0b0c10",
+    });
+    expect(resolveCustomThemeBackgrounds({ gutterBackground: "#0b0c10" }, false)).toEqual({
+      background: "#fafafa",
+      gutterBackground: "#0b0c10",
+    });
+  });
+
+  it("loads custom editor theme with custom UI colors", async () => {
+    const customColors: CustomThemeColors = {
+      ...DEFAULT_CUSTOM_THEME_COLORS,
+      activeLine: "#2a2a3a",
+      selection: "#3a3a4a",
+      cursor: "#ff00ff",
+      gutterBackground: "#111122",
+      lineNumber: "#777788",
+      matchingBracket: "#444455",
+    };
+    const extension = await loadEditorTheme("custom", "dark", customColors);
+    expect(extension).toBeDefined();
   });
 
   it("keeps the existing custom defaults when background is omitted", () => {
@@ -148,6 +187,39 @@ describe("custom editor theme backgrounds", () => {
   });
 });
 
+describe("Cursor editor theme selection", () => {
+  // The Cursor palettes track Cursor/VS Code's own `editor.selectionBackground`
+  // (#264F78 dark, #ADD6FF light). They previously used translucent neutrals
+  // (#40404099 over #181818, #1414141e over #fcfcfc) which composited to #303030 /
+  // #e1e1e1 — visually almost identical to the editor background, so a mouse
+  // selection was hard to spot.
+  it("paints the selection opaque and clearly visible on the editor background", () => {
+    const dark = IDE_EDITOR_THEMES.cursorDark;
+    const light = IDE_EDITOR_THEMES.cursorLight;
+
+    expect(dark.selection).toBe("#264f78");
+    expect(light.selection).toBe("#add6ff");
+    // Opaque, so the highlight cannot wash out against the editor background.
+    expect(dark.selection).toMatch(/^#[0-9a-f]{6}$/);
+    expect(light.selection).toMatch(/^#[0-9a-f]{6}$/);
+    // Selected text must stay legible inside the highlight.
+    expect(wcagContrastRatio(dark.foreground, dark.selection), `cursor-dark text on selection`).toBeGreaterThanOrEqual(3.0);
+    expect(wcagContrastRatio(light.foreground, light.selection), `cursor-light text on selection`).toBeGreaterThanOrEqual(3.0);
+  });
+
+  it("does not paint an opaque background on .cm-scroller so background images can show through", async () => {
+    const ideThemes = ["idea-dark", "idea-light", "jetbrains-dark", "jetbrains-light", "cursor-dark", "cursor-light", "claude-dark", "claude-light"] as const;
+
+    for (const theme of ideThemes) {
+      const extension = (await loadEditorTheme(theme, "dark")) as any;
+      const themeFacet = extension[0]?.find((ext: any) => ext?.value?.rules);
+      expect(themeFacet).toBeDefined();
+      const scrollerRule = themeFacet.value.rules.find((r: string) => r.includes(".cm-scroller {") && r.includes("background"));
+      expect(scrollerRule, `${theme} should not set an opaque background on .cm-scroller`).toBeUndefined();
+    }
+  });
+});
+
 describe("SQL completion theme", () => {
   it("uses the configurable medium radius for the popup container", () => {
     const rules = buildSqlCompletionThemeRules();
@@ -156,16 +228,149 @@ describe("SQL completion theme", () => {
     expect(rules[".cm-tooltip.cm-tooltip-autocomplete > ul > li"]).toMatchObject({ borderRadius: "var(--dbx-radius-sm)" });
   });
 
+  it("renders the info popup and completion list items in the configured editor font", () => {
+    // The info popup is a sibling tooltip rather than a child of the
+    // autocomplete tooltip, so it inherits nothing from it and needs the
+    // variable set on its own rule. Autocomplete ul and completionDetail also
+    // need the variable set so details and items do not fall back to monospace.
+    const rules = buildSqlCompletionThemeRules();
+    const editorFont = `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`;
+
+    expect(rules[".cm-tooltip.cm-completionInfo"]).toMatchObject({ fontFamily: editorFont });
+    expect(rules[".cm-tooltip.cm-completionInfo *"]).toMatchObject({ fontFamily: "inherit" });
+    expect(rules[".cm-completionLabel"]).toMatchObject({ fontFamily: editorFont });
+    expect(rules[".cm-completionDetail"]).toMatchObject({ fontFamily: editorFont });
+    expect(rules[".cm-tooltip.cm-tooltip-autocomplete > ul"]).toMatchObject({ fontFamily: editorFont });
+  });
+
   it("keeps completion labels ahead of long detail text", () => {
     const rules = buildSqlCompletionThemeRules();
 
     expect(rules[".cm-completionLabel"]).toMatchObject({ flex: "0 1 auto" });
     expect(rules[".cm-completionDetail"]).toMatchObject({ flex: "1 1 0", minWidth: "0", textOverflow: "ellipsis" });
   });
+
+  it("keeps the batch column insertion action fixed at the bottom of its menu", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    expect(rules[".cm-tooltip.cm-tooltip-autocomplete > ul > li.cm-batch-column-selection-action"]).toMatchObject({
+      bottom: "0",
+      position: "sticky",
+      zIndex: "1",
+    });
+  });
+
+  it("pins the completion icon glyph to its box so engines cannot clip it", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    // With `left`/`top` auto, the absolutely positioned pseudo element relies on
+    // engine-specific static positions inside the flex icon, and WebKit places it
+    // far enough left for `overflow: hidden` to cut off the left half of the glyph.
+    expect(rules[".cm-completionIcon:before"]).toMatchObject({
+      left: "0",
+      top: "0",
+      width: "15px",
+      height: "15px",
+      maskSize: "14px 14px",
+      maskPosition: "center",
+    });
+    expect(rules[".cm-completionIcon"]).toMatchObject({ width: "15px", height: "15px", overflow: "hidden" });
+  });
+
+  // #12099: sequence completions were typed "variable" but no icon mask was
+  // defined for that kind, so the menu rendered a blank icon slot.
+  it("defines completion icon masks for sequence and variable kinds", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    for (const key of [".cm-completionIcon-sequence", ".cm-completionIcon-variable"]) {
+      expect(rules[key]).toMatchObject({
+        "--dbx-completion-icon-mask": expect.stringContaining("data:image/svg+xml"),
+      });
+    }
+  });
+});
+
+describe("SQL builtin highlight tag", () => {
+  // #7950: count/date_format/etc. were added to the dialect builtin word lists (#7222) but
+  // never actually rendered in a distinct color, because the theme's highlight rule matched
+  // standard(variableName) while @codemirror/lang-sql tags builtin words as standard(name) —
+  // variableName is a *child* tag of name, so a rule keyed on the child never matches the
+  // token's actual (parent) tag.
+  it("gives builtin SQL functions their own highlight class, distinct from plain identifiers and keywords", async () => {
+    const { highlightTree } = await import("@lezer/highlight");
+    const { HighlightStyle } = await import("@codemirror/language");
+    const { tags } = await import("@lezer/highlight");
+    const style = HighlightStyle.define([
+      { tag: tags.keyword, color: "keyword" },
+      { tag: [tags.name, tags.variableName], color: "variable" },
+      { tag: SQL_BUILTIN_HIGHLIGHT_TAG, color: "builtin" },
+    ]);
+
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "postgres", "postgres");
+    const doc = "select count(*) from t";
+    const tree = dialect.language.parser.parse(doc);
+    const classesByToken = new Map<string, string>();
+    highlightTree(tree, style, (from, to, cls) => classesByToken.set(doc.slice(from, to), cls));
+
+    expect(classesByToken.get("count")).toBeDefined();
+    expect(classesByToken.get("count")).not.toBe(classesByToken.get("t"));
+    expect(classesByToken.get("count")).not.toBe(classesByToken.get("select"));
+  });
+});
+
+describe("SQL quoted identifier highlighting (#12122)", () => {
+  it("highlights quoted identifiers with identifier/variable color, distinct from string literals", async () => {
+    const { highlightTree, tags } = await import("@lezer/highlight");
+    const { HighlightStyle } = await import("@codemirror/language");
+    const style = HighlightStyle.define([
+      { tag: tags.keyword, color: "keyword" },
+      { tag: tags.string, color: "string" },
+      { tag: [tags.name, tags.variableName, SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG], color: "variable" },
+    ]);
+
+    const dialects = [
+      { name: "mysql", sql: "SELECT `col`, col, 'val' FROM `tbl`" },
+      { name: "postgres", sql: 'SELECT "col", col, \'val\' FROM "tbl"' },
+      { name: "sqlserver", sql: "SELECT [col], col, 'val' FROM [tbl]" },
+    ];
+
+    for (const { name, sql } of dialects) {
+      const dialect = createDbxCodeMirrorSqlDialect(langSql, name as any, name as any);
+      const tree = dialect.language.parser.parse(sql);
+      const classesByToken = new Map<string, string>();
+      highlightTree(tree, style, (from, to, cls) => classesByToken.set(sql.slice(from, to), cls));
+
+      const quotedCol = name === "mysql" ? "`col`" : name === "postgres" ? '"col"' : "[col]";
+      const quotedTbl = name === "mysql" ? "`tbl`" : name === "postgres" ? '"tbl"' : "[tbl]";
+
+      expect(classesByToken.get(quotedCol), `${name} quoted col`).toBe(classesByToken.get("col"));
+      expect(classesByToken.get(quotedCol), `${name} quoted col vs string`).not.toBe(classesByToken.get("'val'"));
+      expect(classesByToken.get(quotedTbl), `${name} quoted tbl`).toBe(classesByToken.get("col"));
+    }
+  });
+
+  it("maps SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG to special(string) for theme compatibility", async () => {
+    const { tags } = await import("@lezer/highlight");
+    expect(SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG).toBe(tags.special(tags.string));
+  });
 });
 
 describe("editor gutters", () => {
-  it("anchors line numbers to the first visual row of wrapped lines", () => {
+  it("does not let the gutter minimum height cycle against the scroller content height", () => {
+    const rules = buildEditorFontThemeRules();
+
+    // CodeMirror's base theme applies `min-height: 100%` to `.cm-gutter` while
+    // `.cm-gutters` is sized from the scroller content (`.cm-content`), so the
+    // percentage resolves against a height the gutter itself participates in.
+    // WebKit then re-runs layout for the whole gutter subtree whenever layout
+    // is forced, which macOS 27 does on every selection collapse: a 639 line
+    // query made right click / Esc / select-all freeze for ~180ms. The gutter
+    // spacers already span the full content height and `.cm-gutters` paints the
+    // background, so the cyclic minimum must stay at 0.
+    expect(rules[".cm-gutter"]).toMatchObject({ minHeight: "0" });
+  });
+
+  it("keeps single line numbers vertically centered in the base rule", () => {
     const rules = buildEditorFontThemeRules();
 
     expect(rules[".cm-lineNumbers .cm-gutterElement"]).toMatchObject({
@@ -173,6 +378,37 @@ describe("editor gutters", () => {
       display: "flex",
       justifyContent: "flex-end",
     });
-    expect(rules[".cm-lineNumbers .cm-gutterElement.cm-db-wrapped-line-number"]).toMatchObject({ alignItems: "flex-start" });
+  });
+
+  it("styles the fold gutter and SVG fold markers consistently (#11834)", () => {
+    const rules = buildEditorFontThemeRules();
+
+    expect(rules[".cm-foldGutter"]).toMatchObject({
+      width: "16px",
+    });
+    expect(rules[".cm-foldGutter .cm-gutterElement"]).toMatchObject({
+      alignItems: "center",
+      display: "flex",
+      justifyContent: "center",
+    });
+    expect(rules[".cm-foldMarker-svg"]).toMatchObject({
+      display: "inline-flex",
+      width: "16px",
+      height: "16px",
+    });
+  });
+});
+
+describe("editor font theme", () => {
+  it("disables ligatures on the editor content so repainted character runs stay stable", () => {
+    const rules = buildEditorFontThemeRules();
+
+    // Ligature fonts merge runs like `--`/`==` into one glyph and can race
+    // CodeMirror's per-keystroke span patching (dbx#7900); dropping either
+    // declaration would reintroduce unpainted characters in the query editor.
+    expect(rules[".cm-content"]).toMatchObject({
+      fontVariantLigatures: "none",
+      fontFeatureSettings: '"liga" 0, "calt" 0',
+    });
   });
 });

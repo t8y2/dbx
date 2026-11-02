@@ -123,7 +123,9 @@ func (decoder *xuguSpatialDecoder) normalizeRow(values []any) ([]any, []*uint32,
 	}
 	for index, value := range values {
 		if !decoder.spatial[index] {
-			values[index] = normalizeValue(value)
+			// Column types are known here, so temporal values format to a
+			// Xugu-writable wall-clock string instead of an ISO "T"/"Z" literal.
+			values[index] = normalizeValueWithType(value, decoder.columnTypes[index])
 		}
 	}
 	if len(decoder.indices) > 0 {

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test, vi } from "vitest";
-import { collectSidebarRegexIndexScopes, regexTableSearchParents, resolveSidebarRemoteSearchQuery, resolveSidebarSearchDispatchMode } from "../../apps/desktop/src/lib/sidebar/sidebarRegexSearchIndex.ts";
+import { collectSidebarRegexIndexScopes, regexTableSearchParents, resolveSidebarRemoteSearchQuery, resolveSidebarSearchDispatchMode, shouldRestoreTrackedSidebarSearchTargetsInRegexMode } from "../../apps/desktop/src/lib/sidebar/sidebarRegexSearchIndex.ts";
 import type { SidebarRegexIndexScope } from "../../apps/desktop/src/lib/sidebar/sidebarSearchTree.ts";
 import type { TableInfo, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
@@ -38,6 +38,12 @@ test("local search on keeps ordinary queries local and local search off enables 
   assert.equal(resolveSidebarSearchDispatchMode({ query: "orders", regexMode: false, wasRegexMode: false }, { localSearchEnabled: true }), "none");
   assert.equal(resolveSidebarSearchDispatchMode({ query: "orders", regexMode: false, wasRegexMode: false }, { localSearchEnabled: false }), "ordinary");
   assert.equal(resolveSidebarSearchDispatchMode({ query: "", regexMode: false, wasRegexMode: false }, { localSearchEnabled: false }), "ordinary");
+});
+
+test("keeps ordinary search results available until the regex query is cleared", () => {
+  assert.equal(shouldRestoreTrackedSidebarSearchTargetsInRegexMode("user"), false);
+  assert.equal(shouldRestoreTrackedSidebarSearchTargetsInRegexMode("user|role"), false);
+  assert.equal(shouldRestoreTrackedSidebarSearchTargetsInRegexMode(""), true);
 });
 
 test("collects manifest scopes and live-tree backfill scopes through the read-only reader", async () => {

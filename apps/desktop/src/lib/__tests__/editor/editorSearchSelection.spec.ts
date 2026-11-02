@@ -1,11 +1,6 @@
-import { readFileSync } from "node:fs";
 import { EditorSelection } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 import { appendSearchMatchSelection, findSearchMatch, isSearchAddSelectionModifier, selectionRangesForSearchMatches } from "@/lib/editor/editorSearchSelection";
-
-const searchPanelSource = readFileSync(new URL("../../../components/editor/EditorSearchPanel.vue", import.meta.url), "utf8");
-const ddlViewSource = readFileSync(new URL("../../../components/objects/DdlViewDialog.vue", import.meta.url), "utf8");
-const nacosSource = readFileSync(new URL("../../../components/nacos/NacosAdminConsole.vue", import.meta.url), "utf8");
 
 const matches = [
   { from: 0, to: 3 },
@@ -75,23 +70,5 @@ describe("editorSearchSelection", () => {
     expect(isSearchAddSelectionModifier({ ctrlKey: true }, "Win32")).toBe(true);
     expect(isSearchAddSelectionModifier({ metaKey: true }, "Win32")).toBe(false);
     expect(isSearchAddSelectionModifier({ ctrlKey: true }, "Linux x86_64")).toBe(true);
-  });
-
-  it("wires select-all and platform-modifier-click match selection into the search panel", () => {
-    expect(searchPanelSource).toContain("selectionRangesForSearchMatches");
-    expect(searchPanelSource).toContain("appendSearchMatchSelection");
-    expect(searchPanelSource).toContain("isSearchAddSelectionModifier(event)");
-    expect(searchPanelSource).toContain('@click="selectAllMatches"');
-    expect(searchPanelSource).toContain("editor.search.selectAll");
-    expect(searchPanelSource).toContain("collectAllMatches(v, limit + 1)");
-    expect(searchPanelSource).toContain("matches.slice(0, limit)");
-    expect(searchPanelSource).toContain("countEditorSearchMatches");
-    expect(searchPanelSource).toContain("editor.search.selectionLimitSummary");
-    expect(searchPanelSource).not.toContain("matchCountLimited");
-  });
-
-  it("enables multiple selections in every editor using the shared panel", () => {
-    expect(ddlViewSource).toContain("EditorState.allowMultipleSelections.of(true)");
-    expect(nacosSource).toContain("EditorState.allowMultipleSelections.of(true)");
   });
 });

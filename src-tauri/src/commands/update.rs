@@ -5,18 +5,27 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use super::update_portable;
+pub use super::update_cache::DownloadedUpdate;
+use super::{
+    update_cache::{self, CacheRecord},
+    update_portable,
+};
+pub use dbx_core::update::UpdateChannel;
 pub use dbx_core::update::UpdateInfo;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_updater::{Update, UpdaterExt};
+use tauri_plugin_updater::{Update, UpdaterBuilder, UpdaterExt};
 
 const OFFICIAL_UPDATE_ENDPOINTS: [&str; 2] = [
-    "https://dl.dbxio.com/releases/latest/latest.json",
+    "https://dl.dbxio.com/releases/stable/latest.json",
     "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
 ];
+const BETA_UPDATE_ENDPOINTS: [&str; 1] = ["https://dl.dbxio.com/releases/beta/latest.json"];
+#[cfg(test)]
 const R2_LATEST_RELEASE_DOWNLOAD_PREFIX: &str = "https://dl.dbxio.com/releases/latest/";
+const R2_STABLE_RELEASE_DOWNLOAD_PREFIX: &str = "https://dl.dbxio.com/releases/stable/latest/";
+const R2_BETA_RELEASE_DOWNLOAD_PREFIX: &str = "https://dl.dbxio.com/releases/beta/latest/";
 const CNB_RELEASE_DOWNLOAD_PREFIX: &str = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
 const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/t8y2/dbx/releases/download/";
 const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "update-download-progress";
@@ -25,6 +34,17 @@ const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PORTABLE_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_PORTABLE_SIGNATURE_BYTES: usize = 64 * 1024;
 const IS_WINDOWS_7_TARGET: bool = cfg!(target_vendor = "win7");
+
+fn dbx_updater_builder(app: &AppHandle) -> UpdaterBuilder {
+    let cleanup_app = app.clone();
+    app.updater_builder().on_before_exit(move || crate::cleanup_before_updater_forced_exit(&cleanup_app))
+}
+
+fn with_update_channel(builder: UpdaterBuilder, channel: UpdateChannel) -> UpdaterBuilder {
+    builder.version_comparator(move |current, update| {
+        dbx_core::update::is_channel_update_available(channel, &update.version.to_string(), &current.to_string())
+    })
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -37,6 +57,8 @@ pub enum UpdateDownloadSource {
 pub struct UpdateDownloadProgress {
     pub downloaded: u64,
     pub total: Option<u64>,
+    pub attempt_id: String,
+    pub version: String,
 }
 
 #[derive(Default)]
@@ -64,7 +86,12 @@ impl UpdateDownloadProgressGate {
 enum PendingUpdate {
     Downloading(Arc<DownloadCancellation>),
     Installing,
-    Ready(ReadyUpdate),
+    Ready(Box<CachedUpdate>),
+}
+
+struct CachedUpdate {
+    record: CacheRecord,
+    ready: ReadyUpdate,
 }
 
 enum ReadyUpdate {
@@ -128,7 +155,12 @@ impl PendingUpdateState {
         Ok(cancellation)
     }
 
-    fn finish_download(&self, cancellation: &Arc<DownloadCancellation>, update: ReadyUpdate) -> Result<(), String> {
+    fn finish_download(
+        &self,
+        cancellation: &Arc<DownloadCancellation>,
+        update: CachedUpdate,
+        root: &std::path::Path,
+    ) -> Result<(), String> {
         let mut pending = self.pending.lock().map_err(|_| "Update state is unavailable.".to_string())?;
         let is_current = matches!(
             pending.as_ref(),
@@ -138,7 +170,12 @@ impl PendingUpdateState {
         if !is_current {
             return Err(DOWNLOAD_CANCELED_ERROR.to_string());
         }
-        *pending = Some(PendingUpdate::Ready(update));
+        let bytes = match &update.ready {
+            ReadyUpdate::Installer { bytes, .. } => bytes,
+            ReadyUpdate::Portable { archive, .. } => archive,
+        };
+        update_cache::commit(root, &update.record, bytes)?;
+        *pending = Some(PendingUpdate::Ready(Box::new(update)));
         Ok(())
     }
 
@@ -163,12 +200,14 @@ impl PendingUpdateState {
         }
     }
 
-    fn take_ready(&self) -> Result<ReadyUpdate, String> {
+    fn take_ready(&self, cache_id: &str, expected_version: &str) -> Result<CachedUpdate, String> {
         let mut pending = self.pending.lock().map_err(|_| "Update state is unavailable.".to_string())?;
         match pending.take() {
-            Some(PendingUpdate::Ready(update)) => {
+            Some(PendingUpdate::Ready(update))
+                if update.record.info.cache_id == cache_id && update.record.info.version == expected_version =>
+            {
                 *pending = Some(PendingUpdate::Installing);
-                Ok(update)
+                Ok(*update)
             }
             other => {
                 *pending = other;
@@ -177,10 +216,22 @@ impl PendingUpdateState {
         }
     }
 
-    fn restore_ready(&self, update: ReadyUpdate) -> Result<(), String> {
+    fn restore_ready(&self, update: CachedUpdate) -> Result<(), String> {
         let mut pending = self.pending.lock().map_err(|_| "Update state is unavailable.".to_string())?;
-        *pending = Some(PendingUpdate::Ready(update));
+        *pending = Some(PendingUpdate::Ready(Box::new(update)));
         Ok(())
+    }
+
+    fn discard_ready(&self, cache_id: &str, root: &std::path::Path) -> Result<(), String> {
+        let mut pending = self.pending.lock().map_err(|_| "Update state is unavailable.")?;
+        match pending.as_ref() {
+            Some(PendingUpdate::Ready(cached)) if cached.record.info.cache_id == cache_id => {}
+            _ => return Err("Cached update changed or is busy.".into()),
+        }
+        // Logical eviction must succeed even if disk cleanup fails. A later download
+        // retries cleanup before any network work or cache commit.
+        *pending = None;
+        update_cache::discard(root)
     }
 
     fn finish_install(&self) -> Result<(), String> {
@@ -198,15 +249,22 @@ impl UpdateDownloadSource {
         }
     }
 
-    fn endpoints(&self, latest_version: Option<&str>) -> Result<Vec<String>, String> {
+    fn endpoints(&self, latest_version: Option<&str>, channel: UpdateChannel) -> Result<Vec<String>, String> {
+        let channel_endpoints: Vec<String> = match channel {
+            UpdateChannel::Stable => OFFICIAL_UPDATE_ENDPOINTS.iter().map(|endpoint| (*endpoint).to_string()).collect(),
+            UpdateChannel::Beta => BETA_UPDATE_ENDPOINTS.iter().map(|endpoint| (*endpoint).to_string()).collect(),
+        };
         match self {
-            Self::Official => Ok(OFFICIAL_UPDATE_ENDPOINTS.iter().map(|endpoint| endpoint.to_string()).collect()),
+            Self::Official => Ok(channel_endpoints),
             Self::Cnb => {
+                if matches!(channel, UpdateChannel::Beta) {
+                    return Ok(channel_endpoints);
+                }
                 let version =
                     latest_version.ok_or_else(|| "Latest version is required for CNB updates.".to_string())?;
                 Ok(vec![
                     format!("{CNB_RELEASE_DOWNLOAD_PREFIX}{}/latest.json", tag_version(version)),
-                    OFFICIAL_UPDATE_ENDPOINTS[0].to_string(),
+                    channel_endpoints[0].clone(),
                 ])
             }
         }
@@ -238,18 +296,28 @@ impl UpdateDownloadSource {
         &self,
         latest_version: &str,
         arch: &str,
+        channel: UpdateChannel,
+        release_tag: Option<&str>,
     ) -> Result<Vec<PortableAssetCandidate>, String> {
         let normalized_version = latest_version.trim().trim_start_matches('v');
         let filename = update_portable::portable_asset_name(normalized_version, arch)?;
-        let tag = tag_version(normalized_version);
+        let tag = release_tag
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| tag_version(normalized_version));
+        let r2_prefix = match channel {
+            UpdateChannel::Stable => R2_STABLE_RELEASE_DOWNLOAD_PREFIX,
+            UpdateChannel::Beta => R2_BETA_RELEASE_DOWNLOAD_PREFIX,
+        };
         let archive_urls = match self {
-            Self::Official => vec![
-                format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}{filename}"),
-                format!("{GITHUB_RELEASE_DOWNLOAD_PREFIX}{tag}/{filename}"),
-            ],
+            Self::Official => {
+                vec![format!("{r2_prefix}{filename}"), format!("{GITHUB_RELEASE_DOWNLOAD_PREFIX}{tag}/{filename}")]
+            }
             Self::Cnb => vec![
                 format!("{CNB_RELEASE_DOWNLOAD_PREFIX}{tag}/{filename}"),
-                format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}{filename}"),
+                format!("{r2_prefix}{filename}"),
+                format!("{GITHUB_RELEASE_DOWNLOAD_PREFIX}{tag}/{filename}"),
             ],
         };
         Ok(archive_urls
@@ -258,24 +326,41 @@ impl UpdateDownloadSource {
             .collect())
     }
 
-    fn installer_asset_candidates(&self, download_url: &str, latest_version: Option<&str>) -> Vec<String> {
-        let filename = download_url.rsplit('/').next().filter(|name| !name.is_empty()).unwrap_or("");
+    fn installer_asset_candidates(
+        &self,
+        download_url: &str,
+        latest_version: Option<&str>,
+        channel: UpdateChannel,
+        release_tag: Option<&str>,
+    ) -> Vec<String> {
+        let download_path = download_url.split_once('?').map(|(url, _)| url).unwrap_or(download_url);
+        let download_path = download_path.split_once('#').map(|(url, _)| url).unwrap_or(download_path);
+        let filename = download_path.rsplit('/').next().filter(|name| !name.is_empty()).unwrap_or("");
+        let r2_prefix = match channel {
+            UpdateChannel::Stable => R2_STABLE_RELEASE_DOWNLOAD_PREFIX,
+            UpdateChannel::Beta => R2_BETA_RELEASE_DOWNLOAD_PREFIX,
+        };
 
-        let tag = latest_version.map(tag_version).unwrap_or_else(|| {
-            if let Some(pos) = download_url.find("/releases/download/") {
-                let rest = &download_url[pos + "/releases/download/".len()..];
-                if let Some(tag_end) = rest.find('/') {
-                    return rest[..tag_end].to_string();
+        let tag = release_tag
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| latest_version.map(tag_version))
+            .unwrap_or_else(|| {
+                if let Some(pos) = download_url.find("/releases/download/") {
+                    let rest = &download_url[pos + "/releases/download/".len()..];
+                    if let Some(tag_end) = rest.find('/') {
+                        return rest[..tag_end].to_string();
+                    }
                 }
-            }
-            "".to_string()
-        });
+                "".to_string()
+            });
 
         let raw_candidates = match self {
             Self::Official => {
                 let mut urls = Vec::new();
                 if !filename.is_empty() {
-                    urls.push(format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}{filename}"));
+                    urls.push(format!("{r2_prefix}{filename}"));
                 }
                 urls.push(download_url.to_string());
                 if !tag.is_empty() && !filename.is_empty() {
@@ -291,7 +376,7 @@ impl UpdateDownloadSource {
                     urls.push(format!("{CNB_RELEASE_DOWNLOAD_PREFIX}{tag}/{filename}"));
                 }
                 if !filename.is_empty() {
-                    urls.push(format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}{filename}"));
+                    urls.push(format!("{r2_prefix}{filename}"));
                 }
                 urls.push(download_url.to_string());
                 urls
@@ -317,13 +402,26 @@ fn tag_version(version: &str) -> String {
     }
 }
 
+fn release_tag_for_version(version: &Version, candidate: Option<String>) -> Result<String, String> {
+    let tag = candidate.unwrap_or_else(|| tag_version(&version.to_string()));
+    let normalized = tag.strip_prefix('v').unwrap_or(&tag);
+    let parsed = Version::parse(normalized).map_err(|_| "Invalid update release tag.".to_string())?;
+    if (parsed.major, parsed.minor, parsed.patch) != (version.major, version.minor, version.patch) {
+        return Err("Update release tag does not match the downloaded version.".into());
+    }
+    Ok(format!("v{normalized}"))
+}
+
 #[tauri::command]
 pub async fn check_for_updates(
     locale: Option<String>,
     source: Option<dbx_core::DownloadSource>,
+    channel: Option<UpdateChannel>,
 ) -> Result<UpdateInfo, String> {
     let locale = locale.unwrap_or_else(|| "zh-CN".to_string());
-    let release = dbx_core::update::fetch_latest_release(&locale, source.unwrap_or_default()).await?;
+    let channel = channel.unwrap_or_default();
+    let release =
+        dbx_core::update::fetch_latest_release_for_channel(&locale, source.unwrap_or_default(), channel).await?;
     let current_version = env!("CARGO_PKG_VERSION");
     let mut info = dbx_core::update::build_update_info(release, current_version);
     info.portable_mode = crate::data_dir::is_portable_mode();
@@ -342,6 +440,21 @@ pub async fn fetch_changelog(lang: Option<String>) -> Result<dbx_core::changelog
 }
 
 #[tauri::command]
+pub async fn fetch_changelog_index(lang: Option<String>) -> Result<dbx_core::changelog::ChangelogIndex, String> {
+    let lang = lang.unwrap_or_else(|| "en".to_string());
+    dbx_core::changelog::fetch_changelog_index(&lang).await
+}
+
+#[tauri::command]
+pub async fn fetch_changelog_release(
+    lang: Option<String>,
+    tag: String,
+) -> Result<dbx_core::changelog::ChangelogRelease, String> {
+    let lang = lang.unwrap_or_else(|| "en".to_string());
+    dbx_core::changelog::fetch_changelog_release(&lang, &tag).await
+}
+
+#[tauri::command]
 pub async fn get_system_proxy_url() -> Option<String> {
     tauri::async_runtime::spawn_blocking(dbx_core::update::system_proxy_url).await.ok().flatten()
 }
@@ -351,57 +464,212 @@ pub fn cancel_update_download(state: tauri::State<'_, PendingUpdateState>) {
     state.cancel_download();
 }
 
+fn package_kind(app: &AppHandle) -> Result<String, String> {
+    if crate::data_dir::is_portable_mode() {
+        return Ok("portable".into());
+    }
+    Ok(dbx_updater_builder(app).build().map_err(|e| e.to_string())?.package_kind().into())
+}
+
+fn validate_cache_target(record: &CacheRecord, portable_mode: bool, package_kind: &str) -> Result<(), String> {
+    if record.package_kind != package_kind
+        || record.os != std::env::consts::OS
+        || record.arch != std::env::consts::ARCH
+        || record.info.portable_mode != portable_mode
+    {
+        return Err("Cached update does not match this installation.".into());
+    }
+    Ok(())
+}
+
+fn restore_cached(app: &AppHandle) -> Result<Option<CachedUpdate>, String> {
+    let root = update_cache::root(app)?;
+    if requires_manual_update(IS_WINDOWS_7_TARGET) {
+        update_cache::discard(&root)?;
+        return Ok(None);
+    }
+    let restored = (|| {
+        let Some((record, bytes)) = update_cache::read(&root)? else { return Ok(None) };
+        validate_cache_target(&record, crate::data_dir::is_portable_mode(), &package_kind(app)?)?;
+        let version =
+            update_portable::validate_requested_portable_version(&record.info.version, env!("CARGO_PKG_VERSION"))?;
+        let ready = if record.info.portable_mode {
+            update_portable::verify_portable_archive(
+                &bytes,
+                record.signature.as_deref().ok_or("Missing cached signature")?,
+                &version,
+                std::env::consts::ARCH,
+            )?;
+            ReadyUpdate::Portable { archive: bytes, version }
+        } else {
+            let update = with_update_channel(dbx_updater_builder(app), record.info.channel)
+                .build()
+                .map_err(|e| e.to_string())?
+                .restore_update(record.manifest.clone().ok_or("Missing cached release metadata")?)
+                .map_err(|e| e.to_string())?
+                .ok_or("Cached update is no longer newer")?;
+            if update.version != record.info.version {
+                return Err("Cached release version mismatch".into());
+            }
+            update.verify(&bytes).map_err(|e| e.to_string())?;
+            ReadyUpdate::Installer { update: Box::new(update), bytes }
+        };
+        Ok(Some(CachedUpdate { record, ready }))
+    })();
+    if restored.is_err() {
+        update_cache::discard(&root)?;
+    }
+    restored
+}
+
+#[tauri::command(async)]
+pub fn get_downloaded_update(
+    app: AppHandle,
+    state: tauri::State<'_, PendingUpdateState>,
+) -> Result<Option<DownloadedUpdate>, String> {
+    let mut pending = state.pending.lock().map_err(|_| "Update state is unavailable.")?;
+    match pending.as_ref() {
+        Some(PendingUpdate::Ready(cached)) => return Ok(Some(cached.record.info.clone())),
+        Some(_) => return Ok(None),
+        None => {}
+    }
+    update_cache::cleanup_partial(&update_cache::root(&app)?)?;
+    match restore_cached(&app) {
+        Ok(Some(cached)) => {
+            let info = cached.record.info.clone();
+            *pending = Some(PendingUpdate::Ready(Box::new(cached)));
+            Ok(Some(info))
+        }
+        Ok(None) => Ok(None),
+        Err(error) => {
+            eprintln!("[DBX updater] discarded invalid cache: {error}");
+            Ok(None)
+        }
+    }
+}
+
+#[tauri::command(async)]
+pub fn discard_downloaded_update(
+    app: AppHandle,
+    state: tauri::State<'_, PendingUpdateState>,
+    cache_id: String,
+) -> Result<(), String> {
+    state.discard_ready(&cache_id, &update_cache::root(&app)?)
+}
+
 #[tauri::command]
 pub async fn download_update(
     app: AppHandle,
     state: tauri::State<'_, PendingUpdateState>,
     source: UpdateDownloadSource,
-    latest_version: Option<String>,
-) -> Result<(), String> {
+    channel: UpdateChannel,
+    latest_version: String,
+    attempt_id: String,
+    release_notes: Option<String>,
+    release_tag: Option<String>,
+) -> Result<DownloadedUpdate, String> {
     let portable_mode = crate::data_dir::is_portable_mode();
     if requires_manual_update(IS_WINDOWS_7_TARGET) {
         return Err("Windows 7 builds must be updated with the dedicated Windows 7 offline installer.".to_string());
     }
-    let portable_version = if portable_mode {
-        let requested_version =
-            latest_version.as_deref().ok_or_else(|| "Latest version is required for portable updates.".to_string())?;
-        Some(update_portable::validate_requested_portable_version(requested_version, env!("CARGO_PKG_VERSION"))?)
-    } else {
-        None
-    };
-    let cancellation = state.begin_download()?;
-    let result = if let Some(version) = portable_version {
-        download_portable_update_inner(&app, &source, &version, &cancellation)
-            .await
-            .map(|archive| ReadyUpdate::Portable { archive, version })
-    } else {
-        download_update_inner(&app, &source, latest_version.as_deref(), &cancellation)
-            .await
-            .map(|(update, bytes)| ReadyUpdate::Installer { update: Box::new(update), bytes })
-    };
-    match result {
-        Ok(update) => state.finish_download(&cancellation, update),
-        Err(error) => {
-            state.finish_failed_download(&cancellation)?;
-            Err(error)
-        }
+    let version = update_portable::validate_requested_portable_version(&latest_version, env!("CARGO_PKG_VERSION"))?;
+    let release_tag = release_tag_for_version(&version, release_tag)?;
+    if attempt_id.is_empty() || attempt_id.len() > 128 {
+        return Err("Invalid download attempt identifier.".into());
     }
+    let cancellation = state.begin_download()?;
+    let result = async {
+        let cache_root = update_cache::root(&app)?;
+        update_cache::discard(&cache_root)?;
+        update_cache::ensure_writable(&cache_root)?;
+        let (ready, manifest, signature, notes) = if portable_mode {
+            let (archive, signature) = download_portable_update_inner(
+                &app,
+                &source,
+                channel,
+                &version,
+                &release_tag,
+                &attempt_id,
+                &cancellation,
+            )
+            .await?;
+            (ReadyUpdate::Portable { archive, version: version.clone() }, None, Some(signature), String::new())
+        } else {
+            let (update, bytes) = download_update_inner(
+                &app,
+                &source,
+                channel,
+                Some(&latest_version),
+                Some(&release_tag),
+                &attempt_id,
+                &cancellation,
+            )
+            .await?;
+            let manifest = Some(update.raw_json.clone());
+            let notes = update.body.clone().unwrap_or_default();
+            (ReadyUpdate::Installer { update: Box::new(update), bytes }, manifest, None, notes)
+        };
+        let release_url = format!("https://github.com/t8y2/dbx/releases/tag/{release_tag}");
+        let info = DownloadedUpdate {
+            cache_id: uuid::Uuid::new_v4().to_string(),
+            version: version.to_string(),
+            portable_mode,
+            release_url,
+            release_notes: release_notes.unwrap_or(notes),
+            downloaded_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_millis() as u64,
+            channel,
+            release_tag: Some(release_tag),
+            is_promoted: matches!(channel, UpdateChannel::Stable),
+        };
+        let bytes = match &ready {
+            ReadyUpdate::Installer { bytes, .. } => bytes,
+            ReadyUpdate::Portable { archive, .. } => archive,
+        };
+        let cached = CachedUpdate {
+            record: CacheRecord {
+                schema_version: 1,
+                package_kind: package_kind(&app)?,
+                package_length: bytes.len() as u64,
+                package_sha256: update_cache::digest(bytes),
+                info: info.clone(),
+                os: std::env::consts::OS.into(),
+                arch: std::env::consts::ARCH.into(),
+                manifest,
+                signature,
+            },
+            ready,
+        };
+        state.finish_download(&cancellation, cached, &update_cache::root(&app)?)?;
+        Ok(info)
+    }
+    .await;
+    if result.is_err() {
+        state.finish_failed_download(&cancellation)?;
+    }
+    result
 }
 
 async fn download_update_inner(
     app: &AppHandle,
     source: &UpdateDownloadSource,
+    channel: UpdateChannel,
     latest_version: Option<&str>,
+    release_tag: Option<&str>,
+    attempt_id: &str,
     cancellation: &Arc<DownloadCancellation>,
 ) -> Result<(Update, Vec<u8>), String> {
-    let endpoint_urls = source.endpoints(latest_version)?;
+    let endpoint_urls = source.endpoints(latest_version, channel)?;
     println!("[DBX updater] checking from {} endpoints: {}", source.label(), endpoint_urls.join(", "));
     let mut endpoints = Vec::with_capacity(endpoint_urls.len());
     for endpoint_url in endpoint_urls {
         endpoints.push(endpoint_url.parse().map_err(|e| format!("Invalid update endpoint: {e}"))?);
     }
-    let mut builder =
-        app.updater_builder().endpoints(endpoints).map_err(|e| format!("Failed to configure updater endpoint: {e}"))?;
+    let mut builder = with_update_channel(dbx_updater_builder(app), channel)
+        .endpoints(endpoints)
+        .map_err(|e| format!("Failed to configure updater endpoint: {e}"))?;
 
     if let Some(proxy_url) = dbx_core::update::system_proxy_url() {
         let proxy = proxy_url.parse().map_err(|e| format!("Invalid system proxy URL: {e}"))?;
@@ -409,12 +677,23 @@ async fn download_update_inner(
     }
 
     let updater = builder.build().map_err(|e| format!("Failed to create updater: {e}"))?;
-    let update = updater.check().await.map_err(|e| format!("Failed to check updates: {e}"))?;
+    let update = wait_for_download_step(
+        updater.check(),
+        cancellation,
+        Duration::from_secs(30),
+        "Update check timed out.".into(),
+    )
+    .await?
+    .map_err(|e| format!("Failed to check updates: {e}"))?;
     let Some(update) = update else {
         return Err("No update available.".to_string());
     };
 
-    let candidates = source.installer_asset_candidates(update.download_url.as_str(), latest_version);
+    if Some(update.version.as_str()) != latest_version.map(|v| v.trim().trim_start_matches('v')) {
+        return Err("Update version changed; check for updates again.".into());
+    }
+    let candidates =
+        source.installer_asset_candidates(update.download_url.as_str(), latest_version, channel, release_tag);
     println!("[DBX updater] candidates for installer download: {:?}", candidates);
 
     let mut failures = Vec::new();
@@ -440,6 +719,10 @@ async fn download_update_inner(
 
         let (progress_tx, progress_rx) = tokio::sync::mpsc::channel::<()>(16);
 
+        let attempt_id = attempt_id.to_string();
+        let version = update.version.clone();
+        let finish_attempt_id = attempt_id.clone();
+        let finish_version = version.clone();
         let download_result = {
             let mut candidate_update = update.clone();
             candidate_update.download_url = parsed_url.clone();
@@ -452,8 +735,15 @@ async fn download_update_inner(
                                 .fetch_add(chunk_len as u64, Ordering::Relaxed)
                                 .saturating_add(chunk_len as u64);
                             if progress_gate.should_emit(downloaded, total) {
-                                let _ = progress_app_chunk
-                                    .emit(UPDATE_DOWNLOAD_PROGRESS_EVENT, UpdateDownloadProgress { downloaded, total });
+                                let _ = progress_app_chunk.emit(
+                                    UPDATE_DOWNLOAD_PROGRESS_EVENT,
+                                    UpdateDownloadProgress {
+                                        downloaded,
+                                        total,
+                                        attempt_id: attempt_id.clone(),
+                                        version: version.clone(),
+                                    },
+                                );
                             }
                             let _ = progress_tx.try_send(());
                         },
@@ -461,7 +751,12 @@ async fn download_update_inner(
                             let downloaded = finished_downloaded.load(Ordering::Relaxed);
                             let _ = progress_app_finish.emit(
                                 UPDATE_DOWNLOAD_PROGRESS_EVENT,
-                                UpdateDownloadProgress { downloaded, total: Some(downloaded) },
+                                UpdateDownloadProgress {
+                                    downloaded,
+                                    total: Some(downloaded),
+                                    attempt_id: finish_attempt_id,
+                                    version: finish_version,
+                                },
                             );
                         },
                     )
@@ -494,11 +789,15 @@ async fn download_update_inner(
 async fn download_portable_update_inner(
     app: &AppHandle,
     source: &UpdateDownloadSource,
+    channel: UpdateChannel,
     latest_version: &Version,
+    release_tag: &str,
+    attempt_id: &str,
     cancellation: &Arc<DownloadCancellation>,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, String), String> {
     let latest_version_text = latest_version.to_string();
-    let candidates = source.portable_asset_candidates(&latest_version_text, std::env::consts::ARCH)?;
+    let candidates =
+        source.portable_asset_candidates(&latest_version_text, std::env::consts::ARCH, channel, Some(release_tag))?;
     let client = portable_update_http_client()?;
     let mut failures = Vec::new();
 
@@ -513,6 +812,8 @@ async fn download_portable_update_inner(
                 &candidate.signature_url,
                 MAX_PORTABLE_SIGNATURE_BYTES,
                 None,
+                attempt_id,
+                &latest_version_text,
                 cancellation,
             )
             .await?;
@@ -523,11 +824,13 @@ async fn download_portable_update_inner(
                 &candidate.archive_url,
                 MAX_PORTABLE_ARCHIVE_BYTES,
                 Some(app),
+                attempt_id,
+                &latest_version_text,
                 cancellation,
             )
             .await?;
             update_portable::verify_portable_archive(&archive, &signature, latest_version, std::env::consts::ARCH)?;
-            Ok::<Vec<u8>, String>(archive)
+            Ok::<(Vec<u8>, String), String>((archive, signature))
         }
         .await;
 
@@ -563,6 +866,8 @@ async fn download_bounded_bytes(
     url: &str,
     max_bytes: usize,
     progress_app: Option<&AppHandle>,
+    attempt_id: &str,
+    version: &str,
     cancellation: &DownloadCancellation,
 ) -> Result<Vec<u8>, String> {
     if cancellation.is_canceled() {
@@ -589,7 +894,10 @@ async fn download_bounded_bytes(
     }
 
     if let Some(app) = progress_app {
-        let _ = app.emit(UPDATE_DOWNLOAD_PROGRESS_EVENT, UpdateDownloadProgress { downloaded: 0, total });
+        let _ = app.emit(
+            UPDATE_DOWNLOAD_PROGRESS_EVENT,
+            UpdateDownloadProgress { downloaded: 0, total, attempt_id: attempt_id.into(), version: version.into() },
+        );
     }
     let mut progress_gate = UpdateDownloadProgressGate::default();
     progress_gate.should_emit(0, total);
@@ -623,7 +931,12 @@ async fn download_bounded_bytes(
             if let Some(app) = progress_app {
                 let _ = app.emit(
                     UPDATE_DOWNLOAD_PROGRESS_EVENT,
-                    UpdateDownloadProgress { downloaded: bytes.len() as u64, total },
+                    UpdateDownloadProgress {
+                        downloaded: bytes.len() as u64,
+                        total,
+                        attempt_id: attempt_id.into(),
+                        version: version.into(),
+                    },
                 );
             }
         }
@@ -672,11 +985,30 @@ async fn wait_for_download_step<T>(
     }
 }
 
-#[tauri::command]
-pub fn install_downloaded_update(app: AppHandle, state: tauri::State<'_, PendingUpdateState>) -> Result<(), String> {
-    let ready = state.take_ready()?;
-    let portable = matches!(&ready, ReadyUpdate::Portable { .. });
-    let install_result = match &ready {
+#[tauri::command(async)]
+pub fn install_downloaded_update(
+    app: AppHandle,
+    state: tauri::State<'_, PendingUpdateState>,
+    cache_id: String,
+    expected_version: String,
+) -> Result<(), String> {
+    let cached = state.take_ready(&cache_id, &expected_version)?;
+    // Read and reverify disk bytes immediately before installation; never trust memory alone.
+    let refreshed = match restore_cached(&app) {
+        Ok(Some(ready)) if ready.record.info.cache_id == cache_id && ready.record.info.version == expected_version => {
+            ready
+        }
+        other => {
+            state.finish_install()?;
+            return Err(match other {
+                Err(e) => e,
+                _ => "Cached update is missing or changed.".into(),
+            });
+        }
+    };
+    let ready = &refreshed.ready;
+    let portable = matches!(ready, ReadyUpdate::Portable { .. });
+    let install_result = match ready {
         ReadyUpdate::Installer { update, bytes } => {
             update.install(bytes).map_err(|error| format!("Failed to install update: {error}"))
         }
@@ -686,12 +1018,16 @@ pub fn install_downloaded_update(app: AppHandle, state: tauri::State<'_, Pending
         }
     };
     if let Err(error) = install_result {
-        state.restore_ready(ready)?;
+        state.restore_ready(cached)?;
         return Err(error);
     }
-    state.finish_install()?;
     if portable {
+        // The helper can still fail or roll back after this process exits. Keep
+        // the verified package until the upgraded application validates its version.
         schedule_portable_update_exit(app);
+    } else {
+        state.finish_install()?;
+        let _ = update_cache::discard(&update_cache::root(&app)?);
     }
     Ok(())
 }
@@ -710,11 +1046,129 @@ fn schedule_portable_update_exit(app: AppHandle) {
 mod tests {
     use super::{
         requires_manual_update, tag_version, wait_for_download_step, wait_for_progressing_download,
-        DownloadCancellation, PendingUpdateState, UpdateDownloadProgressGate, UpdateDownloadSource,
+        DownloadCancellation, PendingUpdateState, UpdateChannel, UpdateDownloadProgressGate, UpdateDownloadSource,
         CNB_RELEASE_DOWNLOAD_PREFIX, DOWNLOAD_CANCELED_ERROR, GITHUB_RELEASE_DOWNLOAD_PREFIX,
-        OFFICIAL_UPDATE_ENDPOINTS, R2_LATEST_RELEASE_DOWNLOAD_PREFIX,
+        OFFICIAL_UPDATE_ENDPOINTS, R2_BETA_RELEASE_DOWNLOAD_PREFIX, R2_LATEST_RELEASE_DOWNLOAD_PREFIX,
+        R2_STABLE_RELEASE_DOWNLOAD_PREFIX,
     };
+    use semver::Version;
     use std::{future::pending, sync::Arc, time::Duration};
+
+    fn cached_fixture() -> super::CachedUpdate {
+        super::CachedUpdate {
+            record: super::CacheRecord {
+                schema_version: 1,
+                package_kind: "portable".into(),
+                package_length: 0,
+                package_sha256: super::update_cache::digest(&[]),
+                info: super::DownloadedUpdate {
+                    cache_id: "cached-id".into(),
+                    version: "99.0.0".into(),
+                    portable_mode: true,
+                    release_url: String::new(),
+                    release_notes: String::new(),
+                    downloaded_at: 0,
+                    channel: UpdateChannel::Stable,
+                    release_tag: None,
+                    is_promoted: true,
+                },
+                os: std::env::consts::OS.into(),
+                arch: std::env::consts::ARCH.into(),
+                manifest: None,
+                signature: None,
+            },
+            ready: super::ReadyUpdate::Portable { archive: vec![], version: semver::Version::new(99, 0, 0) },
+        }
+    }
+
+    #[test]
+    fn beta_release_tag_is_preserved_and_must_match_version() {
+        let version = Version::parse("0.6.60").unwrap();
+        assert_eq!(
+            super::release_tag_for_version(&version, Some("v0.6.60-beta.20261028.1".into())).unwrap(),
+            "v0.6.60-beta.20261028.1"
+        );
+        assert!(super::release_tag_for_version(&version, Some("v0.6.61-beta.20261028.1".into())).is_err());
+        assert_eq!(super::release_tag_for_version(&version, None).unwrap(), "v0.6.60");
+    }
+
+    #[test]
+    fn offline_restore_keeps_a_same_base_beta_download_installable() {
+        use tauri_plugin_updater::UpdaterExt;
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().plugins.0.insert("updater".into(), serde_json::json!({ "pubkey": "" }));
+        let app =
+            tauri::test::mock_builder().plugin(tauri_plugin_updater::Builder::new().build()).build(context).unwrap();
+        let current = &app.package_info().version;
+        let manifest = serde_json::json!({
+            "version": format!("{}.{}.{}-beta.20261029.1", current.major, current.minor, current.patch),
+            "platforms": {
+                "test-target": { "url": "https://example.com/dbx.tar.gz", "signature": "test-signature" }
+            }
+        });
+        let restore = |channel| {
+            super::with_update_channel(app.updater_builder(), channel)
+                .target("test-target")
+                .endpoints(vec!["https://example.com/latest.json".parse().unwrap()])
+                .unwrap()
+                .build()
+                .unwrap()
+                .restore_update(manifest.clone())
+                .unwrap()
+        };
+        assert!(restore(UpdateChannel::Beta).is_some());
+        assert!(restore(UpdateChannel::Stable).is_none());
+    }
+
+    #[test]
+    fn stale_cache_identity_and_double_install_are_rejected() {
+        let state = PendingUpdateState::default();
+        state.restore_ready(cached_fixture()).unwrap();
+        assert!(state.take_ready("wrong-id", "99.0.0").is_err());
+        assert!(state.take_ready("cached-id", "98.0.0").is_err());
+        let ready = state.take_ready("cached-id", "99.0.0").unwrap();
+        assert!(state.take_ready("cached-id", "99.0.0").is_err());
+        state.restore_ready(ready).unwrap();
+        assert!(state.take_ready("cached-id", "99.0.0").is_ok());
+    }
+
+    #[test]
+    fn canceled_attempt_cannot_commit_or_publish_cache() {
+        let state = PendingUpdateState::default();
+        let attempt = state.begin_download().unwrap();
+        state.cancel_download();
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        assert!(state.finish_download(&attempt, cached_fixture(), &root).is_err());
+        assert!(!root.exists());
+        assert!(state.begin_download().is_ok());
+    }
+
+    #[test]
+    fn cleanup_failure_does_not_leave_ready_state_or_block_new_attempts() {
+        let state = PendingUpdateState::default();
+        state.restore_ready(cached_fixture()).unwrap();
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        // A file in place of the cache root makes deletion fail on every platform.
+        std::fs::write(&root, b"not a directory").unwrap();
+        assert!(state.discard_ready("cached-id", &root).is_err());
+        assert!(state.take_ready("cached-id", "99.0.0").is_err());
+        assert!(state.begin_download().is_ok());
+        std::fs::remove_file(root).unwrap();
+    }
+
+    #[test]
+    fn cache_target_requires_architecture_os_and_installation_type() {
+        let record = cached_fixture().record;
+        assert!(super::validate_cache_target(&record, true, "portable").is_ok());
+        assert!(super::validate_cache_target(&record, false, "portable").is_err());
+        assert!(super::validate_cache_target(&record, true, "nsis").is_err());
+        let mut wrong_arch = record.clone();
+        wrong_arch.arch = "different-architecture".into();
+        assert!(super::validate_cache_target(&wrong_arch, true, "portable").is_err());
+        let mut wrong_os = record;
+        wrong_os.os = "different-os".into();
+        assert!(super::validate_cache_target(&wrong_os, true, "portable").is_err());
+    }
 
     #[test]
     fn all_windows_7_builds_require_manual_updates() {
@@ -730,13 +1184,13 @@ mod tests {
 
     #[test]
     fn builds_official_update_endpoints() {
-        let endpoints = UpdateDownloadSource::Official.endpoints(None).unwrap();
+        let endpoints = UpdateDownloadSource::Official.endpoints(None, UpdateChannel::Stable).unwrap();
         assert_eq!(endpoints, OFFICIAL_UPDATE_ENDPOINTS);
     }
 
     #[test]
     fn builds_cnb_update_endpoint_for_tag() {
-        let endpoints = UpdateDownloadSource::Cnb.endpoints(Some("0.5.39")).unwrap();
+        let endpoints = UpdateDownloadSource::Cnb.endpoints(Some("0.5.39"), UpdateChannel::Stable).unwrap();
         assert_eq!(
             endpoints,
             vec![format!("{CNB_RELEASE_DOWNLOAD_PREFIX}v0.5.39/latest.json"), OFFICIAL_UPDATE_ENDPOINTS[0].to_string()]
@@ -762,11 +1216,13 @@ mod tests {
 
     #[test]
     fn builds_signed_official_portable_asset_candidates() {
-        let candidates = UpdateDownloadSource::Official.portable_asset_candidates("0.5.64", "x86_64").unwrap();
+        let candidates = UpdateDownloadSource::Official
+            .portable_asset_candidates("0.5.64", "x86_64", UpdateChannel::Stable, None)
+            .unwrap();
         assert_eq!(candidates.len(), 2);
         assert_eq!(
             candidates[0].archive_url,
-            format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.64_x64-portable.zip")
+            format!("{R2_STABLE_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.64_x64-portable.zip")
         );
         assert_eq!(
             candidates[1].archive_url,
@@ -777,14 +1233,21 @@ mod tests {
 
     #[test]
     fn builds_cnb_portable_asset_candidate_with_r2_fallback() {
-        let candidates = UpdateDownloadSource::Cnb.portable_asset_candidates("v0.5.64", "aarch64").unwrap();
+        let candidates = UpdateDownloadSource::Cnb
+            .portable_asset_candidates("v0.5.64", "aarch64", UpdateChannel::Stable, None)
+            .unwrap();
+        assert_eq!(candidates.len(), 3);
         assert_eq!(
             candidates[0].archive_url,
             format!("{CNB_RELEASE_DOWNLOAD_PREFIX}v0.5.64/DBX_0.5.64_arm64-portable.zip")
         );
         assert_eq!(
             candidates[1].archive_url,
-            format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.64_arm64-portable.zip")
+            format!("{R2_STABLE_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.64_arm64-portable.zip")
+        );
+        assert_eq!(
+            candidates[2].archive_url,
+            format!("{GITHUB_RELEASE_DOWNLOAD_PREFIX}v0.5.64/DBX_0.5.64_arm64-portable.zip")
         );
     }
 
@@ -793,10 +1256,12 @@ mod tests {
         let candidates = UpdateDownloadSource::Cnb.installer_asset_candidates(
             "https://github.com/t8y2/dbx/releases/download/v0.5.64/DBX_0.5.64_aarch64.dmg",
             Some("0.5.64"),
+            UpdateChannel::Stable,
+            None,
         );
         assert_eq!(candidates.len(), 3);
         assert_eq!(candidates[0], "https://cnb.cool/dbxio.com/dbx/-/releases/download/v0.5.64/DBX_0.5.64_aarch64.dmg");
-        assert_eq!(candidates[1], format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.64_aarch64.dmg"));
+        assert_eq!(candidates[1], format!("{R2_STABLE_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.64_aarch64.dmg"));
         assert_eq!(candidates[2], "https://github.com/t8y2/dbx/releases/download/v0.5.64/DBX_0.5.64_aarch64.dmg");
     }
 
@@ -805,11 +1270,59 @@ mod tests {
         let candidates = UpdateDownloadSource::Official.installer_asset_candidates(
             "https://github.com/t8y2/dbx/releases/download/v0.5.64/DBX_0.5.64_aarch64.dmg",
             Some("0.5.64"),
+            UpdateChannel::Stable,
+            None,
         );
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.64_aarch64.dmg"));
+        assert_eq!(candidates[0], format!("{R2_STABLE_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.64_aarch64.dmg"));
         assert_eq!(candidates[1], "https://github.com/t8y2/dbx/releases/download/v0.5.64/DBX_0.5.64_aarch64.dmg");
         assert!(!candidates.iter().any(|url| url.contains("cnb.cool")));
+    }
+
+    #[test]
+    fn beta_installer_fallbacks_use_the_prerelease_release_tag() {
+        let candidates = UpdateDownloadSource::Cnb.installer_asset_candidates(
+            "https://dl.dbxio.com/releases/beta/v0.6.60-beta.20261028.1/DBX_0.6.60_x64-setup.exe?v=v0.6.60-beta.20261028.1",
+            Some("0.6.60"),
+            UpdateChannel::Beta,
+            Some("v0.6.60-beta.20261028.1"),
+        );
+        assert_eq!(
+            candidates[0],
+            "https://cnb.cool/dbxio.com/dbx/-/releases/download/v0.6.60-beta.20261028.1/DBX_0.6.60_x64-setup.exe"
+        );
+        assert_eq!(candidates[1], format!("{R2_BETA_RELEASE_DOWNLOAD_PREFIX}DBX_0.6.60_x64-setup.exe"));
+        assert_eq!(
+            candidates[2],
+            "https://dl.dbxio.com/releases/beta/v0.6.60-beta.20261028.1/DBX_0.6.60_x64-setup.exe?v=v0.6.60-beta.20261028.1"
+        );
+        assert!(!candidates.iter().any(|url| url.contains("releases/download/v0.6.60/")));
+    }
+
+    #[test]
+    fn beta_portable_candidates_never_use_stable_alias() {
+        let candidates = UpdateDownloadSource::Official
+            .portable_asset_candidates("0.6.60", "x86_64", UpdateChannel::Beta, None)
+            .unwrap();
+        assert_eq!(candidates[0].archive_url, format!("{R2_BETA_RELEASE_DOWNLOAD_PREFIX}DBX_0.6.60_x64-portable.zip"));
+        assert!(!candidates
+            .iter()
+            .any(|candidate| candidate.archive_url.starts_with(R2_LATEST_RELEASE_DOWNLOAD_PREFIX)));
+    }
+
+    #[test]
+    fn beta_portable_fallbacks_use_the_prerelease_release_tag() {
+        let candidates = UpdateDownloadSource::Cnb
+            .portable_asset_candidates("0.6.60", "x86_64", UpdateChannel::Beta, Some("v0.6.60-beta.20261028.1"))
+            .unwrap();
+        assert_eq!(
+            candidates[0].archive_url,
+            format!("{CNB_RELEASE_DOWNLOAD_PREFIX}v0.6.60-beta.20261028.1/DBX_0.6.60_x64-portable.zip")
+        );
+        assert_eq!(
+            candidates[2].archive_url,
+            format!("{GITHUB_RELEASE_DOWNLOAD_PREFIX}v0.6.60-beta.20261028.1/DBX_0.6.60_x64-portable.zip")
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 package com.dbx.agent.h2;
 
+import com.dbx.agent.ConnectParams;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
@@ -10,18 +11,46 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.sql.Driver;
 import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
+import java.util.Properties;
 import java.util.UUID;
 
 final class H2DriverLoader {
     private static final Object EXTRACTION_LOCK = new Object();
     private static final Path CACHE_ROOT = Path.of(System.getProperty("java.io.tmpdir"), "dbx-h2-drivers");
+    // H2's engine registry is classloader-scoped. Keep one engine per driver for
+    // the Agent process, not one per logical session (which fights for file locks).
+    private static final Map<H2DriverVersion, LoadedDriver> BUNDLED = new EnumMap<>(H2DriverVersion.class);
+    private static final Map<String, LoadedDriver> EXTERNAL = new HashMap<>();
 
     private H2DriverLoader() {
     }
 
-    static LoadedDriver load(H2DriverVersion version) throws Exception {
+    static boolean autoServerEnabled(ConnectParams params) throws Exception {
+        // Use H2's parser so escaped INIT statements and duplicate options keep JDBC semantics.
+        Class<?> connectionInfo = load(H2DriverVersion.V3).classLoader().loadClass("org.h2.engine.ConnectionInfo");
+        Properties properties = new Properties();
+        if (params.getUsername() != null) {
+            properties.setProperty("user", params.getUsername());
+        }
+        if (params.getPassword() != null) {
+            properties.setProperty("password", params.getPassword());
+        }
+        Object info = connectionInfo.getConstructor(String.class, Properties.class, String.class, Object.class)
+            .newInstance(H2Agent.buildUrl(params), properties, null, null);
+        return Boolean.TRUE.equals(connectionInfo.getMethod("getProperty", String.class, boolean.class)
+            .invoke(info, "AUTO_SERVER", false));
+    }
+
+    static synchronized LoadedDriver load(H2DriverVersion version) throws Exception {
+        LoadedDriver cached = BUNDLED.get(version);
+        if (cached != null) {
+            return cached;
+        }
         Path jar = extract(version);
         URLClassLoader classLoader = new URLClassLoader(
             new URL[]{jar.toUri().toURL()},
@@ -29,7 +58,9 @@ final class H2DriverLoader {
         );
         try {
             Driver driver = (Driver) Class.forName("org.h2.Driver", true, classLoader).getDeclaredConstructor().newInstance();
-            return new LoadedDriver(version, version.version(), driver, classLoader);
+            LoadedDriver loaded = new LoadedDriver(version, version.version(), driver, classLoader);
+            BUNDLED.put(version, loaded);
+            return loaded;
         } catch (Exception error) {
             closeAfterFailure(classLoader, error);
             throw error;
@@ -39,7 +70,7 @@ final class H2DriverLoader {
         }
     }
 
-    static LoadedDriver loadExternal(List<String> driverPaths, String driverClass) throws Exception {
+    static synchronized LoadedDriver loadExternal(List<String> driverPaths, String driverClass) throws Exception {
         if (driverPaths == null || driverPaths.isEmpty()) {
             throw new IllegalArgumentException("Custom H2 driver profile requires at least one JDBC JAR path");
         }
@@ -50,17 +81,26 @@ final class H2DriverLoader {
             if (!Files.isRegularFile(path)) {
                 throw new IOException("Custom H2 JDBC JAR does not exist: " + path);
             }
-            urls.add(path.toUri().toURL());
+            path = path.toRealPath();
             identities.add(path + ":" + sha256(path));
+            // Keep the original location for relative Manifest Class-Path entries.
+            urls.add(path.toUri().toURL());
         }
         String effectiveDriverClass = driverClass == null || driverClass.isBlank() ? "org.h2.Driver" : driverClass.trim();
+        String identity = effectiveDriverClass + "|" + String.join("|", identities);
+        LoadedDriver cached = EXTERNAL.get(identity);
+        if (cached != null) {
+            return cached;
+        }
         URLClassLoader classLoader = new URLClassLoader(
             urls.toArray(new URL[0]),
             H2DriverLoader.class.getClassLoader()
         );
         try {
             Driver driver = (Driver) Class.forName(effectiveDriverClass, true, classLoader).getDeclaredConstructor().newInstance();
-            return new LoadedDriver(H2DriverVersion.CUSTOM, effectiveDriverClass + "|" + String.join("|", identities), driver, classLoader);
+            LoadedDriver loaded = new LoadedDriver(H2DriverVersion.CUSTOM, identity, driver, classLoader);
+            EXTERNAL.put(identity, loaded);
+            return loaded;
         } catch (Exception error) {
             closeAfterFailure(classLoader, error);
             throw error;

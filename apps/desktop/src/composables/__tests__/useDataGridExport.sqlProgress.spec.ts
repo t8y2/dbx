@@ -15,6 +15,8 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 vi.mock("@/lib/backend/api", () => ({
   startQueryResultExport: vi.fn(),
   cancelQueryResultExport: vi.fn(),
+  createQueryResultTempFile: vi.fn().mockResolvedValue("/tmp/dbx-query-results/result.xlsx"),
+  openQueryResultTempFile: vi.fn(),
 }));
 
 vi.mock("@/composables/useToast", () => ({
@@ -34,6 +36,7 @@ vi.mock("@/stores/settingsStore", () => ({
     editorSettings: {
       exportBatchSize: 1000,
       globalDateTimeExportFormat: "",
+      generateSqlIncludeDatabaseName: false,
       numericColumnRightAlign: true,
     },
   }),
@@ -61,6 +64,8 @@ function createOptions(overrides: Partial<UseDataGridExportOptions> = {}): UseDa
       ],
     })),
     databaseType: computed(() => "postgres"),
+    includeDatabaseName: computed(() => false),
+    hasUniqueQueryInsertTarget: computed(() => true),
     connectionId: computed(() => "connection-1"),
     database: computed(() => "dbx"),
     context: computed(() => "results"),
@@ -137,6 +142,104 @@ describe("query result SQL export progress", () => {
     expect(progressState.value.startedAt).toEqual(expect.any(Number));
     expect(progressState.value.finishedAt).toEqual(expect.any(Number));
     expect(cancelHandler.value).toBeNull();
-    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "sql", exportTableName: "users", exportColumnTypes: ["int4", "text"] }), expect.any(Function));
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "sql", exportTableName: "users", exportColumnTypes: ["int4", "text"] }), expect.any(Function), true);
+  });
+
+  it("passes a resolved Oracle owner as the INSERT target without changing query execution schema", async () => {
+    const queryResultExportRequest = vi.fn(async (request) => ({
+      ...request,
+      connectionId: "connection-1",
+      database: "ORCLPDB1",
+      databaseType: "oracle" as const,
+      schema: "CURRENT_USER",
+      queryBaseSql: "SELECT id, name FROM APP_OWNER.users",
+      sql: "SELECT id, name FROM APP_OWNER.users",
+      executionId: "execution-1",
+    }));
+    const state = useDataGridExport(
+      createOptions({
+        databaseType: computed(() => "oracle"),
+        includeDatabaseName: computed(() => true),
+        tableMeta: computed(() => ({ tableName: "USERS", schema: "APP_OWNER", primaryKeys: [], columns: [] })),
+        queryResultExportRequest,
+      }),
+    );
+
+    await state.exportSql();
+
+    expect(queryResultExportRequest).toHaveBeenCalledWith(expect.objectContaining({ exportTableName: "USERS", exportSchema: "APP_OWNER" }));
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ schema: "CURRENT_USER", exportSchema: "APP_OWNER", exportTableName: "USERS" }), expect.any(Function), true);
+  });
+
+  it("does not infer a target table for query results without a unique source", async () => {
+    const queryResultExportRequest = vi.fn(async (request) => ({
+      ...request,
+      connectionId: "connection-1",
+      database: "dbx",
+      databaseType: "oracle" as const,
+      schema: "CURRENT_USER",
+      queryBaseSql: "SELECT users.id FROM users JOIN orders ON orders.user_id = users.id",
+      sql: "SELECT users.id FROM users JOIN orders ON orders.user_id = users.id",
+      executionId: "execution-1",
+    }));
+    const state = useDataGridExport(
+      createOptions({
+        databaseType: computed(() => "oracle"),
+        includeDatabaseName: computed(() => true),
+        hasUniqueQueryInsertTarget: computed(() => false),
+        tableMeta: computed(() => ({ tableName: "USERS", schema: "APP_OWNER", primaryKeys: [], columns: [] })),
+        queryResultExportRequest,
+      }),
+    );
+
+    await state.exportSql();
+
+    expect(queryResultExportRequest).toHaveBeenCalledWith(expect.objectContaining({ exportTableName: undefined, exportSchema: undefined }));
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ exportTableName: undefined, exportSchema: undefined }), expect.any(Function), true);
+  });
+
+  it("forwards result column EXTRA metadata so identity INSERT exports can be replayed", async () => {
+    const state = useDataGridExport(
+      createOptions({
+        tableMeta: computed(() => ({
+          tableName: "users",
+          primaryKeys: ["id"],
+          columns: [
+            { name: "id", data_type: "int", is_nullable: false, is_primary_key: true, extra: "identity(1,1)" },
+            { name: "name", data_type: "text", is_nullable: true },
+          ],
+        })),
+      }),
+    );
+
+    await state.exportSql();
+
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "sql", exportColumnTypes: ["int4", "text"], exportColumnExtras: ["identity(1,1)", null] }), expect.any(Function), true);
+  });
+
+  it("routes incomplete query-result JSON exports through the streaming backend", async () => {
+    const state = useDataGridExport(createOptions());
+
+    await state.exportJson();
+
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "json", sql: "SELECT id, name FROM users" }), expect.any(Function), true);
+  });
+});
+
+describe("open query result as XLSX", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each(["Done", "Cancelled"] as const)("only opens a completed export (%s)", async (status) => {
+    vi.clearAllMocks();
+    vi.stubGlobal("document", undefined);
+    vi.mocked(api.startQueryResultExport).mockImplementation(async (request, onProgress) => {
+      const progress = { exportId: request.exportId, tableName: "", rowsExported: 1, totalRows: 1, status, errorMessage: null };
+      onProgress(progress);
+      return progress;
+    });
+    await useDataGridExport(createOptions()).openXlsx();
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "xlsx", filePath: "/tmp/dbx-query-results/result.xlsx" }), expect.any(Function), true);
+    if (status === "Done") expect(api.openQueryResultTempFile).toHaveBeenCalledWith("/tmp/dbx-query-results/result.xlsx");
+    else expect(api.openQueryResultTempFile).not.toHaveBeenCalled();
   });
 });

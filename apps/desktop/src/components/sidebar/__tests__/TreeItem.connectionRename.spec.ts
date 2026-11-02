@@ -160,6 +160,39 @@ describe("TreeItem connection quick rename", () => {
     expect(renameConnection).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["Enter", connection.name],
+    ["Escape", "Reporting EU"],
+  ])("restores focus to the connection row after %s dismisses rename", async (key, value) => {
+    const { container, input } = await mountConnectionRename();
+    typeName(input, value);
+
+    press(input, key);
+
+    const row = container.querySelector<HTMLElement>(`[data-node-id="${connection.id}"]`);
+    await vi.waitFor(() => expect(document.activeElement).toBe(row));
+  });
+
+  it("keeps focus on the element the user clicked when a blur commits rename", async () => {
+    const { container, input } = await mountConnectionRename();
+    typeName(input, "Reporting EU");
+
+    const outside = document.createElement("button");
+    container.append(outside);
+    outside.focus();
+    input.dispatchEvent(new FocusEvent("blur"));
+
+    await nextTick();
+    await nextTick();
+
+    // The blur commit must not steal focus back to the tree row: the user
+    // deliberately moved focus elsewhere before the commit landed.
+    const row = container.querySelector<HTMLElement>(`[data-node-id="${connection.id}"]`);
+    expect(document.activeElement).toBe(outside);
+    expect(document.activeElement).not.toBe(row);
+    expect(renameConnection).toHaveBeenCalledWith(connection.id, "Reporting EU");
+  });
+
   it.each(["", "   ", connection.name])("cancels blank or unchanged input %j", async (name) => {
     const { input } = await mountConnectionRename();
     typeName(input, name);
@@ -234,6 +267,50 @@ describe("TreeItem connection quick rename", () => {
 
     expect(event.defaultPrevented).toBe(false);
     expect(bubbledKeydowns).toBe(0);
+    expect(host.handleRowKeydown).not.toHaveBeenCalled();
+    expect(setTableSearchQuery).not.toHaveBeenCalled();
+  });
+
+  it("lets Cmd+Enter bubble from the table-search input for the default-query shortcut", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    let bubbledKeydowns = 0;
+    container.addEventListener("keydown", () => {
+      bubbledKeydowns += 1;
+    });
+    const host = runtimeHost();
+    const runtime = createSidebarTreeRuntime();
+    runtime.bindHost(host);
+    const setTableSearchQuery = vi.fn();
+    const node: TreeNode = {
+      id: "connection-1:app:__table_search",
+      label: "sidebar.searchTablesInCurrentScope",
+      type: "table-search-control",
+      connectionId: connection.id,
+      database: "app",
+      tableSearchParentId: "connection-1:app",
+    };
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(TreeItem, { node, depth: 2 }),
+      }),
+    );
+    app.use(i18n);
+    app.provide(sidebarTreeRuntimeKey, runtime);
+    app.provide(sidebarTreeContextKey, {
+      getVisibleNodes: () => [],
+      getVisibleNodeIndex: () => -1,
+      setTableSearchQuery,
+    });
+    app.mount(container);
+    mountedApps.push(app);
+    await nextTick();
+
+    const input = container.querySelector<HTMLInputElement>("[data-sidebar-table-search-parent-id]");
+    expect(input).toBeTruthy();
+    input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true, cancelable: true }));
+
+    expect(bubbledKeydowns).toBe(1);
     expect(host.handleRowKeydown).not.toHaveBeenCalled();
     expect(setTableSearchQuery).not.toHaveBeenCalled();
   });

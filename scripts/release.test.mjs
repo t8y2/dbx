@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -9,8 +9,13 @@ import { isDesktopVersionOnlyCargoLockChange } from "./release-lock.mjs";
 const repoRoot = new URL("..", import.meta.url).pathname;
 const releaseScript = join(repoRoot, "scripts/release.mjs");
 const releaseWorkflow = join(repoRoot, ".github/workflows/release.yml");
+const appPublishWorkflow = join(repoRoot, ".github/workflows/publish-packages.yml");
+const dailyBetaWorkflow = join(repoRoot, ".github/workflows/daily-beta-release.yml");
 const packagesWorkflow = join(repoRoot, ".github/workflows/mcp-release.yml");
 const vsignConfigPath = join(repoRoot, "src-tauri/tauri.vsign.conf.json");
+const appImageBundlerSetup = join(repoRoot, ".github/scripts/prepare-appimage-bundler.sh");
+const appImageGtkWrapper = join(repoRoot, ".github/scripts/linuxdeploy-plugin-gtk-wrapper.sh");
+const appImageVerifier = join(repoRoot, ".github/scripts/verify-appimage-input-methods.sh");
 
 function runRelease(args, env = {}) {
   return spawnSync(process.execPath, [releaseScript, ...args], {
@@ -41,7 +46,7 @@ function createMockGh() {
       "  const version = tagName.slice(1);",
       "  const assets = [",
       '    "latest.json",',
-      '    "DBX_" + version + "_aarch64.dmg",',
+      '    "DBX_" + version + "_" + (process.env.MOCK_ARM64_DMG_ARCH || "arm64") + ".dmg",',
       '    "DBX_" + version + "_x64.dmg",',
       '    "DBX_" + version + "_x64-setup.exe",',
       '    "DBX_" + version + "_arm64-setup.exe",',
@@ -69,6 +74,90 @@ test("rollback dry-run prints all affected channels without invoking GitHub", ()
   assert.match(result.stdout, /does not downgrade clients/);
 });
 
+test("app release workflows preserve beta tags and stable package URLs", () => {
+  const release = readFileSync(releaseWorkflow, "utf8");
+  const publish = readFileSync(appPublishWorkflow, "utf8");
+  const daily = readFileSync(dailyBetaWorkflow, "utf8");
+
+  assert.ok(release.includes("$version = $tagVersion -replace '-beta\\..*$', ''"));
+  assert.match(release, /--draft=false --prerelease/);
+  assert.match(publish, /__TAG__/);
+  assert.match(publish, /needs: \[publish-stable-alias, validate-candidate\]/);
+  assert.match(publish, /releases\/latest\/download\/\$\{PRODUCT_NAME\}_\\\$version/);
+  assert.match(publish, /Publish stable manifest to GitHub Release/);
+  assert.match(publish, /prepare-channel-manifest\.mjs[\s\S]+stable \"\$TAG\" true/);
+  assert.match(publish, /gh release upload \"\$TAG\" \"\$manifest_dir\/latest\.json\"/);
+  assert.match(publish, /prune-r2-releases\.sh stable "\$\{\{ needs\.upload-r2\.outputs\.tag \}\}"/);
+  assert.match(release, /prune-r2-releases\.sh beta "\$\{\{ inputs\.release_tag \|\| github\.ref_name \}\}"/);
+  assert.match(release, /gh release edit "\$\{RELEASE_TAG\}" --repo "\$\{GITHUB_REPOSITORY\}" --draft=false --prerelease\n/);
+  assert.doesNotMatch(release, /--draft=false --prerelease=false --latest/);
+  assert.match(release, /if: \$\{\{ !contains\(env\.RELEASE_TAG, '-beta\.'\) \}\}\n[\s\S]+gh workflow run publish-packages\.yml[\s\S]+-f tag="\$\{RELEASE_TAG\}"/);
+  assert.match(release, /permissions:\n      contents: write\n      actions: write/);
+  assert.match(publish, /approve-promotion:[\s\S]+if: \$\{\{ contains\(inputs\.tag, '-beta\.'\) \}\}[\s\S]+environment: release-promotion/);
+  assert.match(publish, /needs\.approve-promotion\.result/);
+  // approve-promotion is skipped for plain tags, so every job after it must opt out of the implicit success().
+  assert.match(publish, /name: Upload to R2\n    needs: validate-candidate\n(?:    #[^\n]*\n)+    if: \$\{\{ !cancelled\(\) && needs\.validate-candidate\.result == 'success' \}\}/);
+  assert.match(publish, /name: Promote to Release\n    needs: \[upload-r2, validate-candidate\]\n    if: \$\{\{ !cancelled\(\) && needs\.upload-r2\.result == 'success' \}\}/);
+  assert.match(publish, /edit_args\+=\(--title "DBX v\$\{\{ needs\.validate-candidate\.outputs\.version \}\}"\)/);
+  assert.match(publish, /sync-source-version:[\s\S]+needs: \[validate-candidate, promote-release\][\s\S]+ref: main[\s\S]+MCP_RELEASE_TOKEN/);
+  assert.match(publish, /set-release-version\.mjs "v\$\{VERSION\}"/);
+  assert.match(publish, /promote-docker:[\s\S]+is_beta == 'true'[\s\S]+needs: \[validate-candidate, promote-release\]/);
+  assert.match(publish, /imagetools create -t "\$\{image\}:\$\{STABLE_VERSION\}" -t "\$\{image\}:latest" "\$\{image\}:\$\{source_version\}"/);
+  assert.doesNotMatch(publish, /Stable publication requires a non-prerelease/);
+  assert.doesNotMatch(publish, /no promotion needed/);
+  assert.match(release, /prepare-msi-config\.mjs "\$\{env:RELEASE_TAG\}" src-tauri\/tauri\.msi-version\.conf\.json/);
+  assert.match(release, /--config src-tauri\/tauri\.msi-version\.conf\.json/);
+  assert.doesNotMatch(release, /--bundles nsis' \|\| ''/);
+  assert.match(release, /if \(\$msiInstallers\.Count -eq 0\)/);
+  assert.match(publish, /stable-asset-aliases\.mjs pairs/);
+  assert.match(publish, /stable-asset-aliases\.mjs apply/);
+  assert.match(daily, /schedule:/);
+  assert.match(daily, /gh release create "\$tag"/);
+  assert.match(daily, /-beta\.\$\{date_suffix\}\.\$\{sequence\}/);
+  assert.match(daily, /gh workflow run release\.yml/);
+  assert.match(daily, /MCP_RELEASE_TOKEN/);
+  assert.match(daily, /matches stable; publishing a daily beta build/);
+  assert.match(daily, /next_patch="\$\{BASH_REMATCH\[1\]\}\.\$\{BASH_REMATCH\[2\]\}\.\$\(\(BASH_REMATCH\[3\] \+ 1\)\)"/);
+  assert.match(daily, /sort -V \| tail -n 1/);
+  assert.match(daily, /force:[\s\S]+type: boolean/);
+  assert.match(daily, /compare\/\$\{built_tag\}\.\.\.\$\{GITHUB_SHA\}/);
+  assert.match(daily, /contains\("\[skip ci\]"\) \| not/);
+  assert.match(daily, /No new commits since \$\{built_tag\}; skipping the daily beta build/);
+  assert.match(release, /workflow_dispatch:/);
+  assert.match(release, /release_tag:/);
+  assert.match(release, /RELEASE_TAG:/);
+});
+
+test("promoting a beta moves its Release to the plain version tag", () => {
+  const publish = readFileSync(appPublishWorkflow, "utf8");
+  const has = (text) => assert.ok(publish.includes(text), `publish-packages.yml is missing: ${text}`);
+
+  // The Release is retagged in place so its assets are reused, not copied.
+  has("stable_tag: ${{ steps.version.outputs.stable_tag }}");
+  has("current_tag: ${{ steps.release.outputs.current_tag }}");
+  has('echo "stable_tag=v${VERSION}"');
+  has('gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs"');
+  has('-f "ref=refs/tags/${STABLE_TAG}" -f "sha=${SOURCE_SHA}"');
+  has('edit_args+=(--tag "$STABLE_TAG")');
+  has('gh release edit "${SOURCE_TAG}" "${edit_args[@]}"');
+  // A rerun finds the Release under the stable tag; two Releases for one version is ambiguous.
+  has("Both $TAG and $STABLE_TAG have a Release");
+  has("points to ${STABLE_SHA}, not the promoted build");
+  // The R2 directory, manifest and aliases are keyed by the plain tag.
+  has('echo "tag=${{ needs.validate-candidate.outputs.stable_tag }}" >> "$GITHUB_OUTPUT"');
+  has('gh release download "${{ needs.validate-candidate.outputs.current_tag }}"');
+  has('SOURCE_TAG="${{ needs.validate-candidate.outputs.current_tag }}"');
+  // The GitHub manifest copy points its package URLs at the new tag.
+  has('"https://github.com/t8y2/dbx/releases/download/" + $tag + "/"');
+  // Everything user-facing follows the Release to its new tag.
+  has("TAG: ${{ needs.validate-candidate.outputs.stable_tag }}");
+  has('stable-asset-aliases.mjs pairs "$BETA_TAG"');
+  has('notify_feishu.py "${{ needs.validate-candidate.outputs.stable_tag }}"');
+  // inputs.tag only identifies the build; nothing after validation may link to it.
+  const uses = publish.split("\n").filter((line) => line.includes("github.event.inputs.tag"));
+  assert.deepEqual(uses.map((line) => line.trim()), ['- run: echo "Stable promotion approved for ${{ github.event.inputs.tag }}"']);
+});
+
 test("rollback dispatches each distribution workflow after validation", () => {
   const mockBin = createMockGh();
   const logPath = join(mockBin, "gh.log");
@@ -80,11 +169,7 @@ test("rollback dispatches each distribution workflow after validation", () => {
 
   assert.equal(result.status, 0, result.stderr);
   const commands = readFileSync(logPath, "utf8").trim().split("\n");
-  assert.deepEqual(commands, [
-    "workflow run publish-packages.yml --repo t8y2/dbx -f tag=v0.5.63 -f notify=false",
-    "workflow run sync-cnb-release-assets.yml --repo t8y2/dbx -f tag=v0.5.63",
-    "workflow run rollback-docker-latest.yml --repo t8y2/dbx -f tag=v0.5.63",
-  ]);
+  assert.deepEqual(commands, ["workflow run publish-packages.yml --repo t8y2/dbx -f tag=v0.5.63 -f notify=false", "workflow run sync-cnb-release-assets.yml --repo t8y2/dbx -f tag=v0.5.63", "workflow run rollback-docker-latest.yml --repo t8y2/dbx -f tag=v0.5.63"]);
 });
 
 test("rollback rejects a target that is not older than latest", () => {
@@ -98,6 +183,33 @@ test("rollback rejects a target that is not older than latest", () => {
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /must be older than the current latest release v0\.5\.64/);
+});
+
+test("rollback accepts pre-rename releases that ship the aarch64 dmg asset", () => {
+  const mockBin = createMockGh();
+  const logPath = join(mockBin, "gh.log");
+  const result = runRelease(["rollback", "v0.5.63", "--yes", "--skip-fetch"], {
+    PATH: `${mockBin}:${process.env.PATH}`,
+    GH_LOG: logPath,
+    MOCK_LATEST_TAG: "v0.5.64",
+    MOCK_ARM64_DMG_ARCH: "aarch64",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const commands = readFileSync(logPath, "utf8").trim().split("\n");
+  assert.equal(commands.length, 3);
+});
+
+test("rollback rejects a release missing both arm64 dmg asset names", () => {
+  const mockBin = createMockGh();
+  const result = runRelease(["rollback", "v0.5.63", "--yes", "--skip-fetch"], {
+    PATH: `${mockBin}:${process.env.PATH}`,
+    MOCK_LATEST_TAG: "v0.5.64",
+    MOCK_ARM64_DMG_ARCH: "armv7",
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /missing required distribution assets: DBX_0\.5\.63_arm64\.dmg or DBX_0\.5\.63_aarch64\.dmg/);
 });
 
 test("rollback rejects prerelease tag syntax", () => {
@@ -133,8 +245,67 @@ test("Windows 7 release build does not use sccache", () => {
 
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
-  const win7Job = workflow.slice(start, end);
+  const win7Job = workflow
+    .slice(start, end)
+    // Ignore comments; the job itself documents why sccache is absent.
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("#"))
+    .join("\n");
   assert.doesNotMatch(win7Job, /RUSTC_WRAPPER|SCCACHE_|sccache/i);
+});
+
+test("Linux releases pin the Wayland-capable AppImage bundler before upload", () => {
+  const workflow = readFileSync(releaseWorkflow, "utf8");
+  const setup = readFileSync(appImageBundlerSetup, "utf8");
+  const wrapper = readFileSync(appImageGtkWrapper, "utf8");
+  const verifier = readFileSync(appImageVerifier, "utf8");
+  const prepareStep = workflow.indexOf("Prepare Wayland-capable AppImage bundler");
+  const buildStep = workflow.indexOf("Build Tauri app", prepareStep);
+  const verifyStep = workflow.indexOf("Verify AppImage runtime bundle", buildStep);
+
+  assert.notEqual(prepareStep, -1);
+  assert.ok(prepareStep < buildStep);
+  assert.ok(buildStep < verifyStep);
+  assert.match(workflow, /XDG_CACHE_HOME: \$\{\{ runner\.temp \}\}\/dbx-tauri-cache/);
+  assert.match(workflow, /LINUXDEPLOY_EXCLUDED_LIBRARIES: "libwayland-\*\.so\*;libxkbcommon\.so\*;libxcb-randr\.so\*;libxcb-render\.so\*;libxcb-shm\.so\*;libXau\.so\*;libXdmcp\.so\*"/);
+  assert.match(setup, /tauri_fix_commit=8e7028331ad37ac2db74d4ec20e66be5cacf2c40/);
+  assert.match(setup, /linuxdeploy_revision=07333c6/);
+  assert.match(setup, /36a2d7e274d12e1050d0e9ecfe11d339ed54720b2bec464c286d53f8b07f5c62/);
+  assert.match(setup, /556ab80baa98e600aa80f0dcedfb70bca0e1ce7e9f147fb345be3fcc3e91b2b1/);
+  assert.match(wrapper, /libwayland-\*\.so\*/);
+  assert.match(wrapper, /libxkbcommon\.so\*/);
+  assert.match(verifier, /GTK AppRun hook overrides GDK_BACKEND/);
+  assert.match(verifier, /for requested_backend in wayland x11/);
+  assert.match(verifier, /host Wayland\/XKB\/XCB display stack/);
+});
+
+test("AppImage GTK wrapper removes bundled display-stack libraries", () => {
+  const directory = mkdtempSync(join(tmpdir(), "dbx-appimage-wrapper-test-"));
+  const wrapper = join(directory, "linuxdeploy-plugin-gtk.sh");
+  const upstream = join(directory, "linuxdeploy-plugin-gtk-upstream.sh");
+  const appDir = join(directory, "DBX.AppDir");
+  const libDir = join(appDir, "usr", "lib");
+  const nestedLibDir = join(libDir, "nested");
+
+  copyFileSync(appImageGtkWrapper, wrapper);
+  writeFileSync(upstream, '#!/usr/bin/env bash\nif [[ "$1" == "--plugin-api-version" ]]; then printf "0\\n"; fi\n');
+  chmodSync(wrapper, 0o755);
+  chmodSync(upstream, 0o755);
+  mkdirSync(nestedLibDir, { recursive: true });
+  for (const path of [join(libDir, "libwayland-client.so.0"), join(libDir, "libxkbcommon.so.0"), join(nestedLibDir, "libXau.so.6"), join(libDir, "libsafe.so.1")]) {
+    writeFileSync(path, "");
+  }
+
+  const apiVersion = spawnSync(wrapper, ["--plugin-api-version"], { encoding: "utf8" });
+  assert.equal(apiVersion.status, 0, apiVersion.stderr);
+  assert.equal(apiVersion.stdout.trim(), "0");
+
+  const cleanup = spawnSync(wrapper, ["--appdir", appDir], { encoding: "utf8" });
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+  assert.equal(existsSync(join(libDir, "libwayland-client.so.0")), false);
+  assert.equal(existsSync(join(libDir, "libxkbcommon.so.0")), false);
+  assert.equal(existsSync(join(nestedLibDir, "libXau.so.6")), false);
+  assert.equal(existsSync(join(libDir, "libsafe.so.1")), true);
 });
 
 test("desktop-only Cargo.lock version refresh does not count as a Node package change", () => {

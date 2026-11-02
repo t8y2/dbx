@@ -60,13 +60,14 @@ pub async fn document_find_documents(
     collation: Option<String>,
     cursor: Option<String>,
     cursor_pagination: Option<bool>,
+    include_total: Option<bool>,
     execution_id: Option<String>,
 ) -> Result<DocumentQueryResult, String> {
     let app = state.inner().clone();
     run_cancellable(
         &app,
         execution_id,
-        dbx_core::document_ops::find_documents_core(
+        dbx_core::document_ops::find_documents_core_with_total(
             &app,
             &connection_id,
             &database,
@@ -79,6 +80,7 @@ pub async fn document_find_documents(
             collation.as_deref(),
             cursor.as_deref(),
             cursor_pagination.unwrap_or(false),
+            include_total.unwrap_or(true),
         ),
     )
     .await
@@ -130,6 +132,26 @@ pub async fn elasticsearch_count_documents(
         dbx_core::document_ops::count_elasticsearch_documents_core(&app, &connection_id, &index, filter.as_deref()),
     )
     .await
+}
+
+#[tauri::command]
+pub async fn elasticsearch_get_index_metadata(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+    kind: dbx_core::document_ops::ElasticsearchIndexMetadataKind,
+) -> Result<serde_json::Value, String> {
+    dbx_core::document_ops::elasticsearch_get_index_metadata_core(&state, &connection_id, &index, kind).await
+}
+
+#[tauri::command]
+pub async fn elasticsearch_delete_all_documents(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+) -> Result<dbx_core::db::elasticsearch_driver::ElasticsearchDeleteByQueryResult, String> {
+    ensure_connection_writable(&state, &connection_id, "Delete all documents").await?;
+    dbx_core::document_ops::elasticsearch_delete_all_documents_core(&state, &connection_id, &index).await
 }
 
 #[tauri::command]
@@ -335,6 +357,16 @@ pub async fn meilisearch_get_index_overview(
     index: String,
 ) -> Result<dbx_core::db::meilisearch_driver::MeilisearchIndexOverview, String> {
     dbx_core::document_ops::meilisearch_get_index_overview_core(&state, &connection_id, &index).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_create_index(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    input: dbx_core::db::meilisearch_driver::MeilisearchCreateIndexInput,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Create index").await?;
+    dbx_core::document_ops::meilisearch_create_index_core(&state, &connection_id, &input).await
 }
 
 #[tauri::command]

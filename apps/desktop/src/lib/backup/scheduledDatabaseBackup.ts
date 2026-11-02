@@ -6,15 +6,29 @@ export const DATABASE_BACKUP_SCHEDULES_STORAGE_KEY = "dbx-database-backup-schedu
 export const DATABASE_BACKUP_RUNS_STORAGE_KEY = "dbx-database-backup-runs";
 export const DATABASE_BACKUP_CONFIG_CHANGED_EVENT = "dbx:database-backup-config-changed";
 export const MAX_DATABASE_BACKUP_HISTORY = 200;
+export const DEFAULT_DATABASE_BACKUP_RUN_DIRECTORY_PATTERN = "dbx-backup__{schedule}__{timestamp}__{runId}";
+export const DEFAULT_DATABASE_BACKUP_FILE_NAME_PATTERN = "dbx-backup__{schedule}__{timestamp}__{database}__{runId}";
 
 export type DatabaseBackupFrequency = "hourly" | "daily" | "weekly";
 export type DatabaseBackupExportStatus = "Running" | "Done" | "Error" | "Cancelled";
 export type DatabaseBackupRunStatus = "running" | "success" | "failed" | "cancelled";
 export type DatabaseBackupRunTrigger = "manual" | "scheduled";
-export type DatabaseBackupRunSource = "scheduled" | "one-shot";
-export type DatabaseBackupTableFilterMode = "all" | "include" | "exclude";
+/** `imported` runs list backup files created outside DBX; DBX never deletes their files. */
+export type DatabaseBackupRunSource = "scheduled" | "one-shot" | "imported";
+export type DatabaseBackupTableFilterMode = "all" | "include" | "exclude" | "selected";
+/** Output format of a backup file: plain SQL, gzipped SQL, or a Navicat `.nb3` archive. */
+export type DatabaseBackupOutputCompression = "none" | "gzip" | "nb3";
 
-const CONSISTENT_BACKUP_DATABASE_TYPES = new Set(["mysql", "postgres"]);
+const DATABASE_BACKUP_FILE_SUFFIXES: Record<DatabaseBackupOutputCompression, string> = { none: ".sql", gzip: ".sql.gz", nb3: ".nb3" };
+
+export function normalizeDatabaseBackupOutputCompression(value: unknown): DatabaseBackupOutputCompression {
+  return value === "gzip" || value === "nb3" ? value : "none";
+}
+
+const CONSISTENT_BACKUP_DATABASE_TYPES = new Set(["mysql", "postgres", "opengauss"]);
+// The backend writes and restores Navicat `.nb3` archives for MySQL and PostgreSQL only
+// (`navicat_nb3.rs`); openGauss backups must use plain or gzipped SQL.
+const NAVICAT_BACKUP_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "postgres"]);
 
 export class DatabaseBackupConnectionQueue {
   private readonly tails = new Map<string, Promise<void>>();
@@ -44,6 +58,11 @@ export function databaseBackupAggregateExportStatus(status: DatabaseBackupExport
 
 export function supportsScheduledDatabaseBackup(databaseType: string | undefined): boolean {
   return !!databaseType && CONSISTENT_BACKUP_DATABASE_TYPES.has(databaseType);
+}
+
+/** Navicat `.nb3` archives are only supported when every selected connection is MySQL or PostgreSQL. */
+export function supportsNavicatBackupFormat(databaseTypes: readonly (DatabaseType | undefined)[]): boolean {
+  return databaseTypes.length > 0 && databaseTypes.every((databaseType) => !!databaseType && NAVICAT_BACKUP_DATABASE_TYPES.has(databaseType));
 }
 
 export function resolveScheduledDatabaseBackupTargets(configuredDatabases: readonly string[], availableDatabases: readonly string[], databaseType?: DatabaseType): string[] {
@@ -95,6 +114,7 @@ export function databaseBackupTableNamesAreCaseSensitive(databaseType: DatabaseT
 export function resolveScheduledDatabaseBackupTableScope(mode: DatabaseBackupTableFilterMode, patterns: readonly string[], availableTables: readonly string[], database = "", schema = "", caseSensitive = true): DatabaseBackupTableScope {
   const available = [...new Set(availableTables.map((table) => table.trim()).filter(Boolean))];
   if (mode === "all") return { includedTables: available };
+  if (mode === "selected") throw new Error("Exact table selection requires database and schema identities");
 
   const normalizedPatterns = normalizeDatabaseBackupTablePatterns(patterns);
   const matching = available.filter((table) => databaseBackupTableMatchesPattern(table, normalizedPatterns, database, schema, caseSensitive));
@@ -107,19 +127,62 @@ export function resolveScheduledDatabaseBackupTableScope(mode: DatabaseBackupTab
   };
 }
 
+export interface DatabaseBackupTableTarget {
+  database: string;
+  schema: string;
+  table: string;
+}
+
+export interface DatabaseBackupTableSelectionState {
+  scopeKey: string;
+  ready: boolean;
+}
+
+export function databaseBackupTableTargetKey(target: DatabaseBackupTableTarget): string {
+  return JSON.stringify([target.database, target.schema, target.table]);
+}
+
+export function databaseBackupTableSelectionScopeKey(connectionId: string, databaseType: string | undefined, databases: readonly string[]): string {
+  return JSON.stringify([connectionId, databaseType ?? "", [...new Set(databases)].sort()]);
+}
+
+export function normalizeDatabaseBackupTableTargets(value: unknown): DatabaseBackupTableTarget[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error("Invalid selected backup tables");
+  const result: DatabaseBackupTableTarget[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") throw new Error("Invalid selected backup table");
+    const { database, schema, table } = entry as Record<string, unknown>;
+    if (typeof database !== "string" || typeof schema !== "string" || typeof table !== "string" || !database.trim() || !schema.trim() || !table.trim()) throw new Error("Invalid selected backup table identity");
+    const target = { database, schema, table };
+    const key = databaseBackupTableTargetKey(target);
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(target);
+    }
+  }
+  return result;
+}
+
 export interface DatabaseBackupExecutionConfig {
   connectionId: string;
   databases: string[];
   tableFilterMode: DatabaseBackupTableFilterMode;
   tablePatterns: string[];
+  selectedTables?: DatabaseBackupTableTarget[];
   destinationDirectory: string;
   includeStructure: boolean;
   includeData: boolean;
   includeObjects: boolean;
   dropTableIfExists: boolean;
+  outputCompression: DatabaseBackupOutputCompression;
+  /** File-name template for each database target. The final extension is added automatically. */
+  fileNamePattern?: string;
 }
 
 export interface DatabaseBackupSchedule extends DatabaseBackupExecutionConfig {
+  timeZone?: string;
   id: string;
   name: string;
   enabled: boolean;
@@ -128,6 +191,8 @@ export interface DatabaseBackupSchedule extends DatabaseBackupExecutionConfig {
   timeOfDay: string;
   weekday: number;
   retentionCount: number;
+  /** Relative directory template used to group the files created by one scheduled run. */
+  runDirectoryPattern?: string;
   createdAt: string;
   updatedAt: string;
   nextRunAt: string;
@@ -141,11 +206,14 @@ export function toDatabaseBackupExecutionConfig(schedule: DatabaseBackupSchedule
     databases: [...schedule.databases],
     tableFilterMode: schedule.tableFilterMode,
     tablePatterns: [...schedule.tablePatterns],
+    ...(schedule.tableFilterMode === "selected" ? { selectedTables: normalizeDatabaseBackupTableTargets(schedule.selectedTables) } : {}),
     destinationDirectory: schedule.destinationDirectory,
     includeStructure: schedule.includeStructure,
     includeData: schedule.includeData,
     includeObjects: schedule.includeObjects,
     dropTableIfExists: schedule.dropTableIfExists,
+    outputCompression: schedule.outputCompression,
+    fileNamePattern: schedule.fileNamePattern,
   };
 }
 
@@ -163,6 +231,8 @@ export interface DatabaseBackupRun {
   displayName?: string;
   connectionId: string;
   connectionName: string;
+  /** Selected root used to constrain cleanup of custom-named backup files. */
+  destinationDirectory?: string;
   trigger: DatabaseBackupRunTrigger;
   source: DatabaseBackupRunSource;
   status: DatabaseBackupRunStatus;
@@ -215,7 +285,7 @@ export function normalizeDatabaseBackupTime(value: unknown): string {
 }
 
 export function normalizeDatabaseBackupRetention(value: unknown): number {
-  return boundedInteger(value, 10, 1, 100);
+  return boundedInteger(value, 10, 0, 1000);
 }
 
 export function normalizeDatabaseBackupSchedule(value: unknown, now = new Date()): DatabaseBackupSchedule | null {
@@ -225,6 +295,14 @@ export function normalizeDatabaseBackupSchedule(value: unknown, now = new Date()
   const destinationDirectory = stringValue(input.destinationDirectory).trim();
   if (!id || !connectionId || !destinationDirectory) return null;
 
+  let selectedTables: DatabaseBackupTableTarget[] | undefined;
+  if (input.tableFilterMode === "selected") {
+    try {
+      selectedTables = normalizeDatabaseBackupTableTargets(input.selectedTables);
+    } catch {
+      return null;
+    }
+  }
   const nowIso = now.toISOString();
   const frequency: DatabaseBackupFrequency = input.frequency === "daily" || input.frequency === "weekly" ? input.frequency : "hourly";
   const schedule: DatabaseBackupSchedule = {
@@ -233,18 +311,23 @@ export function normalizeDatabaseBackupSchedule(value: unknown, now = new Date()
     enabled: booleanValue(input.enabled, true),
     connectionId,
     databases: Array.isArray(input.databases) ? [...new Set(input.databases.map((database) => stringValue(database).trim()).filter(Boolean))] : [],
-    tableFilterMode: input.tableFilterMode === "include" || input.tableFilterMode === "exclude" ? input.tableFilterMode : "all",
+    tableFilterMode: input.tableFilterMode === "include" || input.tableFilterMode === "exclude" || input.tableFilterMode === "selected" ? input.tableFilterMode : "all",
     tablePatterns: normalizeDatabaseBackupTablePatterns(input.tablePatterns),
+    ...(selectedTables ? { selectedTables } : {}),
     destinationDirectory,
     frequency,
     intervalHours: boundedInteger(input.intervalHours, 6, 1, 168),
     timeOfDay: normalizeDatabaseBackupTime(input.timeOfDay),
+    timeZone: typeof input.timeZone === "string" ? input.timeZone : undefined,
     weekday: boundedInteger(input.weekday, 1, 0, 6),
     includeStructure: booleanValue(input.includeStructure, true),
     includeData: booleanValue(input.includeData, true),
     includeObjects: booleanValue(input.includeObjects, true),
     dropTableIfExists: booleanValue(input.dropTableIfExists, false),
+    outputCompression: normalizeDatabaseBackupOutputCompression(input.outputCompression),
+    fileNamePattern: normalizeDatabaseBackupFileNamePattern(input.fileNamePattern),
     retentionCount: normalizeDatabaseBackupRetention(input.retentionCount),
+    runDirectoryPattern: normalizeDatabaseBackupRunDirectoryPattern(input.runDirectoryPattern),
     createdAt: validIsoDate(input.createdAt, nowIso),
     updatedAt: validIsoDate(input.updatedAt, nowIso),
     nextRunAt: validIsoDate(input.nextRunAt, ""),
@@ -308,8 +391,9 @@ export function normalizeDatabaseBackupRun(value: unknown): DatabaseBackupRun | 
     displayName: stringValue(input.displayName).trim() || undefined,
     connectionId: stringValue(input.connectionId).trim(),
     connectionName: stringValue(input.connectionName).trim(),
+    destinationDirectory: stringValue(input.destinationDirectory).trim() || undefined,
     trigger: input.trigger === "scheduled" ? "scheduled" : "manual",
-    source: input.source === "one-shot" ? "one-shot" : "scheduled",
+    source: input.source === "one-shot" || input.source === "imported" ? input.source : "scheduled",
     status,
     startedAt,
     completedAt: typeof input.completedAt === "string" && Number.isFinite(Date.parse(input.completedAt)) ? input.completedAt : undefined,
@@ -368,10 +452,12 @@ export function writeDatabaseBackupRuns(runs: readonly DatabaseBackupRun[]) {
 }
 
 export function databaseBackupRunsToPrune(runs: readonly DatabaseBackupRun[], scheduleId: string, retentionCount: number): DatabaseBackupRun[] {
+  const normalizedRetention = normalizeDatabaseBackupRetention(retentionCount);
+  if (normalizedRetention === 0) return [];
   return runs
     .filter((run) => run.scheduleId === scheduleId && run.status === "success")
     .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt))
-    .slice(normalizeDatabaseBackupRetention(retentionCount));
+    .slice(normalizedRetention);
 }
 
 export function sanitizeDatabaseBackupFileSegment(value: string): string {
@@ -380,11 +466,92 @@ export function sanitizeDatabaseBackupFileSegment(value: string): string {
     .replace(/[\\/:*?"<>|]+/g, "_")
     .replace(/[. ]+$/g, "")
     .trim();
+  // Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）不能作为文件名主体，补下划线规避。
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(sanitized)) {
+    return `${sanitized}_`;
+  }
   return sanitized || "database";
 }
 
-export function databaseBackupTimestamp(value: Date | string): string {
+/**
+ * A run directory is always relative to the directory selected in the native
+ * file picker. Empty and legacy schedules keep the stable default template.
+ */
+export function normalizeDatabaseBackupRunDirectoryPattern(value: unknown): string {
+  return stringValue(value).trim() || DEFAULT_DATABASE_BACKUP_RUN_DIRECTORY_PATTERN;
+}
+
+function renderDatabaseBackupRunDirectoryPattern(pattern: string, scheduleName: string, startedAt: Date | string, runId: string, timeZone?: string): string {
+  const timestamp = databaseBackupTimestamp(startedAt, timeZone);
+  const compactTimestamp = timestamp.replace("-", "");
+  return normalizeDatabaseBackupRunDirectoryPattern(pattern).replaceAll("{schedule}", sanitizeDatabaseBackupFileSegment(scheduleName)).replaceAll("{date}", timestamp.slice(0, 8)).replaceAll("{timestamp}", compactTimestamp).replaceAll("{runId}", sanitizeDatabaseBackupFileSegment(runId).slice(0, 8));
+}
+
+export function databaseBackupRunDirectory(directory: string, pattern: string, scheduleName: string, startedAt: Date | string, runId: string, timeZone?: string): string {
+  const normalizedPattern = normalizeDatabaseBackupRunDirectoryPattern(pattern);
+  const rendered = renderDatabaseBackupRunDirectoryPattern(normalizedPattern, scheduleName, startedAt, runId, timeZone);
+  if (!rendered || /^[\\/]|^[a-zA-Z]:/.test(rendered) || /[\\/]$/.test(rendered)) {
+    throw new Error("Backup run directory template must be a relative path.");
+  }
+
+  const segments = rendered.split(/[\\/]+/);
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error("Backup run directory template cannot contain . or .. path segments.");
+  }
+
+  return segments.reduce((path, segment) => joinDatabaseBackupPath(path, sanitizeDatabaseBackupFileSegment(segment)), directory);
+}
+
+export function databaseBackupRunDirectoryPatternIsValid(pattern: string): boolean {
+  try {
+    databaseBackupRunDirectory("/backups", pattern, "database-backup", new Date(2026, 0, 2, 3, 4, 5), "12345678");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A file-name template stays within the selected output directory. Empty and
+ * legacy configurations retain the previous file-name format.
+ */
+export function normalizeDatabaseBackupFileNamePattern(value: unknown): string {
+  return stringValue(value).trim() || DEFAULT_DATABASE_BACKUP_FILE_NAME_PATTERN;
+}
+
+/** Only `{runId}` is unique per run, so it is what keeps several runs started together from writing the same file. */
+export function databaseBackupFileNamePatternHasRunId(pattern: unknown): boolean {
+  return normalizeDatabaseBackupFileNamePattern(pattern).includes("{runId}");
+}
+
+export function databaseBackupFileNamePatternIsValid(pattern: string): boolean {
+  const raw = stringValue(pattern);
+  if (!raw.trim()) return true;
+  return raw === raw.trim() && !/[\\/:*?"<>|]/.test(raw) && !/[. ]$/.test(raw);
+}
+
+function renderDatabaseBackupFileNamePattern(pattern: string, scheduleName: string, fileStem: string, startedAt: Date | string, runId: string, timeZone?: string): string {
+  const normalized = normalizeDatabaseBackupFileNamePattern(pattern);
+  const timestamp = databaseBackupTimestamp(startedAt, timeZone);
+  const variables = {
+    "{schedule}": sanitizeDatabaseBackupFileSegment(scheduleName),
+    "{date}": timestamp.slice(0, 8),
+    "{timestamp}": timestamp,
+    "{database}": sanitizeDatabaseBackupFileSegment(fileStem),
+    "{runId}": sanitizeDatabaseBackupFileSegment(runId).slice(0, 8),
+  };
+  const rendered = Object.entries(variables).reduce((value, [token, replacement]) => value.replaceAll(token, replacement), normalized);
+  const requiredSuffixes = [normalized.includes("{database}") ? "" : variables["{database}"]].filter(Boolean);
+  return [sanitizeDatabaseBackupFileSegment(rendered), ...requiredSuffixes].join("__");
+}
+
+export function databaseBackupTimestamp(value: Date | string, timeZone?: string): string {
   const date = value instanceof Date ? value : new Date(value);
+  if (timeZone) {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).formatToParts(date);
+    const part = (name: string) => parts.find((item) => item.type === name)?.value || "";
+    return `${part("year")}${part("month")}${part("day")}-${part("hour")}${part("minute")}${part("second")}`;
+  }
   const part = (number: number) => String(number).padStart(2, "0");
   return `${date.getFullYear()}${part(date.getMonth() + 1)}${part(date.getDate())}-${part(date.getHours())}${part(date.getMinutes())}${part(date.getSeconds())}`;
 }
@@ -394,7 +561,8 @@ export function joinDatabaseBackupPath(directory: string, fileName: string): str
   return `${directory.replace(/[\\/]+$/, "")}${separator}${fileName}`;
 }
 
-export function databaseBackupFilePath(directory: string, scheduleName: string, fileStem: string, startedAt: Date | string, runId: string): string {
-  const fileName = `dbx-backup__${sanitizeDatabaseBackupFileSegment(scheduleName)}__${databaseBackupTimestamp(startedAt)}__${sanitizeDatabaseBackupFileSegment(fileStem)}__${sanitizeDatabaseBackupFileSegment(runId).slice(0, 8)}.sql`;
+export function databaseBackupFilePath(directory: string, scheduleName: string, fileStem: string, startedAt: Date | string, runId: string, outputCompression: DatabaseBackupOutputCompression = "none", fileNamePattern?: string, timeZone?: string): string {
+  const suffix = DATABASE_BACKUP_FILE_SUFFIXES[outputCompression] ?? ".sql";
+  const fileName = `${renderDatabaseBackupFileNamePattern(fileNamePattern ?? DEFAULT_DATABASE_BACKUP_FILE_NAME_PATTERN, scheduleName, fileStem, startedAt, runId, timeZone)}${suffix}`;
   return joinDatabaseBackupPath(directory, fileName);
 }

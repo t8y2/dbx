@@ -29,6 +29,8 @@ export interface GridNewRowMeta {
   sourceIndex?: number;
   /** Columns whose values differ from the cloned source row. */
   editedColumns?: number[];
+  /** Blank row allocated by Add Row that has not had a value changed yet. */
+  untouched?: boolean;
 }
 
 export type GridOrderedRowEntry = { kind: "source"; sourceIndex: number } | { kind: "new"; newIndex: number };

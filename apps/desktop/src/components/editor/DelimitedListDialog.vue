@@ -151,7 +151,7 @@ async function copyPreview() {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="max-h-[86vh] border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[620px]">
+    <DialogContent class="max-h-[86vh] border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[620px]">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
           <List class="h-5 w-5 text-primary" />

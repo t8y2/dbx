@@ -1,5 +1,16 @@
 import type { SchemaDiffObject } from "@/lib/schema/schemaDiff";
 
+interface SchemaDiffDdlLine {
+  type: string;
+  lineNumber: number | null;
+  isPadding: boolean;
+}
+
+interface SchemaDiffDdlHunk {
+  leftLines: readonly SchemaDiffDdlLine[];
+  rightLines: readonly SchemaDiffDdlLine[];
+}
+
 function readSqlIdentifier(value: string): string | null {
   const input = value.trimStart();
   const opening = input[0];
@@ -58,4 +69,13 @@ export function findSchemaDiffDdlLineNumber(ddl: string, object: SchemaDiffObjec
   const lines = ddl.replace(/\r\n?/g, "\n").split("\n");
   const index = lines.findIndex((line) => lineMatchesObject(line, object, objectName));
   return index >= 0 ? index + 1 : null;
+}
+
+export function findFirstSchemaDiffChangedLineNumber(hunks: readonly SchemaDiffDdlHunk[], side: "source" | "target"): number | null {
+  const linesKey = side === "source" ? "leftLines" : "rightLines";
+  for (const hunk of hunks) {
+    const line = hunk[linesKey].find((candidate) => !candidate.isPadding && candidate.type !== "equal" && candidate.lineNumber !== null);
+    if (line?.lineNumber !== null && line?.lineNumber !== undefined) return line.lineNumber;
+  }
+  return null;
 }

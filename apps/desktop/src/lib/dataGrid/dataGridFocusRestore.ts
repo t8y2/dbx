@@ -32,3 +32,19 @@ function gridFocusCanTransferFrom(root: HTMLElement, activeElement: Element | nu
   if (activeGrid && activeGrid !== root) return activeGrid.dataset.gridActive !== "true";
   return !!closest(".app-tab-bar, [role='tab'], [role='tablist']");
 }
+
+/**
+ * Decide whether a committed cell edit should hand focus back to the grid.
+ *
+ * Keyboard commits (Enter, inline bulk edit) leave focus inside the grid, so
+ * the grid must take it back for arrow-key navigation to keep working. A commit
+ * that ended because an outside pointer interaction moved focus elsewhere — the
+ * SQL editor, the WHERE condition bar, a toolbar button — must not, otherwise
+ * the element the user just clicked never keeps the caret, and the next
+ * keystroke or paste is claimed by the grid instead (#9383).
+ */
+export function shouldRestoreDataGridFocusAfterEditCommit(root: HTMLElement | null | undefined, activeElement: Element | null): boolean {
+  if (!root) return true;
+  if (root.contains(activeElement)) return true;
+  return gridFocusCanTransferFrom(root, activeElement);
+}

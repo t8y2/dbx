@@ -1,3 +1,8 @@
+import type { DatabaseType } from "@/types/database";
+import { DBX_ROWID_COLUMN } from "@/lib/table/tableEditing";
+import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
+import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
+
 // Binary column types that should not be edited inline
 export const BINARY_TYPES = new Set(["blob", "clob", "bytea", "varbinary", "binary", "image", "longblob", "mediumblob", "tinyblob", "blob sub_type 2004", "blob sub_type 2005"]);
 
@@ -53,8 +58,22 @@ export interface EditableQuerySource {
   alias?: string;
 }
 
-const POSTGRES_FOLDED_IDENTIFIER_TYPES = new Set(["postgres", "redshift", "gaussdb", "highgo", "uxdb", "vastbase", "kwdb", "opengauss", "questdb"]);
+export const POSTGRES_FOLDED_IDENTIFIER_TYPES = new Set(["postgres", "redshift", "gaussdb", "highgo", "uxdb", "vastbase", "kwdb", "opengauss", "questdb"]);
 const ORACLE_FOLDED_IDENTIFIER_TYPES = new Set(["oracle", "dameng", "oceanbase-oracle"]);
+
+/**
+ * Fold a SQL source identifier the way the server resolved it when the
+ * identifier was written unquoted: PostgreSQL-compatible engines store and
+ * resolve it lower case, so the folded spelling — not the query's original
+ * casing — is the only name that stays addressable when the identifier is
+ * later quoted (grid saves, generated SQL). Quoted identifiers keep their
+ * exact spelling. `undefined` passes through so callers can fall back to
+ * other identity sources.
+ */
+export function foldUnquotedPostgresMetadataIdentifier(databaseType: string, identifier: string | undefined, quoted: boolean | undefined): string | undefined {
+  if (!identifier || quoted || !POSTGRES_FOLDED_IDENTIFIER_TYPES.has(databaseType)) return identifier;
+  return identifier.toLowerCase();
+}
 
 /**
  * Resolve a SQL source identifier to the canonical name returned by table
@@ -72,23 +91,31 @@ export function resolveMetadataColumnName(databaseType: string, sourceName: stri
   if (sourceNameQuoted === undefined) {
     const exact = metadataColumns.find((column) => column === sourceName);
     if (exact || POSTGRES_FOLDED_IDENTIFIER_TYPES.has(databaseType) || ORACLE_FOLDED_IDENTIFIER_TYPES.has(databaseType)) return exact;
-    const caseOnlyMatches = metadataColumns.filter((column) => column.toLowerCase() === sourceName.toLowerCase());
-    return caseOnlyMatches.length === 1 ? caseOnlyMatches[0] : undefined;
+    return uniqueCaseInsensitiveColumn(metadataColumns, sourceName);
   }
 
+  // Dialect folding is only an assumption about what the server stored: Dameng
+  // keeps the case an unquoted identifier was created with (issue #10233), so
+  // the folded spelling can miss even though the column exists. Fall back to a
+  // case-only match when it is unambiguous -- never when the folded name itself
+  // resolves, so quoted or equally-spelled columns keep their exact identity.
   if (POSTGRES_FOLDED_IDENTIFIER_TYPES.has(databaseType)) {
     const folded = sourceName.toLowerCase();
-    return metadataColumns.find((column) => column === folded);
+    return metadataColumns.find((column) => column === folded) ?? uniqueCaseInsensitiveColumn(metadataColumns, folded);
   }
   if (ORACLE_FOLDED_IDENTIFIER_TYPES.has(databaseType)) {
     const folded = sourceName.toUpperCase();
-    return metadataColumns.find((column) => column === folded);
+    return metadataColumns.find((column) => column === folded) ?? uniqueCaseInsensitiveColumn(metadataColumns, folded);
   }
 
   const exact = metadataColumns.find((column) => column === sourceName);
   if (exact) return exact;
-  const caseOnlyMatches = metadataColumns.filter((column) => column.toLowerCase() === sourceName.toLowerCase());
-  return caseOnlyMatches.length === 1 ? caseOnlyMatches[0] : undefined;
+  return uniqueCaseInsensitiveColumn(metadataColumns, sourceName);
+}
+
+function uniqueCaseInsensitiveColumn(metadataColumns: readonly string[], name: string): string | undefined {
+  const matches = metadataColumns.filter((column) => column.toLowerCase() === name.toLowerCase());
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 export interface ResolvedSourceColumnRef {
@@ -229,7 +256,7 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   if (hasTopLevelKeyword(normalized, ["UNION", "INTERSECT", "EXCEPT", "MINUS"])) {
     return { editable: false, reason: "set-operation" };
   }
-  if (normalized.includes(";")) return { editable: false, reason: "complex-source" };
+  if (hasTopLevelSemicolon(normalized)) return { editable: false, reason: "complex-source" };
 
   const fromIndex = findTopLevelKeyword(normalized, "FROM", 0);
   if (fromIndex < 0) return { editable: false, reason: "no-table" };
@@ -241,6 +268,7 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   // so it cannot be mapped to base rows like an ordinary DISTINCT projection.
   if (distinct && /^ON\b/i.test(selectBodyWithoutDistinct)) return { editable: false, reason: "aggregation" };
   const selectBody = stripSqlServerTopClause(selectBodyWithoutDistinct);
+  if (containsTopLevelAggregate(selectBody)) return { editable: false, reason: "aggregation" };
 
   const groupIndex = findTopLevelKeyword(normalized, "GROUP", fromIndex + 4);
   const havingIndex = findTopLevelKeyword(normalized, "HAVING", fromIndex + 4);
@@ -250,7 +278,7 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   // Row-locking FOR clauses change concurrency behavior, not the base-row
   // mapping. Output/read-only FOR modes must stay non-editable.
   if (forIndex >= 0 && !/^FOR\s+(?:UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\b/i.test(normalized.slice(forIndex))) return { editable: false, reason: "complex-source" };
-  const fromEnd = firstTopLevelKeywordIndex(normalized, ["WHERE", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR"], fromIndex + 4);
+  const fromEnd = firstTopLevelKeywordIndex(normalized, ["WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR"], fromIndex + 4);
   const fromBody = normalized.slice(fromIndex + 4, fromEnd < 0 ? normalized.length : fromEnd).trim();
   if (isExternalFromSource(fromBody)) return { editable: false, reason: "external-source" };
   const sources = parseFromSources(fromBody);
@@ -310,7 +338,7 @@ export function analyzeSelectStructureForDisplay(sql: string): EditableQueryInfo
   if (/^\s*WITH\b/i.test(normalized)) return null;
   if (!/^SELECT\b/i.test(normalized)) return null;
   if (hasTopLevelKeyword(normalized, ["UNION", "INTERSECT", "EXCEPT", "MINUS"])) return null;
-  if (normalized.includes(";")) return null;
+  if (hasTopLevelSemicolon(normalized)) return null;
 
   const fromIndex = findTopLevelKeyword(normalized, "FROM", 0);
   if (fromIndex < 0) return null;
@@ -335,7 +363,10 @@ export function analyzeSelectStructureForDisplay(sql: string): EditableQueryInfo
   const hasWindowClause = findTopLevelKeyword(normalized, "OVER", "SELECT".length) >= 0 || findTopLevelKeyword(normalized, "WINDOW", fromIndex + "FROM".length) >= 0;
   const hasRightJoinClause = hasTopLevelRightJoin(fromBody);
 
-  const selectStar = sources.length === 1 && isSelectStar(selectBody, source.alias);
+  // A bare `*` in a multi-source query expands in source/projection order.
+  // Keep it as a display-only star so joined result columns can still resolve
+  // to their physical metadata without making the query editable.
+  const selectStar = isSelectStar(selectBody, source.alias);
   const columns = selectStar ? [] : parseSelectColumns(selectBody, sources);
   if (!selectStar && columns.length === 0) return null;
   if (sources.length > 1 && columns.some((column) => column.star && !column.sourceKey)) return null;
@@ -452,8 +483,17 @@ function parseSelectColumn(col: string, sources?: EditableQuerySource[]): Editab
 
 function parseStarSelectColumn(col: string, sources?: EditableQuerySource[]): EditableQueryColumn | null {
   if (col === "*") {
+    // An unqualified `*` is unambiguous when the query has exactly one
+    // source, so it can bind to that source like a qualified `alias.*`
+    // would. Without this, expandProjectionColumnsForSources cannot find a
+    // matching table source (no sourceKey) and drops the star expansion
+    // entirely, misaligning every result column that follows it — e.g.
+    // `SELECT *, amount FROM orders` loses all result-column comments even
+    // though the table has no ambiguity to resolve.
+    const sourceKey = sources?.length === 1 ? sources[0]!.key : undefined;
     return {
       star: true,
+      ...(sourceKey ? { sourceKey } : {}),
       resultName: "*",
       expression: col,
     };
@@ -603,8 +643,23 @@ function isSelectStar(body: string, alias: string | undefined): boolean {
   return new RegExp(`^${escapeRegExp(alias)}\\s*\\.\\s*\\*$`, "i").test(trimmed);
 }
 
+export function hasUnparsedQuerySource(sql: string): boolean {
+  const normalized = stripSqlComments(sql).trim();
+  if (/^WITH\b/i.test(normalized) || hasTopLevelKeyword(normalized, ["UNION", "INTERSECT", "EXCEPT", "MINUS"])) return false;
+  const fromIndex = findTopLevelKeyword(normalized, "FROM", 0);
+  if (fromIndex < 0) return false;
+  const forIndex = findTopLevelKeyword(normalized, "FOR", fromIndex + 4);
+  const forLocksRows = forIndex >= 0 && /^FOR\s+(?:UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\b/i.test(normalized.slice(forIndex));
+  const fromEnd = firstTopLevelKeywordIndex(normalized, ["WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", ...(forLocksRows ? ["FOR"] : [])], fromIndex + 4);
+  const fromBody = normalized
+    .slice(fromIndex + 4, fromEnd < 0 ? normalized.length : fromEnd)
+    .replace(/;+\s*$/, "")
+    .trim();
+  return parseFromSources(fromBody).length === 0;
+}
+
 function parseFromSources(body: string): EditableQuerySource[] {
-  if (!body || /[()]/.test(body)) return [];
+  if (!body) return [];
   const sources: EditableQuerySource[] = [];
   let pos = 0;
   const first = parseTableSourceAt(body, pos, sources.length);
@@ -623,7 +678,10 @@ function parseFromSources(body: string): EditableQuerySource[] {
       continue;
     }
     const joinIndex = findTopLevelKeyword(body, "JOIN", pos);
-    if (joinIndex < 0) break;
+    const joinPrefix = body.slice(pos, joinIndex < 0 ? body.length : joinIndex).trim();
+    const hasJoinCondition = startsWithKeyword(body, pos, "ON") || startsWithKeyword(body, pos, "USING");
+    if (joinIndex < 0) return hasJoinCondition ? sources : [];
+    if (!hasJoinCondition && !/^(?:(?:LEFT|RIGHT|INNER|FULL|CROSS|OUTER|NATURAL)\s*)*$/i.test(joinPrefix)) return [];
     const next = parseTableSourceAt(body, joinIndex + "JOIN".length, sources.length);
     if (!next) return [];
     sources.push(next.source);
@@ -655,6 +713,14 @@ function parseTableSourceAt(text: string, start: number, index: number): { sourc
     alias = aliasIdent.value;
     end = aliasIdent.end;
   }
+  tailPos = skipWhitespace(text, end);
+  if (startsWithKeyword(text, tailPos, "WITH")) {
+    const hintTokens = tokenizeSqlSemantic(text.slice(tailPos), "sqlserver");
+    if (hintTokens[1]?.text !== "(") return null;
+    const closingHint = hintTokens.find((token) => token.text === ")" && token.depth === 0);
+    if (!closingHint) return null;
+    end = tailPos + closingHint.span.end;
+  }
 
   const tableName = ident.parts[ident.parts.length - 1]!;
   const tableNameQuoted = ident.quoted[ident.quoted.length - 1];
@@ -684,7 +750,7 @@ function isExternalFromSource(body: string): boolean {
 function tableSourceTerminatorAt(text: string, pos: number): boolean {
   if (pos >= text.length) return true;
   if (text[pos] === ",") return true;
-  return ["ON", "USING", "JOIN", "LEFT", "RIGHT", "INNER", "FULL", "CROSS", "OUTER", "NATURAL"].some((keyword) => startsWithKeyword(text, pos, keyword));
+  return ["ON", "USING", "JOIN", "LEFT", "RIGHT", "INNER", "FULL", "CROSS", "OUTER", "NATURAL", "WITH"].some((keyword) => startsWithKeyword(text, pos, keyword));
 }
 
 function startsWithKeyword(text: string, pos: number, keyword: string): boolean {
@@ -733,7 +799,28 @@ function readIdentifier(text: string, start: number): { value: string; quoted: b
     return null;
   }
   const match = text.slice(pos).match(/^[\p{ID_Start}_][\p{ID_Continue}$]*/u);
-  return match ? { value: match[0], quoted: false, end: pos + match[0].length } : null;
+  if (match) return { value: match[0], quoted: false, end: pos + match[0].length };
+  // MySQL/MariaDB also allow an unquoted identifier to begin with a digit as long as it is not a
+  // pure number, so `select * from 01_tablename` maps back to a base table while `123` / `1e3`
+  // stay literals (#9992).
+  const digitMatch = text.slice(pos).match(/^[0-9][\p{ID_Continue}$]*/u);
+  if (digitMatch && !isNumberShapedToken(digitMatch[0])) {
+    return { value: digitMatch[0], quoted: false, end: pos + digitMatch[0].length };
+  }
+  return null;
+}
+
+/**
+ * Mirrors `sqlNavigation.isNumberShapedToken`: a digit-leading token is only an identifier when
+ * it is not a number (`123`, `1e3`, `0x1f`, `0b101`). See #9992.
+ */
+function isNumberShapedToken(value: string): boolean {
+  if (!/^[0-9]/.test(value)) return false;
+  const rest = value.slice(1).toLowerCase();
+  if (rest === "") return true;
+  if (rest.startsWith("x")) return /^x[0-9a-f]+$/.test(rest);
+  if (rest.startsWith("b")) return /^b[01]+$/.test(rest);
+  return /^[0-9e]+$/.test(rest);
 }
 
 function skipWhitespace(text: string, pos: number): number {
@@ -741,12 +828,149 @@ function skipWhitespace(text: string, pos: number): number {
   return pos;
 }
 
-function stripSqlComments(sql: string): string {
-  return sql.replace(/--.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+const AGGREGATE_FUNCTION_PATTERN = /\b(?:COUNT|SUM|AVG|MIN|MAX|EVERY|ANY|SOME|STDDEV(?:_POP|_SAMP)?|VAR(?:IANCE|_POP|_SAMP)?|GROUP_CONCAT|STRING_AGG|LISTAGG|ARRAY_AGG|JSON_ARRAYAGG|JSON_OBJECTAGG|XMLAGG|APPROX_COUNT_DISTINCT)\s*\(/i;
+
+function containsTopLevelAggregate(expression: string): boolean {
+  let quote: string | null = null;
+  let cleaned = "";
+  let depth = 0;
+  let subqueryDepth: number | undefined;
+  for (let i = 0; i < expression.length; i++) {
+    const ch = expression[i]!;
+    if (quote) {
+      if (ch === quote) {
+        if (quote === "'" && expression[i + 1] === "'") {
+          i++;
+          continue;
+        }
+        quote = null;
+      } else if (quote === "]" && ch === "]") {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      cleaned += " ";
+      continue;
+    }
+    if (ch === "[") {
+      quote = "]";
+      cleaned += " ";
+      continue;
+    }
+    if (ch === "(") depth++;
+    if (ch === ")") {
+      depth--;
+      if (subqueryDepth !== undefined && depth < subqueryDepth) subqueryDepth = undefined;
+    }
+    if (subqueryDepth !== undefined) continue;
+    if (depth > 0 && (ch === "S" || ch === "s") && expression.slice(i, i + 6).toUpperCase() === "SELECT" && !isIdentifierChar(expression[i - 1] ?? "") && !isIdentifierChar(expression[i + 6] ?? "")) {
+      subqueryDepth = depth;
+      cleaned += " ";
+      continue;
+    }
+    cleaned += ch;
+  }
+  return AGGREGATE_FUNCTION_PATTERN.test(cleaned);
 }
 
-function hasTopLevelKeyword(sql: string, keywords: string[]): boolean {
-  return keywords.some((keyword) => findTopLevelKeyword(sql, keyword, 0) >= 0);
+function stripSqlComments(sql: string): string {
+  let result = "";
+  let quote: string | null = null;
+  let i = 0;
+  while (i < sql.length) {
+    const ch = sql[i]!;
+    if (quote) {
+      result += ch;
+      if (ch === quote) {
+        if (quote === "'" && sql[i + 1] === "'") {
+          result += sql[i + 1]!;
+          i += 2;
+          continue;
+        }
+        quote = null;
+      }
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      result += ch;
+      i++;
+      continue;
+    }
+    if (ch === "[") {
+      quote = "]";
+      result += ch;
+      i++;
+      continue;
+    }
+    if (ch === "-" && sql[i + 1] === "-") {
+      i += 2;
+      while (i < sql.length && sql[i] !== "\n") {
+        i++;
+      }
+      continue;
+    }
+    if (ch === "/" && sql[i + 1] === "*") {
+      i += 2;
+      while (i < sql.length && !(sql[i] === "*" && sql[i + 1] === "/")) {
+        i++;
+      }
+      if (i < sql.length) i += 2;
+      continue;
+    }
+    result += ch;
+    i++;
+  }
+  return result;
+}
+
+export function hasTopLevelKeyword(sql: string, keywords: string[], databaseType?: DatabaseType): boolean {
+  const dialect = sqlSemanticDialectFor({ databaseType });
+  const mysqlFamily = dialect.id === "mysql" || dialect.id === "doris";
+  const tokens = tokenizeSqlSemantic(sql, dialect.id, { mysqlDashCommentRequiresWhitespace: mysqlFamily, mysqlBackslashEscape: mysqlFamily });
+  const normalizedKeywords = new Set(keywords.map((keyword) => keyword.toLowerCase()));
+  return tokens.some((token) => token.kind === "word" && token.depth === 0 && normalizedKeywords.has(token.normalized));
+}
+
+function hasTopLevelSemicolon(sql: string): boolean {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i]!;
+    if (quote) {
+      if (ch === quote) {
+        if (quote === "'" && sql[i + 1] === "'") {
+          i++;
+          continue;
+        }
+        quote = null;
+      } else if (quote === "]" && ch === "]") {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "[") {
+      quote = "]";
+      continue;
+    }
+    if (ch === "(") {
+      depth++;
+      continue;
+    }
+    if (ch === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth === 0 && ch === ";") return true;
+  }
+  return false;
 }
 
 function firstTopLevelKeywordIndex(sql: string, keywords: string[], start: number): number {
@@ -759,9 +983,17 @@ function findTopLevelKeyword(sql: string, keyword: string, start: number): numbe
   let quote: string | null = null;
   const upperKeyword = keyword.toUpperCase();
   for (let i = start; i < sql.length; i++) {
-    const ch = sql[i];
+    const ch = sql[i]!;
     if (quote) {
-      if (ch === quote || (quote === "]" && ch === "]")) quote = null;
+      if (ch === quote) {
+        if (quote === "'" && sql[i + 1] === "'") {
+          i++;
+          continue;
+        }
+        quote = null;
+      } else if (quote === "]" && ch === "]") {
+        quote = null;
+      }
       continue;
     }
     if (ch === "'" || ch === '"' || ch === "`") {
@@ -782,7 +1014,7 @@ function findTopLevelKeyword(sql: string, keyword: string, start: number): numbe
     }
     if (depth !== 0) continue;
     if (sql.slice(i, i + keyword.length).toUpperCase() !== upperKeyword) continue;
-    const before = i === 0 ? "" : sql[i - 1];
+    const before = i === 0 ? "" : sql[i - 1]!;
     const after = sql[i + keyword.length] ?? "";
     if (!isIdentifierChar(before) && !isIdentifierChar(after)) return i;
   }
@@ -803,12 +1035,13 @@ function escapeRegExp(value: string): string {
  * comparison prevents `id` from being mistaken for a distinct quoted `"ID"`
  * column in PostgreSQL.
  */
-export function allPrimaryKeysPresent(primaryKeys: string[], resultColumns: string[], analysis?: EditableQueryInfo, sourceKey?: string): boolean {
+export function allPrimaryKeysPresent(primaryKeys: string[], resultColumns: string[], analysis?: EditableQueryInfo, sourceKey?: string, databaseType?: DatabaseType): boolean {
   if (analysis && !analysis.selectStar) {
     const sourceColumns = new Set(
       analysis.columns.flatMap((column) => {
         if (!column.sourceName) return [];
         if (sourceKey && column.sourceKey !== sourceKey) return [];
+        if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID" && column.sourceKey === sourceKey) return [DBX_ROWID_COLUMN, column.sourceName];
         return [column.sourceName];
       }),
     );
@@ -818,10 +1051,32 @@ export function allPrimaryKeysPresent(primaryKeys: string[], resultColumns: stri
   return primaryKeys.every((pk) => colSet.has(pk));
 }
 
-function matchColumnsForResult(analysis: EditableQueryInfo, resultColumns: string[]): EditableQueryColumn[] | undefined {
+const SYNTHETIC_RESULT_ROW_NUMBER_LABELS = new Set(["__dbx_row_num", "dbx_rn"]);
+
+function isOracleFamilyDatabase(databaseType?: DatabaseType | string): boolean {
+  return !!databaseType && ORACLE_FOLDED_IDENTIFIER_TYPES.has(databaseType);
+}
+
+function isTrailingPaginationResultLabel(label: string, analysisResultNames: Set<string>): boolean {
+  const normalized = label.toLowerCase();
+  if (SYNTHETIC_RESULT_ROW_NUMBER_LABELS.has(normalized)) return true;
+  return normalized === "rownum" && !analysisResultNames.has("rownum");
+}
+
+function resultPrefixLengthForEditMatching(analysis: EditableQueryInfo, resultColumns: string[]): number {
+  const analysisNames = new Set(analysis.columns.map((column) => column.resultName.toLowerCase()));
+  let end = resultColumns.length;
+  while (end > analysis.columns.length) {
+    if (!isTrailingPaginationResultLabel(resultColumns[end - 1]!, analysisNames)) break;
+    end -= 1;
+  }
+  return end;
+}
+
+function matchResultPrefixByLabel(analysis: EditableQueryInfo, prefix: string[]): EditableQueryColumn[] | undefined {
   const matches: EditableQueryColumn[] = [];
   let searchFrom = 0;
-  for (const resultColumn of resultColumns) {
+  for (const resultColumn of prefix) {
     let matchIndex = analysis.columns.findIndex((column, index) => index >= searchFrom && column.resultName === resultColumn);
     if (matchIndex < 0) {
       const normalized = resultColumn.toLowerCase();
@@ -835,18 +1090,44 @@ function matchColumnsForResult(analysis: EditableQueryInfo, resultColumns: strin
   return matches;
 }
 
-export function allEditableColumnsWriteable(analysis: EditableQueryInfo, resultColumns: string[], sourceKey?: string): boolean {
-  if (analysis.selectStar) return true;
-  const matchedColumns = matchColumnsForResult(analysis, resultColumns);
-  return !!matchedColumns && matchedColumns.every((source) => !sourceKey || !source.sourceName || source.sourceKey === sourceKey);
+function isRownumLabelSubstitution(resultLabel: string, column: EditableQueryColumn): boolean {
+  if (resultLabel.toLowerCase() !== "rownum") return false;
+  return column.resultName.toLowerCase() !== "rownum" && column.sourceName?.toLowerCase() !== "rownum";
 }
 
-export function sourceColumnsForResult(analysis: EditableQueryInfo, resultColumns: string[], sourceKey?: string): Array<string | undefined> | undefined {
+function padMatchedColumnsToResultLength(matches: Array<EditableQueryColumn | undefined>, resultColumnCount: number): Array<EditableQueryColumn | undefined> {
+  if (matches.length === resultColumnCount) return matches;
+  return [...matches, ...Array.from({ length: resultColumnCount - matches.length }, () => undefined)];
+}
+
+function matchColumnsForResult(analysis: EditableQueryInfo, resultColumns: string[], databaseType?: DatabaseType | string): Array<EditableQueryColumn | undefined> | undefined {
+  const prefixLength = resultPrefixLengthForEditMatching(analysis, resultColumns);
+  const prefix = resultColumns.slice(0, prefixLength);
+  const labeled = matchResultPrefixByLabel(analysis, prefix);
+  if (labeled) return padMatchedColumnsToResultLength(labeled, resultColumns.length);
+
+  if (prefix.length !== analysis.columns.length || !isOracleFamilyDatabase(databaseType)) return undefined;
+
+  const ordinal = analysis.columns.map((column, index) => (isRownumLabelSubstitution(prefix[index]!, column) ? undefined : column));
+  return padMatchedColumnsToResultLength(ordinal, resultColumns.length);
+}
+
+export function allEditableColumnsWriteable(analysis: EditableQueryInfo, resultColumns: string[], sourceKey?: string, databaseType?: DatabaseType | string): boolean {
+  if (analysis.selectStar) return true;
+  const matchedColumns = matchColumnsForResult(analysis, resultColumns, databaseType);
+  return !!matchedColumns && matchedColumns.every((source) => !source || !sourceKey || !source.sourceName || source.sourceKey === sourceKey);
+}
+
+export function sourceColumnsForResult(analysis: EditableQueryInfo, resultColumns: string[], sourceKey?: string, databaseType?: DatabaseType, primaryKeys?: readonly string[]): Array<string | undefined> | undefined {
   if (analysis.selectStar) return undefined;
-  const matchedColumns = matchColumnsForResult(analysis, resultColumns);
+  const matchedColumns = matchColumnsForResult(analysis, resultColumns, databaseType);
   if (!matchedColumns) return undefined;
   return matchedColumns.map((column) => {
+    if (!column) return undefined;
     if (sourceKey && column.sourceKey !== sourceKey) return undefined;
+    if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && !column.sourceNameQuoted && column.sourceName?.toUpperCase() === "ROWID" && column.sourceKey === sourceKey) {
+      return primaryKeys?.length === 1 && primaryKeys[0] === DBX_ROWID_COLUMN ? DBX_ROWID_COLUMN : undefined;
+    }
     return column.sourceName;
   });
 }

@@ -30,6 +30,7 @@ pub struct TokenRpcRequest<'a> {
     flags: BitFlags<RpcOption>,
     params: Vec<RpcParam<'a>>,
     transaction_desc: [u8; 8],
+    tds_version: crate::FeatureLevel,
 }
 
 impl<'a> TokenRpcRequest<'a> {
@@ -42,7 +43,12 @@ impl<'a> TokenRpcRequest<'a> {
             flags: BitFlags::empty(),
             params,
             transaction_desc,
+            tds_version: crate::FeatureLevel::default(),
         }
+    }
+    pub fn with_tds_version(mut self, version: crate::FeatureLevel) -> Self {
+        self.tds_version = version;
+        self
     }
 }
 
@@ -92,11 +98,13 @@ impl<'a> From<RpcProcId> for RpcProcIdValue<'a> {
 
 impl<'a> Encode<BytesMut> for TokenRpcRequest<'a> {
     fn encode(self, dst: &mut BytesMut) -> Result<()> {
-        dst.put_u32_le(ALL_HEADERS_LEN_TX as u32);
-        dst.put_u32_le(ALL_HEADERS_LEN_TX as u32 - 4);
-        dst.put_u16_le(AllHeaderTy::TransactionDescriptor as u16);
-        dst.put_slice(&self.transaction_desc);
-        dst.put_u32_le(1);
+        if self.tds_version >= crate::FeatureLevel::SqlServer2005 {
+            dst.put_u32_le(ALL_HEADERS_LEN_TX as u32);
+            dst.put_u32_le(ALL_HEADERS_LEN_TX as u32 - 4);
+            dst.put_u16_le(AllHeaderTy::TransactionDescriptor as u16);
+            dst.put_slice(&self.transaction_desc);
+            dst.put_u32_le(1);
+        }
 
         match self.proc_id {
             RpcProcIdValue::Id(ref id) => {
@@ -113,7 +121,7 @@ impl<'a> Encode<BytesMut> for TokenRpcRequest<'a> {
         dst.put_u16_le(self.flags.bits());
 
         for param in self.params.into_iter() {
-            param.encode(dst)?;
+            param.encode_for_version(dst, self.tds_version)?;
         }
 
         Ok(())
@@ -122,6 +130,11 @@ impl<'a> Encode<BytesMut> for TokenRpcRequest<'a> {
 
 impl<'a> Encode<BytesMut> for RpcParam<'a> {
     fn encode(self, dst: &mut BytesMut) -> Result<()> {
+        self.encode_for_version(dst, crate::FeatureLevel::default())
+    }
+}
+impl<'a> RpcParam<'a> {
+    fn encode_for_version(self, dst: &mut BytesMut, version: crate::FeatureLevel) -> Result<()> {
         let len_pos = dst.len();
         let mut length = 0u8;
 
@@ -134,8 +147,31 @@ impl<'a> Encode<BytesMut> for RpcParam<'a> {
 
         dst.put_u8(self.flags.bits());
 
-        let mut dst_fi = BytesMutWithTypeInfo::new(dst);
-        self.value.encode(&mut dst_fi)?;
+        let legacy_lob = if version < crate::FeatureLevel::SqlServer2005 {
+            match &self.value {
+                ColumnData::String(Some(s)) if s.encode_utf16().count() > 4000 => {
+                    let units = u32::try_from(s.encode_utf16().count()).map_err(|_| crate::Error::Protocol("NTEXT parameter too large".into()))?;
+                    let bytes = units.checked_mul(2).ok_or_else(|| crate::Error::Protocol("NTEXT parameter too large".into()))?;
+                    dst.put_u8(0x63); // NTEXT TYPE_INFO, followed by L_VARBYTE
+                    dst.put_u32_le(bytes);
+                    dst.extend_from_slice(&[0; 5]); // default collation
+                    dst.put_u32_le(bytes);
+                    for unit in s.encode_utf16() { dst.put_u16_le(unit); }
+                    true
+                }
+                ColumnData::Binary(Some(b)) if b.len() > 8000 => {
+                    let len = u32::try_from(b.len()).map_err(|_| crate::Error::Protocol("IMAGE parameter too large".into()))?;
+                    dst.put_u8(0x22); // IMAGE TYPE_INFO, followed by L_VARBYTE
+                    dst.put_u32_le(len); dst.put_u32_le(len); dst.extend_from_slice(b);
+                    true
+                }
+                _ => false,
+            }
+        } else { false };
+        if !legacy_lob {
+            let mut dst_fi = BytesMutWithTypeInfo::new(dst);
+            self.value.encode(&mut dst_fi)?;
+        }
 
         let dst: &mut [u8] = dst.borrow_mut();
         dst[len_pos] = length;

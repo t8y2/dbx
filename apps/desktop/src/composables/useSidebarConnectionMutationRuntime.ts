@@ -9,6 +9,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { uuid } from "@/lib/common/utils";
 import { connectionFilePath, defaultSqliteBackupFileName, isMemorySqlitePath, sqliteBackupSourcePath } from "@/lib/connection/connectionFile";
+import { withoutSshLocalPorts } from "@/lib/connection/sshLocalPort";
 import { hasEnabledTransportLayers } from "@/lib/backend/connectionTransport";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { revealPathInFileManager } from "@/lib/backend/tauri";
@@ -19,6 +20,8 @@ import { releaseConnectionFromMultiSelection } from "@/lib/sidebar/sidebarConnec
 import { connectionDeleteTargetSnapshot, connectionGroupDeleteTargetSnapshot, deleteConnectionsWithGroup, showDeleteConfirm, showDeleteGroupConfirm, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { disconnectSidebarConnections } from "@/lib/sidebar/sidebarConnectionDisconnect";
+import { connectSidebarConnections } from "@/lib/sidebar/sidebarConnectionConnect";
+import { connectionBearingGroupIdsUnder } from "@/lib/sidebar/sidebarLayout";
 
 interface SidebarConnectionMutationRuntimeOptions {
   activeNode: ShallowRef<TreeNode>;
@@ -116,7 +119,10 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
       await connectionStore.removeConnections(connectionIds);
       options.releaseActiveNodeReference(targets.map((target) => target.id));
       for (const connectionId of connectionIds) {
-        connectionStore.disconnect(connectionId).catch((error) => {
+        // 页签已由 removeConnections 按「删除连接」策略处理，这里只清会话，
+        // 避免再套用「断开连接」策略把刚保留的 SQL 页签关掉。删除是终态，
+        // 也不写"用户已关闭"标记。
+        connectionStore.disconnect(connectionId, { skipTabHandling: true, markClosedByUser: false }).catch((error) => {
           // Removal has already succeeded; disconnect cleanup must not turn it into a failed delete.
           console.warn("[DBX][connection:delete:disconnect-failed]", { connectionId, error });
         });
@@ -148,7 +154,7 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     for (const target of targets) {
       const config = connectionStore.getConfig(target.connectionId);
       if (!config) continue;
-      const newConfig = { ...config, id: uuid(), name: `${config.name} (Copy)` };
+      const newConfig = { ...withoutSshLocalPorts(config), id: uuid(), name: `${config.name} (Copy)` };
       await connectionStore.addConnection(newConfig, connectionStore.groupIdForConnection(target.connectionId));
       duplicatedCount += 1;
     }
@@ -214,7 +220,6 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
 
   async function disconnectConnectionIds(connectionIds: readonly string[]) {
     if (!connectionIds.length) return;
-
     const result = await disconnectSidebarConnections(connectionIds, (connectionId) => connectionStore.disconnect(connectionId));
     if (!result.failed) {
       toast(connectionIds.length > 1 ? t("connection.disconnectedSelected", { count: connectionIds.length }) : t("connection.disconnected"), 2000);
@@ -226,6 +231,50 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     }
     const message = result.firstError instanceof Error ? result.firstError.message : String(result.firstError);
     toast(t("connection.saveFailed", { message }), 5000);
+  }
+
+  async function connectConnectionIds(connectionIds: readonly string[]) {
+    if (!connectionIds.length) return;
+    const result = await connectSidebarConnections(connectionIds, async (connectionId) => {
+      const node = connectionStore.findConnectionNode(connectionId);
+      if (node && connectionStore.loadTreeNodeChildren) {
+        await connectionStore.loadTreeNodeChildren(node);
+      } else {
+        await connectionStore.ensureConnected(connectionId);
+      }
+    });
+    if (!result.failed) {
+      toast(connectionIds.length > 1 ? t("connection.connectedSelected", { count: connectionIds.length }) : t("connection.connected"), 2000);
+      return;
+    }
+    if (result.succeeded > 0) {
+      toast(t("connection.connectSelectedPartial", { succeeded: result.succeeded, failed: result.failed }), 5000);
+      return;
+    }
+    const message = result.firstError instanceof Error ? result.firstError.message : String(result.firstError);
+    toast(t("connection.connectFailed", { message }), 5000);
+  }
+
+  async function restoreSqliteDatabase() {
+    const connectionId = activeNode.value.connectionId;
+    const config = connectionId ? connectionStore.getConfig(connectionId) : undefined;
+    if (!connectionId || !config) return;
+    const usesSsh = (config.transport_layers || []).some((layer) => layer.enabled !== false && layer.type === "ssh");
+    if (!usesSsh) return;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const sourcePath = await open({
+      multiple: false,
+      filters: [{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3", "bak"] }],
+    });
+    if (typeof sourcePath !== "string" || !sourcePath) return;
+    try {
+      toast(t("contextMenu.restoreSqliteDatabaseInProgress"), 2000);
+      await connectionStore.ensureConnected(connectionId);
+      await api.restoreSqliteDatabase(connectionId, sourcePath);
+      toast(t("contextMenu.restoreSqliteDatabaseSuccess"), 3000);
+    } catch (error: any) {
+      toast(t("contextMenu.restoreSqliteDatabaseFailed", { message: error?.message || String(error) }), 5000);
+    }
   }
 
   async function disconnectConnection() {
@@ -265,6 +314,32 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
 
   async function disconnectConnectionGroup() {
     await disconnectConnectionIds(connectionGroupDisconnectTargets());
+  }
+
+  function connectionGroupConnectTargets(): string[] {
+    const node = activeNode.value;
+    if (node.type !== "connection-group") return [];
+    return connectionStore.connectionIdsInGroups([node.id]).filter((connectionId) => !connectionStore.connectedIds.has(connectionId) && !connectionStore.connectingIds?.has(connectionId));
+  }
+
+  function connectionGroupConnectMenuLabel(): string {
+    return t("connectionGroup.openConnections", { count: connectionGroupConnectTargets().length });
+  }
+
+  function canConnectConnectionGroup(): boolean {
+    return connectionGroupConnectTargets().length > 0;
+  }
+
+  async function connectConnectionGroup() {
+    const node = activeNode.value;
+    if (node.type !== "connection-group") return;
+    const targets = connectionGroupConnectTargets();
+    if (!targets.length) return;
+    if (connectionStore.expandConnectionGroups) {
+      const groupIds = connectionStore.sidebarLayout ? connectionBearingGroupIdsUnder(connectionStore.sidebarLayout, node.id) : [node.id];
+      connectionStore.expandConnectionGroups(groupIds.length ? groupIds : [node.id]);
+    }
+    await connectConnectionIds(targets);
   }
 
   /** "断开并忘记本次密码"是否可用：save_password=false 且当前已连接（本次运行期必已输入密码）。 */
@@ -391,7 +466,8 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
       const connectionIds = await connectionStore.deleteConnectionGroups(groupIds, deleteConnectionsWithGroup.value);
       options.releaseActiveNodeReference(groupIds);
       for (const connectionId of connectionIds) {
-        connectionStore.disconnect(connectionId).catch((error) => {
+        // 页签已由 deleteConnectionGroups 按「删除连接」策略处理，这里只清会话。
+        connectionStore.disconnect(connectionId, { skipTabHandling: true, markClosedByUser: false }).catch((error) => {
           console.warn("[DBX][connection-group:delete:disconnect-failed]", { connectionId, error });
         });
       }
@@ -444,12 +520,17 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     sqliteBackupSource,
     canBackupSqliteDatabase,
     backupSqliteDatabase,
+    restoreSqliteDatabase,
     disconnectConnection,
     connectionDisconnectMenuLabel,
     canDisconnectConnection,
     connectionGroupDisconnectMenuLabel,
     canDisconnectConnectionGroup,
     disconnectConnectionGroup,
+    connectionGroupConnectTargets,
+    connectionGroupConnectMenuLabel,
+    canConnectConnectionGroup,
+    connectConnectionGroup,
     canForgetSessionCredential,
     disconnectAndForgetConnectionPassword,
     cancelConnectionAttempt,

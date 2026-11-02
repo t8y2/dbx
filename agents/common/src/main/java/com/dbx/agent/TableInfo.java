@@ -8,6 +8,7 @@ public final class TableInfo {
     private String comment;
     private String parent_schema;
     private String parent_name;
+    private Boolean valid;
 
     public TableInfo() {
         this("", "", null);
@@ -22,11 +23,16 @@ public final class TableInfo {
     }
 
     public TableInfo(String name, String table_type, String comment, String parent_schema, String parent_name) {
+        this(name, table_type, comment, parent_schema, parent_name, null);
+    }
+
+    public TableInfo(String name, String table_type, String comment, String parent_schema, String parent_name, Boolean valid) {
         this.name = name;
         this.table_type = table_type;
         this.comment = comment;
         this.parent_schema = parent_schema;
         this.parent_name = parent_name;
+        this.valid = valid;
     }
 
     public String getName() {
@@ -49,6 +55,10 @@ public final class TableInfo {
         return parent_name;
     }
 
+    public Boolean getValid() {
+        return valid;
+    }
+
     public void setName(String name) {
         this.name = name;
     }
@@ -69,6 +79,10 @@ public final class TableInfo {
         this.parent_name = parent_name;
     }
 
+    public void setValid(Boolean valid) {
+        this.valid = valid;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;
@@ -78,12 +92,13 @@ public final class TableInfo {
             && Objects.equals(table_type, that.table_type)
             && Objects.equals(comment, that.comment)
             && Objects.equals(parent_schema, that.parent_schema)
-            && Objects.equals(parent_name, that.parent_name);
+            && Objects.equals(parent_name, that.parent_name)
+            && Objects.equals(valid, that.valid);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, table_type, comment, parent_schema, parent_name);
+        return Objects.hash(name, table_type, comment, parent_schema, parent_name, valid);
     }
 
     @Override
@@ -93,6 +108,7 @@ public final class TableInfo {
             + ", comment=" + comment
             + ", parent_schema=" + parent_schema
             + ", parent_name=" + parent_name
+            + ", valid=" + valid
             + ")";
     }
 }

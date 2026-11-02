@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { firstLineCellDisplayValue } from "@/lib/dataGrid/cellValue";
+import { displayCellValue, firstLineCellDisplayValue } from "@/lib/dataGrid/cellValue";
+
+describe("displayCellValue", () => {
+  it("renders 64-bit integer strings beyond the JS safe range verbatim (issue #7832)", () => {
+    // The Rust backend ships BIGINT cells above ±(2^53 - 1) as decimal
+    // strings; the grid must keep every digit instead of routing them
+    // through Number(), which zeroes the trailing digits.
+    expect(displayCellValue("1391198305898897409")).toBe("1391198305898897409");
+    expect(displayCellValue("18446744073709551615")).toBe("18446744073709551615");
+    expect(displayCellValue("-9007199254740992")).toBe("-9007199254740992");
+    // Safe-range integers keep crossing as JSON numbers.
+    expect(displayCellValue(9007199254740991)).toBe("9007199254740991");
+    expect(displayCellValue(42)).toBe("42");
+  });
+});
 
 describe("firstLineCellDisplayValue", () => {
   it("shows only the first line in fixed-height cells", () => {

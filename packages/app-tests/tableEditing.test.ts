@@ -29,8 +29,8 @@ function column(name: string, isPrimaryKey = false): ColumnInfo {
 }
 
 test("uses ROWID as Oracle editable key when a table has no primary key", () => {
-  assert.deepEqual(editablePrimaryKeys("oracle", [column("ID"), column("CITY")]), [DBX_ROWID_COLUMN]);
-  assert.deepEqual(editablePrimaryKeys("oceanbase-oracle", [column("ID"), column("CITY")]), [DBX_ROWID_COLUMN]);
+  assert.deepEqual(editablePrimaryKeys("oracle", [column("ID"), column("CITY")], "TABLE"), [DBX_ROWID_COLUMN]);
+  assert.deepEqual(editablePrimaryKeys("oceanbase-oracle", [column("ID"), column("CITY")], "TABLE"), [DBX_ROWID_COLUMN]);
 });
 
 test("keeps declared primary keys ahead of Oracle ROWID fallback", () => {
@@ -145,14 +145,21 @@ test("detects the synthetic Oracle ROWID key case", () => {
   assert.equal(usesSyntheticRowIdKey("oceanbase-oracle", [DBX_ROWID_COLUMN]), true);
   assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "VIEW"), false);
   assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "MATERIALIZED_VIEW"), false);
-  assert.equal(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN]), false);
+  // PostgreSQL identifies keyless rows by the hidden `tableoid:ctid:xmin`
+  // locator, so a bare `__DBX_ROWID` key is the synthetic one. Unknown object
+  // types still fail closed rather than assuming a base table.
+  assert.equal(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN]), true);
+  assert.equal(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "TABLE"), true);
+  assert.equal(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "BASE TABLE"), true);
+  assert.equal(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "PARTITIONED TABLE"), false);
   assert.equal(usesSyntheticRowIdKey("oracle", ["ID"]), false);
   assert.equal(usesSyntheticRowIdKey("neo4j", [DBX_NEO4J_ELEMENT_ID_COLUMN]), true);
 });
 
 test("hides only the synthetic Oracle ROWID grid column", () => {
-  assert.equal(isHiddenGridColumn("oracle", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN]), true);
-  assert.equal(isHiddenGridColumn("oceanbase-oracle", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN]), true);
+  assert.equal(isHiddenGridColumn("oracle", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN]), false);
+  assert.equal(isHiddenGridColumn("oracle", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN], "TABLE"), true);
+  assert.equal(isHiddenGridColumn("oceanbase-oracle", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN], "TABLE"), true);
   assert.equal(isHiddenGridColumn("oracle", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN], "VIEW"), false);
   assert.equal(isHiddenGridColumn("oracle", "ROWID", [DBX_ROWID_COLUMN]), false);
   assert.equal(isHiddenGridColumn("mysql", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN]), false);

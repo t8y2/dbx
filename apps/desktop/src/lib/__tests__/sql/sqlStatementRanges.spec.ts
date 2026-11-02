@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { executionCandidateForMode } from "@/lib/sql/sqlExecutionTarget";
-import { buildExecutionCandidates, currentExecutableStatementRange, executableStatementRanges, fullSqlRange, hasMultipleExecutionTargets, splitSqlStatementRanges, statementRangeAtCursor, supportsExecutionTargetPicker } from "@/lib/sql/sqlStatementRanges";
+import { buildExecutionCandidates, currentExecutableStatementRange, executableStatementRanges, fullSqlRange, hasMultipleExecutionTargets, splitSqlStatementRanges, statementRangeAtCursor, stripMysqlClientDisplayCommand, supportsExecutionTargetPicker } from "@/lib/sql/sqlStatementRanges";
 
 function indexOf(sql: string, needle: string, occurrence = 1): number {
   let from = 0;
@@ -109,6 +109,34 @@ BEGIN
   NULL;
 END;`;
 
+// Mirrors the SP_ETL_LOG procedure from the 2026-09-01 ArgoDB session: PL/SQL-style
+// body with semicolons inside INSERT statements plus a block comment header. The
+// frontend splitter must keep the whole definition as ONE statement — otherwise
+// "execute current statement" sends only the first fragment
+// (`CREATE ... IS BEGIN INSERT INTO ...`) and the server returns 42000 + 1101.
+const argoProcedureFixture = `CREATE OR REPLACE PROCEDURE SP_ETL_LOG
+(
+  II_DATDATE       IN INT, --数据日期
+  IV_SCHEMA_NAME   IN STRING --模式名
+)
+/****************************************
+@AUTHOR:xiangxu
+#0.20150906-xiangxu-处理执行信息插入日志表
+*****************************************/
+IS
+BEGIN
+  INSERT INTO dws.ETL_LOG
+  (
+    DATA_DATE,
+    SCHEMA_NAME
+  )
+  VALUES
+  (
+    II_DATDATE,
+    IV_SCHEMA_NAME
+  );
+END;`;
+
 const gaussDbDollarQuotedFunctionScript = `DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_md5_uuid;
 
 CREATE OR REPLACE FUNCTION dbx_issue_4572_tmp_md5_uuid (v_str IN TEXT) RETURNS varchar(36) LANGUAGE PLPGSQL IMMUTABLE AS $function$
@@ -151,6 +179,61 @@ END;
 
 SELECT 1 AS after_procedure;
 SELECT 2 AS final_statement;`;
+
+const gaussDbMergeWithRecursiveUsing = `MERGE INTO TP_PIM_USER_RES a
+USING (
+  SELECT * FROM (
+    WITH RECURSIVE src AS (
+      SELECT userid, rptcode, appcde
+      FROM sjbase.ta_sys_rpt_aduser
+      WHERE appcde IN ('OSS', '1104')
+    ),
+    grp_oss AS (
+      SELECT s.userid, r.grp_id FROM src s
+      JOIN SJOSSRPT.TP_OSS_CORE_RPT r ON r.code = s.rptcode
+      WHERE s.appcde = 'OSS'
+      UNION ALL
+      SELECT t.userid, p.grp_id FROM grp_oss t
+      JOIN SJOSSRPT.TP_OSS_CORE_GRP c ON c.grp_id = t.grp_id
+      JOIN SJOSSRPT.TP_OSS_CORE_GRP p ON p.grp_id = c.up_grpid
+    )
+    SELECT DISTINCT u.userid, 'RES_OSS_RPT' AS restyp_code, u.res_id, u.appcde
+    FROM (
+      SELECT s.userid, s.rptcode AS res_id, s.appcde FROM src s
+      UNION
+      SELECT g.userid, g.grp_id AS res_id, 'OSS' AS appcde FROM grp_oss g
+    ) u
+  ) t
+) b
+ON (a.user_id = b.userid AND a.restyp_code = b.restyp_code AND a.res_id = b.res_id AND a.appcde = b.appcde)
+WHEN NOT MATCHED THEN
+  INSERT (user_id, restyp_code, res_id, appcde)
+  VALUES (b.userid, b.restyp_code, b.res_id, b.appcde);`;
+
+// Issue #8979: a GaussDB/openGauss instance in Oracle (A) compatibility mode reached through a
+// PostgreSQL/openGauss connection. The routine body is Oracle style and the definition is closed
+// by a standalone `/` line, so splitting at the body semicolons sent a truncated procedure and the
+// server answered `ERROR: subprogram body is not ended correctly at end of input`.
+const postgresFamilyIssue8979ProcedureScript = `CREATE OR REPLACE PROCEDURE sync_yxdyurl_probe() AS
+DECLARE
+BEGIN
+    update test_xm_20260913 set a = '23' where a = '1';
+    COMMIT;
+EXCEPTION
+    WHEN OTHERS THEN
+        ROLLBACK;
+        RAISE;
+END;
+/
+SELECT 1 AS after_procedure;`;
+
+const postgresFamilyDollarQuotedFunctionScript = `CREATE OR REPLACE FUNCTION dbx_issue_8979_pg() RETURNS int AS $$
+BEGIN
+    RETURN 1;
+END;
+$$ LANGUAGE plpgsql;
+/
+SELECT dbx_issue_8979_pg();`;
 
 const xuguProgrammableObjectFixtures = [
   `CREATE OR REPLACE PROCEDURE dbx_xugu_procedure AS
@@ -319,10 +402,103 @@ BEGIN
 END;
 SELECT 3 FROM DUMMY;`;
 
+describe("stripMysqlClientDisplayCommand", () => {
+  it("removes a trailing MySQL CLI vertical-output command", () => {
+    expect(stripMysqlClientDisplayCommand("SHOW CREATE FUNCTION fun_grade \\G")).toBe("SHOW CREATE FUNCTION fun_grade");
+    expect(stripMysqlClientDisplayCommand("SHOW CREATE FUNCTION fun_grade \\G;")).toBe("SHOW CREATE FUNCTION fun_grade;");
+    expect(stripMysqlClientDisplayCommand("SELECT 1\\G\n")).toBe("SELECT 1\n");
+  });
+
+  it("removes the lowercase terminator and a command following the semicolon", () => {
+    expect(stripMysqlClientDisplayCommand("SHOW STATUS \\g")).toBe("SHOW STATUS");
+    expect(stripMysqlClientDisplayCommand("SELECT 1; \\G")).toBe("SELECT 1;");
+  });
+
+  it("does not rewrite ordinary SQL or a command inside a line comment", () => {
+    expect(stripMysqlClientDisplayCommand("SELECT '\\G'")).toBe("SELECT '\\G'");
+    expect(stripMysqlClientDisplayCommand("SELECT 1 -- keep \\G")).toBe("SELECT 1 -- keep \\G");
+    expect(stripMysqlClientDisplayCommand("SELECT 1 # keep \\G")).toBe("SELECT 1 # keep \\G");
+  });
+});
+
 describe("splitSqlStatementRanges", () => {
+  it.each([
+    { databaseType: "postgres" as const, lineEnding: "\n" },
+    { databaseType: "postgres" as const, lineEnding: "\r" },
+    { databaseType: "sqlserver" as const, lineEnding: "\n" },
+    { databaseType: "sqlserver" as const, lineEnding: "\r" },
+    { databaseType: "mysql" as const, lineEnding: "\n" },
+    { databaseType: "mysql" as const, lineEnding: "\r" },
+  ])("does not rescan the remaining script for an absent line ending: %j", ({ databaseType, lineEnding }) => {
+    const statements = Array.from({ length: 500 }, (_, index) => `${databaseType === "mysql" ? "/* trace */ " : ""}SELECT ${index};`);
+    const sql = statements.join(lineEnding);
+    const originalIndexOf = String.prototype.indexOf;
+    let absentLineEndingSearches = 0;
+    const indexOfSpy = vi.spyOn(String.prototype, "indexOf").mockImplementation(function (this: string, searchString: string, position?: number) {
+      const found = originalIndexOf.call(this, searchString, position);
+      if (String(this) === sql && (searchString === "\r" || searchString === "\n") && found === -1) absentLineEndingSearches += 1;
+      return found;
+    });
+    let ranges: ReturnType<typeof splitSqlStatementRanges>;
+    try {
+      ranges = splitSqlStatementRanges(sql, databaseType);
+    } finally {
+      indexOfSpy.mockRestore();
+    }
+
+    expect(absentLineEndingSearches).toBeLessThanOrEqual(1);
+    expect(ranges.map((range) => range.sql)).toEqual(statements.map((statement) => statement.slice(0, -1)));
+    for (const range of ranges) expect(sql.slice(range.from, range.to)).toBe(range.sql);
+  });
+
+  it.each(["\n", "\r", "\r\n"])("preserves standalone slash, GO, and DELIMITER lines with %j", (lineEnding) => {
+    const slashSql = ["SELECT '/ literal';", "\t /  ", "SELECT 2;"].join(lineEnding);
+    expect(rangeSqlTexts(splitSqlStatementRanges(slashSql, "postgres"))).toEqual(["SELECT '/ literal'", "SELECT 2"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(slashSql, "oracle"))).toEqual(["SELECT '/ literal'", "SELECT 2"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(["SELECT 1", "  GO  ", "SELECT 2"].join(lineEnding), "sqlserver"))).toEqual(["SELECT 1", "SELECT 2"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(["DELIMITER //", "SELECT ';'//", "DELIMITER ;", "SELECT 2;"].join(lineEnding), "mysql"))).toEqual(["SELECT ';'", "SELECT 2"]);
+  });
+
+  it("preserves mixed line endings and a final delimiter without a newline", () => {
+    const sql = "SELECT 1;\r\n /\rSELECT 2;\n\t/\r\nSELECT 3;\r/";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "postgres"))).toEqual(["SELECT 1", "SELECT 2", "SELECT 3"]);
+  });
+
   it("splits multiple top-level statements", () => {
     const sql = "SELECT 1;\nSELECT 2;\nSELECT 3;";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT 1", "SELECT 2", "SELECT 3"]);
+  });
+
+  // Issue #7832 shape: MySQL GROUP BY over a LEFT JOIN with an aggregated
+  // derived table, COUNT(DISTINCT IF(...)) in the projection, and inline
+  // `-- 中文` line comments. The splitter must keep it a single statement and
+  // cursor-statement extraction must always include the trailing GROUP BY, so
+  // the executed SQL keeps the query's row cardinality.
+  it("keeps a commented MySQL GROUP BY query as one statement including the GROUP BY (issue #7832)", () => {
+    const sql = [
+      "SELECT",
+      "  base.brand_name",
+      " ,base.stall_id",
+      " ,base.floor",
+      " ,COUNT(1) total_invite -- 邀约数量",
+      " ,SUM(IFNULL(base.ver_status, 0)) sign_num -- 签到数量",
+      " ,SUM(IFNULL(dr.draw_count, 0)) draw_num -- 抽奖次数",
+      " ,SUM(IFNULL(dr.draw_user_num, 0)) draw_user_num -- 抽奖人数",
+      " ,COUNT(distinct IF(base.ver_status = 1, base.mobile, null)) sign_and_draw_user_num",
+      "FROM v_form_data_1786326962 base",
+      "LEFT JOIN (",
+      "  SELECT id, SUM(IFNULL(hx_status, 0)) draw_count, COUNT(distinct IF(hx_status = 1, mobile, null)) draw_user_num",
+      "  FROM v_form_data_1786326962_coupon",
+      "  GROUP BY id",
+      ") dr ON base.id = dr.id",
+      "GROUP BY base.brand_name, base.stall_id, base.floor",
+    ].join("\n");
+    const ranges = splitSqlStatementRanges(sql, "mysql");
+    expect(rangeSqlTexts(ranges)).toEqual([sql.trim()]);
+    for (const position of [0, indexOf(sql, "total_invite"), indexOf(sql, "sign_and_draw_user_num"), sql.indexOf("GROUP BY") + 5, sql.length - 1]) {
+      const range = statementRangeAtCursor(sql, position, "mysql");
+      expect(range?.sql).toContain("GROUP BY base.brand_name, base.stall_id, base.floor");
+    }
   });
 
   it("keeps a trailing statement without a semicolon", () => {
@@ -339,6 +515,30 @@ describe("splitSqlStatementRanges", () => {
   it("handles doubled single quotes as escaped quotes", () => {
     const sql = "SELECT 'it''s; ok';\nSELECT 2";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT 'it''s; ok'", "SELECT 2"]);
+  });
+
+  it("treats backslash as a literal inside single quotes for standard SQL (issue #8189)", () => {
+    // ESCAPE '\' is a complete one-char string in standard SQL; the closing quote must not be
+    // swallowed, so the following statement keeps its own range (and thus its run button).
+    const sql = "SELECT * FROM MAXRELATIONSHIP m WHERE m.PARENT LIKE 'A\\_%' ESCAPE '\\';\nSELECT * FROM USER;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "postgres"))).toEqual(["SELECT * FROM MAXRELATIONSHIP m WHERE m.PARENT LIKE 'A\\_%' ESCAPE '\\'", "SELECT * FROM USER"]);
+    // No databaseType (generic) must behave the same as a standard-SQL dialect.
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql)).length).toBe(2);
+  });
+
+  it("keeps DuckDB Windows path literals separate from following statements", () => {
+    const sql = "SET VARIABLE path = 'C:\\path\\';\nSET VARIABLE next = 'value';\nSELECT 1;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "duckdb"))).toEqual(["SET VARIABLE path = 'C:\\path\\'", "SET VARIABLE next = 'value'", "SELECT 1"]);
+  });
+
+  it("keeps DuckDB escape string literals separate from following statements", () => {
+    const sql = "SELECT E'it\\'';\nSELECT 1;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "duckdb"))).toEqual(["SELECT E'it\\''", "SELECT 1"]);
+  });
+
+  it("keeps backslash-escaped quotes as one string for MySQL (no regression)", () => {
+    const sql = "SELECT 'a\\'b; still string';\nSELECT 2";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["SELECT 'a\\'b; still string'", "SELECT 2"]);
   });
 
   it("ignores semicolons inside double-quoted identifiers", () => {
@@ -364,6 +564,28 @@ describe("splitSqlStatementRanges", () => {
   it("ignores semicolons in hash line comments", () => {
     const sql = "SELECT 1 # a; b\n;\nSELECT 2";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT 1", "SELECT 2"]);
+  });
+
+  it("preserves hash characters in Oracle identifiers", () => {
+    const sql = "select a.FILE_ID,a.BLOCK_ID,a.BLOCKS,b.NAME from dba_extents a,v$datafile b where a.FILE_ID=b.FILE#";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "oracle"))).toEqual([sql]);
+  });
+
+  it("preserves hash characters in Oracle-family identifiers", () => {
+    const sql = "select 1 from dba_extents where FILE_ID = b.FILE#";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "dameng"))).toEqual([sql]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "oceanbase-oracle"))).toEqual([sql]);
+  });
+
+  it("keeps hash line comments scoped to MySQL", () => {
+    const sql = "SELECT 1 # comment;\n;\nSELECT 2";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["SELECT 1", "SELECT 2"]);
+  });
+
+  it("treats hash comments as line comments on generic JDBC and Hive connections", () => {
+    const sql = "SELECT 1 # comment;\n;\nSELECT 2";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "jdbc"))).toEqual(["SELECT 1", "SELECT 2"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "hive"))).toEqual(["SELECT 1", "SELECT 2"]);
   });
 
   it("keeps SQL Server temporary table names instead of treating them as hash comments", () => {
@@ -399,6 +621,11 @@ describe("splitSqlStatementRanges", () => {
   it("skips MySQL delimiter commands and empty custom delimiter statements", () => {
     const sql = "select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["select COUNT(1) FROM your_table", "select COUNT(1) FROM your_table;"]);
+  });
+
+  it("accepts a MySQL delimiter reset without whitespace", () => {
+    const sql = "DELIMITER //\nCREATE PROCEDURE p() BEGIN SELECT 1; END //\nDELIMITER;\nCALL p();";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["CREATE PROCEDURE p() BEGIN SELECT 1; END", "CALL p()"]);
   });
 
   it("keeps MySQL routine blocks together without delimiter commands", () => {
@@ -442,6 +669,126 @@ describe("splitSqlStatementRanges", () => {
 
   it("keeps issue #2405 Oracle PL/SQL block together without a slash delimiter", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(oracleIssue2405PlSql, "oracle"))).toEqual([oracleIssue2405PlSql]);
+  });
+
+  it("keeps Oracle anonymous blocks with local PROCEDURE/FUNCTION declarations together (#9634)", () => {
+    const cases = [
+      "DECLARE\nPROCEDURE local_proc IS\nBEGIN\n  NULL;\nEND;\n\nBEGIN\nlocal_proc;\nEND;",
+      "DECLARE\n  v NUMBER;\n  PROCEDURE p1 IS BEGIN NULL; END;\n  FUNCTION f1 RETURN NUMBER IS BEGIN RETURN 1; END f1;\nBEGIN\n  p1;\n  v := f1;\nEND;",
+      "DECLARE\n  PROCEDURE fwd(x NUMBER);\n  PROCEDURE fwd(x NUMBER) IS BEGIN NULL; END;\nBEGIN\n  fwd(1);\nEND;",
+      "DECLARE\n  PROCEDURE outer_p IS\n    PROCEDURE inner_p IS BEGIN NULL; END;\n  BEGIN\n    inner_p;\n  END;\nBEGIN\n  outer_p;\nEND;",
+    ];
+    for (const sql of cases) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(sql, "oracle"))).toEqual([sql]);
+    }
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${cases[0]}\nSELECT 1 FROM dual;`, "oracle"))).toEqual([cases[0], "SELECT 1 FROM dual"]);
+  });
+
+  it("keeps Dameng WITH FUNCTION declaration and its main query together (#11275)", () => {
+    const sql = `WITH FUNCTION f RETURN NUMBER IS
+    v_start TIMESTAMP := SYSTIMESTAMP;
+    v_delay_seconds NUMBER := MOD(TO_NUMBER(TO_CHAR(SYSDATE, 'SSSSS')), 10) + 1;
+BEGIN
+    WHILE (SYSTIMESTAMP - v_start) < (v_delay_seconds * INTERVAL '1' SECOND) LOOP
+        NULL;
+    END LOOP;
+    RETURN 1;
+END;
+SELECT f FROM dual;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "dameng"))).toEqual([sql]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "oracle"))).toEqual([sql]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${sql}\nSELECT 2 FROM dual;`, "dameng"))).toEqual([sql, "SELECT 2 FROM dual"]);
+    // The statement after the WITH query keeps splitting at its own terminator.
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${sql}\nSELECT 2 FROM dual;`, "oracle"))).toEqual([sql, "SELECT 2 FROM dual"]);
+    // A plain CTE without PL/SQL declarations is ordinary SQL: the trailing `;` stays a delimiter.
+    expect(rangeSqlTexts(splitSqlStatementRanges("WITH t AS (SELECT 1 FROM dual) SELECT * FROM t;", "dameng"))).toEqual(["WITH t AS (SELECT 1 FROM dual) SELECT * FROM t"]);
+    // Cursor anywhere inside the declaration section targets the whole statement.
+    const range = statementRangeAtCursor(sql, sql.indexOf("SYSTIMESTAMP;"), "dameng");
+    expect(range?.sql).toBe(sql);
+  });
+
+  it("keeps multiple WITH FUNCTION declarations in one statement until the main query (#11275)", () => {
+    const sql = `WITH FUNCTION f1 RETURN NUMBER IS
+BEGIN
+  RETURN 1;
+END;
+FUNCTION f2 RETURN NUMBER IS
+  v NUMBER := 0;
+BEGIN
+  v := 2;
+  RETURN v;
+END;
+SELECT f1 + f2 FROM dual;`;
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "dameng"))).toEqual([sql]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${sql}\nSELECT 3 FROM dual;`, "dameng"))).toEqual([sql, "SELECT 3 FROM dual"]);
+  });
+
+  it("keeps ArgoDB PL/SQL procedure bodies together (frontend splitter, mirrors backend argo_split tests)", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(argoProcedureFixture, "argo"))).toEqual([argoProcedureFixture]);
+    expect(hasMultipleExecutionTargets(argoProcedureFixture, "argo")).toBe(false);
+    expect(rangeSqlTexts(executableStatementRanges(argoProcedureFixture, "argo"))).toEqual([argoProcedureFixture]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(argoProcedureFixture, "transwarp"))).toEqual([argoProcedureFixture]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(argoProcedureFixture, "jdbc"))).toEqual([argoProcedureFixture]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(argoProcedureFixture, "hive"))).toEqual([argoProcedureFixture]);
+  });
+
+  it("keeps procedure bodies together on JDBC and Hive connections (#12321)", () => {
+    const procedure = `CREATE OR REPLACE PROCEDURE pro_cbs_check_his(is_date IN VARCHAR(8))
+IS
+BEGIN
+    DELETE FROM transwarp.tmp_cbs_t00_corp_cust_his
+    WHERE data_date = is_date;
+
+    INSERT INTO transwarp.tmp_cbs_t00_corp_cust_his
+    SELECT * FROM transwarp.cbs_t00_corp_cust_his
+    WHERE data_date = is_date;
+
+    COMMIT;
+END;`;
+
+    for (const dbType of ["jdbc", "hive", "argo", "transwarp"] as const) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(procedure, dbType))).toEqual([procedure]);
+      expect(hasMultipleExecutionTargets(procedure, dbType)).toBe(false);
+      expect(rangeSqlTexts(executableStatementRanges(procedure, dbType))).toEqual([procedure]);
+    }
+
+    const procedureWithAs = `CREATE OR REPLACE PROCEDURE pro_cbs_check_his(is_date IN VARCHAR(8))
+AS
+BEGIN
+    DELETE FROM transwarp.tmp_cbs_t00_corp_cust_his
+    WHERE data_date = is_date;
+
+    COMMIT;
+END;`;
+
+    for (const dbType of ["jdbc", "hive", "argo", "transwarp"] as const) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(procedureWithAs, dbType))).toEqual([procedureWithAs]);
+      expect(hasMultipleExecutionTargets(procedureWithAs, dbType)).toBe(false);
+      expect(rangeSqlTexts(executableStatementRanges(procedureWithAs, dbType))).toEqual([procedureWithAs]);
+    }
+  });
+
+  it("splits vanilla Hive string-bodied functions at semicolons on JDBC and Hive connections", () => {
+    const sqlBasic = `CREATE FUNCTION my_udf AS 'com.example.Mask';
+SELECT mask_fn(x) FROM t;`;
+
+    const sqlIfNotExists = `CREATE FUNCTION IF NOT EXISTS my_udf AS 'com.example.Mask';
+SELECT mask_fn(x) FROM t;`;
+
+    const sqlTemporary = `CREATE TEMPORARY FUNCTION my_udf AS 'com.example.Mask';
+SELECT mask_fn(x) FROM t;`;
+
+    for (const dbType of ["jdbc", "hive"] as const) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(sqlBasic, dbType))).toEqual(["CREATE FUNCTION my_udf AS 'com.example.Mask'", "SELECT mask_fn(x) FROM t"]);
+      expect(rangeSqlTexts(splitSqlStatementRanges(sqlIfNotExists, dbType))).toEqual(["CREATE FUNCTION IF NOT EXISTS my_udf AS 'com.example.Mask'", "SELECT mask_fn(x) FROM t"]);
+      expect(rangeSqlTexts(splitSqlStatementRanges(sqlTemporary, dbType))).toEqual(["CREATE TEMPORARY FUNCTION my_udf AS 'com.example.Mask'", "SELECT mask_fn(x) FROM t"]);
+    }
+  });
+
+  it("statement at cursor inside an ArgoDB procedure body returns the whole definition", () => {
+    const range = statementRangeAtCursor(argoProcedureFixture, indexOf(argoProcedureFixture, "ETL_LOG", 2), "argo");
+    expect(range?.sql.trim()).toBe(argoProcedureFixture.trim());
   });
 
   it("keeps consecutive nested Oracle blocks inside their procedure", () => {
@@ -531,6 +878,67 @@ END pkg_utils_without_replace;`;
     expect(rangeSqlTexts(splitSqlStatementRanges(`${packageSpecWithoutReplace}\nSELECT 1;`, "xugu"))).toEqual([packageSpecWithoutReplace, "SELECT 1"]);
   });
 
+  it("keeps an Oracle-style procedure body together for PostgreSQL-family connections", () => {
+    const procedureBody = postgresFamilyIssue8979ProcedureScript.slice(0, postgresFamilyIssue8979ProcedureScript.indexOf("\n/"));
+    const cases = [
+      { databaseType: "postgres" as const, options: undefined },
+      { databaseType: "opengauss" as const, options: { compatibilityMode: "PG" } },
+    ];
+
+    for (const { databaseType, options } of cases) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(postgresFamilyIssue8979ProcedureScript, databaseType, options))).toEqual([procedureBody, "SELECT 1 AS after_procedure"]);
+      expect(statementRangeAtCursor(postgresFamilyIssue8979ProcedureScript, indexOf(postgresFamilyIssue8979ProcedureScript, "ROLLBACK"), databaseType, options)?.sql.trim()).toBe(procedureBody);
+      expect(statementRangeAtCursor(postgresFamilyIssue8979ProcedureScript, postgresFamilyIssue8979ProcedureScript.length - 1, databaseType, options)?.sql.trim()).toBe("SELECT 1 AS after_procedure");
+    }
+  });
+
+  it("does not treat PostgreSQL dollar-quoted routines as Oracle-style bodies", () => {
+    const functionSql = `CREATE OR REPLACE FUNCTION dbx_issue_8979_pg() RETURNS int AS $$
+BEGIN
+    RETURN 1;
+END;
+$$ LANGUAGE plpgsql`;
+
+    for (const databaseType of ["postgres", "opengauss"] as const) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(postgresFamilyDollarQuotedFunctionScript, databaseType))).toEqual([functionSql, "SELECT dbx_issue_8979_pg()"]);
+      expect(statementRangeAtCursor(postgresFamilyDollarQuotedFunctionScript, indexOf(postgresFamilyDollarQuotedFunctionScript, "RETURN 1"), databaseType)?.sql.trim()).toBe(functionSql);
+    }
+  });
+
+  it("still splits ordinary PostgreSQL statements around a bare slash line", () => {
+    const script = `BEGIN;
+SELECT 1;
+COMMIT;
+/
+CREATE FUNCTION dbx_issue_8979_sql() RETURNS int AS 'SELECT 1' LANGUAGE sql;
+CREATE TRIGGER dbx_issue_8979_trg AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f();
+
+SELECT 2;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(script, "postgres"))).toEqual(["BEGIN", "SELECT 1", "COMMIT", "CREATE FUNCTION dbx_issue_8979_sql() RETURNS int AS 'SELECT 1' LANGUAGE sql", "CREATE TRIGGER dbx_issue_8979_trg AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f()", "SELECT 2"]);
+  });
+
+  it("keeps openGauss packages together while compatibility metadata is unknown", () => {
+    const packageSpec = `CREATE OR REPLACE PACKAGE pkg_utils AS
+  FUNCTION get_version RETURN VARCHAR2;
+  PROCEDURE log_message(msg VARCHAR2);
+END pkg_utils;`;
+    const script = `${packageSpec}\n/\nSELECT 1;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(script, "opengauss"))).toEqual([packageSpec, "SELECT 1"]);
+  });
+
+  it("splits openGauss A-mode packages without changing PG mode", () => {
+    const packageSpec = `CREATE OR REPLACE PACKAGE pkg_utils AS
+  FUNCTION get_version RETURN VARCHAR2;
+  PROCEDURE log_message(msg VARCHAR2);
+END pkg_utils;`;
+    const script = `${packageSpec}\n/\nSELECT 1;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(script, "opengauss", { compatibilityMode: "A" }))).toEqual([packageSpec, "SELECT 1"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(script, "opengauss", { compatibilityMode: "PG" }))).not.toEqual([packageSpec, "SELECT 1"]);
+  });
+
   it("splits a declaration-only Oracle package body before following DML", () => {
     const packageBody = `CREATE OR REPLACE PACKAGE BODY packageName IS
 null;
@@ -562,6 +970,28 @@ END;`;
     }
   });
 
+  it("keeps DECODE consecutive CASE expressions inside Oracle-family procedures", () => {
+    // Punctuation between `end` and the next `case` must not look like PL/SQL `END CASE`.
+    const procedure = `CREATE OR REPLACE PROCEDURE dm.sp_demo IS
+BEGIN
+  INSERT INTO t(c)
+  SELECT decode(
+    company_no,
+    'A', (case when x = 1 then 'one' else 'other' end),
+    'B', (case when y = 2 then 'two' else 'other' end)
+  ) as business_type_name
+  FROM src;
+  COMMIT;
+EXCEPTION
+  WHEN OTHERS THEN
+    NULL;
+END sp_demo;`;
+
+    for (const database of ["oracle", "oceanbase-oracle"] as const) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(procedure, database))).toEqual([procedure]);
+    }
+  });
+
   it("keeps SAP HANA DO blocks together", () => {
     const ranges = splitSqlStatementRanges(sapHanaDoBlockFixture, "saphana");
 
@@ -572,6 +1002,100 @@ END;`;
 
   it("keeps consecutive nested SAP HANA blocks inside their DO block", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sapHanaDoBlockWithConsecutiveBlocksFixture, "saphana"))).toEqual([sapHanaDoBlockWithConsecutiveBlocksFixture.slice(0, sapHanaDoBlockWithConsecutiveBlocksFixture.indexOf("\nSELECT 3")), "SELECT 3 FROM DUMMY"]);
+  });
+
+  it("keeps SAP HANA ALTER PROCEDURE bodies together", () => {
+    const sql = `ALTER PROCEDURE PUBLIC.P
+LANGUAGE SQLSCRIPT
+SQL SECURITY INVOKER
+AS
+BEGIN
+  DECLARE v INT;
+  SELECT 1 INTO v FROM DUMMY;
+END;
+SELECT 2 FROM DUMMY;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "saphana"))).toEqual([sql.slice(0, sql.indexOf("\nSELECT 2")), "SELECT 2 FROM DUMMY"]);
+  });
+
+  it("keeps nested CASE expressions in a SAP HANA procedure GROUP BY together", () => {
+    const sql = `ALTER PROCEDURE PUBLIC.P
+LANGUAGE SQLSCRIPT
+SQL SECURITY INVOKER
+AS
+BEGIN
+  T = SELECT 1 FROM DUMMY
+  GROUP BY
+    CASE WHEN KHLX='老客' THEN CASE WHEN SCYEAR='0000' THEN NULL ELSE SCYEAR END ELSE LEFT(CASE WHEN SCDAT_OLD='00000000' THEN NULL ELSE SCDAT_OLD END,4) END,
+    CASE WHEN KHLX='老客' THEN CASE WHEN SCDAT='00000000' THEN NULL ELSE SCDAT END ELSE (CASE WHEN SCDAT_OLD='00000000' THEN NULL ELSE SCDAT_OLD END)END;
+END;
+SELECT 2 FROM DUMMY;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "saphana"))).toEqual([sql.slice(0, sql.indexOf("\nSELECT 2")), "SELECT 2 FROM DUMMY"]);
+  });
+
+  it.each(["DO BEGIN T = SELECT CASE WHEN 1 = 1 THEN 1 ELSE 0 END FROM DUMMY; END;", "do begin t = select 1 from dummy; end;"])("keeps single-line SAP HANA blocks together: %s", (sql) => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "saphana"))).toEqual([sql]);
+  });
+
+  it("still splits SAP HANA ALTER PROCEDURE metadata commands", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges("ALTER PROCEDURE PUBLIC.P RECOMPILE; SELECT 1 FROM DUMMY;", "saphana"))).toEqual(["ALTER PROCEDURE PUBLIC.P RECOMPILE", "SELECT 1 FROM DUMMY"]);
+  });
+
+  it("keeps Firebird CREATE OR ALTER TRIGGER blocks together (#12407)", () => {
+    const trigger = `CREATE OR ALTER TRIGGER "WL_FYD_TP_AU" FOR "WL_FYD" ACTIVE
+AFTER UPDATE
+as
+begin
+  /* Trigger text */
+  IF ( COALESCE(NEW.QSTPS,0) <> COALESCE(OLD.QSTPS,0) ) THEN
+  BEGIN
+    UPDATE WL_FYD SET ZT='完成' WHERE ID= NEW.ID;
+  END
+end;`;
+    const sql = `${trigger}\nSELECT 2 FROM RDB$DATABASE;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "firebird"))).toEqual([trigger, "SELECT 2 FROM RDB$DATABASE"]);
+  });
+
+  it("keeps Firebird procedure with local DECLARE statements together (#12407)", () => {
+    const procedure = `CREATE OR ALTER PROCEDURE SP_GET_USER (USER_ID INT)
+RETURNS (USERNAME VARCHAR(50), TOTAL_AMOUNT NUMERIC(18, 2))
+AS
+DECLARE VARIABLE V_TEMP NUMERIC(18, 2);
+DECLARE VARIABLE V_STATUS INT;
+BEGIN
+  SELECT FIRST 1 NAME FROM USERS WHERE ID = :USER_ID INTO :USERNAME;
+  V_TEMP = 100.50;
+  TOTAL_AMOUNT = :V_TEMP;
+  SUSPEND;
+END;`;
+    const sql = `${procedure}\nSELECT 1 FROM RDB$DATABASE;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "firebird"))).toEqual([procedure, "SELECT 1 FROM RDB$DATABASE"]);
+  });
+
+  it("keeps Firebird EXECUTE BLOCK anonymous blocks together (#12407)", () => {
+    const block = `EXECUTE BLOCK
+RETURNS (OUT_ID INT)
+AS
+DECLARE VARIABLE I INT;
+BEGIN
+  I = 0;
+  WHILE (I < 10) DO
+  BEGIN
+    I = I + 1;
+  END
+  OUT_ID = I;
+  SUSPEND;
+END;`;
+    const sql = `${block}\nSELECT 1 FROM RDB$DATABASE;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "firebird"))).toEqual([block, "SELECT 1 FROM RDB$DATABASE"]);
+  });
+
+  it("still splits Firebird ALTER TRIGGER metadata commands (#12407)", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges("ALTER TRIGGER TR_USERS INACTIVE; SELECT 1 FROM RDB$DATABASE;", "firebird"))).toEqual(["ALTER TRIGGER TR_USERS INACTIVE", "SELECT 1 FROM RDB$DATABASE"]);
   });
 });
 
@@ -844,6 +1368,67 @@ GET /_cat/indices`;
     expect(range?.sql.trim()).toBe("UPDATE users\nSET name = 'a'\nWHERE id = 1");
   });
 
+  it("keeps StarRocks asynchronous materialized-view clauses in the CREATE statement", () => {
+    const createSql = `CREATE MATERIALIZED VIEW mv_monthly_events
+PARTITION BY date_trunc('month', event_time)
+DISTRIBUTED BY RANDOM BUCKETS 1
+REFRESH ASYNC
+AS
+SELECT
+  id,
+  event_time,
+  amount
+FROM base_events`;
+    const sql = `${createSql}\nREFRESH MATERIALIZED VIEW mv_monthly_events;`;
+
+    for (const marker of ["CREATE", "PARTITION", "DISTRIBUTED", "REFRESH ASYNC", "SELECT", "base_events"]) {
+      expect(statementRangeAtCursor(sql, indexOf(sql, marker), "starrocks")?.sql.trim()).toBe(createSql);
+    }
+    expect(statementRangeAtCursor(sql, indexOf(sql, "REFRESH MATERIALIZED"), "starrocks")?.sql.trim()).toBe("REFRESH MATERIALIZED VIEW mv_monthly_events");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "starrocks"))).toEqual([createSql, "REFRESH MATERIALIZED VIEW mv_monthly_events"]);
+  });
+
+  it("keeps StarRocks scheduled materialized-view clauses in the CREATE statement", () => {
+    const sql = `CREATE MATERIALIZED VIEW mv_daily_events
+REFRESH SCHEDULE EVERY (INTERVAL 1 DAY)
+AS
+SELECT id FROM base_events`;
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "REFRESH"), "starrocks")?.sql.trim()).toBe(sql);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SELECT"), "starrocks")?.sql.trim()).toBe(sql);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "starrocks"))).toEqual([sql]);
+  });
+
+  it("keeps StarRocks manual materialized-view refresh in the CREATE statement", () => {
+    const sql = `CREATE MATERIALIZED VIEW mv_manual_events
+REFRESH MANUAL
+AS
+SELECT id FROM base_events`;
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "REFRESH"), "starrocks")?.sql.trim()).toBe(sql);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SELECT"), "starrocks")?.sql.trim()).toBe(sql);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "starrocks"))).toEqual([sql]);
+  });
+
+  it("keeps StarRocks deferred and immediate refresh modifiers with async on the next line", () => {
+    const deferredSql = `CREATE MATERIALIZED VIEW mv_deferred_events
+REFRESH DEFERRED ASYNC
+AS
+SELECT id FROM base_events`;
+    const immediateSql = `CREATE MATERIALIZED VIEW mv_immediate_events
+REFRESH IMMEDIATE
+ASYNC
+AS
+SELECT id FROM base_events`;
+
+    expect(statementRangeAtCursor(deferredSql, indexOf(deferredSql, "REFRESH"), "starrocks")?.sql.trim()).toBe(deferredSql);
+    expect(statementRangeAtCursor(deferredSql, indexOf(deferredSql, "SELECT"), "starrocks")?.sql.trim()).toBe(deferredSql);
+    expect(statementRangeAtCursor(immediateSql, indexOf(immediateSql, "REFRESH"), "starrocks")?.sql.trim()).toBe(immediateSql);
+    expect(statementRangeAtCursor(immediateSql, indexOf(immediateSql, "ASYNC"), "starrocks")?.sql.trim()).toBe(immediateSql);
+    expect(rangeSqlTexts(executableStatementRanges(deferredSql, "starrocks"))).toEqual([deferredSql]);
+    expect(rangeSqlTexts(executableStatementRanges(immediateSql, "starrocks"))).toEqual([immediateSql]);
+  });
+
   it("keeps MySQL ALTER TABLE column comments with the column definition", () => {
     const sql =
       "ALTER TABLE `yb_course_order`\n  ADD COLUMN `audit_status` tinyint(4) DEFAULT NULL\n    COMMENT '审核状态：0-待审核，1-已通过，2-已拒绝',\n  ADD COLUMN `close_reason` varchar(30) DEFAULT NULL\n    COMMENT '关闭原因：timeout-超时关闭，cancel-取消关闭，refund-退款关闭',\n  ADD COLUMN `paid_completion_time` datetime DEFAULT NULL\n    COMMENT '订单完成支付(付清)时间 首次全额支付完成时记录，全部退款后不重置';";
@@ -900,6 +1485,45 @@ COMMENT = '测试';`;
 
     expect(statementRangeAtCursor(sql, indexOf(sql, "comment"))?.sql.trim()).toBe(sql.slice(0, -1));
     expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps SQL Server table hints broken onto their own line with the host statement (#10098)", () => {
+    const sql = "SELECT u.id\nFROM users u\nWITH (NOLOCK)\nWHERE u.id = 1\nSELECT 2;";
+    const expected = "SELECT u.id\nFROM users u\nWITH (NOLOCK)\nWHERE u.id = 1";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual([expected, "SELECT 2"]);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "NOLOCK"), "sqlserver")?.sql.trim()).toBe(expected);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "WHERE"), "sqlserver")?.sql.trim()).toBe(expected);
+  });
+
+  it("keeps JOIN table hints broken onto their own line with the host statement", () => {
+    const sql = "SELECT *\nFROM a\nWITH (NOLOCK)\nJOIN b\nWITH (NOLOCK) ON a.id = b.id\nSELECT 2;";
+    const expected = "SELECT *\nFROM a\nWITH (NOLOCK)\nJOIN b\nWITH (NOLOCK) ON a.id = b.id";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual([expected, "SELECT 2"]);
+  });
+
+  it("keeps INSERT table hints broken onto their own line with the INSERT", () => {
+    const sql = "INSERT INTO t\nWITH (TABLOCK) (id)\nVALUES (1)\nSELECT 2;";
+    // INSERT ... SELECT keeps the source SELECT attached; the table-hint WITH
+    // must not open a soft statement of its own inside the INSERT.
+    const expected = "INSERT INTO t\nWITH (TABLOCK) (id)\nVALUES (1)\nSELECT 2";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual([expected]);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "TABLOCK"), "sqlserver")?.sql.trim()).toBe(expected);
+  });
+
+  it("still treats a line-start CTE WITH as a soft statement start", () => {
+    const sql = "SELECT 1\nWITH x AS (SELECT 2)\nSELECT * FROM x\nSELECT 3;";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 1", "WITH x AS (SELECT 2)\nSELECT * FROM x", "SELECT 3"]);
+    expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual(["SELECT 1", "WITH x AS (SELECT 2)\nSELECT * FROM x", "SELECT 3"]);
+  });
+
+  it("still treats WITH RECURSIVE as a soft statement start", () => {
+    const sql = "SELECT 1\nWITH RECURSIVE t AS (SELECT 2)\nSELECT * FROM t;";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual(["SELECT 1", "WITH RECURSIVE t AS (SELECT 2)\nSELECT * FROM t"]);
   });
 
   it("keeps MySQL ALTER TABLE drop column clauses with the statement", () => {
@@ -1027,6 +1651,44 @@ AND ts = toDateTime('2026-07-15 12:00:00');`;
 
     expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "postgres")?.sql.trim()).toBe(expected);
     expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual([expected, "SELECT 2"]);
+  });
+
+  it("does not merge a query after an inline EXPLAIN statement without semicolons (#12811)", () => {
+    const sql = "SELECT 1\nEXPLAIN SELECT 2\nSELECT 3";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "postgres")?.sql.trim()).toBe("EXPLAIN SELECT 2");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual(["SELECT 1", "EXPLAIN SELECT 2", "SELECT 3"]);
+  });
+
+  it("does not merge a query after an inline EXPLAIN ANALYZE statement (#12811)", () => {
+    const sql = "SELECT 1\nEXPLAIN ANALYZE SELECT 2\nSELECT 3";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "postgres")?.sql.trim()).toBe("EXPLAIN ANALYZE SELECT 2");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual(["SELECT 1", "EXPLAIN ANALYZE SELECT 2", "SELECT 3"]);
+  });
+
+  it("does not merge a query after an inline EXPLAIN with parenthesized options (#12811)", () => {
+    const sql = "EXPLAIN (ANALYZE, BUFFERS) SELECT 1\nSELECT 2";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "postgres")?.sql.trim()).toBe("EXPLAIN (ANALYZE, BUFFERS) SELECT 1");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual(["EXPLAIN (ANALYZE, BUFFERS) SELECT 1", "SELECT 2"]);
+  });
+
+  it("does not merge a query after MySQL EXPLAIN with options", () => {
+    const sql = "EXPLAIN FORMAT = JSON SELECT 1\nSELECT 2";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "mysql")?.sql.trim()).toBe("EXPLAIN FORMAT = JSON SELECT 1");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["EXPLAIN FORMAT = JSON SELECT 1", "SELECT 2"]);
+  });
+
+  it("does not merge a query after a plain MySQL EXPLAIN table statement", () => {
+    const sql = "EXPLAIN users\nSELECT * FROM users;";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "mysql")?.sql.trim()).toBe("EXPLAIN users");
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SELECT"), "mysql")?.sql.trim()).toBe("SELECT * FROM users");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["EXPLAIN users", "SELECT * FROM users"]);
+  });
+
+  it("does not merge a query after an EXPLAIN UPDATE statement", () => {
+    const sql = "EXPLAIN UPDATE test_orders a\nJOIN test_users b ON a.id=b.id\nSET a.name = '张三'\nWHERE b.id > 10\nSELECT 1";
+    const expectedExplain = "EXPLAIN UPDATE test_orders a\nJOIN test_users b ON a.id=b.id\nSET a.name = '张三'\nWHERE b.id > 10";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "mysql")?.sql.trim()).toBe(expectedExplain);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([expectedExplain, "SELECT 1"]);
   });
 
   it("keeps EXPLAIN options CTE UPDATE assignments as one statement", () => {
@@ -1177,10 +1839,23 @@ FROM orders;`;
     expect(range?.sql).toBe("SELECT 1");
   });
 
-  it("skips MySQL delimiter commands when resolving the cursor statement", () => {
+  it("resolves MySQL delimiter command lines to the nearest executable statement", () => {
     const sql = "select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;";
     expect(statementRangeAtCursor(sql, indexOf(sql, "COUNT", 2), "mysql")?.sql.trim()).toBe("select COUNT(1) FROM your_table;");
-    expect(statementRangeAtCursor(sql, indexOf(sql, "delimiter"), "mysql")).toBeNull();
+    // A caret on a leading `delimiter ;;` line targets the statement it introduces.
+    expect(statementRangeAtCursor(sql, indexOf(sql, "delimiter"), "mysql")?.sql.trim()).toBe("select COUNT(1) FROM your_table;");
+    // A trailing `delimiter ;` has nothing after it, so it targets the statement above.
+    expect(statementRangeAtCursor(sql, indexOf(sql, "delimiter", 2), "mysql")?.sql.trim()).toBe("select COUNT(1) FROM your_table;");
+  });
+
+  it("targets the surrounding MySQL statements for delimiter lines in a routine script", () => {
+    const routine = mysqlDelimitedRoutineFixture.slice(mysqlDelimitedRoutineFixture.indexOf("CREATE PROCEDURE"), mysqlDelimitedRoutineFixture.indexOf(" //\nDELIMITER"));
+    expect(statementRangeAtCursor(mysqlDelimitedRoutineFixture, indexOf(mysqlDelimitedRoutineFixture, "DELIMITER"), "mysql")?.sql.trim()).toBe(routine);
+    expect(statementRangeAtCursor(mysqlDelimitedRoutineFixture, indexOf(mysqlDelimitedRoutineFixture, "DELIMITER", 2), "mysql")?.sql.trim()).toBe("CALL sp_insert_random_users(100)");
+  });
+
+  it("returns null for a MySQL script made only of delimiter commands", () => {
+    expect(statementRangeAtCursor("delimiter //\n", 0, "mysql")).toBeNull();
   });
 
   it("returns the full MySQL routine block for cursors inside nested statements", () => {
@@ -1221,14 +1896,126 @@ FROM orders;`;
     expect(statementRangeAtCursor(gaussDbIssue4573Script, indexOf(gaussDbIssue4573Script, "count(*)"), "gaussdb")?.sql.trim()).toBe(expected);
   });
 
+  it("keeps a GaussDB MERGE with a recursive USING query together", () => {
+    for (const needle of ["MERGE INTO", "WITH RECURSIVE", "WHEN NOT MATCHED", "VALUES (b.userid)"]) {
+      expect(statementRangeAtCursor(gaussDbMergeWithRecursiveUsing, indexOf(gaussDbMergeWithRecursiveUsing, needle), "gaussdb")?.sql.trim()).toBe(gaussDbMergeWithRecursiveUsing.slice(0, -1));
+    }
+  });
+
+  it("keeps an Oracle MERGE together when each action starts its own line (#9516)", () => {
+    const merge = `MERGE INTO bom_template t USING (SELECT id, no FROM stage_bom) s ON (t.id = s.id)
+WHEN MATCHED THEN
+UPDATE SET
+  t.no = s.no
+WHERE
+  t.no IS NULL
+WHEN NOT MATCHED THEN
+INSERT (id, no)
+VALUES (s.id, s.no)`;
+    for (const needle of ["MERGE INTO", "UPDATE SET", "WHERE", "INSERT (id, no)", "VALUES (s.id, s.no)"]) {
+      expect(statementRangeAtCursor(merge, indexOf(merge, needle), "oracle")?.sql.trim()).toBe(merge);
+    }
+    expect(rangeSqlTexts(executableStatementRanges(merge, "oracle"))).toEqual([merge]);
+  });
+
+  it("keeps an Oracle MERGE delete action that starts its own line together", () => {
+    const merge = `MERGE INTO bom_template t USING (SELECT id FROM stage_bom) s ON (t.id = s.id)
+WHEN MATCHED THEN
+DELETE WHERE t.no IS NULL`;
+    expect(rangeSqlTexts(executableStatementRanges(merge, "oracle"))).toEqual([merge]);
+  });
+
+  it("keeps an Oracle MERGE together when the UPDATE action's SET starts its own line", () => {
+    const merge = `MERGE INTO bom_template t USING (SELECT id, no FROM stage_bom) s ON (t.id = s.id)
+WHEN MATCHED THEN
+UPDATE
+SET t.no = s.no`;
+    const update = "UPDATE bom_template\nSET no = 'x'";
+    expect(rangeSqlTexts(executableStatementRanges(merge, "oracle"))).toEqual([merge]);
+    expect(rangeSqlTexts(executableStatementRanges(`${merge};\n\n${update};`, "oracle"))).toEqual([merge, update]);
+  });
+
+  it("still splits a standalone UPDATE that follows a terminated MERGE", () => {
+    const merge = "MERGE INTO bom_template t USING (SELECT id FROM stage_bom) s ON (t.id = s.id)\nWHEN MATCHED THEN UPDATE SET t.no = s.no";
+    const update = "UPDATE bom_template SET no = 'x'";
+    expect(rangeSqlTexts(executableStatementRanges(`${merge};\n\n${update};`, "oracle"))).toEqual([merge, update]);
+  });
+
   it("returns the full SAP HANA DO block for cursors inside nested statements", () => {
     const range = statementRangeAtCursor(sapHanaDoBlockFixture, indexOf(sapHanaDoBlockFixture, "Result"), "saphana");
 
     expect(range?.sql.trim()).toBe(sapHanaDoBlockFixture.slice(0, sapHanaDoBlockFixture.indexOf("\nSELECT 2")));
   });
+
+  it("returns the full Firebird trigger definition for cursors inside the body (#12407)", () => {
+    const trigger = `CREATE OR ALTER TRIGGER "WL_FYD_TP_AU" FOR "WL_FYD" ACTIVE
+AFTER UPDATE
+as
+begin
+  /* Trigger text */
+  IF ( COALESCE(NEW.QSTPS,0) <> COALESCE(OLD.QSTPS,0) ) THEN
+  BEGIN
+    UPDATE WL_FYD SET ZT='完成' WHERE ID= NEW.ID;
+  END
+end;`;
+    const sql = `${trigger}\nSELECT 2 FROM RDB$DATABASE;`;
+    const range = statementRangeAtCursor(sql, indexOf(sql, "UPDATE WL_FYD"), "firebird");
+
+    expect(range?.sql.trim()).toBe(trigger);
+  });
 });
 
 describe("executableStatementRanges", () => {
+  it.each(["\n\n", ";\n", "; "])("keeps SELECT after an IRIS Contains operator separate with separator %j", (separator) => {
+    const first = "select * from oec_order_adminstatus where STAT_Code [ '123'";
+    const second = "select top 10 * from Ens_HOSDocument";
+    const sql = first + separator + second;
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "iris"))).toEqual([first, second]);
+    expect(currentExecutableStatementRange(sql, sql.indexOf(second) + 7, "iris")?.sql).toBe(second);
+  });
+
+  it("keeps SQL Server bracket identifiers containing semicolons quoted", () => {
+    const sql = "SELECT [name;part] FROM [table;part]; SELECT 2;";
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual(["SELECT [name;part] FROM [table;part]", "SELECT 2"]);
+  });
+
+  it.each(["doris", "starrocks"] as const)("keeps %s half-open range partitions from swallowing the next statement", (databaseType) => {
+    const first = `CREATE TABLE fixed_partitions_1 (
+  sale_date date NULL,
+  product_id int NULL
+) ENGINE=OLAP
+DUPLICATE KEY(sale_date, product_id)
+PARTITION BY RANGE(sale_date) (
+  PARTITION p_2024_01 VALUES [('2024-02-01'), ('2024-03-01'))
+)
+DISTRIBUTED BY HASH(product_id) BUCKETS 1`;
+    const second = first.replace("fixed_partitions_1", "fixed_partitions_2");
+
+    expect(rangeSqlTexts(executableStatementRanges(`${first};\n\n${second};`, databaseType))).toEqual([first, second]);
+  });
+
+  // Issue #11699: MyBatis XML comparison entities (`&gt;=`, `&lt;=`) end with a
+  // `;` that must not be read as a statement terminator, otherwise one query is
+  // split into fragments, its run buttons multiply, and parameters living in
+  // later fragments are lost from the execute dialog.
+  it("keeps MyBatis comparison entities from splitting a statement (issue #11699)", () => {
+    const sql = ["select * from course_user cu", "where cu.is_delete = 0", "and cu.create_time &gt;= #{param.startDateTime}", "and cu.create_time &lt;= #{param.endDateTime}", "group by cu.dept_id"].join("\n");
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual([sql]);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql]);
+    expect(hasMultipleExecutionTargets(sql, "mysql")).toBe(false);
+    expect(currentExecutableStatementRange(sql, sql.indexOf("group by"), "mysql")?.sql).toBe(sql);
+  });
+
+  it("still splits real statements after an entity and after a bitwise AND (issue #11699)", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges("SELECT a FROM t WHERE b &gt;= 1;\nSELECT 2;", "mysql"))).toEqual(["SELECT a FROM t WHERE b &gt;= 1", "SELECT 2"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges("SELECT a FROM t WHERE a&b;", "mysql"))).toEqual(["SELECT a FROM t WHERE a&b"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges("SELECT 'Tom &amp; Jerry';\nSELECT 2;", "mysql"))).toEqual(["SELECT 'Tom &amp; Jerry'", "SELECT 2"]);
+    // Numeric refs: MySQL-family dialects (and, in this splitter, Postgres) read a
+    // bare `#` as a line comment, so use sqlserver where `#` is an identifier marker.
+    expect(rangeSqlTexts(splitSqlStatementRanges("SELECT &#39; AS q;\nSELECT 2;", "sqlserver"))).toEqual(["SELECT &#39; AS q", "SELECT 2"]);
+  });
+
   it("returns statement ranges starting only at statement starts", () => {
     const sql = "SELECT *\nFROM users\nWHERE active = 1;\nSELECT 2;";
     const ranges = executableStatementRanges(sql);
@@ -1237,10 +2024,10 @@ describe("executableStatementRanges", () => {
   });
 
   it("returns Redis executable command lines", () => {
-    const sql = "GET user:1\n# comment\n  DEL user:2  ";
+    const sql = "GET user:1\n# comment\n  DEL user:2  \n-- another note\nPING";
     const ranges = executableStatementRanges(sql, "redis");
-    expect(rangeSqlTexts(ranges)).toEqual(["GET user:1", "DEL user:2"]);
-    expect(ranges.map((range) => range.from)).toEqual([0, sql.indexOf("DEL")]);
+    expect(rangeSqlTexts(ranges)).toEqual(["GET user:1", "DEL user:2", "PING"]);
+    expect(ranges.map((range) => range.from)).toEqual([0, sql.indexOf("DEL"), sql.indexOf("PING")]);
   });
 
   it("keeps MySQL REPLACE INTO as an executable statement start", () => {
@@ -1288,6 +2075,37 @@ describe("executableStatementRanges", () => {
     expect(rangeSqlTexts(executableStatementRanges(sapHanaDoBlockFixture, "saphana"))).toEqual([sapHanaDoBlockFixture.slice(0, sapHanaDoBlockFixture.indexOf("\nSELECT 2")), "SELECT 2 FROM DUMMY"]);
   });
 
+  it("does not expose run targets for statements inside a Firebird trigger block (#12407)", () => {
+    const trigger = `CREATE OR ALTER TRIGGER "WL_FYD_TP_AU" FOR "WL_FYD" ACTIVE
+AFTER UPDATE
+as
+begin
+  /* Trigger text */
+  IF ( COALESCE(NEW.QSTPS,0) <> COALESCE(OLD.QSTPS,0) ) THEN
+  BEGIN
+    UPDATE WL_FYD SET ZT='完成' WHERE ID= NEW.ID;
+  END
+end;`;
+    const sql = `${trigger}\nSELECT 2 FROM RDB$DATABASE;`;
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "firebird"))).toEqual([trigger, "SELECT 2 FROM RDB$DATABASE"]);
+  });
+
+  it("keeps Firebird trigger without trailing semicolon as one executable range (#12407)", () => {
+    const trigger = `CREATE OR ALTER TRIGGER "WL_FYD_TP_AU" FOR "WL_FYD" ACTIVE
+AFTER UPDATE
+as
+begin
+  /* Trigger text */
+  IF ( COALESCE(NEW.QSTPS,0) <> COALESCE(OLD.QSTPS,0) ) THEN
+  BEGIN
+    UPDATE WL_FYD SET ZT='完成' WHERE ID= NEW.ID;
+  END
+end`;
+
+    expect(rangeSqlTexts(executableStatementRanges(trigger, "firebird"))).toEqual([trigger]);
+  });
+
   it("returns executable SQL Server batches without GO delimiter lines", () => {
     expect(rangeSqlTexts(executableStatementRanges("SELECT 1\nGO\nSELECT 2;", "sqlserver"))).toEqual(["SELECT 1", "SELECT 2"]);
   });
@@ -1314,10 +2132,11 @@ describe("currentExecutableStatementRange", () => {
   });
 
   it("uses the current Redis command line", () => {
-    const sql = "GET user:1\n  DEL user:2\n# comment";
+    const sql = "GET user:1\n  DEL user:2\n# comment\n-- note";
 
     expect(currentExecutableStatementRange(sql, indexOf(sql, "DEL"), "redis")?.sql).toBe("DEL user:2");
     expect(currentExecutableStatementRange(sql, indexOf(sql, "comment"), "redis")).toBeNull();
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "note"), "redis")).toBeNull();
   });
 
   it("uses the current MongoDB command range", () => {
@@ -1603,6 +2422,13 @@ WHERE t2.product_name = '12345'
     expect(candidateSummaries(candidates)).toEqual(["cursor:select COUNT(1) FROM your_table;", "all:select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;"]);
   });
 
+  it("builds a cursor candidate for a MySQL delimiter command line (issue #9485)", () => {
+    const sql = "select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "delimiter"), "mysql");
+    expect(candidateKinds(candidates)).toEqual(["cursor", "all"]);
+    expect(candidates[0].sql).toBe("select COUNT(1) FROM your_table;");
+  });
+
   it("uses the current SQL Server batch for cursor candidates", () => {
     const sql = "SELECT 1\nGO\nSELECT 2;";
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "2"), "sqlserver");
@@ -1614,6 +2440,202 @@ WHERE t2.product_name = '12345'
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "KILL"), "sqlserver");
 
     expect(candidateSummaries(candidates)).toEqual(["cursor:KILL 580", `all:${sql}`]);
+  });
+
+  it("keeps SQL Server IF/ELSE control-flow batches as one execution range", () => {
+    const sql = [
+      "IF EXISTS (SELECT 1 FROM ::fn_listextendedproperty('MS_Description','USER','dbo','TABLE','Categories','COLUMN','CategoryID'))",
+      "BEGIN",
+      "    EXEC sp_updateextendedproperty @name=N'MS_Description', @value=N'test', @level0type=N'USER', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'Categories', @level2type=N'COLUMN', @level2name=N'CategoryID'",
+      "END",
+      "ELSE",
+      "BEGIN",
+      "    EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'test', @level0type=N'USER', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'Categories', @level2type=N'COLUMN', @level2name=N'CategoryID'",
+      "END",
+    ].join("\n");
+    const ranges = executableStatementRanges(sql, "sqlserver");
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "sp_addextendedproperty"), "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([sql]);
+    expect(candidateSummaries(candidates)).toEqual([`all:${sql}`]);
+  });
+
+  it("keeps a SQL Server IF/ELSE batch whole when it follows another statement", () => {
+    const batch = ["IF NOT EXISTS (SELECT 1 FROM dbo.QRTZ_JOB_DETAILS WHERE job_name = N'x')", "BEGIN", "    SELECT 1;", "END", "ELSE", "BEGIN", "    SELECT 2;", "END"].join("\n");
+    const sql = `SELECT 1;\n${batch}`;
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["SELECT 1", batch]);
+  });
+
+  it("keeps a SQL Server IF/ELSE batch whole when its branches hold semicolons", () => {
+    const sql = ["IF NOT EXISTS (SELECT 1 FROM dbo.QRTZ_JOB_DETAILS WHERE job_name = N'x')", "BEGIN", "    SELECT 1;", "END", "ELSE", "BEGIN", "    SELECT 2;", "END"].join("\n");
+    const ranges = executableStatementRanges(sql, "sqlserver");
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "SELECT 2"), "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([sql]);
+    expect(candidateSummaries(candidates)).toEqual([`all:${sql}`]);
+  });
+
+  it("keeps SQL Server IF branches without BEGIN/END blocks whole", () => {
+    const sql = [
+      "IF NOT EXISTS (SELECT 1 FROM ::fn_listextendedproperty(N'MS_Description', N'USER', N'dbo', N'TABLE', N'Categories', N'COLUMN', N'CategoryID'))",
+      "    EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'test'",
+      "ELSE",
+      "    EXEC sp_updateextendedproperty @name=N'MS_Description', @value=N'test'",
+    ].join("\n");
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([sql]);
+  });
+
+  it("keeps a SQL Server IF/BEGIN/END batch without ELSE whole", () => {
+    const sql = ["IF @x = 1", "BEGIN", "    SELECT 1;", "    SELECT 2;", "END"].join("\n");
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([sql]);
+  });
+
+  it("keeps SQL Server WHILE batches whole", () => {
+    const sql = ["WHILE @i < 10", "BEGIN", "    SET @i = @i + 1;", "    IF @i = 5 CONTINUE;", "END"].join("\n");
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([sql]);
+  });
+
+  it("does not merge SQL Server BEGIN TRAN statements with the following batch", () => {
+    const sql = ["BEGIN TRAN;", "UPDATE dbo.T SET x = 1;", "COMMIT;"].join("\n");
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["BEGIN TRAN", "UPDATE dbo.T SET x = 1", "COMMIT"]);
+  });
+
+  const sqlServerTryCatchBatch = [
+    "SET XACT_ABORT ON;",
+    "",
+    "BEGIN TRY",
+    "    BEGIN TRANSACTION;",
+    "",
+    "    UPDATE [dbo].[Documents]",
+    "    SET [Deleted] = 0",
+    "    WHERE [Deleted] = 1;",
+    "",
+    "    DECLARE @Updated int = @@ROWCOUNT;",
+    "",
+    "    IF EXISTS (SELECT 1 FROM [dbo].[Documents] WHERE [Deleted] = 1)",
+    "        THROW 50001, N'Rows with Deleted = 1 still exist.', 1;",
+    "",
+    "    COMMIT TRANSACTION;",
+    "",
+    "    SELECT N'OK' AS Result, @Updated AS RowsUpdated;",
+    "END TRY",
+    "BEGIN CATCH",
+    "    IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;",
+    "    THROW;",
+    "END CATCH;",
+  ].join("\n");
+  // The batch range starts at the real `BEGIN TRY` token, so the blank line
+  // and semicolon around the statement are not part of it.
+  const sqlServerTryCatchRange = sqlServerTryCatchBatch.slice(sqlServerTryCatchBatch.indexOf("BEGIN TRY")).replace(/;$/, "");
+
+  // #13051: a top-level BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH script
+  // must execute as one batch — splitting it at the top-level `;` sends
+  // fragments like `BEGIN TRANSACTION` alone and SQL Server rejects them.
+  it("keeps a SQL Server top-level TRY/CATCH script as one batch after the leading statement", () => {
+    const ranges = executableStatementRanges(sqlServerTryCatchBatch, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["SET XACT_ABORT ON", sqlServerTryCatchRange]);
+  });
+
+  it("keeps the statement after END CATCH as its own SQL Server range", () => {
+    const ranges = executableStatementRanges(`${sqlServerTryCatchBatch}\nSELECT 999;`, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["SET XACT_ABORT ON", sqlServerTryCatchRange, "SELECT 999"]);
+  });
+
+  it("keeps two consecutive SQL Server TRY/CATCH scripts as two ranges", () => {
+    const second = sqlServerTryCatchBatch.replace(/\[dbo\]\.\[Documents\]/g, "[dbo].[Docs]");
+    const ranges = executableStatementRanges(`${sqlServerTryCatchBatch}\n${second};`, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["SET XACT_ABORT ON", sqlServerTryCatchRange, "SET XACT_ABORT ON", second.slice(second.indexOf("BEGIN TRY")).replace(/;$/, "")]);
+  });
+
+  it("keeps a SQL Server top-level plain BEGIN/END block whole", () => {
+    const sql = ["BEGIN", "    SELECT 1;", "    SELECT 2;", "END"].join("\n");
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([sql]);
+  });
+
+  // A bare `BEGIN` is the first keystroke of every SQL Server block: the merge
+  // reads the word after `BEGIN` to tell a block from `BEGIN TRAN`, and a
+  // missing token must not be treated as one (it crashed the splitter).
+  it("splits a lone SQL Server BEGIN without merging", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges("BEGIN", "sqlserver"))).toEqual(["BEGIN"]);
+  });
+
+  it("splits a SQL Server BEGIN terminated by a semicolon without merging", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges("BEGIN;", "sqlserver"))).toEqual(["BEGIN"]);
+  });
+
+  it("splits a SQL Server BEGIN followed by a comment without merging", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges("BEGIN -- draft block", "sqlserver"))).toEqual(["BEGIN"]);
+  });
+
+  it("ends a SQL Server TRY batch without a CATCH at END TRY", () => {
+    const sql = ["BEGIN TRY", "    SELECT 1;", "END TRY", "SELECT 999;"].join("\n");
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["BEGIN TRY\n    SELECT 1;\nEND TRY", "SELECT 999"]);
+  });
+
+  // The depth carried across fragments decides where a batch ends: fragments
+  // after the closing `END` are independent statements, so every following
+  // statement keeps its own execution icon.
+  it("does not swallow the statement after a SQL Server IF/ELSE batch", () => {
+    const batch = ["IF NOT EXISTS (SELECT 1 FROM dbo.T WHERE n = N'x')", "BEGIN", "    SELECT 1;", "END", "ELSE", "BEGIN", "    SELECT 2;", "END"].join("\n");
+    const ranges = executableStatementRanges(`${batch}\nSELECT 999;`, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([batch, "SELECT 999"]);
+  });
+
+  it("keeps two consecutive SQL Server IF/ELSE batches as two ranges", () => {
+    const first = ["IF NOT EXISTS (SELECT 1 FROM dbo.T WHERE n = N'x')", "BEGIN", "    SELECT 1;", "END", "ELSE", "BEGIN", "    SELECT 2;", "END"].join("\n");
+    const second = ["IF NOT EXISTS (SELECT 1 FROM dbo.T WHERE n = N'y')", "BEGIN", "    SELECT 1;", "END", "ELSE", "BEGIN", "    SELECT 2;", "END"].join("\n");
+    const ranges = executableStatementRanges(`${first}\n${second}`, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([first, second]);
+  });
+
+  it("does not merge a SQL Server batch across a GO separator", () => {
+    const batch = ["IF NOT EXISTS (SELECT 1 FROM dbo.T WHERE n = N'x')", "BEGIN", "    SELECT 1;", "END", "ELSE", "BEGIN", "    SELECT 2;", "END"].join("\n");
+    const insert = "INSERT INTO dbo.T (n) VALUES (N'z')";
+    const ranges = executableStatementRanges(`${batch}\nGO\n${insert};`, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([batch, insert]);
+  });
+
+  it("ends a single-line SQL Server IF/BEGIN/END batch before the next statement", () => {
+    const ranges = executableStatementRanges("IF @x = 1 BEGIN SELECT 1; END\nSELECT 999;", "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["IF @x = 1 BEGIN SELECT 1; END", "SELECT 999"]);
+  });
+
+  // T-SQL semicolons are optional: when the ELSE branch tail carries none, the
+  // branch's own `END` and the next statement share one `;`-fragment, and the
+  // second closure must replace the `ELSE`-continuing first one.
+  it("ends a SQL Server IF/ELSE batch at the ELSE branch END without a semicolon", () => {
+    const batch = ["IF @x = 1", "BEGIN", "    SELECT 1;", "END", "ELSE", "BEGIN", "    SELECT 2", "END"].join("\n");
+    const ranges = executableStatementRanges(`${batch}\nSELECT 999;`, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([batch, "SELECT 999"]);
+  });
+
+  it("keeps the comment after a SQL Server batch out of the next statement", () => {
+    const batch = ["IF @x = 1", "BEGIN", "    SELECT 1;", "END"].join("\n");
+    const ranges = executableStatementRanges(`${batch}\n-- gap\nSELECT 999;`, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([batch, "SELECT 999"]);
   });
 });
 

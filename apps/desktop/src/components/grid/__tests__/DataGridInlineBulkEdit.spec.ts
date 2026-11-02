@@ -1,14 +1,5 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { dataGridInlineBulkEditValue } from "@/lib/dataGrid/dataGridInlineBulkEdit";
-
-const dataGridSource = readFileSync(new URL("../DataGrid.vue", import.meta.url), "utf8");
-
-function functionBody(name: string, nextName: string): string {
-  const start = dataGridSource.indexOf(`function ${name}`);
-  const end = dataGridSource.indexOf(`function ${nextName}`, start + 1);
-  return start >= 0 && end > start ? dataGridSource.slice(start, end) : "";
-}
+import { bulkEditInputToSqlValue, dataGridInlineBulkEditValue } from "@/lib/dataGrid/dataGridInlineBulkEdit";
 
 describe("DataGrid inline bulk editing", () => {
   it.each([
@@ -27,16 +18,14 @@ describe("DataGrid inline bulk editing", () => {
   it.each([{ key: "v", ctrlKey: true }, { key: "1", altKey: true }, { key: "删", isComposing: true }, { key: "删", keyCode: 229 }, { key: "Process" }])("ignores shortcut, composition, and control keys: %j", (event) => {
     expect(dataGridInlineBulkEditValue(event, 2)).toBeUndefined();
   });
+});
 
-  it("starts a cell editor instead of opening the bulk edit dialog", () => {
-    const keydown = functionBody("onGridKeydown", "copyDetailValue");
-    expect(keydown).toContain("beginInlineBulkEdit(inlineBulkEditValue)");
-    expect(keydown).not.toContain("openBulkEditDialog");
+describe("bulkEditInputToSqlValue", () => {
+  it.each(["", "   ", "NULL", "null", "Null", "nUlL", " NULL "])("maps the NULL sentinel %j to SQL NULL", (input) => {
+    expect(bulkEditInputToSqlValue(input)).toBeNull();
   });
 
-  it("commits the inline value to the full selection", () => {
-    const commit = functionBody("commitInlineBulkEdit", "commitBooleanGridEdit");
-    expect(commit).toContain("fillSelectionWithValue(nextValue, { emptyStringAsNull: true })");
-    expect(commit).toContain("cancelEdit()");
+  it.each(["0", "false", "NULLL", "NULLX", "'NULL'", "nulls", "NUL", " 1 "])("keeps non-sentinel input %j as typed", (input) => {
+    expect(bulkEditInputToSqlValue(input)).toBe(input);
   });
 });

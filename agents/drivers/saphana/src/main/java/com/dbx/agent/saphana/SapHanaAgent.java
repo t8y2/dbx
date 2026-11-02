@@ -17,11 +17,16 @@ public final class SapHanaAgent extends ConfiguredJdbcAgent {
         30015,
         false,
         Collections.emptySet(),
-        Arrays.asList("COLUMN TABLE", "ROW TABLE", "TABLE", "VIEW")
+        Arrays.asList("COLUMN TABLE", "ROW TABLE", "TABLE", "VIEW", "CALC VIEW", "JOIN VIEW", "OLAP VIEW", "HIERARCHY VIEW")
     );
 
     public SapHanaAgent() {
         super(SAPHANA_PROFILE);
+    }
+
+    @Override
+    protected boolean includeColumnCommentsInTableDdl() {
+        return true;
     }
 
     @Override

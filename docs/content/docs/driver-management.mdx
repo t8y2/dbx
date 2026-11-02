@@ -15,23 +15,23 @@ DBX uses a hybrid driver architecture: built-in Rust drivers, standalone native 
 
 <Callout type="info">Built-in drivers work immediately. Native Agents and sidecars need platform files, while JDBC Agents also need a JRE. The connection dialog prompts for missing components, but automatic installation depends on network access, platform, licensing, and current settings.</Callout>
 
-## Driver Store
+## Built-in Drivers
 
-The Driver Store tab shows all available agent drivers and their status:
+The **Built-in Drivers** tab in Driver Manager lists all available agent drivers and their status:
 
 - **Installed drivers**: version number, size, and update availability
 - **Available drivers**: drivers you can install with one click
 - **Update badges**: when a newer version is available from the registry
 
-Open the Driver Store from **Settings → Drivers** or click the driver hint that appears when creating a connection that needs an agent driver.
+Open Driver Manager from the top toolbar (the button can be toggled under Settings → Toolbar), or click the driver hint that appears when creating a connection that needs an agent driver.
 
 ## Installing Drivers
 
 <Steps>
   <Step>
-    ### Open Driver Store
+    ### Open Driver Manager
 
-    Navigate to **Settings → Drivers** or click the driver install hint in the connection dialog.
+    Open **Driver Manager** from the top toolbar, or click the driver install hint in the connection dialog.
   </Step>
   <Step>
     ### Choose a Driver
@@ -57,13 +57,13 @@ JDBC agent drivers require a Java Runtime Environment. DBX includes JRE manageme
 - **System JRE**: DBX can use an existing Java installation on your system
 - **Managed JRE**: DBX can download and manage its own JRE, isolated from your system Java
 - **Multi-JRE support**: Different drivers can target different JRE versions when needed
-- **Reinstall**: Reinstall the managed JRE from the Driver Store if it becomes corrupted
+- **Reinstall**: Reinstall the managed JRE from the Java runtime area at the top of the **Built-in Drivers** tab if it becomes corrupted
 
 ## Driver Updates
 
 DBX checks for driver updates periodically:
 
-- Update badges appear on the Driver Store tab when newer versions are available
+- Update badges appear on the **Built-in Drivers** tab when newer versions are available
 - Click **Upgrade All Drivers** to update all installed drivers at once
 - Individual drivers can be upgraded from their entry in the store
 
@@ -79,13 +79,13 @@ For environments without internet access, DBX supports offline driver installati
 
 1. Download the DBX offline driver ZIP matching the target OS and CPU architecture on another machine
 2. Transfer it to the offline machine
-3. In Driver Store, use **Import from ZIP** to install the driver bundle
+3. In Driver Manager, use **Import offline package** to install the driver bundle
 
 This is useful for air-gapped networks, strict firewall environments, or pre-approved driver versions in enterprise settings.
 
 Every agent provides a single-driver ZIP that can be installed with **Import offline package**. Java agent packages are platform-independent and do not duplicate the JRE, while native agents such as KingbaseES, Oracle, and Xugu provide separate packages for each OS and CPU architecture.
 
-If the target machine does not already have the managed JRE required by a Java agent, import the matching JRE package once or use the full offline bundle containing every driver and the JRE.
+If the target machine does not already have the managed JRE required by a Java agent, use **Import offline package** to select the matching platform's `dbx-jre-<jre-key>-<platform>.tar.zst` (for example `dbx-jre-21-macos-aarch64.tar.zst`), or use the full offline bundle containing every driver and the JRE. Standalone JRE packages do not require `agent-registry.json`; DBX validates the Java executable's operating system and CPU architecture before installation.
 
 ### Importing KingbaseES on Windows
 
@@ -108,6 +108,6 @@ For databases supported by the [JDBC Plugin](/en/docs/plugins), DBX shows update
 | Problem                                    | Solution                                                                                    |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------- |
 | Driver download fails                      | Check network connectivity and firewall rules. Try the offline import method.               |
-| Agent won't start                          | Verify JRE installation in Driver Store. Reinstall the managed JRE if needed.               |
+| Agent won't start                          | Verify JRE installation in Driver Manager. Reinstall the managed JRE if needed.             |
 | Connection test fails after driver install | Confirm the JDBC URL format matches the driver's expected format. Check SSH/proxy settings. |
 | Wrong driver version                       | Uninstall the current driver and install the correct version from the store.                |

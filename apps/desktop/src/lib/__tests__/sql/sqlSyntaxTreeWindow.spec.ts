@@ -3,6 +3,7 @@ import { ensureSyntaxTree } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
+import { createLargeDocumentSqlLanguage } from "@/lib/editor/codemirrorLargeDocumentSqlLanguage";
 import { resolveLexicalLeafFromSyntaxTree, resolveStatementWindowFromSyntaxTree } from "@/lib/sql/sqlSyntaxTreeWindow";
 import type { DatabaseType } from "@/types/database";
 
@@ -156,5 +157,26 @@ describe("resolveLexicalLeafFromSyntaxTree", () => {
       inBlockComment: false,
       inStringLiteral: false,
     });
+  });
+});
+
+describe("documents highlighted by the large-document stream tokenizer", () => {
+  function streamStateFor(doc: string): EditorState {
+    const state = EditorState.create({ doc, extensions: [createLargeDocumentSqlLanguage(langSql, "mysql", "mysql")] });
+    ensureSyntaxTree(state, doc.length, 5_000);
+    return state;
+  }
+
+  it("reports the lexical context as unknown instead of claiming the cursor is outside strings and comments", () => {
+    const sql = "select 'abc' -- note\nfrom t";
+    const state = streamStateFor(sql);
+
+    expect(resolveLexicalLeafFromSyntaxTree(state, sql.indexOf("abc") + 1)).toBeNull();
+    expect(resolveLexicalLeafFromSyntaxTree(state, sql.indexOf("note") + 1)).toBeNull();
+  });
+
+  it("leaves statement boundaries to the bounded scanner", () => {
+    const sql = "select 1; select 2;";
+    expect(resolveStatementWindowFromSyntaxTree(streamStateFor(sql), 3)).toBeNull();
   });
 });

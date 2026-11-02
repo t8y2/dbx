@@ -1,6 +1,6 @@
-import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionReferencedTable } from "@/lib/sql/sqlCompletion";
+import { removeActiveTableCompletionReference, type SqlCompletionColumn, type SqlCompletionContext, type SqlCompletionReferencedTable } from "@/lib/sql/sqlCompletion";
 import { SQL_SEMANTIC_DIALECTS } from "@/lib/sql/semantic/dialect";
-import type { SqlSemanticModel, SqlSemanticRowSource, SqlSemanticToken } from "@/lib/sql/semantic/types";
+import type { SqlSemanticModel, SqlSemanticRowSource, SqlSemanticSpan, SqlSemanticToken } from "@/lib/sql/semantic/types";
 
 export type SqlSemanticCompletionScopeKind = "keyword" | "table" | "schema" | "catalog" | "routine" | "columns" | "local";
 
@@ -107,6 +107,7 @@ export function sqlSemanticReferencedTables(model: SqlSemanticModel): SqlComplet
         database: source.metadataTarget?.database,
         schema: source.qualifierParts[source.qualifierParts.length - 1],
         schemaQuoted: source.qualifierParts.length > 0 ? !!identifierParts[identifierParts.length - 2]?.quote : undefined,
+        kind: source.kind === "cte" ? ("cte" as const) : undefined,
         alias: source.alias,
         aliasSql: source.aliasSpan ? model.sql.slice(source.aliasSpan.start, source.aliasSpan.end) : source.alias,
         columns: source.columns,
@@ -258,14 +259,90 @@ function semanticMutationTarget(model: SqlSemanticModel): SqlSemanticRowSource |
   return targetId ? model.rowSources.find((source) => source.id === targetId) : model.rowSources.find((source) => source.kind === "mutation_target");
 }
 
+/**
+ * A generated alias is usually a syntax error on a mutation target: an INSERT
+ * target carries no alias at all, and a DELETE or UPDATE target only accepts
+ * one in the multi-table dialects that re-list it elsewhere (issue #9186:
+ * SQL Server rejects `DELETE FROM t AS a`). The typed case matches the
+ * replacement range against the parsed mutation-target span; the empty-prefix
+ * case cannot produce that source yet, so the mutation slot is recognized from
+ * the statement verb and the introducer right before the qualified name being
+ * completed. JOIN/USING/APPLY sources and SELECT FROM sources stay aliasable.
+ */
+function tableCompletionTargetIsAliasUnsafe(model: SqlSemanticModel): boolean {
+  if (model.cursorIntent.kind !== "table" && model.cursorIntent.kind !== "delete_target") return false;
+  const replacement = model.cursorIntent.replacementRange;
+  if (model.rowSources.some((source) => source.kind === "mutation_target" && !source.alias && replacement.start <= source.sourceSpan.end && replacement.end >= source.sourceSpan.start)) {
+    return true;
+  }
+  const introducer = mutationTargetIntroducer(model);
+  if (model.statement.kind === "delete") {
+    if (introducer.normalized === "delete") return true;
+    if (introducer.normalized !== "from") return false;
+    // Only the simple `DELETE FROM t` form targets the source being completed;
+    // once a target list sits between the verb and FROM (`DELETE t FROM ...`),
+    // the FROM clause introduces aliasable row sources.
+    const verbSide = introducer.index > 0 ? introducer.tokens[introducer.index - 1] : undefined;
+    return verbSide?.kind === "word" && verbSide.normalized === "delete";
+  }
+  if (model.statement.kind === "update") return introducer.normalized === "update";
+  if (model.statement.kind === "insert") return introducer.normalized === "into" || introducer.normalized === "insert";
+  return false;
+}
+
+/**
+ * The last syntax word before the table name being completed, skipping that
+ * name's qualifier parts and typed prefix, so `DELETE FROM dh.|` still reports
+ * `from` instead of the qualifier itself.
+ */
+function mutationTargetIntroducer(model: SqlSemanticModel): { normalized: string; index: number; tokens: readonly SqlSemanticToken[] } {
+  const before = model.tokens.filter((token) => token.span.end <= model.cursorIntent.replacementRange.start && token.kind !== "comment");
+  let index = before.length - 1;
+  let identifiersToSkip = model.cursorIntent.qualifierParts.length + (model.cursorIntent.prefix.length > 0 ? 1 : 0);
+  while (index >= 0 && identifiersToSkip > 0) {
+    if (before[index]?.text === ".") {
+      index -= 1;
+      continue;
+    }
+    if (!isSemanticIdentifier(before[index])) break;
+    identifiersToSkip -= 1;
+    index -= 1;
+  }
+  for (; index >= 0; index -= 1) {
+    const token = before[index];
+    if (!token) continue;
+    if (token.kind === "word") return { normalized: token.normalized, index, tokens: before };
+    if (token.kind === "quoted_identifier") return { normalized: "", index, tokens: before };
+    if (token.text === "." || token.kind === "comment") continue;
+    break;
+  }
+  return { normalized: "", index: -1, tokens: before };
+}
+
+/**
+ * When the semantic scanner misses the trailing identifier that the legacy
+ * scanner still reports (semantic prefix empty with a replacement range
+ * collapsed at the cursor) while the merged context keeps a non-empty prefix
+ * from the base context, align the replacement range with that prefix.
+ * prepareSqlCompletionReplacement prefers the range over
+ * `cursor - prefix.length`, so a range collapsed at the cursor would make the
+ * accepted candidate append after the typed prefix instead of replacing it
+ * (issue #7757).
+ */
+function replacementRangeAlignedWithPrefix(model: SqlSemanticModel, keptPrefix: string, semanticRange: SqlSemanticSpan): SqlSemanticSpan {
+  if (keptPrefix.length === 0 || model.cursorIntent.prefix.length > 0) return semanticRange;
+  if (semanticRange.start !== semanticRange.end || semanticRange.end !== model.cursor) return semanticRange;
+  return { start: model.cursor - keptPrefix.length, end: model.cursor };
+}
+
 export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: SqlCompletionContext): SqlCompletionContext {
   if (model.cursorIntent.kind === "suppressed") {
     return base;
   }
   const replacementRange = model.cursorIntent.replacementRange;
-  if (model.cursorIntent.confidence === "low") return { ...base, replacementRange };
+  if (model.cursorIntent.confidence === "low") return { ...base, replacementRange: replacementRangeAlignedWithPrefix(model, base.prefix, replacementRange) };
   if ((base.suggestTables || base.exclusiveTableSuggestions) && model.cursorIntent.kind !== "table" && model.cursorIntent.kind !== "schema" && model.cursorIntent.kind !== "catalog" && model.cursorIntent.kind !== "delete_target") {
-    return { ...base, replacementRange };
+    return { ...base, replacementRange: replacementRangeAlignedWithPrefix(model, base.prefix, replacementRange) };
   }
 
   const scope = sqlSemanticCompletionScope(model);
@@ -275,18 +352,22 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
   const prefix = useBaseTrailingIdentifier ? base.prefix : model.cursorIntent.prefix;
   const qualifierParts = model.cursorIntent.qualifierParts.length > 0 ? [...model.cursorIntent.qualifierParts] : useBaseTrailingIdentifier ? base.qualifierParts : undefined;
   const qualifier = qualifierParts?.join(".");
-  const referencedTables = sqlSemanticReferencedTables(model);
+  let referencedTables = sqlSemanticReferencedTables(model);
+  const suggestTables = scope.kind === "table" || scope.kind === "schema" || scope.kind === "catalog";
+  const activePrefixIsCte = model.rowSources.some((source) => source.kind === "cte" && source.name.toLowerCase() === prefix.toLowerCase());
+  if (suggestTables && prefix && referencedTables.length > 1 && !activePrefixIsCte) {
+    referencedTables = removeActiveTableCompletionReference(referencedTables, prefix, qualifier);
+  }
   const mutationTarget = semanticMutationTarget(model);
   const mutationDatabase = mutationTarget?.metadataTarget?.database;
   const mutationSchema = mutationTarget?.qualifierParts[mutationTarget.qualifierParts.length - 1];
-  const suggestTables = scope.kind === "table" || scope.kind === "schema" || scope.kind === "catalog";
   const suggestColumns = scope.kind === "columns";
   const suggestRoutines = scope.kind === "routine" || (suggestColumns && base.suggestRoutines && !base.exclusiveColumnSuggestions);
   const projectionAliases = sqlSemanticProjectionAliasColumns(model).map((column) => column.name);
 
   return {
     ...base,
-    replacementRange,
+    replacementRange: replacementRangeAlignedWithPrefix(model, prefix, replacementRange),
     prefix,
     qualifier,
     qualifierParts,
@@ -306,6 +387,7 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
     insertSchema: model.cursorIntent.kind === "insert_column" ? mutationSchema : base.insertSchema,
     updateTarget: model.cursorIntent.kind === "update_column" && mutationTarget ? { table: mutationTarget.name, schema: mutationSchema } : base.updateTarget,
     deleteTarget: model.cursorIntent.kind === "delete_target" && mutationTarget ? { table: mutationTarget.name, schema: mutationSchema } : base.deleteTarget,
+    tableCompletionTargetAliasUnsafe: tableCompletionTargetIsAliasUnsafe(model),
     onStar: model.cursorIntent.kind === "star" || base.onStar,
     contextKind,
   };

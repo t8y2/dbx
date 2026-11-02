@@ -2,6 +2,7 @@ import type { ColumnInfo, ConnectionConfig, DatabaseObjectType, DatabaseType, Fo
 import * as api from "@/lib/backend/api";
 import { createColumnDrafts, createForeignKeyDrafts, createIndexDrafts, createTriggerDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildTableStructureChangeSqlOptions } from "@/lib/table/tableStructureEditorSql";
+import { buildOceanbaseTableClone, type OceanbaseTableClone } from "./oceanbaseTableClone";
 
 export interface DropObjectSqlOptions {
   databaseType?: DatabaseType;
@@ -83,6 +84,12 @@ export interface DuplicateTableStructureSqlOptions {
   targetName: string;
   tableComment?: string | null;
   columnComments?: Array<{ name: string; comment: string }>;
+  /** SQL Server only: source primary-key columns recreated on the clone, because
+   * `SELECT ... INTO` copies columns (and IDENTITY) but drops constraints. */
+  primaryKeyColumns?: string[];
+  /** SQL Server only: pre-computed PK constraint name for the clone (respecting
+   * the 128-character identifier limit and source-table index names). */
+  primaryKeyConstraintName?: string;
   /** Quote character reported by the connected server, for types whose quote is not fixed by the
    * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
    * table-data SQL options. */
@@ -100,6 +107,7 @@ export interface DuplicateTableStructurePlan {
   sql: string;
   sourceColumns?: ColumnInfo[];
   executeAsScript: boolean;
+  oceanbaseClone?: OceanbaseTableClone;
 }
 
 export function collectDuplicateTableColumnComments(columns: readonly Pick<ColumnInfo, "name" | "comment">[]): Array<{ name: string; comment: string }> {
@@ -160,14 +168,6 @@ export function oracleDuplicateTableCreateOptions(options: { schema?: string | n
   };
 }
 
-function damengDuplicateTableName(targetName: string): string {
-  const hasLower = /[a-z]/.test(targetName);
-  const hasUpper = /[A-Z]/.test(targetName);
-  const hasSpecial = /[^a-zA-Z0-9_$#]/.test(targetName);
-  const hasInvalidStart = !/^[a-zA-Z_]/.test(targetName);
-  return (hasLower && hasUpper) || hasSpecial || hasInvalidStart ? targetName : targetName.toUpperCase();
-}
-
 function damengCloneIndexName(targetName: string, index: number): string {
   const normalized =
     targetName
@@ -192,7 +192,7 @@ export function damengDuplicateTableCreateOptions(options: { schema?: string | n
   return {
     databaseType: "dameng",
     schema: options.schema || undefined,
-    tableName: damengDuplicateTableName(options.targetName),
+    tableName: options.targetName,
     tableComment: options.tableComment || undefined,
     columns: createColumnDrafts(options.columns, "dameng").map((column, index) => ({
       ...column,
@@ -212,7 +212,31 @@ export function damengDuplicateTableCreateOptions(options: { schema?: string | n
   };
 }
 
+/** SQL Server caps identifiers at 128 characters. */
+export const SQLSERVER_IDENTIFIER_MAX_LENGTH = 128;
+
+/**
+ * Derives the clone's primary-key constraint name from `PK_{target}`, capped at
+ * SQL Server's 128-character identifier limit and de-duplicated against the
+ * source table's index names (schema-wide constraint names cannot be listed
+ * through the table-level index metadata, so a name taken by a *different*
+ * table still surfaces as a server-side error the user can act on).
+ */
+export function sqlServerClonePrimaryKeyConstraintName(indexes: IndexInfo[], targetName: string): string {
+  const base = `PK_${targetName}`;
+  const taken = new Set(indexes.map((index) => index.name.toLowerCase()));
+  let name = base.slice(0, SQLSERVER_IDENTIFIER_MAX_LENGTH);
+  let suffix = 2;
+  while (taken.has(name.toLowerCase())) {
+    const tail = `_${suffix}`;
+    name = `${base.slice(0, SQLSERVER_IDENTIFIER_MAX_LENGTH - tail.length)}${tail}`;
+    suffix += 1;
+  }
+  return name;
+}
+
 export async function buildDuplicateTableStructurePlan(options: DuplicateTableStructurePlanOptions): Promise<DuplicateTableStructurePlan> {
+  if (options.databaseType === "oceanbase-oracle") return buildOceanbaseTableClone(options);
   if (options.databaseType === "oracle") {
     const columnsPromise = options.sourceColumns ? Promise.resolve(options.sourceColumns) : api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
     const tableCommentPromise =
@@ -264,16 +288,53 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
     return { sql: result.statements.join("\n"), sourceColumns: columns, executeAsScript: true };
   }
 
+  // `SELECT TOP 0 * INTO` copies columns and the IDENTITY property but drops constraints, so the
+  // cloned table silently loses its primary key (t8y2/dbx#8931). Load the source primary key and
+  // let the backend append an `ALTER TABLE ... ADD CONSTRAINT ... PRIMARY KEY` for it.
+  if (options.databaseType === "sqlserver") {
+    const [columns, indexes, tableComment] = await Promise.all([
+      options.sourceColumns ? Promise.resolve(options.sourceColumns) : api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog),
+      api.listIndexes(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog),
+      // The web backend's getTableComment is a throwing placeholder, and SQL Server table lists
+      // report `comment: null` for tables without one, so a hard failure would break web cloning.
+      options.tableComment == null
+        ? api.getTableComment(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog).catch((error) => {
+            console.warn(`Failed to load SQL Server table comment for table clone: ${options.sourceName}`, error);
+            return null;
+          })
+        : Promise.resolve(options.tableComment),
+    ]);
+    const columnComments = collectDuplicateTableColumnComments(columns);
+    const primaryKeyColumns = indexes.find((index) => index.is_primary && index.columns.length > 0)?.columns ?? [];
+    const primaryKeyConstraintName = sqlServerClonePrimaryKeyConstraintName(indexes, options.targetName);
+    const sql = await buildDuplicateTableStructureSql({
+      databaseType: options.databaseType,
+      schema: options.schema,
+      sourceName: options.sourceName,
+      targetName: options.targetName,
+      tableComment,
+      columnComments,
+      primaryKeyColumns,
+      primaryKeyConstraintName,
+      identifierQuote: options.identifierQuote,
+    });
+    return { sql, sourceColumns: columns, executeAsScript: primaryKeyColumns.length > 0 || !!tableComment?.trim() || columnComments.length > 0 || duplicateTableStructureRequiresScript(sql) };
+  }
+
+  let sourceColumns = options.sourceColumns;
+  if (options.databaseType === "vastbase" || options.databaseType === "oscar") {
+    sourceColumns ??= await api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
+  }
   const sql = await buildDuplicateTableStructureSql({
     databaseType: options.databaseType,
     schema: options.schema,
     sourceName: options.sourceName,
     targetName: options.targetName,
     tableComment: options.tableComment,
-    columnComments: [],
+    columnComments: options.databaseType === "vastbase" || options.databaseType === "oscar" ? collectDuplicateTableColumnComments(sourceColumns ?? []) : [],
     identifierQuote: options.identifierQuote,
   });
-  return { sql, sourceColumns: options.sourceColumns, executeAsScript: duplicateTableStructureRequiresScript(sql) };
+  return { sql, sourceColumns, executeAsScript: duplicateTableStructureRequiresScript(sql) };
 }
 
 export interface CopyTableDataSqlOptions {
@@ -284,6 +345,7 @@ export interface CopyTableDataSqlOptions {
   columns?: string[];
   postgresOverridingSystemValue?: boolean;
   sqlserverIdentityInsert?: boolean;
+  damengIdentityInsert?: boolean;
   normalizeNewTargetName?: boolean;
   /** Quote character reported by the connected server, for types whose quote is not fixed by the
    * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
@@ -319,10 +381,14 @@ export function buildMysqlAutoIncrementSql(options: MysqlAutoIncrementSqlOptions
   return api.buildMysqlAutoIncrementSql(options);
 }
 
-export function supportsNativeMysqlAutoIncrement(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined): boolean {
-  if (connection?.db_type !== "mysql") return false;
+const MYSQL_AUTO_INCREMENT_PROFILES = new Set(["mysql", "mariadb", "tidb", "oceanbase", "tdsql", "polardb", "greatsql", "custom_mysql", "dolt", "goldendb"]);
+
+export function supportsMysqlAutoIncrement(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined): boolean {
+  if (!connection) return false;
+  if (connection.db_type === "goldendb") return true;
+  if (connection.db_type !== "mysql") return false;
   const profile = connection.driver_profile?.trim().toLowerCase();
-  return !profile || profile === "mysql";
+  return !profile || MYSQL_AUTO_INCREMENT_PROFILES.has(profile);
 }
 
 const DROP_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss"];

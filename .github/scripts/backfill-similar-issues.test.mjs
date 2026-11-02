@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  backfill,
-  listOpenUnassignedIssues,
-  selectChunk,
-} from "./backfill-similar-issues.mjs";
+import { backfill, listOpenUnassignedIssues, selectChunk } from "./backfill-similar-issues.mjs";
 
 test("selectChunk partitions issue numbers deterministically", () => {
   const issues = [1, 2, 3, 4, 5, 6].map((number) => ({ number }));
 
-  assert.deepEqual(selectChunk(issues, { chunkIndex: 0, chunkCount: 3 }).map(({ number }) => number), [6, 3]);
-  assert.deepEqual(selectChunk(issues, { chunkIndex: 1, chunkCount: 3 }).map(({ number }) => number), [4, 1]);
+  assert.deepEqual(
+    selectChunk(issues, { chunkIndex: 0, chunkCount: 3 }).map(({ number }) => number),
+    [6, 3],
+  );
+  assert.deepEqual(
+    selectChunk(issues, { chunkIndex: 1, chunkCount: 3 }).map(({ number }) => number),
+    [4, 1],
+  );
   assert.deepEqual(
     selectChunk(issues, { chunkIndex: 2, chunkCount: 3, maxIssues: 1 }).map(({ number }) => number),
     [5],
@@ -34,8 +36,14 @@ test("listOpenUnassignedIssues filters pull requests and assigned issues across 
 
   const issues = await listOpenUnassignedIssues(client);
   assert.equal(issues.length, 99);
-  assert.equal(issues.some(({ number }) => number === 1), false);
-  assert.equal(issues.some(({ number }) => number === 2), false);
+  assert.equal(
+    issues.some(({ number }) => number === 1),
+    false,
+  );
+  assert.equal(
+    issues.some(({ number }) => number === 2),
+    false,
+  );
   assert.equal(issues.at(-1).number, 101);
 });
 

@@ -46,9 +46,12 @@ export type DataGridContextMenuIcons = {
 export function createDataGridFilterSubmenu(options: {
   label: string;
   icon: Component;
-  labels: Record<"equals" | "notEquals" | "like" | "notLike" | "lessThan" | "greaterThan" | "isNull" | "isNotNull" | "clear", string>;
+  labels: Record<"equals" | "notEquals" | "like" | "notLike" | "lessThan" | "greaterThan" | "custom" | "isNull" | "isNotNull" | "clear", string>;
   apply: (mode: "equals" | "not-equals" | "like" | "not-like" | "less-than" | "greater-than" | "is-null" | "is-not-null") => void;
+  applyCustom: () => void;
   clear: () => void;
+  /** Result grids filter in memory and have no SQL condition builder (#13237). */
+  hideCustom?: boolean;
 }): DataGridContextMenuItem {
   const { labels } = options;
   return {
@@ -61,6 +64,7 @@ export function createDataGridFilterSubmenu(options: {
       { label: labels.notLike, action: () => options.apply("not-like") },
       { label: labels.lessThan, action: () => options.apply("less-than") },
       { label: labels.greaterThan, action: () => options.apply("greater-than") },
+      ...(options.hideCustom ? [] : [{ label: labels.custom, action: () => options.applyCustom() }]),
       { label: "", separator: true },
       { label: labels.isNull, action: () => options.apply("is-null") },
       { label: labels.isNotNull, action: () => options.apply("is-not-null") },
@@ -70,49 +74,174 @@ export function createDataGridFilterSubmenu(options: {
   };
 }
 
+export function createDataGridHighlightSubmenu(options: {
+  label: string;
+  icon: Component;
+  labels: {
+    duplicates: string;
+    nulls: string;
+    clear: string;
+  };
+  hasDuplicatesActive?: boolean;
+  hasNullsActive?: boolean;
+  canClear?: boolean;
+  toggleDuplicates: () => void;
+  toggleNulls: () => void;
+  clear: () => void;
+}): DataGridContextMenuItem {
+  return {
+    label: options.label,
+    icon: options.icon,
+    children: [
+      {
+        label: options.labels.duplicates,
+        checked: options.hasDuplicatesActive,
+        action: options.toggleDuplicates,
+      },
+      {
+        label: options.labels.nulls,
+        checked: options.hasNullsActive,
+        action: options.toggleNulls,
+      },
+      { label: "", separator: true },
+      {
+        label: options.labels.clear,
+        disabled: !options.canClear,
+        action: options.clear,
+      },
+    ],
+  };
+}
+
 export function createDataGridColumnContextMenuItems(options: {
   headerColumn: boolean;
   contextColumn: boolean;
   canCopyAlterSql: boolean;
+  canCopyMetadata?: boolean;
+  /** 当前列（或选中列）解析到了非空注释时才提供「复制列注释」。 */
+  canCopyComment?: boolean;
   canFilter: boolean;
   hasSort: boolean;
   sortMode: "database" | "local";
+  databaseSortEnabled?: boolean;
   frozenColumnCount?: number;
   contextVisibleColIdx?: number;
   hasColumnSelection?: boolean;
-  labels: Record<"copyName" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns", string>;
-  icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort">;
-  actions: { copyName: () => void; copyNames: () => void; details: () => void; copyAlterSql: () => void; sort: (direction: "asc" | "desc" | null, mode: "database" | "local") => void; freezeToColumn: () => void; freezeSelectedColumns: () => void; unfreezeColumns: () => void };
+  hasUserSizedColumns?: boolean;
+  /** 显式多选的可见列数量；为 undefined 时按 0 处理。 */
+  selectedColumnCount?: number;
+  /** 当前可见列总数，用于判断「选中列覆盖全部可见列」而禁用批量隐藏。 */
+  visibleColumnCount?: number;
+  /** 当前被隐藏的列数量，用于决定是否显示「显示全部列」。 */
+  hiddenColumnCount?: number;
+  canHideIdenticalColumns?: boolean;
+  labels: Record<
+    "copyName" | "copyComment" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns" | "hideColumn" | "hideSelectedColumns" | "showAllColumnsMenu",
+    string
+  > &
+    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn" | "hideIdenticalColumns" | "copyMetadata" | "clearRememberedColumnWidths", string>>;
+  icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort"> & Partial<Record<"clearRememberedColumnWidths", Component>>;
+  actions: {
+    copyName: () => void;
+    copyComment: () => void;
+    copyNames: () => void;
+    details: () => void;
+    copyAlterSql: () => void;
+    copyMetadata?: () => void;
+    sort: (direction: "asc" | "desc" | null, mode: "database" | "local") => void;
+    freezeToColumn: () => void;
+    freezeSelectedColumns: () => void;
+    freezeCurrentColumn?: () => void;
+    unfreezeCurrentColumn?: () => void;
+    unfreezeColumns: () => void;
+    hideColumn: () => void;
+    hideSelectedColumns: () => void;
+    hideIdenticalColumns?: () => void;
+    showAllColumnsMenu: () => void;
+    clearRememberedColumnWidths?: () => void;
+  };
   filterSubmenu: DataGridContextMenuItem;
+  highlightSubmenu?: DataGridContextMenuItem;
 }): DataGridContextMenuItem[] {
   const items: DataGridContextMenuItem[] = [];
   if (options.headerColumn) {
     items.push({ label: options.labels.copyName, action: options.actions.copyName, icon: options.icons.copy });
+    if (options.canCopyMetadata) items.push({ label: options.labels.copyMetadata ?? "Copy column metadata", action: options.actions.copyMetadata!, icon: options.icons.copy });
+    // 只有解析到注释时才给出入口：无元数据的查询结果里永远为空，展示反而误导。
+    if (options.canCopyComment) items.push({ label: options.labels.copyComment, action: options.actions.copyComment, icon: options.icons.copy });
     items.push({ label: options.labels.copyNames, action: options.actions.copyNames, icon: options.icons.copy });
     items.push({ label: options.labels.details, action: options.actions.details, icon: options.icons.columnDetails });
     if (options.canCopyAlterSql) items.push({ label: options.labels.copyAlterSql, action: options.actions.copyAlterSql, icon: options.icons.copy });
+    if (options.highlightSubmenu) items.push({ label: "", separator: true }, options.highlightSubmenu);
   }
   if (!options.contextColumn && !options.headerColumn) return items;
   if (options.contextColumn) {
-    items.push(
-      { label: options.labels.databaseAscending, action: () => options.actions.sort("asc", "database"), icon: options.icons.database },
-      { label: options.labels.databaseDescending, action: () => options.actions.sort("desc", "database"), icon: options.icons.database },
-      { label: "", separator: true },
-      { label: options.labels.localAscending, action: () => options.actions.sort("asc", "local"), icon: options.icons.ascending },
-      { label: options.labels.localDescending, action: () => options.actions.sort("desc", "local"), icon: options.icons.descending },
-    );
+    if (options.databaseSortEnabled !== false) {
+      items.push(
+        { label: options.labels.databaseAscending, action: () => options.actions.sort("asc", "database"), icon: options.icons.database },
+        { label: options.labels.databaseDescending, action: () => options.actions.sort("desc", "database"), icon: options.icons.database },
+        { label: "", separator: true },
+      );
+    }
+    items.push({ label: options.labels.localAscending, action: () => options.actions.sort("asc", "local"), icon: options.icons.ascending }, { label: options.labels.localDescending, action: () => options.actions.sort("desc", "local"), icon: options.icons.descending });
     if (options.hasSort) items.push({ label: options.labels.clearSort, action: () => options.actions.sort(null, options.sortMode), icon: options.icons.clearSort });
     if (options.canFilter) items.push({ label: "", separator: true }, options.filterSubmenu);
+    if (!options.headerColumn && options.highlightSubmenu) items.push({ label: "", separator: true }, options.highlightSubmenu);
   }
   if (options.contextVisibleColIdx !== undefined) {
     items.push({ label: "", separator: true });
+    const selectedColumnCount = options.selectedColumnCount ?? 0;
+    const visibleColumnCount = options.visibleColumnCount ?? 0;
+    // 只剩一列时隐藏会被 helper 拒绝；用 disabled 明确表达，而不是静默无效。
+    // 这里读 options.visibleColumnCount 而非本地默认值：字段可选，未传的调用方不应被误禁用。
+    items.push({ label: options.labels.hideColumn, action: options.actions.hideColumn, disabled: options.visibleColumnCount !== undefined && options.visibleColumnCount <= 1 });
+    // 仅在多选（>1）时提供批量隐藏；选中列覆盖全部可见列时禁用，而不是悄悄少隐藏一列。
+    if (options.hasColumnSelection && selectedColumnCount > 1) {
+      items.push({ label: options.labels.hideSelectedColumns, action: options.actions.hideSelectedColumns, disabled: visibleColumnCount > 0 && selectedColumnCount >= visibleColumnCount });
+    }
+    if (options.labels.hideIdenticalColumns && options.actions.hideIdenticalColumns) {
+      items.push({
+        label: options.labels.hideIdenticalColumns,
+        action: options.actions.hideIdenticalColumns,
+        disabled: options.canHideIdenticalColumns === false,
+      });
+    }
+    if ((options.hiddenColumnCount ?? 0) > 0) {
+      items.push({ label: options.labels.showAllColumnsMenu, action: options.actions.showAllColumnsMenu });
+    }
+    if (options.hasUserSizedColumns && options.labels.clearRememberedColumnWidths && options.actions.clearRememberedColumnWidths) {
+      items.push({
+        label: options.labels.clearRememberedColumnWidths,
+        action: options.actions.clearRememberedColumnWidths,
+        icon: options.icons.clearRememberedColumnWidths,
+      });
+    }
     if ((options.frozenColumnCount ?? 0) > 0) {
+      if ((options.contextVisibleColIdx ?? -1) < (options.frozenColumnCount ?? 0) && options.labels.unfreezeCurrentColumn && options.actions.unfreezeCurrentColumn) items.push({ label: options.labels.unfreezeCurrentColumn, action: options.actions.unfreezeCurrentColumn });
       items.push({ label: options.labels.unfreezeColumns, action: options.actions.unfreezeColumns });
     }
     if (options.hasColumnSelection) {
       items.push({ label: options.labels.freezeSelectedColumns, action: options.actions.freezeSelectedColumns });
     }
+    if (options.labels.freezeCurrentColumn && options.actions.freezeCurrentColumn) items.push({ label: options.labels.freezeCurrentColumn, action: options.actions.freezeCurrentColumn });
     items.push({ label: options.labels.freezeToColumn, action: options.actions.freezeToColumn });
+  } else if (options.labels.hideIdenticalColumns && options.actions.hideIdenticalColumns) {
+    items.push({ label: "", separator: true });
+    items.push({
+      label: options.labels.hideIdenticalColumns,
+      action: options.actions.hideIdenticalColumns,
+      disabled: options.canHideIdenticalColumns === false,
+    });
+    if ((options.hiddenColumnCount ?? 0) > 0) {
+      items.push({ label: options.labels.showAllColumnsMenu, action: options.actions.showAllColumnsMenu });
+    }
+    if (options.hasUserSizedColumns && options.labels.clearRememberedColumnWidths && options.actions.clearRememberedColumnWidths) {
+      items.push({
+        label: options.labels.clearRememberedColumnWidths,
+        action: options.actions.clearRememberedColumnWidths,
+        icon: options.icons.clearRememberedColumnWidths,
+      });
+    }
   }
   return items;
 }
@@ -210,13 +339,17 @@ export function dataGridSelectedSortMenuValue(state: DataGridColumnSortState, co
   return dataGridColumnIsSorted(state, column, columnIndex) ? `${state.mode}-${state.direction}` : undefined;
 }
 
-export function createDataGridSortMenuItems(options: { column: string; columnIndex: number; state: DataGridColumnSortState; labels: SortMenuLabels; icons: SortMenuIcons }): DataGridColumnMenuItem[] {
-  const { column, columnIndex, state, labels, icons } = options;
+export function createDataGridSortMenuItems(options: { column: string; columnIndex: number; state: DataGridColumnSortState; labels: SortMenuLabels; icons: SortMenuIcons; databaseSortEnabled?: boolean }): DataGridColumnMenuItem[] {
+  const { column, columnIndex, state, labels, icons, databaseSortEnabled = true } = options;
   const sorted = dataGridColumnIsSorted(state, column, columnIndex);
   return [
-    { label: labels.databaseAscending, value: "database-asc", icon: icons.database, checked: sorted && state.direction === "asc" && state.mode === "database" },
-    { label: labels.databaseDescending, value: "database-desc", icon: icons.database, checked: sorted && state.direction === "desc" && state.mode === "database" },
-    { label: labels.currentPageAscending, value: "local-asc", icon: icons.ascending, checked: sorted && state.direction === "asc" && state.mode === "local", separatorBefore: true },
+    ...(databaseSortEnabled
+      ? [
+          { label: labels.databaseAscending, value: "database-asc", icon: icons.database, checked: sorted && state.direction === "asc" && state.mode === "database" },
+          { label: labels.databaseDescending, value: "database-desc", icon: icons.database, checked: sorted && state.direction === "desc" && state.mode === "database" },
+        ]
+      : []),
+    { label: labels.currentPageAscending, value: "local-asc", icon: icons.ascending, checked: sorted && state.direction === "asc" && state.mode === "local", separatorBefore: databaseSortEnabled },
     { label: labels.currentPageDescending, value: "local-desc", icon: icons.descending, checked: sorted && state.direction === "desc" && state.mode === "local" },
     { label: labels.clear, value: "clear", icon: icons.clear, disabled: !sorted, separatorBefore: true },
   ];

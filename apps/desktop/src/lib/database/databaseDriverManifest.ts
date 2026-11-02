@@ -3,6 +3,9 @@ import driverManifest from "../../../../../crates/dbx-core/assets/database-drive
 
 export type DatabaseSupportLevel = "connect" | "browse" | "understand" | "operate";
 export type DatabaseRuntimeMode = "native" | "file" | "agent" | "external";
+export type DatabaseTransferObjectFamily = "mysql" | "postgres" | "oracle" | "sqlserver";
+export type DatabaseTransferSupportLevel = "verified" | "family-compatible" | "best-effort";
+export type DatabaseCompareMode = "schema" | "data";
 export type ConnectionFormKind = "standard" | "jdbc" | "mq" | "mqtt" | "nacos";
 
 export const DATABASE_PRODUCT_CAPABILITY_KEYS = [
@@ -50,6 +53,9 @@ export interface ManagedDatabaseDriver {
 
 export interface DatabaseDriverManifestEntry {
   dbType: DatabaseType;
+  compareModes?: DatabaseCompareMode[];
+  transferObjectFamily?: DatabaseTransferObjectFamily;
+  transferSupportLevel?: DatabaseTransferSupportLevel;
   label: string;
   dialect?: string;
   runtimeMode: DatabaseRuntimeMode;
@@ -140,6 +146,18 @@ export function databaseRuntimeMode(dbType?: DatabaseType): DatabaseRuntimeMode 
   return dbType ? DATABASE_DRIVER_BY_TYPE.get(dbType)?.runtimeMode : undefined;
 }
 
+export function databaseTransferObjectFamily(dbType?: DatabaseType): DatabaseTransferObjectFamily | undefined {
+  return dbType ? DATABASE_DRIVER_BY_TYPE.get(dbType)?.transferObjectFamily : undefined;
+}
+
+export function databaseTransferSupportLevel(dbType?: DatabaseType): DatabaseTransferSupportLevel | undefined {
+  return dbType ? DATABASE_DRIVER_BY_TYPE.get(dbType)?.transferSupportLevel : undefined;
+}
+
+export function supportsDatabaseCompareMode(dbType: DatabaseType | undefined, mode: DatabaseCompareMode): boolean {
+  return dbType ? DATABASE_DRIVER_BY_TYPE.get(dbType)?.compareModes?.includes(mode) === true : false;
+}
+
 export function databaseProductCapabilities(dbType?: DatabaseType): DatabaseProductCapabilities {
   if (!dbType) return DEFAULT_CAPABILITIES;
   return (DATABASE_DRIVER_BY_TYPE.get(dbType)?.capabilities ?? DEFAULT_CAPABILITIES) as DatabaseProductCapabilities;
@@ -153,9 +171,16 @@ export function manifestDatabaseTypes(): DatabaseType[] {
   return DATABASE_DRIVER_ENTRIES.map((entry) => entry.dbType);
 }
 
-export function usesAgentCursorForQuery(dbType?: DatabaseType): boolean {
+export function usesAgentCursorForQuery(dbType?: DatabaseType, driverProfile?: string): boolean {
+  // DuckDB's native worker captures one bounded result for all subsequent pages.
+  if (dbType === "duckdb") return true;
+  if (dbType === "sqlserver" && driverProfile?.trim().toLowerCase() === "sqlserver-legacy") return true;
   const runtimeMode = databaseRuntimeMode(dbType);
   return runtimeMode === "agent" || runtimeMode === "external";
+}
+
+export function usesAgentCursorForTableData(dbType?: DatabaseType, driverProfile?: string): boolean {
+  return dbType === "cassandra" || (dbType === "sqlserver" && driverProfile?.trim().toLowerCase() === "sqlserver-legacy");
 }
 
 function productCapabilities(overrides: Partial<DatabaseProductCapabilities>): DatabaseProductCapabilities {

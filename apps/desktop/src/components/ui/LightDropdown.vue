@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, type Component } from "vue";
 import { Check, ChevronDown } from "@lucide/vue";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
 
 export interface LightDropdownItem {
   label: string;
   value: string;
   groupLabel?: string;
   title?: string;
+  tooltip?: string;
+  role?: "menuitem" | "menuitemradio" | "menuitemcheckbox";
   icon?: Component;
   iconClass?: string;
   leadingText?: string;
@@ -41,6 +44,7 @@ const props = withDefaults(
     closeOnSelect?: boolean;
     label?: string;
     matchTriggerWidth?: boolean;
+    maxHeight?: string;
   }>(),
   {
     ariaLabel: undefined,
@@ -65,6 +69,7 @@ const props = withDefaults(
     closeOnSelect: true,
     label: undefined,
     matchTriggerWidth: true,
+    maxHeight: "min(420px, calc(100vh - 16px))",
   },
 );
 
@@ -85,7 +90,7 @@ const menuStyle = computed(() => ({
   left: `${x.value}px`,
   top: `${y.value}px`,
   minWidth: props.matchTriggerWidth ? `${minWidth.value}px` : undefined,
-  maxHeight: "min(420px, calc(100vh - 16px))",
+  maxHeight: props.maxHeight,
 }));
 
 function onScroll(event: Event) {
@@ -125,11 +130,21 @@ function fitPositionToViewport() {
   y.value = openBelow ? triggerRect.bottom + gap : Math.max(margin, triggerRect.top - menuRect.height - gap);
 }
 
-function openMenu() {
+function menuItems(): HTMLButtonElement[] {
+  return [...(menuRef.value?.querySelectorAll<HTMLButtonElement>('button[role^="menuitem"]:not(:disabled)') ?? [])];
+}
+
+function openMenu(focus?: "first" | "last") {
   if (props.disabled) return;
   updatePosition();
   open.value = true;
-  nextTick(fitPositionToViewport);
+  nextTick(() => {
+    fitPositionToViewport();
+    if (focus) {
+      const items = menuItems();
+      (focus === "first" ? items[0] : items[items.length - 1])?.focus();
+    }
+  });
   document.addEventListener("pointerdown", onOutsidePointerDown, true);
   document.addEventListener("keydown", onKeydown);
   window.addEventListener("scroll", onScroll, true);
@@ -153,8 +168,42 @@ function onOutsidePointerDown(event: PointerEvent) {
 function onKeydown(event: KeyboardEvent) {
   if (event.key === "Escape") {
     event.preventDefault();
+    const restoreFocus = menuRef.value?.contains(document.activeElement);
     close();
+    if (restoreFocus) triggerRef.value?.focus();
+    return;
   }
+  if (!menuRef.value?.contains(document.activeElement) && document.activeElement !== triggerRef.value) return;
+  const items = menuItems();
+  if (!items.length) return;
+  const index = items.indexOf(document.activeElement as HTMLButtonElement);
+  let next: number;
+  switch (event.key) {
+    case "ArrowDown":
+      next = (index + 1) % items.length;
+      break;
+    case "ArrowUp":
+      next = index < 0 ? items.length - 1 : (index - 1 + items.length) % items.length;
+      break;
+    case "Home":
+      next = 0;
+      break;
+    case "End":
+      next = items.length - 1;
+      break;
+    default:
+      return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  items[next]?.focus();
+}
+
+function onTriggerKeydown(event: KeyboardEvent) {
+  if (open.value || (event.key !== "ArrowDown" && event.key !== "ArrowUp")) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openMenu(event.key === "ArrowDown" ? "first" : "last");
 }
 
 function isItemSelected(item: LightDropdownItem) {
@@ -168,40 +217,53 @@ function selectItem(item: LightDropdownItem) {
   if (props.closeOnSelect) close();
 }
 
+function selectItemOnKeyboard(item: LightDropdownItem, event: MouseEvent) {
+  // Keyboard activation (Enter/Space) emits a click with detail 0; mouse
+  // clicks are already handled by pointerdown, so only pick up keyboard here
+  // to avoid selecting twice for one press.
+  if (event.detail === 0) selectItem(item);
+}
+
 onBeforeUnmount(close);
 </script>
 
 <template>
-  <button ref="triggerRef" type="button" :class="triggerClass" :title="triggerTitle ?? selectedItem?.title" :aria-label="ariaLabel" :aria-expanded="open" :disabled="disabled" @click="toggle">
-    <component :is="triggerIcon" v-if="triggerIcon" :class="triggerIconClass" />
+  <button ref="triggerRef" type="button" :class="triggerClass" :title="triggerTitle ?? selectedItem?.title" :aria-label="ariaLabel" aria-haspopup="menu" :aria-expanded="open" :disabled="disabled" @click="toggle" @keydown="onTriggerKeydown">
+    <slot name="trigger-icon" :open="open">
+      <component :is="triggerIcon" v-if="triggerIcon" :class="triggerIconClass" />
+    </slot>
     <span v-if="showTriggerLabel">{{ triggerLabel ?? selectedItem?.label }}</span>
     <ChevronDown v-if="showChevron" class="h-3 w-3 opacity-50" />
   </button>
   <Teleport to="body">
-    <div v-if="open" ref="menuRef" class="fixed z-50 min-w-32 overflow-x-hidden overflow-y-auto rounded-md p-1 cn-menu-translucent text-popover-foreground" :class="contentClass" :style="menuStyle" role="menu">
+    <div v-if="open" ref="menuRef" class="pointer-events-auto fixed z-(--dbx-floating-layer-z-index) min-w-32 overflow-x-hidden overflow-y-auto rounded-md p-1 cn-menu-translucent text-popover-foreground" :class="contentClass" :style="menuStyle" role="menu" @pointerdown.prevent>
       <div v-if="label" :class="labelClass">{{ label }}</div>
       <div v-if="label" class="bg-border -mx-1 my-1 h-px" />
       <template v-for="item in items" :key="item.value">
         <div v-if="item.separatorBefore" class="bg-border -mx-1 my-1 h-px" />
         <div v-if="item.groupLabel" class="px-1.5 py-1 text-[11px] font-medium text-muted-foreground">{{ item.groupLabel }}</div>
-        <button
-          type="button"
-          class="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
-          :class="[itemClass, highlightSelected && isItemSelected(item) ? selectedItemClass : '']"
-          :disabled="item.disabled"
-          :title="item.title"
-          :style="{ paddingInlineStart: `${0.375 + (item.indentLevel ?? 0) * 0.75}rem` }"
-          role="menuitem"
-          @click="selectItem(item)"
-        >
-          <Check v-if="checkPosition === 'left'" class="h-3 w-3 shrink-0" :class="[isItemSelected(item) ? selectedCheckClass : 'opacity-0']" />
-          <span v-if="item.leadingText" class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none">
-            {{ item.leadingText }}
-          </span>
-          <component :is="item.icon" v-if="item.icon" :class="[itemIconClass, 'shrink-0 text-muted-foreground', item.iconClass]" />
-          <span class="truncate">{{ item.label }}</span>
-          <Check v-if="checkPosition === 'right' && isItemSelected(item)" class="ml-auto h-4 w-4 shrink-0" :class="selectedCheckClass" />
-        </button>
+        <LightTooltip :text="item.tooltip ?? ''" side="right" :delay="1000" :close-delay="0">
+          <button
+            type="button"
+            class="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+            :class="[itemClass, highlightSelected && isItemSelected(item) ? selectedItemClass : '']"
+            :disabled="item.disabled"
+            :title="item.title"
+            :style="{ paddingInlineStart: `${0.375 + (item.indentLevel ?? 0) * 0.75}rem` }"
+            :role="item.role ?? 'menuitem'"
+            :aria-checked="item.role === 'menuitemradio' || item.role === 'menuitemcheckbox' ? isItemSelected(item) : undefined"
+            @pointerdown.prevent="selectItem(item)"
+            @click="selectItemOnKeyboard(item, $event)"
+          >
+            <Check v-if="checkPosition === 'left'" class="h-3 w-3 shrink-0" :class="[isItemSelected(item) ? selectedCheckClass : 'opacity-0']" />
+            <span v-if="item.leadingText" class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none">
+              {{ item.leadingText }}
+            </span>
+            <component :is="item.icon" v-if="item.icon" :class="[itemIconClass, 'shrink-0 text-muted-foreground', item.iconClass]" />
+            <span class="truncate">{{ item.label }}</span>
+            <Check v-if="checkPosition === 'right' && isItemSelected(item)" class="ml-auto h-4 w-4 shrink-0" :class="selectedCheckClass" />
+          </button>
+        </LightTooltip>
       </template>
       <slot />
     </div>

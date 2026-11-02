@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { ConnectionConfig } from "@/types/database";
 import { databaseObjectTreeNodeSchema } from "@/lib/database/databaseFeatureSupport";
 import {
+  GAUSSDB_DWS_PRODUCT_PROFILE,
+  GAUSSDB_DWS_PRODUCT_PROFILE_KEY,
   GAUSSDB_M_JDBC_DRIVER_CLASS,
   connectionDatabaseMetadataSchema,
   connectionObjectTreeNodeSchema,
@@ -9,6 +11,7 @@ import {
   connectionQueryExecutionSchema,
   connectionShouldDiscoverJdbcSchemas,
   connectionShouldLoadIdentifierQuote,
+  connectionTableSqlSchema,
   connectionUsesConnectionRootSchemaMode,
   connectionUsesDatabaseObjectTreeMode,
   effectiveDatabaseTypeForConnection,
@@ -19,15 +22,78 @@ import {
   gaussdbIdentifierQuoteStyle,
   gaussdbTargetServerType,
   inferJdbcDialect,
+  jdbcConnectionUsesDriverRowOffset,
   metadataSchemaForConnection,
+  objectListSchemaForConnection,
   setGaussdbConnectionMode,
   setGaussdbCountQueryDop,
   setGaussdbIdentifierQuoteStyle,
   setGaussdbTargetServerType,
+  sqlServerQualifiesSqlWithTabSchema,
   supportsGaussdbIdentifierQuoteStyle,
+  transferDatabaseTypeForConnection,
+  codeMirrorSqlDialectForConnection,
+  sqlSnippetDatabaseTypeForConnection,
+  kingbaseSqlDatabaseType,
 } from "@/lib/database/jdbcDialect";
+import { supportsTransfer } from "@/lib/database/databaseFeatureSupport";
+import { transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
+import { sidebarObjectKindsForDatabase } from "@/lib/database/databaseObjectCapabilities";
+
+describe("Kingbase compatibility mode routing", () => {
+  it.each([undefined, "", "future_mode"])("does not infer a mode from a version, URL, or unknown mode (%s)", (mode) => {
+    const config = { db_type: "kingbase" as const, connection_string: "jdbc:kingbase8://example.test/demo", database_info: { compatibilityMode: mode, productVersion: "KingbaseES V009R001" } };
+    expect(kingbaseSqlDatabaseType(config)).toBeUndefined();
+    expect(codeMirrorSqlDialectForConnection(config)).toBe("postgres");
+    expect(effectiveDatabaseTypeForConnection(config)).toBe("kingbase");
+  });
+
+  it.each(["postgres", "mysql", "oracle", "sqlserver", "jdbc"] as const)("ignores Kingbase mode metadata on a %s connection", (db_type) => {
+    expect(kingbaseSqlDatabaseType({ db_type, database_info: { compatibilityMode: "oracle" } })).toBeUndefined();
+  });
+
+  it.each([
+    ["pg", "postgres", "postgres"],
+    ["postgresql", "postgres", "postgres"],
+    ["oracle", "oracle", "oracle"],
+    ["mysql", "mysql", "mysql"],
+    ["sqlserver", "sqlserver", "sqlserver"],
+  ] as const)("keeps the %s editor profile separate from the physical database", (mode, type, syntax) => {
+    const connection = { db_type: "kingbase" as const, database_info: { compatibilityMode: mode } };
+    expect(sqlSnippetDatabaseTypeForConnection(connection)).toBe(type);
+    expect(codeMirrorSqlDialectForConnection(connection)).toBe(syntax);
+    expect(effectiveDatabaseTypeForConnection(connection)).toBe("kingbase");
+  });
+});
 
 describe("jdbc dialect inference", () => {
+  it("uses the explicit OceanBase Oracle URL before MySQL driver metadata", () => {
+    const connection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:oceanbase:oracle://example.test:2881/APP",
+      driver_label: "OceanBase MySQL",
+      jdbc_driver_class: "com.oceanbase.jdbc.Driver",
+    };
+    expect(inferJdbcDialect(connection)).toBe("oceanbase-oracle");
+    expect(effectiveDatabaseTypeForConnection(connection)).toBe("oceanbase-oracle");
+    expect(connectionUsesConnectionRootSchemaMode(connection)).toBe(true);
+  });
+
+  it("does not infer Oracle mode for an ordinary OceanBase JDBC URL", () => {
+    const connection = { db_type: "jdbc" as const, connection_string: "jdbc:oceanbase://example.test:2881/APP", driver_label: "OceanBase MySQL" };
+    expect(inferJdbcDialect(connection)).toBe("mysql");
+    expect(connectionUsesConnectionRootSchemaMode(connection)).toBe(false);
+  });
+
+  it("uses an approved dialect hint only for protected saved JDBC URLs", () => {
+    const protectedConnection = { db_type: "jdbc" as const, connection_string: "__DBX_SAVED_CREDENTIAL__:opaque", jdbc_dialect: "oceanbase-oracle" as const };
+    expect(effectiveDatabaseTypeForConnection(protectedConnection)).toBe("oceanbase-oracle");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, connection_string: "jdbc:mysql://host/db" })).toBe("mysql");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, connection_string: "" })).toBe("jdbc");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, db_type: "oracle" })).toBe("oracle");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, jdbc_dialect: "oracle" as never })).toBe("jdbc");
+  });
+
   it("detects InterSystems IRIS and Caché JDBC connections", () => {
     expect(
       inferJdbcDialect({
@@ -53,6 +119,21 @@ describe("jdbc dialect inference", () => {
         jdbc_driver_paths: ["/drivers/intersystems-jdbc-3.10.5.jar"],
       }),
     ).toBe("iris");
+    // Legacy Caché connections pick the CacheDB.jar from the driver store; the
+    // jar file name and driver label are the only Intersystems markers there.
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        jdbc_driver_paths: ["/drivers/CacheDB.jar"],
+      }),
+    ).toBe("iris");
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        driver_label: "CacheDB",
+      }),
+    ).toBe("iris");
+    expect(inferJdbcDialect({ db_type: "jdbc", driver_profile: "cache" })).toBe("iris");
   });
 
   it("uses IRIS table preview dialect for generic JDBC IRIS connections", () => {
@@ -64,6 +145,27 @@ describe("jdbc dialect inference", () => {
     ).toBe("iris");
   });
 
+  it("detects Firebird JDBC connections", () => {
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        connection_string: "jdbc:firebirdsql://localhost:3050/data/test.fdb",
+      }),
+    ).toBe("firebird");
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        jdbc_driver_class: "org.firebirdsql.jdbc.FBDriver",
+      }),
+    ).toBe("firebird");
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        driver_profile: "firebird",
+      }),
+    ).toBe("firebird");
+  });
+
   it("uses JDBC driver profiles when inferring dialect", () => {
     expect(
       inferJdbcDialect({
@@ -71,6 +173,19 @@ describe("jdbc dialect inference", () => {
         driver_profile: "sqlserver",
       }),
     ).toBe("sqlserver");
+  });
+
+  it("detects TDengine JDBC connections and keeps the selected database in the object tree", () => {
+    const connection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:TAOS-RS://tdengine.example:6041/",
+      jdbc_driver_class: "com.taosdata.jdbc.rs.RestfulDriver",
+    };
+
+    expect(inferJdbcDialect(connection)).toBe("tdengine");
+    expect(effectiveDatabaseTypeForConnection(connection)).toBe("tdengine");
+    expect(connectionUsesDatabaseObjectTreeMode(connection)).toBe(false);
+    expect(connectionObjectTreeQuerySchema(connection, "dbx_test")).toBe("dbx_test");
   });
 
   it("keeps Phoenix as generic JDBC while preserving its schema tree", () => {
@@ -87,6 +202,7 @@ describe("jdbc dialect inference", () => {
   it.each([
     ["jdbc:oracle:thin:@//localhost:1521/XE", "oracle"],
     ["jdbc:dm://localhost:5236/DAMENG", "dameng"],
+    ["jdbc:oceanbase:oracle://localhost:2881/APP", "oceanbase-oracle"],
   ] as const)("uses connection-root schemas for %s", (connectionString, dialect) => {
     const connection = {
       db_type: "jdbc" as const,
@@ -98,6 +214,56 @@ describe("jdbc dialect inference", () => {
     expect(connectionUsesDatabaseObjectTreeMode(connection)).toBe(false);
     expect(connectionObjectTreeQuerySchema(connection, "DBX_TEST", "DBX_TEST")).toBe("DBX_TEST");
     expect(connectionObjectTreeNodeSchema(connection, "DBX_TEST", "DBX_TEST")).toBe("DBX_TEST");
+  });
+
+  it("prioritizes explicit OceanBase Oracle mode over conflicting JDBC labels", () => {
+    const connection = {
+      db_type: "jdbc" as const,
+      connection_string: " JDBC:OceanBase:Oracle://localhost:2881/APP ",
+      driver_label: "OceanBase MySQL JDBC",
+      jdbc_driver_class: "com.oceanbase.jdbc.Driver",
+    };
+    expect(inferJdbcDialect(connection)).toBe("oceanbase-oracle");
+    expect(effectiveDatabaseTypeForConnection(connection)).toBe("oceanbase-oracle");
+    expect(connectionUsesConnectionRootSchemaMode(connection)).toBe(true);
+  });
+
+  it("keeps a protected JDBC URL unclassified when the safe connection DTO has no dialect identity", () => {
+    const safeConnection = {
+      db_type: "jdbc" as const,
+      driver_profile: "jdbc",
+      driver_label: "jdbc",
+      connection_string: "<protected>",
+      jdbc_driver_class: "custom.Driver",
+      jdbc_driver_paths: ["/drivers/custom.jar"],
+    };
+    const effectiveType = effectiveDatabaseTypeForConnection(safeConnection);
+
+    expect(inferJdbcDialect(safeConnection)).toBeUndefined();
+    expect(effectiveType).toBe("jdbc");
+    expect(connectionUsesConnectionRootSchemaMode(safeConnection)).toBe(false);
+    expect(sidebarObjectKindsForDatabase(effectiveType)).not.toContain("TYPE");
+    expect(sidebarObjectKindsForDatabase(effectiveType)).not.toContain("TYPE_BODY");
+  });
+
+  it("uses an approved dialect hint only for protected saved JDBC URLs", () => {
+    const protectedConnection = {
+      db_type: "jdbc" as const,
+      connection_string: "__DBX_SAVED_CREDENTIAL__:opaque",
+      jdbc_dialect: "oceanbase-oracle" as const,
+    };
+    expect(effectiveDatabaseTypeForConnection(protectedConnection)).toBe("oceanbase-oracle");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, connection_string: "jdbc:mysql://host/db" })).toBe("mysql");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, connection_string: "" })).toBe("jdbc");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, db_type: "oracle" })).toBe("oracle");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, jdbc_dialect: "oracle" as never })).toBe("jdbc");
+  });
+
+  it("does not guess Oracle mode from an ordinary OceanBase URL or change MySQL connections", () => {
+    expect(inferJdbcDialect({ db_type: "jdbc", connection_string: "jdbc:oceanbase://localhost:2881/APP", jdbc_driver_class: "com.oceanbase.jdbc.Driver" })).toBeUndefined();
+    expect(effectiveDatabaseTypeForConnection({ db_type: "jdbc", connection_string: "jdbc:mysql://localhost:2881/APP", driver_label: "OceanBase" })).toBe("mysql");
+    expect(effectiveDatabaseTypeForConnection({ db_type: "mysql", driver_profile: "oceanbase" })).toBe("mysql");
+    expect(effectiveDatabaseTypeForConnection({ db_type: "oceanbase-oracle" })).toBe("oceanbase-oracle");
   });
 
   it("detects GaussDB-compatible JDBC connections as schema-aware", () => {
@@ -123,8 +289,12 @@ describe("jdbc dialect inference", () => {
     expect(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_class: "org.opengauss.Driver" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_class: "org.postgresql.Driver" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "kingbase" })).toBe(true);
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "kyuubi" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" })).toBe(true);
-    expect(connectionShouldLoadIdentifierQuote({ db_type: "gbase", driver_profile: "gbase8s" })).toBe(true);
+    // openGauss databases switch between backticks (B/MySQL mode) and double
+    // quotes (A/PG modes), so the quote has to come from the backend probe.
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "opengauss" })).toBe(true);
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "gbase8s", driver_profile: "gbase8s" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gbase", driver_profile: "gbase8a" })).toBe(false);
     // Cloud Spanner reports a backtick for GoogleSQL and a double quote for the
     // PostgreSQL dialect; both are only known from the connection.
@@ -140,8 +310,16 @@ describe("jdbc dialect inference", () => {
   });
 
   it("falls back to a flat table tree when GBase 8s reports no schemas", () => {
-    expect(connectionShouldDiscoverJdbcSchemas({ db_type: "gbase", driver_profile: "gbase8s" })).toBe(true);
+    expect(connectionShouldDiscoverJdbcSchemas({ db_type: "gbase8s", driver_profile: "gbase8s" })).toBe(true);
     expect(connectionShouldDiscoverJdbcSchemas({ db_type: "gbase", driver_profile: "gbase8a" })).toBe(false);
+  });
+
+  it("omits the metadata owner from GBase 8s table SQL", () => {
+    expect(connectionTableSqlSchema({ db_type: "gbase8s", driver_profile: "gbase8s" }, "gbasedbt")).toBeUndefined();
+    expect(connectionTableSqlSchema({ db_type: "gbase8s" }, "gbasedbt")).toBeUndefined();
+    expect(connectionTableSqlSchema({ db_type: "informix", driver_profile: "gbase8s" }, "gbasedbt")).toBeUndefined();
+    expect(connectionTableSqlSchema({ db_type: "gbase", driver_profile: "gbase8a" }, "analytics")).toBe("analytics");
+    expect(connectionTableSqlSchema({ db_type: "informix", driver_profile: "informix" }, "informix")).toBe("informix");
   });
 
   it("recognizes GaussDB reached through PostgreSQL-compatible JDBC drivers", () => {
@@ -189,6 +367,68 @@ describe("jdbc dialect inference", () => {
     expect(inferJdbcDialect(damengConnection)).toBe("dameng");
   });
 
+  it("detects GBase JDBC connections for transfer dialect selection", () => {
+    const gbaseConnection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:gbase://localhost:5258/dbx_test",
+      jdbc_driver_class: "cn.gbase.Driver",
+    };
+
+    expect(inferJdbcDialect(gbaseConnection)).toBe("gbase");
+    expect(effectiveDatabaseTypeForConnection(gbaseConnection)).toBe("gbase");
+
+    // GBase 8s is Informix-based and must stay on generic jdbc (no MySQL-family transfer dialect).
+    const gbase8sByUrl = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:gbasedbt-sqli://localhost:9088/dbx_test:INFORMIXSERVER=ol_gbasedbt",
+      jdbc_driver_class: "com.gbasedbt.jdbc.Driver",
+    };
+    const gbase8sByProfile = {
+      db_type: "jdbc" as const,
+      driver_profile: "gbase8s",
+    };
+    const gbase8sProfileWithLegacyGbaseUrl = {
+      db_type: "jdbc" as const,
+      driver_profile: "gbase8s",
+      connection_string: "jdbc:gbase://localhost:5258/dbx_test",
+      jdbc_driver_class: "cn.gbase.Driver",
+    };
+    expect(inferJdbcDialect(gbase8sByUrl)).toBe("informix");
+    expect(effectiveDatabaseTypeForConnection(gbase8sByUrl)).toBe("informix");
+    expect(inferJdbcDialect(gbase8sByProfile)).toBeUndefined();
+    expect(effectiveDatabaseTypeForConnection(gbase8sByProfile)).toBe("jdbc");
+    expect(inferJdbcDialect(gbase8sProfileWithLegacyGbaseUrl)).toBeUndefined();
+    expect(effectiveDatabaseTypeForConnection(gbase8sProfileWithLegacyGbaseUrl)).toBe("jdbc");
+  });
+
+  it("keeps doris-family mysql connections on the mysql transfer path", () => {
+    // Doris/SelectDB/StarRocks connections are saved as db_type=mysql with a
+    // doris-family driver_profile. The SQL dialect stays doris/starrocks
+    // (3-part catalog names), but transfer admission and object kinds must ride
+    // the raw mysql db_type: the standalone doris/starrocks manifest entries are
+    // not transfer-capable, so the effective type would hide these connections
+    // from the transfer dialog and drop their non-table object kinds.
+    for (const driver_profile of ["starrocks", "doris", "selectdb"]) {
+      const connection = { db_type: "mysql" as const, driver_profile };
+      const transferType = transferDatabaseTypeForConnection(connection);
+
+      expect(transferType).toBe("mysql");
+      expect(supportsTransfer(transferType)).toBe(true);
+      expect(transferObjectKindsForDatabase(transferType)).toContain("VIEW");
+    }
+  });
+
+  it("resolves transfer types for non-doris-family connections through the effective type", () => {
+    expect(transferDatabaseTypeForConnection(undefined)).toBeUndefined();
+    expect(transferDatabaseTypeForConnection({ db_type: "mysql" })).toBe("mysql");
+    expect(transferDatabaseTypeForConnection({ db_type: "postgres" })).toBe("postgres");
+    expect(transferDatabaseTypeForConnection({ db_type: "gbase" })).toBeUndefined();
+    expect(transferDatabaseTypeForConnection({ db_type: "jdbc", connection_string: "jdbc:gbase://localhost:5258/dbx_test" })).toBe("gbase");
+    // A generic-JDBC Doris URL keeps its raw db_type (never admitted), matching
+    // the pre-effective-type behavior for unknown jdbc connections.
+    expect(transferDatabaseTypeForConnection({ db_type: "jdbc", connection_string: "jdbc:doris://localhost:9030/dbx_test" })).toBe("jdbc");
+  });
+
   it("uses Hive tree and execution semantics for Inceptor JDBC metadata", () => {
     const connection = {
       db_type: "jdbc" as const,
@@ -219,10 +459,34 @@ describe("jdbc dialect inference", () => {
     expect(inferJdbcDialect({ db_type: "jdbc", driver_label: "Kyuubi JDBC", connection_string: "jdbc:hive2://kyuubi.example.com/default" })).toBe("mysql");
     expect(inferJdbcDialect({ db_type: "jdbc", connection_string: "jdbc:hive2://hiveserver.example.com/default" })).toBe("mysql");
     expect(inferJdbcDialect({ db_type: "jdbc", connection_string: "jdbc:mysql://mysql.example.com/app" })).toBe("mysql");
+    expect(inferJdbcDialect({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/mysql-connector-j-8.0.33.jar"] })).toBe("mysql");
   });
 
   it("prefers explicit Kyuubi identity over Apache Hive product metadata", () => {
     expect(inferJdbcDialect({ db_type: "jdbc", driver_label: "Kyuubi JDBC", database_info: { productName: "Apache Hive" } })).toBe("mysql");
+  });
+});
+
+describe("JDBC driver row offset", () => {
+  it("lets the driver skip rows for dialects without SQL offset pagination", () => {
+    // Unknown vendor dialects stay on the generic JDBC dialect, which emits a
+    // bare SELECT, so the page offset can only be applied by the driver (#9015).
+    expect(jdbcConnectionUsesDriverRowOffset({ db_type: "jdbc", connection_string: "jdbc:sybase:Tds:db.example.com:5000/app" }, "jdbc")).toBe(true);
+    expect(jdbcConnectionUsesDriverRowOffset({ db_type: "jdbc", connection_string: "jdbc:hsqldb:hsql://127.0.0.1:9001/probe" }, "jdbc")).toBe(true);
+  });
+
+  it("keeps the Caché/IRIS ResultSet offset behavior", () => {
+    expect(jdbcConnectionUsesDriverRowOffset({ db_type: "jdbc", connection_string: "jdbc:Cache://localhost:1972/USER" }, "iris")).toBe(true);
+  });
+
+  it("leaves SQL-paginated dialects and driver-capped JDBC drivers alone", () => {
+    expect(jdbcConnectionUsesDriverRowOffset({ db_type: "jdbc", connection_string: "jdbc:mysql://localhost:3306/app" }, "mysql")).toBe(false);
+    expect(jdbcConnectionUsesDriverRowOffset({ db_type: "jdbc", connection_string: "jdbc:oracle:thin:@localhost:1521:XE" }, "oracle")).toBe(false);
+    // YashanDB keeps the generic dialect, but its agent applies
+    // Statement.setMaxRows, which would cap the result set before the skipped rows.
+    expect(jdbcConnectionUsesDriverRowOffset({ db_type: "jdbc", connection_string: "jdbc:yasdb://localhost:1688/app" }, "jdbc")).toBe(false);
+    expect(jdbcConnectionUsesDriverRowOffset({ db_type: "postgres" }, "postgres")).toBe(false);
+    expect(jdbcConnectionUsesDriverRowOffset(undefined, "jdbc")).toBe(false);
   });
 });
 
@@ -239,6 +503,25 @@ describe("GaussDB connection mode", () => {
     setGaussdbConnectionMode(connection, "native");
     expect(connection.driver_profile).toBe("gaussdb");
     expect(connection.jdbc_driver_class).toBeUndefined();
+  });
+
+  it("marks DWS explicitly while retaining the native GaussDB driver profile", () => {
+    const connection = { db_type: "gaussdb", driver_profile: "gaussdb", external_config: { retained: true } } as ConnectionConfig;
+
+    setGaussdbConnectionMode(connection, "dws");
+    expect(gaussdbConnectionMode(connection)).toBe("dws");
+    expect(connection.driver_profile).toBe("gaussdb");
+    expect(connection.jdbc_driver_class).toBeUndefined();
+    expect(connection.external_config).toEqual({ retained: true, [GAUSSDB_DWS_PRODUCT_PROFILE_KEY]: GAUSSDB_DWS_PRODUCT_PROFILE });
+    expect(effectiveDatabaseTypeForConnection(connection)).toBe("gaussdb");
+
+    setGaussdbConnectionMode(connection, "m-jdbc");
+    expect(gaussdbConnectionMode(connection)).toBe("m-jdbc");
+    expect(connection.external_config).toEqual({ retained: true });
+
+    setGaussdbConnectionMode(connection, "native");
+    expect(gaussdbConnectionMode(connection)).toBe("native");
+    expect(connection.external_config).toEqual({ retained: true });
   });
 
   it("uses the driver default and preserves targetServerType from legacy URL fields", () => {
@@ -282,8 +565,8 @@ describe("query execution schema", () => {
     expect(connectionQueryExecutionSchema({ db_type: dbType }, "ai_test", undefined, false)).toBe("ai_test");
   });
 
-  it("prefers an explicit schema for PostgreSQL", () => {
-    expect(connectionQueryExecutionSchema({ db_type: "postgres" }, "app", "reporting", false)).toBe("reporting");
+  it.each(["postgres", "gaussdb", "opengauss"] as const)("prefers an explicit schema for %s", (dbType) => {
+    expect(connectionQueryExecutionSchema({ db_type: dbType }, "app", "reporting", false)).toBe("reporting");
   });
 
   it("prefers an explicit schema for Kingbase query execution", () => {
@@ -304,6 +587,45 @@ describe("query execution schema", () => {
 });
 
 describe("object tree node schema", () => {
+  it.each(["APP", "OTHER", "app", "A_B", "AXB", "_SYS_EPM", "A%B"])("preserves discovered unknown JDBC schema %s without changing SQL dialect or execution context", (schema) => {
+    const connection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:sap://localhost:443/?currentschema=APP",
+      jdbc_driver_class: "com.sap.db.jdbc.Driver",
+    };
+    expect(inferJdbcDialect(connection)).toBeUndefined();
+    expect(effectiveDatabaseTypeForConnection(connection)).toBe("jdbc");
+    expect(connectionShouldDiscoverJdbcSchemas(connection)).toBe(true);
+    expect(connectionUsesDatabaseObjectTreeMode(connection)).toBe(true);
+    expect(connectionObjectTreeQuerySchema(connection, "catalog", schema)).toBe(schema);
+    expect(connectionObjectTreeNodeSchema(connection, "catalog", schema)).toBe(schema);
+    expect(connectionQueryExecutionSchema(connection, "catalog", schema, false)).toBeUndefined();
+  });
+
+  it.each([undefined, ""])("keeps unknown JDBC catalog fallback when schema is %s", (schema) => {
+    const connection = { db_type: "jdbc" as const, connection_string: "jdbc:example://localhost/catalog" };
+    expect(connectionObjectTreeQuerySchema(connection, "catalog", schema)).toBe("");
+    expect(connectionObjectTreeNodeSchema(connection, "catalog", schema)).toBeUndefined();
+  });
+
+  it.each([
+    { db_type: "saphana", query: "APP", node: "APP", fallbackQuery: "", fallbackNode: undefined },
+    { db_type: "mysql", query: "APP", node: undefined, fallbackQuery: "catalog", fallbackNode: undefined },
+    { db_type: "oracle", query: "APP", node: "APP", fallbackQuery: "catalog", fallbackNode: "catalog" },
+    { db_type: "jdbc", driver_profile: "mysql", query: "", node: undefined, fallbackQuery: "", fallbackNode: undefined },
+    { db_type: "jdbc", driver_profile: "oracle", query: "APP", node: "APP", fallbackQuery: "catalog", fallbackNode: "catalog" },
+    { db_type: "jdbc", driver_profile: "databend", connection_string: "jdbc:databend://localhost:8000/catalog", query: "APP", node: "APP", fallbackQuery: "catalog", fallbackNode: "catalog" },
+    { db_type: "jdbc", driver_profile: "postgres", query: "APP", node: "APP", fallbackQuery: "", fallbackNode: undefined },
+    { db_type: "jdbc", driver_profile: "phoenix", query: "APP", node: "APP", fallbackQuery: "", fallbackNode: undefined },
+  ] as const)("keeps $db_type/$driver_profile schema rules", ({ db_type, query, node, fallbackQuery, fallbackNode, ...identity }) => {
+    const connection = { db_type, ...identity };
+    expect(connectionShouldDiscoverJdbcSchemas(connection)).toBe(false);
+    expect(connectionObjectTreeQuerySchema(connection, "catalog", "APP")).toBe(query);
+    expect(connectionObjectTreeNodeSchema(connection, "catalog", "APP")).toBe(node);
+    expect(connectionObjectTreeQuerySchema(connection, "catalog")).toBe(fallbackQuery);
+    expect(connectionObjectTreeNodeSchema(connection, "catalog")).toBe(fallbackNode);
+  });
+
   it("ignores database-shaped schema metadata for MySQL tables", () => {
     expect(connectionObjectTreeNodeSchema({ db_type: "mysql" }, "app", "app")).toBeUndefined();
   });
@@ -319,7 +641,7 @@ describe("object tree node schema", () => {
 
   it.each([
     { db_type: "jdbc" as const, connection_string: "jdbc:informix-sqli://localhost:9088/prulife" },
-    { db_type: "gbase" as const, driver_profile: "gbase8s" },
+    { db_type: "gbase8s" as const, driver_profile: "gbase8s" },
   ])("keeps compatible Informix metadata on the login owner", (connection) => {
     expect(connectionObjectTreeQuerySchema(connection, "prulife")).toBe("");
     expect(connectionObjectTreeNodeSchema(connection, "prulife")).toBeUndefined();
@@ -362,6 +684,57 @@ describe("object tree node schema", () => {
     expect(metadataSchemaForConnection(connection, resourcePath, resourcePath)).toBe("");
   });
 
+  it("never uses the database name as the schema when a schema-tree engine has no schema yet", () => {
+    // Query tabs can reach locate/metadata paths before a schema is picked (a
+    // toolbar "new query" tab, or an external .sql file reopened from disk).
+    // PostgreSQL and its relatives keep tables under a separate schema level, so
+    // `schema || database` sends "dbx_test" as the schema and matches nothing —
+    // locate in the sidebar silently does nothing (issue #7648). The blank schema
+    // lets the backend resolve the session default instead.
+    for (const dbType of ["postgres", "gaussdb", "opengauss", "kingbase", "redshift", "duckdb"] as const) {
+      expect(connectionObjectTreeQuerySchema({ db_type: dbType }, "dbx_test")).toBe("");
+      expect(connectionObjectTreeNodeSchema({ db_type: dbType }, "dbx_test")).toBeUndefined();
+      expect(metadataSchemaForConnection({ db_type: dbType }, "dbx_test")).toBe("");
+      // An explicit schema still wins, and the database name is a legitimate
+      // schema name when the user really did select it.
+      expect(connectionObjectTreeQuerySchema({ db_type: dbType }, "dbx_test", "public")).toBe("public");
+      expect(connectionObjectTreeNodeSchema({ db_type: dbType }, "dbx_test", "public")).toBe("public");
+    }
+    // SQL Server keeps its own dbo default for metadata lookups.
+    expect(connectionObjectTreeQuerySchema({ db_type: "sqlserver" }, "dbx_test")).toBe("");
+    expect(connectionObjectTreeNodeSchema({ db_type: "sqlserver" }, "dbx_test")).toBeUndefined();
+    expect(metadataSchemaForConnection({ db_type: "sqlserver" }, "dbx_test")).toBe("dbo");
+  });
+
+  it("keeps the SunDB catalog name out of the metadata schema", () => {
+    // SUNDB's database (the JDBC URL path segment) is a catalog, and the driver
+    // matches getTables' schemaPattern with a literal `TABLE_SCHEMA LIKE '<name>'`.
+    // Sending the catalog name as the schema matched no objects, so the sidebar
+    // showed an empty "表 0" node (issue #11360). The schema tree now resolves the
+    // real schema first; before one is picked the blank schema lets the backend
+    // use the session default.
+    const connection = { db_type: "sundb" as const };
+    expect(connectionObjectTreeQuerySchema(connection, "vpnccw")).toBe("");
+    expect(connectionObjectTreeNodeSchema(connection, "vpnccw")).toBeUndefined();
+    expect(metadataSchemaForConnection(connection, "vpnccw")).toBe("");
+    // A real schema still passes through unchanged.
+    expect(connectionObjectTreeQuerySchema(connection, "vpnccw", "APP")).toBe("APP");
+    expect(connectionObjectTreeNodeSchema(connection, "vpnccw", "APP")).toBe("APP");
+  });
+
+  it("keeps the database-as-schema fallback for engines whose database is the schema", () => {
+    // Oracle, Dameng and the Hive family address objects as schema.table with no
+    // separate schema level in the tree, so the database name is the schema there
+    // and must survive the fix above.
+    expect(connectionObjectTreeNodeSchema({ db_type: "oracle" }, "DBX_TEST")).toBe("DBX_TEST");
+    expect(connectionObjectTreeQuerySchema({ db_type: "oracle" }, "DBX_TEST")).toBe("DBX_TEST");
+    expect(connectionObjectTreeNodeSchema({ db_type: "dameng" }, "DBX_TEST")).toBe("DBX_TEST");
+    expect(connectionObjectTreeNodeSchema({ db_type: "hive" }, "CS")).toBe("CS");
+    expect(connectionObjectTreeNodeSchema({ db_type: "spark" }, "CS")).toBe("CS");
+    // Flat engines keep returning no tree schema at all.
+    expect(connectionObjectTreeNodeSchema({ db_type: "mysql" }, "shop")).toBeUndefined();
+  });
+
   it("keeps the database-as-schema fallback for flat engines and blanks it for Cloud Spanner", () => {
     // Editor completion paths send the database name as the metadata schema when a
     // connection has no schema level; only Spanner must send a blank schema instead.
@@ -371,5 +744,41 @@ describe("object tree node schema", () => {
     expect(connectionDatabaseMetadataSchema({ db_type: "spanner" }, "projects/p/instances/i/databases/db")).toBe("");
     expect(connectionDatabaseMetadataSchema({ db_type: "spanner" }, "projects/p/instances/i/databases/db", "")).toBe("");
     expect(connectionDatabaseMetadataSchema({ db_type: "spanner" }, "projects/p/instances/i/databases/db", "public")).toBe("public");
+  });
+});
+
+describe("object list schema", () => {
+  it("falls back to the uppercased Dameng connection username when no schema is selected", () => {
+    // Dameng's object SQL filters on a fixed WHERE o.OWNER = ?, so a blank schema
+    // matches nothing and the object tab renders empty (#8301).
+    expect(objectListSchemaForConnection({ db_type: "dameng", username: "sales_app" })).toBe("SALES_APP");
+  });
+
+  it("applies the Dameng fallback to generic jdbc:dm connections", () => {
+    expect(objectListSchemaForConnection({ db_type: "jdbc", connection_string: "jdbc:dm://localhost:5236", username: "sysdba" })).toBe("SYSDBA");
+  });
+
+  it("keeps an explicitly selected schema for Dameng", () => {
+    expect(objectListSchemaForConnection({ db_type: "dameng", username: "sales_app" }, "OTHER_SCHEMA")).toBe("OTHER_SCHEMA");
+  });
+
+  it("returns a blank schema for Dameng when the connection has no usable username", () => {
+    expect(objectListSchemaForConnection({ db_type: "dameng" })).toBe("");
+    expect(objectListSchemaForConnection({ db_type: "dameng", username: "   " })).toBe("");
+  });
+
+  it.each(["oracle", "oceanbase-oracle", "postgres", "mysql"] as const)("does not fall back to the username for %s", (dbType) => {
+    expect(objectListSchemaForConnection({ db_type: dbType, username: "app_user" })).toBe("");
+  });
+});
+
+describe("schema qualification scope", () => {
+  it("only scopes the SQL rewrite for SQL Server", () => {
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "sqlserver" })).toBe(true);
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "sqlserver", driver_profile: "sqlserver-legacy" })).toBe(true);
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "postgres" })).toBe(false);
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "iris" })).toBe(false);
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "kingbase" })).toBe(false);
+    expect(sqlServerQualifiesSqlWithTabSchema(undefined)).toBe(false);
   });
 });

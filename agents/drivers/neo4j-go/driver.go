@@ -16,6 +16,7 @@ import (
 	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
 	neo4jauth "github.com/neo4j/neo4j-go-driver/v6/neo4j/auth"
 	"github.com/neo4j/neo4j-go-driver/v6/neo4j/config"
+	neo4jdb "github.com/neo4j/neo4j-go-driver/v6/neo4j/db"
 )
 
 const (
@@ -27,6 +28,28 @@ const (
 )
 
 func newConnectionRuntime(params connectParams) (*connectionRuntime, error) {
+	runtime, err := openVerifiedRuntime(params)
+	if err == nil {
+		return runtime, nil
+	}
+	direct, changed := directConnectionParams(params)
+	if !changed || !isRoutingUnsupported(err) {
+		return nil, err
+	}
+	// Single-instance servers older than Neo4j 4 (which negotiate Bolt 3) do not
+	// expose the cluster routing procedure, so `neo4j://` cannot be used against
+	// them. Retry the same target with a direct `bolt://` connection instead of
+	// failing the connection outright.
+	runtime, directErr := openVerifiedRuntime(direct)
+	if directErr != nil {
+		return nil, directErr
+	}
+	return runtime, nil
+}
+
+// openVerifiedRuntime opens a driver for params and fails unless the server
+// answers a connectivity check.
+func openVerifiedRuntime(params connectParams) (*connectionRuntime, error) {
 	driver, err := openDriver(params)
 	if err != nil {
 		return nil, err
@@ -37,7 +60,16 @@ func newConnectionRuntime(params connectParams) (*connectionRuntime, error) {
 		_ = driver.Close(context.Background())
 		return nil, err
 	}
-	return &connectionRuntime{driver: driver, params: params}, nil
+	runtime := &connectionRuntime{driver: driver, params: params}
+	if info, err := driver.GetServerInfo(ctx); err == nil {
+		// Older Bolt versions supply numeric IDs in the element-ID fields.
+		runtime.legacySingleDatabase = info.ProtocolVersion().Major < 4
+		runtime.legacyGraphIDs = info.ProtocolVersion().Major < 5
+		// Memgraph reports itself as a Neo4j-compatible server, so the product
+		// name is the only way to tell them apart.
+		runtime.memgraph = strings.Contains(strings.ToLower(info.Agent()), "memgraph")
+	}
+	return runtime, nil
 }
 
 func openDriver(params connectParams) (neo4j.Driver, error) {
@@ -130,14 +162,100 @@ func buildNeo4jURI(params connectParams) (string, error) {
 	if port <= 0 {
 		port = defaultNeo4jPort
 	}
-	scheme := "neo4j"
+	return (&url.URL{Scheme: effectiveNeo4jScheme(params), Host: net.JoinHostPort(host, strconv.Itoa(port))}).String(), nil
+}
+
+// effectiveNeo4jScheme resolves the URI scheme a connection would use, in the
+// same order as buildNeo4jURI: an explicit connection string wins, then an
+// explicit `scheme` parameter, then TLS settings imply `neo4j+s`.
+func effectiveNeo4jScheme(params connectParams) string {
+	if value := strings.TrimSpace(params.ConnectionString); value != "" {
+		parsed, err := url.Parse(strings.TrimPrefix(value, "jdbc:"))
+		if err == nil && isNeo4jScheme(parsed.Scheme) && parsed.Host != "" {
+			return strings.ToLower(parsed.Scheme)
+		}
+	}
 	query := parseURLParams(params.URLParams)
 	if configured := strings.ToLower(strings.TrimSpace(query.Get("scheme"))); isNeo4jScheme(configured) {
-		scheme = configured
-	} else if params.SSL || queryBool(query, "ssl") || queryBool(query, "encrypted") || params.CACertPath != "" || params.ClientCertPath != "" {
-		scheme = "neo4j+s"
+		return configured
 	}
-	return (&url.URL{Scheme: scheme, Host: net.JoinHostPort(host, strconv.Itoa(port))}).String(), nil
+	if neo4jEncryptionRequested(params, query) {
+		return "neo4j+s"
+	}
+	return "neo4j"
+}
+
+func neo4jEncryptionRequested(params connectParams, query url.Values) bool {
+	return params.SSL || queryBool(query, "ssl") || queryBool(query, "encrypted") ||
+		params.CACertPath != "" || params.ClientCertPath != ""
+}
+
+// directConnectionScheme maps a routing scheme to its direct counterpart. The
+// second result is false for schemes that already connect directly.
+func directConnectionScheme(scheme string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "neo4j":
+		return "bolt", true
+	case "neo4j+s":
+		return "bolt+s", true
+	case "neo4j+ssc":
+		return "bolt+ssc", true
+	default:
+		return "", false
+	}
+}
+
+// directConnectionParams rewrites routing-style settings (`neo4j://`) into the
+// equivalent direct settings (`bolt://`), keeping TLS semantics. The second
+// result is false when the connection is already direct or cannot be rewritten.
+func directConnectionParams(params connectParams) (connectParams, bool) {
+	direct, ok := directConnectionScheme(effectiveNeo4jScheme(params))
+	if !ok {
+		return params, false
+	}
+	if value := strings.TrimSpace(params.ConnectionString); value != "" {
+		parsed, err := url.Parse(strings.TrimPrefix(value, "jdbc:"))
+		if err != nil || !isNeo4jScheme(parsed.Scheme) || parsed.Host == "" {
+			return params, false
+		}
+		parsed.Scheme = direct
+		parsed.User = nil
+		parsed.Path = ""
+		parsed.RawPath = ""
+		parsed.RawQuery = filterDriverURIQuery(parsed.Query()).Encode()
+		params.ConnectionString = parsed.String()
+		return params, true
+	}
+	if strings.TrimSpace(params.Host) == "" {
+		return params, false
+	}
+	params.URLParams = withURLParam(params.URLParams, "scheme", direct)
+	return params, true
+}
+
+// routingUnsupportedMessage is the wording the Neo4j driver uses when a Bolt 3
+// server reports that cluster routing is unavailable.
+const routingUnsupportedMessage = "does not support: routing"
+
+// memgraphRoutingUnsupportedMessage is how Memgraph refuses the routing-table
+// procedure. Memgraph speaks Bolt and accepts `neo4j://`, so it is reachable
+// through the Neo4j connection type, but a single instance is not a cluster and
+// answers with this instead of the Neo4j wording (#11947).
+const memgraphRoutingUnsupportedMessage = "cannot fetch routing table"
+
+// isRoutingUnsupported reports whether err is the driver's "routing requires a
+// cluster" failure. The driver flattens its typed feature error into a usage
+// error, so the message is inspected as well as the type.
+func isRoutingUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	var featureErr *neo4jdb.FeatureNotSupportedError
+	if errors.As(err, &featureErr) && strings.EqualFold(featureErr.Feature, "routing") {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, routingUnsupportedMessage) || strings.Contains(message, memgraphRoutingUnsupportedMessage)
 }
 
 func isNeo4jScheme(value string) bool {
@@ -180,15 +298,33 @@ func filterDriverURIQuery(values url.Values) url.Values {
 	return result
 }
 
+// withURLParam replaces one `key=value` entry in a URL parameter string while
+// keeping the remaining entries untouched. Values are copied verbatim (unlike
+// url.Values.Encode) so schemes such as `bolt+s` are not percent-encoded.
+func withURLParam(urlParams, key, value string) string {
+	parts := make([]string, 0, 4)
+	for _, pair := range strings.FieldsFunc(urlParams, func(char rune) bool { return char == '&' || char == ';' }) {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		existingKey, _, _ := strings.Cut(pair, "=")
+		if strings.EqualFold(strings.TrimSpace(existingKey), key) {
+			continue
+		}
+		parts = append(parts, pair)
+	}
+	parts = append(parts, key+"="+value)
+	return strings.Join(parts, "&")
+}
+
 func testConnection(params connectParams) error {
-	driver, err := openDriver(params)
+	runtime, err := newConnectionRuntime(params)
 	if err != nil {
 		return err
 	}
-	defer driver.Close(context.Background())
-	ctx, cancel := context.WithTimeout(context.Background(), defaultConnectTimeout)
-	defer cancel()
-	return driver.VerifyConnectivity(ctx)
+	_ = runtime.close()
+	return nil
 }
 
 func (s *server) validateConnection() error {
@@ -201,10 +337,36 @@ func (s *server) validateConnection() error {
 }
 
 func (s *server) databaseName(override string) string {
+	if s.runtime != nil && s.runtime.legacySingleDatabase {
+		// Servers that negotiated Bolt 3 only expose the default database and
+		// reject any explicit database name, even the configured one.
+		return ""
+	}
 	if value := strings.TrimSpace(override); value != "" {
 		return value
 	}
+	// Memgraph exposes exactly one database named `memgraph`, and sending the
+	// Neo4j default `neo4j` fails with "Tried to retrieve an unknown database".
+	// Omit the name unless the user configured one, so the server picks its own
+	// default (#11947).
+	if s.runtime != nil && s.runtime.memgraph && !hasConfiguredDatabase(s.params) {
+		return ""
+	}
 	return configuredDatabase(s.params)
+}
+
+// hasConfiguredDatabase reports whether a database name came from the user
+// (the form field or the connection string) rather than the Neo4j default.
+func hasConfiguredDatabase(params connectParams) bool {
+	if strings.TrimSpace(params.Database) != "" {
+		return true
+	}
+	value := strings.TrimPrefix(strings.TrimSpace(params.ConnectionString), "jdbc:")
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(parsed.Query().Get("database")) != "" || strings.Trim(strings.TrimSpace(parsed.Path), "/") != ""
 }
 
 func configuredDatabase(params connectParams) string {

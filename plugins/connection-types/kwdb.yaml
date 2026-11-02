@@ -1,6 +1,9 @@
 schemaVersion: 1
 order: 340
 dbType: kwdb
+compareModes: [schema, data]
+transferSupportLevel: family-compatible
+transferObjectFamily: postgres
 rustVariant: Kwdb
 label: KWDB
 dialect: KwDB

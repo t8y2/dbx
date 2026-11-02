@@ -19,6 +19,7 @@ vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
     editorSettings: {
       regexMaxMatchCount: 1000,
+      generateSqlQuoteIdentifiers: true,
     },
   }),
 }));

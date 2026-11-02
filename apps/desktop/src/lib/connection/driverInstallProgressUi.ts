@@ -122,6 +122,24 @@ export function driverInstallProgressPercent(progress: DriverInstallProgress | n
   return Math.min(100, Math.max(0, percent));
 }
 
+export function formatDriverInstallProgressSize(bytes?: number): string {
+  if (!bytes || bytes <= 0) return "0 MB";
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+export function formatDriverInstallProgressText(p: DriverInstallProgress | null | undefined, t: (key: string) => string): string {
+  if (!p) return "";
+  if (p.step === "jre-extract") return t("driverStore.progressJreExtract");
+  if (p.step === "jdbc-plugin-extract") return t("driverStore.progressJdbcPluginExtract");
+  const label = p.step === "jre" ? t("driverStore.progressDownloadJre") : p.step === "jdbc-plugin" ? t("driverStore.progressDownloadJdbcPlugin") : t("driverStore.progressDownloadDriver");
+  if (!p.total) return `${label}...`;
+  const pct = Math.round(((p.downloaded ?? 0) / p.total) * 100);
+  const dl = formatDriverInstallProgressSize(p.downloaded);
+  const total = formatDriverInstallProgressSize(p.total);
+  return `${label}  ${dl} / ${total}  (${pct}%)`;
+}
+
 export function isDriverInstallProgressTarget(dbType: string, state: DriverInstallProgressTargetState): boolean {
   if (state.installing === dbType) return true;
   if (!state.upgradingAll) return false;

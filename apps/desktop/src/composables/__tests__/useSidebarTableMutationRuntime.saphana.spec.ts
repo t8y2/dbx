@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { shallowRef } from "vue";
-import type { TreeNode } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, TreeNode } from "@/types/database";
 import { dropTableCascade, dropTablePreviewSql, emptyTablePreviewSql, sidebarDangerRunningCancel, sidebarDangerRunningExecutionId, sidebarDangerTarget, truncateTableCascade, truncateTablePreviewSql } from "@/components/sidebar/sidebarTreeDialogState";
 
 const mocks = vi.hoisted(() => ({
@@ -49,22 +49,24 @@ function tableNode(database: string | null | undefined): TreeNode {
   } as TreeNode;
 }
 
-function runtime(database: string | null | undefined) {
+function runtime(database: string | null | undefined, config: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile">> = { db_type: "saphana" }, databaseType: DatabaseType = "saphana", historyStore?: any) {
   const node = tableNode(database);
   const activeNode = shallowRef(node);
   const connectionStore = {
     ensureConnected: mocks.ensureConnected,
+    getConfig: () => config,
     removeTreeNode: mocks.removeTreeNode,
   } as any;
   const feature = useSidebarTableMutationRuntime({
     activeNode,
     releaseActiveNodeReference: mocks.releaseActiveNodeReference,
     connectionStore,
-    currentDatabaseType: () => "saphana",
-    databaseTypeForNode: () => "saphana",
+    currentDatabaseType: () => databaseType,
+    databaseTypeForNode: () => databaseType,
     executeWithProductionGuard: mocks.executeWithProductionGuard,
     closeDroppedTableObjectTabsForNode: mocks.closeDroppedTableObjectTabsForNode,
     refreshMutatedTableDataTabsForNode: mocks.refreshMutatedTableDataTabsForNode,
+    historyStore,
   });
   return { feature, node };
 }
@@ -119,6 +121,14 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
     expect(mocks.closeDroppedTableObjectTabsForNode).toHaveBeenCalledWith(node);
     expect(mocks.removeTreeNode).toHaveBeenCalledWith(node.id);
     expect(mocks.releaseActiveNodeReference).toHaveBeenCalledWith([node.id]);
+  });
+
+  it("omits the GBase 8s metadata owner from generated table SQL", async () => {
+    const { feature } = runtime("tenant", { db_type: "gbase8s", driver_profile: "gbase8s" }, "informix");
+
+    await feature.confirmDropTable();
+
+    expect(mocks.buildDropTableSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "informix", schema: undefined, tableName: "ORDERS" }));
   });
 
   it.each(["confirmEmptyTable", "confirmTruncateTable"] as const)("refreshes data tabs after %s", async (action) => {
@@ -211,7 +221,7 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
 
   it("classifies a JDBC-agent-routed timeout (SAP HANA/Oracle/DB2/SQL Server) as timed-out, not failed, even though its message has no timeout wording", async () => {
     const { feature } = runtime("");
-    // AgentCallError::Timeout carries no `detail` (crates/dbx-core/src/backend_error.rs),
+    // AgentCallError::Timeout carries no `detail` (crates/dbx-driver-agent/src/backend_error.rs),
     // so BackendErrorException.message degrades to a generic fallback with no
     // "timed out" text — only the structured backendError distinguishes it.
     const agentTimeoutError = {
@@ -446,5 +456,56 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
     expect(mocks.refreshMutatedTableDataTabsForNode).not.toHaveBeenCalled();
     expect(sidebarDangerRunningExecutionId.value).toBe("");
     expect(sidebarDangerRunningCancel.value).toBeNull();
+  });
+
+  it.each(actions)("records executed SQL into historyStore on $action success", async ({ action, sql }) => {
+    const addMock = vi.fn().mockResolvedValue(undefined);
+    const historyStore = { add: addMock };
+    const { feature } = runtime("", { db_type: "saphana" }, "saphana", historyStore);
+
+    await feature[action]();
+
+    expect(addMock).toHaveBeenCalledOnce();
+    expect(addMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connection_id: "hana-1",
+        database: "",
+        sql,
+        success: true,
+        target: "ORDERS",
+      }),
+    );
+  });
+
+  it("records failed mutation into historyStore when execution fails", async () => {
+    const addMock = vi.fn().mockResolvedValue(undefined);
+    const historyStore = { add: addMock };
+    const { feature } = runtime("", { db_type: "saphana" }, "saphana", historyStore);
+    mocks.executeWithProductionGuard.mockRejectedValueOnce(new Error("Database write error"));
+
+    await feature.confirmDropTable();
+
+    expect(addMock).toHaveBeenCalledOnce();
+    expect(addMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connection_id: "hana-1",
+        database: "",
+        sql: 'DROP TABLE "APP"."ORDERS";',
+        success: false,
+        error: "Database write error",
+        target: "ORDERS",
+      }),
+    );
+  });
+
+  it("does not record into historyStore when production confirmation is declined", async () => {
+    const addMock = vi.fn().mockResolvedValue(undefined);
+    const historyStore = { add: addMock };
+    const { feature } = runtime("", { db_type: "saphana" }, "saphana", historyStore);
+    mocks.executeWithProductionGuard.mockResolvedValueOnce(undefined);
+
+    await feature.confirmDropTable();
+
+    expect(addMock).not.toHaveBeenCalled();
   });
 });

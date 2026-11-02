@@ -6,11 +6,13 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -47,6 +49,146 @@ class IrisAgentTest {
     }
 
     @Test
+    void readsVendorOtherValuesThroughGetObject() {
+        List<String> calls = new ArrayList<>();
+        ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+            if ("getObject".equals(method.getName())) {
+                calls.add("getObject");
+                return new Object() {
+                    @Override
+                    public String toString() {
+                        return "%List(1,2)";
+                    }
+                };
+            }
+            if ("getString".equals(method.getName())) {
+                calls.add("getString");
+                throw new AssertionError("IRIS %LIST must not use getString");
+            }
+            if ("wasNull".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        Object value = new IrisAgent().resultValue(resultSet, 1, Types.OTHER);
+
+        assertEquals("%List(1,2)", value);
+        assertEquals(Collections.singletonList("getObject"), calls);
+    }
+
+    @Test
+    void readsOutOfRangeIntegerThroughBigDecimal() {
+        BigDecimal valueOutsideIntegerRange = new BigDecimal("2147483648");
+        List<String> calls = new ArrayList<>();
+        ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+            if ("getBigDecimal".equals(method.getName())) {
+                calls.add("getBigDecimal");
+                return valueOutsideIntegerRange;
+            }
+            if (method.getName().startsWith("get")) {
+                calls.add(method.getName());
+                throw new SQLException("Numeric value out of range");
+            }
+            if ("wasNull".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        Object value = new IrisAgent().resultValue(resultSet, 1, Types.INTEGER);
+
+        assertEquals(valueOutsideIntegerRange, value);
+        assertEquals(Collections.singletonList("getBigDecimal"), calls);
+    }
+
+    @Test
+    void preservesStringPathForStandardValues() {
+        assertStringPath(Types.VARCHAR);
+        assertStringPath(Types.LONGVARCHAR);
+    }
+
+    private static void assertStringPath(int sqlType) {
+        List<String> calls = new ArrayList<>();
+        ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+            if ("getString".equals(method.getName())) {
+                calls.add("getString");
+                return "ordinary";
+            }
+            if ("wasNull".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        Object value = new IrisAgent().resultValue(resultSet, 1, sqlType);
+
+        assertEquals("ordinary", value);
+        assertEquals(Collections.singletonList("getString"), calls);
+    }
+
+    @Test
+    void preservesNullForVendorOtherValues() {
+        List<String> calls = new ArrayList<>();
+        ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+            if ("getObject".equals(method.getName())) {
+                calls.add("getObject");
+                return null;
+            }
+            if ("wasNull".equals(method.getName())) {
+                return true;
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        Object value = new IrisAgent().resultValue(resultSet, 1, Types.OTHER);
+
+        assertNull(value);
+        assertEquals(Collections.singletonList("getObject"), calls);
+    }
+
+    @Test
+    void readsBitColumnsAsStoredNumbers() {
+        for (int sqlType : new int[] {Types.BIT, Types.BOOLEAN}) {
+            List<String> calls = new ArrayList<>();
+            ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+                if ("getInt".equals(method.getName())) {
+                    calls.add("getInt");
+                    return 1;
+                }
+                if (method.getName().startsWith("get")) {
+                    calls.add(method.getName());
+                    throw new AssertionError("IRIS %Boolean must not be read as a Java boolean");
+                }
+                if ("wasNull".equals(method.getName())) {
+                    return false;
+                }
+                return defaultValue(method.getReturnType());
+            });
+
+            Object value = new IrisAgent().resultValue(resultSet, 1, sqlType);
+
+            assertEquals(1, value);
+            assertEquals(Collections.singletonList("getInt"), calls);
+        }
+    }
+
+    @Test
+    void preservesNullForBitColumns() {
+        ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+            if ("getInt".equals(method.getName())) {
+                return 0;
+            }
+            if ("wasNull".equals(method.getName())) {
+                return true;
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        assertNull(new IrisAgent().resultValue(resultSet, 1, Types.BIT));
+    }
+
+    @Test
     void readsColumnsAndUsesInlinePrimaryKey() {
         List<String> calls = new ArrayList<>();
         Connection conn = fakeConnection(
@@ -77,7 +219,7 @@ class IrisAgentTest {
         assertNull(columns.get(1).getNumeric_precision());
         assertNull(columns.get(1).getNumeric_scale());
         assertEquals(Integer.valueOf(64), columns.get(1).getCharacter_maximum_length());
-        assertEquals(1, calls.size());
+        assertEquals(2, calls.size());
         assertFalse(calls.get(0).contains("LIMIT"));
         assertTrue(calls.get(0).contains("PRIMARY_KEY"));
         assertTrue(calls.get(0).contains("DESCRIPTION"));
@@ -100,9 +242,55 @@ class IrisAgentTest {
 
         assertEquals("identifier", columns.get(0).getComment());
         assertNull(columns.get(1).getComment());
-        assertEquals(1, calls.size());
+        assertEquals(2, calls.size());
         assertTrue(calls.get(0).contains("DESCRIPTION"));
         assertFalse(calls.get(0).contains("TABLE_SCHEMA"));
+        assertTrue(calls.get(1).contains("IS_ROWID"));
+        assertFalse(calls.get(1).contains("TABLE_SCHEMA"));
+    }
+
+    @Test
+    void marksRowIdColumnsAsIdentityExtra() {
+        List<String> calls = new ArrayList<>();
+        Connection conn = fakeConnection(
+            calls,
+            true,
+            Collections.emptyList(),
+            null,
+            Collections.emptyList(),
+            List.of(Map.of("COLUMN_NAME", "ID")),
+            null
+        );
+
+        List<ColumnInfo> columns = IrisAgent.irisColumns(conn, "SQLUser", "People");
+
+        assertEquals("identity", columns.get(0).getExtra());
+        assertNull(columns.get(1).getExtra());
+        assertEquals(2, calls.size());
+        assertTrue(calls.get(1).contains("IS_ROWID"));
+        assertTrue(calls.get(1).contains("IS_IDENTITY"));
+        assertTrue(calls.get(1).contains("UPPER(TABLE_SCHEMA) = UPPER(?)"));
+    }
+
+    @Test
+    void keepsColumnListingWhenIdentityColumnsAreUnavailable() {
+        List<String> calls = new ArrayList<>();
+        Connection conn = fakeConnection(
+            calls,
+            true,
+            Collections.emptyList(),
+            null,
+            Collections.emptyList(),
+            null,
+            new SQLException("Field 'IS_ROWID' not found")
+        );
+
+        List<ColumnInfo> columns = IrisAgent.irisColumns(conn, "SQLUser", "People");
+
+        assertEquals(2, columns.size());
+        assertNull(columns.get(0).getExtra());
+        assertNull(columns.get(1).getExtra());
+        assertEquals(2, calls.size());
     }
 
     @Test
@@ -119,9 +307,10 @@ class IrisAgentTest {
         List<ColumnInfo> columns = IrisAgent.irisColumns(conn, "SQLUser", "People");
 
         assertTrue(columns.get(0).getIs_primary_key());
-        assertEquals(2, calls.size());
+        assertEquals(3, calls.size());
         assertTrue(calls.get(0).contains("INFORMATION_SCHEMA.COLUMNS"));
         assertEquals("JDBC_PRIMARY_KEYS", calls.get(1));
+        assertTrue(calls.get(2).contains("IS_ROWID"));
     }
 
     @Test
@@ -138,9 +327,11 @@ class IrisAgentTest {
         List<ColumnInfo> columns = IrisAgent.irisColumns(conn, "SQLUser", "People");
 
         assertTrue(columns.get(0).getIs_primary_key());
+        assertEquals(4, calls.size());
         assertTrue(calls.get(0).contains("INFORMATION_SCHEMA.COLUMNS"));
         assertEquals("JDBC_PRIMARY_KEYS", calls.get(1));
         assertTrue(calls.get(2).contains("INFORMATION_SCHEMA.KEY_COLUMN_USAGE"));
+        assertTrue(calls.get(3).contains("IS_ROWID"));
     }
 
     @Test
@@ -158,7 +349,9 @@ class IrisAgentTest {
 
         assertFalse(columns.get(0).getIs_primary_key());
         assertFalse(columns.get(1).getIs_primary_key());
+        assertEquals(4, calls.size());
         assertTrue(calls.get(2).contains("INFORMATION_SCHEMA.KEY_COLUMN_USAGE"));
+        assertTrue(calls.get(3).contains("IS_ROWID"));
     }
 
     private static Connection fakeConnection(
@@ -168,11 +361,25 @@ class IrisAgentTest {
         SQLException jdbcPrimaryKeyFailure,
         List<Map<String, Object>> nativePrimaryKeys
     ) {
+        return fakeConnection(
+            callLog, inlinePrimaryKey, jdbcPrimaryKeys, jdbcPrimaryKeyFailure, nativePrimaryKeys, null, null
+        );
+    }
+
+    private static Connection fakeConnection(
+        List<String> callLog,
+        boolean inlinePrimaryKey,
+        List<Map<String, Object>> jdbcPrimaryKeys,
+        SQLException jdbcPrimaryKeyFailure,
+        List<Map<String, Object>> nativePrimaryKeys,
+        List<Map<String, Object>> identityColumns,
+        SQLException identityQueryFailure
+    ) {
         return proxy(Connection.class, (method, args) -> {
             if ("prepareStatement".equals(method.getName())) {
                 String sql = (String) args[0];
                 callLog.add(sql);
-                return fakeStatement(sql, inlinePrimaryKey, nativePrimaryKeys);
+                return fakeStatement(sql, inlinePrimaryKey, nativePrimaryKeys, identityColumns, identityQueryFailure);
             }
             if ("getMetaData".equals(method.getName())) {
                 return fakeMetadata(callLog, jdbcPrimaryKeys, jdbcPrimaryKeyFailure);
@@ -207,10 +414,18 @@ class IrisAgentTest {
     private static PreparedStatement fakeStatement(
         String sql,
         boolean inlinePrimaryKey,
-        List<Map<String, Object>> nativePrimaryKeys
+        List<Map<String, Object>> nativePrimaryKeys,
+        List<Map<String, Object>> identityColumns,
+        SQLException identityQueryFailure
     ) {
         return proxy(PreparedStatement.class, (method, args) -> {
             if ("executeQuery".equals(method.getName())) {
+                if (sql.contains("IS_ROWID")) {
+                    if (identityQueryFailure != null) {
+                        throw identityQueryFailure;
+                    }
+                    return fakeResultSet(identityColumns == null ? Collections.emptyList() : identityColumns);
+                }
                 if (sql.contains("KEY_COLUMN_USAGE")) {
                     return fakeResultSet(nativePrimaryKeys);
                 }

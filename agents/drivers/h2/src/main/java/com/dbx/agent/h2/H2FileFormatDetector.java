@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.OptionalInt;
+import java.util.Properties;
 
 final class H2FileFormatDetector {
     private static final int BLOCK_SIZE = 4096;
@@ -37,10 +38,33 @@ final class H2FileFormatDetector {
         return OptionalInt.of(readMvStoreFormat(mvStore));
     }
 
+    static boolean hasAutoServerLock(String jdbcUrl) {
+        Path base = localDatabaseBasePath(jdbcUrl);
+        if (base == null) {
+            return false;
+        }
+        Properties lock = new Properties();
+        try (InputStream input = Files.newInputStream(withSuffix(base, ".lock.db"))) {
+            lock.load(input);
+            return !lock.getProperty("server", "").isBlank() && !lock.getProperty("id", "").isBlank();
+        } catch (IOException | IllegalArgumentException ignored) {
+            return false;
+        }
+    }
+
+    static final class HeaderReadException extends IOException {
+        HeaderReadException(Path file, IOException cause) {
+            super("Cannot read H2 file headers: " + file + ". " + cause.getMessage()
+                + ". Check file permissions and close other applications using this database, or connect through its H2 TCP server.", cause);
+        }
+    }
+
     private static int readMvStoreFormat(Path file) throws IOException {
         byte[] bytes;
         try (InputStream input = Files.newInputStream(file)) {
             bytes = input.readNBytes(BLOCK_SIZE * 2);
+        } catch (IOException error) {
+            throw new HeaderReadException(file, error);
         }
         if (bytes.length < BLOCK_SIZE * 2) {
             throw new IOException("H2 MVStore file is too small to contain valid headers: " + file);
@@ -131,7 +155,7 @@ final class H2FileFormatDetector {
         return (s2 << 16) | s1;
     }
 
-    private static Path localDatabaseBasePath(String jdbcUrl) {
+    static Path localDatabaseBasePath(String jdbcUrl) {
         String prefix = "jdbc:h2:";
         if (jdbcUrl == null || !jdbcUrl.regionMatches(true, 0, prefix, 0, prefix.length())) {
             return null;

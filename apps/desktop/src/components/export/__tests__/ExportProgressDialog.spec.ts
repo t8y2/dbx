@@ -80,3 +80,70 @@ describe("ExportProgressDialog display name", () => {
     expect(document.body.textContent).toContain("audit_log (.csv)");
   });
 });
+
+describe("ExportProgressDialog query timeout action", () => {
+  it("explains snapshot preparation and keeps cancellation available", async () => {
+    i18n.global.locale.value = "en";
+    const onCancel = vi.fn();
+    await mountDialog({ ...baseProps, status: "PreparingSnapshot", totalRows: 20000, onCancel });
+    expect(document.body.textContent).toContain("Preparing a consistent export snapshot");
+    expect(document.body.textContent).toContain("temporary disk space");
+    const cancel = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Cancel");
+    expect(cancel).toBeTruthy();
+    cancel!.click();
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+
+  it("offers connection settings for a query timeout", async () => {
+    i18n.global.locale.value = "en";
+    const onChangeQueryTimeout = vi.fn();
+    await mountDialog({
+      ...baseProps,
+      status: "Error",
+      errorMessage: "Agent RPC error (-1): dm.jdbc.driver.DMException: 请求执行超时",
+      connectionId: "dm-1",
+      onChangeQueryTimeout,
+    });
+
+    const button = [...document.body.querySelectorAll("button")].find((element) => element.textContent?.includes("Change query timeout"));
+    expect(button).toBeTruthy();
+    button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(onChangeQueryTimeout).toHaveBeenCalledOnce();
+  });
+
+  it("does not offer timeout settings for unrelated export errors", async () => {
+    i18n.global.locale.value = "en";
+    await mountDialog({ ...baseProps, status: "Error", errorMessage: "Permission denied", connectionId: "dm-1" });
+
+    expect(document.body.textContent).not.toContain("Change query timeout");
+  });
+});
+
+describe("ExportProgressDialog queued states", () => {
+  it("lets the user cancel or minimize a waiting export without showing active progress", async () => {
+    i18n.global.locale.value = "en";
+    const onCancel = vi.fn();
+    const onMinimize = vi.fn();
+    await mountDialog({ ...baseProps, status: "Queued", startedAt: undefined, canMinimize: true, onCancel, onMinimize });
+    expect(document.body.textContent).toContain("Queued");
+    expect(document.body.textContent).not.toContain("Elapsed:");
+    expect(document.body.querySelector(".export-progress-indeterminate")).toBeNull();
+    const buttons = [...document.body.querySelectorAll("button")];
+    buttons.find((button) => button.textContent?.trim() === "Cancel")?.click();
+    buttons.find((button) => button.textContent?.trim() === i18n.global.t("exportProgress.minimize"))?.click();
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(onMinimize).toHaveBeenCalledOnce();
+  });
+
+  it("keeps an unknown export distinct from completion and allows closing its view", async () => {
+    i18n.global.locale.value = "en";
+    const onOpenChange = vi.fn();
+    await mountDialog({ ...baseProps, status: "Unknown", "onUpdate:open": onOpenChange });
+    expect(document.body.textContent).toContain("Export status unknown; the queue is blocked");
+    expect(document.body.textContent).not.toContain("Export completed!");
+    const close = [...document.body.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Close");
+    expect(close).toBeTruthy();
+    close?.click();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+});

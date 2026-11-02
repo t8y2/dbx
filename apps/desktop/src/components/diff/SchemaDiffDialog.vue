@@ -1,35 +1,69 @@
 <script setup lang="ts">
-import { computed, ref, watch, onBeforeUnmount } from "vue";
+import { computed, reactive, ref, watch, onBeforeUnmount, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogHeader, DialogTitle, DialogFooter, DialogContent } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
+import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
+import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { useToast } from "@/composables/useToast";
 import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, AlertTriangle, CircleCheck, ChevronDown, ChevronRight } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
+import { isSchemaAware } from "@/lib/database/databaseCapabilities";
+import { supportsDatabaseCompare } from "@/lib/database/databaseCompareCapabilities";
 import { useSchemaDiffConfig } from "@/composables/useSchemaDiffConfig";
 import SchemaDiffConfigStep from "@/components/diff/SchemaDiffConfigStep.vue";
+import SchemaDiffConfigSelector from "@/components/diff/SchemaDiffConfigSelector.vue";
 import FieldMappingDialog from "@/components/diff/FieldMappingDialog.vue";
 import SchemaDiffObjectTree from "@/components/diff/SchemaDiffObjectTree.vue";
+import SchemaDiffRoutineList from "@/components/diff/SchemaDiffRoutineList.vue";
 import SchemaDiffDdlPanel from "@/components/diff/SchemaDiffDdlPanel.vue";
 import SchemaDiffDeployStep from "@/components/diff/SchemaDiffDeployStep.vue";
 import SchemaDiffOptionsPanel from "@/components/diff/SchemaDiffOptionsPanel.vue";
+import SideBySideTextDiff, { type TextDiffSide } from "@/components/common/SideBySideTextDiff.vue";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
-import { buildDeployTxResult } from "@/lib/schema/deployTxResult";
-import { loadSchemaDetails } from "@/lib/schema/schemaDiffMetadataLoad";
-import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSchemaDiffExtraObjects, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
-import { createSchemaDiffTableListLoader, type SchemaDiffTableIdentity } from "@/lib/schema/schemaDiffTableList";
+import { buildContinueOnErrorDeployLog, buildDeployTxResult, type DeployTxResult } from "@/lib/schema/deployTxResult";
+import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSchemaDiffExtraObjectPhase, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
+import { createSchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
+import { countSchemaDiffActionableObjects, partitionSchemaDiffObjectsByResultTab, swapSchemaDiffRoutineMappings } from "@/lib/schema/schemaDiffRoutine";
+import { schemaDiffRoutineObjectTypesIntersection, schemaDiffRoutineProductType } from "@/lib/database/databaseObjectCapabilities";
+import { loadObjectSourceWithRoutineFallback } from "@/lib/table/objectSourceLoad";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import { normalizeSchemaDiffCompareOptions } from "@/types/schemaDiff";
-import type { SchemaDiffCompareOptions, SchemaDiffConfig, FieldMappingEntry } from "@/types/schemaDiff";
+import {
+  createOracleRoutineDeployment,
+  editOracleRoutineDraft,
+  editOraclePackageOptions,
+  includeOraclePackageCompanion,
+  reviewOraclePackageTargetDraft,
+  executeOracleRoutineDeployment,
+  observeOracleRoutineDeployment,
+  oracleRoutineActiveStep,
+  oracleRoutinePlanSql,
+  prepareOracleRoutineRecovery,
+  refreshOracleRoutineDeployment,
+  selectOracleRoutineDraft,
+  synchronizeOracleRoutineSelection,
+  validateOracleRoutineDeployment,
+  canRegenerateOracleRoutineDeployment,
+} from "@/lib/schema/oracleRoutineDeploy";
+import type { SchemaDiffCompareOptions, SchemaDiffConfig, FieldMappingEntry, SchemaDiffTableMapping, SchemaDiffRoutineMapping, OracleRoutineKind, OracleRoutineIdentity } from "@/types/schemaDiff";
+import { getSchemaDiffSession, schemaDiffSessionObjects, startSchemaDiffSession, type SchemaDiffSession } from "@/composables/useSchemaDiffSession";
 import type { DatabaseType, ObjectSourceKind } from "@/types/database";
 import {
-  convertToSchemaDiffObjects,
   detectDestructiveSchemaDiffStatements,
   groupDiffObjects,
   injectColumnRenameSql,
   schemaDiffDeployTargetSchema,
+  normalizeDialectKind,
+  databaseTypeToDialectKind,
+  schemaDiffEngineDatabaseType,
   findSchemaDiffObject,
   flattenSchemaDiffObjects,
   schemaDiffSelectionTargets,
@@ -39,8 +73,6 @@ import {
   setSchemaDiffObjectSelected,
   setSchemaDiffObjectSelectedWithDependencies,
   summarizeSchemaDiffOperations,
-  databaseTypeToDialectKind,
-  normalizeDialectKind,
   type OperationGroup,
   type SchemaDiffObject,
   type DiffOperationType,
@@ -51,15 +83,20 @@ import {
   type CompatibilityWarning,
   type PermissionDiff,
   type DependencyGraph,
+  normalizeSchemaDiffDependencyGraph,
 } from "@/lib/schema/schemaDiff";
-import { compileSchemaDiffTableFilter, filterSchemaDiffTables } from "@/lib/schema/schemaDiffTableFilter";
+
+import { swapSchemaDiffTableMappings } from "@/lib/schema/schemaDiffTableMapping";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
+
+type SchemaDiffResultTab = "tables" | "routines";
 
 const { t } = useI18n();
 const { toast } = useToast();
 const open = defineModel<boolean>("open", { default: false });
 const store = useConnectionStore();
+const settingsStore = useSettingsStore();
 const schemaDiffTableListLoader = createSchemaDiffTableListLoader({
   ensureConnected: (connectionId) => store.ensureConnected(connectionId),
   listTables: (connectionId, database, schema) => api.listTables(connectionId, database, schema),
@@ -69,6 +106,9 @@ const props = defineProps<{
   prefillConnectionId?: string;
   prefillDatabase?: string;
   prefillSchema?: string;
+  prefillSelectedRoutines?: string[];
+  prefillResultTab?: "tables" | "routines";
+  sessionId?: string | null;
 }>();
 
 // Wizard state
@@ -89,8 +129,13 @@ const ignoreComments = ref(false);
 // Options panel
 const showOptionsPanel = ref(false);
 const showFieldMappingDialog = ref(false);
+const showConfigSelector = ref(false);
 const sourceDbType = computed(() => store.getConfig(sourceConnectionId.value)?.db_type ?? "");
 const targetDbType = computed(() => store.getConfig(targetConnectionId.value)?.db_type ?? "");
+// A JDBC connection stores `jdbc` in db_type while its product lives in the driver
+// profile; the diff engine needs the product for clause shapes and view comparison.
+const sourceEngineDbType = computed(() => schemaDiffEngineDatabaseType(store.getConfig(sourceConnectionId.value)));
+const targetEngineDbType = computed(() => schemaDiffEngineDatabaseType(store.getConfig(targetConnectionId.value)));
 
 // Clear stale field mappings when source and target are the same type
 watch([sourceDbType, targetDbType], ([src, tgt]) => {
@@ -100,7 +145,7 @@ watch([sourceDbType, targetDbType], ([src, tgt]) => {
 });
 const optionTree = computed(() => {
   const targetConfig = store.getConfig(targetConnectionId.value);
-  const dbType = targetConfig?.db_type || "postgres";
+  const dbType = schemaDiffEngineDatabaseType(targetConfig) || targetConfig?.db_type || "postgres";
   return getSchemaDiffOptionsForDbType(dbType);
 });
 
@@ -115,10 +160,25 @@ interface SchemaDiffProgress {
 const loading = ref(false);
 const schemaDiffProgress = ref<SchemaDiffProgress | null>(null);
 const schemaDiffHasExtraObjectPhase = ref(false);
-let comparisonRequestId = 0;
+const activeSessionId = ref<string | null>(props.sessionId ?? null);
+let appliedSessionResult: SchemaDiffPreparation | null = null;
+let shownSessionError = "";
+let componentUnmounted = false;
+let suppressTargetIdentityReset = false;
 const diffObjects = ref<SchemaDiffObject[]>([]);
-const diffGroups = ref<OperationGroup[]>([]);
-const selectedObjectId = ref<string | null>(null);
+const tableDiffGroups = ref<OperationGroup[]>([]);
+const routineDiffGroups = ref<OperationGroup[]>([]);
+const resultTab = ref<SchemaDiffResultTab>("tables");
+const preferredResultTab = ref<SchemaDiffResultTab | null>(null);
+const selectedTableObjectId = ref<string | null>(null);
+const selectedRoutineObjectId = ref<string | null>(null);
+const selectedObjectId = computed({
+  get: () => (resultTab.value === "routines" ? selectedRoutineObjectId.value : selectedTableObjectId.value),
+  set: (value: string | null) => {
+    if (resultTab.value === "routines") selectedRoutineObjectId.value = value;
+    else selectedTableObjectId.value = value;
+  },
+});
 const focusedDeploySql = ref("");
 const focusedForwardDeploySql = ref("");
 const focusedRollbackSql = ref("");
@@ -128,7 +188,107 @@ const executing = ref(false);
 const lastDiffResult = ref<SchemaDiffPreparation | null>(null);
 const targetDbVersion = ref<string | null>(null);
 const showResultDialog = ref(false);
-const deployResult = ref<{ success: boolean; status?: string; message: string; affectedRows?: number; error?: string } | null>(null);
+const deployResult = ref<DeployTxResult | null>(null);
+
+const partitionedDiffObjects = computed(() => partitionSchemaDiffObjectsByResultTab(diffObjects.value));
+const tableDiffObjects = computed(() => partitionedDiffObjects.value.tableObjects);
+const routineDiffObjects = computed(() => partitionedDiffObjects.value.routineObjects);
+const currentTabDiffObjects = computed(() => (resultTab.value === "routines" ? routineDiffObjects.value : tableDiffObjects.value));
+const activeDiffGroups = computed(() => (resultTab.value === "routines" ? routineDiffGroups.value : tableDiffGroups.value));
+const tableActionableCount = computed(() => countSchemaDiffActionableObjects(tableDiffObjects.value));
+const routineActionableCount = computed(() => countSchemaDiffActionableObjects(routineDiffObjects.value));
+const tablesCompareEnabled = computed(() => !!schemaDiffPanelOptions.value.tables);
+const routinesCompareEnabled = computed(() => !!schemaDiffPanelOptions.value.functions);
+const canEnableRoutinesCompare = computed(
+  () => schemaDiffRoutineObjectTypesIntersection(schemaDiffRoutineProductType(sourceDbType.value, sourceEngineDbType.value), schemaDiffRoutineProductType(targetDbType.value, targetEngineDbType.value), schemaDiffPanelOptions.value.routineObjectKinds).length > 0,
+);
+const effectiveRoutinesEnabled = computed(() => routinesCompareEnabled.value && canEnableRoutinesCompare.value);
+const showTableResultTab = computed(() => tablesCompareEnabled.value);
+const showRoutineResultTab = computed(() => effectiveRoutinesEnabled.value);
+const showResultTabList = computed(() => showTableResultTab.value && showRoutineResultTab.value);
+const showNoDifferences = computed(() => showTableResultTab.value && tableDiffObjects.value.length === 0);
+const routineInventoriesComplete = computed(() => !!comparisonSession.value?.routineSnapshots?.source?.enumerationComplete && !!comparisonSession.value?.routineSnapshots?.target?.enumerationComplete);
+const showRoutineNoDifferences = computed(() => showRoutineResultTab.value && routineDiffObjects.value.length === 0 && (!isOracleRoutineComparison.value || routineInventoriesComplete.value));
+const comparisonSession = computed(() => getSchemaDiffSession(activeSessionId.value));
+const isOracleRoutineComparison = computed(() => {
+  const snapshots = comparisonSession.value?.routineSnapshots;
+  return !!snapshots?.source && !!snapshots.target && [snapshots.source.endpoint.databaseType, snapshots.target.endpoint.databaseType].every((type) => type === "oracle" || type === "oceanbase-oracle");
+});
+const isOracleRoutineDeploy = computed(() => resultTab.value === "routines" && isOracleRoutineComparison.value);
+const routineDeployment = computed(() => comparisonSession.value?.routineDeployment);
+const routineTargetIsCurrent = computed(() => {
+  const snapshots = comparisonSession.value?.routineSnapshots;
+  return (
+    !!snapshots?.source &&
+    !!snapshots.target &&
+    snapshots.source.endpoint.connectionId === sourceConnectionId.value &&
+    snapshots.source.endpoint.database === sourceDatabase.value &&
+    snapshots.source.endpoint.schema === sourceSchema.value &&
+    snapshots.target.endpoint.connectionId === targetConnectionId.value &&
+    snapshots.target.endpoint.database === targetDatabase.value &&
+    snapshots.target.endpoint.schema === targetSchema.value &&
+    sourceEngineDbType.value === snapshots.source.endpoint.databaseType &&
+    targetEngineDbType.value === snapshots.target.endpoint.databaseType
+  );
+});
+const deployIsBusy = computed(() => executing.value || !!routineDeployment.value?.executing || !!routineDeployment.value?.validating);
+const routineReadIssues = computed(() => {
+  if (!isOracleRoutineComparison.value) return [];
+  return (["source", "target"] as const).flatMap((side) => {
+    const snapshot = comparisonSession.value?.routineSnapshots?.[side];
+    const selected = selectedObject.value;
+    const name = side === "source" ? (selected?.sourceName ?? selected?.name) : (selected?.targetName ?? selected?.name);
+    const object = snapshot?.objects.find((object) => object.version.identity.name === name && object.version.identity.kind === selected?.routineType);
+    return [...(snapshot?.issues ?? []), ...(object?.issues ?? [])].map((issue) => ({ side, message: issue.message }));
+  });
+});
+const deployEditorSql = computed({
+  get: () => {
+    if (!isOracleRoutineDeploy.value || !routineDeployment.value) return selectedDeploySql.value;
+    const state = routineDeployment.value;
+    return state.recoveryPlan ? (oracleRoutineActiveStep(state)?.sql ?? "") : (state.drafts.find((draft) => draft.objectId === state.selectedObjectId)?.sql ?? "");
+  },
+  set: (sql: string) => {
+    if (!isOracleRoutineDeploy.value || !routineDeployment.value) {
+      selectedDeploySql.value = sql;
+      if (deploySqlMode.value === "rollback") rollbackSql.value = sql;
+      else selectedForwardDeploySql.value = sql;
+      return;
+    }
+    if (!routineDeployment.value.recoveryPlan && routineDeployment.value.selectedObjectId) editOracleRoutineDraft(routineDeployment.value, routineDeployment.value.selectedObjectId, sql);
+  },
+});
+let routineConfirmRevision: number | null = null;
+let confirmedDeploy: {
+  sql: string;
+  connectionId: string;
+  connection: ReturnType<typeof store.getConfig>;
+  connectionFingerprint: string;
+  database: string;
+  schema: string;
+  mode: "forward" | "rollback";
+  continueOnError: boolean;
+  destructive: boolean;
+  completeness: RollbackCompleteness;
+} | null = null;
+
+function ensureRoutineDeployment() {
+  const session = comparisonSession.value;
+  if (!isOracleRoutineComparison.value || !session?.routineSnapshots?.source || !session.routineSnapshots.target) return;
+  session.routineDeployment ??= reactive(createOracleRoutineDeployment(session.routineSnapshots.source, session.routineSnapshots.target));
+  session.routineDeployment.ddlPreferences ??= { ...tableDdlPreferences.value };
+  synchronizeOracleRoutineSelection(session.routineDeployment, routineDiffObjects.value);
+  return session.routineDeployment;
+}
+
+function leaveDeployReview() {
+  const state = routineDeployment.value;
+  if (state) {
+    state.stopRequested = true;
+    state.reviewOpen = false;
+  }
+  step.value = "result";
+}
 
 // Phase 4 result fields
 const rollbackSql = ref("");
@@ -146,6 +306,102 @@ const showRenamePanel = ref(true);
 
 // Rollback / forward SQL mode in deploy step
 const deploySqlMode = ref<"forward" | "rollback">("forward");
+const selectedRawPlan = ref<ReturnType<typeof formatSchemaSyncPlan> | null>(null);
+const focusedRawPlan = ref<ReturnType<typeof formatSchemaSyncPlan> | null>(null);
+const focusedPlanObjectId = ref<string | null>(null);
+const focusedPlanError = ref("");
+const generatedForwardSql = ref("");
+const generatedRollbackSql = ref("");
+const selectedPlanCurrent = ref(false);
+const selectedGenerationIssues = computed(() => selectedRawPlan.value?.generationIssues.filter((issue) => issue.direction === deploySqlMode.value) ?? []);
+const focusedGenerationIssues = computed(() => focusedRawPlan.value?.generationIssues.filter((issue) => issue.direction === deploySqlMode.value) ?? []);
+const tableDdlPreferences = ref({
+  includeDdlStorage: settingsStore.editorSettings.includeDdlStorage,
+  compactDdlSql: settingsStore.editorSettings.compactDdlSql,
+  separateDdlIndexes: settingsStore.editorSettings.separateDdlIndexes,
+});
+const ddlPreferences = computed({
+  get: () => (isOracleRoutineDeploy.value ? routineDeployment.value?.ddlPreferences : undefined) ?? tableDdlPreferences.value,
+  set: (preferences) => {
+    if (isOracleRoutineDeploy.value && routineDeployment.value) routineDeployment.value.ddlPreferences = preferences;
+    else tableDdlPreferences.value = preferences;
+  },
+});
+const routineDdlOptionsLocked = computed(() => {
+  const state = routineDeployment.value;
+  return isOracleRoutineDeploy.value && !!state && (!!state.plan || !!state.recoveryPlan || state.drafts.some((draft) => draft.included && draft.sql !== undefined)) && !canRegenerateOracleRoutineDeployment(state);
+});
+const deploySqlDirty = computed(() => !!selectedRawPlan.value && (selectedForwardDeploySql.value !== generatedForwardSql.value || rollbackSql.value !== generatedRollbackSql.value));
+
+function confirmDiscardDeployEdits(): boolean {
+  return !deploySqlDirty.value || window.confirm(t("objects.refreshDiscardConfirm"));
+}
+
+function renderSelectedPlan() {
+  if (!selectedRawPlan.value) return;
+  const type = targetEngineDbType.value ?? getDbType();
+  generatedForwardSql.value = applyDdlTextPreferences(selectedRawPlan.value.forwardSql, type, ddlPreferences.value);
+  generatedRollbackSql.value = applyDdlTextPreferences(selectedRawPlan.value.rollbackSql, type, ddlPreferences.value);
+  selectedForwardDeploySql.value = generatedForwardSql.value;
+  rollbackSql.value = generatedRollbackSql.value;
+  selectedDeploySql.value = deploySqlMode.value === "rollback" ? rollbackSql.value : selectedForwardDeploySql.value;
+}
+
+function renderFocusedPlan() {
+  if (!focusedRawPlan.value) return;
+  const type = targetEngineDbType.value ?? getDbType();
+  focusedForwardDeploySql.value = applyDdlTextPreferences(focusedRawPlan.value.forwardSql, type, ddlPreferences.value);
+  focusedRollbackSql.value = applyDdlTextPreferences(focusedRawPlan.value.rollbackSql, type, ddlPreferences.value);
+  focusedDeploySql.value = deploySqlMode.value === "rollback" ? focusedRollbackSql.value : focusedForwardDeploySql.value;
+}
+
+const independentPreview = ref<{ objectId: string; source?: string; target?: string; issues: string[]; loading: boolean } | null>(null);
+let independentPreviewGeneration = 0;
+const displayedSelectedObject = computed(() => {
+  const object = selectedObject.value;
+  if (!object) return null;
+  return {
+    ...object,
+    sourceDdl: applyDdlTextPreferences((independentPreview.value?.objectId === object.id ? independentPreview.value.source : undefined) ?? object.sourceDdl ?? "", sourceEngineDbType.value ?? getDbType(), ddlPreferences.value),
+    targetDdl: applyDdlTextPreferences((independentPreview.value?.objectId === object.id ? independentPreview.value.target : undefined) ?? object.targetDdl ?? "", targetEngineDbType.value ?? getDbType(), ddlPreferences.value),
+  };
+});
+
+watch([() => settingsStore.editorSettings.includeDdlStorage, () => settingsStore.editorSettings.compactDdlSql, () => settingsStore.editorSettings.separateDdlIndexes, deploySqlDirty, showConfirmDialog, deployIsBusy, isOracleRoutineDeploy], ([include, compact, separate, dirty, confirming, busy]) => {
+  if ((dirty && !isOracleRoutineDeploy.value) || confirming || busy || routineDdlOptionsLocked.value) return;
+  const indexesChanged = ddlPreferences.value.separateDdlIndexes !== separate;
+  const compactChanged = ddlPreferences.value.compactDdlSql !== compact;
+  ddlPreferences.value = { includeDdlStorage: include, compactDdlSql: compact, separateDdlIndexes: separate };
+  if (isOracleRoutineDeploy.value) {
+    const state = routineDeployment.value;
+    if (compactChanged && state && canRegenerateOracleRoutineDeployment(state)) void validateOracleRoutineDeployment(state, undefined, { compactSql: compact, regenerateGenerated: true });
+    return;
+  }
+  if (indexesChanged) {
+    void regenerateSelectedDeploySql();
+    void regenerateFocusedDeploySql();
+    return;
+  }
+  renderSelectedPlan();
+  renderFocusedPlan();
+});
+
+// Deploy review: bracket the deploy script with MySQL's FOREIGN_KEY_CHECKS toggle.
+// Only MySQL honours the session variable, so the option is offered — and sent to
+// the backend — for MySQL targets alone; the backend re-checks the target type and
+// returns every other engine's script unchanged.
+const ignoreForeignKeyChecks = ref(false);
+const continueOnError = ref(false);
+const isMysqlDeployTarget = computed(() => targetEngineDbType.value === "mysql");
+const effectiveIgnoreForeignKeyChecks = computed(() => ignoreForeignKeyChecks.value && isMysqlDeployTarget.value);
+
+// Ticking the box rewrites the script through the plan generator, so the header
+// and trailer come from the same backend implementation the copy, export and
+// deploy paths all read from, and unticking restores the plain script.
+watch(ignoreForeignKeyChecks, () => {
+  if (step.value !== "deploy-review" || !lastDiffResult.value) return;
+  void regenerateSelectedDeploySql();
+});
 
 // Dialog size memory (width + height + splitpanes ratio)
 const DIALOG_SIZE_KEY = "dbx-schema-diff-size";
@@ -190,8 +446,8 @@ const dialogStyle = computed(() => {
   }
   if (step.value === "result") {
     return {
-      width: savedSize?.width || "1100px",
-      height: savedSize?.height || "820px",
+      width: parseFloat(savedSize?.width) > 0 ? savedSize.width : "1100px",
+      height: parseFloat(savedSize?.height) > 0 ? savedSize.height : "820px",
       maxWidth: "calc(100vw - 2rem)",
       maxHeight: "calc(100vh - 2rem)",
     };
@@ -209,6 +465,11 @@ function toggleMaximize() {
 }
 
 function handleDialogEscape(event: KeyboardEvent) {
+  if (showConfigSelector.value) {
+    event.preventDefault();
+    showConfigSelector.value = false;
+    return;
+  }
   if (!showOptionsPanel.value) return;
 
   event.preventDefault();
@@ -219,12 +480,14 @@ let resizeObserver: ResizeObserver | null = null;
 let saveTimeout: number | null = null;
 
 function setupResizeObserver() {
+  if (componentUnmounted) return;
   const el = document.querySelector('[data-slot="dialog-content"]') as HTMLElement;
   if (!el) return;
 
   resizeObserver = new ResizeObserver((entries) => {
     for (const entry of entries) {
       const { width, height } = entry.contentRect;
+      if (width <= 0 || height <= 0) continue;
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = window.setTimeout(() => {
         localStorage.setItem(
@@ -252,7 +515,9 @@ watch(
   () => step.value,
   (newStep) => {
     if (newStep === "result") {
-      setTimeout(setupResizeObserver, 100);
+      setTimeout(() => {
+        if (!componentUnmounted) setupResizeObserver();
+      }, 100);
     } else {
       teardownResizeObserver();
     }
@@ -260,11 +525,13 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  componentUnmounted = true;
+  if (routineDeployment.value) routineDeployment.value.stopRequested = true;
   teardownResizeObserver();
 });
 
 // Config management
-const { configs, activeConfigId, activeConfig, recentConfigs, ensureDefaultConfig, updateActiveConfigConnection, updateActiveConfigOptions, saveToHistory, deleteFromHistory } = useSchemaDiffConfig();
+const { configs, activeConfigId, activeConfig, recentConfigs, ensureDefaultConfig, createConfig, updateConfig, renameConfig, deleteConfig, duplicateConfig, importConfigs, updateActiveConfigConnection, updateActiveConfigOptions, saveToHistory, deleteFromHistory } = useSchemaDiffConfig();
 const schemaDiffPanelOptions = computed(() => normalizeSchemaDiffCompareOptions(activeConfig.value?.options, getDbType()));
 
 const selectedObject = computed(() => {
@@ -275,18 +542,60 @@ const selectedObject = computed(() => {
 
 const selectedTreeObject = computed(() => {
   if (!selectedObjectId.value) return null;
-  for (const group of diffGroups.value) {
+  for (const group of activeDiffGroups.value) {
     for (const typeGroup of group.typeGroups) {
       const object = flattenSchemaDiffObjects(typeGroup.objects).find((candidate) => candidate.id === selectedObjectId.value);
       if (object) return object;
     }
   }
-  return null;
+  return findSchemaDiffObject(diffObjects.value, selectedObjectId.value);
+});
+
+const canDeployRoutines = computed(() => {
+  if (!isOracleRoutineComparison.value) return isSchemaDiffPostgresLike(targetDbType.value);
+  if (!routineTargetIsCurrent.value) return false;
+  const snapshots = comparisonSession.value!.routineSnapshots!;
+  if (snapshots.source!.endpoint.databaseType === snapshots.target!.endpoint.databaseType) return true;
+  const kinds = comparisonSession.value!.config.options.routineObjectKinds;
+  return !!kinds?.length && kinds.every((kind) => kind === "PACKAGE" || kind === "PACKAGE_BODY") && routineDiffObjects.value.every((object) => object.routineType === "PACKAGE" || object.routineType === "PACKAGE_BODY");
+});
+watch([selectedObject, () => ddlPreferences.value.separateDdlIndexes, sourceConnectionId, sourceDatabase, sourceSchema, targetConnectionId, targetDatabase, targetSchema, sourceEngineDbType, targetEngineDbType, () => open.value], async () => {
+  const generation = ++independentPreviewGeneration;
+  independentPreview.value = null;
+  const object = selectedObject.value;
+  if (!open.value || !ddlPreferences.value.separateDdlIndexes || object?.objectKind !== "table") return;
+  const diff = lastDiffResult.value?.diffs.find((diff) => diff.name === object.name);
+  if (!diff) return;
+  const sides = [
+    { side: "source" as const, exists: diff.type !== "removed", type: sourceEngineDbType.value, connectionId: sourceConnectionId.value, database: sourceDatabase.value, schema: sourceSchema.value, tableName: diff.name },
+    { side: "target" as const, exists: diff.type !== "added", type: targetEngineDbType.value, connectionId: targetConnectionId.value, database: targetDatabase.value, schema: targetSchema.value, tableName: diff.targetName ?? diff.name },
+  ].filter((side) => side.exists && (side.type === "oracle" || side.type === "oceanbase-oracle"));
+  if (!sides.length) return;
+  independentPreview.value = { objectId: object.id, issues: [], loading: true };
+  const results = await Promise.all(
+    sides.map(async (side) => {
+      try {
+        const { ddl } = await loadObjectDdl({ connectionId: side.connectionId, queryTimeoutSecs: store.getConfig(side.connectionId)?.query_timeout_secs, database: side.database, schema: side.schema, tableName: side.tableName, separateIndexes: true });
+        return { side: side.side, ddl, issue: undefined };
+      } catch (error: any) {
+        return { side: side.side, ddl: undefined, issue: `${t(side.side === "source" ? "diff.sourceDdl" : "diff.targetDdl")} ${side.schema}.${side.tableName}: ${error?.message || String(error)}` };
+      }
+    }),
+  );
+  if (componentUnmounted || generation !== independentPreviewGeneration || !open.value) return;
+  independentPreview.value = { objectId: object.id, source: results.find((result) => result.side === "source")?.ddl, target: results.find((result) => result.side === "target")?.ddl, issues: results.flatMap((result) => (result.issue ? [result.issue] : [])), loading: false };
 });
 
 const canDeploy = computed(() => {
-  return selectedSchemaDiffObjects(diffObjects.value).length > 0;
+  // MySQL/SQL Server routine sync is deferred (copy DDL only). Postgres-family
+  // already has function DDL templates, so keep deploy on the routines tab.
+  if (resultTab.value === "routines" && !canDeployRoutines.value) return false;
+  return selectedSchemaDiffObjects(currentTabDiffObjects.value).length > 0;
 });
+
+const showRoutineDeployDeferredHint = computed(() => step.value === "result" && resultTab.value === "routines" && !canDeployRoutines.value);
+
+const deployButtonLabel = computed(() => (resultTab.value === "routines" ? t("diff.nextStepDeployRoutines") : t("diff.nextStepDeploy")));
 
 const schemaDiffProgressCount = computed(() => {
   const progress = schemaDiffProgress.value;
@@ -323,7 +632,10 @@ const schemaDiffNextProgressLabel = computed(() => {
 });
 
 function resetComparisonResultState() {
-  comparisonRequestId++;
+  selectedRawPlan.value = null;
+  focusedRawPlan.value = null;
+  focusedPlanObjectId.value = null;
+  focusedPlanError.value = "";
   selectedDeploySqlGeneration++;
   focusedDeploySqlGeneration++;
   loading.value = false;
@@ -331,8 +643,11 @@ function resetComparisonResultState() {
   schemaDiffHasExtraObjectPhase.value = false;
   step.value = "config";
   diffObjects.value = [];
-  diffGroups.value = [];
-  selectedObjectId.value = null;
+  tableDiffGroups.value = [];
+  routineDiffGroups.value = [];
+  resultTab.value = "tables";
+  selectedTableObjectId.value = null;
+  selectedRoutineObjectId.value = null;
   focusedDeploySql.value = "";
   focusedForwardDeploySql.value = "";
   focusedRollbackSql.value = "";
@@ -347,36 +662,169 @@ function resetComparisonResultState() {
   permissionDiffs.value = [];
   dependencyGraph.value = null;
   deploySqlMode.value = "forward";
+  ignoreForeignKeyChecks.value = false;
+  continueOnError.value = false;
   showConfirmDialog.value = false;
   showResultDialog.value = false;
   deployResult.value = null;
 }
 
-// Watch for prefilled values
+function comparisonEndpointLabel(connectionId: string, database: string, schema: string): string {
+  const connection = store.getConfig(connectionId);
+  return [connection?.name || connectionId, database, schema].filter(Boolean).join(" / ");
+}
+
+function restoreSchemaDiffSession(session: SchemaDiffSession): void {
+  const config = session.config;
+  runWithoutTargetIdentityReset(() => {
+    sourceConnectionId.value = config.sourceConnectionId;
+    sourceDatabase.value = config.sourceDatabase;
+    sourceSchema.value = config.sourceSchema;
+    targetConnectionId.value = config.targetConnectionId;
+    targetDatabase.value = config.targetDatabase;
+    targetSchema.value = config.targetSchema;
+  });
+  ignoreComments.value = config.ignoreComments;
+  ensureDefaultConfig(config.targetDbType);
+  updateActiveConfigConnection({
+    sourceConnectionId: config.sourceConnectionId,
+    sourceDatabase: config.sourceDatabase,
+    sourceSchema: config.sourceSchema,
+    targetConnectionId: config.targetConnectionId,
+    targetDatabase: config.targetDatabase,
+    targetSchema: config.targetSchema,
+  });
+  updateActiveConfigOptions(config.options);
+  schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjectPhase(schemaDiffRoutineProductType(config.sourceDbType, config.sourceEngineDbType), schemaDiffRoutineProductType(config.targetDbType, config.targetEngineDbType), config.options);
+}
+
+function applySchemaDiffSession(session: SchemaDiffSession | undefined): void {
+  if (!session) return;
+  schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjectPhase(schemaDiffRoutineProductType(session.config.sourceDbType, session.config.sourceEngineDbType), schemaDiffRoutineProductType(session.config.targetDbType, session.config.targetEngineDbType), session.config.options);
+  if (session.status === "running") {
+    loading.value = true;
+    step.value = "compare";
+    schemaDiffProgress.value = session.progress ?? { phase: "loading-table-lists" };
+    return;
+  }
+
+  loading.value = false;
+  schemaDiffProgress.value = null;
+  if (session.status === "failed") {
+    step.value = "config";
+    if (session.error && shownSessionError !== session.error) {
+      shownSessionError = session.error;
+      toast(session.error, 5000);
+    }
+    return;
+  }
+  if (!session.result) return;
+
+  step.value = "result";
+  if (appliedSessionResult === session.result) return;
+  appliedSessionResult = session.result;
+  rollbackSql.value = session.result.rollbackSyncSql ?? "";
+  rollbackCompleteness.value = session.result.rollbackCompleteness ?? "complete";
+  missingRollbackObjects.value = session.result.missingRollbackObjects ?? [];
+  renameCandidates.value = session.result.renameCandidates ?? [];
+  compatibilityWarnings.value = session.result.compatibilityWarnings ?? [];
+  permissionDiffs.value = session.result.permissionDiffs ?? [];
+  dependencyGraph.value = normalizeSchemaDiffDependencyGraph(session.result.dependencyGraph);
+  diffObjects.value = schemaDiffSessionObjects(session.result, session.routineDeployment);
+  if (session.routineDeployment) {
+    for (const object of diffObjects.value) {
+      const saved = session.routineDeployment.drafts.find((draft) => draft.objectId === object.id);
+      if (saved) object.selected = saved.included;
+    }
+  }
+  rebuildDiffGroups();
+  const hasTableActions = showTableResultTab.value && countSchemaDiffActionableObjects(tableDiffObjects.value) > 0;
+  const hasRoutineActions = showRoutineResultTab.value && countSchemaDiffActionableObjects(routineDiffObjects.value) > 0;
+  if (!showTableResultTab.value && showRoutineResultTab.value) {
+    resultTab.value = "routines";
+    preferredResultTab.value = null;
+  } else if (showTableResultTab.value && !showRoutineResultTab.value) {
+    resultTab.value = "tables";
+    preferredResultTab.value = null;
+  } else if (preferredResultTab.value === "routines" && showRoutineResultTab.value) {
+    resultTab.value = "routines";
+    preferredResultTab.value = null;
+  } else if (preferredResultTab.value) {
+    resultTab.value = "tables";
+    preferredResultTab.value = null;
+  } else {
+    resultTab.value = !hasTableActions && hasRoutineActions ? "routines" : "tables";
+  }
+  selectedTableObjectId.value = null;
+  selectedRoutineObjectId.value = null;
+  lastDiffResult.value = session.result;
+  deploySqlMode.value = "forward";
+  void regenerateSelectedDeploySql();
+  void regenerateFocusedDeploySql();
+  if (session.routineDeployment?.reviewOpen) step.value = "deploy-review";
+}
+
+// A Compare session deliberately outlives this v-if-mounted dialog. Closing the
+// dialog only removes the view; the session runner keeps updating its task.
 watch(
-  () => open.value,
-  (isOpen) => {
-    if (isOpen) {
-      resetComparisonResultState();
-      ensureDefaultConfig();
-      if (props.prefillConnectionId) {
-        sourceConnectionId.value = props.prefillConnectionId;
-        if (props.prefillDatabase) {
-          sourceDatabase.value = props.prefillDatabase;
-        }
-        if (props.prefillSchema) {
-          sourceSchema.value = props.prefillSchema;
-        }
-      }
-    } else {
-      comparisonRequestId++;
-      loading.value = false;
-      schemaDiffProgress.value = null;
-      schemaDiffHasExtraObjectPhase.value = false;
+  [() => open.value, () => props.sessionId],
+  ([isOpen]) => {
+    if (!isOpen) {
+      if (routineDeployment.value) routineDeployment.value.stopRequested = true;
+      return;
+    }
+    const session = getSchemaDiffSession(props.sessionId);
+    activeSessionId.value = session?.id ?? null;
+    appliedSessionResult = null;
+    shownSessionError = "";
+    resetComparisonResultState();
+    if (session) {
+      restoreSchemaDiffSession(session);
+      applySchemaDiffSession(session);
+      return;
+    }
+
+    ensureDefaultConfig();
+    if (props.prefillConnectionId) {
+      sourceConnectionId.value = props.prefillConnectionId;
+      if (props.prefillDatabase) sourceDatabase.value = props.prefillDatabase;
+      if (props.prefillSchema) sourceSchema.value = props.prefillSchema;
+    }
+    if (props.prefillSelectedRoutines?.length) {
+      handleCompareScopeUpdate({ functions: true });
+      handleSelectedRoutinesUpdate([...props.prefillSelectedRoutines]);
+    }
+    preferredResultTab.value = props.prefillResultTab ?? null;
+    if (props.prefillResultTab) {
+      resultTab.value = props.prefillResultTab;
     }
   },
   { immediate: true },
 );
+
+watch(
+  () => {
+    const session = getSchemaDiffSession(activeSessionId.value);
+    return [session?.status, session?.progress, session?.result, session?.error] as const;
+  },
+  () => applySchemaDiffSession(getSchemaDiffSession(activeSessionId.value)),
+);
+
+let restoringResultTab = false;
+watch(resultTab, (_tab, previous) => {
+  if (restoringResultTab) {
+    restoringResultTab = false;
+    return;
+  }
+  if (step.value !== "result") return;
+  if (!confirmDiscardDeployEdits()) {
+    restoringResultTab = true;
+    resultTab.value = previous;
+    return;
+  }
+  void regenerateSelectedDeploySql();
+  void regenerateFocusedDeploySql();
+});
 
 // Config sync
 watch([sourceConnectionId, sourceDatabase, sourceSchema, targetConnectionId, targetDatabase, targetSchema], ([srcConn, srcDb, srcSchema, tgtConn, tgtDb, tgtSchema]) => {
@@ -390,12 +838,78 @@ watch([sourceConnectionId, sourceDatabase, sourceSchema, targetConnectionId, tar
   });
 });
 
+function runWithoutTargetIdentityReset(action: () => void): void {
+  suppressTargetIdentityReset = true;
+  try {
+    action();
+  } finally {
+    void nextTick(() => {
+      suppressTargetIdentityReset = false;
+    });
+  }
+}
+
+watch([sourceConnectionId, sourceDatabase, sourceSchema, targetConnectionId, targetDatabase, targetSchema], () => {
+  if (!suppressTargetIdentityReset && routineDeployment.value) routineDeployment.value.stopRequested = true;
+});
+
+function handleSourceConnectionChange(connectionId: string): void {
+  if (connectionId === sourceConnectionId.value) return;
+  sourceConnectionId.value = connectionId;
+  sourceDatabase.value = "";
+  sourceSchema.value = "";
+  clearCompareObjectSelection();
+}
+
+function clearCompareObjectSelection(): void {
+  if (!activeConfig.value) return;
+  updateActiveConfigOptions(
+    normalizeSchemaDiffCompareOptions(
+      {
+        ...activeConfig.value.options,
+        selectedTables: undefined,
+        selectedRoutines: undefined,
+        tableMappings: [],
+        routineMappings: [],
+      },
+      getDbType(),
+    ),
+  );
+}
+
+// Switching target must drop stale schema (Oracle→MySQL) and object selection/mappings.
+watch(targetConnectionId, (connId, previousConnId) => {
+  if (suppressTargetIdentityReset) return;
+  if (connId === previousConnId) return;
+  targetDatabase.value = "";
+  targetSchema.value = "";
+  clearCompareObjectSelection();
+});
+
+watch(targetDatabase, (database, previousDatabase) => {
+  if (suppressTargetIdentityReset) return;
+  if (database === previousDatabase) return;
+  targetSchema.value = "";
+  clearCompareObjectSelection();
+});
+
+watch(targetDbType, (dbType, previousDbType) => {
+  if (suppressTargetIdentityReset) return;
+  if (!isSchemaAware(dbType as DatabaseType) && targetSchema.value) {
+    targetSchema.value = "";
+  }
+  if (previousDbType && dbType && previousDbType !== dbType) {
+    clearCompareObjectSelection();
+  }
+});
+
 // Auto-fetch target database version when connection/database changes
 watch(
-  () => [targetConnectionId.value, targetDatabase.value],
-  async ([connId, db]) => {
+  () => [targetConnectionId.value, targetDatabase.value, targetSchema.value, targetDbType.value] as const,
+  async ([connId, db, schema, dbType]) => {
     if (connId && db) {
-      await fetchDbVersion(connId, db, targetSchema.value);
+      const effectiveSchema = isSchemaAware(dbType as DatabaseType) ? schema : "";
+      await fetchDbVersion(connId, db, effectiveSchema);
     } else {
       targetDbVersion.value = null;
     }
@@ -408,15 +922,37 @@ function getDbType(): DatabaseType {
 }
 
 function handleSwap() {
-  const tempConn = sourceConnectionId.value;
-  const tempDb = sourceDatabase.value;
-  const tempSchema = sourceSchema.value;
-  sourceConnectionId.value = targetConnectionId.value;
-  sourceDatabase.value = targetDatabase.value;
-  sourceSchema.value = targetSchema.value;
-  targetConnectionId.value = tempConn;
-  targetDatabase.value = tempDb;
-  targetSchema.value = tempSchema;
+  const currentOptions = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, getDbType());
+  const swappedMappings = swapSchemaDiffTableMappings(currentOptions.tableMappings ?? []);
+  const swappedSelectedTables = Array.isArray(currentOptions.selectedTables) ? swappedMappings.map((mapping) => mapping.sourceTable) : undefined;
+  const swappedRoutineMappings = swapSchemaDiffRoutineMappings(currentOptions.routineMappings ?? []);
+  const swappedSelectedRoutines = Array.isArray(currentOptions.selectedRoutines) ? swappedRoutineMappings.map((mapping) => mapping.sourceRoutine) : undefined;
+  if (activeConfig.value) {
+    updateActiveConfigOptions(
+      normalizeSchemaDiffCompareOptions(
+        {
+          ...currentOptions,
+          selectedTables: swappedSelectedTables,
+          tableMappings: swappedMappings,
+          selectedRoutines: swappedSelectedRoutines,
+          routineMappings: swappedRoutineMappings,
+        },
+        getDbType(),
+      ),
+    );
+  }
+
+  runWithoutTargetIdentityReset(() => {
+    const tempConn = sourceConnectionId.value;
+    const tempDb = sourceDatabase.value;
+    const tempSchema = sourceSchema.value;
+    sourceConnectionId.value = targetConnectionId.value;
+    sourceDatabase.value = targetDatabase.value;
+    sourceSchema.value = targetSchema.value;
+    targetConnectionId.value = tempConn;
+    targetDatabase.value = tempDb;
+    targetSchema.value = tempSchema;
+  });
 }
 
 function handleOptionsUpdate(options: SchemaDiffCompareOptions) {
@@ -431,6 +967,38 @@ function handleSelectedTablesUpdate(value?: string[]) {
   }
 }
 
+function handleSelectedRoutinesUpdate(value?: string[]) {
+  if (activeConfig.value) {
+    updateActiveConfigOptions(normalizeSchemaDiffCompareOptions({ ...activeConfig.value.options, selectedRoutines: value }, getDbType()));
+  }
+}
+
+function handleRoutineSelectionUpdate(value: { objectKinds: OracleRoutineKind[]; selectedObjects?: Pick<OracleRoutineIdentity, "name" | "kind">[] }) {
+  if (activeConfig.value) {
+    updateActiveConfigOptions(normalizeSchemaDiffCompareOptions({ ...activeConfig.value.options, routineObjectKinds: value.objectKinds, selectedRoutineObjects: value.selectedObjects, selectedRoutines: undefined, routineMappings: [] }, getDbType()));
+  }
+}
+
+function handleCompareScopeUpdate(value: { tables?: boolean; views?: boolean; functions?: boolean }) {
+  if (activeConfig.value) {
+    const next = { ...activeConfig.value.options, ...value };
+    if (value.tables === false) next.views = false;
+    updateActiveConfigOptions(normalizeSchemaDiffCompareOptions(next, getDbType()));
+  }
+}
+
+function handleTableMappingsUpdate(value: SchemaDiffTableMapping[]) {
+  if (activeConfig.value) {
+    updateActiveConfigOptions(normalizeSchemaDiffCompareOptions({ ...activeConfig.value.options, tableMappings: value }, getDbType()));
+  }
+}
+
+function handleRoutineMappingsUpdate(value: SchemaDiffRoutineMapping[]) {
+  if (activeConfig.value) {
+    updateActiveConfigOptions(normalizeSchemaDiffCompareOptions({ ...activeConfig.value.options, routineMappings: value }, getDbType()));
+  }
+}
+
 function handleFieldMappingsUpdate(mappings: FieldMappingEntry[]) {
   if (activeConfig.value) {
     const updated = { ...activeConfig.value.options, fieldMappings: mappings };
@@ -438,197 +1006,49 @@ function handleFieldMappingsUpdate(mappings: FieldMappingEntry[]) {
   }
 }
 
-async function handleCompare() {
-  const requestId = ++comparisonRequestId;
-  const isCurrentRequest = () => requestId === comparisonRequestId;
+function handleCompare(): void {
+  if (!confirmDiscardDeployEdits()) return;
+  const sourceConfig = store.getConfig(sourceConnectionId.value);
+  const targetConfig = store.getConfig(targetConnectionId.value);
+  if (!supportsDatabaseCompare(sourceConfig, "schema") || !supportsDatabaseCompare(targetConfig, "schema")) return;
+  const targetDbType = (targetConfig?.db_type || "mysql") as DatabaseType;
+  const sourceDbType = sourceConfig?.db_type || targetDbType;
+  const options = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, targetDbType);
 
-  loading.value = true;
-  step.value = "compare";
-  schemaDiffProgress.value = { phase: "loading-table-lists" };
-  schemaDiffHasExtraObjectPhase.value = false;
-
-  // Reset Phase 4 state to prevent stale data from previous compares
-  rollbackSql.value = "";
-  rollbackCompleteness.value = "complete";
-  missingRollbackObjects.value = [];
-  renameCandidates.value = [];
-  compatibilityWarnings.value = [];
-  permissionDiffs.value = [];
-  dependencyGraph.value = null;
-
-  try {
-    const sourceConfig = store.getConfig(sourceConnectionId.value);
-    const targetConfig = store.getConfig(targetConnectionId.value);
-    const dbType = targetConfig?.db_type || "mysql";
-    const sourceDbType = sourceConfig?.db_type || dbType;
-    const opts = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, dbType);
-    const isPostgresLike = isSchemaDiffPostgresLike(dbType);
-    const hasExtraObjectPhase = shouldLoadSchemaDiffExtraObjects(dbType, opts);
-    schemaDiffHasExtraObjectPhase.value = hasExtraObjectPhase;
-    const tableFilter = compileSchemaDiffTableFilter(opts);
-
-    const sourceTableIdentity: SchemaDiffTableIdentity = { connectionId: sourceConnectionId.value, database: sourceDatabase.value, schema: sourceSchema.value };
-    const targetTableIdentity: SchemaDiffTableIdentity = { connectionId: targetConnectionId.value, database: targetDatabase.value, schema: targetSchema.value };
-    // The dialog can remain open while either database changes, so Compare must not reuse
-    // the table list cached while configuring the comparison.
-    const [srcTables, tgtTables] = await Promise.all([schemaDiffTableListLoader.load(sourceTableIdentity, { refresh: true }), schemaDiffTableListLoader.load(targetTableIdentity, { refresh: true })]);
-    if (!isCurrentRequest()) return;
-    // Explicit (visual) table selection is applied here, BEFORE any per-table
-    // metadata details are loaded, so metadata requests only happen for the
-    // final table set. `undefined`/empty means no restriction (legacy path).
-    const { sourceTables, targetTables } = filterSchemaDiffTables(srcTables, tgtTables, tableFilter, opts, opts.selectedTables);
-
-    schemaDiffProgress.value = { phase: "loading-source-details", current: 0, total: sourceTables.length };
-    const sourceDetails = await loadSchemaDetails(
-      sourceTables,
-      {
-        connectionId: sourceConnectionId.value,
-        database: sourceDatabase.value,
-        schema: sourceSchema.value,
-        dbType: sourceDbType,
-        options: opts,
-        onProgress: (progress) => {
-          if (isCurrentRequest()) schemaDiffProgress.value = { phase: "loading-source-details", ...progress };
-        },
-      },
-      api,
-    );
-    if (!isCurrentRequest()) return;
-
-    schemaDiffProgress.value = { phase: "loading-target-details", current: 0, total: targetTables.length };
-    const targetDetails = await loadSchemaDetails(
-      targetTables,
-      {
-        connectionId: targetConnectionId.value,
-        database: targetDatabase.value,
-        schema: targetSchema.value,
-        dbType,
-        options: opts,
-        onProgress: (progress) => {
-          if (isCurrentRequest()) schemaDiffProgress.value = { phase: "loading-target-details", ...progress };
-        },
-      },
-      api,
-    );
-    if (!isCurrentRequest()) return;
-
-    // Fetch new object types for PostgreSQL-like databases
-    const promises: Promise<any>[] = [];
-    if (isPostgresLike && opts?.functions) {
-      promises.push(api.listFunctions(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value));
-      promises.push(api.listFunctions(targetConnectionId.value, targetDatabase.value, targetSchema.value));
-    }
-    if (isPostgresLike && opts?.sequences) {
-      promises.push(api.listSequences(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, !!opts?.sequenceLastValues));
-      promises.push(api.listSequences(targetConnectionId.value, targetDatabase.value, targetSchema.value, !!opts?.sequenceLastValues));
-    }
-    if (isPostgresLike && opts?.rules) {
-      promises.push(api.listRules(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value));
-      promises.push(api.listRules(targetConnectionId.value, targetDatabase.value, targetSchema.value));
-    }
-    if (isPostgresLike && opts?.owners) {
-      promises.push(api.listOwners(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value));
-      promises.push(api.listOwners(targetConnectionId.value, targetDatabase.value, targetSchema.value));
-    }
-
-    if (hasExtraObjectPhase) schemaDiffProgress.value = { phase: "loading-extra-objects" };
-    const results = await Promise.all(promises);
-    if (!isCurrentRequest()) return;
-    let idx = 0;
-    const srcFunctions = opts?.functions && isPostgresLike ? results[idx++] : [];
-    const tgtFunctions = opts?.functions && isPostgresLike ? results[idx++] : [];
-    const srcSequences = opts?.sequences && isPostgresLike ? results[idx++] : [];
-    const tgtSequences = opts?.sequences && isPostgresLike ? results[idx++] : [];
-    const srcRules = opts?.rules && isPostgresLike ? results[idx++] : [];
-    const tgtRules = opts?.rules && isPostgresLike ? results[idx++] : [];
-    const srcOwners = opts?.owners && isPostgresLike ? results[idx++] : [];
-    const tgtOwners = opts?.owners && isPostgresLike ? results[idx++] : [];
-
-    schemaDiffProgress.value = { phase: "comparing" };
-    const result = await api.prepareSchemaDiff({
-      sourceTables,
-      targetTables,
-      sourceDetails,
-      targetDetails,
-      sourceFunctions: srcFunctions,
-      targetFunctions: tgtFunctions,
-      sourceSequences: srcSequences,
-      targetSequences: tgtSequences,
-      sourceRules: srcRules,
-      targetRules: tgtRules,
-      sourceOwners: srcOwners,
-      targetOwners: tgtOwners,
-      databaseType: dbType,
-      targetSchema: schemaDiffDeployTargetSchema(dbType, targetDatabase.value, targetSchema.value),
+  appliedSessionResult = null;
+  shownSessionError = "";
+  resetComparisonResultState();
+  schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjectPhase(schemaDiffRoutineProductType(sourceDbType, sourceEngineDbType.value), schemaDiffRoutineProductType(targetDbType, targetEngineDbType.value), options);
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: sourceConnectionId.value,
+      sourceDatabase: sourceDatabase.value,
+      sourceSchema: sourceSchema.value,
+      targetConnectionId: targetConnectionId.value,
+      targetDatabase: targetDatabase.value,
+      targetSchema: targetSchema.value,
+      sourceDbType,
+      targetDbType,
+      sourceEngineDbType: sourceEngineDbType.value,
+      targetEngineDbType: targetEngineDbType.value,
+      options,
       ignoreComments: ignoreComments.value,
-      cascadeDelete: opts?.cascadeDelete ?? false,
-      compareColumnOrder: opts.compareColumnOrder,
-      detectRenames: opts?.detectRenames ?? false,
-      detectTableRenames: opts?.detectTableRenames ?? false,
-      renameThreshold: opts?.renameThreshold ?? 0.5,
-      enableRollback: opts?.enableRollback ?? false,
-      batchPatterns: opts?.batchPatterns
-        ? opts.batchPatterns
-            .split(",")
-            .map((s: string) => s.trim())
-            .filter(Boolean)
-        : undefined,
-      sourceDialect: opts?.sourceDialect ? normalizeDialectKind(opts.sourceDialect) : sourceConfig?.db_type ? databaseTypeToDialectKind(sourceConfig.db_type) : undefined,
-      targetDialect: opts?.targetDialect ? normalizeDialectKind(opts.targetDialect) : targetConfig?.db_type ? databaseTypeToDialectKind(targetConfig.db_type) : undefined,
-      compatibilityThreshold: opts?.compatibilityThreshold ?? 0.5,
-      fieldMappings:
-        opts?.fieldMappings?.map((m: FieldMappingEntry) => ({
-          sourceType: m.sourceType,
-          targetType: m.targetType,
-          paramStrategy: m.paramStrategy ?? "preserve",
-          customParams: m.customParams,
-        })) || [],
-    });
-    if (!isCurrentRequest()) return;
-
-    // Extract new result fields
-    rollbackSql.value = result.rollbackSyncSql ?? "";
-    rollbackCompleteness.value = result.rollbackCompleteness ?? "complete";
-    missingRollbackObjects.value = result.missingRollbackObjects ?? [];
-    renameCandidates.value = result.renameCandidates ?? [];
-    compatibilityWarnings.value = result.compatibilityWarnings ?? [];
-    permissionDiffs.value = result.permissionDiffs ?? [];
-    dependencyGraph.value = result.dependencyGraph ?? null;
-
-    // Convert to unified objects
-    diffObjects.value = convertToSchemaDiffObjects(result.diffs, result.functionDiffs, result.sequenceDiffs, result.ruleDiffs, result.ownerDiffs, result.renameCandidates);
-
-    // Group by operation type and object kind
-    diffGroups.value = groupDiffObjects(diffObjects.value);
-
-    // Save the structured result; both script previews are generated from the
-    // current selection projection below rather than from the initial full SQL.
-    lastDiffResult.value = result;
-    deploySqlMode.value = "forward";
-    schemaDiffProgress.value = { phase: "generating" };
-    await regenerateSelectedDeploySql();
-    await regenerateFocusedDeploySql();
-    if (!isCurrentRequest()) return;
-
-    schemaDiffProgress.value = null;
-    step.value = "result";
-  } catch (e: any) {
-    if (!isCurrentRequest()) return;
-    schemaDiffProgress.value = null;
-    schemaDiffHasExtraObjectPhase.value = false;
-    toast(e?.message || String(e), 5000);
-    step.value = "config";
-  } finally {
-    if (isCurrentRequest()) loading.value = false;
-  }
+      label: `${comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value)} → ${comparisonEndpointLabel(targetConnectionId.value, targetDatabase.value, targetSchema.value)}`,
+    },
+    { tableListLoader: schemaDiffTableListLoader },
+  );
+  activeSessionId.value = session.id;
+  applySchemaDiffSession(session);
 }
 
 function handleToggleGroup(operationType: DiffOperationType) {
-  diffGroups.value = diffGroups.value.map((g) => (g.operationType === operationType ? { ...g, expanded: !g.expanded } : g));
+  const groups = resultTab.value === "routines" ? routineDiffGroups : tableDiffGroups;
+  groups.value = groups.value.map((g) => (g.operationType === operationType ? { ...g, expanded: !g.expanded } : g));
 }
 
 function handleToggleGroupSelection(operationType: DiffOperationType, selected: boolean) {
-  const group = diffGroups.value.find((candidate) => candidate.operationType === operationType);
+  if (!confirmDiscardDeployEdits()) return;
+  const group = activeDiffGroups.value.find((candidate) => candidate.operationType === operationType);
   for (const object of group?.typeGroups.flatMap((typeGroup) => typeGroup.objects) ?? []) {
     for (const target of schemaDiffSelectionTargets(object)) {
       updateObjectSelection(target.id, selected);
@@ -639,6 +1059,7 @@ function handleToggleGroupSelection(operationType: DiffOperationType, selected: 
 }
 
 function handleToggleObjectSelection(object: SchemaDiffObject, selected: boolean) {
+  if (!confirmDiscardDeployEdits()) return;
   let changed = false;
   for (const target of schemaDiffSelectionTargets(object)) {
     changed = updateObjectSelection(target.id, selected) || changed;
@@ -653,26 +1074,44 @@ function updateObjectSelection(objectId: string, selected: boolean): boolean {
 }
 
 function rebuildDiffGroups() {
-  const expanded = new Map(diffGroups.value.map((group) => [group.operationType, group.expanded]));
-  const typeExpanded = new Map(diffGroups.value.flatMap((group) => group.typeGroups.map((typeGroup) => [`${group.operationType}:${typeGroup.kind}`, typeGroup.expanded] as const)));
-  diffGroups.value = groupDiffObjects(diffObjects.value).map((group) => ({
-    ...group,
-    expanded: expanded.get(group.operationType) ?? group.expanded,
-    typeGroups: group.typeGroups.map((typeGroup) => ({
-      ...typeGroup,
-      expanded: typeExpanded.get(`${group.operationType}:${typeGroup.kind}`) ?? typeGroup.expanded,
-    })),
-  }));
+  const preserveExpanded = (groups: OperationGroup[], objects: SchemaDiffObject[]) => {
+    const expanded = new Map(groups.map((group) => [group.operationType, group.expanded]));
+    const typeExpanded = new Map(groups.flatMap((group) => group.typeGroups.map((typeGroup) => [`${group.operationType}:${typeGroup.kind}`, typeGroup.expanded] as const)));
+    return groupDiffObjects(objects).map((group) => ({
+      ...group,
+      expanded: expanded.get(group.operationType) ?? group.expanded,
+      typeGroups: group.typeGroups.map((typeGroup) => ({
+        ...typeGroup,
+        expanded: typeExpanded.get(`${group.operationType}:${typeGroup.kind}`) ?? typeGroup.expanded,
+      })),
+    }));
+  };
+
+  const { tableObjects, routineObjects } = partitionSchemaDiffObjectsByResultTab(diffObjects.value);
+  tableDiffGroups.value = preserveExpanded(tableDiffGroups.value, tableObjects);
+  routineDiffGroups.value = preserveExpanded(routineDiffGroups.value, routineObjects);
 }
 
 function buildSchemaSyncPlanOptions(options: SchemaDiffCompareOptions) {
+  const engineDbType = targetEngineDbType.value ?? getDbType();
   return {
-    databaseType: getDbType(),
+    databaseType: engineDbType,
     targetSchema: schemaDiffDeployTargetSchema(getDbType(), targetDatabase.value, targetSchema.value),
     cascadeDelete: options.cascadeDelete,
-    sourceDialect: options.sourceDialect ? normalizeDialectKind(options.sourceDialect) : sourceDbType.value ? databaseTypeToDialectKind(sourceDbType.value) : undefined,
+    sourceDialect: options.sourceDialect ? normalizeDialectKind(options.sourceDialect) : sourceEngineDbType.value ? databaseTypeToDialectKind(sourceEngineDbType.value) : undefined,
     fieldMappings: options.fieldMappings,
     enableRollback: options.enableRollback,
+    ignoreForeignKeyChecks: effectiveIgnoreForeignKeyChecks.value,
+    ...(ddlPreferences.value.separateDdlIndexes && (engineDbType === "oracle" || engineDbType === "oceanbase-oracle")
+      ? {
+          oracleDdl: {
+            separateIndexes: true,
+            source: { connectionId: sourceConnectionId.value, database: sourceDatabase.value, schema: sourceSchema.value },
+            target: { connectionId: targetConnectionId.value, database: targetDatabase.value, schema: targetSchema.value },
+            tableMappings: comparisonSession.value?.config.options.tableMappings?.map((mapping) => ({ ...mapping })),
+          },
+        }
+      : {}),
   };
 }
 
@@ -683,45 +1122,64 @@ function formatSchemaSyncPlan(plan: Awaited<ReturnType<typeof api.generateSchema
     forwardSql = injectColumnRenameSql(forwardSql, input.diffs, options.renameThreshold);
     if (nextRollbackSql) nextRollbackSql = injectColumnRenameSql(nextRollbackSql, input.diffs, options.renameThreshold, true);
   }
-  return { forwardSql, rollbackSql: nextRollbackSql };
+  return { forwardSql, rollbackSql: nextRollbackSql, forwardCompleteness: plan.forwardCompleteness ?? "complete", rollbackCompleteness: plan.rollbackCompleteness ?? "complete", generationIssues: plan.generationIssues ?? [] };
+}
+
+function clearSelectedDeploySql() {
+  selectedPlanCurrent.value = false;
+  selectedRawPlan.value = null;
+  selectedForwardDeploySql.value = "";
+  selectedDeploySql.value = "";
+  rollbackSql.value = "";
+  rollbackCompleteness.value = "complete";
+  missingRollbackObjects.value = [];
 }
 
 async function regenerateSelectedDeploySql() {
   const result = lastDiffResult.value;
   const generation = ++selectedDeploySqlGeneration;
+  selectedPlanCurrent.value = false;
   if (!result) {
-    selectedForwardDeploySql.value = "-- No objects selected";
-    selectedDeploySql.value = "-- No objects selected";
-    rollbackSql.value = "";
+    clearSelectedDeploySql();
+    return;
+  }
+  if (isOracleRoutineDeploy.value) {
+    ensureRoutineDeployment();
     return;
   }
 
   const options = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, getDbType());
-  const input = selectSchemaDiffInput(result, diffObjects.value);
+  const input = selectSchemaDiffInput(result, currentTabDiffObjects.value);
   let plan;
   try {
     plan = await api.generateSchemaSyncPlan(input, buildSchemaSyncPlanOptions(options));
   } catch (error: any) {
-    if (generation === selectedDeploySqlGeneration) toast(error?.message || String(error), 5000);
+    if (!componentUnmounted && generation === selectedDeploySqlGeneration) toast(error?.message || String(error), 5000);
     return;
   }
-  if (generation !== selectedDeploySqlGeneration) return;
+  if (componentUnmounted || generation !== selectedDeploySqlGeneration) return;
 
   const formatted = formatSchemaSyncPlan(plan, input, options);
   rollbackCompleteness.value = plan.rollbackCompleteness ?? "complete";
   missingRollbackObjects.value = plan.missingRollbackObjects ?? [];
-  selectedForwardDeploySql.value = formatted.forwardSql;
-  rollbackSql.value = formatted.rollbackSql;
-  selectedDeploySql.value = deploySqlMode.value === "rollback" && formatted.rollbackSql ? formatted.rollbackSql : formatted.forwardSql;
+  selectedRawPlan.value = formatted;
+  renderSelectedPlan();
+  selectedPlanCurrent.value = true;
 }
 
 async function regenerateFocusedDeploySql(objectId: string | null = selectedObjectId.value) {
   const result = lastDiffResult.value;
   const generation = ++focusedDeploySqlGeneration;
-  if (!result || !objectId || !findSchemaDiffObject(diffObjects.value, objectId)) {
-    focusedForwardDeploySql.value = "-- No objects selected";
+  focusedPlanError.value = "";
+  if (focusedPlanObjectId.value !== objectId || !result || !objectId) {
+    focusedRawPlan.value = null;
+    focusedPlanObjectId.value = null;
+    focusedForwardDeploySql.value = "";
     focusedRollbackSql.value = "";
-    focusedDeploySql.value = "-- No objects selected";
+    focusedDeploySql.value = "";
+  }
+  if (isOracleRoutineDeploy.value) return;
+  if (!result || !objectId || !findSchemaDiffObject(diffObjects.value, objectId)) {
     return;
   }
 
@@ -731,15 +1189,18 @@ async function regenerateFocusedDeploySql(objectId: string | null = selectedObje
   try {
     plan = await api.generateSchemaSyncPlan(input, buildSchemaSyncPlanOptions(options));
   } catch (error: any) {
-    if (generation === focusedDeploySqlGeneration && selectedObjectId.value === objectId) toast(error?.message || String(error), 5000);
+    if (!componentUnmounted && generation === focusedDeploySqlGeneration && selectedObjectId.value === objectId) {
+      focusedPlanError.value = error?.message || String(error);
+      toast(focusedPlanError.value, 5000);
+    }
     return;
   }
-  if (generation !== focusedDeploySqlGeneration || selectedObjectId.value !== objectId) return;
+  if (componentUnmounted || generation !== focusedDeploySqlGeneration || selectedObjectId.value !== objectId) return;
 
   const formatted = formatSchemaSyncPlan(plan, input, options);
-  focusedForwardDeploySql.value = formatted.forwardSql;
-  focusedRollbackSql.value = formatted.rollbackSql;
-  focusedDeploySql.value = deploySqlMode.value === "rollback" && formatted.rollbackSql ? formatted.rollbackSql : formatted.forwardSql;
+  focusedRawPlan.value = formatted;
+  focusedPlanObjectId.value = objectId;
+  renderFocusedPlan();
 }
 
 function switchDeploySqlMode(mode: "forward" | "rollback") {
@@ -756,18 +1217,26 @@ function switchDeploySqlMode(mode: "forward" | "rollback") {
 }
 
 const canExecuteDeploy = computed(() => {
+  if (isOracleRoutineDeploy.value) {
+    const state = routineDeployment.value;
+    return routineTargetIsCurrent.value && !!(state?.recoveryPlan ?? state?.plan)?.ready && !deployIsBusy.value;
+  }
   if (deploySqlMode.value === "rollback" && rollbackCompleteness.value === "incomplete") {
     return false;
   }
-  return true;
+  if (!selectedPlanCurrent.value) return false;
+  if (deploySqlMode.value === "forward" && selectedRawPlan.value?.forwardCompleteness === "incomplete") return false;
+  const sql = selectedDeploySql.value.trim();
+  return sql.length > 0 && sql !== "-- No objects selected";
 });
 
 const destructiveStatements = computed(() => {
   const databaseType = store.getConfig(targetConnectionId.value)?.db_type;
-  return detectDestructiveSchemaDiffStatements(selectedDeploySql.value, databaseType);
+  return detectDestructiveSchemaDiffStatements(isOracleRoutineDeploy.value && routineDeployment.value ? oracleRoutinePlanSql(routineDeployment.value) : selectedDeploySql.value, databaseType);
 });
 
 function applyRename(rc: RenameCandidate) {
+  if (!confirmDiscardDeployEdits()) return;
   let found = false;
   for (const obj of diffObjects.value) {
     // Backend-detected renamed diff (diff_type = "renamed")
@@ -798,6 +1267,7 @@ function applyRename(rc: RenameCandidate) {
 }
 
 function ignoreRename(index: number) {
+  if (!confirmDiscardDeployEdits()) return;
   const rc = renameCandidates.value[index];
   if (rc) {
     for (const obj of diffObjects.value) {
@@ -814,6 +1284,10 @@ function ignoreRename(index: number) {
 }
 
 async function handleExecuteScript() {
+  if (isOracleRoutineDeploy.value) {
+    await handleDeployReview();
+    return;
+  }
   if (!selectedDeploySql.value.trim() || selectedDeploySql.value.trim() === "-- No objects selected") {
     toast(t("diff.noObjectsSelected"), 3000);
     return;
@@ -827,16 +1301,45 @@ async function handleExecuteScript() {
 }
 
 async function executeDeploySql() {
+  if (isOracleRoutineDeploy.value && routineDeployment.value) {
+    const state = routineDeployment.value;
+    if (!routineTargetIsCurrent.value) return;
+    await executeOracleRoutineDeployment(state, (sql, execute) =>
+      executeWithProductionSqlGuard({
+        connection: store.getConfig(state.target.endpoint.connectionId),
+        database: state.target.endpoint.database,
+        sql,
+        source: t("production.sourceSchemaDiff"),
+        execute,
+      }),
+    );
+    return;
+  }
+  const confirmed = confirmedDeploy;
+  if (!confirmed || confirmed.completeness === "incomplete") return;
+  const targetIsCurrent = () => {
+    const connection = store.getConfig(confirmed.connectionId);
+    return !!connection && confirmed.connectionId === targetConnectionId.value && confirmed.database === targetDatabase.value && confirmed.schema === targetSchema.value && confirmed.mode === deploySqlMode.value && connectionConfigFingerprint(connection) === confirmed.connectionFingerprint;
+  };
+  confirmedDeploy = null;
   executing.value = true;
   try {
-    const targetConnection = store.getConfig(targetConnectionId.value);
+    if (!targetIsCurrent()) throw new Error(t("processList.oracleConnectionChanged"));
     const failed = await executeWithProductionSqlGuard({
-      connection: targetConnection,
-      database: targetDatabase.value,
-      sql: selectedDeploySql.value,
+      connection: confirmed.connection,
+      database: confirmed.database,
+      sql: confirmed.sql,
       source: t("production.sourceSchemaDiff"),
       execute: async () => {
-        const txLog = await api.executeScriptWith2pc(targetConnectionId.value, targetDatabase.value, [selectedDeploySql.value], targetSchema.value, destructiveStatements.value.length > 0);
+        if (!targetIsCurrent()) throw new Error(t("processList.oracleConnectionChanged"));
+        if (confirmed.continueOnError) {
+          const results = await api.executeMulti(confirmed.connectionId, confirmed.database, confirmed.sql, confirmed.schema || undefined, undefined, {
+            continueOnError: true,
+            maxRows: 1,
+          });
+          return buildContinueOnErrorDeployLog(results);
+        }
+        const txLog = await api.executeScriptWith2pc(confirmed.connectionId, confirmed.database, [confirmed.sql], confirmed.schema, confirmed.destructive);
         return txLog;
       },
     });
@@ -863,61 +1366,179 @@ async function handleSelectObject(reviewObject: SchemaDiffObject) {
   const obj = reviewObject.parentId ? (findSchemaDiffObject(diffObjects.value, reviewObject.parentId) ?? reviewObject) : reviewObject;
 
   // Dynamically fetch DDL for objects that don't have pre-generated DDL
-  // (views need runtime retrieval; functions should already have definition)
-  const objectTypeMap: Record<string, ObjectSourceKind> = {
-    function: "FUNCTION",
-    view: "VIEW",
-  };
-  const objectType = objectTypeMap[obj.objectKind];
-  if (!objectType) return;
-
-  try {
-    // For "create" objects: source has it, target doesn't → fetch source DDL
-    if (obj.operationType === "create" && !obj.sourceDdl) {
-      const result = await api.getObjectSource(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name, objectType, obj.arguments);
-      if (result?.source) obj.sourceDdl = result.source;
-    }
-
-    // For "delete" objects: target has it, source doesn't → fetch target DDL
-    if (obj.operationType === "delete" && !obj.targetDdl) {
-      const result = await api.getObjectSource(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name, objectType, obj.arguments);
-      if (result?.source) obj.targetDdl = result.source;
-    }
-
-    // For "modify" objects: fetch whichever side is missing
-    if (obj.operationType === "modify") {
-      if (!obj.sourceDdl) {
-        const result = await api.getObjectSource(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name, objectType, obj.arguments);
+  // (views need runtime retrieval; routines may have empty definitions from list_functions_via_objects)
+  if (obj.objectKind === "view") {
+    try {
+      if (obj.operationType === "create" && !obj.sourceDdl) {
+        const result = await api.getObjectSource(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name, "VIEW", obj.arguments);
         if (result?.source) obj.sourceDdl = result.source;
       }
-      if (!obj.targetDdl) {
-        const result = await api.getObjectSource(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name, objectType, obj.arguments);
+      if (obj.operationType === "delete" && !obj.targetDdl) {
+        const result = await api.getObjectSource(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name, "VIEW", obj.arguments);
         if (result?.source) obj.targetDdl = result.source;
       }
+      if (obj.operationType === "modify") {
+        if (!obj.sourceDdl) {
+          const result = await api.getObjectSource(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name, "VIEW", obj.arguments);
+          if (result?.source) obj.sourceDdl = result.source;
+        }
+        if (!obj.targetDdl) {
+          const result = await api.getObjectSource(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name, "VIEW", obj.arguments);
+          if (result?.source) obj.targetDdl = result.source;
+        }
+      }
+    } catch {
+      // Silently ignore errors
     }
-  } catch {
-    // Silently ignore errors
+    return;
+  }
+
+  if (obj.objectKind !== "function") return;
+  // Strict snapshots retain incomplete reads and their issues; an ordinary
+  // fallback must not silently replace that evidence with an unverified source.
+  if (isOracleRoutineComparison.value) return;
+
+  const preferredKind: ObjectSourceKind = obj.routineType ?? "FUNCTION";
+
+  async function fetchRoutineDdl(connectionId: string, database: string, schema: string, name: string): Promise<string | undefined> {
+    try {
+      const { source } = await loadObjectSourceWithRoutineFallback(api.getObjectSource, connectionId, database, schema, name, preferredKind, obj.arguments);
+      return source?.source?.trim() ? source.source : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (obj.operationType === "create" && !obj.sourceDdl) {
+    const ddl = await fetchRoutineDdl(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name);
+    if (ddl) obj.sourceDdl = ddl;
+  }
+  if (obj.operationType === "delete" && !obj.targetDdl) {
+    const ddl = await fetchRoutineDdl(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name);
+    if (ddl) obj.targetDdl = ddl;
+  }
+  if (obj.operationType === "modify") {
+    if (!obj.sourceDdl) {
+      const ddl = await fetchRoutineDdl(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name);
+      if (ddl) obj.sourceDdl = ddl;
+    }
+    if (!obj.targetDdl) {
+      const ddl = await fetchRoutineDdl(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name);
+      if (ddl) obj.targetDdl = ddl;
+    }
+  }
+}
+
+async function handleViewRoutineDiff(object: SchemaDiffObject) {
+  await handleSelectObject(object);
+}
+
+async function copyRoutineDiffSide(side: TextDiffSide) {
+  const object = selectedObject.value;
+  if (!object) return;
+  const text = side === "before" ? (object.sourceDdl ?? "") : (object.targetDdl ?? "");
+  try {
+    await copyToClipboard(text);
+    toast(t("diff.routineDdlCopied"), 2000);
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 5000);
   }
 }
 function handleLoadHistoryConfig(config: SchemaDiffConfig) {
-  sourceConnectionId.value = config.sourceConnectionId;
-  sourceDatabase.value = config.sourceDatabase;
-  sourceSchema.value = config.sourceSchema;
-  targetConnectionId.value = config.targetConnectionId;
-  targetDatabase.value = config.targetDatabase;
-  targetSchema.value = config.targetSchema;
+  applyConfigToForm(config);
   if (config.options) {
-    updateActiveConfigOptions(config.options);
+    updateActiveConfigOptions(normalizeSchemaDiffCompareOptions(config.options, getDbType()));
   }
 }
 
+function applyConfigToForm(config: SchemaDiffConfig) {
+  runWithoutTargetIdentityReset(() => {
+    sourceConnectionId.value = config.sourceConnectionId;
+    sourceDatabase.value = config.sourceDatabase;
+    sourceSchema.value = config.sourceSchema;
+    targetConnectionId.value = config.targetConnectionId;
+    targetDatabase.value = config.targetDatabase;
+    targetSchema.value = config.targetSchema;
+  });
+}
+
+function snapshotCurrentConfig(name: string): SchemaDiffConfig {
+  ensureDefaultConfig(getDbType());
+  const base = activeConfig.value;
+  return {
+    id: base?.id ?? "",
+    name,
+    createdAt: base?.createdAt ?? Date.now(),
+    updatedAt: Date.now(),
+    sourceConnectionId: sourceConnectionId.value,
+    sourceDatabase: sourceDatabase.value,
+    sourceSchema: sourceSchema.value,
+    targetConnectionId: targetConnectionId.value,
+    targetDatabase: targetDatabase.value,
+    targetSchema: targetSchema.value,
+    options: { ...schemaDiffPanelOptions.value },
+  };
+}
+
+function handleLoadConfig() {
+  ensureDefaultConfig(getDbType());
+  showConfigSelector.value = true;
+}
+
+function handleSelectActiveConfig(id: string) {
+  if (!id || id === activeConfigId.value) return;
+  activeConfigId.value = id;
+  const config = configs.value.find((entry) => entry.id === id);
+  if (config) applyConfigToForm(config);
+}
+
 function handleSaveConfig() {
-  if (activeConfig.value) {
-    const name = window.prompt(t("diff.saveConfigPrompt"), activeConfig.value.name || t("diff.defaultConfigName"));
-    if (name === null) return; // User cancelled
-    const configToSave = { ...activeConfig.value, name: name.trim() || t("diff.defaultConfigName") };
-    saveToHistory(configToSave);
+  ensureDefaultConfig(getDbType());
+  if (!activeConfig.value) return;
+  const name = window.prompt(t("diff.saveConfigPrompt"), activeConfig.value.name || t("diff.defaultConfigName"));
+  if (name === null) return;
+  const trimmed = name.trim() || t("diff.defaultConfigName");
+  const snapshot = snapshotCurrentConfig(trimmed);
+  updateConfig(activeConfig.value.id, {
+    name: trimmed,
+    sourceConnectionId: snapshot.sourceConnectionId,
+    sourceDatabase: snapshot.sourceDatabase,
+    sourceSchema: snapshot.sourceSchema,
+    targetConnectionId: snapshot.targetConnectionId,
+    targetDatabase: snapshot.targetDatabase,
+    targetSchema: snapshot.targetSchema,
+    options: snapshot.options,
+  });
+  saveToHistory({ ...snapshot, id: activeConfig.value.id });
+  toast(t("diff.configSaved"), 2000);
+}
+
+function handleCreateNamedConfig(name: string) {
+  const snapshot = snapshotCurrentConfig(name);
+  createConfig(name, snapshot, getDbType());
+}
+
+function handleRenameNamedConfig(id: string, name: string) {
+  renameConfig(id, name);
+}
+
+function handleDeleteNamedConfig(id: string) {
+  deleteConfig(id);
+  if (activeConfig.value) applyConfigToForm(activeConfig.value);
+}
+
+function handleDuplicateNamedConfig(id: string) {
+  duplicateConfig(id);
+  if (activeConfig.value) applyConfigToForm(activeConfig.value);
+}
+
+function handleImportNamedConfigs(jsonText: string) {
+  try {
+    importConfigs(jsonText, "merge");
+    if (activeConfig.value) applyConfigToForm(activeConfig.value);
     toast(t("diff.configSaved"), 2000);
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 5000);
   }
 }
 
@@ -927,6 +1548,7 @@ function handleDeleteHistoryConfig(configId: string) {
 }
 
 async function fetchDbVersion(connectionId: string, database: string, schema: string) {
+  if (!supportsDatabaseCompare(store.getConfig(connectionId), "schema")) return;
   try {
     await store.ensureConnected(connectionId);
     const config = store.getConfig(connectionId);
@@ -958,26 +1580,58 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
   }
 }
 
-function handleDeployReview() {
-  const selectedObjects = selectedSchemaDiffObjects(diffObjects.value);
+async function handleDeployReview() {
+  if (resultTab.value === "routines" && !canDeployRoutines.value) return;
+  const selectedObjects = selectedSchemaDiffObjects(currentTabDiffObjects.value);
   if (selectedObjects.length === 0) {
     toast(t("diff.noObjectsSelected"), 3000);
     return;
   }
   step.value = "deploy-review";
+  if (isOracleRoutineDeploy.value) {
+    const state = ensureRoutineDeployment();
+    if (state) {
+      state.reviewOpen = true;
+      if (!state.plan && !state.recoveryPlan && !state.executing) await validateOracleRoutineDeployment(state, undefined, { compactSql: ddlPreferences.value.compactDdlSql });
+    }
+  }
   fetchDbVersion(targetConnectionId.value, targetDatabase.value, targetSchema.value);
 }
 
 async function handleDeploy() {
+  confirmedDeploy = null;
+  if (isOracleRoutineDeploy.value) {
+    if (!canExecuteDeploy.value) return;
+    routineConfirmRevision = routineDeployment.value?.revision ?? null;
+  }
   if (deploySqlMode.value === "rollback" && rollbackCompleteness.value === "incomplete") {
     toast(t("diff.rollbackIncompleteBlocked"), 5000);
     return;
+  }
+  if (!isOracleRoutineDeploy.value) {
+    if (!canExecuteDeploy.value) return;
+    const connection = store.getConfig(targetConnectionId.value);
+    if (!connection) return;
+    confirmedDeploy = {
+      sql: selectedDeploySql.value,
+      connectionId: targetConnectionId.value,
+      connection: connection ? { ...connection } : undefined,
+      connectionFingerprint: connectionConfigFingerprint(connection),
+      database: targetDatabase.value,
+      schema: targetSchema.value,
+      mode: deploySqlMode.value,
+      continueOnError: continueOnError.value,
+      destructive: destructiveStatements.value.length > 0,
+      completeness: deploySqlMode.value === "rollback" ? rollbackCompleteness.value : (selectedRawPlan.value?.forwardCompleteness ?? "complete"),
+    };
   }
   showConfirmDialog.value = true;
 }
 
 async function onConfirmDeploy() {
   showConfirmDialog.value = false;
+  if (!isOracleRoutineDeploy.value && confirmedDeploy) confirmedDeploy.continueOnError = continueOnError.value;
+  if (isOracleRoutineDeploy.value && (routineConfirmRevision !== routineDeployment.value?.revision || !canExecuteDeploy.value)) return;
   if (deploySqlMode.value === "rollback" && rollbackCompleteness.value === "incomplete") {
     toast(t("diff.rollbackIncompleteBlocked"), 5000);
     return;
@@ -987,7 +1641,11 @@ async function onConfirmDeploy() {
 }
 
 const deployStats = computed(() => {
-  const counts = summarizeSchemaDiffOperations(diffObjects.value);
+  if (isOracleRoutineDeploy.value && routineDeployment.value) {
+    const steps = (routineDeployment.value.recoveryPlan ?? routineDeployment.value.plan)?.steps ?? [];
+    return { create: steps.filter((step) => step.action === "create").length, modify: steps.filter((step) => step.action === "replace").length, delete: steps.filter((step) => step.action === "delete").length, total: steps.length };
+  }
+  const counts = summarizeSchemaDiffOperations(currentTabDiffObjects.value);
   return {
     create: counts.create,
     modify: counts.modify,
@@ -1016,7 +1674,7 @@ const targetConnectionInfo = computed(() => {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent :class="['flex flex-col overflow-hidden', isMaximized ? 'min-w-0' : 'min-w-[800px] resize']" :portal-class="isMaximized ? 'p-0' : undefined" :style="dialogStyle" @interact-outside.prevent @escape-key-down="handleDialogEscape">
+    <DialogContent :class="['flex flex-col overflow-hidden dbx-schema-diff-dialog', isMaximized ? 'dbx-dialog-maximized min-w-0' : 'min-w-[800px] resize']" :portal-class="isMaximized ? 'p-0' : undefined" :style="dialogStyle" @interact-outside.prevent @escape-key-down="handleDialogEscape">
       <Button variant="ghost" size="icon-sm" class="absolute top-2 right-10 z-10" @click="toggleMaximize">
         <Maximize2 v-if="!isMaximized" class="w-4 h-4" />
         <Minimize2 v-else class="w-4 h-4" />
@@ -1040,7 +1698,8 @@ const targetConnectionInfo = computed(() => {
         <SchemaDiffConfigStep
           v-if="step === 'config'"
           class="shrink-0"
-          v-model:source-connection-id="sourceConnectionId"
+          :source-connection-id="sourceConnectionId"
+          @update:source-connection-id="handleSourceConnectionChange"
           v-model:source-database="sourceDatabase"
           v-model:source-schema="sourceSchema"
           v-model:target-connection-id="targetConnectionId"
@@ -1049,8 +1708,9 @@ const targetConnectionInfo = computed(() => {
           v-model:ignore-comments="ignoreComments"
           :configs="configs"
           :active-config-id="activeConfigId"
-          :options="activeConfig?.options"
-          :selected-tables="activeConfig?.options?.selectedTables"
+          :options="schemaDiffPanelOptions"
+          :selected-tables="schemaDiffPanelOptions.selectedTables"
+          :selected-routines="schemaDiffPanelOptions.selectedRoutines"
           :table-list-loader="schemaDiffTableListLoader"
           :loading="loading"
           :recent-configs="recentConfigs"
@@ -1058,10 +1718,16 @@ const targetConnectionInfo = computed(() => {
           @swap="handleSwap"
           @show-options="showOptionsPanel = true"
           @save-config="handleSaveConfig"
+          @load-config="handleLoadConfig"
           @load-history-config="handleLoadHistoryConfig"
           @delete-history-config="handleDeleteHistoryConfig"
           @update:field-mappings="handleFieldMappingsUpdate"
+          @update:table-mappings="handleTableMappingsUpdate"
+          @update:routine-mappings="handleRoutineMappingsUpdate"
           @update:selected-tables="handleSelectedTablesUpdate"
+          @update:selected-routines="handleSelectedRoutinesUpdate"
+          @update:routine-selection="handleRoutineSelectionUpdate"
+          @update:compare-scope="handleCompareScopeUpdate"
           @open-field-mapping="showFieldMappingDialog = true"
         />
 
@@ -1096,87 +1762,172 @@ const targetConnectionInfo = computed(() => {
 
         <!-- Result Step -->
         <template v-else-if="step === 'result'">
-          <!-- Rename Candidates Panel -->
-          <div v-if="renameCandidates.length > 0" class="border-b bg-amber-50 dark:bg-amber-950/20 shrink-0 overflow-hidden">
-            <button class="flex items-center gap-2 px-3 py-1.5 w-full text-left text-xs font-medium hover:bg-amber-100/50 dark:hover:bg-amber-900/30 transition-colors" @click="showRenamePanel = !showRenamePanel">
-              <ChevronDown v-if="showRenamePanel" class="w-3 h-3" />
-              <ChevronRight v-else class="w-3 h-3" />
-              {{ t("diff.renameCandidates") }}
-              <span class="ml-auto text-muted-foreground font-normal">{{ renameCandidates.length }} candidate(s)</span>
-            </button>
-            <div v-if="showRenamePanel" class="px-3 pb-2 text-xs">
-              <table class="w-full">
-                <thead>
-                  <tr class="text-muted-foreground border-b">
-                    <th class="text-left py-1 pr-4">{{ t("diff.sourceTable") }}</th>
-                    <th class="text-left py-1 pr-4">{{ t("diff.targetTable") }}</th>
-                    <th class="text-left py-1 pr-4">{{ t("diff.similarity") }}</th>
-                    <th class="text-left py-1">{{ t("common.action") }}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="(rc, i) in renameCandidates" :key="i" class="border-b border-amber-200/50 dark:border-amber-800/30">
-                    <td class="py-1 pr-4 font-mono">{{ rc.sourceName }}</td>
-                    <td class="py-1 pr-4 font-mono">{{ rc.targetName }}</td>
-                    <td class="py-1 pr-4">
-                      <span
-                        class="px-1.5 py-0.5 rounded text-[10px] font-medium"
-                        :class="rc.score >= 0.8 ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' : rc.score >= 0.5 ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'"
-                        >{{ (rc.score * 100).toFixed(0) }}%</span
-                      >
-                    </td>
-                    <td class="py-1">
-                      <button class="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors mr-1" @click="applyRename(rc)">
-                        {{ t("diff.confirmRename") }}
-                      </button>
-                      <button class="text-xs px-2 py-0.5 rounded bg-muted hover:bg-muted/80 transition-colors" @click="ignoreRename(i)">
-                        {{ t("diff.ignore") }}
-                      </button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
+          <p v-if="independentPreview?.loading" role="status" class="flex shrink-0 items-center gap-2 px-3 py-2 text-sm text-muted-foreground"><Loader2 class="h-4 w-4 animate-spin" />{{ t("common.loading") }}</p>
+          <ul v-if="independentPreview?.issues.length" role="alert" class="max-h-32 shrink-0 overflow-auto px-3 py-2 text-sm text-destructive">
+            <li v-for="issue in independentPreview.issues" :key="issue">{{ issue }}</li>
+          </ul>
+          <ul v-if="!isOracleRoutineDeploy && focusedGenerationIssues.length" role="alert" class="max-h-32 shrink-0 overflow-auto px-3 py-2 text-sm text-destructive">
+            <li v-for="(issue, index) in focusedGenerationIssues" :key="index">{{ issue.table ? `${issue.table} / ` : "" }}{{ issue.name }}: {{ issue.reason }}</li>
+          </ul>
+          <p v-if="!isOracleRoutineDeploy && focusedPlanError" role="alert" class="shrink-0 px-3 py-2 text-sm text-destructive">{{ focusedPlanError }}</p>
+          <Tabs v-model="resultTab" class="flex min-h-0 flex-1 flex-col gap-0 data-horizontal:flex-col">
+            <TabsList v-if="showResultTabList" class="mx-3 mt-2 h-8 w-fit shrink-0">
+              <TabsTrigger value="tables" class="text-xs">
+                {{ t("diff.resultTabTables", { count: tableActionableCount }) }}
+              </TabsTrigger>
+              <TabsTrigger value="routines" class="text-xs">
+                {{ t("diff.resultTabRoutines", { count: routineActionableCount }) }}
+              </TabsTrigger>
+            </TabsList>
 
-          <Splitpanes horizontal class="flex-1 min-h-0" @resized="handleSplitpanesResized">
-            <Pane :size="splitpanesSize" min-size="20">
-              <div class="h-full overflow-auto">
-                <SchemaDiffObjectTree :groups="diffGroups" :selected-object-id="selectedObjectId" @toggle-group="handleToggleGroup" @toggle-group-selection="handleToggleGroupSelection" @toggle-object-selection="handleToggleObjectSelection" @select-object="handleSelectObject" />
+            <TabsContent v-if="showTableResultTab" value="tables" class="mt-0 flex min-h-0 flex-1 flex-col outline-none data-[state=inactive]:hidden">
+              <div v-if="showNoDifferences" class="mx-3 mt-2 shrink-0 rounded-md border border-dashed bg-muted/20 px-3 py-2 text-center text-xs text-muted-foreground">
+                {{ t("diff.noDifferences") }}
               </div>
-            </Pane>
-            <Pane :size="100 - splitpanesSize" min-size="20">
-              <SchemaDiffDdlPanel
-                :selected-object="selectedObject"
-                :focused-object="selectedTreeObject"
-                :deploy-sql="focusedDeploySql"
-                :deploy-sql-all="selectedDeploySql"
-                :rollback-forward-sql="selectedForwardDeploySql"
-                :compatibility-warnings="selectedCompatibilityWarnings"
-                :rollback-sql="rollbackSql"
-                :deploy-sql-mode="deploySqlMode"
-                :dependency-graph="dependencyGraph"
-                :permission-diffs="permissionDiffs"
-                :rollback-completeness="rollbackCompleteness"
-                :missing-rollback-objects="missingRollbackObjects"
-                :can-execute="canExecuteDeploy"
-                @update:deploy-sql-mode="switchDeploySqlMode"
-                @execute-script="handleExecuteScript"
-              />
-            </Pane>
-          </Splitpanes>
+              <div v-if="renameCandidates.length > 0" class="shrink-0 overflow-hidden border-b bg-amber-50 dark:bg-amber-950/20">
+                <button class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs font-medium transition-colors hover:bg-amber-100/50 dark:hover:bg-amber-900/30" @click="showRenamePanel = !showRenamePanel">
+                  <ChevronDown v-if="showRenamePanel" class="h-3 w-3" />
+                  <ChevronRight v-else class="h-3 w-3" />
+                  {{ t("diff.renameCandidates") }}
+                  <span class="ml-auto font-normal text-muted-foreground">{{ renameCandidates.length }} candidate(s)</span>
+                </button>
+                <div v-if="showRenamePanel" class="px-3 pb-2 text-xs">
+                  <table class="w-full">
+                    <thead>
+                      <tr class="border-b text-muted-foreground">
+                        <th class="py-1 pr-4 text-left">{{ t("diff.sourceTable") }}</th>
+                        <th class="py-1 pr-4 text-left">{{ t("diff.targetTable") }}</th>
+                        <th class="py-1 pr-4 text-left">{{ t("diff.similarity") }}</th>
+                        <th class="py-1 text-left">{{ t("common.actions") }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(rc, i) in renameCandidates" :key="i" class="border-b border-amber-200/50 dark:border-amber-800/30">
+                        <td class="py-1 pr-4 font-mono">{{ rc.sourceName }}</td>
+                        <td class="py-1 pr-4 font-mono">{{ rc.targetName }}</td>
+                        <td class="py-1 pr-4">
+                          <span
+                            class="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                            :class="rc.score >= 0.8 ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' : rc.score >= 0.5 ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'"
+                            >{{ (rc.score * 100).toFixed(0) }}%</span
+                          >
+                        </td>
+                        <td class="py-1">
+                          <button class="mr-1 rounded bg-primary/10 px-2 py-0.5 text-xs text-primary transition-colors hover:bg-primary/20" @click="applyRename(rc)">
+                            {{ t("diff.confirmRename") }}
+                          </button>
+                          <button class="rounded bg-muted px-2 py-0.5 text-xs transition-colors hover:bg-muted/80" @click="ignoreRename(i)">
+                            {{ t("diff.ignore") }}
+                          </button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <Splitpanes horizontal class="min-h-0 flex-1" @resized="handleSplitpanesResized">
+                <Pane :size="splitpanesSize" min-size="20">
+                  <div class="h-full overflow-auto">
+                    <SchemaDiffObjectTree :groups="tableDiffGroups" :selected-object-id="selectedTableObjectId" @toggle-group="handleToggleGroup" @toggle-group-selection="handleToggleGroupSelection" @toggle-object-selection="handleToggleObjectSelection" @select-object="handleSelectObject" />
+                  </div>
+                </Pane>
+                <Pane :size="100 - splitpanesSize" min-size="20">
+                  <SchemaDiffDdlPanel
+                    :selected-object="displayedSelectedObject"
+                    :focused-object="selectedTreeObject"
+                    :source-schema="sourceSchema"
+                    :target-schema="targetSchema"
+                    :source-database="sourceDatabase"
+                    :target-database="targetDatabase"
+                    :source-db-type="sourceDbType"
+                    :target-db-type="targetDbType"
+                    :deploy-sql="focusedDeploySql"
+                    :deploy-sql-all="selectedDeploySql"
+                    :rollback-forward-sql="selectedForwardDeploySql"
+                    :compatibility-warnings="selectedCompatibilityWarnings"
+                    :rollback-sql="rollbackSql"
+                    :deploy-sql-mode="deploySqlMode"
+                    :dependency-graph="dependencyGraph"
+                    :permission-diffs="permissionDiffs"
+                    :rollback-completeness="rollbackCompleteness"
+                    :missing-rollback-objects="missingRollbackObjects"
+                    :can-execute="canExecuteDeploy"
+                    @update:deploy-sql-mode="switchDeploySqlMode"
+                    @execute-script="handleExecuteScript"
+                  />
+                </Pane>
+              </Splitpanes>
+            </TabsContent>
+
+            <TabsContent v-if="showRoutineResultTab" value="routines" class="mt-0 flex min-h-0 flex-1 flex-col outline-none data-[state=inactive]:hidden">
+              <div v-if="routineReadIssues.length || (selectedObject?.operationType === 'none' && selectedObject.changes?.length)" role="status" class="mx-3 mt-2 max-h-32 shrink-0 space-y-1 overflow-auto text-xs text-amber-700 dark:text-amber-300">
+                <p v-for="(issue, index) in routineReadIssues" :key="index">{{ t(issue.side === "source" ? "diff.sourceObject" : "diff.targetObject") }} — {{ issue.message }}</p>
+                <p v-for="(change, index) in selectedObject?.operationType === 'none' ? (selectedObject.changes ?? []) : []" :key="`change-${index}`">{{ change }}</p>
+              </div>
+              <div v-if="showRoutineNoDifferences" class="mx-3 mt-2 shrink-0 rounded-md border border-dashed bg-muted/20 px-3 py-2 text-center text-xs text-muted-foreground">
+                {{ t("diff.noDifferences") }}
+              </div>
+              <Splitpanes horizontal class="min-h-0 flex-1" @resized="handleSplitpanesResized">
+                <Pane :size="splitpanesSize" min-size="20">
+                  <div class="h-full overflow-auto">
+                    <SchemaDiffRoutineList
+                      :objects="routineDiffObjects"
+                      :viewing-object-id="selectedRoutineObjectId"
+                      :selectable="canDeployRoutines"
+                      :empty-text="t(isOracleRoutineComparison && !routineInventoriesComplete ? 'diff.routineUnreadable' : 'diff.noDifferences')"
+                      @toggle-selection="handleToggleObjectSelection"
+                      @view-diff="handleViewRoutineDiff"
+                    />
+                  </div>
+                </Pane>
+                <Pane :size="100 - splitpanesSize" min-size="20">
+                  <div class="flex h-full min-h-0 flex-col">
+                    <div v-if="!selectedObject || selectedObject.objectKind !== 'function'" class="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                      {{ t("diff.selectRoutineToCompare") }}
+                    </div>
+                    <div v-else-if="!selectedObject.sourceDdl && !selectedObject.targetDdl" class="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                      {{ t("diff.noDdlAvailable") }}
+                    </div>
+                    <SideBySideTextDiff
+                      v-else
+                      class="min-h-0 flex-1"
+                      :before-text="selectedObject.sourceDdl || ''"
+                      :after-text="selectedObject.targetDdl || ''"
+                      :before-label="t('diff.sourceDdl')"
+                      :after-label="t('diff.targetDdl')"
+                      :copy-before-title="t('diff.copySourceDdl')"
+                      :copy-after-title="t('diff.copyTargetDdl')"
+                      :before-available="!!selectedObject.sourceDdl"
+                      :after-available="!!selectedObject.targetDdl"
+                      @copy="copyRoutineDiffSide"
+                    />
+                  </div>
+                </Pane>
+              </Splitpanes>
+            </TabsContent>
+          </Tabs>
         </template>
 
         <!-- Deploy Review Step -->
         <template v-else-if="step === 'deploy-review'">
+          <DdlStorageToggle :database-type="targetEngineDbType" :preferences="ddlPreferences" :disabled="(!isOracleRoutineDeploy && deploySqlDirty) || deployIsBusy || showConfirmDialog || routineDdlOptionsLocked" class="px-3 py-2" />
+          <ul v-if="!isOracleRoutineDeploy && selectedGenerationIssues.length" role="alert" class="max-h-32 shrink-0 overflow-auto px-3 py-2 text-sm text-destructive">
+            <li v-for="(issue, index) in selectedGenerationIssues" :key="index">{{ issue.table ? `${issue.table} / ` : "" }}{{ issue.name }}: {{ issue.reason }}</li>
+          </ul>
           <SchemaDiffDeployStep
-            v-model:deploy-sql="selectedDeploySql"
-            :selected-objects="diffObjects"
+            v-model:deploy-sql="deployEditorSql"
+            v-model:ignore-foreign-key-checks="ignoreForeignKeyChecks"
+            v-model:continue-on-error="continueOnError"
+            :show-ignore-foreign-key-checks="isMysqlDeployTarget"
+            :selected-objects="currentTabDiffObjects"
             :target-connection-id="targetConnectionId"
             :target-database="targetDatabase"
             :target-schema="targetSchema"
-            :executing="executing"
-            :rollback-sql="rollbackSql"
+            :executing="deployIsBusy || showConfirmDialog"
+            :database-type="targetEngineDbType"
+            :routine-deployment="isOracleRoutineDeploy ? routineDeployment : null"
+            :rollback-sql="isOracleRoutineDeploy ? undefined : rollbackSql"
             :deploy-sql-mode="deploySqlMode"
             :compatibility-warnings="selectedCompatibilityWarnings"
             :rename-candidates="renameCandidates"
@@ -1185,8 +1936,20 @@ const targetConnectionInfo = computed(() => {
             :can-execute="canExecuteDeploy"
             :destructive-statement-count="destructiveStatements.length"
             @update:deploy-sql-mode="switchDeploySqlMode"
-            @back="step = 'result'"
+            @back="leaveDeployReview"
             @deploy="handleDeploy"
+            @select-routine="
+              (id) => {
+                if (routineDeployment) selectOracleRoutineDraft(routineDeployment, id);
+              }
+            "
+            @validate-routines="routineDeployment && validateOracleRoutineDeployment(routineDeployment, undefined, { compactSql: ddlPreferences.compactDdlSql })"
+            @include-package-companion="(id, source) => routineDeployment && includeOraclePackageCompanion(routineDeployment, id, source)"
+            @update-package-options="(id, options) => routineDeployment && editOraclePackageOptions(routineDeployment, id, options)"
+            @review-package-target="(id) => routineDeployment && reviewOraclePackageTargetDraft(routineDeployment, id)"
+            @refresh-routines="routineDeployment && refreshOracleRoutineDeployment(routineDeployment)"
+            @observe-routine="(id) => routineDeployment && observeOracleRoutineDeployment(routineDeployment, id)"
+            @recover-routine="(id) => routineDeployment && prepareOracleRoutineRecovery(routineDeployment, id)"
           />
         </template>
       </div>
@@ -1194,6 +1957,7 @@ const targetConnectionInfo = computed(() => {
       <!-- Footer -->
       <DialogFooter class="flex items-center justify-between">
         <div v-if="step === 'result'" class="flex items-center gap-2">
+          <DdlStorageToggle :database-type="targetEngineDbType" :preferences="ddlPreferences" :disabled="(!isOracleRoutineDeploy && deploySqlDirty) || deployIsBusy || showConfirmDialog || routineDdlOptionsLocked" />
           <Button variant="outline" size="sm" @click="step = 'config'">
             <ArrowLeft class="w-3.5 h-3.5 mr-1" />
             {{ t("diff.prevStep") }}
@@ -1206,10 +1970,13 @@ const targetConnectionInfo = computed(() => {
         <div v-else></div>
 
         <div v-if="step === 'result'" class="flex items-center gap-2">
-          <Button size="sm" :disabled="!canDeploy || executing" @click="handleDeployReview">
-            <Loader2 v-if="executing" class="w-3.5 h-3.5 mr-1 animate-spin" />
+          <p v-if="showRoutineDeployDeferredHint" class="max-w-md text-right text-[11px] text-muted-foreground">
+            {{ t("diff.routineSyncDeferredHint") }}
+          </p>
+          <Button v-else size="sm" :disabled="!canDeploy || deployIsBusy" @click="handleDeployReview">
+            <Loader2 v-if="deployIsBusy" class="w-3.5 h-3.5 mr-1 animate-spin" />
             <Play v-else class="w-3.5 h-3.5 mr-1" />
-            {{ t("diff.nextStepDeploy") }}
+            {{ deployButtonLabel }}
           </Button>
         </div>
       </DialogFooter>
@@ -1255,12 +2022,20 @@ const targetConnectionInfo = computed(() => {
                 <li v-for="(item, index) in destructiveStatements" :key="`${item.objectType}-${index}`" class="truncate" :title="item.statement">{{ item.action.toUpperCase() }} {{ item.objectType }}: {{ item.statement }}</li>
               </ul>
             </div>
+
+            <label v-if="!isOracleRoutineDeploy" class="flex items-start gap-2 rounded border border-yellow-300 bg-yellow-50 p-3 text-xs text-yellow-800 dark:border-yellow-700 dark:bg-yellow-950/30 dark:text-yellow-200" :class="executing ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'">
+              <input v-model="continueOnError" type="checkbox" class="mt-0.5 accent-primary" :disabled="executing" />
+              <span>
+                <span class="font-medium">{{ t("diff.continueOnError") }}</span>
+                <span class="mt-1 block">{{ t("diff.continueOnErrorHint") }}</span>
+              </span>
+            </label>
           </div>
 
           <DialogFooter>
             <Button variant="outline" @click="showConfirmDialog = false">{{ t("diff.cancel") }}</Button>
-            <Button variant="destructive" :disabled="executing" @click="onConfirmDeploy">
-              <Loader2 v-if="executing" class="w-3.5 h-3.5 mr-1 animate-spin" />
+            <Button variant="destructive" :disabled="deployIsBusy || (isOracleRoutineDeploy && !canExecuteDeploy)" @click="onConfirmDeploy">
+              <Loader2 v-if="deployIsBusy" class="w-3.5 h-3.5 mr-1 animate-spin" />
               {{ t("diff.confirmDeploy") }}
             </Button>
           </DialogFooter>
@@ -1274,14 +2049,24 @@ const targetConnectionInfo = computed(() => {
             <DialogTitle class="flex items-center gap-2" :class="deployResult?.success ? 'text-green-500' : 'text-destructive'">
               <AlertTriangle v-if="!deployResult?.success" class="h-5 w-5" />
               <CircleCheck v-else class="h-5 w-5" />
-              <template v-if="deployResult?.status === 'mixed'">{{ t("diff.deployMixedTitle") }}</template>
+              <template v-if="deployResult?.status === 'completed_with_errors'">{{ t("diff.deployCompletedWithErrorsTitle") }}</template>
+              <template v-else-if="deployResult?.status === 'mixed'">{{ t("diff.deployMixedTitle") }}</template>
               <template v-else-if="deployResult?.status === 'rolled_back'">{{ t("diff.deployRolledBackTitle") }}</template>
               <template v-else>{{ deployResult?.success ? t("diff.deploySuccess") : t("diff.deployFailed") }}</template>
             </DialogTitle>
           </DialogHeader>
 
           <div class="py-2">
-            <div v-if="deployResult?.status === 'mixed'" class="space-y-2">
+            <div v-if="deployResult?.status === 'completed_with_errors'" class="space-y-2">
+              <p class="text-sm text-destructive-foreground">{{ deployResult.message }}</p>
+              <div v-if="deployResult.failures?.length" class="max-h-56 space-y-2 overflow-auto rounded border border-destructive/30 bg-destructive/5 p-2 text-xs">
+                <div v-for="failure in deployResult.failures" :key="failure.index" class="space-y-1">
+                  <div class="font-medium text-destructive">{{ t("diff.statementNumber", { index: failure.index + 1 }) }}</div>
+                  <pre class="whitespace-pre-wrap font-mono">{{ failure.error }}</pre>
+                </div>
+              </div>
+            </div>
+            <div v-else-if="deployResult?.status === 'mixed'" class="space-y-2">
               <p class="text-sm text-destructive-foreground">{{ deployResult.message }}</p>
               <div class="bg-yellow-50 border border-yellow-300 p-3 rounded text-xs text-yellow-800">
                 {{ t("diff.deployMixedWarning") }}
@@ -1320,12 +2105,34 @@ const targetConnectionInfo = computed(() => {
 
       <!-- Options Panel Overlay -->
       <div v-if="showOptionsPanel" class="absolute inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center" @click.self="showOptionsPanel = false">
-        <div class="bg-card border rounded-lg shadow-lg w-[760px] max-w-[calc(100vw-2rem)] max-h-[80vh] overflow-auto p-4">
-          <div class="flex items-center justify-between mb-4">
+        <div class="flex h-[calc(100%-2rem)] max-h-[680px] w-[900px] max-w-[calc(100%-2rem)] flex-col overflow-hidden rounded-lg border bg-card shadow-lg">
+          <div class="flex shrink-0 items-center justify-between border-b px-4 py-3">
             <h3 class="text-sm font-medium">{{ t("schemaDiff.optionsTitle") }}</h3>
             <Button variant="ghost" size="sm" @click="showOptionsPanel = false" :aria-label="t('common.close')">✕</Button>
           </div>
-          <SchemaDiffOptionsPanel :options="schemaDiffPanelOptions" :option-tree="optionTree" @update:options="handleOptionsUpdate" @close="showOptionsPanel = false" />
+          <div class="min-h-0 flex-1 p-4">
+            <SchemaDiffOptionsPanel :options="schemaDiffPanelOptions" :option-tree="optionTree" @update:options="handleOptionsUpdate" @close="showOptionsPanel = false" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Config selector overlay (save/load named configs) -->
+      <div v-if="showConfigSelector" class="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm" @click.self="showConfigSelector = false">
+        <div class="max-h-[80vh] w-[720px] max-w-[calc(100vw-2rem)] overflow-auto rounded-lg border bg-card p-4 shadow-lg">
+          <div class="mb-4 flex items-center justify-between gap-2">
+            <h3 class="text-sm font-medium">{{ t("diff.loadConfig") }}</h3>
+            <Button variant="ghost" size="sm" :aria-label="t('common.close')" @click="showConfigSelector = false">✕</Button>
+          </div>
+          <SchemaDiffConfigSelector
+            :configs="configs"
+            :active-config-id="activeConfigId"
+            @update:active-config-id="handleSelectActiveConfig"
+            @create="handleCreateNamedConfig"
+            @rename="handleRenameNamedConfig"
+            @delete="handleDeleteNamedConfig"
+            @duplicate="handleDuplicateNamedConfig"
+            @import="handleImportNamedConfigs"
+          />
         </div>
       </div>
 

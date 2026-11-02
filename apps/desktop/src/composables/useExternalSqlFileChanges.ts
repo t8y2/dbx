@@ -4,6 +4,8 @@ import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { externalSqlFileContentMatchesBaseline, externalSqlFileMetadataMatches, externalSqlFileVersionWasIgnored } from "@/lib/sql/externalSqlFileChanges";
 import { useQueryStore } from "@/stores/queryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { externalSqlEditorMaxBytes } from "@/lib/sql/sqlFileOpen";
 import type { ExternalSqlFileSnapshot } from "@/lib/backend/tauri";
 import type { QueryTab } from "@/types/database";
 
@@ -64,6 +66,7 @@ function delay(ms: number) {
 export function useExternalSqlFileChanges(options: UseExternalSqlFileChangesOptions) {
   const { t } = useI18n();
   const queryStore = useQueryStore();
+  const settingsStore = useSettingsStore();
   const pendingPrompt = ref<ExternalSqlFilePrompt | null>(null);
   const checkingTabIds = new Set<string>();
   let promptResolver: ((decision: ExternalSqlFilePromptDecision) => void) | null = null;
@@ -82,13 +85,14 @@ export function useExternalSqlFileChanges(options: UseExternalSqlFileChangesOpti
     return status;
   }
 
-  async function readStableSnapshot(path: string) {
+  async function readStableSnapshot(path: string, encoding?: QueryTab["externalSqlEncoding"]) {
+    const maxSizeBytes = externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb);
     try {
-      return await api.readExternalSqlFileSnapshot(path);
+      return await api.readExternalSqlFileSnapshot(path, maxSizeBytes, encoding);
     } catch (firstError) {
       await delay(MISSING_FILE_RECHECK_DELAY_MS);
       try {
-        return await api.readExternalSqlFileSnapshot(path);
+        return await api.readExternalSqlFileSnapshot(path, maxSizeBytes, encoding);
       } catch {
         throw firstError;
       }
@@ -112,7 +116,7 @@ export function useExternalSqlFileChanges(options: UseExternalSqlFileChangesOpti
 
       if (!forceContentCheck && !tab.externalSqlFileMissing && externalSqlFileMetadataMatches(tab.externalSqlFileVersion, status)) return null;
 
-      const snapshot = await readStableSnapshot(tab.externalSqlPath);
+      const snapshot = await readStableSnapshot(tab.externalSqlPath, tab.externalSqlEncoding);
       if (externalSqlFileContentMatchesBaseline(tab, snapshot) || (!tab.externalSqlFileVersion && tab.sql === snapshot.content)) {
         queryStore.updateExternalSqlFileVersion(tab.id, snapshot.version);
         return null;
@@ -149,7 +153,7 @@ export function useExternalSqlFileChanges(options: UseExternalSqlFileChangesOpti
   async function loadLatest(tab: QueryTab) {
     if (!tab.externalSqlPath) return false;
     try {
-      const snapshot = await readStableSnapshot(tab.externalSqlPath);
+      const snapshot = await readStableSnapshot(tab.externalSqlPath, tab.externalSqlEncoding);
       queryStore.applyExternalSqlFileSnapshot(tab.id, snapshot.content, snapshot.version);
       return true;
     } catch (error: any) {

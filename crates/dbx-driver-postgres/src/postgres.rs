@@ -12798,6 +12798,7 @@ mod tests {
             "EXECUTE DIRECT ON (dn_6001_6002_6003) $$ SELECT indexname FROM pg_indexes $$;",
             "-- run on every datanode\nexecute direct on (dn_1, dn_2) 'SELECT 1'",
             "EXECUTE /* route to datanode */ DIRECT ON (dn_1) 'SELECT 1'",
+            "  execute direct on (dn_1) 'SELECT 1'",
         ] {
             assert!(postgres_statement_returns_rows(sql), "expected rows for: {sql}");
         }

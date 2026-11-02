@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
+import PluginOpenUrlDialog from "./PluginOpenUrlDialog.vue";
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { AlertTriangle, Loader2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
@@ -58,6 +60,7 @@ const emit = defineEmits<{
 const { t, locale: appLocale } = useI18n();
 const { isDark, themeRevision } = useTheme();
 const settingsStore = useSettingsStore();
+const urlDialog = ref<InstanceType<typeof PluginOpenUrlDialog>>();
 const openAiConversation = inject(OPEN_PLUGIN_AI_CONVERSATION, undefined);
 // Per-plugin grant for `script-src 'unsafe-eval'`; flipping it rebuilds the
 // sandbox document (and must not reuse a doc cached under the other setting).
@@ -412,10 +415,12 @@ interface TauriFileDropPayload {
 }
 
 let dropDragActive = false;
+let lastDragPoint: { x: number; y: number } | null = null;
 
-function forwardDragState(active: boolean): void {
+function forwardDragState(active: boolean, position?: { x: number; y: number }): void {
   dropDragActive = active;
-  bridge?.forwardDragState(active);
+  lastDragPoint = active && position ? { x: position.x, y: position.y } : null;
+  bridge?.forwardDragState(active, position);
 }
 
 function onHostFileDrop(event: Event): void {
@@ -432,20 +437,35 @@ function onHostFileDrop(event: Event): void {
   }
   // Overlay titlebar: the webview starts at the window origin, so physical
   // window coordinates divide straight into CSS pixels via devicePixelRatio.
-  const scale = window.devicePixelRatio || 1;
-  if (document.elementFromPoint(position.x / scale, position.y / scale) !== frame) {
+  // A non-finite ratio (e.g. a NaN reading) must behave like 1 so a bad
+  // reading cannot turn every forwarded coordinate into NaN.
+  const dpr = window.devicePixelRatio;
+  const scale = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  const cssX = position.x / scale;
+  const cssY = position.y / scale;
+  if (document.elementFromPoint(cssX, cssY) !== frame) {
     if (dropDragActive) forwardDragState(false);
     return;
   }
   // Claim the drop so the host fallback (open as SQL/database) does not run.
   event.preventDefault();
+  const rect = frame.getBoundingClientRect();
+  const point = {
+    x: cssX - rect.left,
+    y: cssY - rect.top,
+  };
   if (payload.type !== "drop") {
-    if (!dropDragActive) forwardDragState(true);
+    if (dropDragActive && lastDragPoint && Math.abs(lastDragPoint.x - point.x) < 1 && Math.abs(lastDragPoint.y - point.y) < 1) {
+      return;
+    }
+    forwardDragState(true, point);
     return;
   }
-  forwardDragState(false);
   const paths = (payload.paths || []).filter((path) => typeof path === "string" && path);
-  if (!paths.length || !bridge) return;
+  if (!paths.length || !bridge) {
+    forwardDragState(false);
+    return;
+  }
   // Pin the owner and generation before the await: the expansion runs on a
   // Rust blocking thread and can land after a teardown or identity rebuild.
   const pluginId = props.plugin.manifest.id;
@@ -467,10 +487,17 @@ function onHostFileDrop(event: Event): void {
         });
         return;
       }
-      if (files.length) bridge?.forwardFileDrop(files, { dropId, truncated });
-      else console.error("[DBX][plugin-workbench:drop] no dropped files could be opened", paths);
+      if (files.length) {
+        bridge?.forwardFileDrop(files, { dropId, truncated, position: point });
+      } else {
+        console.error("[DBX][plugin-workbench:drop] no dropped files could be opened", paths);
+      }
     } catch (error) {
       console.error("[DBX][plugin-workbench:drop]", error);
+    } finally {
+      if (!disposed && generation === loadGeneration) {
+        forwardDragState(false);
+      }
     }
   })();
 }
@@ -577,7 +604,7 @@ function createBridge() {
               databaseType: connection.db_type,
               connected,
               isConnected: connected,
-              readOnly: connection.read_only === true,
+              readOnly: mysqlDataCharsetEnabled(connection) || connection.read_only === true,
               database: connection.database,
               schema: connection.default_schema,
               providerId: connection.plugin_connection_provider ?? "",
@@ -602,7 +629,7 @@ function createBridge() {
               isConnected: connected,
               providerId: connection.plugin_connection_provider ?? "",
               connectionType: connection.plugin_connection_type,
-              readOnly: connection.read_only === true,
+              readOnly: mysqlDataCharsetEnabled(connection) || connection.read_only === true,
               database: connection.database,
               schema: connection.default_schema,
               // #193b — dock/tab titles bound to the connection (dock first), so plugins can label session rows after renamed terminals.
@@ -624,7 +651,7 @@ function createBridge() {
             databaseType: connection.db_type,
             connected,
             isConnected: connected,
-            readOnly: connection.read_only === true,
+            readOnly: mysqlDataCharsetEnabled(connection) || connection.read_only === true,
             database: connection.database,
             schema: connection.default_schema,
             providerId: connection.plugin_connection_provider ?? "",
@@ -660,6 +687,7 @@ function createBridge() {
       saveFile: (_pluginId, request, data) => savePluginFile(request, data),
       downloadFile: isTauriRuntime() ? downloadPluginFile : undefined,
       cancelDownload: isTauriRuntime() ? cancelPluginDownload : undefined,
+      openUrl: (url) => (urlDialog.value ? urlDialog.value.request(url) : Promise.reject(new Error("Host URL consent is unavailable"))),
       copyText: (_pluginId, text) => copyToClipboard(text),
       // Permission-gated in the bridge (host.clipboard:read); the helper
       // prefers the Tauri clipboard plugin and falls back to the Web Clipboard.
@@ -761,6 +789,7 @@ async function loadWorkbench() {
   // An identity rebuild swaps the plugin this component serves; retire the
   // previous plugin's handles first or they would outlive their owner.
   disposeLocalFileHandles();
+  urlDialog.value?.cancel();
   bridge?.dispose();
   bridge = undefined;
   loading.value = true;
@@ -885,6 +914,8 @@ defineExpose({ requestClose });
 
 onBeforeUnmount(() => {
   disposed = true;
+  dropDragActive = false;
+  lastDragPoint = null;
   loadGeneration += 1;
   // An unanswered consent dialog must not leave the plugin's generation
   // request (and its busy lock) hanging on a dead workbench.
@@ -904,6 +935,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="relative flex size-full overflow-hidden" :class="hostSurfaceClass">
+    <PluginOpenUrlDialog ref="urlDialog" :plugin-id="plugin.manifest.id" :plugin-name="plugin.manifest.name" :permissions="plugin.manifest.permissions" />
     <div v-if="loading" class="absolute inset-0 z-10 flex items-center justify-center text-sm text-muted-foreground" :class="overlayClass">
       <Loader2 class="mr-2 size-4 animate-spin" />
       {{ t("pluginPlatform.loadingTitle", { title }) }}

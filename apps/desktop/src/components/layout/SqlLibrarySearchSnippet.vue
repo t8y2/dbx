@@ -43,5 +43,15 @@ const totalMatches = computed(() => searchResult.value.totalMatches);
 <template>
   <!-- The class falls through to the shared component's root, keeping the
        historical `.dbx-sql-library-snippets` hook (and its spec) working. -->
-  <SqlSearchMatchSnippet class="dbx-sql-library-snippets" :matches="matches" :total-matches="totalMatches" :depth="depth" :initial-visible="COLLAPSED_MATCHES" @expanded-change="(next) => (expanded = next)" @select-match="(match) => emit('selectMatch', match)" />
+  <SqlSearchMatchSnippet
+    class="dbx-sql-library-snippets"
+    :query="query"
+    :matches="matches"
+    :preview-limit="EXPANDED_MATCHES"
+    :total-matches="totalMatches"
+    :depth="depth"
+    :initial-visible="COLLAPSED_MATCHES"
+    @expanded-change="(next) => (expanded = next)"
+    @select-match="(match) => emit('selectMatch', match)"
+  />
 </template>

@@ -20,6 +20,7 @@ pub(super) struct RoutineWriteBinding {
     pub require_absent: bool,
     pub compare: Option<super::plan::ComparePreflight>,
     pub prerequisite_operation_ids: Vec<String>,
+    pub package_effect_operation_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -66,6 +67,13 @@ impl RoutineOperationRecord {
                 format!("{} {}:{} {}", message.attribute, message.line, message.position, message.text)
             }));
             details.extend(readback.issues.iter().map(|issue| issue.message.clone()));
+            if let Some(companion) = &readback.package_companion {
+                details.push(format!("Package companion {:?}: {:?}", companion.identity.kind, companion.state));
+                details.extend(companion.compiler_messages.iter().map(|message| {
+                    format!("{} {}:{} {}", message.attribute, message.line, message.position, message.text)
+                }));
+                details.extend(companion.issues.iter().map(|issue| issue.message.clone()));
+            }
         }
         details.join("\n")
     }
@@ -85,6 +93,7 @@ struct StoredOperation {
     // Later observations may describe a different version of the same object.
     // Dependents remain bound to the first fully verified deployment result.
     verified_post_state: Option<RoutineReadback>,
+    acknowledged_post_state: Option<RoutineReadback>,
     // Web session tokens remain private, in memory, and outside Debug/Serialize.
     owner_scope: Option<String>,
     client_retained: bool,
@@ -262,6 +271,38 @@ impl RoutineOperationRegistry {
         }).collect()
     }
 
+    pub(super) fn package_effects_for_write(
+        &self,
+        operation_id: &str,
+    ) -> Result<Vec<(RoutineWriteBinding, RoutineReadback)>, String> {
+        let operations = self.operations.lock().unwrap_or_else(|error| error.into_inner());
+        let operation = operations
+            .get(operation_id)
+            .filter(|operation| operation.owner_scope == current_credential_owner())
+            .ok_or("Original package operation is unavailable; do not replay the write")?;
+        let mut effects = Vec::new();
+        for id in &operation.binding.package_effect_operation_ids {
+            let related = operations
+                .get(id)
+                .filter(|related| {
+                    related.owner_scope == operation.owner_scope
+                        && related.binding.target == operation.binding.target
+                        && related.binding.expected_config == operation.binding.expected_config
+                })
+                .ok_or(
+                    "An approved package step is unavailable on the original target; validate the remaining draft",
+                )?;
+            match related.record.lifecycle {
+                RoutineOperationLifecycle::Prepared => {},
+                RoutineOperationLifecycle::Running | RoutineOperationLifecycle::Unproven => return Err("An approved related package step has not established its terminal result; observe its original operation ID".into()),
+                RoutineOperationLifecycle::Terminal if !related.record.dispatched => return Err("A related package approval did not complete; validate the remaining plan without replaying completed steps".into()),
+                RoutineOperationLifecycle::Terminal if related.record.verified() => effects.push((related.binding.clone(),related.verified_post_state.clone().ok_or("The related package step has no immutable verified pair result")?)),
+                RoutineOperationLifecycle::Terminal => return Err("An approved package step failed verification; correct its body or refresh the remaining plan without replaying completed steps".into()),
+            }
+        }
+        Ok(effects)
+    }
+
     pub(super) fn mark_dispatched(&self, operation_id: &str) -> Result<(), String> {
         let mut operations = self.operations.lock().unwrap_or_else(|error| error.into_inner());
         let operation = operations.get(operation_id).ok_or("Routine operation record is unavailable")?;
@@ -279,12 +320,31 @@ impl RoutineOperationRegistry {
         readback: Option<RoutineReadback>,
         error: Option<String>,
     ) {
-        self.update_record(operation_id, |record| {
+        let mut operations = self.operations.lock().unwrap_or_else(|error| error.into_inner());
+        self.update_record_locked_with_receipt(&mut operations, operation_id, true, |record| {
             record.lifecycle = RoutineOperationLifecycle::Terminal;
             record.acknowledged = acknowledged;
             record.readback = readback;
             record.error = error;
         });
+    }
+
+    pub(super) fn recovery_post_state(&self, operation_id: &str) -> Result<RoutineReadback, String> {
+        let operations = self.operations.lock().unwrap_or_else(|error| error.into_inner());
+        let operation = operations
+            .get(operation_id)
+            .filter(|operation| operation.owner_scope == current_credential_owner())
+            .ok_or("Original operation is unavailable; only observe its original ID")?;
+        if operation.record.lifecycle != RoutineOperationLifecycle::Terminal
+            || !operation.record.dispatched
+            || !operation.record.acknowledged
+        {
+            return Err("Recovery requires an acknowledged terminal write on the original target".into());
+        }
+        operation
+            .acknowledged_post_state
+            .clone()
+            .ok_or("The acknowledged write has no immutable post-state; refresh and review the target instead".into())
     }
 
     pub(super) fn not_started(&self, operation_id: &str, error: String) {
@@ -325,7 +385,7 @@ mod tests {
     pub(super) fn binding() -> RoutineWriteBinding {
         RoutineWriteBinding { target: RoutineEndpoint { connection_id: "target".into(), database: "tenant".into(), schema: "OWNER".into(), database_type: DatabaseType::OceanbaseOracle, generation: 1 },
             identity: RoutineIdentity { owner: "OWNER".into(), name: "Shared.Name".into(), kind: ObjectSourceKind::Function }, sql: "approved SQL".into(), goal: RoutineReadbackGoal::Inspect,
-            expected_config: serde_json::from_value(serde_json::json!({"id":"target", "name":"test", "db_type": DatabaseType::OceanbaseOracle, "host":"localhost", "port":2881, "username":"OWNER", "password":"", "database":null})).unwrap(), require_absent: false, compare: None, prerequisite_operation_ids: Vec::new() }
+            expected_config: serde_json::from_value(serde_json::json!({"id":"target", "name":"test", "db_type": DatabaseType::OceanbaseOracle, "host":"localhost", "port":2881, "username":"OWNER", "password":"", "database":null})).unwrap(), require_absent: false, compare: None, prerequisite_operation_ids: Vec::new(), package_effect_operation_ids:Vec::new() }
     }
 
     pub(super) fn verified_readback() -> RoutineReadback {
@@ -335,9 +395,35 @@ mod tests {
             exists: Some(true),
             version: None,
             source: Some("expected source".into()),
+            source_origin: None,
+            package_companion: None,
             definition_matches: Some(true),
             compiler_messages: Vec::new(),
             issues: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn package_and_body_share_the_existing_physical_namespace_lock_without_a_second_lock_key() {
+        let registry = RoutineOperationRegistry::default();
+        let mut specification = binding();
+        specification.identity.kind = crate::db::ObjectSourceKind::Package;
+        let specification = registry.prepare(specification);
+        registry.begin(&specification.operation_id, "approved SQL").unwrap();
+        let mut body = binding();
+        body.identity.kind = crate::db::ObjectSourceKind::PackageBody;
+        body.target.connection_id = "another-connection".into();
+        body.expected_config.id = "another-connection".into();
+        body.expected_config.username = "ANOTHER_LOGIN".into();
+        for unknown in [false, true] {
+            if unknown {
+                registry.mark_dispatched(&specification.operation_id).unwrap();
+                registry.waiting_lost(&specification.operation_id, "outcome unknown".into());
+            }
+            let body = registry.prepare(body.clone());
+            assert!(
+                matches!(registry.begin(&body.operation_id, "approved SQL").unwrap(), BeginRoutineOperation::Existing(record) if record.lifecycle == RoutineOperationLifecycle::Terminal && !record.dispatched && record.error.as_deref().is_some_and(|error| error.contains("held")))
+            );
         }
     }
 

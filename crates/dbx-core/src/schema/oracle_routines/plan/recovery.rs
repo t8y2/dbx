@@ -1,5 +1,8 @@
 use super::*;
 
+mod package_recovery;
+pub(in crate::schema::oracle_routines) use package_recovery::prepare_package_recovery;
+
 /// Recovery is a new, explicitly approved DDL operation against the original
 /// operation's recorded post-state. It never unlocks an unknown request.
 pub async fn prepare_oracle_routine_recovery_core(
@@ -7,7 +10,7 @@ pub async fn prepare_oracle_routine_recovery_core(
     operation_id: &str,
 ) -> Result<OracleRoutinePlan, String> {
     let _original_pin = state.routine_operations.pin(operation_id)?;
-    let original = state
+    let mut original = state
         .routine_operations
         .observe(operation_id)
         .operation
@@ -16,10 +19,17 @@ pub async fn prepare_oracle_routine_recovery_core(
         return Err("Recovery requires the original write's terminal evidence; only observe its original ID".into());
     }
     let binding = state.routine_operations.binding_for_readback(operation_id)?;
+    if package::is_package(&original.identity.kind) {
+        let config = checked_endpoint(state, &original.target).await?;
+        let catalog = LiveCatalog { state, endpoint: &original.target, config: &config };
+        let (_, origin) = routine_source_origin(&config)?;
+        return prepare_package_recovery(&state.routine_operations, operation_id, &catalog, &config, origin).await;
+    }
+    original.readback = Some(state.routine_operations.recovery_post_state(operation_id)?);
     check_recovery_receipt(&original, &binding.goal)?;
     let before =
         binding.compare.as_ref().ok_or("This operation has no complete comparison recovery material")?.target.clone();
-    let current = terminal_baseline(state, operation_id, &original.target, &original.identity)?;
+    let current = correction_baseline(original.clone(), &original.target, &original.identity)?;
     let config = checked_endpoint(state, &original.target).await?;
     let catalog = LiveCatalog { state, endpoint: &original.target, config: &config };
     let (_, origin) = routine_source_origin(&config)?;
@@ -40,6 +50,7 @@ pub async fn prepare_oracle_routine_recovery_core(
                 require_absent: step.action == RoutinePlanAction::Create,
                 compare: result.preflight.take(),
                 prerequisite_operation_ids: Vec::new(),
+                package_effect_operation_ids: Vec::new(),
             },
             None,
         )?);
@@ -101,6 +112,7 @@ async fn recovery_plan(
         incoming_callers: Vec::new(),
         issues: Vec::new(),
         operation: None,
+        package_impact: None,
     };
     let mut preflight = None;
     let prepared: Result<(), String> = async {
@@ -130,7 +142,7 @@ async fn recovery_plan(
             step.issues.extend(resolution.issues);
             resolution.proofs
         } else { Vec::new() };
-        preflight = Some(ComparePreflight { source: None, target: current.clone(), proofs, incoming: Some(incoming), selected: vec![identity.clone()] });
+        preflight = Some(ComparePreflight { source: None, target: current.clone(), proofs, incoming: Some(incoming), selected: vec![identity.clone()], package:None });
         Ok(())
     }.await;
     if let Err(error) = prepared {
@@ -216,6 +228,8 @@ mod tests {
                 exists: Some(true),
                 version: None,
                 source: Some("approved".into()),
+                source_origin: None,
+                package_companion: None,
                 definition_matches: Some(true),
                 compiler_messages: Vec::new(),
                 issues: Vec::new(),

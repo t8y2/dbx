@@ -379,6 +379,30 @@ async fn statistics_fallback_reuses_ephemeral_session_and_closes_it() {
 }
 
 #[tokio::test]
+async fn oceanbase_statistics_routes_through_agent_and_preserves_foreground() {
+    for mode in ["success", "fallback", "sql"] {
+        let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+        let foreground = fixture.foreground().await;
+        std::fs::write(fixture.control_path("statistics"), mode).unwrap();
+        let result = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await;
+        let queries = fixture.requests("execute_query");
+        assert!(queries[0]["params"]["sql"].as_str().unwrap().contains("DBA_OB_TABLET_REPLICAS"));
+        if mode == "sql" {
+            assert!(result.is_err());
+            assert_eq!(queries.len(), 2);
+        } else {
+            let rows = result.unwrap();
+            assert_eq!(rows[0].estimated_rows, Some(12));
+            assert_eq!(rows[0].total_bytes, if mode == "success" { Some(4096) } else { None });
+            assert_eq!(queries.len(), if mode == "success" { 1 } else { 2 });
+        }
+        fixture.wait_for_requests("close_session", 1).await;
+        fixture.assert_only_foreground_remains(&foreground).await;
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn statistics_sql_error_and_timeout_clean_up_without_replaying() {
     for failure in ["sql", "timeout"] {
         let fixture = AgentFixture::new(DatabaseType::Dameng).await;

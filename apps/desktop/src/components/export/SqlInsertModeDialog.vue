@@ -4,11 +4,14 @@ import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import type { SqlExportColumnSelection, SqlExportOptions, SqlInsertMode } from "@/lib/export/sqlInsertMode";
+import ExportExecutionMode from "./ExportExecutionMode.vue";
+import type { ManualExportMode } from "@/lib/export/manualExportQueue";
 
 const { t } = useI18n();
 const open = defineModel<boolean>("open", { default: false });
-const props = defineProps<{ allowSplit?: boolean; columns?: SqlExportColumnSelection[] }>();
+const props = defineProps<{ allowSplit?: boolean; columns?: SqlExportColumnSelection[]; showExecutionMode?: boolean }>();
 const selected = ref<SqlInsertMode>("batch");
+const executionMode = ref<ManualExportMode>("immediate");
 const selectedColumnIndexes = ref(props.columns?.map((column) => column.sourceIndex) ?? []);
 const splitSqlOutput = ref(false);
 const splitSqlPartMaxMb = ref(100);
@@ -44,6 +47,7 @@ function onConfirm() {
     insertMode: selected.value,
     splitMaxMb: props.allowSplit && splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
     ...(columnSelectionEnabled.value ? { selectedColumns: selectedColumns.value } : {}),
+    ...(props.showExecutionMode ? { executionMode: executionMode.value } : {}),
   });
 }
 
@@ -69,11 +73,11 @@ function onOpenChange(value: boolean) {
 
 <template>
   <Dialog v-model:open="open" @update:open="onOpenChange">
-    <DialogContent class="sm:max-w-md" @interact-outside.prevent>
+    <DialogContent class="grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-md" @interact-outside.prevent>
       <DialogHeader>
         <DialogTitle>{{ t("grid.sqlInsertModeTitle") }}</DialogTitle>
       </DialogHeader>
-      <div class="space-y-3 py-2">
+      <div class="min-h-0 space-y-3 overflow-y-auto py-2">
         <p class="text-sm text-muted-foreground">{{ t("grid.sqlInsertModePrompt") }}</p>
         <label class="flex cursor-pointer items-start gap-3 rounded-md border p-3 transition-colors hover:bg-accent/50">
           <input v-model="selected" type="radio" value="batch" class="mt-0.5 h-4 w-4 shrink-0" data-sql-insert-mode="batch" />
@@ -123,6 +127,7 @@ function onOpenChange(value: boolean) {
             {{ t("databaseExport.splitSqlOutputDescription", { min: MIN_SPLIT_SQL_PART_MB, max: MAX_SPLIT_SQL_PART_MB }) }}
           </p>
         </div>
+        <ExportExecutionMode v-if="props.showExecutionMode" v-model="executionMode" />
       </div>
       <DialogFooter>
         <Button variant="outline" @click="onCancel">{{ t("common.cancel") }}</Button>

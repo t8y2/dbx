@@ -63,7 +63,7 @@ export function hasRuleLineBreak(ctx: SqlLayoutContext, nodes: AstNode[]): boole
       case "between_predicate":
         return hasRuleLineBreak(ctx, [...node.expr1, ...node.expr2]);
       case "case_expression":
-        return hasRuleLineBreak({ ...ctx, listKind: "general", logicalContext: "expression" }, [...node.expr, ...node.clauses]);
+        return ruleListLayout({ ...ctx, listKind: "general" }) === "vertical" || hasRuleLineBreak({ ...ctx, listKind: "general", logicalContext: "expression" }, [...node.expr, ...node.clauses]);
       case "case_when":
         return hasRuleLineBreak(ctx, [...node.condition, ...node.result]);
       case "case_else":

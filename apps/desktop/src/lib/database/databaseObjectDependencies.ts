@@ -1,6 +1,6 @@
 import type { DatabaseType, TreeNode } from "@/types/database";
 import { xuguDependencyProvider } from "@/lib/database/xuguObjectDependencies";
-import { oracleDependencyProvider } from "@/lib/database/oracleObjectDependencies";
+import { oracleDependencyProvider, dmTriggerDependencyProvider } from "@/lib/database/oracleObjectDependencies";
 import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 
 /**
@@ -8,7 +8,7 @@ import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilit
  * Keeping this contract small lets providers remain independent of Vue state
  * and makes it possible to test them without constructing a full tree node.
  */
-export type DependencyTreeNode = Pick<TreeNode, "type" | "schema" | "objectName" | "label" | "parentType" | "parentName" | "parentSchema">;
+export type DependencyTreeNode = Pick<TreeNode, "type" | "schema" | "objectName" | "label" | "parentType" | "parentName" | "parentSchema" | "meta">;
 
 /**
  * Database-specific dependency inspection contract.
@@ -27,6 +27,7 @@ const PROVIDERS: Partial<Record<DatabaseType, DatabaseDependencyProvider>> = {
   xugu: xuguDependencyProvider,
   oracle: oracleDependencyProvider,
   "oceanbase-oracle": oracleDependencyProvider,
+  dameng: dmTriggerDependencyProvider,
 };
 
 export function databaseDependencyProviderFor(databaseType?: DatabaseType): DatabaseDependencyProvider | null {

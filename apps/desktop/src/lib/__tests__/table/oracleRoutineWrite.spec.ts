@@ -28,6 +28,50 @@ beforeEach(() => {
 });
 
 describe("Oracle routine source save", () => {
+  it.each(["PACKAGE", "PACKAGE_BODY"] as const)("routes ordinary %s saves through the same prepared operation instead of direct SQL", async (kind) => {
+    const { prepareObjectSourceSave } = await import("@/lib/table/objectSourceEditor");
+    const source = { ...input(), identity: { ...input().identity, kind }, sql: `CREATE OR REPLACE ${kind.replaceAll("_", " ")} "Owner.Mixed"."Mixed.Func" AS END "Mixed.Func";` };
+    const operation = record({ identity: source.identity });
+    operation.readback = { ...operation.readback!, identity: source.identity, source: source.sql };
+    vi.mocked(api.prepareOracleRoutineSave).mockResolvedValue({ ...operation, lifecycle: "prepared", dispatched: false, acknowledged: false, readback: null });
+    vi.mocked(api.executeOracleRoutineOperation).mockResolvedValue(operation);
+    const save = await prepareObjectSourceSave(source.connectionId, source.database, "oceanbase-oracle", [source.sql], source.identity.owner, { objectType: kind, name: source.identity.name });
+    expect(api.prepareOracleRoutineSave).toHaveBeenCalledExactlyOnceWith(source);
+    expect(api.executeOracleRoutineOperation).not.toHaveBeenCalled();
+    await expect(save()).resolves.toEqual(operation);
+    expect(api.executeOracleRoutineOperation).toHaveBeenCalledExactlyOnceWith(operation.operationId, source.sql);
+    expect(api.executeQuery).not.toHaveBeenCalled();
+    expect(api.executeScript).not.toHaveBeenCalled();
+  });
+
+  it("does not prepare or dispatch a specification while its body has an unknown original save", async () => {
+    const { prepareObjectSourceSave } = await import("@/lib/table/objectSourceEditor");
+    const source = input();
+    const unknown = record({ identity: { ...source.identity, kind: "PACKAGE_BODY" }, lifecycle: "unproven", acknowledged: false });
+    vi.mocked(api.executeOracleRoutineOperation).mockResolvedValue(unknown);
+    vi.mocked(api.observeOracleRoutineOperation).mockResolvedValue({ operation: unknown, lifecycle: "unproven", error: null });
+    const body = await prepareObjectSourceSave(source.connectionId, source.database, "oracle", ["body draft"], source.identity.owner, { objectType: "PACKAGE_BODY", name: source.identity.name });
+    await expect(body()).rejects.toMatchObject({ operationId: unknown.operationId });
+    const spec = await prepareObjectSourceSave(source.connectionId, source.database, "oracle", ["new specification draft"], source.identity.owner, { objectType: "PACKAGE", name: source.identity.name });
+    await expect(spec()).rejects.toMatchObject({ operationId: unknown.operationId });
+    expect(api.prepareOracleRoutineSave).toHaveBeenCalledTimes(1);
+    expect(api.executeOracleRoutineOperation).toHaveBeenCalledTimes(1);
+    expect(api.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("keeps specification success separate from its invalid companion body and includes the actual compiler error", async () => {
+    const { objectSourceSaveSuccessMessage } = await import("@/lib/table/objectSourceEditor");
+    const operation = record();
+    operation.readback!.packageCompanion = {
+      ...operation.readback!,
+      identity: { ...operation.identity, kind: "PACKAGE_BODY" },
+      state: "invalid",
+      version: { identity: { ...operation.identity, kind: "PACKAGE_BODY" }, status: "INVALID", objectId: "2", lastDdlTime: "1" },
+      compilerMessages: [{ attribute: "ERROR", line: 8, position: 4, text: "PLS-00323" }],
+    };
+    expect(objectSourceSaveSuccessMessage("saved", operation)).toBe("saved\nPACKAGE BODY: INVALID\nERROR 8:4 PLS-00323");
+  });
+
   it("prepares before the real production confirmation and dispatches only the exact approved SQL", async () => {
     const { prepareObjectSourceSave } = await import("@/lib/table/objectSourceEditor");
     const { executeWithProductionSqlGuard } = await import("@/lib/database/productionExecutionGuard");

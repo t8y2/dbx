@@ -19,9 +19,16 @@ export function sshLocalPortState(value: unknown): SshLocalPortState {
   return normalizeSshLocalPort(value) === undefined ? "invalid" : "valid";
 }
 
-/** Like `normalizeSshLocalPort`, but keeps an out-of-range value as a number so form validation can report it. */
+// The HTML number input grammar (a valid floating-point number), so anything the field can display parses as a number.
+const FLOATING_POINT_NUMBER = /^\s*-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?\s*$/;
+
+/**
+ * Keeps a finite number, even an out-of-range one, so form validation can report it. Anything else is unset: a number
+ * input shows it as empty, and an empty-looking field must not fail validation.
+ */
 export function editableSshLocalPort(value: unknown): number | undefined {
-  return sshLocalPortState(value) === "unset" ? undefined : toPortNumber(value);
+  const port = typeof value === "string" && FLOATING_POINT_NUMBER.test(value) ? Number(value) : value;
+  return typeof port === "number" && Number.isFinite(port) ? port : undefined;
 }
 
 // These types never bind the static tunnel on their primary path: SQLite reaches its remote worker over SSH, and
@@ -39,9 +46,11 @@ function isRocketMqConnection(config: SshLocalPortConnection, mqSystemKind?: str
 /**
  * Whether the connection's primary tunnel can listen on a fixed local port (Redis Cluster and Sentinel route per node).
  * `mqSystemKind` is the message-queue kind picked in the form, which the backend reads from `external_config.systemKind`.
+ * `pluginProxyRoute` is the selected plugin provider's `proxy_route` flag: those providers connect through a SOCKS5 route.
  */
-export function sshLocalPortSupportedForConnection(config: SshLocalPortConnection, mqSystemKind?: string): boolean {
+export function sshLocalPortSupportedForConnection(config: SshLocalPortConnection, mqSystemKind?: string, pluginProxyRoute?: boolean): boolean {
   if (NO_STATIC_TUNNEL_DB_TYPES.has(config.db_type) || isCloudflareD1Connection(config) || isRocketMqConnection(config, mqSystemKind)) return false;
+  if (config.db_type === "plugin" && pluginProxyRoute === true) return false;
   return config.db_type !== "redis" || (config.redis_connection_mode !== "cluster" && config.redis_connection_mode !== "sentinel");
 }
 

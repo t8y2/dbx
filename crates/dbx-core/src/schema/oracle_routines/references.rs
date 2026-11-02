@@ -3,25 +3,68 @@
 //! is never used as proof that a higher-priority name does not exist.
 use super::*;
 use dbx_sql::object_source_sql::{
-    OracleDraftIssue, OracleDraftReference, OracleDraftReferenceRole, OracleRoutineDraftAnalysis,
+    analyze_oracle_routine_draft, EditableObjectSourceSqlInput, OracleDraftIssue, OracleDraftPackageMemberKind,
+    OracleDraftReference, OracleDraftReferenceRole, OracleRoutineDraftAnalysis,
 };
 use std::collections::BTreeSet;
 
 #[derive(Clone, Serialize)]
-pub(super) struct CatalogReadProof {
-    pub sql: String,
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<Value>>,
+pub(super) enum CatalogReadProof {
+    Query { sql: String, columns: Vec<String>, rows: Vec<Vec<Value>> },
+    Source { endpoint: RoutineEndpoint, identity: RoutineIdentity, source: String, origin: SourceOrigin },
 }
 
 impl CatalogReadProof {
+    fn manifest_value(&self) -> Value {
+        match self {
+            Self::Query { sql, columns, rows } => serde_json::json!({ "Query": {
+                "sql": sql, "columns": columns,
+                "rows": rows.iter().map(|row| row.iter().map(lossless_catalog_value).collect::<Vec<_>>()).collect::<Vec<_>>(),
+            }}),
+            Self::Source { .. } => serde_json::json!(self),
+        }
+    }
+
     pub async fn verify(&self, catalog: &impl RoutineCatalog) -> Result<(), String> {
-        let current = catalog.query(&self.sql).await?;
-        current.flags.check()?;
-        if current.columns != self.columns || current.rows != self.rows {
-            return Err("Referenced object, name resolution, signature, columns or direct privileges changed; validate the draft again".into());
+        match self {
+            Self::Query { sql, columns, rows } => {
+                let current = catalog.query(sql).await?;
+                current.flags.check()?;
+                if &current.columns != columns || &current.rows != rows {
+                    return Err("Referenced object, name resolution, signature, columns or direct privileges changed; validate the draft again".into());
+                }
+            }
+            Self::Source { endpoint, identity, source, origin } => {
+                let current = catalog.source(identity).await?;
+                check_source(catalog, endpoint, identity, &current, *origin).await?;
+                if current.object.source != *source || current.source_origin != Some(*origin) {
+                    return Err(
+                        "Referenced package specification or its source origin changed; validate the draft again"
+                            .into(),
+                    );
+                }
+            }
         }
         Ok(())
+    }
+}
+
+pub(super) fn lossless_catalog_value(value: &Value) -> Value {
+    match value {
+        Value::Null => serde_json::json!(["null"]),
+        Value::Bool(value) => serde_json::json!(["boolean", value]),
+        Value::Number(value) => serde_json::json!(["number", value.to_string()]),
+        Value::String(value) => serde_json::json!(["string", value]),
+        Value::Array(values) => {
+            serde_json::json!(["array", values.iter().map(lossless_catalog_value).collect::<Vec<_>>()])
+        }
+        Value::Object(values) => serde_json::json!([
+            "object",
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), lossless_catalog_value(value)))
+                .collect::<serde_json::Map<_, _>>()
+        ]),
     }
 }
 
@@ -49,6 +92,62 @@ pub(super) struct DraftResolution {
     pub selected_dependencies: BTreeSet<usize>,
     pub proofs: Vec<CatalogReadProof>,
     pub issues: Vec<OracleDraftIssue>,
+    pub planned_table_dependencies: BTreeSet<usize>,
+    pub proof_groups: Vec<ReferenceProofGroup>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "purpose", rename_all = "camelCase")]
+pub(super) enum ReferenceProofPurpose {
+    PackagePreflight,
+    LoginOwner,
+    Reference {
+        index: usize,
+        reference: OracleDraftReference,
+        query: Option<dbx_sql::object_source_sql::OracleDraftQuery>,
+        resolved: Option<Box<ResolvedRoutineReference>>,
+    },
+}
+
+#[derive(Clone)]
+pub(super) struct ReferenceProofGroup {
+    pub purpose: ReferenceProofPurpose,
+    pub start: usize,
+    pub end: usize,
+}
+
+pub(super) fn reference_proof_manifest(
+    groups: &[ReferenceProofGroup],
+    proofs: &[CatalogReadProof],
+    pending_tables: &[PlannedRelation],
+) -> Vec<Value> {
+    // This projection is not approval: registry admission still requires a
+    // complete typed readback of every precisely registered pending table.
+    groups
+        .iter()
+        .map(|group| {
+            let pending_relation = match &group.purpose {
+                ReferenceProofPurpose::Reference { reference, resolved: Some(resolved), .. }
+                    if reference.role == OracleDraftReferenceRole::Relation && resolved.kind == "TABLE" =>
+                {
+                    pending_tables.iter().any(|table| table.owner == resolved.owner && table.name == resolved.name)
+                }
+                _ => false,
+            };
+            serde_json::json!({
+                "use": group.purpose,
+            "proofs": if pending_relation { Vec::new() } else {
+                proofs[group.start..group.end].iter().map(CatalogReadProof::manifest_value).collect::<Vec<_>>()
+            },
+            })
+        })
+        .collect()
+}
+
+pub(super) struct PlannedRelation {
+    pub owner: String,
+    pub name: String,
+    pub columns: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -66,7 +165,10 @@ struct Resolver<'a, C> {
     endpoint: &'a RoutineEndpoint,
     login: String,
     selected: &'a [SelectedFinalDraft],
+    planned_tables: &'a [PlannedRelation],
     output: DraftResolution,
+    strict_packages: bool,
+    package_contracts: BTreeMap<(String, String), OracleRoutineDraftAnalysis>,
 }
 
 impl<C: RoutineCatalog> Resolver<'_, C> {
@@ -76,7 +178,11 @@ impl<C: RoutineCatalog> Resolver<'_, C> {
         if reply.rows.len() > PAGE_SIZE {
             return Err("Dependency metadata exceeded its verified page size".into());
         }
-        self.output.proofs.push(CatalogReadProof { sql, columns: reply.columns.clone(), rows: reply.rows.clone() });
+        self.output.proofs.push(CatalogReadProof::Query {
+            sql,
+            columns: reply.columns.clone(),
+            rows: reply.rows.clone(),
+        });
         Ok(reply)
     }
 
@@ -110,12 +216,14 @@ impl<C: RoutineCatalog> Resolver<'_, C> {
     }
 
     async fn namespace(&mut self, owner: &str, name: &str) -> Result<Option<Object>, String> {
-        if let Some((index, selected)) = self
-            .selected
-            .iter()
-            .enumerate()
-            .find(|(_, draft)| draft.identity.owner == owner && draft.identity.name == name)
-        {
+        if self.planned_tables.iter().any(|table| table.owner == owner && table.name == name) {
+            return Err("This name is captured by a planned table, not an existing callable object".into());
+        }
+        if let Some((index, selected)) = self.selected.iter().enumerate().find(|(_, draft)| {
+            draft.identity.owner == owner
+                && draft.identity.name == name
+                && draft.identity.kind != db::ObjectSourceKind::PackageBody
+        }) {
             if selected.analysis.is_none() {
                 return Err(format!("Reference {owner}.{name} is selected for deletion"));
             }
@@ -258,6 +366,15 @@ impl<C: RoutineCatalog> Resolver<'_, C> {
         member: Option<&str>,
         reference: &OracleDraftReference,
     ) -> Result<(), String> {
+        if object.kind == "PACKAGE"
+            && (self.strict_packages
+                || object.selected.is_some()
+                || reference.role == OracleDraftReferenceRole::Exception)
+        {
+            let member = member.ok_or("An explicit public package member is required")?;
+            let contract = self.package_contract(object).await?;
+            return check_package_member(&contract, member, reference);
+        }
         let expected = if reference.role == OracleDraftReferenceRole::Procedure { "PROCEDURE" } else { "FUNCTION" };
         if object.name == "DBMS_SQL" {
             return Err("DBMS_SQL execution cannot be proven by this static plan; use supported static SQL or deselect this object".into());
@@ -338,6 +455,68 @@ impl<C: RoutineCatalog> Resolver<'_, C> {
         check_arguments(parameters.iter().map(|(mode, default)| (mode.as_str(), *default)), reference)
     }
 
+    async fn package_contract(&mut self, object: &Object) -> Result<OracleRoutineDraftAnalysis, String> {
+        if let Some(index) = object.selected {
+            let analysis =
+                self.selected[index].analysis.as_ref().ok_or("The final package specification is deleted")?;
+            if !analysis.complete {
+                return Err("The final package specification is not completely analyzed".into());
+            }
+            return Ok(analysis.clone());
+        }
+        let key = (object.owner.clone(), object.name.clone());
+        if let Some(contract) = self.package_contracts.get(&key) {
+            return Ok(contract.clone());
+        }
+        self.accessible(object, false).await?;
+        let identity = RoutineIdentity {
+            owner: object.owner.clone(),
+            name: object.name.clone(),
+            kind: db::ObjectSourceKind::Package,
+        };
+        let source = self.catalog.source(&identity).await?;
+        let origin = source
+            .source_origin
+            .ok_or("A referenced package requires its actual complete specification source origin")?;
+        check_source(self.catalog, self.endpoint, &identity, &source, origin).await?;
+        let again = self.catalog.source(&identity).await?;
+        again.flags.check()?;
+        if again.object.name != identity.name
+            || again.object.schema.as_deref() != Some(&identity.owner)
+            || again.object.object_type != identity.kind
+            || again.object.source != source.object.source
+            || again.source_origin != Some(origin)
+        {
+            return Err("The referenced package specification changed while being read".into());
+        }
+        let contract = analyze_oracle_routine_draft(EditableObjectSourceSqlInput {
+            database_type: self.endpoint.database_type,
+            object_type: identity.kind.clone(),
+            schema: Some(identity.owner.clone()),
+            name: identity.name.clone(),
+            source: source.object.source.clone(),
+        });
+        if !contract.complete {
+            return Err(format!(
+                "Referenced package specification requires manual correction: {}",
+                contract
+                    .issues
+                    .iter()
+                    .map(|issue| format!("{}:{} {}", issue.line, issue.column, issue.message))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        self.output.proofs.push(CatalogReadProof::Source {
+            endpoint: self.endpoint.clone(),
+            identity,
+            source: source.object.source,
+            origin,
+        });
+        self.package_contracts.insert(key, contract.clone());
+        Ok(contract)
+    }
+
     async fn resolve_call(&mut self, reference: &OracleDraftReference) -> Result<(Object, Option<String>), String> {
         let parts: Vec<&str> = reference.parts.iter().map(|name| name.value.as_str()).collect();
         let owner = self.endpoint.schema.clone();
@@ -365,6 +544,40 @@ impl<C: RoutineCatalog> Resolver<'_, C> {
         self.call(&object, member.as_deref(), reference).await?;
         Ok((object, member))
     }
+}
+
+fn check_package_member(
+    contract: &OracleRoutineDraftAnalysis,
+    name: &str,
+    reference: &OracleDraftReference,
+) -> Result<(), String> {
+    let member = contract
+        .package_members
+        .iter()
+        .find(|member| member.public && member.name.value == name)
+        .ok_or_else(|| format!("Package member {name} is not public in the final specification"))?;
+    match member.kind {
+        OracleDraftPackageMemberKind::Variable | OracleDraftPackageMemberKind::Constant
+            if reference.role == OracleDraftReferenceRole::Value =>
+        {
+            return Ok(())
+        }
+        OracleDraftPackageMemberKind::Exception if reference.role == OracleDraftReferenceRole::Exception => {
+            return Ok(())
+        }
+        OracleDraftPackageMemberKind::Function
+            if matches!(reference.role, OracleDraftReferenceRole::Function | OracleDraftReferenceRole::Value) => {}
+        OracleDraftPackageMemberKind::Procedure if reference.role == OracleDraftReferenceRole::Procedure => {}
+        _ => {
+            return Err(format!(
+                "Package member {name} has another scalar, exception or call role in the final specification"
+            ))
+        }
+    }
+    check_arguments(
+        member.parameters.iter().map(|parameter| (parameter.mode.as_str(), parameter.has_default)),
+        reference,
+    )
 }
 
 fn scalar_argument_type(value: &str) -> bool {
@@ -412,16 +625,34 @@ pub(super) async fn resolve_draft(
     selected: &[SelectedFinalDraft],
     index: usize,
 ) -> DraftResolution {
+    resolve_draft_with_tables(catalog, endpoint, selected, index, &[]).await
+}
+
+pub(super) async fn resolve_draft_with_tables(
+    catalog: &impl RoutineCatalog,
+    endpoint: &RoutineEndpoint,
+    selected: &[SelectedFinalDraft],
+    index: usize,
+    planned_tables: &[PlannedRelation],
+) -> DraftResolution {
     let mut resolver = Resolver {
         catalog,
         endpoint,
         login: String::new(),
         selected,
+        planned_tables,
+        strict_packages: matches!(
+            selected[index].identity.kind,
+            db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody
+        ),
+        package_contracts: BTreeMap::new(),
         output: DraftResolution {
             references: Vec::new(),
             selected_dependencies: BTreeSet::new(),
             proofs: Vec::new(),
             issues: Vec::new(),
+            planned_table_dependencies: BTreeSet::new(),
+            proof_groups: Vec::new(),
         },
     };
     let Some(analysis) = &selected[index].analysis else {
@@ -430,6 +661,40 @@ pub(super) async fn resolve_draft(
     if !analysis.complete {
         resolver.output.issues = analysis.issues.clone();
         return resolver.output;
+    }
+    if planned_tables.iter().enumerate().any(|(index, table)| {
+        !resolver.strict_packages
+            || table.owner != endpoint.schema
+            || table.columns.is_empty()
+            || planned_tables[..index].iter().any(|other| other.owner == table.owner && other.name == table.name)
+            || selected.iter().any(|draft| draft.identity.owner == table.owner && draft.identity.name == table.name)
+    }) {
+        resolver.output.issues.push(OracleDraftIssue {
+            code: "pending-table-scope".into(),
+            message: "Planned relations require a unique, complete table contract in the package target namespace"
+                .into(),
+            line: 1,
+            column: 1,
+        });
+        return resolver.output;
+    }
+    if selected[index].identity.kind == db::ObjectSourceKind::PackageBody {
+        if let Some((specification, draft)) = selected.iter().enumerate().find(|(_, draft)| {
+            draft.identity.kind == db::ObjectSourceKind::Package
+                && draft.identity.owner == selected[index].identity.owner
+                && draft.identity.name == selected[index].identity.name
+        }) {
+            if draft.analysis.is_none() {
+                resolver.output.issues.push(OracleDraftIssue {
+                    code: "unresolved-reference".into(),
+                    message: "The package body cannot depend on a deleted final specification".into(),
+                    line: 1,
+                    column: 1,
+                });
+                return resolver.output;
+            }
+            resolver.output.selected_dependencies.insert(specification);
+        }
     }
     let login = async {
         let reply = resolver.query("SELECT USER AS LOGIN_OWNER FROM DUAL".into()).await?;
@@ -451,11 +716,33 @@ pub(super) async fn resolve_draft(
             return resolver.output;
         }
     }
-    let mut relations: BTreeMap<usize, (Object, BTreeSet<String>)> = BTreeMap::new();
+    resolver.output.proof_groups.push(ReferenceProofGroup {
+        purpose: ReferenceProofPurpose::LoginOwner,
+        start: 0,
+        end: resolver.output.proofs.len(),
+    });
+    let mut relations: BTreeMap<usize, (String, BTreeSet<String>)> = BTreeMap::new();
     for (reference_index, reference) in analysis.references.iter().enumerate() {
+        let proof_start = resolver.output.proofs.len();
+        let resolved_start = resolver.output.references.len();
         let resolution: Result<Option<(Object, Option<String>)>, String> = async {
             if reference.role == OracleDraftReferenceRole::Relation {
                 let parts: Vec<&str> = reference.parts.iter().map(|part| part.value.as_str()).collect();
+                let identity = match parts.as_slice() {
+                    [name] => (endpoint.schema.as_str(), *name),
+                    [owner, name] => (*owner, *name),
+                    _ => return Err("A relation needs an exact local or owner.table name".into()),
+                };
+                if let Some((table_index, table)) = planned_tables.iter().enumerate().find(|(_, table)|
+                    table.owner == identity.0 && table.name == identity.1) {
+                    resolver.output.planned_table_dependencies.insert(table_index);
+                    resolver.output.references.push(ResolvedRoutineReference {
+                        owner: table.owner.clone(), name: table.name.clone(), kind: "TABLE".into(), member: None,
+                        selected_index: None, line: reference.line, column: reference.column,
+                    });
+                    relations.insert(reference_index, (table.name.clone(), table.columns.clone()));
+                    return Ok(None);
+                }
                 let object = match parts.as_slice() {
                     [name] => resolver.object(&endpoint.schema, name, true).await?,
                     [owner, name] => resolver.object(owner, name, false).await?,
@@ -466,7 +753,7 @@ pub(super) async fn resolve_draft(
                     return Err("FROM does not resolve to a table or view".into());
                 }
                 let columns = resolver.columns(&object).await?;
-                relations.insert(reference_index, (object.clone(), columns));
+                relations.insert(reference_index, (object.name.clone(), columns));
                 return Ok(Some((object, None)));
             }
             if let Some(query) = reference.query {
@@ -478,7 +765,7 @@ pub(super) async fn resolve_draft(
                     match values.as_slice() {
                         [column] if columns.contains(*column) => return Ok(None),
                         [qualifier, column]
-                            if query.alias.as_ref().map(|alias| alias.value.as_str()).unwrap_or(&relation.name)
+                            if query.alias.as_ref().map(|alias| alias.value.as_str()).unwrap_or(relation)
                                 == *qualifier =>
                         {
                             return if columns.contains(*column) {
@@ -501,6 +788,21 @@ pub(super) async fn resolve_draft(
                     } else {
                         Err("A local scalar shadows this routine prefix; calls or member access are not supported on scalar bindings".into())
                     };
+                }
+                if let Some(binding) = reference.package_binding {
+                    match binding {
+                        OracleDraftPackageMemberKind::Variable | OracleDraftPackageMemberKind::Constant => return Ok(None),
+                        OracleDraftPackageMemberKind::Function => {
+                            let name = &reference.parts.last().ok_or("Package SQL value has no member identity")?.value;
+                            let member = analysis.package_members.iter().find(|member| member.name.value == *name && member.kind == OracleDraftPackageMemberKind::Function).ok_or("The package SQL function has no final member declaration")?;
+                            check_arguments(member.parameters.iter().map(|parameter| (parameter.mode.as_str(), parameter.has_default)), reference)?;
+                            return Ok(None);
+                        }
+                        _ => return Err("A package exception or procedure cannot be used as a scalar SQL value when no column binds this name".into()),
+                    }
+                }
+                if reference.out_of_scope_binding {
+                    return Err("The SQL name is not a relation column and its local binding is outside the lexical scope; qualify an intended external reference".into());
                 }
             }
             resolver.resolve_call(reference).await.map(Some)
@@ -529,6 +831,17 @@ pub(super) async fn resolve_draft(
                 column: reference.column,
             }),
         }
+        resolver.output.proof_groups.push(ReferenceProofGroup {
+            purpose: ReferenceProofPurpose::Reference {
+                index: reference_index,
+                reference: reference.clone(),
+                query: reference.query.and_then(|index| analysis.queries.get(index)).cloned(),
+                resolved: (resolver.output.references.len() > resolved_start)
+                    .then(|| Box::new(resolver.output.references.last().unwrap().clone())),
+            },
+            start: proof_start,
+            end: resolver.output.proofs.len(),
+        });
     }
     resolver.output
 }

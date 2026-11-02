@@ -399,6 +399,22 @@ describe("openTabsPersistence detached connection tabs", () => {
     expect(tabs[0].detachedConnectionName).toBe("prod");
   });
 
+  it("keeps a detached data/structure tab even though its connection no longer exists", () => {
+    // keep-all-tabs 会连同非 SQL 页签一起保留，它们带着 detachedConnectionName 等新建同名连接重绑；
+    // 若恢复阶段按 validConnectionIds 丢掉，重启后 keep-all-tabs 就形同虚设。
+    const saved = serializeOpenTabs([
+      queryTab({ id: "orphan-data", connectionId: "deleted-conn", database: "app", title: "users", mode: "data", detachedConnectionName: "prod" }),
+      queryTab({ id: "orphan-structure", connectionId: "deleted-conn", database: "app", title: "users 结构", mode: "structure", detachedConnectionName: "prod" }),
+      // 没有脱离标记的非 SQL 页签仍然要按连接有效性过滤掉。
+      queryTab({ id: "stray-data", connectionId: "deleted-conn", database: "app", title: "orders", mode: "data" }),
+    ]);
+
+    const { tabs } = restoreOpenTabsPayload({ tabs: saved, activeTabId: "orphan-data" }, { validConnectionIds: ["other-conn"] });
+
+    expect(tabs.map((tab) => tab.id)).toEqual(["orphan-data", "orphan-structure"]);
+    expect(tabs[0].detachedConnectionName).toBe("prod");
+  });
+
   it("omits the detached connection name when the tab is bound to a live connection", () => {
     const [saved] = serializeOpenTabs([queryTab({})]);
 

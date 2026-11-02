@@ -1,10 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { beginSourceSave, captureSourceIdentity } from "@/lib/table/objectSourceIdentity";
-import { executeOraclePackageSaveAs, prepareOraclePackageSaveAs } from "@/lib/table/oraclePackageSaveAs";
+import { executeOraclePackageSaveAs, prepareOraclePackageSaveAs, prepareOraclePackageSaveAsExecution } from "@/lib/table/oraclePackageSaveAs";
+import type { OracleRoutineOperation, OracleRoutineSaveInput } from "@/types/schemaDiff";
 import { invalidateObjectDdlCache } from "@/lib/metadata/objectDdlCache";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 
-const api = vi.hoisted(() => ({ executeQuery: vi.fn(), parseOracleObjectName: vi.fn(), buildExecutableObjectSourceStatements: vi.fn() }));
+const api = vi.hoisted(() => ({
+  executeQuery: vi.fn(),
+  parseOracleObjectName: vi.fn(),
+  buildExecutableObjectSourceStatements: vi.fn(),
+  prepareOracleRoutineSave: vi.fn(),
+  executeOracleRoutineOperation: vi.fn(),
+  observeOracleRoutineOperation: vi.fn(),
+  updateOracleRoutineOperationReferences: vi.fn(),
+}));
 vi.mock("@/lib/backend/api", () => api);
 vi.mock("@/lib/metadata/objectDdlCache", () => ({ invalidateObjectDdlCache: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("@/lib/table/objectBrowserRowsCache", () => ({ invalidateObjectBrowserRowsCache: vi.fn() }));
@@ -24,6 +33,7 @@ let tamperSpecId: boolean;
 let operatorTargetConflict: boolean;
 let newSpecReads: number;
 let grants: Map<string, unknown[][]>;
+let approvals: Map<string, { input: OracleRoutineSaveInput; record: OracleRoutineOperation }>;
 
 function key(name: string, type: string) {
   return `${name}:${type}`;
@@ -52,6 +62,39 @@ beforeEach(() => {
   operatorTargetConflict = false;
   newSpecReads = 0;
   grants = new Map([["P_OLD", []]]);
+  approvals = new Map();
+  api.updateOracleRoutineOperationReferences.mockResolvedValue(undefined);
+  api.prepareOracleRoutineSave.mockImplementation(async (input: OracleRoutineSaveInput) => {
+    const operationId = `package-approval-${approvals.size}`;
+    const record: OracleRoutineOperation = {
+      operationId,
+      identity: input.identity,
+      target: { connectionId: input.connectionId, database: input.database, schema: input.identity.owner, databaseType: "oracle", generation: 1 },
+      lifecycle: "prepared",
+      acknowledged: false,
+      dispatched: false,
+      readback: null,
+      error: null,
+    };
+    approvals.set(operationId, { input, record });
+    return record;
+  });
+  api.executeOracleRoutineOperation.mockImplementation(async (id: string, sql: string) => {
+    const approval = approvals.get(id)!;
+    expect(sql).toBe(approval.input.sql);
+    const record = approval.record;
+    record.dispatched = true;
+    record.lifecycle = "terminal";
+    try {
+      await api.executeQuery(approval.input.connectionId, approval.input.database, sql, approval.input.identity.owner);
+      record.acknowledged = true;
+      record.readback = { identity: record.identity, state: "verified", exists: true, version: null, source: sql, definitionMatches: true, compilerMessages: [], issues: [] };
+    } catch (error) {
+      record.error = error instanceof Error ? error.message : String(error);
+    }
+    return record;
+  });
+  api.observeOracleRoutineOperation.mockImplementation(async (id: string) => ({ operation: approvals.get(id)?.record ?? null, lifecycle: approvals.get(id)?.record.lifecycle ?? "unproven", error: null }));
   api.parseOracleObjectName.mockImplementation(async (name) => name.toUpperCase());
   api.buildExecutableObjectSourceStatements.mockImplementation(async ({ source }: { source: string }) => [source]);
   api.executeQuery.mockImplementation(async (_connection: string, _database: string, sql: string) => {
@@ -111,6 +154,78 @@ beforeEach(() => {
 afterEach(() => vi.clearAllMocks());
 
 describe("Oracle package Save As plan and execution", () => {
+  it("prepares the exact new specification with absence protection before confirmation and releases it without writing on cancel", async () => {
+    const plan = await prepareOraclePackageSaveAs(target);
+    const execute = await prepareOraclePackageSaveAsExecution(plan);
+    expect(api.prepareOracleRoutineSave).toHaveBeenCalledExactlyOnceWith({ connectionId: target.connectionId, database: target.database, identity: { owner: "APP", name: "P_NEW", kind: "PACKAGE" }, sql: plan.specSource, requireAbsent: true });
+    expect(api.executeOracleRoutineOperation).not.toHaveBeenCalled();
+    await execute.dispose();
+    expect(api.updateOracleRoutineOperationReferences).toHaveBeenLastCalledWith([], ["package-approval-0"]);
+    expect(states.has(key("P_NEW", "PACKAGE"))).toBe(false);
+  });
+
+  it("uses controlled specification and body operations while freezing both old and new package identities", async () => {
+    const plan = await prepareOraclePackageSaveAs(target);
+    const dispatch = api.executeOracleRoutineOperation.getMockImplementation()!;
+    api.executeOracleRoutineOperation.mockImplementation(async (...args) => {
+      for (const name of ["P_OLD", "P_NEW"])
+        for (const objectType of ["PACKAGE", "PACKAGE_BODY"]) {
+          const identity = captureSourceIdentity({ connectionId: target.connectionId, database: target.database, schema: "APP", objectType, name });
+          expect(() => beginSourceSave(identity)).toThrow();
+        }
+      return dispatch(...args);
+    });
+    await executeOraclePackageSaveAs(plan);
+    expect(api.executeOracleRoutineOperation.mock.calls.map(([id, sql]) => [id, sql])).toEqual([
+      ["package-approval-0", plan.specSource],
+      ["package-approval-1", plan.bodySource],
+    ]);
+    expect(api.prepareOracleRoutineSave.mock.calls[1]![0]).toMatchObject({ requireAbsent: true, prerequisiteOperationId: "package-approval-0", identity: { kind: "PACKAGE_BODY", name: "P_NEW" } });
+    expect(api.updateOracleRoutineOperationReferences.mock.calls).toEqual([
+      [["package-approval-0"], []],
+      [["package-approval-1"], []],
+      [[], ["package-approval-1"]],
+      [[], ["package-approval-0"]],
+    ]);
+    for (const name of ["P_OLD", "P_NEW"])
+      for (const objectType of ["PACKAGE", "PACKAGE_BODY"]) {
+        const release = beginSourceSave(captureSourceIdentity({ connectionId: target.connectionId, database: target.database, schema: "APP", objectType, name }));
+        release();
+      }
+  });
+
+  it("does not prepare a body against a different connection generation after specification success", async () => {
+    const plan = await prepareOraclePackageSaveAs(target);
+    const prepare = api.prepareOracleRoutineSave.getMockImplementation()!;
+    api.prepareOracleRoutineSave.mockImplementation(async (input: OracleRoutineSaveInput) => {
+      if (input.identity.kind === "PACKAGE_BODY") throw new Error("Package target changed before body preparation");
+      return prepare(input);
+    });
+    await expect(executeOraclePackageSaveAs(plan)).rejects.toMatchObject({ completed: ["PACKAGE P_NEW"], uncertain: "PACKAGE BODY P_NEW", message: expect.stringContaining("target changed") });
+    expect(api.executeOracleRoutineOperation).toHaveBeenCalledTimes(1);
+    expect(states.has(key("P_NEW", "PACKAGE BODY"))).toBe(false);
+    expect(api.prepareOracleRoutineSave).toHaveBeenLastCalledWith(expect.objectContaining({ prerequisiteOperationId: "package-approval-0" }));
+  });
+
+  it("keeps the original unknown body operation even when its current definition is present", async () => {
+    const plan = await prepareOraclePackageSaveAs({ ...target, connectionId: "package-save-as-unknown-body" });
+    const dispatch = api.executeOracleRoutineOperation.getMockImplementation()!;
+    api.executeOracleRoutineOperation.mockImplementation(async (id: string, sql: string) => {
+      const record = await dispatch(id, sql);
+      if (record.identity.kind === "PACKAGE_BODY") {
+        record.lifecycle = "unproven";
+        record.acknowledged = false;
+      }
+      return record;
+    });
+    await expect(executeOraclePackageSaveAs(plan)).rejects.toMatchObject({ completed: ["PACKAGE P_NEW"], uncertain: "PACKAGE BODY P_NEW", message: expect.stringContaining("package-approval-1") });
+    expect(states.has(key("P_NEW", "PACKAGE BODY"))).toBe(true);
+    await expect(executeOraclePackageSaveAs(plan)).rejects.toThrow();
+    expect(api.executeOracleRoutineOperation).toHaveBeenCalledTimes(2);
+    expect(api.prepareOracleRoutineSave).toHaveBeenCalledTimes(2);
+    expect(api.updateOracleRoutineOperationReferences).not.toHaveBeenCalledWith([], ["package-approval-1"]);
+  });
+
   it("validates generated spec and body against the executable Oracle source parser", async () => {
     const plan = await prepareOraclePackageSaveAs(target);
 

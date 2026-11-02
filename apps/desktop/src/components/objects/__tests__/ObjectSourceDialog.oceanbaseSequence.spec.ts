@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   loadTunnelProfiles: vi.fn(),
   loadTableVGroups: vi.fn(),
   loadSidebarLayout: vi.fn(),
+  listInstalledAgents: vi.fn(),
   prepareOracleRoutineSave: vi.fn(),
   updateOracleRoutineOperationReferences: vi.fn(async () => {}),
   executeOracleRoutineOperation: vi.fn(),
@@ -44,8 +45,9 @@ beforeEach(() => {
     throw new Error(`Unexpected HTTP boundary: ${String(input)}`);
   });
 });
-afterEach(() => {
+afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) cleanup();
+  await vi.dynamicImportSettled();
   vi.restoreAllMocks();
   for (const mock of Object.values(mocks)) mock.mockReset();
   expect(unexpectedHttp).toEqual([]);
@@ -74,6 +76,7 @@ async function mount(options: { databaseType?: DatabaseType; initialEditing?: bo
   mocks.loadTunnelProfiles.mockResolvedValue([]);
   mocks.loadTableVGroups.mockResolvedValue({});
   mocks.loadSidebarLayout.mockResolvedValue(null);
+  mocks.listInstalledAgents.mockResolvedValue([]);
   mocks.getObjectSource.mockResolvedValue({ name: "SEQ", schema: "APP", object_type: objectType, source, editable: options.editable !== false });
   mocks.buildEditableObjectSource.mockResolvedValue(objectType === "SEQUENCE" && databaseType === "oceanbase-oracle" ? alter : source);
   mocks.buildExecutableObjectSourceStatements.mockResolvedValue([objectType === "SEQUENCE" ? alter : source]);

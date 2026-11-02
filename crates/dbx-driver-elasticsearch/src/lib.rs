@@ -2375,8 +2375,10 @@ fn parse_elasticsearch_response_with_sql_parser(
             Ok(crate::types::QueryResult {
                 columns,
                 column_types: Vec::new(),
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows,
                 affected_rows: row_count,
@@ -2403,8 +2405,10 @@ fn parse_elasticsearch_response_with_sql_parser(
         Ok(crate::types::QueryResult {
             columns,
             column_types,
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows,
             affected_rows: row_count,
@@ -2577,8 +2581,10 @@ fn raw_json_response_result(
     crate::types::QueryResult {
         columns: vec!["status".to_string(), "response".to_string()],
         column_types: Vec::new(),
+        deferred_large_value_cells: Vec::new(),
         column_sortables: vec![],
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(body_text.into())]],
         affected_rows: 0,
@@ -2646,8 +2652,10 @@ fn parse_elasticsearch_rest_response_with_sql_parser(
     Ok(crate::types::QueryResult {
         columns: vec!["response".to_string()],
         column_types: Vec::new(),
+        deferred_large_value_cells: Vec::new(),
         column_sortables: vec![],
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows,
         affected_rows,
@@ -3154,8 +3162,10 @@ pub fn parse_tabular_sql_response(
     Some(QueryResult {
         columns: column_names,
         column_types: Vec::new(),
+        deferred_large_value_cells: Vec::new(),
         column_sortables: vec![],
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows: result_rows,
         affected_rows: total_key

@@ -1,6 +1,6 @@
 import type { GridCellValue } from "@/lib/dataGrid/dataGridSql";
 import type { DatabaseType, ColumnInfo } from "@/types/database";
-import { binaryCellBytesToHexValue, binaryCellUtf8Text, decodeBinaryUuidText, isBlobCellColumnType, isBlobTextPreviewDatabase } from "@/lib/dataGrid/binaryCellDownload";
+import { binaryCellBytesToHexValue, binaryCellUtf8Text, decodeBinaryUuidText, isBinaryCellTextEditable } from "@/lib/dataGrid/binaryCellDownload";
 import { isNumericColumnType, isUuidColumnType, resolveDataGridTypeVisualKind } from "@/lib/dataGrid/dataGridColumnType";
 import { isBooleanColumnType } from "@/lib/dataGrid/dataGridBooleanColumn";
 
@@ -38,6 +38,9 @@ export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions)
   // the precision checks below so exact values survive as text.
   const useSampledValueType = normalizeDataType(options.columnInfo?.data_type) === "";
   const numericInput = isNumericColumnType(options.columnInfo?.data_type) || (useSampledValueType && typeof oldValue === "number");
+  // A cleared numeric cell is SQL NULL; Number("") and Number(" ") would
+  // otherwise silently turn it into zero (#13755).
+  if (numericInput && value.trim() === "") return null;
   const numericText = normalizeGroupedNumberText(value, options.columnInfo, oldValue, options.numberFormat ?? runtimeNumberFormat());
   // Neo4j INTEGER is always signed 64-bit. Keep its input as text until the
   // Cypher builder validates it, including values outside JavaScript's range.
@@ -96,7 +99,7 @@ export function dataGridCellEditorText(options: { value: GridCellValue | undefin
   if (value === null) return "";
   const uuidText = decodeBinaryUuidText(value, options.columnInfo?.data_type);
   if (uuidText !== null) return uuidText;
-  if (isBlobTextPreviewDatabase(options.databaseType) && isBlobCellColumnType(options.columnInfo?.data_type)) {
+  if (isBinaryCellTextEditable(options.columnInfo?.data_type, options.databaseType)) {
     const text = binaryCellUtf8Text(value, options.columnInfo?.data_type, options.databaseType);
     if (text !== null) return text;
   }
@@ -124,7 +127,7 @@ function coerceUuidTextValue(options: CoerceDataGridCellValueOptions): GridCellV
 }
 
 function coerceBlobTextValue(options: CoerceDataGridCellValueOptions): GridCellValue | undefined {
-  if (!isBlobTextPreviewDatabase(options.databaseType) || !isBlobCellColumnType(options.columnInfo?.data_type)) return undefined;
+  if (!isBinaryCellTextEditable(options.columnInfo?.data_type, options.databaseType)) return undefined;
   const originalText = binaryCellUtf8Text(options.oldValue, options.columnInfo?.data_type, options.databaseType);
   if (originalText === null) return undefined;
   if (options.value === originalText) return options.oldValue;

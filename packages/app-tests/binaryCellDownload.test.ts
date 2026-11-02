@@ -14,6 +14,9 @@ import {
   binaryCellUtf8Text,
   isBlobCellColumnType,
   isBlobTextPreviewDatabase,
+  isByteaCellColumnType,
+  isBinaryCellTextEditable,
+  isBinaryCellTextPreviewColumn,
   MAX_BINARY_CELL_IMPORT_BYTES,
   parseBinaryCellBytes,
   parseBinaryCellHexValue,
@@ -51,13 +54,22 @@ test("TDengine BINARY text is not treated as unprefixed hex", () => {
   assert.equal(binaryCellDisplayText("0x3636", "BINARY(16)", undefined, "tdengine"), "66");
 });
 
-test("binary cell download detects common blob column types", () => {
+test("binary cell download detects common blob and bytea column types", () => {
   assert.equal(isBinaryCellColumnType("BLOB"), true);
   assert.equal(isBinaryCellColumnType("RAW(2000)"), true);
   assert.equal(isBinaryCellColumnType("long raw"), true);
+  assert.equal(isBinaryCellColumnType("bytea"), true);
   assert.equal(isBinaryCellColumnType("varchar"), false);
   assert.equal(isBlobCellColumnType("longblob"), true);
   assert.equal(isBlobCellColumnType("varbinary(255)"), false);
+  assert.equal(isBlobCellColumnType("bytea"), false);
+  assert.equal(isByteaCellColumnType("bytea"), true);
+  assert.equal(isByteaCellColumnType("BYTEA"), true);
+  assert.equal(isByteaCellColumnType("pg_catalog.bytea"), true);
+  assert.equal(isByteaCellColumnType("public.bytea"), true);
+  assert.equal(isByteaCellColumnType("bytea[]"), false);
+  assert.equal(isByteaCellColumnType("_bytea"), false);
+  assert.equal(isByteaCellColumnType("blob"), false);
 });
 
 test("binary cell download menu closes when hover moves to another cell", () => {
@@ -251,7 +263,11 @@ test("binaryCellClipboardText decodes textual MySQL varbinary and preserves arbi
   assert.equal(binaryCellClipboardText("0x616263", "RAW", "oracle"), null);
   assert.equal(binaryCellClipboardText("0x616263", "BINARY(8)", "mysql"), null); // MySQL BINARY 不跟随
   assert.equal(binaryCellClipboardText("0x616263", "VARBINARY(128)", "sqlserver"), null); // SQL Server varbinary 不改
-  assert.equal(binaryCellClipboardText("0x616263", "bytea", "postgres"), null); // Postgres bytea 不改
+  // PostgreSQL bytea 文本复制（#11987）：与显示预览/编辑写回保持同一闸门
+  assert.equal(binaryCellClipboardText("0x616263", "bytea", "postgres"), "abc");
+  assert.equal(binaryCellClipboardText("\\x616263", "bytea", "postgres"), "abc");
+  assert.equal(binaryCellClipboardText("0x89504e47", "bytea", "postgres"), null);
+  assert.equal(binaryCellClipboardText("0x616263", "bytea", "sqlite"), null);
   assert.equal(binaryCellClipboardText("0x616263", "BINARY(16)", "tdengine"), null); // 非 MySQL BINARY 不改
   assert.equal(binaryCellClipboardText("0x616263", "varchar", "mysql"), null); // 非二进制列不改
   assert.equal(binaryCellClipboardText("abcd", "VARBINARY(4)", "mysql"), null); // 普通文本不猜测为裸 hex
@@ -259,13 +275,22 @@ test("binaryCellClipboardText decodes textual MySQL varbinary and preserves arbi
 
 // 回归：SQLite/DuckDB 等库同样有 `blob` 列，文本预览必须与编辑写回路径一样仅对 mysql 开启，
 // 否则出现“单元格/详情显示文本、编辑器却是十六进制”的不一致。
-test("BLOB text preview stays limited to MySQL and Oracle family connections", () => {
+test("BLOB and BYTEA text preview stays limited to supported database connections", () => {
   assert.equal(isBlobTextPreviewDatabase("mysql"), true);
   assert.equal(isBlobTextPreviewDatabase("oracle"), true);
   assert.equal(isBlobTextPreviewDatabase("oceanbase-oracle"), true);
   assert.equal(isBlobTextPreviewDatabase("sqlite"), false);
   assert.equal(isBlobTextPreviewDatabase("duckdb"), false);
   assert.equal(isBlobTextPreviewDatabase(undefined), false);
+
+  assert.equal(isBinaryCellTextEditable("blob", "mysql"), true);
+  assert.equal(isBinaryCellTextEditable("blob", "oracle"), true);
+  assert.equal(isBinaryCellTextEditable("bytea", "postgres"), true);
+  assert.equal(isBinaryCellTextEditable("bytea", "sqlite"), false);
+  assert.equal(isBinaryCellTextEditable("bytea[]", "postgres"), false);
+
+  assert.equal(isBinaryCellTextPreviewColumn("bytea", "postgres"), true);
+  assert.equal(isBinaryCellTextPreviewColumn("bytea", "sqlite"), false);
 
   assert.equal(binaryCellUtf8Text("0x2332303035383035", "LONGBLOB", "sqlite"), null);
   assert.equal(binaryCellUtf8Text("0x2332303035383035", "BLOB", "duckdb"), null);
@@ -281,6 +306,16 @@ test("BLOB text preview stays limited to MySQL and Oracle family connections", (
   assert.equal(binaryCellDisplayText("0x48656c6c6f", "BLOB", undefined, "oracle"), "Hello");
   assert.equal(binaryCellDisplayText("0x48656c6c6f", "BLOB", undefined, "oceanbase-oracle"), "Hello");
   assert.equal(binaryCellDisplayText("0x89504e47", "BLOB", undefined, "oracle"), "BLOB [4 bytes]");
+
+  // PostgreSQL 的 BYTEA 文本预览（#11987）
+  assert.equal(binaryCellUtf8Text("0x48656c6c6f", "bytea", "postgres"), "Hello");
+  assert.equal(binaryCellUtf8Text("\\x48656c6c6f", "bytea", "postgres"), "Hello");
+  assert.equal(binaryCellDisplayText("0x48656c6c6f", "bytea", undefined, "postgres"), "Hello");
+  assert.equal(binaryCellDisplayText("\\x48656c6c6f", "bytea", undefined, "postgres"), "Hello");
+  assert.equal(binaryCellDisplayText("0x89504e47", "bytea", undefined, "postgres"), "BYTEA [4 bytes]");
+  assert.equal(binaryCellDisplayText("\\x89504e47", "bytea", undefined, "postgres"), "BYTEA [4 bytes]");
+  assert.equal(binaryCellUtf8Text("0x48656c6c6f", "bytea", "sqlite"), null);
+  assert.equal(binaryCellDisplayText("0x48656c6c6f", "bytea", undefined, "sqlite"), "BYTEA [5 bytes]");
 
   // binary/varbinary 的文本预览是既有行为（如 TDengine BINARY 文本），不受 mysql 闸门影响。
   assert.equal(binaryCellDisplayText("0x534e2d4130303031", "VARBINARY(8)", undefined, "sqlite"), "SN-A0001");

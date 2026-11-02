@@ -58,4 +58,18 @@ describe("exact metadata transports", () => {
     expect(url.searchParams.get("table")).toBe(table);
     expect(url.searchParams.get("exact_identity")).toBe("true");
   });
+
+  test.each(["native", "display"] as const)("both %s DDL transports carry explicit owner without requiring exact capability", async (mode) => {
+    for (const api of [tauri, http]) {
+      if (mode === "native") await api.getTableDdl("conn", owner, owner, table, undefined, undefined, false, undefined, true, owner);
+      else await api.getTableDisplayDdl("conn", owner, owner, table, undefined, undefined, true, owner);
+    }
+    const payload = invoke.mock.calls[0][1];
+    expect(payload).toMatchObject({ schema: owner, explicitOwner: owner, separateIndexes: true });
+    expect(payload).not.toHaveProperty("exactIdentity");
+    const url = new URL(String(vi.mocked(fetch).mock.calls[0][0]), "http://localhost");
+    expect(url.searchParams.get("explicit_owner")).toBe(owner);
+    expect(url.searchParams.get("schema")).toBe(owner);
+    expect(url.searchParams.has("exact_identity")).toBe(false);
+  });
 });

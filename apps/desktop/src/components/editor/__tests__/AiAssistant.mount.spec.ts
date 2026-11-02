@@ -15,9 +15,9 @@ import { beginPanelResize, endPanelResize } from "@/lib/app/panelResizeState";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, QueryTab } from "@/types/database";
 import type { PluginAiRecommendationHostUpdate } from "@/lib/plugins/pluginHostBridge";
-import type { AiExternalContextRequest } from "@/lib/ai/aiExternalContext";
+import { queryErrorSelection, type AiExternalContextRequest } from "@/lib/ai/aiExternalContext";
 import type { AiContext, AiRequestInput } from "@/lib/ai/ai";
 import { buildAgentRequest } from "@/lib/ai/ai";
 import { AI_SELECTION_CONTEXT_MAX_CHARS } from "@/lib/ai/aiAttachments";
@@ -260,11 +260,11 @@ function stubResizeObserver(): Array<{ callback: ResizeObserverCallback; targets
   return observers;
 }
 
-async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig, configureSettings?: (settings: ReturnType<typeof useSettingsStore>) => void, pluginRecommendations?: PluginAiRecommendationHostUpdate, extraConnections: ConnectionConfig[] = []) {
+async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig, configureSettings?: (settings: ReturnType<typeof useSettingsStore>) => void, pluginRecommendations?: PluginAiRecommendationHostUpdate, extraConnections: ConnectionConfig[] = [], tab?: QueryTab) {
   const pinia = createPinia();
   const errors: unknown[] = [];
   const panelRef = ref<{ openExternalContext: (request: AiExternalContextRequest) => void; selectConversationById: (convId: string) => void } | null>(null);
-  const app = createApp({ render: () => h(TooltipProvider, () => h(AiAssistant, { ref: panelRef, connection, pluginRecommendations })) });
+  const app = createApp({ render: () => h(TooltipProvider, () => h(AiAssistant, { ref: panelRef, connection, pluginRecommendations, tab })) });
   app.use(pinia);
   app.use(i18n);
   app.config.errorHandler = (error) => errors.push(error);
@@ -922,6 +922,95 @@ describe("AiAssistant mount", () => {
 
   const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 
+  it("offers continuation outside a truncated code block and preserves the unsent draft", async () => {
+    aiAssistantMountApi.conversations = [storedConversation({ assistantMode: "ask", assistantAction: "general" })];
+    const partial = "```sql\nSELECT * FROM orders WHERE";
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      onEvent({ type: "text_delta", delta: partial });
+      onEvent({ type: "output_truncated" });
+      onEvent({ type: "agent_end" });
+      return partial;
+    };
+    const { container, errors, panelRef } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    const prompt = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    prompt.value = "Generate a query";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(container.querySelector<HTMLButtonElement>("[data-ai-continue-generation]")?.disabled).toBe(false));
+    const notice = container.querySelector("[data-ai-output-truncated]")!;
+    expect(notice.textContent).toContain(i18n.global.t("ai.outputTruncated"));
+    expect(notice.closest(".ai-code-block")).toBeNull();
+    expect(container.querySelector(".ai-code-block")?.textContent).not.toContain(i18n.global.t("ai.outputTruncated"));
+    const stored = aiAssistantMountApi.savedConversations.at(-1) as { messages: Array<{ content: string; kind?: string }> };
+    expect(stored.messages.at(-1)).toMatchObject({ content: partial, kind: "outputTruncated" });
+
+    // Stage an unrelated draft and selection; the continuation must send neither.
+    panelRef.value!.openExternalContext({
+      target: { connectionId: "conn-a", database: "db_a" },
+      selections: [{ source: "editor", label: "unsent.sql", content: "SELECT secret FROM unsent" }],
+      unresolvedKey: "ai.externalTargetUnavailable",
+    });
+    await settle();
+    prompt.value = "Keep this draft";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      await pending;
+      onEvent({ type: "text_delta", delta: " id = 1;" });
+      onEvent({ type: "agent_end" });
+      return " id = 1;";
+    };
+    const button = container.querySelector<HTMLButtonElement>("[data-ai-continue-generation]")!;
+    button.click();
+    button.click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(2));
+    const input = aiAssistantMountApi.runAgentStreamInputs[1] as AiRequestInput;
+    expect(input.instruction).toBe(i18n.global.t("ai.continueGenerationPrompt"));
+    expect(input.mode).toBe("ask");
+    expect(input.allowWriteSql).toBe(false);
+    expect(input.context.connectionId).toBe("conn-a");
+    expect(input.context.database).toBe("db_a");
+    expect(input.context.selections).toBeUndefined();
+    expect(aiAssistantMountApi.runAgentStreamHistories[1]).toContainEqual({ role: "assistant", content: partial });
+    expect(JSON.stringify(aiAssistantMountApi.runAgentStreamHistories[1])).not.toContain(i18n.global.t("ai.outputTruncated"));
+    expect(prompt.value).toBe("Keep this draft");
+    expect(container.querySelector("[data-ai-selection-chips]")?.textContent).toContain("unsent.sql");
+    finish();
+    await vi.waitFor(() => expect(container.querySelector("[data-ai-continue-generation]")).toBeNull());
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("restores the continuation button from a saved truncated reply, including an empty answer", async () => {
+    aiAssistantMountApi.conversations = [
+      storedConversation({
+        assistantMode: "ask",
+        assistantAction: "general",
+        messages: [
+          { role: "user", content: "previous question" },
+          { role: "assistant", content: "", kind: "outputTruncated" },
+        ],
+      }),
+    ];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    await vi.waitFor(() => expect(container.querySelector("[data-ai-continue-generation]")).not.toBeNull());
+    expect(container.querySelector("[data-ai-output-truncated]")?.textContent).toContain(i18n.global.t("ai.outputTruncated"));
+    container.querySelector<HTMLButtonElement>("[data-ai-continue-generation]")!.click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(1));
+    expect(aiAssistantMountApi.runAgentStreamHistories[0]).toEqual([{ role: "user", content: "previous question" }]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
   // #12075 review: a draft can never be reopened, so its picker selection must not
   // travel into a conversation opened from the list. The leak only surfaced one
   // step later — reopening that conversation showed the abandoned draft's pick
@@ -1207,6 +1296,122 @@ describe("AiAssistant mount", () => {
     // the request cannot leave with the ambient target (R1/R2).
     expect((input.context as AiContext).connectionId).toBe("postgres");
     expect(errors.map(String)).toEqual([]);
+  });
+
+  it("sends the failed statement with its error instead of the edited SQL or older conversation context", async () => {
+    aiAssistantMountApi.conversations = [storedConversation({ messages: [{ role: "user", content: "Explain SELECT 42 AS earlier_query" }] })];
+    const tab = {
+      id: "query-13288",
+      title: "Query 13288",
+      connectionId: "conn-a",
+      database: "db_a",
+      sql: "SELECT 99 AS edited_after_execution;",
+      resultBaseSql: "SELECT 42 AS earlier_query; SHOW INDEX;",
+      lastExecutedSql: "SELECT 100 AS another_execution;",
+      result: { columns: ["Error"], rows: [["MySQL ERROR 1064"]], execution_error: true, sourceStatement: "SHOW INDEX" },
+    } as QueryTab;
+    const { errors, panelRef } = await mountPanel(true, CONN_A, configureAiPanel, undefined, [], tab);
+    panelRef.value!.selectConversationById("conv-a");
+    await settle();
+
+    // Staged editor selections must not consume the failed statement's budget.
+    for (let index = 0; index < 8; index++) {
+      panelRef.value!.openExternalContext({ target: { connectionId: "conn-a", database: "db_a" }, selections: [{ source: "editor", content: `SELECT ${index}` }] });
+    }
+    const selection = queryErrorSelection(tab)!;
+    // A lazy panel mount or another execution can replace the result meanwhile.
+    tab.result!.sourceStatement = "SELECT 101 AS next_execution";
+    panelRef.value!.openExternalContext({
+      target: { connectionId: "conn-a", database: "db_a" },
+      action: "fix",
+      instruction: "MySQL ERROR 1064",
+      selections: [selection],
+    });
+    await vi.waitFor(() => expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(1));
+
+    const input = aiAssistantMountApi.runAgentStreamInputs[0] as AiRequestInput;
+    expect(input.action).toBe("fix");
+    expect(input.instruction).toBe("MySQL ERROR 1064");
+    expect(input.context.currentSql).toBe("SHOW INDEX");
+    expect(input.context.selections).toEqual([{ id: expect.any(String), source: "query-error", label: "Query 13288", content: "SHOW INDEX" }]);
+    const request = buildAgentRequest(input, aiAssistantMountApi.runAgentStreamHistories[0] as never);
+    expect(request.systemPrompt).toContain("Current SQL:\nSHOW INDEX");
+    expect(request.systemPrompt).not.toContain("edited_after_execution");
+    expect(request.messages.at(-1)?.content).toContain("MySQL ERROR 1064");
+    expect(request.messages.at(-1)?.content).toContain("Source: query-error");
+    expect(request.messages.at(-1)?.content).toContain("SHOW INDEX");
+    expect(request.messages.some((message) => message.content.includes("Explain SELECT 42 AS earlier_query"))).toBe(true);
+    await settle();
+    const savedUserMessage = aiAssistantMountApi.savedConversations.at(-1)?.messages as Array<{ role: string; selectionsOmitted?: boolean; selections?: unknown[] }>;
+    expect(savedUserMessage.findLast((message) => message.role === "user")?.selectionsOmitted).toBe(true);
+    expect(savedUserMessage.findLast((message) => message.role === "user")?.selections).toBeUndefined();
+    panelRef.value!.openExternalContext({ target: { connectionId: "conn-a", database: "db_a" }, action: "explain", instruction: "Explain current SQL" });
+    await vi.waitFor(() => expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(2));
+    const nextInput = aiAssistantMountApi.runAgentStreamInputs[1] as AiRequestInput;
+    expect(nextInput.context.currentSql).toBe("SELECT 99 AS edited_after_execution;");
+    expect(nextInput.context.selections).toBeUndefined();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it.each(["ERROR B", "ERROR A"])("keeps concurrent fix requests paired while skills load (next error: %s)", async (nextError) => {
+    const { errors, container, panelRef } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.desktopSettings = { ...settings.desktopSettings, custom_ai_skill_auto_enabled: true };
+    });
+    let resolveCatalog!: (catalog: UserSkillsListResult) => void;
+    aiAssistantMountApi.listUserSkills.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCatalog = resolve;
+        }),
+    );
+    panelRef.value!.openExternalContext({
+      target: { connectionId: "conn-a", database: "db_a" },
+      action: "fix",
+      instruction: "ERROR A",
+      selections: [{ source: "query-error", label: "Failed A", content: "SHOW INDEX" }],
+    });
+    await vi.waitFor(() => expect(resolveCatalog).toBeTypeOf("function"));
+    expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(0);
+    panelRef.value!.openExternalContext({
+      target: { connectionId: "conn-a", database: "db_a" },
+      action: "fix",
+      instruction: nextError,
+      selections: [{ source: "query-error", label: "Failed B", content: "SELECT * FROM missing_b" }],
+    });
+    resolveCatalog({ defaultRoot: { status: "ok", skills: [] }, customRoot: null });
+    await vi.waitFor(() => expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(1));
+    const firstInput = aiAssistantMountApi.runAgentStreamInputs[0] as AiRequestInput;
+    expect(firstInput.instruction).toBe("ERROR A");
+    expect(firstInput.context.currentSql).toBe("SHOW INDEX");
+    expect(firstInput.context.selections?.map((selection) => selection.content)).toEqual(["SHOW INDEX"]);
+    await vi.waitFor(() => expect(sendControl(container).title).not.toBe(i18n.global.t("ai.stopGenerating")));
+
+    // The busy send guard leaves the next request in the composer. Finishing
+    // the first send must not consume that newer SQL or its error text.
+    expect(container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")?.value).toBe(nextError);
+    expect(container.querySelector("[data-ai-selection-chips]")?.textContent).toContain("Failed B");
+    sendControl(container).click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(2));
+    const secondInput = aiAssistantMountApi.runAgentStreamInputs[1] as AiRequestInput;
+    expect(secondInput.instruction).toBe(nextError);
+    expect(secondInput.context.currentSql).toBe("SELECT * FROM missing_b");
+    expect(secondInput.context.selections?.map((selection) => selection.content)).toEqual(["SELECT * FROM missing_b"]);
+    await settle();
+    expect(container.querySelector("[data-ai-selection-chips]")).toBeNull();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it.each([
+    { result: { sourceStatement: "SHOW INDEX" }, resultBaseSql: "SELECT 1; SHOW INDEX;", lastExecutedSql: "SELECT 2", expected: "SHOW INDEX" },
+    { result: { sourceStatement: "SELECT * FROM missing" }, resultSortedSql: "SELECT * FROM missing ORDER BY id", resultBaseSql: "SELECT * FROM missing", lastExecutedSql: "SELECT 2", expected: "SELECT * FROM missing ORDER BY id" },
+    { resultBaseSql: "SHOW INDEX", lastExecutedSql: "SELECT 2", expected: "SHOW INDEX" },
+    { lastExecutedSql: "SHOW INDEX", expected: "SHOW INDEX" },
+    { expected: undefined },
+  ])("resolves the failed result SQL from recorded execution: $expected", ({ expected, ...recorded }) => {
+    const selection = queryErrorSelection({ title: "Query", sql: "SELECT 99 AS unsaved_edit", ...recorded } as QueryTab);
+    expect(selection?.content).toBe(expected);
+    expect(queryErrorSelection(undefined)).toBeUndefined();
   });
 
   it("opens a new chat bound to the tree node's namespace and keeps its table mention", async () => {
@@ -1981,5 +2186,66 @@ describe("AiAssistant mount", () => {
     expect(expandButton?.textContent).toContain(i18n.global.t("ai.skillsLoadedState"));
 
     expect(errors.map(String)).toEqual([]);
+  });
+
+  it.each([false, true])("docks approvals and clears them on resolution or stop (cancel=%s)", async (cancel) => {
+    let emit!: (event: { type: string; [key: string]: unknown }) => void;
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      emit = onEvent;
+      await running;
+      onEvent({ type: "agent_end" });
+      return "Finished";
+    };
+    aiAssistantMountApi.conversations = [storedConversation({ assistantMode: "agent" })];
+    const { container, panelRef, errors } = await mountPanel(true, CONN_A, configureAiPanel);
+    panelRef.value!.selectConversationById("conv-a");
+    await settle();
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.value = "Test tool approvals";
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+    const request = (id: string) => {
+      emit({ type: "tool_call_start", tool_call_id: id, tool_name: "plugin__ssh_exec", args: { command: "printf approval_dock_test" } });
+      emit({ type: "tool_approval_required", tool_call_id: id, approval_id: id, plugin_name: "Test plugin", plugin_tool: "ssh_exec", connection_name: "ConnA", args: { command: "printf approval_dock_test" }, timeout_secs: 60 });
+    };
+    try {
+      request("done");
+      emit({ type: "tool_approval_resolved", tool_call_id: "done", approval_id: "done", outcome: "approved" });
+      request("pending");
+      emit({ type: "text_delta", delta: "Long streamed response. ".repeat(100) });
+      await vi.waitFor(() => expect(container.querySelector("[data-ai-tool-approval-dock]")).not.toBeNull());
+      const dock = container.querySelector("[data-ai-tool-approval-dock]")!;
+      expect(dock.closest('[data-slot="scroll-area-viewport"]')).toBeNull();
+      expect(dock.querySelectorAll("[data-ai-tool-approval]")).toHaveLength(1);
+      expect(dock.textContent).toContain("printf approval_dock_test");
+      expect(container.querySelectorAll("[data-ai-tool-approval]")).toHaveLength(2);
+      const composer = container.querySelector(".ai-prompt-context-container")!;
+      expect(dock.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+      if (cancel) {
+        sendControl(container).click();
+      } else {
+        emit({ type: "tool_approval_resolved", tool_call_id: "pending", approval_id: "pending", outcome: "denied" });
+      }
+      await vi.waitFor(() => expect(container.querySelector("[data-ai-tool-approval-dock]")).toBeNull());
+      expect(container.querySelectorAll("[data-ai-tool-approval]")).toHaveLength(2);
+      if (cancel) {
+        const cards = [...container.querySelectorAll("[data-ai-tool-approval]")];
+        expect(cards.every((card) => card.querySelector("button") === null)).toBe(true);
+        expect(cards.at(-1)?.textContent).toContain(i18n.global.t("ai.toolApproval.status.cancelled"));
+        request("late");
+        await settle();
+        expect(container.querySelector("[data-ai-tool-approval-dock]")).toBeNull();
+      }
+      expect(errors.map(String)).toEqual([]);
+    } finally {
+      finish();
+      await settle();
+    }
   });
 });

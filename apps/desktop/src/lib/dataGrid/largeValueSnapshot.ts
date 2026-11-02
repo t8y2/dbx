@@ -4,9 +4,14 @@ import type { QueryResult } from "@/types/database";
 
 const MAX_MATERIALIZED_BYTES = 16 * 1024 * 1024;
 
-/** Abort only ends local waiting; the caller separately requests server cancellation. */
-export async function waitForLargeValueSnapshot<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+/** By default abort ends local waiting; export leases can retain native completion instead. */
+export async function waitForLargeValueSnapshot<T>(promise: Promise<T>, signal?: AbortSignal, waitForNative = false): Promise<T> {
   if (!signal) return promise;
+  if (waitForNative) {
+    const result = await promise;
+    signal.throwIfAborted();
+    return result;
+  }
   let abort!: () => void;
   try {
     return await Promise.race([
@@ -23,12 +28,12 @@ export async function waitForLargeValueSnapshot<T>(promise: Promise<T>, signal?:
 }
 
 /** No cache: every request validates the original server locator's lifecycle. */
-export async function readLargeValueSnapshot(request: LargeValueRequest, isCurrent: () => boolean, consume: (chunk: LargeValueChunk) => Promise<void> | void, signal?: AbortSignal, readChunk = api.readLargeValueChunk): Promise<void> {
+export async function readLargeValueSnapshot(request: LargeValueRequest, isCurrent: () => boolean, consume: (chunk: LargeValueChunk) => Promise<void> | void, signal?: AbortSignal, readChunk = api.readLargeValueChunk, waitForNative = false): Promise<void> {
   let offset = 0;
   while (true) {
     signal?.throwIfAborted();
     if (!isCurrent()) throw new Error("LOB result context changed");
-    const chunk = await waitForLargeValueSnapshot(readChunk({ ...request, offset, limit: 4096 }), signal);
+    const chunk = await waitForLargeValueSnapshot(readChunk({ ...request, offset, limit: 4096 }), signal, waitForNative);
     signal?.throwIfAborted();
     if (!isCurrent()) throw new Error("LOB result context changed");
     if (chunk.status !== "ok") throw new Error(`LOB snapshot ${chunk.status}; execute the query again`);
@@ -51,7 +56,7 @@ export async function readLargeValueSnapshot(request: LargeValueRequest, isCurre
   }
 }
 
-export async function materializeLargeValueSnapshot(request: LargeValueRequest, isCurrent: () => boolean, signal?: AbortSignal, readChunk = api.readLargeValueChunk): Promise<string> {
+export async function materializeLargeValueSnapshot(request: LargeValueRequest, isCurrent: () => boolean, signal?: AbortSignal, readChunk = api.readLargeValueChunk, waitForNative = false): Promise<string> {
   const chunks: string[] = [];
   let bytes = 0;
   let kind: LargeValueChunk["value_kind"] | undefined;
@@ -67,11 +72,12 @@ export async function materializeLargeValueSnapshot(request: LargeValueRequest, 
     },
     signal,
     readChunk,
+    waitForNative,
   );
   return (kind === "binary" ? "0x" : "") + chunks.join("");
 }
 
-export async function materializeSnapshotResultRows(result: QueryResult, isCurrent: () => boolean, signal?: AbortSignal, executionId?: string): Promise<QueryResult["rows"]> {
+export async function materializeSnapshotResultRows(result: QueryResult, isCurrent: () => boolean, signal?: AbortSignal, executionId?: string, readOptions?: { waitForNative?: boolean; readChunk?: typeof api.readLargeValueChunk }): Promise<QueryResult["rows"]> {
   const cells = result.large_value_cells ?? [];
   if (!cells.some((cell) => cell.value_ref)) return result.rows;
   const context = result.large_value_context;
@@ -80,7 +86,7 @@ export async function materializeSnapshotResultRows(result: QueryResult, isCurre
   let totalBytes = 0;
   for (const cell of cells) {
     if (!cell.value_ref) throw new Error("This result includes a value without a snapshot reference");
-    const value = await materializeLargeValueSnapshot({ ...context, valueRef: cell.value_ref, executionId }, isCurrent, signal);
+    const value = await materializeLargeValueSnapshot({ ...context, valueRef: cell.value_ref, executionId }, isCurrent, signal, readOptions?.readChunk, readOptions?.waitForNative);
     totalBytes += new TextEncoder().encode(value).length;
     if (totalBytes > 64 * 1024 * 1024) throw new Error("LOB result exceeds the 64 MiB export limit; download individual complete values");
     const row = rows[cell.row_index];

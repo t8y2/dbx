@@ -34,6 +34,7 @@ const props = defineProps<{
   autoRefresh?: DataGridToolbarAutoRefreshCapability;
   addRow?: DataGridToolbarAddRowCapability;
   deleteRow?: DataGridToolbarActionCapability;
+  deleteColumn?: DataGridToolbarActionCapability;
   copyData?: DataGridToolbarCopyCapability;
   exportData?: DataGridToolbarExportCapability;
   transpose?: DataGridToolbarActionCapability;
@@ -64,6 +65,7 @@ const visibleActionOrder = computed<DataGridToolbarActionKey[]>(() => {
     copyData: isDataGridToolbarCapabilityVisible(props.copyData),
     addRow: isDataGridToolbarCapabilityVisible(props.addRow),
     deleteRow: isDataGridToolbarCapabilityVisible(props.deleteRow),
+    deleteColumn: isDataGridToolbarCapabilityVisible(props.deleteColumn),
     exportData: isDataGridToolbarCapabilityVisible(props.exportData),
     transpose: isDataGridToolbarCapabilityVisible(props.transpose),
     tableInfo: isDataGridToolbarCapabilityVisible(props.tableInfo),
@@ -203,6 +205,23 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
         </Button>
       </TooltipTrigger>
       <TooltipContent side="bottom">{{ deleteRow?.tooltip ?? deleteRow?.label }}</TooltipContent>
+    </Tooltip>
+
+    <Tooltip v-if="isDataGridToolbarCapabilityVisible(deleteColumn)">
+      <TooltipTrigger as-child>
+        <Button
+          data-toolbar-action="deleteColumn"
+          variant="ghost"
+          size="sm"
+          :class="[...actionButtonClass('deleteColumn'), 'text-destructive hover:bg-destructive/10 hover:text-destructive']"
+          :disabled="isDataGridToolbarCapabilityDisabled(deleteColumn)"
+          @click="void triggerDataGridToolbarAction(deleteColumn)"
+        >
+          <Trash2 class="data-grid-topbar-action-icon h-3 w-3" />
+          <span class="data-grid-topbar-action-label" :class="actionLabelClass('deleteColumn')">{{ deleteColumn?.label }}</span>
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{{ deleteColumn?.tooltip ?? deleteColumn?.label }}</TooltipContent>
     </Tooltip>
 
     <DropdownMenu v-if="isDataGridToolbarCapabilityVisible(exportData)">

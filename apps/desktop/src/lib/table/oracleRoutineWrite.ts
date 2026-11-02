@@ -28,12 +28,16 @@ export function requireVerifiedOracleRoutine(operation: OracleRoutineOperation):
   if (oracleRoutineOperationVerified(operation)) return;
   const pending = operation.lifecycle === "running" || operation.lifecycle === "unproven";
   const stateKey = operation.readback?.state === "invalid" ? "objects.routineReadbackInvalid" : operation.readback?.state === "missing" ? "objects.routineReadbackMissing" : operation.readback?.state === "definition-mismatch" ? "objects.routineReadbackMismatch" : null;
+  const companion = operation.readback?.packageCompanion;
   const details = [
     operation.dispatched && operation.acknowledged ? i18n.global.t("objects.routineWriteAcknowledged") : null,
     stateKey ? i18n.global.t(stateKey) : null,
     operation.error,
     ...(operation.readback?.issues.map((issue) => issue.message) ?? []),
     ...(operation.readback?.compilerMessages.map((message) => `${message.attribute} ${message.line}:${message.position} ${message.text}`) ?? []),
+    ...(companion
+      ? [`${companion.identity.kind.replaceAll("_", " ")}: ${companion.version?.status ?? companion.state}`, ...companion.issues.map((issue) => issue.message), ...companion.compilerMessages.map((message) => `${message.attribute} ${message.line}:${message.position} ${message.text}`)]
+      : []),
   ]
     .filter(Boolean)
     .join("\n");
@@ -42,7 +46,7 @@ export function requireVerifiedOracleRoutine(operation: OracleRoutineOperation):
 
 /** Prepare BEFORE production confirmation, execute the exact approved draft
  * afterwards. Keeping these phases separate binds confirmation to its endpoint. */
-export async function prepareOracleRoutineSourceSave(input: OracleRoutineSaveInput): Promise<PreparedOracleRoutineSave> {
+export async function prepareOracleRoutineSourceSave(input: OracleRoutineSaveInput, { retainTerminalResult = false }: { retainTerminalResult?: boolean } = {}): Promise<PreparedOracleRoutineSave> {
   input = { ...input, identity: { ...input.identity } };
   const key = JSON.stringify([input.connectionId, input.database, input.identity.owner, input.identity.name]);
   const pending = pendingSaves.get(key);
@@ -98,6 +102,7 @@ export async function prepareOracleRoutineSourceSave(input: OracleRoutineSaveInp
   }
   let transferred = false;
   let disposed = false;
+  let retainedTerminal = false;
   const execute = async () => {
     // Different source editors may have prepared concurrently. The Core target
     // hold is authoritative; this map also retains the first unresolved ID.
@@ -122,7 +127,8 @@ export async function prepareOracleRoutineSourceSave(input: OracleRoutineSaveInp
     if (pendingSaves.get(key)?.operation.operationId === approval.operationId) {
       if (operation.lifecycle === "terminal") {
         pendingSaves.delete(key);
-        await releaseOracleRoutineOperations([approval.operationId]);
+        if (retainTerminalResult) retainedTerminal = true;
+        else await releaseOracleRoutineOperations([approval.operationId]);
       } else pendingSaves.set(key, { input, operation });
     }
     requireVerifiedOracleRoutine(operation);
@@ -130,7 +136,7 @@ export async function prepareOracleRoutineSourceSave(input: OracleRoutineSaveInp
   };
   return Object.assign(execute, {
     dispose: async () => {
-      if (transferred || disposed) return;
+      if ((transferred && !retainedTerminal) || disposed) return;
       disposed = true;
       await releaseOracleRoutineOperations([approval.operationId]);
     },

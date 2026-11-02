@@ -81,7 +81,7 @@ def handle(request):
                     mode = 'connection' if failed.read_text() == session else 'success'
                 if mode in ('sql', 'timeout', 'connection'):
                     error = rpc_error(mode)
-                elif mode == 'fallback' and 'TABLE_USED_PAGES' in params['sql']:
+                elif mode == 'fallback' and ('TABLE_USED_PAGES' in params['sql'] or 'DBA_OB_TABLET_REPLICAS' in params['sql']):
                     error = rpc_error('sql')
                 else:
                     result = {'columns': ['TABLE_NAME', 'OWNER', 'NUM_ROWS', 'TOTAL_BYTES'],

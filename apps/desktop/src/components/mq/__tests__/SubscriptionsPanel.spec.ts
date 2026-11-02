@@ -17,7 +17,7 @@ const backend = vi.hoisted(() => ({
 }));
 
 vi.mock("vue-i18n", () => ({
-  useI18n: () => ({ t: (key: string) => key }),
+  useI18n: () => ({ t: (key: string, params?: { count?: number }) => (key === "mqSubscriptions.consumerCount" ? `${params?.count}` : key) }),
 }));
 
 vi.mock("@/lib/backend/api", () => backend);
@@ -137,6 +137,24 @@ afterEach(() => {
   app = null;
   root?.remove();
   root = null;
+});
+
+describe("SubscriptionsPanel Kafka partial results", () => {
+  it.each([undefined, 0, 1])("distinguishes unavailable members from a known count of %s", async (onlineMembers) => {
+    backend.mqListSubscriptions.mockResolvedValue([
+      {
+        ...subscription("orders-service", "consumer-group"),
+        onlineMembers,
+        backlogUnavailable: onlineMembers == null,
+        consumers: Array.from({ length: onlineMembers ?? 0 }, () => ({ consumerName: "consumer-orders" })),
+      },
+    ]);
+    const panel = await mountPanel();
+    const row = panel.querySelector(".subscriptions-table tbody tr")!;
+
+    expect(row.querySelector('[data-testid="online-members"]')?.textContent?.trim()).toBe(onlineMembers == null ? "-" : `${onlineMembers}`);
+    expect(row.querySelectorAll("td")[2].textContent?.trim()).toBe(onlineMembers == null ? "-" : "0");
+  });
 });
 
 describe("SubscriptionsPanel message peek", () => {

@@ -4,12 +4,12 @@ import { createApp, nextTick, type App } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
-import type { GlobalSearchMatch } from "@/lib/backend/api";
+import type { SqlFileContentSearchResult } from "@/lib/backend/api";
 import { useQueryStore } from "@/stores/queryStore";
 
 const mocks = vi.hoisted(() => ({
   isTauri: true,
-  globalSearch: vi.fn(async (_request: unknown): Promise<GlobalSearchMatch[]> => []),
+  search: vi.fn(async (..._args: unknown[]): Promise<SqlFileContentSearchResult> => ({ files: [], skippedFiles: [], truncated: false })),
   readSnapshot: vi.fn(async () => ({ content: "SELECT 1;", version: { mtimeMs: 1, size: 9 } })),
 }));
 
@@ -47,9 +47,11 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/backend/api")>()),
   listSqlFilesInFolder: vi.fn(async () => JSON.parse(JSON.stringify(testEntries))),
   readExternalSqlFileSnapshot: mocks.readSnapshot,
-  globalSearch: mocks.globalSearch,
+  searchSqlFileContents: mocks.search,
 }));
 
+vi.mock("@/components/ui/select", () => import("./sqlSearchTestUtils"));
+import { changeSearchMode } from "./sqlSearchTestUtils";
 import SqlFilePanel from "../SqlFilePanel.vue";
 
 const mounted: Array<{ app: App; host: HTMLElement }> = [];
@@ -75,19 +77,34 @@ function typeQuery(host: HTMLElement, value: string) {
   input.dispatchEvent(new Event("input"));
 }
 
-function hit(overrides: Partial<GlobalSearchMatch> & { path: string; line: number; column: number }): GlobalSearchMatch {
+function result(path: string, lines = [3], column = 8): SqlFileContentSearchResult {
   return {
-    fileName: overrides.path.split("/").pop() ?? overrides.path,
-    matchText: "needle",
-    lineText: "SELECT needle FROM t",
-    ...overrides,
+    files: [
+      {
+        path,
+        totalMatches: lines.length,
+        matches: lines.map((lineNumber) => ({
+          lineNumber,
+          column,
+          lineText: "SELECT needle FROM t",
+          segments: [
+            { text: "SELECT ", matched: false },
+            { text: "needle", matched: true },
+            { text: " FROM t", matched: false },
+          ],
+        })),
+      },
+    ],
+    skippedFiles: [],
+    truncated: false,
   };
 }
 
 beforeEach(() => {
+  localStorage.clear();
   mocks.isTauri = true;
-  mocks.globalSearch.mockReset();
-  mocks.globalSearch.mockResolvedValue([]);
+  mocks.search.mockReset();
+  mocks.search.mockResolvedValue({ files: [], skippedFiles: [], truncated: false });
   mocks.readSnapshot.mockClear();
 });
 
@@ -102,8 +119,9 @@ afterEach(() => {
 describe("SqlFilePanel content search", () => {
   it("shows content-only matches with their snippet and auto-expands the parent folder", async () => {
     const { host } = await mountPanel();
-    mocks.globalSearch.mockResolvedValue([hit({ path: "/sql/queries/02_orders.sql", line: 3, column: 8 })]);
+    mocks.search.mockResolvedValue(result("/sql/queries/02_orders.sql"));
 
+    await changeSearchMode(host, "content");
     typeQuery(host, "needle");
     await vi.waitFor(() => expect(host.querySelector('[data-sql-file-path="/sql/queries/02_orders.sql"]')).not.toBeNull());
 
@@ -119,17 +137,16 @@ describe("SqlFilePanel content search", () => {
     // Content results must not be mistaken for "no results".
     expect(host.querySelector("[data-sql-file-empty-search]")).toBeNull();
 
-    // The backend is asked for the panel's file set, ignore rules disabled, and
-    // only as deep as the tree itself: fixture files sit at tree depth 1
-    // (queries/01_find_user.sql, alpha.sql…), i.e. WalkBuilder depth 2.
-    expect(mocks.globalSearch).toHaveBeenCalledWith(expect.objectContaining({ roots: ["/sql"], query: "needle", extensions: ["sql"], respectIgnoreRules: false, maxDepth: 2 }));
+    // Search uses the exact same file filter as the tree.
+    expect(mocks.search).toHaveBeenCalledWith(["/sql"], "needle", "*.sql");
   });
 
   it("opens the file at the hit line and column when a snippet is clicked", async () => {
     const { host, queryStore } = await mountPanel();
-    mocks.globalSearch.mockResolvedValue([hit({ path: "/sql/queries/02_orders.sql", line: 3, column: 8 })]);
+    mocks.search.mockResolvedValue(result("/sql/queries/02_orders.sql"));
     const openExternalSqlFile = vi.spyOn(queryStore, "openExternalSqlFile");
 
+    await changeSearchMode(host, "content");
     typeQuery(host, "needle");
     const snippetRow = await vi.waitFor(() => {
       const row = host.querySelector<HTMLElement>('[data-sql-file-content-snippet="/sql/queries/02_orders.sql"] .group\\/snippet');
@@ -150,8 +167,9 @@ describe("SqlFilePanel content search", () => {
 
   it("shows truncated snippets and expands to the full match list", async () => {
     const { host } = await mountPanel();
-    mocks.globalSearch.mockResolvedValue([1, 2, 3, 4, 5].map((line) => hit({ path: "/sql/queries/02_orders.sql", line, column: 1 })));
+    mocks.search.mockResolvedValue(result("/sql/queries/02_orders.sql", [1, 2, 3, 4, 5], 1));
 
+    await changeSearchMode(host, "content");
     typeQuery(host, "needle");
     const snippet = await vi.waitFor(() => {
       const element = host.querySelector<HTMLElement>('[data-sql-file-content-snippet="/sql/queries/02_orders.sql"]');
@@ -169,36 +187,41 @@ describe("SqlFilePanel content search", () => {
 
   it("debounces lookups so fast typing issues a single final request", async () => {
     const { host } = await mountPanel();
+    await changeSearchMode(host, "content");
     typeQuery(host, "n");
     typeQuery(host, "ne");
     typeQuery(host, "needle");
 
-    expect(mocks.globalSearch).not.toHaveBeenCalled();
-    await vi.waitFor(() => expect(mocks.globalSearch).toHaveBeenCalledTimes(1));
-    expect(mocks.globalSearch).toHaveBeenCalledWith(expect.objectContaining({ query: "needle" }));
+    expect(mocks.search).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(mocks.search).toHaveBeenCalledTimes(1));
+    expect(mocks.search).toHaveBeenCalledWith(["/sql"], "needle", "*.sql");
   });
 
   it("discards results from a superseded query", async () => {
     const { host } = await mountPanel();
-    let resolveFirst: ((matches: GlobalSearchMatch[]) => void) | undefined;
-    mocks.globalSearch.mockImplementationOnce(
+    let resolveFirst: ((matches: SqlFileContentSearchResult) => void) | undefined;
+    mocks.search.mockImplementationOnce(
       () =>
-        new Promise<GlobalSearchMatch[]>((resolve) => {
+        new Promise<SqlFileContentSearchResult>((resolve) => {
           resolveFirst = resolve;
         }),
     );
-    mocks.globalSearch.mockResolvedValueOnce([hit({ path: "/sql/migrations/01_init.sql", line: 2, column: 1 })]);
+    mocks.search.mockResolvedValueOnce(result("/sql/migrations/01_init.sql", [2], 1));
 
+    await changeSearchMode(host, "content");
     typeQuery(host, "needle");
-    await vi.waitFor(() => expect(mocks.globalSearch).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(mocks.search).toHaveBeenCalledTimes(1));
 
-    // Second query starts (and finishes) before the first response arrives.
+    // Disk scans are serialized; the latest query waits for the in-flight scan.
     typeQuery(host, "other");
+    await nextTick();
+    expect(host.querySelector('[data-sql-file-path="/sql/queries/02_orders.sql"]')).toBeNull();
+    resolveFirst!(result("/sql/queries/02_orders.sql", [1], 1));
+    await nextTick();
+    await nextTick();
+    // Invalidate on the first new keystroke, before the debounce commits "other".
+    expect(host.querySelector("[data-sql-file-content-snippet]")).toBeNull();
     await vi.waitFor(() => expect(host.querySelector('[data-sql-file-path="/sql/migrations/01_init.sql"]')).not.toBeNull());
-
-    resolveFirst!([hit({ path: "/sql/queries/02_orders.sql", line: 1, column: 1 })]);
-    await nextTick();
-    await nextTick();
 
     // The late answer for "needle" must not widen the tree for "other".
     expect(host.querySelector('[data-sql-file-path="/sql/queries/02_orders.sql"]')).toBeNull();
@@ -206,8 +229,9 @@ describe("SqlFilePanel content search", () => {
 
   it("restores the full tree when the query is cleared", async () => {
     const { host } = await mountPanel();
-    mocks.globalSearch.mockResolvedValue([hit({ path: "/sql/queries/02_orders.sql", line: 1, column: 1 })]);
+    mocks.search.mockResolvedValue(result("/sql/queries/02_orders.sql", [1], 1));
 
+    await changeSearchMode(host, "content");
     typeQuery(host, "needle");
     await vi.waitFor(() => expect(host.querySelector("[data-sql-file-content-snippet]")).not.toBeNull());
 
@@ -219,7 +243,32 @@ describe("SqlFilePanel content search", () => {
     expect(host.querySelector("[data-sql-file-content-snippet]")).toBeNull();
   });
 
-  it("degrades to name-only filtering outside the desktop runtime", async () => {
+  it("keeps the two scopes separate and removes content snippets on switching to names", async () => {
+    const { host } = await mountPanel();
+    typeQuery(host, "orders");
+    await nextTick();
+    expect(host.querySelector('[data-sql-file-path="/sql/queries/02_orders.sql"]')).not.toBeNull();
+    expect(mocks.search).not.toHaveBeenCalled();
+    mocks.search.mockResolvedValue(result("/sql/alpha.sql"));
+    await changeSearchMode(host, "content");
+    await vi.waitFor(() => expect(host.querySelector('[data-sql-file-path="/sql/alpha.sql"]')).not.toBeNull());
+    expect(host.querySelector('[data-sql-file-path="/sql/queries/02_orders.sql"]')).toBeNull();
+    await changeSearchMode(host, "name");
+    expect(host.querySelector('[data-sql-file-path="/sql/queries/02_orders.sql"]')).not.toBeNull();
+    expect(host.querySelector("[data-sql-file-content-snippet]")).toBeNull();
+  });
+
+  it("reports a failed content search without silently matching names", async () => {
+    const { host } = await mountPanel();
+    mocks.search.mockRejectedValue(new Error("Search unavailable"));
+    await changeSearchMode(host, "content");
+    typeQuery(host, "orders");
+    await vi.waitFor(() => expect(host.textContent).toContain("Search unavailable"));
+    expect(host.querySelector('[data-sql-file-path="/sql/queries/02_orders.sql"]')).toBeNull();
+    expect(host.querySelector("[data-sql-file-empty-search]")).toBeNull();
+  });
+
+  it("defaults to name filtering without scanning, including outside the desktop runtime", async () => {
     mocks.isTauri = false;
     const { host } = await mountPanel();
 
@@ -229,6 +278,19 @@ describe("SqlFilePanel content search", () => {
 
     // Name matching still works instantly, and no backend search is attempted.
     expect(host.querySelector('[data-sql-file-path="/sql/queries/02_orders.sql"]')).not.toBeNull();
-    expect(mocks.globalSearch).not.toHaveBeenCalled();
+    expect(mocks.search).not.toHaveBeenCalled();
   });
+});
+
+it("remembers the file search mode independently of the SQL library", async () => {
+  localStorage.setItem("dbx-sql-library-search-mode", "name");
+  const first = await mountPanel();
+  await changeSearchMode(first.host, "content");
+  const mountedFirst = mounted.pop()!;
+  mountedFirst.app.unmount();
+  mountedFirst.host.remove();
+  const second = await mountPanel();
+  expect(second.host.querySelector<HTMLSelectElement>("[data-search-mode]")!.value).toBe("content");
+  expect(localStorage.getItem("dbx-sql-library-search-mode")).toBe("name");
+  expect(mocks.search).not.toHaveBeenCalled();
 });

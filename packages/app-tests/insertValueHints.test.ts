@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildInsertValueHints, expandToSqlStatementWindow, findEnclosingDollarQuoteStart, parseInsertValueHints, parseInsertValueHintsInRanges, parseInsertValuesClauses } from "../../apps/desktop/src/lib/sql/insertValueHints.ts";
+import { buildInsertValueHints, expandToBoundedSqlStatementWindow, expandToSqlStatementWindow, findEnclosingDollarQuoteStart, parseInsertValueHints, parseInsertValueHintsInRanges, parseInsertValuesClauses } from "../../apps/desktop/src/lib/sql/insertValueHints.ts";
 import { insertValueHintColumnNames } from "../../apps/desktop/src/lib/sql/insertValueHintColumns.ts";
 
 /**
@@ -718,4 +718,43 @@ test("scans large procedural sources without repeatedly filtering all tokens", (
 test("buildInsertValueHints skips unresolved tables without metadata", () => {
   const clauses = parseInsertValuesClauses("INSERT INTO mystery VALUES (1, 2)");
   assert.deepEqual(buildInsertValueHints(clauses), []);
+});
+
+test("expandToBoundedSqlStatementWindow matches the exact window for ordinary statements", () => {
+  const sql = `${"SELECT 1;\n".repeat(20_000)}INSERT INTO t (a) VALUES (1);\nSELECT 2;`;
+  const insertAt = sql.indexOf("INSERT");
+  const bounded = expandToBoundedSqlStatementWindow(sql, insertAt, insertAt + 6);
+  assert.deepEqual(bounded, expandToSqlStatementWindow(sql, insertAt, insertAt + 6));
+  assert.equal(sql.slice(bounded.from, bounded.to), "INSERT INTO t (a) VALUES (1)");
+});
+
+test("expandToBoundedSqlStatementWindow stays near the requested range inside one enormous statement", () => {
+  const padding = 4 * 1024;
+  const values = Array.from({ length: 50_000 }, (_, index) => `'LTA${String(index).padStart(9, "0")}'`).join(",\n");
+  const sql = `SELECT * FROM orders WHERE code IN (\n${values}\n);`;
+  const cursor = Math.floor(sql.length / 2);
+
+  const exact = expandToSqlStatementWindow(sql, cursor, cursor + 200);
+  assert.ok(exact.to - exact.from > sql.length - 100, "the exact window spans the whole statement");
+
+  const bounded = expandToBoundedSqlStatementWindow(sql, cursor, cursor + 200, "mysql", padding);
+  assert.ok(bounded.from <= cursor && bounded.to >= cursor + 200, "the requested range stays inside the window");
+  assert.ok(bounded.from >= cursor - padding && bounded.to <= cursor + 200 + padding, `window ${bounded.to - bounded.from} must stay within the padding`);
+});
+
+test("expandToBoundedSqlStatementWindow still respects statement boundaries inside its slice", () => {
+  const filler = "SELECT 'x';\n".repeat(10_000);
+  const sql = `${filler}SELECT a, b FROM target_table WHERE a = 1;\n${filler}`;
+  const at = sql.indexOf("target_table");
+  const bounded = expandToBoundedSqlStatementWindow(sql, at, at + 12, "mysql", 2 * 1024);
+  assert.equal(sql.slice(bounded.from, bounded.to), "SELECT a, b FROM target_table WHERE a = 1");
+});
+
+test("expandToBoundedSqlStatementWindow does not read a dollar-quoted body as one literal when the slice starts inside it", () => {
+  const prefix = "CREATE FUNCTION f() RETURNS void AS $$\nBEGIN\n";
+  const body = "  PERFORM 1;\n".repeat(6_000);
+  const sql = `${prefix}${body}  UPDATE widgets SET n = n + 1 WHERE id = 7;\n${body}END;\n$$ LANGUAGE plpgsql;`;
+  const at = sql.indexOf("UPDATE widgets");
+  const bounded = expandToBoundedSqlStatementWindow(sql, at, at + 6, "postgres", 4 * 1024);
+  assert.equal(sql.slice(bounded.from, bounded.to), "UPDATE widgets SET n = n + 1 WHERE id = 7");
 });

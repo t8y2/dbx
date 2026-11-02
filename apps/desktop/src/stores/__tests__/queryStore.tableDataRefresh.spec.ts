@@ -609,6 +609,31 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledTimes(2);
   });
 
+  it.each(["before offset", "at offset"])("advances through empty Cassandra cursor pages %s", async (emptyPagePosition) => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
+    const page = (rows: number[]) => ({ columns: ["id"], rows: rows.map((id) => [id]), affected_rows: 0, execution_time_ms: 1, session_id: "cursor-empty", has_more: true });
+    const pages = emptyPagePosition === "before offset" ? [[], [1, 2], [3, 4]] : [[1, 2], [], [3, 4]];
+    for (const rows of pages) mocks.executeMulti.mockResolvedValueOnce([page(rows)]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+
+    await store.executeTabSql(tabId, 'SELECT * FROM "paged_rows";', { pagination: { limit: 2, offset: 2 } });
+
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    expect(tab.result?.rows).toEqual([[3], [4]]);
+    expect(tab.result?.timing_page_count).toBe(3);
+    expect(tab.resultPageOffset).toBe(2);
+    expect(mocks.executeMulti.mock.calls.map((call) => call[5]?.resultSessionId)).toEqual([undefined, "cursor-empty", "cursor-empty"]);
+    expect(mocks.closeQuerySession).not.toHaveBeenCalled();
+  });
+
   it("closes a Cassandra replay cursor when a later page fails", async () => {
     mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
     mocks.executeMulti.mockResolvedValueOnce([{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-lost", has_more: true }]).mockRejectedValueOnce(new Error("query session not found: cursor-lost"));
@@ -1281,6 +1306,39 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
     expect(tab.isExecuting).toBe(false);
     expect(tab.executionId).toBeUndefined();
+  });
+
+  it.each([{ pendingDataChangeCount: 1 }, { hasPendingDataEditorDraft: true }])("preserves unsaved edits during an import refresh: %j", async (pending) => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    mocks.getConnectionConfig.mockReturnValue({ id: "mysql-1", db_type: "mysql", database: "app" });
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT id FROM users LIMIT 100");
+    mocks.executeMulti.mockResolvedValue([{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1 }]);
+    const createDataTab = (database: string) => {
+      const id = store.createTab("mysql-1", database, "users", "data", undefined, undefined, undefined, { forceNew: true });
+      store.setTableMeta(id, {
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+        primaryKeys: ["id"],
+      });
+      const tab = store.tabs.find((candidate) => candidate.id === id)!;
+      tab.result = { columns: ["id"], rows: [], affected_rows: 0, execution_time_ms: 1 };
+      tab.resultTotalRowCount = 0;
+      return tab;
+    };
+    const edited = createDataTab("app");
+    Object.assign(edited, pending);
+    const clean = createDataTab("app");
+    const unrelated = createDataTab("other");
+
+    await expect(store.refreshDataTabsForTable({ connectionId: "mysql-1", database: "app", schema: "app", schemaCandidates: [undefined, "app"], name: "users" }, { skipPendingChanges: true })).resolves.toBe(1);
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
+    expect(clean.result?.rows).toEqual([[1], [2]]);
+    expect(clean.resultTotalRowCount).toBe(2);
+    expect(edited.result?.rows).toEqual([]);
+    expect(edited).toMatchObject(pending);
+    expect(unrelated.result?.rows).toEqual([]);
   });
 
   it("keeps bulk SQL build failures observable to callers", async () => {

@@ -1,4 +1,5 @@
 import type { DatabaseType } from "@/types/database";
+import type { OracleRoutineKind } from "@/types/schemaDiff";
 
 export type SidebarObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "FUNCTION_INTERNAL" | "FUNCTION_UDF" | "TRIGGER" | "EVENT" | "SEQUENCE" | "INDEX" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
@@ -33,9 +34,9 @@ const KINGBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VI
 const VASTBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "TYPE"];
 
 const POSTGRES_LIKE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION"];
-const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "INDEX", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
-const OCEANBASE_ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "INDEX", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
-const DAMENG_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "INDEX", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
+const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "INDEX", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
+const OCEANBASE_ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "INDEX", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
+const DAMENG_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "INDEX", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
 
 export function supportsSchemaIndexManagement(dbType?: DatabaseType): boolean {
   return dbType === "oracle" || dbType === "oceanbase-oracle" || dbType === "dameng";
@@ -174,19 +175,23 @@ export function supportsSchemaDiffRoutines(dbType?: DatabaseType): boolean {
   return SCHEMA_DIFF_ROUTINE_KINDS.some((kind) => sidebarObjects.includes(kind) && sourceReadable.includes(kind));
 }
 
-export function schemaDiffRoutineObjectTypes(dbType?: DatabaseType): Array<"PROCEDURE" | "FUNCTION"> {
+export function schemaDiffRoutineObjectTypes(dbType?: DatabaseType, requestedKinds: readonly OracleRoutineKind[] = SCHEMA_DIFF_ROUTINE_KINDS): OracleRoutineKind[] {
   if (!supportsSchemaDiffRoutines(dbType)) return [];
   const { sidebarObjects, sourceReadable } = databaseObjectCapabilities(dbType);
-  return SCHEMA_DIFF_ROUTINE_KINDS.filter((kind) => sidebarObjects.includes(kind) && sourceReadable.includes(kind));
+  const kinds: OracleRoutineKind[] = dbType === "oracle" || dbType === "oceanbase-oracle" ? [...SCHEMA_DIFF_ROUTINE_KINDS, "PACKAGE", "PACKAGE_BODY"] : [...SCHEMA_DIFF_ROUTINE_KINDS];
+  return kinds.filter((kind) => requestedKinds.includes(kind) && sidebarObjects.includes(kind) && sourceReadable.includes(kind));
 }
 
-export function schemaDiffRoutineObjectTypesIntersection(sourceDbType?: DatabaseType, targetDbType?: DatabaseType): Array<"PROCEDURE" | "FUNCTION"> {
+export function schemaDiffRoutineObjectTypesIntersection(sourceDbType?: DatabaseType, targetDbType?: DatabaseType, requestedKinds?: readonly OracleRoutineKind[]): OracleRoutineKind[] {
   if (!sourceDbType || !targetDbType) return [];
   const sourceFamily = SCHEMA_DIFF_ROUTINE_FAMILY.get(sourceDbType);
   const targetFamily = SCHEMA_DIFF_ROUTINE_FAMILY.get(targetDbType);
-  if (!sourceFamily || sourceFamily !== targetFamily) return [];
-  const sourceTypes = new Set(schemaDiffRoutineObjectTypes(sourceDbType));
-  return schemaDiffRoutineObjectTypes(targetDbType).filter((kind) => sourceTypes.has(kind));
+  if (!sourceFamily || !targetFamily) return [];
+  const sourceTypes = new Set(schemaDiffRoutineObjectTypes(sourceDbType, requestedKinds));
+  const shared = schemaDiffRoutineObjectTypes(targetDbType, requestedKinds).filter((kind) => sourceTypes.has(kind));
+  if (sourceFamily === targetFamily) return shared;
+  if ((sourceFamily === "oracle" || sourceFamily === "oceanbase-oracle") && (targetFamily === "oracle" || targetFamily === "oceanbase-oracle")) return shared.filter((kind) => kind === "PACKAGE" || kind === "PACKAGE_BODY");
+  return [];
 }
 
 export function sidebarObjectKindsForDatabase(dbType?: DatabaseType, compatibilityMode?: string): SidebarObjectKind[] {

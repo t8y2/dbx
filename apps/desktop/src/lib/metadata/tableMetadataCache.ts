@@ -1,7 +1,7 @@
 import type { ColumnInfo, DatabaseType, IndexInfo, QueryTab } from "@/types/database";
 import * as api from "@/lib/backend/api";
-import { editableRowIdentifierColumns, physicalTablePrimaryKeys } from "@/lib/table/tableEditing";
-import { loadVirtualRowIdentifier } from "@/lib/table/virtualRowIdentifier";
+import { editableRowIdentifierColumns, physicalTablePrimaryKeys, uniqueKeyModelColumns } from "@/lib/table/tableEditing";
+import { loadVirtualRowIdentifier, resolveRowIdentifierColumns } from "@/lib/table/virtualRowIdentifier";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadCacheStatus, type MetadataLoadTraceLogger } from "./metadataLoadCoordinator";
 import { metadataScopeKey, metadataScopeParts, type MetadataScopeInput } from "./metadataLoadScope";
 import { metadataCacheInvalidationMatcher, MetadataResultCache, type MetadataCacheInvalidation } from "./metadataResultCache";
@@ -15,6 +15,7 @@ export interface TableMetadata {
   tableType?: string;
   catalog?: string;
   database?: string;
+  databaseType?: DatabaseType;
   columns: ColumnInfo[];
   indexes: IndexInfo[];
   primaryKeys: string[];
@@ -294,7 +295,7 @@ export function tableMetadataToDataTabMeta(metadata: TableMetadata, overrides?: 
     columns: metadata.columns,
     primaryKeys: metadata.primaryKeys,
     ...(metadata.virtualPrimaryKeys?.length ? { virtualPrimaryKeys: metadata.virtualPrimaryKeys } : {}),
-    physicalPrimaryKeys: physicalTablePrimaryKeys(metadata.columns, metadata.indexes),
+    physicalPrimaryKeys: physicalTablePrimaryKeys(metadata.columns, metadata.indexes, metadata.databaseType),
   };
 }
 
@@ -318,6 +319,43 @@ export async function loadTableIndexes(request: TableMetadataRequest): Promise<I
     if (tableIndexesLoads.get(scopeKey) === entry) tableIndexesLoads.delete(scopeKey);
   });
   return promise;
+}
+
+function tableMetadataFromFacets(request: TableMetadataRequest, columnsResult: TableColumnsLoadResult, indexes: IndexInfo[], rowIdentityResolved: boolean): TableMetadata {
+  let columns = columnsResult.columns;
+  const resolveReportedSchema = (request.databaseType === "vastbase" || request.databaseType === "kingbase") && !request.schema;
+  const resolvedSchema = resolveReportedSchema ? columns.find((column) => column.resolved_schema)?.resolved_schema : request.schema;
+  let primaryKeys = editableRowIdentifierColumns(request.databaseType as DatabaseType, columns, indexes, columnsResult.tableType);
+  // UNIQUE KEY models use is_unique here; rewriting is_primary_key would also
+  // change CREATE/DDL, transfer, data generation and cached column consumers.
+  const keyColumns = uniqueKeyModelColumns(request.databaseType as DatabaseType, indexes);
+  if (keyColumns.size > 0) {
+    if (primaryKeys.length === 0) primaryKeys = columns.filter((column) => keyColumns.has(column.name.toLowerCase())).map((column) => column.name);
+    columns = columns.map((column) => (keyColumns.has(column.name.toLowerCase()) && !column.is_unique ? { ...column, is_unique: true } : column));
+  }
+  return {
+    schema: resolvedSchema || undefined,
+    tableName: request.tableName,
+    tableType: columnsResult.tableType,
+    catalog: request.catalog,
+    database: request.database,
+    databaseType: request.databaseType as DatabaseType,
+    columns,
+    indexes,
+    primaryKeys,
+    rowIdentityResolved: rowIdentityResolved && columns.length > 0,
+    cachedAt: columnsResult.cachedAt,
+  };
+}
+
+export async function loadTableMetadataForExport(request: TableMetadataRequest, read: <T>(request: () => Promise<T>) => Promise<T>, capturedVirtualPrimaryKeys: readonly string[] = []): Promise<TableMetadata> {
+  const columnsResult = await read(() => loadTableColumns({ ...request, force: true }));
+  const resolvedTarget = columnsResult.columns.find((column) => column.resolved_table);
+  const indexRequest = { ...request, force: true, schema: resolvedTarget?.resolved_schema ?? (columnsResult.schema || request.schema || request.currentSchema), tableName: resolvedTarget?.resolved_table ?? request.tableName };
+  const indexes = columnsResult.columns.length ? await read(() => loadTableIndexes(indexRequest)) : [];
+  const metadata = tableMetadataFromFacets(request, columnsResult, indexes, true);
+  const virtualPrimaryKeys = metadata.primaryKeys.length ? [] : (resolveRowIdentifierColumns(capturedVirtualPrimaryKeys, metadata.columns) ?? []);
+  return virtualPrimaryKeys.length ? { ...metadata, primaryKeys: virtualPrimaryKeys, virtualPrimaryKeys } : metadata;
 }
 
 export async function loadTableMetadata(request: TableMetadataRequest): Promise<TableMetadataLoadResult> {
@@ -367,19 +405,7 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
         const indexRequest = { ...request, schema: resolvedTarget?.resolved_schema ?? (resolvedSchema || request.currentSchema), tableName: resolvedTarget?.resolved_table ?? request.tableName };
         const loadedIndexes = columns.length > 0 ? await ((!resolvedTarget && indexesPromise) || loadTableIndexes(indexRequest).catch(() => undefined)) : [];
         const indexes = loadedIndexes ?? indexFailure();
-        const primaryKeys = editableRowIdentifierColumns(request.databaseType as DatabaseType, columns, indexes, columnsResult.tableType);
-        return {
-          schema: resolvedSchema || undefined,
-          tableName: request.tableName,
-          tableType: columnsResult.tableType,
-          catalog: request.catalog,
-          database: request.database,
-          columns,
-          indexes,
-          primaryKeys,
-          rowIdentityResolved: rowIdentityResolved && columns.length > 0,
-          cachedAt: columnsResult.cachedAt,
-        };
+        return tableMetadataFromFacets(request, columnsResult, indexes, rowIdentityResolved);
       },
       { force: request.force, kind: scope.kind },
     );

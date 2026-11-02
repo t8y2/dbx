@@ -20,6 +20,7 @@ vi.mock("@/lib/backend/api", () => apiMock);
 vi.mock("@/composables/useDialogSources", () => ({ openSchemaDiffSession: openMock }));
 vi.mock("@/composables/useExportTracker", () => ({ useExportTracker: () => trackerMock }));
 vi.mock("@/lib/schema/schemaDiffMetadataLoad", () => ({ loadSchemaDetails: vi.fn().mockResolvedValue([]) }));
+vi.mock("@/lib/metadata/objectMetadataCache", () => ({ invalidateObjectMetadataCache: vi.fn().mockResolvedValue(undefined) }));
 
 const { startSchemaDiffSession } = await import("../useSchemaDiffSession.ts");
 
@@ -85,12 +86,48 @@ test("applies every exclude rule before loading source and target details", asyn
   await waitForSession(session);
   assert.equal(session.status, "completed");
   assert.equal(vi.mocked(loadSchemaDetails).mock.calls.length, 2);
+  const { invalidateObjectMetadataCache } = await import("@/lib/metadata/objectMetadataCache");
+  assert.deepEqual(
+    vi.mocked(invalidateObjectMetadataCache).mock.calls.map(([match]) => match),
+    [
+      { connectionId: "source", database: "app" },
+      { connectionId: "target", database: "warehouse" },
+    ],
+  );
   for (const [tables] of vi.mocked(loadSchemaDetails).mock.calls) {
     assert.deepEqual(
       tables.map((table) => table.name),
       ["users"],
     );
   }
+  vi.clearAllMocks();
+});
+
+test("skips metadata cache invalidation when refreshMetadata is turned off", async () => {
+  const { loadSchemaDetails } = await import("@/lib/schema/schemaDiffMetadataLoad");
+  const { invalidateObjectMetadataCache } = await import("@/lib/metadata/objectMetadataCache");
+  vi.clearAllMocks();
+  apiMock.prepareSchemaDiff.mockResolvedValue({ diffs: [], renameCandidates: [], syncSql: "", rollbackSyncSql: "" });
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "source",
+      sourceDatabase: "app",
+      sourceSchema: "",
+      targetConnectionId: "target",
+      targetDatabase: "warehouse",
+      targetSchema: "",
+      sourceDbType: "mysql",
+      targetDbType: "mysql",
+      options: { functions: false, refreshMetadata: false },
+      ignoreComments: false,
+      label: "cached compare",
+    },
+    { tableListLoader: { load: vi.fn().mockResolvedValue([{ name: "users", table_type: "BASE TABLE" }]) } },
+  );
+  await waitForSession(session);
+  assert.equal(session.status, "completed");
+  assert.equal(vi.mocked(loadSchemaDetails).mock.calls.length, 2);
+  assert.equal(vi.mocked(invalidateObjectMetadataCache).mock.calls.length, 0);
   vi.clearAllMocks();
 });
 
@@ -551,5 +588,198 @@ test("a strict-snapshot endpoint mismatch fails the session without generating a
   await waitForSession(session);
   assert.equal(session.status, "failed");
   assert.match(session.error ?? "", /endpoint/);
+  assert.equal(apiMock.prepareSchemaDiff.mock.calls.length, 0);
+});
+
+test("carries immutable BODY-only selection and kind-scoped evidence through the real comparison session", async () => {
+  vi.clearAllMocks();
+  apiMock.loadSchemaDiffRoutines.mockImplementation(async (connectionId: string, database: string, schema: string) => ({
+    endpoint: { connectionId, database, schema, databaseType: "oceanbase-oracle", generation: 6 },
+    state: connectionId.endsWith("source") ? "partial" : "complete",
+    enumerationComplete: true,
+    issues: [],
+    objects: (["PACKAGE", "PACKAGE_BODY"] as const).map((kind, index) => ({
+      version: { identity: { owner: schema, name: "Pkg.With.Dot", kind }, objectId: String(12 + index), status: "VALID", lastDdlTime: "2026-10-23T01:00:00" },
+      source: `CREATE OR REPLACE ${kind.replace("_", " ")} "${schema}"."Pkg.With.Dot" AS END;`,
+      sourceOrigin: "oceanbase-dictionary",
+      sourceComplete: !(connectionId.endsWith("source") && kind === "PACKAGE_BODY"),
+      dependenciesComplete: true,
+      dependencies: [],
+      issues: [],
+    })),
+  }));
+  apiMock.prepareSchemaDiff.mockResolvedValue({ diffs: [], functionDiffs: [], syncSql: "" });
+  const routineObjectKinds: Array<"PACKAGE_BODY" | "PACKAGE"> = ["PACKAGE_BODY"];
+  const selectedRoutineObjects = [{ name: "Pkg.With.Dot", kind: "PACKAGE_BODY" as const }];
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "package-source",
+      sourceDatabase: "db",
+      sourceSchema: "S",
+      targetConnectionId: "package-target",
+      targetDatabase: "db",
+      targetSchema: "T",
+      sourceDbType: "oceanbase-oracle",
+      targetDbType: "oceanbase-oracle",
+      options: { tables: false, functions: true, routineObjectKinds, selectedRoutineObjects },
+      ignoreComments: false,
+      label: "body only",
+    },
+    { tableListLoader: { load: vi.fn().mockResolvedValue([]) } },
+  );
+  routineObjectKinds.push("PACKAGE");
+  selectedRoutineObjects[0]!.name = "changed outside the session";
+  await waitForSession(session);
+  assert.equal(session.status, "completed", session.error ?? "");
+  assert.equal(apiMock.listFunctions.mock.calls.length, 0);
+  for (const call of apiMock.loadSchemaDiffRoutines.mock.calls) {
+    assert.equal(call[3], undefined);
+    assert.deepEqual(call[4], { objectKinds: ["PACKAGE_BODY"], selectedObjects: [{ name: "Pkg.With.Dot", kind: "PACKAGE_BODY" }] });
+  }
+  assert.equal(session.routineSnapshots?.source?.objects.length, 2, "keep the specification as read-only evidence");
+  assert.equal(session.routineSnapshots?.source?.objects[0]?.sourceOrigin, "oceanbase-dictionary");
+  assert.equal(session.routineSnapshots?.target?.objects[1]?.sourceOrigin, "oceanbase-dictionary");
+  const payload = apiMock.prepareSchemaDiff.mock.calls[0][0];
+  assert.deepEqual(
+    payload.sourceFunctions.map((object: { function_type: string }) => object.function_type),
+    ["PACKAGE_BODY"],
+  );
+  assert.deepEqual(
+    payload.targetFunctions.map((object: { function_type: string }) => object.function_type),
+    ["PACKAGE_BODY"],
+  );
+  assert.deepEqual(payload.oracleRoutines.objectKinds, ["PACKAGE_BODY"]);
+  assert.deepEqual(payload.oracleRoutines.sourceIncompleteObjects, [{ name: "Pkg.With.Dot", kind: "PACKAGE_BODY" }]);
+  assert.deepEqual(payload.oracleRoutines.targetIncompleteObjects, []);
+});
+
+test("rejects package comparison on unsupported products instead of silently comparing empty lists", async () => {
+  vi.clearAllMocks();
+  apiMock.listFunctions.mockResolvedValue([]);
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "unsupported-source",
+      sourceDatabase: "db",
+      sourceSchema: "S",
+      targetConnectionId: "unsupported-target",
+      targetDatabase: "db",
+      targetSchema: "T",
+      sourceDbType: "mysql",
+      targetDbType: "mysql",
+      options: { tables: false, functions: true, routineObjectKinds: ["PACKAGE_BODY"] },
+      ignoreComments: false,
+      label: "unsupported",
+    },
+    { tableListLoader: { load: vi.fn().mockResolvedValue([]) } },
+  );
+  await waitForSession(session);
+  assert.equal(session.status, "failed");
+  assert.match(session.error ?? "", /Oracle product/);
+  assert.equal(apiMock.listFunctions.mock.calls.length, 0);
+  assert.equal(apiMock.prepareSchemaDiff.mock.calls.length, 0);
+});
+
+test.each([
+  ["oracle", "oceanbase-oracle"],
+  ["oceanbase-oracle", "oracle"],
+] as const)("loads exact package evidence for a read-only %s to %s comparison", async (sourceType, targetType) => {
+  vi.clearAllMocks();
+  apiMock.loadSchemaDiffRoutines.mockImplementation(async (connectionId: string, database: string, schema: string) => {
+    const databaseType = connectionId.endsWith("source") ? sourceType : targetType;
+    return {
+      endpoint: { connectionId, database, schema, databaseType, generation: 1 },
+      state: "complete",
+      enumerationComplete: true,
+      issues: [],
+      objects: ["PACKAGE", "PACKAGE_BODY"].map((kind, index) => ({
+        version: { identity: { owner: schema, name: "Pkg.With.Dot", kind }, objectId: String(10 + index), status: "VALID", lastDdlTime: "1" },
+        source: `CREATE OR REPLACE ${kind.replace("_", " ")} "${schema}"."Pkg.With.Dot" AS END;`,
+        sourceOrigin: databaseType === "oracle" ? "oracle-metadata" : "oceanbase-dictionary",
+        sourceComplete: true,
+        dependenciesComplete: true,
+        dependencies: [],
+        issues: [],
+      })),
+    };
+  });
+  apiMock.prepareSchemaDiff.mockResolvedValue({ diffs: [], functionDiffs: [], syncSql: "" });
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "cross-package-source",
+      sourceDatabase: "db",
+      sourceSchema: "S",
+      targetConnectionId: "cross-package-target",
+      targetDatabase: "db",
+      targetSchema: "T",
+      sourceDbType: sourceType,
+      targetDbType: targetType,
+      options: { tables: false, functions: true, routineObjectKinds: ["PACKAGE_BODY"], selectedRoutineObjects: [{ name: "Pkg.With.Dot", kind: "PACKAGE_BODY" }] },
+      ignoreComments: false,
+      label: "cross-product package",
+    },
+    { tableListLoader: { load: vi.fn().mockResolvedValue([]) } },
+  );
+  await waitForSession(session);
+  assert.equal(session.status, "completed", session.error ?? "");
+  assert.equal(apiMock.loadSchemaDiffRoutines.mock.calls.length, 2);
+  const payload = apiMock.prepareSchemaDiff.mock.calls[0][0];
+  assert.deepEqual(
+    payload.sourceFunctions.map((object: { function_type: string }) => object.function_type),
+    ["PACKAGE_BODY"],
+  );
+  assert.deepEqual(
+    payload.targetFunctions.map((object: { function_type: string }) => object.function_type),
+    ["PACKAGE_BODY"],
+  );
+  assert.equal(payload.oracleRoutines.sourceDatabaseType, sourceType);
+  assert.equal(payload.oracleRoutines.targetDatabaseType, targetType);
+  assert.equal(session.routineSnapshots?.source?.objects.length, 2);
+});
+
+test("rejects explicitly selected standalone kinds in a cross-product package comparison before metadata requests", async () => {
+  vi.clearAllMocks();
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "cross-pf-source",
+      sourceDatabase: "db",
+      sourceSchema: "S",
+      targetConnectionId: "cross-pf-target",
+      targetDatabase: "db",
+      targetSchema: "T",
+      sourceDbType: "oracle",
+      targetDbType: "oceanbase-oracle",
+      options: { tables: false, functions: true, routineObjectKinds: ["FUNCTION", "PACKAGE_BODY"] },
+      ignoreComments: false,
+      label: "unsupported mixed kinds",
+    },
+    { tableListLoader: { load: vi.fn().mockResolvedValue([]) } },
+  );
+  await waitForSession(session);
+  assert.equal(session.status, "failed");
+  assert.equal(apiMock.loadSchemaDiffRoutines.mock.calls.length, 0);
+  assert.equal(apiMock.prepareSchemaDiff.mock.calls.length, 0);
+});
+
+test.each([{ routineObjectKinds: ["PACKAGE_BODY"], selectedRoutines: ["P"] }, { selectedRoutineObjects: [{ name: "P", kind: "PACKAGE_BODY" }] }])("rejects ambiguous typed selection before issuing metadata requests: %j", async (selection) => {
+  vi.clearAllMocks();
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "ambiguous-source",
+      sourceDatabase: "db",
+      sourceSchema: "S",
+      targetConnectionId: "ambiguous-target",
+      targetDatabase: "db",
+      targetSchema: "T",
+      sourceDbType: "oceanbase-oracle",
+      targetDbType: "oceanbase-oracle",
+      options: { tables: false, functions: true, ...selection },
+      ignoreComments: false,
+      label: "ambiguous",
+    },
+    { tableListLoader: { load: vi.fn().mockResolvedValue([]) } },
+  );
+  await waitForSession(session);
+  assert.equal(session.status, "failed");
+  assert.equal(apiMock.loadSchemaDiffRoutines.mock.calls.length, 0);
   assert.equal(apiMock.prepareSchemaDiff.mock.calls.length, 0);
 });

@@ -17,6 +17,18 @@ pub struct OracleRoutineCompareContext {
     pub target_enumeration_complete: bool,
     pub source_incomplete_names: Vec<String>,
     pub target_incomplete_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_kinds: Option<Vec<ObjectSourceKind>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_incomplete_objects: Option<Vec<OracleRoutineCompareIdentity>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_incomplete_objects: Option<Vec<OracleRoutineCompareIdentity>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OracleRoutineCompareIdentity {
+    pub name: String,
+    pub kind: ObjectSourceKind,
 }
 
 impl OracleRoutineCompareContext {
@@ -26,14 +38,61 @@ impl OracleRoutineCompareContext {
             && !self.source_schema.is_empty()
             && !self.target_schema.is_empty()
     }
+
+    fn package_enabled(&self, kind: &ObjectSourceKind) -> bool {
+        is_package(kind) && self.object_kinds.as_ref().is_some_and(|kinds| kinds.contains(kind))
+    }
+
+    fn readable(&self, kind: &ObjectSourceKind) -> bool {
+        if is_package(kind) && !self.package_enabled(kind) {
+            return false;
+        }
+        self.supported()
+            || (self.package_enabled(kind)
+                && matches!(self.source_database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+                && matches!(self.target_database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+                && !self.source_schema.is_empty()
+                && !self.target_schema.is_empty())
+    }
+}
+
+fn is_package(kind: &ObjectSourceKind) -> bool {
+    matches!(kind, ObjectSourceKind::Package | ObjectSourceKind::PackageBody)
 }
 
 fn kind(function: &FunctionInfo) -> Result<ObjectSourceKind, String> {
     match function.function_type.as_str() {
         "PROCEDURE" => Ok(ObjectSourceKind::Procedure),
         "FUNCTION" => Ok(ObjectSourceKind::Function),
-        _ => Err("Routine kind must be exactly PROCEDURE or FUNCTION".into()),
+        "PACKAGE" => Ok(ObjectSourceKind::Package),
+        "PACKAGE_BODY" => Ok(ObjectSourceKind::PackageBody),
+        _ => Err("Program kind must be exactly PROCEDURE, FUNCTION, PACKAGE or PACKAGE_BODY".into()),
     }
+}
+
+fn comparison_key(function: &FunctionInfo, typed: bool) -> (&'static str, &str) {
+    let namespace = if typed {
+        match function.function_type.as_str() {
+            "PACKAGE" => "PACKAGE",
+            "PACKAGE_BODY" => "PACKAGE_BODY",
+            _ => "ROUTINE",
+        }
+    } else {
+        "ROUTINE"
+    };
+    (namespace, function.name.as_str())
+}
+
+fn incomplete(
+    objects: Option<&[OracleRoutineCompareIdentity]>,
+    names: &[String],
+    name: &str,
+    kind: &ObjectSourceKind,
+) -> bool {
+    objects.map_or_else(
+        || names.iter().any(|candidate| candidate == name),
+        |objects| objects.iter().any(|object| object.name == name && object.kind == *kind),
+    )
 }
 
 fn definition_input(
@@ -60,38 +119,84 @@ pub fn diff_oracle_routines(
     target: &[FunctionInfo],
     context: &OracleRoutineCompareContext,
 ) -> Vec<FunctionDiff> {
-    let source_map = source.iter().map(|function| (function.name.as_str(), function)).collect::<BTreeMap<_, _>>();
-    let target_map = target.iter().map(|function| (function.name.as_str(), function)).collect::<BTreeMap<_, _>>();
+    let typed = context.object_kinds.is_some();
+    let included = |function: &&FunctionInfo| {
+        context.object_kinds.as_ref().is_none_or(|kinds| kind(function).map_or(true, |kind| kinds.contains(&kind)))
+    };
+    let source_map = source
+        .iter()
+        .filter(included)
+        .map(|function| (comparison_key(function, typed), function))
+        .collect::<BTreeMap<_, _>>();
+    let target_map = target
+        .iter()
+        .filter(included)
+        .map(|function| (comparison_key(function, typed), function))
+        .collect::<BTreeMap<_, _>>();
     let names = source_map.keys().chain(target_map.keys()).copied().collect::<BTreeSet<_>>();
     names
         .into_iter()
-        .map(|name| {
-            let source = source_map.get(name).copied();
-            let target = target_map.get(name).copied();
+        .map(|key| {
+            let name = key.1;
+            let source = source_map.get(&key).copied();
+            let target = target_map.get(&key).copied();
+            let object_kind = kind(source.or(target).expect("comparison keys have an object"));
             let mut diff = FunctionDiff {
                 diff_type: "unreadable".into(),
+                program_kind: if typed { object_kind.as_ref().ok().cloned() } else { None },
                 name: name.into(),
                 source: source.cloned(),
                 target: target.cloned(),
                 changes: Vec::new(),
             };
             let compared = (|| {
-                if !context.supported() {
+                let object_kind = object_kind.as_ref().map_err(Clone::clone)?;
+                if !context.readable(object_kind) {
                     return Err(
                         "Automatic routine comparison requires the same Oracle product type and exact owners".into()
                     );
                 }
-                if source.is_some() && context.source_incomplete_names.iter().any(|candidate| candidate == name) {
-                    return Err("Source routine definition is incomplete; readable original text is retained".into());
+                if let Some(source) = source {
+                    if incomplete(
+                        if typed { context.source_incomplete_objects.as_deref() } else { None },
+                        &context.source_incomplete_names,
+                        name,
+                        &kind(source)?,
+                    ) {
+                        return Err(
+                            "Source routine definition is incomplete; readable original text is retained".into()
+                        );
+                    }
                 }
-                if target.is_some() && context.target_incomplete_names.iter().any(|candidate| candidate == name) {
-                    return Err("Target routine definition is incomplete; readable original text is retained".into());
+                if let Some(target) = target {
+                    if incomplete(
+                        if typed { context.target_incomplete_objects.as_deref() } else { None },
+                        &context.target_incomplete_names,
+                        name,
+                        &kind(target)?,
+                    ) {
+                        return Err(
+                            "Target routine definition is incomplete; readable original text is retained".into()
+                        );
+                    }
                 }
                 if source.is_none() && !context.source_enumeration_complete {
                     return Err("Source inventory is incomplete; absence and deletion are not established".into());
                 }
                 if target.is_none() && !context.target_enumeration_complete {
                     return Err("Target inventory is incomplete; absence and creation are not established".into());
+                }
+                if typed
+                    && source_map.values().filter(|object| object.name == name).any(|source| {
+                        target_map.values().filter(|object| object.name == name).any(|target| {
+                            kind(source)
+                                .ok()
+                                .zip(kind(target).ok())
+                                .is_some_and(|(source, target)| is_package(&source) != is_package(&target))
+                        })
+                    })
+                {
+                    return Ok("conflict");
                 }
                 match (source, target) {
                     (Some(source), Some(target)) => {
@@ -139,6 +244,17 @@ pub fn oracle_routine_diff_sql(diff: &FunctionDiff, context: &OracleRoutineCompa
     if !context.supported() {
         return Err("Oracle routine target adaptation requires the same product type".into());
     }
+    if let Some(function) = diff.source.as_ref().or(diff.target.as_ref()) {
+        let object_kind = kind(function)?;
+        if is_package(&object_kind)
+            && (!context.package_enabled(&object_kind) || diff.program_kind.as_ref() != Some(&object_kind))
+        {
+            return Err("Package target SQL requires its explicit program kind and comparison scope".into());
+        }
+        if diff.program_kind.as_ref().is_some_and(|kind| *kind != object_kind || function.name != diff.name) {
+            return Err("Program diff identity does not match its definition".into());
+        }
+    }
     match diff.diff_type.as_str() {
         "added" | "modified" => {
             let source = diff.source.as_ref().ok_or("Routine source is unavailable")?;
@@ -153,7 +269,10 @@ pub fn oracle_routine_diff_sql(diff: &FunctionDiff, context: &OracleRoutineCompa
             let target = diff.target.as_ref().ok_or("Routine target is unavailable")?;
             let keyword = match kind(target)? {
                 ObjectSourceKind::Procedure => "PROCEDURE",
-                _ => "FUNCTION",
+                ObjectSourceKind::Function => "FUNCTION",
+                ObjectSourceKind::Package => "PACKAGE",
+                ObjectSourceKind::PackageBody => "PACKAGE BODY",
+                _ => return Err("Unsupported program kind".into()),
             };
             Ok(format!(
                 "DROP {keyword} \"{}\".\"{}\";",
@@ -181,6 +300,9 @@ mod tests {
             target_enumeration_complete: true,
             source_incomplete_names: Vec::new(),
             target_incomplete_names: Vec::new(),
+            object_kinds: None,
+            source_incomplete_objects: None,
+            target_incomplete_objects: None,
         }
     }
 
@@ -196,6 +318,153 @@ mod tests {
                 value
             ),
         }
+    }
+
+    fn package_context() -> OracleRoutineCompareContext {
+        let mut value = serde_json::to_value(context()).unwrap();
+        value["objectKinds"] = serde_json::json!(["PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"]);
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn package(name: &str, body: bool, value: u32) -> FunctionInfo {
+        let quoted_name = name.replace('"', "\"\"");
+        FunctionInfo {
+            name: name.into(),
+            function_type: if body { "PACKAGE_BODY" } else { "PACKAGE" }.into(),
+            data_type: String::new(),
+            arguments: String::new(),
+            definition: if body {
+                format!("PACKAGE BODY \"{quoted_name}\" AS FUNCTION f RETURN NUMBER IS BEGIN RETURN {value}; END; END;")
+            } else {
+                format!("PACKAGE \"{quoted_name}\" AS c CONSTANT NUMBER := {value}; FUNCTION f RETURN NUMBER; END;")
+            },
+        }
+    }
+
+    #[test]
+    fn package_specification_and_body_have_explicit_separate_identities_in_every_state() {
+        let context = package_context();
+        for state in ["equal", "modified", "added", "removed"] {
+            let source = if state == "removed" {
+                vec![]
+            } else {
+                vec![package("Pkg.With.Dot", false, 2), package("Pkg.With.Dot", true, 2)]
+            };
+            let target = if state == "added" {
+                vec![]
+            } else {
+                let value = if state == "modified" { 1 } else { 2 };
+                vec![package("Pkg.With.Dot", false, value), package("Pkg.With.Dot", true, value)]
+            };
+            let diffs = diff_oracle_routines(&source, &target, &context);
+            assert_eq!(diffs.len(), 2, "{state}: a pair must not collapse by name");
+            assert!(diffs.iter().all(|diff| diff.diff_type == state), "{state}: {diffs:?}");
+            let kinds = diffs
+                .iter()
+                .map(|diff| serde_json::to_value(diff).unwrap()["programKind"].as_str().unwrap().to_string())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(kinds, BTreeSet::from(["PACKAGE".into(), "PACKAGE_BODY".into()]));
+        }
+    }
+
+    #[test]
+    fn a_body_read_failure_does_not_mark_its_same_name_specification_unreadable() {
+        let mut value = serde_json::to_value(package_context()).unwrap();
+        value["sourceIncompleteNames"] = serde_json::json!(["P"]);
+        value["sourceIncompleteObjects"] = serde_json::json!([{"name":"P","kind":"PACKAGE_BODY"}]);
+        let context = serde_json::from_value(value).unwrap();
+        let pair = vec![package("P", false, 1), package("P", true, 1)];
+        let diffs = diff_oracle_routines(&pair, &pair, &context);
+        assert_eq!(diffs.len(), 2);
+        for diff in diffs {
+            let kind = serde_json::to_value(&diff).unwrap()["programKind"].as_str().unwrap().to_string();
+            assert_eq!(diff.diff_type, if kind == "PACKAGE" { "equal" } else { "unreadable" });
+        }
+    }
+
+    #[test]
+    fn kind_scoped_read_failures_follow_each_actual_side_of_a_standalone_conflict() {
+        let mut value = serde_json::to_value(package_context()).unwrap();
+        value["targetIncompleteNames"] = serde_json::json!(["P"]);
+        value["targetIncompleteObjects"] = serde_json::json!([{"name":"P","kind":"FUNCTION"}]);
+        let context = serde_json::from_value(value).unwrap();
+        let source = FunctionInfo {
+            function_type: "PROCEDURE".into(),
+            definition: "PROCEDURE P AS BEGIN NULL; END;".into(),
+            ..function("P", "")
+        };
+        let target = function("P", "retained target");
+        let diffs = diff_oracle_routines(&[source], std::slice::from_ref(&target), &context);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].diff_type, "unreadable");
+        assert_eq!(diffs[0].target.as_ref().unwrap().definition, target.definition);
+        assert!(oracle_routine_diff_sql(&diffs[0], &context).is_err());
+    }
+
+    #[test]
+    fn cross_product_packages_are_readable_but_never_automatic_target_sql() {
+        let mut context = package_context();
+        context.source_database_type = DatabaseType::Oracle;
+        let source = vec![package("P", false, 1), function("Standalone", "v")];
+        let diffs = diff_oracle_routines(&source, &[], &context);
+        assert_eq!(diffs.iter().find(|diff| diff.name == "P").unwrap().diff_type, "added");
+        assert_eq!(diffs.iter().find(|diff| diff.name == "Standalone").unwrap().diff_type, "unreadable");
+        assert!(diffs.iter().all(|diff| oracle_routine_diff_sql(diff, &context).is_err()));
+    }
+
+    #[test]
+    fn package_deletion_sql_distinguishes_body_only_and_the_implicit_pair_drop() {
+        let context = package_context();
+        let pair = vec![package("P", false, 1), package("P", true, 1)];
+        let diffs = diff_oracle_routines(&pair[..1], &pair, &context);
+        let body = diffs.iter().find(|diff| diff.diff_type == "removed").unwrap();
+        assert_eq!(oracle_routine_diff_sql(body, &context).unwrap(), "DROP PACKAGE BODY \"Target.Owner\".\"P\";");
+        let prepared = prepare_schema_diff(SchemaDiffPreparationOptions {
+            target_functions: pair,
+            database_type: DatabaseType::OceanbaseOracle,
+            oracle_routines: Some(context),
+            ..Default::default()
+        });
+        assert_eq!(prepared.sync_sql.trim(), "DROP PACKAGE \"Target.Owner\".\"P\";");
+    }
+
+    #[test]
+    fn package_namespace_conflicts_and_legacy_routine_kind_conflicts_remain_unresolved() {
+        let context = package_context();
+        let diffs = diff_oracle_routines(&[package("P", false, 1)], &[function("P", "v")], &context);
+        assert!(!diffs.is_empty());
+        assert!(diffs.iter().all(|diff| diff.diff_type == "conflict"));
+        assert!(diffs.iter().all(|diff| oracle_routine_diff_sql(diff, &context).is_err()));
+        let procedure = FunctionInfo {
+            function_type: "PROCEDURE".into(),
+            definition: "PROCEDURE P AS BEGIN NULL; END;".into(),
+            ..function("P", "")
+        };
+        let diffs = diff_oracle_routines(&[procedure], &[function("P", "v")], &context);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].diff_type, "conflict");
+    }
+
+    #[test]
+    fn a_package_never_falls_through_generic_function_ddl_templates() {
+        let diff: FunctionDiff = serde_json::from_value(
+            serde_json::json!({"type":"removed","name":"P","programKind":"PACKAGE_BODY","target":package("P",true,1)}),
+        )
+        .unwrap();
+        let sql = crate::schema_diff::generate_schema_sync_sql(
+            &[],
+            &[diff],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            Some("T"),
+            false,
+            None,
+            &[],
+        );
+        assert!(!sql.contains("DROP FUNCTION"));
+        assert!(sql.contains("reviewed package plan"));
     }
 
     #[test]

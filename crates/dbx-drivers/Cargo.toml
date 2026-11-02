@@ -41,7 +41,7 @@ log = "0.4"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["compat"] }
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -79,6 +79,7 @@ tempfile = "3"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }
 
 [dev-dependencies]
+axum = "0.8"
 dbx-driver-support = { path = "../dbx-driver-support", features = ["test-support"] }
 dbx-platform = { path = "../dbx-platform", features = ["test-support"] }
 mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }

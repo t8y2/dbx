@@ -9,10 +9,10 @@ import { useTheme } from "@/composables/useTheme";
 import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { Splitpanes, Pane } from "splitpanes";
-import { oracleRoutineActiveStep, routineIdentityKey, type OracleRoutineDeployment } from "@/lib/schema/oracleRoutineDeploy";
+import { oracleRoutineActiveStep, oracleRoutineDeploymentEntries, routineIdentityKey, type OracleRoutineDeployment } from "@/lib/schema/oracleRoutineDeploy";
 import { oracleRoutineOperationVerified } from "@/lib/table/oracleRoutineWrite";
 import { scalarPositionToUtf16Offset } from "@/lib/sql/errorPosition";
-import type { OracleRoutineOperation } from "@/types/schemaDiff";
+import type { OracleRoutineOperation, OracleRoutinePlanDraft } from "@/types/schemaDiff";
 import type { DatabaseType } from "@/types/database";
 import {
   schemaDiffObjectSelectionState,
@@ -61,6 +61,7 @@ const props = defineProps<{
   continueOnError?: boolean;
   databaseType?: DatabaseType;
   routineDeployment?: OracleRoutineDeployment | null;
+  packageTransfer?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -75,6 +76,9 @@ const emit = defineEmits<{
   "refresh-routines": [];
   "observe-routine": [operationId: string];
   "recover-routine": [operationId: string];
+  "include-package-companion": [objectId: string, source: "source" | "target"];
+  "update-package-options": [objectId: string, options: Pick<OracleRoutinePlanDraft, "packageBodySource" | "packageContract" | "confirmPackagePair">];
+  "review-package-target": [objectId: string];
 }>();
 
 const editorContainer = ref<HTMLDivElement>();
@@ -85,12 +89,44 @@ let editorDisposed = false;
 let readOnlyCompartment: any;
 const routineDraft = computed(() => props.routineDeployment?.drafts.find((draft) => draft.objectId === props.routineDeployment?.selectedObjectId));
 const routineStep = computed(() => (props.routineDeployment ? oracleRoutineActiveStep(props.routineDeployment) : undefined));
+const routineEntries = computed(() => (props.routineDeployment ? oracleRoutineDeploymentEntries(props.routineDeployment) : []));
+const routineIdentity = computed(() => routineStep.value?.identity ?? routineDraft.value?.identity);
+const routineOriginals = computed(() => {
+  if (routineStep.value) return { source: routineStep.value.sourceOriginal, target: routineStep.value.targetOriginal };
+  const draft = routineDraft.value;
+  const source = props.routineDeployment?.source;
+  const target = props.routineDeployment?.target;
+  return {
+    source: source?.objects.find((object) => object.version.identity.owner === source.endpoint.schema && object.version.identity.name === (draft?.sourceName ?? draft?.identity.name) && object.version.identity.kind === draft?.identity.kind)?.source,
+    target: target?.objects.find((object) => draft && routineIdentityKey(object.version.identity) === routineIdentityKey(draft.identity))?.source,
+  };
+});
+const packageDraft = computed(() => (!props.routineDeployment?.recoveryPlan && !editorReadOnly.value && (routineDraft.value?.identity.kind === "PACKAGE" || routineDraft.value?.identity.kind === "PACKAGE_BODY") ? routineDraft.value : undefined));
+const packagePeer = computed(() =>
+  props.routineDeployment?.drafts.find(
+    (draft) => draft.included && draft.identity.owner === packageDraft.value?.identity.owner && draft.identity.name === packageDraft.value?.identity.name && draft.identity.kind !== packageDraft.value?.identity.kind && (draft.identity.kind === "PACKAGE" || draft.identity.kind === "PACKAGE_BODY"),
+  ),
+);
+function packageMaterial(source: "source" | "target", kind: "PACKAGE" | "PACKAGE_BODY") {
+  const snapshot = props.routineDeployment?.[source];
+  const name = source === "source" ? (packageDraft.value?.sourceName ?? packageDraft.value?.identity.name) : packageDraft.value?.identity.name;
+  return snapshot?.objects.find((object) => object.version.identity.owner === snapshot.endpoint.schema && object.version.identity.name === name && object.version.identity.kind === kind && object.sourceComplete && object.source);
+}
 const routineRecord = computed(() => (props.routineDeployment?.recoveryPlan ? routineStep.value?.operation : routineDraft.value?.operation));
+const routineCompanion = computed(() => routineRecord.value?.readback?.packageCompanion);
+const routineCompanionStatus = computed(() => {
+  const companion = routineCompanion.value;
+  if (!companion) return "";
+  if (companion.exists === false) return t("objects.routineReadbackMissing");
+  if (companion.state === "invalid") return t("objects.invalid");
+  if (companion.issues.length || (companion.state !== "present" && companion.state !== "verified")) return t("diff.routineUnverified");
+  return companion.version?.status ?? t("diff.routineUnverified");
+});
 const routineHistory = computed(() => {
   const records = props.routineDeployment?.records.filter((record) => routineDraft.value && routineIdentityKey(record.identity) === routineIdentityKey(routineDraft.value.identity)) ?? [];
   return routineRecord.value && !records.some((record) => record.operationId === routineRecord.value?.operationId) ? [...records, routineRecord.value] : records;
 });
-const editorReadOnly = computed(() => !!props.routineDeployment && (props.executing || !!props.routineDeployment.recoveryPlan || (!!routineDraft.value?.operation && oracleRoutineOperationVerified(routineDraft.value.operation))));
+const editorReadOnly = computed(() => props.executing || (!!props.routineDeployment && (!!props.routineDeployment.recoveryPlan || (!!routineDraft.value?.operation && oracleRoutineOperationVerified(routineDraft.value.operation)))));
 
 function routineStatus(record?: OracleRoutineOperation | null, compact = false): string {
   if (!record) return t("diff.routineNeedsValidation");
@@ -118,7 +154,7 @@ function compilerOffset(line: number, column: number): number | undefined {
   if (!routineStep.value || effectiveSql.value !== routineStep.value.sql || routineRecord.value?.readback?.definitionMatches !== true) return;
   const source = routineRecord.value.readback.source;
   if (!source) return;
-  // ALL_ERRORS positions start at the stored FUNCTION/PROCEDURE unit, not CREATE.
+  // ALL_ERRORS positions start at the stored program unit, not CREATE.
   // Only map the known generated prefix; retain the database coordinates when a
   // more complicated representation cannot be aligned safely.
   const prefix = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?/i.exec(source);
@@ -176,6 +212,7 @@ async function handleSelectObject(obj: SchemaDiffObject) {
 
 // Filter top-level selected objects (exclude children and none)
 const topLevelObjects = computed(() => {
+  if (props.routineDeployment) return routineEntries.value.map((entry): SchemaDiffObject => ({ id: entry.objectId, name: entry.identity.name, routineType: entry.identity.kind, objectKind: "function", operationType: entry.action === "replace" ? "modify" : entry.action, selected: true }));
   const operationOrder: Record<DiffOperationType, number> = { create: 0, modify: 1, delete: 2, none: 3 };
   return props.selectedObjects
     .filter((o) => {
@@ -186,10 +223,10 @@ const topLevelObjects = computed(() => {
 });
 
 const operationCounts = computed(() => {
-  return summarizeSchemaDiffOperations(props.selectedObjects);
+  return summarizeSchemaDiffOperations(props.routineDeployment ? topLevelObjects.value : props.selectedObjects);
 });
 
-const selectedObjectCount = computed(() => selectedSchemaDiffObjects(props.selectedObjects).length);
+const selectedObjectCount = computed(() => (props.routineDeployment ? topLevelObjects.value.length : selectedSchemaDiffObjects(props.selectedObjects).length));
 
 const compatibilityWarningCount = computed(() => props.compatibilityWarnings?.length ?? 0);
 const reviewAlert = computed(() => schemaDiffReviewAlert(props.destructiveStatementCount ?? 0, compatibilityWarningCount.value));
@@ -220,6 +257,7 @@ const operationColors: Record<DiffOperationType, string> = {
 };
 
 // Initialize CodeMirror editor
+let syncingEditorSql = false;
 async function initEditor() {
   if (!editorContainer.value) return;
 
@@ -250,7 +288,7 @@ async function initEditor() {
       fontComp.of(fontExt),
       readOnlyCompartment.of(EditorState.readOnly.of(editorReadOnly.value)),
       EditorView.updateListener.of((update: any) => {
-        if (update.docChanged) {
+        if (update.docChanged && !syncingEditorSql) {
           emit("update:deploySql", update.state.doc.toString());
         }
       }),
@@ -266,9 +304,14 @@ watch(
   () => effectiveSql.value,
   (newVal) => {
     if (editorView.value && editorView.value.state.doc.toString() !== newVal) {
-      editorView.value.dispatch({
-        changes: { from: 0, to: editorView.value.state.doc.length, insert: newVal },
-      });
+      syncingEditorSql = true;
+      try {
+        editorView.value.dispatch({
+          changes: { from: 0, to: editorView.value.state.doc.length, insert: newVal },
+        });
+      } finally {
+        syncingEditorSql = false;
+      }
     }
   },
 );
@@ -394,7 +437,7 @@ function getObjectIconColor(kind: DiffObjectKind): string {
     <!-- Header -->
     <div class="flex items-center justify-between px-3 py-2 border-b shrink-0">
       <div class="flex items-center gap-2">
-        <Button variant="ghost" size="sm" class="h-7 px-2 text-xs gap-1" @click="$emit('back')">
+        <Button v-if="!packageTransfer" variant="ghost" size="sm" class="h-7 px-2 text-xs gap-1" @click="$emit('back')">
           <ArrowLeft class="w-3.5 h-3.5" />
           {{ t("diff.backToResult") }}
         </Button>
@@ -449,11 +492,12 @@ function getObjectIconColor(kind: DiffObjectKind): string {
             <component :is="operationIcons[obj.operationType]" class="w-3.5 h-3.5 shrink-0" :class="operationColors[obj.operationType]" />
             <component :is="getObjectIcon(obj.objectKind)" class="w-3.5 h-3.5 shrink-0" :class="getObjectIconColor(obj.objectKind)" />
             <span class="truncate">{{ obj.name }}</span>
+            <span v-if="obj.routineType === 'PACKAGE' || obj.routineType === 'PACKAGE_BODY'" class="text-muted-foreground">{{ obj.routineType.replaceAll("_", " ") }}</span>
             <span v-if="obj.children?.length" class="text-[10px] text-muted-foreground shrink-0">{{ schemaDiffSelectionTargets(obj).filter((child) => child.selected).length }}/{{ schemaDiffSelectionTargets(obj).length }}</span>
             <span class="text-[10px] text-muted-foreground shrink-0 ml-auto">
               {{ getOperationLabel(obj.operationType) }}
             </span>
-            <span v-if="routineDeployment" class="basis-full pl-5 text-xs text-muted-foreground">{{ routineStatus(routineDeployment.drafts.find((draft) => draft.objectId === obj.id)?.operation, true) }}</span>
+            <span v-if="routineDeployment" class="basis-full pl-5 text-xs text-muted-foreground">{{ routineStatus(routineEntries.find((entry) => entry.objectId === obj.id)?.operation, true) }}</span>
           </div>
           <div v-if="topLevelObjects.length === 0" class="text-xs text-muted-foreground text-center py-4">
             {{ t("diff.noObjectsSelected") }}
@@ -463,23 +507,67 @@ function getObjectIconColor(kind: DiffObjectKind): string {
 
       <Pane size="70" min-size="40">
         <div class="flex h-full min-w-0 flex-col">
-          <div v-if="routineDeployment" class="shrink-0 space-y-2 border-b px-3 py-2 text-xs">
+          <div v-if="routineDeployment" class="max-h-[50%] shrink-0 space-y-2 overflow-y-auto border-b px-3 py-2 text-xs">
             <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <span v-if="routineDraft" class="break-all font-mono">{{ routineDraft.identity.owner }}.{{ routineDraft.identity.name }} · {{ routineDraft.identity.kind }}</span>
+              <span v-if="routineIdentity" class="break-all font-mono">{{ routineIdentity.owner }}.{{ routineIdentity.name }} · {{ routineIdentity.kind }}</span>
               <span class="ml-auto" aria-live="polite">{{ routineDeployment.validating ? t("diff.routineChecking") : routineStatus(routineRecord) }}</span>
             </div>
             <p v-if="routineDeployment.recoveryPlan" class="text-amber-700 dark:text-amber-300">{{ t("diff.routineRecoveryNote") }}</p>
             <p v-else-if="editorReadOnly && !executing" class="text-muted-foreground">{{ t("diff.routineReadOnlyCompleted") }}</p>
+            <div v-if="packageDraft" class="space-y-2">
+              <div v-if="routineDeployment && routineDeployment.source.endpoint.databaseType !== routineDeployment.target.endpoint.databaseType" class="space-y-1 text-amber-700 dark:text-amber-300">
+                <p>{{ routineDeployment.source.endpoint.databaseType }} → {{ routineDeployment.target.endpoint.databaseType }} · {{ t("diff.packageCrossProduct") }}</p>
+                <Button v-if="!packageDraft.reviewedTargetDraft && packageDraft.sql?.trim()" variant="outline" size="sm" :disabled="executing" @click="emit('review-package-target', packageDraft.objectId)">{{ t("diff.packageReviewTarget") }}</Button>
+              </div>
+              <div v-if="packageDraft.identity.kind === 'PACKAGE' && packageDraft.action !== 'delete'" class="flex flex-wrap gap-2">
+                <Button v-if="packageMaterial('source', 'PACKAGE_BODY') && (!packageTransfer || !packageMaterial('target', 'PACKAGE_BODY'))" variant="outline" size="sm" :disabled="executing" @click="emit('include-package-companion', packageDraft.objectId, 'source')">{{
+                  t("diff.packageUseSourceBody")
+                }}</Button>
+                <Button v-if="!packageTransfer && packageMaterial('target', 'PACKAGE_BODY')" variant="outline" size="sm" :disabled="executing" @click="emit('include-package-companion', packageDraft.objectId, 'target')">{{ t("diff.packageRebuildTargetBody") }}</Button>
+              </div>
+              <div v-if="packageDraft.identity.kind === 'PACKAGE_BODY'" class="space-y-2">
+                <Button
+                  v-if="!packagePeer && packageMaterial(packageDraft.action === 'delete' ? 'target' : 'source', 'PACKAGE') && (!packageTransfer || !packageMaterial('target', 'PACKAGE'))"
+                  variant="outline"
+                  size="sm"
+                  :disabled="executing"
+                  @click="emit('include-package-companion', packageDraft.objectId, 'source')"
+                  >{{ t(packageDraft.action === "delete" ? "diff.packageDeleteWhole" : "diff.packageAddSpecification") }}</Button
+                >
+                <div v-if="packageDraft.action !== 'delete'" class="flex flex-wrap gap-3" role="radiogroup" :aria-label="t('diff.packageContract')">
+                  <label v-for="contract in ['source', 'target'] as const" :key="contract" class="flex items-center gap-1.5">
+                    <input type="radio" name="package-contract" :value="contract" :checked="(packageDraft.packageContract ?? 'source') === contract" :disabled="executing" @change="emit('update-package-options', packageDraft.objectId, { packageContract: contract })" />
+                    {{ t(contract === "source" ? "diff.packageSourceContract" : "diff.packageTargetContract") }}
+                  </label>
+                </div>
+              </div>
+              <label v-if="packageDraft.identity.kind === 'PACKAGE' && (packageDraft.action !== 'create' || packageMaterial('target', 'PACKAGE_BODY') || routineStep?.packageImpact?.bodyPending)" class="flex items-start gap-2 text-amber-700 dark:text-amber-300">
+                <input type="checkbox" class="mt-0.5" :checked="packageDraft.confirmPackagePair ?? false" :disabled="executing" @change="emit('update-package-options', packageDraft.objectId, { confirmPackagePair: ($event.target as HTMLInputElement).checked })" />
+                {{ t(packageDraft.action === "delete" ? "diff.packageConfirmDrop" : "diff.packageConfirmImpact") }}
+              </label>
+            </div>
+            <p v-if="routineStep?.packageImpact?.bodyPending" class="text-amber-700 dark:text-amber-300">{{ t("diff.packageSpecificationOnly") }}</p>
+            <p v-if="routineStep?.packageImpact?.mayInitialize" class="text-muted-foreground">{{ t("diff.packageInitialization") }}</p>
+            <details v-if="routineStep?.packageImpact?.grants" class="max-h-32 overflow-auto text-muted-foreground">
+              <summary class="cursor-pointer">{{ t("diff.packageGrantBackup") }}</summary>
+              <p v-if="!routineStep.packageImpact.grants.complete" class="text-amber-700 dark:text-amber-300">{{ routineStep.packageImpact.grants.issue }}</p>
+              <p v-for="(grant, index) in routineStep.packageImpact.grants.grants" :key="index" class="mt-1 break-all font-mono">{{ grant.grantor }} → {{ grant.grantee }} · {{ grant.privilege }} · GRANTABLE={{ grant.grantable }}</p>
+            </details>
             <div v-if="routineDeployment.error || routineStep?.issues.length" role="alert" tabindex="-1" class="max-h-40 space-y-1 overflow-auto text-destructive">
               <p v-if="routineDeployment.error" class="whitespace-pre-wrap break-words">{{ routineDeployment.error }}</p>
               <button v-for="(issue, index) in routineStep?.issues ?? []" :key="index" type="button" class="block w-full text-left hover:underline focus-visible:ring-2 focus-visible:ring-ring" @click="locateIssue(issue.line, issue.column)">
                 {{ issue.line }}:{{ issue.column }} — {{ issue.message }}
               </button>
             </div>
-            <details v-if="routineStep?.targetOriginal" class="max-h-40 overflow-auto text-muted-foreground">
+            <details v-if="routineOriginals.source" class="max-h-40 overflow-auto text-muted-foreground">
+              <summary class="cursor-pointer">{{ t("diff.sourceDdl") }}</summary>
+              <Button variant="ghost" size="sm" class="h-7 text-xs" @click="copyToClipboard(routineOriginals.source)">{{ t("diff.copySourceDdl") }}</Button>
+              <pre class="mt-1 whitespace-pre-wrap break-words font-mono">{{ routineOriginals.source }}</pre>
+            </details>
+            <details v-if="routineOriginals.target" class="max-h-40 overflow-auto text-muted-foreground">
               <summary class="cursor-pointer">{{ t("diff.targetDdl") }}</summary>
-              <pre class="mt-1 whitespace-pre-wrap break-words font-mono">{{ routineStep.targetOriginal }}</pre>
-              <Button variant="ghost" size="sm" class="h-7 text-xs" @click="copyToClipboard(routineStep.targetOriginal)">{{ t("diff.copyTargetDdl") }}</Button>
+              <Button variant="ghost" size="sm" class="h-7 text-xs" @click="copyToClipboard(routineOriginals.target)">{{ t("diff.copyTargetDdl") }}</Button>
+              <pre class="mt-1 whitespace-pre-wrap break-words font-mono">{{ routineOriginals.target }}</pre>
             </details>
             <details v-if="routineStep?.incomingCallers.length" class="max-h-32 overflow-auto text-muted-foreground">
               <summary class="cursor-pointer">{{ t("diff.routineCallers") }} ({{ routineStep.incomingCallers.length }})</summary>
@@ -500,6 +588,21 @@ function getObjectIconColor(kind: DiffObjectKind): string {
               >
                 {{ message.attribute }} {{ message.line }}:{{ message.position }} — {{ message.text }}
               </button>
+              <details v-if="routineRecord.readback?.source" class="max-h-40 overflow-auto text-muted-foreground">
+                <summary class="cursor-pointer">{{ t("diff.targetDdl") }} · {{ routineRecord.identity.kind.replaceAll("_", " ") }}</summary>
+                <Button variant="ghost" size="sm" class="h-7 text-xs" @click="copyToClipboard(routineRecord.readback.source)">{{ t("diff.copyTargetDdl") }}</Button>
+                <pre class="mt-1 whitespace-pre-wrap break-words font-mono">{{ routineRecord.readback.source }}</pre>
+              </details>
+              <div v-if="routineCompanion" class="space-y-1 border-t pt-2">
+                <p class="break-all font-mono">{{ routineCompanion.identity.kind.replaceAll("_", " ") }} {{ routineCompanion.identity.name }} · {{ routineCompanionStatus }}</p>
+                <p v-for="(issue, index) in routineCompanion.issues" :key="index" class="text-destructive">{{ issue.message }}</p>
+                <p v-for="(message, index) in routineCompanion.compilerMessages" :key="index" :class="message.attribute === 'ERROR' ? 'text-destructive' : 'text-amber-700 dark:text-amber-300'">{{ message.attribute }} {{ message.line }}:{{ message.position }} — {{ message.text }}</p>
+                <details v-if="routineCompanion.source" class="max-h-40 overflow-auto text-muted-foreground">
+                  <summary class="cursor-pointer">{{ t("diff.targetDdl") }} · {{ routineCompanion.identity.kind.replaceAll("_", " ") }}</summary>
+                  <Button variant="ghost" size="sm" class="h-7 text-xs" @click="copyToClipboard(routineCompanion.source)">{{ t("diff.copyTargetDdl") }}</Button>
+                  <pre class="mt-1 whitespace-pre-wrap break-words font-mono">{{ routineCompanion.source }}</pre>
+                </details>
+              </div>
               <Button v-if="routineRecord.lifecycle !== 'prepared'" variant="outline" size="sm" class="h-7 text-xs" :disabled="executing || routineDeployment.validating" @click="emit('observe-routine', routineRecord.operationId)">{{ t("diff.routineObserve") }}</Button>
               <Button v-if="routineRecord.lifecycle === 'terminal' && routineRecord.dispatched" variant="ghost" size="sm" class="h-7 text-xs" :disabled="executing || routineDeployment.validating" @click="emit('recover-routine', routineRecord.operationId)">{{
                 t("diff.routineRecoveryPreview")
@@ -521,8 +624,8 @@ function getObjectIconColor(kind: DiffObjectKind): string {
       <div class="flex items-center gap-2">
         <!-- SQL mode toggle -->
         <div v-if="props.rollbackSql" class="flex items-center gap-1 mr-2 border rounded">
-          <button class="text-xs px-2 py-1 rounded transition-colors" :class="props.deploySqlMode === 'forward' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'" @click="$emit('update:deploySqlMode', 'forward')">{{ t("diff.deployMode") }}</button>
-          <button class="text-xs px-2 py-1 rounded transition-colors" :class="props.deploySqlMode === 'rollback' ? 'bg-destructive text-destructive-foreground' : 'hover:bg-accent'" @click="$emit('update:deploySqlMode', 'rollback')">{{ t("diff.rollbackMode") }}</button>
+          <button :disabled="executing" class="text-xs px-2 py-1 rounded transition-colors" :class="props.deploySqlMode === 'forward' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'" @click="$emit('update:deploySqlMode', 'forward')">{{ t("diff.deployMode") }}</button>
+          <button :disabled="executing" class="text-xs px-2 py-1 rounded transition-colors" :class="props.deploySqlMode === 'rollback' ? 'bg-destructive text-destructive-foreground' : 'hover:bg-accent'" @click="$emit('update:deploySqlMode', 'rollback')">{{ t("diff.rollbackMode") }}</button>
         </div>
         <Button variant="outline" size="sm" class="h-7 text-xs gap-1" @click="handleCopy">
           <Copy class="w-3.5 h-3.5" />
@@ -547,14 +650,14 @@ function getObjectIconColor(kind: DiffObjectKind): string {
       <div class="flex items-center gap-2">
         <Button v-if="routineDeployment" variant="outline" size="sm" class="h-7 text-xs" :disabled="executing || routineDeployment.validating" @click="emit('refresh-routines')">{{ t("diff.routineRefreshBaseline") }}</Button>
         <Button v-if="routineDeployment" variant="outline" size="sm" class="h-7 text-xs" :disabled="executing || routineDeployment.validating" @click="emit('validate-routines')">{{ t("diff.routineValidate") }}</Button>
-        <Button variant="ghost" size="sm" class="h-7 text-xs gap-1" @click="$emit('back')">
+        <Button v-if="!packageTransfer" variant="ghost" size="sm" class="h-7 text-xs gap-1" @click="$emit('back')">
           <ArrowLeft class="w-3.5 h-3.5" />
           {{ t("diff.backToResult") }}
         </Button>
-        <Button variant="ghost" size="sm" class="h-7 text-xs" @click="$emit('back')">
+        <Button v-if="!packageTransfer" variant="ghost" size="sm" class="h-7 text-xs" @click="$emit('back')">
           {{ t("diff.cancel") }}
         </Button>
-        <Button size="sm" class="h-7 text-xs gap-1" :disabled="topLevelObjects.length === 0 || executing || canExecute === false" @click="handleDeploy">
+        <Button v-if="!packageTransfer" size="sm" class="h-7 text-xs gap-1" :disabled="topLevelObjects.length === 0 || executing || canExecute === false" @click="handleDeploy">
           <Loader2 v-if="executing" class="w-3.5 h-3.5 animate-spin" />
           <Play v-else class="w-3.5 h-3.5" />
           {{ t("diff.deployToServer") }}

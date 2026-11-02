@@ -194,6 +194,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "colorizeConnectionTabsScope",
     "tabSortMode",
     "tabMaxWidth",
+    "tabDoubleClickAction",
     "tabGroupRows",
     "sidebarActivation",
     "sidebarObjectDisplay",

@@ -1,6 +1,8 @@
 import { ref } from "vue";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
+export { getSqlFileSortOrder, saveSqlFileSortOrder, DEFAULT_SQL_FILE_SORT_ORDER, type SqlFileSortOrder } from "@/lib/sql/sqlFileTreeFilter";
+
 const STORAGE_KEY = "dbx-sql-file-folders";
 const FILTER_STORAGE_KEY = "dbx-sql-file-filter";
 export const DEFAULT_SQL_FILE_FILTER = "(?i)\\.(sql|ddl)$";

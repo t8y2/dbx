@@ -44,6 +44,7 @@ pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &[
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat
 /// the sandbox CSP or enumerate large origin lists.
 pub const MAX_PLUGIN_NETWORK_ORIGINS: usize = 8;
+pub const MAX_PLUGIN_OPEN_URL_ORIGINS: usize = 8;
 /// Bound the `visible_when` / `required_when` expression tree so a hostile
 /// manifest cannot make the host or the dialog evaluator do unbounded work.
 pub const MAX_PLUGIN_FIELD_CONDITION_DEPTH: usize = 8;
@@ -52,6 +53,24 @@ pub const MAX_PLUGIN_FIELD_CONDITION_NODES: usize = 64;
 /// native dialog or the browser `accept` attribute.
 pub const MAX_PLUGIN_PICKER_FILTERS: usize = 16;
 const HOST_NETWORK_PERMISSION_PREFIX: &str = "host.network:";
+
+/// External navigation is independent of sandbox networking. Exact canonical
+/// origins avoid wildcard, path, user-info, and default-port ambiguities.
+pub fn parse_host_open_url_permission(permission: &str) -> Option<&str> {
+    let origin = permission.strip_prefix("host.openUrl:")?;
+    if origin.len() > 4096 || origin.contains('*') || origin.chars().any(|c| c.is_whitespace() || c == '\\') {
+        return None;
+    }
+    let url = reqwest::Url::parse(origin).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.origin().ascii_serialization() != origin
+    {
+        return None;
+    }
+    Some(origin)
+}
 
 /// Parse a `host.network:https://host[:port]` permission into the origin that
 /// may appear in the sandbox `connect-src`. Only https origins without path,
@@ -309,6 +328,81 @@ pub struct PluginMcpContribution {
     /// `false`; set to `true` to opt in to that surface.
     #[serde(default, skip_serializing_if = "is_false")]
     pub external_tools: bool,
+    /// Optional grouping of the plugin's tools for the MCP settings UI. A
+    /// plugin without toolsets shows as one group.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolsets: Vec<PluginMcpToolset>,
+    /// Per-tool declarations keyed by the tool name `mcp/tools` returns. On
+    /// the external `dbx` MCP server only tools declared here with an
+    /// `access` level can be exposed; MCP annotations are not a substitute.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tools: BTreeMap<String, PluginMcpToolDeclaration>,
+    /// Optional sub-scope below a connection (a Kubernetes namespace, a
+    /// directory, …) that users can allow or restrict per connection, like
+    /// databases for SQL connections. The host reads the declared argument
+    /// from each call and enforces the access policy before forwarding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<PluginMcpScope>,
+}
+
+/// A plugin-declared sub-scope kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMcpScope {
+    /// Scope kind id, e.g. `namespace`. Must not be `database` (reserved for
+    /// the built-in database scope).
+    pub kind: String,
+    /// Display name in the access-control tree, e.g. "Namespace".
+    pub title: String,
+    /// Tool argument that carries the scope value. When a connection uses
+    /// selected or none sub-scope admission, the host requires this argument
+    /// on every scope-bound call; only an all-scopes connection may evaluate a
+    /// missing argument at connection level.
+    pub argument: String,
+    /// Optional sidecar method listing a connection's scope values
+    /// (`{ connectionId } → { values: [string] }`), for the settings picker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_method: Option<String>,
+}
+
+/// One group of plugin MCP tools.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMcpToolset {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Highest access a plugin MCP tool can reach, declared by its author.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginMcpAccess {
+    Read,
+    Write,
+    Full,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMcpToolDeclaration {
+    /// Toolset id from `toolsets`; omitted tools join the default group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<PluginMcpAccess>,
+}
+
+impl PluginMcpContribution {
+    /// The declared access of `tool`, if the author declared one.
+    pub fn declared_access(&self, tool: &str) -> Option<PluginMcpAccess> {
+        self.tools.get(tool).and_then(|declaration| declaration.access)
+    }
+
+    pub fn declared_toolset(&self, tool: &str) -> Option<&str> {
+        self.tools.get(tool).and_then(|declaration| declaration.toolset.as_deref())
+    }
 }
 
 fn default_true() -> bool {
@@ -1058,6 +1152,14 @@ impl PluginManifest {
         })
     }
 
+    /// Whether the plugin carries the "provides MCP tools" mark: a backend plus
+    /// an `mcp` contribution. Only marked plugins appear in the MCP settings
+    /// (capability tab) and the Plugin Center's MCP filter; a plugin without
+    /// the mark has no MCP surface at all.
+    pub fn provides_mcp_tools(&self) -> bool {
+        self.backend_entrypoint().is_some() && self.mcp_contribution().is_some()
+    }
+
     /// Whether the optional `mcp` declaration keeps the sidecar tools off the
     /// built-in AI agent (`ai_tools: false`) even when the user opts in via
     /// the Plugin Center. Without it the tools participate once opted in.
@@ -1127,12 +1229,14 @@ impl PluginManifest {
 
         let mut seen_permissions = HashSet::new();
         let mut network_origins: HashSet<&str> = HashSet::new();
+        let mut open_url_origins: HashSet<&str> = HashSet::new();
         for permission in &self.permissions {
             let valid = SUPPORTED_PLUGIN_PERMISSIONS.contains(&permission.as_str())
-                || (permission.starts_with("host.network:") && parse_host_network_permission(permission).is_some());
+                || parse_host_network_permission(permission).is_some()
+                || parse_host_open_url_permission(permission).is_some();
             if !valid {
                 errors.push(format!(
-                    "Unsupported plugin Host API permission '{permission}' (network permissions must look like host.network:https://example.com)"
+                    "Unsupported plugin Host API permission '{permission}' (origins must look like host.network:https://example.com or host.openUrl:https://example.com)"
                 ));
             } else if !seen_permissions.insert(permission) {
                 errors.push(format!("Duplicate plugin permission '{permission}'"));
@@ -1142,11 +1246,20 @@ impl PluginManifest {
                     errors.push(format!("Duplicate plugin network origin '{origin}'"));
                 }
             }
+            if let Some(origin) = parse_host_open_url_permission(permission) {
+                open_url_origins.insert(origin);
+            }
         }
         if network_origins.len() > MAX_PLUGIN_NETWORK_ORIGINS {
             errors.push(format!(
                 "Plugin declares {} network origins; at most {MAX_PLUGIN_NETWORK_ORIGINS} are allowed",
                 network_origins.len()
+            ));
+        }
+        if open_url_origins.len() > MAX_PLUGIN_OPEN_URL_ORIGINS {
+            errors.push(format!(
+                "Plugin declares {} external URL origins; at most {MAX_PLUGIN_OPEN_URL_ORIGINS} are allowed",
+                open_url_origins.len()
             ));
         }
         validate_localizations(&self.localizations, &mut errors);
@@ -1158,6 +1271,16 @@ impl PluginManifest {
             plugin_dir,
             &mut errors,
         );
+        // Missing external access declarations must not disable an older
+        // plugin's drivers or AI tools. The MCP exposure gate hides those tools.
+        if let Some(mcp) = self.mcp_contribution() {
+            if mcp.external_tools && !mcp.tools.values().any(|declaration| declaration.access.is_some()) {
+                warnings.push(format!(
+                    "Mcp contribution '{}' sets external_tools but declares no tool access level; external tools remain hidden until declared under `tools` with `access`",
+                    mcp.id
+                ));
+            }
+        }
 
         let target = current_plugin_target();
         let backend_executable = self.backend_entrypoint().and_then(|backend| {
@@ -1324,15 +1447,27 @@ fn validate_engine_requirement(label: &str, requirement: &str, actual: &str, err
             return;
         }
     };
-    let actual = match Version::parse(actual.trim()) {
+    let mut actual = match Version::parse(actual.trim()) {
         Ok(actual) => actual,
         Err(error) => {
             errors.push(format!("Invalid installed {label} version '{actual}': {error}"));
             return;
         }
     };
-    if !requirement.matches(&actual) {
-        errors.push(format!("Plugin requires {label} {requirement}, but {actual} is installed"));
+    // Release candidates and daily beta builds are built from the same source
+    // release as their stable counterpart. SemVer intentionally sorts
+    // `0.6.63-beta.*` below `0.6.63`, which would make a plugin requiring the
+    // current stable release appear incompatible in a beta DBX build. Try the
+    // real version first so ranges such as `<0.6.63` retain their normal
+    // prerelease semantics, then retry with the stable release baseline.
+    let installed_version = actual.to_string();
+    let matches = requirement.matches(&actual)
+        || (label == "DBX" && !actual.pre.is_empty() && {
+            actual.pre = semver::Prerelease::EMPTY;
+            requirement.matches(&actual)
+        });
+    if !matches {
+        errors.push(format!("Plugin requires {label} {requirement}, but {installed_version} is installed"));
     }
 }
 
@@ -1571,6 +1706,53 @@ fn validate_contributions(
                 );
                 if !has_backend {
                     errors.push(format!("Mcp contribution '{id}' requires a backend entrypoint"));
+                }
+                let mut toolset_ids = HashSet::new();
+                for toolset in &mcp.toolsets {
+                    if !is_plugin_mcp_identifier(&toolset.id) {
+                        errors.push(format!("Mcp contribution '{id}' toolset id '{}' is invalid", toolset.id));
+                    }
+                    if !toolset_ids.insert(toolset.id.as_str()) {
+                        errors
+                            .push(format!("Mcp contribution '{id}' declares toolset '{}' more than once", toolset.id));
+                    }
+                    validate_required_text(&toolset.title, &format!("Mcp toolset '{}' title", toolset.id), errors);
+                    validate_optional_text(
+                        toolset.description.as_deref(),
+                        &format!("Mcp toolset '{}' description", toolset.id),
+                        errors,
+                    );
+                }
+                if mcp.tools.len() > MAX_PLUGIN_MCP_TOOL_DECLARATIONS {
+                    errors.push(format!(
+                        "Mcp contribution '{id}' declares {} tools; at most {MAX_PLUGIN_MCP_TOOL_DECLARATIONS} are allowed",
+                        mcp.tools.len()
+                    ));
+                }
+                if let Some(scope) = &mcp.scope {
+                    if !is_plugin_mcp_identifier(&scope.kind) || scope.kind == "database" {
+                        errors.push(format!(
+                            "Mcp contribution '{id}' scope kind '{}' is invalid or reserved",
+                            scope.kind
+                        ));
+                    }
+                    validate_required_text(&scope.title, &format!("Mcp contribution '{id}' scope title"), errors);
+                    if scope.argument.trim().is_empty() || scope.argument.chars().count() > 64 {
+                        errors.push(format!("Mcp contribution '{id}' scope argument '{}' is invalid", scope.argument));
+                    }
+                    if scope.list_method.as_deref().is_some_and(|method| method.trim().is_empty()) {
+                        errors.push(format!("Mcp contribution '{id}' scope list_method cannot be empty when present"));
+                    }
+                }
+                for (tool, declaration) in &mcp.tools {
+                    if tool.trim().is_empty() || tool.chars().count() > 128 {
+                        errors.push(format!("Mcp contribution '{id}' declares an invalid tool name '{tool}'"));
+                    }
+                    if let Some(toolset) = &declaration.toolset {
+                        if !toolset_ids.contains(toolset.as_str()) {
+                            errors.push(format!("Mcp tool '{tool}' references missing toolset '{toolset}'"));
+                        }
+                    }
                 }
             }
         }
@@ -1985,6 +2167,17 @@ fn validate_optional_reference(value: Option<&str>, label: &str, contribution_id
     }
 }
 
+/// Upper bound for per-tool declarations in one `mcp` contribution; matches
+/// the host's per-plugin tool cap (`MAX_TOOLS_PER_PLUGIN` in dbx-core).
+const MAX_PLUGIN_MCP_TOOL_DECLARATIONS: usize = 64;
+
+fn is_plugin_mcp_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    value.len() <= 64
+        && chars.next().is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && chars.all(|char| char.is_ascii_lowercase() || char.is_ascii_digit() || matches!(char, '.' | '_' | '-'))
+}
+
 fn validate_required_text(value: &str, label: &str, errors: &mut Vec<String>) {
     if value.trim().is_empty() {
         errors.push(format!("{label} cannot be empty"));
@@ -2054,13 +2247,38 @@ fn valid_locale_tag(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn external_url_permissions_require_exact_canonical_http_origins() {
+        for origin in ["https://example.com", "http://localhost:8080", "https://[::1]:8443"] {
+            assert_eq!(super::parse_host_open_url_permission(&format!("host.openUrl:{origin}")), Some(origin));
+        }
+        for permission in [
+            "host.openUrl",
+            "host.network:https://example.com",
+            "host.openUrl:*",
+            "host.openUrl:javascript:alert(1)",
+            "host.openUrl:file:///tmp/file",
+            "host.openUrl:https://example.com/path",
+            "host.openUrl:https://example.com/",
+            "host.openUrl:https://example.com:443",
+            "host.openUrl:https://*.example.com",
+            "host.openUrl:https://user@other.com",
+            "host.openUrl:https://example.com?token=secret",
+            "host.openUrl:https://example.com#fragment",
+            "host.openUrl:https://example.com\\@other.com",
+        ] {
+            assert_eq!(super::parse_host_open_url_permission(permission), None, "{permission}");
+        }
+    }
+    use std::collections::BTreeMap;
+
     use super::{
         parse_host_network_permission, resolve_safe_plugin_path, validate_connection_actions, validate_contributions,
         PluginCommandAction, PluginCommandContribution, PluginCommandPresentation, PluginCommandRestore,
         PluginCommandReuse, PluginConnectionActionContribution, PluginConnectionProviderContribution,
-        PluginContribution, PluginFormFieldBinding, PluginManifest, PluginMcpContribution, PluginMenuItem,
-        PluginMenuLocation, PluginMenusContribution, PluginOpenWorkbenchAction, SUPPORTED_PLUGIN_HOST_API_VERSION,
-        SUPPORTED_PLUGIN_PERMISSIONS,
+        PluginContribution, PluginFormFieldBinding, PluginManifest, PluginMcpAccess, PluginMcpContribution,
+        PluginMcpToolDeclaration, PluginMenuItem, PluginMenuLocation, PluginMenusContribution,
+        PluginOpenWorkbenchAction, SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_PERMISSIONS,
     };
 
     fn context_menu_manifest(menu: &str) -> Result<(tempfile::TempDir, PluginManifest), Box<dyn std::error::Error>> {
@@ -2125,6 +2343,12 @@ mod tests {
             description: None,
             ai_tools: true,
             external_tools: true,
+            toolsets: Vec::new(),
+            scope: None,
+            tools: BTreeMap::from([(
+                "ping".to_string(),
+                PluginMcpToolDeclaration { toolset: None, access: Some(PluginMcpAccess::Read) },
+            )]),
         });
         let mut errors = Vec::new();
         validate_contributions(std::slice::from_ref(&mcp), false, false, &plugin_dir, &mut errors);
@@ -2134,10 +2358,110 @@ mod tests {
         validate_contributions(std::slice::from_ref(&mcp), true, false, &plugin_dir, &mut errors);
         assert!(errors.is_empty(), "{errors:?}");
 
+        // Missing external declarations do not invalidate the whole plugin.
+        let PluginContribution::Mcp(undeclared) = &mcp else { unreachable!() };
+        let undeclared =
+            PluginContribution::Mcp(PluginMcpContribution { tools: BTreeMap::new(), ..undeclared.clone() });
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&undeclared), true, false, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
         let two = vec![mcp.clone(), mcp];
         let mut errors = Vec::new();
         validate_contributions(&two, true, false, &plugin_dir, &mut errors);
         assert!(errors.iter().any(|error| error.contains("at most one")), "{errors:?}");
+    }
+
+    #[test]
+    fn mcp_contribution_declares_toolsets_and_tool_access() {
+        let mcp: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "mcp",
+            "id": "io.dbx.example.mcp",
+            "external_tools": true,
+            "toolsets": [
+                { "id": "files", "title": "Files" },
+                { "id": "shell", "title": "Remote shell", "description": "Run commands" }
+            ],
+            "tools": {
+                "sftp_list_dir": { "toolset": "files", "access": "read" },
+                "ssh_exec": { "toolset": "shell", "access": "full" },
+                "sftp_upload": { "access": "write" }
+            }
+        }))
+        .unwrap();
+        let PluginContribution::Mcp(parsed) = &mcp else { unreachable!() };
+        assert_eq!(parsed.declared_access("ssh_exec"), Some(PluginMcpAccess::Full));
+        assert_eq!(parsed.declared_toolset("sftp_list_dir"), Some("files"));
+        assert_eq!(parsed.declared_toolset("sftp_upload"), None);
+        assert_eq!(parsed.declared_access("unknown"), None);
+        let plugin_dir = std::env::temp_dir();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&mcp), true, false, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // Unknown access levels and unknown fields reject at parse time.
+        assert!(serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "mcp", "id": "x", "tools": { "t": { "access": "admin" } }
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "mcp", "id": "x", "toolsets": [{ "id": "a", "title": "A", "icon": "x" }]
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn mcp_contribution_declares_a_scope() {
+        let mcp: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "mcp",
+            "id": "io.dbx.k8s.mcp",
+            "external_tools": true,
+            "tools": { "get_pods": { "access": "read" } },
+            "scope": { "kind": "namespace", "title": "Namespace", "argument": "namespace", "list_method": "mcp/scopes" }
+        }))
+        .unwrap();
+        let PluginContribution::Mcp(parsed) = &mcp else { unreachable!() };
+        let scope = parsed.scope.as_ref().unwrap();
+        assert_eq!((scope.kind.as_str(), scope.argument.as_str()), ("namespace", "namespace"));
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&mcp), true, false, &std::env::temp_dir(), &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        let reserved: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "mcp", "id": "x", "scope": { "kind": "database", "title": " ", "argument": "" }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&reserved), true, false, &std::env::temp_dir(), &mut errors);
+        let joined = errors.join("\n");
+        assert!(
+            joined.contains("invalid or reserved")
+                && joined.contains("scope title")
+                && joined.contains("scope argument"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn mcp_contribution_rejects_broken_toolset_references() {
+        let mcp: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "mcp",
+            "id": "io.dbx.example.mcp",
+            "toolsets": [
+                { "id": "files", "title": "Files" },
+                { "id": "files", "title": "Again" },
+                { "id": "Bad Id", "title": " " }
+            ],
+            "tools": { "ssh_exec": { "toolset": "shell" } }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&mcp), true, false, &std::env::temp_dir(), &mut errors);
+        let joined = errors.join("\n");
+        assert!(joined.contains("declares toolset 'files' more than once"), "{joined}");
+        assert!(joined.contains("toolset id 'Bad Id' is invalid"), "{joined}");
+        assert!(joined.contains("title cannot be empty"), "{joined}");
+        assert!(joined.contains("references missing toolset 'shell'"), "{joined}");
     }
 
     #[test]
@@ -2160,10 +2484,35 @@ mod tests {
             }]
         }))
         .unwrap();
+        assert!(manifest.provides_mcp_tools(), "backend + mcp contribution carries the MCP mark");
         assert!(!manifest.ai_tools_excluded(), "ai_tools defaults to participating");
         assert!(manifest.external_tools_excluded(), "external_tools defaults to off");
         let compatibility = manifest.compatibility(dir.path(), "0.6.0");
         assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        assert!(compatibility.warnings.is_empty(), "{:?}", compatibility.warnings);
+
+        let mut manifest = manifest;
+        let PluginContribution::Mcp(mcp) = &mut manifest.contributions[0] else { unreachable!() };
+        mcp.external_tools = true;
+        for tools in [BTreeMap::new(), BTreeMap::from([("ping".to_string(), PluginMcpToolDeclaration::default())])] {
+            let PluginContribution::Mcp(mcp) = &mut manifest.contributions[0] else { unreachable!() };
+            mcp.tools = tools;
+            let compatibility = manifest.compatibility(dir.path(), "0.6.0");
+            assert!(compatibility.compatible, "{:?}", compatibility.errors);
+            assert!(
+                compatibility.warnings.iter().any(|warning| warning.contains("external tools remain hidden")),
+                "{:?}",
+                compatibility.warnings
+            );
+            assert!(!manifest.ai_tools_excluded());
+            assert!(manifest.provides_mcp_tools());
+        }
+
+        let PluginContribution::Mcp(mcp) = &mut manifest.contributions[0] else { unreachable!() };
+        mcp.tools.get_mut("ping").unwrap().access = Some(PluginMcpAccess::Read);
+        let compatibility = manifest.compatibility(dir.path(), "0.6.0");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        assert!(compatibility.warnings.is_empty(), "{:?}", compatibility.warnings);
     }
 
     #[test]
@@ -2518,6 +2867,29 @@ mod tests {
         std::fs::write(dir.path().join("ui").join("index.html"), "<!doctype html>").unwrap();
         let compatibility = manifest.compatibility(dir.path(), "0.1.0");
         assert!(compatibility.errors.iter().any(|error| error.contains("host.network:http://api.vendor.com")));
+    }
+
+    #[test]
+    fn manifest_accepts_external_url_origins_but_rejects_malformed_or_excess_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ui")).unwrap();
+        std::fs::write(dir.path().join("ui/index.html"), "<!doctype html>").unwrap();
+        let mut manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version":1,"id":"io.dbx.bookmarks","name":"Bookmarks","version":"1.0.0","publisher":"example",
+            "engines":{"dbx":">=0.1.0","host_api":"^1.0"},"entrypoints":{"ui":{"root":"ui","entry":"ui/index.html"}},
+            "permissions":["host.openUrl:https://example.com","host.openUrl:http://localhost:8080"]
+        }))
+        .unwrap();
+        let valid = manifest.compatibility(dir.path(), "0.1.0");
+        assert!(valid.compatible, "{:?}", valid.errors);
+        manifest.permissions.push("host.openUrl:javascript:alert(1)".into());
+        assert!(manifest
+            .compatibility(dir.path(), "0.1.0")
+            .errors
+            .iter()
+            .any(|error| error.contains("Unsupported plugin Host API permission")));
+        manifest.permissions = (0..9).map(|index| format!("host.openUrl:https://site{index}.example.com")).collect();
+        assert!(manifest.compatibility(dir.path(), "0.1.0").errors.iter().any(|error| error.contains("at most 8")));
     }
 
     #[test]
@@ -2939,6 +3311,30 @@ mod tests {
         let compatibility = manifest.compatibility(dir.path(), "0.6.16");
         assert!(!compatibility.compatible, "{:?}", compatibility.errors);
         assert!(compatibility.errors.iter().any(|error| error.contains(">=999.0.0")), "{:?}", compatibility.errors);
+    }
+
+    #[test]
+    fn compatibility_uses_stable_baseline_for_beta_dbx_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.beta",
+            "name": "Beta",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.6.63", "host_api": "^1.0" }
+        }))
+        .unwrap();
+
+        let beta = manifest.compatibility(dir.path(), "0.6.63-beta.20261101.3");
+        assert!(beta.compatible, "{:?}", beta.errors);
+
+        let too_new = manifest.compatibility(dir.path(), "0.6.62-beta.20261101.3");
+        assert!(!too_new.compatible, "{:?}", too_new.errors);
+        assert!(too_new.errors.iter().any(|error| error.contains("0.6.62-beta.20261101.3")), "{:?}", too_new.errors);
+
+        let stable = manifest.compatibility(dir.path(), "0.6.62");
+        assert!(!stable.compatible, "{:?}", stable.errors);
     }
 
     #[test]

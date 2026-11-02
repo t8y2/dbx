@@ -26,7 +26,7 @@ pub(super) struct JdbcLogicalSession {
     id: String,
     closed: AtomicBool,
     operation: Mutex<()>,
-    close_done: tokio::sync::watch::Sender<bool>,
+    close_done: tokio::sync::watch::Sender<Option<Result<(), String>>>,
 }
 
 impl PluginRegistry {
@@ -83,7 +83,7 @@ impl PluginRegistry {
             id: uuid::Uuid::new_v4().to_string(),
             closed: AtomicBool::new(false),
             operation: Mutex::new(()),
-            close_done: tokio::sync::watch::channel(false).0,
+            close_done: tokio::sync::watch::channel(None).0,
         });
         let opened: Result<serde_json::Value, _> =
             logical.invoke("openJdbcSession", serde_json::json!({}), Some(Duration::from_secs(3))).await;
@@ -133,8 +133,17 @@ impl JdbcLogicalSession {
     }
 
     pub(super) async fn close(self: &Arc<Self>) {
+        let _ = self.close_confirmed().await;
+    }
+
+    pub(super) async fn close_confirmed(self: &Arc<Self>) -> Result<(), String> {
         self.close_in_background();
-        let _ = self.close_done.subscribe().wait_for(|done| *done).await;
+        let mut done = self.close_done.subscribe();
+        let result = done
+            .wait_for(|done| done.is_some())
+            .await
+            .map_err(|_| "JDBC session cleanup outcome is unavailable".to_string())?;
+        result.as_ref().expect("completed close").clone()
     }
 
     pub(super) fn close_in_background(self: &Arc<Self>) {
@@ -145,7 +154,7 @@ impl JdbcLogicalSession {
             let session = self.clone();
             handle.spawn(async move {
                 let runtime = &session.runtime;
-                let _: Result<serde_json::Value, _> = runtime
+                let mut closed = runtime
                     .process
                     .sidecar
                     .invoke_with_timeout(
@@ -154,16 +163,26 @@ impl JdbcLogicalSession {
                         Some("jdbc"),
                         Some(Duration::from_secs(3)),
                     )
-                    .await;
+                    .await
+                    .and_then(|value: serde_json::Value| {
+                        if value["ok"] == true {
+                            Ok(())
+                        } else {
+                            Err("JDBC logical session cleanup was not confirmed".to_string())
+                        }
+                    });
                 let mut members = runtime.members.lock().await;
                 members.0 -= 1;
                 if members.0 == 0 {
                     members.1 = true;
                     if let Err(error) = runtime.process.sidecar.shutdown().await {
                         log::warn!("Failed to stop the shared JDBC plugin runtime: {error}");
+                        if closed.is_ok() {
+                            closed = Err(error);
+                        }
                     }
                 }
-                session.close_done.send_replace(true);
+                session.close_done.send_replace(Some(closed));
             });
         }
     }
@@ -191,6 +210,75 @@ impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         if let Some(session) = &self.0 {
             session.close_in_background();
+        }
+    }
+}
+
+#[cfg(all(test, any(windows, unix)))]
+mod tests {
+    use super::super::lifecycle_tests::{install, registry, ID};
+    use super::*;
+
+    #[tokio::test]
+    async fn unknown_native_close_is_reported_without_closing_a_sibling() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("plugins");
+        let log = temp.path().join("closed.txt");
+        install(&root, "0.3.4");
+        let registry = registry(&root);
+        let process = PluginDriverSession::start(
+            registry.find_plugin(ID).unwrap().unwrap(),
+            "jdbc".into(),
+            "0.6.14".into(),
+            PluginRuntimeEnv::default().with_var("DBX_JDBC_CLOSE_LOG", log.to_string_lossy().into_owned()),
+            registry.lifecycle().begin_connection(ID, "Native job close fixture").unwrap(),
+        )
+        .await
+        .unwrap();
+        let runtime = Arc::new(JdbcRuntime { process: Arc::new(process), members: Mutex::new((2, false)) });
+        let driver = |id: &str| PluginDriverSession {
+            sidecar: runtime.process.sidecar.clone(),
+            driver_id: "jdbc".into(),
+            _activity: None,
+            logical: Some(Arc::new(JdbcLogicalSession {
+                runtime: runtime.clone(),
+                id: id.into(),
+                closed: AtomicBool::new(false),
+                operation: Mutex::new(()),
+                close_done: tokio::sync::watch::channel(None).0,
+            })),
+        };
+        let failed = driver("failed");
+        let sibling = driver("survivor");
+        let close = failed.shutdown_confirmed().await;
+        assert_eq!(failed.shutdown_confirmed().await, close, "closed failure must be retained without reissuing close");
+        assert!(failed.shutdown().await.is_ok(), "ordinary callers keep the existing best-effort shutdown contract");
+        let live: Result<String, _> = sibling.invoke("version", serde_json::json!({})).await;
+        assert_eq!(live.unwrap(), "0.3.4");
+        sibling.shutdown_confirmed().await.unwrap();
+        assert_eq!(std::fs::read_to_string(log).unwrap().lines().filter(|id| *id == "failed").count(), 1);
+        assert!(close.is_err(), "an RPC-confirmed native cleanup failure must not become successful shutdown");
+    }
+
+    #[tokio::test]
+    async fn dedicated_jdbc_close_requires_native_acknowledgment_and_always_stops_its_process() {
+        for (mode, confirmed) in [("acknowledged", true), ("unconfirmed", false)] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("plugins");
+            install(&root, "0.3.4");
+            let registry = registry(&root);
+            let process = PluginDriverSession::start(
+                registry.find_plugin(ID).unwrap().unwrap(),
+                "jdbc".into(),
+                "0.6.14".into(),
+                PluginRuntimeEnv::default().with_var("DBX_JDBC_ROOT_CLOSE", mode),
+                registry.lifecycle().begin_connection(ID, "Owned native job session").unwrap(),
+            )
+            .await
+            .unwrap();
+            assert!(process.pid().await.is_some());
+            assert_eq!(process.shutdown_confirmed().await.is_ok(), confirmed);
+            assert!(process.pid().await.is_none(), "unconfirmed native cleanup must still retire the owned process");
         }
     }
 }

@@ -26,12 +26,12 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'issues' && !github.event.issue.pull_request }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
 
       - name: Triage issue labels and title
         run: node .github/scripts/label-issue-database.mjs
@@ -51,12 +51,12 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name != 'issues' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
 
       - name: Synchronize database labels
         run: node .github/scripts/label-issue-database.mjs

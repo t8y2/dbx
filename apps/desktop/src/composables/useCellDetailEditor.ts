@@ -13,7 +13,7 @@ import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
 import { shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { isJsonColumnType } from "@/lib/dataGrid/cellDetailPresentation";
-import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
+import { clampEditorFontSize, createEditorWheelZoomController, createEditorZoomCommitScheduler, fontSizeFromGestureScale } from "@/lib/editor/editorZoom";
 import i18n from "@/i18n";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorTheme } from "@/stores/settingsStore";
@@ -107,7 +107,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     if (settingsStore.editorSettings.fontSize === fontSize) return;
     settingsStore.updateEditorSettings({ fontSize });
   });
-  const wheelZoomGestureGuard = createEditorWheelZoomGestureGuard();
+  const wheelZoom = createEditorWheelZoomController();
 
   function syncEditorFontCssVars(fontSize = liveFontSize, fontFamily = options.fontFamily()) {
     if (!wrapperEl) return;
@@ -187,6 +187,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
   function onEditorGestureEnd(event: Event) {
     event.preventDefault();
     isGestureZooming = false;
+    wheelZoom.holdScrollGesture(event.timeStamp);
     zoomCommitScheduler.flush(liveFontSize);
   }
 
@@ -194,7 +195,9 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     const editor = view.value;
     if (!editor || destroyed) return;
     if (!isGestureZooming && !zoomCommitScheduler.hasPendingCommit()) {
-      liveFontSize = clampEditorFontSize(fontSize);
+      const nextFontSize = clampEditorFontSize(fontSize);
+      if (nextFontSize !== liveFontSize) wheelZoom.rebase();
+      liveFontSize = nextFontSize;
     }
     syncEditorFontCssVars(liveFontSize, fontFamily);
     const theme = await loadEditorTheme(editorTheme, appearance, undefined, palette);
@@ -342,9 +345,16 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
             return true;
           },
           wheel(event) {
-            if (!wheelZoomGestureGuard.accepts(event)) return false;
+            if (isGestureZooming) {
+              if (event.ctrlKey || event.metaKey) {
+                event.preventDefault();
+                return true;
+              }
+              return false;
+            }
+            const next = wheelZoom.nextFontSize(liveFontSize, event);
+            if (next === null) return false;
             event.preventDefault();
-            const next = fontSizeFromWheelDelta(liveFontSize, event.deltaY);
             applyLiveFontSize(next);
             zoomCommitScheduler.schedule(next);
             return true;

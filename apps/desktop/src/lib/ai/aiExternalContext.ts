@@ -1,6 +1,14 @@
 import type { AiAction } from "@/lib/ai/ai";
 import type { AiSelectionContextInput } from "@/lib/ai/aiAttachments";
 import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import type { QueryTab } from "@/types/database";
+import { queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
+
+/** Capture the displayed result's SQL before the panel loads or the editor changes. */
+export function queryErrorSelection(tab: Pick<QueryTab, "title" | "result" | "resultSortedSql" | "resultBaseSql" | "lastExecutedSql"> | undefined): AiSelectionContextInput | undefined {
+  const sql = tab ? queryResultExecutionSql({ ...tab, sql: "" }) : "";
+  return sql?.trim() ? { source: "query-error", label: tab?.title, content: sql } : undefined;
+}
 
 /**
  * Request shape shared by every AI entry point that lives *outside* the panel

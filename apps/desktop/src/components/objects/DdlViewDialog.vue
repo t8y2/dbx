@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Compartment } from "@codemirror/state";
 import { keymap as codeMirrorKeymap } from "@codemirror/view";
-import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import { computed, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
@@ -62,9 +62,10 @@ const connectionStore = useConnectionStore();
 const originalDdlContent = ref("");
 const formattedDdlContent = ref("");
 const ddlDisplayMode = ref<"formatted" | "original">("formatted");
-const ddlContent = computed(() => applyDdlStoragePreference(ddlDisplayMode.value === "formatted" ? formattedDdlContent.value : originalDdlContent.value, props.databaseType, settingsStore.editorSettings.excludeDdlStorage));
+const ddlContent = computed(() => applyDdlTextPreferences(ddlDisplayMode.value === "formatted" ? formattedDdlContent.value : originalDdlContent.value, props.databaseType, settingsStore.editorSettings));
 const ddlLoading = ref(false);
 const ddlError = ref("");
+let ddlRequestId = 0;
 const ddlEditorContainer = ref<HTMLDivElement>();
 const ddlSearchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
 const ddlEditorView = shallowRef<EditorView | null>(null);
@@ -290,41 +291,40 @@ function toggleDialogMaximized() {
 }
 
 async function loadDdl(force = false) {
+  const requestId = ++ddlRequestId;
+  const request = {
+    connectionId: props.connectionId,
+    queryTimeoutSecs: connectionStore.getConfig(props.connectionId)?.query_timeout_secs,
+    database: props.database,
+    schema: props.schema || props.database,
+    explicitOwner: props.schema || undefined,
+    tableName: props.tableName,
+    objectType: props.objectType,
+    catalog: props.catalog,
+    separateIndexes: (props.databaseType === "oracle" || props.databaseType === "oceanbase-oracle") && settingsStore.editorSettings.separateDdlIndexes,
+  };
+  const formatOptions = {
+    dialect: ddlFormatDialectFor({ formatDialect: props.formatDialect, databaseType: props.databaseType, highlightDialect: props.dialect }),
+    databaseType: props.databaseType,
+    database: props.database,
+    catalog: props.catalog,
+    includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+    quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+  };
   ddlError.value = "";
   ddlLoading.value = true;
   if (force) destroyDdlEditor();
   try {
-    const schema = props.schema || props.database;
-    const { ddl } = await loadObjectDdl(
-      {
-        connectionId: props.connectionId,
-        queryTimeoutSecs: connectionStore.getConfig(props.connectionId)?.query_timeout_secs,
-        database: props.database,
-        schema,
-        tableName: props.tableName,
-        objectType: props.objectType,
-        catalog: props.catalog,
-      },
-      { force },
-    );
-    const formatDialect = ddlFormatDialectFor({ formatDialect: props.formatDialect, databaseType: props.databaseType, highlightDialect: props.dialect });
+    const { ddl } = await loadObjectDdl(request, { force });
+    if (requestId !== ddlRequestId || !props.open) return;
+    const formatted = await formatDdlForDisplay(ddl, formatOptions, settingsStore.editorSettings.sqlFormatter);
+    if (requestId !== ddlRequestId || !props.open) return;
     originalDdlContent.value = ddl;
-    formattedDdlContent.value = await formatDdlForDisplay(
-      ddl,
-      {
-        dialect: formatDialect,
-        databaseType: props.databaseType,
-        database: props.database,
-        catalog: props.catalog,
-        includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
-        quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
-      },
-      settingsStore.editorSettings.sqlFormatter,
-    );
+    formattedDdlContent.value = formatted;
   } catch (e: any) {
-    ddlError.value = e?.message || String(e);
+    if (requestId === ddlRequestId && props.open) ddlError.value = e?.message || String(e);
   } finally {
-    ddlLoading.value = false;
+    if (requestId === ddlRequestId) ddlLoading.value = false;
   }
 }
 
@@ -333,7 +333,11 @@ watch(
   () => props.open,
   async (open) => {
     resetDialogDragOffset();
-    if (!open) return;
+    if (!open) {
+      ddlRequestId++;
+      ddlLoading.value = false;
+      return;
+    }
     const active = document.activeElement;
     editorRootToRestoreFocus = active instanceof HTMLElement ? active.closest(".cm-editor") : null;
     ddlDisplayMode.value = "formatted";
@@ -347,6 +351,10 @@ watch(
   },
   { immediate: true },
 );
+
+watch([() => props.connectionId, () => props.database, () => props.schema, () => props.tableName, () => props.objectType, () => props.catalog, () => props.databaseType, () => props.dialect, () => props.formatDialect, () => settingsStore.editorSettings.separateDdlIndexes], () => {
+  if (props.open && settingsStore.editorSettings.ddlOpenMode !== "tab") void loadDdl();
+});
 
 /**
  * Restores focus through CodeMirror's own `EditorView.focus()` instead of the browser default.
@@ -458,7 +466,7 @@ function destroyDdlEditor() {
 
 /** Copies the DDL text to clipboard. */
 function copyDdlContent() {
-  if (ddlContent.value) {
+  if (!ddlLoading.value && !ddlError.value && ddlContent.value) {
     copyToClipboard(ddlContent.value);
     toast(t("contextMenu.ddlCopied"), 2000);
   }
@@ -478,9 +486,11 @@ function createDdlViewerTab(ddl: string, pending: boolean) {
   if (tab) {
     tab.ddlViewer = {
       schema: props.schema || props.database,
+      explicitOwner: props.schema || undefined,
       tableName: props.tableName,
       objectType: props.objectType,
       formatDialect: ddlFormatDialectFor({ formatDialect: props.formatDialect, databaseType: props.databaseType, highlightDialect: props.dialect }),
+      ...(!pending ? { displaySource: ddlDisplayMode.value === "formatted" ? formattedDdlContent.value : originalDdlContent.value, separateIndexes: (props.databaseType === "oracle" || props.databaseType === "oceanbase-oracle") && settingsStore.editorSettings.separateDdlIndexes } : {}),
     };
     if (pending) {
       tab.ddlLoad = { startedAt: Date.now() };
@@ -491,6 +501,7 @@ function createDdlViewerTab(ddl: string, pending: boolean) {
 }
 
 function openDdlInNewTab() {
+  if (ddlLoading.value || ddlError.value) return;
   const ddl = ddlContent.value.trim();
   if (!ddl) return;
 
@@ -527,6 +538,7 @@ watch(
 
 // Safety net: destroy editor when component eventually unmounts.
 onUnmounted(() => {
+  ddlRequestId++;
   destroyDdlEditor();
 });
 
@@ -590,7 +602,7 @@ function onClose() {
           <EditorSearchPanel v-if="ddlEditorView" ref="ddlSearchPanelRef" :view="ddlEditorView" />
         </div>
       </div>
-      <DdlStorageToggle :database-type="props.databaseType" :disabled="ddlLoading || !!ddlError" />
+      <DdlStorageToggle :database-type="props.databaseType" :disabled="ddlLoading" />
       <DialogFooter class="shrink-0 pr-7">
         <div class="mr-auto flex items-center gap-2 text-sm text-muted-foreground">
           <Switch id="ddl-refresh-on-open" size="sm" :model-value="settingsStore.editorSettings.refreshDdlOnOpen" @update:model-value="setRefreshDdlOnOpen" />
@@ -612,7 +624,7 @@ function onClose() {
           </Select>
         </div>
         <Button variant="outline" @click="onClose">{{ t("common.close") }}</Button>
-        <Button variant="outline" :disabled="ddlLoading || !ddlContent" :title="t('contextMenu.openDdlInNewTab')" @click="openDdlInNewTab">
+        <Button variant="outline" :disabled="ddlLoading || !!ddlError || !ddlContent" :title="t('contextMenu.openDdlInNewTab')" @click="openDdlInNewTab">
           <ExternalLink class="h-4 w-4" />
           {{ t("contextMenu.openDdlInNewTab") }}
         </Button>
@@ -620,7 +632,7 @@ function onClose() {
           <RefreshCw class="h-4 w-4" />
           {{ t("structureEditor.refresh") }}
         </Button>
-        <Button variant="outline" :disabled="!ddlContent" @click="copyDdlContent">
+        <Button variant="outline" :disabled="ddlLoading || !!ddlError || !ddlContent" @click="copyDdlContent">
           <Clipboard class="h-4 w-4" />
           {{ t("grid.copyDdl") }}
         </Button>

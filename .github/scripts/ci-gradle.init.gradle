@@ -1,0 +1,55 @@
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.repositories.MavenArtifactRepository
+
+def target = System.getenv('DBX_CI_GRADLE_ROOT')
+def backup = System.getenv('DBX_CI_GRADLE_SOURCE') == 'backup'
+def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+def applies = { File directory -> target != null && directory.canonicalPath == target }
+
+beforeSettings { settings ->
+    if (applies(settings.settingsDir)) {
+        if (System.getenv('DBX_CI_GRADLE_PHASE') == 'execute') {
+            gradle.startParameter.offline = true
+        }
+        if (backup) {
+            settings.pluginManagement.repositories.clear()
+            settings.pluginManagement.repositories.maven { url = uri(mirror) }
+        }
+    }
+}
+
+afterProject { project ->
+    if (applies(project.rootDir) && backup) {
+        project.repositories.withType(MavenArtifactRepository).each { repository ->
+            if (repository.url.toString() in ['https://repo.maven.apache.org/maven2/',
+                                              'https://repo.maven.apache.org/maven2']) {
+                // Gradle 9.8.2's credentials getter creates credentials even for anonymous repositories.
+                if (repository.usesCredentials() || !repository.authentication.empty) {
+                    throw new GradleException('CI mirror switching does not support authenticated Central repositories')
+                }
+                repository.url = uri(mirror)
+            }
+        }
+    }
+}
+
+projectsEvaluated {
+    if (applies(rootProject.rootDir)) {
+        rootProject.tasks.register('dbxCiAcquireDependencies') {
+            doLast {
+                rootProject.allprojects.each { project ->
+                    project.configurations.findAll { configuration ->
+                        configuration.canBeResolved &&
+                            (System.getenv('DBX_CI_GRADLE_SCOPE') != 'jdbc' ||
+                             configuration.name in ['compileClasspath', 'runtimeClasspath', 'annotationProcessor', 'shadow'])
+                    }.each { configuration ->
+                        def artifacts = configuration.incoming.artifactView {
+                            componentFilter { identifier -> identifier instanceof ModuleComponentIdentifier }
+                        }.files.files
+                        println("Acquired ${project.path}:${configuration.name}: ${artifacts.size()} external artifacts")
+                    }
+                }
+            }
+        }
+    }
+}

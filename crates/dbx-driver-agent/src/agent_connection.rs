@@ -407,13 +407,10 @@ pub fn oracle_alternate_connect_configs(config: &ConnectionConfig, err: &str) ->
     let normalized = err.to_lowercase();
     let candidates = if normalized.contains("ora-12505") {
         vec![service_url, descriptor_service_url, legacy_service_url]
-    } else if normalized.contains("ora-12514") {
-        vec![sid_url, descriptor_sid_url, legacy_service_url]
     } else {
-        match config.oracle_connection_type.as_deref() {
-            Some("sid") => vec![service_url, legacy_service_url, descriptor_sid_url, descriptor_service_url],
-            _ => vec![sid_url, legacy_service_url, descriptor_service_url, descriptor_sid_url],
-        }
+        // ORA-12514: the listener answered but does not know the service name, so a
+        // SID/legacy/descriptor spelling is the only thing that can help.
+        vec![sid_url, descriptor_sid_url, legacy_service_url]
     };
     // The retries travel through `oracle_jdbc_connection_string` as a stored
     // connection string, so they must already carry the profile's protocol.
@@ -481,13 +478,25 @@ fn oracle_jdbc_connection_string(
     Ok(oracle_url_for_profile(config, url))
 }
 
+/// Whether Oracle's alternate connection descriptors can plausibly fix this error.
+///
+/// The alternates only rewrite how the *connect descriptor* names the service/SID
+/// (`//host:port/service`, `host:port:SID`, `(DESCRIPTION=...)`); they never change
+/// host, port or route. ORA-12505/ORA-12514 are answered by a listener that is
+/// reachable on host:port, so a wrong service/SID spelling is exactly what they
+/// diagnose. ORA-12541 ("no listener"), timeouts and resets mean the listener was
+/// never reached, so retrying three more descriptor spellings only opens three
+/// more TCP connections that cannot succeed.
+///
+/// That matters beyond wasted time: enterprise zero-trust/security clients in
+/// front of the database run an authorization check for every new connection and
+/// pop a native warning per failed check, so one failed connect used to stack up
+/// to five dialogs (1 initial + 4 alternates) per attempt. Keep the failure to one
+/// connection; ORA-12541 keeps the "try Service Name/SID" hint
+/// (`oracle_error_with_driver_hint`), it just no longer auto-retries.
 fn oracle_listener_error_can_retry(err: &str) -> bool {
     let normalized = err.to_lowercase();
-    normalized.contains("ora-12505")
-        || normalized.contains("ora-12514")
-        || normalized.contains("ora-12541")
-        || normalized.contains("no listener")
-        || err.contains("没有监听程序")
+    normalized.contains("ora-12505") || normalized.contains("ora-12514")
 }
 
 fn oracle_service_jdbc_url(host: &str, port: u16, database: &str) -> String {
@@ -809,6 +818,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -1409,7 +1420,9 @@ mod tests {
 
         assert_eq!(retry.connection_string.as_deref(), Some("jdbc:oracle:thin:@127.0.0.1:3306:ORCL"));
         assert!(oracle_alternate_connect_config(&retry, "ORA-01017: invalid username/password").is_none());
-        assert!(oracle_alternate_connect_config(&cfg, "ORA-12541: TNS:no listener").is_some());
+        // ORA-12541 is TCP-level: the listener was never reached, so a descriptor
+        // spelling change cannot help and only opens more connections/dialogs.
+        assert!(oracle_alternate_connect_config(&cfg, "ORA-12541: TNS:no listener").is_none());
     }
 
     #[test]
@@ -1423,25 +1436,27 @@ mod tests {
     }
 
     #[test]
-    fn oracle_no_listener_errors_try_common_jdbc_url_variants() {
+    fn oracle_no_listener_errors_do_not_fan_out_into_extra_connections() {
+        // ORA-12541 / "no listener" means host:port was never reached. Rewriting only
+        // the CONNECT_DATA spelling cannot fix reachability, and every alternate is a
+        // brand-new TCP connection — i.e. another authorization popup in front of an
+        // enterprise zero-trust/security client. One failure must stay one connection.
         let mut cfg = config(DatabaseType::Oracle, Some("ORCL"));
         cfg.host = "oracle.example.com".to_string();
         cfg.port = 1521;
         cfg.driver_profile = Some("oracle".to_string());
         cfg.oracle_connection_type = Some("service_name".to_string());
 
-        let retries = oracle_alternate_connect_configs(&cfg, "ORA-12541: TNS:no listener");
-        let urls: Vec<_> = retries.iter().filter_map(|retry| retry.connection_string.as_deref()).collect();
+        assert!(oracle_alternate_connect_configs(&cfg, "ORA-12541: TNS:no listener").is_empty());
+        assert!(oracle_alternate_connect_configs(&cfg, "ORA-12541: TNS:no listener\n没有监听程序").is_empty());
+        assert!(oracle_alternate_connect_config(&cfg, "ORA-12541: TNS:no listener").is_none());
+        // The actionable hint survives, it just no longer auto-retries.
+        assert!(oracle_error_with_driver_hint(&cfg, "ORA-12541: TNS:no listener").contains("Service Name"));
 
-        assert_eq!(
-            urls,
-            vec![
-                "jdbc:oracle:thin:@oracle.example.com:1521:ORCL",
-                "jdbc:oracle:thin:@oracle.example.com:1521/ORCL",
-                "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=oracle.example.com)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCL)))",
-                "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=oracle.example.com)(PORT=1521))(CONNECT_DATA=(SID=ORCL)))",
-            ]
-        );
+        // Listener-answered errors keep their single-purpose alternates: those arrive
+        // after a successful TCP handshake, so the descriptor really can be the fix.
+        let listener_answered = oracle_alternate_connect_configs(&cfg, "ORA-12514: no service");
+        assert_eq!(listener_answered.len(), 3);
     }
 
     #[test]

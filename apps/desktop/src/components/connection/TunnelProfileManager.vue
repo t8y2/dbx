@@ -7,7 +7,7 @@ import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { Loader2, Plus, Trash2, FolderOpen } from "@lucide/vue";
+import { Loader2, Plus, Trash2, FolderOpen, RefreshCw } from "@lucide/vue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useToast } from "@/composables/useToast";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
@@ -16,7 +16,7 @@ import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/l
 import { applySshAuthMethod } from "@/lib/connection/sshAuthMethod";
 import { stripInvisibleCharactersFromLayer } from "@/lib/connection/credentialSanitizer";
 import * as api from "@/lib/backend/api";
-import type { SshConfigHostEntry, TunnelProfile } from "@/types/database";
+import type { SshAgentIdentity, SshConfigHostEntry, TunnelProfile } from "@/types/database";
 import { translateBackendError } from "@/i18n/backend-errors";
 
 const { t } = useI18n();
@@ -81,6 +81,58 @@ function updateSelectedSshHost(value: string | number) {
 
 void loadSshConfigHosts();
 
+const SSH_AGENT_ALL_IDENTITIES = "__all__";
+const sshAgentIdentities = ref<SshAgentIdentity[]>([]);
+const sshAgentIdentitiesLoading = ref(false);
+const sshAgentIdentitiesError = ref("");
+let sshAgentIdentitiesTimer: ReturnType<typeof setTimeout> | undefined;
+let sshAgentIdentitiesRequest = 0;
+
+const sshAgentIdentityOptions = computed(() => {
+  const fingerprint = selectedSsh.value?.ssh_agent_key_fingerprint || "";
+  if (!fingerprint || sshAgentIdentities.value.some((identity) => identity.fingerprint === fingerprint)) {
+    return sshAgentIdentities.value;
+  }
+  return [{ fingerprint, algorithm: "", comment: "" }, ...sshAgentIdentities.value];
+});
+
+function sshAgentIdentityLabel(identity: SshAgentIdentity) {
+  if (!identity.comment) return identity.fingerprint;
+  return identity.algorithm ? `${identity.comment} (${identity.algorithm})` : identity.comment;
+}
+
+function updateSelectedSshAgentKeyFingerprint(value: unknown) {
+  if (!selectedSsh.value) return;
+  const fingerprint = String(value);
+  selectedSsh.value.ssh_agent_key_fingerprint = fingerprint === SSH_AGENT_ALL_IDENTITIES ? "" : fingerprint;
+}
+
+async function loadSshAgentIdentities(sshAgentSockPath: string) {
+  const request = ++sshAgentIdentitiesRequest;
+  sshAgentIdentitiesLoading.value = true;
+  sshAgentIdentitiesError.value = "";
+  try {
+    const identities = await api.listSshAgentIdentities(sshAgentSockPath);
+    if (request === sshAgentIdentitiesRequest) sshAgentIdentities.value = identities;
+  } catch (cause) {
+    if (request === sshAgentIdentitiesRequest) {
+      sshAgentIdentitiesError.value = t("connection.sshAgentKeyLoadFailed", { error: cause instanceof Error ? cause.message : String(cause) });
+    }
+  } finally {
+    if (request === sshAgentIdentitiesRequest) sshAgentIdentitiesLoading.value = false;
+  }
+}
+
+watch(
+  () => (selectedSsh.value?.auth_method === "agent" ? selectedSsh.value.ssh_agent_sock_path || "" : null),
+  (sshAgentSockPath) => {
+    if (sshAgentSockPath === null) return;
+    clearTimeout(sshAgentIdentitiesTimer);
+    sshAgentIdentitiesTimer = setTimeout(() => void loadSshAgentIdentities(sshAgentSockPath), 400);
+  },
+  { immediate: true },
+);
+
 function invalidateProfileTest() {
   testGuard.invalidate();
   isTesting.value = false;
@@ -132,6 +184,26 @@ function updateProxyType(value: unknown) {
   const profile = selectedProxy.value;
   if (!profile) return;
   profile.proxy_type = value === "http" ? "http" : "socks5";
+}
+
+function updateHttpTunnelProtocol(value: unknown) {
+  const profile = selectedHttp.value;
+  if (!profile) return;
+  profile.protocol = String(value) === "navicat_mysql" ? "navicat_mysql" : "dbx_tcp";
+  if (profile.protocol === "navicat_mysql") profile.token = "";
+  if (profile.protocol === "navicat_mysql" && profile.url.trim()) {
+    try {
+      const url = new URL(profile.url.trim());
+      if (url.pathname.endsWith("/")) {
+        url.pathname += "ntunnel_mysql.php";
+        profile.url = url.toString();
+      } else {
+        profile.url = url.toString();
+      }
+    } catch {
+      // Keep invalid input unchanged so save/connect validation can report it.
+    }
+  }
 }
 
 async function browseSshKeyPath(target?: { key_path?: string } | null) {
@@ -244,20 +316,22 @@ async function testSelected() {
           <Label class="text-xs">{{ t("connection.sshUser") }}</Label>
           <Input v-model="selectedSsh.user" class="col-span-3" placeholder="root" />
         </div>
-        <div class="grid grid-cols-4 items-center gap-4">
+        <div class="grid min-w-0 grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.sshAuthMethod") }}</Label>
-          <Select :model-value="selectedSsh.auth_method || 'password'" @update:model-value="updateSshAuthMethod">
-            <SelectTrigger class="col-span-3 h-9">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
-              <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
-              <SelectItem value="key+password">{{ t("connection.sshAuthMethodKeyPassword") }}</SelectItem>
-              <SelectItem value="agent">{{ t("connection.sshUseAgent") }}</SelectItem>
-              <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
-            </SelectContent>
-          </Select>
+          <div class="col-span-3 min-w-0">
+            <Select :model-value="selectedSsh.auth_method || 'password'" @update:model-value="updateSshAuthMethod">
+              <SelectTrigger class="h-9 w-full min-w-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
+                <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
+                <SelectItem value="key+password">{{ t("connection.sshAuthMethodKeyPassword") }}</SelectItem>
+                <SelectItem value="agent">{{ t("connection.sshUseAgent") }}</SelectItem>
+                <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div v-if="!selectedSsh.auth_method || selectedSsh.auth_method === 'password' || selectedSsh.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.sshPassword") }}</Label>
@@ -289,6 +363,35 @@ async function testSelected() {
           <Label class="text-xs">{{ t("connection.sshAgentSockPath") }}</Label>
           <Input v-model="selectedSsh.ssh_agent_sock_path" class="col-span-3" :placeholder="t('connection.sshAgentSockPathPlaceholder')" />
         </div>
+        <div v-if="selectedSsh.auth_method === 'agent'" class="grid grid-cols-4 items-center gap-4">
+          <Label class="text-xs">{{ t("connection.sshAgentKey") }}</Label>
+          <div class="col-span-3 flex min-w-0 items-center gap-1">
+            <div class="min-w-0 flex-1">
+              <Select :model-value="selectedSsh.ssh_agent_key_fingerprint || SSH_AGENT_ALL_IDENTITIES" @update:model-value="updateSelectedSshAgentKeyFingerprint">
+                <SelectTrigger class="h-9 w-full min-w-0">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem :value="SSH_AGENT_ALL_IDENTITIES">{{ t("connection.sshAgentKeyAll") }}</SelectItem>
+                  <SelectItem v-for="identity in sshAgentIdentityOptions" :key="identity.fingerprint" :value="identity.fingerprint" :title="identity.fingerprint">
+                    {{ sshAgentIdentityLabel(identity) }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :title="t('connection.sshAgentKeyRefresh')" :disabled="sshAgentIdentitiesLoading" @click="loadSshAgentIdentities(selectedSsh.ssh_agent_sock_path || '')">
+              <Loader2 v-if="sshAgentIdentitiesLoading" class="h-4 w-4 animate-spin" />
+              <RefreshCw v-else class="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+        <div v-if="selectedSsh.auth_method === 'agent'" class="grid grid-cols-4 items-start gap-4">
+          <span />
+          <div class="col-span-3 text-xs text-muted-foreground">
+            <p>{{ t("connection.sshAgentKeyHint") }}</p>
+            <p v-if="sshAgentIdentitiesError" class="mt-1">{{ sshAgentIdentitiesError }}</p>
+          </div>
+        </div>
         <div class="grid grid-cols-4 items-center gap-4">
           <span />
           <label class="col-span-3 flex cursor-pointer items-center gap-2">
@@ -303,17 +406,19 @@ async function testSelected() {
       </template>
 
       <template v-else-if="selectedProxy">
-        <div class="grid grid-cols-4 items-center gap-4">
+        <div class="grid min-w-0 grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.proxyType") }}</Label>
-          <Select :model-value="selectedProxy.proxy_type || 'socks5'" @update:model-value="updateProxyType">
-            <SelectTrigger class="col-span-3 h-9">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="socks5">SOCKS5</SelectItem>
-              <SelectItem value="http">HTTP CONNECT</SelectItem>
-            </SelectContent>
-          </Select>
+          <div class="col-span-3 min-w-0">
+            <Select :model-value="selectedProxy.proxy_type || 'socks5'" @update:model-value="updateProxyType">
+              <SelectTrigger class="h-9 w-full min-w-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="socks5">SOCKS5</SelectItem>
+                <SelectItem value="http">HTTP CONNECT</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.proxyHost") }}</Label>
@@ -335,17 +440,41 @@ async function testSelected() {
       </template>
 
       <template v-else-if="selectedHttp">
-        <div class="grid grid-cols-4 items-center gap-4">
+        <div class="grid min-w-0 grid-cols-4 items-center gap-4">
+          <Label class="text-xs">{{ t("connection.httpTunnelProtocol") }}</Label>
+          <div class="col-span-3 min-w-0">
+            <Select :model-value="selectedHttp!.protocol" @update:model-value="updateHttpTunnelProtocol">
+              <SelectTrigger class="w-full min-w-0"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="dbx_tcp">{{ t("connection.httpTunnelProtocolDbx") }}</SelectItem>
+                <SelectItem value="navicat_mysql">{{ t("connection.httpTunnelProtocolNavicat") }}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        <div class="grid min-w-0 grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.httpTunnelUrl") }}</Label>
-          <Input v-model="selectedHttp!.url" class="col-span-3" placeholder="https://dbx.example.com/dbx_tunnel.php" />
+          <div class="col-span-3 min-w-0">
+            <Input v-model="selectedHttp!.url" class="w-full min-w-0" :placeholder="selectedHttp!.protocol === 'navicat_mysql' ? 'https://example.com/ntunnel_mysql.php' : 'https://dbx.example.com/dbx_tunnel.php'" />
+          </div>
         </div>
-        <div class="grid grid-cols-4 items-center gap-4">
+        <div v-if="selectedHttp!.protocol === 'navicat_mysql'" class="col-span-4 min-w-0 text-xs text-muted-foreground">
+          {{ t("connection.httpTunnelNavicatHint") }}
+        </div>
+        <div v-if="selectedHttp!.protocol === 'navicat_mysql'" class="col-span-4 min-w-0 text-xs">
+          <a class="text-primary underline underline-offset-2" href="https://help.navicat.com/hc/en-us/articles/218283457-Where-can-I-get-the-HTTP-tunnel-script-file" target="_blank" rel="noopener noreferrer">{{ t("connection.httpTunnelNavicatScriptHelp") }}</a>
+        </div>
+        <div v-if="selectedHttp!.protocol !== 'navicat_mysql'" class="grid min-w-0 grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.httpTunnelToken") }}</Label>
-          <PasswordInput v-model="selectedHttp!.token" class="col-span-3" :placeholder="t('connection.httpTunnelTokenPlaceholder')" />
+          <div class="col-span-3 min-w-0">
+            <PasswordInput v-model="selectedHttp!.token" class="w-full min-w-0" :placeholder="t('connection.httpTunnelTokenPlaceholder')" />
+          </div>
         </div>
-        <div class="grid grid-cols-4 items-center gap-4">
+        <div class="grid min-w-0 grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.httpTunnelConnectTimeout") }}</Label>
-          <Input v-model.number="selectedHttp!.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" />
+          <div class="col-span-3 min-w-0">
+            <Input v-model.number="selectedHttp!.connect_timeout_secs" type="number" min="1" max="300" step="1" class="w-full min-w-0" />
+          </div>
         </div>
       </template>
     </template>

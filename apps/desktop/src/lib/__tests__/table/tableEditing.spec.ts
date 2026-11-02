@@ -18,6 +18,8 @@ import {
   isTdengineExistingRowReadonlyColumn,
   isTableDataEditable,
   parseSalesforceColumnExtra,
+  physicalTablePrimaryKeys,
+  uniqueKeyModelColumns,
   supportsDataGridTransaction,
   shouldIncludeSyntheticRowId,
   showsKeylessEditWarning,
@@ -160,6 +162,51 @@ describe("tableEditing", () => {
     expect(editableRowIdentifierColumns("postgres", columns, [index(["email"])])).toEqual([]);
     expect(editableRowIdentifierColumns("postgres", columns, [{ ...index(["tenant_id"]), key_is_expression: [true] }])).toEqual([]);
     expect(editableRowIdentifierColumns("postgres", columns, [index(["missing"])])).toEqual([]);
+  });
+
+  it("recognizes Doris/StarRocks composite unique keys with nullable columns as row identifier", () => {
+    // In Doris/StarRocks, UNIQUE KEY columns default to nullable in DDL
+    const columns = [column("id"), column("data_type"), column("name")];
+    const dorisUniqueIndex: IndexInfo = {
+      name: "UNIQUE KEY",
+      columns: ["id", "data_type"],
+      is_unique: true,
+      is_primary: false,
+      index_type: "UNIQUE KEY",
+    };
+
+    expect(editableRowIdentifierColumns("doris", columns, [dorisUniqueIndex])).toEqual(["id", "data_type"]);
+    expect(editableRowIdentifierColumns("starrocks", columns, [dorisUniqueIndex])).toEqual(["id", "data_type"]);
+    // Standard engines like MySQL reject nullable unique index columns
+    expect(editableRowIdentifierColumns("mysql", columns, [dorisUniqueIndex])).toEqual([]);
+
+    // Shows keyless edit warning is false when primaryKeys are resolved
+    expect(showsKeylessEditWarning("doris", ["id", "data_type"], "TABLE")).toBe(false);
+    expect(showsKeylessEditWarning("doris", [], "TABLE")).toBe(true);
+
+    // physicalTablePrimaryKeys resolves the unique key model index for Doris/StarRocks
+    expect(physicalTablePrimaryKeys(columns, [dorisUniqueIndex], "doris")).toEqual(["id", "data_type"]);
+    expect(physicalTablePrimaryKeys(columns, [dorisUniqueIndex], "starrocks")).toEqual(["id", "data_type"]);
+    expect(physicalTablePrimaryKeys(columns, [dorisUniqueIndex], "mysql")).toEqual([]);
+
+    // A Doris key spanning every projected column leaves nothing to update.
+    expect(editableRowIdentifierColumns("doris", columns.slice(0, 2), [dorisUniqueIndex])).toEqual([]);
+  });
+
+  it("prefers the Doris UNIQUE KEY model over a nullable unique *secondary* index", () => {
+    // UNIQUE KEY(k1, k2) with `... UNIQUE INDEX uk_tail(tail) USING INVERTED`
+    const columns = [column("k1"), column("k2"), column("tail")];
+    const modelIndex: IndexInfo = { name: "UNIQUE KEY", columns: ["k1", "k2"], is_unique: true, is_primary: false, index_type: "UNIQUE KEY" };
+    const secondaryIndex: IndexInfo = { name: "uk_tail", columns: ["tail"], is_unique: true, is_primary: false, index_type: "INVERTED" };
+    expect(editableRowIdentifierColumns("doris", columns, [modelIndex, secondaryIndex])).toEqual(["k1", "k2"]);
+    expect(editableRowIdentifierColumns("doris", columns, [secondaryIndex, modelIndex])).toEqual(["k1", "k2"]);
+  });
+
+  it("keys every column like a NULLable UNIQUE KEY model but only makes non-key columns unique", () => {
+    const modelIndex: IndexInfo = { name: "UNIQUE KEY", columns: ["id", "data_type"], is_unique: true, is_primary: false, index_type: "UNIQUE KEY" };
+    expect([...uniqueKeyModelColumns("doris", [modelIndex])]).toEqual(["id", "data_type"]);
+    expect([...uniqueKeyModelColumns("mysql", [modelIndex])]).toEqual([]);
+    expect(uniqueKeyModelColumns("doris", []).size).toBe(0);
   });
 
   it.each(["oracle", "oceanbase-oracle"] as const)("prefers physical %s indexes over the ROWID fallback", (databaseType) => {

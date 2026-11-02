@@ -312,6 +312,14 @@ describe("buildSelectAllSql", () => {
     expect(buildSelectAllSql("influxdb3", { tableName: "cpu" })).toBe(`SELECT * FROM "cpu" WHERE time > now() - INTERVAL '5 minutes' ORDER BY time DESC LIMIT 100`);
   });
 
+  it("honors lower keywordCase for new-query SQL prefill (#12933)", () => {
+    expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" }, undefined, undefined, false, true, "lower")).toBe('select * from "users"');
+    expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" }, undefined, undefined, false, true, "upper")).toBe('SELECT * FROM "users"');
+    expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" }, undefined, undefined, false, true, "preserve")).toBe('SELECT * FROM "users"');
+    expect(buildSelectAllSql("influxdb", { tableName: "cpu" }, undefined, undefined, false, true, "lower")).toBe('select * from "cpu" where time > now() - 5m order by time desc limit 100');
+    expect(buildSelectAllSql("influxdb3", { tableName: "cpu" }, undefined, undefined, false, true, "lower")).toBe(`select * from "cpu" where time > now() - interval '5 minutes' order by time desc limit 100`);
+  });
+
   it("bracket-quotes a SQL Server table", () => {
     expect(buildSelectAllSql("sqlserver", { schema: "dbo", tableName: "users" })).toBe("SELECT * FROM [dbo].[users]");
     expect(buildSelectAllSql("sqlserver", { tableName: "users" })).toBe("SELECT * FROM [users]");
@@ -392,6 +400,19 @@ describe("resolveNewQueryInitialSql", () => {
     ).toBe("SELECT * FROM public.users");
   });
 
+  it("honors lower keywordCase when resolving initial new-query SQL (#12933)", () => {
+    expect(
+      resolveNewQueryInitialSql({
+        activeTab: dataTab(),
+        prefillEnabled: true,
+        targetConnectionId: "conn-1",
+        targetDatabase: "app_db",
+        databaseType: "postgres",
+        keywordCase: "lower",
+      }),
+    ).toBe('select * from "users"');
+  });
+
   it("passes the Phoenix driver profile into the initial SQL builder", () => {
     expect(
       resolveNewQueryInitialSql({
@@ -465,5 +486,63 @@ describe("resolveNewQueryInitialSql", () => {
         databaseType: "neo4j",
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("resolveNewQueryTarget schema qualification", () => {
+  const connections = [{ id: "sql-1", host: "localhost", database: "app", default_schema: "dbo", db_type: "sqlserver" as const }];
+
+  it("keeps an implicit tab schema for browsing but out of the SQL scope", () => {
+    const target = resolveNewQueryTarget({
+      activeTab: { connectionId: "sql-1", database: "app", schema: "core" },
+      connections,
+      preferredSource: "tab",
+    });
+    expect(target?.schema).toBe("core");
+    expect(target?.schemaQualifiesSql).toBeUndefined();
+  });
+
+  it("propagates a schema the user explicitly selected on the tab", () => {
+    const target = resolveNewQueryTarget({
+      activeTab: { connectionId: "sql-1", database: "app", schema: "core", schemaQualifiesSql: true },
+      connections,
+      preferredSource: "tab",
+    });
+    expect(target?.schema).toBe("core");
+    expect(target?.schemaQualifiesSql).toBe(true);
+  });
+
+  it("treats a sidebar schema node as an explicit selection", () => {
+    const target = resolveNewQueryTarget({
+      selectedTreeNode: { type: "schema", connectionId: "sql-1", database: "app", schema: "core", label: "core" },
+      connections,
+      preferredSource: "sidebar",
+    });
+    expect(target?.schema).toBe("core");
+    expect(target?.schemaQualifiesSql).toBe(true);
+  });
+
+  it("does not promote the connection default schema from a connection node", () => {
+    const target = resolveNewQueryTarget({
+      selectedTreeNode: { type: "database", connectionId: "sql-1", database: "app", label: "app" },
+      connections,
+      preferredSource: "sidebar",
+    });
+    expect(target?.schema).toBe("dbo");
+    expect(target?.schemaQualifiesSql).toBeUndefined();
+  });
+
+  it("treats an object schema from table metadata as explicit", () => {
+    const target = resolveNewQueryTarget({
+      activeTab: {
+        connectionId: "sql-1",
+        database: "app",
+        tableMeta: { schema: "sales", tableName: "orders", columns: [], primaryKeys: [] },
+      },
+      connections,
+      preferredSource: "tab",
+    });
+    expect(target?.schema).toBe("sales");
+    expect(target?.schemaQualifiesSql).toBe(true);
   });
 });

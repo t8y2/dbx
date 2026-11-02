@@ -234,7 +234,14 @@ async function startSearch() {
     emitState();
     await loadBulkColumns(currentRun);
     if (currentRun !== runId || cancelled.value) return;
-    await scanTableRange(currentRun, false);
+    // 首轮默认扫完全部表：仍按 DATABASE_SEARCH_TABLE_BATCH_SIZE 分批推进，
+    // 批间让出事件循环，保证进度实时刷新且“停止”按钮可响应。
+    while (currentRun === runId && !cancelled.value && nextTableIndex.value < tableTasks.value.length) {
+      await scanTableRange(currentRun, false);
+      if (nextTableIndex.value < tableTasks.value.length) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    }
   } catch (error: any) {
     if (currentRun === runId && !cancelled.value) {
       generalError.value = error?.message || String(error);

@@ -51,6 +51,24 @@ In Docker/Web, reading and execution happen on the server. Temporary resources a
   </Step>
 </Steps>
 
+## Include Other SQL Files (Desktop)
+
+For local `.sql` execution, enable **Resolve SQL file includes** and place a directive on its own line between complete statements:
+
+```sql
+CREATE TABLE example (id INTEGER PRIMARY KEY, name TEXT);
+-- @include "shared/seed.sql"
+INSERT INTO example VALUES (2, 'after include');
+```
+
+The referenced script runs at the directive's position, then execution resumes in its caller. Nested paths resolve relative to the containing file. Repeated references execute repeatedly; select only entry files, not their dependencies. Include boundaries use the same splitter as execution: SQL Server batches end with a standalone `GO` line, while other databases use their own statement delimiters. Included files must end a complete statement or batch.
+
+Paths accept `/` or `\`; quote paths containing spaces with single or double quotes. Only `.sql` files beneath the entry script directory are allowed. Absolute paths, `..`, non-SQL files, symlinks escaping that directory, and cycles are rejected. Include-looking text inside strings, quoted identifiers, or block comments stays literal. No shell commands are executed.
+
+Before sending SQL, DBX streams and decodes every reference in the batch into private temporary files, automatically removed after completion, failure, or cancellation. Each file's BOM takes precedence; otherwise the selected encoding or automatic detection applies. Limits are 16 levels, 256 file visits, 1 GiB expanded text, and 16 MiB per line. Missing files or exceeded limits stop preparation before execution; execution errors still follow the existing transaction and continue-on-error options, not an implicit batch rollback.
+
+Includes are off by default and unavailable for compressed files, split ZIP packages, selected-table restore, or ordinary query-editor execution. Docker/Web hides the option and rejects include-enabled requests to prevent access to other server files. Preview shows the entry script and per-file statistics stay under that entry file. Current statements, failure details, returned errors, and failure logs identify the actual relative source with a prefix such as `[shared/seed.sql]`. Include mode preserves individual source/error boundaries instead of merging adjacent INSERT statements.
+
 ## Multi-File Session Semantics
 
 Selected files form one execution task and run in list order. MySQL-compatible paths reuse one pinned connection across the complete batch, so state established by an earlier file can affect later files, including:
@@ -115,7 +133,7 @@ Query execution support does not guarantee compatibility with every client scrip
     Generate structure, data, and object SQL files.
   </Card>
   <Card title="Database Backup" href="/en/docs/database-backup">
-    Schedule MySQL and PostgreSQL backups in Desktop.
+    Schedule MySQL, PostgreSQL, and openGauss backups in Desktop.
   </Card>
   <Card title="Production Safety" href="/en/docs/production-safety">
     Understand pre-execution confirmation, read-only protection, and privilege boundaries.

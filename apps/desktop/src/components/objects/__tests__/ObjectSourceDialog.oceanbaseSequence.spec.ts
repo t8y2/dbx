@@ -4,24 +4,53 @@ import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { ConnectionConfig, DatabaseType, ObjectSourceKind } from "@/types/database";
+import type { OracleRoutineOperation } from "@/types/schemaDiff";
 import ObjectSourceDialog from "../ObjectSourceDialog.vue";
 import { freezeSourceIdentities } from "@/lib/table/objectSourceIdentity";
 
 const ddl = 'CREATE SEQUENCE "APP"."SEQ" START WITH 40 INCREMENT BY 1 NOCACHE;';
 const alter = 'ALTER SEQUENCE "APP"."SEQ" INCREMENT BY 1 NOCACHE;';
-const mocks = vi.hoisted(() => ({ getObjectSource: vi.fn(), buildEditableObjectSource: vi.fn(), buildExecutableObjectSourceStatements: vi.fn(), executeQuery: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  getObjectSource: vi.fn(),
+  buildEditableObjectSource: vi.fn(),
+  buildExecutableObjectSourceStatements: vi.fn(),
+  executeQuery: vi.fn(),
+  checkConnectionHealth: vi.fn(),
+  subscribeConnectionLiveness: vi.fn(),
+  subscribeConnectionIdleClosed: vi.fn(),
+  prewarmConnection: vi.fn(),
+  loadConnections: vi.fn(),
+  loadTunnelProfiles: vi.fn(),
+  loadTableVGroups: vi.fn(),
+  loadSidebarLayout: vi.fn(),
+  listInstalledAgents: vi.fn(),
+  prepareOracleRoutineSave: vi.fn(),
+  updateOracleRoutineOperationReferences: vi.fn(async () => {}),
+  executeOracleRoutineOperation: vi.fn(),
+  observeOracleRoutineOperation: vi.fn(),
+}));
 // The Rust/backend boundary is mocked; the dialog, CodeMirror editor and shared
 // save/production-guard pipeline remain real. Rust builder tests cover the SQL.
 vi.mock("@/lib/backend/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/backend/api")>()), ...mocks }));
 const cleanups: Array<() => void> = [];
-afterEach(() => {
+const unexpectedHttp: string[] = [];
+beforeEach(() => {
+  unexpectedHttp.length = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    unexpectedHttp.push(String(input));
+    throw new Error(`Unexpected HTTP boundary: ${String(input)}`);
+  });
+});
+afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) cleanup();
+  await vi.dynamicImportSettled();
   vi.restoreAllMocks();
   for (const mock of Object.values(mocks)) mock.mockReset();
+  expect(unexpectedHttp).toEqual([]);
 });
 function button(text: string) {
   return [...document.querySelectorAll<HTMLButtonElement>("button")].find((element) => element.textContent?.trim() === text);
@@ -37,8 +66,17 @@ async function mount(options: { databaseType?: DatabaseType; initialEditing?: bo
   const pinia = createPinia();
   setActivePinia(pinia);
   const store = useConnectionStore();
-  vi.spyOn(store, "ensureConnected").mockResolvedValue(undefined);
-  vi.spyOn(store, "getConfig").mockReturnValue({ id: "ob", name: "test", db_type: databaseType, is_production: options.production } as ConnectionConfig);
+  store.connections.push({ id: "ob", name: "test", db_type: databaseType, is_production: options.production } as ConnectionConfig);
+  store.connectedIds.add("ob");
+  mocks.checkConnectionHealth.mockResolvedValue(undefined);
+  mocks.subscribeConnectionLiveness.mockResolvedValue(() => {});
+  mocks.subscribeConnectionIdleClosed.mockResolvedValue(() => {});
+  mocks.prewarmConnection.mockResolvedValue(undefined);
+  mocks.loadConnections.mockResolvedValue([]);
+  mocks.loadTunnelProfiles.mockResolvedValue([]);
+  mocks.loadTableVGroups.mockResolvedValue({});
+  mocks.loadSidebarLayout.mockResolvedValue(null);
+  mocks.listInstalledAgents.mockResolvedValue([]);
   mocks.getObjectSource.mockResolvedValue({ name: "SEQ", schema: "APP", object_type: objectType, source, editable: options.editable !== false });
   mocks.buildEditableObjectSource.mockResolvedValue(objectType === "SEQUENCE" && databaseType === "oceanbase-oracle" ? alter : source);
   mocks.buildExecutableObjectSourceStatements.mockResolvedValue([objectType === "SEQUENCE" ? alter : source]);
@@ -60,6 +98,82 @@ async function mount(options: { databaseType?: DatabaseType; initialEditing?: bo
 }
 
 describe("OceanBase sequence source through the shared Oracle object dialog", () => {
+  it.each(["TYPE", "TYPE_BODY"] as const)("labels %s editing and save preview for the controlled TYPE flow", async (type) => {
+    const source = type === "TYPE" ? 'CREATE OR REPLACE TYPE "APP"."SEQ" AS OBJECT (ID NUMBER);' : 'CREATE OR REPLACE TYPE BODY "APP"."SEQ" AS MEMBER FUNCTION F RETURN NUMBER IS BEGIN RETURN 1; END; END;';
+    await mount({ type, source });
+    expect(editor()!.state.readOnly).toBe(true);
+    expect(button("contextMenu.editView")).toBeUndefined();
+    button("contextMenu.editObject")!.click();
+    await vi.waitFor(() => expect(editor()!.state.readOnly).toBe(false));
+    expect(document.querySelector('[role="dialog"] h2')?.textContent).toBe("contextMenu.editObject - SEQ");
+    expect(button("objects.saveSource")).toBeUndefined();
+    const requests = await import("@/lib/table/oracleTypeManagementRequest");
+    try {
+      button("objects.typeManagementPreviewSave")!.click();
+      await vi.waitFor(() => expect(requests.oracleTypeManagementRequest.value?.operation).toBe(type === "TYPE_BODY" ? "save-body" : "save-spec"));
+      expect(mocks.buildExecutableObjectSourceStatements).not.toHaveBeenCalled();
+      expect(mocks.executeQuery).not.toHaveBeenCalled();
+    } finally {
+      const pending = requests.oracleTypeManagementRequest.value;
+      if (pending) requests.finishOracleTypeManagementRequest(pending.id, { complete: false, target: pending.target, operation: pending.operation });
+    }
+  });
+
+  function routineOperation(source: string, valid: boolean): OracleRoutineOperation {
+    const identity = { owner: "APP", name: "SEQ", kind: "FUNCTION" as const };
+    return {
+      operationId: "dialog-save-operation",
+      target: { connectionId: "ob", database: "service", schema: "APP", databaseType: "oceanbase-oracle", generation: 0 },
+      identity,
+      lifecycle: "terminal",
+      dispatched: true,
+      acknowledged: true,
+      readback: { identity, state: valid ? "verified" : "invalid", exists: true, version: null, source, definitionMatches: true, compilerMessages: valid ? [] : [{ attribute: "ERROR", line: 2, position: 17, text: "missing identifier" }], issues: [] },
+      error: null,
+    };
+  }
+  it("retains the routine editor and compiler position when acknowledged DDL is INVALID", async () => {
+    const source = 'CREATE OR REPLACE FUNCTION "APP"."SEQ" RETURN NUMBER AS BEGIN RETURN missing_value; END;';
+    const { saved } = await mount({ type: "FUNCTION", source, initialEditing: true });
+    const operation = routineOperation(source, false);
+    mocks.prepareOracleRoutineSave.mockResolvedValue({ ...operation, lifecycle: "prepared", dispatched: false, acknowledged: false, readback: null });
+    mocks.executeOracleRoutineOperation.mockResolvedValue(operation);
+    button("objects.saveSource")!.click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("ERROR 2:17 missing identifier"));
+    expect(mocks.prepareOracleRoutineSave).toHaveBeenCalledWith({ connectionId: "ob", database: "service", identity: operation.identity, sql: source });
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(saved).not.toHaveBeenCalled();
+    expect(mocks.getObjectSource).toHaveBeenCalledTimes(1);
+    expect(editor()!.state.doc.toString()).toBe(source);
+    expect(editor()!.state.facet(EditorState.readOnly)).toBe(false);
+  });
+  it("reloads a routine only after the shared operation has verified the final definition", async () => {
+    const source = 'CREATE OR REPLACE FUNCTION "APP"."SEQ" RETURN NUMBER AS BEGIN RETURN 1; END;';
+    const { saved } = await mount({ type: "FUNCTION", source, initialEditing: true });
+    const operation = routineOperation(source, true);
+    mocks.prepareOracleRoutineSave.mockResolvedValue({ ...operation, lifecycle: "prepared", dispatched: false, acknowledged: false, readback: null });
+    mocks.executeOracleRoutineOperation.mockResolvedValue(operation);
+    button("objects.saveSource")!.click();
+    await vi.waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    expect(mocks.executeOracleRoutineOperation).toHaveBeenCalledExactlyOnceWith(operation.operationId, source);
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(mocks.getObjectSource).toHaveBeenCalledTimes(2));
+  });
+  it("prepares a routine before production confirmation but does not write after cancellation", async () => {
+    const source = 'CREATE OR REPLACE FUNCTION "APP"."SEQ" RETURN NUMBER AS BEGIN RETURN 2; END;';
+    const { saved } = await mount({ type: "FUNCTION", source, initialEditing: true, production: true });
+    const operation = routineOperation(source, true);
+    mocks.prepareOracleRoutineSave.mockResolvedValue({ ...operation, lifecycle: "prepared", dispatched: false, acknowledged: false, readback: null });
+    button("objects.saveSource")!.click();
+    const safety = useProductionSafetyStore();
+    await vi.waitFor(() => expect(safety.pending).toBeDefined());
+    expect(mocks.prepareOracleRoutineSave).toHaveBeenCalledOnce();
+    safety.cancel();
+    await vi.waitFor(() => expect(button("objects.saveSource")!.disabled).toBe(false));
+    expect(mocks.executeOracleRoutineOperation).not.toHaveBeenCalled();
+    expect(saved).not.toHaveBeenCalled();
+    expect(editor()!.state.doc.toString()).toBe(source);
+  });
   it("rechecks identity after the real production confirmation waits", async () => {
     const source = 'CREATE OR REPLACE VIEW "APP"."SEQ" AS SELECT 3 FROM DUAL';
     const { saved } = await mount({ type: "VIEW", source, initialEditing: true, production: true });
@@ -120,7 +234,7 @@ describe("OceanBase sequence source through the shared Oracle object dialog", ()
     expect(editor()!.state.doc.toString()).toMatch(/CREATE\s+SEQUENCE/i);
     expect(editor()!.state.doc.toString()).toMatch(/START\s+WITH\s+40/i);
     expect(mocks.buildEditableObjectSource).toHaveBeenCalledWith({ databaseType: "oceanbase-oracle", objectType: "SEQUENCE", schema: "APP", name: "SEQ", source: ddl });
-    button("contextMenu.editView")!.click();
+    button("contextMenu.editObject")!.click();
     await vi.waitFor(() => expect(editor()!.state.facet(EditorState.readOnly)).toBe(false));
     expect(editor()!.state.doc.toString()).toBe(alter);
     expect(editor()!.state.doc.toString()).not.toContain("START WITH");
@@ -139,14 +253,14 @@ describe("OceanBase sequence source through the shared Oracle object dialog", ()
     await mount({ databaseType: "oracle", initialEditing });
     expect(editor()!.state.facet(EditorState.readOnly)).toBe(true);
     expect(editor()!.state.doc.toString()).toMatch(/CREATE\s+SEQUENCE/i);
-    expect(button("contextMenu.editView")).toBeUndefined();
+    expect(button("contextMenu.editObject")).toBeUndefined();
     expect(button("objects.saveSource")).toBeUndefined();
     expect(mocks.executeQuery).not.toHaveBeenCalled();
   });
   it("honors a driver-declared read-only OceanBase object", async () => {
     await mount({ editable: false, initialEditing: true });
     expect(editor()!.state.facet(EditorState.readOnly)).toBe(true);
-    expect(button("contextMenu.editView")).toBeUndefined();
+    expect(button("contextMenu.editObject")).toBeUndefined();
     expect(mocks.executeQuery).not.toHaveBeenCalled();
   });
   it("does not execute a sequence save after the selected connection changes during SQL generation", async () => {

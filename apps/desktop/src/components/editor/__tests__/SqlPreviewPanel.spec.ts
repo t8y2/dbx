@@ -7,12 +7,13 @@ const mocks = vi.hoisted(() => ({
   highlight: vi.fn<(content: string) => string>(() => ""),
   copyToClipboard: vi.fn<(_text: string) => Promise<void>>(async () => {}),
   toast: vi.fn(),
+  formatterSettings: {} as Record<string, unknown>,
 }));
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: false } }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
-vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { sqlFormatter: {} } }) }));
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { sqlFormatter: mocks.formatterSettings } }) }));
 vi.mock("@/lib/sql/sqlHighlighter", () => ({
   createShikiSqlHighlighter: async () => (content: string) => mocks.highlight(content),
 }));
@@ -47,6 +48,8 @@ vi.mock("@/components/ui/tooltip", async () => {
 });
 
 import SqlPreviewPanel from "@/components/editor/SqlPreviewPanel.vue";
+import { formatSqlText } from "@/lib/sql/sqlFormatter";
+import { DEFAULT_SQL_FORMATTER_SETTINGS } from "@/lib/sql/sqlFormatterConfig";
 
 const SQL = "UPDATE users SET name = 'Ada' WHERE id = 1;";
 
@@ -60,10 +63,10 @@ async function flushUi() {
   }
 }
 
-async function mountPanel(sql = SQL) {
+async function mountPanel(sql = SQL, sqlFormatDialect = "generic") {
   host = document.createElement("div");
   document.body.append(host);
-  app = createApp(SqlPreviewPanel, { sql });
+  app = createApp(SqlPreviewPanel, { sql, sqlFormatDialect });
   app.mount(host);
   await flushUi();
   return host;
@@ -105,6 +108,7 @@ beforeEach(() => {
   mocks.copyToClipboard.mockClear();
   mocks.copyToClipboard.mockImplementation(async () => {});
   mocks.toast.mockClear();
+  mocks.formatterSettings = {};
 });
 
 afterEach(() => {
@@ -170,6 +174,23 @@ describe("SqlPreviewPanel select all", () => {
     dispatchSelectAll(pre);
 
     expect(bubbled).toHaveBeenCalledOnce();
+  });
+});
+
+describe("SqlPreviewPanel formatter fallback", () => {
+  it("shows a fallback toast while retaining the production formatter's base output", async () => {
+    const sql =
+      "create or replace function department_label(p_id number) return varchar2 is\n  v_id number;\n  v_name varchar2(100);\nbegin\n  select deptno,dname into v_id,v_name from dept where deptno=p_id and loc='Boston';\n  v_name := trim(v_name);\n  return v_name;\nexception when no_data_found then return 'unknown';\nend;";
+    const baseSettings = { ...DEFAULT_SQL_FORMATTER_SETTINGS, layoutStyle: "classic" as const };
+    const base = await formatSqlText(sql, "oracle", baseSettings);
+    mocks.formatterSettings = { ...baseSettings, customRulesEnabled: true };
+    const mounted = await mountPanel(sql, "oracle");
+
+    mounted.querySelector<HTMLButtonElement>('[aria-label="toolbar.formatSql"]')!.click();
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("settings.sqlFormatterFallbackNotice", 4000), { timeout: 5000 });
+    await flushUi();
+
+    expect(previewText(mounted).textContent).toBe(base);
   });
 });
 

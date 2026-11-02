@@ -1,4 +1,4 @@
-import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { safeLocalStorageGet, safeLocalStorageKeys, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import type { ColumnWidthDensity } from "@/stores/settingsStore";
 
 export const DATA_GRID_COLUMN_WIDTH_STATE_LIMIT = 128;
@@ -10,6 +10,7 @@ interface DataGridColumnWidthState {
   measurementSignature: string;
   widthsByColumnIndex: Map<number, number>;
   userSizedColumnIndexes: Set<number>;
+  autoFittedColumnIndexes?: Set<number>;
 }
 
 interface StoredDataGridColumnWidthState {
@@ -18,6 +19,7 @@ interface StoredDataGridColumnWidthState {
   measurementSignature: string;
   widths: Array<[number, number]>;
   userSizedColumnIndexes: number[];
+  autoFittedColumnIndexes?: number[];
 }
 
 interface DataGridColumnWidthStateIdentity {
@@ -29,6 +31,7 @@ interface DataGridColumnWidthStateIdentity {
 export interface DataGridColumnWidthStateSnapshot {
   widths: Array<number | undefined>;
   userSizedColumnIndexes: Set<number>;
+  autoFittedColumnIndexes?: Set<number>;
 }
 
 const columnWidthStates = new Map<string, DataGridColumnWidthState>();
@@ -43,7 +46,7 @@ function loadStorageIndex(): string[] {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((key): key is string => typeof key === "string") : [];
+    return Array.isArray(parsed) ? parsed.filter((key): key is string => typeof key === "string" && key.length > 0) : [];
   } catch {
     return [];
   }
@@ -53,9 +56,54 @@ function saveStorageIndex(index: string[]) {
   safeLocalStorageSet(STORAGE_INDEX_KEY, JSON.stringify(index));
 }
 
+function getActualStorageKeys(): Set<string> {
+  const keys = safeLocalStorageKeys();
+  const actualKeys = new Set<string>();
+  for (const key of keys) {
+    if (key.startsWith(STORAGE_PREFIX)) {
+      actualKeys.add(key.slice(STORAGE_PREFIX.length));
+    }
+  }
+  return actualKeys;
+}
+
+function reconcileStorageIndex(activeKey?: string): string[] {
+  const currentIndex = loadStorageIndex();
+  const actualDataKeys = getActualStorageKeys();
+
+  if (currentIndex.length === 0 && actualDataKeys.size === 0) {
+    return activeKey ? [activeKey] : [];
+  }
+
+  const seen = new Set<string>();
+  const validIndex: string[] = [];
+
+  // 1. Keep indexed keys that actually have data in storage, preserving order (prunes orphan index entries)
+  for (const key of currentIndex) {
+    if (actualDataKeys.has(key) && !seen.has(key) && key !== activeKey) {
+      seen.add(key);
+      validIndex.push(key);
+    }
+  }
+
+  // 2. Adopt unindexed stored keys (recovers orphan data entries from concurrent multi-window writes)
+  for (const dataKey of actualDataKeys) {
+    if (!seen.has(dataKey) && dataKey !== activeKey) {
+      seen.add(dataKey);
+      validIndex.unshift(dataKey);
+    }
+  }
+
+  // 3. Place activeKey at the most-recent end
+  if (activeKey) {
+    validIndex.push(activeKey);
+  }
+
+  return validIndex;
+}
+
 function touchStorageKey(cacheKey: string) {
-  const index = loadStorageIndex().filter((key) => key !== cacheKey);
-  index.push(cacheKey);
+  const index = reconcileStorageIndex(cacheKey);
   while (index.length > DATA_GRID_COLUMN_WIDTH_STATE_LIMIT) {
     const oldest = index.shift();
     if (oldest) safeLocalStorageRemove(`${STORAGE_PREFIX}${oldest}`);
@@ -64,14 +112,20 @@ function touchStorageKey(cacheKey: string) {
 }
 
 function removeStorageKey(cacheKey: string) {
+  safeLocalStorageRemove(`${STORAGE_PREFIX}${cacheKey}`);
   const index = loadStorageIndex().filter((key) => key !== cacheKey);
   saveStorageIndex(index);
-  safeLocalStorageRemove(`${STORAGE_PREFIX}${cacheKey}`);
 }
 
 function loadPersistentDataGridColumnWidthState(cacheKey: string): DataGridColumnWidthState | undefined {
   const raw = safeLocalStorageGet(`${STORAGE_PREFIX}${cacheKey}`);
-  if (!raw) return undefined;
+  if (!raw) {
+    const index = loadStorageIndex();
+    if (index.includes(cacheKey)) {
+      saveStorageIndex(index.filter((key) => key !== cacheKey));
+    }
+    return undefined;
+  }
   try {
     const parsed = JSON.parse(raw) as Partial<StoredDataGridColumnWidthState>;
     if (parsed.version !== 1 || typeof parsed.structureSignature !== "string" || typeof parsed.measurementSignature !== "string" || !Array.isArray(parsed.widths) || !Array.isArray(parsed.userSizedColumnIndexes)) {
@@ -88,12 +142,19 @@ function loadPersistentDataGridColumnWidthState(cacheKey: string): DataGridColum
     for (const index of parsed.userSizedColumnIndexes) {
       if (typeof index === "number") userSizedColumnIndexes.add(index);
     }
+    const autoFittedColumnIndexes = new Set<number>();
+    if (Array.isArray(parsed.autoFittedColumnIndexes)) {
+      for (const index of parsed.autoFittedColumnIndexes) {
+        if (typeof index === "number") autoFittedColumnIndexes.add(index);
+      }
+    }
     touchStorageKey(cacheKey);
     return {
       structureSignature: parsed.structureSignature,
       measurementSignature: parsed.measurementSignature,
       widthsByColumnIndex,
       userSizedColumnIndexes,
+      autoFittedColumnIndexes,
     };
   } catch {
     removeStorageKey(cacheKey);
@@ -108,6 +169,7 @@ function savePersistentDataGridColumnWidthState(cacheKey: string, state: DataGri
     measurementSignature: state.measurementSignature,
     widths: Array.from(state.widthsByColumnIndex.entries()),
     userSizedColumnIndexes: Array.from(state.userSizedColumnIndexes),
+    ...(state.autoFittedColumnIndexes && state.autoFittedColumnIndexes.size > 0 ? { autoFittedColumnIndexes: Array.from(state.autoFittedColumnIndexes) } : {}),
   };
   safeLocalStorageSet(`${STORAGE_PREFIX}${cacheKey}`, JSON.stringify(payload));
   touchStorageKey(cacheKey);
@@ -118,6 +180,12 @@ function removePersistentDataGridColumnWidthState(cacheKey: string) {
 }
 
 function clearPersistentDataGridColumnWidthStates() {
+  const allKeys = safeLocalStorageKeys();
+  for (const key of allKeys) {
+    if (key.startsWith(STORAGE_PREFIX)) {
+      safeLocalStorageRemove(key);
+    }
+  }
   const index = loadStorageIndex();
   for (const key of index) {
     safeLocalStorageRemove(`${STORAGE_PREFIX}${key}`);
@@ -144,35 +212,95 @@ export function loadDataGridColumnWidthState(identity: DataGridColumnWidthStateI
     }
   }
   if (!state) return undefined;
-  if (state.structureSignature !== identity.structureSignature || state.measurementSignature !== identity.measurementSignature) {
+  if (state.structureSignature !== identity.structureSignature) {
     columnWidthStates.delete(cacheKey);
     removePersistentDataGridColumnWidthState(cacheKey);
     return undefined;
+  }
+  if (state.measurementSignature !== identity.measurementSignature) {
+    if (state.userSizedColumnIndexes.size === 0) {
+      columnWidthStates.delete(cacheKey);
+      removePersistentDataGridColumnWidthState(cacheKey);
+      return undefined;
+    }
+    const userWidthsByColumnIndex = new Map<number, number>();
+    for (const columnIndex of state.userSizedColumnIndexes) {
+      const width = state.widthsByColumnIndex.get(columnIndex);
+      if (width !== undefined && Number.isFinite(width)) {
+        userWidthsByColumnIndex.set(columnIndex, width);
+      }
+    }
+    if (userWidthsByColumnIndex.size === 0) {
+      columnWidthStates.delete(cacheKey);
+      removePersistentDataGridColumnWidthState(cacheKey);
+      return undefined;
+    }
+    state.measurementSignature = identity.measurementSignature;
+    state.widthsByColumnIndex = userWidthsByColumnIndex;
+    state.autoFittedColumnIndexes?.clear();
+    touchColumnWidthState(cacheKey, state);
+    savePersistentDataGridColumnWidthState(cacheKey, state);
+    return {
+      widths: columnIndexes.map((columnIndex) => (state.userSizedColumnIndexes.has(columnIndex) ? state.widthsByColumnIndex.get(columnIndex) : undefined)),
+      userSizedColumnIndexes: new Set(state.userSizedColumnIndexes),
+      autoFittedColumnIndexes: new Set(),
+    };
   }
   touchColumnWidthState(cacheKey, state);
   return {
     widths: columnIndexes.map((columnIndex) => state.widthsByColumnIndex.get(columnIndex)),
     userSizedColumnIndexes: new Set(state.userSizedColumnIndexes),
+    autoFittedColumnIndexes: new Set(state.autoFittedColumnIndexes ?? []),
   };
 }
 
-export function saveDataGridColumnWidthState(identity: DataGridColumnWidthStateIdentity, columnIndexes: readonly number[], widths: readonly number[], userSizedColumnIndexes: ReadonlySet<number>) {
+export function saveDataGridColumnWidthState(identity: DataGridColumnWidthStateIdentity, columnIndexes: readonly number[], widths: readonly number[], userSizedColumnIndexes: ReadonlySet<number>, autoFittedColumnIndexes?: ReadonlySet<number>) {
   const cacheKey = identity.cacheKey?.trim();
   if (!cacheKey || columnIndexes.length !== widths.length) return;
   const existing = columnWidthStates.get(cacheKey) ?? loadPersistentDataGridColumnWidthState(cacheKey);
-  const widthsByColumnIndex = existing?.structureSignature === identity.structureSignature && existing.measurementSignature === identity.measurementSignature ? new Map(existing.widthsByColumnIndex) : new Map<number, number>();
-  const nextUserSizedColumnIndexes = existing?.structureSignature === identity.structureSignature && existing.measurementSignature === identity.measurementSignature ? new Set(existing.userSizedColumnIndexes) : new Set<number>();
+  const sameStructure = existing?.structureSignature === identity.structureSignature;
+  const sameMeasurement = existing?.measurementSignature === identity.measurementSignature;
+  const widthsByColumnIndex = new Map<number, number>();
+  const nextUserSizedColumnIndexes = new Set<number>();
+  const nextAutoFittedColumnIndexes = new Set<number>();
+
+  if (sameStructure && existing) {
+    for (const [columnIndex, width] of existing.widthsByColumnIndex) {
+      if (sameMeasurement || existing.userSizedColumnIndexes.has(columnIndex)) {
+        widthsByColumnIndex.set(columnIndex, width);
+      }
+    }
+    for (const columnIndex of existing.userSizedColumnIndexes) {
+      nextUserSizedColumnIndexes.add(columnIndex);
+    }
+    if (sameMeasurement && existing.autoFittedColumnIndexes) {
+      for (const columnIndex of existing.autoFittedColumnIndexes) {
+        nextAutoFittedColumnIndexes.add(columnIndex);
+      }
+    }
+  }
+
   columnIndexes.forEach((columnIndex, visibleIndex) => {
     const width = widths[visibleIndex];
     if (Number.isFinite(width)) widthsByColumnIndex.set(columnIndex, width);
-    if (userSizedColumnIndexes.has(columnIndex)) nextUserSizedColumnIndexes.add(columnIndex);
-    else nextUserSizedColumnIndexes.delete(columnIndex);
+    if (userSizedColumnIndexes.has(columnIndex)) {
+      nextUserSizedColumnIndexes.add(columnIndex);
+      nextAutoFittedColumnIndexes.delete(columnIndex);
+    } else {
+      nextUserSizedColumnIndexes.delete(columnIndex);
+    }
+    if (autoFittedColumnIndexes?.has(columnIndex)) {
+      nextAutoFittedColumnIndexes.add(columnIndex);
+    } else if (autoFittedColumnIndexes !== undefined) {
+      nextAutoFittedColumnIndexes.delete(columnIndex);
+    }
   });
   const nextState: DataGridColumnWidthState = {
     structureSignature: identity.structureSignature,
     measurementSignature: identity.measurementSignature,
     widthsByColumnIndex,
     userSizedColumnIndexes: nextUserSizedColumnIndexes,
+    autoFittedColumnIndexes: nextAutoFittedColumnIndexes,
   };
   touchColumnWidthState(cacheKey, nextState);
   if (nextUserSizedColumnIndexes.size > 0) {
@@ -202,4 +330,14 @@ export function clearDataGridColumnWidthStates() {
 
 export function dataGridColumnWidthStateCount(): number {
   return columnWidthStates.size;
+}
+
+export function reconcileDataGridColumnWidthStorageIndex(): string[] {
+  const index = reconcileStorageIndex();
+  while (index.length > DATA_GRID_COLUMN_WIDTH_STATE_LIMIT) {
+    const oldest = index.shift();
+    if (oldest) safeLocalStorageRemove(`${STORAGE_PREFIX}${oldest}`);
+  }
+  saveStorageIndex(index);
+  return index;
 }

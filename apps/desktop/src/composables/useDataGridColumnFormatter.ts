@@ -131,19 +131,30 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
   const formatterForeignKeyReferenceValidation = computed(() => manualReferenceColumnValidation(formatterForeignKeyColumns.value, formatterForeignKeyReferenceKeys.value, formatterForeignKeyRefColumn.value, formatterForeignKeyReferenceMetadataStatus.value, formatterForeignKeyReferenceFilter.value));
   const savedCustomFormatters = computed(() => Object.values(settingsStore.editorSettings.customColumnFormatters).sort((left, right) => left.name.localeCompare(right.name)));
 
+  // Every header, cell format and menu asks for a column's keys several times per render, and building them
+  // is a database x schema x column product of string concatenations. Resolve all columns once per input change.
+  const formatterKeysByColumn = computed<string[][]>(() => {
+    const connectionId = props.connectionId;
+    if (!connectionId) return [];
+    const databaseType = options.resolvedDatabaseType.value;
+    return props.result.columns.map((resultColumn, columnIndex) =>
+      resultColumn
+        ? columnFormatterKeys({
+            connectionId,
+            database: props.database,
+            schema: props.schema,
+            databaseType,
+            resultColumn,
+            sourceColumn: props.sourceColumns?.[columnIndex],
+            displaySource: props.queryDisplaySourceColumns?.[columnIndex],
+            tableMeta: props.tableMeta,
+          })
+        : [],
+    );
+  });
+
   function formatterKeysForColumn(columnIndex: number): string[] {
-    const resultColumn = props.result.columns[columnIndex];
-    if (!props.connectionId || !resultColumn) return [];
-    return columnFormatterKeys({
-      connectionId: props.connectionId,
-      database: props.database,
-      schema: props.schema,
-      databaseType: options.resolvedDatabaseType.value,
-      resultColumn,
-      sourceColumn: props.sourceColumns?.[columnIndex],
-      displaySource: props.queryDisplaySourceColumns?.[columnIndex],
-      tableMeta: props.tableMeta,
-    });
+    return formatterKeysByColumn.value[columnIndex] ?? [];
   }
 
   function formatterKeyForColumn(columnIndex: number): string | null {

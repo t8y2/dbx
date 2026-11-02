@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TreeNode } from "@/types/database";
-import { collapseExpandedTreeNodes, collapseSubtreeDescendants } from "@/lib/sidebar/sidebarTreeCollapse";
+import { collapseSubtreeDescendants } from "@/lib/sidebar/sidebarTreeCollapse";
 import { toggleGroupCollapsed, emptyLayout, createGroup } from "@/lib/sidebar/sidebarLayout";
 import { toggleTableVGroupCollapsed, emptyTableVGroupLayout, createTableVGroup } from "@/lib/table/tableVGroup";
 

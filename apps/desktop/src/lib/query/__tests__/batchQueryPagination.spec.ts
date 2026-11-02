@@ -75,6 +75,13 @@ describe("prepareBatchQueryPagination", () => {
     expect(result!.sql).toContain("LIMIT 21 OFFSET 0");
   });
 
+  it("keeps mysql batches at the requested page size when no probe is offered (#13211)", async () => {
+    const prepare = vi.fn().mockResolvedValue(plan({ pageProbeSql: undefined }));
+    const result = await prepareBatchQueryPagination(options({ databaseType: "mysql" }), prepare);
+    expect(result?.statements).toHaveLength(2);
+    expect(result?.sql).toBe("SELECT id FROM t LIMIT 20 OFFSET 0; SELECT id FROM t LIMIT 20 OFFSET 0");
+  });
+
   it("skips cursor sessions, sqlserver batches, and single statements", async () => {
     const prepare = vi.fn();
     expect(await prepareBatchQueryPagination(options({ useAgentCursor: true }), prepare)).toBeUndefined();

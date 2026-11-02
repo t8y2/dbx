@@ -8,9 +8,12 @@ import {
   importDataTypeForDatabase,
   nextTableImportWizardStep,
   previousTableImportWizardStep,
+  previewValueForGenerator,
   requiredImportTargetColumns,
   resolveTableImportElapsed,
+  suggestDataTypeForGenerator,
   suggestImportTargetDataTypes,
+  TABLE_IMPORT_GENERATOR_OPTIONS,
   tableImportProgressPercent,
   validateImportMappings,
 } from "@/lib/table/tableImport";
@@ -237,5 +240,31 @@ describe("tableImport", () => {
     expect(importDataTypeForDatabase("decimal", "postgres")).toBe("DOUBLE PRECISION");
     expect(importDataTypeForDatabase("decimal", "sqlite")).toBe("REAL");
     expect(importDataTypeForDatabase("decimal", "oracle")).toBe("BINARY_DOUBLE");
+  });
+
+  it("supports auto-generator keys and previews", () => {
+    expect(TABLE_IMPORT_GENERATOR_OPTIONS.map((opt) => opt.value)).toEqual(["uuid", "uuid_simple", "current_timestamp", "current_date", "sequence"]);
+
+    expect(previewValueForGenerator("uuid")).toBe("<UUID>");
+    expect(previewValueForGenerator("uuid_simple")).toBe("<UUID32>");
+    expect(previewValueForGenerator("current_timestamp")).toBe("<NOW>");
+    expect(previewValueForGenerator("current_date")).toBe("<TODAY>");
+    expect(previewValueForGenerator("sequence", 1)).toBe("<SEQ:1>");
+    expect(previewValueForGenerator("sequence", 42)).toBe("<SEQ:42>");
+
+    expect(formatTableImportPreviewCell("original", "uuid", 0)).toBe("<UUID>");
+    expect(formatTableImportPreviewCell(null, "sequence", 2)).toBe("<SEQ:3>");
+  });
+
+  it("suggests data types for generators by database type", () => {
+    expect(suggestDataTypeForGenerator("uuid", "postgres")).toBe("UUID");
+    expect(suggestDataTypeForGenerator("uuid", "sqlserver")).toBe("UNIQUEIDENTIFIER");
+    expect(suggestDataTypeForGenerator("uuid", "mysql")).toBe("VARCHAR(36)");
+    expect(suggestDataTypeForGenerator("uuid_simple", "mysql")).toBe("VARCHAR(32)");
+    expect(suggestDataTypeForGenerator("current_timestamp", "mysql")).toBe("DATETIME");
+    expect(suggestDataTypeForGenerator("current_timestamp", "postgres")).toBe("TIMESTAMP");
+    expect(suggestDataTypeForGenerator("current_date", "postgres")).toBe("DATE");
+    expect(suggestDataTypeForGenerator("sequence", "mysql")).toBe("BIGINT");
+    expect(suggestDataTypeForGenerator("sequence", "sqlite")).toBe("INTEGER");
   });
 });

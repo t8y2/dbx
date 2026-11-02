@@ -313,6 +313,33 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(value.value).toBe("namespace");
   });
 
+  it("prints the Tab keycap on the suggestion Tab would accept", async () => {
+    const { value, input } = mountEditor("where", "", { columns: ["status"] });
+    input.focus();
+    input.value = "status ";
+    input.setSelectionRange(7, 7);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(12));
+    const options = () => Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'));
+    // Nothing is highlighted yet, but Tab still accepts the first row.
+    expect(options()[0].querySelector("kbd")?.getAttribute("data-key")).toBe("Tab");
+    expect(options()[1].querySelector("kbd")).toBeNull();
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(options()[0].querySelector("kbd")?.getAttribute("data-key")).toBe("Tab");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(options()[0].querySelector("kbd")).toBeNull();
+    expect(options()[1].querySelector("kbd")?.getAttribute("data-key")).toBe("Tab");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(value.value).toBe("status <> ");
+  });
+
   it("selects the first WHERE field suggestion with Enter", async () => {
     const { value, input } = mountEditor("where", "", { columns: ["customer_id", "customer_name"] });
     input.focus();

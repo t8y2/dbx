@@ -84,7 +84,7 @@ fn catalog_table_ref(catalog: &str, database: &str, table: &str) -> String {
 /// `default_catalog` in StarRocks (both with `Type=internal`); detection is
 /// type-based (see `CatalogInfo::is_internal`), not name-based.
 pub async fn list_catalogs(pool: &MySqlPool) -> Result<Vec<crate::db::CatalogInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let result = conn.query_iter("SHOW CATALOGS").await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     let catalogs: Vec<crate::db::CatalogInfo> = rows
@@ -124,7 +124,7 @@ fn normalize_catalogs(mut catalogs: Vec<crate::db::CatalogInfo>) -> Vec<crate::d
 
 /// `SHOW DATABASES FROM <catalog>` → databases in the given catalog.
 pub async fn list_databases_show_from(pool: &MySqlPool, catalog: &str) -> Result<Vec<DatabaseInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let sql = format!("SHOW DATABASES FROM {}", quote_identifier(catalog));
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
@@ -137,7 +137,7 @@ pub async fn list_databases_show_from(pool: &MySqlPool, catalog: &str) -> Result
 /// not fetched (the caller only needs names + types for browsing).
 pub async fn list_tables_show_from(pool: &MySqlPool, catalog: &str, database: &str) -> Result<Vec<TableInfo>, String> {
     let sql = format!("SHOW TABLES FROM {}", catalog_database_ref(catalog, database));
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     let mut tables: Vec<TableInfo> = rows
@@ -282,23 +282,37 @@ fn merge_index_infos(target: &mut Vec<IndexInfo>, parsed: Vec<IndexInfo>) {
 
 fn indexes_from_create_table_ddl(ddl: &str) -> Vec<IndexInfo> {
     let mut indexes = Vec::new();
-    for raw_line in ddl.lines() {
-        let line = trim_ddl_definition_line(raw_line);
+    let lines: Vec<&str> = ddl.lines().collect();
+    let mut idx = 0;
+    while idx < lines.len() {
+        let raw_line = lines[idx];
+        let line = raw_line.trim();
+        idx += 1;
         if line.is_empty() {
             continue;
         }
         let upper = line.to_ascii_uppercase();
-        if upper.starts_with("PRIMARY KEY") {
-            if let Some(index) = table_key_index("PRIMARY", line, true, true, "PRIMARY KEY") {
-                indexes.push(index);
+        if upper.starts_with("PRIMARY KEY") || upper.starts_with("UNIQUE KEY") || upper.starts_with("INDEX ") {
+            let mut combined = line.to_string();
+            while first_parenthesized_content(&combined).is_none() && idx < lines.len() {
+                combined.push(' ');
+                combined.push_str(lines[idx].trim());
+                idx += 1;
             }
-        } else if upper.starts_with("UNIQUE KEY") {
-            if let Some(index) = table_key_index("UNIQUE KEY", line, true, false, "UNIQUE KEY") {
-                indexes.push(index);
-            }
-        } else if upper.starts_with("INDEX ") {
-            if let Some(index) = secondary_index(line) {
-                indexes.push(index);
+            let trimmed = trim_ddl_definition_line(&combined);
+            let upper_combined = trimmed.to_ascii_uppercase();
+            if upper_combined.starts_with("PRIMARY KEY") {
+                if let Some(index) = table_key_index("PRIMARY", trimmed, true, true, "PRIMARY KEY") {
+                    indexes.push(index);
+                }
+            } else if upper_combined.starts_with("UNIQUE KEY") {
+                if let Some(index) = table_key_index("UNIQUE KEY", trimmed, true, false, "UNIQUE KEY") {
+                    indexes.push(index);
+                }
+            } else if upper_combined.starts_with("INDEX ") {
+                if let Some(index) = secondary_index(trimmed) {
+                    indexes.push(index);
+                }
             }
         }
     }
@@ -322,6 +336,7 @@ fn table_key_index(name: &str, line: &str, is_unique: bool, is_primary: bool, in
         return None;
     }
     Some(IndexInfo {
+        owner: None,
         key_directions: Vec::new(),
         visibility: None,
         key_metadata_complete: false,
@@ -348,6 +363,7 @@ fn secondary_index(line: &str) -> Option<IndexInfo> {
         return None;
     }
     Some(IndexInfo {
+        owner: None,
         key_directions: Vec::new(),
         visibility: None,
         key_metadata_complete: false,
@@ -570,6 +586,30 @@ UNIQUE KEY(`tenant_id`, `name``part`)
         assert_eq!(indexes[0].comment.as_deref(), Some("name's index"));
         assert_eq!(indexes[1].columns, vec!["tenant_id", "name`part"]);
         assert!(indexes[1].is_unique);
+    }
+
+    #[test]
+    fn doris_create_table_ddl_handles_multiline_unique_key() {
+        let ddl = r#"
+CREATE TABLE `test_multi` (
+  `id` bigint NULL,
+  `data_type` varchar(255) NULL
+) ENGINE=OLAP
+UNIQUE KEY(
+  `id`,
+  `data_type`
+)
+DISTRIBUTED BY HASH(`id`) BUCKETS 3
+"#;
+
+        let indexes = indexes_from_create_table_ddl(ddl);
+
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].name, "UNIQUE KEY");
+        assert_eq!(indexes[0].columns, vec!["id", "data_type"]);
+        assert!(indexes[0].is_unique);
+        assert!(!indexes[0].is_primary);
+        assert_eq!(indexes[0].index_type.as_deref(), Some("UNIQUE KEY"));
     }
 
     fn catalog_info(name: &str, catalog_type: &str, is_current: bool) -> crate::db::CatalogInfo {

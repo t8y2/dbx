@@ -1,6 +1,16 @@
 import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
 import { buildColumnValueFilterCondition, buildColumnValuesFilterCondition, parseFilterValue, removeColumnValueFilterCondition, replaceColumnValueFilterCondition, appendColumnValueFilterCondition } from "@/lib/dataGrid/dataGridColumnFilter";
-import { buildDataGridLocalFilterOptions, sortDataGridLocalFilterOptions, type DataGridLocalFilterSort, dataGridLocalFilterKey, dataGridLocalFilterLabel, rowMatchesDataGridLocalColumnFilters, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
+import {
+  buildDataGridLocalFilterOptions,
+  filterDataGridLocalFilterOptions,
+  parseDataGridLocalFilterCountQuery,
+  sortDataGridLocalFilterOptions,
+  type DataGridLocalFilterSort,
+  dataGridLocalFilterKey,
+  dataGridLocalFilterLabel,
+  rowMatchesDataGridLocalColumnFilters,
+  type DataGridLocalFilterOption,
+} from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import type { DataGridCachedServerColumnFilter } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT, useDataGridDistinctValueLoader } from "@/composables/useDataGridDistinctValueLoader";
@@ -48,6 +58,14 @@ export interface UseDataGridColumnFiltersOptions {
   getConnectionConfig: () => Pick<ConnectionConfig, "driver_profile" | "query_timeout_secs" | "query_timeout_inherit"> | undefined;
   getIdentifierQuote: () => string | undefined;
   getGlobalQueryTimeoutSecs: () => number | undefined;
+  /**
+   * #13237: in-memory value filters for grids that cannot re-query (query
+   * results). They share this local-filter surface so the funnel and the
+   * chip/clear path also cover them.
+   */
+  getClientColumnFilterActive?: (columnIndex: number) => boolean;
+  getClientFilterCount?: () => number;
+  clearClientFilters?: (columnIndex?: number) => void;
   getDistinctWhereInput?: (columnIndex: number) => string | undefined;
   getNewRows: () => readonly (readonly CellValue[])[];
   getRowData: (row: CellValue[], sourceIndex: number) => readonly CellValue[];
@@ -130,8 +148,8 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
     return [...filteredOptions, ...selectedOptions.map((option) => ({ ...option, count: 0 }))].sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: "base" }));
   }
 
-  const localFilterActive = (columnIndex: number) => !!state.localColumnFilters.value[columnIndex]?.size || !!state.serverColumnFilters.value[columnIndex];
-  const localFilterCount = computed(() => Object.values(state.localColumnFilters.value).filter((values) => values.size).length);
+  const localFilterActive = (columnIndex: number) => !!state.localColumnFilters.value[columnIndex]?.size || !!state.serverColumnFilters.value[columnIndex] || !!options.getClientColumnFilterActive?.(columnIndex);
+  const localFilterCount = computed(() => Object.values(state.localColumnFilters.value).filter((values) => values.size).length + (options.getClientFilterCount?.() ?? 0));
   const serverColumnFilterCount = computed(() => Object.keys(state.serverColumnFilters.value).length);
   const hasLocalColumnFilters = computed(() => localFilterCount.value > 0);
   const hasServerColumnFilters = computed(() => serverColumnFilterCount.value > 0);
@@ -169,8 +187,7 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
   });
   const localFilterOptions = computed(() => {
     if (state.localFilterDraft.value?.mode === "server") return serverFilterOptions.value;
-    const query = state.localFilterSearch.value.trim().toLowerCase();
-    const matchingOptions = localFilterAllOptions.value.filter((option) => !query || option.label.toLowerCase().includes(query));
+    const matchingOptions = filterDataGridLocalFilterOptions(localFilterAllOptions.value, state.localFilterSearch.value);
     // Sort before limiting so frequent values outside the default first 500 remain discoverable.
     // buildDataGridLocalFilterOptions already returns value-ascending options, so the default
     // sort state skips the re-sort instead of re-running it on every search keystroke.
@@ -191,6 +208,7 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
   const canApplyTypedLocalFilterValue = computed(() => {
     const typed = localFilterTypedValue.value;
     if (!state.localFilterDraft.value || !typed || !options.canUseWhereSearch.value) return false;
+    if (parseDataGridLocalFilterCountQuery(typed)) return false;
     const normalized = typed.toLowerCase();
     return !localFilterAllOptions.value.some((option) => option.label.toLowerCase() === normalized);
   });
@@ -405,6 +423,7 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
       }
     }
     closeLocalFilter();
+    options.clearClientFilters?.(columnIndex);
     options.resetGridVerticalScroll();
     if (removedServerFilter && applyServerWhereFilter && options.canUseWhereSearch.value) void options.applyWhereFilter();
   }

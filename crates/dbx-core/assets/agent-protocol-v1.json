@@ -2,7 +2,7 @@
   "protocolVersion": 1,
   "handshakeMethod": "handshake",
   "handshakeResponseFields": ["protocolVersion", "agentProtocolVersion", "capabilities"],
-  "allCapabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "kv", "kv_ttl", "kv_cas", "kv_list_values", "kv_status", "kv_history", "etcd_compaction", "etcd_defrag", "etcd_watch", "etcd_lease", "etcd_auth", "mongo_drop_database", "mongo_clone_collection", "mongo_run_command", "mongo_insert_documents", "mongo_replace_document", "mongo_bulk_write", "mongo_rename_collection", "mongo_find_cursor"],
+  "allCapabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "kv", "kv_ttl", "kv_cas", "kv_list_values", "kv_status", "kv_history", "etcd_compaction", "etcd_defrag", "etcd_watch", "etcd_lease", "etcd_auth", "mongo_drop_database", "mongo_clone_collection", "mongo_run_command", "mongo_insert_documents", "mongo_replace_document", "mongo_bulk_write", "mongo_rename_collection", "mongo_find_cursor", "exact_metadata_identity_v1"],
   "capabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl"],
   "defaultSqlCapabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl"],
   "commonMethods": [

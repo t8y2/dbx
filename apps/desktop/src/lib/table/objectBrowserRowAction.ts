@@ -1,8 +1,9 @@
 import type { DatabaseType } from "@/types/database";
-import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
+import { customTypeCapabilities, supportsSchemaIndexManagement, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
+import { schemaIndexIdentity, schemaIndexIsSameOwner } from "@/lib/table/schemaIndexNavigation";
 import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
 
-export type ObjectBrowserRowAction = "table-info" | "type-info" | "open-table" | "open-source" | "open-source-tab" | "none";
+export type ObjectBrowserRowAction = "table-info" | "index-info" | "index-editor" | "type-info" | "open-table" | "open-source" | "open-source-tab" | "none";
 
 /**
  * Determine the action for a single click on an object browser row.
@@ -12,11 +13,12 @@ export type ObjectBrowserRowAction = "table-info" | "type-info" | "open-table" |
  * - otherwise → none
  *
  * TYPE/TYPE_BODY only open source for connections with a real type source
- * implementation (Xugu); other databases list types without a DDL getter.
+ * implementation (Oracle family or Xugu); other databases list types without a DDL getter.
  */
 export function singleClickRowAction(row: ObjectBrowserRow | null | undefined, dbType?: DatabaseType): ObjectBrowserRowAction {
   if (!row) return "none";
   if (dbType === "mongodb") return mongoObjectBrowserRowAction(row);
+  if (row.type === "INDEX") return supportsSchemaIndexManagement(dbType) && schemaIndexIdentity(row) ? "index-info" : "none";
   if (row.type === "TABLE") return "table-info";
   if (row.type === "EVENT") return "none";
   if (row.type === "TYPE" && customTypeCapabilities(dbType).details) return "type-info";
@@ -35,6 +37,11 @@ export function singleClickRowAction(row: ObjectBrowserRow | null | undefined, d
 export function doubleClickRowAction(row: ObjectBrowserRow | null | undefined, dbType?: DatabaseType): ObjectBrowserRowAction {
   if (!row) return "none";
   if (dbType === "mongodb") return mongoObjectBrowserRowAction(row);
+  if (row.type === "INDEX") {
+    if (!supportsSchemaIndexManagement(dbType)) return "none";
+    const target = schemaIndexIdentity(row);
+    return schemaIndexIsSameOwner(target) ? "index-editor" : target ? "index-info" : "none";
+  }
   if (row.type === "TABLE" || row.type === "VIEW" || row.type === "MATERIALIZED_VIEW") return "open-table";
   if (row.type === "EVENT") return "open-source";
   if (row.type === "TYPE" && customTypeCapabilities(dbType).details) return "type-info";
@@ -95,8 +102,8 @@ function mongoObjectBrowserRowAction(row: ObjectBrowserRow): ObjectBrowserRowAct
 }
 
 function canOpenSource(row: ObjectBrowserRow, dbType?: DatabaseType): boolean {
-  // Verified PG-family TYPE rows open the read-only details panel instead;
-  // Xugu keeps its source editor entry through supportsTypeObjectSource below.
+  // Verified custom types open the read-only details panel instead; Oracle
+  // family types and Xugu also use the source entry below.
   if (row.type === "TYPE" && customTypeCapabilities(dbType).details) return false;
   if ((row.type === "TYPE" || row.type === "TYPE_BODY") && !supportsTypeObjectSource(dbType)) return false;
   return (

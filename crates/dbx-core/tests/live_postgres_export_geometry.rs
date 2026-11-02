@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! PostGIS database exports must survive the actual SQL-file restore path.
 //! Requires DBX_LIVE_POSTGIS_HOST/PORT/USER/PASSWORD. Uses uniquely named databases
 //! and retains them and evidence files for inspection; run only on a disposable server.

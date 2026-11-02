@@ -1,6 +1,16 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { activeTabSidebarTarget, expandSidebarLocatePath, findNodePathForTarget, findSidebarConnectionNode, findSidebarNodeForActiveTab, findSidebarNodeForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection, ActiveTabSidebarRevealTracker } from "../../apps/desktop/src/lib/sidebar/sidebarActiveTabTarget.ts";
+import {
+  activeTabSidebarTarget,
+  expandSidebarLocatePath,
+  findNodePathForTarget,
+  findSidebarConnectionNode,
+  findSidebarNodeForActiveTab,
+  findSidebarNodeForTarget,
+  scrollTopForSidebarNode,
+  shouldScrollActiveSidebarSelection,
+  ActiveTabSidebarRevealTracker,
+} from "../../apps/desktop/src/lib/sidebar/sidebarActiveTabTarget.ts";
 import { buildTreeNodesFromLayout, expandGroups } from "../../apps/desktop/src/lib/sidebar/sidebarLayout.ts";
 import { flattenTree } from "../../apps/desktop/src/composables/useFlatTree.ts";
 import type { FlatTreeNode } from "../../apps/desktop/src/composables/useFlatTree.ts";
@@ -615,12 +625,13 @@ test("locate under collapsed connection groups resolves the path, expands the gr
 
   const collapsedTree = buildTreeNodesFromLayout(layout, connections, new Set());
   const nodePath = findNodePathForTarget(target, collapsedTree);
-  assert.deepEqual(nodePath?.map((node) => node.id), ["group-outer", "group-inner", "conn-grouped"]);
+  assert.deepEqual(
+    nodePath?.map((node) => node.id),
+    ["group-outer", "group-inner", "conn-grouped"],
+  );
   assert.equal(findSidebarNodeForTarget(target, flattenTree(collapsedTree)), null);
 
-  const collapsedGroupIds = nodePath!
-    .filter((node) => node.type === "connection-group" && !node.isExpanded)
-    .map((node) => node.id);
+  const collapsedGroupIds = nodePath!.filter((node) => node.type === "connection-group" && !node.isExpanded).map((node) => node.id);
   assert.deepEqual(collapsedGroupIds, ["group-outer", "group-inner"]);
 
   const expandedLayout = expandGroups(layout, collapsedGroupIds);
@@ -757,7 +768,7 @@ test("ActiveTabSidebarRevealTracker settles after the reveal lands", () => {
   assert.deepEqual(retry, { run: true, scroll: true });
 
   // Once found, flatNodes-only changes (user collapse, unrelated loads) must not re-run it.
-  tracker.onSettled(true);
+  tracker.onSettled(true, "tab-1");
   const afterSettled = tracker.onWatchTrigger({ activeTabId: "tab-1", previousActiveTabId: "tab-1", autoSelectEnabled: true, previousAutoSelectEnabled: true });
   assert.deepEqual(afterSettled, { run: false, scroll: false });
 });
@@ -765,7 +776,7 @@ test("ActiveTabSidebarRevealTracker settles after the reveal lands", () => {
 test("ActiveTabSidebarRevealTracker keeps retrying while the target is missing", () => {
   const tracker = new ActiveTabSidebarRevealTracker();
   tracker.onWatchTrigger({ activeTabId: "tab-1", previousActiveTabId: null, autoSelectEnabled: true, previousAutoSelectEnabled: undefined });
-  tracker.onSettled(false); // async children not loaded yet — still pending
+  tracker.onSettled(false, "tab-1"); // async children not loaded yet — still pending
 
   const retry = tracker.onWatchTrigger({ activeTabId: "tab-1", previousActiveTabId: "tab-1", autoSelectEnabled: true, previousAutoSelectEnabled: true });
   assert.deepEqual(retry, { run: true, scroll: true });
@@ -776,7 +787,17 @@ test("ActiveTabSidebarRevealTracker keeps the repo's scroll semantics for settin
   // shouldScrollActiveSidebarSelection scrolls when the setting is toggled ON (previous === false).
   const toggle = tracker.onWatchTrigger({ activeTabId: "tab-1", previousActiveTabId: "tab-1", autoSelectEnabled: true, previousAutoSelectEnabled: false });
   assert.deepEqual(toggle, { run: true, scroll: true });
-  tracker.onSettled(true);
+  tracker.onSettled(true, "tab-1");
   const settled = tracker.onWatchTrigger({ activeTabId: "tab-1", previousActiveTabId: "tab-1", autoSelectEnabled: true, previousAutoSelectEnabled: true });
   assert.deepEqual(settled, { run: false, scroll: false });
+});
+
+test("an older tab reveal cannot settle the new tab's pending reveal", () => {
+  const tracker = new ActiveTabSidebarRevealTracker();
+  tracker.onWatchTrigger({ activeTabId: "tab-a", previousActiveTabId: null, autoSelectEnabled: true, previousAutoSelectEnabled: true });
+  tracker.onWatchTrigger({ activeTabId: "tab-b", previousActiveTabId: "tab-a", autoSelectEnabled: true, previousAutoSelectEnabled: true });
+  tracker.onSettled(true, "tab-a");
+  assert.deepEqual(tracker.onWatchTrigger({ activeTabId: "tab-b", previousActiveTabId: "tab-b", autoSelectEnabled: true, previousAutoSelectEnabled: true }), { run: true, scroll: true });
+  tracker.onSettled(true, "tab-b");
+  assert.deepEqual(tracker.onWatchTrigger({ activeTabId: "tab-b", previousActiveTabId: "tab-b", autoSelectEnabled: true, previousAutoSelectEnabled: true }), { run: false, scroll: false });
 });

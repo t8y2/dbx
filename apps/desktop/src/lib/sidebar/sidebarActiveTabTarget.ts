@@ -428,19 +428,21 @@ export function shouldScrollActiveSidebarSelection(options: { activeTabId: strin
 export class ActiveTabSidebarRevealTracker {
   private pending = false;
   private pendingScroll = false;
+  private pendingTabId: string | null | undefined;
 
   /** Feed the watcher's previous/current values; returns whether the reveal should run now and with which scroll intent. */
   onWatchTrigger(options: { activeTabId: string | null | undefined; previousActiveTabId: string | null | undefined; autoSelectEnabled: boolean; previousAutoSelectEnabled: boolean | undefined }): { run: boolean; scroll: boolean } {
     if (options.activeTabId !== options.previousActiveTabId || options.autoSelectEnabled !== options.previousAutoSelectEnabled) {
       this.pending = true;
+      this.pendingTabId = options.activeTabId;
       this.pendingScroll = shouldScrollActiveSidebarSelection(options);
     }
     return { run: this.pending, scroll: this.pending ? this.pendingScroll : false };
   }
 
   /** Settles the pending reveal once it landed (found); a miss stays pending so the next tree load retries. */
-  onSettled(found: boolean): void {
-    if (found) this.pending = false;
+  onSettled(found: boolean, tabId: string | null | undefined): void {
+    if (found && tabId === this.pendingTabId) this.pending = false;
   }
 }
 

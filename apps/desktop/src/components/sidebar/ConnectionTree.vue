@@ -2576,6 +2576,7 @@ async function selectActiveTabSidebarNode(options: { scroll: boolean }): Promise
 
   await nextTick();
 
+  if (activeTab.value?.id !== tab.id || !settingsStore.editorSettings.autoSelectActiveSidebarNode) return false;
   const index = flatTreeIndex.value.flatNodeIndexById.get(match.id) ?? -1;
   const scroller = currentTreeScroller();
   if (!scroller || index < 0) return true;
@@ -2610,7 +2611,7 @@ watch(
       previousAutoSelectEnabled,
     });
     if (!trigger.run) return;
-    void selectActiveTabSidebarNode({ scroll: trigger.scroll }).then((found) => activeTabRevealTracker.onSettled(found));
+    void selectActiveTabSidebarNode({ scroll: trigger.scroll }).then((found) => activeTabRevealTracker.onSettled(found, activeTabId));
   },
   { flush: "post" },
 );

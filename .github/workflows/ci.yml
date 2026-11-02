@@ -316,7 +316,7 @@ jobs:
       # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
       # 8 MiB main-thread stack must be repeated here: without it the Windows PE
       # keeps the 1 MiB linker default and deep connect/serde call stacks abort
-      # with 0xC00000FD ("DBX 已停止工作"). Guarded by assert-win7-pe-compat.ps1.
+      # with 0xC00000FD ("DBX 已停止工作"). Verified below for x64 and ARM64.
       RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
       RUSTC_WRAPPER: sccache
       # Prefer S3 when available; GitHub's 10 GB cache quota evicts the shared
@@ -328,6 +328,12 @@ jobs:
 
       - name: Setup Rust for standard Windows
         uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - name: Windows PE stack reserve audit tests
+        shell: pwsh
+        run: ./.github/scripts/assert-windows-stack-reserve.test.ps1
 
       - name: MCP replacement temporary file cleanup tests
         shell: pwsh
@@ -371,6 +377,10 @@ jobs:
             # "Show sccache stats" reflects the real counters.
             echo "SCCACHE_IDLE_TIMEOUT=0"
           } >> "$GITHUB_ENV"
+
+      - name: Verify x64 and ARM64 executable stack reserves
+        shell: pwsh
+        run: ./.github/scripts/test-windows-stack-reserve.ps1
 
       - name: Check standard Windows dependency path
         run: cargo check --locked --package dbx --no-default-features --target x86_64-pc-windows-msvc

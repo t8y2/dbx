@@ -2,7 +2,7 @@
 import { createApp, defineComponent, h, reactive, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
-import { effectiveUpdateInfo, isNewerRemoteVersion, isPreparedUpdateObsolete, resolveReleaseTagUrl, useAppUpdater } from "@/composables/useAppUpdater";
+import { effectiveUpdateInfo, isNewerRemoteVersion, isPreparedUpdateObsolete, resolveReleaseTagUrl, resolveUpdateReleaseUrl, useAppUpdater } from "@/composables/useAppUpdater";
 const mocks = vi.hoisted(() => ({
   checkForUpdates: vi.fn(),
   downloadUpdate: vi.fn(),
@@ -20,7 +20,7 @@ vi.mock("@/lib/backend/api", () => mocks);
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
-const settings = reactive({ updateDownloadSource: "official", ignoredUpdateVersion: "", updateNotificationsEnabled: true, autoDownloadUpdates: true, autoUpdateApp: true, toolbarItems: { checkUpdates: true } });
+const settings = reactive({ updateDownloadSource: "official", updateChannel: "stable", ignoredUpdateVersion: "", updateNotificationsEnabled: true, autoDownloadUpdates: true, autoUpdateApp: true, toolbarItems: { checkUpdates: true } });
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: settings, updateEditorSettingsAndPersist: mocks.persist }) }));
 const info = { current_version: "1.0.0", latest_version: "1.1.0", update_available: true, portable_mode: false, manual_update_only: false, release_name: "v1.1.0", release_url: "https://example.com", release_notes: "Changes" };
 const cache = { cache_id: "cached", version: "1.1.0", portable_mode: false, release_url: "https://example.com", release_notes: "Changes", downloaded_at: 1 };
@@ -56,6 +56,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   vi.stubEnv("VITE_DBX_DISABLE_UPDATER", "");
   settings.updateDownloadSource = "official";
+  settings.updateChannel = "stable";
   settings.ignoredUpdateVersion = "";
   settings.updateNotificationsEnabled = true;
   settings.autoDownloadUpdates = true;
@@ -74,6 +75,15 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 describe("older version release pages", () => {
+  it("opens the GitHub beta release before it has been mirrored to CNB", () => {
+    const releaseUrl = "https://github.com/t8y2/dbx/releases/tag/v1.1.0-beta.20261028.1";
+    expect(resolveUpdateReleaseUrl({ ...info, channel: "beta", release_tag: "v1.1.0-beta.20261028.1", release_url: releaseUrl }, "cnb", "fallback")).toBe(releaseUrl);
+  });
+
+  it("uses the original beta tag on CNB after promotion to stable", () => {
+    expect(resolveUpdateReleaseUrl({ ...info, channel: "stable", release_tag: "v1.1.0-beta.20261028.1" }, "cnb", "fallback")).toBe("https://cnb.cool/dbxio.com/dbx/-/releases/tag/v1.1.0-beta.20261028.1");
+  });
+
   it("maps a historical version to the matching GitHub release page", () => {
     expect(resolveReleaseTagUrl("0.5.59", "official")).toBe("https://github.com/t8y2/dbx/releases/tag/v0.5.59");
     expect(resolveReleaseTagUrl("v0.5.59", "official")).toBe("https://github.com/t8y2/dbx/releases/tag/v0.5.59");
@@ -81,6 +91,15 @@ describe("older version release pages", () => {
 
   it("uses the CNB release page when the CNB download source is selected", () => {
     expect(resolveReleaseTagUrl("v0.5.59", "cnb")).toBe("https://cnb.cool/dbxio.com/dbx/-/releases/tag/v0.5.59");
+  });
+
+  it("passes the beta release tag through to the download cache", async () => {
+    settings.updateChannel = "beta";
+    const betaInfo = { ...info, channel: "beta" as const, release_tag: "v1.1.0-beta.20261028.1" };
+    mocks.checkForUpdates.mockResolvedValue(betaInfo);
+    const updater = mount();
+    await updater.checkUpdates({ silent: true });
+    expect(mocks.downloadUpdate).toHaveBeenCalledWith("official", "1.1.0", expect.any(String), "Changes", "beta", "v1.1.0-beta.20261028.1");
   });
 
   it("treats only strictly older releases as rollback candidates", () => {
@@ -97,10 +116,28 @@ describe("prepared update reconciliation (#13562)", () => {
     expect(isPreparedUpdateObsolete("0.5.61", "0.5.60")).toBe(false);
     expect(isPreparedUpdateObsolete("", "0.5.60")).toBe(false);
     expect(isPreparedUpdateObsolete("0.5.61", "")).toBe(false);
+    expect(isPreparedUpdateObsolete("0.6.60-beta.20261029.1", "0.6.60", "beta")).toBe(false);
+    expect(isPreparedUpdateObsolete("0.6.60-beta.20261029.1", "0.6.60", "stable")).toBe(true);
+    expect(isPreparedUpdateObsolete("0.6.60", "0.6.60-beta.20261029.1", "stable")).toBe(true);
+    expect(isPreparedUpdateObsolete("0.6.61", "0.6.60-beta.20261029.1", "stable")).toBe(false);
   });
 });
 
 describe("silent update lifecycle", () => {
+  it("discards the promoted stable cache when its beta binary is already running", async () => {
+    mocks.getAppVersion.mockResolvedValue("1.1.0-beta.20261029.1");
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    mocks.checkForUpdates.mockResolvedValue({ ...info, current_version: "1.1.0-beta.20261029.1", channel: "stable", update_available: false });
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+
+    expect(mocks.discardDownloadedUpdate).toHaveBeenCalledWith(cache.cache_id);
+    expect(updater.updateDownloaded.value).toBe(false);
+    expect(updater.hasUpdateAvailable.value).toBe(false);
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+  });
+
   it("does not check or download updates when disabled for an isolated dev client", async () => {
     vi.stubEnv("VITE_DBX_DISABLE_UPDATER", "1");
     const updater = mount();
@@ -149,7 +186,7 @@ describe("silent update lifecycle", () => {
     expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
     mocks.downloadUpdate.mockResolvedValue({ ...cache, version: "1.2.0" });
     await updater.downloadUpdateInBackground();
-    expect(mocks.downloadUpdate).toHaveBeenCalledWith("official", "1.2.0", expect.any(String), "Changes");
+    expect(mocks.downloadUpdate).toHaveBeenCalledWith("official", "1.2.0", expect.any(String), "Changes", "stable");
     expect(updater.updateDownloaded.value).toBe(true);
   });
   it("preserves a prepared package with automatic downloads disabled", async () => {
@@ -209,7 +246,7 @@ describe("silent update lifecycle", () => {
   it("automatically downloads without surfacing or installing, even while idle", async () => {
     const updater = mount();
     await updater.checkUpdates({ silent: true });
-    expect(mocks.downloadUpdate).toHaveBeenCalledWith("official", "1.1.0", expect.any(String), "Changes");
+    expect(mocks.downloadUpdate).toHaveBeenCalledWith("official", "1.1.0", expect.any(String), "Changes", "stable");
     expect(updater.phase.value).toBe("ready");
     expect(updater.hasUpdateAvailable.value).toBe(true);
     expect(updater.showUpdateDialog.value).toBe(false);
@@ -346,6 +383,26 @@ describe("silent update lifecycle", () => {
     expect(mocks.downloadUpdate).toHaveBeenCalledOnce();
     expect(mocks.checkForUpdates).toHaveBeenCalledOnce();
   });
+  it("rechecks immediately when the persisted update channel changes", async () => {
+    mocks.checkForUpdates.mockResolvedValue({ ...info, update_available: false });
+    const updater = mount();
+    await updater.initialize();
+    mocks.checkForUpdates.mockClear();
+
+    settings.updateChannel = "beta";
+    await vi.waitFor(() => expect(mocks.checkForUpdates).toHaveBeenCalled());
+
+    expect(mocks.checkForUpdates).toHaveBeenLastCalledWith("en", "official", "beta");
+  });
+  it("discards a cached update from another channel before checking", async () => {
+    mocks.checkForUpdates.mockResolvedValue({ ...info, update_available: false });
+    mocks.getDownloadedUpdate.mockResolvedValue({ ...cache, channel: "beta" });
+    const updater = mount();
+    await updater.initialize();
+
+    expect(mocks.discardDownloadedUpdate).toHaveBeenCalledWith(cache.cache_id);
+    expect(updater.updateDownloaded.value).toBe(false);
+  });
   it("reconciles a download that commits just before cancellation without installing it", async () => {
     const pending = deferred<typeof cache>();
     mocks.downloadUpdate.mockReturnValue(pending.promise);
@@ -447,7 +504,7 @@ describe("silent update lifecycle", () => {
     await updater.initialize();
     await vi.waitFor(() => expect(mocks.downloadUpdate).toHaveBeenCalled());
     expect(mocks.discardDownloadedUpdate).toHaveBeenCalledWith("cached");
-    expect(mocks.downloadUpdate).toHaveBeenCalledWith("official", "1.2.0", expect.any(String), "Changes");
+    expect(mocks.downloadUpdate).toHaveBeenCalledWith("official", "1.2.0", expect.any(String), "Changes", "stable");
     expect(updater.updateDownloaded.value).toBe(true);
     expect(updater.updateInfo.value?.latest_version).toBe("1.2.0");
     expect(updater.phase.value).toBe("ready");

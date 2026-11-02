@@ -68,7 +68,7 @@ const backupSettingsCategoryLabelKeys: Record<BackupSettingsCategoryId, string> 
   shortcuts: "settings.shortcutsTab",
   snippets: "settings.snippetsTab",
 };
-const nonSyncableEditorSettingIds = new Set(["updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins", "updateDownloadSource", "ignoredUpdateVersion"]);
+const nonSyncableEditorSettingIds = new Set(["updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins", "updateDownloadSource", "updateChannel", "ignoredUpdateVersion"]);
 const desktopSettingCategories: Record<string, BackupSettingsCategoryId> = {
   show_tray_icon: "appearance",
   linux_floating_frame_enabled: "appearance",

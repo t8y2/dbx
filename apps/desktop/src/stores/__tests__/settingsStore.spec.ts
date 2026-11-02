@@ -46,6 +46,15 @@ describe("normalizeEditorSettings", () => {
     expect(settings.editorSettings).toMatchObject(defaults);
   });
 
+  it("defaults the selection statistic to sum and validates every saved metric", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridSelectionSummaryMetric).toBe("sum");
+    expect(normalizeEditorSettings({}).dataGridSelectionSummaryMetric).toBe("sum");
+    expect(normalizeEditorSettings({ dataGridSelectionSummaryMetric: "unknown" as any }).dataGridSelectionSummaryMetric).toBe("sum");
+    for (const metric of ["sum", "average", "min", "max", "count", "distinct", "cells", "rows"] as const) {
+      expect(normalizeEditorSettings({ dataGridSelectionSummaryMetric: metric }).dataGridSelectionSummaryMetric).toBe(metric);
+    }
+  });
+
   it("retains only an explicit legacy sidebar value without creating a global default", () => {
     expect(DEFAULT_EDITOR_SETTINGS).not.toHaveProperty("sidebarShowUserAdmin");
     expect(normalizeEditorSettings({})).not.toHaveProperty("sidebarShowUserAdmin");
@@ -496,6 +505,13 @@ describe("normalizeEditorSettings", () => {
 
   it("enables automatic table aliases by default", () => {
     expect(normalizeEditorSettings({}).autoAliasTables).toBe(true);
+  });
+
+  it("preserves legacy column comments by default and accepts an explicit opt-out", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments).toBe(true);
+    expect(normalizeEditorSettings({}).batchColumnSelectionIncludeComments).toBe(true);
+    expect(normalizeEditorSettings({ batchColumnSelectionIncludeComments: false }).batchColumnSelectionIncludeComments).toBe(false);
+    expect(normalizeEditorSettings({ batchColumnSelectionIncludeComments: "false" as any }).batchColumnSelectionIncludeComments).toBe(true);
   });
 
   it("preserves disabled automatic table aliases", () => {
@@ -1748,6 +1764,28 @@ describe("settingsStore persisted settings initialization", () => {
     setActivePinia(createPinia());
   });
 
+  it("persists and restores the chosen selection statistic after restarting the store", async () => {
+    let persistedSettings: Record<string, unknown> | null = null;
+    const loadEditorSettings = vi.fn(async () => persistedSettings);
+    const saveEditorSettings = vi.fn(async (settings: Record<string, unknown>) => {
+      persistedSettings = JSON.parse(JSON.stringify(settings));
+    });
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    expect(store.editorSettings.dataGridSelectionSummaryMetric).toBe("sum");
+    store.updateEditorSettings({ dataGridSelectionSummaryMetric: "average" });
+    await store.persistEditorSettings();
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ dataGridSelectionSummaryMetric: "average" }));
+
+    setActivePinia(createPinia());
+    const restartedStore = useSettingsStore();
+    await restartedStore.initEditorSettings();
+    expect(restartedStore.editorSettings.dataGridSelectionSummaryMetric).toBe("average");
+  });
+
   it.each(["persisted", "legacy"])("preserves a %s global opt-out through unrelated saves until connection migration", async (source) => {
     const old = { sidebarShowUserAdmin: false, theme: "xcode-dark" };
     const data = new Map(source === "legacy" ? [["dbx-editor-settings", JSON.stringify(old)]] : []);
@@ -2352,6 +2390,7 @@ describe("settingsStore editor settings persistence", () => {
   it("rolls back a failed atomic update and allows retry", async () => {
     const loadEditorSettings = vi.fn().mockResolvedValue({
       ignoredUpdateVersion: "",
+      updateChannel: "stable",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
@@ -2401,6 +2440,7 @@ describe("settingsStore editor settings persistence", () => {
     let resolveFirstSave!: () => void;
     const loadEditorSettings = vi.fn().mockResolvedValue({
       ignoredUpdateVersion: "",
+      updateChannel: "stable",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
@@ -2438,6 +2478,7 @@ describe("settingsStore editor settings persistence", () => {
     let rejectFirstSave!: (error: Error) => void;
     const loadEditorSettings = vi.fn().mockResolvedValue({
       ignoredUpdateVersion: "",
+      updateChannel: "stable",
       theme: "system",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,

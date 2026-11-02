@@ -922,6 +922,95 @@ describe("AiAssistant mount", () => {
 
   const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 
+  it("offers continuation outside a truncated code block and preserves the unsent draft", async () => {
+    aiAssistantMountApi.conversations = [storedConversation({ assistantMode: "ask", assistantAction: "general" })];
+    const partial = "```sql\nSELECT * FROM orders WHERE";
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      onEvent({ type: "text_delta", delta: partial });
+      onEvent({ type: "output_truncated" });
+      onEvent({ type: "agent_end" });
+      return partial;
+    };
+    const { container, errors, panelRef } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    const prompt = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    prompt.value = "Generate a query";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(container.querySelector<HTMLButtonElement>("[data-ai-continue-generation]")?.disabled).toBe(false));
+    const notice = container.querySelector("[data-ai-output-truncated]")!;
+    expect(notice.textContent).toContain(i18n.global.t("ai.outputTruncated"));
+    expect(notice.closest(".ai-code-block")).toBeNull();
+    expect(container.querySelector(".ai-code-block")?.textContent).not.toContain(i18n.global.t("ai.outputTruncated"));
+    const stored = aiAssistantMountApi.savedConversations.at(-1) as { messages: Array<{ content: string; kind?: string }> };
+    expect(stored.messages.at(-1)).toMatchObject({ content: partial, kind: "outputTruncated" });
+
+    // Stage an unrelated draft and selection; the continuation must send neither.
+    panelRef.value!.openExternalContext({
+      target: { connectionId: "conn-a", database: "db_a" },
+      selections: [{ source: "editor", label: "unsent.sql", content: "SELECT secret FROM unsent" }],
+      unresolvedKey: "ai.externalTargetUnavailable",
+    });
+    await settle();
+    prompt.value = "Keep this draft";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      await pending;
+      onEvent({ type: "text_delta", delta: " id = 1;" });
+      onEvent({ type: "agent_end" });
+      return " id = 1;";
+    };
+    const button = container.querySelector<HTMLButtonElement>("[data-ai-continue-generation]")!;
+    button.click();
+    button.click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(2));
+    const input = aiAssistantMountApi.runAgentStreamInputs[1] as AiRequestInput;
+    expect(input.instruction).toBe(i18n.global.t("ai.continueGenerationPrompt"));
+    expect(input.mode).toBe("ask");
+    expect(input.allowWriteSql).toBe(false);
+    expect(input.context.connectionId).toBe("conn-a");
+    expect(input.context.database).toBe("db_a");
+    expect(input.context.selections).toBeUndefined();
+    expect(aiAssistantMountApi.runAgentStreamHistories[1]).toContainEqual({ role: "assistant", content: partial });
+    expect(JSON.stringify(aiAssistantMountApi.runAgentStreamHistories[1])).not.toContain(i18n.global.t("ai.outputTruncated"));
+    expect(prompt.value).toBe("Keep this draft");
+    expect(container.querySelector("[data-ai-selection-chips]")?.textContent).toContain("unsent.sql");
+    finish();
+    await vi.waitFor(() => expect(container.querySelector("[data-ai-continue-generation]")).toBeNull());
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("restores the continuation button from a saved truncated reply, including an empty answer", async () => {
+    aiAssistantMountApi.conversations = [
+      storedConversation({
+        assistantMode: "ask",
+        assistantAction: "general",
+        messages: [
+          { role: "user", content: "previous question" },
+          { role: "assistant", content: "", kind: "outputTruncated" },
+        ],
+      }),
+    ];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    await vi.waitFor(() => expect(container.querySelector("[data-ai-continue-generation]")).not.toBeNull());
+    expect(container.querySelector("[data-ai-output-truncated]")?.textContent).toContain(i18n.global.t("ai.outputTruncated"));
+    container.querySelector<HTMLButtonElement>("[data-ai-continue-generation]")!.click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(1));
+    expect(aiAssistantMountApi.runAgentStreamHistories[0]).toEqual([{ role: "user", content: "previous question" }]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
   // #12075 review: a draft can never be reopened, so its picker selection must not
   // travel into a conversation opened from the list. The leak only surfaced one
   // step later — reopening that conversation showed the abandoned draft's pick
@@ -2097,5 +2186,66 @@ describe("AiAssistant mount", () => {
     expect(expandButton?.textContent).toContain(i18n.global.t("ai.skillsLoadedState"));
 
     expect(errors.map(String)).toEqual([]);
+  });
+
+  it.each([false, true])("docks approvals and clears them on resolution or stop (cancel=%s)", async (cancel) => {
+    let emit!: (event: { type: string; [key: string]: unknown }) => void;
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      emit = onEvent;
+      await running;
+      onEvent({ type: "agent_end" });
+      return "Finished";
+    };
+    aiAssistantMountApi.conversations = [storedConversation({ assistantMode: "agent" })];
+    const { container, panelRef, errors } = await mountPanel(true, CONN_A, configureAiPanel);
+    panelRef.value!.selectConversationById("conv-a");
+    await settle();
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.value = "Test tool approvals";
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+    const request = (id: string) => {
+      emit({ type: "tool_call_start", tool_call_id: id, tool_name: "plugin__ssh_exec", args: { command: "printf approval_dock_test" } });
+      emit({ type: "tool_approval_required", tool_call_id: id, approval_id: id, plugin_name: "Test plugin", plugin_tool: "ssh_exec", connection_name: "ConnA", args: { command: "printf approval_dock_test" }, timeout_secs: 60 });
+    };
+    try {
+      request("done");
+      emit({ type: "tool_approval_resolved", tool_call_id: "done", approval_id: "done", outcome: "approved" });
+      request("pending");
+      emit({ type: "text_delta", delta: "Long streamed response. ".repeat(100) });
+      await vi.waitFor(() => expect(container.querySelector("[data-ai-tool-approval-dock]")).not.toBeNull());
+      const dock = container.querySelector("[data-ai-tool-approval-dock]")!;
+      expect(dock.closest('[data-slot="scroll-area-viewport"]')).toBeNull();
+      expect(dock.querySelectorAll("[data-ai-tool-approval]")).toHaveLength(1);
+      expect(dock.textContent).toContain("printf approval_dock_test");
+      expect(container.querySelectorAll("[data-ai-tool-approval]")).toHaveLength(2);
+      const composer = container.querySelector(".ai-prompt-context-container")!;
+      expect(dock.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+      if (cancel) {
+        sendControl(container).click();
+      } else {
+        emit({ type: "tool_approval_resolved", tool_call_id: "pending", approval_id: "pending", outcome: "denied" });
+      }
+      await vi.waitFor(() => expect(container.querySelector("[data-ai-tool-approval-dock]")).toBeNull());
+      expect(container.querySelectorAll("[data-ai-tool-approval]")).toHaveLength(2);
+      if (cancel) {
+        const cards = [...container.querySelectorAll("[data-ai-tool-approval]")];
+        expect(cards.every((card) => card.querySelector("button") === null)).toBe(true);
+        expect(cards.at(-1)?.textContent).toContain(i18n.global.t("ai.toolApproval.status.cancelled"));
+        request("late");
+        await settle();
+        expect(container.querySelector("[data-ai-tool-approval-dock]")).toBeNull();
+      }
+      expect(errors.map(String)).toEqual([]);
+    } finally {
+      finish();
+      await settle();
+    }
   });
 });

@@ -1,6 +1,7 @@
 pub mod connection_secrets;
 pub mod driver_runtime;
 pub mod jdbc;
+pub mod parameters;
 pub mod runtime_config;
 pub mod session_credentials;
 pub mod task_supervisor;

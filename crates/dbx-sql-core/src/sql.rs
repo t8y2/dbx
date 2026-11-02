@@ -2721,7 +2721,11 @@ pub fn prepare_sql_file_statement(
         if is_mysql_compatible_target && is_mysql_session_restore_statement(statement) {
             return SqlFileStatementAction::Skip;
         }
-        return SqlFileStatementAction::Execute(statement.to_string());
+        return SqlFileStatementAction::Execute(if is_mysql_compatible_target {
+            normalize_mysql_sql_file_charset(statement)
+        } else {
+            statement.to_string()
+        });
     };
 
     if !is_mysql_compatible_target {
@@ -2733,7 +2737,64 @@ pub fn prepare_sql_file_statement(
         return SqlFileStatementAction::Skip;
     }
 
-    SqlFileStatementAction::Execute(body.to_string())
+    SqlFileStatementAction::Execute(normalize_mysql_sql_file_charset(body))
+}
+
+/// MySQL's `utf8` charset is the legacy 3-byte `utf8mb3` charset.  SQL files
+/// are decoded as Unicode before they reach the driver, so executing a file
+/// that changes the connection to `utf8` makes otherwise valid 4-byte text
+/// (for example emoji) fail or be replaced on MySQL 5.7.  Keep the session
+/// charset semantics for other explicit choices, but use the Unicode-capable
+/// spelling for this legacy alias during SQL-file imports.
+fn normalize_mysql_sql_file_charset(statement: &str) -> String {
+    let executable = leading_executable_sql_with_options(statement, SqlParsingOptions::mysql_compatible());
+    let prefix_len = statement.len() - executable.len();
+    let bytes = executable.as_bytes();
+    if bytes.len() < 3 || !bytes[..3].eq_ignore_ascii_case(b"SET") {
+        return statement.to_string();
+    }
+    let mut index = 3;
+    if bytes.get(index).is_none_or(|byte| !byte.is_ascii_whitespace()) {
+        return statement.to_string();
+    }
+    while bytes.get(index).is_some_and(|byte| byte.is_ascii_whitespace()) {
+        index += 1;
+    }
+    if bytes.len() < index + 5 || !bytes[index..index + 5].eq_ignore_ascii_case(b"NAMES") {
+        return statement.to_string();
+    }
+    index += 5;
+    if bytes.get(index).is_none_or(|byte| !byte.is_ascii_whitespace()) {
+        return statement.to_string();
+    }
+    while bytes.get(index).is_some_and(|byte| byte.is_ascii_whitespace()) {
+        index += 1;
+    }
+    let charset_start = index;
+    while bytes.get(index).is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b';') {
+        index += 1;
+    }
+    let name = &executable[charset_start..index];
+    if !name.eq_ignore_ascii_case("utf8") && !name.eq_ignore_ascii_case("utf8mb3") {
+        return statement.to_string();
+    }
+    // An explicit `COLLATE` clause may name a collation that is not valid for
+    // utf8mb4 (for example `utf8_general_ci`); rewriting only the charset name
+    // would leave the statement failing with ERROR 1273, which is worse than
+    // the legacy charset it started with. Keep such statements verbatim.
+    let mut after_name = index;
+    while bytes.get(after_name).is_some_and(|byte| byte.is_ascii_whitespace()) {
+        after_name += 1;
+    }
+    if bytes.len() >= after_name + 7 && bytes[after_name..after_name + 7].eq_ignore_ascii_case(b"COLLATE") {
+        return statement.to_string();
+    }
+
+    let mut normalized = String::with_capacity(statement.len() + 2);
+    normalized.push_str(&statement[..prefix_len + charset_start]);
+    normalized.push_str("utf8mb4");
+    normalized.push_str(&statement[prefix_len + index..]);
+    normalized
 }
 
 fn strip_postgres_pg_dump_guard_command(statement: &str) -> Option<String> {
@@ -5474,6 +5535,61 @@ mod tests {
     fn prepares_mysql_executable_comments_for_mysql_compatible_imports() {
         assert_eq!(
             prepare_sql_file_statement("/*!40101 SET NAMES utf8mb4 */", &DatabaseType::Mysql, None),
+            SqlFileStatementAction::Execute("SET NAMES utf8mb4".to_string())
+        );
+    }
+
+    #[test]
+    fn normalizes_mysql_legacy_utf8_for_sql_file_imports() {
+        for (source, expected) in [
+            ("SET NAMES utf8", "SET NAMES utf8mb4"),
+            ("set names utf8mb3", "set names utf8mb4"),
+            ("  SET  NAMES  UTF8;", "SET  NAMES  utf8mb4;"),
+            ("-- dump session\nSET NAMES utf8", "-- dump session\nSET NAMES utf8mb4"),
+        ] {
+            assert_eq!(
+                prepare_sql_file_statement(source, &DatabaseType::Mysql, None),
+                SqlFileStatementAction::Execute(expected.to_string())
+            );
+        }
+        assert_eq!(
+            prepare_sql_file_statement("SET NAMES utf8mb4", &DatabaseType::Mysql, None),
+            SqlFileStatementAction::Execute("SET NAMES utf8mb4".to_string())
+        );
+        assert_eq!(
+            prepare_sql_file_statement("SET NAMES latin1", &DatabaseType::Mysql, None),
+            SqlFileStatementAction::Execute("SET NAMES latin1".to_string())
+        );
+        assert_eq!(
+            prepare_sql_file_statement("INSERT INTO t VALUES ('中文 😀')", &DatabaseType::Mysql, None),
+            SqlFileStatementAction::Execute("INSERT INTO t VALUES ('中文 😀')".to_string())
+        );
+        assert_eq!(
+            prepare_sql_file_statement("SET NAMES utf8", &DatabaseType::Postgres, None),
+            SqlFileStatementAction::Execute("SET NAMES utf8".to_string())
+        );
+    }
+
+    #[test]
+    fn keeps_collated_legacy_utf8_set_names_verbatim() {
+        // `utf8_general_ci` is not a valid collation for utf8mb4; rewriting the
+        // charset alone would turn the statement into ERROR 1273.
+        for source in [
+            "SET NAMES utf8 COLLATE utf8_general_ci",
+            "set names utf8mb3   collate utf8mb3_bin;",
+            "-- dump session\nSET NAMES utf8 COLLATE utf8_unicode_ci",
+        ] {
+            assert_eq!(
+                prepare_sql_file_statement(source, &DatabaseType::Mysql, None),
+                SqlFileStatementAction::Execute(source.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_utf8_in_mysql_executable_comments() {
+        assert_eq!(
+            prepare_sql_file_statement("/*!40101 SET NAMES utf8 */", &DatabaseType::Mysql, None),
             SqlFileStatementAction::Execute("SET NAMES utf8mb4".to_string())
         );
     }

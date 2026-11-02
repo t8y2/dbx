@@ -1,5 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { isActiveResultLoading } from "@/lib/sql/queryExecutionState";
+import { statementExecutionMarkers } from "@/lib/tabs/tabPresentation";
 import { BackendErrorException } from "@/lib/backend/errorUtils";
 import type { QueryResult } from "@/types/database";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -113,6 +114,32 @@ function structuredSqlError(detail = "duplicate key") {
 }
 
 describe("queryStore multi-statement errors", () => {
+  it.each(["oracle", "mysql", "postgres", "sqlite", "dameng", "db2", "sqlserver", "turso", "cloudflare-d1"] as const)(
+    "marks selected statements at their absolute editor positions for %s",
+    async (databaseType) => {
+      mocks.getConnectionConfig.mockReturnValue({ id: "selection-connection", db_type: databaseType, database: "app" });
+      mocks.executeMulti.mockResolvedValue([
+        { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
+        { columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 },
+      ]);
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const tabId = store.createTab("selection-connection", "app", "Selection");
+      const tab = store.tabs.find((item) => item.id === tabId)!;
+      tab.sql = "SELECT 0;\n\nSELECT 1;\nSELECT 2;\n\nSELECT 3;";
+      const sourceOffset = tab.sql.indexOf("SELECT 1");
+      const selectedSql = tab.sql.slice(sourceOffset, tab.sql.indexOf("\n\nSELECT 3"));
+
+      await store.executeCurrentSql(selectedSql, { tabId, sourceOffset });
+
+      expect(statementExecutionMarkers(tab.sql, tab.results, databaseType, tab.resultBaseSql, tab.resultEditorFingerprint, tab.batchSqlExecution)).toEqual([
+        { from: sourceOffset, status: "success", successCount: 1, errorCount: 0 },
+        { from: tab.sql.indexOf("SELECT 2"), status: "success", successCount: 1, errorCount: 0 },
+      ]);
+    },
+    30_000,
+  );
+
   it.each(["single", "indexed", "ambiguous", "use", "session_setup"] as const)("retains actual legacy export provenance without guessing statement positions (%s)", async (kind) => {
     const preview = (index?: number): QueryResult => ({
       columns: ["ID", "BODY"],

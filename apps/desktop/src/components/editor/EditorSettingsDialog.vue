@@ -113,6 +113,7 @@ import {
   type TabSortMode,
   type WelcomePageMode,
   type UpdateDownloadSource,
+  type UpdateChannel,
   type CsvQuoteMode,
   type CsvNullMode,
   type QueryResultExportFileNameSource,
@@ -307,6 +308,7 @@ import {
   buildMcpTraeConfig,
   buildMcpVsCodeConfig,
   buildMcpWorkBuddyConfig,
+  buildMcpAntigravityConfig,
   mcpWebBackendUrl,
   type McpLaunchConfig,
   preferMcpNativeLaunch,
@@ -790,6 +792,7 @@ const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurre
 const editShowInsertValueHints = ref(settingsStore.editorSettings.showInsertValueHints);
 const editShowConnectionGroupPath = ref(settingsStore.editorSettings.showConnectionGroupPath);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
+const editBatchColumnSelectionIncludeComments = ref(settingsStore.editorSettings.batchColumnSelectionIncludeComments);
 const editTableCompletionSchemaQualification = ref<SqlTableCompletionSchemaQualification>(settingsStore.editorSettings.tableCompletionSchemaQualification);
 const tableCompletionSchemaQualificationDescription = computed(() => {
   const key = {
@@ -842,6 +845,7 @@ const editColorizeConnectionTabsScope = ref<ConnectionTabColorScope>(settingsSto
 const editTabGroupMode = ref<TabGroupMode>(settingsStore.editorSettings.tabGroupMode);
 const editTabSortMode = ref<TabSortMode>(settingsStore.editorSettings.tabSortMode);
 const editTabMaxWidth = ref<number>(settingsStore.editorSettings.tabMaxWidth);
+const editTabDoubleClickAction = ref<EditorSettings["tabDoubleClickAction"]>(settingsStore.editorSettings.tabDoubleClickAction);
 const editTabGroupRows = ref<TabGroupRowMode>(settingsStore.editorSettings.tabGroupRows);
 const editLinuxFloatingFrameEnabled = ref(settingsStore.desktopSettings.linux_floating_frame_enabled ?? true);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
@@ -1082,6 +1086,7 @@ const editExportRowLimitEnabled = ref(settingsStore.editorSettings.exportRowLimi
 const editExportRowLimit = ref(settingsStore.editorSettings.exportRowLimit);
 const editQueryExportKeysetOptimizationEnabled = ref(settingsStore.editorSettings.queryExportKeysetOptimizationEnabled);
 const editUpdateDownloadSource = ref<UpdateDownloadSource>(settingsStore.editorSettings.updateDownloadSource);
+const editUpdateChannel = ref<UpdateChannel>(settingsStore.editorSettings.updateChannel);
 const editToolbarItems = ref({ ...settingsStore.editorSettings.toolbarItems });
 // Desktop-only toolbar buttons (always-on-top) can never render in the Web build, so their switches stay out of the Web settings dialog.
 const toolbarVisibilityItems = computed(() => visibleToolbarVisibilityItems(TOOLBAR_VISIBILITY_ITEMS, isWeb));
@@ -1252,6 +1257,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showInsertValueHints: editShowInsertValueHints.value,
     showConnectionGroupPath: editShowConnectionGroupPath.value,
     autoAliasTables: editAutoAliasTables.value,
+    batchColumnSelectionIncludeComments: editBatchColumnSelectionIncludeComments.value,
     tableCompletionSchemaQualification: editTableCompletionSchemaQualification.value,
     insertSpaceAfterCompletion: editInsertSpaceAfterCompletion.value,
     sqlServerSpaceConfirmsCompletion: editSqlServerSpaceConfirmsCompletion.value,
@@ -1286,6 +1292,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     tabGroupMode: editTabGroupMode.value,
     tabSortMode: editTabSortMode.value,
     tabMaxWidth: editTabMaxWidth.value,
+    tabDoubleClickAction: editTabDoubleClickAction.value,
     tabGroupRows: editTabGroupRows.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
     dataGridColumnCommentsInInfoArea: editDataGridColumnCommentsInInfoArea.value,
@@ -1392,6 +1399,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     exportRowLimit: editExportRowLimit.value,
     queryExportKeysetOptimizationEnabled: editQueryExportKeysetOptimizationEnabled.value,
     updateDownloadSource: editUpdateDownloadSource.value,
+    updateChannel: editUpdateChannel.value,
     toolbarItems: { ...editToolbarItems.value },
     snippets: editSnippets.value,
     snippetTriggerKey: editSnippetTriggerKey.value,
@@ -1957,6 +1965,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowInsertValueHints.value = settingsStore.editorSettings.showInsertValueHints;
   editShowConnectionGroupPath.value = settingsStore.editorSettings.showConnectionGroupPath;
   editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
+  editBatchColumnSelectionIncludeComments.value = settingsStore.editorSettings.batchColumnSelectionIncludeComments;
   editTableCompletionSchemaQualification.value = settingsStore.editorSettings.tableCompletionSchemaQualification;
   editInsertSpaceAfterCompletion.value = settingsStore.editorSettings.insertSpaceAfterCompletion;
   editSqlServerSpaceConfirmsCompletion.value = settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion;
@@ -1992,6 +2001,7 @@ function syncEditorSettingsDraftFromStore() {
   editTabGroupMode.value = settingsStore.editorSettings.tabGroupMode;
   editTabSortMode.value = settingsStore.editorSettings.tabSortMode;
   editTabMaxWidth.value = settingsStore.editorSettings.tabMaxWidth;
+  editTabDoubleClickAction.value = settingsStore.editorSettings.tabDoubleClickAction;
   editTabGroupRows.value = settingsStore.editorSettings.tabGroupRows;
   editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
   editDataGridColumnCommentsInInfoArea.value = settingsStore.editorSettings.dataGridColumnCommentsInInfoArea;
@@ -2098,6 +2108,7 @@ function syncEditorSettingsDraftFromStore() {
   editExportRowLimit.value = settingsStore.editorSettings.exportRowLimit;
   editQueryExportKeysetOptimizationEnabled.value = settingsStore.editorSettings.queryExportKeysetOptimizationEnabled;
   editUpdateDownloadSource.value = settingsStore.editorSettings.updateDownloadSource;
+  editUpdateChannel.value = settingsStore.editorSettings.updateChannel;
   editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
   editSnippets.value = settingsStore.editorSettings.snippets.map(editableSnippet);
   editSnippetTriggerKey.value = settingsStore.editorSettings.snippetTriggerKey;
@@ -2139,6 +2150,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   showInsertValueHints: editShowInsertValueHints,
   showConnectionGroupPath: editShowConnectionGroupPath,
   autoAliasTables: editAutoAliasTables,
+  batchColumnSelectionIncludeComments: editBatchColumnSelectionIncludeComments,
   tableCompletionSchemaQualification: editTableCompletionSchemaQualification,
   insertSpaceAfterCompletion: editInsertSpaceAfterCompletion,
   sqlServerSpaceConfirmsCompletion: editSqlServerSpaceConfirmsCompletion,
@@ -2170,6 +2182,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   tabGroupMode: editTabGroupMode,
   tabSortMode: editTabSortMode,
   tabMaxWidth: editTabMaxWidth,
+  tabDoubleClickAction: editTabDoubleClickAction,
   tabGroupRows: editTabGroupRows,
   showColumnCommentsInHeader: editShowColumnCommentsInHeader,
   dataGridColumnCommentsInInfoArea: editDataGridColumnCommentsInInfoArea,
@@ -2274,6 +2287,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   globalDateTimeExportFormat: editGlobalDateTimeExportFormat,
   globalDateTimeImportFormat: editGlobalDateTimeImportFormat,
   updateDownloadSource: editUpdateDownloadSource,
+  updateChannel: editUpdateChannel,
   toolbarItems: editToolbarItems,
   snippets: editSnippets,
   snippetTriggerKey: editSnippetTriggerKey,
@@ -2700,6 +2714,13 @@ async function applySettings() {
 }
 
 async function applySettingsAndClose() {
+  // With nothing staged there is nothing to persist, so the button only closes.
+  // It used to be disabled in that state, which read as "the button does
+  // nothing" (#13862).
+  if (!hasChanges()) {
+    closeSettings();
+    return;
+  }
   if (await applySettingsForResult()) {
     closeSettings();
   }
@@ -2750,6 +2771,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
     editShowConnectionGroupPath.value = DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+    editBatchColumnSelectionIncludeComments.value = DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments;
     editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
     editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
     editSqlServerSpaceConfirmsCompletion.value = DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion;
@@ -2802,6 +2824,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editTabGroupMode.value = DEFAULT_EDITOR_SETTINGS.tabGroupMode;
     editTabSortMode.value = DEFAULT_EDITOR_SETTINGS.tabSortMode;
     editTabMaxWidth.value = DEFAULT_EDITOR_SETTINGS.tabMaxWidth;
+    editTabDoubleClickAction.value = DEFAULT_EDITOR_SETTINGS.tabDoubleClickAction;
     editTabGroupRows.value = DEFAULT_EDITOR_SETTINGS.tabGroupRows;
     editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
     editLinuxFloatingFrameEnabled.value = DEFAULT_DESKTOP_SETTINGS.linux_floating_frame_enabled ?? true;
@@ -2924,6 +2947,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editAutoUpdateMcp.value = DEFAULT_EDITOR_SETTINGS.autoUpdateMcp;
     editAutoUpdatePlugins.value = DEFAULT_EDITOR_SETTINGS.autoUpdatePlugins;
     editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
+    editUpdateChannel.value = DEFAULT_EDITOR_SETTINGS.updateChannel;
   }
 }
 
@@ -2956,6 +2980,7 @@ function resetAllDefaults() {
   editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
   editShowConnectionGroupPath.value = DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+  editBatchColumnSelectionIncludeComments.value = DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments;
   editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
   editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
   editSqlServerSpaceConfirmsCompletion.value = DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion;
@@ -3094,6 +3119,7 @@ function resetAllDefaults() {
   editExportRowLimit.value = DEFAULT_EDITOR_SETTINGS.exportRowLimit;
   editQueryExportKeysetOptimizationEnabled.value = DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled;
   editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
+  editUpdateChannel.value = DEFAULT_EDITOR_SETTINGS.updateChannel;
   editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
   editSnippets.value = DEFAULT_SQL_SNIPPETS.map((s) => ({ ...s }));
   editSnippetTriggerKey.value = DEFAULT_EDITOR_SETTINGS.snippetTriggerKey;
@@ -3408,6 +3434,10 @@ function onUiScaleChange(value: unknown) {
 
 function onUpdateDownloadSourceChange(v: any) {
   if (v === "official" || v === "cnb") editUpdateDownloadSource.value = v;
+}
+
+function onUpdateChannelChange(v: any) {
+  if (v === "stable" || v === "beta") editUpdateChannel.value = v;
 }
 
 function setSidebarObjectDisplay(value: "grouped" | "simple") {
@@ -4190,7 +4220,7 @@ async function exportDebugLogs() {
 }
 
 // ---------- MCP Server ----------
-type McpConfigTab = "claude" | "cursor" | "codebuddy" | "zcode" | "trae" | "vscode" | "windsurf" | "codex" | "deepseek-harness" | "opencode" | "pi" | "cherry-studio" | "qoder" | "workbuddy";
+type McpConfigTab = "claude" | "cursor" | "codebuddy" | "zcode" | "trae" | "vscode" | "windsurf" | "codex" | "deepseek-harness" | "opencode" | "pi" | "cherry-studio" | "qoder" | "workbuddy" | "antigravity";
 type McpCopyKind = "install" | "uninstall" | "http-endpoint" | "http-token" | "http-config" | `${McpConfigTab}-config`;
 type McpTransportTab = "stdio" | "http";
 type McpManagementTab = "access" | "capabilities" | "permissions";
@@ -5193,6 +5223,7 @@ const mcpDeepSeekHarnessRecommendedConfig = computed(() => buildMcpDeepSeekHarne
 const mcpOpenCodeRecommendedConfig = computed(() => buildMcpOpenCodeConfig(mcpLaunchConfig.value));
 const mcpPiRecommendedConfig = computed(() => buildMcpPiConfig(mcpLaunchConfig.value));
 const mcpWorkBuddyRecommendedConfig = computed(() => buildMcpWorkBuddyConfig(mcpLaunchConfig.value));
+const mcpAntigravityRecommendedConfig = computed(() => buildMcpAntigravityConfig(mcpLaunchConfig.value));
 
 const mcpStatusTone = computed<"ok" | "warning" | "muted">(() => {
   if (!mcpStatus.value) return "muted";
@@ -6023,7 +6054,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
       if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
       await settingsStore.updateDesktopSettings(result.desktopSettings);
       await connectionStore.initFromDisk();
-      await savedSqlStore.initFromStorage();
+      await savedSqlStore.reloadFromStorage();
       await tunnelProfileStore.refresh();
       await settingsStore.reloadAiConfigs();
       let message = t("settings.localBackupImportSuccess", { path: localBackupPath.value });
@@ -6056,7 +6087,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
       if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
       await settingsStore.updateDesktopSettings(result.desktopSettings);
       await connectionStore.initFromDisk();
-      await savedSqlStore.initFromStorage();
+      await savedSqlStore.reloadFromStorage();
       await tunnelProfileStore.refresh();
       await settingsStore.reloadAiConfigs();
       let message = t("settings.syncSnippetDownloadSuccess", { bytes: result.summary.bytes, id: result.summary.snippetId });
@@ -6088,7 +6119,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
     if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
     await settingsStore.updateDesktopSettings(result.desktopSettings);
     await connectionStore.initFromDisk();
-    await savedSqlStore.initFromStorage();
+    await savedSqlStore.reloadFromStorage();
     await tunnelProfileStore.refresh();
     await settingsStore.reloadAiConfigs();
     recordWebDavSyncSuccess(config);
@@ -8527,6 +8558,16 @@ onUnmounted(() => {
                   <Switch id="editor-auto-alias-tables" v-model="editAutoAliasTables" class="mt-0.5" />
                 </div>
 
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-batch-column-selection-include-comments">{{ t("settings.batchColumnSelectionIncludeComments") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.batchColumnSelectionIncludeCommentsDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-batch-column-selection-include-comments" v-model="editBatchColumnSelectionIncludeComments" class="mt-0.5" />
+                </div>
+
                 <div class="settings-item flex items-start justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-table-completion-schema-qualification>
                   <div class="min-w-0 space-y-1">
                     <Label>{{ t("settings.tableCompletionSchemaQualification") }}</Label>
@@ -9312,6 +9353,16 @@ onUnmounted(() => {
                     </Select>
                   </div>
                   <div class="space-y-2">
+                    <Label>{{ t("settings.tabDoubleClickAction") }}</Label>
+                    <Select v-model="editTabDoubleClickAction">
+                      <SelectTrigger class="w-full"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">{{ t("settings.tabDoubleClickActionDefault") }}</SelectItem>
+                        <SelectItem value="close">{{ t("settings.tabDoubleClickActionClose") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="space-y-2">
                     <Label>{{ t("settings.tabMaxWidth") }}</Label>
                     <Select :model-value="String(editTabMaxWidth)" @update:model-value="setTabMaxWidth(Number($event))">
                       <SelectTrigger class="w-full"><SelectValue /></SelectTrigger>
@@ -9330,6 +9381,7 @@ onUnmounted(() => {
                   <p>{{ t("settings.tabOrganizationDescription") }}</p>
                   <p>{{ t("settings.tabGroupRowsDescription") }}</p>
                   <p>{{ t("settings.tabMaxWidthDescription") }}</p>
+                  <p>{{ t("settings.tabDoubleClickActionDescription") }}</p>
                 </div>
               </div>
 
@@ -13304,6 +13356,7 @@ LIMIT 100;</pre>
                         <TabsTrigger value="cherry-studio" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Cherry Studio</TabsTrigger>
                         <TabsTrigger value="qoder" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Qoder</TabsTrigger>
                         <TabsTrigger value="workbuddy" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">WorkBuddy</TabsTrigger>
+                        <TabsTrigger value="antigravity" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Antigravity</TabsTrigger>
                       </TabsList>
 
                       <TabsContent value="claude" class="m-0">
@@ -13510,6 +13563,21 @@ LIMIT 100;</pre>
                           </div>
                         </div>
                       </TabsContent>
+
+                      <TabsContent value="antigravity" class="m-0">
+                        <div class="space-y-2">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                            {{ t("settings.mcpAntigravityConfigPath") }}
+                          </div>
+                          <div class="relative rounded-md border bg-background p-3">
+                            <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpAntigravityRecommendedConfig }}</code></pre>
+                            <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('antigravity-config', mcpAntigravityRecommendedConfig)">
+                              <CheckCircle2 v-if="mcpCopied === 'antigravity-config'" class="h-3.5 w-3.5 text-green-500" />
+                              <Copy v-else class="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      </TabsContent>
                     </Tabs>
                   </div>
 
@@ -13612,6 +13680,20 @@ LIMIT 100;</pre>
                   </div>
                 </div>
                 <p class="border-t pt-3 text-xs text-muted-foreground">{{ t("settings.updateRestartHint") }}</p>
+              </div>
+
+              <div class="flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div class="min-w-0 space-y-1">
+                  <Label>{{ t("settings.updateChannel") }}</Label>
+                  <p class="text-sm text-muted-foreground">{{ t("settings.updateChannelDescription") }}</p>
+                </div>
+                <Select :model-value="editUpdateChannel" @update:model-value="onUpdateChannelChange">
+                  <SelectTrigger class="h-9 w-full sm:w-[180px]"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="stable">{{ t("settings.updateChannelStable") }}</SelectItem>
+                    <SelectItem value="beta">{{ t("settings.updateChannelBeta") }}</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
 
               <div class="flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -13842,7 +13924,7 @@ LIMIT 100;</pre>
         <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
           {{ t("settings.apply") }}
         </Button>
-        <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettingsAndClose">
+        <Button :disabled="hasApplyBlocker" @click="applySettingsAndClose">
           {{ t("settings.applyAndClose") }}
         </Button>
       </DialogFooter>
@@ -13918,7 +14000,7 @@ LIMIT 100;</pre>
         <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
           {{ t("settings.apply") }}
         </Button>
-        <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettingsAndClose">
+        <Button :disabled="hasApplyBlocker" @click="applySettingsAndClose">
           {{ t("settings.applyAndClose") }}
         </Button>
       </DialogFooter>
@@ -13943,7 +14025,7 @@ LIMIT 100;</pre>
         <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
           {{ t("settings.apply") }}
         </Button>
-        <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettingsAndClose">
+        <Button :disabled="hasApplyBlocker" @click="applySettingsAndClose">
           {{ t("settings.applyAndClose") }}
         </Button>
       </DialogFooter>

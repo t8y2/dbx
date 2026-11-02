@@ -46,7 +46,7 @@ import {
   type NativeJobAdminSelection,
   type NativeJobDefinitionDraft,
 } from "@/lib/database/nativeJobAdmin";
-import { DAMENG_JOB_ENVIRONMENT_SQL, damengInitJobSystemSql, isDamengJobEnvironmentMissingError, parseDamengJobEnvironmentReady } from "@/lib/database/damengJobAdmin";
+import { DAMENG_JOB_ENVIRONMENT_SQL, damengInitJobSystemSql, isDamengJobAlreadyInitializedError, isDamengJobEnvironmentMissingError, parseDamengJobEnvironmentReady } from "@/lib/database/damengJobAdmin";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
@@ -587,6 +587,15 @@ async function applyPendingSql() {
     await (pendingAfterApply.value?.() ?? Promise.resolve());
     await loadJobs();
   } catch (error: any) {
+    const message = error?.message || String(error);
+    if (isDameng.value && isDamengJobAlreadyInitializedError(message)) {
+      // SP_INIT_JOB_SYS 非幂等：环境已存在时达梦抛 -2124，语义上等于初始化意图已满足。
+      jobEnvironmentReady.value = true;
+      toast(t("damengJobAdmin.environmentReady"), 2500);
+      previewDialogOpen.value = false;
+      await loadJobs();
+      return;
+    }
     toast(t("damengJobAdmin.applyFailed", { message: error?.message || String(error) }), 5000);
   } finally {
     applying.value = false;

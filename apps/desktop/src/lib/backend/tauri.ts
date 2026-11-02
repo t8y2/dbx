@@ -1560,7 +1560,7 @@ export interface AiChatMessage {
   content: string;
   mentions?: unknown[];
   reasoning?: string;
-  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked";
+  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked" | "outputTruncated";
   /** Set on the assistant message whose generation failed; persisted (mirrors dbx-core `AiChatMessage.failed`). */
   failed?: boolean;
   /** Target frozen when this assistant turn started, retained for confirmation. */
@@ -1706,6 +1706,10 @@ export async function readUserSkills(ids: string[], settings: UserSkillRootSetti
 
 export async function testConnection(config: ConnectionConfig): Promise<string> {
   return invokeBackend("test_connection", { config });
+}
+
+export async function connectionParameters(config: ConnectionConfig): Promise<import("@/lib/connection/connectionParameterCatalog").ConnectionParameterMetadata> {
+  return invokeBackend("connection_parameters", { config });
 }
 
 export async function testSshTunnel(config: ConnectionConfig): Promise<string> {
@@ -1920,6 +1924,7 @@ export async function listTables(
   catalog?: string,
   tableNameFilter?: import("@/types/database").TableNameFilter,
   exactIdentity?: boolean,
+  pageTableRoots?: boolean,
 ): Promise<TableInfo[]> {
   return invoke("list_tables", {
     connectionId,
@@ -1932,6 +1937,7 @@ export async function listTables(
     catalog,
     tableNameFilter,
     ...(exactIdentity ? { exactIdentity: true } : {}),
+    ...(pageTableRoots ? { pageTableRoots: true } : {}),
   });
 }
 
@@ -2190,6 +2196,8 @@ export async function executeMulti(
      *  (`BEGIN` / `START TRANSACTION`) open across executions until COMMIT /
      *  ROLLBACK instead of rolling it back when the batch ends. */
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
   },
 ): Promise<QueryResult[]> {
   const diagnosticsEnabled = isDebugLoggingEnabled();
@@ -2264,6 +2272,8 @@ export async function executeMultiWithProgress(
     continueOnError?: boolean;
     executionMode?: "simple";
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
     executionId?: string;
   },
 ): Promise<QueryResult[]> {
@@ -2409,6 +2419,7 @@ export async function executeInManualTransaction(
   timeoutSecs?: number,
   boundStatements?: BlobBoundStatement[],
   deferLobs?: boolean,
+  reportCompilationErrors?: boolean,
 ): Promise<QueryResult[]> {
   return invokeBackend("execute_in_manual_transaction", {
     txnSessionId,
@@ -2424,6 +2435,7 @@ export async function executeInManualTransaction(
     timeoutSecs,
     boundStatements,
     deferLobs,
+    reportCompilationErrors,
   });
 }
 
@@ -3636,9 +3648,13 @@ export interface UpdateInfo {
   release_name: string;
   release_url: string;
   release_notes: string;
+  channel?: "stable" | "beta";
+  release_tag?: string;
+  is_promoted?: boolean;
 }
 
 export type UpdateDownloadSource = "official" | "cnb";
+export type UpdateChannel = "stable" | "beta";
 
 export interface DownloadedUpdate {
   cache_id: string;
@@ -3647,6 +3663,9 @@ export interface DownloadedUpdate {
   release_url: string;
   release_notes: string;
   downloaded_at: number;
+  channel?: UpdateChannel;
+  release_tag?: string;
+  is_promoted?: boolean;
 }
 
 export interface UpdateDownloadProgress {
@@ -3706,20 +3725,28 @@ export async function uninstallNpmMcpServer(): Promise<string> {
   return invoke("uninstall_npm_mcp_server");
 }
 
-export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource): Promise<UpdateInfo> {
-  return invoke("check_for_updates", { locale, source });
+export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource, channel: UpdateChannel = "stable"): Promise<UpdateInfo> {
+  return invoke("check_for_updates", { locale, source, channel });
 }
 
 export async function fetchChangelog(lang?: string): Promise<import("@/lib/app/changelog").ChangelogData> {
   return invoke("fetch_changelog", { lang });
 }
 
+export async function fetchChangelogIndex(lang?: string): Promise<import("@/lib/app/changelog").ChangelogIndexData> {
+  return invoke("fetch_changelog_index", { lang });
+}
+
+export async function fetchChangelogRelease(lang: string | undefined, tag: string): Promise<import("@/lib/app/changelog").ChangelogRelease> {
+  return invoke("fetch_changelog_release", { lang, tag });
+}
+
 export async function getSystemProxyUrl(): Promise<string | null> {
   return invoke("get_system_proxy_url");
 }
 
-export async function downloadUpdate(source: UpdateDownloadSource, latestVersion: string, attemptId: string, releaseNotes?: string): Promise<DownloadedUpdate> {
-  return invoke("download_update", { source, latestVersion, attemptId, releaseNotes });
+export async function downloadUpdate(source: UpdateDownloadSource, latestVersion: string, attemptId: string, releaseNotes?: string, channel: UpdateChannel = "stable", releaseTag?: string): Promise<DownloadedUpdate> {
+  return invoke("download_update", { source, channel, latestVersion, attemptId, releaseNotes, releaseTag });
 }
 
 export async function cancelUpdateDownload(): Promise<void> {
@@ -6691,6 +6718,7 @@ export interface DatabaseExportRequest {
   includeCreateDatabase?: boolean;
   dropTableIfExists?: boolean;
   omitAutoIncrement?: boolean;
+  omitDatabaseQualifier?: boolean;
   preserveOriginalLanguage?: boolean;
   failOnError?: boolean;
   preventOverwrite?: boolean;

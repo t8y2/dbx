@@ -12770,6 +12770,7 @@ export default {
     loading: "Loading...",
     peekDefaultHint: "Without a partition, reads all partitions from earliest.",
     count: "Count",
+    decodePayload: "Decode",
     advancedFilter: "Advanced (partition / offset)",
     partition: "Partition",
     partitionPlaceholderAll: "Empty = all",

@@ -53,18 +53,7 @@ defineExpose({ selectTab, confirmDiscard, refresh });
 </script>
 
 <template>
-  <OracleCustomTypeInfoPanel
-    v-if="isOracleFamily"
-    ref="panel"
-    :connection="connection"
-    :database="database"
-    :schema="schema"
-    :name="name"
-    :catalog="catalog"
-    :database-type="effectiveDatabaseType"
-    @close="emit('close')"
-    @open-source="emit('open-source', $event)"
-  />
+  <OracleCustomTypeInfoPanel v-if="isOracleFamily" ref="panel" :connection="connection" :database="database" :schema="schema" :name="name" :catalog="catalog" :database-type="effectiveDatabaseType" @close="emit('close')" @open-source="emit('open-source', $event)" />
   <PostgresCustomTypeInfoPanel
     v-else
     ref="panel"

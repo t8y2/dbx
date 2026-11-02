@@ -2087,8 +2087,8 @@ function confirmTriggerDraftDiscard() {
 }
 
 function leaveCustomTypeDesigner(confirmed = false): boolean {
-  if (sidePanelMode.value !== "type-info") return true;
-  if (!confirmed && sidePanelRef.value?.confirmDiscard() === false) return false;
+  if (sidePanelMode.value !== "type-info" || !customTypeCapabilities(effectiveDatabaseType.value).management) return true;
+  if (!confirmed && sidePanelRef.value?.confirmDiscard?.() === false) return false;
   customTypeRestoreSession.value = undefined;
   emit("customTypeSessionChange", null);
   onCustomTypeDirtyChange(false);
@@ -2097,7 +2097,7 @@ function leaveCustomTypeDesigner(confirmed = false): boolean {
 }
 
 function closeSidePanel(confirmed = false) {
-  if (!confirmTriggerDraftDiscard() || !leaveCustomTypeDesigner(confirmed)) return;
+  if (!leaveCustomTypeDesigner(confirmed)) return;
   selectedTableInfoColumns.value = [];
   sidePanelRow.value = null;
   sourceRow.value = null;

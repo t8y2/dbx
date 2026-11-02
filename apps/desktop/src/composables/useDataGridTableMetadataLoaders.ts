@@ -154,7 +154,8 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
       ddlRequestGeneration++;
     });
 
-  async function fetchDdl(force = options.settingsStore.editorSettings.refreshDdlOnOpen) {
+  // The properties drawer has no cache preference; reopening it must reflect external schema changes.
+  async function fetchDdl(force = true) {
     const request: ObjectDdlRequest | undefined = tableRequest();
     if (!request) return;
     // Query execution and source-table metadata can belong to different

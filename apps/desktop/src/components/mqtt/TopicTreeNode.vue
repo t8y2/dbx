@@ -28,7 +28,13 @@ const active = computed(() => props.subscribedTopics.some(([topic]) => topic ===
 const visible = computed(() => {
   const filter = props.filter?.trim().toLowerCase();
   if (!filter) return true;
-  const matches = (node: MqttTopicNode): boolean => node.fullPath.toLowerCase().includes(filter) || (node.children ?? []).some(matches);
+  const matches = (node: MqttTopicNode): boolean =>
+    node.fullPath.toLowerCase().includes(filter) ||
+    !!props.savedTopics
+      .find((config) => config.topic === node.fullPath)
+      ?.alias?.toLowerCase()
+      .includes(filter) ||
+    (node.children ?? []).some(matches);
   return matches(props.node);
 });
 
@@ -52,6 +58,7 @@ function toggle() {
 
       <button type="button" class="min-w-0 flex-1 truncate text-left font-mono font-medium" :title="node.fullPath" @click="node.isLeaf ? emit('select', node.fullPath) : toggle()">{{ node.name }}<span v-if="!node.isLeaf" class="text-muted-foreground/70">/</span></button>
 
+      <span v-if="savedConfig?.alias" data-mqtt-topic-alias class="max-w-32 truncate text-xs text-muted-foreground" :title="savedConfig.alias">{{ savedConfig.alias }}</span>
       <template v-if="savedConfig">
         <span class="shrink-0 rounded border px-1 py-0.5 text-[10px] text-muted-foreground">QoS {{ savedConfig.qos === "atmostonce" ? 0 : savedConfig.qos === "atleastonce" ? 1 : 2 }}</span>
         <span v-if="savedConfig.noLocal" class="shrink-0 rounded border border-blue-400/40 px-1 py-0.5 text-[10px] text-blue-600 dark:text-blue-400" :title="t('connection.mqttNoLocalMqtt5Only')">NL</span>

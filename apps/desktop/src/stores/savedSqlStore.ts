@@ -305,6 +305,14 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     return refreshFromStoragePromise;
   }
 
+  async function reloadFromStorage() {
+    // A restore can finish while the initial read is still in flight. Wait for
+    // that read before fetching the restored library so it cannot overwrite it.
+    if (initFromStoragePromise) await initFromStoragePromise;
+    if (!isLoaded.value) return initFromStorage();
+    applyLibrary(await api.loadSavedSqlLibrary());
+  }
+
   function listFolders(connectionId: string) {
     return listChildFolders(connectionId);
   }
@@ -1219,6 +1227,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     treeVersion,
     initFromStorage,
     refreshFromStorage,
+    reloadFromStorage,
     listFolders,
     listChildFolders,
     listFiles,

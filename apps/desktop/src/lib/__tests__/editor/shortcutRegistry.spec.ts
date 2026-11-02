@@ -14,6 +14,7 @@ import {
   MACOS_RESERVED_SHORTCUTS,
   normalizeModifierOnlyShortcut,
   normalizeShortcutSettings,
+  readNormalizedShortcutSettings,
   resolveCapturedShortcutEdit,
   selectionOccurrenceDefaultShortcut,
   selectLineEndsDefaultShortcut,
@@ -837,5 +838,44 @@ describe("shortcutRegistry editor actions", () => {
       const settings = settingsWith({ globalSearch: "Mod+Alt+F" });
       expect(findShortcutConflict("quickOpen", "Alt Alt", settings, "Win32")).toBeNull();
     });
+  });
+});
+
+describe("normalized shortcut table cache", () => {
+  const platform = "Win32";
+
+  it("returns a fresh, mutable copy on every call", () => {
+    const first = normalizeShortcutSettings({}, platform);
+    first.executeSql = "Mod+Alt+Shift+9";
+    expect(normalizeShortcutSettings({}, platform).executeSql).not.toBe("Mod+Alt+Shift+9");
+  });
+
+  it("follows in-place edits of the same settings object", () => {
+    const settings: Partial<ShortcutSettings> = { executeSql: "Mod+Alt+7" };
+    expect(readNormalizedShortcutSettings(settings, platform).executeSql).toBe("Mod+Alt+7");
+    settings.executeSql = "Mod+Alt+8";
+    expect(readNormalizedShortcutSettings(settings, platform).executeSql).toBe("Mod+Alt+8");
+    delete settings.executeSql;
+    expect(readNormalizedShortcutSettings(settings, platform).executeSql).toBe(normalizeShortcutSettings({}, platform).executeSql);
+  });
+
+  it("keeps platform-specific results apart", () => {
+    const settings: Partial<ShortcutSettings> = {};
+    const win = readNormalizedShortcutSettings(settings, "Win32");
+    const mac = readNormalizedShortcutSettings(settings, "MacIntel");
+    expect(win).toEqual(normalizeShortcutSettings(settings, "Win32"));
+    expect(mac).toEqual(normalizeShortcutSettings(settings, "MacIntel"));
+  });
+
+  it("shares one frozen table between read-only callers", () => {
+    const settings: Partial<ShortcutSettings> = { executeSql: "Mod+Alt+6" };
+    const shared = readNormalizedShortcutSettings(settings, platform);
+    expect(readNormalizedShortcutSettings({ ...settings }, platform)).toBe(shared);
+    expect(Object.isFrozen(shared)).toBe(true);
+  });
+
+  it("treats non-string configured values as unset", () => {
+    const withBogus = { executeSql: 42 } as unknown as Partial<ShortcutSettings>;
+    expect(normalizeShortcutSettings(withBogus, platform)).toEqual(normalizeShortcutSettings({}, platform));
   });
 });

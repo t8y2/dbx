@@ -33,10 +33,10 @@ const primaryActions: Record<SidebarMenuScope, readonly string[]> = {
 
 const recommendedPrimaryActions: Partial<Record<SidebarMenuScope, readonly string[]>> = {
   connection: ["contextMenu.serverDashboard", "contextMenu.processList", "contextMenu.sqlServerTrace", "contextMenu.instanceInfo", "contextMenu.damengJobAdmin", "contextMenu.configureVisibleObjects", "visibleSchemas.title"],
-  database: ["sidebar.togglePinnedObject", "visibleSchemas.title"],
-  schema: ["sidebar.togglePinnedObject"],
-  table: ["sidebar.togglePinnedObject"],
-  view: ["sidebar.togglePinnedObject"],
+  database: ["contextMenu.exportDatabase", "sidebar.togglePinnedObject", "visibleSchemas.title"],
+  schema: ["contextMenu.exportDatabase", "sidebar.togglePinnedObject"],
+  table: ["contextMenu.exportDatabase", "sidebar.togglePinnedObject"],
+  view: ["contextMenu.exportDatabase", "sidebar.togglePinnedObject"],
   "sql-editor": ["toolbar.explainPlan", "editor.contextMenu.uppercaseSelection", "editor.contextMenu.lowercaseSelection", "editor.contextMenu.screenshotSelection"],
 };
 

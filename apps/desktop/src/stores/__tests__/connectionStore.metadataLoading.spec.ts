@@ -2,6 +2,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { filterLocallySearchedTables } from "@/lib/sidebar/sidebarSearchTree";
+import { tablePartitionGroups } from "@/lib/table/tableTree";
 import { encodeSchemaTreeCache } from "@/lib/metadata/schemaTreeCache";
 import type { ConnectionConfig, ObjectInfo, TableInfo, TreeNode } from "@/types/database";
 
@@ -12,6 +13,10 @@ function installLocalStorage() {
     setItem: vi.fn((key: string, value: string) => data.set(key, value)),
     removeItem: vi.fn((key: string) => data.delete(key)),
   });
+}
+
+function tableTreeLabels(nodes: TreeNode[] | undefined): string[] {
+  return (nodes ?? []).flatMap((node) => [...(node.type === "table" || node.type === "view" || node.type === "materialized_view" ? [node.label] : []), ...tableTreeLabels(node.children)]);
 }
 
 // Mirrors SIDEBAR_TABLE_SEARCH_RESULT_BUDGET in connectionStore.ts (4× the
@@ -1121,7 +1126,9 @@ describe("connectionStore metadata loading", () => {
     const result = await Promise.race([store.loadTables(connection.id, "app", "public").then(() => "done"), new Promise((resolve) => setTimeout(() => resolve("timeout"), 50))]);
 
     expect(result).toBe("done");
-    expect(listTables).toHaveBeenCalledWith(connection.id, "app", "public", undefined, 1001, 0);
+    // PostgreSQL sidebar pages count top-level relations and append each page's
+    // partitions, so the simple-mode loader opts into root paging.
+    expect(listTables).toHaveBeenCalledWith(connection.id, "app", "public", undefined, 1001, 0, undefined, undefined, undefined, undefined, true);
     expect(listObjects).toHaveBeenCalled();
     expect(schemaNode.children?.map((node) => node.label)).toEqual(["users"]);
   });
@@ -4131,6 +4138,126 @@ describe("connectionStore metadata loading", () => {
     expect(tablesGroup.children?.map((child) => child.label)).toEqual(["t_0001", "t_0002", "t_0003", "t_0004", "tree.loadMore"]);
     expect(tablesGroup.children?.at(-1)?.type).toBe("load-more");
     expect(listTables.mock.calls[1].slice(3, 6)).toEqual(["t", 3, 2]);
+  });
+
+  it("pages PostgreSQL table groups by top-level relation and loads each root's partitions", async () => {
+    const rows: TableInfo[] = [
+      { name: "orders", table_type: "BASE TABLE", comment: null },
+      { name: "users", table_type: "BASE TABLE", comment: null },
+      { name: "z_probe", table_type: "BASE TABLE", comment: null },
+      { name: "zz_last", table_type: "BASE TABLE", comment: null },
+      { name: "orders_2025", table_type: "BASE TABLE", comment: null, parent_schema: "public", parent_name: "orders" },
+      { name: "orders_2026", table_type: "BASE TABLE", comment: null, parent_schema: "public", parent_name: "orders" },
+      { name: "orders_2026_01", table_type: "BASE TABLE", comment: null, parent_schema: "public", parent_name: "orders_2026" },
+      { name: "users_2026", table_type: "BASE TABLE", comment: null, parent_schema: "public", parent_name: "users" },
+      { name: "z_probe_2026", table_type: "BASE TABLE", comment: null, parent_schema: "public", parent_name: "z_probe" },
+      { name: "zz_last_2026", table_type: "BASE TABLE", comment: null, parent_schema: "public", parent_name: "zz_last" },
+    ];
+    const rowsByName = new Map(rows.map((row) => [row.name, row]));
+    const rootNameOf = (row: TableInfo): string => {
+      let current = row;
+      while (current.parent_name) current = rowsByName.get(current.parent_name)!;
+      return current.name;
+    };
+    const listTables = vi.fn((_connectionId: string, _database: string, _schema: string, _filter?: string, limit?: number, offset = 0, _objectTypes?: string[], _catalog?: string, _tableNameFilter?: unknown, _exactIdentity?: boolean, pageTableRoots?: boolean) => {
+      // The sidebar must opt into root paging explicitly; other callers keep
+      // row-based pagination.
+      expect(pageTableRoots).toBe(true);
+      const roots = rows.filter((row) => !row.parent_name);
+      const pageRoots = roots.slice(offset, offset + (limit ?? roots.length));
+      const pageRootNames = new Set(pageRoots.map((row) => row.name));
+      return Promise.resolve([...pageRoots, ...rows.filter((row) => row.parent_name && pageRootNames.has(rootNameOf(row)))]);
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    settingsStore.desktopSettings.sidebar_table_page_size = 2;
+
+    const connection = postgresConnection();
+    const tablesGroup: TreeNode = {
+      id: "pg-1:app:public:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: connection.id,
+      database: "app",
+      schema: "public",
+      isExpanded: true,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: "pg-1:app",
+            label: "app",
+            type: "database",
+            connectionId: connection.id,
+            database: "app",
+            isExpanded: true,
+            children: [
+              {
+                id: "pg-1:app:public",
+                label: "public",
+                type: "schema",
+                connectionId: connection.id,
+                database: "app",
+                schema: "public",
+                isExpanded: true,
+                children: [tablesGroup],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    await store.loadObjectGroupChildren(tablesGroup, { force: true });
+
+    expect(listTables.mock.calls[0]).toEqual([connection.id, "app", "public", undefined, 3, 0, ["TABLE"], undefined, undefined, undefined, true]);
+    expect(tablesGroup.children?.map((node) => node.label)).toEqual(["orders", "users", "tree.loadMore"]);
+    const orders = tablesGroup.children?.find((node) => node.label === "orders");
+    const ordersPartitions = tablePartitionGroups(orders!)[0]?.children ?? [];
+    expect(ordersPartitions.map((node) => node.label)).toEqual(["orders_2025", "orders_2026"]);
+    expect(tablePartitionGroups(ordersPartitions.find((node) => node.label === "orders_2026")!)[0]?.children?.map((node) => node.label)).toEqual(["orders_2026_01"]);
+    const firstPageLabels = tableTreeLabels(tablesGroup.children);
+    expect(firstPageLabels).not.toContain("z_probe");
+    expect(firstPageLabels).not.toContain("z_probe_2026");
+
+    const loadMore = tablesGroup.children?.at(-1);
+    expect(loadMore?.type).toBe("load-more");
+    expect(loadMore?.loadMore).toMatchObject({ offset: 2, pageSize: 2 });
+    await store.loadMoreObjectGroupChildren(loadMore!);
+
+    // The next window opens at the probe root the first page hid, so no root is
+    // skipped or repeated between pages.
+    expect(listTables.mock.calls[1]).toEqual([connection.id, "app", "public", undefined, 3, 2, ["TABLE"], undefined, undefined, undefined, true]);
+    expect(tablesGroup.children?.map((node) => node.label)).toEqual(["orders", "users", "z_probe", "zz_last"]);
+    const loadedLabels = tableTreeLabels(tablesGroup.children);
+    expect(new Set(loadedLabels).size).toBe(loadedLabels.length);
+    const probe = tablesGroup.children?.find((node) => node.label === "z_probe");
+    expect(tablePartitionGroups(probe!)[0]?.children?.map((node) => node.label)).toEqual(["z_probe_2026"]);
+    expect(listTables).toHaveBeenCalledTimes(2);
   });
 
   it("discards a collapsed remote-search projection so the next expansion reloads the ordinary page", async () => {

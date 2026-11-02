@@ -10,6 +10,7 @@ import {
   buildMcpTraeConfig,
   buildMcpVsCodeConfig,
   buildMcpWorkBuddyConfig,
+  buildMcpAntigravityConfig,
   mcpWebBackendUrl,
   preferMcpNativeLaunch,
 } from "@/lib/mcp/mcpConfigTemplates";
@@ -19,7 +20,7 @@ describe("MCP config templates", () => {
     const shim = { command: "node", args: ["/old/shim.js"], env: { DBX_DATA_DIR: "/custom/data" } };
     const native = preferMcpNativeLaunch(shim, binary);
     expect(native).toEqual({ command: binary, env: shim.env });
-    for (const builder of [buildMcpJsonConfig, buildMcpTraeConfig, buildMcpQoderConfig, buildMcpVsCodeConfig, buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpDeepSeekHarnessConfig, buildMcpOpenCodeConfig, buildMcpPiConfig, buildMcpWorkBuddyConfig]) {
+    for (const builder of [buildMcpJsonConfig, buildMcpTraeConfig, buildMcpQoderConfig, buildMcpVsCodeConfig, buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpDeepSeekHarnessConfig, buildMcpOpenCodeConfig, buildMcpPiConfig, buildMcpWorkBuddyConfig, buildMcpAntigravityConfig]) {
       const result = builder(native);
       expect(result).toContain(JSON.stringify(binary));
       expect(result).toContain("DBX_DATA_DIR");
@@ -69,6 +70,16 @@ describe("MCP config templates", () => {
     const launch = { command: "dbx-mcp-server", env: { DBX_DATA_DIR: "D:\\DBX Data" } };
 
     expect(JSON.parse(buildMcpWorkBuddyConfig(launch))).toEqual({
+      mcpServers: {
+        dbx: launch,
+      },
+    });
+  });
+
+  it("builds the standard mcpServers JSON used by Antigravity", () => {
+    const launch = { command: "dbx-mcp-server", env: { DBX_DATA_DIR: "D:\\DBX Data" } };
+
+    expect(JSON.parse(buildMcpAntigravityConfig(launch))).toEqual({
       mcpServers: {
         dbx: launch,
       },

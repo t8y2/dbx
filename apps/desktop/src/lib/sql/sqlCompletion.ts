@@ -15,6 +15,7 @@ import { isEditorStatePlausibleFor, resolveLexicalLeafFromSyntaxTree, resolveSql
 import { DEFAULT_SQL_SNIPPETS, MANTICORESEARCH_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 import { BACKSLASH_ESCAPE_STRING_DIALECTS } from "@/lib/sql/sqlStatementRanges";
 import { requiresClickhouseIdentifierQuote, requiresMysqlIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
+import { isFullwidthParenthesis, MYSQL_FULLWIDTH_IDENTIFIER_CHARACTERS } from "@/lib/sql/sqlIdentifierCharacters";
 import { identifierMatchScore, matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { quoteTableIdentifier, quoteTableIdentifierIfNeeded } from "@/lib/table/tableSelectSql";
@@ -1004,11 +1005,14 @@ function isTableTriggerKeyword(keyword: string, options: SqlSemanticBuildOptions
 }
 
 /** APPLY is only a table-source trigger as the CROSS/OUTER APPLY operator; a bare `apply`
- *  may be a table name and must keep clause keywords available (issue #13829). */
-function isApplyOperatorTrigger(lastWord: string, beforeToken: string): boolean {
+ *  may be a table name and must keep clause keywords available (issue #13829). The gap
+ *  between CROSS/OUTER and APPLY may hold comments, so the remainder is comment-masked
+ *  before the prefix check (PR #13889 review follow-up). */
+function isApplyOperatorTrigger(lastWord: string, beforeToken: string, databaseType?: DatabaseType): boolean {
   if (lastWord !== "apply") return false;
-  const withoutApply = beforeToken.slice(0, beforeToken.length - "apply".length).trimEnd();
-  return /(?:^|[\s(])(?:cross|outer)$/i.test(withoutApply);
+  const withoutApply = beforeToken.slice(0, beforeToken.length - "apply".length);
+  const masked = maskSqlLiteralsAndComments(withoutApply, databaseType).trimEnd();
+  return /(?:^|[\s(])(?:cross|outer)$/i.test(masked);
 }
 
 // Keywords that only make sense in DDL / statement-start contexts (not inside SELECT/INSERT/UPDATE/DELETE)
@@ -3047,7 +3051,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   // identical arguments three times, which was cheap when it was regex-based but now runs a full
   // tokenizeSqlSemantic pass, so the duplicate work is worth avoiding.
   const inTableListContext = isInTableListContext(beforeToken, options.databaseType);
-  const applyTableTrigger = isApplyOperatorTrigger(lastWord, beforeToken);
+  const applyTableTrigger = isApplyOperatorTrigger(lastWord, beforeToken, options.databaseType);
   const afterTableTrigger = isTableTriggerKeyword(lastWord, options) || applyTableTrigger || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
   const exclusiveTableSuggestions = EXCLUSIVE_TABLE_TRIGGER_KEYWORDS.has(lastWord) || applyTableTrigger || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
   const tableAliasAfterCursor = hasTableAliasAfterCursor(sql, cursor);
@@ -3400,9 +3404,9 @@ function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseTy
   let index = tail.length;
 
   while (index > 0) {
-    const parsed = parseTrailingIdentifierPart(tail, index);
+    const parsed = parseTrailingIdentifierPart(tail, index, databaseType);
     if (!parsed) {
-      const omittedSqlServerSchema = databaseType === "sqlserver" && tail[index - 1] === "." && parseTrailingIdentifierPart(tail, index - 1);
+      const omittedSqlServerSchema = databaseType === "sqlserver" && tail[index - 1] === "." && parseTrailingIdentifierPart(tail, index - 1, databaseType);
       if (!omittedSqlServerSchema) break;
       parts.unshift(SQLSERVER_DEFAULT_SCHEMA);
       index -= 1;
@@ -3439,7 +3443,7 @@ function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseTy
   };
 }
 
-function parseTrailingIdentifierPart(input: string, endExclusive: number): { start: number; raw: string } | null {
+function parseTrailingIdentifierPart(input: string, endExclusive: number, databaseType?: DatabaseType): { start: number; raw: string } | null {
   if (endExclusive <= 0) return null;
   const end = endExclusive - 1;
   const tailChar = input[end];
@@ -3484,13 +3488,14 @@ function parseTrailingIdentifierPart(input: string, endExclusive: number): { sta
       const high = input.charCodeAt(previous - 1);
       if (high >= 0xd800 && high <= 0xdbff) previous--;
     }
-    if (!SQL_IDENTIFIER_SUFFIX_CHAR.test(input.slice(previous, start))) break;
+    const char = input.slice(previous, start);
+    if (!SQL_IDENTIFIER_SUFFIX_CHAR.test(char) && !(databaseType === "mysql" && isFullwidthParenthesis(char))) break;
     start = previous;
   }
   if (start === endExclusive) return null;
   const raw = input.slice(start, endExclusive);
   const firstCodePoint = raw.codePointAt(0);
-  if (firstCodePoint === undefined || !SQL_IDENTIFIER_START_CHAR.test(String.fromCodePoint(firstCodePoint))) {
+  if (firstCodePoint === undefined || (!SQL_IDENTIFIER_START_CHAR.test(String.fromCodePoint(firstCodePoint)) && !(databaseType === "mysql" && isFullwidthParenthesis(String.fromCodePoint(firstCodePoint))))) {
     return null;
   }
 
@@ -3993,6 +3998,11 @@ function buildTableRefPattern(unquotedIdentifier: string, aliasIdentifier: strin
 const TABLE_REF_PATTERN_ASCII = buildTableRefPattern(TABLE_REF_UNQUOTED_IDENTIFIER_ASCII, TABLE_REF_ALIAS_ASCII, false);
 const TABLE_REF_PATTERN_UNICODE_DEFAULT = buildTableRefPattern(TABLE_REF_UNQUOTED_IDENTIFIER_UNICODE, TABLE_REF_ALIAS_UNICODE, false);
 const TABLE_REF_PATTERN_UNICODE_SQLSERVER = buildTableRefPattern(TABLE_REF_UNQUOTED_IDENTIFIER_UNICODE, TABLE_REF_ALIAS_UNICODE, true);
+const TABLE_REF_PATTERN_MYSQL = buildTableRefPattern(
+  `[_\\p{ID_Start}${MYSQL_FULLWIDTH_IDENTIFIER_CHARACTERS}][@#${SQL_IDENTIFIER_CONTINUE_CHAR.source.slice(1, -1)}${MYSQL_FULLWIDTH_IDENTIFIER_CHARACTERS}]*`,
+  `[_\\p{ID_Start}${MYSQL_FULLWIDTH_IDENTIFIER_CHARACTERS}][${SQL_IDENTIFIER_CONTINUE_CHAR.source.slice(1, -1)}${MYSQL_FULLWIDTH_IDENTIFIER_CHARACTERS}]*`,
+  false,
+);
 
 /**
  * Masks string literals and comments so keyword/table-reference scanning never mistakes text
@@ -4208,7 +4218,7 @@ function extractReferencedTables(sql: string, databaseType?: DatabaseType): SqlC
   // Trino/Presto/Impala, Db2, Teradata) keep the ASCII-only shape to avoid false-positive matches.
   // An unresolved databaseType (e.g. a scratch editor before a connection is picked) also defaults
   // to ASCII-only, matching this function's behavior before dialect-aware Unicode matching existed.
-  const pattern = !databaseType || ASCII_ONLY_UNQUOTED_IDENTIFIER_DATABASES.has(databaseType) ? TABLE_REF_PATTERN_ASCII : databaseType === "sqlserver" ? TABLE_REF_PATTERN_UNICODE_SQLSERVER : TABLE_REF_PATTERN_UNICODE_DEFAULT;
+  const pattern = !databaseType || ASCII_ONLY_UNQUOTED_IDENTIFIER_DATABASES.has(databaseType) ? TABLE_REF_PATTERN_ASCII : databaseType === "mysql" ? TABLE_REF_PATTERN_MYSQL : databaseType === "sqlserver" ? TABLE_REF_PATTERN_UNICODE_SQLSERVER : TABLE_REF_PATTERN_UNICODE_DEFAULT;
   // These are shared module-level RegExp objects (built once for performance), so reset
   // lastIndex before each scan rather than relying on a fresh object per call.
   pattern.lastIndex = 0;

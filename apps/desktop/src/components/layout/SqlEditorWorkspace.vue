@@ -47,13 +47,11 @@ const workspaceClass = computed(() => (typeof attrs.class === "string" ? attrs.c
 const surfaceProps = computed(() => ({
   activeTab: props.activeTab,
   activeConnection: props.activeConnection,
-  executableSql: props.executableSql,
+  hasExecutableSql: props.hasExecutableSql,
   activeOutputView: props.activeOutputView,
   formatSqlRequest: props.formatSqlRequest,
   compressSqlRequest: props.compressSqlRequest,
   keywordCaseRequest: props.keywordCaseRequest,
-  selectedSql: props.selectedSql,
-  cursorPos: props.cursorPos,
   blockDangerousRedisCommands: props.blockDangerousRedisCommands,
   zenMode: props.zenMode,
 }));

@@ -14,13 +14,11 @@ const resultClass = computed(() => (typeof attrs.class === "string" ? attrs.clas
 const surfaceProps = computed<ContentAreaSurfaceProps>(() => ({
   activeTab: props.activeTab,
   activeConnection: props.activeConnection,
-  executableSql: props.executableSql,
+  hasExecutableSql: props.hasExecutableSql,
   activeOutputView: props.activeOutputView,
   formatSqlRequest: props.formatSqlRequest,
   compressSqlRequest: props.compressSqlRequest,
   keywordCaseRequest: props.keywordCaseRequest,
-  selectedSql: props.selectedSql,
-  cursorPos: props.cursorPos,
   blockDangerousRedisCommands: props.blockDangerousRedisCommands,
 }));
 const contentEmits = createContentSurfaceEventForwarders(emit);

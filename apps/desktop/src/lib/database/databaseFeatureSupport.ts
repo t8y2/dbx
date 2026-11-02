@@ -285,6 +285,19 @@ export function usesPostgresLikeStructureCopy(dbType?: DatabaseType): boolean {
   return !!dbType && PG_LIKE_STRUCTURE_TYPES.has(dbType);
 }
 
+/**
+ * PostgreSQL-protocol connections whose native driver can page a sidebar table
+ * list by top-level relation and append each page's partition descendants
+ * (`list_table_roots_page_core`). GaussDB's external M/JDBC driver still pages
+ * rows itself, so it keeps the row-based cursor.
+ */
+const PARTITION_ROOT_PAGED_TABLE_TYPES: ReadonlySet<DatabaseType> = new Set(["postgres", "redshift", "gaussdb", "kwdb", "opengauss"]);
+
+export function pagesTablePartitionsWithRootPage(connection?: Pick<ConnectionConfig, "db_type" | "driver_profile"> | null): boolean {
+  if (!connection || !PARTITION_ROOT_PAGED_TABLE_TYPES.has(connection.db_type)) return false;
+  return !(connection.db_type === "gaussdb" && connection.driver_profile?.toLowerCase() === "gaussdb-m");
+}
+
 const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "gaussdb", "opengauss", "mysql", "oracle", "jdbc", "oceanbase-oracle", "dameng", "sqlserver"];
 
 /** Oracle-family databases, kept ONLY for the Oracle-specific ALTER SESSION SET

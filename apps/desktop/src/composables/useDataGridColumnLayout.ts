@@ -593,6 +593,13 @@ export function useDataGridColumnLayout(options: {
   }
 
   const columnHeaderDragState = ref<ColumnHeaderDragState | null>(null);
+  // A press on a header creates the drag state before anything has moved. Header rendering must only
+  // follow the state once the pointer really dragged: reading the raw state would re-render every
+  // header on pointerdown and again on pointerup, i.e. twice for each plain click (sorting, selecting).
+  const columnHeaderActiveDrag = computed(() => {
+    const state = columnHeaderDragState.value;
+    return state?.dragging ? state : null;
+  });
   const columnHeaderResizeActive = ref(false);
   let columnHeaderDragClickGuardUntil = 0;
   let columnHeaderSuppressNextClick = false;
@@ -604,7 +611,7 @@ export function useDataGridColumnLayout(options: {
 
   const columnHeaderTooltipsDisabled = computed(() =>
     columnHeaderTooltipDisabled({
-      columnDragActive: columnHeaderDragState.value !== null,
+      columnDragActive: columnHeaderActiveDrag.value !== null,
       columnResizeActive: columnHeaderResizeActive.value,
     }),
   );
@@ -965,13 +972,18 @@ export function useDataGridColumnLayout(options: {
     return true;
   }
 
+  // Shared objects: a fresh literal per call would make every header's `dragClass` prop look changed on
+  // every parent render.
+  const COLUMN_HEADER_DRAG_HIDDEN_CLASS = { "opacity-0 pointer-events-none": true };
+  const COLUMN_HEADER_DRAG_VISIBLE_CLASS = { "opacity-0 pointer-events-none": false };
+
   function columnHeaderDragClass(visibleColIdx: number) {
-    const state = columnHeaderDragState.value;
-    return { "opacity-0 pointer-events-none": state?.dragging && !state.referenceMode && state.sourceVisibleIndex === visibleColIdx };
+    const state = columnHeaderActiveDrag.value;
+    return state && !state.referenceMode && state.sourceVisibleIndex === visibleColIdx ? COLUMN_HEADER_DRAG_HIDDEN_CLASS : COLUMN_HEADER_DRAG_VISIBLE_CLASS;
   }
 
   function columnHeaderPreviewOffset(visibleColIdx: number): number {
-    const state = columnHeaderDragState.value;
+    const state = columnHeaderActiveDrag.value;
     if (!state || state.referenceMode) return 0;
     const scrollCompensation = state.sourceVisibleIndex < frozenColumnCount.value ? 0 : state.currentScrollLeft - state.startScrollLeft;
     return columnHeaderPreviewOffsetForColumn({
@@ -985,7 +997,14 @@ export function useDataGridColumnLayout(options: {
     });
   }
 
+  // Built once per layout change rather than per render, so unchanged headers receive the same style object.
+  const columnHeaderStyles = computed(() => toValue(options.renderedColumnWidths).map((_, visibleColIdx) => buildColumnHeaderStyle(visibleColIdx)));
+
   function columnHeaderStyle(visibleColIdx: number) {
+    return columnHeaderStyles.value[visibleColIdx] ?? buildColumnHeaderStyle(visibleColIdx);
+  }
+
+  function buildColumnHeaderStyle(visibleColIdx: number) {
     const style = renderedColumnStyle(visibleColIdx);
     const offset = columnHeaderPreviewOffset(visibleColIdx);
     // 冻结列头需要更高 z-index（与列头行号 z-20 一致）以覆盖非冻结列头

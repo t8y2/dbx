@@ -492,6 +492,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({}).autoAliasTables).toBe(true);
   });
 
+  it("preserves legacy column comments by default and accepts an explicit opt-out", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments).toBe(true);
+    expect(normalizeEditorSettings({}).batchColumnSelectionIncludeComments).toBe(true);
+    expect(normalizeEditorSettings({ batchColumnSelectionIncludeComments: false }).batchColumnSelectionIncludeComments).toBe(false);
+    expect(normalizeEditorSettings({ batchColumnSelectionIncludeComments: "false" as any }).batchColumnSelectionIncludeComments).toBe(true);
+  });
+
   it("preserves disabled automatic table aliases", () => {
     expect(normalizeEditorSettings({ autoAliasTables: false }).autoAliasTables).toBe(false);
   });
@@ -2368,6 +2375,7 @@ describe("settingsStore editor settings persistence", () => {
   it("rolls back a failed atomic update and allows retry", async () => {
     const loadEditorSettings = vi.fn().mockResolvedValue({
       ignoredUpdateVersion: "",
+      updateChannel: "stable",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
@@ -2417,6 +2425,7 @@ describe("settingsStore editor settings persistence", () => {
     let resolveFirstSave!: () => void;
     const loadEditorSettings = vi.fn().mockResolvedValue({
       ignoredUpdateVersion: "",
+      updateChannel: "stable",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
@@ -2454,6 +2463,7 @@ describe("settingsStore editor settings persistence", () => {
     let rejectFirstSave!: (error: Error) => void;
     const loadEditorSettings = vi.fn().mockResolvedValue({
       ignoredUpdateVersion: "",
+      updateChannel: "stable",
       theme: "system",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,

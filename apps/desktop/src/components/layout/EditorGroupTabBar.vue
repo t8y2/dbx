@@ -1439,7 +1439,7 @@ function removeTabDragGhost() {
 }
 
 function isDirtyTab(tab: QueryTab) {
-  return queryStore.isTabDirty(tab);
+  return queryStore.dirtyTabIds.has(tab.id);
 }
 
 function tabTitleStyle(tab: QueryTab): CSSProperties | undefined {
@@ -1820,6 +1820,10 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
 function handleTabDoubleClick(tab: QueryTab, event: MouseEvent) {
   event.stopPropagation();
   if (event.target instanceof Element && event.target.closest("button, input, [role='button']")) {
+    return;
+  }
+  if (settingsStore.editorSettings.tabDoubleClickAction === "close") {
+    closeTab(tab);
     return;
   }
   if (tab.mode === "data") {

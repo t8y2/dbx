@@ -12,6 +12,7 @@ test-support = ["host-prompts"]
 downloads = ["dep:reqwest", "dep:futures", "dep:serde"]
 
 [dependencies]
+semver = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "socks"], optional = true }
 futures = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["process", "time"] }

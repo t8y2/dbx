@@ -437,6 +437,11 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
     // 其它 loadTableMetadata 消费者最长 30 秒拿到旧列。不带 schema/catalog
     // 维度（宁可多废，schema 形态在各消费点可能不同）
     invalidateTableMetadataCache({ connectionId: context.connectionId, database: context.database, tableName: context.tableName, ...(context.exactIdentity ? { schema: context.schema } : {}) });
+    try {
+      await connectionStore.refreshTableColumnsTree(context.connectionId, context.database, context.tableName, context.schema, context.catalog);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 5000);
+    }
     const matchingDataTabs = queryStore.tabs.filter((tab) => tab.mode === "data" && tab.connectionId === context.connectionId && tab.database === context.database && tab.tableMeta?.tableName === context.tableName && (tab.schema || tab.tableMeta.schema || "") === (context.schema || ""));
     // 同一 catalog 只强制加载一次，结果分发给全部匹配 tab
     const loadedByCatalog = new Map<string, { columns: ColumnInfo[]; primaryKeys: string[] }>();

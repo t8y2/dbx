@@ -668,12 +668,44 @@ function parseJdbcDremioUrl(source: string): ParsedConnectionUrl | null {
   };
 }
 
+/** Schemes that address a web endpoint, where `#` really does start a fragment. */
+const WEB_URL_SCHEMES = new Set(["http", "https"]);
+
+/**
+ * Database connection URLs are DSNs, not web pages: the query is a parameter
+ * list that is read to the end (PgJDBC, and DBX's own Hive/Oracle JDBC
+ * importers), and a `#` inside a credential, database name or parameter value
+ * is literal text. WHATWG `URL` stops at the first `#` instead, which imported
+ * `…?password=Jxc#2026@n` as the password `Jxc` and dropped the rest without a
+ * warning, and rejected `user:p#ss@host` as an invalid URL.
+ *
+ * Escaping the literal `#` before parsing fixes both: `decodeUrlPart` restores
+ * the original character for credentials, and DBX re-encodes credentials when it
+ * builds the driver URL, so the value reaches the driver unchanged. Only Redis
+ * documents a fragment of its own (`#insecure`), so that suffix stays an alias;
+ * `http`/`https` endpoints keep standard fragment behaviour.
+ */
+function normalizeConnectionUrlFragment(source: string): { source: string; redisInsecure: boolean } {
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(source)?.[1]?.toLowerCase() ?? "";
+  if (WEB_URL_SCHEMES.has(scheme)) return { source, redisInsecure: false };
+
+  const fragmentStart = source.indexOf("#");
+  if (fragmentStart < 0) return { source, redisInsecure: false };
+
+  const fragment = source.slice(fragmentStart + 1);
+  if ((scheme === "redis" || scheme === "rediss") && decodeUrlPart(fragment).trim().toLowerCase() === "insecure") {
+    return { source: source.slice(0, fragmentStart), redisInsecure: true };
+  }
+
+  return { source: source.replace(/#/g, "%23"), redisInsecure: false };
+}
+
 function parseJdbcDremioArrowFlightSqlUrl(source: string): ParsedConnectionUrl | null {
   if (!/^jdbc:arrow-flight-sql:\/\//i.test(source)) return null;
 
   let parsed: URL;
   try {
-    parsed = new URL(source.replace(/^jdbc:/i, ""));
+    parsed = new URL(normalizeConnectionUrlFragment(source.replace(/^jdbc:/i, "")).source);
   } catch {
     return null;
   }
@@ -731,9 +763,10 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   const zooKeeperResult = parseZooKeeperUrl(source);
   if (zooKeeperResult) return zooKeeperResult;
 
+  const normalizedSource = normalizeConnectionUrlFragment(source);
   let parsed: URL;
   try {
-    parsed = new URL(source);
+    parsed = new URL(normalizedSource.source);
   } catch {
     throw new Error("Invalid connection URL");
   }
@@ -747,11 +780,10 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   const urlParams = parsed.search.replace(/^\?/, "");
   const name = connectionNameParam(parsed);
   const urlParamsWithoutName = stripConnectionNameParam(urlParams);
-  const normalizedFragment = decodeUrlPart(parsed.hash.replace(/^#/, "")).trim().toLowerCase();
   // A Redis path can carry pasted redis-cli flags ("…/0 --tls --insecure");
   // salvage the db index plus the TLS/insecure intent before they are dropped.
   const redisPath = profile.type === "redis" ? parseRedisUrlPath(databaseFromPath(parsed.pathname) || "") : null;
-  const redisInsecure = redisPath?.insecure || normalizedFragment === "insecure";
+  const redisInsecure = redisPath?.insecure || normalizedSource.redisInsecure;
   const parsedUrlParams = profile.type === "redis" && redisInsecure && !/(^|&)insecure=/i.test(urlParamsWithoutName) ? [urlParamsWithoutName, "insecure=true"].filter(Boolean).join("&") : urlParamsWithoutName;
   const jdbcCredentials = isJdbcUrl && (profile.type === "mysql" || profile.profile === "oceanbase-oracle") ? extractMysqlCredentialParams(parsedUrlParams) : undefined;
   const effectiveUrlParams = jdbcCredentials?.urlParams ?? parsedUrlParams;

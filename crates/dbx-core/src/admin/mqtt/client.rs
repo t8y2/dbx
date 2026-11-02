@@ -870,6 +870,7 @@ impl MqttClient {
                     } else {
                         saved.push(MqttSavedTopic {
                             topic: pending.topic.clone(),
+                            alias: String::new(),
                             qos: pending.qos,
                             no_local: pending.no_local,
                             enabled: true,
@@ -1033,6 +1034,7 @@ impl MqttClient {
     /// Save or update a subscription configuration without sending a broker request.
     pub async fn save_topic_config(&self, mut config: MqttSavedTopic) -> Result<(), String> {
         config.topic = config.topic.trim().to_string();
+        config.alias = config.alias.trim().to_string();
         validate_topic_filter(&config.topic)?;
         if config.no_local && !matches!(self.config.protocol_version, super::types::MqttProtocolVersion::V5) {
             return Err("MQTT 3.x 不支持 No Local 订阅选项".to_string());

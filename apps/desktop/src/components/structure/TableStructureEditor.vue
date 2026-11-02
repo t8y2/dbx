@@ -347,6 +347,7 @@ let ddlEditorScrollCleanup: (() => void) | null = null;
 const loadedMetadataFacets = new Set<ObjectMetadataFacet>();
 let structureEditorReady = false;
 const ddlFetched = ref(false);
+let pendingDdlNavigation = false;
 /** User-edited DDL script; `null` means untouched (the loaded DDL is shown verbatim). */
 const ddlDraft = ref<string | null>(null);
 
@@ -583,8 +584,11 @@ function getStructureColumns(request: StructureDdlRequest) {
   return request.exactIdentity ? api.getColumns(request.connectionId, request.database, request.schema, request.tableName, request.catalog, undefined, undefined, true) : api.getColumns(request.connectionId, request.database, request.schema, request.tableName, request.catalog);
 }
 
-async function fetchDdl(force = false) {
+async function fetchDdl(force = false, options?: { preserveDraft?: boolean }) {
   if (!props.connectionId || !props.database || !props.tableName || (!force && ddlFetched.value) || !tableMetadataCapabilities.value.ddl) return;
+  const initialDdlDraft = ddlDraft.value;
+  const canReplaceDraft = () => !options?.preserveDraft || (!saving.value && !hasPendingStructureChanges() && !ddlDirty.value && !triggerStructureRecovery.value && ddlDraft.value === initialDdlDraft);
+  if (!canReplaceDraft()) return;
   if (force) destroyDdlEditor();
   const request = ddlRequest();
   const separateIndexes = (databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle") && ddlIndexesSeparated.value;
@@ -603,11 +607,12 @@ async function fetchDdl(force = false) {
   try {
     const { ddl } = await loadObjectDdl({ ...request, separateIndexes }, { force });
     const formatted = await formatStructureDdl(ddl);
-    if (!current()) return;
+    if (!current() || !canReplaceDraft()) return;
+    if (options?.preserveDraft) ddlDraft.value = null;
     rawDdlContent.value = formatted;
     ddlFetched.value = true;
   } catch (e: any) {
-    if (!current()) return;
+    if (!current() || !canReplaceDraft()) return;
     ddlLoadError.value = String(e?.message || e);
     ddlFetched.value = false;
   } finally {
@@ -3919,6 +3924,7 @@ function resetState() {
   rawDdlContent.value = "";
   ddlDraft.value = null;
   ddlFetched.value = false;
+  pendingDdlNavigation = false;
   loadedMetadataFacets.clear();
   newTableName.value = "";
   postgresForeignTable.value = emptyPostgresForeignTableDraft();
@@ -7818,7 +7824,7 @@ onMounted(() => {
   } else if (isCreateMode.value) {
     markDraftHydratedAndSync();
   } else if (activeTab.value === "ddl") {
-    void Promise.all([fetchDdl(), loadVisibleTableComment(), probePartitionsTabVisibility()]).then(markDraftHydratedAndSync);
+    void loadActiveTableStructureMetadataIfNeeded().then(markDraftHydratedAndSync);
   } else {
     void loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true }).then(() => applyInitialStructureTarget());
   }
@@ -7900,8 +7906,11 @@ function resolveStructureMetadataTab(tab: TableInfoTab | undefined, capabilities
 
 function applyInitialStructureTab(useDefault = true) {
   if (props.initialTab) {
-    activeTab.value = resolveStructureMetadataTab(props.initialTab);
+    const nextTab = resolveStructureMetadataTab(props.initialTab);
+    if (nextTab === "ddl" && (props.initialTabRequestId === undefined || props.initialTabRequestId !== lastAppliedInitialTabRequestId)) pendingDdlNavigation = true;
+    activeTab.value = nextTab;
     lastAppliedInitialTabRequestId = props.initialTabRequestId;
+    if (structureEditorReady && pendingDdlNavigation) void loadActiveTableStructureMetadataIfNeeded();
   } else if (useDefault) {
     activeTab.value = resolveStructureMetadataTab(undefined);
   }
@@ -8161,7 +8170,11 @@ watch(refreshVersion, (version, previous) => {
 async function loadActiveTableStructureMetadataIfNeeded() {
   if (!structureEditorReady || isCreateMode.value) return;
   if (activeTab.value === "ddl") {
-    await Promise.all([ddlLoading.value ? Promise.resolve() : fetchDdl(), loadVisibleTableComment(false, true), probePartitionsTabVisibility()]);
+    // Explicit navigation refreshes a clean editor; ordinary tab switches keep its baseline.
+    const refreshNavigation = pendingDdlNavigation;
+    pendingDdlNavigation = false;
+    const ddl = ddlLoading.value ? Promise.resolve() : refreshNavigation ? fetchDdl(true, { preserveDraft: true }) : fetchDdl();
+    await Promise.all([ddl, loadVisibleTableComment(false, true), probePartitionsTabVisibility()]);
     return;
   }
   if (loading.value || secondaryMetadataLoading.value) return;

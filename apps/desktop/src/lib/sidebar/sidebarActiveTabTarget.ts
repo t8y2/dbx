@@ -419,6 +419,31 @@ export function shouldScrollActiveSidebarSelection(options: { activeTabId: strin
   return options.activeTabId !== options.previousActiveTabId || (options.autoSelectEnabled && options.previousAutoSelectEnabled === false);
 }
 
+/**
+ * Tracks whether the auto-select reveal for the current tab is still pending, so retries can
+ * finish it once async tree children arrive, while user-initiated collapses after it settled
+ * are left alone: re-running the reveal on every flatNodes change re-expanded whatever the
+ * user had just collapsed, making connection/database nodes impossible to fold (#13839, #13849).
+ */
+export class ActiveTabSidebarRevealTracker {
+  private pending = false;
+  private pendingScroll = false;
+
+  /** Feed the watcher's previous/current values; returns whether the reveal should run now and with which scroll intent. */
+  onWatchTrigger(options: { activeTabId: string | null | undefined; previousActiveTabId: string | null | undefined; autoSelectEnabled: boolean; previousAutoSelectEnabled: boolean | undefined }): { run: boolean; scroll: boolean } {
+    if (options.activeTabId !== options.previousActiveTabId || options.autoSelectEnabled !== options.previousAutoSelectEnabled) {
+      this.pending = true;
+      this.pendingScroll = shouldScrollActiveSidebarSelection(options);
+    }
+    return { run: this.pending, scroll: this.pending ? this.pendingScroll : false };
+  }
+
+  /** Settles the pending reveal once it landed (found); a miss stays pending so the next tree load retries. */
+  onSettled(found: boolean): void {
+    if (found) this.pending = false;
+  }
+}
+
 // nearest is used for passive auto-selection; smart keeps context for the existing toolbar action.
 export type SidebarNodeScrollAlign = "nearest" | "top" | "smart" | "center";
 

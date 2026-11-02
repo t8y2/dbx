@@ -55,7 +55,7 @@ import {
   findSidebarNodeForTarget,
   findNodePathForTarget,
   scrollTopForSidebarNode,
-  shouldScrollActiveSidebarSelection,
+  ActiveTabSidebarRevealTracker,
   type ActiveTabSidebarTarget,
   type SidebarNodeScrollAlign,
 } from "@/lib/sidebar/sidebarActiveTabTarget";
@@ -2547,10 +2547,10 @@ function currentTreeScroller(): HTMLElement | null {
   return ((useVirtualTree.value ? treeScrollerRef.value?.$el : plainTreeScrollerRef.value) as HTMLElement | undefined) ?? null;
 }
 
-async function selectActiveTabSidebarNode(options: { scroll: boolean }) {
-  if (!settingsStore.editorSettings.autoSelectActiveSidebarNode) return;
+async function selectActiveTabSidebarNode(options: { scroll: boolean }): Promise<boolean> {
+  if (!settingsStore.editorSettings.autoSelectActiveSidebarNode) return false;
   const tab = activeTab.value;
-  if (!tab) return;
+  if (!tab) return false;
 
   let match = findSidebarNodeForActiveTab(tab, flatNodes.value);
   if (!match) {
@@ -2559,12 +2559,12 @@ async function selectActiveTabSidebarNode(options: { scroll: boolean }) {
     if (nodePath && nodePath.length > 0) {
       expandSidebarNodePath(nodePath);
       await nextTick();
-      if (activeTab.value?.id !== tab.id) return;
+      if (activeTab.value?.id !== tab.id) return false;
       match = findSidebarNodeForActiveTab(tab, flatNodes.value);
     }
   }
-  if (!match) return;
-  if (activeTab.value?.id !== tab.id) return;
+  if (!match) return false;
+  if (activeTab.value?.id !== tab.id) return false;
 
   if (store.connectionMultiSelectActive || store.selectedTreeNodeId !== match.id || store.treeSelectionAnchorId !== match.id || store.selectedTreeNodeIds.length !== 1 || store.selectedTreeNodeIds[0] !== match.id) {
     store.selectedTreeNodeId = match.id;
@@ -2572,13 +2572,13 @@ async function selectActiveTabSidebarNode(options: { scroll: boolean }) {
     store.treeSelectionAnchorId = match.id;
     store.connectionMultiSelectActive = false;
   }
-  if (!options.scroll) return;
+  if (!options.scroll) return true;
 
   await nextTick();
 
   const index = flatTreeIndex.value.flatNodeIndexById.get(match.id) ?? -1;
   const scroller = currentTreeScroller();
-  if (!scroller || index < 0) return;
+  if (!scroller || index < 0) return true;
 
   const nextScrollTop = scrollTopForSidebarNode({
     index,
@@ -2591,19 +2591,26 @@ async function selectActiveTabSidebarNode(options: { scroll: boolean }) {
   if (nextScrollTop !== scroller.scrollTop) {
     scroller.scrollTop = nextScrollTop;
   }
+  return true;
 }
+
+// The reveal must settle: re-running it on every flatNodes change (expansion, collapse, async
+// loads after it landed) re-expanded whatever the user had just collapsed (#13839, #13849).
+// Pending stays true across flatNodes-only fires until the target is found, so async tree
+// loads still complete the reveal started by a tab switch or a setting toggle.
+const activeTabRevealTracker = new ActiveTabSidebarRevealTracker();
 
 watch(
   [() => activeTab.value?.id ?? null, flatNodes, () => settingsStore.editorSettings.autoSelectActiveSidebarNode],
   ([activeTabId, _nodes, autoSelectEnabled], [previousActiveTabId, _previousNodes, previousAutoSelectEnabled]) => {
-    void selectActiveTabSidebarNode({
-      scroll: shouldScrollActiveSidebarSelection({
-        activeTabId,
-        previousActiveTabId,
-        autoSelectEnabled,
-        previousAutoSelectEnabled,
-      }),
+    const trigger = activeTabRevealTracker.onWatchTrigger({
+      activeTabId,
+      previousActiveTabId,
+      autoSelectEnabled,
+      previousAutoSelectEnabled,
     });
+    if (!trigger.run) return;
+    void selectActiveTabSidebarNode({ scroll: trigger.scroll }).then((found) => activeTabRevealTracker.onSettled(found));
   },
   { flush: "post" },
 );

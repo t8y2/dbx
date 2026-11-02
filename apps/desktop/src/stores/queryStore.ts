@@ -3831,7 +3831,7 @@ export const useQueryStore = defineStore("query", () => {
     catalog?: string,
     eventName?: string,
     eventReadOnly = false,
-    initialObjectFilter?: "tables" | "events" | "indexes",
+    initialObjectFilter?: ObjectBrowserFilter,
     eventCreateRequestId?: number,
     indexRequest?: { create?: boolean; view?: import("@/types/database").SchemaIndexIdentity },
   ) {
@@ -3857,6 +3857,13 @@ export const useQueryStore = defineStore("query", () => {
           eventCreateRequestId: undefined,
           initialObjectFilter: initialObjectFilter ?? (eventName ? "events" : existing.objectBrowser?.initialObjectFilter),
           eventOpenRequestId: (existing.objectBrowser?.eventOpenRequestId ?? 0) + 1,
+        };
+      } else if (initialObjectFilter && initialObjectFilter !== "indexes") {
+        // 分组节点（表/视图/存储过程…）重复点击：复用 tab 的同时把列表切到对应类型。
+        existing.objectBrowser = {
+          ...existing.objectBrowser,
+          initialObjectFilter,
+          filter: initialObjectFilter,
         };
       }
       if (initialObjectFilter === "indexes" || indexRequest) {

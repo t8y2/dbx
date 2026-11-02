@@ -3089,6 +3089,11 @@ export async function saveAiConversation(conversation: AiConversation): Promise<
   return post("/api/ai/conversation", { conversation });
 }
 
+/** Patches only the plugin attachment list; see the Tauri counterpart. */
+export async function updateAiConversationPluginConnections(conversationId: string, pluginConnectionIds: string[]): Promise<void> {
+  return post("/api/ai/conversation/plugin-connections", { conversationId, pluginConnectionIds });
+}
+
 export async function loadAiConversations(): Promise<AiConversation[]> {
   return get("/api/ai/conversations");
 }

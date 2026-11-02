@@ -6718,6 +6718,31 @@ impl Storage {
         .await
     }
 
+    /// Updates only the plugin attachment list of a conversation.
+    ///
+    /// A toggle can land after a transcript snapshot was built but before that
+    /// snapshot is saved. Repairing the record by re-saving the whole snapshot
+    /// would write its older messages and title over whatever has been persisted
+    /// since, so callers must patch this one column instead. A missing row is a
+    /// no-op: the first save of a new chat may still be in flight.
+    pub async fn update_ai_conversation_plugin_connection_ids(
+        &self,
+        id: &str,
+        plugin_connection_ids: &[String],
+    ) -> Result<(), String> {
+        let id = id.to_string();
+        let plugin_connection_ids = serde_json::to_string(plugin_connection_ids).map_err(|e| e.to_string())?;
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE ai_conversations SET plugin_connection_ids = ? WHERE id = ?",
+                params![plugin_connection_ids, id],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn load_ai_conversations(&self) -> Result<Vec<AiConversation>, String> {
         self.with_conn(|conn| {
             let mut stmt = conn
@@ -11956,6 +11981,31 @@ mod tests {
         let loaded = storage.load_ai_conversations().await.unwrap();
         let saved = loaded.iter().find(|item| item.id == "attached-conv").unwrap();
         assert!(saved.plugin_connection_ids.is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    // #13978 review: a toggle (and the stale-snapshot repair) must patch only the
+    // attachment column, never re-save a whole older snapshot over newer content.
+    #[tokio::test]
+    async fn plugin_attachment_update_touches_only_that_column() {
+        let path = temp_db_path("ai-conversation-plugin-attachment-update");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        let mut conversation = ai_conversation("attach-update", "0001");
+        conversation.messages[0].content = "the persisted turn".to_string();
+        storage.save_ai_conversation(&conversation).await.unwrap();
+
+        storage.update_ai_conversation_plugin_connection_ids("attach-update", &["ssh-1".to_string()]).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "attach-update").unwrap();
+        assert_eq!(saved.plugin_connection_ids, ["ssh-1"]);
+        // The transcript and title stay the ones the full save wrote.
+        assert_eq!(saved.title, conversation.title);
+        assert_eq!(saved.messages[0].content, "the persisted turn");
+
+        // A row that does not exist yet is a no-op, not an error: the first save
+        // of a new chat may still be in flight when the toggle lands.
+        storage.update_ai_conversation_plugin_connection_ids("missing", &["ssh-1".to_string()]).await.unwrap();
 
         let _ = std::fs::remove_file(path);
     }

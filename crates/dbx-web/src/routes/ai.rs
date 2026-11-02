@@ -43,6 +43,13 @@ pub struct SaveAiConversationRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateConversationPluginConnectionsRequest {
+    pub conversation_id: String,
+    pub plugin_connection_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AiCompleteRequest {
     pub request: AiCompletionRequest,
 }
@@ -259,6 +266,21 @@ pub async fn save_ai_conversation(
     Json(body): Json<SaveAiConversationRequest>,
 ) -> Result<Json<()>, AppError> {
     state.app.storage.save_ai_conversation(&body.conversation).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+/// Patches only the plugin attachment list; used by attachment toggles and the
+/// stale-snapshot repair so an older transcript is never re-written.
+pub async fn update_ai_conversation_plugin_connections(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<UpdateConversationPluginConnectionsRequest>,
+) -> Result<Json<()>, AppError> {
+    state
+        .app
+        .storage
+        .update_ai_conversation_plugin_connection_ids(&body.conversation_id, &body.plugin_connection_ids)
+        .await
+        .map_err(AppError::from)?;
     Ok(Json(()))
 }
 

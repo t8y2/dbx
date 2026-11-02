@@ -38,6 +38,20 @@ const conversationLoadedSkillIds = createReactiveMap(new Map<string, string[]>()
 const conversationLoadedSkillBodies = createReactiveMap(new Map<string, LoadedSkillBody[]>());
 /** Conversations whose one-time hint has already been shown. */
 const conversationSkillHintSeen = new Set<string>();
+
+/**
+ * Live plugin attachment lists per conversation id, shared by every panel
+ * instance. Desktop background runs keep the old component's closure alive after
+ * the panel is closed and reopened; a per-instance map would let that closure
+ * write its pre-close attachments back over a newer choice made in the new panel.
+ */
+const conversationPluginConnectionIds = createReactiveMap(new Map<string, string[]>());
+/**
+ * Per-conversation write chain for attachment patches. Each toggle enqueues its
+ * patch so two quick clicks land in click order — the database cannot reorder
+ * them, and the last click always wins.
+ */
+const pluginAttachmentWriteChains = new Map<string, Promise<void>>();
 </script>
 
 <script setup lang="ts">
@@ -220,6 +234,7 @@ import {
   aiCancelStream,
   resolveAiToolApproval,
   saveAiConversation,
+  updateAiConversationPluginConnections,
   saveAiRun,
   saveAiRunState,
   loadAiConversations,
@@ -554,15 +569,6 @@ const activeAction = picker.action;
  * the next send.
  */
 const draftPluginConnectionIds = ref<string[]>([]);
-/**
- * Live attachment lists per conversation id, in memory.
- *
- * A new chat's draft list moves here when its id is minted, and every toggle
- * writes here too. A snapshot can be built before a click and resolve after it,
- * so reading this map first keeps the UI, the saved record and the next request
- * on the user's latest choice instead of the pre-click snapshot.
- */
-const conversationPluginConnectionIds = createReactiveMap(new Map<string, string[]>());
 /** Plugins whose "built-in AI tools" switch is on; others cannot contribute tools. */
 const pluginToolPluginIds = ref<Set<string>>(new Set());
 /** Plugin display names for the attachment list, by plugin id. */
@@ -690,6 +696,21 @@ function isPluginConnectionAttached(connectionId: string): boolean {
   return isPluginConnectionTarget.value ? connectionId === boundConnection.value?.id : attachedPluginConnectionIds.value.includes(connectionId);
 }
 
+/** Patches the attachment column in click order; the last click always wins.
+ *  The chain is module-scoped so a reopened panel serializes against the writes
+ *  an older panel instance still has in flight. */
+function persistPluginAttachmentIds(targetConversationId: string, ids: string[]) {
+  const previous = pluginAttachmentWriteChains.get(targetConversationId) ?? Promise.resolve();
+  const write = previous
+    .catch(() => {})
+    .then(() => updateAiConversationPluginConnections(targetConversationId, ids))
+    .catch(() => {});
+  pluginAttachmentWriteChains.set(targetConversationId, write);
+  void write.finally(() => {
+    if (pluginAttachmentWriteChains.get(targetConversationId) === write) pluginAttachmentWriteChains.delete(targetConversationId);
+  });
+}
+
 /** Persists one attachment change on the shown conversation (or its draft). */
 function togglePluginConnection(connectionId: string) {
   if (isPluginConnectionTarget.value) return;
@@ -703,23 +724,15 @@ function togglePluginConnection(connectionId: string) {
   // Record the click before anything async: a first snapshot built earlier (or
   // still in flight) must not resurrect the pre-click list.
   conversationPluginConnectionIds.set(targetConversationId, next);
+  // Patch only this column. A full snapshot save here could race a streaming
+  // transcript save and write older messages over newer ones. A missing row is a
+  // no-op; the landing snapshot's repair below re-applies the live list.
+  persistPluginAttachmentIds(targetConversationId, next);
   const record = conversations.value.find((conversation) => conversation.id === targetConversationId);
-  if (!record) {
-    // The id is minted but its first save has not returned yet; persist the
-    // change now so the record is not left with the pre-toggle list.
-    void persistConversation().catch(() => {});
-    return;
-  }
+  if (!record) return;
   const updated: AiConversation = { ...record, pluginConnectionIds: next, updatedAt: new Date().toISOString() };
   const index = conversations.value.findIndex((conversation) => conversation.id === updated.id);
   if (index >= 0) conversations.value.splice(index, 1, updated);
-  // Same persistence path as the mode picker: a chip click must reach disk even
-  // if the panel never sends another message.
-  if (conversationId.value === updated.id && messages.value.length) {
-    void persistConversation().catch(() => {});
-  } else {
-    void saveAiConversation(updated).catch(() => {});
-  }
 }
 
 /**
@@ -5939,7 +5952,11 @@ function syncPersistedConversation(conversation: AiConversation) {
   if (index >= 0) conversations.value.splice(index, 1, merged);
   else conversations.value.unshift(merged);
   conversations.value.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-  if (merged !== conversation) void saveAiConversation(merged).catch(() => {});
+  if (merged !== conversation) {
+    // Patch only the attachment column: re-saving this older snapshot would
+    // write its stale transcript and title over whatever landed since.
+    persistPluginAttachmentIds(merged.id, livePluginConnectionIds ?? []);
+  }
 }
 
 /** Re-registers a persisted run at startup. `extra` overrides the transcript
@@ -5989,6 +6006,10 @@ function extractRecoverableDraft(messages: ChatMessage[]): { draft: string; mess
  *  the run, and the conversation transcript without the unsent user message. */
 async function persistPendingInputRecovery(conversation: AiConversation, messages: ChatMessage[], run: AiRun, updatedAt: string) {
   const first = messages.find((m) => m.role === "user" && m.kind !== "contextSummary");
+  // This path rewrites the whole record, so it must carry the plugin
+  // attachments forward too: the live map is still cold at startup, so the
+  // stored list is the source unless a toggle has already happened this session.
+  const pluginConnectionIds = conversationPluginConnectionIds.get(conversation.id) ?? conversation.pluginConnectionIds ?? [];
   const snapshot: AiConversation = {
     id: conversation.id,
     // Same title precedence as buildConversationSnapshot(): a recovered run
@@ -6022,6 +6043,7 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
     // (#12075): this path rewrites the whole record, so the values come from the
     // same raw source as `buildConversationSnapshot` (never `effective`).
     ...pickerSnapshotFor(conversation.id),
+    ...(pluginConnectionIds.length ? { pluginConnectionIds: [...pluginConnectionIds] } : {}),
     createdAt: conversation.createdAt,
     updatedAt,
   };

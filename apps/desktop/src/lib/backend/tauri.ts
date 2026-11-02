@@ -1653,6 +1653,12 @@ export async function saveAiConversation(conversation: AiConversation): Promise<
   return invoke("save_ai_conversation", { conversation });
 }
 
+/** Patches only the plugin attachment list, so an old transcript snapshot is
+ *  never re-written over newer messages (attachment toggles + repair path). */
+export async function updateAiConversationPluginConnections(conversationId: string, pluginConnectionIds: string[]): Promise<void> {
+  return invoke("update_ai_conversation_plugin_connections", { conversationId, pluginConnectionIds });
+}
+
 export async function loadAiConversations(): Promise<AiConversation[]> {
   return invoke("load_ai_conversations");
 }

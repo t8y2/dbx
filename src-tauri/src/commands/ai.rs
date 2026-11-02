@@ -530,6 +530,17 @@ pub async fn save_ai_conversation(state: State<'_, Arc<AppState>>, conversation:
     state.storage.save_ai_conversation(&conversation).await
 }
 
+/// Patches only the plugin attachment list; used by attachment toggles and the
+/// stale-snapshot repair so an older transcript is never re-written.
+#[tauri::command]
+pub async fn update_ai_conversation_plugin_connections(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+    plugin_connection_ids: Vec<String>,
+) -> Result<(), String> {
+    state.storage.update_ai_conversation_plugin_connection_ids(&conversation_id, &plugin_connection_ids).await
+}
+
 #[tauri::command]
 pub async fn load_ai_conversations(state: State<'_, Arc<AppState>>) -> Result<Vec<AiConversation>, String> {
     state.storage.load_ai_conversations().await

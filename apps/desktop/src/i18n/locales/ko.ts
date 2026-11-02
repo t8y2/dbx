@@ -1328,6 +1328,7 @@ export default withEnglishFallback({
     matchPreviewLimit: "일치하는 총 {total}개 줄 중 처음 {limit}개 줄만 미리 볼 수 있습니다.",
   },
   connection: {
+    groupPath: "그룹 경로",
     mqttTopicAlias: "별칭 (선택 사항)",
     mysqlDataCharsetWriteBlocked: "데이터 문자 집합 호환 모드에서는 읽기 전용이 강제됩니다. 쓰기와 임시 잠금 해제는 사용할 수 없습니다.",
     mysqlDataCharsetUnsupported: "dataCharset은 네이티브 MySQL 프로필에서만 지원됩니다. MariaDB, TiDB 및 다른 프로필은 지원하지 않습니다.",

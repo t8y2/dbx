@@ -1537,6 +1537,7 @@ export default {
   },
 
   connection: {
+    groupPath: "Group path",
     parameterEditor: {
       title: "Connection parameters",
       description: "Configure parameters for this connection. Changes take effect after applying.",

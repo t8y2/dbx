@@ -107,3 +107,19 @@ test("generates a UUID for UUID() without an argument", () => {
   assert.match(command!, /^db\.getCollection\("events"\)\.insertOne\(\{"token": UUID\("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"\), "fixed": UUID\("123e4567-e89b-12d3-a456-426614174000"\)\}\)$/);
   assert.equal(parseMongoCommand(command!)?.command.kind, "insert");
 });
+
+test("snapshots mutable document and array arguments at each call", () => {
+  const commands = expand(`const doc = { index: 0, nested: [1] };
+    db.items.insertOne(doc);
+    doc.index = 1; doc.nested.push(2);
+    db.items.insertOne(doc);
+    doc.index = 2; doc.nested.push(3);`);
+  assert.deepEqual(commands, ['db.getCollection("items").insertOne({"index": 0, "nested": [1]})', 'db.getCollection("items").insertOne({"index": 1, "nested": [1, 2]})']);
+});
+
+test("snapshots cursor chain arguments before later mutation", () => {
+  const commands = expand(`const order = { score: -1 };
+    db.items.find({}).sort(order);
+    order.score = 1;`);
+  assert.deepEqual(commands, ['db.getCollection("items").find({}).sort({"score": -1})']);
+});

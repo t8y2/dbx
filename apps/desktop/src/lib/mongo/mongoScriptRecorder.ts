@@ -22,8 +22,8 @@ interface RecordedCall {
   database?: string;
   collection?: string;
   method: string;
-  args: unknown[];
-  chain: { method: string; args: unknown[] }[];
+  args: string;
+  chain: { method: string; args: string }[];
 }
 
 /**
@@ -42,7 +42,7 @@ export function recordMongoScriptCommands(script: string): MongoScriptExpansion 
         get: (_target, method) => {
           if (typeof method !== "string") return undefined;
           return (...args: unknown[]) => {
-            call.chain.push({ method, args });
+            call.chain.push({ method, args: formatArguments(args) });
             return chain;
           };
         },
@@ -55,7 +55,7 @@ export function recordMongoScriptCommands(script: string): MongoScriptExpansion 
     new Proxy(
       {},
       {
-        get: (_target, method) => (typeof method === "string" ? (...args: unknown[]) => record({ database, collection: name, method, args, chain: [] }) : undefined),
+        get: (_target, method) => (typeof method === "string" ? (...args: unknown[]) => record({ database, collection: name, method, args: formatArguments(args), chain: [] }) : undefined),
       },
     );
 
@@ -67,7 +67,7 @@ export function recordMongoScriptCommands(script: string): MongoScriptExpansion 
           if (typeof property !== "string") return undefined;
           if (property === "getCollection") return (collectionName: unknown) => collection(name, requireName(collectionName, "getCollection"));
           if (property === "getSiblingDB") return (databaseName: unknown) => database(requireName(databaseName, "getSiblingDB"));
-          if (DATABASE_METHODS.has(property)) return (...args: unknown[]) => record({ database: name, method: property, args, chain: [] });
+          if (DATABASE_METHODS.has(property)) return (...args: unknown[]) => record({ database: name, method: property, args: formatArguments(args), chain: [] });
           return collection(name, property);
         },
       },
@@ -131,8 +131,8 @@ function formatRecordedCall(call: RecordedCall): string {
   let text = "db";
   if (call.database !== undefined) text += `.getSiblingDB(${JSON.stringify(call.database)})`;
   if (call.collection !== undefined) text += `.getCollection(${JSON.stringify(call.collection)})`;
-  text += `.${call.method}(${formatArguments(call.args)})`;
-  for (const link of call.chain) text += `.${link.method}(${formatArguments(link.args)})`;
+  text += `.${call.method}(${call.args})`;
+  for (const link of call.chain) text += `.${link.method}(${link.args})`;
   return text;
 }
 

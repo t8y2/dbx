@@ -31,6 +31,21 @@ import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
+  it("keeps manual export and toolbar preferences across updates and reloads", async () => {
+    const defaults = { defaultExportMode: "immediate", dataGridHideToolbarLabels: false };
+    expect(DEFAULT_EDITOR_SETTINGS).toMatchObject(defaults);
+    expect(normalizeEditorSettings({})).toMatchObject(defaults);
+    expect(normalizeEditorSettings({ defaultExportMode: "invalid", dataGridHideToolbarLabels: "true" } as any)).toMatchObject(defaults);
+    setActivePinia(createPinia());
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settings = useSettingsStore();
+    const changes = { defaultExportMode: "queued" as const, dataGridHideToolbarLabels: true };
+    settings.updateEditorSettings(changes);
+    expect(normalizeEditorSettings(JSON.parse(JSON.stringify(settings.editorSettings)))).toMatchObject(changes);
+    settings.updateEditorSettings(defaults as { defaultExportMode: "immediate"; dataGridHideToolbarLabels: boolean });
+    expect(settings.editorSettings).toMatchObject(defaults);
+  });
+
   it("defaults the selection statistic to sum and validates every saved metric", () => {
     expect(DEFAULT_EDITOR_SETTINGS.dataGridSelectionSummaryMetric).toBe("sum");
     expect(normalizeEditorSettings({}).dataGridSelectionSummaryMetric).toBe("sum");
@@ -490,6 +505,13 @@ describe("normalizeEditorSettings", () => {
 
   it("enables automatic table aliases by default", () => {
     expect(normalizeEditorSettings({}).autoAliasTables).toBe(true);
+  });
+
+  it("preserves legacy column comments by default and accepts an explicit opt-out", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments).toBe(true);
+    expect(normalizeEditorSettings({}).batchColumnSelectionIncludeComments).toBe(true);
+    expect(normalizeEditorSettings({ batchColumnSelectionIncludeComments: false }).batchColumnSelectionIncludeComments).toBe(false);
+    expect(normalizeEditorSettings({ batchColumnSelectionIncludeComments: "false" as any }).batchColumnSelectionIncludeComments).toBe(true);
   });
 
   it("preserves disabled automatic table aliases", () => {

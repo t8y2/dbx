@@ -90,6 +90,7 @@ import DataGridToolbar from "@/components/grid/DataGridToolbar.vue";
 import DataGridVirtualRowIdentifier from "@/components/grid/DataGridVirtualRowIdentifier.vue";
 import DataGridExtractorDialog from "@/components/grid/DataGridExtractorDialog.vue";
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
+import { dataGridColumnSourceText } from "@/lib/dataGrid/columnSourceText";
 import { formatDataGridColumnMetadataForCopy } from "@/lib/dataGrid/dataGridColumnMetadataCopy";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
@@ -503,6 +504,7 @@ const columnHeaderLabels = computed(() => ({
   copyColumnName: t("grid.copyColumnName"),
   copyColumnComment: t("grid.copyColumnComment"),
   columnName: t("grid.columnName"),
+  columnSource: t("grid.columnSource"),
   columnType: t("grid.columnType"),
   columnComment: t("grid.columnComment"),
   nullable: t("structureEditor.nullable"),
@@ -988,7 +990,8 @@ const splitDataGridToolbar = computed(() => settingsStore.editorSettings.dataGri
 const compactDataGridToolbar = computed(() => dataGridTopbarOverflowCompact.value || (!splitDataGridToolbar.value && isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)));
 const responsiveDataGridToolbarActionCount = computed(() => (splitDataGridToolbar.value ? 0 : dataGridToolbarActionCollapseCount(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)));
 const compactDataGridToolbarActionCount = computed(() => Math.max(responsiveDataGridToolbarActionCount.value, dataGridTopbarOverflowActionCount.value));
-const compactDataGridToolbarActions = computed(() => (splitDataGridToolbar.value ? compactDataGridToolbarActionCount.value > 0 : compactDataGridToolbar.value));
+const compactDataGridToolbarLeading = computed(() => (splitDataGridToolbar.value ? compactDataGridToolbarActionCount.value > 0 : compactDataGridToolbar.value));
+const compactDataGridToolbarActions = computed(() => settingsStore.editorSettings.dataGridHideToolbarLabels || compactDataGridToolbarLeading.value);
 watch(splitDataGridToolbar, () => {
   resetDataGridTopbarOverflowCompact();
   nextTick(updateDataGridTopbarWidth);
@@ -7661,6 +7664,10 @@ const activeCellDetail = computed(() => {
   const cell = detailCell.value;
   return cell ? cellDetailFor(cell.rowIndex, cell.col) : null;
 });
+
+function columnSourceText(actualColIdx: number): string | undefined {
+  return dataGridColumnSourceText(props.queryDisplaySourceColumns?.[actualColIdx]);
+}
 
 function columnInfoText(actualColIdx: number, includeName = true): string {
   const column = props.result.columns[actualColIdx];
@@ -14581,7 +14588,18 @@ watch(
   { flush: "post" },
 );
 
+function focusGrid(): boolean {
+  if (!gridRef.value || visibleColumns.value.length === 0) return false;
+  if (displayItems.value.length > 0 && !hasCellSelection.value && !hasRowSelection.value && !hasColumnSelection.value) {
+    selectSingleCell(0, 0);
+    scrollCellIntoView(0, 0);
+  }
+  gridRef.value.focus({ preventScroll: true });
+  return true;
+}
+
 defineExpose({
+  focusGrid,
   exportMenuItems,
   exportWarning,
   selectExportMenuItem,
@@ -15330,7 +15348,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           :class="splitDataGridToolbar ? 'grid h-16 grid-cols-[auto_minmax(0,1fr)] grid-rows-2' : 'flex h-8 items-center'"
         >
           <div v-if="hasResultToolbarLeadingSlot" data-grid-topbar-row="actions" class="flex shrink-0 items-center border-r" :class="splitDataGridToolbar ? 'col-start-1 row-start-1' : ''">
-            <slot name="result-toolbar-leading" :compact="compactDataGridToolbarActions" />
+            <slot name="result-toolbar-leading" :compact="compactDataGridToolbarLeading" />
           </div>
           <!-- Clip both axes instead of creating a hidden scroll container around the toolbar controls. -->
           <div data-grid-topbar-row="filters" class="data-grid-topbar-scroll min-w-0 overflow-clip" :class="splitDataGridToolbar ? 'data-grid-topbar-scroll--row-divider col-span-2 row-start-2' : 'flex-1'">
@@ -15434,6 +15452,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             data-grid-topbar-row="actions"
             :class="splitDataGridToolbar ? 'col-start-2 row-start-1' : 'ml-auto'"
             :compact-action-count="compactDataGridToolbarActionCount"
+            :compact="settingsStore.editorSettings.dataGridHideToolbarLabels"
             :refresh="refreshToolbarCapability"
             :auto-refresh="autoRefreshToolbarCapability"
             :add-row="addRowToolbarCapability"
@@ -15451,7 +15470,15 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                    banner line of its own. -->
               <Tooltip v-if="tableDataPreviewTruncated && tableDataPreviewNoticeHidden && !tableDataFullTextMode">
                 <TooltipTrigger as-child>
-                  <Button variant="ghost" size="sm" :disabled="tableDataFullTextLoading" class="data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5" @click="loadCurrentPageFullText">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    :disabled="tableDataFullTextLoading"
+                    :aria-label="t('grid.tableDataPreviewLoadPageShortTitle')"
+                    class="data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5"
+                    :class="{ 'data-grid-topbar-action-button--compact': compactDataGridToolbarActions }"
+                    @click="loadCurrentPageFullText"
+                  >
                     <Info class="data-grid-topbar-action-icon w-3 h-3 text-amber-600 dark:text-amber-400" />
                     <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbarActions }">{{ t("grid.tableDataPreviewLoadPageShort") }}</span>
                   </Button>
@@ -15498,6 +15525,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     size="sm"
                     :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbarActions ? 'data-grid-topbar-action-button--compact' : '', mongoJsonPreviewOpen ? 'text-primary bg-primary/10 hover:bg-primary/15' : '']"
                     :aria-pressed="mongoJsonPreviewOpen"
+                    :aria-label="t('grid.mongoJsonPreview')"
                     @click="toggleMongoJsonPreview"
                   >
                     <Code2 class="data-grid-topbar-action-icon w-3 h-3" />
@@ -16043,6 +16071,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     :show-comment-line="reserveColumnCommentLine"
                     :tooltip-column-type="columnTypeMap.get(col.name)"
                     :tooltip-column-comment="resolvedColumnComment(col.name, col.actualColIdx)"
+                    :tooltip-column-source="columnSourceText(col.actualColIdx)"
                     :column-nullability="headerColumnNullability(col.actualColIdx)"
                     :type-class="typeColorClass(headerColumnType(col.name, col.actualColIdx))"
                     :drag-class="columnHeaderDragClass(col.visibleColIdx)"
@@ -16050,6 +16079,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     :copy-column-name-label="columnHeaderLabels.copyColumnName"
                     :copy-column-comment-label="columnHeaderLabels.copyColumnComment"
                     :column-name-label="columnHeaderLabels.columnName"
+                    :column-source-label="columnHeaderLabels.columnSource"
                     :column-type-label="columnHeaderLabels.columnType"
                     :column-comment-label="columnHeaderLabels.columnComment"
                     :nullable-label="columnHeaderLabels.nullable"
@@ -17354,7 +17384,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 
     <!-- Bottom status bar -->
     <div v-if="!isErrorResult" class="grid grid-cols-[max-content_minmax(0,1fr)_minmax(0,max-content)] items-center gap-2 px-3 py-1 border-t text-xs text-muted-foreground bg-muted/30 shrink-0" :class="{ 'relative max-sm:pt-7': selectedColumnInfo }">
-      <div class="flex min-w-0 items-center gap-2 overflow-hidden">
+      <div class="flex min-w-max shrink-0 items-center gap-2">
         <span v-if="hasData" class="shrink-0">
           {{
             t(showTruncationWarning ? "grid.loadedRows" : "grid.totalRows", {
@@ -17396,7 +17426,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       <div v-if="selectedColumnInfo" data-grid-column-info class="min-w-0 max-w-full truncate select-text max-sm:absolute max-sm:left-3 max-sm:right-3 max-sm:top-1" :title="selectedColumnInfo">
         {{ selectedColumnInfo }}
       </div>
-      <div v-else-if="settingsStore.editorSettings.showDataGridStatusSql && sqlOneLiner" class="flex min-w-0 max-w-full items-center gap-1">
+      <div v-else-if="settingsStore.editorSettings.showDataGridStatusSql && sqlOneLiner" class="flex min-w-0 max-w-full items-center gap-1 overflow-hidden">
         <CustomContextMenu :items="statusSqlContextMenuItems" v-slot="{ onContextMenu }">
           <Tooltip>
             <TooltipTrigger as-child>

@@ -10,6 +10,7 @@ use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::foreign_keys::build_foreign_key_sql_for_new_table;
 use super::indexes::{build_create_index_statements, mysql_inline_index_definition, normalized_index_type};
 use super::mysql_engine::{append_mysql_table_option, validate_mysql_engine};
+use super::mysql_table_charset::mysql_table_charset_clause;
 use super::transwarp;
 use super::triggers::{build_trigger_sql_for_new_table, build_trigger_sql_with_operations};
 use super::types::{TableStructureSqlOptions, TableStructureSqlPlan, TableStructureSqlResult};
@@ -75,6 +76,28 @@ fn build_create_table_sql_impl(
     server_version: Option<&str>,
     dialect_options: CreateTableDialectOptions,
 ) -> TableStructureSqlPlan {
+    let native_mysql = options.database_type == Some(DatabaseType::Mysql)
+        && !options.is_gaussdb_m_mode
+        && options
+            .driver_profile
+            .as_deref()
+            .is_none_or(|profile| profile.trim().is_empty() || profile.trim().eq_ignore_ascii_case("mysql"));
+    let table_charset_clause = match dialect_options.mysql_table_charset.as_ref() {
+        Some(_) if !native_mysql => {
+            return TableStructureSqlResult {
+                statements: Vec::new(),
+                warnings: vec![
+                    "Setting the table character set is supported only for native MySQL connections.".to_string()
+                ],
+            }
+            .into();
+        }
+        Some(change) => match mysql_table_charset_clause(change) {
+            Ok(clause) => Some(clause),
+            Err(warning) => return TableStructureSqlResult { statements: Vec::new(), warnings: vec![warning] }.into(),
+        },
+        None => None,
+    };
     let foreign_clause = match dialect_options.postgres_foreign_table.as_ref() {
         Some(foreign) => match super::postgres_foreign_table::create_clause(&options, foreign) {
             Ok(clause) => Some(clause),
@@ -141,12 +164,6 @@ fn build_create_table_sql_impl(
     }
     // MySQL requires the supporting key to exist in the CREATE itself. A later
     // CREATE INDEX cannot rescue a table rejected for ERROR 1075.
-    let native_mysql = options.database_type == Some(DatabaseType::Mysql)
-        && !options.is_gaussdb_m_mode
-        && options
-            .driver_profile
-            .as_deref()
-            .is_none_or(|profile| profile.trim().is_empty() || profile.trim().eq_ignore_ascii_case("mysql"));
     let mut inline_auto_index = None;
     if native_mysql {
         let auto_columns: Vec<_> = active_columns
@@ -365,6 +382,12 @@ fn build_create_table_sql_impl(
     if let Some(engine) = options.mysql_engine.as_deref().map(str::trim).filter(|engine| !engine.is_empty()) {
         if let Some(statement) = statements.last_mut() {
             append_mysql_table_option(statement, &format!("ENGINE = {engine}"));
+        }
+    }
+
+    if let Some(clause) = table_charset_clause {
+        if let Some(statement) = statements.last_mut() {
+            append_mysql_table_option(statement, &clause);
         }
     }
 

@@ -40,6 +40,7 @@ import { enforceRightSidebarPanelExclusivity, RIGHT_SIDEBAR_PANEL_IDS, transitio
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useToast } from "@/composables/useToast";
+import ToastHost from "@/components/common/ToastHost.vue";
 import { useTheme } from "@/composables/useTheme";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
 import { canDownloadAndInstallUpdate, useAppUpdater } from "@/composables/useAppUpdater";
@@ -63,7 +64,7 @@ import {
 import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { useFileDrop } from "@/composables/useFileDrop";
-import { useLargeSqlFileStreamingFallback } from "@/composables/useLargeSqlFileFallback";
+import { useSqlFilePicker } from "@/composables/useSqlFilePicker";
 import { usePanelResize } from "@/composables/usePanelResize";
 import { loadUiTuning } from "@/lib/app/uiTuning";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
@@ -119,8 +120,8 @@ import { uuid } from "@/lib/common/utils";
 import { getPlatform, isMacOS, isWindows } from "@/lib/backend/platform";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
-import { activeTabExternalSqlFileTarget, rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab, unassociatedExternalSqlFileTarget, type ExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
-import { defaultSavedQueryFileName, externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, isSqlFilePath, queryEditorOpenFileAccept, queryEditorOpenFileFilters, queryTabExternalFilePath, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
+import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { defaultSavedQueryFileName, externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, isSqlFilePath, queryTabExternalFilePath, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 import type { ConnectionConfig, DatabaseType, ObjectBrowserFilter, ObjectSourceKind, QueryTab, TableInfoTab, TabOutputView, TreeNode } from "@/types/database";
 import { OPEN_PLUGIN_SETTINGS, type PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { parsePluginInstallDeepLink } from "@/lib/plugins/pluginInstallDeepLink";
@@ -172,6 +173,8 @@ import {
   isSwitchToNextTabShortcut,
   isSwitchToPreviousTabShortcut,
   isToggleResultsPaneShortcut,
+  isFocusResultGridShortcut,
+  isFocusSqlEditorShortcut,
   isToggleAiPanelShortcut,
   isToggleSidebarShortcut,
   isToggleZenModeShortcut,
@@ -326,7 +329,7 @@ connectionStore.setBeforeConnectHandler(async (config) => {
     await connectionStore.updateConnection(config);
   }
 });
-const { message: toastMessage, visible: toastVisible, action: toastAction, toast } = useToast();
+const { toast } = useToast();
 const { isDark, themeMode, applyTheme, setThemeMode, writeRootToken } = useTheme();
 const { activeCount: activeBackgroundTaskCount, tasks: backgroundTasks, cancelTask: cancelBackgroundTask } = useExportTracker();
 const tableCopyTasks = useTableCopyTaskStore();
@@ -367,7 +370,7 @@ const {
   },
 });
 const { setupFileDrop } = useFileDrop();
-const { openInStreamingExecutorOnTooLarge } = useLargeSqlFileStreamingFallback();
+const { openSqlFile } = useSqlFilePicker();
 
 const isDesktop = isTauriRuntime();
 const componentUpdates = useComponentUpdates({ isDesktop: isDesktop || isUpdatePreviewMockEnabled() });
@@ -3009,73 +3012,6 @@ async function saveActiveSqlAsLocalFile() {
   if (tab) await saveExternalSqlTabAs(tab);
 }
 
-function applyExternalSqlTarget(tab: QueryTab, target: ExternalSqlFileTarget) {
-  if (target.connectionId !== tab.connectionId) {
-    queryStore.updateConnection(tab.id, target.connectionId, target.database);
-  }
-  if (target.catalog !== tab.catalog || target.database !== tab.database) {
-    if (target.catalog !== undefined || tab.catalog !== undefined) queryStore.updateCatalog(tab.id, target.catalog, target.database);
-    else queryStore.updateDatabase(tab.id, target.database);
-  }
-  // updateConnection/updateCatalog/updateDatabase all reset the schema, so the
-  // remembered schema has to be reapplied after them.
-  if (target.schema !== tab.schema) queryStore.updateSchema(tab.id, target.schema);
-}
-
-function applyExternalSqlFileTarget(tab: QueryTab, path: string) {
-  applyExternalSqlTarget(
-    tab,
-    resolveExternalSqlFileTargetForActiveTab(path, queryStore.tabs, tab.id, (connectionId) => connectionStore.getConfig(connectionId), { allowMongoScripts: true }),
-  );
-}
-
-async function openSqlFile() {
-  const tab = activeTab.value;
-  if (!tab) return;
-  const connection = connectionStore.getConfig(tab.connectionId);
-  const databaseType = effectiveDatabaseTypeForConnection(connection) ?? connection?.db_type;
-  let openedSqlPath: string | undefined;
-  try {
-    if (isTauriRuntime()) {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const path = await open({
-        filters: queryEditorOpenFileFilters(databaseType),
-        multiple: false,
-      });
-      if (path) {
-        const sqlPath = path as string;
-        openedSqlPath = sqlPath;
-        const snapshot = await api.readExternalSqlFileSnapshot(sqlPath, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb), "auto");
-        queryStore.updateSql(tab.id, snapshot.content);
-        queryStore.linkExternalSqlPath(tab.id, sqlPath, sqlFileTitleFromPath(sqlPath), snapshot.version, snapshot.encoding);
-        applyExternalSqlFileTarget(tab, sqlPath);
-      }
-    } else {
-      const input = document.createElement("input");
-      input.type = "file";
-      input.accept = queryEditorOpenFileAccept(databaseType);
-      input.onchange = async () => {
-        const file = input.files?.[0];
-        if (!file) return;
-        try {
-          queryStore.updateSql(tab.id, await readBrowserSqlFile(file, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb)));
-          applyExternalSqlTarget(
-            tab,
-            activeTabExternalSqlFileTarget(queryStore.tabs, tab.id, (connectionId) => connectionStore.getConfig(connectionId), { allowMongoScripts: true }),
-          );
-        } catch (e: any) {
-          toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
-        }
-      };
-      input.click();
-    }
-  } catch (e: any) {
-    if (!openInStreamingExecutorOnTooLarge(openedSqlPath, e)) {
-      toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
-    }
-  }
-}
-
 async function importResultArchive() {
   try {
     const bytes = await openQueryResultArchiveFile();
@@ -4845,6 +4781,17 @@ async function handleKeydown(e: KeyboardEvent) {
     e.stopPropagation();
     return;
   }
+  if (isFocusResultGridShortcut(e, shortcuts) || isFocusSqlEditorShortcut(e, shortcuts)) {
+    const target = e.target instanceof Element ? e.target : null;
+    if (!showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value && !target?.closest('[role="dialog"], [role="alertdialog"]')) {
+      const focused = isFocusResultGridShortcut(e, shortcuts) ? contentAreaRef.value?.focusResultGrid() : contentAreaRef.value?.focusSqlEditor();
+      if (focused) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }
+    return;
+  }
   if (isNewQueryShortcut(e, shortcuts)) {
     e.preventDefault();
     e.stopPropagation();
@@ -5491,6 +5438,7 @@ onUnmounted(() => {
           @immediate-sync="openImmediateSync"
           @open-transfer="dialogs.showTransferDialog.value = true"
           @open-sql-file="dialogs.showSqlFileDialog.value = true"
+          @open-sql-editor-file="openSqlFile"
           @open-schema-diff="dialogs.showSchemaDiffDialog.value = true"
           @open-data-compare="dialogs.showDataCompareDialog.value = true"
           @open-backups="openSettings('backups')"
@@ -6023,14 +5971,7 @@ onUnmounted(() => {
           }"
           @animationend="finishSqlLibraryFlyAnimation(sqlLibraryFlyAnimation.id)"
         />
-        <Transition name="toast">
-          <div v-if="toastVisible" class="fixed bottom-6 inset-x-0 mx-auto z-99999 w-max max-w-[90vw] sm:max-w-3xl px-4 py-2 rounded-lg bg-foreground text-background-solid text-sm shadow-lg select-text whitespace-pre-wrap break-words">
-            <span>{{ toastMessage }}</span>
-            <button v-if="toastAction" type="button" class="ml-3 shrink-0 rounded border border-background/40 bg-background/10 px-2 py-0.5 text-xs font-medium hover:bg-background/20" @click="toastAction.onClick()">
-              {{ toastAction.label }}
-            </button>
-          </div>
-        </Transition>
+        <ToastHost />
       </Teleport>
 
       <Dialog
@@ -6171,19 +6112,12 @@ onUnmounted(() => {
 }
 
 .sql-library-fly-icon {
+  --sql-library-fly-from-x: 0px;
+  --sql-library-fly-from-y: 0px;
+  --sql-library-fly-to-x: 0px;
+  --sql-library-fly-to-y: 0px;
   animation: sql-library-fly-in 560ms cubic-bezier(0.45, 0, 0.55, 1) both;
   will-change: transform, opacity;
-}
-
-.toast-enter-active,
-.toast-leave-active {
-  transition: 0.25s ease;
-  transition-property: transform, opacity;
-}
-.toast-enter-from,
-.toast-leave-to {
-  opacity: 0;
-  transform: translateY(100%) scale(0.95);
 }
 
 @media (prefers-reduced-motion: reduce) {

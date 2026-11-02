@@ -3,7 +3,7 @@
 import { createApp, h, nextTick, reactive, shallowRef } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
-import { language, syntaxTree } from "@codemirror/language";
+import { ensureSyntaxTree, language, syntaxTree } from "@codemirror/language";
 import { EditorView, showTooltip } from "@codemirror/view";
 import { toggleLineComment, undo } from "@codemirror/commands";
 import { acceptCompletion, setSelectedCompletion, completionStatus, currentCompletions, startCompletion } from "@codemirror/autocomplete";
@@ -16,6 +16,7 @@ const cleanups: Array<() => void> = [];
 
 afterEach(() => {
   for (const cleanup of cleanups.splice(0).reverse()) cleanup();
+  window.getSelection()?.removeAllRanges();
   vi.restoreAllMocks();
 });
 
@@ -69,6 +70,32 @@ async function expectSqlCompletion(view: EditorView) {
 }
 
 describe("QueryEditor language capabilities", () => {
+  it("updates MyBatis highlighting when parameter substitution settings change", async () => {
+    const sql = "SELECT 1 WHERE htm = #{packetCode} AND 1 = 1\nORDER BY htm";
+    const { editor, view, settings, onExecute } = await mountEditor({ modelValue: sql, databaseType: "mysql", dialect: "mysql" });
+    const parameterPosition = sql.indexOf("#{") + 2;
+    ensureSyntaxTree(view.state, sql.length, 1000);
+    expect(syntaxTree(view.state).resolveInner(parameterPosition, 1).name).toBe("SqlParameter");
+    settings.updateEditorSettings({ sqlVariableSyntaxOverrides: { mysql: { mybatis: false } } });
+    await nextTick();
+    ensureSyntaxTree(view.state, sql.length, 1000);
+    expect(syntaxTree(view.state).resolveInner(parameterPosition, 1).name).toBe("LineComment");
+    settings.updateEditorSettings({ sqlVariableSyntaxOverrides: {} });
+    await nextTick();
+    ensureSyntaxTree(view.state, sql.length, 1000);
+    expect(syntaxTree(view.state).resolveInner(parameterPosition, 1).name).toBe("SqlParameter");
+    settings.updateEditorSettings({ sqlVariableSubstitutionEnabled: false });
+    await nextTick();
+    ensureSyntaxTree(view.state, sql.length, 1000);
+    expect(syntaxTree(view.state).resolveInner(parameterPosition, 1).name).toBe("LineComment");
+    settings.updateEditorSettings({ sqlVariableSubstitutionEnabled: true });
+    await nextTick();
+    ensureSyntaxTree(view.state, sql.length, 1000);
+    expect(syntaxTree(view.state).resolveInner(parameterPosition, 1).name).toBe("SqlParameter");
+    expect(view.state.doc.toString()).toBe(sql);
+    expect(editor.requestExecuteAll({ bypassPicker: true })).toBe(true);
+    expect(onExecute.mock.calls[0][0].fullSql).toBe(sql);
+  });
   it.each([
     ["p_", "p_input"],
     ["v_", "v_local"],

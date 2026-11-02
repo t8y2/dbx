@@ -51,6 +51,29 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, semanticComple
 }
 
 describe("QueryEditor hover resolution", () => {
+  it.each(["oracle", "postgres", "sqlserver"] as const)("does not apply MySQL identifier rules to a %s connection with a MySQL editor fallback", async (databaseType) => {
+    const modelValue = "SELECT * FROM 医疗服务（省级）";
+    const { store, resolve } = createHarness({ modelValue, databaseType, dialect: "mysql" });
+    expect(await resolve(modelValue.indexOf("（"))).toBeNull();
+    expect(store.lookupLocalCompletionTables).not.toHaveBeenCalled();
+    expect(store.listCompletionTables).not.toHaveBeenCalled();
+    expect(loadDdl).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("loads DDL using a complete unquoted MySQL fullwidth table name (semantic=%s)", async (semantic) => {
+    const name = "医疗服务项目限年龄（省级）_事后_tab_1";
+    const database = "归档库（省级）";
+    const modelValue = `SELECT * FROM ${database}.${name} gt1;`;
+    const { store, resolve, createHoverDom } = createHarness({ modelValue, databaseType: "mysql", dialect: "mysql", database: "demo", schema: undefined }, semantic);
+    store.lookupLocalCompletionTables.mockReturnValue([{ name, database }]);
+    const tooltip = await resolve(modelValue.lastIndexOf("省级"));
+    expect(tooltip).not.toBeNull();
+    expect(modelValue.slice(tooltip!.pos, tooltip!.end)).toBe(`${database}.${name}`);
+    tooltip!.create();
+    expect(loadDdl).toHaveBeenCalledWith(expect.objectContaining({ database, schema: "", tableName: name }));
+    expect(createHoverDom).toHaveBeenCalledWith(name, expect.any(String), expect.any(String), undefined);
+  });
+
   it.each(["oracle", "oceanbase-oracle"] as const)("keeps complete independent %s indexes and applies text preferences after hover formatting", async (type) => {
     loadDdl.mockResolvedValueOnce({ ddl: `CREATE  TABLE "users" ("id" NUMBER) ${type === "oracle" ? "PCTFREE 0" : "PCTFREE=0"};\nCREATE  INDEX "ix" ON "users"("id");` });
     const { store, settings, resolve, createHoverDom } = createHarness({ databaseType: type, dialect: "mysql" });

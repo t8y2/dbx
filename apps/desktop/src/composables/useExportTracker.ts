@@ -874,6 +874,17 @@ export function useExportTracker() {
     task.status = "Cancelling";
   }
 
+  function markDataTransferTaskCancelling(transferId: string) {
+    const task = taskMap.get(transferId);
+    if (!task || task.kind !== "data-transfer" || task.status !== "Running") return;
+    task.status = "Cancelling";
+  }
+
+  function restoreDataTransferTaskRunning(transferId: string) {
+    const task = taskMap.get(transferId);
+    if (task?.kind === "data-transfer" && task.status === "Cancelling") task.status = "Running";
+  }
+
   function restoreDatabaseExportTaskRunning(exportId: string) {
     const task = taskMap.get(exportId);
     if (task?.kind === "database-export" && task.status === "Cancelling") task.status = "Running";
@@ -921,7 +932,10 @@ export function useExportTracker() {
     }
     const nextStatus = normalizeTransferStatus(progress.status, progress.terminal);
     const hadError = task.status === "Error";
-    task.status = hadError && nextStatus === "Done" ? "Error" : nextStatus;
+    // A cancel request is only acknowledged by the backend at its next checkpoint (between
+    // metadata reads or tables); keep showing "Cancelling" until a terminal event arrives.
+    if (task.status === "Cancelling" && nextStatus === "Running") task.status = "Cancelling";
+    else task.status = hadError && nextStatus === "Done" ? "Error" : nextStatus;
     task.errorMessage = progress.error || task.errorMessage || null;
     task.tableIndex = progress.tableIndex;
     task.totalTables = progress.totalTables;
@@ -1050,7 +1064,13 @@ export function useExportTracker() {
       } else if (task?.kind === "sql-file") {
         await api.cancelSqlFileExecution(exportId);
       } else if (task?.kind === "data-transfer") {
-        await api.cancelTransfer(exportId);
+        markDataTransferTaskCancelling(exportId);
+        try {
+          await api.cancelTransfer(exportId);
+        } catch (error) {
+          restoreDataTransferTaskRunning(exportId);
+          throw error;
+        }
       } else {
         markTableExportTaskCancelling(exportId);
         await api.cancelTableExport(exportId);

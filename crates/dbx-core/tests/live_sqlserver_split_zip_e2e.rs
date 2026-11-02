@@ -137,6 +137,7 @@ async fn manual_e2e_sqlserver_default_split_zip_export_then_import_skip_relation
         include_create_database: false,
         drop_table_if_exists: true,
         omit_auto_increment: false,
+        omit_database_qualifier: false,
         preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,

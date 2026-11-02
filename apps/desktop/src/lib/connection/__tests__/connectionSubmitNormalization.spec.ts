@@ -88,4 +88,12 @@ describe("connection submit normalization", () => {
       expect(value.username).toBe("user");
     }
   });
+
+  it("tolerates undefined or omitted username and host without crashing (#13826)", () => {
+    const value = config({ host: undefined as any, username: undefined as any, database: undefined });
+    normalizeConnectionIdentityFields(value);
+    expect(value.host).toBeUndefined();
+    expect(value.username).toBeUndefined();
+    expect(value.database).toBeUndefined();
+  });
 });

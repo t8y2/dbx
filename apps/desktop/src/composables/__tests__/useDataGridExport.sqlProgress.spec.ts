@@ -34,6 +34,7 @@ vi.mock("@/composables/useDataGridExtractor", () => ({
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
     editorSettings: {
+      defaultExportMode: "immediate",
       exportBatchSize: 1000,
       globalDateTimeExportFormat: "",
       generateSqlIncludeDatabaseName: false,

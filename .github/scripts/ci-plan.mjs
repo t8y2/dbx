@@ -6,6 +6,7 @@ import { goAgents, integrationCases, rustAgents, rustGroups } from "./ci-config.
 
 const win7InfrastructureFiles = new Set([
   ".github/scripts/assert-win7-pe-compat.ps1",
+  ".github/scripts/assert-windows-stack-reserve.ps1",
   ".github/scripts/assert-webview2-win7-loader.ps1",
   ".github/scripts/assert-win7-installer-content.ps1",
   ".github/scripts/assert-webview2-win7-runtime.ps1",
@@ -145,7 +146,7 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
     agent_integration_changed: liveMatrix.length > 0,
     duckdb_changed: nativeChanges.has("duckdb"),
     duckdb_windows: sharedRust || files.some((file) => file.startsWith("agents/drivers/duckdb/")),
-    windows_standard: windowsWin7Candidate,
+    windows_standard: windowsWin7Candidate || files.some((file) => file === ".github/scripts/assert-windows-stack-reserve.test.ps1" || file === ".github/scripts/test-windows-stack-reserve.ps1"),
     windows_win7_bundle: win7InfrastructureChanged || win7DependencyChanged || unknownRust || (rust && unknownMember),
     windows_win7_candidate: windowsWin7Candidate,
     windows_win7_affected_packages: [...win7Affected].sort(),

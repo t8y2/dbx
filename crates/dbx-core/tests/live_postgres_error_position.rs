@@ -141,6 +141,7 @@ async fn live_pg_multi_core_reports_error_position_in_the_backend_envelope() {
     let detail = backend_error.detail().unwrap_or_default();
     assert!(!detail.contains(SQL_ERROR_POSITION_MARKER), "detail must not leak the marker: {detail}");
     assert!(detail.contains("no_such_table"), "detail should keep the native message: {detail}");
+    assert!(detail.contains("SQLSTATE 42P01"), "detail should keep the native error code: {detail}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

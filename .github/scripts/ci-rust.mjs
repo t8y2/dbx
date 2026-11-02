@@ -7,7 +7,7 @@ export function rustCommand(action, group, mode) {
   if (!["test", "doctest", "clippy", "tree"].includes(action) || !["full", "fast"].includes(mode) || (group !== "workspace" && !Object.hasOwn(rustGroups, group)) || (action === "clippy" && group !== "workspace")) {
     throw new Error(`Unknown Rust CI configuration: ${action}/${group}/${mode}`);
   }
-  const capabilityFeatures = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-sqlcipher", "sqlserver-native-attention"];
+  const capabilityFeatures = ["duckdb-sidecar", "dynamodb", "mongo-js-runtime", "mq-admin", "sqlite-sqlcipher", "sqlserver-native-attention"];
   if (mode === "full") capabilityFeatures.push("system-fonts");
   const appFeatures = ["dbx", "dbx-core", "dbx-web"].flatMap((name) => capabilityFeatures.map((feature) => `${name}/${feature}`));
   const foundationFeatures = [

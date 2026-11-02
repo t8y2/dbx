@@ -103,6 +103,7 @@ defineExpose({
   requestQueryEditorExecute: (tabId?: string) => editorGroupForTab(tabId)?.requestQueryEditorExecute() ?? false,
   requestQueryEditorExecuteAll: (tabId?: string) => editorGroupForTab(tabId)?.requestQueryEditorExecuteAll() ?? false,
   captureQueryEditorExecutionSnapshot: (tabId?: string) => editorGroupForTab(tabId)?.captureQueryEditorExecutionSnapshot(),
+  requestQueryEditorExecuteMongoScript: (tabId?: string) => editorGroupForTab(tabId)?.requestQueryEditorExecuteMongoScript() ?? false,
   requestQueryEditorExecuteInNewResultTab: (tabId?: string) => editorGroupForTab(tabId)?.requestQueryEditorExecuteInNewResultTab() ?? false,
   requestQueryEditorPreviewChanges: (stackSql?: string) => activeEditorGroup()?.requestQueryEditorPreviewChanges(stackSql) ?? false,
   shouldBlockQueryEditorExecutionShortcut: (event: KeyboardEvent) => activeEditorGroup()?.shouldBlockQueryEditorExecutionShortcut(event) ?? false,

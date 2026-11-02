@@ -6,7 +6,7 @@ license = "Apache-2.0"
 
 [features]
 test-support = []
-default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
+default = ["duckdb-sidecar", "dynamodb", "mongo-js-runtime", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
 duckdb-sidecar = ["dbx-sql/duckdb-sidecar", "dbx-drivers/duckdb-sidecar"]
 dynamodb = ["dbx-drivers/dynamodb"]
 mq-admin = ["dep:rumqttc", "dbx-types/mq-admin", "dbx-drivers/mq-admin"]
@@ -25,6 +25,7 @@ openapi = ["dbx-types/openapi", "dbx-sql/openapi"]
 # secret-service/zbus client so cross builds (zigbuild) link no C libdbus.
 # Desktop and native package builds enable this.
 os-keyring = ["dep:keyring", "dep:secret-service"]
+mongo-js-runtime = ["dep:rquickjs", "dep:rquickjs-serde"]
 system-fonts = ["font-kit"]
 
 [dependencies]
@@ -62,6 +63,8 @@ reqwest = { version = "0.12", default-features = false, features = ["cookies", "
 prometheus-parse = "=0.2.5"
 futures = "0.3"
 mongodb = { version = "3.2.5", features = ["socks5-proxy"] }
+rquickjs = { version = "0.12.2", optional = true }
+rquickjs-serde = { version = "0.6.1", optional = true }
 rumqttc = { version = "0.24", features = ["websocket"], optional = true }
 portpicker = "0.1.1"
 csv = "1"
@@ -95,6 +98,12 @@ tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }
+
+[target.'cfg(all(windows, target_vendor = "win7"))'.dependencies]
+# rquickjs-sys ships MSVC bindings for the standard Windows target but not DBX's
+# custom Win7 vendor triple. Generate equivalent bindings on the Win7 release
+# runner instead of enabling bindgen for every supported platform.
+rquickjs = { version = "0.12.2", features = ["bindgen"], optional = true }
 
 [dev-dependencies]
 dbx-core = { path = ".", default-features = false, features = ["test-support"] }

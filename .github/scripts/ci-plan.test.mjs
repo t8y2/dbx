@@ -384,7 +384,7 @@ test("workspace Cargo flags preserve full versus fast coverage and strict clippy
     assert.ok(command.includes("--workspace"));
     assert.ok(command.includes("--locked"));
     for (const pkg of ["dbx", "dbx-core", "dbx-web"]) {
-      for (const feature of ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-sqlcipher"]) assert.ok(features.includes(`${pkg}/${feature}`));
+      for (const feature of ["duckdb-sidecar", "dynamodb", "mongo-js-runtime", "mq-admin", "sqlite-sqlcipher"]) assert.ok(features.includes(`${pkg}/${feature}`));
       assert.equal(features.includes(`${pkg}/system-fonts`), mode === "full");
     }
     assert.deepEqual(rustCommand("clippy", "workspace", mode).slice(-3), ["--", "-D", "warnings"]);
@@ -393,6 +393,17 @@ test("workspace Cargo flags preserve full versus fast coverage and strict clippy
   for (const group of Object.keys(rustGroups)) assert.ok(rustCommand("test", group, "fast").includes("--package"));
   assert.throws(() => rustCommand("test", "unknown", "full"));
   assert.throws(() => rustCommand("clippy", "foundation", "full"));
+});
+
+test("MongoDB JavaScript runs in application CI without leaking into driver or foundation lanes", () => {
+  for (const mode of ["fast", "full"]) {
+    for (const group of Object.keys(rustGroups)) {
+      const features = rustCommand("test", group, mode).at(-1).split(",");
+      for (const pkg of ["dbx", "dbx-core", "dbx-web"]) {
+        assert.equal(features.includes(`${pkg}/mongo-js-runtime`), group === "application");
+      }
+    }
+  }
 });
 
 test("nextest, doctests and coverage select identical packages and features in every Rust lane", () => {

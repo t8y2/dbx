@@ -2048,6 +2048,113 @@ SELECT @value AS Message;`;
     expect(onDeferredExecutionSettled).toHaveBeenCalledWith({ status: "started", ok: false, errorMessage: "connection lost", tabId: "tab-1" });
   });
 
+  it("keeps supported MongoDB commands on the existing execution path", async () => {
+    const sql = "db.items.find({ active: true }).limit(10)";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mongodb"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["_id"], rows: [["1"]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(execution.showDangerDialog.value).toBe(false);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
+  });
+
+  it("only confirms MongoDB JavaScript after the explicit script action", async () => {
+    const sql = "for (let i = 0; i < 2; i += 1) {\n  db.items.insertOne({ index: i });\n}";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mongodb"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("summary");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["Output", "Value"], rows: [["Summary", "2/2"]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(execution.showDangerDialog.value).toBe(false);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
+
+    executeCurrentSql.mockClear();
+    await execution.tryExecuteMongoScript();
+
+    expect(execution.showDangerDialog.value).toBe(true);
+    expect(execution.pendingDangerSql.value).toBe(sql);
+    expect(execution.pendingDangerKind.value).toBe("mongo-script");
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+
+    await execution.onDangerConfirm();
+
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1", mongoScriptExecution: true, dangerousMongoScriptConfirmed: true });
+    expect(activeOutputView.value).toBe("result");
+  });
+
+  it.each(["confirm", "cancel", "target-change", "target-change-during-guard"] as const)("settles MongoDB script %s against the captured tab and viewport", async (action) => {
+    const sql = 'print("hello"); db.items.find({});';
+    const original = { ...queryTab("app"), sql };
+    const other = { ...queryTab("other"), id: "tab-other", sql: "db.other.find({})" };
+    const activeTab = ref<QueryTab | undefined>(original);
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mongodb"));
+    const queryStore = useQueryStore();
+    queryStore.tabs = [original, other];
+    queryStore.activeTabId = original.id;
+    useConnectionStore().connections = [activeConnection.value!];
+    const execute = vi.spyOn(queryStore, "executeCurrentSql").mockResolvedValue(true);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const settled = vi.fn();
+    const cancelled = vi.fn();
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => activeTab.value?.sql ?? ""),
+      activeOutputView: ref("result"),
+      onDeferredExecutionSettled: settled,
+      onExecutionCancelled: cancelled,
+    });
+    useSettingsStore().updateEditorSettings({ confirmDangerousSqlExecution: false });
+    expect(await execution.tryExecuteMongoScript(sql, { editorViewportRequestId: 42 })).toEqual({ status: "deferred", reason: "danger", tabId: original.id });
+    await nextTick();
+    activeTab.value = other;
+    queryStore.activeTabId = other.id;
+    if (action === "cancel") {
+      execution.showDangerDialog.value = false;
+      await nextTick();
+    } else {
+      if (action === "target-change") queryStore.tabs[0]!.database = "changed";
+      const confirmation = execution.onDangerConfirm();
+      if (action === "target-change-during-guard") queryStore.tabs[0]!.database = "changed";
+      await confirmation;
+    }
+    if (action === "confirm") {
+      expect(execute).toHaveBeenCalledWith(sql, expect.objectContaining({ tabId: original.id, mongoScriptExecution: true, dangerousMongoScriptConfirmed: true }));
+      expect(settled).toHaveBeenCalledWith(expect.objectContaining({ status: "started", tabId: original.id }));
+    } else {
+      expect(execute).not.toHaveBeenCalled();
+      expect(cancelled).toHaveBeenCalledWith(42);
+      expect(settled).toHaveBeenCalledWith({ status: "not-started", reason: "cancelled", tabId: original.id });
+    }
+  });
+
   it("keeps the active retained result when a new-result dangerous prompt is cancelled", async () => {
     const result = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
     const activeTab = ref<QueryTab | undefined>({

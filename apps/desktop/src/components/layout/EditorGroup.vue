@@ -89,6 +89,7 @@ defineExpose({
   requestQueryEditorExecute: () => activeSurfaceRef.value?.requestQueryEditorExecute() ?? false,
   requestQueryEditorExecuteAll: () => activeSurfaceRef.value?.requestQueryEditorExecuteAll() ?? false,
   captureQueryEditorExecutionSnapshot: () => activeSurfaceRef.value?.captureQueryEditorExecutionSnapshot(),
+  requestQueryEditorExecuteMongoScript: () => activeSurfaceRef.value?.requestQueryEditorExecuteMongoScript() ?? false,
   requestQueryEditorExecuteInNewResultTab: () => activeSurfaceRef.value?.requestQueryEditorExecuteInNewResultTab() ?? false,
   requestQueryEditorPreviewChanges: async (stackSql?: string) => (await activeSurfaceRef.value?.requestQueryEditorPreviewChanges(stackSql)) ?? false,
   shouldBlockQueryEditorExecutionShortcut: (event: KeyboardEvent) => activeSurfaceRef.value?.shouldBlockQueryEditorExecutionShortcut(event) ?? false,
@@ -251,6 +252,7 @@ const groupExecutableSqlMayContainDml = computed(() => mayContainDmlStatement(gr
         @toolbar-execute="toolbar.toolbarExecute($event, activeTab.id)"
         @toolbar-execute-all="toolbar.toolbarExecuteAll($event, activeTab.id)"
         @toolbar-execute-in-new-result-tab="toolbar.toolbarExecuteInNewResultTab($event, activeTab.id)"
+        @execute-mongo-script="activeSurfaceRef?.requestQueryEditorExecuteMongoScript()"
         @multi-execute="toolbar.multiExecute()"
         @preview-changes="activeTab && toolbar.previewChanges(activeTab.id)"
         @cancel="activeTab && toolbar.cancelExecution(activeTab.id)"

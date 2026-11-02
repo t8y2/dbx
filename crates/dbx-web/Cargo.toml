@@ -9,10 +9,11 @@ name = "dbx-web"
 path = "src/main.rs"
 
 [features]
-default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
+default = ["duckdb-sidecar", "dynamodb", "mongo-js-runtime", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar", "dbx-mcp/duckdb-sidecar"]
 dynamodb = ["dbx-core/dynamodb"]
 mq-admin = ["dbx-core/mq-admin", "dbx-mcp/mq-admin"]
+mongo-js-runtime = ["dbx-core/mongo-js-runtime"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
 system-fonts = ["dbx-core/system-fonts"]
 # Pass-through so CI feature lanes can compile-check the vendored ATTENTION

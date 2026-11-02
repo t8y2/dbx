@@ -1146,10 +1146,12 @@ function promptActiveConnectionSelection(tabId?: string) {
 
 const {
   dangerSql,
+  pendingDangerKind,
   showDangerDialog,
   suppressDangerConfirm,
   tryExecute,
   tryExecuteInNewResultTab,
+  tryExecuteMongoScript,
   doExecute,
   cancelActiveExecution,
   requestDangerConfirmation,
@@ -5688,6 +5690,7 @@ onUnmounted(() => {
                     "
                     @execute="(tabId: string, override?: SqlExecutionOverride) => tryExecute(override, { tabId })"
                     @execute-in-new-result-tab="(tabId: string, override?: SqlExecutionOverride) => tryExecuteInNewResultTab(override, { tabId })"
+                    @execute-mongo-script="(tabId: string, override?: SqlExecutionOverride) => tryExecuteMongoScript(override, { tabId })"
                     @cancel="(tabId: string) => cancelActiveExecution(tabId)"
                     @explain="(tabId: string) => tryExplain(undefined, { tabId })"
                     @editor-update="(tabId: string, v: string) => queryStore.updateSql(tabId, v)"
@@ -5907,6 +5910,7 @@ onUnmounted(() => {
           :connection-initial-tab="connectionDialogInitialTab"
           :show-danger-dialog="showDangerDialog"
           :danger-sql="dangerSql"
+          :danger-kind="pendingDangerKind"
           :suppress-danger-confirm="suppressDangerConfirm"
           :active-database-type="activeConnection?.db_type"
           :show-sql-parameter-dialog="showSqlParameterDialog"

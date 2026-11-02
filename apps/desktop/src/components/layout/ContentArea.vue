@@ -2048,6 +2048,10 @@ function acceptQueryEditorExecutionViewport(requestId: number) {
   return queryEditorRef.value?.acceptGutterExecutionViewport(requestId) ?? false;
 }
 
+function requestQueryEditorExecuteMongoScript() {
+  return queryEditorRef.value?.requestExecuteMongoScript?.() ?? false;
+}
+
 function cancelQueryEditorExecutionViewport(requestId: number) {
   return queryEditorRef.value?.cancelGutterExecutionViewport(requestId) ?? false;
 }
@@ -2200,6 +2204,7 @@ defineExpose({
   requestQueryEditorPreviewChanges,
   shouldBlockQueryEditorExecutionShortcut,
   acceptQueryEditorExecutionViewport,
+  requestQueryEditorExecuteMongoScript,
   cancelQueryEditorExecutionViewport,
   pasteClipboardAsSqlInCondition,
   applyTableStructureChanges,
@@ -2345,6 +2350,7 @@ defineExpose({
                 @format-error="emit('formatError', activeTab.id)"
                 @execute="sourceSectionActive && emit('execute', activeTab.id, $event)"
                 @execute-in-new-result-tab="sourceSectionActive && emit('executeInNewResultTab', activeTab.id, $event)"
+                @execute-mongo-script="sourceSectionActive && emit('executeMongoScript', activeTab.id, $event)"
                 @explain="sourceSectionActive && emit('explain', activeTab.id)"
                 @export-query="handleExportQuery"
                 @save="sourceSectionActive && emit('saveSql', props.activeTab.id)"

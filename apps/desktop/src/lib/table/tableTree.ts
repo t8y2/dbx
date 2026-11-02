@@ -434,14 +434,28 @@ export function appendTableTreeLoadMoreNode(children: TreeNode[], loadMoreNode: 
   return children;
 }
 
+const isKeptTableTreeNode = (node: TreeNode) => node.type !== "load-more" || node.loadMore?.objectType === "INDEX";
+
+// Returns `nodes` itself when nothing was removed, and only reassigns a child list that changed,
+// so a long page of childless table rows is not rebuilt (and re-triggered) on every page load.
+function pruneTableTreeLoadMoreNodes(nodes: TreeNode[]): TreeNode[] {
+  const kept = nodes.every(isKeptTableTreeNode) ? nodes : nodes.filter(isKeptTableTreeNode);
+  for (const node of kept) {
+    if (node.children?.length) {
+      const children = pruneTableTreeLoadMoreNodes(node.children);
+      if (children !== node.children) node.children = children;
+    }
+    if (node.hiddenChildren?.length) {
+      const hiddenChildren = pruneTableTreeLoadMoreNodes(node.hiddenChildren);
+      if (hiddenChildren !== node.hiddenChildren) node.hiddenChildren = hiddenChildren;
+    }
+  }
+  return kept;
+}
+
 export function withoutTableTreeLoadMoreNodes(nodes: TreeNode[] | undefined): TreeNode[] {
-  return (nodes ?? [])
-    .filter((node) => node.type !== "load-more" || node.loadMore?.objectType === "INDEX")
-    .map((node) => {
-      if (node.children) node.children = withoutTableTreeLoadMoreNodes(node.children);
-      if (node.hiddenChildren) node.hiddenChildren = withoutTableTreeLoadMoreNodes(node.hiddenChildren);
-      return node;
-    });
+  const pruned = pruneTableTreeLoadMoreNodes(nodes ?? []);
+  return pruned === nodes ? [...pruned] : pruned;
 }
 
 export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChildren: TreeNode[], connectionId: string, database: string): TreeNode[] {

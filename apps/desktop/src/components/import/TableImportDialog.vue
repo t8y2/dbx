@@ -156,6 +156,9 @@ const cancelling = ref(false);
 const importId = ref("");
 const progress = ref<api.TableImportProgress | null>(null);
 const errorMessage = ref("");
+// A SQL file that table import cannot preview (multi-table dump, DDL, REPLACE, expressions) is a
+// script for the SQL file executor; remember it so the dialog can offer that hand-off.
+const sqlScriptFallbackSource = ref<ImportSource | null>(null);
 const wizardStep = ref<TableImportWizardStep>("source");
 const fileInput = ref<HTMLInputElement | null>(null);
 const navicatBackupInput = ref<HTMLInputElement | null>(null);
@@ -558,6 +561,7 @@ function resetState() {
   importId.value = "";
   progress.value = null;
   errorMessage.value = "";
+  sqlScriptFallbackSource.value = null;
   wizardStep.value = "source";
 }
 
@@ -896,6 +900,7 @@ async function loadPreview(fileOrPath = selectedSource.value) {
   const requestId = ++previewRequestId;
   loadingPreview.value = true;
   errorMessage.value = "";
+  sqlScriptFallbackSource.value = null;
   try {
     const nextPreview = await previewSelectedImportFile(fileOrPath);
     if (requestId !== previewRequestId) return;
@@ -911,6 +916,7 @@ async function loadPreview(fileOrPath = selectedSource.value) {
     columnMapping.value = {};
     columnDataTypes.value = {};
     errorMessage.value = String(e?.message || e);
+    if (sourceFormat.value === "sql") sqlScriptFallbackSource.value = fileOrPath;
   } finally {
     if (requestId === previewRequestId) loadingPreview.value = false;
   }
@@ -933,6 +939,7 @@ function assignSelectedSource(source: string | File) {
   columnDataTypes.value = {};
   progress.value = null;
   errorMessage.value = "";
+  sqlScriptFallbackSource.value = null;
   const name = typeof source === "string" ? source : source.name;
   sourceFormat.value = detectedFormat;
   emptyStringAsNull.value = defaultTableImportEmptyStringAsNull(sourceFormat.value);
@@ -983,8 +990,11 @@ async function prepareBatchSources(sources: ImportSource[]) {
     return;
   }
   emptyStringAsNull.value = formats.length && formats.every((format) => format === formats[0]) ? defaultTableImportEmptyStringAsNull(formats[0]!) : defaultTableImportEmptyStringAsNull(formats[0] ?? "csv");
+  sqlScriptFallbackSource.value = null;
+  let previewingSource: ImportSource | undefined;
   try {
     for (const [index, source] of sources.entries()) {
+      previewingSource = source;
       const format = formats[index]!;
       const initialPreview = await api.previewTableImportFile(source, {
         connectionId: props.prefillConnectionId,
@@ -1035,6 +1045,7 @@ async function prepareBatchSources(sources: ImportSource[]) {
   } catch (e: any) {
     batchTasks.value = [];
     errorMessage.value = String(e?.message || e);
+    if (previewingSource !== undefined && detectFormat(sourceName(previewingSource)) === "sql") sqlScriptFallbackSource.value = previewingSource;
   } finally {
     loadingPreview.value = false;
   }
@@ -1074,7 +1085,7 @@ async function applySelectedSources(sources: ImportSource[]) {
   // A Navicat archive restores a whole database, so only a single-file selection may
   // take that path; a mixed batch must stay in the table-import flow for the other files.
   const navicatBackup = supportsNavicatBackupImport.value && sources.length === 1 ? sources.find((source) => sourceName(source).toLowerCase().endsWith(`.${NAVICAT_BACKUP_FORMAT}`)) : undefined;
-  if (navicatBackup) await openNavicatBackupRestore(navicatBackup);
+  if (navicatBackup) await openSqlFileExecutor(navicatBackup);
   else if (targetMode.value === "create") await prepareBatchSources(sources);
   else assignSelectedSource(sources[0]!);
 }
@@ -1091,21 +1102,22 @@ async function selectNavicatBackupFile() {
   }
   const { open } = await import("@tauri-apps/plugin-dialog");
   const selected = await open({ multiple: false, filters: [NAVICAT_BACKUP_FILTER] });
-  if (typeof selected === "string") await openNavicatBackupRestore(selected);
+  if (typeof selected === "string") await openSqlFileExecutor(selected);
 }
 
 async function handleNavicatBackupInputChange(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   input.value = "";
-  if (file && !running.value) await openNavicatBackupRestore(file);
+  if (file && !running.value) await openSqlFileExecutor(file);
 }
 
 /**
- * Navicat archives hold whole databases (DDL, rows, routines, triggers), so they are
- * restored by the SQL file executor, prefilled with this dialog's target database.
+ * Navicat archives and whole-database SQL dumps hold DDL, rows, routines and triggers rather
+ * than rows for one table, so they run through the streaming SQL file executor, prefilled
+ * with this dialog's target database.
  */
-async function openNavicatBackupRestore(source: ImportSource) {
+async function openSqlFileExecutor(source: ImportSource) {
   const connectionId = props.prefillConnectionId;
   if (!connectionId) return;
   const target = { connectionId, database: props.prefillDatabase || "", ...(props.prefillSchema ? { schema: props.prefillSchema } : {}) };
@@ -2484,6 +2496,12 @@ watch(rawProgressPercent, (percent) => {
           <span class="flex-1">{{ errorMessage }}</span>
           <Button v-if="targetMode === 'existing' && !loadingTarget && !existingTargetMetadataReady" variant="outline" size="sm" class="h-6 px-2 text-xs" @click="loadTargetColumns()">
             {{ t("tableImport.retry") }}
+          </Button>
+        </div>
+        <div v-if="sqlScriptFallbackSource && props.prefillConnectionId" class="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          <span class="flex-1">{{ t("tableImport.sqlScriptHint") }}</span>
+          <Button variant="outline" size="sm" class="h-6 shrink-0 px-2 text-xs" :disabled="loadingPreview || running" @click="openSqlFileExecutor(sqlScriptFallbackSource)">
+            {{ t("tableImport.sqlScriptRun") }}
           </Button>
         </div>
       </div>

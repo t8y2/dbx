@@ -11592,9 +11592,17 @@ async fn fetch_foreign_keys_for_tables(
     database: &str,
     schema: &str,
     tables: &[String],
+    cancel_transfer_id: Option<&str>,
 ) -> Result<HashMap<String, Vec<db::ForeignKeyInfo>>, String> {
     let mut result = HashMap::new();
     for table in tables {
+        // One metadata round trip per table: on a large schema this phase can run for
+        // minutes, so a cancel request must be honoured between tables.
+        if let Some(transfer_id) = cancel_transfer_id {
+            if is_cancelled(transfer_id).await {
+                return Err("Cancelled".to_string());
+            }
+        }
         let fks = crate::schema::list_foreign_keys_core(state, connection_id, database, schema, table).await?;
         result.insert(table.clone(), fks);
     }
@@ -11627,6 +11635,20 @@ pub async fn sort_tables_by_fk_dependency_with_foreign_keys(
     tables: &[String],
     parents_first: bool,
 ) -> Result<(Vec<String>, HashMap<String, Vec<db::ForeignKeyInfo>>), String> {
+    sort_tables_by_fk_dependency_cancellable(state, connection_id, database, schema, tables, parents_first, None).await
+}
+
+/// Same as `sort_tables_by_fk_dependency_with_foreign_keys`, but stops with `Err("Cancelled")`
+/// as soon as `cancel_transfer_id` is flagged cancelled while foreign keys are being fetched.
+pub async fn sort_tables_by_fk_dependency_cancellable(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    tables: &[String],
+    parents_first: bool,
+    cancel_transfer_id: Option<&str>,
+) -> Result<(Vec<String>, HashMap<String, Vec<db::ForeignKeyInfo>>), String> {
     if tables.len() <= 1 {
         return Ok((tables.to_vec(), HashMap::new()));
     }
@@ -11651,7 +11673,7 @@ pub async fn sort_tables_by_fk_dependency_with_foreign_keys(
         (db::postgres::list_table_dependencies(&pool, schema).await?, HashMap::new())
     } else {
         let foreign_keys_by_table =
-            fetch_foreign_keys_for_tables(state, connection_id, database, schema, tables).await?;
+            fetch_foreign_keys_for_tables(state, connection_id, database, schema, tables, cancel_transfer_id).await?;
         let dependencies = foreign_keys_by_table
             .iter()
             .flat_map(|(table, fks)| fks.iter().map(move |fk| (table.clone(), fk.ref_table.clone())))

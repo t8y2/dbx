@@ -180,6 +180,7 @@ import {
   switchToTabIndexFromShortcut,
   tabSwitcherDirectionFromShortcut,
 } from "@/lib/editor/keyboardShortcuts";
+import { normalizeShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import { DBX_VIM_ACTION_EVENT, type DbxVimActionEvent } from "@/lib/editor/vimDbxActions";
 import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
 import { initialTabSwitcherSelection, moveTabSwitcherSelection, tabSwitcherOrder } from "@/lib/tabs/tabSwitcher";
@@ -1094,6 +1095,10 @@ const executableSql = computed(() => {
       })
     : "";
 });
+
+// Descendants only need to know whether there is anything to run. Handing them the SQL text itself
+// would re-render the whole editor shell on every keystroke.
+const hasExecutableSql = computed(() => executableSql.value.trim().length > 0);
 
 async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot, executionTab?: QueryTab) {
   const tab = executionTab ?? activeTab.value;
@@ -4515,7 +4520,7 @@ function handleTabSwitcherKeydownCapture(e: KeyboardEvent) {
 function handleGlobalSearchKeydownCapture(e: KeyboardEvent) {
   if (canCaptureModifierDoubleTapSearch(e)) modifierDoubleTapSearch.handleKeydown(e);
   if (isShortcutEditingKeydown(e)) return;
-  if (e.defaultPrevented || !isGlobalSearchShortcut(e, settingsStore.editorSettings.shortcuts)) return;
+  if (e.defaultPrevented || !isGlobalSearchShortcut(e, normalizeShortcutSettings(settingsStore.editorSettings.shortcuts))) return;
   e.preventDefault();
   e.stopPropagation();
   quickOpenForceContent.value = true;
@@ -4523,7 +4528,7 @@ function handleGlobalSearchKeydownCapture(e: KeyboardEvent) {
 }
 
 function handleAuxiliarySearchKeydownCapture(e: KeyboardEvent) {
-  if (e.defaultPrevented || !isFocusSearchShortcut(e, settingsStore.editorSettings.shortcuts)) return;
+  if (e.defaultPrevented || !isFocusSearchShortcut(e, normalizeShortcutSettings(settingsStore.editorSettings.shortcuts))) return;
   const target = e.target instanceof Element ? e.target : document.activeElement instanceof Element ? document.activeElement : null;
   // 快捷键录入表面（每行录入框、SQL 录入框、#11787 的录入态）自己拥有键盘：焦点搜索键
   // 默认就是 Mod+F，若在这里把焦点抢到设置页顶部的全局搜索框，用户正在录入的 Ctrl+F
@@ -4716,7 +4721,9 @@ function handleVimDbxAppAction(event: Event) {
 async function handleKeydown(e: KeyboardEvent) {
   if (e.defaultPrevented) return;
 
-  const shortcuts = settingsStore.editorSettings.shortcuts;
+  // Every isXxxShortcut below normalizes what it is given; handing it an already
+  // normalized plain object keeps that to a cheap cache hit per key press.
+  const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
   if (showTabSwitcher.value) return;
   if (isFocusWhereShortcut(e, shortcuts) && !showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value) {
     const target = e.target instanceof Element ? e.target : null;
@@ -5653,13 +5660,11 @@ onUnmounted(() => {
                     :can-detach-tabs="isDesktop"
                     :detached-drop-target="detachedDropTargetTabId !== null"
                     @detach-tab="detachTab"
-                    :executable-sql="executableSql"
+                    :has-executable-sql="hasExecutableSql"
                     :active-output-view="activeOutputView"
                     :format-sql-request="formatSqlRequest"
                     :compress-sql-request="compressSqlRequest"
                     :keyword-case-request="keywordCaseRequest"
-                    :selected-sql="selectedSql"
-                    :cursor-pos="cursorPos"
                     :block-dangerous-redis-commands="blockDangerousRedisCommands"
                     :zen-mode="isZenMode"
                     @update:active-output-view="

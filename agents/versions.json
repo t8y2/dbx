@@ -7,7 +7,7 @@
   "databend": "0.1.79",
   "databricks": "0.1.86",
   "db2": "0.1.92",
-  "duckdb": "0.1.37",
+  "duckdb": "0.1.38",
   "exasol": "0.1.87",
   "firebird": "0.1.90",
   "gbase8a": "0.1.86",

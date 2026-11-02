@@ -1401,7 +1401,7 @@ function runSqlShortcutAction(action: ReturnType<typeof enabledSqlShortcutAction
   } else {
     const line = currentView.state.doc.lineAt(head);
     const localHead = Math.min(Math.max(0, head - line.from), line.text.length);
-    selected = resolveSqlShortcutTableToken(line.text, { from: localHead, to: localHead, empty: true, head: localHead });
+    selected = resolveSqlShortcutTableToken(line.text, { from: localHead, to: localHead, empty: true, head: localHead }, resolveSqlDialectId(sqlCompletionDialectOptions()));
   }
   if (!selected) return false;
   const sql = buildSqlShortcutExecutionSql(action, selected, props.databaseType);
@@ -2800,7 +2800,7 @@ watch([() => props.clientSessionId, () => props.completionContextVersion], () =>
 });
 
 watch(
-  [() => props.tabId, () => props.databaseType, () => props.dialect, () => props.syntaxDialect, sqlSyntaxDialect, () => props.mongoQueryLanguage, sqlDriverProfile, () => kingbaseConfig.value?.database_info?.compatibilityMode],
+  [() => props.tabId, () => props.databaseType, () => props.dialect, () => props.syntaxDialect, sqlSyntaxDialect, () => props.mongoQueryLanguage, sqlDriverProfile, () => kingbaseConfig.value?.database_info?.compatibilityMode, () => JSON.stringify(sqlStatementParameterOptions())],
   () => {
     completion.invalidateRequests();
     refreshCompletionCache();
@@ -2815,6 +2815,7 @@ watch(
         codeMirrorRuntime.sqlLanguageComp.reconfigure(codeMirrorRuntime.buildSqlLanguageExtension()),
         codeMirrorRuntime.sqlSemanticHighlightComp.reconfigure(codeMirrorRuntime.buildSqlSemanticHighlightExtension()),
         codeMirrorRuntime.sqlSignatureComp.reconfigure(codeMirrorRuntime.buildSqlSignatureExtension()),
+        refreshSqlUnknownObjectHighlights.of(null),
       ],
     });
     applyEditorCompletionExtension();

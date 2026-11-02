@@ -1,3 +1,4 @@
+import { shouldReportOracleCompilationErrors } from "@/lib/query/oracleCompilationErrors";
 import { hasShortDataGridSqlPage } from "@/lib/dataGrid/dataGridPagination";
 import { createQueryRequestTiming } from "@/lib/queryRequestTiming";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
@@ -5963,12 +5964,14 @@ export const useQueryStore = defineStore("query", () => {
     return refreshDataTabInternal(id);
   }
 
-  async function refreshDataTabsForTable(target: TableDataRefreshTarget): Promise<number> {
+  async function refreshDataTabsForTable(target: TableDataRefreshTarget, options?: { skipPendingChanges?: boolean }): Promise<number> {
     const matchingTabs = tabs.value.filter((tab) => tabMatchesTableDataRefreshTarget(tab, target));
     if (matchingTabs.length === 0) return 0;
 
     let refreshed = 0;
     for (const tab of matchingTabs) {
+      // Background imports must preserve unsaved grid edits and cell drafts.
+      if (options?.skipPendingChanges && ((tab.pendingDataChangeCount ?? 0) > 0 || tab.hasPendingDataEditorDraft)) continue;
       if (await refreshDataTabInternal(tab.id, { supersedeBusy: true, propagateBuildError: true })) refreshed += 1;
     }
 
@@ -9369,6 +9372,7 @@ export const useQueryStore = defineStore("query", () => {
           continueOnError: continueOnBatchError,
           // MySQL-family connections only use this; other drivers ignore it.
           ...(settingsStore.editorSettings.keepExplicitTransactionInAutoCommit ? { preserveExplicitTransaction: true } : {}),
+          ...(tab.mode === "query" && shouldReportOracleCompilationErrors(effectiveDbType, sqlToExecute) ? { reportCompilationErrors: true } : {}),
         };
         queryExecutionLog("info", "execute-multi:invoke", {
           traceId,
@@ -9457,7 +9461,14 @@ export const useQueryStore = defineStore("query", () => {
                   useAgentResultSession ? resultSessionId : undefined,
                   resultSessionId ? undefined : classificationSql,
                 ] as const;
-                const results = await (effectiveDbType === "sqlserver" ? api.executeInManualTransaction(...args, executionId, frontendTimeoutSecs) : deferLobs ? api.executeInManualTransaction(...args, executionId, frontendTimeoutSecs, undefined, true) : api.executeInManualTransaction(...args));
+                const reportCompilationErrors = tab.mode === "query" && shouldReportOracleCompilationErrors(effectiveDbType, sqlToExecute);
+                const results = await (effectiveDbType === "sqlserver"
+                  ? api.executeInManualTransaction(...args, executionId, frontendTimeoutSecs)
+                  : deferLobs
+                    ? api.executeInManualTransaction(...args, executionId, frontendTimeoutSecs, undefined, true, ...(reportCompilationErrors ? [true] : []))
+                    : reportCompilationErrors
+                      ? api.executeInManualTransaction(...args, undefined, undefined, undefined, undefined, true)
+                      : api.executeInManualTransaction(...args));
                 bindLargeValueContext(results, sessionId);
                 for (const result of results) {
                   if (result.session_id) result.manual_transaction_session_id = sessionId;

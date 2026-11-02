@@ -1,5 +1,6 @@
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
+import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
 import { findCteColumnResolution, findCteReferenceAt } from "@/lib/sql/semantic/cteNavigation";
 import { extractIdentifierDetailsAt, isSqlKeyword, matchSqlObject, matchTable, resolveSqlObjectNavigationIdentity, sqlObjectNavigationTarget, sqlObjectNavigationTargetFromIdentity, sqlObjectNavigationTypeFromCompletionObjectType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { matchHoverTableCandidates, pickHoverObjectMatch, resolveHoverTableLookupTarget } from "@/lib/editor/hoverTableLookup";
@@ -69,7 +70,8 @@ export function useQueryEditorObjectNavigation(options: QueryEditorObjectNavigat
     // modifier-held mouse moves never materialize the whole document string.
     const windowFrom = Math.max(0, pos - 1024);
     const doc = currentView.state.doc;
-    const extracted = extractIdentifierDetailsAt(doc.sliceString(windowFrom, Math.min(doc.length, pos + 1024)), pos - windowFrom);
+    const dialectId = resolveSqlDialectId({ databaseType: props.databaseType, dialect: props.databaseType ? undefined : props.dialect });
+    const extracted = extractIdentifierDetailsAt(doc.sliceString(windowFrom, Math.min(doc.length, pos + 1024)), pos - windowFrom, dialectId);
     if (!extracted || (!extracted.quoted && isSqlKeyword(extracted.identifier))) return null;
     return extracted.identifier;
   }
@@ -119,7 +121,8 @@ export function useQueryEditorObjectNavigation(options: QueryEditorObjectNavigat
     }
 
     const doc = currentView.state.doc.toString();
-    const extracted = extractIdentifierDetailsAt(doc, pos);
+    const dialectId = resolveSqlDialectId({ databaseType: props.databaseType, dialect: props.databaseType ? undefined : props.dialect });
+    const extracted = extractIdentifierDetailsAt(doc, pos, dialectId);
     if (!extracted) {
       return false;
     }
@@ -133,7 +136,7 @@ export function useQueryEditorObjectNavigation(options: QueryEditorObjectNavigat
     setTimeout(async () => {
       try {
         // Single identity model: quote flags + role (relation column list vs routine call vs unknown).
-        const identity = resolveSqlObjectNavigationIdentity(doc, pos);
+        const identity = resolveSqlObjectNavigationIdentity(doc, pos, dialectId);
         if (!identity) return;
 
         const identifierParts = identity.parts.map((part) => part.value);

@@ -277,6 +277,34 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     await initFromStoragePromise;
   }
 
+  let refreshFromStoragePromise: Promise<void> | null = null;
+  let refreshFromStorageRequested = false;
+
+  function refreshFromStorage(): Promise<void> {
+    refreshFromStorageRequested = true;
+    if (!refreshFromStoragePromise) {
+      refreshFromStoragePromise = (async () => {
+        await initFromStorage();
+        do {
+          refreshFromStorageRequested = false;
+          // Let this window finish its own writes before applying a remote
+          // snapshot, and retry if local state changed while the read awaited.
+          await Promise.allSettled(fileWrites.values());
+          const currentVersion = version.value;
+          const library = await api.loadSavedSqlLibrary();
+          if (currentVersion !== version.value) {
+            refreshFromStorageRequested = true;
+            continue;
+          }
+          applyLibrary(library);
+        } while (refreshFromStorageRequested);
+      })().finally(() => {
+        refreshFromStoragePromise = null;
+      });
+    }
+    return refreshFromStoragePromise;
+  }
+
   async function reloadFromStorage() {
     // A restore can finish while the initial read is still in flight. Wait for
     // that read before fetching the restored library so it cannot overwrite it.
@@ -550,6 +578,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   }
 
   async function saveFile(input: SaveFileInput) {
+    await initFromStorage();
     const timestamp = nowIso();
     const existing = input.id ? getFile(input.id) : undefined;
     const catalog = normalizedCatalog(input.catalog);
@@ -1197,6 +1226,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     version,
     treeVersion,
     initFromStorage,
+    refreshFromStorage,
     reloadFromStorage,
     listFolders,
     listChildFolders,

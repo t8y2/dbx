@@ -834,6 +834,7 @@ export default withEnglishFallback({
     loadingTitle: "Загрузка {title}",
     clipboardReadConsent: "«{name}» запрашивает чтение системного буфера обмена. Его рабочая область получит текущее содержимое буфера обмена (возможно, содержащее скопированные вами пароли или токены). Разрешить чтение в этом запуске?",
     clipboardReadConsentTitle: "Запрос на чтение буфера обмена",
+    compatibilityErrors: "Проверка совместимости не удалась",
   },
   auth: {
     rateLimited: "Повторите попытку через {seconds} с",

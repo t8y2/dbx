@@ -8,7 +8,7 @@ import FirebirdObjectManager from "@/components/objects/FirebirdObjectManager.vu
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 
-import { computed, createApp, nextTick, onActivated, onBeforeUnmount, onDeactivated, ref, shallowRef, watch, type Component } from "vue";
+import { computed, createApp, nextTick, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, shallowRef, watch, type Component } from "vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import {
@@ -73,6 +73,8 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { parseMysqlTableEngineMetadata, MYSQL_STORAGE_ENGINES_SQL, mysqlTableEngineSql, mysqlTableCollationSql } from "@/lib/table/mysqlTableEngine";
+import { parseCreateDatabaseCharsetMetadata, normalizeCreateDatabaseCharsetKey, createDatabaseCollationOptionsForCharset, nextCreateDatabaseCollation, defaultCreateDatabaseCollationForCharset } from "@/lib/database/createDatabaseCharsetOptions";
 import { DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
 import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
@@ -260,7 +262,7 @@ import { createLocateTabMenuItem } from "@/lib/tabs/tabMenu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type ObjectFilter = ObjectBrowserFilter;
-type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
+type ObjectBrowserColumnKey = "select" | "name" | "type" | "engine" | "collation" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -272,7 +274,7 @@ const props = defineProps<{
   initialEventOpenRequestId?: number;
   /** 显式"新建事件"请求号：每次菜单点击递增，用于打开/重新进入 CREATE 编辑器 */
   initialEventCreateRequestId?: number;
-  initialObjectFilter?: "tables" | "events" | "indexes";
+  initialObjectFilter?: ObjectFilter;
   initialIndexCreateRequestId?: number;
   initialViewTarget?: SchemaIndexIdentity;
   initialViewRequestId?: number;
@@ -344,7 +346,9 @@ function initialObjectBrowserFilter(): ObjectFilter {
   const preferred = props.selectedObjectFilter ?? props.initialObjectFilter;
   if (preferred === "indexes") return "indexes";
   if (props.connection.db_type === "oceanbase-oracle") return preferred ?? "tables";
-  return preferred === "triggers" && oracleTriggerObjectReadOptions(props.connection, ["TRIGGER"], props.catalog) ? "triggers" : "all";
+  if (preferred === "triggers") return oracleTriggerObjectReadOptions(props.connection, ["TRIGGER"], props.catalog) ? "triggers" : "all";
+  // 侧栏对象分组节点（表/视图/存储过程…）点击时携带明确的类型筛选，直接生效。
+  return preferred ?? "all";
 }
 const objectFilter = ref<ObjectFilter>(initialObjectBrowserFilter());
 const userHasSelectedFilter = ref(false);
@@ -499,7 +503,16 @@ const supportsBatchTableActions = computed(() => !isVictoriaMetrics.value && !is
 const showTableStatistics = computed(() => !usesServerObjectPaging.value && effectiveDatabaseType.value !== "nebula" && (objectFilter.value === "all" || objectFilter.value === "tables"));
 const showObjectRowStats = computed(() => showTableStatistics.value);
 const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
-const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
+// 引擎/排序规则只由 MySQL 系 information_schema 统计填充（后端 include_mysql_details）。
+const showObjectEngineColumn = computed(() => showTableStatistics.value && effectiveDatabaseType.value === "mysql");
+const showObjectCollationColumn = computed(() => showObjectEngineColumn.value);
+const objectRowsLabel = computed(() => {
+  const type = effectiveDatabaseType.value;
+  if (type === "victoriametrics" || type === "influxdb") return t("objects.series");
+  if (type === "elasticsearch" || type === "easysearch") return t("objects.docs");
+  if (type === "couchdb") return t("objects.documents");
+  return t("objects.rows");
+});
 
 function toggleTableDdlWordWrap() {
   settingsStore.updateEditorSettings({
@@ -627,6 +640,8 @@ const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
   select: 34,
   name: 260,
   type: 110,
+  engine: 90,
+  collation: 130,
   estimatedRows: 110,
   totalBytes: 100,
   created_at: 150,
@@ -638,6 +653,8 @@ const objectColumnVisibilityStorageKey = computed(() => `dbx-object-browser-colu
 const objectColumnDefinitions = computed(() => [
   { key: "name" as const, label: t("objects.name") },
   { key: "type" as const, label: t("objects.type") },
+  ...(showObjectEngineColumn.value ? [{ key: "engine" as const, label: t("objects.engine") }] : []),
+  ...(showObjectCollationColumn.value ? [{ key: "collation" as const, label: t("objects.collation") }] : []),
   ...(showObjectRowStats.value ? [{ key: "estimatedRows" as const, label: objectRowsLabel.value }] : []),
   ...(showObjectSizeStats.value ? [{ key: "totalBytes" as const, label: t("objects.size") }] : []),
   ...(hasCreatedAt.value ? [{ key: "created_at" as const, label: t("objects.createdAt") }] : []),
@@ -1153,6 +1170,8 @@ function toggleSort(key: ObjectBrowserSortKey) {
 
 const sortKeyOptions = computed<ObjectBrowserSortKey[]>(() => {
   const options: ObjectBrowserSortKey[] = ["name", "type"];
+  if (showObjectEngineColumn.value) options.push("engine");
+  if (showObjectCollationColumn.value) options.push("collation");
   if (showObjectRowStats.value) options.push("estimatedRows");
   if (showObjectSizeStats.value) options.push("totalBytes");
   if (hasCreatedAt.value) options.push("created_at");
@@ -1171,6 +1190,8 @@ watch(sortKeyOptions, (options) => {
 function sortKeyLabel(key: ObjectBrowserSortKey): string {
   if (key === "name") return t("objects.name");
   if (key === "type") return t("objects.type");
+  if (key === "engine") return t("objects.engine");
+  if (key === "collation") return t("objects.collation");
   if (key === "estimatedRows") return objectRowsLabel.value;
   if (key === "totalBytes") return t("objects.size");
   if (key === "created_at") return t("objects.createdAt");
@@ -4696,6 +4717,161 @@ async function confirmTruncateTable() {
   truncateTarget.value = null;
 }
 
+// ---- MySQL 表选项（引擎/排序规则）行内修改 ----
+
+interface TableOptionEditorState {
+  field: "engine" | "collation";
+  row: ObjectBrowserRow;
+  value: string;
+  loading: boolean;
+  engines: string[];
+  collations: string[];
+  charsets: string[];
+  collationsByCharset: Record<string, string[]>;
+  charset: string;
+}
+
+const tableOptionEditor = ref<TableOptionEditorState | null>(null);
+const showTableOptionEditor = ref(false);
+const tableOptionEditorApplying = ref(false);
+const tableOptionEditorRiskAcknowledged = ref(false);
+
+// 通过取消/X/Esc 关闭弹窗时必须清掉编辑状态，否则打开守卫会拦截后续点击，
+// 表现为"引擎只能点开一次、排序规则点了没反应"。
+watch(showTableOptionEditor, (open) => {
+  if (!open) {
+    tableOptionEditor.value = null;
+    tableOptionEditorRiskAcknowledged.value = false;
+  }
+});
+
+// CONVERT TO 会重写整表数据；统计行数超过该阈值时视为大表，要求显式确认。
+const TABLE_OPTION_RISK_ROW_THRESHOLD = 500_000;
+
+const tableOptionEditorRisk = computed(() => {
+  const state = tableOptionEditor.value;
+  if (!state) return null;
+  const currentCharset = (state.row.collation ?? "").split("_")[0] || "";
+  const charsetChanged = state.field === "collation" && !!currentCharset && !!state.charset && normalizeCreateDatabaseCharsetKey(state.charset) !== normalizeCreateDatabaseCharsetKey(currentCharset);
+  const bigTable = (state.row.estimatedRows ?? 0) > TABLE_OPTION_RISK_ROW_THRESHOLD;
+  if (!charsetChanged && !bigTable) return null;
+  return { charsetChanged, bigTable, rows: state.row.estimatedRows ?? null };
+});
+
+function canEditTableOptions(row: ObjectBrowserRow): boolean {
+  return showObjectEngineColumn.value && !usesServerObjectPaging.value && row.type === "TABLE";
+}
+
+function tableOptionCurrentValue(state: TableOptionEditorState): string {
+  return (state.field === "engine" ? state.row.engine : state.row.collation) ?? "";
+}
+
+function updateTableOptionEditorCharset(value: string) {
+  const state = tableOptionEditor.value;
+  if (!state || state.field !== "collation") return;
+  const previous = state.charset;
+  state.charset = value;
+  state.value = nextCreateDatabaseCollation(value, previous, state.value, state.collationsByCharset);
+  const options = createDatabaseCollationOptionsForCharset(value, state.collationsByCharset);
+  state.collations = options.includes(state.value) ? options : [state.value, ...options];
+}
+
+function quoteMysqlTableTarget(row: ObjectBrowserRow): string {
+  const database = props.database.replace(/`/g, "``");
+  const table = row.name.replace(/`/g, "``");
+  return `\`${database}\`.\`${table}\``;
+}
+
+function tableOptionEditorAlterSql(state: TableOptionEditorState): string {
+  const target = quoteMysqlTableTarget(state.row);
+  if (state.field === "engine") {
+    return `ALTER TABLE ${target} ENGINE = ${state.value.trim()};`;
+  }
+  const collation = state.value.trim();
+  const charset = state.charset || collation.split("_")[0] || "utf8mb4";
+  const currentCharset = (state.row.collation ?? "").split("_")[0] || "";
+  if (currentCharset && normalizeCreateDatabaseCharsetKey(charset) !== normalizeCreateDatabaseCharsetKey(currentCharset)) {
+    // 字符集变化时必须 CONVERT TO，才能一并转换既有列的数据编码。
+    return `ALTER TABLE ${target} CONVERT TO CHARACTER SET ${charset} COLLATE ${collation};`;
+  }
+  return `ALTER TABLE ${target} DEFAULT CHARACTER SET = ${charset} COLLATE = ${collation};`;
+}
+
+async function openTableOptionEditor(row: ObjectBrowserRow, field: "engine" | "collation") {
+  if (!canEditTableOptions(row) || tableOptionEditor.value) return;
+  // reactive 包装：模板读取的是 ref 的响应式代理，直接改普通对象不会触发重渲染，
+  // 会导致查询返回后下拉选项一直是空的。
+  const state = reactive<TableOptionEditorState>({ field, row, value: field === "engine" ? (row.engine ?? "") : (row.collation ?? ""), loading: true, engines: [], collations: [], charsets: [], collationsByCharset: {}, charset: "" });
+  tableOptionEditor.value = state;
+  showTableOptionEditor.value = true;
+  tableOptionEditorRiskAcknowledged.value = false;
+  try {
+    await connectionStore.ensureConnected(props.connection.id);
+    // 统计缺失（旧后端/装饰性数据降级）时当前值可能为空，先查一次真实当前值，
+    // 并回填到行内让单元格按钮立即显示名称。
+    if (!state.value) {
+      const currentSql = field === "engine" ? mysqlTableEngineSql(props.database, row.name) : mysqlTableCollationSql(props.database, row.name);
+      const currentResult = await api.executeQuery(props.connection.id, props.database, currentSql);
+      const currentValue = String(currentResult.rows[0]?.[0] ?? "").trim();
+      if (currentValue) {
+        state.value = currentValue;
+        patchObjectBrowserTableOption(row.name, row.schema, field, currentValue);
+      }
+    }
+    if (field === "engine") {
+      const result = await api.executeQuery(props.connection.id, props.database, MYSQL_STORAGE_ENGINES_SQL, undefined, undefined, { maxRows: 500 });
+      state.engines = parseMysqlTableEngineMetadata(result).engines;
+      if (!state.engines.includes(state.value) && state.value) state.engines.unshift(state.value);
+    } else {
+      const [charsetResult, collationResult] = await Promise.all([api.executeQuery(props.connection.id, props.database, "SHOW CHARACTER SET", undefined, undefined, { maxRows: 1000 }), api.executeQuery(props.connection.id, props.database, "SHOW COLLATION", undefined, undefined, { maxRows: 10000 })]);
+      const metadata = parseCreateDatabaseCharsetMetadata(charsetResult, collationResult);
+      state.charsets = metadata.charsets;
+      state.collationsByCharset = metadata.collationsByCharset;
+      const currentCharsetKey = normalizeCreateDatabaseCharsetKey(state.value.split("_")[0] || "");
+      state.charset = metadata.charsets.find((charset) => normalizeCreateDatabaseCharsetKey(charset) === currentCharsetKey) || metadata.charsets[0] || "";
+      const options = createDatabaseCollationOptionsForCharset(state.charset, state.collationsByCharset);
+      state.collations = options.includes(state.value) || !state.value ? options : [state.value, ...options];
+      if (!options.includes(state.value) && state.value) {
+        state.value = defaultCreateDatabaseCollationForCharset(state.charset, state.collationsByCharset) || state.value;
+      }
+    }
+  } catch (e: any) {
+    toast(translateBackendError(t, e) || t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+    showTableOptionEditor.value = false;
+    tableOptionEditor.value = null;
+  } finally {
+    state.loading = false;
+  }
+}
+
+/** 把查询到的当前引擎/排序规则回填到行内，让单元格按钮立即显示名称而不必等统计刷新。 */
+function patchObjectBrowserTableOption(name: string, schema: string | undefined, field: "engine" | "collation", value: string) {
+  rows.value = rows.value.map((existing) => (existing.name === name && (existing.schema || "") === (schema || "") ? { ...existing, [field]: value } : existing));
+}
+
+async function applyTableOptionEditor() {
+  const state = tableOptionEditor.value;
+  if (!state || tableOptionEditorApplying.value) return;
+  const value = state.value.trim();
+  if (!value || value === tableOptionCurrentValue(state)) return;
+  const sql = tableOptionEditorAlterSql(state);
+  tableOptionEditorApplying.value = true;
+  try {
+    await connectionStore.ensureConnected(props.connection.id);
+    await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql));
+    toast(t("objects.tableOptionUpdateSuccess", { name: state.row.name }));
+    // 乐观回填：不等统计刷新，单元格按钮立即显示新值。
+    patchObjectBrowserTableOption(state.row.name, state.row.schema, state.field, value);
+    showTableOptionEditor.value = false;
+    tableOptionEditor.value = null;
+    refresh();
+  } catch (e: any) {
+    toast(translateBackendError(t, e) || t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    tableOptionEditorApplying.value = false;
+  }
+}
+
 async function refreshVacuumPreviewSql() {
   const row = vacuumTarget.value;
   vacuumPreviewSql.value = "";
@@ -5401,6 +5577,9 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       ...row,
       estimatedRows: normalizeStatisticNumber(stat.estimated_rows),
       totalBytes: normalizeStatisticNumber(stat.total_bytes),
+      // 统计未返回细节（如 SHOW 元数据模式的兼容库）时保留已回填/乐观更新的值。
+      engine: stat.engine ?? row.engine ?? null,
+      collation: stat.collation ?? row.collation ?? null,
     };
   });
   cacheObjectBrowserRows(cacheWriteToken, rows.value, { cachedAt });
@@ -5505,7 +5684,11 @@ function selectObjectFilter(filter: ObjectFilter) {
 watch(
   () => props.selectedObjectFilter ?? props.initialObjectFilter,
   (filter) => {
-    if (filter && (filter === "indexes" || objectFilter.value === "indexes")) selectObjectFilter(filter);
+    if (!filter) return;
+    if (filter === "indexes" || objectFilter.value === "indexes") selectObjectFilter(filter);
+    // 侧栏分组节点复用已打开 tab 时携带新的类型筛选：跟随外部变更（本组件
+    // 之外的写入方只有 store 的索引路径与自身的 filterChange 回显）。
+    else if (filter !== objectFilter.value && filter !== "all") selectObjectFilter(filter);
   },
 );
 
@@ -6248,6 +6431,36 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                   <GripVertical class="h-3 w-3" />
                 </div>
               </div>
+              <div v-if="showObjectEngineColumn && isObjectColumnVisible('engine')" class="relative flex min-w-0 items-center">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('engine')">
+                  <span class="truncate">{{ t("objects.engine") }}</span>
+                  <component :is="sortIconFor('engine')" v-if="sortIconFor('engine')" class="h-3 w-3 shrink-0" />
+                </button>
+                <div
+                  v-if="!isLastVisibleObjectColumn('engine')"
+                  data-object-column-resize="engine"
+                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                  @mousedown="onObjectColumnResizeStart('engine', $event)"
+                  @dblclick="resetObjectColumnWidth('engine', 90, $event)"
+                >
+                  <GripVertical class="h-3 w-3" />
+                </div>
+              </div>
+              <div v-if="showObjectCollationColumn && isObjectColumnVisible('collation')" class="relative flex min-w-0 items-center">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('collation')">
+                  <span class="truncate">{{ t("objects.collation") }}</span>
+                  <component :is="sortIconFor('collation')" v-if="sortIconFor('collation')" class="h-3 w-3 shrink-0" />
+                </button>
+                <div
+                  v-if="!isLastVisibleObjectColumn('collation')"
+                  data-object-column-resize="collation"
+                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                  @mousedown="onObjectColumnResizeStart('collation', $event)"
+                  @dblclick="resetObjectColumnWidth('collation', 130, $event)"
+                >
+                  <GripVertical class="h-3 w-3" />
+                </div>
+              </div>
               <div v-if="showObjectRowStats && isObjectColumnVisible('estimatedRows')" class="relative flex min-w-0 items-center">
                 <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
                   <span class="truncate">{{ objectRowsLabel }}</span>
@@ -6383,6 +6596,32 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     <span v-if="item.valid != null" class="shrink-0 rounded border px-1 py-px text-[10px] font-medium" :class="item.valid ? 'border-emerald-500/30 text-emerald-600' : 'border-destructive/30 text-destructive'">
                       {{ t(item.valid ? "objects.validStatus" : "objects.invalidStatus") }}
                     </span>
+                  </div>
+                  <div v-if="showObjectEngineColumn && isObjectColumnVisible('engine')" class="flex min-w-0 items-center">
+                    <button
+                      v-if="canEditTableOptions(item)"
+                      type="button"
+                      class="inline-flex max-w-full min-w-0 items-center rounded-full border px-2 py-px text-xs font-medium transition-colors"
+                      :class="item.engine ? 'border-sky-500/40 bg-sky-500/10 text-sky-700 hover:bg-sky-500/20 dark:text-sky-400' : 'border-dashed border-muted-foreground/30 text-muted-foreground/70 hover:border-muted-foreground/50 hover:text-foreground'"
+                      :title="item.engine || t('objects.engineEditHint')"
+                      @click.stop="openTableOptionEditor(item, 'engine')"
+                    >
+                      <span class="truncate">{{ item.engine || "—" }}</span>
+                    </button>
+                    <span v-else class="truncate text-xs text-muted-foreground" :title="item.engine || ''">{{ item.engine || "" }}</span>
+                  </div>
+                  <div v-if="showObjectCollationColumn && isObjectColumnVisible('collation')" class="flex min-w-0 items-center">
+                    <button
+                      v-if="canEditTableOptions(item)"
+                      type="button"
+                      class="inline-flex max-w-full min-w-0 items-center rounded-full border px-2 py-px text-xs transition-colors"
+                      :class="item.collation ? 'border-border bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground' : 'border-dashed border-muted-foreground/30 text-muted-foreground/70 hover:border-muted-foreground/50 hover:text-foreground'"
+                      :title="item.collation || t('objects.engineEditHint')"
+                      @click.stop="openTableOptionEditor(item, 'collation')"
+                    >
+                      <span class="truncate">{{ item.collation || "—" }}</span>
+                    </button>
+                    <span v-else class="truncate text-xs text-muted-foreground" :title="item.collation || ''">{{ item.collation || "" }}</span>
                   </div>
                   <div v-if="showObjectRowStats && isObjectColumnVisible('estimatedRows')" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
                     {{ formatObjectBrowserCount(item.estimatedRows) }}
@@ -7010,6 +7249,52 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <DialogFooter>
         <Button v-if="browserTriggerFeedback" variant="outline" :disabled="browserTriggerBusy" @click="refreshBrowserTriggerFeedback">{{ t("oracleTrigger.verifyReadOnly") }}</Button>
         <Button @click="showCompileErrorDialog = false">{{ t("common.close") }}</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="showTableOptionEditor">
+    <DialogContent class="sm:max-w-[460px]">
+      <DialogHeader>
+        <DialogTitle>
+          {{ tableOptionEditor?.field === "engine" ? t("objects.engineDialogTitle", { name: tableOptionEditor?.row.name ?? "" }) : t("objects.collationDialogTitle", { name: tableOptionEditor?.row.name ?? "" }) }}
+        </DialogTitle>
+      </DialogHeader>
+      <div v-if="tableOptionEditor" class="grid gap-3">
+        <div v-if="tableOptionEditor.field === 'collation'" class="grid grid-cols-2 gap-3">
+          <label class="grid gap-1.5">
+            <span class="text-xs font-medium text-muted-foreground">{{ t("objects.tableOptionCharset") }}</span>
+            <SearchableSelect
+              :model-value="tableOptionEditor.charset"
+              :options="tableOptionEditor.charsets"
+              :loading="tableOptionEditor.loading"
+              :placeholder="t('objects.tableOptionCharset')"
+              :search-placeholder="t('objects.tableOptionSearchPlaceholder')"
+              :empty-text="t('objects.tableOptionEmpty')"
+              @update:model-value="updateTableOptionEditorCharset"
+            />
+          </label>
+          <label class="grid gap-1.5">
+            <span class="text-xs font-medium text-muted-foreground">{{ t("objects.collation") }}</span>
+            <SearchableSelect v-model="tableOptionEditor.value" :options="tableOptionEditor.collations" :loading="tableOptionEditor.loading" :placeholder="t('objects.collation')" :search-placeholder="t('objects.tableOptionSearchPlaceholder')" :empty-text="t('objects.tableOptionEmpty')" />
+          </label>
+        </div>
+        <SearchableSelect v-else v-model="tableOptionEditor.value" :options="tableOptionEditor.engines" :loading="tableOptionEditor.loading" :placeholder="t('objects.engine')" :search-placeholder="t('objects.tableOptionSearchPlaceholder')" :empty-text="t('objects.tableOptionEmpty')" />
+        <div v-if="tableOptionEditorRisk" class="grid gap-1.5 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          <span v-if="tableOptionEditorRisk.charsetChanged">{{ t("objects.riskCharsetChange", { from: (tableOptionEditor.row.collation ?? "").split("_")[0] || "", to: tableOptionEditor.charset }) }}</span>
+          <span v-if="tableOptionEditorRisk.bigTable">{{ t("objects.riskBigTable", { rows: formatObjectBrowserCount(tableOptionEditorRisk.rows) }) }}</span>
+          <label class="flex items-center gap-2 font-medium">
+            <input v-model="tableOptionEditorRiskAcknowledged" type="checkbox" class="h-3.5 w-3.5 shrink-0 accent-destructive" />
+            <span>{{ t("objects.riskAcknowledge") }}</span>
+          </label>
+        </div>
+        <pre class="overflow-auto rounded bg-muted/40 p-3 text-xs leading-5 text-foreground">{{ tableOptionEditorAlterSql(tableOptionEditor) }}</pre>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" @click="showTableOptionEditor = false">{{ t("common.cancel") }}</Button>
+        <Button :disabled="tableOptionEditorApplying || !tableOptionEditor?.value.trim() || (tableOptionEditor ? tableOptionEditor.value.trim() === tableOptionCurrentValue(tableOptionEditor) : false) || (!!tableOptionEditorRisk && !tableOptionEditorRiskAcknowledged)" @click="applyTableOptionEditor">
+          {{ t("common.apply") }}
+        </Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

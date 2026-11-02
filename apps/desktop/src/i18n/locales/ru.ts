@@ -11129,6 +11129,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlwaysDescription: "Добавлять схему всегда, когда она доступна в метаданных.",
     autoAliasTables: "Автоматически добавлять псевдонимы таблиц",
     autoAliasTablesDescription: "При выборе автодополнения таблицы в FROM или JOIN вставлять сгенерированный псевдоним, например order_items AS oi.",
+    batchColumnSelectionIncludeComments: "Добавлять комментарии при вставке выбранных столбцов",
+    batchColumnSelectionIncludeCommentsDescription: "Включать комментарии столбцов базы данных при массовой вставке столбцов SELECT из списка автодополнения.",
     sqlServerSpaceConfirmsCompletion: "Пробел подтверждает автодополнение (стиль SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Пока список автодополнения открыт, нажатие пробела принимает выбранное ключевое слово, таблицу или столбец и сохраняет пробел. Enter и Tab работают как раньше.",
     functionCompletionIncludeParams: "Примеры параметров при автодополнении функций",

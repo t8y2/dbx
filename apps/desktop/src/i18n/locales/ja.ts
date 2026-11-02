@@ -9495,6 +9495,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlwaysDescription: "メタデータにスキーマがある場合は常に挿入します。",
     autoAliasTables: "テーブル別名を自動追加",
     autoAliasTablesDescription: "FROM または JOIN でテーブル補完を選択すると、order_items AS oi のような生成済み別名を挿入します。",
+    batchColumnSelectionIncludeComments: "選択した列の挿入時にコメントを含める",
+    batchColumnSelectionIncludeCommentsDescription: "補完リストから SELECT の列を一括挿入するときに、データベースの列コメントを含めます。",
     sqlServerSpaceConfirmsCompletion: "スペースで補完を確定（SQL Server 方式）",
     sqlServerSpaceConfirmsCompletionDescription: "補完リストの表示中にスペースを押すと、選択中のキーワード・テーブル・列を確定し、空白を保持します。Enter と Tab は従来どおり動作します。",
     functionCompletionIncludeParams: "関数補全に引数プレースホルダーを含める",

@@ -9749,6 +9749,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlwaysDescription: "Incluye el esquema siempre que esté disponible en los metadatos.",
     autoAliasTables: "Agregar alias de tabla automáticamente",
     autoAliasTablesDescription: "Al seleccionar una tabla en FROM o JOIN, inserta un alias generado como order_items AS oi.",
+    batchColumnSelectionIncludeComments: "Incluir comentarios al insertar columnas seleccionadas",
+    batchColumnSelectionIncludeCommentsDescription: "Incluye los comentarios de las columnas de la base de datos al insertar varias columnas SELECT desde la lista de autocompletado.",
     sqlServerSpaceConfirmsCompletion: "Confirmar la sugerencia con espacio (estilo SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Con la lista de sugerencias abierta, pulsar espacio acepta la palabra clave, tabla o columna seleccionada y conserva el espacio. Intro y Tabulador no cambian.",
     functionCompletionIncludeParams: "Incluir ejemplos de parámetros en autocompletado de funciones",

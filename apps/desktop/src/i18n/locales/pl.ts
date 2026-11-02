@@ -9588,6 +9588,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlwaysDescription: "Dołączaj schemat zawsze, gdy jest dostępny w metadanych.",
     autoAliasTables: "Automatycznie dodawaj aliasy tabel",
     autoAliasTablesDescription: "Podczas wybierania uzupełnienia tabeli w klauzuli FROM lub JOIN wstawiaj wygenerowany alias, np. order_items AS oi.",
+    batchColumnSelectionIncludeComments: "Dołączaj komentarze podczas wstawiania wybranych kolumn",
+    batchColumnSelectionIncludeCommentsDescription: "Dołączaj komentarze kolumn bazy danych podczas zbiorczego wstawiania kolumn SELECT z listy autouzupełniania.",
     sqlServerSpaceConfirmsCompletion: "Spacja zatwierdza uzupełnienie (styl SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Gdy lista uzupełniania jest otwarta, naciśnięcie Spacji akceptuje wybrane słowo kluczowe, tabelę lub kolumnę i zachowuje spację na końcu. Enter i Tab działają bez zmian.",
     functionCompletionIncludeParams: "Dołączaj przykłady parametrów w uzupełnianiu funkcji",

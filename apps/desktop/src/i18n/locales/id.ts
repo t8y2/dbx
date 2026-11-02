@@ -9195,6 +9195,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlwaysDescription: "Sertakan skema kapan pun tersedia di metadata.",
     autoAliasTables: "Tambahkan alias tabel secara otomatis",
     autoAliasTablesDescription: "Saat memilih pelengkapan tabel di FROM atau JOIN, sisipkan alias yang dihasilkan seperti order_items AS oi.",
+    batchColumnSelectionIncludeComments: "Sertakan komentar saat menyisipkan kolom yang dipilih",
+    batchColumnSelectionIncludeCommentsDescription: "Sertakan komentar kolom basis data saat menyisipkan beberapa kolom SELECT dari daftar pelengkapan.",
     sqlServerSpaceConfirmsCompletion: "Spasi mengonfirmasi pelengkapan (gaya SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Saat daftar pelengkapan terbuka, menekan Spasi akan menerima kata kunci, tabel, atau kolom yang dipilih serta mempertahankan spasi di akhir. Enter dan Tab tetap berperilaku seperti sebelumnya.",
     functionCompletionIncludeParams: "Sertakan contoh parameter dalam pelengkapan fungsi",

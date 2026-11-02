@@ -11302,6 +11302,8 @@ export default withEnglishFallback({
     registerInstance: "インスタンスを登録",
     deregister: "解除",
     nacosContextPathHint: "空欄の場合は現在の接続モードのデフォルト値を使用します。サービスルートパスを明示的に使用する場合は / を入力し、リバースプロキシのシナリオでは /nacos などのプレフィックスを入力できます。",
+    nacosManualNamespaceDiscoveryHint: "名前空間 ID を入力してください。カンマまたは改行で区切ることができます。DBX は名前空間ディレクトリのクエリをスキップし、接続時に設定の読み取り権限を検証します。",
+    nacosManualNamespaceIdsRequired: "名前空間 ID を少なくとも 1 つ入力してください。",
   },
   databaseBrowser: {
     search: "データベースを検索...",

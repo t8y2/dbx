@@ -14169,6 +14169,8 @@ export default withEnglishFallback({
     restore: "Восстановить",
     registerInstance: "Зарегистрировать экземпляр",
     deregister: "Дерегистрировать",
+    nacosManualNamespaceDiscoveryHint: "Укажите ID пространства имён, разделяя запятыми или переводами строк. DBX пропустит запрос каталога пространств имён и проверит разрешения на чтение конфигурации при подключении.",
+    nacosManualNamespaceIdsRequired: "Укажите хотя бы один ID пространства имён.",
   },
   doltVersionControl: {
     title: "Управление версиями Dolt",

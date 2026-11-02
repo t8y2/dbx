@@ -26,25 +26,25 @@ fn config(id: &str, database: &str) -> ConnectionConfig {
 #[tokio::test]
 #[ignore = "requires a disposable PostGIS server"]
 async fn postgres_database_export_preserves_geometry_paged() {
-    round_trip(false, SqlInsertDialect::Source, "public").await;
+    Box::pin(round_trip(false, SqlInsertDialect::Source, "public")).await;
 }
 
 #[tokio::test]
 #[ignore = "requires a disposable PostGIS server"]
 async fn postgres_database_export_preserves_geometry_snapshot() {
-    round_trip(true, SqlInsertDialect::Source, "public").await;
+    Box::pin(round_trip(true, SqlInsertDialect::Source, "public")).await;
 }
 
 #[tokio::test]
 #[ignore = "requires a disposable PostGIS server"]
 async fn postgres_database_export_standard_sql_preserves_geometry() {
-    round_trip(false, SqlInsertDialect::Standard, "public").await;
+    Box::pin(round_trip(false, SqlInsertDialect::Standard, "public")).await;
 }
 
 #[tokio::test]
 #[ignore = "requires a disposable PostGIS server"]
 async fn postgres_database_export_preserves_geometry_with_nonpublic_extension() {
-    round_trip(true, SqlInsertDialect::Source, "spatial").await;
+    Box::pin(round_trip(true, SqlInsertDialect::Source, "spatial")).await;
 }
 
 async fn round_trip(snapshot: bool, dialect: SqlInsertDialect, extension_schema: &str) {

@@ -1704,6 +1704,8 @@ export default withEnglishFallback({
     doltShowSystemTablesHint: "Wyświetl wbudowane tabele kontroli wersji Dolt na listach tabel tego połączenia.",
     showSystemSchemas: "Pokaż schematy systemowe",
     showSystemSchemasHint: "Wyświetl schematy systemowe i metadane w panelu bocznym oraz selektorach schematów tego połączenia.",
+    showSystemDatabases: "Pokaż systemowe bazy danych",
+    showSystemDatabasesHint: "Wyświetl wbudowane bazy systemowe (information_schema, performance_schema, mysql, sys) w panelu bocznym oraz selektorach baz danych dla tego połączenia.",
     showDatabaseLinks: "Pokaż łącza baz danych",
     showDatabaseLinksHint: "Wyświetl pozycję łączy bazodanowych w panelu bocznym tego połączenia.",
     tableLoading: "Ładowanie tabeli",

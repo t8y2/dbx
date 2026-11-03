@@ -53,7 +53,7 @@ const connectionProfileKeys = new Set(["id", "dbType", "label", "pickerLabel", "
 const driverProfileKeys = new Set(["profile", "agentKey", "packageKey", "label", "storeVisible", "storeOrder"]);
 const managedDriverKeys = new Set(["key", "label", "storeVisible", "storeOrder"]);
 const capabilityKeys = new Set(["queryExecution", "metadataBrowse", "objectBrowser", "objectSource", "schemaSearch", "diagram", "tableDataEdit", "tableStructureEdit", "tableImport", "dataTransfer", "sqlFileExecution", "databaseCreate", "fieldLineage", "sqlExplain", "userAdmin", "driverManagement"]);
-const traitKeys = new Set(["schemaAware", "databaseSchemaQualified", "singleDatabase", "clearableQuerySchema", "fetchFirst", "treeSchema", "databaseObjectTree", "pgVacuum", "pgLikeStructure", "diagramSql"]);
+const traitKeys = new Set(["schemaAware", "databaseSchemaQualified", "singleDatabase", "clearableQuerySchema", "fetchFirst", "treeSchema", "databaseObjectTree", "pgVacuum", "pgLikeStructure", "diagramSql", "showSystemDatabases"]);
 
 function connectionTypeFiles() {
   if (!existsSync(connectionTypeDirectory)) throw new Error(`Missing connection type descriptor directory: ${connectionTypeDirectory}`);

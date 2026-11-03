@@ -22,3 +22,9 @@ export const PG_VACUUM_TYPES = databaseTypesWithTrait("pgVacuum");
 export const PG_LIKE_STRUCTURE_TYPES = databaseTypesWithTrait("pgLikeStructure");
 
 export const DIAGRAM_SQL_TYPES = databaseTypesWithTrait("diagramSql");
+
+// Engines whose "system" namespace sits at the database level (MySQL exposes
+// information_schema/performance_schema/mysql/sys as databases, not as schemas
+// inside a database). Only these react to `show_system_schemas` with a
+// database-level list, so the setting must not leak onto schema-aware engines.
+export const SHOW_SYSTEM_DATABASES_TYPES = databaseTypesWithTrait("showSystemDatabases");

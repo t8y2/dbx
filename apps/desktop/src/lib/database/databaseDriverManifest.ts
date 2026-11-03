@@ -30,7 +30,7 @@ export const DATABASE_PRODUCT_CAPABILITY_KEYS = [
 export type DatabaseProductCapability = (typeof DATABASE_PRODUCT_CAPABILITY_KEYS)[number];
 export type DatabaseProductCapabilities = Record<DatabaseProductCapability, boolean>;
 
-export const DATABASE_BEHAVIOR_TRAIT_KEYS = ["schemaAware", "databaseSchemaQualified", "singleDatabase", "clearableQuerySchema", "fetchFirst", "treeSchema", "databaseObjectTree", "pgVacuum", "pgLikeStructure", "diagramSql"] as const;
+export const DATABASE_BEHAVIOR_TRAIT_KEYS = ["schemaAware", "databaseSchemaQualified", "singleDatabase", "clearableQuerySchema", "fetchFirst", "treeSchema", "databaseObjectTree", "pgVacuum", "pgLikeStructure", "diagramSql", "showSystemDatabases"] as const;
 
 export type DatabaseBehaviorTrait = (typeof DATABASE_BEHAVIOR_TRAIT_KEYS)[number];
 export type DatabaseBehaviorTraits = Partial<Record<DatabaseBehaviorTrait, boolean>>;

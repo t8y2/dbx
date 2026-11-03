@@ -8239,7 +8239,7 @@ export default withEnglishFallback({
     locateActiveFile: "현재 파일 찾기",
     activeFileNotFound: "현재 파일을 찾을 수 없습니다. 파일이 존재하는지 또는 파일 필터로 숨겨졌는지 확인하세요.",
     title: "SQL 파일",
-    storageHelp: "폴더 열기로 연 디스크의 파일을 표시합니다. 기본적으로 .sql 및 .ddl 파일이 표시되며 필터 설정에서 변경할 수 있습니다. 편집 내용은 원본 파일에 바로 저장됩니다.",
+    storageHelp: "폴더 열기로 연 디스크의 파일을 표시합니다. 기본적으로 .sql, .ddl, .psql, .prc, .pkb 등 데이터베이스 스크립트 파일이 표시되며 필터 설정에서 변경할 수 있습니다. 편집 내용은 원본 파일에 바로 저장됩니다.",
     openFolder: "폴더 열기",
     closePanel: "닫기",
     loading: "불러오는 중...",

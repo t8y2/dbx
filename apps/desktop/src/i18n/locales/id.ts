@@ -7772,7 +7772,7 @@ export default withEnglishFallback({
     folderDeleted: "Folder dihapus",
     deleteFolderFailed: "Gagal menghapus folder: {message}",
     title: "File SQL",
-    storageHelp: "Ini adalah file di disk yang dibuka melalui Buka Folder. Secara default, file .sql dan .ddl ditampilkan; Anda dapat menyesuaikan filter file. Perubahan disimpan langsung kembali ke file aslinya.",
+    storageHelp: "Ini adalah file di disk yang dibuka melalui Buka Folder. Secara default, file skrip database seperti .sql, .ddl, .psql, .prc, dan .pkb ditampilkan; Anda dapat menyesuaikan filter file. Perubahan disimpan langsung kembali ke file aslinya.",
     openFolder: "Buka Folder",
     closePanel: "Tutup",
     loading: "Memuat...",

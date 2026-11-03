@@ -6961,7 +6961,7 @@ export default withEnglishFallback({
     locateActiveFile: "Geçerli dosyayı bul",
     activeFileNotFound: "Geçerli dosya bulunamadı. Dosyanın var olup olmadığını veya dosya filtresi tarafından gizlenip gizlenmediğini kontrol edin.",
     title: "SQL Dosyaları",
-    storageHelp: "Klasör Aç ile açılan diskteki dosyalardır. Varsayılan olarak .sql ve .ddl dosyaları gösterilir; dosya filtresini özelleştirebilirsiniz. Düzenlemeler doğrudan özgün dosyaya kaydedilir.",
+    storageHelp: "Klasör Aç ile açılan diskteki dosyalardır. Varsayılan olarak .sql, .ddl, .psql, .prc ve .pkb gibi veritabanı komut dosyaları gösterilir; dosya filtresini özelleştirebilirsiniz. Düzenlemeler doğrudan özgün dosyaya kaydedilir.",
     openFolder: "Klasör Aç",
     closePanel: "Kapat",
     loading: "Yükleniyor...",

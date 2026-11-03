@@ -55,6 +55,13 @@ impl PluginConnectionHandle {
         self.session.as_ref().is_none_or(|session| session.status().state == PluginSessionState::Running)
     }
 
+    /// A running sidecar can outlive a disconnected SSH transport. Consult
+    /// the session's ordered lifecycle/event state without starting any I/O.
+    pub fn is_connected(&self) -> bool {
+        self.is_running()
+            && self.session.as_ref().is_none_or(|session| session.connection_is_connected(&self.connection_id))
+    }
+
     /// The lifecycle payload this connection was opened with: provider,
     /// hydrated connection, and the runtime endpoint *after* DBX transport
     /// layers. Host-initiated calls that act on an open connection (for
@@ -1137,6 +1144,7 @@ mod tests {
         assert!(host.connect_connection(&config, "localhost", 0, None).await.is_err());
         drop(update);
         let connection = host.connect_connection(&config, "localhost", 0, None).await.unwrap();
+        assert!(connection.is_connected(), "UI-only providers do not require transport-state events");
         assert!(lifecycle.begin_update("sample.ui").unwrap_err().contains("Saved UI connection"));
         connection.disconnect().await.unwrap();
         drop(connection);
@@ -1832,6 +1840,160 @@ mod tests {
             &provider
         )
         .is_ok());
+    }
+
+    #[cfg(unix)]
+    fn write_connection_state_sidecar(root: &std::path::Path, plugin_id: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let plugin_dir = root.join(plugin_id);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({
+                "manifest_version": 1,
+                "id": plugin_id,
+                "name": "Connection state test",
+                "version": "1.0.0",
+                "publisher": "sample",
+                "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+                "entrypoints": { "backend": {
+                    "protocol_versions": [1], "transport": "stdio-jsonl", "executable": "plugin.sh"
+                } },
+                "contributions": [{
+                    "type": "connection-provider", "id": "sample.connection",
+                    "database_type": "sample", "capabilities": ["connect", "disconnect"]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let script = plugin_dir.join("plugin.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":["connections","events"],"plugin":{"id":"__PLUGIN_ID__","version":"1.0.0"}}}\n' "$initialize_id"
+while IFS= read -r request; do
+  request_id=$(printf '%s' "$request" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$request" in
+    *'"method":"sample/drop-a"'*)
+      printf '{"jsonrpc":"2.0","method":"ssh/session/state","params":{"connectionId":"a","state":"disconnected"}}\n'
+      ;;
+    *'"method":"sample/unrelated"'*)
+      printf '{"jsonrpc":"2.0","method":"sample/session/state","params":{"connectionId":"a","state":"disconnected"}}\n'
+      printf '{"jsonrpc":"2.0","method":"ssh/session/state","params":{"connectionId":"a","state":"connecting"}}\n'
+      printf '{"jsonrpc":"2.0","method":"ssh/session/state","params":{"state":"disconnected"}}\n'
+      ;;
+  esac
+  case "$request" in
+    *'"name":"fail-connect"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"success":false,"message":"test failure"}}\n' "$request_id"
+      ;;
+    *)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"success":true}}\n' "$request_id"
+      ;;
+  esac
+  case "$request" in
+    *'"name":"drop-after-connect"'*)
+      printf '{"jsonrpc":"2.0","method":"ssh/session/state","params":{"connectionId":"a","state":"disconnected"}}\n'
+      ;;
+  esac
+done
+"#
+            .replace("__PLUGIN_ID__", plugin_id),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(script, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn state_test_connection(plugin_id: &str, id: &str) -> ConnectionConfig {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "db_type": "plugin", "host": "localhost", "port": 0,
+            "username": "", "password": "", "plugin_id": plugin_id,
+            "plugin_connection_provider": "sample.connection", "plugin_connection_type": "sample"
+        }))
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connection_transport_state_follows_wire_order_without_restarting_the_sidecar() {
+        let root = tempfile::tempdir().unwrap();
+        write_connection_state_sidecar(root.path(), "sample.states");
+        let host = super::PluginHost::new(crate::plugins::PluginRegistry::new_with_app_version(
+            root.path().to_path_buf(),
+            "0.5.67",
+        ));
+        let mut config = state_test_connection("sample.states", "a");
+        let first = host.connect_connection(&config, "localhost", 0, None).await.unwrap();
+        let other =
+            host.connect_connection(&state_test_connection("sample.states", "b"), "localhost", 0, None).await.unwrap();
+        let session = host.activate("sample.states").await.unwrap();
+        let process_id = session.pid().await;
+        let mut delayed_events = session.subscribe_events();
+        session.invoke::<serde_json::Value>("sample/drop-a", serde_json::Value::Null).await.unwrap();
+        assert!(first.is_running(), "a dropped transport must not require a process crash");
+        assert!(!first.is_connected());
+        assert!(other.is_connected(), "transport state belongs to its connection id");
+
+        config.name = "fail-connect".to_string();
+        assert!(host.connect_connection(&config, "localhost", 0, None).await.is_err());
+        assert!(!first.is_connected(), "a rejected connect must not clear the reported disconnect");
+        config.name = "reconnect".to_string();
+        let reconnected = host.connect_connection(&config, "localhost", 0, None).await.unwrap();
+        assert_eq!(session.pid().await, process_id);
+        assert!(reconnected.is_connected());
+        // Consuming an old notification after reconnect cannot alter the
+        // transport state: it was recorded before the successful RPC response.
+        assert_eq!(delayed_events.recv().await.unwrap().params["state"], "disconnected");
+        assert!(reconnected.is_connected());
+        session.invoke::<serde_json::Value>("sample/unrelated", serde_json::Value::Null).await.unwrap();
+        assert!(reconnected.is_connected(), "unrelated or incomplete events must not change connectivity");
+
+        config.name = "drop-after-connect".to_string();
+        let immediately_lost = host.connect_connection(&config, "localhost", 0, None).await.unwrap();
+        // A following response is a deterministic stdout barrier for the
+        // notification sent just after the connect response.
+        session.invoke::<serde_json::Value>("sample/barrier", serde_json::Value::Null).await.unwrap();
+        assert!(immediately_lost.is_running());
+        assert!(!immediately_lost.is_connected());
+        host.stop_all().await.unwrap();
+        assert!(!other.is_connected());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connection_transport_state_is_isolated_by_plugin_and_sidecar_incarnation() {
+        let root = tempfile::tempdir().unwrap();
+        for id in ["sample.first", "sample.second"] {
+            write_connection_state_sidecar(root.path(), id);
+        }
+        let host = super::PluginHost::new(crate::plugins::PluginRegistry::new_with_app_version(
+            root.path().to_path_buf(),
+            "0.5.67",
+        ));
+        let config = state_test_connection("sample.first", "a");
+        let old = host.connect_connection(&config, "localhost", 0, None).await.unwrap();
+        let unrelated =
+            host.connect_connection(&state_test_connection("sample.second", "a"), "localhost", 0, None).await.unwrap();
+        let old_session = host.activate("sample.first").await.unwrap();
+        let mut delayed_events = old_session.subscribe_events();
+        old_session.invoke::<serde_json::Value>("sample/drop-a", serde_json::Value::Null).await.unwrap();
+        assert!(!old.is_connected());
+        assert!(unrelated.is_connected(), "another plugin can reuse the same connection id");
+
+        host.stop("sample.first").await.unwrap();
+        let replacement = host.connect_connection(&config, "localhost", 0, None).await.unwrap();
+        assert!(replacement.is_connected());
+        assert!(!old.is_connected());
+        assert_eq!(delayed_events.recv().await.unwrap().params["state"], "disconnected");
+        assert!(replacement.is_connected(), "queued events belong to their original sidecar session");
+        host.stop_all().await.unwrap();
     }
 
     #[cfg(unix)]

@@ -537,6 +537,22 @@ export const useConnectionStore = defineStore("connection", () => {
   const activePinnedTreeNodeReorderKey = ref<string | null>(null);
   let pinnedTreeNodePersistQueue: Promise<void> = Promise.resolve();
   const connectedIds = ref<Set<string>>(new Set());
+  // A backend can still own another database's pool after the default pool is
+  // closed. Keep that connection selectable without claiming its default
+  // dialect has been initialized (ensureConnected must still do that on use).
+  const observedOpenConnections = ref(new Map<string, string>());
+  const establishedConnectionIds = computed(() => {
+    const ids = new Set(connectedIds.value);
+    for (const connection of connections.value) {
+      if (observedOpenConnections.value.get(connection.id) === connectionConfigFingerprint(connection)) ids.add(connection.id);
+    }
+    return ids;
+  });
+  let connectedConnectionsRefreshGeneration = 0;
+  let connectedConnectionsRefresh: Promise<void> | undefined;
+  let connectedConnectionsRefreshRequested = false;
+  let connectedConnectionsReloadRequested = false;
+  const connectionStatusProbeGenerations = new Map<string, number>();
   /**
    * 本会话内被用户**显式关闭**（侧栏「关闭连接」/「关闭选中的 N 个连接」/「关闭所有活跃
    * 连接」/「断开并忘记本次密码」）且此后尚未重新连接的连接。
@@ -1060,6 +1076,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function clearConnectionIdentifierQuote(connectionId: string) {
+    observedOpenConnections.value.delete(connectionId);
     clearConnectionDatabaseModes(connectionId);
     if (!(connectionId in identifierQuotes.value)) return;
     const next = { ...identifierQuotes.value };
@@ -1078,7 +1095,12 @@ export const useConnectionStore = defineStore("connection", () => {
   async function refreshConnectionIdentifierQuote(connectionId: string, config: ConnectionConfig) {
     clearConnectionIdentifierQuote(connectionId);
     if (!connectionShouldLoadIdentifierQuote(config)) return;
+    const revision = connectionStateRevision(connectionId);
+    const currentConfig = getConfig(connectionId);
+    const fingerprint = currentConfig && connectionConfigFingerprint(currentConfig);
     const quote = await api.connectionIdentifierQuote(connectionId).catch(() => undefined);
+    const latestConfig = getConfig(connectionId);
+    if (!isCurrentConnectionStateRevision(connectionId, revision) || (fingerprint !== undefined && (!latestConfig || connectionConfigFingerprint(latestConfig) !== fingerprint))) return;
     if (quote != null) identifierQuotes.value = { ...identifierQuotes.value, [connectionId]: quote };
   }
 
@@ -1114,6 +1136,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function bumpConnectionStateRevision(connectionId: string): number {
+    observedOpenConnections.value.delete(connectionId);
     const revision = (connectionStateRevisions.get(connectionId) ?? 0) + 1;
     connectionStateRevisions.set(connectionId, revision);
     // Invalidate per-node load generations under this connection (and clear sticky
@@ -5414,6 +5437,8 @@ export const useConnectionStore = defineStore("connection", () => {
    * disconnected`) so the tree reflects the real transport state.
    */
   function markConnectionOffline(connectionId: string) {
+    observedOpenConnections.value.delete(connectionId);
+    startConnectionStatusProbe(connectionId);
     connectedIds.value.delete(connectionId);
     const node = findConnectionNode(connectionId);
     if (node) {
@@ -5421,6 +5446,99 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     clearConnectionHealthCheck(connectionId);
     clearConnectionPrewarmState(connectionId);
+  }
+
+  /** Hydrate another window's established connections without opening any pools. */
+  function refreshConnectedConnections(options: { reload?: boolean } = {}): Promise<void> {
+    // Coalesce events while invalidating the in-flight snapshot immediately.
+    ++connectedConnectionsRefreshGeneration;
+    connectedConnectionsRefreshRequested = true;
+    connectedConnectionsReloadRequested ||= options.reload === true;
+    if (!connectedConnectionsRefresh) {
+      connectedConnectionsRefresh = (async () => {
+        while (connectedConnectionsRefreshRequested) {
+          connectedConnectionsRefreshRequested = false;
+          const reload = connectedConnectionsReloadRequested;
+          connectedConnectionsReloadRequested = false;
+          const generation = connectedConnectionsRefreshGeneration;
+          if (reload) await reloadFromDisk({ readOnly: true });
+          await refreshConnectedConnectionsSnapshot(generation);
+        }
+      })().finally(() => {
+        connectedConnectionsRefresh = undefined;
+      });
+    }
+    return connectedConnectionsRefresh;
+  }
+
+  function startConnectionStatusProbe(connectionId: string): () => boolean {
+    const generation = (connectionStatusProbeGenerations.get(connectionId) ?? 0) + 1;
+    connectionStatusProbeGenerations.set(connectionId, generation);
+    // Order read-only probes without invalidating active tree/metadata loads.
+    return () => connectionStatusProbeGenerations.get(connectionId) === generation;
+  }
+
+  async function refreshConnectedConnectionsSnapshot(generation: number): Promise<void> {
+    const snapshot = [...connections.value];
+    let nextIndex = 0;
+    // A large saved connection list must not issue thousands of IPC calls at once.
+    await Promise.all(
+      Array.from({ length: Math.min(4, snapshot.length) }, async () => {
+        while (nextIndex < snapshot.length && generation === connectedConnectionsRefreshGeneration) {
+          const connection = snapshot[nextIndex++];
+          const id = connection.id;
+          if (connectingIds.value.has(id) || hasDisconnectInFlight(id)) continue;
+          const revision = connectionStateRevision(id);
+          const fingerprint = connectionConfigFingerprint(connection);
+          const wasConnected = connectedIds.value.has(id);
+          const isLatestProbe = startConnectionStatusProbe(id);
+          const isCurrent = () => {
+            const current = getConfig(id);
+            return (
+              generation === connectedConnectionsRefreshGeneration &&
+              isLatestProbe() &&
+              !!current &&
+              connectionConfigFingerprint(current) === fingerprint &&
+              isCurrentConnectionStateRevision(id, revision) &&
+              !connectingIds.value.has(id) &&
+              !hasDisconnectInFlight(id) &&
+              connectedIds.value.has(id) === wasConnected
+            );
+          };
+          let open: boolean;
+          try {
+            open = await api.connectionIsOpen(id);
+          } catch {
+            // An unavailable transport says nothing about the existing state.
+            continue;
+          }
+          if (!isCurrent()) continue;
+          if (open && !wasConnected) {
+            observedOpenConnections.value.set(id, fingerprint);
+            // ensureConnected trusts connectedIds. Load the driver's dialect before
+            // marking it ready, otherwise detached windows keep the default quote.
+            let quote: string | undefined;
+            if (connectionShouldLoadIdentifierQuote(connection)) {
+              try {
+                quote = await withMetadataLoadTimeout(id, api.connectionIdentifierQuote(id, undefined, { existingOnly: true }), "identifier quote");
+              } catch {
+                // A missing default pool does not make another database's live
+                // pool disappear. Keep the picker candidate, but let an explicit
+                // use initialize the configured database and its own dialect.
+                continue;
+              }
+              if (!isCurrent()) continue;
+            }
+            clearConnectionIdentifierQuote(id);
+            if (quote != null) identifierQuotes.value = { ...identifierQuotes.value, [id]: quote };
+            markConnectionConnected(id);
+            clearConnectionClosedByUser(id);
+          } else if (!open) {
+            markConnectionOffline(id);
+          }
+        }
+      }),
+    );
   }
 
   /**
@@ -5433,8 +5551,9 @@ export const useConnectionStore = defineStore("connection", () => {
    * A failed confirm says nothing about the connection, so it leaves the sidebar untouched.
    */
   async function confirmConnectionLiveness(connectionId: string): Promise<void> {
-    if (!connectionId || !connectedIds.value.has(connectionId)) return;
+    if (!connectionId || !establishedConnectionIds.value.has(connectionId)) return;
     const stateRevision = connectionStateRevision(connectionId);
+    const isLatestProbe = startConnectionStatusProbe(connectionId);
     let open: boolean;
     try {
       open = await api.connectionIsOpen(connectionId);
@@ -5444,8 +5563,8 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     if (open) return;
     // A late confirm must not undo an explicit disconnect or a newer reconnect.
-    if (!isCurrentConnectionStateRevision(connectionId, stateRevision)) return;
-    if (!connectedIds.value.has(connectionId)) return;
+    if (!isLatestProbe() || !isCurrentConnectionStateRevision(connectionId, stateRevision)) return;
+    if (!establishedConnectionIds.value.has(connectionId)) return;
     markConnectionOffline(connectionId);
   }
 
@@ -5467,7 +5586,7 @@ export const useConnectionStore = defineStore("connection", () => {
       // Sequential on purpose: resync only happens after a transport lag, and one probe in
       // flight at a time keeps a large connected set from stampeding the backend.
       // Snapshot the ids: the confirm below removes entries from this set as it flips them.
-      for (const connectionId of Array.from(connectedIds.value)) {
+      for (const connectionId of Array.from(establishedConnectionIds.value)) {
         await confirmConnectionLiveness(connectionId);
       }
       return;
@@ -5484,6 +5603,7 @@ export const useConnectionStore = defineStore("connection", () => {
    * 早于当前会话（见该函数的「迟到事件」说明）。
    */
   function markConnectionConnected(connectionId: string): void {
+    observedOpenConnections.value.delete(connectionId);
     connectedIds.value.add(connectionId);
     connectionConnectedAtMs.set(connectionId, Date.now());
   }
@@ -5508,6 +5628,13 @@ export const useConnectionStore = defineStore("connection", () => {
   async function handleConnectionIdleClosed(payload: ConnectionIdleClosedEvent): Promise<void> {
     const connectionId = payload?.connectionId;
     if (!connectionId) return;
+    // An observed-only connection has no local establishment timestamp yet.
+    // Confirm the backend state instead of retiring a potentially newer pool,
+    // and do not wait for a pending dialect read to finish before removing it.
+    if (!connectedIds.value.has(connectionId) && establishedConnectionIds.value.has(connectionId)) {
+      await confirmConnectionLiveness(connectionId);
+      return;
+    }
     // 已不在已连接集合（用户已手动断开，或此前已处理过该事件）时忽略，避免重复 toast。
     if (!connectedIds.value.has(connectionId)) return;
     const closedAtMs = Number(payload.closedAtMs);
@@ -11365,14 +11492,49 @@ export const useConnectionStore = defineStore("connection", () => {
     updateLayoutAndRebuild(reconciledLayout);
   }
 
-  async function reloadFromDisk() {
+  async function reloadFromDisk(options: { readOnly?: boolean } = {}) {
     // An external change may arrive after an in-flight reload read its snapshot.
     // Wait for it, then read again instead of joining that stale snapshot.
     await initFromDiskPromise;
-    await initFromDisk();
+    await initFromDisk(options);
   }
 
-  async function initFromDisk() {
+  function normalizeDiskConnection(savedConfig: ConnectionConfig, readOnly: boolean | undefined): ConnectionConfig {
+    const config = normalizeConnection(savedConfig);
+    if (readOnly) {
+      // Keep persisted effective values, not this window's stale global defaults.
+      if (typeof savedConfig.connect_timeout_secs === "number" && Number.isFinite(savedConfig.connect_timeout_secs) && savedConfig.connect_timeout_secs > 0) config.connect_timeout_secs = savedConfig.connect_timeout_secs;
+      if (typeof savedConfig.query_timeout_secs === "number" && Number.isFinite(savedConfig.query_timeout_secs) && savedConfig.query_timeout_secs >= 0) config.query_timeout_secs = savedConfig.query_timeout_secs;
+    }
+    return config;
+  }
+
+  function invalidateReloadedConnectionState(connectionId: string) {
+    // The other window may already have replaced its pool. Retire only this
+    // window's old readiness and metadata; the read-only snapshot adopts the new one.
+    bumpConnectionStateRevision(connectionId);
+    markConnectionOffline(connectionId);
+    clearConnectionIdentifierQuote(connectionId);
+    clearEtcdAccessCapabilities(connectionId);
+    clearSidebarStorageCaches(connectionId);
+    clearPrimaryVisibleObjectNames(connectionId);
+    clearConnectionRootMetadataLoad(connectionId);
+    cancelObjectDdlLoadsForConnection(connectionId);
+    cancelObjectMetadataLoadsForConnection(connectionId);
+    clearMetadataRuntimeCacheForConnection(connectionId);
+    invalidateCompletionCache(connectionId);
+    void invalidateObjectDdlCache({ connectionId });
+    invalidateConnectionMetadataLifetime(connectionId);
+    clearLoadedChildrenCache(connectionId, { deletePersisted: false });
+    const node = findConnectionNode(connectionId);
+    if (node) {
+      node.isExpanded = false;
+      node.children = [];
+      node.hiddenChildren = undefined;
+    }
+  }
+
+  async function initFromDisk(options: { readOnly?: boolean } = {}) {
     // Connection normalization and timeout migration depend on persisted global
     // settings. Startup helpers may initialize connections before App.initApp().
     await settingsStore.initEditorSettings();
@@ -11382,14 +11544,20 @@ export const useConnectionStore = defineStore("connection", () => {
         // 整体覆盖内存布局前，先落盘窗口内未写盘的分组编辑（防止 300ms 防抖窗口
         // 内的编辑被备份轮询/重载带回的旧快照静默回滚）。
         await flushTableVGroupPersist();
-        const [pinnedOrder, saved, , loadedTableVGroups] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(settingsStore.editorSettings.sidebarShowUserAdmin !== false), tunnelProfileStore.init(), api.loadTableVGroups()]);
+        const [pinnedOrder, saved, , loadedTableVGroups] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(options.readOnly ? undefined : settingsStore.editorSettings.sidebarShowUserAdmin !== false), tunnelProfileStore.init(), api.loadTableVGroups()]);
         setPinnedTreeNodeOrder(pinnedOrder);
-        await migrateTimeoutInheritance(saved);
-        const loadedConnections = saved.map(normalizeConnection).map((loadedConfig) => {
+        // Another window may have different cached global timeout settings.
+        // Reading its saved configurations must never migrate or write them back.
+        if (!options.readOnly) await migrateTimeoutInheritance(saved);
+        const loadedConnections = saved.map((savedConfig) => {
+          const loadedConfig = normalizeDiskConnection(savedConfig, options.readOnly);
           const currentConfig = connections.value.find((connection) => connection.id === loadedConfig.id);
           const startingFingerprint = startingConfigFingerprints.get(loadedConfig.id);
           if (currentConfig && (startingFingerprint === undefined || connectionConfigFingerprint(currentConfig) !== startingFingerprint)) {
             return currentConfig;
+          }
+          if (options.readOnly && currentConfig && connectionConfigFingerprint(normalizeDiskConnection(currentConfig, true)) !== connectionConfigFingerprint(loadedConfig)) {
+            invalidateReloadedConnectionState(loadedConfig.id);
           }
           return loadedConfig;
         });
@@ -11399,7 +11567,10 @@ export const useConnectionStore = defineStore("connection", () => {
         // (for example, the scheduled-backup poll) completes while they are open.
         const runtimeOneTimeConnections = connections.value.filter((connection) => connection.one_time === true && !loadedIds.has(connection.id));
         connections.value = [...loadedConnections, ...runtimeOneTimeConnections];
-        if (loadedConnections.some((connection, index) => (connection.connect_timeout_inherit === true && connection.connect_timeout_secs !== saved[index]?.connect_timeout_secs) || (connection.query_timeout_inherit === true && connection.query_timeout_secs !== saved[index]?.query_timeout_secs))) {
+        if (
+          !options.readOnly &&
+          loadedConnections.some((connection, index) => (connection.connect_timeout_inherit === true && connection.connect_timeout_secs !== saved[index]?.connect_timeout_secs) || (connection.query_timeout_inherit === true && connection.query_timeout_secs !== saved[index]?.query_timeout_secs))
+        ) {
           await persistConnections();
         }
         syncTimeoutInheritanceBackup();
@@ -11462,6 +11633,7 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshObjectListTreeNode,
     refreshTableColumnsTree,
     connectedIds,
+    establishedConnectionIds,
     connectingIds,
     isConnectionClosedByUser,
     userClosedConnectionIds,
@@ -11534,6 +11706,7 @@ export const useConnectionStore = defineStore("connection", () => {
     disconnect,
     hasDisconnectInFlight,
     markConnectionOffline,
+    refreshConnectedConnections,
     handleConnectionLivenessMessage,
     handleConnectionIdleClosed,
     markConnectionConnected,

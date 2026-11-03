@@ -2440,6 +2440,7 @@ export default withEnglishFallback({
     saveAllChanges: "บันทึกทั้งหมด",
     selectConnection: "เลือกการเชื่อมต่อ",
     searchConnection: "ค้นหาการเชื่อมต่อ...",
+    noConnectedConnections: "ไม่มีการเชื่อมต่อที่ใช้งานอยู่ โปรดเปิดการเชื่อมต่อจากแถบด้านข้างก่อน",
     selectCatalog: "เลือก Catalog",
     searchCatalog: "ค้นหา Catalog...",
     selectDatabase: "เลือกฐานข้อมูล",

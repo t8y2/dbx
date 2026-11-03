@@ -2307,6 +2307,7 @@ export default withEnglishFallback({
     saveAllChanges: "すべて保存",
     selectConnection: "接続を選択",
     searchConnection: "接続を検索...",
+    noConnectedConnections: "接続が確立されていません。先にサイドバーから接続を開いてください。",
     selectCatalog: "カタログを選択",
     searchCatalog: "カタログを検索...",
     selectDatabase: "データベースを選択",

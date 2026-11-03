@@ -1824,12 +1824,20 @@ impl AppState {
     ///
     /// Deliberately a pure registry read: it never calls
     /// `get_or_create_pool`, so checking the state cannot itself open the
-    /// connection. Ownership uses the same key convention as
+    /// connection. Plugin handles also consult transport state already reported
+    /// by their sidecar: a running process can outlive its SSH connection.
+    /// Ownership uses the same key convention as
     /// `drain_connection_pools` — the connection id, optionally followed by `:`
     /// and the database/catalog/role/session suffix that `base_pool_key_for` and
     /// its session-scoped variant build.
     pub async fn is_connection_open(&self, connection_id: &str) -> bool {
-        self.connections.read().await.keys().any(|key| pool_key_belongs_to_connection(key, connection_id))
+        self.connections.read().await.iter().any(|(key, pool)| {
+            pool_key_belongs_to_connection(key, connection_id)
+                && match pool {
+                    PoolKind::PluginConnection(handle) => handle.is_connected(),
+                    _ => true,
+                }
+        })
     }
 
     /// Subscribe to backend-confirmed connection liveness messages (#4339).
@@ -6506,6 +6514,24 @@ impl AppState {
         connection_id: &str,
         database: Option<&str>,
     ) -> Result<Option<String>, String> {
+        self.connection_identifier_quote_inner(connection_id, database, false).await
+    }
+
+    /// Read dialect metadata from an existing pool without reopening a closed connection.
+    pub async fn existing_connection_identifier_quote(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        self.connection_identifier_quote_inner(connection_id, database, true).await
+    }
+
+    async fn connection_identifier_quote_inner(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        existing_only: bool,
+    ) -> Result<Option<String>, String> {
         let config = self
             .configs
             .read()
@@ -6513,7 +6539,16 @@ impl AppState {
             .get(connection_id)
             .cloned()
             .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
-        let pool_key = self.get_or_create_pool(connection_id, database).await?;
+        let pool = if existing_only {
+            let (_, pool) = self
+                .existing_workload_pool_for_session(connection_id, database, None)
+                .await
+                .ok_or_else(|| format!("Connection pool is not open: {connection_id}"))?;
+            Some(pool)
+        } else {
+            let pool_key = self.get_or_create_pool(connection_id, database).await?;
+            self.pool_handle(&pool_key).await
+        };
         enum IdentifierQuoteSource {
             NativeGaussdb(deadpool_postgres::Pool),
             NativeOpenGauss(deadpool_postgres::Pool),
@@ -6521,7 +6556,7 @@ impl AppState {
             ExternalDriver { config: Arc<ConnectionConfig>, session: Arc<PluginDriverSession> },
         }
         let source = {
-            match self.pool_handle(&pool_key).await.as_ref() {
+            match pool.as_ref() {
                 // GaussDB and openGauss take their identifier quote from the
                 // database compatibility mode (`pg_database.datcompatibility`):
                 // MySQL-compatible databases use backticks, while Oracle and
@@ -15424,6 +15459,66 @@ for line in sys.stdin:
         assert!(nacos_config.connect_override.is_none());
         state.proxy_tunnels.stop_tunnel("proxied-nacos:transport:0").await;
         state.proxy_tunnels.stop_tunnel("proxied-nacos:rnacos-console:transport:0").await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn identifier_quote_existing_pool_does_not_open_a_saved_connection() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "quote-closed".to_string();
+        config.db_type = DatabaseType::Sqlite;
+        config.host = ":memory:".to_string();
+        config.password.clear();
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let error = state.existing_connection_identifier_quote("quote-closed", None).await.unwrap_err();
+
+        assert!(error.contains("Connection pool is not open"), "{error}");
+        assert!(!state.is_connection_open("quote-closed").await);
+        assert!(state.connections.read().await.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn identifier_quote_existing_pool_reuses_open_pool_and_rejects_closed_pool() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "quote-open".to_string();
+        config.db_type = DatabaseType::Sqlite;
+        config.host = ":memory:".to_string();
+        config.password.clear();
+        state.configs.write().await.insert(config.id.clone(), config);
+        // The original API still opens a pool by default, while SQLite legitimately
+        // returns no dialect override. Reusing that pool must preserve this None.
+        assert_eq!(state.connection_identifier_quote("quote-open", None).await.unwrap(), None);
+        let before = state.connections.read().await.snapshot("quote-open").unwrap().publication;
+
+        assert_eq!(state.existing_connection_identifier_quote("quote-open", None).await.unwrap(), None);
+        let after = state.connections.read().await.snapshot("quote-open").unwrap().publication;
+        assert!(before.is_same(&after));
+        assert_eq!(state.connections.read().await.len(), 1);
+
+        state.connections.write().await.remove("quote-open");
+        assert!(state.existing_connection_identifier_quote("quote-open", None).await.is_err());
+        assert!(!state.is_connection_open("quote-open").await);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn identifier_quote_existing_pool_does_not_borrow_another_database_pool() {
+        let (state, dir) = test_app_state().await;
+        let config = mysql_config(None);
+        state.configs.write().await.insert(config.id.clone(), config);
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+        state.connections.write().await.insert("conn:analytics".to_string(), PoolKind::Sqlite(pool));
+
+        assert!(state.is_connection_open("conn").await);
+        assert!(state.existing_connection_identifier_quote("conn", None).await.is_err());
+        assert!(state.existing_connection_identifier_quote("conn", Some("billing")).await.is_err());
+        assert_eq!(state.existing_connection_identifier_quote("conn", Some("analytics")).await.unwrap(), None);
+        assert_eq!(state.connections.read().await.len(), 1);
+        assert!(state.connections.read().await.contains_key("conn:analytics"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

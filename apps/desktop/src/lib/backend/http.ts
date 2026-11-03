@@ -663,10 +663,11 @@ export async function prewarmConnection(connectionId: string, database?: string,
   return post("/api/connection/prewarm", { connectionId, database, catalog, clientSessionId });
 }
 
-export async function connectionIdentifierQuote(connectionId: string, database?: string): Promise<string | undefined> {
+export async function connectionIdentifierQuote(connectionId: string, database?: string, options?: { existingOnly?: boolean }): Promise<string | undefined> {
   const quote = await post<string | null>("/api/connection/identifier-quote", {
     connectionId,
     database,
+    ...(options?.existingOnly ? { existingOnly: true } : {}),
   });
   return quote ?? undefined;
 }

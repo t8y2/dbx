@@ -2287,6 +2287,7 @@ export default withEnglishFallback({
     saveAllChanges: "Salvar tudo",
     selectConnection: "Selecionar conexão",
     searchConnection: "Pesquisar conexões...",
+    noConnectedConnections: "Nenhuma conexão ativa. Abra uma conexão na barra lateral primeiro.",
     selectCatalog: "Selecionar catálogo",
     searchCatalog: "Pesquisar catálogos...",
     selectDatabase: "Selecionar banco de dados",

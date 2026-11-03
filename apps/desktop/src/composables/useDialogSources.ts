@@ -559,17 +559,19 @@ export function useDialogSources() {
     applyingImportSelection.value = true;
     try {
       for (const update of updates) await connectionStore.updateConnection(update);
-      const existingIds = new Set(connectionStore.connections.map((connection) => connection.id));
-      const { count, layout } = preview.connections.length ? await connectionStore.applyConnectionsImport(preview) : { count: 0, layout: undefined };
-      const importedIds = connectionStore.connections.map((connection) => connection.id).filter((id) => !existingIds.has(id));
-      // Keychain lookups cover only the selected DataGrip rows, and fill only
-      // connections this import created, so unselected rows keep their passwords.
+      const { count, layout, createdIds } = preview.connections.length ? await connectionStore.applyConnectionsImport(preview) : { count: 0, layout: undefined, createdIds: new Map<string, string>() };
+      // Each selected DataGrip row fills only the connection created from that
+      // row, so a row deduplicated against another app's connection, an
+      // unselected row, or a pre-existing connection never receives its password.
       for (const selection of selections.filter((item) => item.group.source === "datagrip")) {
         const selectedIds = new Set(selection.connectionIds);
-        const selected = selection.group.preview.connections.filter((connection) => selectedIds.has(connection.id));
-        if (!selected.length || !importedIds.length) continue;
+        const targets = selection.group.preview.connections.flatMap((source) => {
+          const connectionId = selectedIds.has(source.id) ? createdIds.get(source.id) : undefined;
+          return connectionId ? [{ source, connectionId }] : [];
+        });
+        if (!targets.length) continue;
         try {
-          await connectionStore.applyDataGripKeychainPasswords({ payload: JSON.parse(selection.group.content), selected, connectionIds: importedIds });
+          await connectionStore.applyDataGripKeychainPasswords({ payload: JSON.parse(selection.group.content), targets });
         } catch {
           // The imported connection remains usable with credentials entered manually.
         }

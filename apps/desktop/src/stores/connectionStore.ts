@@ -11288,7 +11288,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return parseConnectionConfigObject(JSON.parse(json));
   }
 
-  async function applyConnectionsImport(preview: ConnectionConfigBundle, selectedConnectionIds?: Iterable<string>): Promise<{ count: number; layout?: SidebarLayout }> {
+  async function applyConnectionsImport(preview: ConnectionConfigBundle, selectedConnectionIds?: Iterable<string>): Promise<{ count: number; layout?: SidebarLayout; createdIds: Map<string, string> }> {
     const selected = selectConnectionConfigBundle(preview, selectedConnectionIds);
     const importedTunnelProfileStore = useTunnelProfileStore();
     await importedTunnelProfileStore.init();
@@ -11302,7 +11302,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await importedTunnelProfileStore.saveProfiles([...importedTunnelProfileStore.profiles, ...imported.tunnelProfiles]);
     }
     for (const connection of imported.connections) await addConnection(normalizeConnection(connection));
-    return { count: imported.connections.length, layout: imported.layout };
+    return { count: imported.connections.length, layout: imported.layout, createdIds: imported.createdIds };
   }
 
   async function importConnectionsFromFile(content: string, passphrase: string | null, selectedConnectionIds?: Iterable<string>): Promise<{ count: number; layout?: SidebarLayout }> {
@@ -11312,26 +11312,22 @@ export const useConnectionStore = defineStore("connection", () => {
 
   /**
    * Read macOS Keychain passwords for DataGrip connections and update them.
-   * With a scope, only the Keychain entries of the `selected` DataGrip rows are
-   * read and only the connections in `connectionIds` are updated.
+   * With a scope, each target pairs a DataGrip source row with the connection
+   * created from it: only those rows' Keychain entries are read, and each
+   * password is written only to its own target connection.
    */
-  async function applyDataGripKeychainPasswords(scope?: { payload: DataGripImportPayload; selected: ConnectionConfig[]; connectionIds: Iterable<string> }): Promise<number> {
+  async function applyDataGripKeychainPasswords(scope?: { payload: DataGripImportPayload; targets: { source: ConnectionConfig; connectionId: string }[] }): Promise<number> {
     const payload = scope ? scope.payload : pendingDataGripPayload;
     if (!scope) pendingDataGripPayload = null;
     if (!payload) return 0;
+    if (scope && !scope.targets.length) return 0;
 
     try {
       const { getDataGripUuidMap, datagripKeychainService, dataGripKeychainKey } = await import("@/lib/imports/datagripImport");
       // dedupKey → DataGrip UUID
       const uuidMap = getDataGripUuidMap(payload);
-      const targetIds = scope ? new Set(scope.connectionIds) : null;
-      if (scope) {
-        const selectedKeys = new Set(scope.selected.map(dataGripKeychainKey));
-        for (const dedupKey of uuidMap.keys()) {
-          if (!selectedKeys.has(dedupKey)) uuidMap.delete(dedupKey);
-        }
-      }
-      if (uuidMap.size === 0 || targetIds?.size === 0) return 0;
+      if (scope) return await fillDataGripKeychainTargets(scope.targets, uuidMap, datagripKeychainService, dataGripKeychainKey);
+      if (uuidMap.size === 0) return 0;
 
       // Build service names for batch Keychain read
       const dedupKeyToService = new Map<string, string>();
@@ -11354,7 +11350,6 @@ export const useConnectionStore = defineStore("connection", () => {
       // Update connections that have passwords (match by name/host/port)
       let filled = 0;
       const updated = connections.value.map((conn) => {
-        if (targetIds && !targetIds.has(conn.id)) return conn;
         const service = dedupKeyToService.get(dataGripKeychainKey(conn));
         if (!service) return conn;
         const password = passwordByService.get(service);
@@ -11374,6 +11369,33 @@ export const useConnectionStore = defineStore("connection", () => {
       console.warn("[DataGrip Import] Keychain read failed:", e);
       return 0;
     }
+  }
+
+  async function fillDataGripKeychainTargets(targets: { source: ConnectionConfig; connectionId: string }[], uuidMap: Map<string, string>, keychainService: (dgUuid: string) => string, keychainKey: (connection: ConnectionConfig) => string): Promise<number> {
+    // Target connection ID → Keychain service of the DataGrip row it was created from.
+    const serviceByConnectionId = new Map<string, string>();
+    for (const { source, connectionId } of targets) {
+      const dgUuid = uuidMap.get(keychainKey(source));
+      if (dgUuid) serviceByConnectionId.set(connectionId, keychainService(dgUuid));
+    }
+    if (serviceByConnectionId.size === 0) return 0;
+
+    const results: [string, string][] = await api.readKeychainPasswords([...new Set(serviceByConnectionId.values())]);
+    const passwordByService = new Map(results.filter(([, password]) => password));
+
+    let filled = 0;
+    const updated = connections.value.map((conn) => {
+      const service = serviceByConnectionId.get(conn.id);
+      const password = service ? passwordByService.get(service) : undefined;
+      if (!password) return conn;
+      filled++;
+      return { ...conn, password };
+    });
+    if (filled > 0) {
+      connections.value = updated;
+      await persistConnections();
+    }
+    return filled;
   }
 
   function applySidebarLayout(layout: SidebarLayout) {

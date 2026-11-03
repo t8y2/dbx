@@ -34,6 +34,7 @@ vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast
 
 import { useDialogSources } from "@/composables/useDialogSources";
 import { clearRememberedExportPassphrase, getRememberedExportPassphrase } from "@/lib/backend/exportPassphraseSession";
+import { prepareConnectionConfigImport, type ConnectionConfigBundle } from "@/lib/connection/connectionConfigTransfer";
 
 const mountedApps: App[] = [];
 
@@ -230,23 +231,65 @@ describe("useDialogSources", () => {
     expect(getRememberedExportPassphrase()).toBe("passphrase");
   });
 
-  it("limits the DataGrip Keychain lookup to the selected rows and the connections this import created", async () => {
-    const alpha = { ...conn("dg-alpha"), name: "Alpha", host: "alpha.example" };
-    const beta = { ...conn("dg-beta"), name: "Beta", host: "beta.example" };
-    mocks.store.connections = [conn("existing")];
-    mocks.store.applyConnectionsImport.mockImplementation(async (preview: { connections: ConnectionConfig[] }) => {
-      mocks.store.connections = [...mocks.store.connections, ...preview.connections.map((connection) => ({ ...connection, id: `new-${connection.id}` }))];
-      return { count: preview.connections.length };
-    });
+  describe("installed-app DataGrip Keychain targeting", () => {
     const content = JSON.stringify({ format: "datagrip-import", dataSources: "<project/>" });
-    const group = { source: "datagrip" as const, label: "DataGrip", path: "/datagrip/dataSources.xml", content, preview: { connections: [alpha, beta] } };
-    const dialogs = await mountDialogs();
+    const datagripGroup = (connections: ConnectionConfig[]) => ({ source: "datagrip" as const, label: "DataGrip", path: "/datagrip/dataSources.xml", content, preview: { connections } });
+    const dbeaverGroup = (connections: ConnectionConfig[]) => ({ source: "dbeaver" as const, label: "DBeaver", path: "/dbeaver/data-sources.json", content: "{}", preview: { connections } });
 
-    await dialogs.onInstalledConnectionsSelected([{ group, connectionIds: ["dg-alpha"] }]);
+    beforeEach(() => {
+      // Run the real deduplication so the test covers which rows are actually created.
+      mocks.store.applyConnectionsImport.mockImplementation(async (preview: ConnectionConfigBundle) => {
+        let n = 0;
+        const imported = prepareConnectionConfigImport(preview, mocks.store.connections, [], () => `created-${++n}`);
+        mocks.store.connections = [...mocks.store.connections, ...imported.connections];
+        return { count: imported.connections.length, layout: imported.layout, createdIds: imported.createdIds };
+      });
+    });
 
-    expect(mocks.store.applyConnectionsImport.mock.calls[0][0].connections.map((connection: ConnectionConfig) => connection.name)).toEqual(["Alpha"]);
-    expect(mocks.store.applyDataGripKeychainPasswords).toHaveBeenCalledTimes(1);
-    expect(mocks.store.applyDataGripKeychainPasswords).toHaveBeenCalledWith({ payload: JSON.parse(content), selected: [alpha], connectionIds: ["new-dg-alpha"] });
-    expect(mocks.store.parseConnectionsImport).not.toHaveBeenCalled();
+    it("limits the lookup to the selected rows and the connections created from them", async () => {
+      const alpha = { ...conn("dg-alpha"), name: "Alpha", host: "alpha.example" };
+      const beta = { ...conn("dg-beta"), name: "Beta", host: "beta.example" };
+      mocks.store.connections = [conn("existing")];
+      const dialogs = await mountDialogs();
+
+      await dialogs.onInstalledConnectionsSelected([{ group: datagripGroup([alpha, beta]), connectionIds: ["dg-alpha"] }]);
+
+      expect(mocks.store.applyConnectionsImport.mock.calls[0][0].connections.map((connection: ConnectionConfig) => connection.name)).toEqual(["Alpha"]);
+      expect(mocks.store.applyDataGripKeychainPasswords).toHaveBeenCalledTimes(1);
+      expect(mocks.store.applyDataGripKeychainPasswords).toHaveBeenCalledWith({ payload: JSON.parse(content), targets: [{ source: alpha, connectionId: "created-1" }] });
+      expect(mocks.store.parseConnectionsImport).not.toHaveBeenCalled();
+    });
+
+    it("targets only the DataGrip row's own connection when another app has the same endpoint with a different account", async () => {
+      const endpoint = { name: "Shared", host: "db.example", port: 5432, database: "app" };
+      const fromDbeaver = { ...conn("dbeaver-row"), ...endpoint, username: "dbeaver-user", password: "dbeaver-secret" };
+      const fromDatagrip = { ...conn("datagrip-row"), ...endpoint, username: "datagrip-user", password: "" };
+      const dialogs = await mountDialogs();
+
+      await dialogs.onInstalledConnectionsSelected([
+        { group: dbeaverGroup([fromDbeaver]), connectionIds: ["dbeaver-row"] },
+        { group: datagripGroup([fromDatagrip]), connectionIds: ["datagrip-row"] },
+      ]);
+
+      // Both accounts are imported instead of the DataGrip row being dropped as a duplicate.
+      expect(mocks.store.connections.map((connection) => [connection.id, connection.username, connection.password])).toEqual([
+        ["created-1", "dbeaver-user", "dbeaver-secret"],
+        ["created-2", "datagrip-user", ""],
+      ]);
+      expect(mocks.store.applyDataGripKeychainPasswords).toHaveBeenCalledWith({ payload: JSON.parse(content), targets: [{ source: fromDatagrip, connectionId: "created-2" }] });
+    });
+
+    it("skips the lookup when the DataGrip row is deduplicated against another app's identical connection", async () => {
+      const shared = { name: "Shared", host: "db.example", port: 5432, database: "app", username: "app" };
+      const dialogs = await mountDialogs();
+
+      await dialogs.onInstalledConnectionsSelected([
+        { group: dbeaverGroup([{ ...conn("dbeaver-row"), ...shared, password: "dbeaver-secret" }]), connectionIds: ["dbeaver-row"] },
+        { group: datagripGroup([{ ...conn("datagrip-row"), ...shared, password: "" }]), connectionIds: ["datagrip-row"] },
+      ]);
+
+      expect(mocks.store.connections.map((connection) => [connection.id, connection.password])).toEqual([["created-1", "dbeaver-secret"]]);
+      expect(mocks.store.applyDataGripKeychainPasswords).not.toHaveBeenCalled();
+    });
   });
 });

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { parseConnectionConfigObject, selectConnectionConfigBundle, type ConnectionConfigBundle } from "@/lib/connection/connectionConfigTransfer";
+import { connectionImportIdentity, parseConnectionConfigObject, selectConnectionConfigBundle, type ConnectionConfigBundle } from "@/lib/connection/connectionConfigTransfer";
 import { emptyLayout, mergeSidebarLayout } from "@/lib/sidebar/sidebarLayout";
 import type { ConnectionConfig } from "@/types/database";
 
@@ -82,18 +82,13 @@ function isWineSource(source: InstalledConnectionSource): boolean {
   }
 }
 
-function connectionIdentity(connection: ConnectionConfig): string {
-  const tunnels = (connection.transport_layers ?? []).map((layer) => (layer.type === "ssh" ? [layer.type, layer.host, layer.port, layer.user, layer.auth_method, layer.key_path] : [layer.type]));
-  return JSON.stringify([connection.name, connection.db_type, connection.driver_profile || connection.db_type, connection.host, connection.port, connection.username, connection.database || "", connection.connection_string || "", tunnels]);
-}
-
 export function planInstalledConnectionImport(selections: InstalledConnectionSelection[], existing: ConnectionConfig[]): { preview: ConnectionConfigBundle; updates: ConnectionConfig[] } {
   const combined = combineInstalledConnectionSelections(selections);
   const wineIds = new Set(selections.filter((selection) => isWineSource(selection.group)).flatMap((selection) => selection.connectionIds));
   const updates: ConnectionConfig[] = [];
   const createIds: string[] = [];
   for (const connection of combined.connections) {
-    const matches = wineIds.has(connection.id) ? existing.filter((candidate) => connectionIdentity(candidate) === connectionIdentity(connection)) : [];
+    const matches = wineIds.has(connection.id) ? existing.filter((candidate) => connectionImportIdentity(candidate) === connectionImportIdentity(connection)) : [];
     if (matches.length !== 1) {
       createIds.push(connection.id);
       continue;

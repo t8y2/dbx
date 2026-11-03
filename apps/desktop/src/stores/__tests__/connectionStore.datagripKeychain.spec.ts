@@ -47,7 +47,7 @@ describe("DataGrip Keychain import scope", () => {
       imported(alpha, "existing-alpha", "user-entered"),
     ];
 
-    const filled = await store.applyDataGripKeychainPasswords({ payload, selected: [alpha], connectionIds: ["new-alpha", "new-beta"] });
+    const filled = await store.applyDataGripKeychainPasswords({ payload, targets: [{ source: alpha, connectionId: "new-alpha" }] });
 
     expect(filled).toBe(1);
     expect(mocks.readKeychainPasswords).toHaveBeenCalledTimes(1);
@@ -58,10 +58,28 @@ describe("DataGrip Keychain import scope", () => {
     expect(byId.get("existing-alpha")).toBe("user-entered");
   });
 
-  it("skips the Keychain entirely when no selected row maps to a DataGrip source", async () => {
+  it("never writes a DataGrip password to a matching connection imported from another app", async () => {
+    const [alpha] = parseDataGripImport(payload).connections;
+    const store = useConnectionStore();
+    // Same name, host, port and database as the DataGrip row, but a different account and password.
+    const dbeaver: ConnectionConfig = { ...alpha, id: "new-dbeaver", username: "dbeaver-user", password: "dbeaver-secret" };
+    const datagrip: ConnectionConfig = { ...alpha, id: "new-datagrip", username: "datagrip-user", password: "" };
+    store.connections = [dbeaver, datagrip];
+
+    const filled = await store.applyDataGripKeychainPasswords({ payload, targets: [{ source: alpha, connectionId: "new-datagrip" }] });
+
+    expect(filled).toBe(1);
+    const byId = new Map(store.connections.map((connection) => [connection.id, connection.password]));
+    expect(byId.get("new-datagrip")).toBe(`keychain:${datagripKeychainService("uuid-alpha")}`);
+    expect(byId.get("new-dbeaver")).toBe("dbeaver-secret");
+  });
+
+  it("skips the Keychain entirely when no selected row maps to a created connection", async () => {
+    const [alpha] = parseDataGripImport(payload).connections;
     const store = useConnectionStore();
     store.connections = [];
-    expect(await store.applyDataGripKeychainPasswords({ payload, selected: [], connectionIds: ["new-alpha"] })).toBe(0);
+    expect(await store.applyDataGripKeychainPasswords({ payload, targets: [] })).toBe(0);
+    expect(await store.applyDataGripKeychainPasswords({ payload, targets: [{ source: { ...alpha, name: "Unknown" }, connectionId: "new-alpha" }] })).toBe(0);
     expect(mocks.readKeychainPasswords).not.toHaveBeenCalled();
   });
 });

@@ -1,7 +1,8 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { isObjectCacheInvalidationError } from "@/lib/metadata/objectCacheInvalidationError";
-import type { ConnectionConfig, TreeNode } from "@/types/database";
+import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
+import type { ColumnInfo, ConnectionConfig, TreeNode } from "@/types/database";
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -102,6 +103,84 @@ describe("connectionStore tree refresh state", () => {
     vi.unstubAllGlobals();
     installLocalStorage();
     setActivePinia(createPinia());
+  });
+
+  it.each([
+    [true, "old"],
+    [false, "old"],
+    [true, "renamed"],
+    [false, "renamed"],
+  ] as const)("refreshes saved table columns without changing expansion (%s, %s)", async (expanded, name) => {
+    const getColumns = vi.fn().mockResolvedValue([column("old"), column("removed")]);
+    installApiMocks({ getColumns });
+    const group: TreeNode = { id: "pg-1:app:public:users:__columns", label: "Columns", type: "group-columns", connectionId: "pg-1", database: "app", schema: "public", tableName: "users", children: [] };
+    const otherSchema = { ...group, id: "other-schema", schema: "other", isExpanded: true, children: [] };
+    const otherCatalog = { ...group, id: "other-catalog", catalog: "external", isExpanded: true, children: [] };
+    const store = await createStore(schemaNode([group, otherSchema, otherCatalog]));
+    await store.loadColumns("pg-1", "app", "users", "public", group.id);
+    group.isExpanded = expanded;
+    const updated = { ...column(name), data_type: "character varying", character_maximum_length: 512, comment: "updated comment", is_nullable: false };
+    getColumns.mockResolvedValue([updated]);
+
+    await store.refreshTableColumnsTree("pg-1", "app", "users", "public");
+
+    expect(getColumns).toHaveBeenCalledTimes(2);
+    expect(getColumns).toHaveBeenLastCalledWith("pg-1", "app", "public", "users", undefined);
+    expect(group.children).toHaveLength(1);
+    expect(group.children![0]).toMatchObject({ label: `${name} (character varying)`, meta: updated });
+    expect(createColumnDrafts([group.children![0]!.meta as ColumnInfo], "postgres")[0]).toMatchObject({ dataType: "character varying(512)", comment: "updated comment", isNullable: false });
+    expect(group.objectCount).toBe(1);
+    expect(group.isExpanded).toBe(expanded);
+    expect(otherSchema.children).toEqual([]);
+    expect(otherCatalog.children).toEqual([]);
+  });
+
+  it("preserves old columns on a failed reload and retries an empty loaded group", async () => {
+    const getColumns = vi.fn().mockResolvedValue([]);
+    installApiMocks({ getColumns });
+    const group: TreeNode = { id: "pg-1:app:public:users:__columns", label: "Columns", type: "group-columns", connectionId: "pg-1", database: "app", schema: "public", tableName: "users", children: [] };
+    const store = await createStore(schemaNode([group]));
+    await store.loadColumns("pg-1", "app", "users", "public", group.id);
+    group.isExpanded = false;
+    getColumns.mockResolvedValueOnce([column("added")]);
+    await store.refreshTableColumnsTree("pg-1", "app", "users", "public");
+    expect(group.children![0]!.meta).toEqual(column("added"));
+    getColumns.mockRejectedValueOnce(new Error("metadata denied"));
+    await expect(store.refreshTableColumnsTree("pg-1", "app", "users", "public")).rejects.toThrow("metadata denied");
+    expect(group.children![0]!.meta).toEqual(column("added"));
+    expect(group.isExpanded).toBe(false);
+    expect(group.isLoading).toBe(false);
+  });
+
+  it("ignores an older column request that finishes after the saved structure reload", async () => {
+    let finishOld!: (value: ReturnType<typeof column>[]) => void;
+    const getColumns = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishOld = resolve;
+          }),
+      )
+      .mockResolvedValue([column("fresh")]);
+    installApiMocks({ getColumns });
+    const group: TreeNode = { id: "pg-1:app:public:users:__columns", label: "Columns", type: "group-columns", connectionId: "pg-1", database: "app", schema: "public", tableName: "users", children: [] };
+    const store = await createStore(schemaNode([group]));
+    const oldLoad = store.loadColumns("pg-1", "app", "users", "public", group.id);
+    await store.refreshTableColumnsTree("pg-1", "app", "users", "public");
+    finishOld([column("stale")]);
+    await oldLoad;
+    expect(group.children![0]!.meta).toEqual(column("fresh"));
+  });
+
+  it("does not load unopened column groups after a structure save", async () => {
+    const getColumns = vi.fn();
+    installApiMocks({ getColumns });
+    const group: TreeNode = { id: "pg-1:app:public:users:__columns", label: "Columns", type: "group-columns", connectionId: "pg-1", database: "app", schema: "public", tableName: "users", children: [] };
+    const store = await createStore(schemaNode([group]));
+    await store.refreshTableColumnsTree("pg-1", "app", "users", "public");
+    expect(getColumns).not.toHaveBeenCalled();
+    expect(group.isExpanded).toBeUndefined();
   });
 
   it("preserves an object group count while rebuilding grouped placeholders", async () => {

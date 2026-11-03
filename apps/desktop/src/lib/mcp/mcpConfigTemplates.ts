@@ -131,3 +131,7 @@ export function buildMcpPiConfig(config?: McpLaunchConfig): string {
 export function buildMcpWorkBuddyConfig(config?: McpLaunchConfig): string {
   return buildMcpJsonConfig(config);
 }
+
+export function buildMcpAntigravityConfig(config?: McpLaunchConfig): string {
+  return buildMcpJsonConfig(config);
+}

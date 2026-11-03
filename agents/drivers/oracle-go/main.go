@@ -355,6 +355,9 @@ type queryOptions struct {
 	FetchSize   int    `json:"fetchSize"`
 	TimeoutSecs int    `json:"timeoutSecs"`
 	DeferLOBs   bool   `json:"deferLobs"`
+	// ReportCompilationErrors is opt-in because SQL file imports and transfers
+	// legitimately create objects that stay INVALID until their dependencies exist.
+	ReportCompilationErrors bool `json:"reportCompilationErrors"`
 }
 
 const largeValueBytesColumnPrefix = "__DBX_LARGE_VALUE_BYTES_"
@@ -4974,6 +4977,9 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	var err error
 	messages := s.withStatementDBMSOutput(opts.SQL, func() error {
 		result, err = s.executeQueryWithoutOutput(opts)
+		if err == nil && opts.ReportCompilationErrors {
+			err = s.compilationErrorForStatement(trimStatementSQL(opts.SQL))
+		}
 		return err
 	})
 	result.Messages = append(result.Messages, messages...)

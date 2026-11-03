@@ -15272,7 +15272,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         label: t("dangerDialog.title"),
         icon: AlertTriangle,
         variant: "destructive",
-        visible: canShowContextDeleteColumn || (row && !row.isDeleted && deletableContextRowIds.length > 0),
+        visible: !!(canShowContextDeleteColumn || (row && !row.isDeleted && deletableContextRowIds.length > 0)),
         children: [
           ...(canShowContextDeleteColumn
             ? [

@@ -7783,6 +7783,7 @@ const columnDetail = computed(() => {
     typeByColumn: columnTypeMap.value,
     resultColumnTypes: props.result.column_types,
     commentByColumn: columnCommentMap.value,
+    comment: resolvedColumnComment(props.result.columns[columnIndex] ?? "", columnIndex),
     displayValue: (value, index) => formatCellCached(value, index),
     rawValue: gridDetailRawValue,
     isNullValue: gridDetailIsNullValue,

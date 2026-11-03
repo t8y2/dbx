@@ -240,7 +240,7 @@ import { customTypeCapabilities, isOracleFamilyTypeSource, sidebarObjectKindsFor
 import { requestOracleTypeManagement } from "@/lib/table/oracleTypeManagementRequest";
 import { schemaIndexIdentity, schemaIndexIsSameOwner } from "@/lib/table/schemaIndexNavigation";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
-import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
+import { filterObjectBrowserTableColumns, sortObjectBrowserTableColumns, type ObjectBrowserTableColumnSort, type ObjectBrowserTableColumnSortKey } from "@/lib/table/objectBrowserTableInfo";
 import { visibleMongoCollections } from "@/lib/sidebar/mongoCollectionMutation";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
@@ -1479,13 +1479,37 @@ const tableInfoTabListStyle = computed(() => ({
 
 const filteredTableColumns = computed(() => filterObjectBrowserTableColumns(tableColumns.value, tableInfoSearchQuery.value));
 
+const tableColumnSort = ref<ObjectBrowserTableColumnSort | null>(null);
+
+const sortedTableColumns = computed(() => sortObjectBrowserTableColumns(filteredTableColumns.value, tableColumnSort.value));
+
+watch(
+  () => [sidePanelRow.value?.id, props.database] as const,
+  () => {
+    tableColumnSort.value = null;
+  },
+);
+
+function toggleTableColumnSort(key: ObjectBrowserTableColumnSortKey) {
+  tableColumnSort.value = tableColumnSort.value?.key === key ? (tableColumnSort.value.direction === "asc" ? { key, direction: "desc" } : null) : { key, direction: "asc" };
+}
+
+function tableColumnSortDirection(key: ObjectBrowserTableColumnSortKey): ObjectBrowserTableColumnSort["direction"] | undefined {
+  return tableColumnSort.value?.key === key ? tableColumnSort.value.direction : undefined;
+}
+
+function tableColumnSortIndicator(key: ObjectBrowserTableColumnSortKey): string {
+  const direction = tableColumnSortDirection(key);
+  return direction === "asc" ? "▲" : direction === "desc" ? "▼" : "↕";
+}
+
 function toggleTableInfoColumnSelection(name: string, event: MouseEvent) {
   const current = selectedTableInfoColumns.value;
   const index = current.indexOf(name);
   if (event.ctrlKey || event.metaKey) {
     selectedTableInfoColumns.value = index < 0 ? [...current, name] : current.filter((column) => column !== name);
   } else if (event.shiftKey && current.length > 0) {
-    const visibleNames = filteredTableColumns.value.map((column) => column.name);
+    const visibleNames = sortedTableColumns.value.map((column) => column.name);
     const anchor = visibleNames.indexOf(current[current.length - 1]!);
     const target = visibleNames.indexOf(name);
     selectedTableInfoColumns.value = anchor < 0 || target < 0 ? [name] : visibleNames.slice(Math.min(anchor, target), Math.max(anchor, target) + 1);
@@ -1500,10 +1524,10 @@ function onTableInfoColumnContextMenu(name: string, event: MouseEvent, openMenu:
 }
 
 function copyTableInfoColumnDetails() {
-  const ordered = filteredTableColumns.value.filter((column) => selectedTableInfoColumns.value.includes(column.name));
+  const ordered = sortedTableColumns.value.filter((column) => selectedTableInfoColumns.value.includes(column.name));
   if (ordered.length === 0) return;
   const headers = ["#", t("grid.columnName"), t("grid.columnType"), t("grid.tableInfoNullable"), t("structureEditor.defaultValue"), t("grid.columnComment")];
-  const rows = ordered.map((column) => [String(filteredTableColumns.value.findIndex((item) => item.name === column.name) + 1), column.name, gaussdbMColumnType(column.data_type), column.is_nullable ? "YES" : "NO", tableColumnDefaultDisplayValue(column.column_default), column.comment ?? ""]);
+  const rows = ordered.map((column) => [String(sortedTableColumns.value.findIndex((item) => item.name === column.name) + 1), column.name, gaussdbMColumnType(column.data_type), column.is_nullable ? "YES" : "NO", tableColumnDefaultDisplayValue(column.column_default), column.comment ?? ""]);
   const text = [headers, ...rows].map((row) => row.map(encodeSpreadsheetTsvCell).join("\t")).join("\n");
   void copyToClipboard(text)
     .then(() => toast(t("contextMenu.copyAdvancedInfo"), 2000))
@@ -1516,7 +1540,7 @@ function tableInfoColumnContextMenuItems(): ContextMenuItem[] {
 
 function onTableInfoColumnsCopy(event: ClipboardEvent) {
   if (selectedTableInfoColumns.value.length === 0 || !event.clipboardData) return;
-  const names = filteredTableColumns.value.filter((column) => selectedTableInfoColumns.value.includes(column.name)).map((column) => column.name);
+  const names = sortedTableColumns.value.filter((column) => selectedTableInfoColumns.value.includes(column.name)).map((column) => column.name);
   if (names.length === 0) return;
   event.clipboardData.setData("text/plain", names.join("\n"));
   event.preventDefault();
@@ -1530,7 +1554,7 @@ function onTableInfoColumnsKeydown(event: KeyboardEvent) {
   event.preventDefault();
   event.stopPropagation();
   if (key === "c" && !event.shiftKey) {
-    const names = filteredTableColumns.value.filter((column) => selectedTableInfoColumns.value.includes(column.name)).map((column) => column.name);
+    const names = sortedTableColumns.value.filter((column) => selectedTableInfoColumns.value.includes(column.name)).map((column) => column.name);
     if (names.length) void copyToClipboard(names.join("\n")).catch((error) => toast(t("grid.copyFailed", { message: error?.message || String(error) }), 5000));
     return;
   }
@@ -6574,14 +6598,30 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               <thead class="sticky top-0 bg-muted text-muted-foreground">
                 <tr class="border-b">
                   <th class="text-left text-nowrap font-medium px-3 py-2 w-8">#</th>
-                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnName") }}</th>
-                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnType") }}</th>
-                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.tableInfoNullable") }}</th>
-                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("structureEditor.defaultValue") }}</th>
+                  <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="tableColumnSortDirection('name') === 'asc' ? 'ascending' : tableColumnSortDirection('name') === 'desc' ? 'descending' : 'none'">
+                    <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleTableColumnSort('name')">
+                      {{ t("grid.columnName") }} <span class="text-[10px]">{{ tableColumnSortIndicator("name") }}</span>
+                    </button>
+                  </th>
+                  <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="tableColumnSortDirection('dataType') === 'asc' ? 'ascending' : tableColumnSortDirection('dataType') === 'desc' ? 'descending' : 'none'">
+                    <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleTableColumnSort('dataType')">
+                      {{ t("grid.columnType") }} <span class="text-[10px]">{{ tableColumnSortIndicator("dataType") }}</span>
+                    </button>
+                  </th>
+                  <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="tableColumnSortDirection('nullable') === 'asc' ? 'ascending' : tableColumnSortDirection('nullable') === 'desc' ? 'descending' : 'none'">
+                    <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleTableColumnSort('nullable')">
+                      {{ t("grid.tableInfoNullable") }} <span class="text-[10px]">{{ tableColumnSortIndicator("nullable") }}</span>
+                    </button>
+                  </th>
+                  <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="tableColumnSortDirection('defaultValue') === 'asc' ? 'ascending' : tableColumnSortDirection('defaultValue') === 'desc' ? 'descending' : 'none'">
+                    <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleTableColumnSort('defaultValue')">
+                      {{ t("structureEditor.defaultValue") }} <span class="text-[10px]">{{ tableColumnSortIndicator("defaultValue") }}</span>
+                    </button>
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                <CustomContextMenu v-for="(column, index) in filteredTableColumns" :key="column.name" :items="tableInfoColumnContextMenuItems" v-slot="{ onContextMenu, isOpen }">
+                <CustomContextMenu v-for="(column, index) in sortedTableColumns" :key="column.name" :items="tableInfoColumnContextMenuItems" v-slot="{ onContextMenu, isOpen }">
                   <tr
                     tabindex="0"
                     :data-table-info-column="column.name"

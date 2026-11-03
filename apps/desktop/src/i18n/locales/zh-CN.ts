@@ -2657,6 +2657,7 @@ export default withEnglishFallback({
       lowercaseSelection: "转为小写",
       convertNamingStyle: "切换命名风格",
       delimitedList: "转换为带分隔符的列表",
+      addSnippet: "添加片段",
       addNextSelectionOccurrence: "增加下一个选中词",
       selectAllSelectionOccurrences: "选中所有选中词",
       selectCurrentStatement: "选中当前语句",
@@ -2686,6 +2687,10 @@ export default withEnglishFallback({
       doubleClickInsert: "双击插入到编辑器",
       drag: "拖动面板",
       empty: "暂无字段",
+    },
+    snippetQuickAdd: {
+      prefixUnique: "触发键必须唯一。",
+      saved: "已添加片段 {label}",
     },
     gotoLine: {
       placeholder: "行号",

@@ -353,7 +353,8 @@ test("selective encrypted import applies only chosen connections and later remai
 
 test("duplicate imports do not overwrite tunnel profiles before connection deduplication", async () => {
   const existingProfile = { type: "ssh", id: "tunnel-duplicate", host: "local-bastion", port: 22, user: "root" } as TunnelProfile;
-  const backend = installBackend([conn("local-duplicate", "Duplicate", 3306)], null, [existingProfile]);
+  // Import identity includes the transport route, so the local copy carries the same tunnel layer to be a true duplicate.
+  const backend = installBackend([{ ...conn("local-duplicate", "Duplicate", 3306), transport_layers: [tunnelLayer("duplicate-layer", "tunnel-duplicate")] }], null, [existingProfile]);
   const storage = installMemoryStorage();
   try {
     setActivePinia(createPinia());

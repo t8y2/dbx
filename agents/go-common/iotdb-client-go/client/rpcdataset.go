@@ -51,9 +51,15 @@ type IoTDBRpcDataSet struct {
 	timeFormat    string
 	timeFactor    int32
 	timePrecision string
+
+	// interrupt closes the owning session's transport so a paged Fetch that is
+	// blocked in a Thrift socket read returns when its context is cancelled.
+	interrupt func()
 }
 
-func NewIoTDBRpcDataSet(sql string, columnNameList []string, columnTypeList []string, columnNameIndex map[string]int32, ignoreTimestamp bool, moreData bool, queryId int64, statementId int64, client *rpc.IClientRPCServiceClient, sessionId int64, queryResult [][]byte, fetchSize int32, timeout *int64, zoneId string, timeFormat string, timeFactor int32, columnIndex2TsBlockColumnIndexList []int32) (rpcDataSet *IoTDBRpcDataSet, err error) {
+// NewIoTDBRpcDataSet builds a result set. The optional interrupt func is
+// variadic to keep upstream call sites source-compatible.
+func NewIoTDBRpcDataSet(sql string, columnNameList []string, columnTypeList []string, columnNameIndex map[string]int32, ignoreTimestamp bool, moreData bool, queryId int64, statementId int64, client *rpc.IClientRPCServiceClient, sessionId int64, queryResult [][]byte, fetchSize int32, timeout *int64, zoneId string, timeFormat string, timeFactor int32, columnIndex2TsBlockColumnIndexList []int32, interrupt ...func()) (rpcDataSet *IoTDBRpcDataSet, err error) {
 	ds := &IoTDBRpcDataSet{
 		sessionId:                        sessionId,
 		statementId:                      statementId,
@@ -69,6 +75,9 @@ func NewIoTDBRpcDataSet(sql string, columnNameList []string, columnTypeList []st
 		columnTypeList:                   make([]string, 0, len(columnTypeList)+1),
 		columnOrdinalMap:                 make(map[string]int32),
 		columnName2TsBlockColumnIndexMap: make(map[string]int32),
+	}
+	if len(interrupt) > 0 {
+		ds.interrupt = interrupt[0]
 	}
 	columnStartIndex := int32(1)
 	resultSetColumnSize := int32(len(columnNameList))
@@ -233,6 +242,11 @@ func (s *IoTDBRpcDataSet) fetchResults(ctx context.Context) (bool, error) {
 	if s.isClosed {
 		return false, fmt.Errorf("this data set is already closed")
 	}
+	// FetchResultsV2 is a blocking Thrift read that does not observe ctx; the
+	// session watcher closes the transport so cancellation/deadline returns
+	// instead of waiting for the page (#13935 review round 3).
+	stop := watchContextDone(ctx, s.interrupt)
+	defer stop()
 	req := rpc.TSFetchResultsReq{
 		SessionId: s.sessionId,
 		Statement: s.sql,
@@ -244,6 +258,9 @@ func (s *IoTDBRpcDataSet) fetchResults(ctx context.Context) (bool, error) {
 
 	resp, err := s.client.FetchResultsV2(ctx, &req)
 
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
 	if err != nil {
 		return false, err
 	}

@@ -3585,6 +3585,10 @@ fn transport_layer_ssh_key_passphrase_key(index: usize, layer: &TransportLayerCo
     format!("{}{}.ssh_key_passphrase", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
 }
 
+fn transport_layer_ssh_totp_secret_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.ssh_totp_secret", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
 fn transport_layer_proxy_password_key(index: usize, layer: &TransportLayerConfig) -> String {
     format!("{}{}.proxy_password", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
 }
@@ -3599,6 +3603,12 @@ fn scrub_transport_layer_secrets(config: &mut ConnectionConfig) {
             TransportLayerConfig::Ssh(ssh) => {
                 ssh.password.clear();
                 ssh.key_passphrase.clear();
+                // Same class of secret as the passphrase: it lives in the
+                // secret store, not in the plaintext config JSON. `Some("")`
+                // keeps the cleared-vs-absent distinction intact.
+                if ssh.totp_secret.is_some() {
+                    ssh.totp_secret = Some(String::new());
+                }
             }
             TransportLayerConfig::Proxy(proxy) => {
                 proxy.password.clear();
@@ -7155,6 +7165,18 @@ fn persist_connection_in_tx(
                     &transport_layer_ssh_key_passphrase_key(index, layer),
                     &ssh.key_passphrase,
                 )?;
+                // Three-state, matching `persist_transport_layer_secrets`:
+                // absent leaves the stored secret untouched so a payload that
+                // never carried it cannot erase it.
+                if let Some(secret) = ssh.totp_secret.as_deref() {
+                    persist_secret_in_tx(
+                        tx,
+                        codec,
+                        &config.id,
+                        &transport_layer_ssh_totp_secret_key(index, layer),
+                        secret,
+                    )?;
+                }
             }
             TransportLayerConfig::Proxy(proxy) => {
                 persist_secret_in_tx(

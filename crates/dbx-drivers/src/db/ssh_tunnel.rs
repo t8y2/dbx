@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::path_utils::expand_tilde;
+use crate::db::ssh_totp;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -337,13 +338,41 @@ fn keyboard_interactive_prompt_text(name: &str, instructions: &str, prompt: &str
         .join("\n\n")
 }
 
+/// Answers one keyboard-interactive prompt, locally when possible.
+///
+/// This is the single decision point for "what replies to this prompt", so the
+/// local-credential path and the interactive path can never drift apart. A
+/// configured TOTP secret answers a one-time-code prompt without any UI; every
+/// other prompt — a password, an account picker, anything unrecognised — goes
+/// to the dialog, which is where headless hosts deliberately fail closed rather
+/// than guess a credential.
+///
+/// `spent` is the caller's one-shot guard: a code may be generated for this
+/// session only once, so a second round after a rejected code falls back to the
+/// dialog instead of burning fresh codes forever.
 async fn request_keyboard_interactive_answer(
     host: &str,
     port: u16,
     name: &str,
     instructions: &str,
     prompt: &russh::client::Prompt,
+    totp_secret: Option<&str>,
+    spent: bool,
 ) -> Result<String, String> {
+    if !spent {
+        if let Some(secret) = totp_secret.filter(|secret| !secret.trim().is_empty()) {
+            if ssh_totp::is_totp_prompt(&prompt.prompt) {
+                return ssh_totp::generate_code(
+                    secret,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|elapsed| elapsed.as_secs())
+                        .unwrap_or_default(),
+                );
+            }
+        }
+    }
+
     let prompt_text = keyboard_interactive_prompt_text(name, instructions, &prompt.prompt);
     let request = ssh_prompt::secret_input_request(host, port, prompt_text, prompt.echo);
     let Some(responder_rx) = ssh_prompt::request_ssh_prompt(request) else {
@@ -365,6 +394,28 @@ async fn request_keyboard_interactive_answer(
     }
 }
 
+/// Opens (or re-opens) a keyboard-interactive round under the connect budget.
+async fn start_keyboard_interactive(
+    session: &mut Handle<SshClient>,
+    ssh_user: &str,
+    connect_timeout: Duration,
+    connect_timeout_secs: u64,
+) -> Result<KeyboardInteractiveAuthResponse, String> {
+    tokio::time::timeout(connect_timeout, session.authenticate_keyboard_interactive_start(ssh_user, None::<String>))
+        .await
+        .map_err(|_| format!("SSH keyboard-interactive auth timed out ({connect_timeout_secs}s)"))?
+        .map_err(|e| format!("SSH keyboard-interactive auth failed: {e}"))
+}
+
+/// Answers a keyboard-interactive challenge, locally when possible.
+///
+/// A configured TOTP secret is spent only on the narrow shape DBX can be
+/// certain about: exactly one non-echoed prompt that names a one-time code, on
+/// the first challenge of the session. Anything else — a password prompt, an
+/// account picker, a multi-question form, a later round after the code was
+/// already spent — goes through the interactive dialog, which is where headless
+/// hosts deliberately fail closed rather than guess a credential.
+#[allow(clippy::too_many_arguments)]
 async fn authenticate_keyboard_interactive(
     session: &mut Handle<SshClient>,
     ssh_user: &str,
@@ -372,14 +423,13 @@ async fn authenticate_keyboard_interactive(
     port: u16,
     connect_timeout: Duration,
     connect_timeout_secs: u64,
+    totp_secret: Option<&str>,
 ) -> Result<(), String> {
-    let mut response = tokio::time::timeout(
-        connect_timeout,
-        session.authenticate_keyboard_interactive_start(ssh_user, None::<String>),
-    )
-    .await
-    .map_err(|_| format!("SSH keyboard-interactive auth timed out ({connect_timeout_secs}s)"))?
-    .map_err(|e| format!("SSH keyboard-interactive auth failed: {e}"))?;
+    let mut response = start_keyboard_interactive(session, ssh_user, connect_timeout, connect_timeout_secs).await?;
+
+    // A TOTP code is single-use per session: once one round was answered
+    // locally, later rounds go through the dialog instead of generating more.
+    let mut totp_spent = false;
 
     loop {
         match response {
@@ -391,10 +441,26 @@ async fn authenticate_keyboard_interactive(
                 ));
             }
             KeyboardInteractiveAuthResponse::InfoRequest { name, instructions, prompts } => {
+                let answered_locally = totp_secret.is_some_and(|secret| !secret.trim().is_empty())
+                    && !totp_spent
+                    && prompts.iter().any(|prompt| ssh_totp::is_totp_prompt(&prompt.prompt));
+
                 let mut answers = Vec::with_capacity(prompts.len());
                 for prompt in &prompts {
-                    answers.push(request_keyboard_interactive_answer(host, port, &name, &instructions, prompt).await?);
+                    answers.push(
+                        request_keyboard_interactive_answer(
+                            host,
+                            port,
+                            &name,
+                            &instructions,
+                            prompt,
+                            totp_secret,
+                            totp_spent,
+                        )
+                        .await?,
+                    );
                 }
+                totp_spent |= answered_locally;
 
                 response =
                     tokio::time::timeout(connect_timeout, session.authenticate_keyboard_interactive_respond(answers))
@@ -452,6 +518,10 @@ pub async fn connect_and_authenticate(
     connect_timeout_secs: u64,
     known_hosts_path: &Path,
     proxy_command: &str,
+    // Base32 TOTP secret, when the connection stores one. Lets a
+    // keyboard-interactive MFA challenge be answered without a prompt UI,
+    // which is what makes such connections usable from `dbx-mcp`.
+    totp_secret: Option<&str>,
 ) -> Result<Handle<SshClient>, String> {
     let config = Arc::new(ssh_client_config());
     let connect_timeout = Duration::from_secs(connect_timeout_secs);
@@ -581,6 +651,7 @@ pub async fn connect_and_authenticate(
                             host_key_port,
                             connect_timeout,
                             connect_timeout_secs,
+                            totp_secret,
                         )
                         .await?;
                         return Ok(attempt.finish());
@@ -620,6 +691,7 @@ pub async fn connect_and_authenticate(
                             host_key_port,
                             connect_timeout,
                             connect_timeout_secs,
+                            totp_secret,
                         )
                         .await?;
                         return Ok(attempt.finish());
@@ -671,6 +743,7 @@ pub async fn connect_and_authenticate(
                 host_key_port,
                 connect_timeout,
                 connect_timeout_secs,
+                totp_secret,
             )
             .await?;
         } else if let AuthResult::Failure { remaining_methods, partial_success } = &auth_res {
@@ -698,6 +771,7 @@ pub async fn connect_and_authenticate(
                 host_key_port,
                 connect_timeout,
                 connect_timeout_secs,
+                totp_secret,
             )
             .await?;
         } else if let AuthResult::Failure { remaining_methods, partial_success } = &auth_res {
@@ -727,6 +801,7 @@ pub async fn connect_and_authenticate(
                     host_key_port,
                     connect_timeout,
                     connect_timeout_secs,
+                    totp_secret,
                 )
                 .await?;
             }
@@ -740,6 +815,7 @@ pub async fn connect_and_authenticate(
             host_key_port,
             connect_timeout,
             connect_timeout_secs,
+            totp_secret,
         )
         .await?;
     } else {
@@ -1548,6 +1624,9 @@ async fn tunnel_reconnect_loop(
     allow_exec_channel_proxy: bool,
     status: Arc<TunnelStatus>,
     proxy_command: String,
+    // Owned because the loop outlives the spawn call that created it; the
+    // reconnect path needs the same MFA secret as the initial handshake.
+    totp_secret: Option<String>,
 ) {
     loop {
         // Reaching the top of the loop means a live session: either the initial
@@ -1590,6 +1669,7 @@ async fn tunnel_reconnect_loop(
                 connect_timeout_secs,
                 &known_hosts_path,
                 &proxy_command,
+                totp_secret.as_deref(),
             )
             .await
             {
@@ -1774,6 +1854,7 @@ impl TunnelManager {
         expose_to_lan: bool,
         allow_exec_channel_proxy: bool,
         proxy_command: &str,
+        totp_secret: Option<&str>,
     ) -> Result<u16, String> {
         self.start_tunnel_on_local_port(
             connection_id,
@@ -1796,6 +1877,7 @@ impl TunnelManager {
             allow_exec_channel_proxy,
             None,
             proxy_command,
+            totp_secret,
         )
         .await
     }
@@ -1823,6 +1905,7 @@ impl TunnelManager {
         allow_exec_channel_proxy: bool,
         requested_local_port: Option<u16>,
         proxy_command: &str,
+        totp_secret: Option<&str>,
     ) -> Result<u16, String> {
         let healthy = Self::healthy_port(&*self.tunnels.lock().await, connection_id, TunnelKind::Fixed);
         if let Some(port) = healthy.filter(|port| requested_local_port.is_none_or(|requested| requested == *port)) {
@@ -1857,6 +1940,7 @@ impl TunnelManager {
             allow_exec_channel_proxy,
             requested_local_port,
             proxy_command,
+            totp_secret,
         )
         .await?;
 
@@ -1888,6 +1972,7 @@ impl TunnelManager {
         connect_timeout_secs: u64,
         allow_exec_channel_proxy: bool,
         proxy_command: &str,
+        totp_secret: Option<&str>,
     ) -> Result<u16, String> {
         let healthy = Self::healthy_port(&*self.tunnels.lock().await, connection_id, TunnelKind::Socks5);
         if let Some(port) = healthy {
@@ -1917,6 +2002,7 @@ impl TunnelManager {
             &self.known_hosts_path,
             allow_exec_channel_proxy,
             proxy_command,
+            totp_secret,
         )
         .await?;
 
@@ -2074,6 +2160,7 @@ impl TunnelManager {
                 hop.allow_exec_channel_proxy,
                 None,
                 &hop.proxy_command,
+                hop.totp_secret.as_deref(),
             )
             .await
             .map_err(|err| format!("SSH hop {} failed: {err}", index + 1))?;
@@ -2189,6 +2276,7 @@ async fn spawn_tunnel(
     allow_exec_channel_proxy: bool,
     requested_local_port: Option<u16>,
     proxy_command: &str,
+    totp_secret: Option<&str>,
 ) -> Result<(JoinHandle<()>, u16, Arc<TunnelStatus>), String> {
     spawn_tunnel_target(
         connect_host,
@@ -2210,6 +2298,7 @@ async fn spawn_tunnel(
         allow_exec_channel_proxy,
         requested_local_port,
         proxy_command,
+        totp_secret,
     )
     .await
 }
@@ -2232,6 +2321,7 @@ async fn spawn_socks5_proxy(
     known_hosts_path: &Path,
     allow_exec_channel_proxy: bool,
     proxy_command: &str,
+    totp_secret: Option<&str>,
 ) -> Result<(JoinHandle<()>, u16, Arc<TunnelStatus>), String> {
     spawn_tunnel_target(
         connect_host,
@@ -2253,6 +2343,7 @@ async fn spawn_socks5_proxy(
         allow_exec_channel_proxy,
         None,
         proxy_command,
+        totp_secret,
     )
     .await
 }
@@ -2278,6 +2369,7 @@ async fn spawn_tunnel_target(
     allow_exec_channel_proxy: bool,
     requested_local_port: Option<u16>,
     proxy_command: &str,
+    totp_secret: Option<&str>,
 ) -> Result<(JoinHandle<()>, u16, Arc<TunnelStatus>), String> {
     let (listener, local_port) = bind_tunnel_listener(expose_to_lan, requested_local_port).await?;
 
@@ -2298,6 +2390,7 @@ async fn spawn_tunnel_target(
         connect_timeout_secs,
         known_hosts_path,
         proxy_command,
+        totp_secret,
     )
     .await?;
 
@@ -2323,6 +2416,7 @@ async fn spawn_tunnel_target(
         allow_exec_channel_proxy,
         status.clone(),
         proxy_command.to_string(),
+        totp_secret.map(str::to_string),
     ));
 
     #[cfg(test)]
@@ -2697,6 +2791,7 @@ mod tests {
             auth_method: "password".to_string(),
             allow_exec_channel_proxy: false,
             proxy_command: String::new(),
+            totp_secret: None,
         }
     }
 
@@ -3533,6 +3628,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             5,
             &known_hosts_path,
             "",
+        None,
         )
         .await
         .expect("password + TOTP authentication should succeed");
@@ -3581,6 +3677,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             5,
             &known_hosts_path,
             "",
+        None,
         )
         .await
         .expect("public key + TOTP authentication should succeed");
@@ -3690,6 +3787,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                             5,
                             false,
                             "",
+                        None,
                         )
                         .await
                 } else {
@@ -3714,6 +3812,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                             false,
                             false,
                             "",
+                        None,
                         )
                         .await
                 }
@@ -3873,6 +3972,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 5,
                 false,
                 "",
+            None,
             )
             .await
             .unwrap();
@@ -3894,6 +3994,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 5,
                 false,
                 "",
+            None,
             )
             .await
             .unwrap();
@@ -3977,6 +4078,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 false,
                 requested_local_port,
                 "",
+            None,
             )
             .await
     }
@@ -4183,6 +4285,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 false,
                 true,
                 "",
+            None,
             )
             .await
             .expect("start fallback tunnel");
@@ -4240,6 +4343,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 false,
                 false,
                 "",
+            None,
             )
             .await
             .expect("start tunnel");
@@ -4285,6 +4389,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             5,
             &known_hosts_path,
             "",
+        None,
         )
         .await
         .expect("forwarded SSH connection should authenticate");
@@ -4336,6 +4441,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             1,
             &known_hosts_path,
             "",
+        None,
         )
         .await
         .expect("accepting the host key after the network timeout window should still succeed");
@@ -4387,6 +4493,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             false,
             false,
             "",
+        None,
         );
         let second = manager.start_tunnel(
             "shared-layer",
@@ -4408,6 +4515,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             false,
             false,
             "",
+        None,
         );
         let (first_port, second_port) = tokio::join!(first, second);
 
@@ -4620,6 +4728,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 false,
                 false,
                 "",
+            None,
             )
             .await
             .expect("initial tunnel start should succeed");
@@ -4666,6 +4775,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 false,
                 false,
                 "",
+            None,
             )
             .await;
 
@@ -4719,6 +4829,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 false,
                 Some(local_port),
                 "",
+            None,
             )
         };
         assert_eq!(start().await.unwrap(), local_port);
@@ -4780,6 +4891,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             5,
             &known_hosts_path,
             "",
+        None,
         )
         .await
         {

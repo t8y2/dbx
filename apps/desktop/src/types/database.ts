@@ -366,6 +366,17 @@ export interface SshTunnelConfig {
    * and `enabled` are kept).
    */
   profile_id?: string;
+  /**
+   * Base32 TOTP secret (RFC 6238) for a keyboard-interactive MFA challenge.
+   *
+   * Lets a headless host such as `dbx-mcp` answer the one-time-code prompt
+   * itself, since it has no dialog to ask through. Leave empty for bastions
+   * without a second factor, or to keep answering the prompt interactively.
+   *
+   * `undefined` means "leave the stored secret untouched" — the three states
+   * are distinct so a saved secret can also be cleared.
+   */
+  totp_secret?: string;
 }
 
 export interface SshAgentIdentity {

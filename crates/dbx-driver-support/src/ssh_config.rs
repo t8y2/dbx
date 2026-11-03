@@ -178,6 +178,10 @@ fn jump_hop_from_entry(leaf: &SshTunnelConfig, entry: SshConfigHostEntry) -> Ssh
         password: leaf.password.clone(),
         key_path: entry.identity_file.unwrap_or_else(|| leaf.key_path.clone()),
         key_passphrase: leaf.key_passphrase.clone(),
+        // A ProxyJump hop has no connection form of its own, so it inherits
+        // the leaf's MFA the same way it inherits the leaf's password: a
+        // bastion chain normally guards every hop with the same account.
+        totp_secret: leaf.totp_secret.clone(),
         connect_timeout_secs: leaf.connect_timeout_secs,
         expose_lan: false,
         local_port: None,

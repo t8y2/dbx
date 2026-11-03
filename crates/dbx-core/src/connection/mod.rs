@@ -4347,6 +4347,7 @@ impl AppState {
                             false,
                             leaf.allow_exec_channel_proxy,
                             &leaf.proxy_command,
+                            leaf.totp_secret.as_deref(),
                         )
                         .await
                         .map(|_| ())

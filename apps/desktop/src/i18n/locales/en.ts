@@ -2585,6 +2585,7 @@ export default {
     selectConnection: "Select connection",
     selectConnectionRequired: "Select a connection first",
     searchConnection: "Search connections...",
+    noConnectedConnections: "No active connections. Open a connection in the sidebar first.",
     selectCatalog: "Select catalog",
     searchCatalog: "Search catalogs...",
     selectDatabase: "Select database",

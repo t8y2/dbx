@@ -242,7 +242,9 @@ import { resolveDefaultAiSchema, type AiAction } from "@/lib/ai/ai";
 import { useBackgroundImage } from "@/composables/useBackgroundImage";
 import ExternalSqlFileChangeDialog from "@/components/editor/ExternalSqlFileChangeDialog.vue";
 import { resolveWindowContext } from "@/lib/app/windowContext";
+import { CONNECTION_STATE_CHANGED_EVENT, subscribePluginConnectionStateChanges, type ConnectionStateChangedEvent } from "@/lib/connection/connectionStateEvents";
 import { openDetachedTabWindow } from "@/lib/app/detachedTabWindow";
+import { initializeDetachedTab } from "@/lib/app/detachedTabInitialization";
 import { DETACH_TAB_REQUEST_EVENT, type DetachTabRequestDetail } from "@/lib/tabs/detachedTableOpen";
 import { FLOATING_OPEN_FILESYSTEM_EVENT, FLOATING_OPEN_WORKBENCH_EVENT, type FloatingOpenFilesystemPayload, type FloatingOpenWorkbenchPayload } from "@/lib/plugins/pluginFloatingWindow";
 import { OPEN_PLUGIN_AI_CONVERSATION, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
@@ -902,15 +904,35 @@ async function initDetachedWindow() {
     await finishDetachedWindowClose();
     return;
   }
-  await queryStore.adoptDetachedTab(handoff);
-  await queryStore.hydrateSavedSqlTabs();
-  if (handoff.runtime.activeOutputView) activeOutputView.value = handoff.runtime.activeOutputView;
-  const { emit } = await import("@tauri-apps/api/event");
-  await emit("dbx:detached-tab-ready", { tabId: detachedContextTabId, revision: handoff.revision });
+  await initializeDetachedTab(handoff, {
+    queryStore,
+    setActiveOutputView: (view) => {
+      activeOutputView.value = view;
+    },
+    refreshConnections: refreshWindowConnections,
+  });
+}
+
+async function refreshWindowConnections(reload = false): Promise<void> {
+  if (!isDesktop) return;
+  try {
+    await connectionStore.refreshConnectedConnections({ reload });
+  } catch (error) {
+    console.warn("[DBX] window connection state refresh failed:", error);
+  }
+}
+
+async function handleConnectionStateChanged(payload: unknown): Promise<void> {
+  const event = payload as Partial<ConnectionStateChangedEvent> | null;
+  // A disk reload may migrate persisted settings. Ignore its own save event
+  // instead of feeding that migration back into another disk reload.
+  if (!event || typeof event.sourceWindowLabel !== "string" || event.sourceWindowLabel === windowContext.windowLabel) return;
+  await refreshWindowConnections(event.configurationChanged === true);
 }
 
 async function setupDetachedWindowEvents() {
   if (!isDesktop) return;
+  detachedEventUnlisteners.push(await subscribePluginConnectionStateChanges(connectionStore.getConfig, refreshWindowConnections));
   try {
     detachedEventUnlisteners.push(await subscribeSavedSqlLibraryChanges(() => savedSqlStore.refreshFromStorage()));
   } catch (error) {
@@ -929,6 +951,7 @@ async function setupDetachedWindowEvents() {
         ["dbx:detached-tab-dropped", handleDetachedTabDropped],
         ["dbx:detached-tab-lost", handleDetachedTabLost],
       ];
+  events.push([CONNECTION_STATE_CHANGED_EVENT, handleConnectionStateChanged]);
   for (const [event, handler] of events) {
     detachedEventUnlisteners.push(await listen(event, (message) => void (handler as (payload: unknown) => Promise<void>)(message.payload)));
   }
@@ -5204,6 +5227,7 @@ async function syncConnectionLivenessSubscription(active: boolean): Promise<void
   try {
     const unlisten = await api.subscribeConnectionLiveness((message) => {
       void connectionStore.handleConnectionLivenessMessage(message);
+      void refreshWindowConnections();
     });
     if (!appReady.value) {
       // Auth flipped off while the subscription was being established.
@@ -5235,6 +5259,7 @@ async function syncConnectionIdleClosedSubscription(active: boolean): Promise<vo
   try {
     const unlisten = await api.subscribeConnectionIdleClosed((payload) => {
       void connectionStore.handleConnectionIdleClosed(payload);
+      void refreshWindowConnections();
     });
     if (!appReady.value) {
       // Auth flipped off while the subscription was being established.

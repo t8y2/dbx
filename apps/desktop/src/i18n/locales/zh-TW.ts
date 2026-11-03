@@ -2270,6 +2270,7 @@ export default withEnglishFallback({
     selectConnection: "選擇連線",
     selectConnectionRequired: "請先選擇連線",
     searchConnection: "搜尋連線……",
+    noConnectedConnections: "目前沒有已建立的連線，請先在側邊欄開啟連線。",
     selectCatalog: "選擇 Catalog",
     searchCatalog: "搜尋 Catalog……",
     selectDatabase: "選擇資料庫",

@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick, reactive, ref, type App } from "vue";
+import { createApp, h, nextTick, reactive, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { TableInfoTab, TableStructureEditorDraft } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   connection: {
@@ -234,6 +235,34 @@ function selectTab(button: HTMLButtonElement) {
   button.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, ctrlKey: false }));
 }
 
+function mountDdlNavigationEditor() {
+  const root = document.createElement("div");
+  document.body.append(root);
+  const navigation = reactive({ initialTab: "ddl" as TableInfoTab, initialTabRequestId: 1 });
+  let draft: TableStructureEditorDraft | undefined;
+  app = createApp({
+    render: () =>
+      h(TableStructureEditor, {
+        connectionId: mocks.connection.id,
+        database: "test",
+        schema: "public",
+        tableName: "users",
+        ...navigation,
+        "onUpdate:draft": (nextDraft: TableStructureEditorDraft | undefined) => {
+          draft = nextDraft;
+        },
+      }),
+  });
+  app.mount(root);
+  return { root, navigation, draft: () => draft };
+}
+
+function changeTableComment(root: HTMLElement, comment: string) {
+  const input = root.querySelector<HTMLInputElement>("[data-table-comment-input]")!;
+  input.value = comment;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.connection.db_type = "postgres";
@@ -245,7 +274,7 @@ beforeEach(() => {
   mocks.buildTableOwnerChangeSql.mockResolvedValue({ statements: [], warnings: [] });
   mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
   mocks.getTableOwner.mockResolvedValue("app_user");
-  mocks.loadObjectDdl.mockResolvedValue({ ddl: DDL, cacheStatus: "remote" });
+  mocks.loadObjectDdl.mockReset().mockResolvedValue({ ddl: DDL, cacheStatus: "remote" });
   mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({
     value: facet === "columns" ? [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true }] : facet === "comment" ? "" : facet === "owner" ? "app_user" : [],
     cacheStatus: "remote",
@@ -259,6 +288,92 @@ afterEach(() => {
 });
 
 describe("TableStructureEditor DDL tab lifecycle", () => {
+  it("queries fresh DDL for a new clean navigation request", async () => {
+    const { root } = mountDdlNavigationEditor();
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL));
+    expect(mocks.loadObjectDdl).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ tableName: "users" }), { force: true });
+  });
+
+  it("refreshes a reused clean DDL tab for a new navigation request", async () => {
+    const { root, navigation } = mountDdlNavigationEditor();
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL));
+    mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint, external_added text);", cacheStatus: "remote" });
+    navigation.initialTabRequestId++;
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain("external_added"));
+    expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(2);
+    expect(mocks.loadObjectDdl.mock.calls[1][1]).toEqual({ force: true });
+  });
+
+  it("queries once when navigating back to DDL from another structure tab", async () => {
+    const { root, navigation } = mountDdlNavigationEditor();
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL));
+    selectTab(buttonWithText(root, "structureEditor.columns"));
+    await nextTick();
+    mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint, external_added text);", cacheStatus: "remote" });
+    navigation.initialTabRequestId++;
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain("external_added"));
+    expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(2);
+  });
+
+  it("replaces an unchanged DDL draft after an edit was undone", async () => {
+    const { root, navigation, draft } = mountDdlNavigationEditor();
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL));
+    const { EditorView } = await import("@codemirror/view");
+    const view = EditorView.findFromDOM(root.querySelector(".cm-content")!)!;
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "\n-- undone edit" } });
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: DDL } });
+    await vi.waitFor(() => expect(draft()?.dirty).toBe(false));
+    mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint, external_added text);", cacheStatus: "remote" });
+    navigation.initialTabRequestId++;
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain("external_added"));
+    expect(draft()?.ddlDraft).toBeNull();
+    expect(draft()?.dirty).toBe(false);
+  });
+
+  it.each(["DDL", "table comment"])("preserves a pending %s draft when navigating to DDL again", async (editedFacet) => {
+    const { root, navigation, draft } = mountDdlNavigationEditor();
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL));
+    if (editedFacet === "DDL") {
+      const { EditorView } = await import("@codemirror/view");
+      const view = EditorView.findFromDOM(root.querySelector(".cm-content")!)!;
+      view.dispatch({ changes: { from: view.state.doc.length, insert: "\n-- local draft" } });
+    } else changeTableComment(root, "Local comment draft");
+    await vi.waitFor(() => expect(draft()?.dirty).toBe(true));
+    mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (external_added text);", cacheStatus: "remote" });
+    navigation.initialTabRequestId++;
+    await nextTick();
+    await nextTick();
+    expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(1);
+    expect(root.querySelector(".cm-content")?.textContent).toContain(DDL);
+    if (editedFacet === "DDL") expect(draft()?.ddlDraft).toContain("-- local draft");
+    else expect(draft()?.tableComment).toBe("Local comment draft");
+    expect(draft()?.dirty).toBe(true);
+  });
+
+  it("discards a navigation refresh result if another structural draft was edited while waiting", async () => {
+    const { root, navigation, draft } = mountDdlNavigationEditor();
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL));
+    const pending = deferred<{ ddl: string; cacheStatus: "remote" }>();
+    mocks.loadObjectDdl.mockReturnValueOnce(pending.promise);
+    navigation.initialTabRequestId++;
+    try {
+      await vi.waitFor(() => expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(2));
+      changeTableComment(root, "Draft entered while waiting");
+      await vi.waitFor(() => expect(draft()?.dirty).toBe(true));
+    } finally {
+      pending.resolve({ ddl: "CREATE TABLE users (external_added text);", cacheStatus: "remote" });
+    }
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL));
+    expect(root.querySelector(".cm-content")?.textContent).not.toContain("external_added");
+    expect(draft()?.tableComment).toBe("Draft entered while waiting");
+    const { EditorView } = await import("@codemirror/view");
+    const view = EditorView.findFromDOM(root.querySelector(".cm-content")!)!;
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "\n-- keep this baseline" } });
+    await vi.waitFor(() => expect(draft()?.ddlDraft).toContain("-- keep this baseline"));
+    expect(draft()?.rawDdlContent).toContain(DDL);
+    expect(draft()?.rawDdlContent).not.toContain("external_added");
+  });
+
   it.each(["oracle", "oceanbase-oracle"])("reloads %s DDL for independent indexes and freezes an edited draft", async (type) => {
     mocks.connection.db_type = type;
     mocks.loadObjectDdl.mockResolvedValueOnce({ ddl: 'CREATE TABLE "T" ("ID" NUMBER);', cacheStatus: "remote" }).mockResolvedValueOnce({ ddl: 'CREATE TABLE "T" ("ID" NUMBER);\nCREATE INDEX "DETACHED" ON "T"("ID");', cacheStatus: "remote" });

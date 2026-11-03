@@ -170,7 +170,7 @@ vi.mock("@/components/ui/select", async () => {
 });
 
 import DocumentBrowser from "@/components/document/DocumentBrowser.vue";
-import { resetBrowserStateCaches } from "@/lib/tabs/documentBrowserStateCache";
+import { resetBrowserStateCaches, saveDocumentBrowserState } from "@/lib/tabs/documentBrowserStateCache";
 
 let app: App<Element> | null = null;
 let root: HTMLDivElement | null = null;
@@ -257,6 +257,86 @@ afterEach(() => {
   app = null;
   root = null;
   vi.unstubAllGlobals();
+});
+
+describe("DocumentBrowser filter toggle", () => {
+  function filterCheckbox() {
+    const checkbox = root!.querySelector<HTMLInputElement>('input[type="checkbox"][aria-label="grid.applyFilter"]');
+    expect(checkbox).not.toBeNull();
+    return checkbox!;
+  }
+
+  it("disables and restores a filter without losing the text or sort order", async () => {
+    await mountBrowser();
+    const [filter, sort] = queryTextareas();
+    typeInTextarea(filter, '{"name":"row_1"}');
+    typeInTextarea(sort, '{"name":-1}');
+    pressEnter(filter);
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBe('{"name":"row_1"}');
+
+    filterCheckbox().click();
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBeUndefined();
+    expect(backend.documentFindDocuments.mock.lastCall![7]).toBe('{"name":-1}');
+    expect(filter.value).toBe('{"name":"row_1"}');
+
+    filterCheckbox().click();
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBe('{"name":"row_1"}');
+  });
+
+  it("keeps disabled filters disabled after switching tabs and refreshing", async () => {
+    await mountBrowser({ stateKey: "toggle-tab" });
+    typeInTextarea(queryTextareas()[0], '{"name":"row_1"}');
+    filterCheckbox().click();
+    await flushUi();
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await mountBrowser({ stateKey: "toggle-tab" });
+
+    expect(filterCheckbox().checked).toBe(false);
+    expect(queryTextareas()[0].value).toBe('{"name":"row_1"}');
+    await dataGrid.reload!();
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBeUndefined();
+    filterCheckbox().click();
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBe('{"name":"row_1"}');
+  });
+
+  it("does not parse incomplete filter text while the filter is disabled", async () => {
+    await mountBrowser();
+    typeInTextarea(queryTextareas()[0], '{"name":');
+    backend.documentFindDocuments.mockClear();
+    filterCheckbox().click();
+    await flushUi();
+    expect(backend.documentFindDocuments).toHaveBeenCalledOnce();
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBeUndefined();
+    expect(queryTextareas()[0].value).toBe('{"name":');
+  });
+
+  it("toggles manual and structured conditions together and resets pagination", async () => {
+    saveDocumentBrowserState("structured-toggle", {
+      filterInput: '{"name":"row_1"}',
+      sortInput: "",
+      appliedDocumentFilter: { active: true },
+      documentFilterRules: [],
+      page: 1,
+    });
+    backend.documentFindDocuments.mockResolvedValue(documentResult(1, 2, 6));
+    await mountBrowser({ stateKey: "structured-toggle" });
+    const combined = '{"$and":[{"name":"row_1"},{"active":true}]}';
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBe(combined);
+    filterCheckbox().click();
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.lastCall![3]).toBe(0);
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBeUndefined();
+    filterCheckbox().click();
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBe(combined);
+  });
 });
 
 describe("DocumentBrowser tab state (tab switch persistence)", () => {

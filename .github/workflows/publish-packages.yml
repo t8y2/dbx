@@ -30,9 +30,16 @@ jobs:
     if: ${{ !cancelled() && contains(fromJSON('["success", "skipped"]'), needs.approve-promotion.result) }}
     runs-on: ubuntu-latest
     outputs:
+      # tag is the input (a beta build identity for promotions). stable_tag is the
+      # plain version tag the promoted Release is published under, and current_tag
+      # is where the Release lives right now: the beta tag before promotion, the
+      # stable tag once promote-release has moved it (reruns start there).
       tag: ${{ steps.version.outputs.tag }}
+      stable_tag: ${{ steps.version.outputs.stable_tag }}
+      current_tag: ${{ steps.release.outputs.current_tag }}
       version: ${{ steps.version.outputs.version }}
       published_at: ${{ steps.release.outputs.published_at }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
       is_beta: ${{ steps.version.outputs.is_beta }}
     steps:
       - uses: actions/checkout@v7
@@ -54,7 +61,9 @@ jobs:
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           VERSION="${TAG#v}"
-          echo "version=${VERSION%%-beta.*}" >> "$GITHUB_OUTPUT"
+          VERSION="${VERSION%%-beta.*}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "stable_tag=v${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Validate published prerelease and CI checks
         id: release
@@ -63,23 +72,58 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.version.outputs.tag }}"
-          RELEASE_JSON="$(gh release view "$TAG" --repo "${{ github.repository }}" --json isDraft,isPrerelease,assets)"
+          STABLE_TAG="${{ steps.version.outputs.stable_tag }}"
+          REPO="${{ github.repository }}"
+
+          # A promoted beta is republished under the plain version tag, so a rerun
+          # finds its Release there. Two Releases for one version is ambiguous.
+          CURRENT_TAG="$TAG"
+          if [[ "$TAG" != "$STABLE_TAG" ]]; then
+            beta_exists=false; stable_exists=false
+            gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 && beta_exists=true
+            gh release view "$STABLE_TAG" --repo "$REPO" >/dev/null 2>&1 && stable_exists=true
+            if [[ "$beta_exists" == "true" && "$stable_exists" == "true" ]]; then
+              echo "::error::Both $TAG and $STABLE_TAG have a Release; remove the stale one before promoting."
+              exit 1
+            fi
+            if [[ "$beta_exists" == "false" && "$stable_exists" == "true" ]]; then
+              CURRENT_TAG="$STABLE_TAG"
+              echo "::notice::$TAG was already moved to $STABLE_TAG; continuing idempotently."
+            fi
+          fi
+          echo "current_tag=${CURRENT_TAG}" >> "$GITHUB_OUTPUT"
+
+          RELEASE_JSON="$(gh release view "$CURRENT_TAG" --repo "$REPO" --json isDraft,isPrerelease,assets)"
           if [[ "$(jq -r '.isDraft' <<<"$RELEASE_JSON")" == "true" ]]; then
-            echo "::error::Release $TAG must be published before promotion."
+            echo "::error::Release $CURRENT_TAG must be published before promotion."
             exit 1
           fi
           if [[ "${{ steps.version.outputs.is_beta }}" == "true" && "$(jq -r '.isPrerelease' <<<"$RELEASE_JSON")" == "false" ]]; then
             echo "::notice::Beta promotion candidate $TAG is already stable; continuing idempotently."
           fi
 
-          PUBLISHED_AT="$(gh release view "$TAG" --repo "${{ github.repository }}" --json publishedAt --jq '.publishedAt // empty')"
+          PUBLISHED_AT="$(gh release view "$CURRENT_TAG" --repo "$REPO" --json publishedAt --jq '.publishedAt // empty')"
           test -n "$PUBLISHED_AT"
           echo "published_at=${PUBLISHED_AT}" >> "$GITHUB_OUTPUT"
 
-          REF_JSON="$(gh api "repos/${{ github.repository }}/git/ref/tags/${TAG}")"
-          SHA="$(jq -r '.object.sha' <<<"$REF_JSON")"
-          if [[ "$(jq -r '.object.type' <<<"$REF_JSON")" == tag ]]; then
-            SHA="$(gh api "repos/${{ github.repository }}/git/tags/${SHA}" --jq '.object.sha')"
+          commit_of_tag() {
+            local ref_json sha
+            ref_json="$(gh api "repos/${REPO}/git/ref/tags/$1")"
+            sha="$(jq -r '.object.sha' <<<"$ref_json")"
+            if [[ "$(jq -r '.object.type' <<<"$ref_json")" == tag ]]; then
+              sha="$(gh api "repos/${REPO}/git/tags/${sha}" --jq '.object.sha')"
+            fi
+            printf '%s' "$sha"
+          }
+          SHA="$(commit_of_tag "$CURRENT_TAG")"
+          echo "source_sha=${SHA}" >> "$GITHUB_OUTPUT"
+          # A stable tag that already exists must be the build that is being promoted.
+          if [[ "$CURRENT_TAG" != "$STABLE_TAG" ]] && gh api "repos/${REPO}/git/ref/tags/${STABLE_TAG}" >/dev/null 2>&1; then
+            STABLE_SHA="$(commit_of_tag "$STABLE_TAG")"
+            if [[ "$STABLE_SHA" != "$SHA" ]]; then
+              echo "::error::Tag $STABLE_TAG points to ${STABLE_SHA}, not the promoted build ${SHA}."
+              exit 1
+            fi
           fi
           node .github/scripts/validate-release-ci.mjs "$GITHUB_REPOSITORY" "$SHA"
 
@@ -89,7 +133,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${{ steps.version.outputs.tag }}"
+          TAG="${{ steps.release.outputs.current_tag }}"
           mkdir -p "$RUNNER_TEMP/promotion-assets"
           gh release download "$TAG" --repo "${{ github.repository }}" --pattern latest.json --dir "$RUNNER_TEMP/promotion-assets" --clobber
           gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/promotion-assets/release-assets.txt"
@@ -112,6 +156,7 @@ jobs:
   publish:
     name: Publish to Homebrew & Scoop
     needs: [publish-stable-alias, validate-candidate]
+    if: ${{ !cancelled() && needs.publish-stable-alias.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -120,12 +165,10 @@ jobs:
       - name: Extract version from tag
         id: version
         run: |
-          TAG="${{ github.event.inputs.tag }}"
-          TAG="$(echo "${TAG}" | xargs)"
-          VERSION="${TAG#v}"
-          # Beta tags identify the GitHub Release, while package assets keep
-          # the stable base version in their filenames.
-          VERSION="${VERSION%%-beta.*}"
+          # A promoted beta is republished under the plain version tag, which is
+          # also what the package assets' file names carry.
+          TAG="${{ needs.validate-candidate.outputs.stable_tag }}"
+          VERSION="${{ needs.validate-candidate.outputs.version }}"
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
             echo "::error::Tag '${TAG}' does not look like a semver version."
             exit 1
@@ -327,28 +370,38 @@ jobs:
   upload-r2:
     name: Upload to R2
     needs: validate-candidate
+    # Plain version tags skip approve-promotion, and a skipped ancestor would
+    # skip every job after it. Each job below therefore checks its own
+    # dependencies instead of relying on the implicit success().
+    if: ${{ !cancelled() && needs.validate-candidate.result == 'success' }}
     outputs:
+      # The stable R2 directory, manifest and aliases are keyed by the plain
+      # version tag, which is also where promote-release publishes the Release.
       tag: ${{ steps.version.outputs.tag }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      - name: Extract version from tag
+      - name: Resolve release tags
         id: version
         run: |
-          TAG="${{ needs.validate-candidate.outputs.tag }}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ needs.validate-candidate.outputs.stable_tag }}" >> "$GITHUB_OUTPUT"
 
       - name: Download release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p assets
-          gh release download "${{ steps.version.outputs.tag }}" \
+          gh release download "${{ needs.validate-candidate.outputs.current_tag }}" \
             --repo "${{ github.repository }}" \
             --dir assets \
             --clobber
           ls -lh assets/
+
+      - name: Add stable package aliases for R2
+        # promote-release adds these to the GitHub Release only after this job, so
+        # the immutable R2 directory has to get them here as well.
+        run: node .github/scripts/stable-asset-aliases.mjs apply "${{ needs.validate-candidate.outputs.tag }}" assets
 
       - name: Validate latest.json completeness
         run: |
@@ -376,6 +429,8 @@ jobs:
       - name: Rewrite latest.json download URLs to R2 CDN
         run: |
           TAG="${{ steps.version.outputs.tag }}"
+          # The manifest still points at the tag the Release lives under now.
+          SOURCE_TAG="${{ needs.validate-candidate.outputs.current_tag }}"
           LATEST_JSON="assets/latest.json"
           if [ ! -f "$LATEST_JSON" ]; then
             echo "::warning::latest.json not found, skipping URL rewrite"
@@ -383,11 +438,11 @@ jobs:
           fi
           echo "Before:"
           jq '.platforms[]?.url // empty' "$LATEST_JSON"
-          jq --arg tag "$TAG" '
+          jq --arg tag "$TAG" --arg source "$SOURCE_TAG" '
             (.platforms[]?.url?) |= (
               sub("\\?.*$"; "")
-              | if startswith("https://github.com/t8y2/dbx/releases/download/" + $tag + "/")
-                then sub("https://github\\.com/t8y2/dbx/releases/download/" + $tag + "/"; "https://dl.dbxio.com/releases/stable/" + $tag + "/")
+              | if startswith("https://github.com/t8y2/dbx/releases/download/" + $source + "/")
+                then sub("https://github\\.com/t8y2/dbx/releases/download/" + $source + "/"; "https://dl.dbxio.com/releases/stable/" + $tag + "/")
                 else .
                 end
               + "?v=" + $tag
@@ -404,7 +459,9 @@ jobs:
           manifest_key="releases/stable/${{ steps.version.outputs.tag }}/latest.json"
           if aws s3api head-object --bucket "${{ secrets.R2_BUCKET_NAME }}" --key "$manifest_key" --endpoint-url "$endpoint" >/dev/null 2>&1; then
             aws s3 cp "s3://${{ secrets.R2_BUCKET_NAME }}/${manifest_key}" "$RUNNER_TEMP/existing-stable-manifest.json" --endpoint-url "$endpoint"
-            if ! cmp -s assets/latest.json "$RUNNER_TEMP/existing-stable-manifest.json"; then
+            # sync-changelog fills in `notes` after a successful publish, so a
+            # rerun must not treat that field as a content change.
+            if ! cmp -s <(jq -S 'del(.notes)' assets/latest.json) <(jq -S 'del(.notes)' "$RUNNER_TEMP/existing-stable-manifest.json"); then
               echo "::error::Immutable stable manifest already exists for ${{ steps.version.outputs.tag }} with different contents."
               exit 1
             fi
@@ -420,6 +477,7 @@ jobs:
   promote-release:
     name: Promote to Release
     needs: [upload-r2, validate-candidate]
+    if: ${{ !cancelled() && needs.upload-r2.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -428,21 +486,36 @@ jobs:
       - name: Promote prerelease to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_TAG: ${{ needs.validate-candidate.outputs.current_tag }}
+          STABLE_TAG: ${{ needs.validate-candidate.outputs.stable_tag }}
+          SOURCE_SHA: ${{ needs.validate-candidate.outputs.source_sha }}
         run: |
-          TAG="${{ needs.validate-candidate.outputs.tag }}"
-          edit_args=(--repo "${{ github.repository }}" --prerelease=false --latest)
+          set -euo pipefail
+          edit_args=(--repo "${GITHUB_REPOSITORY}" --prerelease=false --latest)
           if [[ "${{ needs.validate-candidate.outputs.is_beta }}" == "true" ]]; then
-            # A promoted beta keeps its beta tag, but the page is a stable release.
             edit_args+=(--title "DBX v${{ needs.validate-candidate.outputs.version }}")
           fi
-          gh release edit "${TAG}" "${edit_args[@]}"
-          echo "::notice::Release ${TAG} promoted from prerelease to latest release"
+          if [[ "$SOURCE_TAG" != "$STABLE_TAG" ]]; then
+            # Move the promoted beta Release (and every asset on it) to the plain
+            # version tag instead of copying it, so downloads, package managers and
+            # old clients that build releases/tag/vX.Y.Z all resolve. The tag is
+            # created on the built commit through the API: events created with
+            # GITHUB_TOKEN do not start the tag-triggered Release workflow. The beta
+            # git tag stays as build provenance.
+            if ! gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${STABLE_TAG}" >/dev/null 2>&1; then
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+                -f "ref=refs/tags/${STABLE_TAG}" -f "sha=${SOURCE_SHA}" >/dev/null
+            fi
+            edit_args+=(--tag "$STABLE_TAG")
+          fi
+          gh release edit "${SOURCE_TAG}" "${edit_args[@]}"
+          echo "::notice::Release ${SOURCE_TAG} promoted to latest release as ${STABLE_TAG}"
 
       - name: Publish stable manifest to GitHub Release
         if: ${{ needs.validate-candidate.outputs.is_beta == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.validate-candidate.outputs.tag }}
+          TAG: ${{ needs.validate-candidate.outputs.stable_tag }}
           PUBLISHED_AT: ${{ needs.validate-candidate.outputs.published_at }}
         shell: bash
         run: |
@@ -458,6 +531,11 @@ jobs:
             "$manifest_dir/latest.json" \
             "$manifest_dir/latest.json" \
             stable "$TAG" true "$PUBLISHED_AT"
+          # The package URLs still name the beta tag the Release was built under.
+          jq --arg tag "$TAG" '
+            (.platforms[]?.url?) |= sub("^https://github\\.com/t8y2/dbx/releases/download/[^/]+/"; "https://github.com/t8y2/dbx/releases/download/" + $tag + "/")
+          ' "$manifest_dir/latest.json" > "$manifest_dir/latest.json.tmp"
+          mv "$manifest_dir/latest.json.tmp" "$manifest_dir/latest.json"
           jq -e --arg tag "$TAG" '
             .channel == "stable" and
             .release_tag == $tag and
@@ -472,17 +550,14 @@ jobs:
         if: ${{ needs.validate-candidate.outputs.is_beta == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.validate-candidate.outputs.tag }}
+          TAG: ${{ needs.validate-candidate.outputs.stable_tag }}
+          BETA_TAG: ${{ needs.validate-candidate.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
-          tag_version="${TAG#v}"
-          base_version="${tag_version%%-beta.*}"
           mkdir -p "$RUNNER_TEMP/stable-package-assets"
           assets_json="$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json assets)"
-          for suffix in arm64.dmg x64.dmg x64-setup.exe arm64-setup.exe x64_en-US.msi arm64_en-US.msi; do
-            source="DBX_${tag_version}_${suffix}"
-            target="DBX_${base_version}_${suffix}"
+          while read -r source target; do
             if ! jq -e --arg name "$target" '.assets[] | select(.name == $name)' <<<"$assets_json" >/dev/null; then
               if ! jq -e --arg name "$source" '.assets[] | select(.name == $name)' <<<"$assets_json" >/dev/null; then
                 echo "::error::Missing beta package asset $source."
@@ -492,13 +567,13 @@ jobs:
               cp "$RUNNER_TEMP/stable-package-assets/$source" "$RUNNER_TEMP/stable-package-assets/$target"
               gh release upload "$TAG" "$RUNNER_TEMP/stable-package-assets/$target" --repo "${GITHUB_REPOSITORY}" --clobber
             fi
-          done
+          done < <(node .github/scripts/stable-asset-aliases.mjs pairs "$BETA_TAG")
 
       - name: Sync promoted release to CNB
         env:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.validate-candidate.outputs.tag }}
+          TAG: ${{ needs.validate-candidate.outputs.stable_tag }}
         if: ${{ needs.validate-candidate.outputs.is_beta == 'true' }}
         run: |
           set -euo pipefail
@@ -564,6 +639,7 @@ jobs:
     # promoted version is committed here. The daily beta job and local builds
     # read the source version, which would otherwise stay on an old release.
     needs: [validate-candidate, promote-release]
+    if: ${{ !cancelled() && needs.promote-release.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main
@@ -605,6 +681,7 @@ jobs:
   publish-stable-alias:
     name: Publish stable update aliases
     needs: [promote-release, upload-r2]
+    if: ${{ !cancelled() && needs.promote-release.result == 'success' && needs.upload-r2.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Copy immutable manifest to stable aliases
@@ -618,15 +695,21 @@ jobs:
           set -euo pipefail
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
           source="s3://${R2_BUCKET_NAME}/releases/stable/${TAG}/"
+          # R2 rejects the tagging headers the CLI sends on bucket-to-bucket copies
+          # (GetObjectTagging, x-amz-tagging-directive), so download the immutable
+          # directory once and upload it to each alias, like a first publish does.
+          assets="$RUNNER_TEMP/stable-aliases"
+          mkdir -p "${assets}"
+          aws s3 sync "${source}" "${assets}/" --endpoint-url "${endpoint}"
           for alias in stable/latest latest; do
-            aws s3 sync "${source}" "s3://${R2_BUCKET_NAME}/releases/${alias}/" \
+            aws s3 sync "${assets}/" "s3://${R2_BUCKET_NAME}/releases/${alias}/" \
               --endpoint-url "${endpoint}" \
               --cache-control "no-cache" \
               --delete
           done
-          aws s3 cp "${source}latest.json" "s3://${R2_BUCKET_NAME}/releases/stable/latest.json" \
+          aws s3 cp "${assets}/latest.json" "s3://${R2_BUCKET_NAME}/releases/stable/latest.json" \
             --endpoint-url "${endpoint}" --cache-control "no-cache"
-          aws s3 cp "${source}latest.json" "s3://${R2_BUCKET_NAME}/releases/latest/latest.json" \
+          aws s3 cp "${assets}/latest.json" "s3://${R2_BUCKET_NAME}/releases/latest/latest.json" \
             --endpoint-url "${endpoint}" --cache-control "no-cache"
 
       - name: Keep latest five versioned releases in R2
@@ -664,15 +747,16 @@ jobs:
 
   notify-qq:
     name: QQ Notify
-    needs: [publish]
-    if: ${{ inputs.notify }}
+    needs: [publish, validate-candidate]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && inputs.notify }}
     runs-on: ubuntu-latest
     steps:
       - name: Build message
         id: msg
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.inputs.tag }}
+          # The promoted Release now lives under the plain version tag.
+          TAG: ${{ needs.validate-candidate.outputs.stable_tag }}
         run: |
           RELEASE_JSON=$(gh release view "${TAG}" --repo "${{ github.repository }}" --json tagName,name,url,body)
           export RELEASE_TAG=$(echo "$RELEASE_JSON" | jq -r '.tagName')
@@ -724,7 +808,7 @@ jobs:
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
           PAYLOAD=$(jq -nc --arg msg "$MSG_CONTENT" \
-            '{"umo": "default:GroupMessage:1087880322", "message": $msg}')
+            '{"umo": "default:GroupMessage:244975070", "message": $msg}')
           printf '%s' "$PAYLOAD" | ssh "root@${HOST}" "curl -fsS -X POST http://localhost:6185/api/v1/im/message \
             -H 'Authorization: Bearer ${ASTRBOT_API_KEY}' \
             -H 'Content-Type: application/json' \
@@ -732,8 +816,8 @@ jobs:
 
   notify-feishu:
     name: Notify Feishu group
-    needs: [publish]
-    if: ${{ inputs.notify }}
+    needs: [publish, validate-candidate]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && inputs.notify }}
     # Card sends after promotion so the title reflects the formal release.
     runs-on: ubuntu-latest
     steps:
@@ -747,4 +831,4 @@ jobs:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
-        run: python3 scripts/notify_feishu.py "${{ github.event.inputs.tag }}"
+        run: python3 scripts/notify_feishu.py "${{ needs.validate-candidate.outputs.stable_tag }}"

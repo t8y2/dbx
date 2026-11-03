@@ -44,6 +44,7 @@ pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &[
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat
 /// the sandbox CSP or enumerate large origin lists.
 pub const MAX_PLUGIN_NETWORK_ORIGINS: usize = 8;
+pub const MAX_PLUGIN_OPEN_URL_ORIGINS: usize = 8;
 /// Bound the `visible_when` / `required_when` expression tree so a hostile
 /// manifest cannot make the host or the dialog evaluator do unbounded work.
 pub const MAX_PLUGIN_FIELD_CONDITION_DEPTH: usize = 8;
@@ -52,6 +53,24 @@ pub const MAX_PLUGIN_FIELD_CONDITION_NODES: usize = 64;
 /// native dialog or the browser `accept` attribute.
 pub const MAX_PLUGIN_PICKER_FILTERS: usize = 16;
 const HOST_NETWORK_PERMISSION_PREFIX: &str = "host.network:";
+
+/// External navigation is independent of sandbox networking. Exact canonical
+/// origins avoid wildcard, path, user-info, and default-port ambiguities.
+pub fn parse_host_open_url_permission(permission: &str) -> Option<&str> {
+    let origin = permission.strip_prefix("host.openUrl:")?;
+    if origin.len() > 4096 || origin.contains('*') || origin.chars().any(|c| c.is_whitespace() || c == '\\') {
+        return None;
+    }
+    let url = reqwest::Url::parse(origin).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.origin().ascii_serialization() != origin
+    {
+        return None;
+    }
+    Some(origin)
+}
 
 /// Parse a `host.network:https://host[:port]` permission into the origin that
 /// may appear in the sandbox `connect-src`. Only https origins without path,
@@ -1210,12 +1229,14 @@ impl PluginManifest {
 
         let mut seen_permissions = HashSet::new();
         let mut network_origins: HashSet<&str> = HashSet::new();
+        let mut open_url_origins: HashSet<&str> = HashSet::new();
         for permission in &self.permissions {
             let valid = SUPPORTED_PLUGIN_PERMISSIONS.contains(&permission.as_str())
-                || (permission.starts_with("host.network:") && parse_host_network_permission(permission).is_some());
+                || parse_host_network_permission(permission).is_some()
+                || parse_host_open_url_permission(permission).is_some();
             if !valid {
                 errors.push(format!(
-                    "Unsupported plugin Host API permission '{permission}' (network permissions must look like host.network:https://example.com)"
+                    "Unsupported plugin Host API permission '{permission}' (origins must look like host.network:https://example.com or host.openUrl:https://example.com)"
                 ));
             } else if !seen_permissions.insert(permission) {
                 errors.push(format!("Duplicate plugin permission '{permission}'"));
@@ -1225,11 +1246,20 @@ impl PluginManifest {
                     errors.push(format!("Duplicate plugin network origin '{origin}'"));
                 }
             }
+            if let Some(origin) = parse_host_open_url_permission(permission) {
+                open_url_origins.insert(origin);
+            }
         }
         if network_origins.len() > MAX_PLUGIN_NETWORK_ORIGINS {
             errors.push(format!(
                 "Plugin declares {} network origins; at most {MAX_PLUGIN_NETWORK_ORIGINS} are allowed",
                 network_origins.len()
+            ));
+        }
+        if open_url_origins.len() > MAX_PLUGIN_OPEN_URL_ORIGINS {
+            errors.push(format!(
+                "Plugin declares {} external URL origins; at most {MAX_PLUGIN_OPEN_URL_ORIGINS} are allowed",
+                open_url_origins.len()
             ));
         }
         validate_localizations(&self.localizations, &mut errors);
@@ -1417,15 +1447,27 @@ fn validate_engine_requirement(label: &str, requirement: &str, actual: &str, err
             return;
         }
     };
-    let actual = match Version::parse(actual.trim()) {
+    let mut actual = match Version::parse(actual.trim()) {
         Ok(actual) => actual,
         Err(error) => {
             errors.push(format!("Invalid installed {label} version '{actual}': {error}"));
             return;
         }
     };
-    if !requirement.matches(&actual) {
-        errors.push(format!("Plugin requires {label} {requirement}, but {actual} is installed"));
+    // Release candidates and daily beta builds are built from the same source
+    // release as their stable counterpart. SemVer intentionally sorts
+    // `0.6.63-beta.*` below `0.6.63`, which would make a plugin requiring the
+    // current stable release appear incompatible in a beta DBX build. Try the
+    // real version first so ranges such as `<0.6.63` retain their normal
+    // prerelease semantics, then retry with the stable release baseline.
+    let installed_version = actual.to_string();
+    let matches = requirement.matches(&actual)
+        || (label == "DBX" && !actual.pre.is_empty() && {
+            actual.pre = semver::Prerelease::EMPTY;
+            requirement.matches(&actual)
+        });
+    if !matches {
+        errors.push(format!("Plugin requires {label} {requirement}, but {installed_version} is installed"));
     }
 }
 
@@ -2205,6 +2247,29 @@ fn valid_locale_tag(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn external_url_permissions_require_exact_canonical_http_origins() {
+        for origin in ["https://example.com", "http://localhost:8080", "https://[::1]:8443"] {
+            assert_eq!(super::parse_host_open_url_permission(&format!("host.openUrl:{origin}")), Some(origin));
+        }
+        for permission in [
+            "host.openUrl",
+            "host.network:https://example.com",
+            "host.openUrl:*",
+            "host.openUrl:javascript:alert(1)",
+            "host.openUrl:file:///tmp/file",
+            "host.openUrl:https://example.com/path",
+            "host.openUrl:https://example.com/",
+            "host.openUrl:https://example.com:443",
+            "host.openUrl:https://*.example.com",
+            "host.openUrl:https://user@other.com",
+            "host.openUrl:https://example.com?token=secret",
+            "host.openUrl:https://example.com#fragment",
+            "host.openUrl:https://example.com\\@other.com",
+        ] {
+            assert_eq!(super::parse_host_open_url_permission(permission), None, "{permission}");
+        }
+    }
     use std::collections::BTreeMap;
 
     use super::{
@@ -2805,6 +2870,29 @@ mod tests {
     }
 
     #[test]
+    fn manifest_accepts_external_url_origins_but_rejects_malformed_or_excess_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ui")).unwrap();
+        std::fs::write(dir.path().join("ui/index.html"), "<!doctype html>").unwrap();
+        let mut manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version":1,"id":"io.dbx.bookmarks","name":"Bookmarks","version":"1.0.0","publisher":"example",
+            "engines":{"dbx":">=0.1.0","host_api":"^1.0"},"entrypoints":{"ui":{"root":"ui","entry":"ui/index.html"}},
+            "permissions":["host.openUrl:https://example.com","host.openUrl:http://localhost:8080"]
+        }))
+        .unwrap();
+        let valid = manifest.compatibility(dir.path(), "0.1.0");
+        assert!(valid.compatible, "{:?}", valid.errors);
+        manifest.permissions.push("host.openUrl:javascript:alert(1)".into());
+        assert!(manifest
+            .compatibility(dir.path(), "0.1.0")
+            .errors
+            .iter()
+            .any(|error| error.contains("Unsupported plugin Host API permission")));
+        manifest.permissions = (0..9).map(|index| format!("host.openUrl:https://site{index}.example.com")).collect();
+        assert!(manifest.compatibility(dir.path(), "0.1.0").errors.iter().any(|error| error.contains("at most 8")));
+    }
+
+    #[test]
     fn accepts_read_only_host_permissions_and_still_rejects_unknown_permissions() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("ui")).unwrap();
@@ -3223,6 +3311,30 @@ mod tests {
         let compatibility = manifest.compatibility(dir.path(), "0.6.16");
         assert!(!compatibility.compatible, "{:?}", compatibility.errors);
         assert!(compatibility.errors.iter().any(|error| error.contains(">=999.0.0")), "{:?}", compatibility.errors);
+    }
+
+    #[test]
+    fn compatibility_uses_stable_baseline_for_beta_dbx_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.beta",
+            "name": "Beta",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.6.63", "host_api": "^1.0" }
+        }))
+        .unwrap();
+
+        let beta = manifest.compatibility(dir.path(), "0.6.63-beta.20261101.3");
+        assert!(beta.compatible, "{:?}", beta.errors);
+
+        let too_new = manifest.compatibility(dir.path(), "0.6.62-beta.20261101.3");
+        assert!(!too_new.compatible, "{:?}", too_new.errors);
+        assert!(too_new.errors.iter().any(|error| error.contains("0.6.62-beta.20261101.3")), "{:?}", too_new.errors);
+
+        let stable = manifest.compatibility(dir.path(), "0.6.62");
+        assert!(!stable.compatible, "{:?}", stable.errors);
     }
 
     #[test]

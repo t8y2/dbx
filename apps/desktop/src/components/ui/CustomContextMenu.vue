@@ -19,7 +19,7 @@ const emit = defineEmits<{
 }>();
 
 defineSlots<{
-  default(props: { onContextMenu: (event: MouseEvent) => void; isOpen: boolean }): any;
+  default(props: { onContextMenu: (event: MouseEvent, itemsOverride?: ContextMenuItem[]) => void; isOpen: boolean }): any;
 }>();
 
 // The pointer must settle on another row before it takes the submenu over from

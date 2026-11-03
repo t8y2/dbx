@@ -1,6 +1,7 @@
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { notifySavedSqlLibraryChanged } from "@/lib/savedSql/savedSqlLibraryEvents";
 import { Channel } from "@tauri-apps/api/core";
 import { SnapshotCompletionError, unwrapSnapshotCompletion } from "@/lib/export/snapshotCompletion";
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
@@ -1560,7 +1561,7 @@ export interface AiChatMessage {
   content: string;
   mentions?: unknown[];
   reasoning?: string;
-  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked";
+  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked" | "outputTruncated";
   /** Set on the assistant message whose generation failed; persisted (mirrors dbx-core `AiChatMessage.failed`). */
   failed?: boolean;
   /** Target frozen when this assistant turn started, retained for confirmation. */
@@ -1924,6 +1925,7 @@ export async function listTables(
   catalog?: string,
   tableNameFilter?: import("@/types/database").TableNameFilter,
   exactIdentity?: boolean,
+  pageTableRoots?: boolean,
 ): Promise<TableInfo[]> {
   return invoke("list_tables", {
     connectionId,
@@ -1936,6 +1938,7 @@ export async function listTables(
     catalog,
     tableNameFilter,
     ...(exactIdentity ? { exactIdentity: true } : {}),
+    ...(pageTableRoots ? { pageTableRoots: true } : {}),
   });
 }
 
@@ -2194,6 +2197,8 @@ export async function executeMulti(
      *  (`BEGIN` / `START TRANSACTION`) open across executions until COMMIT /
      *  ROLLBACK instead of rolling it back when the batch ends. */
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
   },
 ): Promise<QueryResult[]> {
   const diagnosticsEnabled = isDebugLoggingEnabled();
@@ -2268,6 +2273,8 @@ export async function executeMultiWithProgress(
     continueOnError?: boolean;
     executionMode?: "simple";
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
     executionId?: string;
   },
 ): Promise<QueryResult[]> {
@@ -2413,6 +2420,7 @@ export async function executeInManualTransaction(
   timeoutSecs?: number,
   boundStatements?: BlobBoundStatement[],
   deferLobs?: boolean,
+  reportCompilationErrors?: boolean,
 ): Promise<QueryResult[]> {
   return invokeBackend("execute_in_manual_transaction", {
     txnSessionId,
@@ -2428,6 +2436,7 @@ export async function executeInManualTransaction(
     timeoutSecs,
     boundStatements,
     deferLobs,
+    reportCompilationErrors,
   });
 }
 
@@ -3559,23 +3568,30 @@ export async function loadSavedSqlFile(id: string): Promise<SavedSqlFile | null>
 }
 
 export async function saveSavedSqlFolder(folder: SavedSqlFolder): Promise<SavedSqlFolder> {
-  return invoke("save_saved_sql_folder", { folder });
+  const saved = await invoke<SavedSqlFolder>("save_saved_sql_folder", { folder });
+  await notifySavedSqlLibraryChanged();
+  return saved;
 }
 
 export async function deleteSavedSqlFolder(id: string): Promise<void> {
-  return invoke("delete_saved_sql_folder", { id });
+  await invoke("delete_saved_sql_folder", { id });
+  await notifySavedSqlLibraryChanged();
 }
 
 export async function saveSavedSqlFile(file: SavedSqlFile): Promise<SavedSqlFile> {
-  return invoke("save_saved_sql_file", { file });
+  const saved = await invoke<SavedSqlFile>("save_saved_sql_file", { file });
+  await notifySavedSqlLibraryChanged();
+  return saved;
 }
 
 export async function saveDefaultQueryContent(id: string, sql: string, updatedAt: string): Promise<void> {
-  return invoke("save_default_query_content", { id, sql, updatedAt });
+  await invoke("save_default_query_content", { id, sql, updatedAt });
+  await notifySavedSqlLibraryChanged();
 }
 
 export async function deleteSavedSqlFile(id: string): Promise<void> {
-  return invoke("delete_saved_sql_file", { id });
+  await invoke("delete_saved_sql_file", { id });
+  await notifySavedSqlLibraryChanged();
 }
 
 export async function savedSqlStorageDir(): Promise<string> {
@@ -3588,6 +3604,10 @@ export async function openSavedSqlStorageDir(dir?: string | null): Promise<void>
 
 export async function revealPathInFileManager(path: string): Promise<void> {
   return invoke("reveal_path_in_file_manager", { path });
+}
+
+export async function openPathWithDefaultApp(path: string): Promise<void> {
+  return invoke("open_path_with_default_app", { path });
 }
 
 export async function deleteDatabaseBackupFiles(paths: string[], allowedRoots: string[] = []): Promise<number> {

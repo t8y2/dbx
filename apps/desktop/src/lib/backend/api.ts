@@ -204,6 +204,7 @@ export const deleteSavedSqlFile = forward("deleteSavedSqlFile");
 export const savedSqlStorageDir = forward("savedSqlStorageDir");
 export const openSavedSqlStorageDir = forward("openSavedSqlStorageDir");
 export const revealPathInFileManager = forward("revealPathInFileManager");
+export const openPathWithDefaultApp = forward("openPathWithDefaultApp");
 export const deleteDatabaseBackupFiles = forward("deleteDatabaseBackupFiles");
 export const databaseBackupCommand = forward("databaseBackupCommand");
 export const databaseBackupBackground = forward("databaseBackupBackground");

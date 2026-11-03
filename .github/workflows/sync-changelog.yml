@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -79,10 +79,19 @@ jobs:
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
         run: |
           set -euo pipefail
-          TAG="$(jq -r '.version' latest-notes.json)"
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          # The moving aliases serve whichever release is currently stable, which
+          # is not always the newest one: a rollback points them at an older
+          # release. Refresh that release's notes instead of re-pointing the
+          # aliases at the newest changelog entry. Manifests from before release
+          # channels carry no release_tag; their tag is the plain version.
+          TAG="$(aws s3 cp "s3://${R2_BUCKET_NAME}/releases/stable/latest.json" - --endpoint-url "$ENDPOINT" \
+            | jq -r '.release_tag // ("v" + .version)')"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]{8}\.[0-9]+)?$ ]] \
+            || { echo "::error::Stable alias does not name a release tag: ${TAG}"; exit 1; }
           mkdir -p updater-assets
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir updater-assets --clobber
-          NOTES="$(jq -r '.notes' latest-notes.json)"
+          NOTES="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body // ""')"
           jq --arg notes "$NOTES" '.notes = $notes' updater-assets/latest.json > updater-assets/latest.json.tmp
           mv updater-assets/latest.json.tmp updater-assets/latest.json
           gh release upload "$TAG" updater-assets/latest.json --repo "$GITHUB_REPOSITORY" --clobber
@@ -100,7 +109,6 @@ jobs:
             --assets-dir cnb-assets \
             --overwrite-existing
 
-          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
           # Start from the immutable channel manifest so changelog refreshes keep
           # the release metadata and platform assets produced by the release job.
           aws s3 cp "s3://${R2_BUCKET_NAME}/releases/${CHANNEL}/${TAG}/latest.json" r2-versioned.json \

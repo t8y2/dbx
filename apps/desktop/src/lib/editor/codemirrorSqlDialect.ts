@@ -3,6 +3,8 @@ import type { SQLDialect } from "@codemirror/lang-sql";
 import { SQL_REGION_DOLLAR_QUOTES, SQL_REGION_IDENTIFIER_POLICIES, SQL_REGION_IDENTIFIER_SPECS, SQL_REGION_COMMENT_POLICIES, SQL_REGION_COMMENT_SPECS, SQL_REGION_STRING_POLICIES, SQL_REGION_STRING_SPECS, type SqlRegionDialectSpec } from "./sqlRegionDialectPolicy";
 import type { DatabaseType } from "@/types/database";
 import { driverProfileSqlBuiltinTerms } from "@/lib/database/driverProfileExtensions";
+import { withSqlParameterHighlighting } from "./codemirrorSqlParameters";
+import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
 
 // In SQL, quoted identifiers (e.g. `col`, "col", [col]) represent column, table,
 // and schema names — not string literals (#12122). CodeMirror's SQL grammar tags
@@ -404,7 +406,7 @@ export function sqlRegionDialectSpec(dialect: SQLDialect, dialectName: CodeMirro
   };
 }
 
-export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName = "mysql", databaseType?: DatabaseType, driverProfile?: string): SQLDialect {
+export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName = "mysql", databaseType?: DatabaseType, driverProfile?: string, parameterOptions?: SqlParameterOptions): SQLDialect {
   // SOQL is its own language, not a SQL superset: define it from a precise keyword
   // set with no identifier quoting, single-quoted strings, and backslash escapes.
   if (databaseType === "salesforce" || dialectName === "soql") {
@@ -438,7 +440,7 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
   const policyDatabaseType = sqlPolicyDatabaseType(dialectName, databaseType);
   const commentSpec = sqlCommentDialectSpec(dialectName, policyDatabaseType);
   const identifierSpec = policyDatabaseType ? SQL_REGION_IDENTIFIER_SPECS[SQL_REGION_IDENTIFIER_POLICIES[policyDatabaseType]] : {};
-  return langSql.SQLDialect.define({
+  const dialect = langSql.SQLDialect.define({
     ...baseDialect.spec,
     // Use the same supported delimiters and line comments as region scanning.
     ...(identifierSpec.identifierQuotes !== undefined ? { identifierQuotes: identifierSpec.identifierQuotes } : {}),
@@ -472,4 +474,5 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
   }).configureLanguage({
     props: SQL_DIALECT_LANGUAGE_PROPS,
   });
+  return withSqlParameterHighlighting(dialect, parameterOptions);
 }

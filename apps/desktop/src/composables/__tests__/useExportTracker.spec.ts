@@ -384,6 +384,10 @@ describe("data transfer task duration", () => {
       expect(task.exportId).toBe("transfer-1");
       expect(task.status).toBe("Running");
       expect(api.startTransfer).toHaveBeenCalledTimes(1);
+      // Even if started with confirmed flag, persisted request resets it to false
+      expect(task.dataTransferRequest?.dropTargetConfirmed).toBe(false);
+      // Running task cannot be re-executed
+      expect(canReexecuteDataTransferTask(task)).toBe(false);
 
       // Finish first run with an error and failure logs
       tracker.updateDataTransferTask(task.exportId, {
@@ -402,67 +406,32 @@ describe("data transfer task duration", () => {
       expect(task.errorMessage).toBe("connection timeout");
       expect(canReexecuteDataTransferTask(task)).toBe(true);
 
-      // Now re-execute the finished task
-      now = 50_000;
-      const reexecuted = tracker.reexecuteDataTransferTask(task);
-      expect(reexecuted).toBe(task);
-      expect(reexecuted!.exportId).not.toBe("transfer-1");
-      const nextTransferId = reexecuted!.exportId;
-
-      // Verify task in tracker map has moved to the new id
-      expect(tracker.tasks.value.find((t) => t.exportId === "transfer-1")).toBeUndefined();
-      expect(tracker.tasks.value.find((t) => t.exportId === nextTransferId)).toBe(task);
-
-      // Verify task fields were reset
-      expect(task.status).toBe("Running");
-      expect(task.startedAt).toBe(50_000);
-      expect(task.finishedAt).toBeUndefined();
-      expect(task.rowsExported).toBe(0);
-      expect(task.tableIndex).toBe(0);
-      expect(task.errorMessage).toBeNull();
-      expect(task.transferFailures).toEqual([]);
-      expect(task.logLines).toEqual([]);
-
-      // Verify backend API called with the new transferId and cloned options
-      expect(api.startTransfer).toHaveBeenCalledTimes(2);
-      const secondCallArg = vi.mocked(api.startTransfer).mock.calls[1][0];
-      expect(secondCallArg.transferId).toBe(nextTransferId);
-      expect(secondCallArg.tables).toEqual(["users"]);
-
-      // Verify onOpen now invokes with the nextTransferId
+      // Verify onOpen invokes with task exportId
       task.onOpen?.();
-      expect(openedTaskIds).toEqual([nextTransferId]);
-
-      // Verify terminal success for the re-executed run
-      activeProgressHandler?.({
-        transferId: nextTransferId,
-        table: "users",
-        tableIndex: 1,
-        totalTables: 1,
-        rowsTransferred: 10,
-        totalRows: 10,
-        status: "done",
-        error: null,
-        terminal: true,
-      });
-
-      await Promise.resolve();
-      expect(task.status).toBe("Done");
-      expect(onDone).toHaveBeenCalledTimes(1);
+      expect(openedTaskIds).toEqual(["transfer-1"]);
     });
 
-    it("refuses to re-execute an already running transfer", () => {
+    it("gates re-execution on terminal status and unconfirmed request", () => {
       const tracker = useExportTracker();
       const request = transferRequest("active-transfer");
-      const task = tracker.startDataTransferTask(request, "users");
+      request.dropTargetConfirmed = true;
+      const dummyDeployment = {} as any;
+      const task = tracker.startDataTransferTask(request, "users", {
+        oracleRoutineDeployment: dummyDeployment,
+      });
 
       expect(task.status).toBe("Running");
-      expect(api.startTransfer).toHaveBeenCalledTimes(1);
+      expect(canReexecuteDataTransferTask(task)).toBe(false);
+      // Oracle routine deployment from executed run is not retained for re-execution
+      expect(task.dataTransferOptions?.oracleRoutineDeployment).toBeUndefined();
+      // Drop target confirmed is always reset to false in persisted request
+      expect(task.dataTransferRequest?.dropTargetConfirmed).toBe(false);
 
-      const result = tracker.reexecuteDataTransferTask(task);
-      expect(result).toBe(task);
-      expect(api.startTransfer).toHaveBeenCalledTimes(1);
-      expect(task.exportId).toBe("active-transfer");
+      task.status = "Cancelled";
+      expect(canReexecuteDataTransferTask(task)).toBe(true);
+
+      task.status = "Done";
+      expect(canReexecuteDataTransferTask(task)).toBe(true);
     });
   });
 

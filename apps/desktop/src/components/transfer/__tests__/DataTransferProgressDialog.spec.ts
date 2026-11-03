@@ -312,9 +312,10 @@ describe("DataTransferProgressDialog", () => {
       "sdb → tdb",
     );
 
+    const onReexecute = vi.fn();
     const container = document.createElement("div");
     document.body.append(container);
-    const app = createApp({ render: () => h(DataTransferProgressDialog, { open: true, task }) });
+    const app = createApp({ render: () => h(DataTransferProgressDialog, { open: true, task, onReexecute }) });
     mountedApps.push(app);
     app.use(i18n);
     app.mount(container);
@@ -346,8 +347,8 @@ describe("DataTransferProgressDialog", () => {
     reexecuteBtn!.click();
     await nextTick();
 
-    // Task status resets to Running and api.startTransfer is invoked again
-    expect(task.status).toBe("Running");
-    expect(mocks.startTransfer).toHaveBeenCalledTimes(2);
+    // Emits reexecute and routes via transfer confirmation flow without directly calling startTransfer
+    expect(onReexecute).toHaveBeenCalledWith(task);
+    expect(mocks.startTransfer).toHaveBeenCalledTimes(1);
   });
 });

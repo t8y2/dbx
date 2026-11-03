@@ -880,9 +880,10 @@ describe("ExportProgressPopover file name and reveal action", () => {
     });
   });
 
-  it("shows re-execute action for finished data-transfer task and triggers re-execution (#13621)", async () => {
+  it("does not offer direct re-execution bypass from the task list and routes via task details (#13621)", async () => {
     vi.mocked(api.startTransfer).mockResolvedValue(undefined);
     const tracker = useExportTracker();
+    const onOpen = vi.fn();
     const task = tracker.startDataTransferTask(
       {
         transferId: "popover-transfer",
@@ -902,6 +903,7 @@ describe("ExportProgressPopover file name and reveal action", () => {
         dropTargetConfirmed: false,
       },
       "sdb → tdb",
+      { openTask: onOpen },
     );
 
     // Complete the task
@@ -921,13 +923,12 @@ describe("ExportProgressPopover file name and reveal action", () => {
 
     const reexecuteTitle = i18n.global.t("transfer.reexecute");
     const reexecuteButton = document.body.querySelector<HTMLButtonElement>(`button[title="${reexecuteTitle}"]`);
-    expect(reexecuteButton).toBeDefined();
-    expect(reexecuteButton).not.toBeNull();
+    expect(reexecuteButton).toBeNull();
 
-    reexecuteButton!.click();
-    await nextTick();
-
-    expect(task.status).toBe("Running");
-    expect(api.startTransfer).toHaveBeenCalledTimes(2);
+    const openButton = document.body.querySelector<HTMLButtonElement>('button[title="Open task"]');
+    expect(openButton).not.toBeNull();
+    openButton!.click();
+    expect(onOpen).toHaveBeenCalledWith(task.exportId);
+    expect(api.startTransfer).toHaveBeenCalledTimes(1);
   });
 });

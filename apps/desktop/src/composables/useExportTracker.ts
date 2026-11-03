@@ -836,51 +836,17 @@ export function useExportTracker() {
   function startDataTransferTask(request: api.TransferRequest, label: string, options: DataTransferTaskOptions = {}): ExportTask {
     const existingTask = taskMap.get(request.transferId);
     const task = existingTask ?? addDataTransferTask(request.transferId, label, request.tables.length);
-    task.dataTransferRequest = JSON.parse(JSON.stringify(request));
+    task.dataTransferRequest = {
+      ...JSON.parse(JSON.stringify(request)),
+      dropTargetConfirmed: false,
+    };
     task.dataTransferLabel = label;
-    task.dataTransferOptions = options;
+    task.dataTransferOptions = {
+      ...options,
+      oracleRoutineDeployment: undefined,
+    };
     task.onOpen = () => (options.openTask ? options.openTask(task.exportId) : options.onOpen?.());
     task.startedAt ??= Date.now();
-    return executeTransferRun(task, request, options);
-  }
-
-  function reexecuteDataTransferTask(taskOrId: string | ExportTask): ExportTask | undefined {
-    const task = typeof taskOrId === "string" ? taskMap.get(taskOrId) : taskOrId;
-    if (!task || task.kind !== "data-transfer" || !task.dataTransferRequest) return undefined;
-    if (task.status === "Running" || task.status === "Writing" || task.status === "Cancelling" || task.status === "PreparingSnapshot") {
-      return task;
-    }
-
-    const oldId = task.exportId;
-    const newTransferId = uuid();
-    taskMap.delete(oldId);
-    transferFailureStates.delete(oldId);
-    taskCancelHandlers.delete(oldId);
-
-    task.exportId = newTransferId;
-    taskMap.set(newTransferId, task);
-
-    task.status = "Running";
-    task.startedAt = Date.now();
-    task.finishedAt = undefined;
-    task.rowsExported = 0;
-    task.totalRows = null;
-    task.tableIndex = 0;
-    task.currentTable = "";
-    task.errorMessage = null;
-    task.transferFailures = [];
-    task.transferFailuresOmitted = 0;
-    task.logLines = [];
-
-    const options = task.dataTransferOptions ?? {};
-    task.onOpen = () => (options.openTask ? options.openTask(newTransferId) : options.onOpen?.());
-
-    const request: api.TransferRequest = {
-      ...JSON.parse(JSON.stringify(task.dataTransferRequest)),
-      transferId: newTransferId,
-    };
-    task.dataTransferRequest = request;
-
     return executeTransferRun(task, request, options);
   }
 
@@ -1160,7 +1126,6 @@ export function useExportTracker() {
     addMultiDbExecutionTask,
     updateMultiDbExecutionTask,
     startDataTransferTask,
-    reexecuteDataTransferTask,
     canReexecuteDataTransferTask,
     updateTableExportTask,
     updateDatabaseExportTask,

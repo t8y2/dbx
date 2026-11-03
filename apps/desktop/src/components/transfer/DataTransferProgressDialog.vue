@@ -5,7 +5,7 @@ import { AlertCircle, ArrowRightLeft, CheckCircle2, ChevronDown, ChevronRight, L
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { formatDataTransferDuration, useExportTracker, canReexecuteDataTransferTask, type ExportTask } from "@/composables/useExportTracker";
-import { openDataTransferTask } from "@/composables/useDialogSources";
+import { openDataTransferTask, reexecuteDataTransferTask } from "@/composables/useDialogSources";
 import { translateBackendError } from "@/i18n/backend-errors";
 import SchemaDiffDeployStep from "@/components/diff/SchemaDiffDeployStep.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
@@ -33,15 +33,16 @@ const showPackageReview = ref(true);
 const packageDraftSql = computed(() => packageDeployment.value?.drafts.find((draft) => draft.objectId === packageDeployment.value?.selectedObjectId)?.sql ?? "");
 const packageConfirmOpen = ref(false);
 const packageConfirmSql = ref("");
+const emit = defineEmits<{
+  (e: "reexecute", task: ExportTask): void;
+}>();
 let resolvePackageConfirmation: ((confirmed: boolean) => void) | undefined;
-const { cancelTask, reexecuteDataTransferTask } = useExportTracker();
+const { cancelTask } = useExportTracker();
 const canReexecute = computed(() => canReexecuteDataTransferTask(props.task));
 
 function handleReexecute() {
-  const newTask = reexecuteDataTransferTask(props.task);
-  if (newTask) {
-    openDataTransferTask(newTask.exportId);
-  }
+  emit("reexecute", props.task);
+  reexecuteDataTransferTask(props.task);
 }
 const currentTime = ref(Date.now());
 let elapsedTimer: ReturnType<typeof setInterval> | undefined;

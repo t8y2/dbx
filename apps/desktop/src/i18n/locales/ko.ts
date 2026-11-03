@@ -9353,7 +9353,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "사이드바 가로 스크롤 허용",
     sidebarAllowHorizontalScrollDescription: "사이드바 가로 스크롤을 허용하여 긴 테이블, 뷰, 컬렉션 이름을 전체로 표시합니다.",
     sidebarShowConnectionEndpoints: "연결 이름 뒤에 서버와 계정 표시",
-    sidebarShowConnectionEndpointsDescription: "사이드바의 연결 이름 뒤에 서버:포트@계정을 표시하여 연결을 구별하기 쉽게 합니다.",
+    sidebarShowConnectionEndpointsDescription: "사이드바의 연결 이름 뒤에 서버:포트{'@'}계정을 표시하여 연결을 구별하기 쉽게 합니다.",
     sidebarHoverEnabled: "가장자리 호버 시 사이드바 자동 펼치기",
     sidebarHoverEnabledDescription: "왼쪽 가장자리에 마우스를 올리면 접힌 사이드바가 잠시 표시됩니다. 끄면 펼치기 버튼이나 단축키를 사용하세요.",
     sidebarHoverDelay: "사이드바 가장자리 호버 지연(ms)",

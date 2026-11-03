@@ -9229,7 +9229,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "Permitir rolagem horizontal da barra lateral",
     sidebarAllowHorizontalScrollDescription: "Mostrar nomes longos de tabelas, views e coleções por completo, permitindo a rolagem horizontal da barra lateral.",
     sidebarShowConnectionEndpoints: "Mostrar servidor e conta após o nome da conexão",
-    sidebarShowConnectionEndpointsDescription: "Acrescenta servidor:porta@conta após cada nome de conexão na barra lateral para diferenciá-las.",
+    sidebarShowConnectionEndpointsDescription: "Acrescenta servidor:porta{'@'}conta após cada nome de conexão na barra lateral para diferenciá-las.",
     sidebarHoverEnabled: "Expandir a barra lateral ao passar pela borda",
     sidebarHoverEnabledDescription: "Passe o mouse na borda esquerda para abrir temporariamente a barra lateral recolhida. Quando desativado, use o botão de expansão ou o atalho de teclado.",
     sidebarHoverDelay: "Atraso ao passar pela borda (ms)",

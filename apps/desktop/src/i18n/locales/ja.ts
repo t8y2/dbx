@@ -9230,7 +9230,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "サイドバーの横スクロールを許可",
     sidebarAllowHorizontalScrollDescription: "サイドバーの横スクロールを許可して、長いテーブル、ビュー、コレクション名を完全に表示します。",
     sidebarShowConnectionEndpoints: "接続名の後にサーバーとアカウントを表示",
-    sidebarShowConnectionEndpointsDescription: "サイドバーの接続名の後に サーバー:ポート@アカウント を表示し、接続を区別しやすくします。",
+    sidebarShowConnectionEndpointsDescription: "サイドバーの接続名の後に サーバー:ポート{'@'}アカウント を表示し、接続を区別しやすくします。",
     sidebarHoverEnabled: "画面端のホバーでサイドバーを自動展開",
     sidebarHoverEnabledDescription: "左端にマウスを合わせると、折りたたんだサイドバーを一時的に表示します。無効時は展開ボタンまたはショートカットを使用できます。",
     sidebarHoverDelay: "サイドバーのホバー待機時間（ミリ秒）",

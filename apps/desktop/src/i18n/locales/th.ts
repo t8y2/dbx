@@ -11190,7 +11190,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "อนุญาตให้ Sidebar เลื่อนแนวนอน",
     sidebarAllowHorizontalScrollDescription: "แสดงชื่อตาราง View และ Collection แบบเต็ม โดยอนุญาตให้ Sidebar เลื่อนแนวนอน",
     sidebarShowConnectionEndpoints: "แสดงเซิร์ฟเวอร์และบัญชีหลังชื่อการเชื่อมต่อ",
-    sidebarShowConnectionEndpointsDescription: "แสดง เซิร์ฟเวอร์:พอร์ต@บัญชี ต่อท้ายชื่อการเชื่อมต่อใน Sidebar เพื่อแยกแยะการเชื่อมต่อ",
+    sidebarShowConnectionEndpointsDescription: "แสดง เซิร์ฟเวอร์:พอร์ต{'@'}บัญชี ต่อท้ายชื่อการเชื่อมต่อใน Sidebar เพื่อแยกแยะการเชื่อมต่อ",
     sidebarHoverEnabled: "ขยายแถบด้านข้างเมื่อวางเมาส์ที่ขอบ",
     sidebarHoverEnabledDescription: "วางเมาส์ที่ขอบซ้ายเพื่อเปิดแถบด้านข้างที่ยุบไว้ชั่วคราว เมื่อปิดใช้งาน ให้ใช้ปุ่มขยายหรือแป้นพิมพ์ลัด",
     sidebarHoverDelay: "เวลาหน่วงเมื่อวางเมาส์ที่ขอบ (มิลลิวินาที)",

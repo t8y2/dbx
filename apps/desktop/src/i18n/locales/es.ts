@@ -9453,7 +9453,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "Permitir desplazamiento horizontal lateral",
     sidebarAllowHorizontalScrollDescription: "Muestra completos los nombres largos de tablas, vistas y colecciones permitiendo desplazamiento horizontal en la barra lateral.",
     sidebarShowConnectionEndpoints: "Mostrar servidor y cuenta tras el nombre de la conexión",
-    sidebarShowConnectionEndpointsDescription: "Añade servidor:puerto@cuenta tras cada nombre de conexión en la barra lateral para distinguir las conexiones.",
+    sidebarShowConnectionEndpointsDescription: "Añade servidor:puerto{'@'}cuenta tras cada nombre de conexión en la barra lateral para distinguir las conexiones.",
     sidebarHoverEnabled: "Expandir la barra lateral al pasar por el borde",
     sidebarHoverEnabledDescription: "Pasa el cursor por el borde izquierdo para abrir temporalmente la barra lateral contraída. Si se desactiva, usa el botón de expansión o el atajo de teclado.",
     sidebarHoverDelay: "Retardo al pasar por el borde (ms)",

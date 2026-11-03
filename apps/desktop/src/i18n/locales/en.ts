@@ -10670,7 +10670,7 @@ export default {
     sidebarAllowHorizontalScroll: "Allow sidebar horizontal scroll",
     sidebarAllowHorizontalScrollDescription: "Show long table, view, and collection names in full by allowing horizontal sidebar scrolling.",
     sidebarShowConnectionEndpoints: "Show server and account after connection names",
-    sidebarShowConnectionEndpointsDescription: "Append server:port@account after each connection name in the sidebar to tell connections apart.",
+    sidebarShowConnectionEndpointsDescription: "Append server:port{'@'}account after each connection name in the sidebar to tell connections apart.",
     sidebarHoverEnabled: "Auto-expand sidebar on edge hover",
     sidebarHoverEnabledDescription: "Hover at the left edge to temporarily open the collapsed sidebar. When disabled, use the expand button or keyboard shortcut.",
     sidebarHoverDelay: "Sidebar edge hover delay (ms)",

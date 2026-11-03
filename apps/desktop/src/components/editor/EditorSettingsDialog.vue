@@ -3931,8 +3931,8 @@ const settingsSearchEntries = computed(() =>
     settingsSearchCategoryLabels.value,
   ),
 );
-const settingsSearchResults = computed(() => searchSettings(settingsSearchEntries.value, settingsSearchQuery.value, currentLocale(), Infinity));
 const settingsSearchActive = computed(() => Boolean(settingsSearchQuery.value.trim()));
+const settingsSearchResults = computed(() => (settingsSearchActive.value ? searchSettings(settingsSearchEntries.value, settingsSearchQuery.value, currentLocale(), Infinity) : []));
 const settingsSearchVisible = computed(() => settingsSearchOpen.value && settingsSearchActive.value);
 const settingsSearchResultGroups = computed(() => {
   const groups = new Map<SettingsCategory, { categoryLabel: string; results: (typeof settingsSearchResults.value)[number][] }>();
@@ -4097,12 +4097,13 @@ async function selectSettingsSearchResult(result: SettingsSearchEntry) {
 }
 
 function onSettingsSearchKeydown(event: KeyboardEvent) {
-  const results = settingsSearchResults.value;
   if (event.key === "Escape") {
     event.preventDefault();
     exitSettingsSearch();
     return;
   }
+  if (!settingsSearchActive.value || !["ArrowDown", "ArrowUp", "Enter"].includes(event.key)) return;
+  const results = settingsSearchResults.value;
   if (!results.length) return;
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     event.preventDefault();

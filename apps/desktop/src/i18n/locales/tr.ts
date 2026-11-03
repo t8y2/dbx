@@ -7997,7 +7997,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "Kenar çubuğunda yatay kaydırmaya izin ver",
     sidebarAllowHorizontalScrollDescription: "Yatay kenar çubuğu kaydırmasına izin vererek uzun tablo, görünüm ve koleksiyon adlarını tam göster.",
     sidebarShowConnectionEndpoints: "Bağlantı adından sonra sunucu ve hesabı göster",
-    sidebarShowConnectionEndpointsDescription: "Bağlantıları ayırt etmek için kenar çubuğundaki her bağlantı adından sonra sunucu:port@hesap gösterir.",
+    sidebarShowConnectionEndpointsDescription: "Bağlantıları ayırt etmek için kenar çubuğundaki her bağlantı adından sonra sunucu:port{'@'}hesap gösterir.",
     sidebarHoverEnabled: "Kenara gelindiğinde yan çubuğu otomatik genişlet",
     sidebarHoverEnabledDescription: "Daraltılmış yan çubuğu geçici olarak açmak için fareyi sol kenarda tutun. Devre dışıyken genişletme düğmesini veya klavye kısayolunu kullanın.",
     sidebarHoverDelay: "Yan çubuk kenarında bekleme süresi (ms)",

@@ -36,6 +36,11 @@ if (manifest.version !== baseVersion && manifest.version !== tagVersion && !prom
     `Manifest version ${manifest.version} does not match tag version ${tagVersion}, base version ${baseVersion}, or the promoted beta build of ${baseVersion}.`,
   );
 }
+// The promoted binary keeps its beta build version, which the stable manifest
+// no longer exposes. Record it so an installed beta build can recognise that
+// it is the build that was promoted.
+if (promotesBetaBuild) manifest.promoted_from = manifest.version;
+else delete manifest.promoted_from;
 manifest.version = channel === "beta" ? tagVersion : baseVersion;
 manifest.channel = channel;
 manifest.release_tag = tag;

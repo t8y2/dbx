@@ -15,6 +15,7 @@ import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
 import { canDownloadAndInstallUpdate, isNewerRemoteVersion, resolveReleaseTagUrl } from "@/composables/useAppUpdater";
 import type { ComponentUpdateCategory } from "@/composables/useComponentUpdates";
 import { currentLocale } from "@/i18n";
+import { displayAppVersion } from "@/lib/app/promotedBuild";
 import { changelogLangFromLocale, createLatestRequestGuard, fetchChangelogIndex, type ChangelogReleaseSummary } from "@/lib/app/changelog";
 import DriverInstallProgressCircle from "@/components/config/DriverInstallProgressCircle.vue";
 import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
@@ -396,13 +397,13 @@ watch(
               <p v-if="updateInfo?.update_available">
                 {{
                   t("updates.availableMessage", {
-                    current: updateInfo.current_version,
+                    current: displayAppVersion(updateInfo.current_version),
                     latest: updateInfo.latest_version,
                   })
                 }}
               </p>
               <p v-else-if="!checkingUpdates && !updateDownloaded && !updateReady" class="text-muted-foreground">
-                {{ updateCheckMessage || t("updates.upToDate", { version: updateInfo?.current_version || "" }) }}
+                {{ updateCheckMessage || t("updates.upToDate", { version: displayAppVersion(updateInfo?.current_version || "") }) }}
               </p>
               <div
                 v-if="updateInfo?.update_available && updateInfo.release_notes"

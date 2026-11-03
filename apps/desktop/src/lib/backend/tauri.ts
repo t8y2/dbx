@@ -3663,6 +3663,7 @@ export interface UpdateInfo {
   channel?: "stable" | "beta";
   release_tag?: string;
   is_promoted?: boolean;
+  promoted_from?: string;
 }
 
 export type UpdateDownloadSource = "official" | "cnb";

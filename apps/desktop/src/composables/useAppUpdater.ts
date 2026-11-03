@@ -8,6 +8,7 @@ import type { UpdateDownloadProgress } from "@/lib/backend/tauri";
 import { currentLocale } from "@/i18n";
 import { shouldBlockAppUpdate } from "@/lib/app/appUpdateTaskGuard";
 import { isUpdatePreparationError, UpdatePreparationError } from "@/lib/app/updatePreparation";
+import { displayAppVersion, recordPromotedBuild } from "@/lib/app/promotedBuild";
 import { uuid } from "@/lib/common/utils";
 import { isUpdatePreviewMockEnabled, previewAppUpdateInfo } from "@/lib/updates/updatePreviewMock";
 
@@ -294,11 +295,12 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       const info = await api.checkForUpdates(currentLocale(), normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), updateChannel.value);
       if (token !== generation || disposed) return;
       updateInfo.value = info;
+      recordPromotedBuild(info);
       // Installation may have started while the check was in flight; only restore
       // the phase this check itself owns.
       if (phase.value === "checking") phase.value = downloaded.value ? "ready" : "idle";
       if (!info.update_available) {
-        updateCheckMessage.value = t("updates.upToDate", { version: info.current_version });
+        updateCheckMessage.value = t("updates.upToDate", { version: displayAppVersion(info.current_version) });
         // The remote no longer offers a newer release, but a package from an
         // earlier download can still sit in the cache. Drop it once the running
         // build already satisfies it, otherwise the update badge never clears

@@ -4505,14 +4505,10 @@ const agentInstallProgressLabel = computed(() => {
 });
 const canCloseAgentInstallDialog = computed(() => !agentInstallRunning.value || !!agentInstallError.value);
 const sqlServerDriverMode = computed<"auto" | "legacy">(() => (sqlServerUsesLegacyCompatibility(form.value) ? "legacy" : "auto"));
-const shouldUseWideConnectionDialog = computed(
-  () => dialogStep.value === "config" && (canChooseVisibleDatabases.value || canChooseVisibleNacosNamespaces.value || (canChooseVisibleSchemas.value && !visibleFilterUsesSchemas.value) || (selectedPluginProvider.value?.contribution.fields.length ?? 0) >= 6),
-);
 const connectionDialogContentClass = computed(() => {
   if (dialogStep.value === "select") return "connection-dialog-content--picker sm:h-[720px] sm:max-w-[880px]";
-  const widthClass = shouldUseWideConnectionDialog.value ? "connection-dialog-content--wide sm:max-w-[660px]" : "connection-dialog-content--standard sm:max-w-[560px]";
   const scrollableAdvancedNacos = form.value.db_type === "nacos" && configTab.value === "advanced";
-  return `${widthClass} connection-dialog-content--config${scrollableAdvancedNacos ? " connection-dialog-content--scrollable" : ""}`;
+  return `connection-dialog-content--config max-w-[660px]${scrollableAdvancedNacos ? " connection-dialog-content--scrollable" : ""}`;
 });
 const connectionLabelClass = "justify-self-start text-left";
 const connectionLabelSmallClass = `${connectionLabelClass} text-xs`;
@@ -7573,16 +7569,7 @@ function openExternalUrl(url: string) {
 
 <template>
   <Dialog :open="open && !parameterEditorOpen" @update:open="open = $event">
-    <DialogContent
-      :style="dialogContentStyle"
-      class="connection-dialog-content"
-      :class="connectionDialogContentClass"
-      :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined"
-      @interact-outside.prevent
-      @escape-key-down="handleDialogEscape"
-      @keydown="preventDialogDocumentSelectAll"
-      @copy="copyDialogPasswordFieldValue"
-    >
+    <DialogContent :style="dialogContentStyle" class="connection-dialog-content" :class="connectionDialogContentClass" @interact-outside.prevent @escape-key-down="handleDialogEscape" @keydown="preventDialogDocumentSelectAll" @copy="copyDialogPasswordFieldValue">
       <DialogHeader class="cursor-move select-none" @pointerdown="onDialogHeaderPointerDown" @pointermove="onDialogHeaderPointerMove" @pointerup="onDialogHeaderPointerEnd" @pointercancel="onDialogHeaderPointerEnd">
         <DialogTitle>{{ editingId ? t("connection.editTitle") : t("connection.title") }}</DialogTitle>
       </DialogHeader>
@@ -7713,8 +7700,8 @@ function openExternalUrl(url: string) {
       <template v-else>
         <div class="connection-config-step flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
           <Tabs v-model="configTab" class="flex min-h-0 flex-1 flex-col">
-            <div class="flex items-center justify-between border-b pb-2">
-              <TabsList>
+            <div class="flex min-w-0 shrink-0 items-center justify-between overflow-x-auto border-b pb-2">
+              <TabsList class="shrink-0">
                 <TabsTrigger value="connection">{{ t("connection.basicTab") }}</TabsTrigger>
                 <TabsTrigger v-if="supportsTlsToggle" value="tls">{{ t("connection.tlsTab") }}</TabsTrigger>
                 <TabsTrigger v-if="canUseTransportLayers" value="transport">{{ t("connection.sshTunnel") }}</TabsTrigger>
@@ -8512,7 +8499,7 @@ function openExternalUrl(url: string) {
                         <div class="text-sm font-medium">{{ t("nacos.nacosConnectionPlan") }}</div>
                         <p class="mt-0.5 text-xs leading-5 text-muted-foreground">{{ t("nacos.nacosConnectionPlanDescription") }}</p>
                       </div>
-                      <div class="grid grid-cols-3 gap-2 p-3">
+                      <div class="grid grid-cols-3 gap-2 p-4">
                         <button
                           v-for="profile in NACOS_CONNECTION_PROFILES"
                           :key="profile.value"
@@ -8564,22 +8551,22 @@ function openExternalUrl(url: string) {
                         <div class="text-sm font-medium">{{ t("nacos.nacosAuth") }}</div>
                         <p class="mt-0.5 text-xs text-muted-foreground">{{ t("nacos.nacosAuthHint") }}</p>
                       </div>
-                      <div class="grid max-w-md gap-1.5">
+                      <div class="grid gap-1.5">
                         <div class="grid gap-1.5">
-                          <div class="flex h-9 items-center gap-1 rounded-md border bg-muted/20 p-0.5">
-                            <Button type="button" size="sm" class="h-8 flex-1" :variant="nacosAuthKind === 'none' ? 'default' : 'ghost'" @click="nacosAuthKind = 'none'">{{ t("connection.nacosAuthNone") }}</Button>
-                            <Button type="button" size="sm" class="h-8 flex-1" :variant="nacosAuthKind === 'usernamePassword' ? 'default' : 'ghost'" @click="nacosAuthKind = 'usernamePassword'">{{ t("nacos.nacosUsernamePassword") }}</Button>
+                          <div id="nacos-primary-auth" class="flex min-h-9 items-stretch gap-1 rounded-md border bg-muted/20 p-0.5">
+                            <Button type="button" size="sm" class="h-auto min-h-8 min-w-0 flex-1 whitespace-normal" :variant="nacosAuthKind === 'none' ? 'default' : 'ghost'" @click="nacosAuthKind = 'none'">{{ t("connection.nacosAuthNone") }}</Button>
+                            <Button type="button" size="sm" class="h-auto min-h-8 min-w-0 flex-1 whitespace-normal" :variant="nacosAuthKind === 'usernamePassword' ? 'default' : 'ghost'" @click="nacosAuthKind = 'usernamePassword'">{{ t("nacos.nacosUsernamePassword") }}</Button>
                           </div>
                         </div>
                       </div>
                       <div v-if="nacosAuthKind === 'usernamePassword'" class="mt-4 grid gap-4 sm:grid-cols-2">
                         <div class="grid gap-1.5">
-                          <Label>{{ t("connection.user") }}</Label>
-                          <Input v-model="nacosUsername" placeholder="nacos" />
+                          <Label for="nacos-primary-username">{{ t("connection.user") }}</Label>
+                          <Input id="nacos-primary-username" v-model="nacosUsername" placeholder="nacos" />
                         </div>
                         <div class="grid gap-1.5">
-                          <Label>{{ t("connection.password") }}</Label>
-                          <PasswordInput v-model="nacosPassword" />
+                          <Label for="nacos-primary-password">{{ t("connection.password") }}</Label>
+                          <PasswordInput id="nacos-primary-password" v-model="nacosPassword" />
                         </div>
                       </div>
                       <p v-if="isNacosV3AdminPlane && nacosAuthKind === 'usernamePassword'" class="mt-4 border-t pt-4 text-xs leading-5 text-muted-foreground">
@@ -10595,37 +10582,37 @@ function openExternalUrl(url: string) {
                   <div class="grid gap-5 p-4">
                     <div class="grid gap-1.5">
                       <div class="flex items-center justify-between gap-3">
-                        <Label>{{ t("connection.nacosContextPath") }}</Label>
+                        <Label for="nacos-context-path">{{ t("connection.nacosContextPath") }}</Label>
                         <Button v-if="nacosContextPath" type="button" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="nacosContextPath = ''">
                           {{ t("connection.nacosContextPathRestoreAuto") }}
                         </Button>
                       </div>
-                      <Input v-model="nacosContextPath" :placeholder="t('connection.nacosContextPathPlaceholder')" />
+                      <Input id="nacos-context-path" v-model="nacosContextPath" :placeholder="t('connection.nacosContextPathPlaceholder')" />
                       <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosContextPathHint") }}</p>
                     </div>
 
                     <div class="grid gap-1.5">
-                      <Label>{{ t("connection.nacosPageSize") }}</Label>
-                      <Input v-model.number="nacosPageSize" type="number" min="1" max="500" />
+                      <Label for="nacos-page-size">{{ t("connection.nacosPageSize") }}</Label>
+                      <Input id="nacos-page-size" v-model.number="nacosPageSize" type="number" min="1" max="500" />
                       <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosPageSizeHint") }}</p>
                     </div>
 
                     <div v-if="isNacosV3AdminPlane" class="grid gap-1.5 border-t pt-4">
                       <div>
-                        <Label>{{ t("connection.nacosWebConsoleUrl") }}</Label>
+                        <Label for="nacos-web-console-url">{{ t("connection.nacosWebConsoleUrl") }}</Label>
                         <p class="mt-1 text-[11px] leading-4 text-muted-foreground">{{ t("connection.nacosWebConsoleUrlHint") }}</p>
                       </div>
-                      <Input v-model="nacosConsoleUrl" :placeholder="nacosWebConsoleUrlPlaceholder" />
+                      <Input id="nacos-web-console-url" v-model="nacosConsoleUrl" :placeholder="nacosWebConsoleUrlPlaceholder" />
                     </div>
 
                     <div class="grid gap-2 border-t pt-4">
                       <div class="grid gap-1.5 sm:grid-cols-[minmax(0,1fr)_180px] sm:items-center">
                         <div>
-                          <Label>{{ t("connection.nacosMetrics") }}</Label>
+                          <Label for="nacos-metrics-mode">{{ t("connection.nacosMetrics") }}</Label>
                           <p class="mt-1 text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosMetricsHint") }}</p>
                         </div>
                         <Select v-model="nacosMetricsMode">
-                          <SelectTrigger class="h-9">
+                          <SelectTrigger id="nacos-metrics-mode" class="h-9 w-full min-w-0">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
@@ -10636,36 +10623,36 @@ function openExternalUrl(url: string) {
                         </Select>
                       </div>
                       <div v-if="nacosMetricsMode === 'custom'" class="grid gap-1.5">
-                        <Label>{{ t("connection.nacosMetricsUrl") }}</Label>
-                        <Input v-model="nacosMetricsUrl" :aria-invalid="!!nacosMetricsUrlError" :class="{ 'border-destructive focus-visible:ring-destructive': nacosMetricsUrlError }" placeholder="http://127.0.0.1:8848/nacos/actuator/prometheus" />
+                        <Label for="nacos-metrics-url">{{ t("connection.nacosMetricsUrl") }}</Label>
+                        <Input id="nacos-metrics-url" v-model="nacosMetricsUrl" :aria-invalid="!!nacosMetricsUrlError" :class="{ 'border-destructive focus-visible:ring-destructive': nacosMetricsUrlError }" placeholder="http://127.0.0.1:8848/nacos/actuator/prometheus" />
                         <p v-if="nacosMetricsUrlError" class="text-xs text-destructive">{{ nacosMetricsUrlError }}</p>
                       </div>
                     </div>
 
                     <div v-if="nacosImplementation === 'rnacos'" class="grid gap-4 border-t pt-4">
-                      <div class="flex items-start justify-between gap-4">
-                        <div>
+                      <div class="flex items-center justify-between gap-4">
+                        <div class="min-w-0 flex-1">
                           <Label>{{ t("nacos.nacosRnacosExtension") }}</Label>
                           <p class="mt-1 text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosRnacosExtensionHint") }}</p>
                         </div>
                         <label class="inline-flex shrink-0 items-center gap-2">
-                          <Switch v-model="nacosHistoryEnabled" />
-                          <span class="text-sm text-muted-foreground">{{ t("nacos.nacosEnabled") }}</span>
+                          <span class="text-sm text-muted-foreground">{{ t("nacos.configHistory") }}</span>
+                          <Switch id="nacos-history-enabled" v-model="nacosHistoryEnabled" :aria-label="t('nacos.configHistory')" />
                         </label>
                       </div>
                       <div class="grid gap-1.5">
-                        <Label>{{ t("connection.nacosRNacosConsoleUrl") }}</Label>
-                        <Input v-model="nacosRNacosConsoleAddr" :placeholder="t('connection.nacosRNacosConsoleUrlPlaceholder')" />
+                        <Label for="nacos-rnacos-console-url">{{ t("connection.nacosRNacosConsoleUrl") }}</Label>
+                        <Input id="nacos-rnacos-console-url" v-model="nacosRNacosConsoleAddr" :placeholder="t('connection.nacosRNacosConsoleUrlPlaceholder')" />
                         <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosRnacosConsoleUrlHint") }}</p>
                       </div>
                       <template v-if="nacosRNacosConsoleAddr.trim()">
                         <div class="grid gap-1.5">
                           <Label>{{ t("connection.nacosConsoleAuthentication") }}</Label>
-                          <div class="flex items-center gap-1 rounded-md border bg-muted/20 p-0.5">
-                            <Button type="button" size="sm" class="h-8 flex-1" :variant="nacosConsoleAuthKind === 'inherit' ? 'default' : 'ghost'" :disabled="nacosAuthKind === 'none'" @click="nacosConsoleAuthKind = 'inherit'">
+                          <div id="nacos-console-auth" class="flex items-center gap-1 rounded-md border bg-muted/20 p-0.5">
+                            <Button type="button" size="sm" class="h-auto min-h-8 min-w-0 flex-1 whitespace-normal" :variant="nacosConsoleAuthKind === 'inherit' ? 'default' : 'ghost'" :disabled="nacosAuthKind === 'none'" @click="nacosConsoleAuthKind = 'inherit'">
                               {{ t("connection.nacosConsoleAuthInherit") }}
                             </Button>
-                            <Button type="button" size="sm" class="h-8 flex-1" :variant="nacosConsoleAuthKind === 'usernamePassword' ? 'default' : 'ghost'" @click="nacosConsoleAuthKind = 'usernamePassword'">
+                            <Button type="button" size="sm" class="h-auto min-h-8 min-w-0 flex-1 whitespace-normal" :variant="nacosConsoleAuthKind === 'usernamePassword' ? 'default' : 'ghost'" @click="nacosConsoleAuthKind = 'usernamePassword'">
                               {{ t("connection.nacosConsoleAuthSeparate") }}
                             </Button>
                           </div>
@@ -10673,35 +10660,35 @@ function openExternalUrl(url: string) {
                         </div>
                         <div v-if="nacosConsoleAuthKind === 'usernamePassword'" class="grid gap-4 sm:grid-cols-2">
                           <div class="grid gap-1.5">
-                            <Label>{{ t("connection.nacosConsoleUser") }}</Label>
-                            <Input v-model="nacosConsoleUsername" />
+                            <Label for="nacos-console-username">{{ t("connection.nacosConsoleUser") }}</Label>
+                            <Input id="nacos-console-username" v-model="nacosConsoleUsername" />
                           </div>
                           <div class="grid gap-1.5">
-                            <Label>{{ t("connection.nacosConsolePassword") }}</Label>
-                            <PasswordInput v-model="nacosConsolePassword" />
+                            <Label for="nacos-console-password">{{ t("connection.nacosConsolePassword") }}</Label>
+                            <PasswordInput id="nacos-console-password" v-model="nacosConsolePassword" />
                           </div>
                         </div>
                       </template>
                     </div>
 
-                    <label class="flex items-start justify-between gap-4 border-t pt-4">
-                      <div>
+                    <label class="flex items-center justify-between gap-4 border-t pt-4">
+                      <div class="min-w-0 flex-1">
                         <div class="text-sm font-medium">{{ t("connection.nacosTls") }}</div>
                         <p class="mt-1 text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosTlsHint") }}</p>
                       </div>
                       <span class="inline-flex shrink-0 items-center gap-2">
-                        <input v-model="nacosTlsSkipVerify" type="checkbox" class="mr-0" />
                         <span class="text-sm text-muted-foreground">{{ t("connection.nacosTlsSkipVerify") }}</span>
+                        <input id="nacos-tls-skip-verify" v-model="nacosTlsSkipVerify" type="checkbox" class="mr-0" :aria-label="t('connection.nacosTlsSkipVerify')" />
                       </span>
                     </label>
                   </div>
                 </section>
 
-                <div v-if="showGaussdbConnectionMode" class="grid grid-cols-4 items-start gap-4">
-                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbConnectionMode") }}</Label>
-                  <div class="col-span-3 grid gap-1">
+                <div v-if="showGaussdbConnectionMode" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
+                  <Label for="gaussdb-mode" :class="connectionLabelSmallClass">{{ t("connection.gaussdbConnectionMode") }}</Label>
+                  <div class="col-span-3">
                     <Select v-model="gaussdbDriverMode">
-                      <SelectTrigger class="h-9">
+                      <SelectTrigger id="gaussdb-mode" class="h-auto min-h-9 w-full min-w-0 whitespace-normal *:data-[slot=select-value]:block *:data-[slot=select-value]:line-clamp-none *:data-[slot=select-value]:min-w-0 *:data-[slot=select-value]:text-left">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -10710,10 +10697,10 @@ function openExternalUrl(url: string) {
                         <SelectItem value="dws">{{ t("connection.gaussdbConnectionModeDws") }}</SelectItem>
                       </SelectContent>
                     </Select>
-                    <p class="text-xs leading-5 text-muted-foreground">
-                      {{ isGaussdbMJdbcConnection ? t("connection.gaussdbConnectionModeMJdbcHint") : isGaussdbDwsConnection ? t("connection.gaussdbConnectionModeDwsHint") : t("connection.gaussdbConnectionModeNativeHint") }}
-                    </p>
                   </div>
+                  <p class="col-span-3 col-start-2 text-xs leading-5 text-muted-foreground">
+                    {{ isGaussdbMJdbcConnection ? t("connection.gaussdbConnectionModeMJdbcHint") : isGaussdbDwsConnection ? t("connection.gaussdbConnectionModeDwsHint") : t("connection.gaussdbConnectionModeNativeHint") }}
+                  </p>
                 </div>
                 <div v-if="isGaussdbMJdbcConnection" class="grid grid-cols-4 items-start gap-4">
                   <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbMJdbcDriver") }}</Label>
@@ -10752,11 +10739,11 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
                 </div>
-                <div v-if="showGaussdbIdentifierQuoteStyle" class="grid grid-cols-4 items-start gap-4">
-                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbIdentifierQuoteStyle") }}</Label>
-                  <div class="col-span-3 grid gap-1">
+                <div v-if="showGaussdbIdentifierQuoteStyle" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
+                  <Label for="gaussdb-quote-style" :class="connectionLabelSmallClass">{{ t("connection.gaussdbIdentifierQuoteStyle") }}</Label>
+                  <div class="col-span-3">
                     <Select v-model="gaussdbQuoteStyle">
-                      <SelectTrigger class="h-9">
+                      <SelectTrigger id="gaussdb-quote-style" class="h-9 w-full min-w-0">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -10765,14 +10752,14 @@ function openExternalUrl(url: string) {
                         <SelectItem value="backtick">{{ t("connection.gaussdbIdentifierQuoteBacktick") }}</SelectItem>
                       </SelectContent>
                     </Select>
-                    <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.gaussdbIdentifierQuoteHint") }}</p>
                   </div>
+                  <p class="col-span-3 col-start-2 text-xs leading-5 text-muted-foreground">{{ t("connection.gaussdbIdentifierQuoteHint") }}</p>
                 </div>
-                <div v-if="isGaussdbMJdbcConnection" class="grid grid-cols-4 items-start gap-4">
-                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbTargetServerType") }}</Label>
-                  <div class="col-span-3 grid gap-1">
+                <div v-if="isGaussdbMJdbcConnection" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
+                  <Label for="gaussdb-target-server-type" :class="connectionLabelSmallClass">{{ t("connection.gaussdbTargetServerType") }}</Label>
+                  <div class="col-span-3">
                     <Select v-model="gaussdbTargetServerTypeComputed">
-                      <SelectTrigger class="h-9">
+                      <SelectTrigger id="gaussdb-target-server-type" class="h-9 w-full min-w-0">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -10781,16 +10768,16 @@ function openExternalUrl(url: string) {
                         <SelectItem value="any">{{ t("connection.gaussdbTargetServerTypeAny") }}</SelectItem>
                       </SelectContent>
                     </Select>
-                    <p class="text-xs leading-5 text-muted-foreground">
-                      {{ t("connection.gaussdbTargetServerTypeHint") }}
-                    </p>
                   </div>
+                  <p class="col-span-3 col-start-2 text-xs leading-5 text-muted-foreground">
+                    {{ t("connection.gaussdbTargetServerTypeHint") }}
+                  </p>
                 </div>
-                <div v-if="showGaussdbConnectionMode" class="grid grid-cols-4 items-start gap-4">
-                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbCountQueryDop") }}</Label>
-                  <div class="col-span-3 grid gap-1">
+                <div v-if="showGaussdbConnectionMode" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
+                  <Label for="gaussdb-query-dop" :class="connectionLabelSmallClass">{{ t("connection.gaussdbCountQueryDop") }}</Label>
+                  <div class="col-span-3">
                     <Select v-model="gaussdbCountQueryDopComputed">
-                      <SelectTrigger class="h-9">
+                      <SelectTrigger id="gaussdb-query-dop" class="h-9 w-full min-w-0">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -10801,38 +10788,35 @@ function openExternalUrl(url: string) {
                         <SelectItem :value="16">16</SelectItem>
                       </SelectContent>
                     </Select>
-                    <p class="text-xs leading-5 text-muted-foreground">
-                      {{ t("connection.gaussdbCountQueryDopHint") }}
-                    </p>
                   </div>
+                  <p class="col-span-3 col-start-2 text-xs leading-5 text-muted-foreground">
+                    {{ t("connection.gaussdbCountQueryDopHint") }}
+                  </p>
                 </div>
                 <section class="connection-advanced-section grid content-start gap-4 rounded-lg border p-4">
                   <h3 class="text-base font-bold">{{ t("connection.advancedConnectionBehavior") }}</h3>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.connectTimeout") }}</Label>
                     <div class="connection-timeout-options col-span-3 grid gap-2">
-                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5" :class="form.connect_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
-                        <input id="connect-timeout-global" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
-                        <div class="flex min-w-0 flex-1 items-center gap-1">
-                          <label for="connect-timeout-global" class="min-w-0 cursor-pointer whitespace-normal break-words text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
-                          <HelpTooltip :label="t('connection.globalConnectTimeoutHint')" content-class="max-w-[280px]">
-                            {{ t("connection.globalConnectTimeoutHint") }}
-                          </HelpTooltip>
+                      <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5" :class="form.connect_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                        <div class="flex min-w-0 flex-auto items-center gap-2">
+                          <input id="connect-timeout-global" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
+                          <div class="flex min-w-0 flex-1 items-center gap-1">
+                            <label for="connect-timeout-global" class="min-w-0 cursor-pointer whitespace-normal break-words text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
+                            <HelpTooltip :label="t('connection.globalConnectTimeoutHint')" content-class="max-w-[280px]">
+                              {{ t("connection.globalConnectTimeoutHint") }}
+                            </HelpTooltip>
+                          </div>
                         </div>
-                        <Input v-model.number="editGlobalConnectTimeoutSecs" type="number" min="1" :max="MAX_CONNECT_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full" :disabled="form.connect_timeout_inherit !== true" @input="clampConnectTimeoutInput($event, 'global')" />
+                        <Input v-model.number="editGlobalConnectTimeoutSecs" type="number" min="1" :max="MAX_CONNECT_TIMEOUT_SECS" step="1" class="h-7 min-w-20 flex-[1_0_5rem]" :disabled="form.connect_timeout_inherit !== true" @input="clampConnectTimeoutInput($event, 'global')" />
                       </div>
-                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5" :class="form.connect_timeout_inherit !== true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
-                        <input id="connect-timeout-connection" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="false" class="h-3.5 w-3.5 shrink-0 accent-primary" />
-                        <label for="connect-timeout-connection" class="min-w-0 flex-1 cursor-pointer whitespace-normal break-words text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
-                        <Input v-model.number="form.connect_timeout_secs" type="number" min="1" :max="MAX_CONNECT_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full" :disabled="form.connect_timeout_inherit === true" @input="clampConnectTimeoutInput($event, 'connection')" />
+                      <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5" :class="form.connect_timeout_inherit !== true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                        <div class="flex min-w-0 flex-auto items-center gap-2">
+                          <input id="connect-timeout-connection" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="false" class="h-3.5 w-3.5 shrink-0 accent-primary" />
+                          <label for="connect-timeout-connection" class="min-w-0 flex-1 cursor-pointer whitespace-normal break-words text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
+                        </div>
+                        <Input v-model.number="form.connect_timeout_secs" type="number" min="1" :max="MAX_CONNECT_TIMEOUT_SECS" step="1" class="h-7 min-w-20 flex-[1_0_5rem]" :disabled="form.connect_timeout_inherit === true" @input="clampConnectTimeoutInput($event, 'connection')" />
                       </div>
-                    </div>
-                  </div>
-                  <div v-if="form.db_type === 'etcd'" class="grid grid-cols-4 items-start gap-4">
-                    <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.etcdGrpcMaxInbound") }}</Label>
-                    <div class="col-span-3 space-y-1">
-                      <Input v-model.number="etcdGrpcMaxInboundMessageSizeMiB" type="number" :min="ETCD_GRPC_MAX_INBOUND_MIN_MIB" :max="ETCD_GRPC_MAX_INBOUND_MAX_MIB" step="1" />
-                      <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.etcdGrpcMaxInboundHint") }}</p>
                     </div>
                   </div>
                   <!-- query_timeout_secs only feeds the database query pipeline
@@ -10842,59 +10826,62 @@ function openExternalUrl(url: string) {
                   <div v-if="!isPluginConnection" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.queryTimeout") }}</Label>
                     <div class="connection-timeout-options col-span-3 grid gap-2">
-                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5" :class="form.query_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
-                        <input id="query-timeout-global" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
-                        <div class="flex min-w-0 flex-1 items-center gap-1">
-                          <label for="query-timeout-global" class="min-w-0 cursor-pointer whitespace-normal break-words text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
-                          <HelpTooltip :label="t('connection.globalQueryTimeoutHint')" content-class="max-w-[280px]">
-                            {{ t("connection.globalQueryTimeoutHint") }}
-                          </HelpTooltip>
+                      <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5" :class="form.query_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                        <div class="flex min-w-0 flex-auto items-center gap-2">
+                          <input id="query-timeout-global" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
+                          <div class="flex min-w-0 flex-1 items-center gap-1">
+                            <label for="query-timeout-global" class="min-w-0 cursor-pointer whitespace-normal break-words text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
+                            <HelpTooltip :label="t('connection.globalQueryTimeoutHint')" content-class="max-w-[280px]">
+                              {{ t("connection.globalQueryTimeoutHint") }}
+                            </HelpTooltip>
+                          </div>
                         </div>
-                        <Input v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full" :disabled="form.query_timeout_inherit !== true" @input="clampQueryTimeoutInput($event, 'global')" />
+                        <Input v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="h-7 min-w-20 flex-[1_0_5rem]" :disabled="form.query_timeout_inherit !== true" @input="clampQueryTimeoutInput($event, 'global')" />
                       </div>
-                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5" :class="form.query_timeout_inherit !== true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
-                        <input id="query-timeout-connection" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="false" class="h-3.5 w-3.5 shrink-0 accent-primary" />
-                        <label for="query-timeout-connection" class="min-w-0 flex-1 cursor-pointer whitespace-normal break-words text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
-                        <Input v-model.number="form.query_timeout_secs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full" :disabled="form.query_timeout_inherit === true" @input="clampQueryTimeoutInput($event, 'connection')" />
+                      <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5" :class="form.query_timeout_inherit !== true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                        <div class="flex min-w-0 flex-auto items-center gap-2">
+                          <input id="query-timeout-connection" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="false" class="h-3.5 w-3.5 shrink-0 accent-primary" />
+                          <label for="query-timeout-connection" class="min-w-0 flex-1 cursor-pointer whitespace-normal break-words text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
+                        </div>
+                        <Input v-model.number="form.query_timeout_secs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="h-7 min-w-20 flex-[1_0_5rem]" :disabled="form.query_timeout_inherit === true" @input="clampQueryTimeoutInput($event, 'connection')" />
                       </div>
                     </div>
                   </div>
-                  <div v-show="supportsIdleTimeoutSetting" class="grid grid-cols-4 items-start gap-4">
-                    <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.idleTimeout") }}</Label>
-                    <div class="col-span-3 space-y-1">
-                      <Input v-model.number="form.idle_timeout_secs" type="number" min="0" :max="MAX_IDLE_TIMEOUT_SECS" step="1" @input="clampIdleTimeoutInput($event)" />
-                      <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.idleTimeoutHint") }}</p>
-                    </div>
+                  <div v-show="supportsIdleTimeoutSetting" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
+                    <Label for="connection-idle-timeout" :class="connectionLabelSmallClass">{{ t("connection.idleTimeout") }}</Label>
+                    <Input id="connection-idle-timeout" v-model.number="form.idle_timeout_secs" type="number" min="0" :max="MAX_IDLE_TIMEOUT_SECS" step="1" class="col-span-3" @input="clampIdleTimeoutInput($event)" />
+                    <p class="col-span-3 col-start-2 text-xs leading-5 text-muted-foreground">{{ t("connection.idleTimeoutHint") }}</p>
                   </div>
-                  <div v-show="supportsManualTransactionTimeoutSetting" class="grid grid-cols-4 items-start gap-4">
-                    <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.manualTransactionTimeout") }}</Label>
-                    <div class="col-span-3 space-y-1">
-                      <Input v-model.number="form.manual_transaction_timeout_secs" type="number" :min="MIN_MANUAL_TRANSACTION_TIMEOUT_SECS" :max="MAX_MANUAL_TRANSACTION_TIMEOUT_SECS" step="1" />
-                      <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.manualTransactionTimeoutHint", { min: MIN_MANUAL_TRANSACTION_TIMEOUT_SECS, max: MAX_MANUAL_TRANSACTION_TIMEOUT_SECS }) }}</p>
-                    </div>
+                  <div v-show="supportsManualTransactionTimeoutSetting" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
+                    <Label for="connection-manual-transaction-timeout" :class="connectionLabelSmallClass">{{ t("connection.manualTransactionTimeout") }}</Label>
+                    <Input id="connection-manual-transaction-timeout" v-model.number="form.manual_transaction_timeout_secs" type="number" :min="MIN_MANUAL_TRANSACTION_TIMEOUT_SECS" :max="MAX_MANUAL_TRANSACTION_TIMEOUT_SECS" step="1" class="col-span-3" />
+                    <p class="col-span-3 col-start-2 text-xs leading-5 text-muted-foreground">{{ t("connection.manualTransactionTimeoutHint", { min: MIN_MANUAL_TRANSACTION_TIMEOUT_SECS, max: MAX_MANUAL_TRANSACTION_TIMEOUT_SECS }) }}</p>
                   </div>
                   <!-- 空闲自动断开由后端在连接池层面实现，所有方言均适用，故不做方言门控：
                      即使上面的「空闲超时」被 v-show 隐藏，这里也要展示。 -->
-                  <div class="grid grid-cols-4 items-start gap-4">
-                    <Label :class="connectionLabelSmallPaddedClass">
+                  <div class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
+                    <Label for="connection-idle-disconnect" :class="connectionLabelSmallClass">
                       <span class="inline-flex items-center gap-1">{{ t("connection.idleDisconnect") }} <HelpTooltip :label="t('connection.idleDisconnectHint')" content-class="max-w-[280px]" /></span>
                     </Label>
-                    <div class="col-span-3 space-y-1">
-                      <div class="flex items-center gap-2">
-                        <Switch v-model="idleDisconnectEnabled" />
-                        <Input v-model.number="form.idle_disconnect_secs" type="number" min="1" :max="MAX_IDLE_DISCONNECT_SECS" step="1" class="flex-1" :disabled="!idleDisconnectEnabled" @input="clampIdleDisconnectInput($event)" />
-                      </div>
-                      <p v-if="idleDisconnectKeepaliveWarning" class="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-xs leading-5 text-amber-700 dark:text-amber-400">
-                        {{ t("connection.idleDisconnectKeepaliveWarning") }}
-                      </p>
+                    <div class="col-span-3 flex items-center gap-2">
+                      <Switch v-model="idleDisconnectEnabled" :aria-label="t('connection.idleDisconnect')" />
+                      <Input id="connection-idle-disconnect" v-model.number="form.idle_disconnect_secs" type="number" min="1" :max="MAX_IDLE_DISCONNECT_SECS" step="1" class="flex-1" :disabled="!idleDisconnectEnabled" @input="clampIdleDisconnectInput($event)" />
                     </div>
+                    <p v-if="idleDisconnectKeepaliveWarning" class="col-span-3 col-start-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-xs leading-5 text-amber-700 dark:text-amber-400">
+                      {{ t("connection.idleDisconnectKeepaliveWarning") }}
+                    </p>
                   </div>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label :class="connectionLabelSmallClass">{{ t("connection.keepaliveInterval") }}</Label>
+                    <Label for="connection-keepalive-interval" :class="connectionLabelSmallClass">{{ t("connection.keepaliveInterval") }}</Label>
                     <div class="col-span-3 flex items-center gap-2">
-                      <Switch v-model="keepaliveEnabled" />
-                      <Input v-model.number="form.keepalive_interval_secs" type="number" min="1" max="3600" step="1" class="flex-1" :disabled="!keepaliveEnabled" />
+                      <Switch v-model="keepaliveEnabled" :aria-label="t('connection.keepaliveInterval')" />
+                      <Input id="connection-keepalive-interval" v-model.number="form.keepalive_interval_secs" type="number" min="1" max="3600" step="1" class="flex-1" :disabled="!keepaliveEnabled" />
                     </div>
+                  </div>
+                  <div v-if="form.db_type === 'etcd'" class="grid grid-cols-4 items-center gap-x-4 gap-y-1 border-t pt-4">
+                    <Label for="connection-etcd-grpc-max-inbound" :class="connectionLabelSmallClass">{{ t("connection.etcdGrpcMaxInbound") }}</Label>
+                    <Input id="connection-etcd-grpc-max-inbound" v-model.number="etcdGrpcMaxInboundMessageSizeMiB" type="number" :min="ETCD_GRPC_MAX_INBOUND_MIN_MIB" :max="ETCD_GRPC_MAX_INBOUND_MAX_MIB" step="1" class="col-span-3" />
+                    <p class="col-span-3 col-start-2 text-xs leading-5 text-muted-foreground">{{ t("connection.etcdGrpcMaxInboundHint") }}</p>
                   </div>
                 </section>
                 <section class="connection-advanced-section grid content-start gap-4 rounded-lg border p-4">
@@ -11009,20 +10996,20 @@ function openExternalUrl(url: string) {
                   </div>
                   <!-- Documentation notes are a relational-only feature, so this
                      follows the same isSchemaAware gate as the row above. -->
-                  <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-start gap-4">
-                    <Label :class="connectionLabelTopClass">{{ t("connection.docsNotesPath") }}</Label>
-                    <div class="col-span-3 space-y-1">
-                      <Input v-model="form.docs_notes_path" :placeholder="t('connection.docsNotesPathPlaceholder')" spellcheck="false" />
-                      <p class="text-xs text-muted-foreground">
-                        {{ t("connection.docsNotesPathHint") }}
-                      </p>
+                  <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
+                    <Label for="connection-notes-file" :class="connectionLabelSmallClass">{{ t("connection.docsNotesPath") }}</Label>
+                    <div class="col-span-3">
+                      <Input id="connection-notes-file" v-model="form.docs_notes_path" :placeholder="t('connection.docsNotesPathPlaceholder')" spellcheck="false" />
                     </div>
+                    <p class="col-span-3 col-start-2 text-xs text-muted-foreground">
+                      {{ t("connection.docsNotesPathHint") }}
+                    </p>
                   </div>
-                  <div v-if="form.db_type === 'redis'" class="grid grid-cols-4 items-center gap-4">
-                    <Label :class="connectionLabelSmallClass">{{ t("settings.redisScanPageSize") }}</Label>
-                    <div class="col-span-3 flex flex-col gap-1">
+                  <div v-if="form.db_type === 'redis'" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
+                    <Label for="redis-scan-count" :class="connectionLabelSmallClass">{{ t("settings.redisScanPageSize") }}</Label>
+                    <div class="col-span-3">
                       <Select :model-value="String(form.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT)" @update:model-value="form.redis_scan_page_size = Number($event)">
-                        <SelectTrigger>
+                        <SelectTrigger id="redis-scan-count" class="w-full min-w-0">
                           <SelectValue :placeholder="t('settings.redisScanPageSize')" />
                         </SelectTrigger>
                         <SelectContent>
@@ -11031,18 +11018,18 @@ function openExternalUrl(url: string) {
                           </SelectItem>
                         </SelectContent>
                       </Select>
-                      <p class="text-xs text-muted-foreground">{{ t("settings.redisScanPageSizeDescription") }}</p>
                     </div>
+                    <p class="col-span-3 col-start-2 text-xs text-muted-foreground">{{ t("settings.redisScanPageSizeDescription") }}</p>
                   </div>
-                  <div v-if="form.db_type === 'redis'" class="grid grid-cols-4 items-start gap-4">
-                    <Label for="redis-value-preview-limit-input" :class="connectionLabelTopClass">{{ t("settings.redisValuePreviewLimit") }}</Label>
-                    <div class="col-span-3 space-y-1">
+                  <div v-if="form.db_type === 'redis'" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
+                    <Label for="redis-value-preview-limit-input" :class="connectionLabelSmallClass">{{ t("settings.redisValuePreviewLimit") }}</Label>
+                    <div class="col-span-3">
                       <div class="flex items-center gap-2">
                         <Input id="redis-value-preview-limit-input" v-model.number="editRedisValuePreviewLimitKiB" type="number" :min="REDIS_VALUE_PREVIEW_LIMIT_KIB_MIN" :max="REDIS_VALUE_PREVIEW_LIMIT_KIB_MAX" step="1" class="h-8 w-32 text-xs" />
                         <span class="text-sm text-muted-foreground">KiB</span>
                       </div>
-                      <p class="text-xs text-muted-foreground">{{ t("settings.redisValuePreviewLimitDescription") }}</p>
                     </div>
+                    <p class="col-span-3 col-start-2 text-xs text-muted-foreground">{{ t("settings.redisValuePreviewLimitDescription") }}</p>
                   </div>
                 </section>
               </div>
@@ -11911,7 +11898,7 @@ html.dbx-legacy-webview.dark .connection-transport-layer-option--selected:hover 
   font-weight: 400;
 }
 
-.connection-dialog-content[data-wide="true"] .grid.grid-cols-4 {
+.connection-dialog-content--config .grid.grid-cols-4 {
   grid-template-columns: minmax(5.5rem, 0.7fr) repeat(3, minmax(0, 1fr));
 }
 
@@ -11927,10 +11914,5 @@ html.dbx-legacy-webview.dark .connection-transport-layer-option--selected:hover 
 
 .connection-advanced-section > .grid > [data-slot="label"] {
   text-wrap: balance;
-}
-
-.connection-dialog-content[data-wide="true"] .connection-form-body {
-  width: min(100%, 36rem);
-  margin-inline: auto;
 }
 </style>

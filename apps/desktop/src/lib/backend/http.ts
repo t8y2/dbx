@@ -3975,11 +3975,11 @@ export async function createQueryResultTempFile(_extension = "xlsx"): Promise<st
   throw new Error("Opening query results in an external application is only available in the desktop app");
 }
 
-export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string): Promise<void> {
+export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string, csvWithoutBom = false): Promise<void> {
   const { formatCsv } = await import("@/lib/export/exportFormats");
   const content = formatCsv(columns, rows as (string | number | boolean | null)[][], csvQuoteMode, nullLiteral);
   const fileName = filePath.split(/[\\/]/).pop() || "export.csv";
-  const blob = new Blob(["\uFEFF", content], {
+  const blob = new Blob([csvWithoutBom ? "" : "\uFEFF", content], {
     type: "text/csv;charset=utf-8",
   });
   const url = URL.createObjectURL(blob);

@@ -9827,6 +9827,7 @@ export default withEnglishFallback({
     autoOpenExportFolder: "Abrir carpeta automáticamente después de exportar",
     autoOpenExportFolderDescription: "Abre y muestra automáticamente la carpeta que contiene el archivo exportado en el administrador de archivos tras completarse la exportación.",
     exportSection: "Exportar",
+    csvWithoutBom: "CSV UTF-8 sin BOM",
     csvQuoteMode: "Comillas de campos CSV",
     csvQuoteModeDescription: "Elige cómo usar comillas dobles en los campos CSV.",
     csvQuoteModeAll: "Todos los campos",

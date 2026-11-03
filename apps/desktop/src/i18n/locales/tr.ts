@@ -8376,6 +8376,7 @@ export default withEnglishFallback({
     autoOpenExportFolder: "Dışa aktardıktan sonra klasörü otomatik aç",
     autoOpenExportFolderDescription: "Veri dışa aktarımı başarılı olduğunda dosya yöneticisinde dışa aktarılan dosyanın klasörünü otomatik olarak açar.",
     exportSection: "Dışa Aktar",
+    csvWithoutBom: "BOM olmadan CSV UTF-8",
     csvQuoteMode: "CSV alan tırnakları",
     csvQuoteModeDescription: "CSV alanlarının çift tırnağı nasıl kullanacağını seçin.",
     csvQuoteModeAll: "Tüm alanlar",

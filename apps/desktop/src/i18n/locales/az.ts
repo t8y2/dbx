@@ -8463,6 +8463,7 @@ export default withEnglishFallback({
     autoOpenExportFolder: "İxracdan sonra qovluğu avtomatik aç",
     autoOpenExportFolderDescription: "Məlumat ixracı uğurla başa çatdıqda fayl menecerində ixrac edilən faylın qovluğunu avtomatik açır.",
     exportSection: "İxrac",
+    csvWithoutBom: "BOM olmadan CSV UTF-8",
     csvQuoteMode: "CSV sahələrinin dırnaqları",
     csvQuoteModeDescription: "CSV sahələrində qoşa dırnaqların necə istifadə olunacağını seçin.",
     csvQuoteModeAll: "Bütün sahələr",

@@ -167,6 +167,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "damengClientBinDir",
   "autoOpenExportFolder",
   "applyColumnFormattersOnExport",
+  "csvWithoutBom",
   "csvQuoteMode",
   "csvNullMode",
   "queryResultExportFileNameSource",

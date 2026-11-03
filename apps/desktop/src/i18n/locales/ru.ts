@@ -11222,6 +11222,7 @@ export default withEnglishFallback({
     autoOpenExportFolder: "Автоматически открывать папку после экспорта",
     autoOpenExportFolderDescription: "Автоматически открывать папку с экспортированным файлом в файловом менеджере после завершения экспорта данных.",
     exportSection: "Экспорт",
+    csvWithoutBom: "CSV UTF-8 без BOM",
     csvQuoteMode: "Кавычки в полях CSV",
     csvQuoteModeDescription: "Выберите, как поля CSV используют двойные кавычки.",
     csvQuoteModeAll: "Все поля",

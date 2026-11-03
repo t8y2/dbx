@@ -10627,6 +10627,7 @@ export default withEnglishFallback({
     shortcutToggleFold: "접기/펼치기",
     shortcutFoldAll: "모두 접기",
     shortcutUnfoldAll: "모두 펼치기",
+    csvWithoutBom: "BOM 없는 UTF-8 CSV",
     csvQuoteMode: "CSV 필드 따옴표",
     csvQuoteModeDescription: "CSV 내보내기 시 필드에 큰따옴표를 사용하는 방식을 선택합니다.",
     csvQuoteModeAll: "모든 필드",

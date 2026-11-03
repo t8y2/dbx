@@ -11098,6 +11098,7 @@ export default {
     autoOpenExportFolder: "Auto-open folder after export",
     autoOpenExportFolderDescription: "Automatically reveal and open the containing folder in the file manager after data export succeeds.",
     exportSection: "Export",
+    csvWithoutBom: "CSV UTF-8 without BOM",
     csvQuoteMode: "CSV field quotes",
     csvQuoteModeDescription: "Choose how CSV fields use double quotes.",
     csvQuoteModeAll: "All fields",

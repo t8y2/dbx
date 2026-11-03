@@ -11060,6 +11060,7 @@ export default withEnglishFallback({
     autoOpenExportFolder: "导出后自动打开所在文件夹",
     autoOpenExportFolderDescription: "数据导出成功后，自动在系统文件管理器中打开并定位导出文件所在的文件夹。",
     exportSection: "导出",
+    csvWithoutBom: "CSV UTF-8 无 BOM",
     csvQuoteMode: "CSV 字段引号",
     csvQuoteModeDescription: "选择 CSV 导出时字段使用双引号的方式。",
     csvQuoteModeAll: "全部字段",

@@ -9586,6 +9586,7 @@ export default withEnglishFallback({
     autoOpenExportFolder: "Abrir pasta automaticamente após exportar",
     autoOpenExportFolderDescription: "Abre e revela automaticamente a pasta que contém o arquivo exportado no gerenciador de arquivos após a conclusão da exportação.",
     exportSection: "Exportar",
+    csvWithoutBom: "CSV UTF-8 sem BOM",
     csvQuoteMode: "Aspas dos campos CSV",
     csvQuoteModeDescription: "Escolha como usar aspas duplas nos campos CSV.",
     csvQuoteModeAll: "Todos os campos",

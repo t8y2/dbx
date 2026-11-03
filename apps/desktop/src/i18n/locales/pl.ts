@@ -9655,6 +9655,7 @@ export default withEnglishFallback({
     autoOpenExportFolder: "Automatycznie otwieraj folder po eksporcie",
     autoOpenExportFolderDescription: "Automatycznie pokazuj i otwieraj folder docelowy w menedżerze plików po udanym eksporcie danych.",
     exportSection: "Eksportuj",
+    csvWithoutBom: "CSV UTF-8 bez BOM",
     csvQuoteMode: "Cudzysłowy pól CSV",
     csvQuoteModeDescription: "Wybierz sposób stosowania podwójnych cudzysłowów w polach CSV.",
     csvQuoteModeAll: "Wszystkie pola",

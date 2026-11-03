@@ -9590,6 +9590,7 @@ export default withEnglishFallback({
     autoOpenExportFolder: "Apri cartella automaticamente dopo l'esportazione",
     autoOpenExportFolderDescription: "Apre e mostra automaticamente la cartella contenente il file esportato nel file manager dopo il completamento dell'esportazione.",
     exportSection: "Esportazione",
+    csvWithoutBom: "CSV UTF-8 senza BOM",
     csvQuoteMode: "Virgolette campi CSV",
     csvQuoteModeDescription: "Scegli come usare le virgolette doppie nei campi CSV.",
     csvQuoteModeAll: "Tutti i campi",

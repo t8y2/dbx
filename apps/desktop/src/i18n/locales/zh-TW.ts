@@ -9567,6 +9567,7 @@ export default withEnglishFallback({
     updateChannelStable: "穩定版（推薦）",
     updateChannelBeta: "Dev Beta",
     exportSection: "匯出",
+    csvWithoutBom: "CSV UTF-8 無 BOM",
     csvQuoteMode: "CSV 欄位引號",
     csvQuoteModeDescription: "選擇 CSV 匯出時欄位使用雙引號的方式。",
     csvQuoteModeAll: "全部欄位",

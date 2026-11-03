@@ -9271,6 +9271,7 @@ export default withEnglishFallback({
     autoOpenExportFolder: "Buka folder otomatis setelah ekspor",
     autoOpenExportFolderDescription: "Buka dan tampilkan folder yang berisi berkas hasil ekspor secara otomatis di pengelola berkas setelah ekspor data berhasil.",
     exportSection: "Ekspor",
+    csvWithoutBom: "CSV UTF-8 tanpa BOM",
     csvQuoteMode: "Tanda kutip bidang CSV",
     csvQuoteModeDescription: "Pilih bagaimana bidang CSV menggunakan tanda kutip ganda.",
     csvQuoteModeAll: "Semua bidang",

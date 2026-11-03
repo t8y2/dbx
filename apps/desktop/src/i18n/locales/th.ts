@@ -11591,6 +11591,7 @@ export default withEnglishFallback({
     autoOpenExportFolder: "เปิดโฟลเดอร์อัตโนมัติหลังส่งออก",
     autoOpenExportFolderDescription: "แสดงและเปิดโฟลเดอร์ที่เก็บไฟล์ในตัวจัดการไฟล์โดยอัตโนมัติหลังส่งออกข้อมูลสำเร็จ",
     exportSection: "ส่งออก",
+    csvWithoutBom: "CSV UTF-8 ไม่มี BOM",
     csvQuoteMode: "เครื่องหมายคำพูดฟิลด์ CSV",
     csvQuoteModeDescription: "เลือกวิธีใช้เครื่องหมายคำพูดคู่กับฟิลด์ CSV",
     csvQuoteModeAll: "ทุกฟิลด์",

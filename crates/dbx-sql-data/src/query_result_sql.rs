@@ -548,7 +548,6 @@ fn mysql_statement_references_session_variable(sql: &str) -> bool {
         "datadir",
         "lower_case_table_names",
     ];
-    let bytes = sql.as_bytes();
     let mut i = 0usize;
     while i < sql.len() {
         let ch = next_char(sql, i);

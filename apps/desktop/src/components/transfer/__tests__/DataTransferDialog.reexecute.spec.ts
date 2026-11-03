@@ -218,10 +218,6 @@ function findButton(predicate: (text: string) => boolean): HTMLButtonElement | u
   return [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) => predicate(b.textContent?.trim() || ""));
 }
 
-function findLastButton(predicate: (text: string) => boolean): HTMLButtonElement | undefined {
-  return [...document.body.querySelectorAll<HTMLButtonElement>("button")].reverse().find((b) => predicate(b.textContent?.trim() || ""));
-}
-
 describe("DataTransferDialog Re-execution (#13621 / P1 review)", () => {
   it("re-executes overwrite transfer: prefills parameters, regenerates plan, requires confirmation before start", async () => {
     const tracker = useExportTracker();

@@ -5,7 +5,7 @@ import { AlertCircle, ArrowRightLeft, CheckCircle2, ChevronDown, ChevronRight, L
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { formatDataTransferDuration, useExportTracker, canReexecuteDataTransferTask, type ExportTask } from "@/composables/useExportTracker";
-import { openDataTransferTask, reexecuteDataTransferTask } from "@/composables/useDialogSources";
+import { reexecuteDataTransferTask } from "@/composables/useDialogSources";
 import { translateBackendError } from "@/i18n/backend-errors";
 import SchemaDiffDeployStep from "@/components/diff/SchemaDiffDeployStep.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";

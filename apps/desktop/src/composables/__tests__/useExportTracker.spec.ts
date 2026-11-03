@@ -366,10 +366,7 @@ describe("data transfer task duration", () => {
     });
 
     it("resets state, assigns a new transferId, and starts transfer again", async () => {
-      let activeProgressHandler: ((progress: TransferProgress) => void) | undefined;
-      vi.mocked(api.startTransfer).mockImplementation(async (request, onProgress) => {
-        activeProgressHandler = onProgress;
-      });
+      vi.mocked(api.startTransfer).mockImplementation(async () => {});
 
       const tracker = useExportTracker();
       const openedTaskIds: string[] = [];

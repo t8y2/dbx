@@ -301,7 +301,7 @@ const TEMPORAL_COLUMN_TYPE_BASES = new Set(["date", "date_nanos", "date32", "dat
 const STRUCTURED_COLUMN_TYPE_BASES = new Set(["json", "jsonb", "jsonpath", "xml", "xmltype", "array", "map", "tuple", "struct", "row", "object", "nested", "flattened", "document", "variant"]);
 const IDENTIFIER_COLUMN_TYPE_BASES = new Set(["uuid", "uniqueidentifier", "rowid", "urowid"]);
 const BINARY_COLUMN_TYPE_BASES = new Set(["bytea", "blob", "tinyblob", "mediumblob", "longblob", "binary", "varbinary", "image", "raw", "long raw", "bfile"]);
-const SPATIAL_COLUMN_TYPE_BASES = new Set(["geometry", "geography", "sdo_geometry", "point", "linestring", "polygon", "multipoint", "multilinestring", "multipolygon", "geometrycollection"]);
+const SPATIAL_COLUMN_TYPE_BASES = new Set(["geometry", "geography", "sdo_geometry", "st_geometry", "point", "linestring", "polygon", "multipoint", "multilinestring", "multipolygon", "geometrycollection"]);
 const TYPE_VISUAL_TRANSPARENT_WRAPPERS = new Set(["nullable", "lowcardinality"]);
 
 function unwrapDataGridColumnType(dataType: string): { normalized: string; array: boolean } {
@@ -335,6 +335,10 @@ function dataGridColumnTypeBase(dataType: string): { base: string; array: boolea
   let base = unwrapped.normalized.replace(/\s+unsigned\b/g, "").trim();
   const parameterStart = base.indexOf("(");
   if (parameterStart >= 0) base = base.slice(0, parameterStart).trim();
+  // Vendor metadata may schema-qualify type names (for example YashanDB's
+  // `MDSYS.ST_GEOMETRY`); the semantic kind comes from the unqualified name.
+  const qualifier = base.lastIndexOf(".");
+  if (qualifier >= 0) base = base.slice(qualifier + 1);
   if (base.startsWith("timestamp with ")) base = "timestamptz";
   else if (base.startsWith("timestamp without ")) base = "timestamp";
   else if (base.startsWith("time with ")) base = "timetz";

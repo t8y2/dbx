@@ -272,3 +272,39 @@ describe("Mongo collection cell detail presentation", () => {
     expect(dataGridColumnDetailTsv(columnDetail!, undefined, mongoDocumentGridExternalValue)).toBe("");
   });
 });
+
+describe("geometry cell detail spatial metadata", () => {
+  it("carries the per-cell SRID into the cell and row/column detail builders", () => {
+    const detail = buildDataGridCellDetail({
+      rowIndex: 0,
+      rowId: 7,
+      row: ["POINT(1 2)"],
+      columns: ["shape"],
+      columnIndex: 0,
+      displayValue: (cell) => displayCellValue(cell),
+      isEditable: false,
+      srid: 3857,
+    });
+    expect(detail?.srid).toBe(3857);
+
+    const rowDetail = buildDataGridRowDetail({
+      rowIndex: 0,
+      rowId: 7,
+      row: ["POINT(1 2)"],
+      columns: ["shape"],
+      columnIndexes: [0],
+      displayValue: (cell) => displayCellValue(cell),
+      spatialSrid: (rowId, columnIndex) => (rowId === 7 && columnIndex === 0 ? 4326 : null),
+    });
+    expect(rowDetail.fields[0]?.srid).toBe(4326);
+
+    const columnDetail = buildDataGridColumnDetail({
+      rows: [{ rowIndex: 0, rowId: 7, row: ["POINT(1 2)"] }],
+      columns: ["shape"],
+      columnIndex: 0,
+      displayValue: (cell) => displayCellValue(cell),
+      spatialSrid: () => 4490,
+    });
+    expect(columnDetail?.fields[0]?.srid).toBe(4490);
+  });
+});

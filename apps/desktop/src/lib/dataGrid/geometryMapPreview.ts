@@ -98,18 +98,26 @@ export function geometryColumnIndices(columnTypes: readonly string[] | undefined
   const indices = new Set<number>();
   if (columnTypes && columnTypes.length > 0) {
     for (let i = 0; i < columnTypes.length; i++) {
-      const base = (columnTypes[i] ?? "")
-        .trim()
-        .toLowerCase()
-        .split(/[(:\s]/)[0];
-      if (base === "geometry" || base === "geography") indices.add(i);
+      if (isGeometryTypeName(columnTypes[i])) indices.add(i);
     }
-  } else if (spatialColumns) {
-    for (const entry of spatialColumns) {
-      if (typeof entry.column_index === "number" && entry.column_index >= 0) {
-        indices.add(entry.column_index);
-      }
+  }
+  // Drivers such as YashanDB report vendor type names but still send spatial
+  // metadata, so both sources contribute instead of one masking the other.
+  for (const entry of spatialColumns ?? []) {
+    if (typeof entry.column_index === "number" && entry.column_index >= 0) {
+      indices.add(entry.column_index);
     }
   }
   return [...indices].sort((a, b) => a - b);
+}
+
+/** Recognize `geometry`, `geography`, and YashanDB's `[MDSYS.]ST_GEOMETRY`. */
+function isGeometryTypeName(columnType: string | undefined): boolean {
+  const base = (columnType ?? "")
+    .trim()
+    .toLowerCase()
+    .split(/[(:\s]/)[0]
+    .split(".")
+    .pop();
+  return base === "geometry" || base === "geography" || base === "st_geometry";
 }

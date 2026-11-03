@@ -7640,6 +7640,16 @@ function gridDetailIsNullValue(value: CellValue): boolean {
   return value === null || (usesMongoDocumentGridValues.value && value === MONGO_DOCUMENT_GRID_NULL);
 }
 
+function gridDetailSrid(rowId: number, columnIndex: number): number | null {
+  const item = getRowItem(rowId);
+  const sourceIndex = item && "sourceIndex" in item ? item.sourceIndex : undefined;
+  if (sourceIndex !== undefined) {
+    const perCell = props.result.spatial_values?.[sourceIndex]?.[columnIndex];
+    if (perCell !== undefined && perCell !== null) return perCell;
+  }
+  return props.result.spatial_columns?.find((entry) => entry.column_index === columnIndex)?.srid ?? null;
+}
+
 function cellDetailFor(rowIndex: number, columnIndex: number): DataGridCellDetail | null {
   const item = displayItemAt(rowIndex);
   if (!item) return null;
@@ -7662,6 +7672,7 @@ function cellDetailFor(rowIndex: number, columnIndex: number): DataGridCellDetai
     databaseType: resolvedDatabaseType.value,
     isValuePreviewTruncated: isLargeValuePreview(item, columnIndex),
     pendingDecodePlaceholder: isPendingDecode(item, columnIndex) ? t("grid.largeValuePendingDecode") : undefined,
+    srid: gridDetailSrid(item.id, columnIndex),
   });
 }
 
@@ -7758,6 +7769,7 @@ const rowDetail = computed(() => {
       }),
     isValuePreviewTruncated: (columnIndex) => isLargeValuePreview(item, columnIndex),
     pendingDecodePlaceholder: (columnIndex) => (isPendingDecode(item, columnIndex) ? t("grid.largeValuePendingDecode") : undefined),
+    spatialSrid: gridDetailSrid,
   });
 });
 
@@ -7786,6 +7798,7 @@ const columnDetail = computed(() => {
     displayValue: (value, index) => formatCellCached(value, index),
     rawValue: gridDetailRawValue,
     isNullValue: gridDetailIsNullValue,
+    spatialSrid: gridDetailSrid,
   });
 });
 

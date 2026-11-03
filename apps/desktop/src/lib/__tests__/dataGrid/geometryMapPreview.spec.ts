@@ -52,6 +52,29 @@ describe("buildGeometryMapFeatureCollection", () => {
     });
   });
 
+  it("recognizes YashanDB MDSYS.ST_GEOMETRY columns from spatial metadata", () => {
+    const ctx = context();
+    ctx.result.columns = ["shape", "name"];
+    ctx.result.column_types = ["MDSYS.ST_GEOMETRY", "VARCHAR"];
+    ctx.result.spatial_columns = [{ column_index: 0, srid: 4490 }];
+    ctx.result.spatial_values = [[4490, null]];
+    ctx.result.rows = [["POINT Z(116.397 39.908 50)", "yashan"]];
+    ctx.displayRowRefs = [{ id: 1, sourceIndex: 0, isNew: false }];
+
+    expect(hasGeometryMapPreviewColumns(ctx.result)).toBe(true);
+    expect(buildGeometryMapFeatureCollection(ctx)).toEqual({
+      type: "FeatureCollection",
+      detectedSrid: 4490,
+      features: [
+        {
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [116.397, 39.908] },
+          properties: { _column: "shape", _row: 0, _srid: 4490, name: "yashan" },
+        },
+      ],
+    });
+  });
+
   it("checks preview availability from column metadata without parsing result rows", () => {
     const result = context().result;
     expect(hasGeometryMapPreviewColumns(result)).toBe(true);
@@ -64,6 +87,10 @@ describe("buildGeometryMapFeatureCollection", () => {
     expect(hasGeometryMapPreviewColumns(result)).toBe(true);
 
     result.column_types = ["text", "text"];
+    // Spatial metadata stays authoritative even when a vendor type name is
+    // not recognizable on its own.
+    expect(hasGeometryMapPreviewColumns(result)).toBe(true);
+    result.spatial_columns = undefined;
     expect(hasGeometryMapPreviewColumns(result)).toBe(false);
   });
 

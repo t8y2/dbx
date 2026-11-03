@@ -7007,6 +7007,27 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn agent_query_result_passes_through_spatial_metadata() {
+        // YashanDB reports the vendor type name but decodes ST_GEOMETRY cells
+        // to WKT in the agent; the desktop needs the spatial metadata intact
+        // to detect the map preview and per-cell SRIDs.
+        let json = serde_json::json!({
+            "columns": ["id", "geom"],
+            "column_types": ["INTEGER", "MDSYS.ST_GEOMETRY"],
+            "spatial_columns": [{"column_index": 1, "srid": 4326}],
+            "spatial_values": [[null, 4326]],
+            "rows": [[1, "POINT(116.397 39.908)"]],
+            "affected_rows": 0,
+            "execution_time_ms": 5
+        });
+        let result: crate::types::QueryResult = serde_json::from_value(json).expect("deserialize agent result");
+        assert_eq!(result.column_types, vec!["INTEGER".to_string(), "MDSYS.ST_GEOMETRY".to_string()]);
+        assert_eq!(result.spatial_columns, vec![crate::types::SpatialColumn { column_index: 1, srid: Some(4326) }]);
+        assert_eq!(result.spatial_values, vec![vec![None, Some(4326)]]);
+        assert_eq!(result.rows[0][1], serde_json::json!("POINT(116.397 39.908)"));
+    }
+
+    #[test]
     fn builds_mongo_agent_request_params() {
         assert_eq!(mongo_database_params("app"), serde_json::json!({ "database": "app" }));
         assert_eq!(

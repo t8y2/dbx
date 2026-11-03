@@ -5232,6 +5232,8 @@ export default withEnglishFallback({
     gridfs: "GridFS",
   },
   objects: {
+    loadCapacity: "載入 / 重新整理容量",
+    loadDetails: "載入詳情",
     packageSaveAsTitle: "套件另存為",
     packageSaveAsHint: "將 {name} 複製為新套件。原套件、呼叫端、收藏項目和已開啟的草稿都會保留。",
     packageSaveAsMetadataProblem: "套件中繼資料不完整或無法安全複製。請查看診斷並重新整理計畫。",

@@ -1983,6 +1983,7 @@ export async function listObjects(
     tableNameFilter,
     executionId,
     ...(readOptions?.identityMode ? { identityMode: readOptions.identityMode } : {}),
+    ...(readOptions?.lightweight !== undefined ? { lightweight: readOptions.lightweight } : {}),
     ...(options === true ? { exactIdentity: true } : {}),
   });
 }

@@ -1494,7 +1494,11 @@ pub fn agent_close_query_session_params(session_id: &str) -> serde_json::Value {
 
 pub fn is_connection_error(err: &str) -> bool {
     let lower = err.to_lowercase();
-    if is_dbx_query_timeout_error(&lower) || is_agent_rpc_timeout_error(&lower) || is_pool_saturation_error(err) {
+    if is_dbx_query_timeout_error(&lower)
+        || is_mysql_browser_metadata_timeout_error(&lower)
+        || is_agent_rpc_timeout_error(&lower)
+        || is_pool_saturation_error(err)
+    {
         return false;
     }
     lower.contains("connection")
@@ -1530,6 +1534,13 @@ pub fn is_connection_error(err: &str) -> bool {
 
 pub(crate) fn is_dbx_query_timeout_error(lower: &str) -> bool {
     lower.starts_with("query timed out after ")
+}
+
+fn is_mysql_browser_metadata_timeout_error(lower: &str) -> bool {
+    // The driver already cancels the statement and retires its connection.
+    // Reconnecting and replaying would restart the same exhausted budget,
+    // including when cancellation itself reported a connection error.
+    lower.starts_with("mysql browser metadata timed out after ")
 }
 
 fn is_agent_rpc_timeout_error(lower: &str) -> bool {
@@ -12455,6 +12466,20 @@ done
         assert!(!is_connection_error("ORA-00942: table or view does not exist"));
         assert!(!is_connection_error("syntax error at position 5"));
         assert!(!is_connection_error("os error 13"));
+    }
+
+    #[test]
+    fn mysql_browser_metadata_timeout_does_not_reconnect_or_discard_pool() {
+        for error in [
+            "MySQL browser metadata timed out after 5s; query cancelled",
+            "MySQL browser metadata timed out after 5s; cancellation failed: MySQL KILL QUERY timed out",
+            "MySQL browser metadata timed out after 5s; cancellation failed: connection reset by peer",
+        ] {
+            assert!(!is_connection_error(error), "{error}");
+            assert_eq!(pool_error_action(Some(DatabaseType::Mysql), error), PoolErrorAction::Keep);
+        }
+        assert!(is_connection_error("MySQL connection timed out (5s)"));
+        assert!(is_connection_error("connection reset by peer"));
     }
 
     #[test]

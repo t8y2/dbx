@@ -6863,6 +6863,8 @@ export default {
     anyPrivilegeDisabled: "ANY-type privileges are disabled by DM8 (ENABLE_DDL_ANY_PRIV=0) and cannot be granted or revoked",
   },
   objects: {
+    loadCapacity: "Load / refresh capacity",
+    loadDetails: "Load details",
     packageSaveAsTitle: "Save Package As",
     packageSaveAsHint: "Copy {name} to a new package. The original package, its callers, saved items, and open drafts remain unchanged.",
     packageSaveAsMetadataProblem: "Package metadata is incomplete or cannot be copied safely. Review diagnostics and refresh the plan.",

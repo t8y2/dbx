@@ -115,7 +115,7 @@ export function sqlRegionFoldRanges(state: EditorState): Map<number, FoldRange> 
             index++;
           }
         } else index++;
-      } else if (dialect.regionDashComments !== false && ch === "-" && next === "-" && (!dialect.spaceAfterDashes || index + 2 === line.length || /[\s\x00-\x20]/.test(line[index + 2]))) {
+      } else if (dialect.regionDashComments !== false && ch === "-" && next === "-" && (!dialect.spaceAfterDashes || index + 2 === line.length || /\s/.test(line[index + 2]) || line.charCodeAt(index + 2) <= 0x20)) {
         continuedLineComment = !!dialect.regionLineCommentContinuation && line.endsWith("\\");
         break;
       } else if ((ch === "#" && (dialect.hashComments || (dialect.regionClickHouseHashComments && (next === " " || next === "!")))) || (ch === "/" && next === "/" && dialect.slashComments)) {

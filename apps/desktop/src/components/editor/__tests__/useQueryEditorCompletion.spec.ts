@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { CompletionContext, insertCompletionText, snippetCompletion } from "@codemirror/autocomplete";
-import { EditorState } from "@codemirror/state";
+import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { computed, reactive, shallowRef } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -793,5 +793,37 @@ describe.each([false, true])("bare alias-dot column resolution (semantic=%s)", (
     store.listCompletionColumns.mockResolvedValue([{ name: "id", table: "users", schema: "myschema" }]);
     const result = await provide(false);
     expect(result?.options.some((option) => option.label === "id")).toBe(true);
+  });
+});
+
+describe("snippet completion with multiple cursors (issue #14096)", () => {
+  it("applies the snippet to every cursor, not just the main one", async () => {
+    const doc = "sfhd_dwd.dwd_t_ug_org\nsfhd_dwd.dwd_t_ug_user\nsfhd_dwd.dwd_t_cus_room";
+    const { provide, currentView, settings } = createHarness({ databaseType: "mysql", dialect: "mysql", modelValue: doc });
+    settings.editorSettings.snippets = [{ id: "custom-sf", label: "select * from $table", prefix: "sf", body: "select * from ${1:table_name};" }];
+    // Rebuild the editor state with multiple cursors enabled (one after each `sf`).
+    currentView.setState(
+      EditorState.create({
+        doc,
+        selection: EditorSelection.create([EditorSelection.cursor(2), EditorSelection.cursor(24), EditorSelection.cursor(47)]),
+        extensions: [EditorState.allowMultipleSelections.of(true)],
+      }),
+    );
+    const result = await provide(false);
+    const snippetOption = result?.options.find((option) => option.type === "snippet");
+    expect(snippetOption).toBeDefined();
+    (snippetOption!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, snippetOption, result!.from, 2);
+    expect(currentView.state.doc.toString()).toBe("select * from table_name;hd_dwd.dwd_t_ug_org\nselect * from table_name;hd_dwd.dwd_t_ug_user\nselect * from table_name;hd_dwd.dwd_t_cus_room");
+  });
+
+  it("keeps the single-cursor snippet path unchanged", async () => {
+    const { provide, currentView, settings } = createHarness({ databaseType: "mysql", dialect: "mysql", modelValue: "select * from users limit 10\n\nsf" });
+    settings.editorSettings.snippets = [{ id: "custom-sf", label: "select * from $table", prefix: "sf", body: "select * from ${1:table_name};" }];
+    const result = await provide(false);
+    const snippetOption = result?.options.find((option) => option.type === "snippet");
+    expect(snippetOption).toBeDefined();
+    const cursor = currentView.state.selection.main.head;
+    (snippetOption!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, snippetOption, result!.from, cursor);
+    expect(currentView.state.doc.toString()).toBe("select * from users limit 10\n\nselect * from table_name;");
   });
 });

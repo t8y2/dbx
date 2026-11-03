@@ -48,6 +48,7 @@ import {
 } from "@/lib/sql/sqlCompletionLookupTarget";
 import { appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
 import { completionReplacementTo, shouldResolveSqlColumnCompletion } from "@/lib/editor/batchColumnSelection";
+import { applySnippetAcrossRanges } from "@/lib/editor/queryEditorSnippetMultiCursor";
 import { completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentation";
 import { supportsDatabaseNameCompletion } from "@/lib/database/databaseFeatureSupport";
 import { sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -450,7 +451,11 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     };
     const batchColumnSelection = batchColumnSelectionMarkerForItem(item);
     if (shouldApplyCompletionAsSnippet(item) && item.apply) {
-      const completion = runtime.codeMirrorSnippetCompletion(item.apply, {
+      // Capture the narrowed template so the closure below (the completion
+      // `apply` handler) keeps a `string` type — `item.apply` is `string |
+      // undefined` and control-flow narrowing does not survive into a closure.
+      const apply = item.apply;
+      const completion = runtime.codeMirrorSnippetCompletion(apply, {
         ...labelPresentation,
         ...(sortText ? { sortText } : {}),
         type: item.type,
@@ -473,6 +478,13 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
             replaceClosingQuote: "replaceClosingQuote" in item ? item.replaceClosingQuote : undefined,
             replaceSelectWildcard: "replaceSelectWildcard" in item ? item.replaceSelectWildcard : undefined,
           });
+          // Multiple cursors (issue #14096): a single CodeMirror snippet apply
+          // only touches the main cursor, leaving the other lines' typed prefix
+          // (e.g. `sf`) behind. Apply the expanded snippet to every cursor.
+          if (view.state.selection.ranges.length > 1) {
+            applySnippetAcrossRanges(view, apply, from, replaceTo);
+            return;
+          }
           if (typeof originalApply === "function") {
             originalApply(view, completionItem as never, from, replaceTo);
           } else {

@@ -253,9 +253,7 @@ test("resolves local table search parent from active tree node id", () => {
         type: "database",
         connectionId: "conn",
         database: "db1",
-        children: [
-          { id: "conn:db1:tbl", label: "tbl", type: "table", connectionId: "conn", database: "db1" },
-        ],
+        children: [{ id: "conn:db1:tbl", label: "tbl", type: "table", connectionId: "conn", database: "db1" }],
       },
       {
         id: "conn:db2",
@@ -274,6 +272,23 @@ test("resolves local table search parent from active tree node id", () => {
           },
         ],
       },
+      {
+        id: "conn:db_routines",
+        label: "db_routines",
+        type: "database",
+        connectionId: "conn",
+        database: "db_routines",
+        children: [
+          {
+            id: "conn:db_routines:__procs",
+            label: "procedures",
+            type: "group-procedures",
+            connectionId: "conn",
+            database: "db_routines",
+            children: [{ id: "conn:db_routines:p1", label: "p1", type: "procedure", connectionId: "conn", database: "db_routines" }],
+          },
+        ],
+      },
     ],
   };
 
@@ -281,5 +296,8 @@ test("resolves local table search parent from active tree node id", () => {
   assert.equal(resolveLocalTableSearchParent([tree], "conn:db1", "simple")?.id, "conn:db1");
   assert.equal(resolveLocalTableSearchParent([tree], "conn:db2:orders", "grouped")?.id, "conn:db2:__tables");
   assert.equal(resolveLocalTableSearchParent([tree], "conn:db2", "grouped")?.id, "conn:db2:__tables");
+  assert.equal(resolveLocalTableSearchParent([tree], "conn:db_routines", "grouped"), null);
+  assert.equal(resolveLocalTableSearchParent([tree], "conn:db_routines:__procs", "grouped"), null);
+  assert.equal(resolveLocalTableSearchParent([tree], "conn:db_routines:p1", "grouped"), null);
   assert.equal(resolveLocalTableSearchParent([tree], "conn", "simple"), null);
 });

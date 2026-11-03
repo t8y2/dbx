@@ -98,6 +98,64 @@ describe("sidebarTableSearchControl", () => {
                 },
               ],
             },
+            {
+              id: "conn:pg:db:routines_only",
+              label: "routines_only",
+              type: "schema",
+              connectionId: "conn:pg",
+              database: "mydb",
+              schema: "routines_only",
+              children: [
+                {
+                  id: "conn:pg:db:routines_only:fn1",
+                  label: "fn1",
+                  type: "function",
+                  connectionId: "conn:pg",
+                  database: "mydb",
+                  schema: "routines_only",
+                },
+              ],
+            },
+          ],
+        },
+        {
+          id: "conn:pg:db_collapsed",
+          label: "db_collapsed",
+          type: "database",
+          connectionId: "conn:pg",
+          database: "db_collapsed",
+        },
+      ],
+    },
+    {
+      id: "conn:grouped_routines",
+      label: "Grouped Routines Connection",
+      type: "connection",
+      connectionId: "conn:grouped_routines",
+      children: [
+        {
+          id: "conn:grouped_routines:db",
+          label: "db_routines",
+          type: "database",
+          connectionId: "conn:grouped_routines",
+          database: "db_routines",
+          children: [
+            {
+              id: "conn:grouped_routines:db:__procedures",
+              label: "Procedures",
+              type: "group-procedures",
+              connectionId: "conn:grouped_routines",
+              database: "db_routines",
+              children: [
+                {
+                  id: "conn:grouped_routines:db:proc1",
+                  label: "proc1",
+                  type: "procedure",
+                  connectionId: "conn:grouped_routines",
+                  database: "db_routines",
+                },
+              ],
+            },
           ],
         },
       ],
@@ -154,6 +212,17 @@ describe("sidebarTableSearchControl", () => {
         expect(tableParent?.id).toBe("conn:pg:db:public");
         expect(tableParent?.type).toBe("schema");
       });
+
+      it("returns null for routine-only schema or routine item", () => {
+        expect(resolveLocalTableSearchParent(treeNodes, "conn:pg:db:routines_only", "simple")).toBeNull();
+        expect(resolveLocalTableSearchParent(treeNodes, "conn:pg:db:routines_only:fn1", "simple")).toBeNull();
+      });
+
+      it("resolves collapsed database node before its children are loaded", () => {
+        const parent = resolveLocalTableSearchParent(treeNodes, "conn:pg:db_collapsed", "simple");
+        expect(parent?.id).toBe("conn:pg:db_collapsed");
+        expect(parent?.type).toBe("database");
+      });
     });
 
     describe("grouped mode", () => {
@@ -173,6 +242,18 @@ describe("sidebarTableSearchControl", () => {
         const parent = resolveLocalTableSearchParent(treeNodes, "conn:1:db2", "grouped");
         expect(parent?.id).toBe("conn:1:db2:__tables");
         expect(parent?.type).toBe("group-tables");
+      });
+
+      it("returns null when database/schema in grouped mode has no group-tables", () => {
+        expect(resolveLocalTableSearchParent(treeNodes, "conn:grouped_routines:db", "grouped")).toBeNull();
+        expect(resolveLocalTableSearchParent(treeNodes, "conn:grouped_routines:db:__procedures", "grouped")).toBeNull();
+        expect(resolveLocalTableSearchParent(treeNodes, "conn:grouped_routines:db:proc1", "grouped")).toBeNull();
+      });
+
+      it("resolves collapsed database node before its children are loaded in grouped mode", () => {
+        const parent = resolveLocalTableSearchParent(treeNodes, "conn:pg:db_collapsed", "grouped");
+        expect(parent?.id).toBe("conn:pg:db_collapsed");
+        expect(parent?.type).toBe("database");
       });
     });
   });

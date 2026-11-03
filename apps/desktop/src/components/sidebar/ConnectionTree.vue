@@ -74,7 +74,7 @@ import { createFlatTreeIndex, flatTreeRowsChanged, getSidebarTreeRowHeight, SIDE
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntimeHostInstance } from "@/lib/sidebar/sidebarTreeRuntime";
 import { createSidebarPasteHandlerRegistry } from "@/lib/sidebar/sidebarPasteHandlerRegistry";
-import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode, resolveLocalTableSearchParent, sidebarSearchableObjectGroupTypes, tableSearchControlId } from "@/lib/sidebar/sidebarTableSearchControl";
+import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode, parentHasSearchableTableList, resolveLocalTableSearchParent, sidebarSearchableObjectGroupTypes, tableSearchControlId } from "@/lib/sidebar/sidebarTableSearchControl";
 import { createSidebarTableSearchDebouncer, scheduleExclusiveSidebarTableSearchDebounce } from "@/lib/sidebar/sidebarTableSearchIndex";
 import TreeItem from "./TreeItem.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
@@ -2630,6 +2630,31 @@ watch(
   { flush: "post" },
 );
 
+let latestLocalTableSearchFocusRequestId = 0;
+
+function focusGlobalSearch(): boolean {
+  const input = searchInputRef.value;
+  if (!input) return false;
+  input.focus();
+  input.select();
+  return true;
+}
+
+function findLocalTableSearchInput(parent: TreeNode): HTMLInputElement | null {
+  const root = rootRef.value;
+  if (!root) return null;
+  const directInput = root.querySelector<HTMLInputElement>(`[data-sidebar-table-search-parent-id="${CSS.escape(parent.id)}"]`);
+  if (directInput) return directInput;
+  if (parent.children) {
+    const tableGroup = parent.children.find((c) => c.type === "group-tables");
+    if (tableGroup) {
+      const groupInput = root.querySelector<HTMLInputElement>(`[data-sidebar-table-search-parent-id="${CSS.escape(tableGroup.id)}"]`);
+      if (groupInput) return groupInput;
+    }
+  }
+  return null;
+}
+
 function focusSearch(target: Element | null = null): boolean {
   const tableSearchControl = target?.closest<HTMLElement>("[data-sidebar-table-search-control]");
   if (tableSearchControl) {
@@ -2641,50 +2666,92 @@ function focusSearch(target: Element | null = null): boolean {
     }
   }
 
+  // Preserve user's setting: do not overwrite editorSettings.sidebarTableSearchEnabled on Ctrl+F
+  if (!settingsStore.editorSettings.sidebarTableSearchEnabled) {
+    return focusGlobalSearch();
+  }
+
   const targetNodeId = target?.closest<HTMLElement>("[data-node-id]")?.dataset.nodeId;
   const activeNodeId = targetNodeId || store.selectedTreeNodeId || findSidebarNodeForActiveTab(activeTab.value, flatNodes.value)?.id || null;
   const searchParent = resolveLocalTableSearchParent(store.treeNodes, activeNodeId, settingsStore.editorSettings.sidebarObjectDisplay);
 
-  if (searchParent) {
-    if (!settingsStore.editorSettings.sidebarTableSearchEnabled) {
-      settingsStore.updateEditorSettings({ sidebarTableSearchEnabled: true });
-    }
+  if (!searchParent) {
+    return focusGlobalSearch();
+  }
 
-    const parentId = searchParent.id;
-    const root = rootRef.value;
-    const existingInput = root?.querySelector<HTMLInputElement>(`[data-sidebar-table-search-parent-id="${CSS.escape(parentId)}"]`);
-    if (existingInput) {
-      existingInput.focus();
-      existingInput.select();
-      return true;
-    }
-
-    if (!searchParent.isExpanded) {
-      sidebarTreeRuntimeHostRef.value?.toggleNode(searchParent);
-    }
-
-    const searchControlNodeId = tableSearchControlId(parentId);
-    void (async () => {
-      await nextTick();
-      if (flatTreeIndex.value.flatNodeIndexById.has(searchControlNodeId)) {
-        await scrollToSidebarNode(searchControlNodeId);
-      } else {
-        await scrollToSidebarNode(parentId);
-      }
-      await waitForSidebarRenderFrame();
-      const input = rootRef.value?.querySelector<HTMLInputElement>(`[data-sidebar-table-search-parent-id="${CSS.escape(parentId)}"]`);
-      if (input) {
-        input.focus();
-        input.select();
-      }
-    })();
+  const existingInput = findLocalTableSearchInput(searchParent);
+  if (existingInput) {
+    existingInput.focus();
+    existingInput.select();
     return true;
   }
 
-  const input = searchInputRef.value;
-  if (!input) return false;
-  input.focus();
-  input.select();
+  if (!searchParent.isExpanded) {
+    sidebarTreeRuntimeHostRef.value?.toggleNode(searchParent);
+  }
+
+  const focusRequestId = ++latestLocalTableSearchFocusRequestId;
+  const initialTabId = activeTab.value?.id ?? null;
+  const initialTargetNodeId = activeNodeId;
+
+  void (async () => {
+    const timeoutAt = Date.now() + 2500;
+    let attempts = 0;
+    const maxAttempts = 150;
+
+    const isStale = () => {
+      if (focusRequestId !== latestLocalTableSearchFocusRequestId) return true;
+      if ((activeTab.value?.id ?? null) !== initialTabId) return true;
+      const currentActiveNodeId = store.selectedTreeNodeId || findSidebarNodeForActiveTab(activeTab.value, flatNodes.value)?.id || null;
+      if (initialTargetNodeId && currentActiveNodeId && currentActiveNodeId !== initialTargetNodeId) return true;
+      return false;
+    };
+
+    while (attempts++ < maxAttempts && Date.now() < timeoutAt) {
+      await nextTick();
+      if (isStale()) return;
+
+      const currentParent = resolveLocalTableSearchParent(store.treeNodes, initialTargetNodeId, settingsStore.editorSettings.sidebarObjectDisplay) ?? searchParent;
+      const effectiveParent = currentParent.type === "group-tables" ? currentParent : settingsStore.editorSettings.sidebarObjectDisplay === "grouped" ? (currentParent.children?.find((c) => c.type === "group-tables") ?? currentParent) : currentParent;
+
+      if (settingsStore.editorSettings.sidebarObjectDisplay === "grouped" && effectiveParent.type === "group-tables" && !effectiveParent.isExpanded) {
+        sidebarTreeRuntimeHostRef.value?.toggleNode(effectiveParent);
+      }
+
+      const searchControlNodeId = tableSearchControlId(effectiveParent.id);
+
+      if (flatTreeIndex.value.flatNodeIndexById.has(searchControlNodeId)) {
+        await scrollToSidebarNode(searchControlNodeId);
+        await waitForSidebarRenderFrame();
+        if (isStale()) return;
+
+        const input = rootRef.value?.querySelector<HTMLInputElement>(`[data-sidebar-table-search-parent-id="${CSS.escape(effectiveParent.id)}"]`);
+        if (input) {
+          input.focus();
+          input.select();
+          return;
+        }
+      }
+
+      // Check if loading has finished and the scope has no searchable tables
+      const isLoading = currentParent.isLoading || (currentParent.children === undefined && currentParent.isExpanded);
+      if (!isLoading && currentParent.children !== undefined) {
+        const hasSearchableTables = settingsStore.editorSettings.sidebarObjectDisplay === "grouped" ? effectiveParent.type === "group-tables" && (effectiveParent.children === undefined || parentHasSearchableTableList(effectiveParent)) : parentHasSearchableTableList(currentParent);
+
+        if (!hasSearchableTables) {
+          break;
+        }
+      }
+
+      await waitForSidebarRenderFrame();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    if (!isStale()) {
+      focusGlobalSearch();
+    }
+  })();
+
   return true;
 }
 

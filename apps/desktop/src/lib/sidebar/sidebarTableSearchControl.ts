@@ -20,7 +20,12 @@ export function tableSearchControlId(parentId: string): string {
   return `${parentId}:__table_search`;
 }
 
-export const localTableSearchParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables"]);
+export const localTableSearchParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables", "group-views", "group-materialized-views"]);
+
+export function parentHasSearchableTableList(node: TreeNode): boolean {
+  // Routine-only schemas should not show a table-specific search box.
+  return !!node.children?.some((child) => tableSearchableChildTypes.has(child.type));
+}
 
 export function findNodePathById(nodes: readonly TreeNode[], targetNodeId: string, ancestors: readonly TreeNode[] = []): readonly TreeNode[] | undefined {
   for (const node of nodes) {
@@ -41,15 +46,24 @@ export function resolveLocalTableSearchParent(nodes: readonly TreeNode[], active
 
   if (sidebarObjectDisplay === "grouped") {
     for (let i = path.length - 1; i >= 0; i--) {
-      if (path[i]!.type === "group-tables") {
-        return path[i]!;
+      if (searchableObjectGroupTypes.has(path[i]!.type)) {
+        const group = path[i]!;
+        if (group.children === undefined || parentHasSearchableTableList(group)) {
+          return group;
+        }
+        return null;
       }
     }
     for (let i = path.length - 1; i >= 0; i--) {
       const candidate = path[i]!;
       if (simpleObjectParentTypes.has(candidate.type)) {
-        const tableGroup = candidate.children?.find((child) => child.type === "group-tables");
-        if (tableGroup) return tableGroup;
+        if (candidate.children !== undefined) {
+          const tableGroup = candidate.children.find((child) => child.type === "group-tables");
+          if (tableGroup && (tableGroup.children === undefined || parentHasSearchableTableList(tableGroup))) {
+            return tableGroup;
+          }
+          return null;
+        }
         return candidate;
       }
     }
@@ -57,16 +71,18 @@ export function resolveLocalTableSearchParent(nodes: readonly TreeNode[], active
   }
 
   for (let i = path.length - 1; i >= 0; i--) {
-    if (simpleObjectParentTypes.has(path[i]!.type)) {
-      return path[i]!;
+    const candidate = path[i]!;
+    if (simpleObjectParentTypes.has(candidate.type)) {
+      if (candidate.children !== undefined) {
+        if (parentHasSearchableTableList(candidate)) {
+          return candidate;
+        }
+        continue;
+      }
+      return candidate;
     }
   }
   return null;
-}
-
-function parentHasSearchableTableList(node: TreeNode): boolean {
-  // Routine-only schemas should not show a table-specific search box.
-  return !!node.children?.some((child) => tableSearchableChildTypes.has(child.type));
 }
 
 function shouldInsertTableSearchControl(item: FlatTreeNode, sidebarObjectDisplay: "simple" | "grouped", activeQueries: Readonly<Record<string, string | undefined>>): boolean {
